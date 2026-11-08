@@ -159,6 +159,8 @@ class WafV2Test {
     @Test
     @Order(9)
     void cloudfrontScopeIsolated() {
+        Assumptions.assumeTrue(List.of("aws", "aws-cn").contains(TestFixtures.partition()),
+                "the CLOUDFRONT scope exists only in the partitions that have CloudFront");
         waf.createIPSet(r -> r
                 .name(ipSetName).scope(Scope.CLOUDFRONT)
                 .ipAddressVersion(IPAddressVersion.IPV4)

@@ -14,6 +14,7 @@
 /src/                    @hectorvent @pgermosen
 /compatibility-tests/    @hectorvent @pgermosen
 /docs/                   @hectorvent @pgermosen
+/tools/                  @hectorvent @pgermosen
 
 # CI, release automation, workflow hygiene
 /.github/                @hectorvent

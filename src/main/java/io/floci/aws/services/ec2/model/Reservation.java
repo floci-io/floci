@@ -1,0 +1,38 @@
+package io.floci.aws.services.ec2.model;
+
+import com.fasterxml.jackson.annotation.JsonIgnore;
+import com.fasterxml.jackson.annotation.JsonIgnoreProperties;
+import io.quarkus.runtime.annotations.RegisterForReflection;
+
+import java.util.ArrayList;
+import java.util.List;
+
+@RegisterForReflection
+@JsonIgnoreProperties(ignoreUnknown = true)
+public class Reservation {
+
+    private String reservationId;
+    private String ownerId;
+    private List<GroupIdentifier> groups = new ArrayList<>();
+    private List<Instance> instances = new ArrayList<>();
+    /** The volumes the launch created, kept for a caller that must undo it; never stored or returned. */
+    @JsonIgnore
+    private List<String> launchVolumeIds = new ArrayList<>();
+
+    public Reservation() {}
+
+    public String getReservationId() { return reservationId; }
+    public void setReservationId(String reservationId) { this.reservationId = reservationId; }
+
+    public String getOwnerId() { return ownerId; }
+    public void setOwnerId(String ownerId) { this.ownerId = ownerId; }
+
+    public List<GroupIdentifier> getGroups() { return groups; }
+    public void setGroups(List<GroupIdentifier> groups) { this.groups = groups; }
+
+    public List<Instance> getInstances() { return instances; }
+    public void setInstances(List<Instance> instances) { this.instances = instances; }
+
+    @JsonIgnore
+    public List<String> getLaunchVolumeIds() { return launchVolumeIds; }
+}

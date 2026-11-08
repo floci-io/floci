@@ -6,54 +6,85 @@ import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 import software.amazon.awssdk.services.glue.GlueClient;
 import software.amazon.awssdk.services.glue.model.BatchCreatePartitionRequest;
+import software.amazon.awssdk.services.glue.model.BatchCreatePartitionResponse;
+import software.amazon.awssdk.services.glue.model.BatchDeleteConnectionRequest;
+import software.amazon.awssdk.services.glue.model.BatchDeleteConnectionResponse;
 import software.amazon.awssdk.services.glue.model.BatchDeleteTableRequest;
+import software.amazon.awssdk.services.glue.model.BatchDeleteTableResponse;
 import software.amazon.awssdk.services.glue.model.BatchGetPartitionRequest;
 import software.amazon.awssdk.services.glue.model.BatchUpdatePartitionRequest;
 import software.amazon.awssdk.services.glue.model.BatchUpdatePartitionRequestEntry;
 import software.amazon.awssdk.services.glue.model.Column;
 import software.amazon.awssdk.services.glue.model.ColumnStatistics;
 import software.amazon.awssdk.services.glue.model.ColumnStatisticsData;
+import software.amazon.awssdk.services.glue.model.ConditionCheckFailureException;
+import software.amazon.awssdk.services.glue.model.Connection;
+import software.amazon.awssdk.services.glue.model.ConnectionInput;
+import software.amazon.awssdk.services.glue.model.ConnectionPropertyKey;
+import software.amazon.awssdk.services.glue.model.ConnectionType;
+import software.amazon.awssdk.services.glue.model.CreateConnectionRequest;
+import software.amazon.awssdk.services.glue.model.CreateConnectionResponse;
 import software.amazon.awssdk.services.glue.model.CreateDatabaseRequest;
 import software.amazon.awssdk.services.glue.model.CreatePartitionRequest;
 import software.amazon.awssdk.services.glue.model.CreateTableRequest;
 import software.amazon.awssdk.services.glue.model.CreateUserDefinedFunctionRequest;
+import software.amazon.awssdk.services.glue.model.DataCatalogEncryptionSettings;
 import software.amazon.awssdk.services.glue.model.DatabaseInput;
 import software.amazon.awssdk.services.glue.model.DeleteColumnStatisticsForPartitionRequest;
 import software.amazon.awssdk.services.glue.model.DeleteColumnStatisticsForTableRequest;
+import software.amazon.awssdk.services.glue.model.DeleteConnectionRequest;
 import software.amazon.awssdk.services.glue.model.DeleteDatabaseRequest;
 import software.amazon.awssdk.services.glue.model.DeletePartitionRequest;
+import software.amazon.awssdk.services.glue.model.DeleteResourcePolicyRequest;
 import software.amazon.awssdk.services.glue.model.DeleteTableRequest;
 import software.amazon.awssdk.services.glue.model.DeleteUserDefinedFunctionRequest;
 import software.amazon.awssdk.services.glue.model.EntityNotFoundException;
+import software.amazon.awssdk.services.glue.model.ExistCondition;
 import software.amazon.awssdk.services.glue.model.GetColumnStatisticsForPartitionRequest;
+import software.amazon.awssdk.services.glue.model.GetColumnStatisticsForPartitionResponse;
 import software.amazon.awssdk.services.glue.model.GetColumnStatisticsForTableRequest;
+import software.amazon.awssdk.services.glue.model.GetColumnStatisticsForTableResponse;
+import software.amazon.awssdk.services.glue.model.GetConnectionRequest;
+import software.amazon.awssdk.services.glue.model.GetConnectionsFilter;
+import software.amazon.awssdk.services.glue.model.GetConnectionsRequest;
+import software.amazon.awssdk.services.glue.model.GetDataCatalogEncryptionSettingsRequest;
 import software.amazon.awssdk.services.glue.model.GetDatabaseRequest;
 import software.amazon.awssdk.services.glue.model.GetDatabasesRequest;
 import software.amazon.awssdk.services.glue.model.GetPartitionRequest;
 import software.amazon.awssdk.services.glue.model.GetPartitionsRequest;
+import software.amazon.awssdk.services.glue.model.GetResourcePoliciesRequest;
+import software.amazon.awssdk.services.glue.model.GetResourcePolicyRequest;
+import software.amazon.awssdk.services.glue.model.GetResourcePolicyResponse;
 import software.amazon.awssdk.services.glue.model.GetTableRequest;
 import software.amazon.awssdk.services.glue.model.GetTablesRequest;
 import software.amazon.awssdk.services.glue.model.GetUserDefinedFunctionRequest;
 import software.amazon.awssdk.services.glue.model.GetUserDefinedFunctionsRequest;
 import software.amazon.awssdk.services.glue.model.LongColumnStatisticsData;
+import software.amazon.awssdk.services.glue.model.Partition;
 import software.amazon.awssdk.services.glue.model.PartitionInput;
 import software.amazon.awssdk.services.glue.model.PartitionValueList;
+import software.amazon.awssdk.services.glue.model.PhysicalConnectionRequirements;
 import software.amazon.awssdk.services.glue.model.PrincipalType;
+import software.amazon.awssdk.services.glue.model.PutResourcePolicyRequest;
 import software.amazon.awssdk.services.glue.model.ResourceType;
 import software.amazon.awssdk.services.glue.model.ResourceUri;
 import software.amazon.awssdk.services.glue.model.SerDeInfo;
 import software.amazon.awssdk.services.glue.model.StorageDescriptor;
+import software.amazon.awssdk.services.glue.model.Table;
 import software.amazon.awssdk.services.glue.model.TableInput;
 import software.amazon.awssdk.services.glue.model.UpdateColumnStatisticsForPartitionRequest;
 import software.amazon.awssdk.services.glue.model.UpdateColumnStatisticsForTableRequest;
+import software.amazon.awssdk.services.glue.model.UpdateConnectionRequest;
 import software.amazon.awssdk.services.glue.model.UpdatePartitionRequest;
 import software.amazon.awssdk.services.glue.model.UpdateTableRequest;
 import software.amazon.awssdk.services.glue.model.UpdateUserDefinedFunctionRequest;
 import software.amazon.awssdk.services.glue.model.UserDefinedFunction;
 import software.amazon.awssdk.services.glue.model.UserDefinedFunctionInput;
 import software.amazon.awssdk.services.resourcegroupstaggingapi.ResourceGroupsTaggingApiClient;
+import software.amazon.awssdk.services.resourcegroupstaggingapi.model.GetResourcesResponse;
 
 import java.time.Instant;
+import java.util.List;
 import java.util.Map;
 import java.util.stream.Collectors;
 
@@ -69,6 +100,8 @@ class GlueCatalogTest {
     private static final String SECOND_TABLE_NAME = "catalog_table_second";
     private static final String FUNCTION_NAME = "catalog_function";
     private static final String DATABASE_TAGGED_NAME = TestFixtures.uniqueName("catalog_tagged_db");
+    private static final String CONNECTION_NAME = TestFixtures.uniqueName("catalog_connection");
+    private static final String KAFKA_CONNECTION_NAME = TestFixtures.uniqueName("catalog_kafka_connection");
 
     private static GlueClient glue;
     private static ResourceGroupsTaggingApiClient tagging;
@@ -84,6 +117,12 @@ class GlueCatalogTest {
         if (glue == null) {
             return;
         }
+        try {
+            glue.batchDeleteConnection(BatchDeleteConnectionRequest.builder()
+                    .connectionNameList(CONNECTION_NAME, KAFKA_CONNECTION_NAME)
+                    .build());
+        }
+        catch (Exception ignored) {}
         try {
             glue.deleteUserDefinedFunction(DeleteUserDefinedFunctionRequest.builder()
                     .databaseName(DATABASE_NAME)
@@ -149,7 +188,7 @@ class GlueCatalogTest {
                 .tableInput(tableInput("created"))
                 .build());
 
-        var createdTable = glue.getTable(GetTableRequest.builder()
+        Table createdTable = glue.getTable(GetTableRequest.builder()
                 .databaseName(DATABASE_NAME)
                 .name(TABLE_NAME)
                 .build()).table();
@@ -193,7 +232,7 @@ class GlueCatalogTest {
                 .tableName(TABLE_NAME)
                 .columnName("id")
                 .build());
-        var deletedStatistics = glue.getColumnStatisticsForTable(GetColumnStatisticsForTableRequest.builder()
+        GetColumnStatisticsForTableResponse deletedStatistics = glue.getColumnStatisticsForTable(GetColumnStatisticsForTableRequest.builder()
                 .databaseName(DATABASE_NAME)
                 .tableName(TABLE_NAME)
                 .columnNames("id")
@@ -209,7 +248,7 @@ class GlueCatalogTest {
                 .versionId(createdTable.versionId())
                 .tableInput(tableInput("updated"))
                 .build());
-        var updatedTable = glue.getTable(GetTableRequest.builder()
+        Table updatedTable = glue.getTable(GetTableRequest.builder()
                 .databaseName(DATABASE_NAME)
                 .name(TABLE_NAME)
                 .build()).table();
@@ -230,7 +269,7 @@ class GlueCatalogTest {
                         .values("2027")
                         .build())
                 .build());
-        var batchCreatePartition = glue.batchCreatePartition(BatchCreatePartitionRequest.builder()
+        BatchCreatePartitionResponse batchCreatePartition = glue.batchCreatePartition(BatchCreatePartitionRequest.builder()
                 .databaseName(DATABASE_NAME)
                 .tableName(TABLE_NAME)
                 .partitionInputList(PartitionInput.builder()
@@ -276,7 +315,7 @@ class GlueCatalogTest {
                     assertThat(error.partitionValueList()).containsExactly("missing");
                     assertThat(error.errorDetail().errorCode()).isEqualTo("EntityNotFoundException");
                 });
-        var partition = glue.getPartition(GetPartitionRequest.builder()
+        Partition partition = glue.getPartition(GetPartitionRequest.builder()
                 .databaseName(DATABASE_NAME)
                 .tableName(TABLE_NAME)
                 .partitionValues("2026")
@@ -364,7 +403,7 @@ class GlueCatalogTest {
                                 .build())
                         .build())
                 .build());
-        var statistics = glue.getColumnStatisticsForPartition(GetColumnStatisticsForPartitionRequest.builder()
+        GetColumnStatisticsForPartitionResponse statistics = glue.getColumnStatisticsForPartition(GetColumnStatisticsForPartitionRequest.builder()
                 .databaseName(DATABASE_NAME)
                 .tableName(TABLE_NAME)
                 .partitionValues("2026")
@@ -488,7 +527,7 @@ class GlueCatalogTest {
                 .tableInput(tableInput(BATCH_DELETE_DATABASE_NAME, SECOND_TABLE_NAME, "batch delete second table"))
                 .build());
 
-        var response = glue.batchDeleteTable(BatchDeleteTableRequest.builder()
+        BatchDeleteTableResponse response = glue.batchDeleteTable(BatchDeleteTableRequest.builder()
                 .databaseName(BATCH_DELETE_DATABASE_NAME)
                 .tablesToDelete(TABLE_NAME, SECOND_TABLE_NAME)
                 .build());
@@ -520,8 +559,8 @@ class GlueCatalogTest {
                 .tags(Map.of("Environment", "dev", "Project", "project1"))
                 .build());
 
-        String databaseArn = "arn:aws:glue:us-east-1:000000000000:database/" + DATABASE_TAGGED_NAME;
-        var response = tagging.getResources(b -> b.resourceARNList(databaseArn));
+        String databaseArn = TestFixtures.arn("glue", "000000000000", "database/" + DATABASE_TAGGED_NAME);
+        GetResourcesResponse response = tagging.getResources(b -> b.resourceARNList(databaseArn));
 
         assertThat(response.resourceTagMappingList()).singleElement().satisfies(mapping -> {
             assertThat(mapping.resourceARN()).isEqualTo(databaseArn);
@@ -529,6 +568,142 @@ class GlueCatalogTest {
                     .containsEntry("Environment", "dev")
                     .containsEntry("Project", "project1");
         });
+    }
+
+    @Test
+    @DisplayName("Connections are created, read with and without the password, redefined and deleted")
+    void connectionLifecycle() {
+        CreateConnectionResponse created = glue.createConnection(CreateConnectionRequest.builder()
+                .connectionInput(ConnectionInput.builder()
+                        .name(CONNECTION_NAME)
+                        .description("orders database")
+                        .connectionType(ConnectionType.JDBC)
+                        .matchCriteria("orders")
+                        .connectionProperties(Map.of(
+                                ConnectionPropertyKey.JDBC_CONNECTION_URL, "jdbc:postgresql://db.internal:5432/orders",
+                                ConnectionPropertyKey.USERNAME, "app",
+                                ConnectionPropertyKey.PASSWORD, "s3cret"))
+                        .physicalConnectionRequirements(PhysicalConnectionRequirements.builder()
+                                .subnetId("subnet-0123456789abcdef0")
+                                .securityGroupIdList("sg-0123456789abcdef0")
+                                .availabilityZone(TestFixtures.region().id() + "a")
+                                .build())
+                        .build())
+                .tags(Map.of("env", "dev"))
+                .build());
+        assertThat(created.createConnectionStatusAsString()).isEqualTo("READY");
+
+        Connection connection = glue.getConnection(GetConnectionRequest.builder()
+                .name(CONNECTION_NAME)
+                .build()).connection();
+        assertThat(connection.name()).isEqualTo(CONNECTION_NAME);
+        assertThat(connection.connectionType()).isEqualTo(ConnectionType.JDBC);
+        assertThat(connection.description()).isEqualTo("orders database");
+        assertThat(connection.connectionProperties()).containsEntry(ConnectionPropertyKey.PASSWORD, "s3cret");
+        assertThat(connection.physicalConnectionRequirements().subnetId()).isEqualTo("subnet-0123456789abcdef0");
+        assertThat(connection.statusAsString()).isEqualTo("READY");
+        assertThat(connection.connectionSchemaVersion()).isEqualTo(1);
+        assertThat(connection.creationTime()).isNotNull();
+        assertThat(connection.lastUpdatedTime()).isNotNull();
+
+        Connection hidden = glue.getConnection(GetConnectionRequest.builder()
+                .name(CONNECTION_NAME)
+                .hidePassword(true)
+                .build()).connection();
+        assertThat(hidden.connectionProperties()).doesNotContainKey(ConnectionPropertyKey.PASSWORD);
+        assertThat(hidden.connectionProperties()).containsEntry(ConnectionPropertyKey.USERNAME, "app");
+
+        glue.createConnection(CreateConnectionRequest.builder()
+                .connectionInput(ConnectionInput.builder()
+                        .name(KAFKA_CONNECTION_NAME)
+                        .connectionType(ConnectionType.KAFKA)
+                        .connectionProperties(Map.of(ConnectionPropertyKey.KAFKA_BOOTSTRAP_SERVERS, "broker:9092"))
+                        .build())
+                .build());
+        List<Connection> kafkaOnly = glue.getConnections(GetConnectionsRequest.builder()
+                .filter(GetConnectionsFilter.builder().connectionType(ConnectionType.KAFKA).build())
+                .build()).connectionList();
+        assertThat(kafkaOnly).extracting(Connection::name).contains(KAFKA_CONNECTION_NAME);
+        assertThat(kafkaOnly).extracting(Connection::connectionType).containsOnly(ConnectionType.KAFKA);
+
+        // UpdateConnection redefines the connection: the description is gone afterwards.
+        glue.updateConnection(UpdateConnectionRequest.builder()
+                .name(CONNECTION_NAME)
+                .connectionInput(ConnectionInput.builder()
+                        .name(CONNECTION_NAME)
+                        .connectionType(ConnectionType.JDBC)
+                        .connectionProperties(Map.of(
+                                ConnectionPropertyKey.JDBC_CONNECTION_URL, "jdbc:postgresql://db2.internal:5432/orders",
+                                ConnectionPropertyKey.SECRET_ID, "prod/orders"))
+                        .build())
+                .build());
+        Connection redefined = glue.getConnection(GetConnectionRequest.builder()
+                .name(CONNECTION_NAME)
+                .build()).connection();
+        assertThat(redefined.description()).isNull();
+        assertThat(redefined.connectionProperties()).doesNotContainKey(ConnectionPropertyKey.PASSWORD);
+        assertThat(redefined.connectionProperties()).containsEntry(ConnectionPropertyKey.SECRET_ID, "prod/orders");
+        assertThat(redefined.creationTime()).isEqualTo(connection.creationTime());
+
+        glue.deleteConnection(DeleteConnectionRequest.builder().connectionName(CONNECTION_NAME).build());
+        assertThatThrownBy(() -> glue.getConnection(GetConnectionRequest.builder().name(CONNECTION_NAME).build()))
+                .isInstanceOf(EntityNotFoundException.class);
+
+        BatchDeleteConnectionResponse batch = glue.batchDeleteConnection(BatchDeleteConnectionRequest.builder()
+                .connectionNameList(KAFKA_CONNECTION_NAME, CONNECTION_NAME)
+                .build());
+        assertThat(batch.succeeded()).containsExactly(KAFKA_CONNECTION_NAME);
+        assertThat(batch.errors()).containsOnlyKeys(CONNECTION_NAME);
+    }
+
+    @Test
+    @DisplayName("The catalog resource policy follows the create, update and delete conditions Terraform sends")
+    void catalogResourcePolicyLifecycle() {
+        String policy = "{\"Version\":\"2012-10-17\",\"Statement\":[{\"Effect\":\"Allow\","
+                + "\"Principal\":{\"AWS\":\"" + TestFixtures.globalArn("iam", "111122223333", "root") + "\"},"
+                + "\"Action\":\"glue:GetTable\",\"Resource\":\"*\"}]}";
+        String policyV2 = policy.replace("glue:GetTable", "glue:GetTables");
+        // Start from no policy; the catalog is shared with other tests.
+        try {
+            glue.deleteResourcePolicy(DeleteResourcePolicyRequest.builder().build());
+        }
+        catch (EntityNotFoundException ignored) {}
+
+        String hash = glue.putResourcePolicy(PutResourcePolicyRequest.builder()
+                .policyInJson(policy)
+                .policyExistsCondition(ExistCondition.NOT_EXIST)
+                .build()).policyHash();
+        GetResourcePolicyResponse read = glue.getResourcePolicy(GetResourcePolicyRequest.builder().build());
+        assertThat(read.policyInJson()).isEqualTo(policy);
+        assertThat(read.policyHash()).isEqualTo(hash);
+        assertThat(read.createTime()).isNotNull();
+        assertThat(read.updateTime()).isNotNull();
+
+        assertThatThrownBy(() -> glue.putResourcePolicy(PutResourcePolicyRequest.builder()
+                .policyInJson(policyV2)
+                .policyExistsCondition(ExistCondition.NOT_EXIST)
+                .build()))
+                .isInstanceOf(ConditionCheckFailureException.class);
+
+        String hash2 = glue.putResourcePolicy(PutResourcePolicyRequest.builder()
+                .policyInJson(policyV2)
+                .policyExistsCondition(ExistCondition.MUST_EXIST)
+                .policyHashCondition(hash)
+                .build()).policyHash();
+        assertThat(glue.getResourcePolicy(GetResourcePolicyRequest.builder().build()).policyInJson()).isEqualTo(policyV2);
+        assertThat(glue.getResourcePolicies(GetResourcePoliciesRequest.builder().build()).getResourcePoliciesResponseList()).hasSize(1);
+
+        assertThatThrownBy(() -> glue.deleteResourcePolicy(DeleteResourcePolicyRequest.builder()
+                .policyHashCondition(hash).build()))
+                .isInstanceOf(ConditionCheckFailureException.class);
+        glue.deleteResourcePolicy(DeleteResourcePolicyRequest.builder().policyHashCondition(hash2).build());
+        assertThatThrownBy(() -> glue.getResourcePolicy(GetResourcePolicyRequest.builder().build()))
+                .isInstanceOf(EntityNotFoundException.class);
+
+        DataCatalogEncryptionSettings settings = glue.getDataCatalogEncryptionSettings(GetDataCatalogEncryptionSettingsRequest.builder().build())
+                .dataCatalogEncryptionSettings();
+        assertThat(settings.encryptionAtRest().catalogEncryptionModeAsString()).isEqualTo("DISABLED");
+        assertThat(settings.connectionPasswordEncryption().returnConnectionPasswordEncrypted()).isFalse();
     }
 
     private static TableInput tableInput(String description) {

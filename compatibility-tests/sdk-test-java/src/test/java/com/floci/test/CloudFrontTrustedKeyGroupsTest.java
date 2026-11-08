@@ -8,7 +8,9 @@ import software.amazon.awssdk.services.cloudfront.model.CreatePublicKeyResponse;
 import software.amazon.awssdk.services.cloudfront.model.DistributionConfig;
 import software.amazon.awssdk.services.cloudfront.model.GetDistributionConfigResponse;
 import software.amazon.awssdk.services.cloudfront.model.GetDistributionResponse;
+import software.amazon.awssdk.services.cloudfront.model.KeyGroup;
 import software.amazon.awssdk.services.cloudfront.model.S3OriginConfig;
+import software.amazon.awssdk.services.cloudfront.model.UpdateDistributionResponse;
 import software.amazon.awssdk.services.cloudfront.model.ViewerProtocolPolicy;
 
 import java.security.KeyPairGenerator;
@@ -62,7 +64,7 @@ class CloudFrontTrustedKeyGroupsTest {
                                     request -> request.id(createdKeyGroupId))
                             .keyGroupConfig()
                             .items());
-            var listedKeyGroup =
+            KeyGroup listedKeyGroup =
                     cloudFront.listKeyGroups(request -> request.maxItems("100"))
                             .keyGroupList()
                             .items()
@@ -146,11 +148,11 @@ class CloudFrontTrustedKeyGroupsTest {
                     GetDistributionConfigResponse current =
                             cloudFront.getDistributionConfig(
                                     request -> request.id(id));
-                    var disabled = current.distributionConfig()
+                    DistributionConfig disabled = current.distributionConfig()
                             .toBuilder()
                             .enabled(false)
                             .build();
-                    var updated = cloudFront.updateDistribution(
+                    UpdateDistributionResponse updated = cloudFront.updateDistribution(
                             request -> request
                                     .id(id)
                                     .ifMatch(current.eTag())

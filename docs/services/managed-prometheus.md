@@ -20,7 +20,13 @@ definitions, scrapers and logging configurations are not implemented.
   ingestion/query endpoint.
 - The `alias` parameter of `ListWorkspaces` is a **prefix** filter, matching the provider's
   `alias_prefix` data-source argument.
-- `clientToken` on `CreateWorkspace` is accepted and ignored: creates are not deduplicated.
+- `CreateWorkspace` deduplicates requests with the same case-sensitive `clientToken` in
+  the calling account and region. Tokens accept 1–64 printable ASCII characters excluding
+  spaces. A retry returns the original response; changing the alias, tags or KMS key with
+  the same token returns `ConflictException` (409). Receipts use the configured storage
+  mode and are committed atomically with the workspace in the same store. They remain
+  until that state is cleared, including after workspace deletion; token
+  expiry is not emulated. Requests without a token create independently.
 - `kmsKeyArn` is stored and echoed back but no encryption is performed.
 - A rule groups namespace is **ACTIVE from birth** for the same reason, so the provider's
   create (`CREATING` → `ACTIVE`) and update (`UPDATING` → `ACTIVE`) waiters complete on their
@@ -38,8 +44,8 @@ definitions, scrapers and logging configurations are not implemented.
 - Namespace names are validated against AMP's documented constraints (1 to 128 characters
   matching `.*[0-9A-Za-z][-.0-9A-Z_a-z]*.*`). Floci additionally rejects `/`, because the
   namespace is addressed as a single path segment.
-- `clientToken` on `CreateRuleGroupsNamespace` is accepted and ignored, the same as on
-  `CreateWorkspace`: creates are not deduplicated.
+- `clientToken` on `CreateRuleGroupsNamespace` is accepted and ignored: namespace creates
+  are not deduplicated.
 - The shared tags dispatcher rejects an ARN whose service, region or account does not match the
   request with `ValidationException` (400), rather than resolving it against the request's own
   region.

@@ -9,6 +9,7 @@ import org.junit.jupiter.params.provider.MethodSource;
 import org.xerial.snappy.Snappy;
 import org.xerial.snappy.SnappyInputStream;
 import software.amazon.awssdk.core.ResponseInputStream;
+import software.amazon.awssdk.core.SdkBytes;
 import software.amazon.awssdk.services.firehose.FirehoseClient;
 import software.amazon.awssdk.services.firehose.model.BufferingHints;
 import software.amazon.awssdk.services.firehose.model.CompressionFormat;
@@ -25,7 +26,6 @@ import software.amazon.awssdk.services.s3.model.GetObjectRequest;
 import software.amazon.awssdk.services.s3.model.GetObjectResponse;
 import software.amazon.awssdk.services.s3.model.ListObjectsV2Request;
 import software.amazon.awssdk.services.s3.model.S3Object;
-import software.amazon.awssdk.core.SdkBytes;
 
 import java.io.ByteArrayInputStream;
 import java.io.ByteArrayOutputStream;
@@ -63,6 +63,7 @@ class FirehoseCompressionDeliveryTest {
      */
     private static final int BUFFERING_INTERVAL_SECONDS = 5;
     private static final long POLL_TIMEOUT_MILLIS = 240_000L;
+    private static final long POLL_INTERVAL_MILLIS = TestFixtures.isRealAws() ? 5_000L : 250L;
 
     private static FirehoseClient firehose;
     private static S3Client s3;
@@ -202,7 +203,7 @@ class FirehoseCompressionDeliveryTest {
             if (!contents.isEmpty()) {
                 return contents.get(0).key();
             }
-            Thread.sleep(5_000L);
+            Thread.sleep(POLL_INTERVAL_MILLIS);
         }
         throw new AssertionError("no object delivered under " + prefix + " within "
                 + POLL_TIMEOUT_MILLIS / 1000 + "s");

@@ -1,0 +1,23 @@
+{
+  "error": "Resource with id [Fn] is invalid. Destination is required if Type is not ['SQS', 'SNS']",
+  "input": {
+    "Resources": {
+      "Fn": {
+        "Properties": {
+          "CodeUri": "s3://b/k",
+          "EventInvokeConfig": {
+            "DestinationConfig": {
+              "OnFailure": {
+                "Type": "Lambda"
+              }
+            }
+          },
+          "Handler": "index.handler",
+          "Runtime": "python3.12"
+        },
+        "Type": "AWS::Serverless::Function"
+      }
+    },
+    "Transform": "AWS::Serverless-2016-10-31"
+  }
+}

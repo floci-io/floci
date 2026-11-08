@@ -1,13 +1,15 @@
 package com.floci.test;
 
 import org.junit.jupiter.api.*;
-import software.amazon.awssdk.core.sync.RequestBody;
 import software.amazon.awssdk.auth.credentials.AwsBasicCredentials;
 import software.amazon.awssdk.auth.credentials.AwsSessionCredentials;
 import software.amazon.awssdk.auth.credentials.StaticCredentialsProvider;
+import software.amazon.awssdk.core.sync.RequestBody;
 import software.amazon.awssdk.regions.Region;
 import software.amazon.awssdk.services.iam.IamClient;
 import software.amazon.awssdk.services.iam.model.*;
+import software.amazon.awssdk.services.lambda.LambdaClient;
+import software.amazon.awssdk.services.lambda.model.LambdaException;
 import software.amazon.awssdk.services.s3.S3Client;
 import software.amazon.awssdk.services.s3.model.CreateBucketRequest;
 import software.amazon.awssdk.services.s3.model.DeleteBucketRequest;
@@ -16,6 +18,10 @@ import software.amazon.awssdk.services.s3.model.ListObjectsV2Request;
 import software.amazon.awssdk.services.s3.model.ListObjectsV2Response;
 import software.amazon.awssdk.services.s3.model.PutObjectRequest;
 import software.amazon.awssdk.services.s3.model.S3Exception;
+import software.amazon.awssdk.services.secretsmanager.SecretsManagerClient;
+import software.amazon.awssdk.services.secretsmanager.model.SecretsManagerException;
+import software.amazon.awssdk.services.sqs.SqsClient;
+import software.amazon.awssdk.services.sqs.model.SqsException;
 import software.amazon.awssdk.services.sts.StsClient;
 import software.amazon.awssdk.services.sts.model.*;
 
@@ -53,6 +59,7 @@ class IamEnforcementTest {
     // ── Resource names ─────────────────────────────────────────────────────────
     private static final String USER        = "iam-enf-test-user";
     private static final String ROLE        = "iam-enf-test-role";
+    private static final String PATH_ROLE   = "iam-enf-test-path-role";
     private static final String POLICY_NAME = "iam-enf-allow-s3list";
 
     private static final String TRUST_POLICY = """
@@ -156,6 +163,11 @@ class IamEnforcementTest {
         try { iam.deleteAccessKey(DeleteAccessKeyRequest.builder()
                 .userName(USER).accessKeyId(userAccessKeyId).build()); } catch (Exception ignored) {}
         try { iam.deleteRole(DeleteRoleRequest.builder().roleName(ROLE).build()); } catch (Exception ignored) {}
+        cleanupResource("delete principal-arn policy from role " + PATH_ROLE,
+                () -> iam.deleteRolePolicy(DeleteRolePolicyRequest.builder()
+                        .roleName(PATH_ROLE).policyName("principal-arn").build()));
+        cleanupResource("delete role " + PATH_ROLE,
+                () -> iam.deleteRole(DeleteRoleRequest.builder().roleName(PATH_ROLE).build()));
         try { iam.deletePolicy(DeletePolicyRequest.builder().policyArn(allowPolicyArn).build()); } catch (Exception ignored) {}
         try { iam.deleteUser(DeleteUserRequest.builder().userName(USER).build()); } catch (Exception ignored) {}
         iam.close();
@@ -425,6 +437,171 @@ class IamEnforcementTest {
                         () -> adminS3.deleteBucket(DeleteBucketRequest.builder().bucket(bucket).build()));
             }
         }
+    }
+
+    @Test
+    @Order(9)
+    @DisplayName("AWS JSON 1.0 SQS authorization denial returns HTTP 400")
+    void json10AccessDeniedReturns400() {
+        assumeEnforcementEnabled();
+        try (SqsClient sqs = SqsClient.builder()
+                .endpointOverride(TestFixtures.endpoint())
+                .region(Region.US_EAST_1)
+                .credentialsProvider(userCredentials())
+                .build()) {
+            assertThatThrownBy(sqs::listQueues)
+                    .isInstanceOfSatisfying(SqsException.class, error -> {
+                        assertThat(error.statusCode()).isEqualTo(400);
+                        assertThat(error.awsErrorDetails().errorCode()).isEqualTo("AccessDeniedException");
+                    });
+        }
+    }
+
+    @Test
+    @Order(10)
+    @DisplayName("AWS JSON 1.1 Secrets Manager authorization denial returns HTTP 400")
+    void json11AccessDeniedReturns400() {
+        assumeEnforcementEnabled();
+        try (SecretsManagerClient secrets = SecretsManagerClient.builder()
+                .endpointOverride(TestFixtures.endpoint())
+                .region(Region.US_EAST_1)
+                .credentialsProvider(userCredentials())
+                .build()) {
+            assertThatThrownBy(secrets::listSecrets)
+                    .isInstanceOfSatisfying(SecretsManagerException.class, error -> {
+                        assertThat(error.statusCode()).isEqualTo(400);
+                        assertThat(error.awsErrorDetails().errorCode()).isEqualTo("AccessDeniedException");
+                    });
+        }
+    }
+
+    @Test
+    @Order(11)
+    @DisplayName("REST-JSON Lambda authorization denial remains HTTP 403")
+    void restJsonAccessDeniedRemains403() {
+        assumeEnforcementEnabled();
+        try (LambdaClient lambda = LambdaClient.builder()
+                .endpointOverride(TestFixtures.endpoint())
+                .region(Region.US_EAST_1)
+                .credentialsProvider(userCredentials())
+                .build()) {
+            assertThatThrownBy(lambda::listFunctions)
+                    .isInstanceOfSatisfying(LambdaException.class, error -> {
+                        assertThat(error.statusCode()).isEqualTo(403);
+                        assertThat(error.awsErrorDetails().errorCode()).isEqualTo("AccessDeniedException");
+                    });
+        }
+    }
+
+    @Test
+    @Order(12)
+    @DisplayName("AWS Query IAM authorization denial remains HTTP 403")
+    void queryAccessDeniedRemains403() {
+        assumeEnforcementEnabled();
+        try (IamClient caller = IamClient.builder()
+                .endpointOverride(TestFixtures.endpoint())
+                .region(Region.US_EAST_1)
+                .credentialsProvider(userCredentials())
+                .build()) {
+            assertThatThrownBy(caller::listUsers)
+                    .isInstanceOfSatisfying(IamException.class, error -> {
+                        assertThat(error.statusCode()).isEqualTo(403);
+                        assertThat(error.awsErrorDetails().errorCode()).isEqualTo("AccessDenied");
+                    });
+        }
+    }
+
+    @Test
+    @Order(13)
+    @DisplayName("a role session's aws:PrincipalArn is its role's ARN, path included")
+    void roleSessionPrincipalArnIsTheRolesArnWithItsPath() {
+        assumeEnforcementEnabled();
+        String pathRoleArn = iam.createRole(CreateRoleRequest.builder()
+                .roleName(PATH_ROLE)
+                .path("/team/")
+                .assumeRolePolicyDocument(TRUST_POLICY)
+                .build()).role().arn();
+        AssumeRoleResponse assumed = sts.assumeRole(AssumeRoleRequest.builder()
+                .roleArn(pathRoleArn)
+                .roleSessionName("principal-arn")
+                .build());
+        String sessionArn = assumed.assumedRoleUser().arn();
+        // AWS reports the role's ARN in aws:PrincipalArn, not the session's: a condition on the role
+        // matches, one on the session ARN does not, and a Deny keyed on the role fires.
+        iam.putRolePolicy(PutRolePolicyRequest.builder()
+                .roleName(PATH_ROLE)
+                .policyName("principal-arn")
+                .policyDocument("""
+                        {"Version":"2012-10-17","Statement":[
+                          {"Effect":"Allow","Action":"iam:ListUsers","Resource":"*",
+                           "Condition":{"ArnEquals":{"aws:PrincipalArn":"%1$s"}}},
+                          {"Effect":"Allow","Action":"iam:ListRoles","Resource":"*",
+                           "Condition":{"ArnEquals":{"aws:PrincipalArn":"%2$s"}}},
+                          {"Effect":"Allow","Action":"iam:ListGroups","Resource":"*"},
+                          {"Effect":"Deny","Action":"iam:ListGroups","Resource":"*",
+                           "Condition":{"ArnEquals":{"aws:PrincipalArn":"%1$s"}}}
+                        ]}""".formatted(pathRoleArn, sessionArn))
+                .build());
+
+        try (IamClient session = IamClient.builder()
+                .endpointOverride(TestFixtures.endpoint())
+                .region(Region.US_EAST_1)
+                .credentialsProvider(StaticCredentialsProvider.create(AwsSessionCredentials.create(
+                        assumed.credentials().accessKeyId(),
+                        assumed.credentials().secretAccessKey(),
+                        assumed.credentials().sessionToken())))
+                .build()) {
+            assertThatCode(session::listUsers).doesNotThrowAnyException();
+            assertThatThrownBy(session::listRoles)
+                    .isInstanceOf(IamException.class)
+                    .extracting(e -> ((IamException) e).statusCode())
+                    .isEqualTo(403);
+            assertThatThrownBy(session::listGroups)
+                    .isInstanceOf(IamException.class)
+                    .extracting(e -> ((IamException) e).statusCode())
+                    .isEqualTo(403);
+        }
+    }
+
+    @Test
+    @Order(14)
+    @DisplayName("a deactivated access key is refused until it is activated again")
+    void deactivatedAccessKeyIsRefusedUntilActivatedAgain() {
+        assumeEnforcementEnabled();
+        AccessKey key = iam.createAccessKey(CreateAccessKeyRequest.builder().userName(USER).build()).accessKey();
+        try (StsClient caller = StsClient.builder()
+                     .endpointOverride(TestFixtures.endpoint())
+                     .region(Region.US_EAST_1)
+                     .credentialsProvider(StaticCredentialsProvider.create(
+                             AwsBasicCredentials.create(key.accessKeyId(), key.secretAccessKey())))
+                     .build();
+             S3Client s3 = s3WithCredentials(key.accessKeyId(), key.secretAccessKey())) {
+            iam.updateAccessKey(UpdateAccessKeyRequest.builder()
+                    .userName(USER).accessKeyId(key.accessKeyId()).status(StatusType.INACTIVE).build());
+            // Not even a call that needs no permission.
+            assertThatThrownBy(caller::getCallerIdentity)
+                    .isInstanceOfSatisfying(StsException.class, error -> {
+                        assertThat(error.statusCode()).isEqualTo(403);
+                        assertThat(error.awsErrorDetails().errorCode()).isEqualTo("InvalidClientTokenId");
+                    });
+            assertThatThrownBy(s3::listBuckets)
+                    .isInstanceOfSatisfying(S3Exception.class, error -> {
+                        assertThat(error.statusCode()).isEqualTo(403);
+                        assertThat(error.awsErrorDetails().errorCode()).isEqualTo("InvalidAccessKeyId");
+                    });
+
+            iam.updateAccessKey(UpdateAccessKeyRequest.builder()
+                    .userName(USER).accessKeyId(key.accessKeyId()).status(StatusType.ACTIVE).build());
+            assertThatCode(caller::getCallerIdentity).doesNotThrowAnyException();
+        } finally {
+            cleanupResource("delete access key " + key.accessKeyId(),
+                    () -> iam.deleteAccessKey(DeleteAccessKeyRequest.builder()
+                            .userName(USER).accessKeyId(key.accessKeyId()).build()));
+        }
+    }
+
+    private static StaticCredentialsProvider userCredentials() {
+        return StaticCredentialsProvider.create(AwsBasicCredentials.create(userAccessKeyId, userSecretKey));
     }
 
     private static void cleanupResource(String description, CleanupAction action) {

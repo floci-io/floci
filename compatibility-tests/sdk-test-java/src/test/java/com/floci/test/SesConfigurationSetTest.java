@@ -7,7 +7,6 @@ import org.junit.jupiter.api.MethodOrderer;
 import org.junit.jupiter.api.Order;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.TestMethodOrder;
-
 import software.amazon.awssdk.awscore.exception.AwsServiceException;
 import software.amazon.awssdk.services.ses.SesClient;
 import software.amazon.awssdk.services.ses.model.ConfigurationSet;
@@ -17,13 +16,14 @@ import software.amazon.awssdk.services.ses.model.DescribeConfigurationSetRequest
 import software.amazon.awssdk.services.ses.model.DescribeConfigurationSetResponse;
 import software.amazon.awssdk.services.ses.model.ListConfigurationSetsRequest;
 import software.amazon.awssdk.services.ses.model.ListConfigurationSetsResponse;
-
 import software.amazon.awssdk.services.sesv2.SesV2Client;
 import software.amazon.awssdk.services.sesv2.model.GetConfigurationSetRequest;
 import software.amazon.awssdk.services.sesv2.model.GetConfigurationSetResponse;
 import software.amazon.awssdk.services.sesv2.model.PutConfigurationSetSuppressionOptionsRequest;
 import software.amazon.awssdk.services.sesv2.model.SuppressionListReason;
 import software.amazon.awssdk.services.sesv2.model.Tag;
+
+import java.util.Collections;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
@@ -108,7 +108,8 @@ class SesConfigurationSetTest {
     @Order(4)
     void v2ListConfigurationSetsIncludesCreated() {
         software.amazon.awssdk.services.sesv2.model.ListConfigurationSetsResponse response =
-                sesV2.listConfigurationSets(software.amazon.awssdk.services.sesv2.model.ListConfigurationSetsRequest.builder().build());
+                sesV2.listConfigurationSets(software.amazon.awssdk.services.sesv2.model.ListConfigurationSetsRequest.builder()
+                        .pageSize(1000).build());
         assertThat(response.configurationSets()).contains(v2Name);
     }
 
@@ -169,7 +170,7 @@ class SesConfigurationSetTest {
     @Order(13)
     void v1ListConfigurationSetsIncludesCreated() {
         ListConfigurationSetsResponse response = sesV1.listConfigurationSets(
-                ListConfigurationSetsRequest.builder().build());
+                ListConfigurationSetsRequest.builder().maxItems(1000).build());
         assertThat(response.configurationSets())
                 .anyMatch(cs -> v1Name.equals(cs.name()));
     }
@@ -267,7 +268,7 @@ class SesConfigurationSetTest {
         // to disable suppression filtering for a configuration set.
         sesV2.putConfigurationSetSuppressionOptions(PutConfigurationSetSuppressionOptionsRequest.builder()
                 .configurationSetName(suppressionCsName)
-                .suppressedReasons(java.util.Collections.emptyList())
+                .suppressedReasons(Collections.emptyList())
                 .build());
 
         GetConfigurationSetResponse after = sesV2.getConfigurationSet(GetConfigurationSetRequest.builder()

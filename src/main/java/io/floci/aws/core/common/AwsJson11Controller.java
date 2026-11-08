@@ -1,0 +1,405 @@
+package io.floci.aws.core.common;
+
+import com.fasterxml.jackson.core.JsonProcessingException;
+import com.fasterxml.jackson.databind.DeserializationFeature;
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.ObjectReader;
+import io.floci.aws.services.acm.AcmJsonHandler;
+import io.floci.aws.services.apigatewayv2.ApiGatewayV2JsonHandler;
+import io.floci.aws.services.applicationautoscaling.ApplicationAutoScalingJsonHandler;
+import io.floci.aws.services.athena.AthenaJsonHandler;
+import io.floci.aws.services.bcmdataexports.BcmDataExportsJsonHandler;
+import io.floci.aws.services.budgets.BudgetsJsonHandler;
+import io.floci.aws.services.ce.CostExplorerJsonHandler;
+import io.floci.aws.services.cloudcontrol.CloudControlJsonHandler;
+import io.floci.aws.services.cloudhsmv2.CloudHsmV2JsonHandler;
+import io.floci.aws.services.cloudmap.CloudMapHandler;
+import io.floci.aws.services.cloudtrail.CloudTrailJsonHandler;
+import io.floci.aws.services.cloudwatch.logs.CloudWatchLogsHandler;
+import io.floci.aws.services.codebuild.CodeBuildJsonHandler;
+import io.floci.aws.services.codedeploy.CodeDeployJsonHandler;
+import io.floci.aws.services.codepipeline.CodePipelineJsonHandler;
+import io.floci.aws.services.cognito.CognitoJsonHandler;
+import io.floci.aws.services.cognitoidentity.CognitoIdentityJsonHandler;
+import io.floci.aws.services.comprehend.ComprehendJsonHandler;
+import io.floci.aws.services.configservice.ConfigServiceJsonHandler;
+import io.floci.aws.services.cur.CurJsonHandler;
+import io.floci.aws.services.datasync.DataSyncJsonHandler;
+import io.floci.aws.services.dms.DmsJsonHandler;
+import io.floci.aws.services.ecr.EcrJsonHandler;
+import io.floci.aws.services.ecs.EcsJsonHandler;
+import io.floci.aws.services.emr.EmrHandler;
+import io.floci.aws.services.eventbridge.EventBridgeHandler;
+import io.floci.aws.services.firehose.FirehoseJsonHandler;
+import io.floci.aws.services.globalaccelerator.GlobalAcceleratorJsonHandler;
+import io.floci.aws.services.glue.GlueJsonHandler;
+import io.floci.aws.services.identitystore.IdentityStoreJsonHandler;
+import io.floci.aws.services.kinesis.KinesisJsonHandler;
+import io.floci.aws.services.kinesisanalytics.KinesisAnalyticsV2JsonHandler;
+import io.floci.aws.services.kms.KmsJsonHandler;
+import io.floci.aws.services.lightsail.LightsailJsonHandler;
+import io.floci.aws.services.marketplace.MarketplaceEntitlementController;
+import io.floci.aws.services.marketplace.MarketplaceMeteringController;
+import io.floci.aws.services.memorydb.MemoryDbHandler;
+import io.floci.aws.services.networkfirewall.NetworkFirewallJsonHandler;
+import io.floci.aws.services.organizations.OrganizationsJsonHandler;
+import io.floci.aws.services.pricing.PricingJsonHandler;
+import io.floci.aws.services.redshiftdata.RedshiftDataJsonHandler;
+import io.floci.aws.services.redshiftserverless.RedshiftServerlessJsonHandler;
+import io.floci.aws.services.rekognition.RekognitionJsonHandler;
+import io.floci.aws.services.resourcegroupstagging.ResourceGroupsTaggingJsonHandler;
+import io.floci.aws.services.route53resolver.Route53ResolverJsonHandler;
+import io.floci.aws.services.sagemaker.SageMakerJsonHandler;
+import io.floci.aws.services.secretsmanager.SecretsManagerJsonHandler;
+import io.floci.aws.services.servicecatalog.ServiceCatalogJsonHandler;
+import io.floci.aws.services.servicequotas.ServiceQuotasJsonHandler;
+import io.floci.aws.services.ssm.Ec2MessagesJsonHandler;
+import io.floci.aws.services.ssm.SsmJsonHandler;
+import io.floci.aws.services.ssoadmin.SsoAdminJsonHandler;
+import io.floci.aws.services.textract.TextractJsonHandler;
+import io.floci.aws.services.transcribe.TranscribeJsonHandler;
+import io.floci.aws.services.transfer.TransferHandler;
+import io.floci.aws.services.translate.TranslateJsonHandler;
+import io.floci.aws.services.wafv2.WafV2Handler;
+import jakarta.inject.Inject;
+import jakarta.ws.rs.*;
+import jakarta.ws.rs.core.Context;
+import jakarta.ws.rs.core.HttpHeaders;
+import jakarta.ws.rs.core.Response;
+import jakarta.ws.rs.core.UriInfo;
+import org.jboss.logging.Logger;
+
+/**
+ * Generic dispatcher for all AWS services that use the application/x-amz-json-1.1 protocol.
+ * Routes requests to the appropriate service handler based on the X-Amz-Target header prefix.
+ * <p>
+ * Currently supported services:
+ * - SSM (AmazonSSM.*)
+ * - EventBridge (AmazonEventBridge.*)
+ * - CloudWatch Logs (Logs_20140328.*)
+ */
+@Path("/")
+public class AwsJson11Controller {
+
+    public static final String CONTENT_TYPE_AWS_JSON_1_1 = "application/x-amz-json-1.1";
+    private static final Logger LOG = Logger.getLogger(AwsJson11Controller.class);
+
+    private final ObjectMapper objectMapper;
+    private final ObjectReader strictBodyReader;
+    private final ResolvedServiceCatalog catalog;
+    private final RegionResolver regionResolver;
+    private final SsmJsonHandler ssmJsonHandler;
+    private final EventBridgeHandler eventBridgeHandler;
+    private final CloudMapHandler cloudMapHandler;
+    private final EmrHandler emrHandler;
+    private final MemoryDbHandler memoryDbHandler;
+    private final WafV2Handler wafV2Handler;
+    private final CloudWatchLogsHandler cloudWatchLogsHandler;
+    private final SecretsManagerJsonHandler secretsManagerJsonHandler;
+    private final KinesisJsonHandler kinesisJsonHandler;
+    private final KinesisAnalyticsV2JsonHandler kinesisAnalyticsV2JsonHandler;
+    private final ApiGatewayV2JsonHandler apigwV2JsonHandler;
+    private final KmsJsonHandler kmsJsonHandler;
+    private final CognitoJsonHandler cognitoJsonHandler;
+    private final AcmJsonHandler acmJsonHandler;
+    private final EcsJsonHandler ecsJsonHandler;
+    private final EcrJsonHandler ecrJsonHandler;
+    private final GlueJsonHandler glueJsonHandler;
+    private final AthenaJsonHandler athenaJsonHandler;
+    private final RedshiftDataJsonHandler redshiftDataJsonHandler;
+    private final RedshiftServerlessJsonHandler redshiftServerlessJsonHandler;
+    private final FirehoseJsonHandler firehoseJsonHandler;
+    private final ResourceGroupsTaggingJsonHandler resourceGroupsTaggingJsonHandler;
+    private final CodeBuildJsonHandler codeBuildJsonHandler;
+    private final CodeDeployJsonHandler codeDeployJsonHandler;
+    private final CodePipelineJsonHandler codePipelineJsonHandler;
+    private final Ec2MessagesJsonHandler ec2MessagesJsonHandler;
+    private final TransferHandler transferHandler;
+    private final TextractJsonHandler textractJsonHandler;
+    private final ComprehendJsonHandler comprehendJsonHandler;
+    private final RekognitionJsonHandler rekognitionJsonHandler;
+    private final PricingJsonHandler pricingJsonHandler;
+    private final TranscribeJsonHandler transcribeJsonHandler;
+    private final TranslateJsonHandler translateJsonHandler;
+    private final CostExplorerJsonHandler costExplorerJsonHandler;
+    private final CurJsonHandler curJsonHandler;
+    private final BcmDataExportsJsonHandler bcmDataExportsJsonHandler;
+    private final ConfigServiceJsonHandler configServiceJsonHandler;
+    private final CloudTrailJsonHandler cloudTrailJsonHandler;
+    private final LightsailJsonHandler lightsailJsonHandler;
+    private final Route53ResolverJsonHandler route53ResolverJsonHandler;
+    private final CognitoIdentityJsonHandler cognitoIdentityJsonHandler;
+    private final GlobalAcceleratorJsonHandler globalAcceleratorJsonHandler;
+    private final DataSyncJsonHandler dataSyncJsonHandler;
+    private final NetworkFirewallJsonHandler networkFirewallJsonHandler;
+    private final ServiceCatalogJsonHandler serviceCatalogJsonHandler;
+    private final CloudControlJsonHandler cloudControlJsonHandler;
+    private final ApplicationAutoScalingJsonHandler applicationAutoScalingJsonHandler;
+    private final CloudHsmV2JsonHandler cloudHsmV2JsonHandler;
+    private final OrganizationsJsonHandler organizationsJsonHandler;
+    private final SsoAdminJsonHandler ssoAdminJsonHandler;
+    private final IdentityStoreJsonHandler identityStoreJsonHandler;
+    private final BudgetsJsonHandler budgetsJsonHandler;
+    private final ServiceQuotasJsonHandler serviceQuotasJsonHandler;
+    private final MarketplaceEntitlementController marketplaceEntitlementController;
+    private final MarketplaceMeteringController marketplaceMeteringController;
+    private final SageMakerJsonHandler sageMakerJsonHandler;
+    private final DmsJsonHandler dmsJsonHandler;
+
+    @Inject
+    public AwsJson11Controller(ObjectMapper objectMapper, ResolvedServiceCatalog catalog,
+                               RegionResolver regionResolver,
+                               SsmJsonHandler ssmJsonHandler, EventBridgeHandler eventBridgeHandler,
+                               CloudMapHandler cloudMapHandler,
+                               EmrHandler emrHandler,
+                               MemoryDbHandler memoryDbHandler,
+                               WafV2Handler wafV2Handler,
+                               CloudWatchLogsHandler cloudWatchLogsHandler,
+                               SecretsManagerJsonHandler secretsManagerJsonHandler,
+                               KinesisJsonHandler kinesisJsonHandler,
+                               KinesisAnalyticsV2JsonHandler kinesisAnalyticsV2JsonHandler,
+                               ApiGatewayV2JsonHandler apigwV2JsonHandler,
+                               KmsJsonHandler kmsJsonHandler, CognitoJsonHandler cognitoJsonHandler,
+                               AcmJsonHandler acmJsonHandler, EcsJsonHandler ecsJsonHandler,
+                               EcrJsonHandler ecrJsonHandler, GlueJsonHandler glueJsonHandler,
+                               AthenaJsonHandler athenaJsonHandler,
+                               RedshiftDataJsonHandler redshiftDataJsonHandler,
+                               RedshiftServerlessJsonHandler redshiftServerlessJsonHandler,
+                               FirehoseJsonHandler firehoseJsonHandler,
+                               ResourceGroupsTaggingJsonHandler resourceGroupsTaggingJsonHandler,
+                               CodeBuildJsonHandler codeBuildJsonHandler,
+                               CodeDeployJsonHandler codeDeployJsonHandler,
+                               CodePipelineJsonHandler codePipelineJsonHandler,
+                               Ec2MessagesJsonHandler ec2MessagesJsonHandler,
+                               TransferHandler transferHandler,
+                               TextractJsonHandler textractJsonHandler,
+                               ComprehendJsonHandler comprehendJsonHandler,
+                               RekognitionJsonHandler rekognitionJsonHandler,
+                               PricingJsonHandler pricingJsonHandler,
+                               TranscribeJsonHandler transcribeJsonHandler,
+                               TranslateJsonHandler translateJsonHandler,
+                               CostExplorerJsonHandler costExplorerJsonHandler,
+                               CurJsonHandler curJsonHandler,
+                               BcmDataExportsJsonHandler bcmDataExportsJsonHandler,
+                               ConfigServiceJsonHandler configServiceJsonHandler,
+                               CloudTrailJsonHandler cloudTrailJsonHandler,
+                               LightsailJsonHandler lightsailJsonHandler,
+                               Route53ResolverJsonHandler route53ResolverJsonHandler,
+                               CognitoIdentityJsonHandler cognitoIdentityJsonHandler,
+                               GlobalAcceleratorJsonHandler globalAcceleratorJsonHandler,
+                               DataSyncJsonHandler dataSyncJsonHandler,
+                               NetworkFirewallJsonHandler networkFirewallJsonHandler,
+                               ServiceCatalogJsonHandler serviceCatalogJsonHandler,
+                               CloudControlJsonHandler cloudControlJsonHandler,
+                               ApplicationAutoScalingJsonHandler applicationAutoScalingJsonHandler,
+                               CloudHsmV2JsonHandler cloudHsmV2JsonHandler,
+                               OrganizationsJsonHandler organizationsJsonHandler,
+                               SsoAdminJsonHandler ssoAdminJsonHandler,
+                               IdentityStoreJsonHandler identityStoreJsonHandler,
+                               BudgetsJsonHandler budgetsJsonHandler,
+                               ServiceQuotasJsonHandler serviceQuotasJsonHandler,
+                               MarketplaceEntitlementController marketplaceEntitlementController,
+                               MarketplaceMeteringController marketplaceMeteringController,
+                               SageMakerJsonHandler sageMakerJsonHandler,
+                               DmsJsonHandler dmsJsonHandler) {
+        this.objectMapper = objectMapper;
+        this.strictBodyReader = objectMapper.reader().with(DeserializationFeature.FAIL_ON_TRAILING_TOKENS);
+        this.catalog = catalog;
+        this.regionResolver = regionResolver;
+        this.ssmJsonHandler = ssmJsonHandler;
+        this.eventBridgeHandler = eventBridgeHandler;
+        this.cloudMapHandler = cloudMapHandler;
+        this.emrHandler = emrHandler;
+        this.memoryDbHandler = memoryDbHandler;
+        this.wafV2Handler = wafV2Handler;
+        this.cloudWatchLogsHandler = cloudWatchLogsHandler;
+        this.secretsManagerJsonHandler = secretsManagerJsonHandler;
+        this.kinesisJsonHandler = kinesisJsonHandler;
+        this.kinesisAnalyticsV2JsonHandler = kinesisAnalyticsV2JsonHandler;
+        this.apigwV2JsonHandler = apigwV2JsonHandler;
+        this.kmsJsonHandler = kmsJsonHandler;
+        this.cognitoJsonHandler = cognitoJsonHandler;
+        this.acmJsonHandler = acmJsonHandler;
+        this.ecsJsonHandler = ecsJsonHandler;
+        this.ecrJsonHandler = ecrJsonHandler;
+        this.glueJsonHandler = glueJsonHandler;
+        this.athenaJsonHandler = athenaJsonHandler;
+        this.redshiftDataJsonHandler = redshiftDataJsonHandler;
+        this.redshiftServerlessJsonHandler = redshiftServerlessJsonHandler;
+        this.firehoseJsonHandler = firehoseJsonHandler;
+        this.resourceGroupsTaggingJsonHandler = resourceGroupsTaggingJsonHandler;
+        this.codeBuildJsonHandler = codeBuildJsonHandler;
+        this.codeDeployJsonHandler = codeDeployJsonHandler;
+        this.codePipelineJsonHandler = codePipelineJsonHandler;
+        this.ec2MessagesJsonHandler = ec2MessagesJsonHandler;
+        this.transferHandler = transferHandler;
+        this.textractJsonHandler = textractJsonHandler;
+        this.comprehendJsonHandler = comprehendJsonHandler;
+        this.rekognitionJsonHandler = rekognitionJsonHandler;
+        this.pricingJsonHandler = pricingJsonHandler;
+        this.transcribeJsonHandler = transcribeJsonHandler;
+        this.translateJsonHandler = translateJsonHandler;
+        this.costExplorerJsonHandler = costExplorerJsonHandler;
+        this.curJsonHandler = curJsonHandler;
+        this.bcmDataExportsJsonHandler = bcmDataExportsJsonHandler;
+        this.configServiceJsonHandler = configServiceJsonHandler;
+        this.cloudTrailJsonHandler = cloudTrailJsonHandler;
+        this.lightsailJsonHandler = lightsailJsonHandler;
+        this.route53ResolverJsonHandler = route53ResolverJsonHandler;
+        this.cognitoIdentityJsonHandler = cognitoIdentityJsonHandler;
+        this.globalAcceleratorJsonHandler = globalAcceleratorJsonHandler;
+        this.dataSyncJsonHandler = dataSyncJsonHandler;
+        this.networkFirewallJsonHandler = networkFirewallJsonHandler;
+        this.serviceCatalogJsonHandler = serviceCatalogJsonHandler;
+        this.cloudControlJsonHandler = cloudControlJsonHandler;
+        this.applicationAutoScalingJsonHandler = applicationAutoScalingJsonHandler;
+        this.cloudHsmV2JsonHandler = cloudHsmV2JsonHandler;
+        this.organizationsJsonHandler = organizationsJsonHandler;
+        this.ssoAdminJsonHandler = ssoAdminJsonHandler;
+        this.identityStoreJsonHandler = identityStoreJsonHandler;
+        this.budgetsJsonHandler = budgetsJsonHandler;
+        this.serviceQuotasJsonHandler = serviceQuotasJsonHandler;
+        this.marketplaceEntitlementController = marketplaceEntitlementController;
+        this.marketplaceMeteringController = marketplaceMeteringController;
+        this.sageMakerJsonHandler = sageMakerJsonHandler;
+        this.dmsJsonHandler = dmsJsonHandler;
+    }
+
+    @POST
+    @Consumes(CONTENT_TYPE_AWS_JSON_1_1)
+    @Produces(CONTENT_TYPE_AWS_JSON_1_1)
+    public Response handle(
+            @HeaderParam("X-Amz-Target") String target,
+            @Context HttpHeaders httpHeaders,
+            @Context UriInfo uriInfo,
+            String body) {
+
+        if (target == null) {
+            return JsonErrorResponseUtils.createMissingTargetErrorResponse();
+        }
+
+        ServiceCatalog.TargetMatch targetMatch = catalog.matchTarget(target).orElse(null);
+        if (targetMatch == null) {
+            return JsonErrorResponseUtils.createUnknownOperationErrorResponse(target);
+        }
+
+        String serviceKey = targetMatch.descriptor().externalKey();
+        String action = targetMatch.action();
+        LOG.infov("AwsJson11Controller {0} action: {1}", serviceKey, action);
+
+        JsonNode request;
+        try {
+            // No payload is how an operation without input goes over the wire, so it reads as {}.
+            request = body == null || body.isBlank()
+                    ? objectMapper.createObjectNode()
+                    : strictBodyReader.readTree(body);
+        } catch (JsonProcessingException e) {
+            return JsonErrorResponseUtils.createSerializationErrorResponse();
+        }
+        // Input is always a structure: a bare null, array or scalar parses but is still a
+        // client serialization error rather than something every handler must guard against.
+        if (!request.isObject()) {
+            return JsonErrorResponseUtils.createSerializationErrorResponse();
+        }
+
+        try {
+            String region = regionResolver.getRegion();
+            String authorization = httpHeaders.getHeaderString("Authorization");
+            if (authorization == null || authorization.isBlank()) {
+                authorization = IamEnforcementFilter.requestAuthorization(null, uriInfo.getQueryParameters());
+            }
+
+            Response delegated = switch (serviceKey) {
+                case "ssm" -> ssmJsonHandler.handle(
+                        action, request, region, authorization);
+                case "events" -> eventBridgeHandler.handle(action, request, region);
+                case "servicediscovery" -> cloudMapHandler.handle(action, request, region);
+                case "elasticmapreduce" -> emrHandler.handle(action, request, region);
+                case "wafv2" -> wafV2Handler.handle(action, request, region);
+                case "memorydb" -> memoryDbHandler.handle(action, request, region);
+                case "logs" -> cloudWatchLogsHandler.handle(action, request, region);
+                case "secretsmanager" -> secretsManagerJsonHandler.handle(action, request, region, authorization);
+                case "kinesis" -> kinesisJsonHandler.handle(action, request, region);
+                case "kinesisanalytics" -> kinesisAnalyticsV2JsonHandler.handle(action, request, region);
+                case "apigatewayv2" -> apigwV2JsonHandler.handle(action, request, region);
+                case "kms" -> kmsJsonHandler.handle(action, request, region);
+                case "cognito-idp" -> cognitoJsonHandler.handle(action, request, region);
+                case "acm" -> acmJsonHandler.handle(action, request, region);
+                case "ecs" -> ecsJsonHandler.handle(action, request, region, uriInfo.getBaseUri());
+                case "ecr" -> ecrJsonHandler.handle(action, request, region);
+                case "glue" -> glueJsonHandler.handle(action, request, region);
+                case "athena" -> athenaJsonHandler.handle(action, request, region);
+                case "redshift-data" -> redshiftDataJsonHandler.handle(action, request, region);
+                case "redshift-serverless" -> redshiftServerlessJsonHandler.handle(
+                        action, request, region, authorization);
+                case "firehose" -> firehoseJsonHandler.handle(action, request, region);
+                case "tagging" -> resourceGroupsTaggingJsonHandler.handle(action, request, region);
+                case "codebuild" -> codeBuildJsonHandler.handle(action, request, region, regionResolver.getAccountId());
+                case "codedeploy" -> codeDeployJsonHandler.handle(action, request, region);
+                case "codepipeline" -> codePipelineJsonHandler.handle(
+                        action, request, region, regionResolver.getAccountId());
+                case "ec2messages" -> ec2MessagesJsonHandler.handle(action, request, region);
+                case "transfer" -> transferHandler.handle(action, request, region);
+                case "textract" -> textractJsonHandler.handle(action, request, region);
+                case "comprehend" -> comprehendJsonHandler.handle(action, request, region);
+                case "rekognition" -> rekognitionJsonHandler.handle(action, request, region);
+                case "pricing" -> pricingJsonHandler.handle(action, request, region);
+                case "transcribe" -> transcribeJsonHandler.handle(action, request);
+                case "translate" -> translateJsonHandler.handle(action, request, region);
+                case "ce" -> costExplorerJsonHandler.handle(action, request, region);
+                case "cur" -> curJsonHandler.handle(action, request, region);
+                case "bcm-data-exports" -> bcmDataExportsJsonHandler.handle(action, request, region);
+                case "config" -> configServiceJsonHandler.handle(action, request, region);
+                case "cloudtrail" -> cloudTrailJsonHandler.handle(action, request, region);
+                case "application-autoscaling" -> applicationAutoScalingJsonHandler.handle(action, request, region);
+                case "lightsail" -> lightsailJsonHandler.handle(action, request, region);
+                case "route53resolver" -> route53ResolverJsonHandler.handle(action, request, region, regionResolver.getAccountId());
+                case "cognito-identity" -> cognitoIdentityJsonHandler.handle(action, request, region);
+                // Global Accelerator is a global service: its resources carry an empty ARN region
+                // segment and are never partitioned by the region the caller signed with, so the
+                // handler takes no region.
+                case "globalaccelerator" -> globalAcceleratorJsonHandler.handle(action, request);
+                case "datasync" -> dataSyncJsonHandler.handle(action, request, region);
+                case "network-firewall" -> networkFirewallJsonHandler.handle(
+                        action, request, region, regionResolver.getAccountId());
+                case "servicecatalog" -> serviceCatalogJsonHandler.handle(
+                        action, request, region, regionResolver.getAccountId());
+                case "cloudcontrol" -> cloudControlJsonHandler.handle(
+                                        action, request, region, regionResolver.getAccountId());
+                case "cloudhsmv2" -> cloudHsmV2JsonHandler.handle(action, request, region);
+                // Organizations is global and account-scoped rather than region-scoped: every
+                // action is authorized against the calling account, so pass that instead of region.
+                case "organizations" ->
+                        organizationsJsonHandler.handle(action, request, regionResolver.getAccountId());
+                case "sso" -> ssoAdminJsonHandler.handle(action, request, regionResolver.getAccountId(), region);
+                case "identitystore" -> identityStoreJsonHandler.handle(action, request);
+                case "budgets" -> budgetsJsonHandler.handle(action, request, regionResolver.getAccountId());
+                case "servicequotas" -> serviceQuotasJsonHandler.handle(
+                        action, request, region, regionResolver.getAccountId());
+                case "marketplace" -> {
+                    if (targetMatch.prefix().startsWith("AWSMPEntitlementService.")) {
+                        yield marketplaceEntitlementController.handle(action, request, region);
+                    }
+                    yield marketplaceMeteringController.handle(action, request, region);
+                }
+                case "sagemaker" -> sageMakerJsonHandler.handle(action, request, region);
+                case "dms" -> dmsJsonHandler.handle(action, request, region);
+                default -> null;
+            };
+            // catalog.matchTarget is protocol-agnostic: a JSON 1.0 target
+            // (e.g. DynamoDB_20120810.*) can match here under @Consumes json-1.1.
+            // Return the AWS-style unknown-operation error rather than null.
+            if (delegated == null) {
+                return JsonErrorResponseUtils.createUnknownOperationErrorResponse(target);
+            }
+            return delegated;
+        } catch (AwsException e) {
+            return JsonErrorResponseUtils.createErrorResponse(e);
+        } catch (Exception e) {
+            LOG.errorf(e, "Error processing %s request", serviceKey);
+            return JsonErrorResponseUtils.createErrorResponse(e);
+        }
+    }
+
+}

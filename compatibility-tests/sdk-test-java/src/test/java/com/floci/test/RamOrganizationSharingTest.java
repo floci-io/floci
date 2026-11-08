@@ -2,14 +2,17 @@ package com.floci.test;
 
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.parallel.ResourceLock;
 import software.amazon.awssdk.services.iam.IamClient;
 import software.amazon.awssdk.services.organizations.OrganizationsClient;
+import software.amazon.awssdk.services.organizations.model.AwsOrganizationsNotInUseException;
 import software.amazon.awssdk.services.ram.RamClient;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.junit.jupiter.api.Assumptions.assumeFalse;
 
 @DisplayName("RAM organization sharing")
+@ResourceLock("organizations")
 class RamOrganizationSharingTest {
     private static final String MANAGEMENT_ACCOUNT = "222222222222";
 
@@ -23,7 +26,7 @@ class RamOrganizationSharingTest {
              IamClient iam = TestFixtures.iamClient(MANAGEMENT_ACCOUNT)) {
             try {
                 organizations.describeOrganization();
-            } catch (software.amazon.awssdk.services.organizations.model.AwsOrganizationsNotInUseException e) {
+            } catch (AwsOrganizationsNotInUseException e) {
                 organizations.createOrganization(request -> request.featureSet("ALL"));
             }
 

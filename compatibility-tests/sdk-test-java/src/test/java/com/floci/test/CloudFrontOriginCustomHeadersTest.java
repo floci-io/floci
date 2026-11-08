@@ -5,10 +5,12 @@ import software.amazon.awssdk.services.cloudfront.CloudFrontClient;
 import software.amazon.awssdk.services.cloudfront.model.CreateDistributionResponse;
 import software.amazon.awssdk.services.cloudfront.model.CustomHeaders;
 import software.amazon.awssdk.services.cloudfront.model.DistributionConfig;
+import software.amazon.awssdk.services.cloudfront.model.DistributionSummary;
 import software.amazon.awssdk.services.cloudfront.model.GetDistributionConfigResponse;
 import software.amazon.awssdk.services.cloudfront.model.Origin;
 import software.amazon.awssdk.services.cloudfront.model.OriginCustomHeader;
 import software.amazon.awssdk.services.cloudfront.model.S3OriginConfig;
+import software.amazon.awssdk.services.cloudfront.model.UpdateDistributionResponse;
 import software.amazon.awssdk.services.cloudfront.model.ViewerProtocolPolicy;
 
 import java.util.List;
@@ -74,7 +76,7 @@ class CloudFrontOriginCustomHeadersTest {
                     request -> request.id(created.distribution().id()));
             assertOriginShapes(fetched.distributionConfig().origins().items());
 
-            var listed = cloudFront.listDistributions(request -> request.maxItems("100"))
+            DistributionSummary listed = cloudFront.listDistributions(request -> request.maxItems("100"))
                     .distributionList()
                     .items()
                     .stream()
@@ -88,11 +90,11 @@ class CloudFrontOriginCustomHeadersTest {
                     String id = distributionId;
                     GetDistributionConfigResponse current = cloudFront.getDistributionConfig(
                             request -> request.id(id));
-                    var disabled = current.distributionConfig()
+                    DistributionConfig disabled = current.distributionConfig()
                             .toBuilder()
                             .enabled(false)
                             .build();
-                    var updated = cloudFront.updateDistribution(request -> request
+                    UpdateDistributionResponse updated = cloudFront.updateDistribution(request -> request
                             .id(id)
                             .ifMatch(current.eTag())
                             .distributionConfig(disabled));

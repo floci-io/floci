@@ -39,6 +39,19 @@
 | `UpdateShardCount` | - |
 <!-- floci:actions:end -->
 
+## Stream Listing
+
+`ListStreams` returns sorted `StreamNames`, with at most 100 names per page by default.
+`Limit` accepts integers from 1 to 10000, but values above 100 still return at most 100 names.
+When `HasMoreStreams` is true, pass the last returned name as `ExclusiveStartStreamName`
+to continue. Truncated pages also return `NextToken`, which CLI and SDK paginators can send
+back without an `ExclusiveStartStreamName`. Tokens are scoped to this operation and region,
+use the same configurable lifetime as `ListShards` tokens (see the TTL setting below),
+and remain usable if the cursor stream is deleted.
+Each page also returns `StreamSummaries`, one entry per name in `StreamNames` and in the same
+order, with `StreamName`, `StreamARN`, `StreamStatus`, `StreamModeDetails` and
+`StreamCreationTimestamp`.
+
 ## Local Inspection Endpoints
 
 These endpoints are Floci-local read-only helpers for the UI and tests. AWS SDK
@@ -69,9 +82,35 @@ aws kinesis describe-stream --stream-arn arn:aws:kinesis:us-east-1:000000000000:
 
 A `LATEST` iterator is positioned at the shard tip at the moment the iterator is created, matching AWS: records written after the iterator was obtained are returned, records written before are not. This supports the standard tailing pattern: obtain a `LATEST` iterator, trigger the action that produces the record, then poll `GetRecords` following `NextShardIterator`.
 
+A closed shard returns a JSON null `NextShardIterator` on its final page, including
+when that page contains records. Earlier pages keep their continuation iterator.
+Only the terminal page includes `ChildShards`: each direct child's ID, all of its
+parent IDs and its hash-key range. A caught-up open shard keeps a non-null iterator.
+Consumers should process the final records before stopping at the null iterator.
+
+The internal Pipes and Firehose readers retain a sequence cursor after the final
+record to avoid replaying a terminal batch. Firehose commits that cursor only after
+delivery succeeds; its unflushed buffer remains in memory. Pipes keeps its existing
+advance-before-delivery policy and first-shard polling limitation; child scheduling
+and full lineage orchestration are not implemented.
+
+## Record Retention
+
+A stream's retention period (default 24 hours, `IncreaseStreamRetentionPeriod`/`DecreaseStreamRetentionPeriod` up to 8760 hours) is enforced: a record older than the current retention period is not returned by `GetRecords` or the `GET /_aws/kinesis/records` inspection endpoint, and is actually removed from memory rather than merely hidden. Expiry is checked lazily on each stream's next `PutRecord`/`PutRecords` or read after a record ages out; there is no scheduled sweep. After `DecreaseStreamRetentionPeriod`, records outside the new window are inaccessible from the next put or read, in line with AWS making them inaccessible almost immediately. Shard iterators (including `NextShardIterator` continuation tokens and `LATEST`) resolve by sequence number, so they keep working correctly across pruning even if the exact record they were positioned at has since expired.
+
 ## Record Routing
 
-`PutRecord` and `PutRecords` honor `ExplicitHashKey` when it is provided. The value must be a decimal integer in the Kinesis hash-key space, and records are written to the open shard whose `HashKeyRange` contains that value. Without `ExplicitHashKey`, Floci keeps using the partition key to choose a shard.
+`PutRecord` and `PutRecords` honor `ExplicitHashKey` when it is provided. The
+value must be a decimal integer in the Kinesis hash-key space, and records are
+written to the open shard whose `HashKeyRange` contains that value.
+
+Without `ExplicitHashKey`, Floci uses the partition key's Java hash modulo the
+number of stored shards, including closed shards. If this selects a closed
+shard, it follows split and merge lineage through any closed intermediate shards
+to the first open descendant in breadth-first, stored-shard order. Writes never
+append to a closed shard or fall back to an unrelated open shard. A lineage with
+no reachable open shard fails the write. This simplified ordinary-key placement
+differs from AWS's MD5 hash-range routing.
 
 ## Shard Scaling (UpdateShardCount)
 
@@ -96,10 +135,18 @@ action, so that limit is intentionally unenforced here.
 | Variable | Default | Description |
 |---|---|---|
 | `FLOCI_SERVICES_KINESIS_ENABLED` | `true` | Enable or disable the service |
+| `FLOCI_SERVICES_KINESIS_LIST_SHARDS_NEXT_TOKEN_TTL_MILLIS` | `300000` | Lifetime of `ListShards` and `ListStreams` `NextToken` values in milliseconds. Lower it to exercise `ExpiredNextTokenException` without waiting |
 
 ## Enhanced Fan-Out (EFO)
 
-`SubscribeToShard` uses a snapshot-and-close model: the server returns one batch of records as a binary EventStream response and closes the connection. The SDK resubscribes automatically using the `ContinuationSequenceNumber` from the last delivered record. All five `StartingPosition` types are supported: `TRIM_HORIZON`, `LATEST`, `AT_SEQUENCE_NUMBER`, `AFTER_SEQUENCE_NUMBER`, `AT_TIMESTAMP`.
+`SubscribeToShard` uses a snapshot-and-close model: the server returns one batch
+of records as a binary EventStream response and closes the connection. For a
+nonterminal batch, use `ContinuationSequenceNumber` from the last delivered record
+when resubscribing. At a closed shard's end, the event includes the same direct
+`ChildShards` metadata and omits `ContinuationSequenceNumber`, even when it includes
+final records. This remains a snapshot response rather than a long-lived
+subscription. All five `StartingPosition` types are supported: `TRIM_HORIZON`,
+`LATEST`, `AT_SEQUENCE_NUMBER`, `AFTER_SEQUENCE_NUMBER`, `AT_TIMESTAMP`.
 
 ```bash
 export AWS_ENDPOINT_URL=http://localhost:4566

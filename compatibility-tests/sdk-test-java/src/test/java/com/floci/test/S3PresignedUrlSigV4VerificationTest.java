@@ -5,6 +5,8 @@ import org.junit.jupiter.api.Assumptions;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.MethodSource;
 import software.amazon.awssdk.auth.credentials.AwsBasicCredentials;
 import software.amazon.awssdk.auth.credentials.StaticCredentialsProvider;
 import software.amazon.awssdk.core.sync.RequestBody;
@@ -13,18 +15,32 @@ import software.amazon.awssdk.services.iam.IamClient;
 import software.amazon.awssdk.services.iam.model.CreateAccessKeyResponse;
 import software.amazon.awssdk.services.s3.S3Client;
 import software.amazon.awssdk.services.s3.S3Configuration;
+import software.amazon.awssdk.services.s3.model.ChecksumAlgorithm;
 import software.amazon.awssdk.services.s3.model.CreateBucketRequest;
+import software.amazon.awssdk.services.s3.model.CreateMultipartUploadRequest;
+import software.amazon.awssdk.services.s3.model.CreateMultipartUploadResponse;
 import software.amazon.awssdk.services.s3.model.GetObjectRequest;
 import software.amazon.awssdk.services.s3.model.PutObjectRequest;
 import software.amazon.awssdk.services.s3.model.S3Exception;
+import software.amazon.awssdk.services.s3.model.UploadPartRequest;
 import software.amazon.awssdk.services.s3.presigner.S3Presigner;
 import software.amazon.awssdk.services.s3.presigner.model.GetObjectPresignRequest;
+import software.amazon.awssdk.services.s3.presigner.model.PresignedUploadPartRequest;
+import software.amazon.awssdk.services.s3.presigner.model.UploadPartPresignRequest;
 
+import java.io.InputStream;
+import java.io.OutputStream;
+import java.net.HttpURLConnection;
 import java.net.URI;
 import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
+import java.nio.charset.StandardCharsets;
 import java.time.Duration;
+import java.util.List;
+import java.util.Locale;
+import java.util.Map;
+import java.util.stream.Stream;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
@@ -78,22 +94,22 @@ class S3PresignedUrlSigV4VerificationTest {
     void sdkPresignedUrlIsAcceptedButNotValidForAnotherObject() throws Exception {
         assumeEnforcementEnabled();
 
-        var urlA = presignGet(KEY_A);
-        var urlB = presignGet(KEY_B);
+        String urlA = presignGet(KEY_A);
+        String urlB = presignGet(KEY_B);
 
-        var a = httpGet(urlA);
+        HttpResponse<String> a = httpGet(urlA);
         assertThat(a.statusCode()).isEqualTo(200);
         assertThat(a.body()).isEqualTo(BODY_A);
 
-        var b = httpGet(urlB);
+        HttpResponse<String> b = httpGet(urlB);
         assertThat(b.statusCode()).isEqualTo(200);
         assertThat(b.body()).isEqualTo(BODY_B);
 
         // Transplant: object A's raw path with object B's complete raw query
-        var transplanted = TestFixtures.endpoint()
+        String transplanted = TestFixtures.endpoint()
                 + URI.create(urlA).getRawPath() + "?" + URI.create(urlB).getRawQuery();
 
-        var t = httpGet(transplanted);
+        HttpResponse<String> t = httpGet(transplanted);
         assertThat(t.statusCode()).isEqualTo(403);
         assertThat(t.body()).contains("SignatureDoesNotMatch");
     }
@@ -103,17 +119,17 @@ class S3PresignedUrlSigV4VerificationTest {
     void reorderedQueryParametersStillVerify() throws Exception {
         assumeEnforcementEnabled();
 
-        var url = URI.create(presignGet(KEY_A));
-        var pairs = url.getRawQuery().split("&");
-        var reordered = new StringBuilder();
-        for (var i = pairs.length - 1; i >= 0; i--) {
+        URI url = URI.create(presignGet(KEY_A));
+        String[] pairs = url.getRawQuery().split("&");
+        StringBuilder reordered = new StringBuilder();
+        for (int i = pairs.length - 1; i >= 0; i--) {
             reordered.append(pairs[i]);
             if (i > 0) {
                 reordered.append("&");
             }
         }
 
-        var r = httpGet(TestFixtures.endpoint() + url.getRawPath() + "?" + reordered);
+        HttpResponse<String> r = httpGet(TestFixtures.endpoint() + url.getRawPath() + "?" + reordered);
         assertThat(r.statusCode()).isEqualTo(200);
         assertThat(r.body()).isEqualTo(BODY_A);
     }
@@ -124,7 +140,7 @@ class S3PresignedUrlSigV4VerificationTest {
         assumeEnforcementEnabled();
 
         String url;
-        try (var presigner = presigner()) {
+        try (S3Presigner presigner = presigner()) {
             url = presigner.presignGetObject(GetObjectPresignRequest.builder()
                     .signatureDuration(Duration.ofMinutes(5))
                     .getObjectRequest(GetObjectRequest.builder()
@@ -134,7 +150,7 @@ class S3PresignedUrlSigV4VerificationTest {
                     .build()).url().toString();
         }
 
-        var r = httpGet(url);
+        HttpResponse<String> r = httpGet(url);
         assertThat(r.statusCode()).isEqualTo(200);
         assertThat(r.body()).isEqualTo(BODY_A);
     }
@@ -144,11 +160,11 @@ class S3PresignedUrlSigV4VerificationTest {
     void expiredPresignedUrlIsRejected() throws Exception {
         assumeEnforcementEnabled();
 
-        var url = URI.create(presignGet(KEY_A));
-        var expiredQuery = url.getRawQuery()
+        URI url = URI.create(presignGet(KEY_A));
+        String expiredQuery = url.getRawQuery()
                 .replaceFirst("X-Amz-Date=[^&]+", "X-Amz-Date=20200101T000000Z");
 
-        var r = httpGet(TestFixtures.endpoint() + url.getRawPath() + "?" + expiredQuery);
+        HttpResponse<String> r = httpGet(TestFixtures.endpoint() + url.getRawPath() + "?" + expiredQuery);
         assertThat(r.statusCode()).isEqualTo(403);
         assertThat(r.body()).contains("AccessDenied");
     }
@@ -158,21 +174,21 @@ class S3PresignedUrlSigV4VerificationTest {
     void presignedUrlSignedWithIamAccessKeyIsAccepted() throws Exception {
         assumeEnforcementEnabled();
 
-        var userName = TestFixtures.uniqueName("presign-user");
+        String userName = TestFixtures.uniqueName("presign-user");
         iam.createUser(r -> r.userName(userName).path("/"));
         CreateAccessKeyResponse keyResponse = iam.createAccessKey(r -> r.userName(userName));
-        var accessKeyId = keyResponse.accessKey().accessKeyId();
-        var secretKey = keyResponse.accessKey().secretAccessKey();
+        String accessKeyId = keyResponse.accessKey().accessKeyId();
+        String secretKey = keyResponse.accessKey().secretAccessKey();
 
         String url;
-        try (var presigner = presigner(accessKeyId, secretKey)) {
+        try (S3Presigner presigner = presigner(accessKeyId, secretKey)) {
             url = presigner.presignGetObject(GetObjectPresignRequest.builder()
                     .signatureDuration(Duration.ofMinutes(5))
                     .getObjectRequest(GetObjectRequest.builder().bucket(BUCKET).key(KEY_A).build())
                     .build()).url().toString();
         }
 
-        var r = httpGet(url);
+        HttpResponse<String> r = httpGet(url);
         assertThat(r.statusCode()).isEqualTo(200);
         assertThat(r.body()).isEqualTo(BODY_A);
     }
@@ -182,16 +198,96 @@ class S3PresignedUrlSigV4VerificationTest {
     void presignedUrlWithMalformedCredentialIsRejected() throws Exception {
         assumeEnforcementEnabled();
 
-        var url = URI.create(presignGet(KEY_A));
-        var query = url.getRawQuery().replaceFirst("X-Amz-Credential=[^&]+", "X-Amz-Credential=test");
+        URI url = URI.create(presignGet(KEY_A));
+        String query = url.getRawQuery().replaceFirst("X-Amz-Credential=[^&]+", "X-Amz-Credential=test");
 
-        var r = httpGet(TestFixtures.endpoint() + url.getRawPath() + "?" + query);
+        HttpResponse<String> r = httpGet(TestFixtures.endpoint() + url.getRawPath() + "?" + query);
         assertThat(r.statusCode()).isEqualTo(403);
         assertThat(r.body()).contains("InvalidAccessKeyId");
     }
 
+    @ParameterizedTest(name = "{0}")
+    @MethodSource("checksumCases")
+    @DisplayName("unsigned checksum header on presigned multipart PUT is rejected")
+    void unsignedChecksumHeaderOnPresignedUploadPartIsRejected(ChecksumCase checksum) throws Exception {
+        assumeEnforcementEnabled();
+
+        String key = "unsigned-checksum-" + checksum.algorithm().toString().toLowerCase(Locale.ROOT) + ".bin";
+        CreateMultipartUploadResponse upload = s3.createMultipartUpload(CreateMultipartUploadRequest.builder()
+                .bucket(BUCKET)
+                .key(key)
+                .checksumAlgorithm(checksum.algorithm())
+                .build());
+        try {
+            PresignedUploadPartRequest unsignedChecksum;
+            PresignedUploadPartRequest signedChecksum;
+            try (S3Presigner presigner = presigner()) {
+                unsignedChecksum = presigner.presignUploadPart(UploadPartPresignRequest.builder()
+                        .signatureDuration(Duration.ofMinutes(5))
+                        .uploadPartRequest(UploadPartRequest.builder()
+                                .bucket(BUCKET)
+                                .key(key)
+                                .uploadId(upload.uploadId())
+                                .partNumber(1)
+                                .build())
+                        .build());
+                UploadPartRequest.Builder signedRequest = UploadPartRequest.builder()
+                        .bucket(BUCKET)
+                        .key(key)
+                        .uploadId(upload.uploadId())
+                        .partNumber(1);
+                signedChecksum = presigner.presignUploadPart(UploadPartPresignRequest.builder()
+                        .signatureDuration(Duration.ofMinutes(5))
+                        .uploadPartRequest(withChecksum(signedRequest, checksum))
+                        .build());
+            }
+
+            HttpResult rejected = httpPut(unsignedChecksum,
+                    Map.of(checksum.headerName(), checksum.value()), "123456789");
+            assertThat(rejected.status()).isEqualTo(403);
+            assertThat(rejected.body()).contains("<Code>AccessDenied</Code>");
+            assertThat(rejected.body()).contains(
+                    "<Message>There were headers present in the request which were not signed</Message>");
+            assertThat(rejected.body()).contains(
+                    "<HeadersNotSigned>" + checksum.headerName() + "</HeadersNotSigned>");
+
+            assertThat(signedChecksum.httpRequest().headers()).containsKey(checksum.headerName());
+            HttpResult accepted = httpPut(signedChecksum, Map.of(), "123456789");
+            assertThat(accepted.status()).isEqualTo(200);
+        } finally {
+            s3.abortMultipartUpload(r -> r.bucket(BUCKET).key(key).uploadId(upload.uploadId()));
+        }
+    }
+
+    private static Stream<ChecksumCase> checksumCases() {
+        return Stream.of(
+                new ChecksumCase(ChecksumAlgorithm.CRC32,
+                        "x-amz-checksum-crc32", "y/Q5Jg=="),
+                new ChecksumCase(ChecksumAlgorithm.CRC32_C,
+                        "x-amz-checksum-crc32c", "4waSgw=="),
+                new ChecksumCase(ChecksumAlgorithm.CRC64_NVME,
+                        "x-amz-checksum-crc64nvme", "rosUhgp5mIg="),
+                new ChecksumCase(ChecksumAlgorithm.SHA1,
+                        "x-amz-checksum-sha1", "98O8HYCOBHMq32eZZczDTKeuNEE="),
+                new ChecksumCase(ChecksumAlgorithm.SHA256,
+                        "x-amz-checksum-sha256", "FeKw08M4keuw8e9gnsQZQgwg4yDOlMZfvIwzEkSOsiU="));
+    }
+
+    private static UploadPartRequest withChecksum(
+            UploadPartRequest.Builder request, ChecksumCase checksum) {
+        return switch (checksum.algorithm()) {
+            case CRC32 -> request.checksumCRC32(checksum.value()).build();
+            case CRC32_C -> request.checksumCRC32C(checksum.value()).build();
+            case CRC64_NVME -> request.checksumCRC64NVME(checksum.value()).build();
+            case SHA1 -> request.checksumSHA1(checksum.value()).build();
+            case SHA256 -> request.checksumSHA256(checksum.value()).build();
+            default -> throw new IllegalArgumentException(
+                    "Unsupported checksum algorithm: " + checksum.algorithm());
+        };
+    }
+
     private static boolean probeEnforcementEnabled() {
-        var unknownS3 = S3Client.builder()
+        S3Client unknownS3 = S3Client.builder()
                 .endpointOverride(TestFixtures.endpoint())
                 .region(Region.US_EAST_1)
                 .credentialsProvider(StaticCredentialsProvider.create(
@@ -232,7 +328,7 @@ class S3PresignedUrlSigV4VerificationTest {
     }
 
     private static String presignGet(String key) {
-        try (var presigner = presigner()) {
+        try (S3Presigner presigner = presigner()) {
             return presigner.presignGetObject(GetObjectPresignRequest.builder()
                     .signatureDuration(Duration.ofMinutes(5))
                     .getObjectRequest(GetObjectRequest.builder().bucket(BUCKET).key(key).build())
@@ -244,5 +340,44 @@ class S3PresignedUrlSigV4VerificationTest {
         return HttpClient.newHttpClient().send(
                 HttpRequest.newBuilder(URI.create(url)).GET().build(),
                 HttpResponse.BodyHandlers.ofString());
+    }
+
+    private static HttpResult httpPut(PresignedUploadPartRequest presigned,
+                                      Map<String, String> additionalHeaders,
+                                      String body) throws Exception {
+        HttpURLConnection connection = (HttpURLConnection) presigned.url().openConnection();
+        connection.setRequestMethod("PUT");
+        connection.setDoOutput(true);
+        for (Map.Entry<String, List<String>> entry : presigned.httpRequest().headers().entrySet()) {
+            for (String value : entry.getValue()) {
+                connection.addRequestProperty(entry.getKey(), value);
+            }
+        }
+        additionalHeaders.forEach(connection::addRequestProperty);
+
+        byte[] bytes = body.getBytes(StandardCharsets.UTF_8);
+        connection.setFixedLengthStreamingMode(bytes.length);
+        try (OutputStream output = connection.getOutputStream()) {
+            output.write(bytes);
+        }
+
+        int status = connection.getResponseCode();
+        InputStream responseStream = status >= 400 ? connection.getErrorStream() : connection.getInputStream();
+        if (responseStream == null) {
+            return new HttpResult(status, "");
+        }
+        try (InputStream input = responseStream) {
+            return new HttpResult(status, new String(input.readAllBytes(), StandardCharsets.UTF_8));
+        }
+    }
+
+    private record HttpResult(int status, String body) {
+    }
+
+    private record ChecksumCase(ChecksumAlgorithm algorithm, String headerName, String value) {
+        @Override
+        public String toString() {
+            return algorithm.toString();
+        }
     }
 }

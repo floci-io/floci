@@ -130,6 +130,32 @@ public class C {
     assert r.extract_rest_actions(src) == ["CreateThing", "ListThings"]
 
 
+def test_extract_rest_inherits_methods_from_superclass(tmp_path: Path):
+    base_src = """
+public abstract class BaseController {
+    @GET
+    public Response getBaseItem() { return ok(); }
+
+    @DELETE
+    public Response deleteBaseItem() { return ok(); }
+}
+"""
+    sub_src = """
+@Path("/items")
+public class ChildController extends BaseController {
+    @POST
+    public Response createChildItem() { return ok(); }
+}
+"""
+    base_file = tmp_path / "BaseController.java"
+    sub_file = tmp_path / "ChildController.java"
+    base_file.write_text(base_src, encoding="utf-8")
+    sub_file.write_text(sub_src, encoding="utf-8")
+
+    actions = r.extract_rest_actions(sub_src, sub_file)
+    assert actions == ["GetBaseItem", "DeleteBaseItem", "CreateChildItem"]
+
+
 def test_extract_actions_applies_rename_and_exclude(tmp_path: Path):
     src = tmp_path / "ThingController.java"
     src.write_text(REST_CONTROLLER)

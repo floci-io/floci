@@ -28,6 +28,15 @@ Auto Scaling groups over the Query protocol under the `autoscaling` signing name
 | `UntagResource` | Removes tags from a scalable target |
 <!-- floci:actions:end -->
 
+## Pagination
+
+`DescribeScalableTargets` accepts `MaxResults` from 1 to 50 and defaults to 50.
+`DescribeScalingPolicies` accepts `MaxResults` from 1 to 10 and defaults to 10.
+When more results remain, pass the returned `NextToken` with the same operation,
+region, and filters to retrieve the next page. An invalid token returns
+`InvalidNextTokenException`; an out-of-range page size returns `ValidationException`.
+Tokens expire when the emulator restarts.
+
 ## Identity
 
 A scalable target is keyed by the triple **(ServiceNamespace, ResourceId,
@@ -52,6 +61,9 @@ PolicyARN          arn:aws:autoscaling:<region>:<account>:scalingPolicy:<uuid>:r
 `DescribeScalableTargets` into the resource's `arn` attribute and then passes it to
 `ListTagsForResource` on every read, so it is always populated.
 
+Under IAM enforcement, a request naming a target by its triple is checked on that ARN, and a
+`RegisterScalableTarget` registering a new one on `scalable-target/*`, as its id is not assigned yet.
+
 ## CloudWatch alarms
 
 A `TargetTrackingScaling` policy creates a real pair of CloudWatch alarms, exactly as AWS
@@ -63,7 +75,25 @@ TargetTracking-<resourceId>-AlarmLow-<uuid>
 ```
 
 They are visible through `DescribeAlarms` and are deleted when the policy is deleted or
-its scalable target is deregistered.
+its scalable target is deregistered, exactly as on AWS.
+
+Each alarm watches the CloudWatch metric it scales on, as real AWS's alarms do:
+
+- A `CustomizedMetricSpecification` passes the caller's `Namespace`, `MetricName`,
+  `Dimensions`, `Statistic` (defaulting to `Average`) and `Unit` straight onto the
+  alarms, so data published under the identity the policy named is what the alarms
+  read.
+- `ECSServiceAverageCPUUtilization` maps onto the documented AWS/ECS service-level
+  metric: `CPUUtilization` with the `ClusterName`/`ServiceName` dimensions taken from
+  the resource ID, and `ECSServiceAverageMemoryUtilization` maps to `MemoryUtilization`
+  the same way.
+- `ALBRequestCountPerTarget` maps onto AWS/ApplicationELB `RequestCountPerTarget` with
+  the `LoadBalancer`/`TargetGroup` dimensions encoded in the policy's `ResourceLabel`.
+  The alarm reads the `Sum` statistic, the only valid one for that metric on CloudWatch
+  (its data points are already the per-minute average across the group's targets).
+- Any other predefined type keeps the service namespace's CloudWatch namespace under the
+  type's own name, since that type's metric identity is not one Floci derives; push the
+  metric under that name to exercise such a policy.
 
 For `ecs` targets, the alarm is created with the same `ClusterName`/`ServiceName`
 dimensions real AWS attaches to the metric, so a metric you push with
@@ -136,8 +166,6 @@ arn:aws:iam::<account>:role/aws-service-role/<namespace>.application-autoscaling
   implemented.
 - `PredictiveScalingPolicyConfiguration` is accepted only insofar as `PolicyType` is
   validated; the configuration block is not stored.
-- Pagination is not implemented — `DescribeScalableTargets` and `DescribeScalingPolicies`
-  return all matching results and never emit a `NextToken`.
 - **The evaluation range's exact width is an approximation.** Alarm evaluation follows
   CloudWatch's documented precedence: a wider "evaluation range" than
   `Period × EvaluationPeriods` is queried, and whenever enough *real* datapoints exist within

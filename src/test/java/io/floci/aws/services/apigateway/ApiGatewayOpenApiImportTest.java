@@ -1,0 +1,2120 @@
+package io.floci.aws.services.apigateway;
+
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.node.ObjectNode;
+import com.sun.net.httpserver.HttpServer;
+import io.quarkus.test.junit.QuarkusTest;
+import io.restassured.builder.RequestSpecBuilder;
+import io.restassured.http.ContentType;
+import io.restassured.specification.RequestSpecification;
+import org.junit.jupiter.api.*;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.Arguments;
+import org.junit.jupiter.params.provider.MethodSource;
+import org.junit.jupiter.params.provider.ValueSource;
+
+import java.net.InetSocketAddress;
+import java.nio.charset.StandardCharsets;
+import java.util.concurrent.atomic.AtomicInteger;
+import java.util.stream.Stream;
+
+import static io.restassured.RestAssured.given;
+import static org.hamcrest.Matchers.*;
+import static org.junit.jupiter.api.Assertions.*;
+
+/**
+ * Integration tests for API Gateway OpenAPI/Swagger import.
+ * Tests ImportRestApi (POST /restapis?mode=import) and PutRestApi (PUT /restapis/{apiId}?mode=overwrite).
+ */
+@QuarkusTest
+@TestMethodOrder(MethodOrderer.OrderAnnotation.class)
+class ApiGatewayOpenApiImportTest {
+
+    private static final ObjectMapper mapper = new ObjectMapper();
+    private static String importedApiId;
+    private static String overwriteApiId;
+
+    // ──────────────────────────── Import Basic ────────────────────────────
+
+    @Test
+    @Order(1)
+    void importRestApi_basicMock() throws Exception {
+        String spec = """
+                {
+                  "openapi": "3.0.1",
+                  "info": {
+                    "title": "MockAPI",
+                    "description": "A simple mock API",
+                    "version": "1.0"
+                  },
+                  "paths": {
+                    "/health": {
+                      "get": {
+                        "x-amazon-apigateway-integration": {
+                          "type": "MOCK",
+                          "requestTemplates": {
+                            "application/json": "{\\"statusCode\\": 200}"
+                          },
+                          "responses": {
+                            "default": {
+                              "statusCode": "200",
+                              "responseTemplates": {
+                                "application/json": "{\\"status\\": \\"ok\\"}"
+                              }
+                            }
+                          }
+                        }
+                      }
+                    }
+                  }
+                }
+                """;
+
+        String body = given()
+                .contentType(ContentType.JSON)
+                .queryParam("mode", "import")
+                .body(spec)
+                .when()
+                .post("/restapis")
+                .then()
+                .statusCode(201)
+                .body("name", equalTo("MockAPI"))
+                .body("description", equalTo("A simple mock API"))
+                .body("id", notNullValue())
+                .extract().body().asString();
+
+        JsonNode node = mapper.readTree(body);
+        importedApiId = node.get("id").asText();
+    }
+
+    @Test
+    @Order(2)
+    void importRestApi_resourcesCreated() {
+        // Should have root "/" and "/health"
+        String body = given()
+                .contentType(ContentType.JSON)
+                .when()
+                .get("/restapis/" + importedApiId + "/resources")
+                .then()
+                .statusCode(200)
+                .body("item", hasSize(2))
+                .extract().body().asString();
+    }
+
+    @Test
+    @Order(3)
+    void importRestApi_methodAndIntegrationCreated() throws Exception {
+        // Find the /health resource
+        String body = given()
+                .contentType(ContentType.JSON)
+                .when()
+                .get("/restapis/" + importedApiId + "/resources")
+                .then()
+                .statusCode(200)
+                .extract().body().asString();
+
+        JsonNode resources = mapper.readTree(body).get("item");
+        String healthResourceId = null;
+        for (JsonNode r : resources) {
+            if ("/health".equals(r.get("path").asText())) {
+                healthResourceId = r.get("id").asText();
+            }
+        }
+        assertNotNull(healthResourceId, "Should have /health resource");
+
+        // Verify the GET method has MOCK integration
+        given()
+                .contentType(ContentType.JSON)
+                .when()
+                .get("/restapis/" + importedApiId + "/resources/" + healthResourceId + "/methods/GET/integration")
+                .then()
+                .statusCode(200)
+                .body("type", equalTo("MOCK"));
+    }
+
+    // ──────────────────────────── Import Nested Paths ────────────────────────────
+
+    @Test
+    @Order(10)
+    void importRestApi_nestedPaths() throws Exception {
+        String spec = """
+                {
+                  "openapi": "3.0.1",
+                  "info": { "title": "NestedAPI", "version": "1.0" },
+                  "paths": {
+                    "/orders": {
+                      "get": {
+                        "x-amazon-apigateway-integration": { "type": "MOCK" }
+                      }
+                    },
+                    "/orders/{orderId}": {
+                      "get": {
+                        "x-amazon-apigateway-integration": { "type": "MOCK" }
+                      }
+                    },
+                    "/orders/{orderId}/items": {
+                      "get": {
+                        "x-amazon-apigateway-integration": { "type": "MOCK" }
+                      },
+                      "post": {
+                        "x-amazon-apigateway-integration": { "type": "MOCK" }
+                      }
+                    }
+                  }
+                }
+                """;
+
+        String body = given()
+                .contentType(ContentType.JSON)
+                .queryParam("mode", "import")
+                .body(spec)
+                .when()
+                .post("/restapis")
+                .then()
+                .statusCode(201)
+                .body("name", equalTo("NestedAPI"))
+                .extract().body().asString();
+
+        String apiId = mapper.readTree(body).get("id").asText();
+
+        // Should have: /, /orders, /orders/{orderId}, /orders/{orderId}/items
+        String resourcesBody = given()
+                .contentType(ContentType.JSON)
+                .when()
+                .get("/restapis/" + apiId + "/resources")
+                .then()
+                .statusCode(200)
+                .body("item", hasSize(4))
+                .extract().body().asString();
+
+        JsonNode items = mapper.readTree(resourcesBody).get("item");
+        boolean hasRoot = false, hasOrders = false, hasOrderId = false, hasItems = false;
+        for (JsonNode r : items) {
+            String path = r.get("path").asText();
+            switch (path) {
+                case "/" -> hasRoot = true;
+                case "/orders" -> hasOrders = true;
+                case "/orders/{orderId}" -> hasOrderId = true;
+                case "/orders/{orderId}/items" -> hasItems = true;
+            }
+        }
+        assertTrue(hasRoot && hasOrders && hasOrderId && hasItems,
+                "Should have all nested resources");
+
+        // Cleanup
+        given().delete("/restapis/" + apiId);
+    }
+
+    // ──────────────────────────── Import with AWS Integration ────────────────────────────
+
+    @Test
+    @Order(20)
+    void importRestApi_awsIntegrationWithTemplates() throws Exception {
+        String spec = """
+                {
+                  "openapi": "3.0.1",
+                  "info": { "title": "SfnAPI", "version": "1.0" },
+                  "paths": {
+                    "/start": {
+                      "post": {
+                        "x-amazon-apigateway-integration": {
+                          "type": "AWS",
+                          "httpMethod": "POST",
+                          "uri": "arn:aws:apigateway:us-east-1:states:action/StartExecution",
+                          "passthroughBehavior": "NEVER",
+                          "requestTemplates": {
+                            "application/json": "#set($body = $input.json('$'))\\n{\\"input\\": \\"$util.escapeJavaScript($body)\\", \\"stateMachineArn\\": \\"arn:aws:states:us-east-1:000000000000:stateMachine:test\\"}"
+                          },
+                          "requestParameters": {
+                            "integration.request.header.X-Custom": "'static-value'"
+                          },
+                          "responses": {
+                            "default": {
+                              "statusCode": "200",
+                              "responseTemplates": {
+                                "application/json": "$input.json('$')"
+                              }
+                            },
+                            "4\\\\d{2}": {
+                              "statusCode": "400"
+                            }
+                          }
+                        }
+                      }
+                    }
+                  }
+                }
+                """;
+
+        String body = given()
+                .contentType(ContentType.JSON)
+                .queryParam("mode", "import")
+                .body(spec)
+                .when()
+                .post("/restapis")
+                .then()
+                .statusCode(201)
+                .extract().body().asString();
+
+        String apiId = mapper.readTree(body).get("id").asText();
+
+        // Find /start resource
+        String resourcesBody = given()
+                .contentType(ContentType.JSON)
+                .when()
+                .get("/restapis/" + apiId + "/resources")
+                .then()
+                .statusCode(200)
+                .extract().body().asString();
+
+        String startResourceId = null;
+        for (JsonNode r : mapper.readTree(resourcesBody).get("item")) {
+            if ("/start".equals(r.get("path").asText())) {
+                startResourceId = r.get("id").asText();
+            }
+        }
+        assertNotNull(startResourceId);
+
+        // Verify integration
+        given()
+                .contentType(ContentType.JSON)
+                .when()
+                .get("/restapis/" + apiId + "/resources/" + startResourceId + "/methods/POST/integration")
+                .then()
+                .statusCode(200)
+                .body("type", equalTo("AWS"))
+                .body("uri", equalTo("arn:aws:apigateway:us-east-1:states:action/StartExecution"))
+                .body("passthroughBehavior", equalTo("NEVER"));
+
+        // Verify integration responses exist
+        given()
+                .contentType(ContentType.JSON)
+                .when()
+                .get("/restapis/" + apiId + "/resources/" + startResourceId + "/methods/POST/integration/responses/200")
+                .then()
+                .statusCode(200);
+
+        given()
+                .contentType(ContentType.JSON)
+                .when()
+                .get("/restapis/" + apiId + "/resources/" + startResourceId + "/methods/POST/integration/responses/400")
+                .then()
+                .statusCode(200);
+
+        // Verify method responses exist
+        given()
+                .contentType(ContentType.JSON)
+                .when()
+                .get("/restapis/" + apiId + "/resources/" + startResourceId + "/methods/POST/responses/200")
+                .then()
+                .statusCode(200);
+
+        // Cleanup
+        given().delete("/restapis/" + apiId);
+    }
+
+    // ──────────────────────────── PutRestApi (overwrite) ────────────────────────────
+
+    @Test
+    @Order(30)
+    void putRestApi_createApiForOverwrite() throws Exception {
+        // Create API imperatively first
+        String body = given()
+                .contentType(ContentType.JSON)
+                .body("{\"name\": \"OverwriteMe\", \"description\": \"Will be overwritten\"}")
+                .when()
+                .post("/restapis")
+                .then()
+                .statusCode(201)
+                .extract().body().asString();
+
+        overwriteApiId = mapper.readTree(body).get("id").asText();
+    }
+
+    @Test
+    @Order(31)
+    void putRestApi_overwriteWithNewSpec() throws Exception {
+        String spec = """
+                {
+                  "openapi": "3.0.1",
+                  "info": { "title": "OverwrittenAPI", "description": "New description", "version": "2.0" },
+                  "paths": {
+                    "/users": {
+                      "get": {
+                        "x-amazon-apigateway-integration": { "type": "MOCK" }
+                      }
+                    },
+                    "/users/{userId}": {
+                      "get": {
+                        "x-amazon-apigateway-integration": { "type": "MOCK" }
+                      },
+                      "delete": {
+                        "x-amazon-apigateway-integration": { "type": "MOCK" }
+                      }
+                    }
+                  }
+                }
+                """;
+
+        given()
+                .contentType(ContentType.JSON)
+                .queryParam("mode", "overwrite")
+                .body(spec)
+                .when()
+                .put("/restapis/" + overwriteApiId)
+                .then()
+                .statusCode(200)
+                .body("name", equalTo("OverwrittenAPI"))
+                .body("description", equalTo("New description"));
+    }
+
+    @Test
+    @Order(32)
+    void putRestApi_verifyNewResources() throws Exception {
+        // Should have: /, /users, /users/{userId}
+        String body = given()
+                .contentType(ContentType.JSON)
+                .when()
+                .get("/restapis/" + overwriteApiId + "/resources")
+                .then()
+                .statusCode(200)
+                .body("item", hasSize(3))
+                .extract().body().asString();
+
+        JsonNode items = mapper.readTree(body).get("item");
+        boolean hasUsers = false, hasUserId = false;
+        for (JsonNode r : items) {
+            String path = r.get("path").asText();
+            if ("/users".equals(path)) hasUsers = true;
+            if ("/users/{userId}".equals(path)) hasUserId = true;
+        }
+        assertTrue(hasUsers && hasUserId, "Should have /users and /users/{userId}");
+    }
+
+    // ──────────────────────────── Swagger 2.0 ────────────────────────────
+
+    @Test
+    @Order(40)
+    void importRestApi_swagger20() throws Exception {
+        String spec = """
+                {
+                  "swagger": "2.0",
+                  "info": { "title": "Swagger2API", "version": "1.0" },
+                  "paths": {
+                    "/ping": {
+                      "get": {
+                        "responses": { "200": { "description": "OK" } },
+                        "x-amazon-apigateway-integration": {
+                          "type": "MOCK",
+                          "requestTemplates": {
+                            "application/json": "{\\"statusCode\\": 200}"
+                          },
+                          "responses": {
+                            "default": {
+                              "statusCode": "200",
+                              "responseTemplates": {
+                                "application/json": "{\\"message\\": \\"pong\\"}"
+                              }
+                            }
+                          }
+                        }
+                      }
+                    }
+                  }
+                }
+                """;
+
+        String body = given()
+                .contentType(ContentType.JSON)
+                .queryParam("mode", "import")
+                .body(spec)
+                .when()
+                .post("/restapis")
+                .then()
+                .statusCode(201)
+                .body("name", equalTo("Swagger2API"))
+                .extract().body().asString();
+
+        String apiId = mapper.readTree(body).get("id").asText();
+
+        // Verify resources
+        given()
+                .contentType(ContentType.JSON)
+                .when()
+                .get("/restapis/" + apiId + "/resources")
+                .then()
+                .statusCode(200)
+                .body("item", hasSize(2));
+
+        // Cleanup
+        given().delete("/restapis/" + apiId);
+    }
+
+    // ──────────────────────────── Error Cases ────────────────────────────
+
+    @Test
+    @Order(50)
+    void importRestApi_invalidSpec() {
+        given()
+                .contentType(ContentType.JSON)
+                .queryParam("mode", "import")
+                .body("this is not valid json or yaml")
+                .when()
+                .post("/restapis")
+                .then()
+                .statusCode(400);
+    }
+
+    @Test
+    @Order(51)
+    void putRestApi_nonExistentApi() {
+        String spec = """
+                {"openapi": "3.0.1", "info": {"title": "Test", "version": "1.0"}, "paths": {}}
+                """;
+        given()
+                .contentType(ContentType.JSON)
+                .queryParam("mode", "overwrite")
+                .body(spec)
+                .when()
+                .put("/restapis/nonexistent123")
+                .then()
+                .statusCode(404);
+    }
+
+    @Test
+    @Order(52)
+    void putRestApi_modeMergeAccepted() throws Exception {
+        String apiBody = given()
+                .contentType(ContentType.JSON)
+                .body("{\"name\": \"MergeTest\"}")
+                .post("/restapis")
+                .then().statusCode(201).extract().body().asString();
+        String apiId = mapper.readTree(apiBody).get("id").asText();
+
+        String spec = """
+                {"openapi": "3.0.1", "info": {"title": "Merged", "version": "1.0"}, "paths": {}}
+                """;
+        given()
+                .contentType(ContentType.JSON)
+                .queryParam("mode", "merge")
+                .body(spec)
+                .when()
+                .put("/restapis/" + apiId)
+                .then()
+                .statusCode(200)
+                .body("name", equalTo("Merged"));
+
+        given().delete("/restapis/" + apiId);
+    }
+
+    // ──────────────────────────── YAML Format ────────────────────────────
+
+    @Test
+    @Order(60)
+    void importRestApi_yamlFormat() throws Exception {
+        String spec = """
+                openapi: "3.0.1"
+                info:
+                  title: YamlAPI
+                  version: "1.0"
+                paths:
+                  /status:
+                    get:
+                      x-amazon-apigateway-integration:
+                        type: MOCK
+                        requestTemplates:
+                          application/json: '{"statusCode": 200}'
+                        responses:
+                          default:
+                            statusCode: "200"
+                """;
+
+        String body = given()
+                .contentType(ContentType.JSON)
+                .queryParam("mode", "import")
+                .body(spec)
+                .when()
+                .post("/restapis")
+                .then()
+                .statusCode(201)
+                .body("name", equalTo("YamlAPI"))
+                .extract().body().asString();
+
+        String apiId = mapper.readTree(body).get("id").asText();
+
+        given()
+                .contentType(ContentType.JSON)
+                .when()
+                .get("/restapis/" + apiId + "/resources")
+                .then()
+                .statusCode(200)
+                .body("item", hasSize(2));
+
+        // Cleanup
+        given().delete("/restapis/" + apiId);
+    }
+
+    // ──────────────────────────── Root Path Methods ────────────────────────────
+
+    @Test
+    @Order(70)
+    void importRestApi_methodOnRootPath() throws Exception {
+        String spec = """
+                {
+                  "openapi": "3.0.1",
+                  "info": { "title": "RootPathAPI", "version": "1.0" },
+                  "paths": {
+                    "/": {
+                      "get": {
+                        "x-amazon-apigateway-integration": {
+                          "type": "MOCK",
+                          "requestTemplates": { "application/json": "{\\"statusCode\\": 200}" },
+                          "responses": { "default": { "statusCode": "200" } }
+                        }
+                      }
+                    },
+                    "/sub": {
+                      "post": {
+                        "x-amazon-apigateway-integration": { "type": "MOCK" }
+                      }
+                    }
+                  }
+                }
+                """;
+
+        String body = given()
+                .contentType(ContentType.JSON)
+                .queryParam("mode", "import")
+                .body(spec)
+                .when()
+                .post("/restapis")
+                .then()
+                .statusCode(201)
+                .extract().body().asString();
+
+        String apiId = mapper.readTree(body).get("id").asText();
+
+        // Should have root "/" and "/sub"
+        String resourcesBody = given()
+                .contentType(ContentType.JSON)
+                .when()
+                .get("/restapis/" + apiId + "/resources")
+                .then()
+                .statusCode(200)
+                .body("item", hasSize(2))
+                .extract().body().asString();
+
+        // Find root resource and verify it has a GET method
+        JsonNode items = mapper.readTree(resourcesBody).get("item");
+        String rootId = null;
+        for (JsonNode r : items) {
+            if ("/".equals(r.get("path").asText())) {
+                rootId = r.get("id").asText();
+            }
+        }
+        assertNotNull(rootId);
+
+        // Root should have GET method with MOCK integration
+        given()
+                .contentType(ContentType.JSON)
+                .when()
+                .get("/restapis/" + apiId + "/resources/" + rootId + "/methods/GET/integration")
+                .then()
+                .statusCode(200)
+                .body("type", equalTo("MOCK"));
+
+        given().delete("/restapis/" + apiId);
+    }
+
+    // ──────────────────────────── End-to-End Invoke ────────────────────────────
+
+    @Test
+    @Order(80)
+    void importRestApi_deployAndInvokeMock() throws Exception {
+        String spec = """
+                {
+                  "openapi": "3.0.1",
+                  "info": { "title": "InvokeTestAPI", "version": "1.0" },
+                  "paths": {
+                    "/echo": {
+                      "get": {
+                        "x-amazon-apigateway-integration": {
+                          "type": "MOCK",
+                          "requestTemplates": { "application/json": "{\\"statusCode\\": 200}" },
+                          "responses": {
+                            "default": {
+                              "statusCode": "200",
+                              "responseTemplates": {
+                                "application/json": "{\\"message\\": \\"hello from imported api\\"}"
+                              }
+                            }
+                          }
+                        }
+                      }
+                    }
+                  }
+                }
+                """;
+
+        // Import
+        String body = given()
+                .contentType(ContentType.JSON)
+                .queryParam("mode", "import")
+                .body(spec)
+                .when()
+                .post("/restapis")
+                .then()
+                .statusCode(201)
+                .extract().body().asString();
+
+        String apiId = mapper.readTree(body).get("id").asText();
+
+        // Deploy
+        String deployBody = given()
+                .contentType(ContentType.JSON)
+                .body("{}")
+                .when()
+                .post("/restapis/" + apiId + "/deployments")
+                .then()
+                .statusCode(201)
+                .extract().body().asString();
+
+        String deployId = mapper.readTree(deployBody).get("id").asText();
+
+        // Create stage
+        given()
+                .contentType(ContentType.JSON)
+                .body("{\"stageName\": \"test\", \"deploymentId\": \"" + deployId + "\"}")
+                .when()
+                .post("/restapis/" + apiId + "/stages")
+                .then()
+                .statusCode(201);
+
+        // Invoke
+        given()
+                .when()
+                .get("/execute-api/" + apiId + "/test/echo")
+                .then()
+                .statusCode(200)
+                .body(containsString("hello from imported api"));
+
+        given().delete("/restapis/" + apiId);
+    }
+
+    // ──────────────────────────── Schemas → Models ────────────────────────────
+
+    @Test
+    @Order(85)
+    void importRestApi_schemasCreateModels() throws Exception {
+        String spec = """
+                {
+                  "openapi": "3.0.1",
+                  "info": { "title": "ModelsAPI", "version": "1.0" },
+                  "paths": {
+                    "/orders": {
+                      "post": {
+                        "requestBody": {
+                          "content": {
+                            "application/json": {
+                              "schema": { "$ref": "#/components/schemas/OrderInput" }
+                            }
+                          }
+                        },
+                        "x-amazon-apigateway-integration": { "type": "MOCK",
+                          "requestTemplates": { "application/json": "{\\"statusCode\\": 200}" },
+                          "responses": { "default": { "statusCode": "200" } } }
+                      }
+                    }
+                  },
+                  "components": {
+                    "schemas": {
+                      "OrderInput": {
+                        "type": "object",
+                        "required": ["itemId", "quantity"],
+                        "properties": {
+                          "itemId": { "type": "string" },
+                          "quantity": { "type": "integer" }
+                        }
+                      },
+                      "OrderOutput": {
+                        "type": "object",
+                        "properties": {
+                          "orderId": { "type": "string" },
+                          "status": { "type": "string" }
+                        }
+                      }
+                    }
+                  }
+                }
+                """;
+
+        String body = given()
+                .contentType(ContentType.JSON)
+                .queryParam("mode", "import")
+                .body(spec)
+                .when()
+                .post("/restapis")
+                .then()
+                .statusCode(201)
+                .extract().body().asString();
+
+        String apiId = mapper.readTree(body).get("id").asText();
+
+        // Verify models were created
+        given()
+                .contentType(ContentType.JSON)
+                .when()
+                .get("/restapis/" + apiId + "/models")
+                .then()
+                .statusCode(200)
+                .body("item", hasSize(2));
+
+        // Verify individual model
+        given()
+                .contentType(ContentType.JSON)
+                .when()
+                .get("/restapis/" + apiId + "/models/OrderInput")
+                .then()
+                .statusCode(200)
+                .body("name", equalTo("OrderInput"))
+                .body("contentType", equalTo("application/json"))
+                .body("schema", containsString("itemId"));
+
+        // Verify requestModels on method
+        String resourcesBody = given()
+                .contentType(ContentType.JSON)
+                .when()
+                .get("/restapis/" + apiId + "/resources")
+                .then()
+                .extract().body().asString();
+
+        String ordersResourceId = null;
+        for (JsonNode r : mapper.readTree(resourcesBody).get("item")) {
+            if ("/orders".equals(r.get("path").asText())) {
+                ordersResourceId = r.get("id").asText();
+            }
+        }
+        assertNotNull(ordersResourceId);
+
+        given()
+                .contentType(ContentType.JSON)
+                .when()
+                .get("/restapis/" + apiId + "/resources/" + ordersResourceId + "/methods/POST")
+                .then()
+                .statusCode(200)
+                .body("requestModels.'application/json'", equalTo("OrderInput"));
+
+        given().delete("/restapis/" + apiId);
+    }
+
+    // ──────────────────────────── Request Validators ────────────────────────────
+
+    @Test
+    @Order(90)
+    void importRestApi_requestValidators() throws Exception {
+        String spec = """
+                {
+                  "openapi": "3.0.1",
+                  "info": { "title": "ValidatorAPI", "version": "1.0" },
+                  "x-amazon-apigateway-request-validators": {
+                    "full": {
+                      "validateRequestBody": true,
+                      "validateRequestParameters": true
+                    },
+                    "params-only": {
+                      "validateRequestBody": false,
+                      "validateRequestParameters": true
+                    }
+                  },
+                  "x-amazon-apigateway-request-validator": "full",
+                  "paths": {
+                    "/validated": {
+                      "post": {
+                        "x-amazon-apigateway-integration": { "type": "MOCK",
+                          "requestTemplates": { "application/json": "{\\"statusCode\\": 200}" },
+                          "responses": { "default": { "statusCode": "200" } } }
+                      }
+                    },
+                    "/params-checked": {
+                      "get": {
+                        "x-amazon-apigateway-request-validator": "params-only",
+                        "x-amazon-apigateway-integration": { "type": "MOCK",
+                          "requestTemplates": { "application/json": "{\\"statusCode\\": 200}" },
+                          "responses": { "default": { "statusCode": "200" } } }
+                      }
+                    }
+                  }
+                }
+                """;
+
+        String body = given()
+                .contentType(ContentType.JSON)
+                .queryParam("mode", "import")
+                .body(spec)
+                .when()
+                .post("/restapis")
+                .then()
+                .statusCode(201)
+                .extract().body().asString();
+
+        String apiId = mapper.readTree(body).get("id").asText();
+
+        // Verify validators were created
+        String validatorsBody = given()
+                .contentType(ContentType.JSON)
+                .when()
+                .get("/restapis/" + apiId + "/requestvalidators")
+                .then()
+                .statusCode(200)
+                .body("item", hasSize(2))
+                .extract().body().asString();
+
+        // Find the "full" validator
+        JsonNode validators = mapper.readTree(validatorsBody).get("item");
+        String fullValidatorId = null;
+        String paramsOnlyValidatorId = null;
+        for (JsonNode v : validators) {
+            if ("full".equals(v.get("name").asText())) {
+                fullValidatorId = v.get("id").asText();
+                assertTrue(v.get("validateRequestBody").asBoolean());
+                assertTrue(v.get("validateRequestParameters").asBoolean());
+            }
+            if ("params-only".equals(v.get("name").asText())) {
+                paramsOnlyValidatorId = v.get("id").asText();
+                assertFalse(v.get("validateRequestBody").asBoolean());
+                assertTrue(v.get("validateRequestParameters").asBoolean());
+            }
+        }
+        assertNotNull(fullValidatorId, "Should have 'full' validator");
+        assertNotNull(paramsOnlyValidatorId, "Should have 'params-only' validator");
+
+        // Verify /validated method uses the default "full" validator
+        String resourcesBody = given()
+                .contentType(ContentType.JSON)
+                .when()
+                .get("/restapis/" + apiId + "/resources")
+                .then()
+                .extract().body().asString();
+
+        String validatedResourceId = null;
+        String paramsCheckedResourceId = null;
+        for (JsonNode r : mapper.readTree(resourcesBody).get("item")) {
+            if ("/validated".equals(r.get("path").asText())) {
+                validatedResourceId = r.get("id").asText();
+            }
+            if ("/params-checked".equals(r.get("path").asText())) {
+                paramsCheckedResourceId = r.get("id").asText();
+            }
+        }
+
+        // Default validator applied to /validated POST
+        given()
+                .contentType(ContentType.JSON)
+                .when()
+                .get("/restapis/" + apiId + "/resources/" + validatedResourceId + "/methods/POST")
+                .then()
+                .statusCode(200)
+                .body("requestValidatorId", equalTo(fullValidatorId));
+
+        // Operation-level override on /params-checked GET
+        given()
+                .contentType(ContentType.JSON)
+                .when()
+                .get("/restapis/" + apiId + "/resources/" + paramsCheckedResourceId + "/methods/GET")
+                .then()
+                .statusCode(200)
+                .body("requestValidatorId", equalTo(paramsOnlyValidatorId));
+
+        given().delete("/restapis/" + apiId);
+    }
+
+    @Test
+    @Order(91)
+    void importRestApi_validatorPrecedence() throws Exception {
+        // AWS only supports operation-level > API-level default (no path-level)
+        String spec = """
+                {
+                  "openapi": "3.0.1",
+                  "info": { "title": "ValidatorPrecedenceAPI", "version": "1.0" },
+                  "x-amazon-apigateway-request-validators": {
+                    "full": { "validateRequestBody": true, "validateRequestParameters": true },
+                    "body-only": { "validateRequestBody": true, "validateRequestParameters": false }
+                  },
+                  "x-amazon-apigateway-request-validator": "full",
+                  "paths": {
+                    "/default-validated": {
+                      "get": {
+                        "x-amazon-apigateway-integration": { "type": "MOCK",
+                          "requestTemplates": {"application/json": "{\\"statusCode\\": 200}"},
+                          "responses": {"default": {"statusCode": "200"}} }
+                      }
+                    },
+                    "/op-override": {
+                      "get": {
+                        "x-amazon-apigateway-integration": { "type": "MOCK",
+                          "requestTemplates": {"application/json": "{\\"statusCode\\": 200}"},
+                          "responses": {"default": {"statusCode": "200"}} }
+                      },
+                      "post": {
+                        "x-amazon-apigateway-request-validator": "body-only",
+                        "x-amazon-apigateway-integration": { "type": "MOCK",
+                          "requestTemplates": {"application/json": "{\\"statusCode\\": 200}"},
+                          "responses": {"default": {"statusCode": "200"}} }
+                      }
+                    }
+                  }
+                }
+                """;
+
+        String body = given()
+                .contentType(ContentType.JSON)
+                .queryParam("mode", "import")
+                .body(spec)
+                .when()
+                .post("/restapis")
+                .then()
+                .statusCode(201)
+                .extract().body().asString();
+
+        String apiId = mapper.readTree(body).get("id").asText();
+
+        // Find validators
+        String validatorsBody = given()
+                .contentType(ContentType.JSON)
+                .get("/restapis/" + apiId + "/requestvalidators")
+                .then().statusCode(200).extract().body().asString();
+
+        String fullId = null, bodyOnlyId = null;
+        for (JsonNode v : mapper.readTree(validatorsBody).get("item")) {
+            if ("full".equals(v.get("name").asText())) fullId = v.get("id").asText();
+            if ("body-only".equals(v.get("name").asText())) bodyOnlyId = v.get("id").asText();
+        }
+        assertNotNull(fullId);
+        assertNotNull(bodyOnlyId);
+
+        // Find resources
+        String resourcesBody = given().get("/restapis/" + apiId + "/resources")
+                .then().extract().body().asString();
+        String defaultResourceId = null, opOverrideResourceId = null;
+        for (JsonNode r : mapper.readTree(resourcesBody).get("item")) {
+            if ("/default-validated".equals(r.get("path").asText())) defaultResourceId = r.get("id").asText();
+            if ("/op-override".equals(r.get("path").asText())) opOverrideResourceId = r.get("id").asText();
+        }
+
+        // /default-validated GET should use API-level default "full"
+        given().contentType(ContentType.JSON)
+                .get("/restapis/" + apiId + "/resources/" + defaultResourceId + "/methods/GET")
+                .then().statusCode(200)
+                .body("requestValidatorId", equalTo(fullId));
+
+        // /op-override GET should also use API-level default "full"
+        given().contentType(ContentType.JSON)
+                .get("/restapis/" + apiId + "/resources/" + opOverrideResourceId + "/methods/GET")
+                .then().statusCode(200)
+                .body("requestValidatorId", equalTo(fullId));
+
+        // /op-override POST should use operation-level "body-only"
+        given().contentType(ContentType.JSON)
+                .get("/restapis/" + apiId + "/resources/" + opOverrideResourceId + "/methods/POST")
+                .then().statusCode(200)
+                .body("requestValidatorId", equalTo(bodyOnlyId));
+
+        given().delete("/restapis/" + apiId);
+    }
+
+    // ──────────────────────────── Model CRUD ────────────────────────────
+
+    @Test
+    @Order(95)
+    void modelCrud_createGetListDelete() throws Exception {
+        // Create an API
+        String apiBody = given()
+                .contentType(ContentType.JSON)
+                .body("{\"name\": \"ModelCrudTest\"}")
+                .when()
+                .post("/restapis")
+                .then()
+                .statusCode(201)
+                .extract().body().asString();
+        String apiId = mapper.readTree(apiBody).get("id").asText();
+
+        // Create a model
+        String schema = "{\"type\":\"object\",\"properties\":{\"id\":{\"type\":\"string\"}}}";
+        given()
+                .contentType(ContentType.JSON)
+                .body("{\"name\": \"Pet\", \"description\": \"A pet\", \"contentType\": \"application/json\", \"schema\": " + mapper.writeValueAsString(schema) + "}")
+                .when()
+                .post("/restapis/" + apiId + "/models")
+                .then()
+                .statusCode(201)
+                .body("name", equalTo("Pet"))
+                .body("description", equalTo("A pet"))
+                .body("contentType", equalTo("application/json"));
+
+        // Get model
+        given()
+                .contentType(ContentType.JSON)
+                .when()
+                .get("/restapis/" + apiId + "/models/Pet")
+                .then()
+                .statusCode(200)
+                .body("name", equalTo("Pet"))
+                .body("schema", containsString("id"));
+
+        // List models
+        given()
+                .contentType(ContentType.JSON)
+                .when()
+                .get("/restapis/" + apiId + "/models")
+                .then()
+                .statusCode(200)
+                .body("item", hasSize(1));
+
+        // Delete model
+        given()
+                .when()
+                .delete("/restapis/" + apiId + "/models/Pet")
+                .then()
+                .statusCode(202);
+
+        // Verify deleted
+        given()
+                .contentType(ContentType.JSON)
+                .when()
+                .get("/restapis/" + apiId + "/models/Pet")
+                .then()
+                .statusCode(404);
+
+        given().delete("/restapis/" + apiId);
+    }
+
+    // ──────────────────────────── Request Body Validation ────────────────────────────
+
+    @ParameterizedTest
+    @ValueSource(strings = {"us-east-1", "cn-north-1", "us-gov-west-1"})
+    @Order(100)
+    void importedModelReferencesValidateDeployedSiblingModelsAndRecursiveBodies(String region) throws Exception {
+        RequestSpecification request = new RequestSpecBuilder().addHeader("Authorization",
+                "AWS4-HMAC-SHA256 Credential=test/20261015/" + region
+                        + "/apigateway/aws4_request, SignedHeaders=host, Signature=test").build();
+        String spec = """
+                {
+                  "openapi":"3.0.1", "info":{"title":"ReferencedWorkflowModels","version":"1"},
+                  "x-amazon-apigateway-request-validators":{
+                    "full":{"validateRequestBody":true,"validateRequestParameters":true}},
+                  "x-amazon-apigateway-request-validator":"full",
+                  "paths":{"/list-workflows":{"post":{
+                    "requestBody":{"content":{"application/json":{
+                      "schema":{"$ref":"#/components/schemas/Request"}}}},
+                    "x-amazon-apigateway-integration":{"type":"MOCK",
+                      "requestTemplates":{"application/json":"{\\"statusCode\\":200}"},
+                      "responses":{"default":{"statusCode":"200",
+                        "responseTemplates":{"application/json":"{\\"accepted\\":true}"}}}}}}},
+                  "components":{"schemas":{
+                    "Category":{"type":"string","enum":["DMS"]},
+                    "Status":{"type":"string","enum":["RUNNING"]},
+                    "Request":{"type":"object","required":["workflowCategory","status"],
+                      "properties":{
+                        "workflowCategory":{"$ref":"#/components/schemas/Category"},
+                        "status":{"$ref":"#/components/schemas/Status"},
+                        "child":{"$ref":"#/components/schemas/Request"}}}}}
+                }
+                """;
+        String apiId = given().spec(request).contentType(ContentType.JSON).queryParam("mode", "import")
+                .body(spec).post("/restapis").then().statusCode(201).extract().path("id");
+        AtomicInteger integrationCalls = new AtomicInteger();
+        HttpServer integration = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
+        try {
+            integration.createContext("/accepted", exchange -> {
+                integrationCalls.incrementAndGet();
+                byte[] bytes = "{\"accepted\":true}".getBytes(StandardCharsets.UTF_8);
+                exchange.getResponseHeaders().set("Content-Type", "application/json");
+                exchange.sendResponseHeaders(200, bytes.length);
+                exchange.getResponseBody().write(bytes);
+                exchange.close();
+            });
+            integration.start();
+            String resourceId = given().spec(request).get("/restapis/" + apiId + "/resources")
+                    .then().statusCode(200).extract().path("item.find { it.path == '/list-workflows' }.id");
+            given().spec(request).contentType(ContentType.JSON)
+                    .body("{\"type\":\"HTTP_PROXY\",\"httpMethod\":\"POST\",\"uri\":\"http://127.0.0.1:"
+                            + integration.getAddress().getPort() + "/accepted\"}")
+                    .put("/restapis/" + apiId + "/resources/" + resourceId + "/methods/POST/integration")
+                    .then().statusCode(201);
+            String deployment = given().spec(request).contentType(ContentType.JSON).body("{}")
+                    .post("/restapis/" + apiId + "/deployments")
+                    .then().statusCode(201).extract().path("id");
+            given().spec(request).contentType(ContentType.JSON)
+                    .body("{\"stageName\":\"test\",\"deploymentId\":\"" + deployment + "\"}")
+                    .post("/restapis/" + apiId + "/stages").then().statusCode(201);
+            String endpoint = "/execute-api/" + apiId + "/test/list-workflows";
+            String valid = "{\"workflowCategory\":\"DMS\",\"status\":\"RUNNING\"}";
+            given().spec(request).contentType(ContentType.JSON).body(valid).post(endpoint)
+                    .then().statusCode(200).body(containsString("accepted"));
+            given().spec(request).contentType(ContentType.JSON)
+                    .body("{\"workflowCategory\":\"DMS\",\"status\":\"RUNNING\",\"child\":" + valid + "}")
+                    .post(endpoint).then().statusCode(200);
+            assertEquals(2, integrationCalls.get(), "Valid requests must reach the integration");
+            assertRejectedWithoutIntegration(request, endpoint, "{\"status\":\"RUNNING\"}", integrationCalls);
+            assertRejectedWithoutIntegration(request, endpoint, valid.replace("RUNNING", "INVALID"), integrationCalls);
+            assertRejectedWithoutIntegration(request, endpoint,
+                    "{\"workflowCategory\":\"DMS\",\"status\":\"RUNNING\",\"child\":"
+                            + valid.replace("RUNNING", "INVALID") + "}", integrationCalls);
+
+            String schema = "{\"type\":\"string\",\"enum\":[\"DONE\"]}";
+            String patch = "{\"patchOperations\":[{\"op\":\"replace\",\"path\":\"/schema\",\"value\":"
+                    + mapper.writeValueAsString(schema) + "}]}";
+            given().spec(request).contentType(ContentType.JSON).body(patch)
+                    .patch("/restapis/" + apiId + "/models/Status").then().statusCode(200);
+            given().spec(request).contentType(ContentType.JSON).body(valid).post(endpoint).then().statusCode(200);
+            assertRejectedWithoutIntegration(request, endpoint, valid.replace("RUNNING", "DONE"), integrationCalls);
+            given().spec(request).contentType(ContentType.JSON).body("{\"stageName\":\"test\"}")
+                    .post("/restapis/" + apiId + "/deployments").then().statusCode(201);
+            assertRejectedWithoutIntegration(request, endpoint, valid, integrationCalls);
+            given().spec(request).contentType(ContentType.JSON).body(valid.replace("RUNNING", "DONE"))
+                    .post(endpoint).then().statusCode(200);
+
+            String storedSchema = given().spec(request).get("/restapis/" + apiId + "/models/Request")
+                    .then().statusCode(200).extract().path("schema");
+            assertFalse(mapper.readTree(storedSchema).has("components"), "Validation must not rewrite stored models");
+            String urlSchema = storedSchema.replace("#/components/schemas/",
+                    "https://apigateway.amazonaws.com/restapis/" + apiId + "/models/");
+            given().spec(request).contentType(ContentType.JSON)
+                    .body("{\"patchOperations\":[{\"op\":\"replace\",\"path\":\"/schema\",\"value\":"
+                            + mapper.writeValueAsString(urlSchema) + "}]}")
+                    .patch("/restapis/" + apiId + "/models/Request").then().statusCode(200);
+            given().spec(request).contentType(ContentType.JSON).body("{\"stageName\":\"test\"}")
+                    .post("/restapis/" + apiId + "/deployments").then().statusCode(201);
+            given().spec(request).contentType(ContentType.JSON).body(valid.replace("RUNNING", "DONE"))
+                    .post(endpoint).then().statusCode(200);
+            given().spec(request).contentType(ContentType.JSON)
+                    .body("{\"workflowCategory\":\"DMS\",\"status\":\"DONE\",\"child\":"
+                            + valid.replace("RUNNING", "DONE") + "}")
+                    .post(endpoint).then().statusCode(200);
+            assertRejectedWithoutIntegration(request, endpoint, valid, integrationCalls);
+            assertRejectedWithoutIntegration(request, endpoint,
+                    "{\"workflowCategory\":\"DMS\",\"status\":\"DONE\",\"child\":" + valid + "}", integrationCalls);
+            given().spec(request).contentType(ContentType.JSON).body(patch.replace("DONE", "RUNNING"))
+                    .patch("/restapis/" + apiId + "/models/Status").then().statusCode(200);
+            given().spec(request).delete("/restapis/" + apiId + "/models/Category").then().statusCode(202);
+            given().spec(request).contentType(ContentType.JSON).body(valid.replace("RUNNING", "DONE"))
+                    .post(endpoint).then().statusCode(200);
+            assertRejectedWithoutIntegration(request, endpoint, valid, integrationCalls);
+            given().spec(request).contentType(ContentType.JSON).body(patch)
+                    .patch("/restapis/" + apiId + "/models/Status").then().statusCode(200);
+            given().spec(request).contentType(ContentType.JSON)
+                    .body("{\"name\":\"Category\",\"schema\":\"{\\\"type\\\":\\\"string\\\",\\\"enum\\\":[\\\"DMS\\\"]}\"}")
+                    .post("/restapis/" + apiId + "/models").then().statusCode(201);
+            given().spec(request).contentType(ContentType.JSON)
+                    .body("{\"name\":\"UnrelatedInvalid\",\"schema\":\"{invalid\"}")
+                    .post("/restapis/" + apiId + "/models").then().statusCode(201);
+            ObjectNode annotated = (ObjectNode) mapper.readTree(storedSchema);
+            annotated.putObject("default").put("$ref", "#/components/schemas/NotAModel");
+            given().spec(request).contentType(ContentType.JSON)
+                    .body("{\"patchOperations\":[{\"op\":\"replace\",\"path\":\"/schema\",\"value\":"
+                            + mapper.writeValueAsString(annotated.toString()) + "}]}")
+                    .patch("/restapis/" + apiId + "/models/Request").then().statusCode(200);
+            given().spec(request).contentType(ContentType.JSON).body("{\"stageName\":\"test\"}")
+                    .post("/restapis/" + apiId + "/deployments").then().statusCode(201);
+            given().spec(request).contentType(ContentType.JSON).body(valid.replace("RUNNING", "DONE"))
+                    .post(endpoint).then().statusCode(200);
+            String otherApi = given().spec(request).contentType(ContentType.JSON).body("{\"name\":\"OtherModelOwner\"}")
+                    .post("/restapis").then().statusCode(201).extract().path("id");
+            try {
+                given().spec(request).contentType(ContentType.JSON)
+                        .body("{\"name\":\"OtherOnly\",\"contentType\":\"application/json\",\"schema\":"
+                                + mapper.writeValueAsString("{\"type\":\"object\"}") + "}")
+                        .post("/restapis/" + otherApi + "/models").then().statusCode(201);
+                String missing = "{\"$ref\":\"https://apigateway.amazonaws.com/restapis/"
+                        + otherApi + "/models/OtherOnly\"}";
+                given().spec(request).contentType(ContentType.JSON)
+                        .body("{\"patchOperations\":[{\"op\":\"replace\",\"path\":\"/schema\",\"value\":"
+                                + mapper.writeValueAsString(missing) + "}]}")
+                        .patch("/restapis/" + apiId + "/models/Request").then().statusCode(200);
+                given().spec(request).contentType(ContentType.JSON).body("{\"stageName\":\"test\"}")
+                        .post("/restapis/" + apiId + "/deployments").then().statusCode(201);
+                assertRejectedWithoutIntegration(request, endpoint, valid, integrationCalls);
+            } finally {
+                given().spec(request).delete("/restapis/" + otherApi).then().statusCode(202);
+            }
+
+            AtomicInteger externalReads = new AtomicInteger();
+            HttpServer external = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
+            external.createContext("/schema", exchange -> {
+                externalReads.incrementAndGet();
+                byte[] bytes = "{}".getBytes(StandardCharsets.UTF_8);
+                exchange.sendResponseHeaders(200, bytes.length);
+                exchange.getResponseBody().write(bytes);
+                exchange.close();
+            });
+            external.start();
+            try {
+                String externalSchema = "{\"$ref\":\"http://127.0.0.1:" + external.getAddress().getPort() + "/schema\"}";
+                given().spec(request).contentType(ContentType.JSON)
+                        .body("{\"patchOperations\":[{\"op\":\"replace\",\"path\":\"/schema\",\"value\":"
+                                + mapper.writeValueAsString(externalSchema) + "}]}")
+                        .patch("/restapis/" + apiId + "/models/Request").then().statusCode(200);
+                given().spec(request).contentType(ContentType.JSON).body("{\"stageName\":\"test\"}")
+                        .post("/restapis/" + apiId + "/deployments").then().statusCode(201);
+                assertRejectedWithoutIntegration(request, endpoint, valid, integrationCalls);
+                assertEquals(0, externalReads.get(), "Request validation must not fetch external schemas");
+            } finally {
+                external.stop(0);
+            }
+        } finally {
+            integration.stop(0);
+            given().spec(request).delete("/restapis/" + apiId).then().statusCode(202);
+        }
+    }
+
+    private void assertRejectedWithoutIntegration(RequestSpecification request, String endpoint, String body,
+                                                  AtomicInteger integrationCalls) {
+        int calls = integrationCalls.get();
+        given().spec(request).contentType(ContentType.JSON).body(body).post(endpoint)
+                .then().statusCode(400).body("message", equalTo("Invalid request body"))
+                .header("x-amzn-ErrorType", equalTo("BadRequestException"));
+        assertEquals(calls, integrationCalls.get(), "Rejected requests must not reach the integration");
+    }
+
+    @Test
+    @Order(96)
+    void validation_rejectsInvalidBody() throws Exception {
+        String spec = """
+                {
+                  "openapi": "3.0.1",
+                  "info": { "title": "BodyValidationAPI", "version": "1.0" },
+                  "x-amazon-apigateway-request-validators": {
+                    "body-only": {
+                      "validateRequestBody": true,
+                      "validateRequestParameters": false
+                    }
+                  },
+                  "x-amazon-apigateway-request-validator": "body-only",
+                  "paths": {
+                    "/items": {
+                      "post": {
+                        "requestBody": {
+                          "content": {
+                            "application/json": {
+                              "schema": { "$ref": "#/components/schemas/ItemInput" }
+                            }
+                          }
+                        },
+                        "x-amazon-apigateway-integration": {
+                          "type": "MOCK",
+                          "requestTemplates": { "application/json": "{\\"statusCode\\": 200}" },
+                          "responses": { "default": { "statusCode": "200",
+                            "responseTemplates": { "application/json": "{\\"ok\\": true}" } } }
+                        }
+                      }
+                    }
+                  },
+                  "components": {
+                    "schemas": {
+                      "ItemInput": {
+                        "type": "object",
+                        "required": ["name", "price"],
+                        "properties": {
+                          "name": { "type": "string" },
+                          "price": { "type": "number" }
+                        }
+                      }
+                    }
+                  }
+                }
+                """;
+
+        String apiBody = given()
+                .contentType(ContentType.JSON)
+                .queryParam("mode", "import")
+                .body(spec)
+                .when()
+                .post("/restapis")
+                .then()
+                .statusCode(201)
+                .extract().body().asString();
+        String apiId = mapper.readTree(apiBody).get("id").asText();
+
+        // Deploy
+        String deployBody = given()
+                .contentType(ContentType.JSON)
+                .body("{}")
+                .post("/restapis/" + apiId + "/deployments")
+                .then().statusCode(201).extract().body().asString();
+        String deployId = mapper.readTree(deployBody).get("id").asText();
+        given().contentType(ContentType.JSON)
+                .body("{\"stageName\":\"test\",\"deploymentId\":\"" + deployId + "\"}")
+                .post("/restapis/" + apiId + "/stages").then().statusCode(201);
+
+        // Valid request — should pass
+        given()
+                .contentType(ContentType.JSON)
+                .body("{\"name\": \"Widget\", \"price\": 9.99}")
+                .when()
+                .post("/execute-api/" + apiId + "/test/items")
+                .then()
+                .statusCode(200)
+                .body(containsString("ok"));
+
+        // Missing required field "price" — should fail
+        given()
+                .contentType(ContentType.JSON)
+                .body("{\"name\": \"Widget\"}")
+                .when()
+                .post("/execute-api/" + apiId + "/test/items")
+                .then()
+                .statusCode(400)
+                .body("message", equalTo("Invalid request body"));
+
+        // Wrong type for "price" — should fail
+        given()
+                .contentType(ContentType.JSON)
+                .body("{\"name\": \"Widget\", \"price\": \"not-a-number\"}")
+                .when()
+                .post("/execute-api/" + apiId + "/test/items")
+                .then()
+                .statusCode(400);
+
+        // Empty body — should fail
+        given()
+                .contentType(ContentType.JSON)
+                .body("")
+                .when()
+                .post("/execute-api/" + apiId + "/test/items")
+                .then()
+                .statusCode(400);
+
+        given().delete("/restapis/" + apiId);
+    }
+
+    // ──────────────────────────── Request Parameter Validation ────────────────────────────
+
+    @Test
+    @Order(97)
+    void validation_rejectsMissingRequiredParams() throws Exception {
+        // Create API imperatively to test param validation
+        String apiBody = given()
+                .contentType(ContentType.JSON)
+                .body("{\"name\": \"ParamValidationAPI\"}")
+                .post("/restapis")
+                .then().statusCode(201).extract().body().asString();
+        String apiId = mapper.readTree(apiBody).get("id").asText();
+
+        // Get root resource
+        String resourcesBody = given().get("/restapis/" + apiId + "/resources")
+                .then().extract().body().asString();
+        String rootId = null;
+        for (JsonNode r : mapper.readTree(resourcesBody).get("item")) {
+            if ("/".equals(r.get("path").asText())) rootId = r.get("id").asText();
+        }
+
+        // Create /search resource
+        String searchBody = given()
+                .contentType(ContentType.JSON)
+                .body("{\"pathPart\": \"search\"}")
+                .post("/restapis/" + apiId + "/resources/" + rootId)
+                .then().statusCode(201).extract().body().asString();
+        String searchId = mapper.readTree(searchBody).get("id").asText();
+
+        // Create request validator (params-only)
+        String valBody = given()
+                .contentType(ContentType.JSON)
+                .body("{\"name\": \"params-only\", \"validateRequestBody\": false, \"validateRequestParameters\": true}")
+                .post("/restapis/" + apiId + "/requestvalidators")
+                .then().statusCode(201).extract().body().asString();
+        String validatorId = mapper.readTree(valBody).get("id").asText();
+
+        // Create GET method with required query param and linked validator
+        given()
+                .contentType(ContentType.JSON)
+                .body("{\"authorizationType\": \"NONE\", \"requestValidatorId\": \"" + validatorId + "\", \"requestParameters\": {\"method.request.querystring.q\": true, \"method.request.header.X-Api-Key\": true}}")
+                .put("/restapis/" + apiId + "/resources/" + searchId + "/methods/GET")
+                .then().statusCode(201);
+
+        // Add MOCK integration
+        given()
+                .contentType(ContentType.JSON)
+                .body("{\"type\": \"MOCK\", \"requestTemplates\": {\"application/json\": \"{\\\"statusCode\\\": 200}\"}, \"passthroughBehavior\": \"WHEN_NO_MATCH\"}")
+                .put("/restapis/" + apiId + "/resources/" + searchId + "/methods/GET/integration")
+                .then().statusCode(201);
+        given()
+                .contentType(ContentType.JSON)
+                .body("{\"statusCode\": \"200\", \"responseTemplates\": {\"application/json\": \"{\\\"results\\\": []}\"}, \"selectionPattern\": \"\"}")
+                .put("/restapis/" + apiId + "/resources/" + searchId + "/methods/GET/integration/responses/200")
+                .then().statusCode(201);
+
+        // Deploy
+        String deployBody = given()
+                .contentType(ContentType.JSON)
+                .body("{}")
+                .post("/restapis/" + apiId + "/deployments")
+                .then().statusCode(201).extract().body().asString();
+        String deployId = mapper.readTree(deployBody).get("id").asText();
+        given().contentType(ContentType.JSON)
+                .body("{\"stageName\":\"test\",\"deploymentId\":\"" + deployId + "\"}")
+                .post("/restapis/" + apiId + "/stages").then().statusCode(201);
+
+        // Missing query param "q" — should fail
+        given()
+                .header("X-Api-Key", "test-key")
+                .when()
+                .get("/execute-api/" + apiId + "/test/search")
+                .then()
+                .statusCode(400)
+                .body(containsString("q"));
+
+        // Missing header "X-Api-Key" — should fail
+        given()
+                .queryParam("q", "test")
+                .when()
+                .get("/execute-api/" + apiId + "/test/search")
+                .then()
+                .statusCode(400)
+                .body(containsString("X-Api-Key"));
+
+        // Both present — should pass
+        given()
+                .queryParam("q", "test")
+                .header("X-Api-Key", "test-key")
+                .when()
+                .get("/execute-api/" + apiId + "/test/search")
+                .then()
+                .statusCode(200)
+                .body(containsString("results"));
+
+        given().delete("/restapis/" + apiId);
+    }
+
+    // ──────────────────────────── Content-Type Tolerance ────────────────────────────
+
+    @Test
+    @Order(73)
+    void importRestApi_octetStreamContentType() throws Exception {
+        String spec = """
+                {"openapi": "3.0.1", "info": {"title": "OctetImport", "version": "1.0"}, "paths": {}}
+                """;
+        String body = given()
+                .contentType("application/octet-stream")
+                .queryParam("mode", "import")
+                .body(spec.getBytes())
+                .when()
+                .post("/restapis")
+                .then()
+                .statusCode(201)
+                .body("name", equalTo("OctetImport"))
+                .extract().body().asString();
+
+        String apiId = mapper.readTree(body).get("id").asText();
+        given().delete("/restapis/" + apiId);
+    }
+
+    @Test
+    @Order(71)
+    void putRestApi_noContentType() throws Exception {
+        String createBody = given()
+                .contentType(ContentType.JSON)
+                .body("{\"name\": \"NoCtype\"}")
+                .post("/restapis")
+                .then().statusCode(201).extract().body().asString();
+        String apiId = mapper.readTree(createBody).get("id").asText();
+
+        String spec = """
+                {"openapi": "3.0.1", "info": {"title": "NoCtypeOverwritten", "version": "1.0"}, "paths": {}}
+                """;
+        given()
+                .queryParam("mode", "overwrite")
+                .body(spec.getBytes())
+                .when()
+                .put("/restapis/" + apiId)
+                .then()
+                .statusCode(200)
+                .body("name", equalTo("NoCtypeOverwritten"));
+
+        given().delete("/restapis/" + apiId);
+    }
+
+    @Test
+    @Order(72)
+    void putRestApi_octetStreamContentType() throws Exception {
+        String createBody = given()
+                .contentType(ContentType.JSON)
+                .body("{\"name\": \"OctetOverwrite\"}")
+                .post("/restapis")
+                .then().statusCode(201).extract().body().asString();
+        String apiId = mapper.readTree(createBody).get("id").asText();
+
+        String spec = """
+                {"openapi": "3.0.1", "info": {"title": "OctetOverwritten", "version": "1.0"}, "paths": {}}
+                """;
+        given()
+                .contentType("application/octet-stream")
+                .queryParam("mode", "overwrite")
+                .body(spec.getBytes())
+                .when()
+                .put("/restapis/" + apiId)
+                .then()
+                .statusCode(200)
+                .body("name", equalTo("OctetOverwritten"));
+
+        given().delete("/restapis/" + apiId);
+    }
+
+    // ──────────────────────────── Security scheme / authorizer import ────────────────────────────
+
+    @Test
+    @Order(89)
+    void importRestApi_lambdaAuthorizerFromSecurityScheme() throws Exception {
+        String spec = """
+                {
+                  "openapi": "3.0.1",
+                  "info": {"title": "SecuredAPI", "version": "1.0"},
+                  "components": {
+                    "securitySchemes": {
+                      "MyLambdaAuth": {
+                        "type": "apiKey", "name": "Authorization", "in": "header",
+                        "x-amazon-apigateway-authtype": "custom",
+                        "x-amazon-apigateway-authorizer": {
+                          "type": "token",
+                          "authorizerUri": "arn:aws:apigateway:us-east-1:lambda:path/2015-03-31/functions/arn:aws:lambda:us-east-1:000000000000:function:authz/invocations",
+                          "authorizerResultTtlInSeconds": 300
+                        }
+                      }
+                    }
+                  },
+                  "paths": {
+                    "/secure": {
+                      "get": {
+                        "security": [{"MyLambdaAuth": []}],
+                        "x-amazon-apigateway-integration": {
+                          "type": "MOCK",
+                          "requestTemplates": {"application/json": "{\\"statusCode\\": 200}"},
+                          "responses": {"default": {"statusCode": "200"}}
+                        }
+                      }
+                    }
+                  }
+                }
+                """;
+        String apiId = mapper.readTree(given()
+                .contentType(ContentType.JSON).queryParam("mode", "import").body(spec)
+                .when().post("/restapis").then().statusCode(201)
+                .extract().body().asString()).get("id").asText();
+
+        // The security scheme became an Authorizer (previously dropped on import).
+        String authId = given()
+                .when().get("/restapis/" + apiId + "/authorizers")
+                .then().statusCode(200)
+                .body("item", hasSize(1))
+                .body("item[0].type", equalTo("TOKEN"))
+                .body("item[0].authorizerUri", containsString("function:authz"))
+                .body("item[0].identitySource", equalTo("method.request.header.Authorization"))
+                .extract().body().jsonPath().getString("item[0].id");
+
+        // The GET /secure method is wired to that authorizer (CUSTOM) — not silently left NONE/open.
+        String resourceId = given()
+                .when().get("/restapis/" + apiId + "/resources")
+                .then().statusCode(200)
+                .extract().body().jsonPath().getString("item.find { it.path == '/secure' }.id");
+
+        given()
+                .when().get("/restapis/" + apiId + "/resources/" + resourceId + "/methods/GET")
+                .then().statusCode(200)
+                .body("authorizationType", equalTo("CUSTOM"))
+                .body("authorizerId", equalTo(authId));
+
+        given().delete("/restapis/" + apiId);
+    }
+
+    @Test
+    @Order(92)
+    void importRestApi_cognitoProviderArnsAndTokenDefault() throws Exception {
+        String spec = """
+                {
+                  "openapi": "3.0.1",
+                  "info": {"title": "MixedAuthAPI", "version": "1.0"},
+                  "components": {
+                    "securitySchemes": {
+                      "CognitoAuth": {
+                        "type": "apiKey", "name": "Authorization", "in": "header",
+                        "x-amazon-apigateway-authtype": "cognito_user_pools",
+                        "x-amazon-apigateway-authorizer": {
+                          "type": "cognito_user_pools",
+                          "providerARNs": ["arn:aws:cognito-idp:us-east-1:000000000000:userpool/us-east-1_ABC123"]
+                        }
+                      },
+                      "BearerAuth": {
+                        "type": "http", "scheme": "bearer",
+                        "x-amazon-apigateway-authtype": "custom",
+                        "x-amazon-apigateway-authorizer": {
+                          "type": "token",
+                          "authorizerUri": "arn:aws:apigateway:us-east-1:lambda:path/2015-03-31/functions/arn:aws:lambda:us-east-1:000000000000:function:bearerAuthz/invocations"
+                        }
+                      }
+                    }
+                  },
+                  "paths": {
+                    "/cog": {
+                      "get": {
+                        "security": [{"CognitoAuth": ["orders/read"]}],
+                        "x-amazon-apigateway-integration": {
+                          "type": "MOCK",
+                          "requestTemplates": {"application/json": "{\\"statusCode\\": 200}"},
+                          "responses": {"default": {"statusCode": "200"}}
+                        }
+                      }
+                    },
+                    "/tok": {
+                      "get": {
+                        "security": [{"BearerAuth": []}],
+                        "x-amazon-apigateway-integration": {
+                          "type": "MOCK",
+                          "requestTemplates": {"application/json": "{\\"statusCode\\": 200}"},
+                          "responses": {"default": {"statusCode": "200"}}
+                        }
+                      }
+                    }
+                  }
+                }
+                """;
+        String apiId = mapper.readTree(given()
+                .contentType(ContentType.JSON).queryParam("mode", "import").body(spec)
+                .when().post("/restapis").then().statusCode(201)
+                .extract().body().asString()).get("id").asText();
+
+        given()
+                .when().get("/restapis/" + apiId + "/authorizers")
+                .then().statusCode(200)
+                .body("item", hasSize(2))
+                // Cognito authorizer keeps its user-pool ARNs (previously dropped on import).
+                .body("item.find { it.name == 'CognitoAuth' }.type", equalTo("COGNITO_USER_POOLS"))
+                .body("item.find { it.name == 'CognitoAuth' }.providerARNs[0]",
+                        containsString("userpool/us-east-1_ABC123"))
+                // A TOKEN authorizer whose scheme has no derivable header defaults identitySource
+                // to the Authorization header, as AWS does (rather than leaving it null).
+                .body("item.find { it.name == 'BearerAuth' }.type", equalTo("TOKEN"))
+                .body("item.find { it.name == 'BearerAuth' }.identitySource",
+                        equalTo("method.request.header.Authorization"));
+
+        String resources = given().when().get("/restapis/" + apiId + "/resources")
+                .then().statusCode(200).extract().body().asString();
+        String cogResourceId = null;
+        for (JsonNode resource : mapper.readTree(resources).get("item")) {
+            if ("/cog".equals(resource.path("path").asText())) {
+                cogResourceId = resource.path("id").asText();
+            }
+        }
+        assertNotNull(cogResourceId);
+        given().when().get("/restapis/" + apiId + "/resources/" + cogResourceId + "/methods/GET")
+                .then().statusCode(200)
+                .body("authorizationScopes", hasItem("orders/read"));
+
+        given().delete("/restapis/" + apiId);
+    }
+
+    @Test
+    @Order(93)
+    void importRestApi_rejectsMultipleAuthorizers() {
+        String spec = """
+                {
+                  "openapi": "3.0.1",
+                  "info": {"title": "MultiAuthAPI", "version": "1.0"},
+                  "components": {
+                    "securitySchemes": {
+                      "AuthA": {
+                        "type": "apiKey", "name": "Authorization", "in": "header",
+                        "x-amazon-apigateway-authtype": "custom",
+                        "x-amazon-apigateway-authorizer": {
+                          "type": "token",
+                          "authorizerUri": "arn:aws:apigateway:us-east-1:lambda:path/2015-03-31/functions/arn:aws:lambda:us-east-1:000000000000:function:authA/invocations"
+                        }
+                      },
+                      "AuthB": {
+                        "type": "apiKey", "name": "Authorization", "in": "header",
+                        "x-amazon-apigateway-authtype": "custom",
+                        "x-amazon-apigateway-authorizer": {
+                          "type": "token",
+                          "authorizerUri": "arn:aws:apigateway:us-east-1:lambda:path/2015-03-31/functions/arn:aws:lambda:us-east-1:000000000000:function:authB/invocations"
+                        }
+                      }
+                    }
+                  },
+                  "paths": {
+                    "/multi": {
+                      "get": {
+                        "security": [{"AuthA": [], "AuthB": []}],
+                        "x-amazon-apigateway-integration": {
+                          "type": "MOCK",
+                          "requestTemplates": {"application/json": "{\\"statusCode\\": 200}"},
+                          "responses": {"default": {"statusCode": "200"}}
+                        }
+                      }
+                    }
+                  }
+                }
+                """;
+        given().contentType(ContentType.JSON).queryParam("mode", "import").body(spec)
+                .post("/restapis").then().statusCode(400)
+                .body("message", containsString("Only one Authorizer or IAM authorization"));
+        given().get("/restapis").then().statusCode(200)
+                .body("item.find { it.name == 'MultiAuthAPI' }", nullValue());
+
+    }
+
+    @Test
+    @Order(94)
+    void putRestApi_overwriteReplacesAuthorizersWithoutLeavingStaleEntries() throws Exception {
+        String spec = """
+                {
+                  "openapi": "3.0.1",
+                  "info": {"title": "OverwriteAuthAPI", "version": "1.0"},
+                  "components": {
+                    "securitySchemes": {
+                      "LambdaAuth": {
+                        "type": "apiKey", "name": "Authorization", "in": "header",
+                        "x-amazon-apigateway-authtype": "custom",
+                        "x-amazon-apigateway-authorizer": {
+                          "type": "token",
+                          "authorizerUri": "arn:aws:apigateway:us-east-1:lambda:path/2015-03-31/functions/arn:aws:lambda:us-east-1:000000000000:function:overwriteAuthz/invocations"
+                        }
+                      }
+                    }
+                  },
+                  "paths": {
+                    "/secure": {
+                      "get": {
+                        "security": [{"LambdaAuth": []}],
+                        "x-amazon-apigateway-integration": {"type": "MOCK"}
+                      }
+                    }
+                  }
+                }
+                """;
+
+        String apiId = mapper.readTree(given()
+                .contentType(ContentType.JSON).queryParam("mode", "import").body(spec)
+                .when().post("/restapis").then().statusCode(201)
+                .extract().body().asString()).get("id").asText();
+
+        given()
+                .contentType(ContentType.JSON).queryParam("mode", "overwrite").body(spec)
+                .when().put("/restapis/" + apiId)
+                .then().statusCode(200);
+
+        String authorizerId = given()
+                .when().get("/restapis/" + apiId + "/authorizers")
+                .then().statusCode(200)
+                .body("item", hasSize(1))
+                .extract().body().jsonPath().getString("item[0].id");
+        String resourceId = given()
+                .when().get("/restapis/" + apiId + "/resources")
+                .then().statusCode(200)
+                .extract().body().jsonPath().getString("item.find { it.path == '/secure' }.id");
+
+        given()
+                .when().get("/restapis/" + apiId + "/resources/" + resourceId + "/methods/GET")
+                .then().statusCode(200)
+                .body("authorizationType", equalTo("CUSTOM"))
+                .body("authorizerId", equalTo(authorizerId));
+
+        given().delete("/restapis/" + apiId);
+    }
+
+    @Test
+    @Order(101)
+    void importRestApi_requestAuthorizerWithoutIdentitySourceRejectsDefaultCaching() {
+        String title = "InvalidCachedRequestAuthorizer";
+        String spec = requestAuthorizerSpec(title, "", "/invalid");
+
+        given()
+                .contentType(ContentType.JSON).queryParam("mode", "import").body(spec)
+                .when().post("/restapis")
+                .then().statusCode(400)
+                .body("__type", equalTo("BadRequestException"))
+                .body("message", allOf(
+                        containsString("RequestAuth"),
+                        containsString("identitySource"),
+                        containsString("caching")));
+
+        given()
+                .when().get("/restapis")
+                .then().statusCode(200)
+                .body("item.name", not(hasItem(title)));
+    }
+
+    @Test
+    @Order(102)
+    void importRestApi_requestAuthorizerWithoutIdentitySourceAllowsZeroTtl() throws Exception {
+        String spec = requestAuthorizerSpec(
+                "UncachedRequestAuthorizer", ", \"authorizerResultTtlInSeconds\": 0", "/uncached");
+        String apiId = mapper.readTree(given()
+                .contentType(ContentType.JSON).queryParam("mode", "import").body(spec)
+                .when().post("/restapis")
+                .then().statusCode(201)
+                .extract().body().asString()).get("id").asText();
+
+        try {
+            given()
+                    .when().get("/restapis/" + apiId + "/authorizers")
+                    .then().statusCode(200)
+                    .body("item", hasSize(1))
+                    .body("item[0].type", equalTo("REQUEST"))
+                    .body("item[0].authorizerResultTtlInSeconds", equalTo(0))
+                    .body("item[0].identitySource", nullValue());
+        } finally {
+            given().delete("/restapis/" + apiId);
+        }
+    }
+
+    @Test
+    @Order(103)
+    void putRestApi_invalidCachedRequestAuthorizerDoesNotReplaceExistingApi() throws Exception {
+        String originalSpec = """
+                {
+                  "openapi": "3.0.1",
+                  "info": {"title": "PreservedAuthorizerAPI", "version": "1.0"},
+                  "components": {
+                    "securitySchemes": {
+                      "HeaderAuth": {
+                        "type": "apiKey", "name": "X-Auth", "in": "header",
+                        "x-amazon-apigateway-authorizer": {
+                          "type": "request",
+                          "authorizerUri": "arn:aws:apigateway:us-east-1:lambda:path/2015-03-31/functions/arn:aws:lambda:us-east-1:000000000000:function:headerAuth/invocations",
+                          "identitySource": "method.request.header.X-Auth"
+                        }
+                      }
+                    }
+                  },
+                  "paths": {"/kept": {"get": {"security": [{"HeaderAuth": []}]}}}
+                }
+                """;
+        String apiId = mapper.readTree(given()
+                .contentType(ContentType.JSON).queryParam("mode", "import").body(originalSpec)
+                .when().post("/restapis")
+                .then().statusCode(201)
+                .extract().body().asString()).get("id").asText();
+
+        try {
+            String invalidSpec = requestAuthorizerSpec("MustNotReplaceAPI", "", "/replacement");
+            given()
+                    .contentType(ContentType.JSON).queryParam("mode", "overwrite").body(invalidSpec)
+                    .when().put("/restapis/" + apiId)
+                    .then().statusCode(400)
+                    .body("__type", equalTo("BadRequestException"));
+
+            given()
+                    .when().get("/restapis/" + apiId)
+                    .then().statusCode(200)
+                    .body("name", equalTo("PreservedAuthorizerAPI"));
+            given()
+                    .when().get("/restapis/" + apiId + "/resources")
+                    .then().statusCode(200)
+                    .body("item.path", hasItem("/kept"))
+                    .body("item.path", not(hasItem("/replacement")));
+            given()
+                    .when().get("/restapis/" + apiId + "/authorizers")
+                    .then().statusCode(200)
+                    .body("item", hasSize(1))
+                    .body("item[0].name", equalTo("HeaderAuth"))
+                    .body("item[0].identitySource", equalTo("method.request.header.X-Auth"))
+                    .body("item[0].authorizerResultTtlInSeconds", equalTo(300));
+        } finally {
+            given().delete("/restapis/" + apiId);
+        }
+    }
+
+    @ParameterizedTest(name = "{0}")
+    @MethodSource("malformedImportedAuthorizerExtensions")
+    @Order(98)
+    void putRestApi_malformedAuthorizerExtensionDoesNotReplaceExistingApi(
+            String caseName,
+            String expectedProperty,
+            String expectedType,
+            String authorizationTypeJson,
+            String authorizerDefinitionJson) throws Exception {
+        String originalSpec = requestAuthorizerSpec(
+                "PreservedAuthTypeAPI",
+                ", \"authorizerResultTtlInSeconds\": 0",
+                "/kept");
+        String apiId = mapper.readTree(given()
+                .contentType(ContentType.JSON).queryParam("mode", "import").body(originalSpec)
+                .when().post("/restapis").then().statusCode(201)
+                .extract().body().asString()).get("id").asText();
+
+        try {
+            given()
+                    .contentType(ContentType.JSON).queryParam("mode", "overwrite")
+                    .body(malformedImportedAuthorizerSpec(authorizationTypeJson, authorizerDefinitionJson))
+                    .when().put("/restapis/" + apiId)
+                    .then().statusCode(400)
+                    .body("__type", equalTo("BadRequestException"))
+                    .body("message", allOf(
+                            containsString(expectedProperty),
+                            containsString("BrokenAuth"),
+                            containsString("must be " + expectedType)));
+
+            given()
+                    .when().get("/restapis/" + apiId)
+                    .then().statusCode(200)
+                    .body("name", equalTo("PreservedAuthTypeAPI"));
+            String resourceId = given()
+                    .when().get("/restapis/" + apiId + "/resources")
+                    .then().statusCode(200)
+                    .body("item.path", hasItem("/kept"))
+                    .body("item.path", not(hasItem("/replacement")))
+                    .extract().body().jsonPath().getString("item.find { it.path == '/kept' }.id");
+            String authorizerId = given()
+                    .when().get("/restapis/" + apiId + "/authorizers")
+                    .then().statusCode(200)
+                    .body("item", hasSize(1))
+                    .body("item[0].name", equalTo("RequestAuth"))
+                    .body("item[0].type", equalTo("REQUEST"))
+                    .body("item[0].authorizerResultTtlInSeconds", equalTo(0))
+                    .extract().body().jsonPath().getString("item[0].id");
+            given()
+                    .when().get("/restapis/" + apiId + "/resources/" + resourceId + "/methods/GET")
+                    .then().statusCode(200)
+                    .body("authorizationType", equalTo("CUSTOM"))
+                    .body("authorizerId", equalTo(authorizerId));
+        } finally {
+            given().delete("/restapis/" + apiId);
+        }
+    }
+
+    private static Stream<Arguments> malformedImportedAuthorizerExtensions() {
+        String customAuthType = "\"custom\"";
+        String authorizerUri = "\"arn:aws:apigateway:us-east-1:lambda:path/2015-03-31/functions/"
+                + "arn:aws:lambda:us-east-1:000000000000:function:brokenAuth/invocations\"";
+        String validAuthorizer = """
+                {"type":"token","authorizerUri":%s}
+                """.formatted(authorizerUri);
+        return Stream.of(
+                Arguments.of(
+                        "non-string x-amazon-apigateway-authtype",
+                        "x-amazon-apigateway-authtype",
+                        "a string",
+                        "{\"unexpected\":\"custom\"}",
+                        validAuthorizer),
+                Arguments.of(
+                        "non-object x-amazon-apigateway-authorizer",
+                        "x-amazon-apigateway-authorizer",
+                        "an object",
+                        customAuthType,
+                        "[\"invalid\"]"),
+                Arguments.of(
+                        "non-string authorizer type",
+                        "x-amazon-apigateway-authorizer.type",
+                        "a string",
+                        customAuthType,
+                        """
+                                {"type":{"unexpected":"token"},"authorizerUri":%s}
+                                """.formatted(authorizerUri)),
+                Arguments.of(
+                        "missing authorizer type",
+                        "x-amazon-apigateway-authorizer.type",
+                        "one of token, request, or cognito_user_pools",
+                        customAuthType,
+                        """
+                                {"authorizerUri":%s}
+                                """.formatted(authorizerUri)),
+                Arguments.of(
+                        "unsupported authorizer type",
+                        "x-amazon-apigateway-authorizer.type",
+                        "one of token, request, or cognito_user_pools",
+                        customAuthType,
+                        """
+                                {"type":"jwt","authorizerUri":%s}
+                                """.formatted(authorizerUri)),
+                Arguments.of(
+                        "non-string authorizerUri",
+                        "x-amazon-apigateway-authorizer.authorizerUri",
+                        "a string",
+                        customAuthType,
+                        """
+                                {"type":"token","authorizerUri":{"unexpected":"uri"}}
+                                """),
+                Arguments.of(
+                        "non-string identitySource",
+                        "x-amazon-apigateway-authorizer.identitySource",
+                        "a string",
+                        customAuthType,
+                        """
+                                {
+                                  "type":"request",
+                                  "authorizerUri":%s,
+                                  "identitySource":{"unexpected":"source"},
+                                  "authorizerResultTtlInSeconds":0
+                                }
+                                """.formatted(authorizerUri)),
+                Arguments.of(
+                        "non-array providerARNs",
+                        "x-amazon-apigateway-authorizer.providerARNs",
+                        "an array of strings",
+                        customAuthType,
+                        """
+                                {"type":"cognito_user_pools","providerARNs":{"unexpected":"arn"}}
+                                """),
+                Arguments.of(
+                        "non-string providerARNs member",
+                        "x-amazon-apigateway-authorizer.providerARNs",
+                        "an array of strings",
+                        customAuthType,
+                        """
+                                {"type":"cognito_user_pools","providerARNs":[{"unexpected":"arn"}]}
+                                """));
+    }
+
+    private static String malformedImportedAuthorizerSpec(
+            String authorizationTypeJson, String authorizerDefinitionJson) {
+        return """
+                {
+                  "openapi": "3.0.1",
+                  "info": {"title": "MustNotReplaceAuthTypeAPI", "version": "1.0"},
+                  "components": {
+                    "securitySchemes": {
+                      "BrokenAuth": {
+                        "type": "apiKey", "name": "Authorization", "in": "header",
+                        "x-amazon-apigateway-authtype": %s,
+                        "x-amazon-apigateway-authorizer": %s
+                      }
+                    }
+                  },
+                  "paths": {"/replacement": {"get": {"security": [{"BrokenAuth": []}]}}}
+                }
+                """.formatted(authorizationTypeJson, authorizerDefinitionJson);
+    }
+
+    private static String requestAuthorizerSpec(String title, String ttlProperty, String path) {
+        return """
+                {
+                  "openapi": "3.0.1",
+                  "info": {"title": "%s", "version": "1.0"},
+                  "components": {
+                    "securitySchemes": {
+                      "RequestAuth": {
+                        "type": "apiKey", "name": "Authorization", "in": "header",
+                        "x-amazon-apigateway-authorizer": {
+                          "type": "request",
+                          "authorizerUri": "arn:aws:apigateway:us-east-1:lambda:path/2015-03-31/functions/arn:aws:lambda:us-east-1:000000000000:function:requestAuth/invocations"%s
+                        }
+                      }
+                    }
+                  },
+                  "paths": {"%s": {"get": {"security": [{"RequestAuth": []}]}}}
+                }
+                """.formatted(title, ttlProperty, path);
+    }
+
+    // ──────────────────────────── Cleanup ────────────────────────────
+
+    @Test
+    @Order(99)
+    void cleanup() {
+        if (importedApiId != null) {
+            given().delete("/restapis/" + importedApiId);
+        }
+        if (overwriteApiId != null) {
+            given().delete("/restapis/" + overwriteApiId);
+        }
+    }
+}

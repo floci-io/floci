@@ -1,0 +1,22 @@
+{
+  "error": "Transforming resource with id [Fn] attempts to create a new resource with id [FnEventInvokeConfig] and type \"AWS::Lambda::EventInvokeConfig\". A resource with that id already exists within this template. Please use a different id for that resource.",
+  "input": {
+    "Resources": {
+      "Fn": {
+        "Properties": {
+          "CodeUri": "s3://b/k",
+          "EventInvokeConfig": {
+            "MaximumRetryAttempts": 1
+          },
+          "Handler": "index.handler",
+          "Runtime": "python3.12"
+        },
+        "Type": "AWS::Serverless::Function"
+      },
+      "FnEventInvokeConfig": {
+        "Type": "AWS::SQS::Queue"
+      }
+    },
+    "Transform": "AWS::Serverless-2016-10-31"
+  }
+}

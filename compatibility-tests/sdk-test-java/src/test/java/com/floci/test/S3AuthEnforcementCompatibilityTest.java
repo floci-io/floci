@@ -13,6 +13,7 @@ import software.amazon.awssdk.core.sync.RequestBody;
 import software.amazon.awssdk.regions.Region;
 import software.amazon.awssdk.services.s3.S3Client;
 import software.amazon.awssdk.services.s3.model.CreateBucketRequest;
+import software.amazon.awssdk.services.s3.model.DeletePublicAccessBlockRequest;
 import software.amazon.awssdk.services.s3.model.GetObjectRequest;
 import software.amazon.awssdk.services.s3.model.GetObjectResponse;
 import software.amazon.awssdk.services.s3.model.ListObjectsV2Request;
@@ -46,6 +47,7 @@ class S3AuthEnforcementCompatibilityTest {
         unknownCredentialS3 = s3WithCredentials("bad-key", "bad-secret");
 
         adminS3.createBucket(CreateBucketRequest.builder().bucket(PUBLIC_BUCKET).build());
+        adminS3.deletePublicAccessBlock(DeletePublicAccessBlockRequest.builder().bucket(PUBLIC_BUCKET).build());
         adminS3.putBucketPolicy(PutBucketPolicyRequest.builder()
                 .bucket(PUBLIC_BUCKET)
                 .policy(publicReadPolicy(PUBLIC_BUCKET))

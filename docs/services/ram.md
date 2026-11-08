@@ -23,7 +23,9 @@ below for what's simplified.
 | `UpdateResourceShare` | Renames a share and/or toggles `allowExternalPrincipals` (`POST /updateresourceshare`) |
 | `AssociateResourceShare` | Adds resource ARNs and/or principals to an existing share (`POST /associateresourceshare`) |
 | `DisassociateResourceShare` | Removes resource ARNs and/or principals from a share (`POST /disassociateresourceshare`) |
+| `GetResourceShareAssociations` | Lists active resource or principal associations for shares owned by the caller, with entity, share ARN, status, and pagination filters (`POST /getresourceshareassociations`) |
 | `ListPrincipals` | Lists principals associated with visible shares (`POST /listprincipals`) |
+| `ListResourceSharePermissions` | Lists the permissions associated with a share: one default AWS managed permission (`AWSRAMDefaultPermission<Type>`, `AWS_MANAGED`) per distinct resource type in the share; unknown share ARN is `UnknownResourceException` (`POST /listresourcesharepermissions`) |
 | `TagResource` | Adds/overwrites tags on a resource share (`POST /tagresource`) |
 | `UntagResource` | Removes tags by key from a resource share (`POST /untagresource`) |
 | `GetResourceShareInvitations` | Lists invitations received by the caller, filterable by `resourceShareArns`/`resourceShareInvitationArns`. Empty for organization/OU-principal shares, which never get one (`POST /getresourceshareinvitations`) |
@@ -85,14 +87,16 @@ aws --endpoint-url http://localhost:4566 ram accept-resource-share-invitation \
   missing or unmodelled value is rejected with `InvalidParameterException` rather than defaulted
   to `SELF`.
 - `GetResourceShares` applies the `name`, `resourceShareArns` and `resourceShareStatus` filters;
-  `tagFilters`, `permissionArn`, `permissionVersion` and pagination (`nextToken`/`maxResults`)
-  are accepted but ignored, every matching share is returned in one page.
+  `maxResults`/`nextToken` page the matching shares. `tagFilters`, `permissionArn` and
+  `permissionVersion` are accepted but ignored.
 - Operations outside the table above are not routed. RAM's paths are matched literally, so an
   unimplemented operation falls through to S3's `/{bucket}` route and comes back as an S3
   `NoSuchBucket` XML body where the SDK expects JSON, not a modeled `UnknownOperationException`.
   If a client reports an XML parse error against a RAM call, that is the cause, not credentials.
-  `GetResourceShareAssociations` is the one most likely to be hit: Terraform's
-  `aws_ram_resource_association` and `aws_ram_principal_association` read it on every refresh.
+- `GetResourceShareAssociations` reports current `ASSOCIATED` resource and principal entries
+  for caller-owned shares. There are no persisted per-association transitions or source entries,
+  so `SOURCE` and other status filters return an empty page. Association creation and update
+  times use the containing share's times; `external` is always false.
 - `AssociateResourceShare`/`DisassociateResourceShare` responses synthesize one
   `resourceShareAssociation` row per requested ARN/principal rather than tracking real
   per-association status transitions (e.g. no `ASSOCIATING`/`DISASSOCIATING` intermediate
@@ -100,7 +104,8 @@ aws --endpoint-url http://localhost:4566 ram accept-resource-share-invitation \
 - `TagResource`/`UntagResource` only support tagging by `resourceShareArn`; tagging an
   individual shared resource via `resourceArn` is not modeled (RAM's `TagResource` accepts
   either, but LZA only tags shares).
-- Permission-related operations are not implemented: `CreatePermission`,
-  `AssociateResourceSharePermission`, `ListPermissions`, and the rest of the permission-version
-  family. Shares created here always use RAM's default managed permission implicitly: there
-  is no explicit permission model to associate or version.
+- Only `ListResourceSharePermissions` of the permission family is implemented; `CreatePermission`,
+  `AssociateResourceSharePermission`, `ListPermissions`, and the permission-version
+  family are not, and `nextToken`/`maxResults` are accepted but ignored. Shares created here
+  always use RAM's default managed permission implicitly: there is no explicit permission model
+  to associate or version.

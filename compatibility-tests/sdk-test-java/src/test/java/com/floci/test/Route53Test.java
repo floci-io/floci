@@ -8,8 +8,8 @@ import software.amazon.awssdk.services.ec2.Ec2Client;
 import software.amazon.awssdk.services.ec2.model.CreateVpcRequest;
 import software.amazon.awssdk.services.ec2.model.DeleteVpcRequest;
 import software.amazon.awssdk.services.route53.Route53Client;
-import software.amazon.awssdk.services.route53.model.CreateHostedZoneRequest;
 import software.amazon.awssdk.services.route53.model.AssociateVpcWithHostedZoneRequest;
+import software.amazon.awssdk.services.route53.model.CreateHostedZoneRequest;
 import software.amazon.awssdk.services.route53.model.CreateHostedZoneResponse;
 import software.amazon.awssdk.services.route53.model.CreateVpcAssociationAuthorizationRequest;
 import software.amazon.awssdk.services.route53.model.DeleteHostedZoneRequest;
@@ -29,6 +29,8 @@ import static org.junit.jupiter.api.Assumptions.assumeFalse;
 
 @DisplayName("Route 53")
 class Route53Test {
+
+    private static final VPCRegion VPC_REGION = VPCRegion.fromValue(TestFixtures.region().id());
 
     private static Route53Client route53;
 
@@ -84,11 +86,11 @@ class Route53Test {
             try {
                 VPC zoneVpc = VPC.builder()
                         .vpcId(zoneVpcId)
-                        .vpcRegion(VPCRegion.US_EAST_1)
+                        .vpcRegion(VPC_REGION)
                         .build();
                 VPC spokeVpc = VPC.builder()
                         .vpcId(spokeVpcId)
-                        .vpcRegion(VPCRegion.US_EAST_1)
+                        .vpcRegion(VPC_REGION)
                         .build();
 
                 zoneId = zoneRoute53.createHostedZone(CreateHostedZoneRequest.builder()
@@ -123,7 +125,7 @@ class Route53Test {
                         .singleElement()
                         .satisfies(vpc -> {
                             assertThat(vpc.vpcId()).isEqualTo(spokeVpcId);
-                            assertThat(vpc.vpcRegion()).isEqualTo(VPCRegion.US_EAST_1);
+                            assertThat(vpc.vpcRegion()).isEqualTo(VPC_REGION);
                         });
 
                 vpcRoute53.associateVPCWithHostedZone(
@@ -135,7 +137,7 @@ class Route53Test {
                 assertThat(vpcRoute53.listHostedZonesByVPC(
                         ListHostedZonesByVpcRequest.builder()
                                 .vpcId(spokeVpcId)
-                                .vpcRegion(VPCRegion.US_EAST_1)
+                                .vpcRegion(VPC_REGION)
                                 .build()).hostedZoneSummaries())
                         .singleElement()
                         .satisfies(summary -> {
@@ -157,7 +159,7 @@ class Route53Test {
                 assertThat(vpcRoute53.listHostedZonesByVPC(
                         ListHostedZonesByVpcRequest.builder()
                                 .vpcId(spokeVpcId)
-                                .vpcRegion(VPCRegion.US_EAST_1)
+                                .vpcRegion(VPC_REGION)
                                 .build()).hostedZoneSummaries())
                         .singleElement();
 

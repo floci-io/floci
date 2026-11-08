@@ -1,6 +1,7 @@
 # Elastic Load Balancing (Classic, v1)
 
-**Protocol:** Query (XML) — `POST http://localhost:4566/` with `Action=` and `Version=2012-06-01`
+**Protocol:** Query (XML), form `POST` or SigV4-signed `GET` at `http://localhost:4566/`
+with `Action=` and `Version=2012-06-01`.
 
 Classic Elastic Load Balancing is the 2012-06-01 API behind `aws elb` and Terraform's `aws_elb`
 resource. It is a **different API** from [ELB v2](elb.md) (ALB/NLB, 2015-12-01), even though both
@@ -9,7 +10,7 @@ scope.
 
 ## How Floci tells the two apart
 
-Every Query-protocol request carries the API version it is speaking as the `Version` form
+Every Query-protocol request carries the API version it is speaking as the `Version` request
 parameter, and that is what Floci routes on:
 
 | `Version` | Answered by |
@@ -63,8 +64,16 @@ opened and no traffic is forwarded. Only the control plane and health checking a
 
 ## Behavior Notes
 
-- Load balancer state is persisted through Floci storage and health checking is restarted on
-  startup.
+- An omitted `InstanceProtocol` defaults to `HTTP` for HTTP/HTTPS listeners and
+  `TCP` for TCP/SSL listeners. Explicit backend protocols remain unchanged.
+  Creation, listener additions, persisted readback and identical listener retries
+  use the same effective value.
+- A load balancer created in subnets without `SecurityGroups` gets the VPC's `default` security
+  group, reported in `SecurityGroups` and `SourceSecurityGroup`. Floci uses the VPC's `default`
+  group in the default VPC too, rather than a dedicated `default_elb_<id>` group. A load balancer
+  created with only `AvailabilityZones` gets no security group.
+- Load balancer state is persisted through Floci storage, and on startup health checking is
+  restarted for the load balancers of every account.
 - A new load balancer gets AWS's default health check (`TCP:80`, interval 30, timeout 5,
   unhealthy 2, healthy 10) and AWS's default attributes (cross-zone off, access log off,
   connection draining off with a 300 second timeout, 60 second idle timeout).
@@ -74,9 +83,18 @@ opened and no traffic is forwarded. Only the control plane and health checking a
   the same port.
 - Between registration and the first successful check an instance reports `OutOfService` with
   reason code `ELB`, as it does on AWS.
+- Health is tracked per account, so two accounts can each have a load balancer with the same name
+  without either one changing the instance health the other reports.
 - An Auto Scaling group that names Classic load balancers in `LoadBalancerNames` has its instances
   registered and deregistered automatically, so a Terraform `min_elb_capacity` wait can be
   satisfied.
+- A listener's `SSLCertificateId` must name an existing certificate: an IAM server certificate ARN
+  or an ACM certificate ARN. `CreateLoadBalancer` and `CreateLoadBalancerListeners` reject a
+  missing one with `CertificateNotFound`, and a blank one on an HTTPS or SSL listener; an HTTP or
+  TCP listener may carry a blank one, as Terraform sends. A certificate a listener references cannot be
+  deleted until the listener is removed: `DeleteServerCertificate` returns `DeleteConflict`, and
+  ACM's `DeleteCertificate` returns `ResourceInUseException` and lists the load balancer under
+  `InUseBy`.
 
 ## Configuration
 

@@ -9,6 +9,8 @@ import org.junit.jupiter.api.Order;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.TestMethodOrder;
 import software.amazon.awssdk.core.SdkBytes;
+import software.amazon.awssdk.services.kms.KmsClient;
+import software.amazon.awssdk.services.kms.model.CreateKeyRequest;
 import software.amazon.awssdk.services.lambda.LambdaClient;
 import software.amazon.awssdk.services.lambda.model.CreateFunctionRequest;
 import software.amazon.awssdk.services.lambda.model.DeleteFunctionRequest;
@@ -30,6 +32,7 @@ import software.amazon.awssdk.services.secretsmanager.model.GetResourcePolicyReq
 import software.amazon.awssdk.services.secretsmanager.model.GetResourcePolicyResponse;
 import software.amazon.awssdk.services.secretsmanager.model.GetSecretValueRequest;
 import software.amazon.awssdk.services.secretsmanager.model.GetSecretValueResponse;
+import software.amazon.awssdk.services.secretsmanager.model.InvalidParameterException;
 import software.amazon.awssdk.services.secretsmanager.model.ListSecretVersionIdsRequest;
 import software.amazon.awssdk.services.secretsmanager.model.ListSecretVersionIdsResponse;
 import software.amazon.awssdk.services.secretsmanager.model.ListSecretsRequest;
@@ -43,14 +46,19 @@ import software.amazon.awssdk.services.secretsmanager.model.RotateSecretResponse
 import software.amazon.awssdk.services.secretsmanager.model.RotationRulesType;
 import software.amazon.awssdk.services.secretsmanager.model.SecretVersionsListEntry;
 import software.amazon.awssdk.services.secretsmanager.model.SecretsManagerException;
+import software.amazon.awssdk.services.secretsmanager.model.Tag;
 import software.amazon.awssdk.services.secretsmanager.model.TagResourceRequest;
 import software.amazon.awssdk.services.secretsmanager.model.UntagResourceRequest;
 import software.amazon.awssdk.services.secretsmanager.model.UpdateSecretRequest;
 
+import java.io.ByteArrayOutputStream;
+import java.nio.charset.StandardCharsets;
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
 import java.util.stream.Collectors;
+import java.util.zip.ZipEntry;
+import java.util.zip.ZipOutputStream;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
@@ -92,7 +100,7 @@ class SecretsManagerTest {
                 .name(secretName)
                 .secretString(SECRET_VALUE)
                 .description("Test secret")
-                .tags(software.amazon.awssdk.services.secretsmanager.model.Tag.builder().key("env").value("test").build())
+                .tags(Tag.builder().key("env").value("test").build())
                 .build());
 
         secretArn = response.arn();
@@ -188,7 +196,7 @@ class SecretsManagerTest {
     void tagResource() {
         sm.tagResource(TagResourceRequest.builder()
                 .secretId(secretName)
-                .tags(software.amazon.awssdk.services.secretsmanager.model.Tag.builder().key("team").value("backend").build())
+                .tags(Tag.builder().key("team").value("backend").build())
                 .build());
 
         DescribeSecretResponse response = sm.describeSecret(DescribeSecretRequest.builder()
@@ -238,24 +246,24 @@ class SecretsManagerTest {
     void rotateSecretStub() throws Exception {
         String lambdaName = "RotationLambda-" + System.currentTimeMillis();
         try (LambdaClient lambda = TestFixtures.lambdaClient()) {
-            java.io.ByteArrayOutputStream baos = new java.io.ByteArrayOutputStream();
-            try (java.util.zip.ZipOutputStream zos = new java.util.zip.ZipOutputStream(baos)) {
-                zos.putNextEntry(new java.util.zip.ZipEntry("index.js"));
-                zos.write("exports.handler = async (event) => { return 'ok'; };".getBytes(java.nio.charset.StandardCharsets.UTF_8));
+            ByteArrayOutputStream baos = new ByteArrayOutputStream();
+            try (ZipOutputStream zos = new ZipOutputStream(baos)) {
+                zos.putNextEntry(new ZipEntry("index.js"));
+                zos.write("exports.handler = async (event) => { return 'ok'; };".getBytes(StandardCharsets.UTF_8));
                 zos.closeEntry();
             }
 
             lambda.createFunction(CreateFunctionRequest.builder()
                     .functionName(lambdaName)
                     .runtime(Runtime.fromValue("nodejs20.x"))
-                    .role("arn:aws:iam::000000000000:role/dummy-role")
+                    .role(TestFixtures.globalArn("iam", "000000000000", "role/dummy-role"))
                     .handler("index.handler")
                     .code(FunctionCode.builder().zipFile(SdkBytes.fromByteArray(baos.toByteArray())).build())
                     .build());
 
             RotateSecretResponse rotateResponse = sm.rotateSecret(RotateSecretRequest.builder()
                     .secretId(secretName)
-                    .rotationLambdaARN("arn:aws:lambda:us-east-1:000000000000:function:" + lambdaName)
+                    .rotationLambdaARN(TestFixtures.arn("lambda", "000000000000", "function:" + lambdaName))
                     .rotationRules(RotationRulesType.builder().automaticallyAfterDays(30L).build())
                     .build());
 
@@ -276,8 +284,16 @@ class SecretsManagerTest {
     @Test
     @Order(13)
     void kmsKeyIdPreservation() {
-        String kmsKeyId = "arn:aws:kms:us-east-1:000000000000:key/my-key";
+        // The key has to exist: Secrets Manager checks it before accepting the secret, so a
+        // made-up ARN is rejected here the same way AWS rejects one.
         String kmsSecretName = "sdk-test-kms-secret-" + System.currentTimeMillis();
+        String kmsKeyId;
+        try (KmsClient kms = TestFixtures.kmsClient()) {
+            kmsKeyId = kms.createKey(CreateKeyRequest.builder()
+                            .description("sdk-test secrets manager key")
+                            .build())
+                    .keyMetadata().arn();
+        }
 
         try {
             sm.createSecret(CreateSecretRequest.builder()
@@ -303,6 +319,20 @@ class SecretsManagerTest {
 
     @Test
     @Order(14)
+    void createSecretWithAnUnknownKmsKeyIsRejected() {
+        String kmsSecretName = "sdk-test-bad-kms-secret-" + System.currentTimeMillis();
+
+        assertThatThrownBy(() -> sm.createSecret(CreateSecretRequest.builder()
+                .name(kmsSecretName)
+                .secretString("kms-value")
+                .kmsKeyId(TestFixtures.arn("kms", "000000000000", "key/does-not-exist"))
+                .build()))
+                .isInstanceOf(InvalidParameterException.class)
+                .hasMessageContaining("You can't access the KMS key");
+    }
+
+    @Test
+    @Order(15)
     void createSecretDuplicateThrows400() {
         String dupName = "sdk-test-dup-secret-" + System.currentTimeMillis();
 
@@ -330,7 +360,7 @@ class SecretsManagerTest {
     }
 
     @Test
-    @Order(15)
+    @Order(16)
     void getRandomPassword() {
         GetRandomPasswordResponse response = sm.getRandomPassword(GetRandomPasswordRequest.builder()
                 .passwordLength(32L)
@@ -341,7 +371,7 @@ class SecretsManagerTest {
     }
 
     @Test
-    @Order(16)
+    @Order(17)
     void getSecretValueNonExistentThrows400() {
         assertThatThrownBy(() -> sm.getSecretValue(GetSecretValueRequest.builder()
                 .secretId("non-existent-secret-" + System.currentTimeMillis())
@@ -356,7 +386,7 @@ class SecretsManagerTest {
     // ─────────────────────────────────────────────────────────────────────────
 
     @Test
-    @Order(17)
+    @Order(18)
     @DisplayName("#340 getSecretValue resolves partial ARN (without random suffix)")
     void getSecretValueByPartialArn() {
         Assumptions.assumeTrue(secretArn != null, "CreateSecret must succeed first");
@@ -374,7 +404,7 @@ class SecretsManagerTest {
     }
 
     @Test
-    @Order(18)
+    @Order(19)
     @DisplayName("#340 getSecretValue resolves partial ARN for secret with slashes in name")
     void getSecretValueByPartialArnWithSlashesInName() {
         String slashName = "compat-340/dev/database-" + System.currentTimeMillis();
@@ -404,7 +434,7 @@ class SecretsManagerTest {
     }
 
     @Test
-    @Order(19)
+    @Order(20)
     void batchGetSecretValue() {
         String s1 = "batch-secret-1-" + System.currentTimeMillis();
         String s2 = "batch-secret-2-" + System.currentTimeMillis();
@@ -429,7 +459,7 @@ class SecretsManagerTest {
     }
 
     @Test
-    @Order(20)
+    @Order(21)
     @DisplayName("batchGetSecretValue returns partial Errors list for missing secrets without throwing")
     void batchGetSecretValuePartialErrors() {
         String exists = "batch-exists-" + UUID.randomUUID();
@@ -472,7 +502,7 @@ class SecretsManagerTest {
     // ─────────────────────────────────────────────────────────────────────────
 
     @Test
-    @Order(21)
+    @Order(22)
     @DisplayName("resource policy round trip: put returns ARN/Name, get returns the policy, delete clears it")
     void resourcePolicyRoundTrip() {
         Assumptions.assumeTrue(secretArn != null, "CreateSecret must succeed first");

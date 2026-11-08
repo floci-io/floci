@@ -1,0 +1,1264 @@
+{
+  "reflection" : [
+    {
+      "condition" : {
+        "typeReached" : "com.sun.jna.Native"
+      },
+      "type" : "com.sun.jna.Callback",
+      "jniAccessible" : true
+    },
+    {
+      "condition" : {
+        "typeReached" : "com.sun.jna.CallbackReference"
+      },
+      "type" : "com.sun.jna.CallbackProxy",
+      "methods" : [
+        {
+          "name" : "callback",
+          "parameterTypes" : [
+            "java.lang.Object[]"
+          ]
+        }
+      ]
+    },
+    {
+      "condition" : {
+        "typeReached" : "com.sun.jna.Native"
+      },
+      "type" : "com.sun.jna.CallbackProxy",
+      "jniAccessible" : true,
+      "methods" : [
+        {
+          "name" : "callback",
+          "parameterTypes" : [
+            "java.lang.Object[]"
+          ]
+        }
+      ]
+    },
+    {
+      "condition" : {
+        "typeReached" : "com.sun.jna.Native"
+      },
+      "type" : "com.sun.jna.CallbackReference",
+      "jniAccessible" : true,
+      "methods" : [
+        {
+          "name" : "getCallback",
+          "parameterTypes" : [
+            "java.lang.Class",
+            "com.sun.jna.Pointer",
+            "boolean"
+          ]
+        },
+        {
+          "name" : "getFunctionPointer",
+          "parameterTypes" : [
+            "com.sun.jna.Callback",
+            "boolean"
+          ]
+        },
+        {
+          "name" : "getNativeString",
+          "parameterTypes" : [
+            "java.lang.Object",
+            "boolean"
+          ]
+        },
+        {
+          "name" : "initializeThread",
+          "parameterTypes" : [
+            "com.sun.jna.Callback",
+            "com.sun.jna.CallbackReference$AttachOptions"
+          ]
+        }
+      ]
+    },
+    {
+      "condition" : {
+        "typeReached" : "com.sun.jna.Native"
+      },
+      "type" : "com.sun.jna.CallbackReference$AttachOptions",
+      "jniAccessible" : true
+    },
+    {
+      "condition" : {
+        "typeReached" : "com.sun.jna.Native"
+      },
+      "type" : "com.sun.jna.FromNativeConverter",
+      "jniAccessible" : true,
+      "methods" : [
+        {
+          "name" : "nativeType",
+          "parameterTypes" : [ ]
+        }
+      ]
+    },
+    {
+      "condition" : {
+        "typeReached" : "com.sun.jna.Native"
+      },
+      "type" : "com.sun.jna.IntegerType",
+      "jniAccessible" : true,
+      "fields" : [
+        {
+          "name" : "value"
+        }
+      ]
+    },
+    {
+      "condition" : {
+        "typeReached" : "com.sun.jna.Native"
+      },
+      "type" : "com.sun.jna.JNIEnv",
+      "jniAccessible" : true
+    },
+    {
+      "condition" : {
+        "typeReached" : "com.sun.jna.Native"
+      },
+      "type" : "com.sun.jna.Native",
+      "jniAccessible" : true,
+      "methods" : [
+        {
+          "name" : "dispose",
+          "parameterTypes" : [ ]
+        },
+        {
+          "name" : "fromNative",
+          "parameterTypes" : [
+            "com.sun.jna.FromNativeConverter",
+            "java.lang.Object",
+            "java.lang.reflect.Method"
+          ]
+        },
+        {
+          "name" : "fromNative",
+          "parameterTypes" : [
+            "java.lang.Class",
+            "java.lang.Object"
+          ]
+        },
+        {
+          "name" : "fromNative",
+          "parameterTypes" : [
+            "java.lang.reflect.Method",
+            "java.lang.Object"
+          ]
+        },
+        {
+          "name" : "nativeType",
+          "parameterTypes" : [
+            "java.lang.Class"
+          ]
+        },
+        {
+          "name" : "toNative",
+          "parameterTypes" : [
+            "com.sun.jna.ToNativeConverter",
+            "java.lang.Object"
+          ]
+        }
+      ]
+    },
+    {
+      "condition" : {
+        "typeReached" : "com.sun.jna.Native"
+      },
+      "type" : "com.sun.jna.Native$ffi_callback",
+      "jniAccessible" : true,
+      "methods" : [
+        {
+          "name" : "invoke",
+          "parameterTypes" : [
+            "long",
+            "long",
+            "long"
+          ]
+        }
+      ]
+    },
+    {
+      "condition" : {
+        "typeReached" : "com.sun.jna.Native"
+      },
+      "type" : "com.sun.jna.NativeLong",
+      "methods" : [
+        {
+          "name" : "<init>",
+          "parameterTypes" : [ ]
+        }
+      ]
+    },
+    {
+      "condition" : {
+        "typeReached" : "com.sun.jna.Native"
+      },
+      "type" : "com.sun.jna.NativeMapped",
+      "jniAccessible" : true,
+      "methods" : [
+        {
+          "name" : "toNative",
+          "parameterTypes" : [ ]
+        }
+      ]
+    },
+    {
+      "condition" : {
+        "typeReached" : "com.sun.jna.Native"
+      },
+      "type" : "com.sun.jna.Pointer",
+      "jniAccessible" : true,
+      "fields" : [
+        {
+          "name" : "peer"
+        }
+      ],
+      "methods" : [
+        {
+          "name" : "<init>",
+          "parameterTypes" : [
+            "long"
+          ]
+        }
+      ]
+    },
+    {
+      "condition" : {
+        "typeReached" : "com.sun.jna.Native"
+      },
+      "type" : "com.sun.jna.PointerType",
+      "jniAccessible" : true,
+      "fields" : [
+        {
+          "name" : "pointer"
+        }
+      ]
+    },
+    {
+      "condition" : {
+        "typeReached" : "com.sun.jna.Native"
+      },
+      "type" : "com.sun.jna.Structure",
+      "jniAccessible" : true,
+      "fields" : [
+        {
+          "name" : "memory"
+        },
+        {
+          "name" : "typeInfo"
+        }
+      ],
+      "methods" : [
+        {
+          "name" : "autoRead",
+          "parameterTypes" : [ ]
+        },
+        {
+          "name" : "autoWrite",
+          "parameterTypes" : [ ]
+        },
+        {
+          "name" : "getTypeInfo",
+          "parameterTypes" : [ ]
+        },
+        {
+          "name" : "newInstance",
+          "parameterTypes" : [
+            "java.lang.Class",
+            "long"
+          ]
+        }
+      ]
+    },
+    {
+      "condition" : {
+        "typeReached" : "com.sun.jna.Native"
+      },
+      "type" : "com.sun.jna.Structure$ByValue",
+      "jniAccessible" : true
+    },
+    {
+      "condition" : {
+        "typeReached" : "com.sun.jna.Native"
+      },
+      "type" : "com.sun.jna.Structure$FFIType",
+      "fields" : [
+        {
+          "name" : "alignment"
+        },
+        {
+          "name" : "elements"
+        },
+        {
+          "name" : "size"
+        },
+        {
+          "name" : "type"
+        }
+      ],
+      "methods" : [
+        {
+          "name" : "<init>",
+          "parameterTypes" : [ ]
+        }
+      ]
+    },
+    {
+      "condition" : {
+        "typeReached" : "com.sun.jna.Structure"
+      },
+      "type" : "com.sun.jna.Structure$FFIType",
+      "fields" : [
+        {
+          "name" : "size"
+        }
+      ]
+    },
+    {
+      "condition" : {
+        "typeReached" : "com.sun.jna.Structure$FFIType"
+      },
+      "type" : "com.sun.jna.Structure$FFIType",
+      "fields" : [
+        {
+          "name" : "alignment"
+        },
+        {
+          "name" : "elements"
+        },
+        {
+          "name" : "size"
+        },
+        {
+          "name" : "type"
+        }
+      ],
+      "methods" : [
+        {
+          "name" : "<init>",
+          "parameterTypes" : [ ]
+        }
+      ]
+    },
+    {
+      "condition" : {
+        "typeReached" : "com.sun.jna.Native"
+      },
+      "type" : "com.sun.jna.Structure$FFIType$FFITypes",
+      "jniAccessible" : true,
+      "fields" : [
+        {
+          "name" : "ffi_type_double"
+        },
+        {
+          "name" : "ffi_type_float"
+        },
+        {
+          "name" : "ffi_type_longdouble"
+        },
+        {
+          "name" : "ffi_type_pointer"
+        },
+        {
+          "name" : "ffi_type_sint16"
+        },
+        {
+          "name" : "ffi_type_sint32"
+        },
+        {
+          "name" : "ffi_type_sint64"
+        },
+        {
+          "name" : "ffi_type_sint8"
+        },
+        {
+          "name" : "ffi_type_uint16"
+        },
+        {
+          "name" : "ffi_type_uint32"
+        },
+        {
+          "name" : "ffi_type_uint64"
+        },
+        {
+          "name" : "ffi_type_uint8"
+        },
+        {
+          "name" : "ffi_type_void"
+        }
+      ]
+    },
+    {
+      "condition" : {
+        "typeReached" : "com.sun.jna.Native"
+      },
+      "type" : "com.sun.jna.Structure$FFIType$size_t",
+      "methods" : [
+        {
+          "name" : "<init>",
+          "parameterTypes" : [ ]
+        }
+      ]
+    },
+    {
+      "condition" : {
+        "typeReached" : "com.sun.jna.Structure"
+      },
+      "type" : "com.sun.jna.Structure$FFIType$size_t",
+      "methods" : [
+        {
+          "name" : "<init>",
+          "parameterTypes" : [ ]
+        }
+      ]
+    },
+    {
+      "condition" : {
+        "typeReached" : "com.sun.jna.Structure$FFIType"
+      },
+      "type" : "com.sun.jna.Structure$FFIType$size_t",
+      "methods" : [
+        {
+          "name" : "<init>",
+          "parameterTypes" : [ ]
+        }
+      ]
+    },
+    {
+      "condition" : {
+        "typeReached" : "com.sun.jna.Union"
+      },
+      "type" : "com.sun.jna.Union"
+    },
+    {
+      "condition" : {
+        "typeReached" : "com.sun.jna.Native"
+      },
+      "type" : "com.sun.jna.WString",
+      "jniAccessible" : true,
+      "methods" : [
+        {
+          "name" : "<init>",
+          "parameterTypes" : [
+            "java.lang.String"
+          ]
+        }
+      ]
+    },
+    {
+      "condition" : {
+        "typeReached" : "com.sun.jna.Native"
+      },
+      "type" : "com.sun.jna.ptr.ByteByReference",
+      "methods" : [
+        {
+          "name" : "<init>",
+          "parameterTypes" : [ ]
+        }
+      ]
+    },
+    {
+      "condition" : {
+        "typeReached" : "com.sun.jna.Native"
+      },
+      "type" : "com.sun.jna.ptr.DoubleByReference",
+      "methods" : [
+        {
+          "name" : "<init>",
+          "parameterTypes" : [ ]
+        }
+      ]
+    },
+    {
+      "condition" : {
+        "typeReached" : "com.sun.jna.Native"
+      },
+      "type" : "com.sun.jna.ptr.FloatByReference",
+      "methods" : [
+        {
+          "name" : "<init>",
+          "parameterTypes" : [ ]
+        }
+      ]
+    },
+    {
+      "condition" : {
+        "typeReached" : "com.sun.jna.Native"
+      },
+      "type" : "com.sun.jna.ptr.IntByReference",
+      "methods" : [
+        {
+          "name" : "<init>",
+          "parameterTypes" : [ ]
+        }
+      ]
+    },
+    {
+      "condition" : {
+        "typeReached" : "com.sun.jna.Native"
+      },
+      "type" : "com.sun.jna.ptr.LongByReference",
+      "methods" : [
+        {
+          "name" : "<init>",
+          "parameterTypes" : [ ]
+        }
+      ]
+    },
+    {
+      "condition" : {
+        "typeReached" : "com.sun.jna.Native"
+      },
+      "type" : "com.sun.jna.ptr.NativeLongByReference",
+      "methods" : [
+        {
+          "name" : "<init>",
+          "parameterTypes" : [ ]
+        }
+      ]
+    },
+    {
+      "condition" : {
+        "typeReached" : "com.sun.jna.Native"
+      },
+      "type" : "com.sun.jna.ptr.PointerByReference",
+      "methods" : [
+        {
+          "name" : "<init>",
+          "parameterTypes" : [ ]
+        }
+      ]
+    },
+    {
+      "condition" : {
+        "typeReached" : "com.sun.jna.Native"
+      },
+      "type" : "com.sun.jna.ptr.ShortByReference",
+      "methods" : [
+        {
+          "name" : "<init>",
+          "parameterTypes" : [ ]
+        }
+      ]
+    },
+    {
+      "condition" : {
+        "typeReached" : "com.sun.jna.Native"
+      },
+      "type" : "java.lang.Boolean",
+      "jniAccessible" : true,
+      "fields" : [
+        {
+          "name" : "TYPE"
+        },
+        {
+          "name" : "value"
+        }
+      ],
+      "methods" : [
+        {
+          "name" : "<init>",
+          "parameterTypes" : [
+            "boolean"
+          ]
+        }
+      ]
+    },
+    {
+      "condition" : {
+        "typeReached" : "com.sun.jna.Native"
+      },
+      "type" : "java.lang.Byte",
+      "jniAccessible" : true,
+      "fields" : [
+        {
+          "name" : "TYPE"
+        },
+        {
+          "name" : "value"
+        }
+      ],
+      "methods" : [
+        {
+          "name" : "<init>",
+          "parameterTypes" : [
+            "byte"
+          ]
+        }
+      ]
+    },
+    {
+      "condition" : {
+        "typeReached" : "com.sun.jna.Native"
+      },
+      "type" : "java.lang.Character",
+      "jniAccessible" : true,
+      "fields" : [
+        {
+          "name" : "TYPE"
+        },
+        {
+          "name" : "value"
+        }
+      ],
+      "methods" : [
+        {
+          "name" : "<init>",
+          "parameterTypes" : [
+            "char"
+          ]
+        }
+      ]
+    },
+    {
+      "condition" : {
+        "typeReached" : "com.sun.jna.Native"
+      },
+      "type" : "java.lang.Class",
+      "jniAccessible" : true,
+      "methods" : [
+        {
+          "name" : "getComponentType",
+          "parameterTypes" : [ ]
+        }
+      ]
+    },
+    {
+      "condition" : {
+        "typeReached" : "com.sun.jna.Native$4"
+      },
+      "type" : "java.lang.ClassLoader"
+    },
+    {
+      "condition" : {
+        "typeReached" : "com.sun.jna.Native"
+      },
+      "type" : "java.lang.Double",
+      "jniAccessible" : true,
+      "fields" : [
+        {
+          "name" : "TYPE"
+        },
+        {
+          "name" : "value"
+        }
+      ],
+      "methods" : [
+        {
+          "name" : "<init>",
+          "parameterTypes" : [
+            "double"
+          ]
+        }
+      ]
+    },
+    {
+      "condition" : {
+        "typeReached" : "com.sun.jna.Native"
+      },
+      "type" : "java.lang.Float",
+      "jniAccessible" : true,
+      "fields" : [
+        {
+          "name" : "TYPE"
+        },
+        {
+          "name" : "value"
+        }
+      ],
+      "methods" : [
+        {
+          "name" : "<init>",
+          "parameterTypes" : [
+            "float"
+          ]
+        }
+      ]
+    },
+    {
+      "condition" : {
+        "typeReached" : "com.sun.jna.Native"
+      },
+      "type" : "java.lang.Integer",
+      "jniAccessible" : true,
+      "fields" : [
+        {
+          "name" : "TYPE"
+        },
+        {
+          "name" : "value"
+        }
+      ],
+      "methods" : [
+        {
+          "name" : "<init>",
+          "parameterTypes" : [
+            "int"
+          ]
+        }
+      ]
+    },
+    {
+      "condition" : {
+        "typeReached" : "com.sun.jna.Native"
+      },
+      "type" : "java.lang.Long",
+      "jniAccessible" : true,
+      "fields" : [
+        {
+          "name" : "TYPE"
+        },
+        {
+          "name" : "value"
+        }
+      ],
+      "methods" : [
+        {
+          "name" : "<init>",
+          "parameterTypes" : [
+            "long"
+          ]
+        }
+      ]
+    },
+    {
+      "condition" : {
+        "typeReached" : "com.sun.jna.Library$Handler"
+      },
+      "type" : "java.lang.Object",
+      "methods" : [
+        {
+          "name" : "equals",
+          "parameterTypes" : [
+            "java.lang.Object"
+          ]
+        },
+        {
+          "name" : "hashCode",
+          "parameterTypes" : [ ]
+        },
+        {
+          "name" : "toString",
+          "parameterTypes" : [ ]
+        }
+      ]
+    },
+    {
+      "condition" : {
+        "typeReached" : "com.sun.jna.Native"
+      },
+      "type" : "java.lang.Object",
+      "jniAccessible" : true,
+      "methods" : [
+        {
+          "name" : "toString",
+          "parameterTypes" : [ ]
+        }
+      ]
+    },
+    {
+      "condition" : {
+        "typeReached" : "com.sun.jna.Native"
+      },
+      "type" : "java.lang.Short",
+      "jniAccessible" : true,
+      "fields" : [
+        {
+          "name" : "TYPE"
+        },
+        {
+          "name" : "value"
+        }
+      ],
+      "methods" : [
+        {
+          "name" : "<init>",
+          "parameterTypes" : [
+            "short"
+          ]
+        }
+      ]
+    },
+    {
+      "condition" : {
+        "typeReached" : "com.sun.jna.Native"
+      },
+      "type" : "java.lang.String",
+      "jniAccessible" : true,
+      "methods" : [
+        {
+          "name" : "<init>",
+          "parameterTypes" : [
+            "byte[]"
+          ]
+        },
+        {
+          "name" : "<init>",
+          "parameterTypes" : [
+            "byte[]",
+            "java.lang.String"
+          ]
+        },
+        {
+          "name" : "getBytes",
+          "parameterTypes" : [ ]
+        },
+        {
+          "name" : "getBytes",
+          "parameterTypes" : [
+            "java.lang.String"
+          ]
+        },
+        {
+          "name" : "toCharArray",
+          "parameterTypes" : [ ]
+        }
+      ]
+    },
+    {
+      "condition" : {
+        "typeReached" : "com.sun.jna.Structure$FFIType"
+      },
+      "type" : "java.lang.String"
+    },
+    {
+      "condition" : {
+        "typeReached" : "com.sun.jna.Native"
+      },
+      "type" : "java.lang.System",
+      "jniAccessible" : true,
+      "methods" : [
+        {
+          "name" : "getProperty",
+          "parameterTypes" : [
+            "java.lang.String"
+          ]
+        }
+      ]
+    },
+    {
+      "condition" : {
+        "typeReached" : "com.sun.jna.NativeLibrary"
+      },
+      "type" : "java.lang.Throwable",
+      "methods" : [
+        {
+          "name" : "addSuppressed",
+          "parameterTypes" : [
+            "java.lang.Throwable"
+          ]
+        }
+      ]
+    },
+    {
+      "condition" : {
+        "typeReached" : "com.sun.jna.Native"
+      },
+      "type" : "java.lang.UnsatisfiedLinkError",
+      "jniAccessible" : true,
+      "methods" : [
+        {
+          "name" : "<init>",
+          "parameterTypes" : [
+            "java.lang.String"
+          ]
+        }
+      ]
+    },
+    {
+      "condition" : {
+        "typeReached" : "com.sun.jna.Native"
+      },
+      "type" : "java.lang.Void",
+      "jniAccessible" : true,
+      "fields" : [
+        {
+          "name" : "TYPE"
+        }
+      ]
+    },
+    {
+      "condition" : {
+        "typeReached" : "com.sun.jna.internal.ReflectionUtils"
+      },
+      "type" : "java.lang.invoke.MethodHandle",
+      "methods" : [
+        {
+          "name" : "bindTo",
+          "parameterTypes" : [
+            "java.lang.Object"
+          ]
+        },
+        {
+          "name" : "invokeWithArguments",
+          "parameterTypes" : [
+            "java.lang.Object[]"
+          ]
+        }
+      ]
+    },
+    {
+      "condition" : {
+        "typeReached" : "com.sun.jna.internal.ReflectionUtils"
+      },
+      "type" : "java.lang.invoke.MethodHandles",
+      "methods" : [
+        {
+          "name" : "lookup",
+          "parameterTypes" : [ ]
+        },
+        {
+          "name" : "privateLookupIn",
+          "parameterTypes" : [
+            "java.lang.Class",
+            "java.lang.invoke.MethodHandles$Lookup"
+          ]
+        }
+      ]
+    },
+    {
+      "condition" : {
+        "typeReached" : "com.sun.jna.internal.ReflectionUtils"
+      },
+      "type" : "java.lang.invoke.MethodHandles$Lookup",
+      "methods" : [
+        {
+          "name" : "findSpecial",
+          "parameterTypes" : [
+            "java.lang.Class",
+            "java.lang.String",
+            "java.lang.invoke.MethodType",
+            "java.lang.Class"
+          ]
+        },
+        {
+          "name" : "in",
+          "parameterTypes" : [
+            "java.lang.Class"
+          ]
+        },
+        {
+          "name" : "unreflectSpecial",
+          "parameterTypes" : [
+            "java.lang.reflect.Method",
+            "java.lang.Class"
+          ]
+        }
+      ]
+    },
+    {
+      "condition" : {
+        "typeReached" : "com.sun.jna.internal.ReflectionUtils"
+      },
+      "type" : "java.lang.invoke.MethodType",
+      "methods" : [
+        {
+          "name" : "methodType",
+          "parameterTypes" : [
+            "java.lang.Class",
+            "java.lang.Class[]"
+          ]
+        }
+      ]
+    },
+    {
+      "condition" : {
+        "typeReached" : "com.sun.jna.Native"
+      },
+      "type" : "java.lang.reflect.Method",
+      "jniAccessible" : true,
+      "methods" : [
+        {
+          "name" : "getParameterTypes",
+          "parameterTypes" : [ ]
+        },
+        {
+          "name" : "getReturnType",
+          "parameterTypes" : [ ]
+        }
+      ]
+    },
+    {
+      "condition" : {
+        "typeReached" : "com.sun.jna.VarArgsChecker"
+      },
+      "type" : "java.lang.reflect.Method",
+      "methods" : [
+        {
+          "name" : "isVarArgs",
+          "parameterTypes" : [ ]
+        }
+      ]
+    },
+    {
+      "condition" : {
+        "typeReached" : "com.sun.jna.internal.ReflectionUtils"
+      },
+      "type" : "java.lang.reflect.Method",
+      "methods" : [
+        {
+          "name" : "isDefault",
+          "parameterTypes" : [ ]
+        }
+      ]
+    },
+    {
+      "condition" : {
+        "typeReached" : "com.sun.jna.Native"
+      },
+      "type" : "java.nio.Buffer",
+      "jniAccessible" : true,
+      "methods" : [
+        {
+          "name" : "position",
+          "parameterTypes" : [ ]
+        }
+      ]
+    },
+    {
+      "condition" : {
+        "typeReached" : "com.sun.jna.Platform"
+      },
+      "type" : "java.nio.Buffer"
+    },
+    {
+      "condition" : {
+        "typeReached" : "com.sun.jna.Native"
+      },
+      "type" : "java.nio.ByteBuffer",
+      "jniAccessible" : true,
+      "methods" : [
+        {
+          "name" : "array",
+          "parameterTypes" : [ ]
+        },
+        {
+          "name" : "arrayOffset",
+          "parameterTypes" : [ ]
+        }
+      ]
+    },
+    {
+      "condition" : {
+        "typeReached" : "com.sun.jna.Native"
+      },
+      "type" : "java.nio.CharBuffer",
+      "jniAccessible" : true,
+      "methods" : [
+        {
+          "name" : "array",
+          "parameterTypes" : [ ]
+        },
+        {
+          "name" : "arrayOffset",
+          "parameterTypes" : [ ]
+        }
+      ]
+    },
+    {
+      "condition" : {
+        "typeReached" : "com.sun.jna.Native"
+      },
+      "type" : "java.nio.DoubleBuffer",
+      "jniAccessible" : true,
+      "methods" : [
+        {
+          "name" : "array",
+          "parameterTypes" : [ ]
+        },
+        {
+          "name" : "arrayOffset",
+          "parameterTypes" : [ ]
+        }
+      ]
+    },
+    {
+      "condition" : {
+        "typeReached" : "com.sun.jna.Native"
+      },
+      "type" : "java.nio.FloatBuffer",
+      "jniAccessible" : true,
+      "methods" : [
+        {
+          "name" : "array",
+          "parameterTypes" : [ ]
+        },
+        {
+          "name" : "arrayOffset",
+          "parameterTypes" : [ ]
+        }
+      ]
+    },
+    {
+      "condition" : {
+        "typeReached" : "com.sun.jna.Native"
+      },
+      "type" : "java.nio.IntBuffer",
+      "jniAccessible" : true,
+      "methods" : [
+        {
+          "name" : "array",
+          "parameterTypes" : [ ]
+        },
+        {
+          "name" : "arrayOffset",
+          "parameterTypes" : [ ]
+        }
+      ]
+    },
+    {
+      "condition" : {
+        "typeReached" : "com.sun.jna.Native"
+      },
+      "type" : "java.nio.LongBuffer",
+      "jniAccessible" : true,
+      "methods" : [
+        {
+          "name" : "array",
+          "parameterTypes" : [ ]
+        },
+        {
+          "name" : "arrayOffset",
+          "parameterTypes" : [ ]
+        }
+      ]
+    },
+    {
+      "condition" : {
+        "typeReached" : "com.sun.jna.Native"
+      },
+      "type" : "java.nio.ShortBuffer",
+      "jniAccessible" : true,
+      "methods" : [
+        {
+          "name" : "array",
+          "parameterTypes" : [ ]
+        },
+        {
+          "name" : "arrayOffset",
+          "parameterTypes" : [ ]
+        }
+      ]
+    },
+    {
+      "condition" : {
+        "typeReached" : "com.sun.jna.Native"
+      },
+      "type" : "java.security.SecureRandomParameters"
+    },
+    {
+      "condition" : {
+        "typeReached" : "com.sun.jna.Native"
+      },
+      "type" : "long"
+    },
+    {
+      "condition" : {
+        "typeReached" : "com.sun.jna.Native"
+      },
+      "type" : "sun.awt.X11.XErrorHandlerUtil",
+      "jniAccessible" : true
+    },
+    {
+      "condition" : {
+        "typeReached" : "com.sun.jna.Native"
+      },
+      "type" : "sun.security.provider.NativePRNG",
+      "methods" : [
+        {
+          "name" : "<init>",
+          "parameterTypes" : [ ]
+        },
+        {
+          "name" : "<init>",
+          "parameterTypes" : [
+            "java.security.SecureRandomParameters"
+          ]
+        }
+      ]
+    },
+    {
+      "condition" : {
+        "typeReached" : "com.sun.jna.Native"
+      },
+      "type" : "sun.security.provider.SHA",
+      "methods" : [
+        {
+          "name" : "<init>",
+          "parameterTypes" : [ ]
+        }
+      ]
+    },
+    {
+      "condition" : {
+        "typeReached" : "com.sun.jna.CallbackReference"
+      },
+      "type" : {
+        "lambda" : {
+          "declaringClass" : "net_java_dev_jna.jna.CallbackAndUtilityCoverageTest",
+          "interfaces" : [
+            "net_java_dev_jna.jna.CallbackAndUtilityCoverageTest$Adder"
+          ]
+        }
+      }
+    },
+    {
+      "condition" : {
+        "typeReached" : "com.sun.jna.CallbackReference"
+      },
+      "type" : {
+        "lambda" : {
+          "declaringClass" : "net_java_dev_jna.jna.CallbackAndUtilityCoverageTest",
+          "interfaces" : [
+            "net_java_dev_jna.jna.CallbackAndUtilityCoverageTest$StructureCallback"
+          ]
+        }
+      }
+    }
+  ],
+  "resources" : [
+    {
+      "condition" : {
+        "typeReached" : "com.sun.jna.Native"
+      },
+      "glob" : "com/sun/jna/darwin-aarch64/libjnidispatch.jnilib"
+    },
+    {
+      "condition" : {
+        "typeReached" : "com.sun.jna.Native"
+      },
+      "glob" : "com/sun/jna/darwin-x86-64/libjnidispatch.jnilib"
+    },
+    {
+      "condition" : {
+        "typeReached" : "com.sun.jna.Native"
+      },
+      "glob" : "com/sun/jna/linux-aarch64/libjnidispatch.so"
+    },
+    {
+      "condition" : {
+        "typeReached" : "com.sun.jna.Native"
+      },
+      "glob" : "com/sun/jna/linux-x86-64/libjnidispatch.so"
+    },
+    {
+      "condition" : {
+        "typeReached" : "com.sun.jna.Native"
+      },
+      "glob" : "com/sun/jna/win32-x86-64/jnidispatch.dll"
+    },
+    {
+      "condition" : {
+        "typeReached" : "com.sun.jna.NativeLibrary"
+      },
+      "glob" : "libjnaCoverage94589515742070.so"
+    },
+    {
+      "condition" : {
+        "typeReached" : "com.sun.jna.NativeLibrary"
+      },
+      "glob" : "linux-x86-64/libjnaCoverage94589515742070.so"
+    }
+  ]
+}

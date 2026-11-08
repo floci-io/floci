@@ -16,14 +16,14 @@ Floci Lambda runs your function code locally inside real Docker containers - clo
 | `UpdateFunctionCode` | Upload new code |
 | `UpdateFunctionConfiguration` | Update runtime, handler, memory, timeout, environment, architectures, tracing, layers, and more |
 | `DeleteFunction` | Remove a function |
-| `Invoke` | Invoke a function synchronously or asynchronously |
+| `Invoke` | Invoke a function synchronously or asynchronously. A durable function starts a durable execution |
 | `CreateEventSourceMapping` | Connect SQS / Kinesis / DynamoDB Streams to a function |
 | `GetEventSourceMapping` | Get event source mapping details |
 | `ListEventSourceMappings` | List all event source mappings |
 | `UpdateEventSourceMapping` | Update a mapping |
 | `DeleteEventSourceMapping` | Remove a mapping |
 | `PublishVersion` | Publish an immutable version |
-| `ListVersionsByFunction` | List all published versions of a function |
+| `ListVersionsByFunction` | List all published versions of a function, `$LATEST` first and then published versions in ascending numeric order |
 | `CreateAlias` | Create a named alias pointing to a version |
 | `GetAlias` | Get alias details |
 | `ListAliases` | List all aliases for a function |
@@ -32,32 +32,242 @@ Floci Lambda runs your function code locally inside real Docker containers - clo
 | `AddPermission` | Add a resource-policy statement |
 | `GetPolicy` | Get the function resource policy |
 | `RemovePermission` | Remove a resource-policy statement |
-| `GetFunctionCodeSigningConfig` | Return code-signing config (always empty) |
-| `ListFunctionsByCodeSigningConfig` | Validates the ARN; no code-signing config can exist, so every well-formed ARN returns `ResourceNotFoundException` |
+| `GetFunctionCodeSigningConfig` | Return the code-signing config attached to `$LATEST` (or an empty ARN) |
+| `PutFunctionCodeSigningConfig` | Attach or replace a code-signing config on `$LATEST` |
+| `DeleteFunctionCodeSigningConfig` | Detach the code-signing config from `$LATEST` |
+| `ListFunctionsByCodeSigningConfig` | List functions carrying a config, with marker pagination |
+| `CreateCodeSigningConfig` | Create a code signing configuration |
+| `GetCodeSigningConfig` | Read a code signing configuration |
+| `UpdateCodeSigningConfig` | Update the members the request names |
+| `DeleteCodeSigningConfig` | Delete a code signing configuration |
+| `ListCodeSigningConfigs` | List the configurations in the region |
 | `CreateFunctionUrlConfig` | Provision a function URL |
 | `GetFunctionUrlConfig` | Read function URL config |
 | `UpdateFunctionUrlConfig` | Update function URL config |
 | `DeleteFunctionUrlConfig` | Delete function URL config |
-| `ListTags` | List tags on a function |
-| `TagResource` | Tag a function |
-| `UntagResource` | Untag a function |
+| `ListTags` | List tags on a function or event source mapping |
+| `TagResource` | Tag a function or event source mapping |
+| `UntagResource` | Untag a function or event source mapping |
 | `PutFunctionConcurrency` | Set reserved concurrent executions |
 | `GetFunctionConcurrency` | Get reserved concurrent executions |
 | `DeleteFunctionConcurrency` | Clear reserved concurrent executions |
+| `PutProvisionedConcurrencyConfig` | Initialize Docker environments for a published version or simple alias |
+| `GetProvisionedConcurrencyConfig` | Read the allocation's actual initialization status and capacity |
+| `ListProvisionedConcurrencyConfigs` | List configured versions and aliases with their current capacity |
+| `DeleteProvisionedConcurrencyConfig` | Remove an allocation and stop its environments |
 | `GetAccountSettings` | Account limits plus usage derived from the caller's stored functions |
 | `PutFunctionEventInvokeConfig` | Set the asynchronous invocation settings of a function, version or alias (retries, event age, destinations) |
 | `UpdateFunctionEventInvokeConfig` | Change some of those settings, leaving the rest as they are |
 | `GetFunctionEventInvokeConfig` | Read the asynchronous invocation settings |
 | `DeleteFunctionEventInvokeConfig` | Remove the asynchronous invocation settings |
 | `ListFunctionEventInvokeConfigs` | List the asynchronous invocation settings of every version and alias of a function |
+| `CheckpointDurableExecution` | Record the operation updates of the Durable Execution SDK and return the new state |
+| `GetDurableExecutionState` | Operations of a running durable execution, for replay |
+| `GetDurableExecution` | Status, result or error and the DurableConfig of a durable execution |
+| `GetDurableExecutionHistory` | Event log of a durable execution, oldest or newest first |
+| `ListDurableExecutionsByFunction` | Durable executions of a function or version, filtered by status, name and start time |
+| `StopDurableExecution` | Stop a running durable execution with an error |
+| `SendDurableExecutionCallbackSuccess` | Complete a durable callback with a result, up to 1 MB |
+| `SendDurableExecutionCallbackFailure` | Fail a durable callback with an error |
+| `SendDurableExecutionCallbackHeartbeat` | Keep a durable callback with a heartbeat timeout alive |
+
+`UpdateFunctionConfiguration` validates `MemorySize` and `Timeout` as whole numbers in their
+supported ranges before changing any stored settings. A rejected value returns
+`InvalidParameterValueException` and leaves the function configuration unchanged.
 
 The event invoke configuration is stored and returned as AWS does, and `AWS::Lambda::EventInvokeConfig`
-provisions it from a stack. Asynchronous invocations do not yet apply its retry, event age or
-destination settings.
+provisions it from a stack. A SAM function's `EventInvokeConfig` expands into that resource as
+`sam deploy` does: on `$LATEST`, or on the `AutoPublishAlias` alias, with the inline role policy for
+each destination and the SQS queue or SNS topic SAM creates when a destination gives only its `Type`.
+Asynchronous invocations apply its retry, event age, destination settings, and dead-letter queue
+configurations (`DeadLetterConfig`).
+
+### Function policies under IAM enforcement
+
+With [IAM enforcement](iam.md#resource-based-policies) on, the statements `AddPermission` adds take
+part in authorizing calls to the function:
+
+- An invoke of a function named by a full or partial ARN runs the function in the account in the
+  ARN. An invoke of another account's function needs its function policy to allow the caller as
+  well as the caller's own identity policy.
+- A Step Functions Lambda task is authorized the same way, as the state machine's execution role or
+  the role the task's `Credentials` name; see
+  [Step Functions](step-functions.md#lambda-tasks-under-iam-enforcement).
+- `GetFunction`, `GetFunctionConfiguration` and `ListDurableExecutionsByFunction`, given a full ARN
+  with a version or alias, read the function in the account in the ARN, and need its function
+  policy to allow the caller in the same way.
+- Provisioned-concurrency configuration operations also act in the account named by the function
+  reference. Cross-account access requires that function's policy to allow the caller.
+- Other operations act on the caller's own function of the name the ARN gives, whatever account
+  the ARN names, and are authorized against that function. Floci does not serve them on another
+  account's function, which AWS allows through a function policy.
+- Within one account, a statement naming the caller grants on its own. One naming only the
+  account, as `AddPermission --principal <account-id>` writes it, delegates to the account, so the
+  caller's identity policy has to allow the call too.
+- An invoke or provisioned-concurrency configuration operation is authorized against the version or
+  alias it names, in the function name or in `Qualifier`. A grant added with `Qualifier` covers that
+  version or alias only, and a grant on the function does not cover a qualified operation.
+  Other operations are authorized against the unqualified function.
+- A statement conditioned on `InvokedViaFunctionUrl` does not admit a direct `Invoke`.
+- `aws:PrincipalOrgID` is not part of the request context, so a grant added with `PrincipalOrgID`
+  admits no caller.
+
+### Qualified reads
+
+`GetFunction` and `GetFunctionConfiguration` preserve an alias in the returned
+`FunctionArn`, while `Version` identifies that alias's primary published version.
+This applies to a `Qualifier` parameter and aliases embedded in a name, full ARN
+or partial ARN. Reading an alias does not change the stored version or the
+identities returned by subsequent unqualified and numeric-version reads.
+
+### Reserved Concurrency
+
+Unqualified `GetFunction` reads include `Concurrency.ReservedConcurrentExecutions` when a reservation
+is set, including an explicit zero. Qualified reads omit `Concurrency`, whether `$LATEST`, a published
+version, or an alias is supplied through `Qualifier` or embedded in the function name or ARN.
+Use `GetFunctionConcurrency` to read the function-wide reservation separately.
+Deleting the reservation with `DeleteFunctionConcurrency` removes the `Concurrency` member from
+subsequent unqualified `GetFunction` responses.
+
+### Asynchronous Invocation Retries and Dead-Letter Queues
+
+An asynchronous invocation (`InvocationType: Event`) answers `202` immediately and runs on the background
+pool. If the invocation fails, it is retried up to `MaximumRetryAttempts` (default: 2, total 3 attempts)
+unless the event age exceeds `MaximumEventAgeInSeconds` (default: 21600 seconds, 6 hours). As in AWS, the
+first retry waits one minute and the second two. `FLOCI_SERVICES_LAMBDA_ASYNC_RETRY_DELAY_SECONDS` sets the
+first wait (the second is twice it), and `0` retries back to back for fast local test runs. A wait never runs
+past `MaximumEventAgeInSeconds`, so an event that expires while waiting is reported then. A retry that finds the
+function's concurrency in use tries again every second until the event expires, where AWS backs off for up to
+five minutes. Deleting the function drops its pending retries without delivering a record, as AWS does.
+
+When retries are exhausted or event age is exceeded:
+
+- If an `OnFailure` destination is configured, the failure record is delivered to the destination.
+- Otherwise, if a `DeadLetterConfig` (`TargetArn`) is configured on the function, the original request payload
+  is delivered to the specified SQS queue or SNS topic with `RequestID`, `ErrorCode` (Number), and `ErrorMessage`
+  (String, truncated to the first 1 KB) message attributes.
+- If both are configured, Floci routes to the `OnFailure` destination rather than the dead-letter queue
+  by design choice (AWS describes dead-letter queues as an alternative to an on-failure destination without
+  specifying precedence).
+
+### Asynchronous Invocation Destinations
+
+An asynchronous invocation delivers its result to the `OnSuccess` or `OnFailure` destination the configuration
+names. Four of AWS's five destination kinds are supported, routed by the service in the destination ARN: an EventBridge
+event bus, an SQS queue, an SNS topic, and another Lambda function. A function with no destination configured
+is unaffected, and delivery never changes what the caller sees: the invoke still answers `202` immediately, and
+a destination that rejects the record is logged rather than reported back.
+
+Every destination receives the same invocation record AWS sends:
+
+```json
+{
+  "version": "1.0",
+  "timestamp": "2026-09-22T10:15:31.123Z",
+  "requestContext": {
+    "requestId": "8ea123e4-1db7-4aba-9559-05a9a25c8b78",
+    "functionArn": "arn:aws:lambda:us-east-1:000000000000:function:bank-pawnshop:$LATEST",
+    "condition": "Success",
+    "approximateInvokeCount": 1
+  },
+  "requestPayload": { "bankId": "BANK-PawnShop" },
+  "responseContext": { "statusCode": 200, "executedVersion": "$LATEST" },
+  "responsePayload": { "bankId": "PawnShop", "rate": 3.5 }
+}
+```
+
+On an EventBridge destination the record is the event `detail`, under the source `lambda` and the
+detail type `Lambda Function Invocation Result - Success`, so a rule can match a field of the
+function's own response at `detail.responsePayload.<field>`. A failed invocation carries the detail
+type `Lambda Function Invocation Result - Failure`, a `condition` of `RetriesExhausted`, a
+`responseContext.functionError` of `Unhandled`, and the error as its `responsePayload`. That
+`functionError` member is present only on a failure record. The `approximateInvokeCount` field reflects
+the actual number of attempts executed before completion or exhaustion.
+
+An alias-specific destination configuration is used when the alias is invoked, whether the alias is named
+in `Qualifier` or on the function name. If the alias has none, Floci checks the configuration on the
+version that the alias resolves to.
+
+Two limits are worth knowing:
+
+- **An S3 `OnFailure` destination is not delivered.** AWS added an S3 bucket as a fifth
+  destination kind, on failure only. Floci routes on the service in the destination ARN and has
+  no `s3` arm, so such a record is dropped with a warning rather than written to the bucket. The
+  configuration is still stored and read back, so Terraform and CloudFormation converge; only the
+  delivery is missing.
+- **A chain of Lambda destinations stops at 16 hops, but only a chain of Lambda destinations.** A
+  function whose `OnSuccess` names another function would otherwise invoke forever; AWS halts such
+  a chain at about the same depth through recursive loop detection, and here the record at the
+  sixteenth hop is dropped with a warning. The bound is keyed on the destination being a Lambda
+  ARN, so a cycle that leaves and re-enters Lambda by another route is **not** bounded: a topic
+  that fans back to the function, or a bus rule targeting it, each start a fresh chain at zero.
+  Avoid configuring one until this is closed.
+
+### Durable Functions
+
+A function created with `DurableConfig` is a durable function. Invoking it through a version or
+alias (`name:1`, `name:live`, `?Qualifier=1`) starts a durable execution. An unqualified name is
+rejected, as on AWS. `X-Amz-Durable-Execution-Name` names the execution, and Floci generates a
+UUID when it is absent. `X-Amz-Durable-Execution-Arn` returns the execution ARN. A
+`RequestResponse` invoke blocks until the execution ends, waits included, and needs an
+`ExecutionTimeout` of 15 minutes or less. `Event` answers 202 and the execution continues in the
+background. Invocations through an ARN (EventBridge, Scheduler, function URLs, destinations) start
+durable executions the same way.
+
+The checkpoint protocol under `/2025-12-01` is the real one, so the Durable Execution SDK works
+unchanged for steps, waits, step retries, callbacks, chained invokes and replay. Timers are persisted and fired by a
+background sweep, so an execution survives a restart of Floci. A function that returns something
+other than the `{Status, Result, Error}` envelope fails its execution with
+`Invalid Status in invocation output.` A function that throws is re-invoked four more times, after
+1, 2, 4 and 8 seconds, and then fails the execution with its error. AWS does the same over a few
+minutes.
+
+A callback (`createCallback`, `waitForCallback`) gets a callback id that the
+`SendDurableExecutionCallback*` APIs complete. Its `TimeoutSeconds` and `HeartbeatTimeoutSeconds`
+fail it with `Callback.Timeout` or `Callback.Heartbeat`, and each heartbeat restarts the heartbeat
+timeout. A failure sent with an empty request body fails the callback but does not invoke the
+function again, as on AWS, so the execution keeps waiting. The SDKs send `{}` when `Error` is
+omitted, which does invoke it.
+
+A chained invoke (`context.invoke`) runs another function with an input of up to 1 MB. A durable
+target needs a version or alias and runs as its own durable execution, and its close completes the
+operation as `SUCCEEDED`, `FAILED`, `TIMED_OUT` or `STOPPED`. Any other function is invoked once,
+and an output over 1 MB fails the operation. A missing function or an unqualified durable one
+fails the operation at once, and a target in another account or Region is rejected at checkpoint.
+Stopping the parent leaves the child running, as on AWS.
+
+`GetDurableExecutionHistory` leaves payloads out unless `IncludeExecutionData=true` is sent. The
+API reference names `true` as the default, but AWS answers this way.
+
+`SendDurableExecutionCallbackSuccess` takes a result of up to 1 MB. The API reference names 256 KB,
+but AWS accepts 1 MB and rejects one byte more.
+
+The public `public.ecr.aws/lambda` images do not bundle the SDK that the managed runtimes carry.
+Add `aws-durable-execution-sdk-python` or `@aws/durable-execution-sdk-js` to your deployment
+package.
+
+Not emulated yet:
+
+- The execution role's `lambda:InvokeFunction` permission before a chained invoke. `TenantId` is
+  recorded in the history only.
+- Durable executions started by Step Functions or by an event source mapping. These invoke the
+  function as a plain one.
+- Payload encryption. `KMSKeyArn` is stored and returned only.
+- EventBridge status-change events, the X-Ray `TraceHeader`, and a dead-letter queue or
+  destinations for durable executions.
+- The per-execution limits of 3,000 operations and 100 MB of persisted payload.
+
+## Code signing configuration pagination
+
+`ListCodeSigningConfigs` accepts `MaxItems` from 1 to 10,000 and returns `NextMarker`
+when more configurations remain. Pass that value as `Marker` to continue listing.
+Omitting `MaxItems` returns up to 10,000 configurations. Markers are signed and scoped
+to the account and region; the final page omits `NextMarker`.
 
 ## Hot-Reloading via Reactive S3 Sync
 
-Floci supports an automatic hot-reloading mechanism when functions are deployed via S3. This follows the standard AWS behavior where S3 and Lambda interact, but is optimized for a seamless local development experience.
+Floci supports automatic hot reload for S3 deployments as a local development convenience.
+AWS normally copies the deployment package: overwriting its S3 object alone does not redeploy the function.
 
 When a Lambda function is created using an S3 bucket and key, Floci maintains a link between the function and its source object. Any subsequent update to that S3 object (e.g., via `s3:PutObject`) automatically triggers a reactive synchronization:
 
@@ -67,6 +277,9 @@ When a Lambda function is created using an S3 bucket and key, Floci maintains a 
 4.  **Reload**: The very next invocation starts a fresh container with the updated code.
 
 This allows you to update your Lambda code by simply re-uploading your ZIP to S3, without having to manually call `UpdateFunctionCode` or restart any containers.
+
+Published versions retain their own code snapshots. Reactive sync updates only `$LATEST`;
+publication and extraction share the per-function lock so a version cannot capture a partial update.
 
 ### Example
 
@@ -87,12 +300,38 @@ aws s3 cp updated-function.zip s3://my-bucket/function.zip
 aws lambda invoke --function-name my-function out.json
 ```
 
-!!! note "Standard Behavior"
-    This mechanism requires no custom configuration or non-standard magic strings. It works with standard AWS SDKs and CLI tools, providing a "live" development feel while staying within the AWS API contract.
+!!! note "Local development behavior"
+    This mechanism requires no custom configuration or special strings. It uses standard AWS SDK and CLI calls; automatic redeployment after an S3 upload is a Floci convenience.
+
+### Configuration {#reactive-s3-sync-configuration}
+
+| Variable | Default | Description |
+|---|---|---|
+| `FLOCI_SERVICES_LAMBDA_REACTIVE_S3_SYNC_ENABLED` | `true` | Re-deploy a function when the S3 object it was deployed from is overwritten. `false` only stores the object, as AWS does |
+| `FLOCI_SERVICES_LAMBDA_REACTIVE_S3_SYNC_ASYNC` | `false` | Re-deploy in the background, so the upload returns without waiting for it |
+
+By default the re-deploy runs inside the upload: `PutObject`, `CopyObject` or
+`CompleteMultipartUpload` returns only once the function has its new code. With
+`FLOCI_SERVICES_LAMBDA_REACTIVE_S3_SYNC_ASYNC=true` the upload returns at once, and the
+function reports `LastUpdateStatus` `InProgress` until the re-deploy finishes. Wait for it
+before invoking, or the invocation may still run the previous code:
+
+```bash
+aws s3 cp updated-function.zip s3://my-bucket/function.zip
+aws lambda wait function-updated --function-name my-function
+aws lambda invoke --function-name my-function out.json
+```
+
+Uploads that arrive while a re-deploy is running are coalesced: the next re-deploy reads the
+object as it is when it starts, so a burst of uploads costs at most one more. A re-deploy that
+fails, for example because the object is not a valid ZIP, leaves the previous code in place and
+reports `LastUpdateStatus` `Failed` with a `LastUpdateStatusReason` until the function's next
+successful update: a re-deploy, `UpdateFunctionCode` or `UpdateFunctionConfiguration`, since the
+status describes the last update of either kind. The status is kept in memory and is not persisted.
 
 ## Hot-Reload via Bind Mount
 
-For the tightest inner-loop development cycle, Floci supports a **bind-mount hot-reload** mode. Instead of packaging code into a ZIP and uploading it to S3, you point Floci directly at a directory on your host machine. The directory is bind-mounted into `/var/task` inside the container, so every invocation runs the files as they currently exist on disk, with no upload or redeploy.
+For the tightest inner-loop development cycle, Floci supports a **bind-mount hot-reload** mode. Instead of packaging code into a ZIP and uploading it to S3, you point Floci directly at a directory on your host machine. The directory is bind-mounted read-only into `/var/task` inside the container, as `/var/task` is read-only in AWS Lambda, so every invocation runs the files as they currently exist on disk, with no upload or redeploy.
 
 This is enabled by using the magic bucket name `hot-reload` when creating a function:
 
@@ -126,6 +365,8 @@ FLOCI_SERVICES_LAMBDA_HOT_RELOAD_ENABLED=true
 FLOCI_SERVICES_LAMBDA_HOT_RELOAD_ALLOWED_PATHS=/home/user/projects,/tmp
 ```
 
+An `S3Key` is accepted when it is one of the listed directories or inside one. `.` and `..` segments are resolved first, so `/home/user/projects/../secrets` and a sibling such as `/home/user/projects-old` are rejected. Symbolic links on the Docker host are not resolved by Floci. A path containing `:` is rejected. Without an allow-list any absolute host path is accepted except the host root, `/var`, `/proc`, and anything under `/run` or `/var/run`, where the Docker socket lives or can be reached. Floci logs a warning at startup when hot-reload is enabled without an allow-list.
+
 **Docker Compose setup**: enable the feature and share the Docker socket:
 
 ```yaml
@@ -136,6 +377,18 @@ services:
     environment:
       FLOCI_SERVICES_LAMBDA_HOT_RELOAD_ENABLED: "true"
 ```
+
+### CloudFormation and SAM
+
+`AWS::Lambda::Function` accepts the same pair. A template whose `Code` is
+`{"S3Bucket": "hot-reload", "S3Key": "/absolute/path"}` is handed to Lambda unchanged instead of
+being resolved against S3, so the stack creates a hot-reload function and reaches
+`CREATE_COMPLETE`. A SAM `CodeUri` of `s3://hot-reload//absolute/path` expands to the same `Code`:
+the double slash keeps the key absolute, because SAM takes everything after the first slash as the key.
+Redeploying the stack with an unchanged path is a no-op for the code; a changed path updates the
+function's bind mount through `UpdateFunctionCode`. Lambda's own hot-reload checks still apply, so
+a stack whose hot-reload path is relative, outside the allow-list, or used while hot-reload is
+disabled fails with Lambda's error as the resource status reason.
 
 ### Limitations
 
@@ -155,17 +408,18 @@ services:
 | Path on host required | No | Yes |
 
 !!! note "Concurrency enforcement"
-    Reserved concurrency is enforced: invocations beyond the reserved value
-    return `TooManyRequestsException` (HTTP 429). Functions without a reserved
-    value share a **per-region** pool. AWS Lambda's "account-level" limit is
-    in fact a per-account-per-region quota, and Floci mirrors that by
-    partitioning counters on the ARN's region segment. The pool size (default
-    1000) is configurable via `floci.services.lambda.region-concurrency-limit`
-    and applies independently to each region. `PutFunctionConcurrency`
-    validates that the requested value leaves at least
+    Reserved concurrency is enforced function-wide: invocations of every
+    version and alias count against the function's reservation, and
+    invocations beyond the reserved value return `TooManyRequestsException`
+    (HTTP 429). Functions without a reserved value share a **per-region**
+    pool. AWS Lambda's "account-level" limit is in fact a
+    per-account-per-region quota, and Floci mirrors that by partitioning
+    counters on the ARN's region segment. The pool size (default 1000) is
+    configurable via `floci.services.lambda.region-concurrency-limit` and
+    applies independently to each region. `PutFunctionConcurrency` validates
+    that the requested value leaves at least
     `floci.services.lambda.unreserved-concurrency-min` (default 100) available
-    for unreserved functions in that region. `PutProvisionedConcurrencyConfig`
-    and related provisioned-concurrency operations remain unimplemented.
+    for unreserved functions in that region.
 
     Reducing or clearing a function's reserved value does not kill
     invocations that are already in flight. This matches AWS, which
@@ -175,12 +429,25 @@ services:
 
 Function URLs are also reachable directly on `/{proxy:.*}` under the Lambda URL controller, which routes the request into the normal `Invoke` path.
 
+Function URLs are not available in AWS GovCloud (US) or in the China Regions
+([GovCloud guide](https://docs.aws.amazon.com/govcloud-us/latest/UserGuide/govcloud-lambda.html),
+[China guide](https://docs.amazonaws.cn/en_us/aws/latest/userguide/lambda.html)), so
+`CreateFunctionUrlConfig` is an `InvalidParameterValueException` in those regions, and an
+`AWS::Lambda::Url` in a CloudFormation stack there fails with it. See
+[AWS Partitions](../configuration/partitions.md).
+
 **Versions:** `CreateFunction` and `UpdateFunctionCode` honour `Publish`, publishing a version
 and reporting it in the response's `Version`. The two differ in the ARN they return, matching the
 live service: `CreateFunction` keeps the unqualified `FunctionArn` while `UpdateFunctionCode`
 returns the qualified one (`...:function:name:2`), as `PublishVersion` does. Without `Publish`
 both answer for `$LATEST` and create nothing. `UpdateFunctionConfiguration` has no `Publish`
 parameter in the AWS API and none here.
+
+On a cold launch, `AWS_LAMBDA_FUNCTION_VERSION` contains the executing version:
+`$LATEST` for an unqualified invocation and the published version number for a
+version or alias invocation. This follows the
+[Lambda environment variable contract](https://docs.aws.amazon.com/lambda/latest/dg/configuration-envvars.html#configuration-envvars-runtime)
+and was checked against live AWS in `us-east-1` on October 12, 2026 at 19:49 UTC.
 
 `DeleteFunction` honours `Qualifier` — it removes that published version only, leaving `$LATEST`,
 the other versions and the function's aliases in place; without a qualifier the whole function
@@ -200,22 +467,138 @@ architecture. `Marker` is opaque and signed with a key generated at startup, so 
 edited or previous-run token is rejected with `InvalidParameterValueException` rather than
 applied as a cursor. One divergence: a parameter sent with an empty value
 (`?CompatibleRuntime=`) is treated as absent rather than rejected, because RESTEasy binds an
-empty query value as null. `CreateFunction`/`UpdateFunctionConfiguration`
-validate each `Layers` ARN eagerly against that storage, matching real AWS - an unresolvable ARN
-is rejected with `InvalidParameterValueException`, not silently accepted. Only resolves layers
-published into this same local Floci instance; a real AWS-owned layer ARN (e.g. the AWS AppConfig
-Extension or a Datadog-published layer) can never resolve here, since there's no mechanism in
-Floci for fetching real AWS content - publish your own copy of the layer's content locally under
-a name you control and reference that ARN instead.
+empty query value as null. Resolution honours the ARN's
+account and partition: an ARN naming another account resolves to nothing rather than to a
+same-named layer of the caller's own, matching the live service, which answers that case with
+`AccessDeniedException` and never substitutes. `CreateFunction`/`UpdateFunctionConfiguration`
+validate each `Layers` ARN in the caller's own account eagerly against that storage, matching
+real AWS - an unresolvable one is rejected with `InvalidParameterValueException: Layer version
+... does not exist.`, not silently accepted.
+
+An ARN naming another account or another partition is answered on the live service by the layer's
+resource policy: an AWS-managed public layer resolves, and everything else is
+`AccessDeniedException`. Measured on `CreateFunction` in ap-southeast-1, a foreign-account ARN and
+a cross-partition ARN return the same `AccessDeniedException`, so Floci returns that for both.
+Floci implements no layer permissions and cannot fetch real AWS content, so it cannot tell a
+public layer from a private one; refusing is the faithful default, being the answer AWS gives to
+every foreign ARN except a public one.
+
+Set `floci.services.lambda.accept-external-layer-arns: true`
+(`FLOCI_SERVICES_LAMBDA_ACCEPT_EXTERNAL_LAYER_ARNS`) to record a same-partition foreign ARN on the
+function instead of refusing it, which is what a stack attaching Powertools, the AppConfig
+extension or a vendor-published layer needs. The trade is explicit: with it on, Floci also accepts
+an ARN AWS would refuse with `AccessDeniedException`, so a typo or a private third-party layer
+passes here and fails on deploy. The content is never mounted at `/opt` either way, and a warning
+is logged at attach time and again at invoke; publish your own copy of the content locally under a
+name you control if the handler needs it at runtime.
+
+A layer ARN outside the caller's partition is refused whatever that setting says. Partitions are
+isolated, so no resource policy can ever make such a layer readable, and `GetLayerVersionByArn`
+rejects one outright with `InvalidParameterValueException: Invalid layer version ...`.
+
+## Provisioned concurrency
+
+Published versions with `SnapStart.ApplyOn=PublishedVersions` reject provisioned concurrency
+with `ResourceConflictException`, including through an alias. A configured alias cannot
+retarget to such a version. Eligibility uses the published snapshot, so changing `$LATEST`
+does not change older versions. Get and Delete retain their normal configuration lookup
+behavior, and unconfigured aliases can still point to SnapStart versions.
+
+Put, Get and Delete use `/2019-09-30/functions/{FunctionName}/provisioned-concurrency`
+with a required `Qualifier` query parameter. Put accepts a positive integer
+`ProvisionedConcurrentExecutions` and returns HTTP 202 with `IN_PROGRESS`. An existing
+function without a configuration returns `ProvisionedConcurrencyConfigNotFoundException`
+from Get.
+
+List uses the same route with `List=ALL` and no qualifier. It returns the function's
+configured versions and aliases, their qualified `FunctionArn` and current allocation status.
+An existing function without configurations returns an empty list. `MaxItems` accepts 1
+through 50; `NextMarker` resumes with `Marker`. Markers are scoped to the function, account
+and region. Name, full ARN and partial ARN references use the same configuration inventory.
+
+An alias and its resolved published version cannot both have configurations. Different
+aliases of the same provisioned version also conflict; other versions remain independent.
+`LastModified` uses Lambda's UTC `+0000` form.
+
+Each environment runs the real function initialization. `READY` requires the runtime and
+every discovered extension to send their first Runtime API `Next` request. Provisioning
+does not enqueue a handler event. Initialization failures become `FAILED`; the initialization
+deadline is the greater of 130 seconds and the configured function timeout. A later ordinary
+Invoke for that exact alias or version uses an available initialized environment, with
+on-demand spillover when all its environments are busy. Other aliases, versions, accounts
+and regions do not borrow that allocation.
+
+Layer initialization uses the stored function's account and partition, including background
+workers without a request context. An unresolved configured layer or missing layer directory
+fails provisioned initialization; it is never silently omitted from a `READY` environment.
+Cross-account layer sharing remains unsupported.
+
+With IAM enforcement enabled, these operations authorize the function owner and qualifier
+against the caller's identity policy and the owner's function policy. A cross-account grant
+for Get does not authorize Put, Delete, or another qualifier.
+
+Provisioned environments are separate from ordinary idle eviction. Desired configurations
+are persisted; restarting Floci initializes new processes before reporting `READY`.
+Deleting the configuration, alias or function removes the owned environments. Changing an
+alias's version reinitializes its existing allocation for the new published version and
+releases the old version's configuration conflict. The alias retains its requested quota;
+retired environments retain their local container capacity until cleanup succeeds. An identical
+Put preserves the existing healthy allocation. Failed background alias refreshes retain their
+previous allocation and retry on later reconciliation without blocking other configurations.
+An alias with a configuration cannot move to
+`$LATEST`; remove the configuration first. Get and Delete remain available if the alias gains
+unsupported weighted routing.
+
+This implementation supports the non-ephemeral Docker executor with immutable published
+versions and simple aliases. It refuses `$LATEST`, weighted aliases, hot reload, durable
+functions and other executors. Allocations share the configured `warm-pool-max-per-function`
+ceiling across a function's qualifiers, and the optional `warm-pool-max-total` ceiling across
+provisioned allocations. A function's reserved concurrency is also a ceiling. These local
+resource bounds do not implement AWS's complete regional provisioned-concurrency quota
+accounting, automatic scaling, or weighted-alias allocation. Provisioned runtimes receive
+their numeric `AWS_LAMBDA_FUNCTION_VERSION` and
+`AWS_LAMBDA_INITIALIZATION_TYPE=provisioned-concurrency`.
+
+Configuration replacement and deletion remain committed if environment removal fails.
+Failed removals retain ownership and are retried while Floci is running; they continue
+to count against local container limits until cleanup succeeds.
+
+Shutdown drains provisioned and on-demand containers concurrently within one
+`floci.services.lambda.container-drain-timeout-seconds` budget. The default is 15 seconds;
+set `FLOCI_SERVICES_LAMBDA_CONTAINER_DRAIN_TIMEOUT_SECONDS` when a larger fleet needs more
+time for Docker to finish removing stopped containers. Supported values are 1 through 300;
+invalid values fail initialization. The parent process's stop grace must exceed this
+budget. The destruction hook does not start another drain budget. Failed removals remain
+owned for a later retirement or reset retry; a completed removal is not repeated.
+A launch that outlasts the deadline is reported as incomplete cleanup. Its invocation is
+refused, and any returned container remains owned for a later cleanup retry; the deadline
+does not guarantee cancellation of an unresponsive container launcher.
+
+If an invocation finishes after the shutdown deadline, releasing its still-owned
+container starts a separate bounded cleanup attempt. This does not extend the
+initial shutdown wait.
+
+When using `floci-cli`, set `floci stop --timeout <seconds>` above the configured
+drain budget. The CLI currently defaults to 10 seconds, including for `floci restart`.
+For a longer drain, explicitly stop with the larger timeout and then start Floci.
 
 ## Not Implemented
 
 These AWS Lambda operations have no handler in Floci. Calls will return `404` or an error:
 
 - Layer permissions (`AddLayerVersionPermission`, `RemoveLayerVersionPermission`, `GetLayerVersionPolicy`)
-- Provisioned concurrency (`PutProvisionedConcurrencyConfig`, `GetProvisionedConcurrencyConfig`, `ListProvisionedConcurrencyConfigs`, `DeleteProvisionedConcurrencyConfig`)
 - `InvokeWithResponseStream`
-- Code signing management (only `GetFunctionCodeSigningConfig` and `ListFunctionsByCodeSigningConfig` are wired; there is no `PutFunctionCodeSigningConfig` or `CreateCodeSigningConfig`, so no code-signing config can exist and `ListFunctionsByCodeSigningConfig` reports every well-formed ARN as `ResourceNotFoundException` — a malformed ARN or an out-of-range `MaxItems` is rejected with `InvalidParameterValueException` first)
+
+Code signing enforcement is not emulated: an attached configuration never gates a deployment.
+The attachment lifecycle is supported for `$LATEST`: `PutFunctionCodeSigningConfig` attaches or
+replaces a configuration, `GetFunctionCodeSigningConfig` reads it,
+`DeleteFunctionCodeSigningConfig` detaches it, and `ListFunctionsByCodeSigningConfig` returns
+attached functions with marker pagination. `PutFunctionCodeSigningConfig` and the
+`CodeSigningConfigArn` supplied to `CreateFunction` return
+`CodeSigningConfigNotFoundException` when the named configuration does not exist.
+Configuration resource reads and `ListFunctionsByCodeSigningConfig` return
+`ResourceNotFoundException` for an unknown configuration. A malformed ARN or out-of-range
+`MaxItems` is rejected with `InvalidParameterValueException` first.
 
 ## Configuration
 
@@ -234,19 +617,28 @@ These AWS Lambda operations have no handler in Floci. Calls will return `404` or
 | `FLOCI_SERVICES_LAMBDA_HONOUR_ARCHITECTURES` | `false` | Select each function's declared architecture for Docker image pulls and containers |
 | `FLOCI_SERVICES_LAMBDA_DEFAULT_MEMORY_MB` | `128` | Default function memory (MB) |
 | `FLOCI_SERVICES_LAMBDA_DEFAULT_TIMEOUT_SECONDS` | `3` | Default function timeout (seconds) |
+| `FLOCI_SERVICES_LAMBDA_DURABLE_SWEEP_ENABLED` | `true` | Fire durable execution timers (waits, step retries, execution timeouts, retention expiry) |
+| `FLOCI_SERVICES_LAMBDA_DURABLE_SWEEP_INTERVAL_SECONDS` | `1` | How often the durable sweep runs |
 | `FLOCI_SERVICES_LAMBDA_RUNTIME_API_BASE_PORT` | `12000` | First port in the Lambda Runtime API range |
-| `FLOCI_SERVICES_LAMBDA_RUNTIME_API_MAX_PORT` | `12499` | Last port in the Lambda Runtime API range. One port is held per running container, so the range width caps concurrent executions |
+| `FLOCI_SERVICES_LAMBDA_RUNTIME_API_MAX_PORT` | `12499` | Last port in the Lambda Runtime API range. One port is held per running container, so the range width caps concurrent executions. Each running container also holds two Docker connections, so a wider range needs a matching `FLOCI_DOCKER_MAX_CONNECTIONS` |
 | `FLOCI_SERVICES_LAMBDA_CODE_PATH` | `./data/lambda-code` | Directory where Lambda ZIP files are stored |
 | `FLOCI_SERVICES_LAMBDA_POLL_INTERVAL_MS` | `1000` | Event-source mapping poll interval (milliseconds) |
+| `FLOCI_SERVICES_LAMBDA_ASYNC_RETRY_DELAY_SECONDS` | `60` | Wait before the first retry of a failed asynchronous invocation (seconds); the second waits twice this, `0` retries back to back |
 | `FLOCI_SERVICES_LAMBDA_CONTAINER_IDLE_TIMEOUT_SECONDS` | `300` | Idle container shutdown timeout (seconds) |
+| `FLOCI_SERVICES_LAMBDA_INIT_TIMEOUT_SECONDS` | `10` | Time a newly started runtime has to finish its init and request its first invocation (seconds). A function whose `Timeout` plus 2 seconds is longer waits that long instead. See [Slow cold starts](#slow-cold-starts) |
+| `FLOCI_SERVICES_LAMBDA_WARM_POOL_MAX_PER_FUNCTION` | `max(4, cpus)` | Maximum idle (warm) containers kept per function |
+| `FLOCI_SERVICES_LAMBDA_WARM_POOL_MAX_TOTAL` | `0` | Maximum idle (warm) containers kept across all functions, LRU-evicted beyond it. `0` = unbounded. See the note below |
 | `FLOCI_SERVICES_LAMBDA_REGION_CONCURRENCY_LIMIT` | `1000` | Maximum concurrent executions per region |
 | `FLOCI_SERVICES_LAMBDA_UNRESERVED_CONCURRENCY_MIN` | `100` | Minimum unreserved capacity `PutFunctionConcurrency` must leave |
 | `FLOCI_SERVICES_LAMBDA_HOT_RELOAD_ENABLED` | `false` | Enable bind-mount hot-reload via `S3Bucket=hot-reload` |
 | `FLOCI_SERVICES_LAMBDA_HOT_RELOAD_ALLOWED_PATHS` | *(unset)* | Comma-separated allowlist of host paths that may be bind-mounted |
+| `FLOCI_SERVICES_LAMBDA_REACTIVE_S3_SYNC_ENABLED` | `true` | Re-deploy a function when its S3 deployment object is overwritten. See [Reactive S3 Sync](#reactive-s3-sync-configuration) |
+| `FLOCI_SERVICES_LAMBDA_REACTIVE_S3_SYNC_ASYNC` | `false` | Run that re-deploy in the background so the upload does not wait for it |
 | `FLOCI_SERVICES_LAMBDA_DOCKER_NETWORK` | *(unset)* | Docker network to attach Lambda containers to (overrides `FLOCI_SERVICES_DOCKER_NETWORK`) |
+| `FLOCI_SERVICES_LAMBDA_DOCKER_FLAGS` | *(unset)* | Additional Docker flags applied to Lambda containers, including `--env`, `--volume`, `--publish`, `--add-host`, `--dns`, `--label`, `--network`, `--user`, `--privileged`, and `--platform`. Explicit `--dns` entries replace automatic embedded DNS and public fallback resolvers. Published ports support `host:container` and `127.0.0.1:host:container` forms |
 | `FLOCI_SERVICES_LAMBDA_EXTRA_HOSTS` | *(unset)* | Comma-separated `hostname:ip` entries added to each Lambda container's `/etc/hosts`; `ip` may be `host-gateway`, mirroring `docker run --add-host` |
 | `FLOCI_SERVICES_LAMBDA_DOCKER_HOST_OVERRIDE` | *(unset)* | Explicit host/IP that spawned Lambda containers use to reach Floci's Runtime API, bypassing auto-detection |
-| `FLOCI_SERVICES_LAMBDA_CONTAINER_NAME_PREFIX` | `floci` | Base name prefix for spawned Lambda containers and code volumes (e.g. `acme` → `acme-<function>-<id>` containers, `acme-code-<function>-<hash>` volumes). Must be a valid Docker name segment (`[A-Za-z0-9][A-Za-z0-9_.-]*`); invalid values are ignored with a warning |
+| `FLOCI_SERVICES_LAMBDA_CONTAINER_NAME_PREFIX` | `floci` | Base name prefix for spawned Lambda containers and code volumes (e.g. `acme` → `acme-<function>-<id>` containers, `acme-code-<function>-<hash>` volumes; with `FLOCI_DOCKER_RESOURCE_NAMESPACE` set, the namespace follows the prefix and a short hash of it ends the volume name, e.g. `acme-<namespace>-code-<function>-<hash>-<namespace hash>`). Must be a valid Docker name segment (`[A-Za-z0-9][A-Za-z0-9_.-]*`); invalid values are ignored with a warning |
 | `FLOCI_SERVICES_LAMBDA_CODE_VOLUME_POPULATE_CONCURRENCY` | `max(2, cpus/2)` | Maximum concurrent first-time code-volume populates. See the note below |
 | `FLOCI_SERVICES_LAMBDA_EXECUTOR` | `docker` | Execution backend: `docker` (containers) or `kubernetes` (pods) |
 | `FLOCI_SERVICES_LAMBDA_KUBERNETES_NAMESPACE` | `default` | Namespace Lambda pods are created in |
@@ -285,6 +677,62 @@ These AWS Lambda operations have no handler in Floci. Calls will return `404` or
 
     Only first-time populates are gated. Warm containers, already-populated volumes, and
     functions under 32 MB are never serialised by this.
+
+    The temporary copy helper is removed without a stop grace period once copying
+    finishes or fails. It runs no Lambda code; actual execution environments retain
+    their normal shutdown and extension-drain behavior.
+
+!!! note "Bounding warm containers"
+    After an invocation the container stays warm so the next call skips the cold start, and is
+    reaped only after `container-idle-timeout-seconds` of inactivity. Each function keeps up to
+    `warm-pool-max-per-function` idle containers, but nothing limits the sum: a stack of many
+    functions that fan out through streams and triggers can accumulate one warm container per
+    function touched, and each runtime container holds its own memory. On a Docker Desktop with
+    a modest memory allocation that is enough to have Floci OOM-killed. `ephemeral: true` avoids
+    it by cold-starting every invocation, at a large latency cost.
+
+    `warm-pool-max-total` bounds the idle containers across all functions. When a release
+    would exceed it, the least-recently-used idle container of any function is stopped first,
+    so the function that just ran (the most likely to run again) keeps its container:
+
+    ```bash
+    FLOCI_SERVICES_LAMBDA_WARM_POOL_MAX_TOTAL=24
+    ```
+
+    This bounds idle containers only, emulator-wide. Busy containers do not count toward it;
+    their ceiling is `region-concurrency-limit`, which applies independently in each region, so
+    peak container count is `warm-pool-max-total` plus the in-flight invocations across every
+    active region. A cap that is smaller than the number of functions invoked in a tight loop
+    trades some warm hits for the memory bound. A negative value is ignored with a warning and
+    leaves the total unbounded, like `0`.
+
+### Slow cold starts
+
+A cold start has two budgets. The Init phase runs from the moment the container has started
+until its runtime requests the first invocation, which covers runtime startup and the
+function's static initialization. The function's `Timeout` starts only when the invocation is
+handed to the runtime, so in Floci a slow init never shortens the handler's time and
+`getRemainingTimeInMillis()` reports the full `Timeout`. AWS differs here: an init that runs
+past its 10-second limit is retried with the first invocation, inside the function's
+`Timeout`, so there a slow init does eat into the handler's time.
+
+The Init phase may last `init-timeout-seconds` (default 10, the limit AWS applies), counted
+from the container's start, so launching extensions and attaching logs use part of it. A
+function whose `Timeout` plus 2 seconds is longer than what is left of the budget waits that
+long instead. A runtime that has not asked for its invocation by then is stopped, the
+invocation fails with `Function.TimedOut`, and Floci logs a warning naming the setting. Java
+and other JVM runtimes on a busy CI host can need more than 10 seconds; raise the budget there:
+
+```bash
+FLOCI_SERVICES_LAMBDA_INIT_TIMEOUT_SECONDS=120
+```
+
+Image pulls and container creation happen before the Init phase and are not counted
+against it. The budget applies only until the runtime first requests an invocation: a warm
+or provisioned container whose runtime stops asking is given its `Timeout` plus 2 seconds.
+SQS event source mappings add the budget to the visibility timeout they receive messages
+with, so a message is not delivered to another consumer while its cold start is still within
+the budget.
 
 ### Runtime API host override
 
@@ -512,9 +960,9 @@ No extra configuration or `cap_add` is needed because Docker containers have
 `CAP_NET_BIND_SERVICE` in their default capability set, so Floci (running as a
 non-root user) can bind UDP/53 without any changes to your Compose file.
 
-### VpcConfig, SnapStart and LoggingConfig
+### VpcConfig, SnapStart, LoggingConfig and DurableConfig
 
-All three round-trip through `CreateFunction`, `UpdateFunctionConfiguration`,
+All four round-trip through `CreateFunction`, `UpdateFunctionConfiguration`,
 `GetFunctionConfiguration`, `GetFunction`, `ListFunctions` and `PublishVersion`.
 
 The response shapes are **not** the request shapes, and Floci follows the AWS model
@@ -522,9 +970,10 @@ rather than echoing the request back:
 
 | Field | Request shape | Response shape | Extra members Floci fills in |
 |---|---|---|---|
-| `VpcConfig` | `VpcConfig` | `VpcConfigResponse` | `VpcId`, resolved from the first subnet via EC2 |
+| `VpcConfig` | `VpcConfig` | `VpcConfigResponse` | `VpcId`, shared by all declared subnets and security groups |
 | `SnapStart` | `SnapStart` | `SnapStartResponse` | `OptimizationStatus` — `On` only for a published version with `ApplyOn=PublishedVersions`, `Off` for `$LATEST` |
 | `LoggingConfig` | `LoggingConfig` | `LoggingConfig` | — |
+| `DurableConfig` | `DurableConfig` | `DurableConfig` | `RetentionPeriodInDays` defaults to 14; omitted for a function created without it |
 
 `SnapStart` and `LoggingConfig` are always present in a response, as on AWS: an
 unset function reads back `SnapStart={ApplyOn: None, OptimizationStatus: Off}` and
@@ -536,17 +985,47 @@ is a permanent diff rather than a cosmetic omission.
 `LoggingConfig` is replaced wholesale on update, not merged — an update naming only
 `LogFormat` resets `LogGroup` to the default.
 
-`LogGroup` is validated against AWS's documented constraint: 1-512 characters matching
-`[.\-_/#A-Za-z0-9]+`. `ApplicationLogLevel` and `SystemLogLevel` are accepted with any
-`LogFormat` but are only ever stored — and therefore only ever returned — when the
-resolved format is `JSON`; supplying them with `LogFormat=Text` is not an error, it is
-simply a no-op. That is Floci's own call rather than probed AWS behaviour: it keeps the
-request path consistent with Floci's response shape, which never surfaces the levels for
-Text.
+A function's execution environments write their logs, `START`, `END` and `REPORT`
+included, to the `LogGroup` its `LoggingConfig` names, creating the group when it does not
+exist, and `AWS_LAMBDA_LOG_GROUP_NAME` names that group. Once a group is named, which several
+functions can share, each stream's name carries the function's name, as on AWS:
+`2026/10/16/my-fn[$LATEST]<id>` rather than the default group's `2026/10/16/[$LATEST]<id>`.
 
-`VpcConfig` is omitted entirely while the function is not attached to a VPC.
-Subnets that EC2 does not know about are still accepted and returned; only `VpcId`
-is left off in that case.
+The execution environment gets `AWS_LAMBDA_LOG_FORMAT` from `LogFormat` and, under `LogFormat=JSON`,
+`AWS_LAMBDA_LOG_LEVEL` from `ApplicationLogLevel` (`INFO` when unset, the level the API reports).
+The runtime interface clients read both: a Python function writes each record as a JSON object,
+`extra` keys included, and drops records under the level.
+
+`DurableConfig` requires `ExecutionTimeout` on create. A durable function created without
+a `Timeout` gets `min(ExecutionTimeout, 900)`. It always logs in JSON format, and
+`LogFormat: Text` is rejected. On update the members are merged, and a function created
+without `DurableConfig` cannot gain one. CloudFormation and Terraform (`durable_config`) replace
+the function to add or remove it. See Durable Functions for the execution itself.
+
+`LogGroup` is validated against AWS's documented constraint: 1-512 characters matching
+`[.\-_/#A-Za-z0-9]+`. `ApplicationLogLevel` and `SystemLogLevel` belong to `LogFormat=JSON`:
+a log level under Text, whether `LogFormat` names Text or is left to that default, is refused
+on create and on update with `InvalidParameterValueException` ("LogLevel is not supported when
+LogFormat is set to "Text". Remove LogLevel from your request or change the LogFormat to
+"JSON" and try again."), as Lambda refuses it (measured in eu-west-1, 2026-10-18).
+
+`VpcConfig` accepts placeholder subnet and security-group IDs that are unknown in
+Floci's request account and region. This local compatibility behavior preserves the
+requested IDs but omits `VpcId` whenever any requested resource is unknown. Known
+subnets and security groups must still belong to one VPC, even when the request also
+contains unknown IDs. Mixed known VPCs or specifying only subnets or only security
+groups fail with `InvalidParameterValueException` before the function is mutated.
+A rejected update preserves the configuration and revision. Empty subnet and security
+group lists detach the function, and the response then omits `VpcConfig`. Published
+versions retain their network configuration when `$LATEST` changes.
+
+These checks validate the declaration. Function containers still use the configured
+Docker network. With Docker-backed VPC networks (`FLOCI_SERVICES_EC2_VPC_NETWORKS_ENABLED=true`
+and `FLOCI_SERVICES_EC2_MOCK=false`) and a known `VpcId`, the container also joins that VPC's
+Docker network at an address leased from the first subnet in `SubnetIds`, so it reaches EC2
+instances and `awsvpc` ECS tasks in the VPC at the private addresses they report. The address is
+returned once the container is removed. `VpcConfig` does not yet enforce security-group rules or
+NAT egress, and the other subnets are not used.
 
 `RuntimeVersionConfig.RuntimeVersionArn` is returned for managed (non-image)
 runtimes. Its value is derived from the runtime name, so it is stable across
@@ -572,6 +1051,10 @@ being mounted as an empty local volume.
     safety net, Floci also appends configurable public resolvers (default
     `8.8.8.8`, `8.8.4.4`) after its own IP on each spawned container's DNS list,
     so name resolution still works if the embedded forwarder cannot answer.
+
+    Explicit `--dns` flags replace those automatic resolvers. In that case,
+    the injected `AWS_ENDPOINT_URL` uses the reachable Docker host address
+    instead of a hostname that requires Floci's resolver.
 
     Tune or disable this for offline / locked-down networks where those resolvers
     are blocked:
@@ -617,7 +1100,7 @@ FLOCI_DNS_EXTRA_SUFFIXES=localhost.localstack.cloud,localhost.example.internal
 
 ### Real AWS Credentials
 
-By default, a Lambda function whose execution role exists in Floci's IAM store receives temporary credentials for that role. SDK calls made by the function identify as `assumed-role/<role>/floci-session`, and IAM enforcement evaluates the role's policies. If the role is unknown to Floci, the container keeps the compatibility fallback described below.
+By default, a Lambda function whose execution role exists in Floci's IAM store receives temporary credentials for that role. SDK calls made by the function identify as `assumed-role/<role>/<function-name>`, and IAM enforcement evaluates the role's policies. If the role is unknown to Floci, the container keeps the compatibility fallback described below.
 
 For hybrid local/cloud testing, where some services are emulated and others hit real AWS, you can mount your host `~/.aws` directory into Lambda containers:
 
@@ -732,6 +1215,16 @@ aws lambda update-function-code \
 
 Connect Lambda to SQS, Kinesis, or DynamoDB Streams. Self-managed Apache Kafka event source mappings are accepted, validated, persisted, and returned on the wire, but Floci does not run an active Kafka consumer poller:
 
+For DynamoDB Streams mappings, Floci retries failed batches with exponential backoff, honors `MaximumRetryAttempts` and `MaximumRecordAgeInSeconds`, and sends discarded batches to configured SQS, SNS, or S3 `DestinationConfig.OnFailure` destinations. With `BisectBatchOnFunctionError`, a batch that fails with a function error is split in half and retried, narrowing it down to the failing record, which then follows the normal retry and record age rules. Splits do not count as retry attempts, and only function errors split: throttles do not, and a partial batch response retries from the reported record. If the OnFailure destination refuses a discarded batch, Floci logs the failure, drops the batch and advances past it.
+
+For Kinesis mappings, a function error leaves the shard checkpoint in place and the same batch is retried with exponential backoff. With `FunctionResponseTypes: ["ReportBatchItemFailures"]`, a partial batch response moves the checkpoint up to the lowest reported record and retries from there, and a malformed response retries the whole batch. Each of these retries counts toward `MaximumRetryAttempts`; when a partial batch response moves the checkpoint forward, the attempts count again from the new checkpoint, as they do for DynamoDB Streams. When the attempts run out, or a failed batch is older than `MaximumRecordAgeInSeconds`, Floci discards the batch: it sends one invocation record with a `KinesisBatchInfo` block to the SQS, SNS, or S3 `DestinationConfig.OnFailure` destination, if one is set, moves the checkpoint past the batch and goes on with the next records of the shard. If the destination refuses the record, Floci logs the failure and discards the batch all the same. With the defaults (`-1` or unset) a failing batch is retried until it succeeds. A throttle leaves the checkpoint in place, without a backoff and without using an attempt, until the batch is older than `MaximumRecordAgeInSeconds`: then it is discarded the same way, with an `approximateInvokeCount` of the invocations that ran. The record age is checked only when an invoke fails or is throttled, so records are not dropped before their first invoke. With `BisectBatchOnFunctionError`, a batch that fails with a function error is split in half and retried, as for DynamoDB Streams, narrowing it down to the failing record, which then follows the normal retry and record age rules. Splits do not count as retry attempts, and a batch already older than `MaximumRecordAgeInSeconds` is discarded rather than split. `FunctionResponseTypes` can be set or cleared on an existing mapping with `UpdateEventSourceMapping`.
+
+For both stream sources, the first retry waits twice `FLOCI_SERVICES_LAMBDA_POLL_INTERVAL_MS` (2 seconds by default), and each later retry waits twice as long as the one before, up to 60 seconds.
+
+For SQS mappings, a function error returns every delivered message to the queue with the queue's `VisibilityTimeout`, so it is received again after that timeout and the queue's `RedrivePolicy` applies as usual. With `FunctionResponseTypes: ["ReportBatchItemFailures"]`, only the messages the function reports are returned and the rest are deleted; a malformed response returns the whole batch.
+
+A DynamoDB Streams mapping created with `StartingPosition: LATEST` delivers only records written after it is created, so a stream that is empty at creation delivers everything written later. After a restart it still resumes from the trim horizon, because native stream records are volatile. Deleting or disabling a mapping stops any poll that has not yet invoked the function. An invocation already running completes, but its checkpoint is not saved: a deleted mapping is never recreated and its result is dropped, and a disabled mapping re-reads that batch when it is enabled again.
+
 ```bash
 # SQS trigger
 QUEUE_ARN=$(aws sqs get-queue-attributes \
@@ -798,6 +1291,32 @@ use `ParallelizationFactor` instead, which is a separate field.
     at a time regardless). Real parallel dispatch capped by
     `MaximumConcurrency` is tracked as a follow-up.
 
+### ParallelizationFactor (Kinesis and DynamoDB Streams only)
+
+`CreateEventSourceMapping` and `UpdateEventSourceMapping` accept a
+`ParallelizationFactor` integer between 1 and 10 on Kinesis and DynamoDB
+Streams event sources. `GetEventSourceMapping`, `ListEventSourceMappings`
+and the create, update and delete responses return it on every stream
+mapping, `1` when none was set, as AWS does. SQS mappings omit it.
+
+```bash
+aws lambda create-event-source-mapping \
+  --function-name my-function \
+  --event-source-arn $STREAM_ARN \
+  --starting-position LATEST \
+  --parallelization-factor 4 \
+  --endpoint-url $AWS_ENDPOINT_URL
+```
+
+Values outside 1 to 10 are rejected with `InvalidParameterValueException`,
+and so is `ParallelizationFactor` on any other event source.
+
+!!! note "Enforcement status"
+    The configured `ParallelizationFactor` is persisted and returned on the
+    wire, but the Kinesis and DynamoDB Streams pollers still process one
+    batch per shard at a time. Concurrent batches per shard are tracked as
+    a follow-up.
+
 ### FilterCriteria
 
 `CreateEventSourceMapping` and `UpdateEventSourceMapping` accept a
@@ -837,17 +1356,20 @@ of `{}` or with an empty `Filters` array clears any existing filters.
 
 !!! note "Supported operators"
     Filtering reuses Floci's shared EventBridge matcher (the same one EventBridge
-    Pipes uses). It supports exact match on a string, number or `null`, plus
-    `prefix`, `suffix`, `equals-ignore-case`, `exists`, `anything-but` (a string,
-    a non-empty array of strings and numbers, or a nested `prefix`), and `numeric`
-    comparison/value pairs using `=`, `>`, `>=`, `<`, `<=`. Patterns using only
-    these behave as on AWS.
+    Pipes and EventBridge V2 use). It supports exact match on a string, number,
+    boolean or `null`, plus `prefix`, `suffix`, `equals-ignore-case`, `exists`,
+    `anything-but` (a string, a non-empty array of strings and numbers, or a nested
+    `prefix`), `numeric` comparison/value pairs using `=`, `>`, `>=`, `<`, `<=`,
+    and `$or`. Patterns using only these behave as on AWS. As on AWS, `[null]`
+    matches a field whose value is `null`, not a missing one (use
+    `[{"exists": false}]` for that), `anything-but` does not match a missing
+    field, and a record field that is an array matches when any element does.
 
     A pattern is validated at `CreateEventSourceMapping` and
     `UpdateEventSourceMapping` and rejected with `InvalidParameterValueException`
     when the matcher could not satisfy it: an unknown operator, an operator AWS
     documents that Floci does not implement (`cidr`, `wildcard`), more than one
-    operator in a single match element, a boolean literal, a wrong operand type,
+    operator in a single match element, a wrong operand type,
     or a malformed `numeric` sequence such as an odd-length array or a
     non-numeric value. This is stricter than AWS, which accepts several of these.
     The trade is deliberate: the pollers checkpoint past (Kinesis, DynamoDB) or
@@ -855,19 +1377,51 @@ of `{}` or with an empty `Filters` array clears any existing filters.
     match destroys records rather than being inert, and create time is the last
     point at which the caller can still act on it.
 
-    One matcher deviation remains and is not a validation error, because it
-    depends on the record rather than the pattern: event-value array intersection,
-    where AWS matches when the record's own field is itself an array and any
-    element satisfies the pattern, and Floci does not.
-
-!!! warning "Direct Lambda API only"
-    `FilterCriteria` is carried only by the direct Lambda
-    `CreateEventSourceMapping` / `UpdateEventSourceMapping` APIs (SDK, CLI,
-    Terraform). CloudFormation and SAM event-source-mapping resources do not yet
-    forward `FilterCriteria` (as they also do not forward `ScalingConfig` or
-    `DestinationConfig`); forwarding it through those paths is tracked as a
-    follow-up.
+!!! warning "SAM event sources"
+    CloudFormation `AWS::Lambda::EventSourceMapping` resources forward
+    `FilterCriteria`, `MaximumBatchingWindowInSeconds`, `ScalingConfig` and
+    `DestinationConfig`, so a stack-created mapping behaves as one created
+    through the Lambda API. SAM `SQS`, `Kinesis` and `DynamoDB` function events
+    forward only the queue or stream, `BatchSize` and `Enabled`, so any other
+    event property, `FilterCriteria` included, is dropped.
 
 ## Supported Runtimes
 
 Any runtime that has an official AWS Lambda container image works with Floci (e.g. `nodejs22.x`, `python3.13`, `java21`, `go1.x`, `provided.al2023`).
+
+With the Docker and Kubernetes executors, ZIP-based `provided.*` runtimes execute the package's
+`/var/task/bootstrap`, falling back to `/opt/bootstrap` only when the package has
+no bootstrap. The supplied executable stays in place, so scripts that locate
+companion files relative to their own path continue to work. The Kubernetes init
+container restores executable permission on package and layer bootstrap files
+after extraction and installs the shared delegate in `/var/runtime`. Managed
+runtimes keep their image-provided `/var/runtime` unchanged.
+
+By default, Floci builds each runtime image reference from `floci.services.lambda.ecr-base-uri`
+and the runtime tag. To pin one runtime to a full image reference, set
+`floci.services.lambda.runtime-images` in the Floci configuration:
+
+```yaml
+floci:
+  services:
+    lambda:
+      runtime-images:
+        "python3.12": "public.ecr.aws/lambda/python:3.12@sha256:<digest>"
+```
+
+Replace `<digest>` with the image's full SHA-256 digest. The override applies to
+zip-based functions using that runtime; other runtimes retain their default images.
+Custom image URI passthrough and image-package functions are unaffected.
+
+For Docker functions that share a runtime but use different CPU architectures,
+add platform-specific keys such as `"java17.linux.amd64"` and
+`"java17.linux.arm64"`, each pointing to its platform manifest digest.
+The Docker launcher's effective platform selects that entry before the
+runtime-wide fallback. Enable `floci.services.lambda.honour-architectures` to
+use the function's architecture; an explicit Docker `--platform` takes precedence.
+The code-copy helper uses the same platform. With no selected Docker platform,
+or for the Kubernetes launcher, the runtime-wide entry and default resolution
+remain in effect.
+
+Environment variables use the quoted map-key form, for example
+`FLOCI_SERVICES_LAMBDA_RUNTIME_IMAGES__JAVA17_LINUX_ARM64__`.

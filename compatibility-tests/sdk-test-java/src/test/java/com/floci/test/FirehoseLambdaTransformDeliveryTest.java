@@ -61,6 +61,7 @@ class FirehoseLambdaTransformDeliveryTest {
 
     private static final int BUFFERING_INTERVAL_SECONDS = 5;
     private static final long POLL_TIMEOUT_MILLIS = 240_000L;
+    private static final long POLL_INTERVAL_MILLIS = TestFixtures.isRealAws() ? 5_000L : 250L;
     private static final String KEPT_RECORD = "keep-me\n";
     private static final String DROPPED_RECORD = "DROP-me\n";
     private static final String FAILED_RECORD = "FAIL-me\n";
@@ -178,7 +179,7 @@ class FirehoseLambdaTransformDeliveryTest {
                 throw new AssertionError("no object under " + prefix + " in " + bucket + " after "
                         + POLL_TIMEOUT_MILLIS / 1000 + "s");
             }
-            Thread.sleep(5_000L);
+            Thread.sleep(POLL_INTERVAL_MILLIS);
         }
     }
 
@@ -205,7 +206,7 @@ class FirehoseLambdaTransformDeliveryTest {
                 throw new AssertionError("delivery stream stayed " + status + " for "
                         + POLL_TIMEOUT_MILLIS / 1000 + "s");
             }
-            Thread.sleep(5_000L);
+            Thread.sleep(POLL_INTERVAL_MILLIS);
         }
     }
 

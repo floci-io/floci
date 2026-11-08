@@ -12,6 +12,7 @@
 | `GenerateRandom` | Generate random bytes |
 | `GetPublicKey` | Get public key material for asymmetric keys |
 | `DescribeKey` | Get key metadata |
+| `ReplicateKey` | Create a multi-Region replica of a primary key |
 | `ListKeys` | List all keys |
 | `CreateGrant` | Create a grant for a KMS key |
 | `ListGrants` | List grants for a KMS key |
@@ -23,6 +24,8 @@
 | `ReEncrypt` | Re-encrypt under a different key |
 | `GenerateDataKey` | Generate a data key (plaintext + encrypted) |
 | `GenerateDataKeyWithoutPlaintext` | Generate only the encrypted data key |
+| `GenerateDataKeyPair` | Generate an asymmetric data key pair (plaintext + encrypted private key, public key) |
+| `GenerateDataKeyPairWithoutPlaintext` | Generate an asymmetric data key pair (encrypted private key, public key) |
 | `Sign` | Sign a message with an asymmetric key |
 | `Verify` | Verify a signature |
 | `GenerateMac` | Generate a MAC with an HMAC key |
@@ -55,7 +58,56 @@
 
 `Encrypt`, `Decrypt`, and `ReEncrypt` apply real RSAES-OAEP for RSA keys (`RSA_2048`, `RSA_3072`, `RSA_4096`) when `EncryptionAlgorithm` is `RSAES_OAEP_SHA_1` or `RSAES_OAEP_SHA_256`. The ciphertext is raw RSA output of the modulus length, for example exactly 256 bytes for `RSA_2048`. A ciphertext produced locally with the public key from `GetPublicKey` decrypts the same way it does on real AWS, which makes the usual envelope pattern work. Only the encrypting side needs the public key. As on real AWS, asymmetric `Decrypt` requires `KeyId`, an `EncryptionContext` is rejected for asymmetric keys, and plaintext larger than the OAEP capacity of the key fails validation.
 
-Symmetric keys keep the emulator's internal ciphertext format, which is not compatible with ciphertexts from real AWS KMS.
+Symmetric keys keep the emulator's internal ciphertext format, described below, which is not compatible with ciphertexts from real AWS KMS.
+
+## Symmetric Ciphertext Envelope
+
+`Encrypt`, `Decrypt`, `ReEncrypt` and `GenerateDataKey` protect `SYMMETRIC_DEFAULT` plaintext with
+real AES-256-GCM, using a per-key data-encryption key ("backing key") that is generated when the
+key is created, or is the material imported into an `Origin=EXTERNAL` key, and is never exposed by
+any API. The blob is opaque bytes, base64-encoded in JSON exactly like real AWS KMS, but
+internally it is a versioned envelope:
+
+```
+offset      size  field
+0           4     magic "KMS3" (0x4B 0x4D 0x53 0x33)
+4           1     format version (currently 1)
+5           2     key id length (big-endian unsigned short)
+7           N     key id (UTF-8)
+7+N         2     backing key id length (big-endian unsigned short)
+9+N         M     backing key id (UTF-8)
+9+N+M       12    AES-GCM IV (random, generated per call)
+21+N+M      ...   AES-256-GCM ciphertext, followed by the 16-byte GCM tag
+```
+
+The key id lets `Decrypt` identify the key from the blob alone, matching AWS KMS, which does not
+require `KeyId` on `Decrypt` for symmetric keys. The GCM additional authenticated data (AAD) is
+every header byte up to and including the IV, plus the SHA-256 fingerprint of the canonicalized
+`EncryptionContext`. Binding the header into the AAD means decrypting with the wrong key, the
+wrong backing key version, or the wrong `EncryptionContext`, and any bit flip anywhere in the
+blob (header, IV, ciphertext or tag), all fail GCM tag verification the same way and surface as
+`InvalidCiphertextException`, never a plaintext.
+
+`RotateKeyOnDemand` mints a new backing key and switches future encryptions to it, but keeps prior
+backing keys in the key's state, so ciphertext encrypted before a rotation keeps decrypting after
+it, matching real AWS KMS, which also retains prior backing keys.
+
+### Legacy blob formats (read-only)
+
+Two older, unauthenticated formats are still accepted by `Decrypt` for backward compatibility with
+ciphertext produced by earlier versions of this emulator, but are never produced by `Encrypt`
+anymore:
+
+- `kms:v2:<keyId>:<nonceHex>:<contextFingerprintHex>:<base64(plaintext)>`
+- `kms:<keyId>:<base64(plaintext)>`
+
+Neither format used real key material: the payload was the plaintext itself, base64-encoded, so
+anyone holding a v1 or v2 blob could read the plaintext directly, and a tampered blob still
+"decrypted" to the original value. Any ciphertext already persisted in this shape (for example,
+stored in a database from before this fix) keeps decrypting so existing data is not orphaned, but
+new calls to `Encrypt` always produce the AES-GCM envelope described above. Keys created before
+backing keys existed generate their backing key material lazily the first time they are used for
+a cryptographic operation, and persist it from then on.
 
 ## Imported Key Material
 
@@ -66,11 +118,22 @@ which puts the key in state `Enabled`. Wrapping material against the wrong key, 
 different algorithm than the one requested, fails with `InvalidCiphertextException` the same way
 it does on AWS.
 
-Supported `WrappingAlgorithm` values are `RSAES_OAEP_SHA_256` and `RSAES_OAEP_SHA_1`, over
-`WrappingKeySpec` `RSA_2048`, `RSA_3072` or `RSA_4096`. `RSAES_PKCS1_V1_5` is rejected, matching
-AWS, which stopped supporting it on October 10, 2023. The `RSA_AES_KEY_WRAP_*` variants exist for
-material longer than an RSA modulus can hold and are also rejected: no importable key spec here
-carries more than 64 bytes.
+Supported wrapping algorithms depend on the type of imported key material. Floci supports the
+following combinations:
+
+| Key material | Supported wrapping algorithm and spec |
+| --- | --- |
+| Symmetric encryption key (`SYMMETRIC_DEFAULT`) | **Wrapping algorithms:** `RSAES_OAEP_SHA_256`, `RSAES_OAEP_SHA_1`<br>**Wrapping key specs:** `RSA_2048`, `RSA_3072`, `RSA_4096` |
+| HMAC key (`HMAC_*`) | **Wrapping algorithms:** `RSAES_OAEP_SHA_256`, `RSAES_OAEP_SHA_1`<br>**Wrapping key specs:** `RSA_2048`, `RSA_3072`, `RSA_4096` |
+| Asymmetric RSA private key (`RSA_*`) | **Wrapping algorithms:** `RSA_AES_KEY_WRAP_SHA_256`, `RSA_AES_KEY_WRAP_SHA_1`<br>**Wrapping key specs:** `RSA_2048`, `RSA_3072`, `RSA_4096` |
+| Asymmetric elliptic curve private key (`ECC_NIST_P256`, `ECC_NIST_P384`, `ECC_NIST_P521`, `ECC_SECG_P256K1`) | **Wrapping algorithms:** `RSA_AES_KEY_WRAP_SHA_256`, `RSA_AES_KEY_WRAP_SHA_1`, `RSAES_OAEP_SHA_256`, `RSAES_OAEP_SHA_1`<br>**Wrapping key specs:** `RSA_2048`, `RSA_3072`, `RSA_4096` |
+
+As on AWS, `ECC_NIST_P521` material cannot use an `RSAES_OAEP_*` algorithm with the `RSA_2048`
+wrapping key spec: `GetParametersForImport` rejects that combination with
+`UnsupportedOperationException`. Use a larger wrapping key or an `RSA_AES_KEY_WRAP_*` algorithm.
+
+The hybrid `RSA_AES_KEY_WRAP_*` algorithms require a 256-bit AES key. `RSAES_PKCS1_V1_5` is
+rejected, matching AWS, which stopped supporting it on October 10, 2023.
 
 An import token is scoped to one key and spent by the import that uses it, and a second
 `GetParametersForImport` call invalidates the token the previous one returned. Tokens expire 24
@@ -81,6 +144,11 @@ future and no more than 365 days out. Once `ValidTo` passes, the material is dro
 returns to `PendingImport`, as does `DeleteImportedKeyMaterial`. Expiry is evaluated when the key
 is next read rather than on a timer, which is not observable through the API. Deleting the
 material of a key that is already in `PendingDeletion` leaves that state in place.
+
+A `SYMMETRIC_DEFAULT` key with `Origin=EXTERNAL` encrypts under the imported material itself: it
+is the backing key named in the ciphertext envelope described above, and no other material is
+ever generated for the key. Deleting or expiring the material removes that backing key, so
+ciphertext produced under it decrypts again only once the same material has been re-imported.
 
 A key in `PendingImport` rejects cryptographic operations, `EnableKey` and `DisableKey` with
 `KMSInvalidStateException`. `CancelKeyDeletion` on a key whose material was never imported, or was
@@ -96,18 +164,75 @@ own the material and cannot rotate it.
 
 **Deviations:**
 
-- `Origin=EXTERNAL` is supported only for `SYMMETRIC_DEFAULT` and the `HMAC_*` key specs, whose
-  material is a raw byte string. Real AWS KMS also imports asymmetric material as a DER-encoded
-  key pair; here an asymmetric spec with `Origin=EXTERNAL` is rejected at `CreateKey` with
-  `UnsupportedOperationException` rather than creating a key that could never sign or decrypt.
+- `Origin=EXTERNAL` supports `SYMMETRIC_DEFAULT`, the `HMAC_*` key specs, the `RSA_*` key specs, and
+  `ECC_NIST_P256`, `ECC_NIST_P384`, `ECC_NIST_P521` and `ECC_SECG_P256K1`. Imported elliptic curve
+  material is a PKCS#8 private key on the key spec's named curve; as on AWS, the public key is
+  derived from it, and an embedded public key must match.
+- Other asymmetric key specs, including `ECC_NIST_EDWARDS25519`, which AWS can import, are rejected at
+  `CreateKey` with `UnsupportedOperationException`.
 - Holding several imported key materials on one symmetric key, which real KMS uses for on-demand
   rotation of imported material, is not emulated. `ImportType=NEW_KEY_MATERIAL` on a key that
   already has key material is rejected with `UnsupportedOperationException`, and
   `ListKeyRotations` is not implemented.
 
+## AWS Managed Keys
+
+Every AWS account has a per-region AWS managed key for each service that encrypts data on the
+account's behalf, published under the reserved `alias/aws/<service>` alias: `alias/aws/s3`,
+`alias/aws/ebs`, `alias/aws/rds` and so on. Nothing creates them, so no template declares them,
+but a module that leaves a service's encryption at its default resolves one through a data
+source. Floci ships the same catalog.
+
+The catalog holds only **AWS managed** keys, which live in your account and do have that alias.
+It deliberately excludes services that encrypt with an **AWS owned** key, which lives in an
+AWS-owned account and has no alias in yours: EKS API-data envelope encryption is the clearest
+case. Resolving an alias AWS does not publish would be worse than not having it, since the call
+would succeed here and fail against a real account.
+
+```bash
+aws kms list-aliases --query 'Aliases[?starts_with(AliasName, `alias/aws/`)].AliasName' \
+  --endpoint-url $AWS_ENDPOINT_URL
+
+aws kms describe-key --key-id alias/aws/s3 \
+  --query KeyMetadata.KeyManager --endpoint-url $AWS_ENDPOINT_URL   # -> "AWS"
+```
+
+A region's AWS managed keys are minted the first time anything reads that region's key or alias
+namespace: `ListKeys`, `ListAliases`, or a lookup naming one of the reserved aliases. An entry is
+skipped only when its alias is present *and* targets an AWS managed key, so a lost or
+quarantined `kms-keys.json` rebuilds from the catalog rather than leaving every alias dangling,
+and a reserved alias persisted on a customer key is re-pointed. A lost `kms-aliases.json`
+re-aliases the surviving AWS managed keys instead of minting a second set.
+They behave as AWS's keys, not the account's:
+
+- `DescribeKey` reports `KeyManager: AWS`, and `GetKeyRotationStatus` reports `true`, since AWS
+  rotates them and the customer cannot turn that off.
+- They encrypt and decrypt like any other symmetric key.
+- Every administrative operation is refused with `AccessDeniedException`: `ScheduleKeyDeletion`,
+  `CancelKeyDeletion`, `PutKeyPolicy`, `UpdateKeyDescription`, `EnableKey`, `DisableKey`,
+  `EnableKeyRotation`, `DisableKeyRotation`, `RotateKeyOnDemand`, `TagResource`,
+  `UntagResource` and `CreateGrant` (AWS's key policy allows grants only via the owning service).
+- The `alias/aws/` namespace is reserved. `CreateAlias` under it is rejected with
+  `InvalidAliasNameException`, and `UpdateAlias` or `DeleteAlias` against one of these aliases is
+  rejected with `AccessDeniedException`.
+- They cannot be given a second alias. `CreateAlias` or `UpdateAlias` naming an AWS managed key as
+  the target is rejected with `AccessDeniedException`.
+
+Two deliberate simplifications: the key policy is the standard account-root policy rather than
+the service-principal policy with a `kms:ViaService` condition that AWS attaches, and AWS
+distinguishes some of the refusals above as unsupported operations rather than access denials.
+The catalog itself is `src/main/resources/kms/aws-managed-keys.yaml`; adding a service is a line
+there.
+
 ## Grant Support Scope
 
 Grant lifecycle operations (`CreateGrant`, `ListGrants`, `ListRetirableGrants`, `RevokeGrant`, `RetireGrant`) are supported. However, grant lifecycle support **does not** imply grant-based authorization enforcement on cryptographic operations (`Encrypt`, `Decrypt`, `Sign`, `Verify`, `GenerateDataKey`, etc.). Grants are stored and queryable but are not evaluated during crypto operations.
+
+## IAM Enforcement
+
+With `FLOCI_SERVICES_IAM_ENFORCEMENT_ENABLED=true`, an operation that names a key is evaluated against that key's ARN, as on AWS. A `KeyId` given as a key id, an alias name, an alias ARN or a key ARN resolves to the key it names, so a policy scoped to one key ARN allows that key and no other, and a `Deny` scoped to one fires for that key. A `Decrypt` that names no `KeyId` is evaluated against the key that encrypted its `CiphertextBlob`.
+
+`CreateAlias`, `UpdateAlias` and `DeleteAlias` are evaluated against the alias ARN and the key it points at, `UpdateAlias` also against the key it will point at, the two resource types the Service Authorization Reference lists for them. `ReEncrypt` is evaluated against both keys it acts on, under the single `kms:ReEncrypt` action: the source its `SourceKeyId` names, or when it names none the key that encrypted its `CiphertextBlob` (never a `KeyId`, which the operation does not read), and the destination its `DestinationKeyId` names. AWS authorizes the two halves separately as `kms:ReEncryptFrom` and `kms:ReEncryptTo`, which Floci does not split yet. The grant operations name the key the grant they act on belongs to: a `RetireGrant` carrying a `GrantToken` the key that grant belongs to, since the handler finds the grant by the token alone, and a `RetireGrant` or `RevokeGrant` identifying its grant by `KeyId` and `GrantId` the key it names together with the key that grant belongs to. A request nothing resolves keeps the permissive `key/*` pattern, and the operation then fails with its own error. `CreateKey`, `GenerateRandom`, `ListKeys`, `ListAliases` and `ListRetirableGrants` name no key resource and are evaluated against `*`, the resource a policy must name for them on AWS too.
 
 ## Configuration
 

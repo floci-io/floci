@@ -25,9 +25,10 @@ aliases:
   kafka: msk                            # MSK's SigV4 signing name is "kafka"
   mq: amazonmq                          # Amazon MQ's SigV4 signing name is "mq"
   signin: iam                           # AWS Sign-In facet, at iam.md#aws-sign-in-login-credentials
-  sso: iam                              # Identity Center ListInstances facet on the IAM page
+  sso: ssoadmin                         # descriptor("sso") is the Identity Center admin API; ssoadmin.md is its page
   sso-oidc: ssooidc                     # IAM Identity Center OIDC REST API
   events: eventbridge
+  eventsv2: eventbridgev2               # EventBridge V2's endpoint prefix is "eventsv2"
   servicediscovery: cloudmap            # Cloud Map's SigV4 signing name
   elasticmapreduce: emr                 # EMR's SigV4 signing name
   logs: cloudwatch                      # CloudWatch Logs facet, at cloudwatch.md
@@ -36,6 +37,7 @@ aliases:
   codeguru-reviewer: codegurureviewer   # SigV4 signing name is hyphenated; the doc slug is not
   cognito-identity: cognitoidentity     # SigV4 signing name is hyphenated; the doc slug is not
   app-integrations: appintegrations     # SigV4 signing name is hyphenated; the doc slug is not
+  paymentcryptography: payment-cryptography
   servicecatalog: service-catalog
   cognito-idp: cognito                  # Cognito's SigV4 signing name
   states: step-functions                # Step Functions' SigV4 signing name
@@ -50,6 +52,7 @@ aliases:
   ec2messages: ssm                      # SSM Messages facet, documented alongside ssm.md
   iotdata: iot                          # IoT Data row shares iot.md with IoT Core
   resource-explorer-2: resource-explorer # API version suffix; the page is resource-explorer.md
+  bedrock-agentcore-control: bedrock-agentcore  # control plane owns the page; the data-plane row is the facet
 
 # A NEW switch/REST descriptor not listed here and not resolvable via an alias fails
 # `--strict`. Every entry MUST carry a `by:` expiry date (ISO, YYYY-MM-DD): once that
@@ -61,13 +64,30 @@ aliases:
 # add the row or come back and renew the date with a fresh justification; it can never
 # just be forgotten. Remove an entry outright once the referenced PR merges and the
 # row lands - don't wait for it to expire.
-deferred:
-  - key: bedrock-agentcore
-    reason: "documented by floci-io/floci#2436 (open at time of writing)"
-    by: "2026-09-15"
-  - key: bedrock-agentcore-control
-    reason: "documented by floci-io/floci#2436 (open at time of writing)"
-    by: "2026-09-15"
+deferred: []
+
+# Non-tabular pages with one Query/JSON action dispatcher per numeric base row.
+# These counts are checked against the handler switch, without flattening the
+# grouped documentation. Anchored and mixed-dispatch rows need separate rules.
+# Paths are relative to the Java package root, PACKAGE_DIR in tools/java_sources.py.
+action_count_sources:
+  autoscaling: services/autoscaling/AutoScalingQueryHandler.java
+  cloudmap: services/cloudmap/CloudMapHandler.java
+  codebuild: services/codebuild/CodeBuildJsonHandler.java
+  codedeploy: services/codedeploy/CodeDeployJsonHandler.java
+  cognito: services/cognito/CognitoJsonHandler.java
+  config: services/configservice/ConfigServiceJsonHandler.java
+  ec2: services/ec2/Ec2QueryHandler.java
+  ecs: services/ecs/EcsJsonHandler.java
+  elastic-beanstalk: services/elasticbeanstalk/ElasticBeanstalkQueryHandler.java
+  elb: services/elbv2/ElbV2QueryHandler.java
+  elb-classic: services/elb/ElbClassicQueryHandler.java
+  glue: services/glue/GlueJsonHandler.java
+  iam: services/iam/IamQueryHandler.java
+  resource-groups-tagging: services/resourcegroupstagging/ResourceGroupsTaggingJsonHandler.java
+  ses: services/ses/SesQueryHandler.java
 
 # docs/services pages that intentionally have no Service Matrix row of their own.
-facet_pages: []
+facet_pages:
+  - cloudfront-private-origin
+  - cloudwatch-metric-filters-verification

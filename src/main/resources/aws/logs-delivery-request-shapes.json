@@ -1,0 +1,303 @@
+{
+  "_source": {
+    "generator": "tools/aws/regen_logs_delivery_shapes.py",
+    "botocore": "botocore 1.43.118 (installed package)"
+  },
+  "operations": {
+    "PutDeliverySource": "PutDeliverySourceRequest",
+    "GetDeliverySource": "GetDeliverySourceRequest",
+    "DeleteDeliverySource": "DeleteDeliverySourceRequest",
+    "DescribeDeliverySources": "DescribeDeliverySourcesRequest",
+    "PutDeliveryDestination": "PutDeliveryDestinationRequest",
+    "GetDeliveryDestination": "GetDeliveryDestinationRequest",
+    "DeleteDeliveryDestination": "DeleteDeliveryDestinationRequest",
+    "DescribeDeliveryDestinations": "DescribeDeliveryDestinationsRequest",
+    "CreateDelivery": "CreateDeliveryRequest",
+    "GetDelivery": "GetDeliveryRequest",
+    "UpdateDeliveryConfiguration": "UpdateDeliveryConfigurationRequest",
+    "DeleteDelivery": "DeleteDeliveryRequest",
+    "DescribeDeliveries": "DescribeDeliveriesRequest"
+  },
+  "shapes": {
+    "Arn": {
+      "type": "string"
+    },
+    "Boolean": {
+      "type": "boolean"
+    },
+    "CreateDeliveryRequest": {
+      "type": "structure",
+      "required": [
+        "deliverySourceName",
+        "deliveryDestinationArn"
+      ],
+      "members": {
+        "deliverySourceName": "DeliverySourceName",
+        "deliveryDestinationArn": "Arn",
+        "recordFields": "RecordFields",
+        "fieldDelimiter": "FieldDelimiter",
+        "s3DeliveryConfiguration": "S3DeliveryConfiguration",
+        "tags": "Tags"
+      }
+    },
+    "DeleteDeliveryDestinationRequest": {
+      "type": "structure",
+      "required": [
+        "name"
+      ],
+      "members": {
+        "name": "DeliveryDestinationName"
+      }
+    },
+    "DeleteDeliveryRequest": {
+      "type": "structure",
+      "required": [
+        "id"
+      ],
+      "members": {
+        "id": "DeliveryId"
+      }
+    },
+    "DeleteDeliverySourceRequest": {
+      "type": "structure",
+      "required": [
+        "name"
+      ],
+      "members": {
+        "name": "DeliverySourceName"
+      }
+    },
+    "DeliveryDestinationConfiguration": {
+      "type": "structure",
+      "required": [
+        "destinationResourceArn"
+      ],
+      "members": {
+        "destinationResourceArn": "Arn"
+      }
+    },
+    "DeliveryDestinationName": {
+      "type": "string",
+      "min": 1,
+      "max": 60,
+      "pattern": "[\\w-]*"
+    },
+    "DeliveryDestinationNames": {
+      "type": "list",
+      "min": 1,
+      "max": 20,
+      "member": "DeliveryDestinationName"
+    },
+    "DeliveryDestinationType": {
+      "type": "string",
+      "enum": [
+        "S3",
+        "CWL",
+        "FH",
+        "XRAY"
+      ]
+    },
+    "DeliveryId": {
+      "type": "string",
+      "min": 1,
+      "max": 64,
+      "pattern": "^[0-9A-Za-z]+$"
+    },
+    "DeliverySourceConfiguration": {
+      "type": "map",
+      "key": "DeliverySourceConfigurationKey",
+      "value": "DeliverySourceConfigurationValue"
+    },
+    "DeliverySourceConfigurationKey": {
+      "type": "string",
+      "min": 1,
+      "max": 255
+    },
+    "DeliverySourceConfigurationValue": {
+      "type": "string",
+      "min": 1,
+      "max": 255
+    },
+    "DeliverySourceName": {
+      "type": "string",
+      "min": 1,
+      "max": 60,
+      "pattern": "[\\w-]*"
+    },
+    "DeliverySourceNames": {
+      "type": "list",
+      "min": 1,
+      "max": 20,
+      "member": "DeliverySourceName"
+    },
+    "DeliverySuffixPath": {
+      "type": "string",
+      "min": 1,
+      "max": 256
+    },
+    "DescribeDeliveriesRequest": {
+      "type": "structure",
+      "members": {
+        "nextToken": "NextToken",
+        "limit": "DescribeLimit",
+        "deliverySourceNames": "DeliverySourceNames"
+      }
+    },
+    "DescribeDeliveryDestinationsRequest": {
+      "type": "structure",
+      "members": {
+        "nextToken": "NextToken",
+        "limit": "DescribeLimit",
+        "names": "DeliveryDestinationNames"
+      }
+    },
+    "DescribeDeliverySourcesRequest": {
+      "type": "structure",
+      "members": {
+        "nextToken": "NextToken",
+        "limit": "DescribeLimit",
+        "resourceArns": "FilterResourceArns"
+      }
+    },
+    "DescribeLimit": {
+      "type": "integer",
+      "min": 1,
+      "max": 50
+    },
+    "FieldDelimiter": {
+      "type": "string",
+      "min": 0,
+      "max": 5
+    },
+    "FieldHeader": {
+      "type": "string",
+      "min": 1,
+      "max": 64
+    },
+    "FilterResourceArns": {
+      "type": "list",
+      "min": 1,
+      "max": 20,
+      "member": "Arn"
+    },
+    "GetDeliveryDestinationRequest": {
+      "type": "structure",
+      "required": [
+        "name"
+      ],
+      "members": {
+        "name": "DeliveryDestinationName"
+      }
+    },
+    "GetDeliveryRequest": {
+      "type": "structure",
+      "required": [
+        "id"
+      ],
+      "members": {
+        "id": "DeliveryId"
+      }
+    },
+    "GetDeliverySourceRequest": {
+      "type": "structure",
+      "required": [
+        "name"
+      ],
+      "members": {
+        "name": "DeliverySourceName"
+      }
+    },
+    "LogType": {
+      "type": "string",
+      "min": 1,
+      "max": 255,
+      "pattern": "[\\w]*"
+    },
+    "NextToken": {
+      "type": "string",
+      "min": 1
+    },
+    "OutputFormat": {
+      "type": "string",
+      "enum": [
+        "json",
+        "plain",
+        "w3c",
+        "raw",
+        "parquet"
+      ]
+    },
+    "PutDeliveryDestinationRequest": {
+      "type": "structure",
+      "required": [
+        "name"
+      ],
+      "members": {
+        "name": "DeliveryDestinationName",
+        "outputFormat": "OutputFormat",
+        "deliveryDestinationConfiguration": "DeliveryDestinationConfiguration",
+        "deliveryDestinationType": "DeliveryDestinationType",
+        "roleArn": "Arn",
+        "tags": "Tags"
+      }
+    },
+    "PutDeliverySourceRequest": {
+      "type": "structure",
+      "required": [
+        "name",
+        "resourceArn",
+        "logType"
+      ],
+      "members": {
+        "name": "DeliverySourceName",
+        "resourceArn": "Arn",
+        "logType": "LogType",
+        "tags": "Tags",
+        "deliverySourceConfiguration": "DeliverySourceConfiguration"
+      }
+    },
+    "RecordFields": {
+      "type": "list",
+      "min": 0,
+      "max": 128,
+      "member": "FieldHeader"
+    },
+    "S3DeliveryConfiguration": {
+      "type": "structure",
+      "members": {
+        "suffixPath": "DeliverySuffixPath",
+        "enableHiveCompatiblePath": "Boolean"
+      }
+    },
+    "TagKey": {
+      "type": "string",
+      "min": 1,
+      "max": 128,
+      "pattern": "^([\\p{L}\\p{Z}\\p{N}_.:/=+\\-@]+)$"
+    },
+    "TagValue": {
+      "type": "string",
+      "max": 256,
+      "pattern": "^([\\p{L}\\p{Z}\\p{N}_.:/=+\\-@]*)$"
+    },
+    "Tags": {
+      "type": "map",
+      "min": 1,
+      "max": 50,
+      "key": "TagKey",
+      "value": "TagValue"
+    },
+    "UpdateDeliveryConfigurationRequest": {
+      "type": "structure",
+      "required": [
+        "id"
+      ],
+      "members": {
+        "id": "DeliveryId",
+        "recordFields": "RecordFields",
+        "fieldDelimiter": "FieldDelimiter",
+        "s3DeliveryConfiguration": "S3DeliveryConfiguration"
+      }
+    }
+  }
+}

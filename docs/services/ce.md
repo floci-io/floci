@@ -10,19 +10,72 @@ multiplied by the bundled AWS Pricing snapshot served by the
 so any test that mutates resources (e.g. creates a bucket, runs an instance)
 sees those changes in the next `GetCostAndUsage` call.
 
-## Supported Operations
+## Supported Actions
 
-| Operation | Notes |
-|-----------|-------|
+<!-- floci:actions:start -->
+| Action | Description |
+| --- | --- |
 | `GetCostAndUsage` | Full `TimePeriod` / `Granularity` / `Filter` / `GroupBy` / `Metrics` support |
 | `GetCostAndUsageWithResources` | Same shape as `GetCostAndUsage`; for resource-level breakdown, group by `Type=DIMENSION,Key=RESOURCE_ID` |
 | `GetDimensionValues` | Returns dimension values present in the synthesized data set |
 | `GetTags` | Returns tag keys / values across enumerated resources |
-| `GetReservationCoverage` | Stub — returns zeroed totals; full RI math lands in a follow-up PR |
-| `GetReservationUtilization` | Stub — returns zeroed totals |
-| `GetSavingsPlansCoverage` | Stub — returns empty list |
-| `GetSavingsPlansUtilization` | Stub — returns zeroed totals |
-| `GetCostCategories` | Stub — returns empty list (cost-category management not yet emulated) |
+| `GetReservationCoverage` | Stub; returns zeroed totals; full RI math lands in a follow-up PR |
+| `GetReservationUtilization` | Stub; returns zeroed totals |
+| `GetSavingsPlansCoverage` | Stub; returns empty list |
+| `GetSavingsPlansUtilization` | Stub; returns zeroed totals |
+| `GetCostCategories` | Stub; returns empty list (cost-category management not yet emulated) |
+| `CreateAnomalyMonitor` | Store a dimensional or custom monitor with optional resource tags |
+| `GetAnomalyMonitors` | List account-scoped monitors with ARN filters and pagination |
+| `UpdateAnomalyMonitor` | Update a monitor's name |
+| `DeleteAnomalyMonitor` | Delete a monitor without deleting subscriptions |
+| `CreateAnomalySubscription` | Store subscriber, frequency, monitor, and threshold configuration |
+| `GetAnomalySubscriptions` | List subscriptions with ARN or monitor filters and pagination |
+| `UpdateAnomalySubscription` | Update supplied settings while preserving omitted fields |
+| `DeleteAnomalySubscription` | Delete a subscription |
+| `ListTagsForResource` | Read monitor or subscription tags |
+| `TagResource` | Add or replace monitor or subscription tags |
+| `UntagResource` | Remove monitor or subscription tag keys |
+<!-- floci:actions:end -->
+
+## Cost anomaly configuration
+
+Monitors and subscriptions support creation, listing, updates, deletion, and resource tags.
+They are global within the calling account: requests signed for different regions see the same
+resources, while another account cannot read or modify them. Definitions and tags use Floci's
+configured storage and survive restarts in persistent storage modes.
+
+`DIMENSIONAL` monitors support `SERVICE`, `LINKED_ACCOUNT`, `TAG`, and `COST_CATEGORY`.
+Tag and cost-category monitors provide a key in `MonitorSpecification`; `CUSTOM` monitors
+provide linked-account, tag, or cost-category values. `MonitorSpecification` is a JSON object,
+including when the caller's configuration tool represents it internally as a JSON string.
+
+Subscriptions support `DAILY` or `WEEKLY` email configuration and `IMMEDIATE` SNS configuration.
+Updates preserve omitted fields and reject invalid changes before writing. The deprecated
+`Threshold` input is accepted as an absolute-cost shorthand; reads return its normalized
+`ThresholdExpression`. Monitor names are labels, not idempotency keys.
+
+`GetAnomalyMonitors` and `GetAnomalySubscriptions` accept their ARN-list filters, `MaxResults`,
+and `NextPageToken`; subscriptions also support a `MonitorArn` filter. Tags are managed through
+`ResourceArn`, `ResourceTags`, and `ResourceTagKeys`, and are not embedded in the resource
+definitions returned by the list APIs.
+
+Deleting a monitor leaves subscriptions intact and editable. In this emulator, their saved
+monitor ARN lists remain unchanged until explicitly updated. Monitor evaluation, anomaly
+generation, email confirmation, and email/SNS notification delivery are not emulated. Floci
+does not synthesize subscriber confirmation status or a monitor's last evaluation date.
+Organizations management-account eligibility is not enforced for the additional dimensional
+monitor types.
+
+For example, create a monitor and a daily subscription against the local endpoint:
+
+```bash
+MONITOR_ARN=$(aws ce create-anomaly-monitor --endpoint-url http://localhost:4566 \
+  --anomaly-monitor '{"MonitorName":"services","MonitorType":"DIMENSIONAL","MonitorDimension":"SERVICE"}' \
+  --resource-tags Key=Environment,Value=development --query MonitorArn --output text)
+
+aws ce create-anomaly-subscription --endpoint-url http://localhost:4566 \
+  --anomaly-subscription "{\"SubscriptionName\":\"daily-alerts\",\"Frequency\":\"DAILY\",\"MonitorArnList\":[\"$MONITOR_ARN\"],\"Subscribers\":[{\"Address\":\"alerts@example.com\",\"Type\":\"EMAIL\"}],\"ThresholdExpression\":{\"Dimensions\":{\"Key\":\"ANOMALY_TOTAL_IMPACT_ABSOLUTE\",\"Values\":[\"100\"],\"MatchOptions\":[\"GREATER_THAN_OR_EQUAL\"]}}}"
+```
 
 ## Cost synthesis model
 
@@ -120,7 +173,7 @@ for result in resp["ResultsByTime"]:
 
 - Forecasting (`GetCostForecast`, `GetUsageForecast`).
 - Right-sizing recommendations (`GetRightsizingRecommendation`).
-- Anomaly detection management (`GetAnomalies`, `*AnomalyMonitor`, `*AnomalySubscription`) — separate PR planned per #791.
+- Anomaly evaluation and results (`GetAnomalies`), email confirmation, and email/SNS delivery.
 - Real Reservation / Savings Plan utilization math — currently zeroed stubs.
 - Cost category management (`CreateCostCategoryDefinition` / `*Definition` / `ListCostCategoryDefinitions`).
 - Resource-level granularity beyond what `GetCostAndUsageWithResources` exposes today.

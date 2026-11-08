@@ -1,0 +1,2490 @@
+package io.floci.aws.services.cloudfront;
+
+import com.fasterxml.jackson.core.type.TypeReference;
+import io.floci.aws.config.EmulatorConfig;
+import io.floci.aws.config.LocalStackParity;
+import io.floci.aws.core.common.AwsArnUtils;
+import io.floci.aws.core.common.AwsException;
+import io.floci.aws.core.common.CertificateReferenceResolver;
+import io.floci.aws.core.common.CloudFrontEdgeDomain;
+import io.floci.aws.core.common.RegionResolver;
+import io.floci.aws.core.common.SmithyValidationErrors;
+import io.floci.aws.core.common.dns.EmbeddedDnsServer;
+import io.floci.aws.core.storage.AccountAwareStorageBackend;
+import io.floci.aws.core.storage.StorageBackend;
+import io.floci.aws.core.storage.StorageFactory;
+import io.floci.aws.services.acm.AcmCertificateReferenceProvider.CertificateReference;
+import io.floci.aws.services.cloudfront.model.CacheBehavior;
+import io.floci.aws.services.cloudfront.model.CachePolicy;
+import io.floci.aws.services.cloudfront.model.CloudFrontFunction;
+import io.floci.aws.services.cloudfront.model.CloudFrontOriginAccessIdentity;
+import io.floci.aws.services.cloudfront.model.ContinuousDeploymentPolicy;
+import io.floci.aws.services.cloudfront.model.DefaultCacheBehavior;
+import io.floci.aws.services.cloudfront.model.Distribution;
+import io.floci.aws.services.cloudfront.model.DistributionConfig;
+import io.floci.aws.services.cloudfront.model.FieldLevelEncryptionConfig;
+import io.floci.aws.services.cloudfront.model.FieldLevelEncryptionProfile;
+import io.floci.aws.services.cloudfront.model.Invalidation;
+import io.floci.aws.services.cloudfront.model.KeyGroup;
+import io.floci.aws.services.cloudfront.model.MonitoringSubscription;
+import io.floci.aws.services.cloudfront.model.Origin;
+import io.floci.aws.services.cloudfront.model.OriginAccessControl;
+import io.floci.aws.services.cloudfront.model.OriginRequestPolicy;
+import io.floci.aws.services.cloudfront.model.PublicKey;
+import io.floci.aws.services.cloudfront.model.RealtimeLogConfig;
+import io.floci.aws.services.cloudfront.model.ResponseHeadersPolicy;
+import io.floci.aws.services.cloudfront.model.StreamingDistribution;
+import io.floci.aws.services.iam.IamService;
+import io.floci.aws.services.iam.ServerCertificateReferenceProvider;
+import jakarta.enterprise.context.ApplicationScoped;
+import jakarta.inject.Inject;
+
+import java.net.URI;
+import java.security.SecureRandom;
+import java.time.Instant;
+import java.util.ArrayList;
+import java.util.Collection;
+import java.util.Comparator;
+import java.util.HashSet;
+import java.util.LinkedHashMap;
+import java.util.LinkedHashSet;
+import java.util.List;
+import java.util.Locale;
+import java.util.Map;
+import java.util.Objects;
+import java.util.Optional;
+import java.util.SequencedSet;
+import java.util.Set;
+import java.util.UUID;
+import java.util.function.Function;
+import java.util.function.Supplier;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
+
+@ApplicationScoped
+public class CloudFrontService implements ServerCertificateReferenceProvider {
+
+    private static final String CHARS = "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
+    private static final int MAX_CUSTOM_RESPONSE_HEADERS_POLICIES = 20;
+    private static final int MAX_DISTRIBUTIONS_PER_RESPONSE_HEADERS_POLICY = 100;
+    private static final SecureRandom RANDOM = new SecureRandom();
+    /** The enum values in the order AWS lists them. */
+    private static final List<String> OAC_ORIGIN_TYPES =
+            List.of("s3", "execute-api", "lambda", "mediastore", "mediapackagev2");
+    private static final List<String> OAC_SIGNING_PROTOCOLS = List.of("sigv4", "sigv4a");
+    private static final List<String> OAC_SIGNING_BEHAVIORS =
+            List.of("always-amz-auth", "never", "always", "no-override");
+    private static final Set<String> FUNCTION_RUNTIMES = Set.of("cloudfront-js-1.0", "cloudfront-js-2.0");
+    private static final int MAX_ORIGIN_CUSTOM_HEADERS = 30;
+    private static final int MAX_CUSTOM_HEADER_NAME_LENGTH = 256;
+    private static final int MAX_CUSTOM_HEADER_VALUE_LENGTH = 1_783;
+    private static final int MAX_CUSTOM_HEADERS_LENGTH = 10_240;
+    private static final Pattern HTTP_HEADER_NAME =
+            Pattern.compile("[!#$%&'*+.^_`|~0-9A-Za-z-]+");
+    private static final Set<String> PROHIBITED_ORIGIN_CUSTOM_HEADERS = Set.of(
+            "cache-control", "connection", "content-length", "cookie", "host", "if-match",
+            "if-modified-since", "if-none-match", "if-range", "if-unmodified-since",
+            "max-forwards", "pragma", "proxy-authenticate", "proxy-authorization",
+            "proxy-connection", "range", "request-range", "te", "trailer", "transfer-encoding",
+            "upgrade", "via", "x-real-ip");
+    static final String MANAGED_CORS_AND_SECURITY_POLICY_ID =
+            "e61eb60c-9c35-4d20-a928-2b84e02af89c";
+    static final String MANAGED_CORS_PREFLIGHT_POLICY_ID =
+            "5cc3b908-e619-4b99-88e5-2cf7f45965bd";
+    static final String MANAGED_CORS_PREFLIGHT_AND_SECURITY_POLICY_ID =
+            "eaab4381-ed33-4a86-88ca-d9558dc6cd63";
+    static final String MANAGED_SECURITY_POLICY_ID =
+            "67f7725c-6f97-4210-82d7-5512b31e9d03";
+    static final String MANAGED_SIMPLE_CORS_POLICY_ID =
+            "60669652-455b-4ae9-85a4-c4c02393f86c";
+    private static final Map<String, ResponseHeadersPolicy> MANAGED_RESPONSE_HEADERS_POLICIES =
+            managedResponseHeadersPolicies();
+    static final String MANAGED_ALL_VIEWER_ORIGIN_REQUEST_POLICY_ID =
+            "216adef6-5c7f-47e4-b989-5492eafa07d3";
+    static final String MANAGED_ALL_VIEWER_AND_CLOUDFRONT_HEADERS_ORIGIN_REQUEST_POLICY_ID =
+            "33f36d7e-f396-46d9-90e0-52428a34d9dc";
+    static final String MANAGED_ALL_VIEWER_EXCEPT_HOST_HEADER_ORIGIN_REQUEST_POLICY_ID =
+            "b689b0a8-53d0-40ab-baf2-68738e2966ac";
+    static final String MANAGED_CORS_CUSTOM_ORIGIN_ORIGIN_REQUEST_POLICY_ID =
+            "59781a5b-3903-41f3-afcb-af62929ccde1";
+    static final String MANAGED_CORS_S3_ORIGIN_ORIGIN_REQUEST_POLICY_ID =
+            "88a5eaf4-2fd4-4709-b370-b4c650ea3fcf";
+    static final String MANAGED_MEDIATAILOR_ORIGIN_REQUEST_POLICY_ID =
+            "775133bc-15f2-49f9-abea-afb2e0bf67d2";
+    static final String MANAGED_HOST_HEADER_ONLY_ORIGIN_REQUEST_POLICY_ID =
+            "bf0718e1-ba1e-49d1-88b1-f726733018ae";
+    static final String MANAGED_USER_AGENT_REFERER_ORIGIN_REQUEST_POLICY_ID =
+            "acba4595-bd28-49b8-b9fe-13317c0390fa";
+    private static final Map<String, OriginRequestPolicy> MANAGED_ORIGIN_REQUEST_POLICIES =
+            managedOriginRequestPolicies();
+    private static final Map<String, CachePolicy> MANAGED_CACHE_POLICIES = managedCachePolicies();
+    private static final String MANAGED_POLICY_ETAG = "E23ZP02F085DFQ";
+
+    private final AccountAwareStorageBackend<Distribution> distStore;
+    private final StorageBackend<String, List<Invalidation>> invalidationStore;
+    private final StorageBackend<String, CachePolicy> cachePolicyStore;
+    private final StorageBackend<String, OriginRequestPolicy> orpStore;
+    private final StorageBackend<String, ResponseHeadersPolicy> rhpStore;
+    private final StorageBackend<String, OriginAccessControl> oacStore;
+    private final StorageBackend<String, CloudFrontOriginAccessIdentity> oaiStore;
+    private final StorageBackend<String, CloudFrontFunction> functionStore;
+    private final StorageBackend<String, Map<String, String>> tagStore;
+    private final StorageBackend<String, ContinuousDeploymentPolicy> cdpStore;
+    private final StorageBackend<String, PublicKey> publicKeyStore;
+    private final StorageBackend<String, KeyGroup> keyGroupStore;
+    private final StorageBackend<String, RealtimeLogConfig> realtimeLogConfigStore;
+    private final StorageBackend<String, StreamingDistribution> streamingDistStore;
+    private final StorageBackend<String, FieldLevelEncryptionConfig> fleConfigStore;
+    private final StorageBackend<String, FieldLevelEncryptionProfile> fleProfileStore;
+    private final StorageBackend<String, MonitoringSubscription> monitoringStore;
+    private final String accountId;
+    private final RegionResolver regionResolver;
+    private final IamService iamService;
+    private final CertificateReferenceResolver certificates;
+    private final String configuredDomainSuffix;
+    /**
+     * Host suffixes under which every distribution is served as {@code <id><suffix>}, whatever
+     * {@code floci.services.cloudfront.domain-suffix} makes the assigned domain name. They carry the
+     * {@code cloudfront} service label on the endpoint hosts the embedded DNS resolves, the same
+     * derivation API Gateway uses for {@code <id>.execute-api.<host>}, so a name that resolves to
+     * Floci is also routed by it. {@code <id>.cloudfront.localhost.floci.io} and
+     * {@code <id>.cloudfront.localhost} are additionally covered by the generated HTTPS
+     * certificate, so a signed URL for either can be downloaded over HTTPS.
+     */
+    private final List<String> localDeliverySuffixes;
+    private final Pattern lambdaOriginHost;
+
+    public CloudFrontService(StorageFactory factory, EmulatorConfig config, RegionResolver regionResolver) {
+        this(factory, config, regionResolver, null, null);
+    }
+
+    @Inject
+    public CloudFrontService(StorageFactory factory, EmulatorConfig config, RegionResolver regionResolver,
+                             IamService iamService, CertificateReferenceResolver certificates) {
+        this.iamService = iamService;
+        this.certificates = certificates;
+        this.distStore = factory.create("cloudfront", "cloudfront-distributions.json",
+                new TypeReference<Map<String, Distribution>>() {});
+        this.invalidationStore = factory.create("cloudfront", "cloudfront-invalidations.json",
+                new TypeReference<Map<String, List<Invalidation>>>() {});
+        this.cachePolicyStore = factory.create("cloudfront", "cloudfront-cache-policies.json",
+                new TypeReference<Map<String, CachePolicy>>() {});
+        this.orpStore = factory.create("cloudfront", "cloudfront-origin-request-policies.json",
+                new TypeReference<Map<String, OriginRequestPolicy>>() {});
+        this.rhpStore = factory.create("cloudfront", "cloudfront-response-headers-policies.json",
+                new TypeReference<Map<String, ResponseHeadersPolicy>>() {});
+        this.oacStore = factory.create("cloudfront", "cloudfront-oac.json",
+                new TypeReference<Map<String, OriginAccessControl>>() {});
+        this.oaiStore = factory.create("cloudfront", "cloudfront-oai.json",
+                new TypeReference<Map<String, CloudFrontOriginAccessIdentity>>() {});
+        this.functionStore = factory.create("cloudfront", "cloudfront-functions.json",
+                new TypeReference<Map<String, CloudFrontFunction>>() {});
+        this.tagStore = factory.create("cloudfront", "cloudfront-tags.json",
+                new TypeReference<Map<String, Map<String, String>>>() {});
+        this.cdpStore = factory.create("cloudfront", "cloudfront-continuous-deployment-policies.json",
+                new TypeReference<Map<String, ContinuousDeploymentPolicy>>() {});
+        this.publicKeyStore = factory.create("cloudfront", "cloudfront-public-keys.json",
+                new TypeReference<Map<String, PublicKey>>() {});
+        this.keyGroupStore = factory.create("cloudfront", "cloudfront-key-groups.json",
+                new TypeReference<Map<String, KeyGroup>>() {});
+        this.realtimeLogConfigStore = factory.create("cloudfront", "cloudfront-realtime-log-configs.json",
+                new TypeReference<Map<String, RealtimeLogConfig>>() {});
+        this.streamingDistStore = factory.create("cloudfront", "cloudfront-streaming-distributions.json",
+                new TypeReference<Map<String, StreamingDistribution>>() {});
+        this.fleConfigStore = factory.create("cloudfront", "cloudfront-fle-configs.json",
+                new TypeReference<Map<String, FieldLevelEncryptionConfig>>() {});
+        this.fleProfileStore = factory.create("cloudfront", "cloudfront-fle-profiles.json",
+                new TypeReference<Map<String, FieldLevelEncryptionProfile>>() {});
+        this.monitoringStore = factory.create("cloudfront", "cloudfront-monitoring-subscriptions.json",
+                new TypeReference<Map<String, MonitoringSubscription>>() {});
+        this.accountId = config.defaultAccountId();
+        this.regionResolver = regionResolver;
+        this.configuredDomainSuffix = config.services().cloudfront().domainSuffix().orElse(null);
+        this.localDeliverySuffixes = localDeliverySuffixes(config);
+        this.lambdaOriginHost = lambdaOriginHost(config);
+    }
+
+    // ── Distributions ─────────────────────────────────────────────────────────
+
+    public synchronized Distribution createDistribution(Distribution dist, Map<String, String> tags) {
+        ensureAliasesAvailable(dist.getConfig(), null);
+        validateOriginSettings(dist.getConfig());
+        validateOriginCustomHeaders(dist.getConfig());
+        validateResponseHeadersPolicyReferences(dist.getConfig(), null);
+        validateTrustedKeyGroups(dist.getConfig());
+        validateOriginAccessControls(dist.getConfig());
+        return whileCertificatesHeld(dist.getConfig(), () -> {
+            validateViewerCertificate(dist.getConfig());
+            String id = generateDistributionId();
+            dist.setId(id);
+            dist.setArn(arn("distribution/" + id));
+            dist.setDomainName(domainNameFor(id));
+            dist.setStatus("Deployed");
+            dist.setLastModifiedTime(Instant.now());
+            dist.setEtag(UUID.randomUUID().toString());
+            if (tags != null && !tags.isEmpty()) {
+                dist.setTags(tags);
+                tagStore.put(dist.getArn(), tags);
+            }
+            distStore.put(id, dist);
+            return dist;
+        });
+    }
+
+    public Distribution getDistribution(String id) {
+        return distStore.get(id).orElseThrow(() ->
+                new AwsException("NoSuchDistribution", "The specified distribution does not exist.", 404));
+    }
+
+    public synchronized Distribution updateDistribution(String id, String ifMatch, Distribution updated) {
+        Distribution existing = getDistribution(id);
+        if (!existing.getEtag().equals(ifMatch)) {
+            throw new AwsException("InvalidIfMatchVersion",
+                    "The If-Match version is missing or not valid for the resource.", 400);
+        }
+        ensureAliasesAvailable(updated.getConfig(), id);
+        validateOriginSettings(updated.getConfig());
+        validateOriginCustomHeaders(updated.getConfig());
+        validateResponseHeadersPolicyReferences(updated.getConfig(), id);
+        validateTrustedKeyGroups(updated.getConfig());
+        validateOriginAccessControls(updated.getConfig());
+        return whileCertificatesHeld(updated.getConfig(), () -> {
+            validateViewerCertificate(updated.getConfig());
+            updated.setId(id);
+            updated.setArn(existing.getArn());
+            updated.setDomainName(existing.getDomainName());
+            updated.setStatus("Deployed");
+            updated.setLastModifiedTime(Instant.now());
+            updated.setEtag(UUID.randomUUID().toString());
+            updated.setTags(existing.getTags());
+            distStore.put(id, updated);
+            return updated;
+        });
+    }
+
+    @Override
+    public List<Reference> serverCertificateReferences() {
+        List<Reference> references = new ArrayList<>();
+        for (Distribution distribution : distStore.scan(k -> true)) {
+            String certificateId = iamCertificateId(distribution.getConfig());
+            if (certificateId != null) {
+                references.add(new Reference(certificateId, "distribution " + distribution.getId()));
+            }
+        }
+        return references;
+    }
+
+    /**
+     * The ACM certificates the distributions serve, each held by its distribution, so ACM lists the
+     * distribution in {@code InUseBy} and refuses to delete the certificate. Like
+     * {@link #serverCertificateReferences} it reads a copy of the store and takes no monitor.
+     */
+    public List<CertificateReference> acmCertificateReferences() {
+        List<CertificateReference> references = new ArrayList<>();
+        for (Distribution distribution : distStore.scan(k -> true)) {
+            String certificateArn = acmCertificateArn(distribution.getConfig());
+            if (certificateArn != null) {
+                references.add(new CertificateReference(certificateArn, distribution.getArn()));
+            }
+        }
+        return references;
+    }
+
+    private static String acmCertificateArn(DistributionConfig config) {
+        if (config == null || config.getViewerCertificate() == null) {
+            return null;
+        }
+        String certificateArn = config.getViewerCertificate().get("ACMCertificateArn");
+        return certificateArn == null || certificateArn.isBlank() ? null : certificateArn;
+    }
+
+    private static String iamCertificateId(DistributionConfig config) {
+        if (config == null || config.getViewerCertificate() == null) {
+            return null;
+        }
+        String certificateId = config.getViewerCertificate().get("IAMCertificateId");
+        return certificateId == null || certificateId.isBlank() ? null : certificateId;
+    }
+
+    private void validateViewerCertificate(DistributionConfig config) {
+        String certificateId = iamCertificateId(config);
+        if (certificateId != null && iamService != null
+                && iamService.findServerCertificateById(certificateId).isEmpty()) {
+            throw new AwsException("InvalidViewerCertificate",
+                    "The specified SSL certificate doesn't exist, isn't valid, "
+                            + "or doesn't include a valid certificate chain.", 400);
+        }
+        String certificateArn = acmCertificateArn(config);
+        if (certificateArn != null && !isExistingAcmCertificate(certificateArn)) {
+            throw new AwsException("InvalidViewerCertificate",
+                    "The specified SSL certificate doesn't exist, isn't valid, "
+                            + "or doesn't include a valid certificate chain.", 400);
+        }
+    }
+
+    /**
+     * Only an ACM certificate: the resolver also answers for IAM server certificates, but one named
+     * here would never be held by {@link #serverCertificateReferences}, which reads
+     * {@code IAMCertificateId}.
+     */
+    private boolean isExistingAcmCertificate(String arn) {
+        if (!AwsArnUtils.isArn(arn)) {
+            return false;
+        }
+        AwsArnUtils.Arn parsed = AwsArnUtils.parse(arn);
+        return "acm".equals(parsed.service())
+                && (certificates == null || certificates.exists(parsed.region(), arn));
+    }
+
+    /**
+     * Runs a write that may record a certificate reference while the certificate's owner holds the
+     * lock its delete takes, IAM's for {@code DeleteServerCertificate} and ACM's for
+     * {@code DeleteCertificate}, so the certificate cannot be deleted between
+     * {@link #validateViewerCertificate} and the store write. Without the guard the delete sees no
+     * reference, because the distribution is not saved yet, and the distribution is left holding a
+     * certificate that is gone. IAM's lock is taken first, the order the resolver uses.
+     */
+    private <T> T whileCertificatesHeld(DistributionConfig config, Supplier<T> action) {
+        String certificateArn = acmCertificateArn(config);
+        Supplier<T> acmHeld = certificates == null || certificateArn == null
+                ? action
+                : () -> certificates.supplyWhileHeld(List.of(certificateArn), action);
+        if (iamService == null || iamCertificateId(config) == null) {
+            // Nothing to order with IAM. A distribution that names no IAM certificate cannot be
+            // left holding one, and the scan reads a copy of the store rather than a live
+            // collection, so this write cannot disturb it either. Taking the lock anyway would make
+            // every distribution write wait on a certificate delete, and the other way round.
+            return acmHeld.get();
+        }
+        return iamService.supplyWithServerCertificatesHeld(acmHeld);
+    }
+
+    private static void validateOriginSettings(DistributionConfig config) {
+        if (config == null || config.getOrigins() == null) {
+            return;
+        }
+        for (Origin origin : config.getOrigins()) {
+            requireRange("InvalidArgument", "ConnectionAttempts",
+                    origin.getConnectionAttempts(),
+                    CloudFrontOriginTimeouts.MIN_CONNECTION_ATTEMPTS,
+                    CloudFrontOriginTimeouts.MAX_CONNECTION_ATTEMPTS, "");
+            requireRange("InvalidArgument", "ConnectionTimeout",
+                    origin.getConnectionTimeout(),
+                    CloudFrontOriginTimeouts.MIN_CONNECTION_TIMEOUT_SECONDS,
+                    CloudFrontOriginTimeouts.MAX_CONNECTION_TIMEOUT_SECONDS, " seconds");
+            Map<String, Object> customOriginConfig = origin.getCustomOriginConfig();
+            int originReadTimeout = CloudFrontOriginTimeouts.DEFAULT_ORIGIN_READ_TIMEOUT_SECONDS;
+            if (customOriginConfig != null) {
+                requireRange("InvalidOriginReadTimeout", "OriginReadTimeout",
+                        asIntOrNull(customOriginConfig.get("OriginReadTimeout")),
+                        CloudFrontOriginTimeouts.MIN_ORIGIN_READ_TIMEOUT_SECONDS,
+                        CloudFrontOriginTimeouts.MAX_ORIGIN_READ_TIMEOUT_SECONDS, " seconds");
+                requireRange("InvalidOriginKeepaliveTimeout", "OriginKeepaliveTimeout",
+                        asIntOrNull(customOriginConfig.get("OriginKeepaliveTimeout")),
+                        CloudFrontOriginTimeouts.MIN_ORIGIN_KEEPALIVE_TIMEOUT_SECONDS,
+                        CloudFrontOriginTimeouts.MAX_ORIGIN_KEEPALIVE_TIMEOUT_SECONDS, " seconds");
+                Integer readTimeout = asIntOrNull(customOriginConfig.get("OriginReadTimeout"));
+                if (readTimeout != null) {
+                    originReadTimeout = readTimeout;
+                }
+            }
+            validateResponseCompletionTimeout(origin.getResponseCompletionTimeout(), originReadTimeout);
+        }
+    }
+
+    /**
+     * The completion timeout bounds the whole request to the origin, so it cannot be shorter than
+     * the read timeout it contains. Create and update both run this, whichever path the request
+     * came from, so a distribution created through the XML API and one created through
+     * CloudFormation are held to the same rule.
+     */
+    private static void validateResponseCompletionTimeout(Integer completionTimeout, int originReadTimeout) {
+        if (completionTimeout == null) {
+            return;
+        }
+        if (completionTimeout < 0) {
+            throw new AwsException("InvalidArgument",
+                    "The parameter ResponseCompletionTimeout must be a non-negative integer.", 400);
+        }
+        if (completionTimeout > 0 && completionTimeout < originReadTimeout) {
+            throw new AwsException(
+                    "InvalidArgument",
+                    "The parameter ResponseCompletionTimeout must be greater than or "
+                            + "equal to OriginReadTimeout.",
+                    400);
+        }
+    }
+
+    private static void requireRange(String errorCode, String field, Integer value,
+            int min, int max, String unit) {
+        if (value != null && (value < min || value > max)) {
+            throw new AwsException(
+                    errorCode,
+                    "The parameter " + field + " must be between " + min + " and " + max + unit + ".",
+                    400);
+        }
+    }
+
+    private static Integer asIntOrNull(Object value) {
+        if (value instanceof Integer intValue) {
+            return intValue;
+        }
+        if (value instanceof String text) {
+            try {
+                return Integer.valueOf(text);
+            } catch (NumberFormatException e) {
+                return null;
+            }
+        }
+        return null;
+    }
+
+    private static void validateOriginCustomHeaders(DistributionConfig config) {
+        if (config == null || config.getOrigins() == null) {
+            return;
+        }
+        for (Origin origin : config.getOrigins()) {
+            List<Map<String, String>> headers = origin.getCustomHeaders();
+            if (headers == null) {
+                continue;
+            }
+            if (headers.size() > MAX_ORIGIN_CUSTOM_HEADERS) {
+                throw new AwsException(
+                        "TooManyOriginCustomHeaders",
+                        "Your request contains too many origin custom headers.",
+                        400);
+            }
+            int combinedLength = 0;
+            Set<String> names = new HashSet<>();
+            for (Map<String, String> header : headers) {
+                String name = header == null ? null : header.get("HeaderName");
+                String value = header == null ? null : header.get("HeaderValue");
+                if (name == null || name.isBlank() || value == null
+                        || name.length() > MAX_CUSTOM_HEADER_NAME_LENGTH
+                        || value.length() > MAX_CUSTOM_HEADER_VALUE_LENGTH
+                        || !HTTP_HEADER_NAME.matcher(name).matches()
+                        || value.indexOf('\r') >= 0 || value.indexOf('\n') >= 0) {
+                    throw invalidOriginCustomHeader("Invalid origin custom header name or value");
+                }
+                String normalized = name.toLowerCase(Locale.ROOT);
+                if (PROHIBITED_ORIGIN_CUSTOM_HEADERS.contains(normalized)
+                        || normalized.startsWith("x-amz-") || normalized.startsWith("x-edge-")) {
+                    throw invalidOriginCustomHeader("Prohibited origin custom header: " + name);
+                }
+                if (!names.add(normalized)) {
+                    throw invalidOriginCustomHeader("Duplicate origin custom header: " + name);
+                }
+                combinedLength += name.length() + value.length();
+                if (combinedLength > MAX_CUSTOM_HEADERS_LENGTH) {
+                    throw invalidOriginCustomHeader("Origin custom headers exceed the size quota");
+                }
+            }
+        }
+    }
+
+    private static AwsException invalidOriginCustomHeader(String message) {
+        return new AwsException("InvalidArgument", message, 400);
+    }
+
+    public synchronized void deleteDistribution(String id, String ifMatch) {
+        Distribution existing = getDistribution(id);
+        if (!existing.getEtag().equals(ifMatch)) {
+            throw new AwsException("InvalidIfMatchVersion",
+                    "The If-Match version is missing or not valid for the resource.", 400);
+        }
+        if (existing.getConfig() != null && existing.getConfig().isEnabled()) {
+            throw new AwsException("DistributionNotDisabled",
+                    "The distribution you are trying to delete has not been disabled.", 409);
+        }
+        distStore.delete(id);
+        invalidationStore.delete(id);
+        tagStore.delete(existing.getArn());
+        tagStore.delete("distribution/" + id);
+    }
+
+    /**
+     * Removes a distribution and its associated invalidations/tags without the disable/If-Match guards
+     * enforced by {@link #deleteDistribution(String, String)}. Used by CloudFormation stack deletion,
+     * which owns the resource lifecycle at the stack level.
+     */
+    public synchronized void removeDistribution(String id) {
+        Distribution existing = distStore.get(id).orElse(null);
+        distStore.delete(id);
+        invalidationStore.delete(id);
+        if (existing != null) {
+            tagStore.delete(existing.getArn());
+        }
+        tagStore.delete("distribution/" + id);
+    }
+
+    public List<Distribution> listDistributions(String marker, int maxItems) {
+        List<Distribution> all = new ArrayList<>(distStore.scan(k -> true));
+        all.sort((a, b) -> a.getId().compareTo(b.getId()));
+        return paginate(all, marker, maxItems, Distribution::getId);
+    }
+
+    public synchronized void associateAlias(String targetDistributionId, String alias) {
+        if (alias == null || alias.isBlank()) {
+            throw new AwsException("InvalidArgument", "The alias must not be empty.", 400);
+        }
+        Distribution dist = getDistribution(targetDistributionId);
+        if (dist.getConfig() == null) {
+            throw new AwsException("InvalidArgument", "The target distribution has no configuration.", 400);
+        }
+        for (Distribution candidate : distStore.scan(k -> true)) {
+            if (targetDistributionId.equals(candidate.getId()) || candidate.getConfig() == null
+                    || candidate.getConfig().getAliases() == null) {
+                continue;
+            }
+            List<String> previousAliases = candidate.getConfig().getAliases();
+            List<String> remaining = new ArrayList<>(previousAliases);
+            remaining.removeIf(existing -> alias.equalsIgnoreCase(existing));
+            if (remaining.size() != previousAliases.size()) {
+                candidate.getConfig().setAliases(remaining);
+                candidate.setEtag(UUID.randomUUID().toString());
+                candidate.setLastModifiedTime(Instant.now());
+                distStore.put(candidate.getId(), candidate);
+            }
+        }
+
+        List<String> aliases = dist.getConfig().getAliases();
+        if (aliases == null) {
+            aliases = new ArrayList<>();
+        } else {
+            aliases = new ArrayList<>(aliases);
+        }
+        aliases.removeIf(existing -> alias.equalsIgnoreCase(existing));
+        aliases.add(alias);
+        dist.getConfig().setAliases(aliases);
+        dist.setEtag(UUID.randomUUID().toString());
+        dist.setLastModifiedTime(Instant.now());
+        distStore.put(targetDistributionId, dist);
+    }
+
+    public boolean hasDistributions() {
+        return !distStore.isEmptyInAllAccounts();
+    }
+
+    /**
+     * Finds the distribution whose data-plane requests should be served for the given {@code Host}
+     * header. A distribution matches when the host equals its assigned CloudFront domain name
+     * ({@code <id>.cloudfront.net}), one of its alternate domain names (CNAME aliases), or one of
+     * the local delivery hostnames {@code <id>.cloudfront.localhost.floci.io} and
+     * {@code <id>.cloudfront.localhost}. Any port suffix is ignored and matching is
+     * case-insensitive. Returns {@code null} when nothing matches.
+     */
+    public Distribution findByHost(String host) {
+        if (host == null || host.isBlank()) {
+            return null;
+        }
+        String hostname = stripPort(host);
+        // Every request gets here once a distribution exists, so this lookup avoids copying strings.
+        String rawPrefix = AccountAwareStorageBackend.rawKey(distStore.accountId(), "");
+        List<Distribution> distributions = distStore.scanRaw(rawKey -> rawKey.startsWith(rawPrefix));
+        for (Distribution dist : distributions) {
+            if (hostname.equalsIgnoreCase(dist.getDomainName())) {
+                return dist;
+            }
+        }
+        for (Distribution dist : distributions) {
+            DistributionConfig cfg = dist.getConfig();
+            if (cfg != null && cfg.getAliases() != null) {
+                for (String alias : cfg.getAliases()) {
+                    if (hostname.equalsIgnoreCase(alias)) {
+                        return dist;
+                    }
+                }
+            }
+        }
+        for (Distribution dist : distributions) {
+            if (matchesLocalDeliveryHost(hostname, dist.getId())) {
+                return dist;
+            }
+        }
+        Distribution best = null;
+        int bestSpecificity = -1;
+        for (Distribution dist : distributions) {
+            DistributionConfig cfg = dist.getConfig();
+            if (cfg == null || cfg.getAliases() == null) {
+                continue;
+            }
+            for (String alias : cfg.getAliases()) {
+                if (wildcardAliasMatches(alias, hostname) && alias.length() > bestSpecificity) {
+                    best = dist;
+                    bestSpecificity = alias.length();
+                }
+            }
+        }
+        return best;
+    }
+
+    /**
+     * The domain name a new distribution is served under. AWS assigns a lower-case host, and a
+     * browser lower-cases the authority it sends, so an upper-case id in the host would never match
+     * the resource a signed URL was signed for. The suffix is the request partition's unless one
+     * is configured.
+     */
+    private String domainNameFor(String id) {
+        return id.toLowerCase(Locale.ROOT) + "."
+                + CloudFrontEdgeDomain.domainSuffix(configuredDomainSuffix, regionResolver.getPartition());
+    }
+
+    private static List<String> localDeliverySuffixes(EmulatorConfig config) {
+        SequencedSet<String> endpointHosts = new LinkedHashSet<>();
+        endpointHosts.add("localhost");
+        EmbeddedDnsServer.BUILTIN_SUFFIXES.forEach(endpointHosts::add);
+        config.hostname().ifPresent(endpointHosts::add);
+        LocalStackParity.withDnsSuffixes(config.dns().extraSuffixes()).ifPresent(endpointHosts::addAll);
+        return endpointHosts.stream()
+                .map(host -> ".cloudfront." + host.toLowerCase(Locale.ROOT))
+                .toList();
+    }
+
+    /** True when {@code hostname} is the local delivery host of the distribution with this id. */
+    private boolean matchesLocalDeliveryHost(String hostname, String id) {
+        int idLength = id.length();
+        for (String suffix : localDeliverySuffixes) {
+            if (hostname.length() == idLength + suffix.length()
+                    && hostname.regionMatches(true, 0, id, 0, idLength)
+                    && hostname.regionMatches(true, idLength, suffix, 0, suffix.length())) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private void ensureAliasesAvailable(DistributionConfig config, String currentDistributionId) {
+        if (config == null || config.getAliases() == null) {
+            return;
+        }
+        for (String requested : config.getAliases()) {
+            if (requested == null || requested.isBlank()) {
+                continue;
+            }
+            for (Distribution existing : distStore.scan(k -> true)) {
+                if (existing.getId().equals(currentDistributionId) || existing.getConfig() == null
+                        || existing.getConfig().getAliases() == null) {
+                    continue;
+                }
+                for (String assigned : existing.getConfig().getAliases()) {
+                    if (requested.equalsIgnoreCase(assigned)) {
+                        throw new AwsException("CNAMEAlreadyExists",
+                                "The CNAME you provided is already associated with a different resource.", 409);
+                    }
+                }
+            }
+        }
+    }
+
+    private static boolean wildcardAliasMatches(String alias, String hostname) {
+        if (alias == null || !alias.startsWith("*.") || hostname == null) {
+            return false;
+        }
+        String suffix = alias.substring(1);          // ".example.com"
+        if (hostname.length() <= suffix.length()
+                || !hostname.regionMatches(true, hostname.length() - suffix.length(),
+                        suffix, 0, suffix.length())) {
+            return false;
+        }
+        // A CloudFront wildcard replaces exactly one label, so the part standing in for the "*"
+        // must not itself contain a dot: "*.example.com" covers marketing.example.com but not
+        // marketing.product.example.com. AWS is explicit that names at a level higher or lower
+        // than the wildcard are not covered.
+        return hostname.lastIndexOf('.', hostname.length() - suffix.length() - 1) < 0;
+    }
+
+    private static String stripPort(String host) {
+        int colon = host.lastIndexOf(':');
+        if (colon > 0) {
+            String maybePort = host.substring(colon + 1);
+            if (!maybePort.isEmpty() && maybePort.chars().allMatch(Character::isDigit)) {
+                return host.substring(0, colon);
+            }
+        }
+        return host;
+    }
+
+    // ── Invalidations ─────────────────────────────────────────────────────────
+
+    public synchronized Invalidation createInvalidation(String distributionId, Invalidation inv) {
+        getDistribution(distributionId);
+        inv.setId(generateInvalidationId());
+        inv.setStatus("Completed");
+        inv.setCreateTime(Instant.now());
+        List<Invalidation> list = new ArrayList<>(
+                invalidationStore.get(distributionId).orElse(new ArrayList<>()));
+        list.add(inv);
+        invalidationStore.put(distributionId, list);
+        return inv;
+    }
+
+    public Invalidation getInvalidation(String distributionId, String invId) {
+        getDistribution(distributionId);
+        List<Invalidation> list = invalidationStore.get(distributionId).orElse(List.of());
+        return list.stream()
+                .filter(i -> i.getId().equals(invId))
+                .findFirst()
+                .orElseThrow(() -> new AwsException("NoSuchInvalidation",
+                        "The specified invalidation does not exist.", 404));
+    }
+
+    public List<Invalidation> listInvalidations(String distributionId, String marker, int maxItems) {
+        getDistribution(distributionId);
+        List<Invalidation> all = new ArrayList<>(
+                invalidationStore.get(distributionId).orElse(List.of()));
+        return paginate(all, marker, maxItems, Invalidation::getId);
+    }
+
+    // ── Cache Policies ────────────────────────────────────────────────────────
+
+    public synchronized CachePolicy createCachePolicy(CachePolicy policy) {
+        policy.setId(UUID.randomUUID().toString());
+        policy.setEtag(UUID.randomUUID().toString());
+        policy.setLastModifiedTime(Instant.now());
+        cachePolicyStore.put(policy.getId(), policy);
+        return policy;
+    }
+
+    public CachePolicy getCachePolicy(String id) {
+        return cachePolicyStore.get(id)
+                .or(() -> Optional.ofNullable(MANAGED_CACHE_POLICIES.get(id)))
+                .orElseThrow(() -> new AwsException("NoSuchCachePolicy",
+                        "The specified cache policy does not exist.", 404));
+    }
+
+    public synchronized CachePolicy updateCachePolicy(String id, String ifMatch, CachePolicy updated) {
+        CachePolicy existing = getCachePolicy(id);
+        if (isManagedCachePolicy(id)) {
+            throw new AwsException("IllegalUpdate",
+                    "AWS managed cache policies cannot be updated.", 400);
+        }
+        if (!existing.getEtag().equals(ifMatch)) {
+            throw new AwsException("InvalidIfMatchVersion",
+                    "The If-Match version is missing or not valid for the resource.", 400);
+        }
+        updated.setId(id);
+        updated.setEtag(UUID.randomUUID().toString());
+        updated.setLastModifiedTime(Instant.now());
+        cachePolicyStore.put(id, updated);
+        return updated;
+    }
+
+    public synchronized void deleteCachePolicy(String id, String ifMatch) {
+        CachePolicy existing = getCachePolicy(id);
+        if (isManagedCachePolicy(id)) {
+            throw new AwsException("IllegalDelete",
+                    "AWS managed cache policies cannot be deleted.", 400);
+        }
+        if (!existing.getEtag().equals(ifMatch)) {
+            throw new AwsException("InvalidIfMatchVersion",
+                    "The If-Match version is missing or not valid for the resource.", 400);
+        }
+        if (isCachePolicyInUse(id)) {
+            throw new AwsException("CachePolicyInUse",
+                    "Cannot delete the cache policy because it is attached to one or more cache behaviors.",
+                    409);
+        }
+        cachePolicyStore.delete(id);
+    }
+
+    public List<CachePolicy> listCachePolicies(String marker, int maxItems) {
+        return listCachePolicies(marker, maxItems, null);
+    }
+
+    /**
+     * Lists custom and AWS managed cache policies; {@code type} narrows the list to the AWS
+     * lowercase {@code managed} or {@code custom} value.
+     */
+    public List<CachePolicy> listCachePolicies(String marker, int maxItems, String type) {
+        List<CachePolicy> all = mergeCustomAndManaged(type, "Cache policy",
+                cachePolicyStore.scan(k -> true), MANAGED_CACHE_POLICIES.values(),
+                CachePolicy::getName, CachePolicy::getId);
+        return paginate(all, marker, maxItems, CachePolicy::getId);
+    }
+
+    static boolean isManagedCachePolicy(String id) {
+        return MANAGED_CACHE_POLICIES.containsKey(id);
+    }
+
+    // ── Origin Request Policies ───────────────────────────────────────────────
+
+    public synchronized OriginRequestPolicy createOriginRequestPolicy(OriginRequestPolicy policy) {
+        policy.setId(UUID.randomUUID().toString());
+        policy.setEtag(UUID.randomUUID().toString());
+        policy.setLastModifiedTime(Instant.now());
+        orpStore.put(policy.getId(), policy);
+        return policy;
+    }
+
+    public OriginRequestPolicy getOriginRequestPolicy(String id) {
+        return orpStore.get(id)
+                .or(() -> Optional.ofNullable(MANAGED_ORIGIN_REQUEST_POLICIES.get(id)))
+                .orElseThrow(() -> new AwsException("NoSuchOriginRequestPolicy",
+                        "The specified origin request policy does not exist.", 404));
+    }
+
+    public synchronized OriginRequestPolicy updateOriginRequestPolicy(String id, String ifMatch,
+                                                                       OriginRequestPolicy updated) {
+        OriginRequestPolicy existing = getOriginRequestPolicy(id);
+        if (isManagedOriginRequestPolicy(id)) {
+            throw new AwsException("IllegalUpdate",
+                    "AWS managed origin request policies cannot be updated.", 400);
+        }
+        if (!existing.getEtag().equals(ifMatch)) {
+            throw new AwsException("InvalidIfMatchVersion",
+                    "The If-Match version is missing or not valid for the resource.", 400);
+        }
+        updated.setId(id);
+        updated.setEtag(UUID.randomUUID().toString());
+        updated.setLastModifiedTime(Instant.now());
+        orpStore.put(id, updated);
+        return updated;
+    }
+
+    public synchronized void deleteOriginRequestPolicy(String id, String ifMatch) {
+        OriginRequestPolicy existing = getOriginRequestPolicy(id);
+        if (isManagedOriginRequestPolicy(id)) {
+            throw new AwsException("IllegalDelete",
+                    "AWS managed origin request policies cannot be deleted.", 400);
+        }
+        if (!existing.getEtag().equals(ifMatch)) {
+            throw new AwsException("InvalidIfMatchVersion",
+                    "The If-Match version is missing or not valid for the resource.", 400);
+        }
+        if (isOriginRequestPolicyInUse(id)) {
+            throw new AwsException("OriginRequestPolicyInUse",
+                    "Cannot delete the origin request policy because it is attached to one or more cache behaviors.",
+                    409);
+        }
+        orpStore.delete(id);
+    }
+
+    public List<OriginRequestPolicy> listOriginRequestPolicies(String marker, int maxItems) {
+        return listOriginRequestPolicies(marker, maxItems, null);
+    }
+
+    /**
+     * Lists custom and AWS managed origin request policies; {@code type} narrows the list to the
+     * AWS lowercase {@code managed} or {@code custom} value.
+     */
+    public List<OriginRequestPolicy> listOriginRequestPolicies(String marker, int maxItems, String type) {
+        List<OriginRequestPolicy> all = mergeCustomAndManaged(type, "Origin request policy",
+                orpStore.scan(k -> true), MANAGED_ORIGIN_REQUEST_POLICIES.values(),
+                OriginRequestPolicy::getName, OriginRequestPolicy::getId);
+        return paginate(all, marker, maxItems, OriginRequestPolicy::getId);
+    }
+
+    static boolean isManagedOriginRequestPolicy(String id) {
+        return MANAGED_ORIGIN_REQUEST_POLICIES.containsKey(id);
+    }
+
+    // ── Response Headers Policies ─────────────────────────────────────────────
+
+    public synchronized ResponseHeadersPolicy createResponseHeadersPolicy(ResponseHeadersPolicy policy) {
+        ResponseHeadersPolicyValidator.validate(policy);
+        ensureResponseHeadersPolicyNameAvailable(policy.getName(), null);
+        if (rhpStore.scan(k -> true).size() >= MAX_CUSTOM_RESPONSE_HEADERS_POLICIES) {
+            throw new AwsException("TooManyResponseHeadersPolicies",
+                    "The maximum number of response headers policies has been reached.", 400);
+        }
+        policy.setId(UUID.randomUUID().toString());
+        policy.setEtag(UUID.randomUUID().toString());
+        policy.setLastModifiedTime(Instant.now());
+        rhpStore.put(policy.getId(), policy);
+        return policy;
+    }
+
+    public ResponseHeadersPolicy getResponseHeadersPolicy(String id) {
+        return rhpStore.get(id)
+                .or(() -> Optional.ofNullable(MANAGED_RESPONSE_HEADERS_POLICIES.get(id)))
+                .orElseThrow(() -> new AwsException("NoSuchResponseHeadersPolicy",
+                        "The specified response headers policy does not exist.", 404));
+    }
+
+    public synchronized ResponseHeadersPolicy updateResponseHeadersPolicy(String id, String ifMatch,
+                                                                           ResponseHeadersPolicy updated) {
+        ResponseHeadersPolicy existing = getResponseHeadersPolicy(id);
+        rejectManagedResponseHeadersPolicyUpdate(id);
+        if (!existing.getEtag().equals(ifMatch)) {
+            throw new AwsException("PreconditionFailed",
+                    "The precondition in one or more of the request-header fields evaluated to false.", 412);
+        }
+        ResponseHeadersPolicyValidator.validate(updated);
+        ensureResponseHeadersPolicyNameAvailable(updated.getName(), id);
+        updated.setId(id);
+        updated.setEtag(UUID.randomUUID().toString());
+        updated.setLastModifiedTime(Instant.now());
+        rhpStore.put(id, updated);
+        return updated;
+    }
+
+    public synchronized void deleteResponseHeadersPolicy(String id, String ifMatch) {
+        ResponseHeadersPolicy existing = getResponseHeadersPolicy(id);
+        rejectManagedResponseHeadersPolicyDelete(id);
+        if (!existing.getEtag().equals(ifMatch)) {
+            throw new AwsException("PreconditionFailed",
+                    "The precondition in one or more of the request-header fields evaluated to false.", 412);
+        }
+        if (isResponseHeadersPolicyInUse(id)) {
+            throw new AwsException("ResponseHeadersPolicyInUse",
+                    "The response headers policy is attached to one or more distributions.", 409);
+        }
+        rhpStore.delete(id);
+    }
+
+    public List<ResponseHeadersPolicy> listResponseHeadersPolicies(String marker, int maxItems) {
+        return listResponseHeadersPolicies(marker, maxItems, null);
+    }
+
+    public List<ResponseHeadersPolicy> listResponseHeadersPolicies(
+            String marker, int maxItems, String type) {
+        List<ResponseHeadersPolicy> all = mergeCustomAndManaged(type, "Response headers policy",
+                rhpStore.scan(k -> true), MANAGED_RESPONSE_HEADERS_POLICIES.values(),
+                ResponseHeadersPolicy::getName, ResponseHeadersPolicy::getId);
+        if (marker != null && !marker.isEmpty()) {
+            int idx = -1;
+            for (int i = 0; i < all.size(); i++) {
+                if (all.get(i).getId().equals(marker)) {
+                    idx = i + 1;
+                    break;
+                }
+            }
+            if (idx < 0) {
+                throw new AwsException("InvalidArgument",
+                        "The specified marker is invalid.", 400);
+            }
+            all = all.subList(idx, all.size());
+        }
+        if (maxItems > 0 && all.size() > maxItems) {
+            return all.subList(0, maxItems);
+        }
+        return all;
+    }
+
+    static boolean isManagedResponseHeadersPolicy(String id) {
+        return MANAGED_RESPONSE_HEADERS_POLICIES.containsKey(id);
+    }
+
+    private void ensureResponseHeadersPolicyNameAvailable(String name, String excludedId) {
+        boolean duplicateCustom = rhpStore.scan(k -> true).stream()
+                .anyMatch(existing -> !existing.getId().equals(excludedId)
+                        && name.equals(existing.getName()));
+        boolean duplicateManaged = MANAGED_RESPONSE_HEADERS_POLICIES.values().stream()
+                .anyMatch(existing -> name.equals(existing.getName()));
+        if (duplicateCustom || duplicateManaged) {
+            throw new AwsException("ResponseHeadersPolicyAlreadyExists",
+                    "A response headers policy with this name already exists.", 409);
+        }
+    }
+
+    private static void rejectManagedResponseHeadersPolicyUpdate(String id) {
+        if (isManagedResponseHeadersPolicy(id)) {
+            throw new AwsException("IllegalUpdate",
+                    "AWS managed response headers policies cannot be updated.", 400);
+        }
+    }
+
+    private static void rejectManagedResponseHeadersPolicyDelete(String id) {
+        if (isManagedResponseHeadersPolicy(id)) {
+            throw new AwsException("IllegalDelete",
+                    "AWS managed response headers policies cannot be deleted.", 400);
+        }
+    }
+
+    private void validateResponseHeadersPolicyReferences(
+            DistributionConfig config, String excludedDistributionId) {
+        if (config == null) {
+            return;
+        }
+        Set<String> policyIds = new LinkedHashSet<>();
+        if (config.getDefaultCacheBehavior() != null) {
+            addResponseHeadersPolicyId(
+                    policyIds,
+                    config.getDefaultCacheBehavior().getResponseHeadersPolicyId());
+        }
+        if (config.getCacheBehaviors() != null) {
+            config.getCacheBehaviors().forEach(behavior ->
+                    addResponseHeadersPolicyId(
+                            policyIds, behavior.getResponseHeadersPolicyId()));
+        }
+        for (String policyId : policyIds) {
+            requireResponseHeadersPolicy(policyId);
+            long associatedDistributions = distStore.scan(k -> true).stream()
+                    .filter(distribution -> excludedDistributionId == null
+                            || !excludedDistributionId.equals(distribution.getId()))
+                    .filter(distribution -> usesResponseHeadersPolicy(
+                            distribution.getConfig(), policyId))
+                    .count();
+            if (associatedDistributions
+                    >= MAX_DISTRIBUTIONS_PER_RESPONSE_HEADERS_POLICY) {
+                throw new AwsException(
+                        "TooManyDistributionsAssociatedToResponseHeadersPolicy",
+                        "The maximum number of distributions have been associated with the "
+                                + "specified response headers policy.",
+                        400);
+            }
+        }
+    }
+
+    private static void addResponseHeadersPolicyId(
+            Set<String> policyIds, String policyId) {
+        if (policyId != null && !policyId.isBlank()) {
+            policyIds.add(policyId);
+        }
+    }
+
+    private void requireResponseHeadersPolicy(String policyId) {
+        if (policyId != null && !policyId.isBlank()) {
+            getResponseHeadersPolicy(policyId);
+        }
+    }
+
+    private boolean isResponseHeadersPolicyInUse(String id) {
+        return isAttachedToACacheBehavior(id,
+                DefaultCacheBehavior::getResponseHeadersPolicyId, CacheBehavior::getResponseHeadersPolicyId);
+    }
+
+    /**
+     * Kept as its own entry point for the per-distribution association count, which asks the
+     * question of one config at a time and can be handed a distribution with none.
+     */
+    private static boolean usesResponseHeadersPolicy(DistributionConfig config, String id) {
+        return config != null && usesPolicy(config, id,
+                DefaultCacheBehavior::getResponseHeadersPolicyId, CacheBehavior::getResponseHeadersPolicyId);
+    }
+
+    private boolean isCachePolicyInUse(String id) {
+        return isAttachedToACacheBehavior(id,
+                DefaultCacheBehavior::getCachePolicyId, CacheBehavior::getCachePolicyId);
+    }
+
+    private boolean isOriginRequestPolicyInUse(String id) {
+        return isAttachedToACacheBehavior(id,
+                DefaultCacheBehavior::getOriginRequestPolicyId, CacheBehavior::getOriginRequestPolicyId);
+    }
+
+    /**
+     * Whether any distribution attaches {@code id} to its default or one of its ordered cache
+     * behaviors. Cache, origin request and response headers policies each hang off the same two
+     * places, so the three in-use checks differ only in which id they read.
+     */
+    private boolean isAttachedToACacheBehavior(String id,
+                                               Function<DefaultCacheBehavior, String> onDefault,
+                                               Function<CacheBehavior, String> onOrdered) {
+        return distStore.scan(k -> true).stream()
+                .map(Distribution::getConfig)
+                .filter(Objects::nonNull)
+                .anyMatch(config -> usesPolicy(config, id, onDefault, onOrdered));
+    }
+
+    private static boolean usesPolicy(DistributionConfig config, String id,
+                                      Function<DefaultCacheBehavior, String> onDefault,
+                                      Function<CacheBehavior, String> onOrdered) {
+        boolean defaultUsesPolicy = config.getDefaultCacheBehavior() != null
+                && id.equals(onDefault.apply(config.getDefaultCacheBehavior()));
+        boolean orderedUsesPolicy = config.getCacheBehaviors() != null
+                && config.getCacheBehaviors().stream()
+                        .anyMatch(behavior -> behavior != null && id.equals(onOrdered.apply(behavior)));
+        return defaultUsesPolicy || orderedUsesPolicy;
+    }
+
+    private static Map<String, ResponseHeadersPolicy> managedResponseHeadersPolicies() {
+        Map<String, Object> simpleCors = corsConfig(
+                List.of("*"), List.of(), List.of(), List.of(), null);
+        Map<String, Object> preflightCors = corsConfig(
+                List.of("*"),
+                List.of("GET", "HEAD", "PUT", "POST", "PATCH", "DELETE", "OPTIONS"),
+                List.of(), List.of("*"), null);
+        Map<String, Object> security = securityHeadersConfig();
+
+        Map<String, ResponseHeadersPolicy> policies = new LinkedHashMap<>();
+        policies.put(MANAGED_CORS_AND_SECURITY_POLICY_ID, managedResponseHeadersPolicy(
+                MANAGED_CORS_AND_SECURITY_POLICY_ID, "Managed-CORS-and-SecurityHeadersPolicy",
+                "Allows all origins for simple CORS requests, and adds security headers",
+                Map.of("CorsConfig", simpleCors, "SecurityHeadersConfig", security)));
+        policies.put(MANAGED_CORS_PREFLIGHT_POLICY_ID, managedResponseHeadersPolicy(
+                MANAGED_CORS_PREFLIGHT_POLICY_ID, "Managed-CORS-With-Preflight",
+                "Allows all origins for CORS requests, including preflight requests",
+                Map.of("CorsConfig", preflightCors)));
+        policies.put(MANAGED_CORS_PREFLIGHT_AND_SECURITY_POLICY_ID, managedResponseHeadersPolicy(
+                MANAGED_CORS_PREFLIGHT_AND_SECURITY_POLICY_ID,
+                "Managed-CORS-with-preflight-and-SecurityHeadersPolicy",
+                "Allows all origins for CORS requests, including preflight requests, and adds security headers",
+                Map.of("CorsConfig", preflightCors, "SecurityHeadersConfig", security)));
+        policies.put(MANAGED_SECURITY_POLICY_ID, managedResponseHeadersPolicy(
+                MANAGED_SECURITY_POLICY_ID, "Managed-SecurityHeadersPolicy",
+                "Adds a set of security headers to every response",
+                Map.of("SecurityHeadersConfig", security)));
+        policies.put(MANAGED_SIMPLE_CORS_POLICY_ID, managedResponseHeadersPolicy(
+                MANAGED_SIMPLE_CORS_POLICY_ID, "Managed-SimpleCORS",
+                "Allows all origins for simple CORS requests",
+                Map.of("CorsConfig", simpleCors)));
+        return Map.copyOf(policies);
+    }
+
+    /**
+     * The AWS managed origin request policies, with the IDs and settings the CloudFront Developer
+     * Guide lists under "Use managed origin request policies".
+     */
+    private static Map<String, OriginRequestPolicy> managedOriginRequestPolicies() {
+        Map<String, OriginRequestPolicy> policies = new LinkedHashMap<>();
+        policies.put(MANAGED_ALL_VIEWER_ORIGIN_REQUEST_POLICY_ID, managedOriginRequestPolicy(
+                MANAGED_ALL_VIEWER_ORIGIN_REQUEST_POLICY_ID, "Managed-AllViewer",
+                "Includes all values (headers, cookies, and query strings) from the viewer request",
+                selection("HeaderBehavior", "allViewer", "Headers", List.of()),
+                selection("CookieBehavior", "all", "Cookies", List.of()),
+                selection("QueryStringBehavior", "all", "QueryStrings", List.of())));
+        policies.put(MANAGED_ALL_VIEWER_AND_CLOUDFRONT_HEADERS_ORIGIN_REQUEST_POLICY_ID,
+                managedOriginRequestPolicy(
+                        MANAGED_ALL_VIEWER_AND_CLOUDFRONT_HEADERS_ORIGIN_REQUEST_POLICY_ID,
+                        "Managed-AllViewerAndCloudFrontHeaders-2022-06",
+                        "Includes all values from the viewer request and all CloudFront headers "
+                                + "released through June 2022",
+                        selection("HeaderBehavior", "allViewerAndWhitelistCloudFront", "Headers",
+                                List.of("CloudFront-Forwarded-Proto", "CloudFront-Is-Android-Viewer",
+                                        "CloudFront-Is-Desktop-Viewer", "CloudFront-Is-IOS-Viewer",
+                                        "CloudFront-Is-Mobile-Viewer", "CloudFront-Is-SmartTV-Viewer",
+                                        "CloudFront-Is-Tablet-Viewer", "CloudFront-Viewer-Address",
+                                        "CloudFront-Viewer-ASN", "CloudFront-Viewer-City",
+                                        "CloudFront-Viewer-Country", "CloudFront-Viewer-Country-Name",
+                                        "CloudFront-Viewer-Country-Region",
+                                        "CloudFront-Viewer-Country-Region-Name",
+                                        "CloudFront-Viewer-Http-Version", "CloudFront-Viewer-Latitude",
+                                        "CloudFront-Viewer-Longitude", "CloudFront-Viewer-Metro-Code",
+                                        "CloudFront-Viewer-Postal-Code", "CloudFront-Viewer-Time-Zone",
+                                        "CloudFront-Viewer-TLS")),
+                        selection("CookieBehavior", "all", "Cookies", List.of()),
+                        selection("QueryStringBehavior", "all", "QueryStrings", List.of())));
+        policies.put(MANAGED_ALL_VIEWER_EXCEPT_HOST_HEADER_ORIGIN_REQUEST_POLICY_ID,
+                managedOriginRequestPolicy(
+                        MANAGED_ALL_VIEWER_EXCEPT_HOST_HEADER_ORIGIN_REQUEST_POLICY_ID,
+                        "Managed-AllViewerExceptHostHeader",
+                        "Includes all values from the viewer request except the Host header",
+                        selection("HeaderBehavior", "allExcept", "Headers", List.of("Host")),
+                        selection("CookieBehavior", "all", "Cookies", List.of()),
+                        selection("QueryStringBehavior", "all", "QueryStrings", List.of())));
+        policies.put(MANAGED_CORS_CUSTOM_ORIGIN_ORIGIN_REQUEST_POLICY_ID, managedOriginRequestPolicy(
+                MANAGED_CORS_CUSTOM_ORIGIN_ORIGIN_REQUEST_POLICY_ID, "Managed-CORS-CustomOrigin",
+                "Includes the header that enables CORS requests when the origin is a custom origin",
+                selection("HeaderBehavior", "whitelist", "Headers", List.of("Origin")),
+                selection("CookieBehavior", "none", "Cookies", List.of()),
+                selection("QueryStringBehavior", "none", "QueryStrings", List.of())));
+        policies.put(MANAGED_CORS_S3_ORIGIN_ORIGIN_REQUEST_POLICY_ID, managedOriginRequestPolicy(
+                MANAGED_CORS_S3_ORIGIN_ORIGIN_REQUEST_POLICY_ID, "Managed-CORS-S3Origin",
+                "Includes the headers that enable CORS requests when the origin is an Amazon S3 bucket",
+                selection("HeaderBehavior", "whitelist", "Headers", List.of(
+                        "Origin", "Access-Control-Request-Headers", "Access-Control-Request-Method")),
+                selection("CookieBehavior", "none", "Cookies", List.of()),
+                selection("QueryStringBehavior", "none", "QueryStrings", List.of())));
+        policies.put(MANAGED_MEDIATAILOR_ORIGIN_REQUEST_POLICY_ID, managedOriginRequestPolicy(
+                MANAGED_MEDIATAILOR_ORIGIN_REQUEST_POLICY_ID,
+                "Managed-Elemental-MediaTailor-PersonalizedManifests",
+                "For use with an origin that is an AWS Elemental MediaTailor endpoint",
+                selection("HeaderBehavior", "whitelist", "Headers", List.of(
+                        "Origin", "Access-Control-Request-Headers", "Access-Control-Request-Method",
+                        "User-Agent", "X-Forwarded-For")),
+                selection("CookieBehavior", "none", "Cookies", List.of()),
+                selection("QueryStringBehavior", "all", "QueryStrings", List.of())));
+        policies.put(MANAGED_HOST_HEADER_ONLY_ORIGIN_REQUEST_POLICY_ID, managedOriginRequestPolicy(
+                MANAGED_HOST_HEADER_ONLY_ORIGIN_REQUEST_POLICY_ID, "Managed-HostHeaderOnly",
+                "Includes only the Host header from the viewer request",
+                selection("HeaderBehavior", "whitelist", "Headers", List.of("Host")),
+                selection("CookieBehavior", "none", "Cookies", List.of()),
+                selection("QueryStringBehavior", "none", "QueryStrings", List.of())));
+        policies.put(MANAGED_USER_AGENT_REFERER_ORIGIN_REQUEST_POLICY_ID, managedOriginRequestPolicy(
+                MANAGED_USER_AGENT_REFERER_ORIGIN_REQUEST_POLICY_ID, "Managed-UserAgentRefererHeaders",
+                "Includes only the User-Agent and Referer headers",
+                selection("HeaderBehavior", "whitelist", "Headers", List.of("User-Agent", "Referer")),
+                selection("CookieBehavior", "none", "Cookies", List.of()),
+                selection("QueryStringBehavior", "none", "QueryStrings", List.of())));
+        return Map.copyOf(policies);
+    }
+
+    /**
+     * The AWS managed cache policies whose settings the CloudFront Developer Guide lists under
+     * "Use managed cache policies". The four Amplify-only policies have no published settings and
+     * are not modeled.
+     */
+    private static Map<String, CachePolicy> managedCachePolicies() {
+        List<String> noHeaders = List.of();
+        List<String> originOverrideHeaders = List.of(
+                "Host", "Origin", "X-HTTP-Method-Override", "X-HTTP-Method", "X-Method-Override");
+        Map<String, Object> noCookies = selection("CookieBehavior", "none", "Cookies", List.of());
+        Map<String, Object> allCookies = selection("CookieBehavior", "all", "Cookies", List.of());
+        Map<String, Object> noQueryStrings =
+                selection("QueryStringBehavior", "none", "QueryStrings", List.of());
+        Map<String, Object> allQueryStrings =
+                selection("QueryStringBehavior", "all", "QueryStrings", List.of());
+        Map<String, CachePolicy> policies = new LinkedHashMap<>();
+        addManagedCachePolicy(policies, "2e54312d-136d-493c-8eb9-b001f22f67d2", "Managed-Amplify",
+                2, 600, 2, true, true,
+                headerSelection(List.of("Authorization", "CloudFront-Viewer-Country", "Host")),
+                allCookies, allQueryStrings);
+        addManagedCachePolicy(policies, "4135ea2d-6df8-44a3-9df3-4b5a84be39ad",
+                "Managed-CachingDisabled", 0, 0, 0, false, false,
+                headerSelection(noHeaders), noCookies, noQueryStrings);
+        addManagedCachePolicy(policies, "658327ea-f89d-4fab-a63d-7e88639e58f6",
+                "Managed-CachingOptimized", 1, 31536000, 86400, true, true,
+                headerSelection(noHeaders), noCookies, noQueryStrings);
+        addManagedCachePolicy(policies, "b2884449-e4de-46a7-ac36-70bc7f1ddd6d",
+                "Managed-CachingOptimizedForUncompressedObjects", 1, 31536000, 86400, false, false,
+                headerSelection(noHeaders), noCookies, noQueryStrings);
+        addManagedCachePolicy(policies, "08627262-05a9-4f76-9ded-b50ca2e3a84f",
+                "Managed-Elemental-MediaPackage", 0, 31536000, 86400, true, false,
+                headerSelection(List.of("Origin")), noCookies,
+                selection("QueryStringBehavior", "whitelist", "QueryStrings",
+                        List.of("aws.manifestfilter", "start", "end", "m")));
+        addManagedCachePolicy(policies, "83da9c7e-98b4-4e11-a168-04f0df8e2c65",
+                "Managed-UseOriginCacheControlHeaders", 0, 31536000, 0, true, true,
+                headerSelection(originOverrideHeaders), allCookies, noQueryStrings);
+        addManagedCachePolicy(policies, "4cc15a8a-d715-48a4-82b8-cc0b614638fe",
+                "Managed-UseOriginCacheControlHeaders-QueryStrings", 0, 31536000, 0, true, true,
+                headerSelection(originOverrideHeaders), allCookies, allQueryStrings);
+        return Map.copyOf(policies);
+    }
+
+    private static Map<String, Object> headerSelection(List<String> names) {
+        return selection("HeaderBehavior", names.isEmpty() ? "none" : "whitelist", "Headers", names);
+    }
+
+    private static void addManagedCachePolicy(
+            Map<String, CachePolicy> policies, String id, String name, long minTtl, long maxTtl,
+            long defaultTtl, boolean gzip, boolean brotli, Map<String, Object> headers,
+            Map<String, Object> cookies, Map<String, Object> queryStrings) {
+        Map<String, Object> parameters = new LinkedHashMap<>();
+        parameters.put("EnableAcceptEncodingGzip", Boolean.toString(gzip));
+        parameters.put("EnableAcceptEncodingBrotli", Boolean.toString(brotli));
+        parameters.put("HeadersConfig", headers);
+        parameters.put("CookiesConfig", cookies);
+        parameters.put("QueryStringsConfig", queryStrings);
+        Map<String, Object> config = new LinkedHashMap<>();
+        config.put("MinTTL", Long.toString(minTtl));
+        config.put("DefaultTTL", Long.toString(defaultTtl));
+        config.put("MaxTTL", Long.toString(maxTtl));
+        config.put("ParametersInCacheKeyAndForwardedToOrigin", Map.copyOf(parameters));
+        CachePolicy policy = new CachePolicy();
+        policy.setId(id);
+        policy.setName(name);
+        policy.setEtag(MANAGED_POLICY_ETAG);
+        policy.setLastModifiedTime(Instant.EPOCH);
+        policy.setConfig(Map.copyOf(config));
+        policies.put(id, policy);
+    }
+
+    private static OriginRequestPolicy managedOriginRequestPolicy(
+            String id, String name, String comment, Map<String, Object> headers,
+            Map<String, Object> cookies, Map<String, Object> queryStrings) {
+        Map<String, Object> config = new LinkedHashMap<>();
+        config.put("HeadersConfig", headers);
+        config.put("CookiesConfig", cookies);
+        config.put("QueryStringsConfig", queryStrings);
+        OriginRequestPolicy policy = new OriginRequestPolicy();
+        policy.setId(id);
+        policy.setName(name);
+        policy.setComment(comment);
+        policy.setEtag(MANAGED_POLICY_ETAG);
+        policy.setLastModifiedTime(Instant.EPOCH);
+        policy.setConfig(Map.copyOf(config));
+        return policy;
+    }
+
+    /** One policy selection block, in the shape {@link CloudFrontPolicyConfigCodec} stores. */
+    private static Map<String, Object> selection(String behaviorKey, String behavior,
+                                                 String listKey, List<String> names) {
+        Map<String, Object> block = new LinkedHashMap<>();
+        block.put(behaviorKey, behavior);
+        if (!names.isEmpty()) {
+            block.put(listKey, List.copyOf(names));
+        }
+        return Map.copyOf(block);
+    }
+
+    private static ResponseHeadersPolicy managedResponseHeadersPolicy(
+            String id, String name, String comment, Map<String, Object> config) {
+        ResponseHeadersPolicy policy = new ResponseHeadersPolicy();
+        policy.setId(id);
+        policy.setName(name);
+        policy.setComment(comment);
+        policy.setEtag(MANAGED_POLICY_ETAG);
+        policy.setLastModifiedTime(Instant.EPOCH);
+        policy.setConfig(config);
+        return policy;
+    }
+
+    private static Map<String, Object> corsConfig(List<String> origins, List<String> methods,
+                                                   List<String> headers, List<String> exposeHeaders,
+                                                   Long maxAgeSeconds) {
+        Map<String, Object> cors = new LinkedHashMap<>();
+        cors.put("AccessControlAllowCredentials", "false");
+        cors.put("AccessControlAllowHeaders", headers);
+        cors.put("AccessControlAllowMethods", methods);
+        cors.put("AccessControlAllowOrigins", origins);
+        cors.put("AccessControlExposeHeaders", exposeHeaders);
+        if (maxAgeSeconds != null) {
+            cors.put("AccessControlMaxAgeSec", Long.toString(maxAgeSeconds));
+        }
+        cors.put("OriginOverride", "false");
+        return Map.copyOf(cors);
+    }
+
+    private static Map<String, Object> securityHeadersConfig() {
+        Map<String, Object> security = new LinkedHashMap<>();
+        security.put("ContentTypeOptions", Map.of("Override", "true"));
+        security.put("FrameOptions", Map.of("FrameOption", "SAMEORIGIN", "Override", "false"));
+        security.put("ReferrerPolicy", Map.of(
+                "ReferrerPolicy", "strict-origin-when-cross-origin", "Override", "false"));
+        security.put("StrictTransportSecurity", Map.of(
+                "AccessControlMaxAgeSec", "31536000", "Override", "false"));
+        security.put("XSSProtection", Map.of(
+                "Protection", "true", "ModeBlock", "true", "Override", "false"));
+        return Map.copyOf(security);
+    }
+
+    // ── Origin Access Control ─────────────────────────────────────────────────
+
+    public synchronized OriginAccessControl createOriginAccessControl(OriginAccessControl oac) {
+        validateOriginAccessControl(oac);
+        oac.setId(UUID.randomUUID().toString());
+        oac.setEtag(UUID.randomUUID().toString());
+        oac.setLastModifiedTime(Instant.now());
+        oacStore.put(oac.getId(), oac);
+        return oac;
+    }
+
+    public OriginAccessControl getOriginAccessControl(String id) {
+        return oacStore.get(id).orElseThrow(() ->
+                new AwsException("NoSuchOriginAccessControl",
+                        "The specified origin access control does not exist.", 404));
+    }
+
+    public synchronized OriginAccessControl updateOriginAccessControl(String id, String ifMatch,
+                                                                       OriginAccessControl updated) {
+        OriginAccessControl existing = getOriginAccessControl(id);
+        if (!existing.getEtag().equals(ifMatch)) {
+            throw new AwsException("InvalidIfMatchVersion",
+                    "The If-Match version is missing or not valid for the resource.", 400);
+        }
+        validateOriginAccessControl(updated);
+        if (changesHowItSigns(existing, updated) && originAccessControlInUse(id)) {
+            throw new AwsException("IllegalUpdate", "Cannot update origin type when associated to origins.", 400);
+        }
+        updated.setId(id);
+        updated.setEtag(UUID.randomUUID().toString());
+        updated.setLastModifiedTime(Instant.now());
+        oacStore.put(id, updated);
+        return updated;
+    }
+
+    public synchronized void deleteOriginAccessControl(String id, String ifMatch) {
+        OriginAccessControl existing = getOriginAccessControl(id);
+        if (!existing.getEtag().equals(ifMatch)) {
+            throw new AwsException("InvalidIfMatchVersion",
+                    "The If-Match version is missing or not valid for the resource.", 400);
+        }
+        if (originAccessControlInUse(id)) {
+            throw new AwsException("OriginAccessControlInUse",
+                    "Cannot delete the origin access control because it's in use by one or more distributions.",
+                    409);
+        }
+        oacStore.delete(id);
+    }
+
+    public List<OriginAccessControl> listOriginAccessControls(String marker, int maxItems) {
+        List<OriginAccessControl> all = new ArrayList<>(oacStore.scan(k -> true));
+        all.sort((a, b) -> a.getName() != null && b.getName() != null
+                ? a.getName().compareTo(b.getName()) : a.getId().compareTo(b.getId()));
+        return paginate(all, marker, maxItems, OriginAccessControl::getId);
+    }
+
+    // ── Origin Access Identity (OAI) ──────────────────────────────────────────
+
+    public synchronized CloudFrontOriginAccessIdentity createCloudFrontOriginAccessIdentity(
+            CloudFrontOriginAccessIdentity oai) {
+        for (CloudFrontOriginAccessIdentity existing : oaiStore.scan(k -> true)) {
+            if (oai.getCallerReference() != null
+                    && oai.getCallerReference().equals(existing.getCallerReference())) {
+                throw new AwsException("CloudFrontOriginAccessIdentityAlreadyExists",
+                        "An origin access identity with the caller reference already exists.", 409);
+            }
+        }
+        oai.setId(generateDistributionId());
+        oai.setS3CanonicalUserId(UUID.randomUUID().toString().replace("-", "") + UUID.randomUUID().toString().replace("-", ""));
+        oai.setEtag(UUID.randomUUID().toString());
+        oaiStore.put(oai.getId(), oai);
+        return oai;
+    }
+
+    public CloudFrontOriginAccessIdentity getCloudFrontOriginAccessIdentity(String id) {
+        return oaiStore.get(id).orElseThrow(() ->
+                new AwsException("NoSuchCloudFrontOriginAccessIdentity",
+                        "The specified origin access identity does not exist.", 404));
+    }
+
+    public synchronized CloudFrontOriginAccessIdentity updateCloudFrontOriginAccessIdentity(
+            String id, String ifMatch, CloudFrontOriginAccessIdentity updated) {
+        CloudFrontOriginAccessIdentity existing = getCloudFrontOriginAccessIdentity(id);
+        if (!existing.getEtag().equals(ifMatch)) {
+            throw new AwsException("InvalidIfMatchVersion",
+                    "The If-Match version is missing or not valid for the resource.", 400);
+        }
+        updated.setId(id);
+        updated.setS3CanonicalUserId(existing.getS3CanonicalUserId());
+        updated.setEtag(UUID.randomUUID().toString());
+        oaiStore.put(id, updated);
+        return updated;
+    }
+
+    public synchronized void deleteCloudFrontOriginAccessIdentity(String id, String ifMatch) {
+        CloudFrontOriginAccessIdentity existing = getCloudFrontOriginAccessIdentity(id);
+        if (!existing.getEtag().equals(ifMatch)) {
+            throw new AwsException("InvalidIfMatchVersion",
+                    "The If-Match version is missing or not valid for the resource.", 400);
+        }
+        if (originAccessIdentityInUse(id)) {
+            throw new AwsException("CloudFrontOriginAccessIdentityInUse",
+                    "The Origin Access Identity specified is already in use.", 409);
+        }
+        oaiStore.delete(id);
+    }
+
+    public List<CloudFrontOriginAccessIdentity> listCloudFrontOriginAccessIdentities(
+            String marker, int maxItems) {
+        List<CloudFrontOriginAccessIdentity> all = new ArrayList<>(oaiStore.scan(k -> true));
+        return paginate(all, marker, maxItems, CloudFrontOriginAccessIdentity::getId);
+    }
+
+    private static void validateOriginAccessControl(OriginAccessControl oac) {
+        if (oac == null) {
+            throw new AwsException("InvalidArgument",
+                    "The origin access control configuration is required.", 400);
+        }
+        List<String> violations = new ArrayList<>();
+        addEnumViolation(violations, "originAccessControlOriginType", oac.getOriginAccessControlOriginType(),
+                OAC_ORIGIN_TYPES);
+        addEnumViolation(violations, "signingProtocol", oac.getSigningProtocol(), OAC_SIGNING_PROTOCOLS);
+        addEnumViolation(violations, "signingBehavior", oac.getSigningBehavior(), OAC_SIGNING_BEHAVIORS);
+        if (oac.getName() == null) {
+            violations.add(nullViolation("name"));
+        }
+        if (!violations.isEmpty()) {
+            throw SmithyValidationErrors.exception("MalformedXML", violations);
+        }
+        if (oac.getName().isEmpty()) {
+            throw new AwsException("InvalidArgument", "The parameter Name is too small or empty.", 400);
+        }
+        if (oac.getName().length() > 64) {
+            throw new AwsException("InvalidArgument", "The parameter Name is too big.", 400);
+        }
+        String originType = oac.getOriginAccessControlOriginType();
+        if ("always-amz-auth".equals(oac.getSigningBehavior()) && !"lambda".equals(originType)) {
+            throw new AwsException("InvalidArgument",
+                    "The parameter SigningBehavior always-amz-auth is only supported with lambda origin type.", 400);
+        }
+        if ("sigv4a".equals(oac.getSigningProtocol()) && !"s3".equals(originType) && !"lambda".equals(originType)) {
+            throw new AwsException("InvalidArgument",
+                    "The parameter OriginType sigv4a is only supported with s3 or lambda origin types.", 400);
+        }
+        if ("execute-api".equals(originType)) {
+            // AWS lists this origin type but refuses it.
+            throw new AwsException("AccessDenied", "Access Denied.", 403);
+        }
+    }
+
+    /** What an origin access control may not change while an origin uses it. */
+    private static boolean changesHowItSigns(OriginAccessControl existing, OriginAccessControl updated) {
+        return !Objects.equals(existing.getOriginAccessControlOriginType(), updated.getOriginAccessControlOriginType())
+                || !Objects.equals(existing.getSigningProtocol(), updated.getSigningProtocol())
+                || "always-amz-auth".equals(existing.getSigningBehavior())
+                        != "always-amz-auth".equals(updated.getSigningBehavior());
+    }
+
+    private static void addEnumViolation(List<String> violations, String member, String value, List<String> values) {
+        if (value == null) {
+            violations.add(nullViolation(member));
+        } else if (!values.contains(value)) {
+            violations.add("Value '" + value + "' at 'originAccessControlConfig." + member
+                    + "' failed to satisfy constraint: Member must satisfy enum value set: ["
+                    + String.join(", ", values) + "]");
+        }
+    }
+
+    private static String nullViolation(String member) {
+        return SmithyValidationErrors.notNull("originAccessControlConfig." + member);
+    }
+
+    /** The kinds of Lambda origin CloudFront tells apart. */
+    private enum LambdaOrigin { NONE, FUNCTION_URL, WEB_FUNCTION, GLOBAL_WEB_FUNCTION }
+
+    /**
+     * CloudFront knows a Lambda origin by its hostname alone, case sensitively. The endpoints of this
+     * Floci end in its own host instead of {@code on.aws}.
+     */
+    private static Pattern lambdaOriginHost(EmulatorConfig config) {
+        String authority = URI.create(config.effectiveBaseUrl()).getAuthority();
+        String flociHost = Pattern.quote(authority.replaceFirst(":\\d+$", "")) + "(?::\\d+)?";
+        return Pattern.compile(".+\\.(lambda-web|lambda-url)\\.(global|[a-z]{2,4}-[a-z-]+-\\d+)\\.(?:on\\.aws|"
+                + flociHost + ")");
+    }
+
+    private LambdaOrigin lambdaOrigin(String domainName) {
+        Matcher matcher = lambdaOriginHost.matcher(domainName == null ? "" : domainName);
+        if (!matcher.matches()) {
+            return LambdaOrigin.NONE;
+        }
+        boolean global = "global".equals(matcher.group(2));
+        if ("lambda-url".equals(matcher.group(1))) {
+            return global ? LambdaOrigin.NONE : LambdaOrigin.FUNCTION_URL;
+        }
+        return global ? LambdaOrigin.GLOBAL_WEB_FUNCTION : LambdaOrigin.WEB_FUNCTION;
+    }
+
+    /**
+     * The origin access control an origin names has to exist, and suit a Lambda origin by the rules
+     * CloudFront checks in this order. Then come the Lambda@Edge origin triggers it refuses in front
+     * of the origins those controls sign.
+     */
+    private void validateOriginAccessControls(DistributionConfig config) {
+        if (config == null || config.getOrigins() == null) {
+            return;
+        }
+        Set<String> amzAuthOrigins = new HashSet<>();
+        for (Origin origin : config.getOrigins()) {
+            String oacId = origin == null ? null : origin.getOriginAccessControlId();
+            if (oacId == null || oacId.isBlank()) {
+                continue;
+            }
+            Optional<OriginAccessControl> oac = oacStore.get(oacId);
+            if (oac.isEmpty()) {
+                throw new AwsException("InvalidOriginAccessControl",
+                        "The specified origin access control does not exist or is not valid.", 400);
+            }
+            validateOriginAccessControlFor(lambdaOrigin(origin.getDomainName()), oac.get());
+            if ("always-amz-auth".equals(oac.get().getSigningBehavior())
+                    || "sigv4a".equals(oac.get().getSigningProtocol())) {
+                amzAuthOrigins.add(origin.getId());
+            }
+        }
+        if (config.getDefaultCacheBehavior() != null) {
+            rejectOriginTriggers(amzAuthOrigins, config.getDefaultCacheBehavior().getTargetOriginId(),
+                    config.getDefaultCacheBehavior().getLambdaFunctionAssociations());
+        }
+        if (config.getCacheBehaviors() != null) {
+            for (CacheBehavior behavior : config.getCacheBehaviors()) {
+                rejectOriginTriggers(amzAuthOrigins, behavior.getTargetOriginId(),
+                        behavior.getLambdaFunctionAssociations());
+            }
+        }
+    }
+
+    private static void validateOriginAccessControlFor(LambdaOrigin origin, OriginAccessControl oac) {
+        boolean lambda = "lambda".equals(oac.getOriginAccessControlOriginType());
+        boolean webFunction = origin == LambdaOrigin.WEB_FUNCTION || origin == LambdaOrigin.GLOBAL_WEB_FUNCTION;
+        if (webFunction ? !lambda : (lambda && origin == LambdaOrigin.NONE)) {
+            throw illegalOriginAccessConfiguration("The origin type and OAC origin type differ");
+        }
+        if (!lambda) {
+            return;
+        }
+        boolean sigv4a = "sigv4a".equals(oac.getSigningProtocol());
+        if (origin == LambdaOrigin.GLOBAL_WEB_FUNCTION && !sigv4a) {
+            throw illegalOriginAccessConfiguration("This origin domain requires SigV4a signing protocol.");
+        }
+        if (origin != LambdaOrigin.GLOBAL_WEB_FUNCTION && sigv4a) {
+            throw illegalOriginAccessConfiguration("SigV4a signing protocol is not compatible with this origin domain.");
+        }
+        boolean amzAuth = "always-amz-auth".equals(oac.getSigningBehavior());
+        if (webFunction && !amzAuth) {
+            throw illegalOriginAccessConfiguration("Lambda-Web origins require always-amz-auth signing behavior.");
+        }
+        if (!webFunction && amzAuth) {
+            throw illegalOriginAccessConfiguration("always-amz-auth signing behavior requires a Lambda-Web origin.");
+        }
+    }
+
+    private static AwsException illegalOriginAccessConfiguration(String reason) {
+        return new AwsException("IllegalOriginAccessConfiguration", "Illegal configuration: " + reason, 400);
+    }
+
+    private static void rejectOriginTriggers(Set<String> amzAuthOrigins, String targetOriginId,
+                                             List<Map<String, Object>> associations) {
+        if (!amzAuthOrigins.contains(targetOriginId) || associations == null) {
+            return;
+        }
+        for (Map<String, Object> association : associations) {
+            Object eventType = association.get("EventType");
+            if ("origin-request".equals(eventType) || "origin-response".equals(eventType)) {
+                throw new AwsException("InvalidLambdaFunctionAssociation",
+                        "Lambda@Edge origin triggers are incompatible with SigV4a and always-amz-auth origins."
+                                + " Use a different origin or disassociate the function.", 400);
+            }
+        }
+    }
+
+    private boolean originAccessControlInUse(String id) {
+        for (Distribution distribution : distStore.scan(k -> true)) {
+            DistributionConfig config = distribution.getConfig();
+            if (config == null || config.getOrigins() == null) {
+                continue;
+            }
+            for (Origin origin : config.getOrigins()) {
+                if (origin != null && id.equals(origin.getOriginAccessControlId())) {
+                    return true;
+                }
+            }
+        }
+        return false;
+    }
+
+    private boolean originAccessIdentityInUse(String id) {
+        for (Distribution distribution : distStore.scan(k -> true)) {
+            DistributionConfig config = distribution.getConfig();
+            if (config == null || config.getOrigins() == null) {
+                continue;
+            }
+            for (Origin origin : config.getOrigins()) {
+                if (origin != null && originAccessIdentityMatches(
+                        origin.getS3OriginConfig() != null
+                                ? origin.getS3OriginConfig().get("OriginAccessIdentity")
+                                : null,
+                        id)) {
+                    return true;
+                }
+            }
+        }
+        for (StreamingDistribution distribution : streamingDistStore.scan(k -> true)) {
+            if (originAccessIdentityMatches(distribution.getS3OriginAccessIdentity(), id)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private static boolean originAccessIdentityMatches(String reference, String id) {
+        if (reference == null || reference.isBlank()) {
+            return false;
+        }
+        String normalized = reference.startsWith("/") ? reference.substring(1) : reference;
+        return normalized.equals("origin-access-identity/cloudfront/" + id);
+    }
+
+    // ── CloudFront Functions ──────────────────────────────────────────────────
+
+    public synchronized CloudFrontFunction createFunction(CloudFrontFunction fn) {
+        validateFunctionRuntime(fn.getRuntime());
+        // The bare name holds the DEVELOPMENT stage, and the LIVE stage of releases before
+        // stage-aware keys.
+        if (functionStore.get(fn.getName()).isPresent()
+                || functionStore.get(functionKey(fn.getName(), "LIVE")).isPresent()) {
+            throw new AwsException("FunctionAlreadyExists",
+                    "A function with the same name already exists in this AWS account.", 409);
+        }
+        fn.setStage("DEVELOPMENT");
+        fn.setStatus("UNPUBLISHED");
+        fn.setEtag(UUID.randomUUID().toString());
+        fn.setCreatedTime(Instant.now());
+        fn.setLastModifiedTime(Instant.now());
+        functionStore.put(fn.getName(), fn);
+        return fn;
+    }
+
+    public CloudFrontFunction describeFunction(String name, String stage) {
+        String effectiveStage = normalizeFunctionStage(stage);
+        Optional<CloudFrontFunction> function = functionStore.get(functionKey(name, effectiveStage));
+        if (function.isEmpty() && "LIVE".equals(effectiveStage)) {
+            // Releases before stage-aware keys stored a published LIVE function under
+            // the bare name. Keep that state readable without exposing it as DEVELOPMENT.
+            function = functionStore.get(name).filter(fn -> "LIVE".equals(fn.getStage()));
+        }
+        return function.filter(fn -> effectiveStage.equals(fn.getStage())).orElseThrow(() ->
+                new AwsException("NoSuchFunctionExists",
+                        "The specified function does not exist.", 404));
+    }
+
+    public synchronized CloudFrontFunction updateFunction(String name, String ifMatch,
+                                                          CloudFrontFunction updated) {
+        validateFunctionRuntime(updated.getRuntime());
+        CloudFrontFunction existing = describeFunction(name, null);
+        if (!existing.getEtag().equals(ifMatch)) {
+            throw new AwsException("InvalidIfMatchVersion",
+                    "The If-Match version is missing or not valid for the resource.", 400);
+        }
+        updated.setName(name);
+        updated.setStage(existing.getStage());
+        updated.setStatus(existing.getStatus());
+        updated.setEtag(UUID.randomUUID().toString());
+        updated.setCreatedTime(existing.getCreatedTime());
+        updated.setLastModifiedTime(Instant.now());
+        functionStore.put(name, updated);
+        return updated;
+    }
+
+    public synchronized CloudFrontFunction publishFunction(String name, String ifMatch) {
+        CloudFrontFunction development = describeFunction(name, "DEVELOPMENT");
+        if (!development.getEtag().equals(ifMatch)) {
+            throw new AwsException("InvalidIfMatchVersion",
+                    "The If-Match version is missing or not valid for the resource.", 400);
+        }
+        CloudFrontFunction live = copyFunction(development);
+        live.setStage("LIVE");
+        live.setStatus("DEPLOYED");
+        live.setEtag(UUID.randomUUID().toString());
+        live.setLastModifiedTime(Instant.now());
+        functionStore.put(functionKey(name, "LIVE"), live);
+        return live;
+    }
+
+    public synchronized void deleteFunction(String name, String ifMatch) {
+        CloudFrontFunction existing = functionStore.get(name)
+                .or(() -> functionStore.get(functionKey(name, "LIVE")))
+                .orElseThrow(() -> new AwsException("NoSuchFunctionExists",
+                        "The specified function does not exist.", 404));
+        if (!existing.getEtag().equals(ifMatch)) {
+            throw new AwsException("InvalidIfMatchVersion",
+                    "The If-Match version is missing or not valid for the resource.", 400);
+        }
+        functionStore.delete(name);
+        functionStore.delete(functionKey(name, "LIVE"));
+    }
+
+    public List<CloudFrontFunction> listFunctions(String stage, String marker, int maxItems) {
+        List<CloudFrontFunction> all = new ArrayList<>(functionStore.scan(k -> true));
+        if (stage != null && !stage.isEmpty()) {
+            String effectiveStage = normalizeFunctionStage(stage);
+            all = new ArrayList<>(all.stream()
+                    .filter(f -> effectiveStage.equals(f.getStage()))
+                    .toList());
+        }
+        all.sort(Comparator.comparing(CloudFrontFunction::getName)
+                .thenComparing(CloudFrontFunction::getStage));
+        return paginate(all, marker, maxItems, CloudFrontFunction::getName);
+    }
+
+    private static String functionKey(String name, String stage) {
+        return switch (stage) {
+            case "DEVELOPMENT" -> name;
+            case "LIVE" -> name + "::LIVE";
+            default -> throw invalidFunctionStage(stage);
+        };
+    }
+
+    private static String normalizeFunctionStage(String stage) {
+        String effectiveStage = stage == null || stage.isEmpty() ? "DEVELOPMENT" : stage;
+        if (!"DEVELOPMENT".equals(effectiveStage) && !"LIVE".equals(effectiveStage)) {
+            throw invalidFunctionStage(effectiveStage);
+        }
+        return effectiveStage;
+    }
+
+    private static void validateFunctionRuntime(String runtime) {
+        if (runtime != null && !FUNCTION_RUNTIMES.contains(runtime)) {
+            throw new AwsException("InvalidArgument",
+                    "The parameter Runtime must be cloudfront-js-1.0 or cloudfront-js-2.0.", 400);
+        }
+    }
+
+    private static AwsException invalidFunctionStage(String stage) {
+        return new AwsException("InvalidArgument",
+                "The parameter Stage must be DEVELOPMENT or LIVE: " + stage, 400);
+    }
+
+    private static CloudFrontFunction copyFunction(CloudFrontFunction source) {
+        CloudFrontFunction copy = new CloudFrontFunction();
+        copy.setName(source.getName());
+        copy.setStage(source.getStage());
+        copy.setStatus(source.getStatus());
+        copy.setFunctionCode(source.getFunctionCode());
+        copy.setRuntime(source.getRuntime());
+        copy.setComment(source.getComment());
+        copy.setEtag(source.getEtag());
+        copy.setCreatedTime(source.getCreatedTime());
+        copy.setLastModifiedTime(source.getLastModifiedTime());
+        return copy;
+    }
+
+    // ── Tags ──────────────────────────────────────────────────────────────────
+
+    public Map<String, String> listTagsForResource(String arn) {
+        return tagStore.get(arn).orElse(new LinkedHashMap<>());
+    }
+
+    public synchronized void tagResource(String arn, Map<String, String> tags) {
+        Map<String, String> existing = new LinkedHashMap<>(tagStore.get(arn).orElse(new LinkedHashMap<>()));
+        existing.putAll(tags);
+        tagStore.put(arn, existing);
+    }
+
+    public synchronized void untagResource(String arn, List<String> tagKeys) {
+        Map<String, String> existing = new LinkedHashMap<>(tagStore.get(arn).orElse(new LinkedHashMap<>()));
+        tagKeys.forEach(existing::remove);
+        tagStore.put(arn, existing);
+    }
+
+    // ── Continuous Deployment Policies ───────────────────────────────────────
+
+    public synchronized ContinuousDeploymentPolicy createContinuousDeploymentPolicy(
+            ContinuousDeploymentPolicy policy) {
+        policy.setId(UUID.randomUUID().toString());
+        policy.setLastModifiedTime(Instant.now());
+        policy.setEtag(UUID.randomUUID().toString());
+        cdpStore.put(policy.getId(), policy);
+        return policy;
+    }
+
+    public ContinuousDeploymentPolicy getContinuousDeploymentPolicy(String id) {
+        return cdpStore.get(id).orElseThrow(() ->
+                new AwsException("NoSuchContinuousDeploymentPolicy",
+                        "The specified continuous deployment policy does not exist.", 404));
+    }
+
+    public synchronized ContinuousDeploymentPolicy updateContinuousDeploymentPolicy(
+            String id, String ifMatch, ContinuousDeploymentPolicy updated) {
+        ContinuousDeploymentPolicy existing = getContinuousDeploymentPolicy(id);
+        if (!existing.getEtag().equals(ifMatch)) {
+            throw new AwsException("InvalidIfMatchVersion",
+                    "The If-Match version is missing or not valid for the resource.", 400);
+        }
+        updated.setId(id);
+        updated.setLastModifiedTime(Instant.now());
+        updated.setEtag(UUID.randomUUID().toString());
+        cdpStore.put(id, updated);
+        return updated;
+    }
+
+    public synchronized void deleteContinuousDeploymentPolicy(String id, String ifMatch) {
+        ContinuousDeploymentPolicy existing = getContinuousDeploymentPolicy(id);
+        if (!existing.getEtag().equals(ifMatch)) {
+            throw new AwsException("InvalidIfMatchVersion",
+                    "The If-Match version is missing or not valid for the resource.", 400);
+        }
+        cdpStore.delete(id);
+    }
+
+    public List<ContinuousDeploymentPolicy> listContinuousDeploymentPolicies(String marker, int maxItems) {
+        List<ContinuousDeploymentPolicy> all = new ArrayList<>(cdpStore.scan(k -> true));
+        all.sort((a, b) -> a.getId().compareTo(b.getId()));
+        return paginate(all, marker, maxItems, ContinuousDeploymentPolicy::getId);
+    }
+
+    // ── CopyDistribution ──────────────────────────────────────────────────────
+
+    public synchronized Distribution copyDistribution(String primaryDistributionId, String callerReference,
+                                                       Map<String, String> tags) {
+        Distribution primary = getDistribution(primaryDistributionId);
+        Distribution copy = new Distribution();
+        copy.setConfig(primary.getConfig());
+        if (copy.getConfig() != null) {
+            copy.getConfig().setCallerReference(callerReference);
+            copy.getConfig().setStaging(true);
+        }
+        return createDistribution(copy, tags);
+    }
+
+    // ── Public Keys ───────────────────────────────────────────────────────────
+
+    public synchronized PublicKey createPublicKey(PublicKey key) {
+        validatePublicKey(key);
+        boolean duplicateCallerReference =
+                publicKeyStore.scan(existing -> true).stream()
+                        .anyMatch(existing -> Objects.equals(
+                                existing.getCallerReference(),
+                                key.getCallerReference()));
+        if (duplicateCallerReference) {
+            throw new AwsException(
+                    "PublicKeyAlreadyExists",
+                    "A public key with this caller reference already exists.",
+                    409);
+        }
+        key.setId(generatePublicKeyId());
+        key.setCreatedTime(Instant.now());
+        key.setEtag(UUID.randomUUID().toString());
+        publicKeyStore.put(key.getId(), key);
+        return key;
+    }
+
+    public PublicKey getPublicKey(String id) {
+        return publicKeyStore.get(id).orElseThrow(() ->
+                new AwsException("NoSuchPublicKey", "The specified public key does not exist.", 404));
+    }
+
+    public synchronized PublicKey updatePublicKey(String id, String ifMatch, PublicKey updated) {
+        PublicKey existing = getPublicKey(id);
+        if (!existing.getEtag().equals(ifMatch)) {
+            throw new AwsException(
+                    "PreconditionFailed",
+                    "The precondition in one or more request-header fields evaluated to false.",
+                    412);
+        }
+        validatePublicKey(updated);
+        if (!Objects.equals(
+                    existing.getCallerReference(),
+                    updated.getCallerReference())
+                || !Objects.equals(existing.getName(), updated.getName())
+                || !Objects.equals(
+                    existing.getEncodedKey(), updated.getEncodedKey())) {
+            throw new AwsException(
+                    "CannotChangeImmutablePublicKeyFields",
+                    "The caller reference, name, and encoded public key cannot be changed.",
+                    400);
+        }
+        updated.setId(id);
+        updated.setCreatedTime(existing.getCreatedTime());
+        updated.setEtag(UUID.randomUUID().toString());
+        publicKeyStore.put(id, updated);
+        return updated;
+    }
+
+    public synchronized void deletePublicKey(String id, String ifMatch) {
+        PublicKey existing = getPublicKey(id);
+        if (!existing.getEtag().equals(ifMatch)) {
+            throw new AwsException(
+                    "PreconditionFailed",
+                    "The precondition in one or more request-header fields evaluated to false.",
+                    412);
+        }
+        if (publicKeyInUse(id)) {
+            throw new AwsException(
+                    "PublicKeyInUse", "The specified public key is in use.", 409);
+        }
+        publicKeyStore.delete(id);
+    }
+
+    public List<PublicKey> listPublicKeys(String marker, int maxItems) {
+        List<PublicKey> all = new ArrayList<>(publicKeyStore.scan(k -> true));
+        all.sort((a, b) -> a.getId().compareTo(b.getId()));
+        return paginate(all, marker, maxItems, PublicKey::getId);
+    }
+
+    /**
+     * Resolves the PEM public key for a {@code Key-Pair-Id} used to sign a request, but only when that
+     * public key is a member of one of the supplied key groups. Returns {@code null} when the key is
+     * unknown or is not a member of any of those groups — i.e. it is not a trusted signer.
+     */
+    public String trustedPublicKeyPem(String keyPairId, List<String> keyGroupIds) {
+        if (keyPairId == null || keyGroupIds == null || keyGroupIds.isEmpty()) {
+            return null;
+        }
+        boolean trusted = false;
+        for (String keyGroupId : keyGroupIds) {
+            KeyGroup group = keyGroupStore.get(keyGroupId).orElse(null);
+            if (group != null && group.getItems() != null && group.getItems().contains(keyPairId)) {
+                trusted = true;
+                break;
+            }
+        }
+        if (!trusted) {
+            return null;
+        }
+        return publicKeyStore.get(keyPairId).map(PublicKey::getEncodedKey).orElse(null);
+    }
+
+    public List<KeyGroup> activeTrustedKeyGroups(DistributionConfig config) {
+        LinkedHashSet<String> ids = new LinkedHashSet<>();
+        if (config != null) {
+            DefaultCacheBehavior defaultBehavior = config.getDefaultCacheBehavior();
+            if (defaultBehavior != null
+                    && defaultBehavior.isTrustedKeyGroupsEnabled()
+                    && defaultBehavior.getTrustedKeyGroups() != null) {
+                ids.addAll(defaultBehavior.getTrustedKeyGroups());
+            }
+            if (config.getCacheBehaviors() != null) {
+                for (CacheBehavior behavior : config.getCacheBehaviors()) {
+                    if (behavior != null
+                            && behavior.isTrustedKeyGroupsEnabled()
+                            && behavior.getTrustedKeyGroups() != null) {
+                        ids.addAll(behavior.getTrustedKeyGroups());
+                    }
+                }
+            }
+        }
+        return ids.stream().map(this::getKeyGroup).toList();
+    }
+
+    // ── Key Groups ────────────────────────────────────────────────────────────
+
+    public synchronized KeyGroup createKeyGroup(KeyGroup group) {
+        validateKeyGroup(group);
+        validateUniqueKeyGroupName(group.getName(), null);
+        group.setId(UUID.randomUUID().toString());
+        group.setLastModifiedTime(Instant.now());
+        group.setEtag(UUID.randomUUID().toString());
+        keyGroupStore.put(group.getId(), group);
+        return group;
+    }
+
+    public KeyGroup getKeyGroup(String id) {
+        return keyGroupStore.get(id).orElseThrow(() ->
+                new AwsException("NoSuchResource", "The specified key group does not exist.", 404));
+    }
+
+    public synchronized KeyGroup updateKeyGroup(String id, String ifMatch, KeyGroup updated) {
+        KeyGroup existing = getKeyGroup(id);
+        if (!existing.getEtag().equals(ifMatch)) {
+            throw new AwsException(
+                    "PreconditionFailed",
+                    "The precondition in one or more request-header fields evaluated to false.",
+                    412);
+        }
+        validateKeyGroup(updated);
+        validateUniqueKeyGroupName(updated.getName(), id);
+        updated.setId(id);
+        updated.setLastModifiedTime(Instant.now());
+        updated.setEtag(UUID.randomUUID().toString());
+        keyGroupStore.put(id, updated);
+        return updated;
+    }
+
+    public synchronized void deleteKeyGroup(String id, String ifMatch) {
+        KeyGroup existing = getKeyGroup(id);
+        if (!existing.getEtag().equals(ifMatch)) {
+            throw new AwsException(
+                    "PreconditionFailed",
+                    "The precondition in one or more request-header fields evaluated to false.",
+                    412);
+        }
+        if (keyGroupInUse(id)) {
+            throw new AwsException(
+                    "ResourceInUse",
+                    "Cannot delete this resource because it is in use.",
+                    409);
+        }
+        keyGroupStore.delete(id);
+    }
+
+    private void validateUniqueKeyGroupName(String name, String excludedId) {
+        boolean duplicate = keyGroupStore.scan(group -> true).stream()
+                .anyMatch(group -> !Objects.equals(excludedId, group.getId())
+                        && Objects.equals(name, group.getName()));
+        if (duplicate) {
+            throw new AwsException(
+                    "KeyGroupAlreadyExists",
+                    "A key group with this name already exists.",
+                    409);
+        }
+    }
+
+    public List<KeyGroup> listKeyGroups(String marker, int maxItems) {
+        List<KeyGroup> all = new ArrayList<>(keyGroupStore.scan(k -> true));
+        all.sort((a, b) -> a.getId().compareTo(b.getId()));
+        return paginate(all, marker, maxItems, KeyGroup::getId);
+    }
+
+    private static void validatePublicKey(PublicKey key) {
+        if (key == null
+                || key.getCallerReference() == null
+                || key.getCallerReference().isBlank()
+                || key.getName() == null
+                || key.getName().isBlank()
+                || key.getEncodedKey() == null
+                || key.getEncodedKey().isBlank()) {
+            throw new AwsException(
+                    "InvalidArgument",
+                    "CallerReference, Name, and EncodedKey are required.",
+                    400);
+        }
+        if (key.getComment() != null && key.getComment().length() > 128) {
+            throw new AwsException(
+                    "InvalidArgument", "The comment must be 128 characters or fewer.", 400);
+        }
+        try {
+            CloudFrontSignatureVerifier.parseSupportedPublicKey(
+                    key.getEncodedKey());
+        } catch (Exception e) {
+            throw new AwsException(
+                    "InvalidArgument",
+                    "The encoded public key must be RSA-2048 or ECDSA P-256 in X.509 PEM format.",
+                    400);
+        }
+    }
+
+    private void validateKeyGroup(KeyGroup group) {
+        if (group == null || group.getName() == null || group.getName().isBlank()) {
+            throw new AwsException(
+                    "InvalidArgument", "The parameter Name is required.", 400);
+        }
+        if (group.getComment() != null && group.getComment().length() > 128) {
+            throw new AwsException(
+                    "InvalidArgument", "The comment must be 128 characters or fewer.", 400);
+        }
+        List<String> items = group.getItems();
+        if (items == null || items.isEmpty()) {
+            throw new AwsException(
+                    "InvalidArgument",
+                    "A key group must contain at least one public key.",
+                    400);
+        }
+        if (items.size() > 5) {
+            throw new AwsException(
+                    "TooManyPublicKeysInKeyGroup",
+                    "A key group can contain at most five public keys.",
+                    400);
+        }
+        if (new LinkedHashSet<>(items).size() != items.size()) {
+            throw new AwsException(
+                    "InvalidArgument",
+                    "A public key cannot appear more than once in a key group.",
+                    400);
+        }
+        for (String publicKeyId : items) {
+            if (publicKeyId == null
+                    || publicKeyId.isBlank()
+                    || publicKeyStore.get(publicKeyId).isEmpty()) {
+                throw new AwsException(
+                        "InvalidArgument",
+                        "The specified public key does not exist.",
+                        400);
+            }
+        }
+    }
+
+    private void validateTrustedKeyGroups(DistributionConfig config) {
+        if (config == null) {
+            return;
+        }
+        DefaultCacheBehavior defaultBehavior = config.getDefaultCacheBehavior();
+        if (defaultBehavior != null) {
+            validateTrustedKeyGroups(
+                    defaultBehavior.isTrustedKeyGroupsEnabled(),
+                    defaultBehavior.getTrustedKeyGroups());
+        }
+        if (config.getCacheBehaviors() != null) {
+            for (CacheBehavior behavior : config.getCacheBehaviors()) {
+                if (behavior != null) {
+                    validateTrustedKeyGroups(
+                            behavior.isTrustedKeyGroupsEnabled(),
+                            behavior.getTrustedKeyGroups());
+                }
+            }
+        }
+    }
+
+    private void validateTrustedKeyGroups(
+            boolean enabled, List<String> keyGroupIds) {
+        List<String> ids = keyGroupIds != null ? keyGroupIds : List.of();
+        if (enabled && ids.isEmpty()) {
+            throw new AwsException(
+                    "InvalidArgument",
+                    "TrustedKeyGroups cannot be enabled without a key group.",
+                    400);
+        }
+        for (String keyGroupId : ids) {
+            if (keyGroupId == null
+                    || keyGroupId.isBlank()
+                    || keyGroupStore.get(keyGroupId).isEmpty()) {
+                throw new AwsException(
+                        "TrustedKeyGroupDoesNotExist",
+                        "The specified key group does not exist.",
+                        400);
+            }
+        }
+    }
+
+    private boolean publicKeyInUse(String id) {
+        for (KeyGroup group : keyGroupStore.scan(k -> true)) {
+            if (group.getItems() != null && group.getItems().contains(id)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private boolean keyGroupInUse(String id) {
+        for (Distribution distribution : distStore.scan(k -> true)) {
+            DistributionConfig config = distribution.getConfig();
+            if (config == null) {
+                continue;
+            }
+            DefaultCacheBehavior defaultBehavior =
+                    config.getDefaultCacheBehavior();
+            if (defaultBehavior != null
+                    && defaultBehavior.getTrustedKeyGroups() != null
+                    && defaultBehavior.getTrustedKeyGroups().contains(id)) {
+                return true;
+            }
+            if (config.getCacheBehaviors() != null) {
+                for (CacheBehavior behavior : config.getCacheBehaviors()) {
+                    if (behavior != null
+                            && behavior.getTrustedKeyGroups() != null
+                            && behavior.getTrustedKeyGroups().contains(id)) {
+                        return true;
+                    }
+                }
+            }
+        }
+        return false;
+    }
+
+    // ── Realtime Log Configs ──────────────────────────────────────────────────
+
+    public synchronized RealtimeLogConfig createRealtimeLogConfig(RealtimeLogConfig cfg) {
+        String arn = arn("realtime-log-config/" + cfg.getName());
+        cfg.setArn(arn);
+        realtimeLogConfigStore.put(cfg.getName(), cfg);
+        return cfg;
+    }
+
+    public RealtimeLogConfig getRealtimeLogConfig(String nameOrArn) {
+        if (AwsArnUtils.looksLikeArn(nameOrArn)) {
+            String name = nameOrArn.substring(nameOrArn.lastIndexOf('/') + 1);
+            return realtimeLogConfigStore.get(name).orElseThrow(() ->
+                    new AwsException("NoSuchRealtimeLogConfig",
+                            "The specified realtime log configuration does not exist.", 404));
+        }
+        return realtimeLogConfigStore.get(nameOrArn).orElseThrow(() ->
+                new AwsException("NoSuchRealtimeLogConfig",
+                        "The specified realtime log configuration does not exist.", 404));
+    }
+
+    public synchronized RealtimeLogConfig updateRealtimeLogConfig(RealtimeLogConfig updated) {
+        getRealtimeLogConfig(updated.getName());
+        String arn = arn("realtime-log-config/" + updated.getName());
+        updated.setArn(arn);
+        realtimeLogConfigStore.put(updated.getName(), updated);
+        return updated;
+    }
+
+    public synchronized void deleteRealtimeLogConfig(String nameOrArn) {
+        RealtimeLogConfig existing = getRealtimeLogConfig(nameOrArn);
+        String name = existing.getName();
+        realtimeLogConfigStore.delete(name);
+    }
+
+    public List<RealtimeLogConfig> listRealtimeLogConfigs(String marker, int maxItems) {
+        List<RealtimeLogConfig> all = new ArrayList<>(realtimeLogConfigStore.scan(k -> true));
+        all.sort((a, b) -> a.getName().compareTo(b.getName()));
+        return paginate(all, marker, maxItems, RealtimeLogConfig::getName);
+    }
+
+    // ── Streaming Distributions ───────────────────────────────────────────────
+
+    public synchronized StreamingDistribution createStreamingDistribution(StreamingDistribution sd) {
+        String id = generateDistributionId();
+        sd.setId(id);
+        sd.setArn(arn("streaming-distribution/" + id));
+        sd.setDomainName(domainNameFor(id));
+        sd.setStatus("Deployed");
+        sd.setLastModifiedTime(Instant.now());
+        sd.setEtag(UUID.randomUUID().toString());
+        streamingDistStore.put(id, sd);
+        return sd;
+    }
+
+    public StreamingDistribution getStreamingDistribution(String id) {
+        return streamingDistStore.get(id).orElseThrow(() ->
+                new AwsException("NoSuchStreamingDistribution",
+                        "The specified streaming distribution does not exist.", 404));
+    }
+
+    public synchronized StreamingDistribution updateStreamingDistribution(String id, String ifMatch,
+                                                                           StreamingDistribution updated) {
+        StreamingDistribution existing = getStreamingDistribution(id);
+        if (!existing.getEtag().equals(ifMatch)) {
+            throw new AwsException("InvalidIfMatchVersion",
+                    "The If-Match version is missing or not valid for the resource.", 400);
+        }
+        updated.setId(id);
+        updated.setArn(existing.getArn());
+        updated.setDomainName(existing.getDomainName());
+        updated.setStatus("Deployed");
+        updated.setLastModifiedTime(Instant.now());
+        updated.setEtag(UUID.randomUUID().toString());
+        streamingDistStore.put(id, updated);
+        return updated;
+    }
+
+    public synchronized void deleteStreamingDistribution(String id, String ifMatch) {
+        StreamingDistribution existing = getStreamingDistribution(id);
+        if (!existing.getEtag().equals(ifMatch)) {
+            throw new AwsException("InvalidIfMatchVersion",
+                    "The If-Match version is missing or not valid for the resource.", 400);
+        }
+        if (existing.isEnabled()) {
+            throw new AwsException("StreamingDistributionNotDisabled",
+                    "The streaming distribution you are trying to delete has not been disabled.", 409);
+        }
+        streamingDistStore.delete(id);
+    }
+
+    // ── Field-Level Encryption Configs ────────────────────────────────────────
+
+    public synchronized FieldLevelEncryptionConfig createFieldLevelEncryptionConfig(
+            FieldLevelEncryptionConfig cfg) {
+        cfg.setId(UUID.randomUUID().toString());
+        cfg.setLastModifiedTime(Instant.now());
+        cfg.setEtag(UUID.randomUUID().toString());
+        fleConfigStore.put(cfg.getId(), cfg);
+        return cfg;
+    }
+
+    public FieldLevelEncryptionConfig getFieldLevelEncryptionConfig(String id) {
+        return fleConfigStore.get(id).orElseThrow(() ->
+                new AwsException("NoSuchFieldLevelEncryptionConfig",
+                        "The specified field-level encryption configuration does not exist.", 404));
+    }
+
+    public synchronized FieldLevelEncryptionConfig updateFieldLevelEncryptionConfig(
+            String id, String ifMatch, FieldLevelEncryptionConfig updated) {
+        FieldLevelEncryptionConfig existing = getFieldLevelEncryptionConfig(id);
+        if (!existing.getEtag().equals(ifMatch)) {
+            throw new AwsException("InvalidIfMatchVersion",
+                    "The If-Match version is missing or not valid for the resource.", 400);
+        }
+        updated.setId(id);
+        updated.setLastModifiedTime(Instant.now());
+        updated.setEtag(UUID.randomUUID().toString());
+        fleConfigStore.put(id, updated);
+        return updated;
+    }
+
+    public synchronized void deleteFieldLevelEncryptionConfig(String id, String ifMatch) {
+        FieldLevelEncryptionConfig existing = getFieldLevelEncryptionConfig(id);
+        if (!existing.getEtag().equals(ifMatch)) {
+            throw new AwsException("InvalidIfMatchVersion",
+                    "The If-Match version is missing or not valid for the resource.", 400);
+        }
+        fleConfigStore.delete(id);
+    }
+
+    public List<FieldLevelEncryptionConfig> listFieldLevelEncryptionConfigs(String marker, int maxItems) {
+        List<FieldLevelEncryptionConfig> all = new ArrayList<>(fleConfigStore.scan(k -> true));
+        all.sort((a, b) -> a.getId().compareTo(b.getId()));
+        return paginate(all, marker, maxItems, FieldLevelEncryptionConfig::getId);
+    }
+
+    // ── Field-Level Encryption Profiles ──────────────────────────────────────
+
+    public synchronized FieldLevelEncryptionProfile createFieldLevelEncryptionProfile(
+            FieldLevelEncryptionProfile profile) {
+        profile.setId(UUID.randomUUID().toString());
+        profile.setLastModifiedTime(Instant.now());
+        profile.setEtag(UUID.randomUUID().toString());
+        fleProfileStore.put(profile.getId(), profile);
+        return profile;
+    }
+
+    public FieldLevelEncryptionProfile getFieldLevelEncryptionProfile(String id) {
+        return fleProfileStore.get(id).orElseThrow(() ->
+                new AwsException("NoSuchFieldLevelEncryptionProfile",
+                        "The specified field-level encryption profile does not exist.", 404));
+    }
+
+    public synchronized FieldLevelEncryptionProfile updateFieldLevelEncryptionProfile(
+            String id, String ifMatch, FieldLevelEncryptionProfile updated) {
+        FieldLevelEncryptionProfile existing = getFieldLevelEncryptionProfile(id);
+        if (!existing.getEtag().equals(ifMatch)) {
+            throw new AwsException("InvalidIfMatchVersion",
+                    "The If-Match version is missing or not valid for the resource.", 400);
+        }
+        updated.setId(id);
+        updated.setLastModifiedTime(Instant.now());
+        updated.setEtag(UUID.randomUUID().toString());
+        fleProfileStore.put(id, updated);
+        return updated;
+    }
+
+    public synchronized void deleteFieldLevelEncryptionProfile(String id, String ifMatch) {
+        FieldLevelEncryptionProfile existing = getFieldLevelEncryptionProfile(id);
+        if (!existing.getEtag().equals(ifMatch)) {
+            throw new AwsException("InvalidIfMatchVersion",
+                    "The If-Match version is missing or not valid for the resource.", 400);
+        }
+        fleProfileStore.delete(id);
+    }
+
+    public List<FieldLevelEncryptionProfile> listFieldLevelEncryptionProfiles(String marker, int maxItems) {
+        List<FieldLevelEncryptionProfile> all = new ArrayList<>(fleProfileStore.scan(k -> true));
+        all.sort((a, b) -> a.getId().compareTo(b.getId()));
+        return paginate(all, marker, maxItems, FieldLevelEncryptionProfile::getId);
+    }
+
+    // ── Monitoring Subscriptions ──────────────────────────────────────────────
+
+    public synchronized MonitoringSubscription createMonitoringSubscription(
+            String distributionId, MonitoringSubscription subscription) {
+        getDistribution(distributionId);
+        subscription.setDistributionId(distributionId);
+        monitoringStore.put(distributionId, subscription);
+        return subscription;
+    }
+
+    public MonitoringSubscription getMonitoringSubscription(String distributionId) {
+        return monitoringStore.get(distributionId).orElseThrow(() ->
+                new AwsException("NoSuchMonitoringSubscription",
+                        "A monitoring subscription does not exist for the specified distribution.", 404));
+    }
+
+    public synchronized void deleteMonitoringSubscription(String distributionId) {
+        getMonitoringSubscription(distributionId);
+        monitoringStore.delete(distributionId);
+    }
+
+    // ── Helpers ───────────────────────────────────────────────────────────────
+
+    /** A CloudFront ARN: global, so it carries no region and takes the request's partition. */
+    public String arn(String resource) {
+        return regionResolver.buildGlobalArn("cloudfront", accountId, resource);
+    }
+
+    private static String generateDistributionId() {
+        StringBuilder sb = new StringBuilder("E");
+        for (int i = 0; i < 13; i++) {
+            sb.append(CHARS.charAt(RANDOM.nextInt(CHARS.length())));
+        }
+        return sb.toString();
+    }
+
+    /** AWS issues public key ids as K + 13 characters; the value travels in Key-Pair-Id. */
+    private static String generatePublicKeyId() {
+        StringBuilder sb = new StringBuilder("K");
+        for (int i = 0; i < 13; i++) {
+            sb.append(CHARS.charAt(RANDOM.nextInt(CHARS.length())));
+        }
+        return sb.toString();
+    }
+
+    private static String generateInvalidationId() {
+        StringBuilder sb = new StringBuilder("I");
+        for (int i = 0; i < 13; i++) {
+            sb.append(CHARS.charAt(RANDOM.nextInt(CHARS.length())));
+        }
+        return sb.toString();
+    }
+
+    private static <T> List<T> mergeCustomAndManaged(String type, String policyLabel,
+                                                     Collection<T> custom, Collection<T> managed,
+                                                     Function<T, String> nameFn,
+                                                     Function<T, String> idFn) {
+        if (type != null && !"custom".equals(type) && !"managed".equals(type)) {
+            throw new AwsException("InvalidArgument",
+                    policyLabel + " Type must be managed or custom.", 400);
+        }
+        List<T> all = new ArrayList<>();
+        if (!"managed".equals(type)) {
+            all.addAll(custom);
+        }
+        if (!"custom".equals(type)) {
+            all.addAll(managed);
+        }
+        all.sort((a, b) -> nameFn.apply(a) != null && nameFn.apply(b) != null
+                ? nameFn.apply(a).compareTo(nameFn.apply(b))
+                : idFn.apply(a).compareTo(idFn.apply(b)));
+        return all;
+    }
+
+    private <T> List<T> paginate(List<T> all, String marker, int maxItems,
+                                  Function<T, String> keyFn) {
+        if (marker != null && !marker.isEmpty()) {
+            int idx = 0;
+            for (int i = 0; i < all.size(); i++) {
+                if (marker.equals(keyFn.apply(all.get(i)))) {
+                    idx = i + 1;
+                    break;
+                }
+            }
+            all = all.subList(idx, all.size());
+        }
+        if (maxItems > 0 && all.size() > maxItems) {
+            return all.subList(0, maxItems);
+        }
+        return all;
+    }
+}

@@ -1,0 +1,98 @@
+{
+  "expected": {
+    "FnEventInvokeConfig": {
+      "Properties": {
+        "DestinationConfig": {
+          "OnFailure": {
+            "Destination": "arn:aws:events:us-east-1:123456789012:event-bus/default"
+          },
+          "OnSuccess": {
+            "Destination": {
+              "Fn::GetAtt": [
+                "Target",
+                "Arn"
+              ]
+            }
+          }
+        },
+        "FunctionName": {
+          "Ref": "Fn"
+        },
+        "Qualifier": "$LATEST"
+      },
+      "Type": "AWS::Lambda::EventInvokeConfig"
+    },
+    "FnRole": {
+      "Policies": [
+        {
+          "PolicyDocument": {
+            "Statement": [
+              {
+                "Action": "lambda:InvokeFunction",
+                "Effect": "Allow",
+                "Resource": {
+                  "Fn::GetAtt": [
+                    "Target",
+                    "Arn"
+                  ]
+                }
+              }
+            ]
+          },
+          "PolicyName": "FnEventInvokeConfigOnSuccessLambdaPolicy"
+        },
+        {
+          "PolicyDocument": {
+            "Statement": [
+              {
+                "Action": "events:PutEvents",
+                "Effect": "Allow",
+                "Resource": "arn:aws:events:us-east-1:123456789012:event-bus/default"
+              }
+            ]
+          },
+          "PolicyName": "FnEventInvokeConfigOnFailureEventBridgePolicy"
+        }
+      ],
+      "Type": "AWS::IAM::Role"
+    }
+  },
+  "input": {
+    "Resources": {
+      "Fn": {
+        "Properties": {
+          "CodeUri": "s3://b/k",
+          "EventInvokeConfig": {
+            "DestinationConfig": {
+              "OnFailure": {
+                "Destination": "arn:aws:events:us-east-1:123456789012:event-bus/default",
+                "Type": "EventBridge"
+              },
+              "OnSuccess": {
+                "Destination": {
+                  "Fn::GetAtt": [
+                    "Target",
+                    "Arn"
+                  ]
+                },
+                "Type": "Lambda"
+              }
+            }
+          },
+          "Handler": "index.handler",
+          "Runtime": "python3.12"
+        },
+        "Type": "AWS::Serverless::Function"
+      },
+      "Target": {
+        "Properties": {
+          "CodeUri": "s3://b/k",
+          "Handler": "index.handler",
+          "Runtime": "python3.12"
+        },
+        "Type": "AWS::Serverless::Function"
+      }
+    },
+    "Transform": "AWS::Serverless-2016-10-31"
+  }
+}

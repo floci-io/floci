@@ -1,0 +1,23 @@
+{
+  "_source": {
+    "generator": "RequestShapeModelTest"
+  },
+  "operations": {
+    "Send": "SendRequest"
+  },
+  "shapes": {
+    "SendRequest": {
+      "type": "structure",
+      "members": {
+        "To": "Addresses"
+      }
+    },
+    "Addresses": {
+      "type": "list",
+      "member": "Address"
+    },
+    "Address": {
+      "type": "string"
+    }
+  }
+}

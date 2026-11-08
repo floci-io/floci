@@ -745,3 +745,207 @@ describe('API Gateway v1 — execute-api data plane', () => {
     });
   });
 });
+
+// ──────────────────────────── Query string parameter parsing ────────────────────────────
+
+/**
+ * How a REST API fills queryStringParameters / multiValueQueryStringParameters.
+ *
+ * Captured against a real REST API in us-west-2 with a Lambda proxy integration:
+ * ?x=1&x=2&x=3 yields {"x":"3"} and {"x":["1","2","3"]} — the LAST value wins in the
+ * single-value map, as it does for duplicate headers. A valueless parameter arrives as "",
+ * an absent query string makes both maps null, and a JSON:API style filter[status]=open
+ * keeps its brackets.
+ */
+describe('API Gateway v1 — query string parameters', () => {
+  let gw: APIGatewayClient;
+  let lambda: LambdaClient;
+  let apiId: string;
+  const echoFn = uniqueName('qs-echo');
+
+  beforeAll(async () => {
+    gw = makeClient(APIGatewayClient);
+    lambda = makeClient(LambdaClient);
+
+    await createLambda(lambda, echoFn, `
+      exports.handler = async (event) => ({
+        statusCode: 200,
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          qsp: event.queryStringParameters,
+          mvqsp: event.multiValueQueryStringParameters
+        })
+      });
+    `);
+
+    const api = await gw.send(new CreateRestApiCommand({ name: uniqueName('qs-test') }));
+    apiId = api.id!;
+
+    const resources = await gw.send(new GetResourcesCommand({ restApiId: apiId }));
+    const rootId = resources.items![0].id!;
+
+    const echoRes = await apigwFetch(`/restapis/${apiId}/resources/${rootId}`, 'POST', { pathPart: 'echo' });
+    const echoId = (await echoRes.json() as { id: string }).id;
+
+    await apigwFetch(`/restapis/${apiId}/resources/${echoId}/methods/GET`, 'PUT', {
+      authorizationType: 'NONE',
+    });
+    await apigwFetch(`/restapis/${apiId}/resources/${echoId}/methods/GET/integration`, 'PUT', {
+      type: 'AWS_PROXY',
+      httpMethod: 'POST',
+      uri: `arn:aws:apigateway:${REGION}:lambda:path/2015-03-31/functions/arn:aws:lambda:${REGION}:${ACCOUNT}:function:${echoFn}/invocations`,
+    });
+
+    const depRes = await apigwFetch(`/restapis/${apiId}/deployments`, 'POST', { description: 'compat-test' });
+    const depId = (await depRes.json() as { id: string }).id;
+    await apigwFetch(`/restapis/${apiId}/stages`, 'POST', { stageName: 'prod', deploymentId: depId });
+  });
+
+  afterAll(async () => {
+    try { if (apiId) await gw.send(new DeleteRestApiCommand({ restApiId: apiId })); } catch { /* ignore */ }
+    await deleteLambda(lambda, echoFn);
+  });
+
+  async function echo(query: string): Promise<{ qsp: Record<string, string> | null; mvqsp: Record<string, string[]> | null }> {
+    const res = await executeApi(apiId, 'prod', '/echo', { query });
+    expect(res.status).toBe(200);
+    return res.json() as Promise<{ qsp: Record<string, string> | null; mvqsp: Record<string, string[]> | null }>;
+  }
+
+  it('should take the last value of a repeated parameter', async () => {
+    const { qsp, mvqsp } = await echo('x=1&x=2&x=3');
+    expect(qsp).toEqual({ x: '3' });
+    expect(mvqsp).toEqual({ x: ['1', '2', '3'] });
+  });
+
+  it('should keep a trailing empty value as the winner', async () => {
+    const { qsp } = await echo('x=1&x=');
+    expect(qsp).toEqual({ x: '' });
+  });
+
+  it('should represent a valueless parameter as an empty string', async () => {
+    const { qsp } = await echo('a&b=1');
+    expect(qsp).toEqual({ a: '', b: '1' });
+  });
+
+  it('should preserve a bracketed parameter name', async () => {
+    const { qsp, mvqsp } = await echo('filter%5Bstatus%5D=open');
+    expect(qsp).toEqual({ 'filter[status]': 'open' });
+    expect(mvqsp).toEqual({ 'filter[status]': ['open'] });
+  });
+
+  it('should null both maps when there is no query string', async () => {
+    const { qsp, mvqsp } = await echo('');
+    expect(qsp).toBeNull();
+    expect(mvqsp).toBeNull();
+  });
+});
+
+// ──────────────────────────── Resource/method resolution precedence ────────────────────────────
+
+/**
+ * AWS selects the most specific resource that can serve the requested method, searching
+ * literal, then path parameter, then greedy {proxy+}. A resource that declares methods but
+ * not the requested one yields to a less specific sibling that declares it.
+ *
+ * Captured against a real REST API in us-west-2 (MOCK integrations, no authorizer): with
+ * /users/{userId} GET and a literal /users/me PATCH deployed, GET /users/me is served by
+ * /users/{userId} with userId="me", and with /things/real GET and /things/{proxy+} ANY,
+ * POST /things/real is served by /things/{proxy+}.
+ */
+describe('API Gateway v1 — resource/method resolution precedence', () => {
+  let gw: APIGatewayClient;
+  let apiId: string;
+
+  /** Wire a MOCK method that echoes which resource served the request. */
+  async function mockMethod(resourceId: string, httpMethod: string, marker: string): Promise<void> {
+    await apigwFetch(`/restapis/${apiId}/resources/${resourceId}/methods/${httpMethod}`, 'PUT', {
+      authorizationType: 'NONE',
+    });
+    await apigwFetch(`/restapis/${apiId}/resources/${resourceId}/methods/${httpMethod}/responses/200`, 'PUT', {});
+    await apigwFetch(`/restapis/${apiId}/resources/${resourceId}/methods/${httpMethod}/integration`, 'PUT', {
+      type: 'MOCK',
+      requestTemplates: { 'application/json': '{"statusCode": 200}' },
+    });
+    await apigwFetch(
+      `/restapis/${apiId}/resources/${resourceId}/methods/${httpMethod}/integration/responses/200`,
+      'PUT',
+      { selectionPattern: '', responseTemplates: { 'application/json': `{"servedBy":"${marker}"}` } }
+    );
+  }
+
+  /** Create a child resource and return its id. */
+  async function child(parentId: string, pathPart: string): Promise<string> {
+    const res = await apigwFetch(`/restapis/${apiId}/resources/${parentId}`, 'POST', { pathPart });
+    return (await res.json() as { id: string }).id;
+  }
+
+  beforeAll(async () => {
+    gw = makeClient(APIGatewayClient);
+
+    const api = await gw.send(new CreateRestApiCommand({ name: uniqueName('routing-precedence') }));
+    apiId = api.id!;
+
+    const resources = await gw.send(new GetResourcesCommand({ restApiId: apiId }));
+    const rootId = resources.items![0].id!;
+
+    // /users/{userId} GET alongside a literal /users/me carrying only PATCH.
+    const usersId = await child(rootId, 'users');
+    await mockMethod(await child(usersId, '{userId}'), 'GET', 'users-by-id');
+    await mockMethod(await child(usersId, 'me'), 'PATCH', 'users-me');
+
+    // /things/real carrying only GET alongside a greedy /things/{proxy+} ANY.
+    const thingsId = await child(rootId, 'things');
+    await mockMethod(await child(thingsId, 'real'), 'GET', 'things-real');
+    await mockMethod(await child(thingsId, '{proxy+}'), 'ANY', 'things-proxy');
+
+    const depRes = await apigwFetch(`/restapis/${apiId}/deployments`, 'POST', { description: 'compat-test' });
+    const depId = (await depRes.json() as { id: string }).id;
+    await apigwFetch(`/restapis/${apiId}/stages`, 'POST', { stageName: 'prod', deploymentId: depId });
+  });
+
+  afterAll(async () => {
+    try { if (apiId) await gw.send(new DeleteRestApiCommand({ restApiId: apiId })); } catch { /* ignore */ }
+  });
+
+  async function servedBy(path: string, method: string): Promise<string> {
+    const res = await executeApi(apiId, 'prod', path, { method });
+    expect(res.status).toBe(200);
+    return (await res.json() as { servedBy: string }).servedBy;
+  }
+
+  it('should serve GET /users/me from the parameterised sibling', async () => {
+    expect(await servedBy('/users/me', 'GET')).toBe('users-by-id');
+  });
+
+  it('should keep the literal resource for the method it declares', async () => {
+    expect(await servedBy('/users/me', 'PATCH')).toBe('users-me');
+  });
+
+  it('should serve an ordinary id from the parameterised resource', async () => {
+    expect(await servedBy('/users/abc123', 'GET')).toBe('users-by-id');
+  });
+
+  it('should keep the literal resource for GET /things/real', async () => {
+    expect(await servedBy('/things/real', 'GET')).toBe('things-real');
+  });
+
+  it('should serve POST /things/real from the greedy proxy', async () => {
+    expect(await servedBy('/things/real', 'POST')).toBe('things-proxy');
+  });
+
+  // AWS resolves path and method together, so "no such path" and "a path whose resources
+  // declare no usable method" are one failure: 403 Missing Authentication Token, not 404/405.
+  it('should answer 403 when no candidate resource declares the method', async () => {
+    const res = await executeApi(apiId, 'prod', '/users/me', { method: 'POST' });
+    expect(res.status).toBe(403);
+    expect(res.headers.get('x-amzn-errortype')).toBe('MissingAuthenticationTokenException');
+    expect(await res.json()).toEqual({ message: 'Missing Authentication Token' });
+  });
+
+  it('should answer 403 for a path that matches no resource', async () => {
+    const res = await executeApi(apiId, 'prod', '/zzz', { method: 'GET' });
+    expect(res.status).toBe(403);
+    expect(await res.json()).toEqual({ message: 'Missing Authentication Token' });
+  });
+});

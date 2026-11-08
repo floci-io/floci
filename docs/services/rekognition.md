@@ -17,10 +17,34 @@
 
 ## Emulation Behavior
 
-- **Stub responses:** every action returns a fixed, AWS-shaped response — no real
-  image analysis is performed. `Image`/`SourceImage`/`TargetImage` content is
-  accepted but never decoded, the same way Textract accepts `Document` without
-  reading it.
+- **Stub responses:** every action returns a fixed, AWS-shaped response. No image
+  analysis is performed: what an image shows never changes the result.
+- **Images are checked as Rekognition checks them:** an image Rekognition refuses is
+  refused here, with Rekognition's error, before any response. Measured against
+  Rekognition in us-east-2, for each operation and for both `Bytes` and `S3Object`:
+    - Anything but a JPEG or PNG (WebP, GIF, other bytes) is refused with
+      `InvalidImageFormatException`, and so is a cut-off or hollow file the way Rekognition
+      judges it: a PNG without an `IDAT` or `IEND` chunk, or a JPEG cut inside its headers or
+      whose frame or scan header is shorter than its component count requires. A JPEG whose
+      headers are complete through the start-of-scan header is accepted however much of the
+      image data after it is missing.
+    - A JPEG with stray bytes between its segments is accepted, as Rekognition accepts it.
+    - `Bytes` that are not base64 are refused with `SerializationException`; base64
+      without its `=` padding is accepted.
+    - `Bytes` that are empty or longer than 5,242,880 bytes are refused with
+      `ValidationException`, naming the member (`image.bytes`, `sourceImage.bytes`,
+      `targetImage.bytes`). For `CompareFaces` both images' lengths are checked before
+      either image is read, and every violation is reported in one error.
+    - An `S3Object` that cannot be read (a missing bucket or object, or a bucket in
+      another region than the request) is refused with `InvalidS3ObjectException`. A bucket
+      created without a location constraint is in the default region. The object is read
+      from Floci's S3, so it has to be uploaded first; only as much of it as its format
+      needs is read, so a large object is not loaded into memory.
+    - A side over 10,000 pixels is refused with `ImageTooLargeException` by
+      `DetectModerationLabels` and `DetectLabels`, and with
+      `InvalidImageFormatException` by the other operations.
+    - Two documented limits are not enforced, because Rekognition does not enforce them:
+      images under 80 pixels are accepted, and an S3 object over 15 MB is accepted.
 - **Content-listing operations return one canned entry:** `DetectLabels` and
   `DetectText` always report a single stub label/text detection, matching the
   Textract stub's block-hierarchy convention.
@@ -35,12 +59,9 @@
   `Bytes` (string-typed) or `S3Object` (structure-typed) — matching AWS's own
   modeling and rejecting wrong JSON types as `SerializationException`. This is
   protocol compatibility, not content analysis.
-- **Intentional deviations:** `Bytes`'s content is not validated as
-  well-formed base64 (the `S3Object` shape has no required members in AWS's
-  own model, so its fields aren't validated either), and supplying both
-  `Bytes` and `S3Object` is accepted rather than rejected — nothing in the
-  Rekognition API model declares that combination invalid, and the stub
-  never reads either field's content regardless.
+- **Both `Bytes` and `S3Object`:** supplying both is accepted rather than rejected,
+  since nothing in the Rekognition API model declares that combination invalid. The
+  bytes are what is checked.
 - **Out of scope:** face-collection persistence (`CreateCollection`,
   `IndexFaces`, `SearchFaces`), custom-model training (`Projects`, `Datasets`,
   `ProjectVersions`), live video (`StreamProcessor`), async video jobs
@@ -72,6 +93,10 @@ across Rekognition, Textract, and Comprehend:
   }
 }
 ```
+
+The object named by the key has to exist in Floci's S3 and be an image Rekognition
+accepts: the image is checked before the mock is looked up, so a call naming an object
+that was never uploaded fails with `InvalidS3ObjectException`, as it does on AWS.
 
 The lookup key is **`"<Bucket>/<Name>"`** from `Image.S3Object` (or `SourceImage.S3Object`
 for `CompareFaces` — `TargetImage` has no independent key in this scheme). A `Bytes`-backed

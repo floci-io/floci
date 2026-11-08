@@ -50,7 +50,15 @@ Floci emulates the AWS WAF v2 management API. Web ACLs, IP sets, regex pattern s
 
 ## Scope
 
-WAF v2 resources are partitioned by `Scope`: `REGIONAL` (ALB, API Gateway, AppSync) or `CLOUDFRONT`. Pass `--scope` on every call; `CLOUDFRONT`-scoped requests must target `us-east-1` as on real AWS.
+WAF v2 resources are partitioned by `Scope`: `REGIONAL` (ALB, API Gateway, AppSync) or `CLOUDFRONT`. Pass `--scope` on every call; `CLOUDFRONT`-scoped requests target the partition's CloudFront region (`us-east-1`, or `cn-northwest-1` in China) as on real AWS. The `CLOUDFRONT` scope exists only where CloudFront does, the commercial and China partitions; elsewhere it is a `WAFInvalidParameterException`. See [AWS Partitions](../configuration/partitions.md).
+
+## IP set addresses
+
+`CreateIPSet` and `UpdateIPSet` require every entry in `Addresses` to be in CIDR notation matching the set's `IPAddressVersion`: an IPv4 address with a `/1`-`/32` prefix, or an IPv6 address with a `/1`-`/128` prefix (a `/0` prefix is rejected, matching AWS). A bare address with no prefix, a prefix outside that range, or an address that does not match the declared `IPAddressVersion` is rejected with `WAFInvalidParameterException`.
+
+## Tags
+
+Every WAF v2 resource accepts at most 50 tags. `TagResource`, `CreateWebACL`, `CreateIPSet`, `CreateRegexPatternSet` and `CreateRuleGroup` reject a request that would leave the resource with more than 50 tags with `WAFLimitsExceededException`; overwriting an existing key does not count toward the limit. Tag keys must be 1-128 characters and values 0-256 characters, both limited to letters, numbers, spaces and `_ . : / = + - @`. An invalid key or value is rejected with `WAFInvalidParameterException` (`Field: TAGS`, or `TAG_KEYS` for `UntagResource`).
 
 ## Example
 

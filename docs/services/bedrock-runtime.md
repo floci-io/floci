@@ -38,6 +38,7 @@ InvokeModel bodies are passed through as opaque bytes; neither backend parses re
 | `FLOCI_SERVICES_BEDROCK_RUNTIME_PROXY_DEFAULT_MODEL` | _(none)_ | Fallback OpenAI-side model id when no mapping matches and passthrough is disabled |
 | `FLOCI_SERVICES_BEDROCK_RUNTIME_PROXY_MODEL_MAPPING` | _(none)_ | Comma-separated `bedrockModelId=openaiModelId` pairs, e.g. `anthropic.claude-3-sonnet-20240229-v1:0=claude-3-sonnet` |
 | `FLOCI_SERVICES_BEDROCK_RUNTIME_PROXY_PASSTHROUGH` | `false` | When true, forward the raw Bedrock model id as-is if no mapping matches |
+| `FLOCI_SERVICES_BEDROCK_RUNTIME_PROXY_ERROR_BODY_TIMEOUT_MILLIS` | `1000` | How long to collect an upstream error body before returning the error without its details. Must be positive. |
 
 ## Proxy Backend
 
@@ -52,7 +53,104 @@ export FLOCI_SERVICES_BEDROCK_RUNTIME_PROXY_DEFAULT_MODEL=llama3.2
 
 Useful for integration testing: applications that call Bedrock directly don't need to stand up their own stub/mock of Bedrock — point the existing SDK client at Floci and get real responses from whatever OpenAI-compatible backend is already available, with the stubbing concern handled by Floci instead of the application under test.
 
+### Upstream failures and caller cancellation
+
+When a caller disconnects during `Converse` or `ConverseStream`, the proxy cancels
+pending upstream requests and closes streaming response bodies, including streams
+that stall between tokens. The model server controls how it reacts to that signal.
+
+Operational HTTP-error warnings retain the upstream status code and omit the
+backend response body. A connected caller receives `ModelErrorException` with a
+bounded backend error description. Error-body reads, for both `Converse` and
+`ConverseStream`, are limited to 8 KiB with a one-second collection deadline
+(`FLOCI_SERVICES_BEDROCK_RUNTIME_PROXY_ERROR_BODY_TIMEOUT_MILLIS`). If the body
+stalls, the proxy closes it and returns the known model error without body details.
+
 ## Examples
+
+### Structured outputs through the proxy
+
+Both `Converse` and `ConverseStream` translate
+`outputConfig.textFormat` with `type: "json_schema"` into OpenAI
+`response_format.json_schema`. The Bedrock
+`structure.jsonSchema.schema` value is a JSON string; the proxy parses it into
+the schema object expected by the backend, without rewriting its properties.
+Optional `name` and `description` are preserved. If the name is omitted, the
+proxy uses `response`, since the OpenAI wire shape requires a name.
+
+```python
+import json
+
+response = client.converse(
+    modelId="your-mapped-model-id",
+    messages=[{"role": "user", "content": [{"text": "Return a readiness label."}]}],
+    outputConfig={"textFormat": {
+        "type": "json_schema",
+        "structure": {"jsonSchema": {
+            "name": "readiness",
+            "schema": json.dumps({
+                "type": "object",
+                "properties": {"ready": {"type": "boolean"}},
+                "required": ["ready"],
+                "additionalProperties": False,
+            }),
+        }},
+    }},
+)
+```
+
+The backend and model must support this response format and the supplied schema.
+The proxy does not inject OpenAI's `strict` flag: that mode imposes extra schema
+restrictions, such as requiring every property, that valid Bedrock schemas need
+not satisfy. Schema enforcement therefore follows the backend's behavior; Floci
+does not emulate Bedrock's guaranteed schema adherence. Callers should validate
+returned data when testing through the proxy.
+The proxy rejects malformed configuration or a schema that is not a JSON object
+with `400 ValidationException`; it does not implement a JSON Schema validator or
+validate generated responses. Requests without a text format keep their existing
+behavior. The `stub` backend still ignores output constraints.
+
+`outputConfig.effort` is translated to OpenAI `reasoning_effort` on both operations,
+with or without `textFormat`. The supported Bedrock levels are `low`, `medium`,
+`high`, `xhigh`, and `max`; the requested value is preserved without downgrading it.
+The configured backend and model must support the requested effort level. In
+particular, `max` is not a standard OpenAI Chat Completions level and requires a
+backend that accepts it. A backend rejection is returned as `ModelErrorException`.
+Malformed or unrecognized effort values produce a
+`400 ValidationException` before contacting the backend.
+
+### Inline images through the proxy
+
+Both `Converse` and `ConverseStream` forward inline `image` blocks as OpenAI
+`image_url` data URLs, preserving the order of text and images in each message.
+The supported image formats are `png`, `jpeg`, `gif`, and `webp`. The configured
+backend and model must support image input. Text-only messages keep their
+existing string representation.
+
+```python
+with open("image.png", "rb") as image:
+    response = client.converse(
+        modelId="your-mapped-model-id",
+        messages=[{"role": "user", "content": [
+            {"text": "Describe this image."},
+            {"image": {"format": "png", "source": {"bytes": image.read()}}},
+        ]}],
+    )
+```
+
+Supply raw bytes to the AWS SDK; it performs the wire-level Base64 encoding.
+The proxy rejects unsupported formats, malformed Base64, empty byte sources,
+and S3 image sources with `400 ValidationException` before contacting the backend.
+Only `text` and `json` blocks are supported inside `toolResult.content`, because
+OpenAI tool messages accept text and the proxy serializes JSON results to text.
+Other content, including images, documents, videos, and search results, is rejected
+with `400 ValidationException` before contacting the backend, rather than being
+silently discarded.
+
+It does not decode image files or enforce model-specific image dimensions and
+size limits; those remain the responsibility of the configured backend.
+
+### Text requests
 
 ```bash
 export AWS_ENDPOINT_URL=http://localhost:4566

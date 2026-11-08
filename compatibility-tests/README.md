@@ -75,6 +75,12 @@ just setup-typescript  # npm install
 just setup-awscli      # Clone bats-core, bats-support, bats-assert
 ```
 
+The boto3 and botocore versions in `sdk-test-python/requirements.txt` pin the test clients,
+not the AWS models used to generate Floci's vendored data. For model audits and data
+regeneration, use the pin in `tools/aws/requirements.txt` at the repository root and check
+the selected model source. See [Botocore pin of record](../CONTRIBUTING.md#botocore-pin-of-record)
+for the distinction and the generators' data-source precedence.
+
 ## Running Tests
 
 ### All SDKs
@@ -122,6 +128,10 @@ The Terraform and OpenTofu suites run each `test/*.bats` file in its own process
 concurrently, so they write one report per file rather than a single `junit.xml`.
 Every consumer globs the directory, so nothing downstream changes. Set
 `BATS_PARALLEL_FILES=0` to run the files one at a time when isolating a failure.
+Each file also runs under a `BATS_FILE_TIMEOUT` (default `12m`): a fixture that hangs
+fails under its own name with its TAP output ending at the stuck test, and the reports of
+the files that finished are still published, instead of the whole job dying at the
+workflow's 20 minute limit with nothing reported.
 
 ## Configuration
 

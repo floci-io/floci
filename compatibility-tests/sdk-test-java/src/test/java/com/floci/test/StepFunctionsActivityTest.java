@@ -4,6 +4,7 @@ import org.junit.jupiter.api.*;
 import software.amazon.awssdk.services.sfn.SfnClient;
 import software.amazon.awssdk.services.sfn.model.*;
 
+import java.time.Duration;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.TimeUnit;
 
@@ -144,7 +145,8 @@ class StepFunctionsActivityTest {
 
             worker.get(90, TimeUnit.SECONDS);
 
-            DescribeExecutionResponse result = pollUntilDone(execArn);
+            DescribeExecutionResponse result =
+                    TestFixtures.awaitExecutionTerminal(sfn, execArn, Duration.ofSeconds(60));
             assertThat(result.status()).isEqualTo(ExecutionStatus.SUCCEEDED);
             assertThat(result.output()).contains("\"result\":\"done\"");
         } finally {
@@ -208,25 +210,13 @@ class StepFunctionsActivityTest {
 
             worker.get(90, TimeUnit.SECONDS);
 
-            DescribeExecutionResponse result = pollUntilDone(execArn);
+            DescribeExecutionResponse result =
+                    TestFixtures.awaitExecutionTerminal(sfn, execArn, Duration.ofSeconds(60));
             assertThat(result.status()).isEqualTo(ExecutionStatus.SUCCEEDED);
             assertThat(result.output()).contains("\"processed\":true");
         } finally {
             try { sfn.deleteStateMachine(b -> b.stateMachineArn(smArn)); } catch (Exception ignored) {}
             try { sfn.deleteActivity(b -> b.activityArn(arn)); } catch (Exception ignored) {}
         }
-    }
-
-    // ──────────────────────────── helper ────────────────────────────
-
-    private DescribeExecutionResponse pollUntilDone(String execArn) throws InterruptedException {
-        for (int i = 0; i < 120; i++) {
-            DescribeExecutionResponse resp = sfn.describeExecution(b -> b.executionArn(execArn));
-            if (resp.status() != ExecutionStatus.RUNNING) {
-                return resp;
-            }
-            Thread.sleep(500);
-        }
-        throw new AssertionError("Execution did not complete within 60s: " + execArn);
     }
 }

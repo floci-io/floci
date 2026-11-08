@@ -2,8 +2,7 @@
 """Regenerate the "Supported Resource Types" table in docs/services/cloudformation.md.
 
 The set of types comes from src/test/resources/cloudformation/supported-resource-types.tsv,
-which CfnResourceInventoryTest pins to the CDI-resolved provisioner registry plus the legacy
-switch. Presentation (row order, service labels, notes) comes from cfn_resource_types.yaml.
+which CfnResourceInventoryTest pins to the CDI-resolved provisioner registry. Presentation (row order, service labels, notes) comes from cfn_resource_types.yaml.
 
 Deliberately reads the TSV rather than parsing the Java: several provisioners return
 `Set.of(CONSTANT, CONSTANT)` from resourceTypes(), so a source regex sees only a subset. The
@@ -24,11 +23,14 @@ from pathlib import Path
 
 import yaml
 
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from java_sources import SERVICES_PACKAGE_DIR  # noqa: E402
+
 REPO_ROOT = Path(__file__).resolve().parents[2]
 INVENTORY = REPO_ROOT / "src/test/resources/cloudformation/supported-resource-types.tsv"
 CONFIG = Path(__file__).resolve().parent / "cfn_resource_types.yaml"
 DOC = REPO_ROOT / "docs/services/cloudformation.md"
-PROVISIONER_DIR = REPO_ROOT / "src/main/java/io/github/hectorvent/floci/services/cloudformation/provisioners"
+PROVISIONER_DIR = REPO_ROOT / SERVICES_PACKAGE_DIR / "cloudformation/provisioners"
 
 MARKER_START = "<!-- floci:cfn-types:start -->"
 MARKER_END = "<!-- floci:cfn-types:end -->"
@@ -154,15 +156,14 @@ def check_provisioner_annotations() -> list[str]:
 
 
 def check_no_double_ownership(inventory) -> list[str]:
-    """A type served by a provisioner must not also sit in the legacy switch."""
+    """A type has exactly one provisioner; the registry refuses a duplicate only at boot."""
     owners: dict[str, set[str]] = {}
     for resource_type, owner in inventory:
         owners.setdefault(resource_type, set()).add(owner)
     return [
-        f"{resource_type} is claimed by both the legacy switch and {sorted(o - {'LEGACY_SWITCH'})[0]}; "
-        f"the registry wins, leaving the switch arm as dead code"
+        f"{resource_type} is claimed by {' and '.join(sorted(o))}; a type has exactly one provisioner"
         for resource_type, o in sorted(owners.items())
-        if len(o) > 1 and "LEGACY_SWITCH" in o
+        if len(o) > 1
     ]
 
 

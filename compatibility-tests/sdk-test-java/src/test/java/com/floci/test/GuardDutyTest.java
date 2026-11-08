@@ -2,6 +2,7 @@ package com.floci.test;
 
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.parallel.ResourceLock;
 import software.amazon.awssdk.services.guardduty.GuardDutyClient;
 import software.amazon.awssdk.services.guardduty.model.AccountDetail;
 import software.amazon.awssdk.services.guardduty.model.AdminStatus;
@@ -9,9 +10,12 @@ import software.amazon.awssdk.services.guardduty.model.AutoEnableMembers;
 import software.amazon.awssdk.services.guardduty.model.BadRequestException;
 import software.amazon.awssdk.services.guardduty.model.CreateDetectorResponse;
 import software.amazon.awssdk.services.guardduty.model.DescribeOrganizationConfigurationResponse;
+import software.amazon.awssdk.services.guardduty.model.DescribePublishingDestinationResponse;
+import software.amazon.awssdk.services.guardduty.model.DestinationProperties;
+import software.amazon.awssdk.services.guardduty.model.DestinationType;
+import software.amazon.awssdk.services.guardduty.model.DetectorAdditionalConfiguration;
 import software.amazon.awssdk.services.guardduty.model.DetectorFeature;
 import software.amazon.awssdk.services.guardduty.model.DetectorFeatureConfiguration;
-import software.amazon.awssdk.services.guardduty.model.DetectorAdditionalConfiguration;
 import software.amazon.awssdk.services.guardduty.model.DetectorStatus;
 import software.amazon.awssdk.services.guardduty.model.FeatureAdditionalConfiguration;
 import software.amazon.awssdk.services.guardduty.model.FeatureStatus;
@@ -23,6 +27,7 @@ import software.amazon.awssdk.services.guardduty.model.OrgFeatureAdditionalConfi
 import software.amazon.awssdk.services.guardduty.model.OrgFeatureStatus;
 import software.amazon.awssdk.services.guardduty.model.OrganizationAdditionalConfiguration;
 import software.amazon.awssdk.services.guardduty.model.OrganizationFeatureConfiguration;
+import software.amazon.awssdk.services.guardduty.model.PublishingStatus;
 
 import java.util.List;
 import java.util.Map;
@@ -31,6 +36,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 @DisplayName("GuardDuty")
+@ResourceLock("organizations")
 class GuardDutyTest {
 
     @Test
@@ -99,7 +105,7 @@ class GuardDutyTest {
                         .isEqualTo(FindingPublishingFrequency.ONE_HOUR);
 
                 String detectorArn =
-                        "arn:aws:guardduty:us-east-1:000000000000:detector/" + detectorId;
+                        TestFixtures.arn("guardduty", "000000000000", "detector/" + detectorId);
                 guardduty.tagResource(request -> request
                         .resourceArn(detectorArn)
                         .tags(Map.of("team", "security")));
@@ -115,6 +121,73 @@ class GuardDutyTest {
             assertThatThrownBy(() -> guardduty.getDetector(request -> request.detectorId(detectorId)))
                     .isInstanceOf(BadRequestException.class)
                     .hasMessageContaining("is not owned by the current account");
+        }
+    }
+
+    @Test
+    void publishingDestinationLifecycleUsesAwsSdkWireShapes() throws Exception {
+        String bucketArn = "arn:aws:s3:::compat-findings-bucket";
+        String firstKey = "arn:aws:kms:us-east-1:000000000000:key/compat-first";
+        String secondKey = "arn:aws:kms:us-east-1:000000000000:key/compat-second";
+
+        try (GuardDutyClient guardduty = TestFixtures.guardDutyClient()) {
+            String detectorId = guardduty.createDetector(request -> request.enable(true)).detectorId();
+
+            try (AutoCloseable deleteDetector = () ->
+                    guardduty.deleteDetector(request -> request.detectorId(detectorId))) {
+                String destinationId = guardduty.createPublishingDestination(request -> request
+                        .detectorId(detectorId)
+                        .destinationType(DestinationType.S3)
+                        .destinationProperties(DestinationProperties.builder()
+                                .destinationArn(bucketArn)
+                                .kmsKeyArn(firstKey)
+                                .build()))
+                        .destinationId();
+                assertThat(destinationId).isNotBlank();
+
+                DescribePublishingDestinationResponse described =
+                        guardduty.describePublishingDestination(request -> request
+                                .detectorId(detectorId)
+                                .destinationId(destinationId));
+                assertThat(described.destinationId()).isEqualTo(destinationId);
+                assertThat(described.destinationType()).isEqualTo(DestinationType.S3);
+                assertThat(described.status()).isEqualTo(PublishingStatus.PUBLISHING);
+                assertThat(described.publishingFailureStartTimestamp()).isNotNull();
+                assertThat(described.destinationProperties().destinationArn()).isEqualTo(bucketArn);
+                assertThat(described.destinationProperties().kmsKeyArn()).isEqualTo(firstKey);
+
+                guardduty.updatePublishingDestination(request -> request
+                        .detectorId(detectorId)
+                        .destinationId(destinationId)
+                        .destinationProperties(DestinationProperties.builder()
+                                .destinationArn(bucketArn)
+                                .kmsKeyArn(secondKey)
+                                .build()));
+                assertThat(guardduty.describePublishingDestination(request -> request
+                        .detectorId(detectorId)
+                        .destinationId(destinationId))
+                        .destinationProperties().kmsKeyArn()).isEqualTo(secondKey);
+
+                assertThat(guardduty.listPublishingDestinations(request -> request.detectorId(detectorId))
+                        .destinations())
+                        .singleElement()
+                        .satisfies(destination -> {
+                            assertThat(destination.destinationId()).isEqualTo(destinationId);
+                            assertThat(destination.destinationType()).isEqualTo(DestinationType.S3);
+                            assertThat(destination.status()).isEqualTo(PublishingStatus.PUBLISHING);
+                        });
+
+                guardduty.deletePublishingDestination(request -> request
+                        .detectorId(detectorId)
+                        .destinationId(destinationId));
+                assertThat(guardduty.listPublishingDestinations(request -> request.detectorId(detectorId))
+                        .destinations()).isEmpty();
+                assertThatThrownBy(() -> guardduty.describePublishingDestination(request -> request
+                        .detectorId(detectorId)
+                        .destinationId(destinationId)))
+                        .isInstanceOf(BadRequestException.class)
+                        .hasMessageContaining("input parameters have invalid values");
+            }
         }
     }
 

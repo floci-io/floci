@@ -7,12 +7,11 @@ import org.junit.jupiter.api.MethodOrderer;
 import org.junit.jupiter.api.Order;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.TestMethodOrder;
-
+import org.junit.jupiter.api.parallel.ResourceLock;
 import software.amazon.awssdk.services.sesv2.SesV2Client;
 import software.amazon.awssdk.services.sesv2.model.AlreadyExistsException;
 import software.amazon.awssdk.services.sesv2.model.BadRequestException;
 import software.amazon.awssdk.services.sesv2.model.CreateConfigurationSetRequest;
-import software.amazon.awssdk.services.sesv2.model.CreateEmailIdentityRequest;
 import software.amazon.awssdk.services.sesv2.model.CreateTenantRequest;
 import software.amazon.awssdk.services.sesv2.model.CreateTenantResponse;
 import software.amazon.awssdk.services.sesv2.model.DeleteConfigurationSetRequest;
@@ -58,6 +57,7 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
  */
 @DisplayName("SES v2 Tenants")
 @TestMethodOrder(MethodOrderer.OrderAnnotation.class)
+@ResourceLock("ses-account")
 class SesTenantTest {
 
     private static final String TENANT = "compat-tenant-alpha";
@@ -73,7 +73,8 @@ class SesTenantTest {
     @BeforeAll
     static void setup() {
         sesV2 = TestFixtures.sesV2Client();
-        sesV2.createEmailIdentity(CreateEmailIdentityRequest.builder().emailIdentity(IDENTITY).build());
+        // Verified, so tenantSend_gatesOnAssociations can send from an address under it.
+        TestFixtures.verifySesDomainIdentityViaRoute53(sesV2, IDENTITY);
         sesV2.createConfigurationSet(CreateConfigurationSetRequest.builder()
                 .configurationSetName(CONFIG_SET).build());
         sesV2.putSuppressedDestination(r -> r.emailAddress(ACCOUNT_ADDR)

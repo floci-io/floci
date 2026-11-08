@@ -4,13 +4,15 @@ import org.junit.jupiter.api.*;
 import software.amazon.awssdk.services.sfn.SfnClient;
 import software.amazon.awssdk.services.sfn.model.*;
 
+import java.time.Duration;
+
 import static org.assertj.core.api.Assertions.*;
 
 /**
  * Compatibility tests for nested state machine execution via optimised integrations:
- *   arn:aws:states:::states:startExecution          (fire-and-forget)
- *   arn:aws:states:::states:startExecution.sync     (wait, return full execution envelope)
- *   arn:aws:states:::states:startExecution.sync:2   (wait, return only child output)
+ *   arn:aws:states:::states:startExecution          (fire-and-forget, return the StartExecution response)
+ *   arn:aws:states:::states:startExecution.sync     (wait, return the execution envelope, Output a JSON string)
+ *   arn:aws:states:::states:startExecution.sync:2   (wait, return the execution envelope, Output a JSON value)
  *
  * Covers Issue #254.
  */
@@ -62,7 +64,7 @@ class StepFunctionsNestedSmTest {
 
     @Test
     @Order(1)
-    void sync2_parentReceivesChildOutputDirectly() throws InterruptedException {
+    void sync2_parentReceivesEnvelopeWithOutputAsJsonValue() throws InterruptedException {
         String parentDef = """
                 {
                   "StartAt": "InvokeChild",
@@ -90,14 +92,16 @@ class StepFunctionsNestedSmTest {
                     .stateMachineArn(parentSmArn)
                     .input("{}")).executionArn();
 
-            DescribeExecutionResponse result = pollUntilDone(execArn);
+            DescribeExecutionResponse result =
+                    TestFixtures.awaitExecutionTerminal(sfn, execArn, Duration.ofSeconds(30));
 
             assertThat(result.status()).isEqualTo(ExecutionStatus.SUCCEEDED);
-            // Output must be the child's parsed output object, not an envelope
+            // Output must be the PascalCase envelope, with the child's output as a JSON value
             assertThat(result.output())
-                    .contains("\"computed\":true")
-                    .contains("\"value\":42")
-                    .doesNotContain("executionArn");
+                    .contains("\"ExecutionArn\"")
+                    .contains("\"Status\":\"SUCCEEDED\"")
+                    .contains("\"Input\":{\"trigger\":\"sync2\"}")
+                    .contains("\"Output\":{\"computed\":true,\"value\":42}");
         } finally {
             try { sfn.deleteStateMachine(b -> b.stateMachineArn(parentSmArn)); } catch (Exception ignored) {}
         }
@@ -135,14 +139,16 @@ class StepFunctionsNestedSmTest {
                     .stateMachineArn(parentSmArn)
                     .input("{}")).executionArn();
 
-            DescribeExecutionResponse result = pollUntilDone(execArn);
+            DescribeExecutionResponse result =
+                    TestFixtures.awaitExecutionTerminal(sfn, execArn, Duration.ofSeconds(30));
 
             assertThat(result.status()).isEqualTo(ExecutionStatus.SUCCEEDED);
-            // Output must be the full envelope: executionArn, status, output (as a string), etc.
+            // Output must be the PascalCase envelope, with the child's output as a JSON string
             assertThat(result.output())
-                    .contains("executionArn")
-                    .contains("\"SUCCEEDED\"")
-                    .contains("\"output\"");
+                    .contains("\"ExecutionArn\"")
+                    .contains("\"Status\":\"SUCCEEDED\"")
+                    .contains("\"Input\":\"{\\\"trigger\\\":\\\"sync\\\"}\"")
+                    .contains("\"Output\":\"{\\\"computed\\\":true,\\\"value\\\":42}\"");
         } finally {
             try { sfn.deleteStateMachine(b -> b.stateMachineArn(parentSmArn)); } catch (Exception ignored) {}
         }
@@ -180,29 +186,17 @@ class StepFunctionsNestedSmTest {
                     .stateMachineArn(parentSmArn)
                     .input("{}")).executionArn();
 
-            DescribeExecutionResponse result = pollUntilDone(execArn);
+            DescribeExecutionResponse result =
+                    TestFixtures.awaitExecutionTerminal(sfn, execArn, Duration.ofSeconds(30));
 
             assertThat(result.status()).isEqualTo(ExecutionStatus.SUCCEEDED);
-            // Output must be { executionArn, startDate } — no child output
+            // Output must be { ExecutionArn, StartDate } with no child output
             assertThat(result.output())
-                    .contains("executionArn")
-                    .contains("startDate")
+                    .contains("\"ExecutionArn\"")
+                    .contains("\"StartDate\"")
                     .doesNotContain("\"SUCCEEDED\"");
         } finally {
             try { sfn.deleteStateMachine(b -> b.stateMachineArn(parentSmArn)); } catch (Exception ignored) {}
         }
-    }
-
-    // ──────────────────────────── helper ────────────────────────────
-
-    private DescribeExecutionResponse pollUntilDone(String execArn) throws InterruptedException {
-        for (int i = 0; i < 60; i++) {
-            DescribeExecutionResponse resp = sfn.describeExecution(b -> b.executionArn(execArn));
-            if (resp.status() != ExecutionStatus.RUNNING) {
-                return resp;
-            }
-            Thread.sleep(500);
-        }
-        throw new AssertionError("Execution did not complete within 30s: " + execArn);
     }
 }

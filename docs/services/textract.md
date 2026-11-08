@@ -32,7 +32,7 @@ Every block includes: `Id` (UUID), `Confidence` (99.9), `Page` (1), and a `Geome
 
 ### Async job lifecycle
 
-`Start*` operations store a job ID in memory and return it immediately. `Get*` calls with a valid job ID always return `JobStatus: SUCCEEDED`. Job IDs are not persisted across restarts. Using a `GetDocumentTextDetection` job ID in `GetDocumentAnalysis` (or vice-versa) returns `InvalidJobIdException`.
+`Start*` operations store a job ID and its result in memory and return the ID immediately. `Get*` calls with a valid job ID return `JobStatus: SUCCEEDED` and the same result every time, so a result can be fetched repeatedly. A job is retained for 7 days, after which it expires and `Get*` returns `InvalidJobIdException`; expired jobs are also swept when a new job is stored. The store is capped at 10,000 jobs: once the cap is reached the oldest job is evicted first, which AWS does not do, so a job that is still inside its 7-day window can read as `InvalidJobIdException` once enough newer jobs exist. Job IDs are not persisted across restarts. Using a `GetDocumentTextDetection` job ID in `GetDocumentAnalysis` (or vice-versa) returns `InvalidJobIdException`.
 
 ## Configuration
 

@@ -7,17 +7,16 @@ import org.junit.jupiter.api.MethodOrderer;
 import org.junit.jupiter.api.Order;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.TestMethodOrder;
-
 import software.amazon.awssdk.services.ses.SesClient;
 import software.amazon.awssdk.services.ses.model.DeleteIdentityPolicyRequest;
 import software.amazon.awssdk.services.ses.model.GetIdentityPoliciesRequest;
 import software.amazon.awssdk.services.ses.model.ListIdentityPoliciesRequest;
 import software.amazon.awssdk.services.ses.model.PutIdentityPolicyRequest;
-
 import software.amazon.awssdk.services.sesv2.SesV2Client;
 import software.amazon.awssdk.services.sesv2.model.AlreadyExistsException;
 import software.amazon.awssdk.services.sesv2.model.CreateEmailIdentityPolicyRequest;
 import software.amazon.awssdk.services.sesv2.model.CreateEmailIdentityRequest;
+import software.amazon.awssdk.services.sesv2.model.DeleteEmailIdentityPolicyRequest;
 import software.amazon.awssdk.services.sesv2.model.DeleteEmailIdentityRequest;
 import software.amazon.awssdk.services.sesv2.model.GetEmailIdentityPoliciesRequest;
 import software.amazon.awssdk.services.sesv2.model.NotFoundException;
@@ -143,5 +142,20 @@ class SesIdentityPolicyTest {
 
         assertThat(sesV1.listIdentityPolicies(ListIdentityPoliciesRequest.builder()
                 .identity(IDENTITY).build()).policyNames()).doesNotContain("v1p");
+    }
+
+    @Test
+    @Order(8)
+    void v2_deleteThenGet() {
+        sesV2.createEmailIdentityPolicy(CreateEmailIdentityPolicyRequest.builder()
+                .emailIdentity(IDENTITY).policyName("p2").policy(DOC).build());
+        assertThat(sesV2.getEmailIdentityPolicies(GetEmailIdentityPoliciesRequest.builder()
+                .emailIdentity(IDENTITY).build()).policies()).containsKey("p2");
+
+        sesV2.deleteEmailIdentityPolicy(DeleteEmailIdentityPolicyRequest.builder()
+                .emailIdentity(IDENTITY).policyName("p2").build());
+
+        assertThat(sesV2.getEmailIdentityPolicies(GetEmailIdentityPoliciesRequest.builder()
+                .emailIdentity(IDENTITY).build()).policies()).doesNotContainKey("p2");
     }
 }

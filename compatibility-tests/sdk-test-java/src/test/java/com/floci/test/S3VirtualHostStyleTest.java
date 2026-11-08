@@ -1,6 +1,7 @@
 package com.floci.test;
 
 import org.junit.jupiter.api.*;
+import software.amazon.awssdk.core.ResponseInputStream;
 import software.amazon.awssdk.core.sync.RequestBody;
 import software.amazon.awssdk.services.s3.S3Client;
 import software.amazon.awssdk.services.s3.model.*;
@@ -102,7 +103,7 @@ class S3VirtualHostStyleTest {
     @Test
     @Order(6)
     void getObject() throws Exception {
-        var response = s3.getObject(GetObjectRequest.builder()
+        ResponseInputStream<GetObjectResponse> response = s3.getObject(GetObjectRequest.builder()
                 .bucket(BUCKET).key(KEY).build());
         String downloaded = new String(response.readAllBytes(), StandardCharsets.UTF_8);
 
@@ -129,7 +130,7 @@ class S3VirtualHostStyleTest {
 
         assertThat(response.copyObjectResult().eTag()).isNotNull();
 
-        var getResponse = s3.getObject(GetObjectRequest.builder()
+        ResponseInputStream<GetObjectResponse> getResponse = s3.getObject(GetObjectRequest.builder()
                 .bucket(BUCKET).key(COPIED_KEY).build());
         String downloaded = new String(getResponse.readAllBytes(), StandardCharsets.UTF_8);
         assertThat(downloaded).isEqualTo(CONTENT);
@@ -148,6 +149,20 @@ class S3VirtualHostStyleTest {
 
     @Test
     @Order(10)
+    void keyWithPercentSign() {
+        String key = "a%/b";
+        s3.putObject(PutObjectRequest.builder().bucket(BUCKET).key(key).build(),
+                RequestBody.fromString(CONTENT));
+
+        ListObjectsV2Response listed = s3.listObjectsV2(
+                ListObjectsV2Request.builder().bucket(BUCKET).build());
+        assertThat(listed.contents()).extracting(S3Object::key).containsExactly(key);
+
+        s3.deleteObject(DeleteObjectRequest.builder().bucket(BUCKET).key(key).build());
+    }
+
+    @Test
+    @Order(11)
     void deleteBucket() {
         s3.deleteBucket(DeleteBucketRequest.builder().bucket(BUCKET).build());
     }

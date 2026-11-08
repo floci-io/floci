@@ -1,0 +1,1208 @@
+package io.floci.aws.services.cloudformation;
+
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import io.floci.aws.core.common.AwsException;
+import io.floci.aws.services.apigatewayv2.ApiGatewayV2Service;
+import io.floci.aws.services.apigatewayv2.model.Api;
+import io.floci.aws.services.apigatewayv2.model.Authorizer;
+import io.floci.aws.services.apigatewayv2.model.Integration;
+import io.floci.aws.services.apigatewayv2.model.Route;
+import io.floci.aws.services.apigatewayv2.model.VpcLink;
+import io.floci.aws.services.cloudformation.model.StackResource;
+import io.floci.aws.services.cloudformation.provisioners.ApiGatewayV2CfnProvisioner;
+import io.floci.aws.services.cloudformation.provisioners.CfnResourceDispatcher;
+import io.floci.aws.services.cloudformation.provisioners.CfnRollback;
+import io.floci.aws.services.cloudformation.provisioners.CloudFormationResourceRegistry;
+import io.floci.aws.services.s3.S3Service;
+import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
+import org.mockito.ArgumentCaptor;
+import org.mockito.InOrder;
+
+import java.util.HashMap;
+import java.util.List;
+import java.util.Map;
+import java.util.concurrent.atomic.AtomicInteger;
+import java.util.function.Function;
+
+import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertSame;
+import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyMap;
+import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.ArgumentMatchers.argThat;
+import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.Mockito.doAnswer;
+import static org.mockito.Mockito.doThrow;
+import static org.mockito.Mockito.inOrder;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.times;
+import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.when;
+
+class ApiGatewayV2CfnProvisionerTest {
+
+    private static final String REGION = "us-east-1";
+    private static final String API_ID = "api-123";
+    private final ObjectMapper mapper = new ObjectMapper();
+    private ApiGatewayV2Service apiGatewayV2Service;
+    private CfnResourceDispatcher provisioner;
+
+    @BeforeEach
+    void setUp() {
+        apiGatewayV2Service = mock(ApiGatewayV2Service.class);
+        provisioner = CfnProvisionerFixture.builder()
+                .apiGatewayV2(apiGatewayV2Service)
+                .objectMapper(mapper)
+                .provisioners(new ApiGatewayV2CfnProvisioner(apiGatewayV2Service, mock(S3Service.class), mapper))
+                .build();
+
+        Api api = new Api();
+        api.setApiId(API_ID);
+        api.setApiEndpoint("https://" + API_ID + ".execute-api.localhost");
+        when(apiGatewayV2Service.createApi(eq(REGION), anyMap())).thenReturn(api);
+        when(apiGatewayV2Service.updateApi(eq(REGION), eq(API_ID), anyMap())).thenReturn(api);
+    }
+
+    @Test
+    void publishesApiIdEndpointAndExecuteApiArn() throws Exception {
+        StackResource api = provision(propertiesWithoutBody(), null, Map.of());
+
+        assertEquals("CREATE_COMPLETE", api.getStatus());
+        assertEquals(API_ID, api.getAttributes().get("ApiId"));
+        assertEquals("https://" + API_ID + ".execute-api.localhost", api.getAttributes().get("ApiEndpoint"));
+        assertEquals("arn:aws:execute-api:us-east-1:000000000000:api-123",
+                api.getAttributes().get("ExecuteApiArn"));
+    }
+
+    @Test
+    void authorizerWithNonNumericTtlIsRejected() throws Exception {
+        StackResource authorizer = provisioner.provision("MyAuth", "AWS::ApiGatewayV2::Authorizer",
+                mapper.readTree("""
+                        {"ApiId": "api-123",
+                         "IdentitySource": ["$request.header.Authorization"],
+                         "AuthorizerResultTtlInSeconds": "not-a-number"}
+                        """),
+                engine(), REGION, "000000000000", "test-stack", null, Map.of());
+
+        assertEquals("CREATE_FAILED", authorizer.getStatus());
+        assertTrue(authorizer.getStatusReason().contains("AuthorizerResultTtlInSeconds must be an integer"),
+                authorizer.getStatusReason());
+    }
+
+    @Test
+    void restoresExistingRoutesAndCleansPartialReplacementWhenRouteCreationFails() throws Exception {
+        Route oldRoute = route("old-route", "GET /before");
+        when(apiGatewayV2Service.createRoute(eq(REGION), eq(API_ID), anyMap())).thenAnswer(invocation -> {
+            @SuppressWarnings("unchecked")
+            Map<String, Object> request = invocation.getArgument(2);
+            return switch ((String) request.get("routeKey")) {
+                case "GET /before" -> oldRoute;
+                case "GET /first" -> route("partial-route", "GET /first");
+                case "GET /second" -> throw new AwsException("InternalFailure", "simulated route failure", 500);
+                default -> throw new AssertionError("Unexpected route key: " + request.get("routeKey"));
+            };
+        });
+        when(apiGatewayV2Service.getRoute(REGION, API_ID, "old-route")).thenReturn(oldRoute);
+
+        StackResource original = provision(body("""
+                {"paths":{"/before":{"get":{}}}}
+                """), null, Map.of());
+
+        StackResource replacement = provision(body("""
+                {"paths":{"/first":{"get":{}},"/second":{"get":{}}}}
+                """), original.getPhysicalId(), original.getAttributes());
+
+        assertEquals("CREATE_COMPLETE", original.getStatus());
+        assertEquals("CREATE_FAILED", replacement.getStatus());
+        assertEquals("old-route", replacement.getAttributes().get("__FlociApiGatewayV2BodyRouteIds"));
+        verify(apiGatewayV2Service).deleteRoute(REGION, API_ID, "old-route");
+        verify(apiGatewayV2Service).deleteRoute(REGION, API_ID, "partial-route");
+        verify(apiGatewayV2Service).restoreRoute(REGION, API_ID, oldRoute, List.of());
+    }
+
+    @Test
+    void retainsPartialRoutesWhenMaterializationCleanupFails() throws Exception {
+        when(apiGatewayV2Service.createRoute(eq(REGION), eq(API_ID), anyMap())).thenAnswer(invocation -> {
+            @SuppressWarnings("unchecked")
+            Map<String, Object> request = invocation.getArgument(2);
+            return switch ((String) request.get("routeKey")) {
+                case "GET /first" -> route("partial-route", "GET /first");
+                case "GET /second" -> throw new AwsException("InternalFailure", "simulated route failure", 500);
+                default -> throw new AssertionError("Unexpected route key: " + request.get("routeKey"));
+            };
+        });
+        doAnswer(invocation -> {
+            throw new AwsException("InternalFailure", "simulated cleanup failure", 500);
+        }).when(apiGatewayV2Service).deleteRoute(REGION, API_ID, "partial-route");
+
+        StackResource failed = provision(body("""
+                {"paths":{"/first":{"get":{}},"/second":{"get":{}}}}
+                """), null, Map.of());
+
+        assertEquals("CREATE_FAILED", failed.getStatus());
+        assertEquals("partial-route", failed.getAttributes().get("__FlociApiGatewayV2BodyRouteIds"));
+    }
+
+    @Test
+    void apiCreateDeletesTheApiItCreatedWhenItsBodyIsRefused() throws Exception {
+        when(apiGatewayV2Service.createRoute(eq(REGION), eq(API_ID), anyMap()))
+                .thenReturn(route("partial-route", "GET /first"));
+
+        StackResource failed = provision(body("""
+                {"paths":{"/first":{"get":{}},"/second":{"get":{"security":"not-an-array"}}}}
+                """), null, Map.of());
+
+        assertEquals("CREATE_FAILED", failed.getStatus());
+        assertEquals("security must be an array", failed.getStatusReason());
+        // The Body's own cleanup runs first, then the API goes, with every child it still has.
+        InOrder order = inOrder(apiGatewayV2Service);
+        order.verify(apiGatewayV2Service).deleteRoute(REGION, API_ID, "partial-route");
+        order.verify(apiGatewayV2Service).deleteApi(REGION, API_ID);
+        // Already deleted, so the engine's create rollback has nothing left to delete.
+        assertFalse(failed.getAttributes().containsKey(CfnRollback.ROLLBACK_OWNED_ATTR));
+    }
+
+    @Test
+    void apiCreateLeavesTheApiToTheStackRollbackWhenItCannotDeleteIt() throws Exception {
+        doThrow(new AwsException("TooManyRequestsException", "Too Many Requests", 429)).doNothing()
+                .when(apiGatewayV2Service).deleteApi(REGION, API_ID);
+
+        StackResource failed = provision(body("""
+                {"paths":{"/items":{"get":{"security":"not-an-array"}}}}
+                """), null, Map.of());
+
+        assertEquals("CREATE_FAILED", failed.getStatus());
+        assertEquals("security must be an array", failed.getStatusReason());
+        // Marked as created by this stack, so the create rollback, or DeleteStack, deletes it again.
+        assertEquals(API_ID, failed.getPhysicalId());
+        assertEquals("true", failed.getAttributes().get(CfnRollback.ROLLBACK_OWNED_ATTR));
+        provisioner.delete(failed, REGION);
+        verify(apiGatewayV2Service, times(2)).deleteApi(REGION, API_ID);
+    }
+
+    @Test
+    void apiCreateWithABodyItCannotReadCreatesNoApi() throws Exception {
+        StackResource failed = provision(mapper.readTree("""
+                {"Name":"test-api","ProtocolType":"HTTP","BodyS3Location":"not-s3"}
+                """), null, Map.of());
+
+        assertEquals("CREATE_FAILED", failed.getStatus());
+        assertEquals("BodyS3Location must resolve to a non-empty S3 location", failed.getStatusReason());
+        assertNull(failed.getPhysicalId());
+        verify(apiGatewayV2Service, never()).createApi(anyString(), anyMap());
+        verify(apiGatewayV2Service, never()).deleteApi(anyString(), anyString());
+    }
+
+    @Test
+    void apiUpdateWithABodyItCannotReadLeavesTheApiAsItWas() throws Exception {
+        StackResource failed = provision(mapper.readTree("""
+                {"Name":"renamed-api","ProtocolType":"HTTP","BodyS3Location":"not-s3"}
+                """), API_ID, Map.of("ApiId", API_ID));
+
+        assertEquals("CREATE_FAILED", failed.getStatus());
+        verify(apiGatewayV2Service, never()).updateApi(anyString(), anyString(), anyMap());
+        verify(apiGatewayV2Service, never()).deleteApi(anyString(), anyString());
+    }
+
+    @Test
+    void apiUpdateKeepsTheApiWhenItsBodyIsRefused() throws Exception {
+        StackResource failed = provision(body("""
+                {"paths":{"/items":{"get":{"security":"not-an-array"}}}}
+                """), API_ID, Map.of("ApiId", API_ID));
+
+        assertEquals("CREATE_FAILED", failed.getStatus());
+        verify(apiGatewayV2Service).updateApi(eq(REGION), eq(API_ID), anyMap());
+        verify(apiGatewayV2Service, never()).deleteApi(anyString(), anyString());
+        assertFalse(failed.getAttributes().containsKey(CfnRollback.ROLLBACK_OWNED_ATTR));
+    }
+
+    @Test
+    void apiDeleteToleratesOnlyAnApiAlreadyGone() {
+        StackResource api = new StackResource();
+        api.setResourceType("AWS::ApiGatewayV2::Api");
+        api.setPhysicalId(API_ID);
+        doThrow(new AwsException("NotFoundException", "Invalid API id specified", 404))
+                .when(apiGatewayV2Service).deleteApi(REGION, API_ID);
+
+        assertDoesNotThrow(() -> provisioner.delete(api, REGION));
+
+        AwsException throttled = new AwsException("TooManyRequestsException", "Too Many Requests", 429);
+        doThrow(throttled).when(apiGatewayV2Service).deleteApi(REGION, API_ID);
+        assertSame(throttled, assertThrows(AwsException.class, () -> provisioner.delete(api, REGION)));
+    }
+
+    @Test
+    void restoresExistingRouteWhenReplacementCleanupKeepsAConflictingRoute() throws Exception {
+        Route oldRoute = route("old-route", "GET /same");
+        Route replacementRoute = route("replacement-route", "GET /same");
+        AtomicInteger sameRouteCreations = new AtomicInteger();
+        when(apiGatewayV2Service.createRoute(eq(REGION), eq(API_ID), anyMap())).thenAnswer(invocation -> {
+            @SuppressWarnings("unchecked")
+            Map<String, Object> request = invocation.getArgument(2);
+            return switch ((String) request.get("routeKey")) {
+                case "GET /same" -> sameRouteCreations.getAndIncrement() == 0 ? oldRoute : replacementRoute;
+                case "GET /second" -> throw new AwsException("InternalFailure", "simulated route failure", 500);
+                default -> throw new AssertionError("Unexpected route key: " + request.get("routeKey"));
+            };
+        });
+        when(apiGatewayV2Service.getRoute(REGION, API_ID, "old-route")).thenReturn(oldRoute);
+        doAnswer(invocation -> {
+            if ("replacement-route".equals(invocation.getArgument(2))) {
+                throw new AwsException("InternalFailure", "simulated cleanup failure", 500);
+            }
+            return null;
+        }).when(apiGatewayV2Service).deleteRoute(eq(REGION), eq(API_ID), anyString());
+
+        StackResource original = provision(body("""
+                {"paths":{"/same":{"get":{}}}}
+                """), null, Map.of());
+        StackResource replacement = provision(body("""
+                {"paths":{"/same":{"get":{}},"/second":{"get":{}}}}
+                """), original.getPhysicalId(), original.getAttributes());
+
+        assertEquals("CREATE_COMPLETE", original.getStatus());
+        assertEquals("CREATE_FAILED", replacement.getStatus());
+        assertEquals("old-route,replacement-route",
+                replacement.getAttributes().get("__FlociApiGatewayV2BodyRouteIds"));
+        verify(apiGatewayV2Service).restoreRoute(REGION, API_ID, oldRoute,
+                List.of("replacement-route"));
+    }
+
+    @Test
+    void mergesFailedUpdateRouteAndIntegrationOwnershipIntoCommittedMetadata() {
+        StackResource previous = new StackResource();
+        previous.setResourceType("AWS::ApiGatewayV2::Api");
+        previous.getAttributes().put("__FlociApiGatewayV2BodyRouteIds", "old-route");
+        previous.getAttributes().put("__FlociApiGatewayV2BodyIntegrationIds", "old-integration");
+        previous.getAttributes().put("__FlociApiGatewayV2BodyAuthorizerIds", "old-authorizer");
+
+        StackResource attempted = new StackResource();
+        attempted.setResourceType("AWS::ApiGatewayV2::Api");
+        attempted.getAttributes().put("__FlociApiGatewayV2BodyRouteIds",
+                "old-route,surviving-route");
+        attempted.getAttributes().put("__FlociApiGatewayV2BodyIntegrationIds",
+                "old-integration,surviving-integration");
+        attempted.getAttributes().put("__FlociApiGatewayV2BodyAuthorizerIds",
+                "old-authorizer,surviving-authorizer");
+
+        provisioner.mergeFailedUpdateResourceTracking(previous, attempted);
+
+        assertEquals("old-route,surviving-route",
+                previous.getAttributes().get("__FlociApiGatewayV2BodyRouteIds"));
+        assertEquals("old-integration,surviving-integration",
+                previous.getAttributes().get("__FlociApiGatewayV2BodyIntegrationIds"));
+        assertEquals("old-authorizer,surviving-authorizer",
+                previous.getAttributes().get("__FlociApiGatewayV2BodyAuthorizerIds"));
+    }
+
+    @Test
+    void carriesAReplacementCleanupRecordOntoTheRestoredResourceForAnyType() {
+        StackResource previous = new StackResource();
+        previous.setLogicalId("Subnet");
+        previous.setResourceType("AWS::EC2::Subnet");
+        previous.setPhysicalId("subnet-prior");
+        previous.setAttributes(new HashMap<>());
+        StackResource attempted = new StackResource();
+        attempted.setLogicalId("Subnet");
+        attempted.setResourceType("AWS::EC2::Subnet");
+        attempted.setPhysicalId("subnet-replacement");
+        attempted.setAttributes(new HashMap<>(Map.of(
+                "__FlociReplacementCleanup",
+                "{\"region\":\"us-east-1\",\"displaced\":[{\"physicalId\":\"subnet-replacement\",\"resourceType\":\"AWS::EC2::Subnet\",\"region\":\"us-east-1\",\"retainable\":false,\"cleanupAttempts\":1}]}")));
+
+        provisioner.mergeFailedUpdateResourceTracking(previous, attempted);
+
+        String record = previous.getAttributes().get("__FlociReplacementCleanup");
+        assertTrue(record != null && record.contains("subnet-replacement") && record.contains("\"cleanupAttempts\":1"),
+                "the orphan the attempt could not remove is owed on the restored resource: " + record);
+    }
+
+    @ParameterizedTest
+    @ValueSource(booleans = {true, false})
+    void bodyMapsIntegrationAndRequestAuthorizerCredentials(boolean integrationCredentials) throws Exception {
+        Authorizer authorizer = new Authorizer();
+        authorizer.setAuthorizerId("body-authorizer");
+        when(apiGatewayV2Service.createAuthorizer(eq(REGION), eq(API_ID), anyMap())).thenReturn(authorizer);
+        Integration integration = new Integration();
+        integration.setIntegrationId("body-integration");
+        when(apiGatewayV2Service.createIntegration(eq(REGION), eq(API_ID), anyMap())).thenReturn(integration);
+        when(apiGatewayV2Service.createRoute(eq(REGION), eq(API_ID), anyMap()))
+                .thenReturn(route("body-route", "GET /items"));
+
+        StackResource resource = provision(body("""
+                {"components":{"securitySchemes":{"RequestAuth":{
+                  "type":"apiKey","name":"Authorization","in":"header",
+                  "x-amazon-apigateway-authorizer":{"type":"request",
+                    "authorizerUri":"arn:aws:lambda:us-east-1:000000000000:function:auth",
+                    "authorizerCredentials":"arn:aws:iam::000000000000:role/authorizer",
+                    "identitySource":"$request.header.Authorization",
+                    "authorizerPayloadFormatVersion":"2.0"}}}},
+                 "paths":{"/items":{"get":{"security":[{"RequestAuth":[]}],
+                  "x-amazon-apigateway-integration":{"type":"aws_proxy",
+                    "uri":"arn:aws:lambda:us-east-1:000000000000:function:target",
+                    "credentials":"arn:aws:iam::000000000000:role/integration",
+                    "httpMethod":"POST","payloadFormatVersion":"2.0"}}}}}
+                """), null, Map.of());
+
+        assertEquals("CREATE_COMPLETE", resource.getStatus());
+        if (integrationCredentials) {
+            verify(apiGatewayV2Service).createIntegration(eq(REGION), eq(API_ID), argThat(request ->
+                    "arn:aws:iam::000000000000:role/integration".equals(request.get("credentialsArn"))));
+        } else {
+            verify(apiGatewayV2Service).createAuthorizer(eq(REGION), eq(API_ID), argThat(request ->
+                    "arn:aws:iam::000000000000:role/authorizer".equals(request.get("authorizerCredentialsArn"))));
+        }
+    }
+
+    @Test
+    void materializesInheritedJwtSecurityAndHonorsOperationOptOut() throws Exception {
+        Authorizer authorizer = new Authorizer();
+        authorizer.setAuthorizerId("body-authorizer");
+        when(apiGatewayV2Service.createAuthorizer(eq(REGION), eq(API_ID), anyMap()))
+                .thenReturn(authorizer);
+        when(apiGatewayV2Service.createRoute(eq(REGION), eq(API_ID), anyMap())).thenAnswer(invocation -> {
+            @SuppressWarnings("unchecked")
+            Map<String, Object> request = invocation.getArgument(2);
+            return route("route-" + request.get("routeKey"), (String) request.get("routeKey"));
+        });
+
+        StackResource resource = provision(body("""
+                {
+                  "components":{"securitySchemes":{"JwtAuth":{
+                    "type":"oauth2",
+                    "x-amazon-apigateway-authorizer":{
+                      "type":"jwt",
+                      "identitySource":"$request.header.Authorization",
+                      "jwtConfiguration":{
+                        "issuer":"https://issuer.example.com",
+                        "audience":["client-id"]
+                      }
+                    }
+                  }}},
+                  "security":[{"JwtAuth":["orders/read"]}],
+                  "paths":{
+                    "/protected":{"get":{}},
+                    "/public":{"get":{"security":[]}}
+                  }
+                }
+                """), null, Map.of());
+
+        assertEquals("CREATE_COMPLETE", resource.getStatus());
+        assertEquals("body-authorizer",
+                resource.getAttributes().get("__FlociApiGatewayV2BodyAuthorizerIds"));
+        verify(apiGatewayV2Service).createAuthorizer(eq(REGION), eq(API_ID), argThat(request ->
+                "JwtAuth".equals(request.get("name"))
+                        && "JWT".equals(request.get("authorizerType"))
+                        && "$request.header.Authorization".equals(request.get("identitySource"))));
+        verify(apiGatewayV2Service).createRoute(eq(REGION), eq(API_ID), argThat(request ->
+                "GET /protected".equals(request.get("routeKey"))
+                        && "JWT".equals(request.get("authorizationType"))
+                        && "body-authorizer".equals(request.get("authorizerId"))
+                        && List.of("orders/read").equals(request.get("authorizationScopes"))));
+        verify(apiGatewayV2Service).createRoute(eq(REGION), eq(API_ID), argThat(request ->
+                "GET /public".equals(request.get("routeKey"))
+                        && "NONE".equals(request.get("authorizationType"))
+                        && !request.containsKey("authorizerId")));
+    }
+
+    @Test
+    void rejectsProtectedOperationWhenSecuritySchemeCannotBeResolved() throws Exception {
+        StackResource resource = provision(body("""
+                {
+                  "security":[{"MissingAuthorizer":[]}],
+                  "paths":{"/protected":{"get":{}}}
+                }
+                """), null, Map.of());
+
+        assertEquals("CREATE_FAILED", resource.getStatus());
+        assertEquals("Protected operation GET /protected references unsupported security scheme 'MissingAuthorizer'",
+                resource.getStatusReason());
+        verify(apiGatewayV2Service, never()).createRoute(eq(REGION), eq(API_ID), anyMap());
+    }
+
+    @Test
+    void rejectsAndSecurityRequirementInsteadOfApplyingOnlyOneScheme() throws Exception {
+        Authorizer first = new Authorizer();
+        first.setAuthorizerId("first-authorizer");
+        Authorizer second = new Authorizer();
+        second.setAuthorizerId("second-authorizer");
+        when(apiGatewayV2Service.createAuthorizer(eq(REGION), eq(API_ID), anyMap()))
+                .thenReturn(first, second);
+
+        StackResource resource = provision(body("""
+                {
+                  "components":{"securitySchemes":{
+                    "First":{"x-amazon-apigateway-authorizer":{
+                      "type":"jwt","jwtConfiguration":{"issuer":"https://first.example.com"}
+                    }},
+                    "Second":{"x-amazon-apigateway-authorizer":{
+                      "type":"jwt","jwtConfiguration":{"issuer":"https://second.example.com"}
+                    }}
+                  }},
+                  "security":[{"First":[],"Second":[]}],
+                  "paths":{"/protected":{"get":{}}}
+                }
+                """), null, Map.of());
+
+        assertEquals("CREATE_FAILED", resource.getStatus());
+        verify(apiGatewayV2Service, never()).createRoute(eq(REGION), eq(API_ID), anyMap());
+        verify(apiGatewayV2Service).deleteAuthorizer(REGION, API_ID, "first-authorizer");
+        verify(apiGatewayV2Service).deleteAuthorizer(REGION, API_ID, "second-authorizer");
+    }
+
+    @Test
+    void rejectsUnrepresentableSecurityOrAlternativesInsteadOfChoosingOne() throws Exception {
+        StackResource resource = provision(body("""
+                {
+                  "security":[{"First":[]},{"Second":[]}],
+                  "paths":{"/protected":{"get":{}}}
+                }
+                """), null, Map.of());
+
+        assertEquals("CREATE_FAILED", resource.getStatus());
+        verify(apiGatewayV2Service, never()).createRoute(eq(REGION), eq(API_ID), anyMap());
+    }
+
+    @Test
+    void honorsAnonymousAlternativeInSecurityOrList() throws Exception {
+        Authorizer authorizer = new Authorizer();
+        authorizer.setAuthorizerId("optional-authorizer");
+        when(apiGatewayV2Service.createAuthorizer(eq(REGION), eq(API_ID), anyMap()))
+                .thenReturn(authorizer);
+        when(apiGatewayV2Service.createRoute(eq(REGION), eq(API_ID), anyMap()))
+                .thenReturn(route("optional-route", "GET /optional"));
+
+        StackResource resource = provision(body("""
+                {
+                  "components":{"securitySchemes":{"JwtAuth":{
+                    "x-amazon-apigateway-authorizer":{
+                      "type":"jwt","jwtConfiguration":{"issuer":"https://issuer.example.com"}
+                    }
+                  }}},
+                  "security":[{"JwtAuth":[]},{}],
+                  "paths":{"/optional":{"get":{}}}
+                }
+                """), null, Map.of());
+
+        assertEquals("CREATE_COMPLETE", resource.getStatus());
+        verify(apiGatewayV2Service).createRoute(eq(REGION), eq(API_ID), argThat(request ->
+                "GET /optional".equals(request.get("routeKey"))
+                        && "NONE".equals(request.get("authorizationType"))));
+    }
+
+    @Test
+    void materializesRequestAuthorizerSecurityAsCustomAuthorization() throws Exception {
+        Authorizer authorizer = new Authorizer();
+        authorizer.setAuthorizerId("request-authorizer");
+        when(apiGatewayV2Service.createAuthorizer(eq(REGION), eq(API_ID), anyMap()))
+                .thenReturn(authorizer);
+        when(apiGatewayV2Service.createRoute(eq(REGION), eq(API_ID), anyMap()))
+                .thenReturn(route("protected-route", "POST /protected"));
+
+        StackResource resource = provision(body("""
+                {
+                  "components":{"securitySchemes":{"RequestAuth":{
+                    "type":"apiKey",
+                    "x-amazon-apigateway-authorizer":{
+                      "type":"request",
+                      "identitySource":["$request.header.Authorization"],
+                      "authorizerUri":"arn:aws:apigateway:us-east-1:lambda:path/functions/auth/invocations",
+                      "authorizerPayloadFormatVersion":"2.0",
+                      "enableSimpleResponses":true
+                    }
+                  }}},
+                  "paths":{"/protected":{"post":{"security":[{"RequestAuth":[]}]}}}
+                }
+                """), null, Map.of());
+
+        assertEquals("CREATE_COMPLETE", resource.getStatus());
+        verify(apiGatewayV2Service).createAuthorizer(eq(REGION), eq(API_ID), argThat(request ->
+                "REQUEST".equals(request.get("authorizerType"))
+                        && Boolean.TRUE.equals(request.get("enableSimpleResponses"))));
+        verify(apiGatewayV2Service).createRoute(eq(REGION), eq(API_ID), argThat(request ->
+                "POST /protected".equals(request.get("routeKey"))
+                        && "CUSTOM".equals(request.get("authorizationType"))
+                        && "request-authorizer".equals(request.get("authorizerId"))));
+    }
+
+    @Test
+    void restoresBodyAuthorizerWhenSecuredRouteReplacementFails() throws Exception {
+        Authorizer oldAuthorizer = new Authorizer();
+        oldAuthorizer.setAuthorizerId("old-authorizer");
+        Authorizer replacementAuthorizer = new Authorizer();
+        replacementAuthorizer.setAuthorizerId("replacement-authorizer");
+        when(apiGatewayV2Service.createAuthorizer(eq(REGION), eq(API_ID), anyMap()))
+                .thenReturn(oldAuthorizer, replacementAuthorizer);
+
+        Route oldRoute = route("old-route", "GET /protected");
+        when(apiGatewayV2Service.createRoute(eq(REGION), eq(API_ID), anyMap()))
+                .thenReturn(oldRoute)
+                .thenThrow(new AwsException("InternalFailure", "simulated route failure", 500));
+        when(apiGatewayV2Service.getRoute(REGION, API_ID, "old-route")).thenReturn(oldRoute);
+        when(apiGatewayV2Service.getAuthorizer(REGION, API_ID, "old-authorizer"))
+                .thenReturn(oldAuthorizer);
+
+        String securedBody = """
+                {
+                  "components":{"securitySchemes":{"JwtAuth":{
+                    "x-amazon-apigateway-authorizer":{
+                      "type":"jwt",
+                      "jwtConfiguration":{"issuer":"https://issuer.example.com"}
+                    }
+                  }}},
+                  "security":[{"JwtAuth":[]}],
+                  "paths":{"/protected":{"get":{}}}
+                }
+                """;
+        StackResource original = provision(body(securedBody), null, Map.of());
+        StackResource replacement = provision(body(securedBody), original.getPhysicalId(),
+                original.getAttributes());
+
+        assertEquals("CREATE_COMPLETE", original.getStatus());
+        assertEquals("CREATE_FAILED", replacement.getStatus());
+        assertEquals("old-authorizer",
+                replacement.getAttributes().get("__FlociApiGatewayV2BodyAuthorizerIds"));
+        verify(apiGatewayV2Service).deleteAuthorizer(REGION, API_ID, "old-authorizer");
+        verify(apiGatewayV2Service).deleteAuthorizer(REGION, API_ID, "replacement-authorizer");
+        verify(apiGatewayV2Service).restoreAuthorizer(REGION, API_ID, oldAuthorizer);
+        verify(apiGatewayV2Service).restoreRoute(REGION, API_ID, oldRoute, List.of());
+    }
+
+    @Test
+    void rejectsSigV4SecurityUntilHttpApiIamEnforcementIsSupported() throws Exception {
+        StackResource resource = provision(body("""
+                {
+                  "components":{"securitySchemes":{"SigV4":{
+                    "type":"apiKey",
+                    "x-amazon-apigateway-authtype":"awsSigv4"
+                  }}},
+                  "security":[{"SigV4":[]}],
+                  "paths":{"/iam":{"get":{}}}
+                }
+                """), null, Map.of());
+
+        assertEquals("CREATE_FAILED", resource.getStatus());
+        verify(apiGatewayV2Service, never()).createAuthorizer(eq(REGION), eq(API_ID), anyMap());
+        verify(apiGatewayV2Service, never()).createRoute(eq(REGION), eq(API_ID), anyMap());
+    }
+
+    @Test
+    void restoresExistingRoutesWhenOldRouteDeletionFails() throws Exception {
+        Route oldOne = route("old-one", "GET /before-one");
+        Route oldTwo = route("old-two", "GET /before-two");
+        when(apiGatewayV2Service.createRoute(eq(REGION), eq(API_ID), anyMap())).thenAnswer(invocation -> {
+            @SuppressWarnings("unchecked")
+            Map<String, Object> request = invocation.getArgument(2);
+            return switch ((String) request.get("routeKey")) {
+                case "GET /before-one" -> oldOne;
+                case "GET /before-two" -> oldTwo;
+                case "GET /after" -> route("replacement-route", "GET /after");
+                default -> throw new AssertionError("Unexpected route key: " + request.get("routeKey"));
+            };
+        });
+        when(apiGatewayV2Service.getRoute(REGION, API_ID, "old-one")).thenReturn(oldOne);
+        when(apiGatewayV2Service.getRoute(REGION, API_ID, "old-two")).thenReturn(oldTwo);
+        doAnswer(invocation -> {
+            if ("old-two".equals(invocation.getArgument(2))) {
+                throw new AwsException("InternalFailure", "simulated delete failure", 500);
+            }
+            return null;
+        }).when(apiGatewayV2Service).deleteRoute(eq(REGION), eq(API_ID), anyString());
+
+        StackResource original = provision(body("""
+                {"paths":{"/before-one":{"get":{}},"/before-two":{"get":{}}}}
+                """), null, Map.of());
+
+        StackResource replacement = provision(body("""
+                {"paths":{"/after":{"get":{}}}}
+                """), original.getPhysicalId(), original.getAttributes());
+
+        assertEquals("CREATE_COMPLETE", original.getStatus());
+        assertEquals("CREATE_FAILED", replacement.getStatus());
+        assertEquals("old-one,old-two", replacement.getAttributes().get("__FlociApiGatewayV2BodyRouteIds"));
+        verify(apiGatewayV2Service, never()).createRoute(eq(REGION), eq(API_ID),
+                argThat(request -> "GET /after".equals(request.get("routeKey"))));
+        verify(apiGatewayV2Service).restoreRoute(REGION, API_ID, oldOne, List.of());
+        verify(apiGatewayV2Service).restoreRoute(REGION, API_ID, oldTwo, List.of());
+    }
+
+    @Test
+    void restoresExistingRoutesWhenDefinitionRemovalFails() throws Exception {
+        Route oldOne = route("old-one", "GET /before-one");
+        Route oldTwo = route("old-two", "GET /before-two");
+        when(apiGatewayV2Service.createRoute(eq(REGION), eq(API_ID), anyMap())).thenAnswer(invocation -> {
+            @SuppressWarnings("unchecked")
+            Map<String, Object> request = invocation.getArgument(2);
+            return switch ((String) request.get("routeKey")) {
+                case "GET /before-one" -> oldOne;
+                case "GET /before-two" -> oldTwo;
+                default -> throw new AssertionError("Unexpected route key: " + request.get("routeKey"));
+            };
+        });
+        when(apiGatewayV2Service.getRoute(REGION, API_ID, "old-one")).thenReturn(oldOne);
+        when(apiGatewayV2Service.getRoute(REGION, API_ID, "old-two")).thenReturn(oldTwo);
+        doAnswer(invocation -> {
+            if ("old-two".equals(invocation.getArgument(2))) {
+                throw new AwsException("InternalFailure", "simulated delete failure", 500);
+            }
+            return null;
+        }).when(apiGatewayV2Service).deleteRoute(eq(REGION), eq(API_ID), anyString());
+
+        StackResource original = provision(body("""
+                {"paths":{"/before-one":{"get":{}},"/before-two":{"get":{}}}}
+                """), null, Map.of());
+
+        StackResource removal = provision(propertiesWithoutBody(), original.getPhysicalId(),
+                original.getAttributes());
+
+        assertEquals("CREATE_COMPLETE", original.getStatus());
+        assertEquals("CREATE_FAILED", removal.getStatus());
+        assertEquals("old-one,old-two", removal.getAttributes().get("__FlociApiGatewayV2BodyRouteIds"));
+        verify(apiGatewayV2Service).restoreRoute(REGION, API_ID, oldOne, List.of());
+        verify(apiGatewayV2Service).restoreRoute(REGION, API_ID, oldTwo, List.of());
+    }
+
+    @Test
+    void vpcLinkCreatesTheLinkAndPublishesItsId() throws Exception {
+        when(apiGatewayV2Service.createVpcLink(eq(REGION), anyMap())).thenReturn(vpcLink("vl-1", List.of("subnet-a")));
+
+        StackResource link = provisionVpcLink("""
+                {"Name":"my-link","SubnetIds":["subnet-a"],"SecurityGroupIds":["sg-1"],"Tags":{"Env":"test"}}
+                """, null, Map.of());
+
+        assertEquals("CREATE_COMPLETE", link.getStatus());
+        assertEquals("vl-1", link.getPhysicalId());
+        assertEquals("vl-1", link.getAttributes().get("VpcLinkId"));
+        verify(apiGatewayV2Service).createVpcLink(eq(REGION), argThat(req -> "my-link".equals(req.get("name"))
+                && List.of("subnet-a").equals(req.get("subnetIds"))
+                && List.of("sg-1").equals(req.get("securityGroupIds"))
+                && Map.of("Env", "test").equals(req.get("tags"))));
+    }
+
+    @Test
+    void vpcLinkNameChangeUpdatesTheLinkInPlace() throws Exception {
+        VpcLink prior = vpcLink("vl-1", List.of("subnet-a"));
+        prior.setName("old-name");
+        when(apiGatewayV2Service.getVpcLink(REGION, "vl-1")).thenReturn(prior);
+
+        StackResource link = provisionVpcLink("""
+                {"Name":"new-name","SubnetIds":["subnet-a"]}
+                """, "vl-1", Map.of("VpcLinkId", "vl-1"));
+
+        assertEquals("vl-1", link.getPhysicalId());
+        verify(apiGatewayV2Service).updateVpcLink(REGION, "vl-1", Map.of("name", "new-name"));
+        verify(apiGatewayV2Service, never()).createVpcLink(anyString(), anyMap());
+        assertFalse(provisioner.hasReplacementUpdate(link));
+    }
+
+    @Test
+    void vpcLinkSubnetChangeReplacesTheLink() throws Exception {
+        when(apiGatewayV2Service.getVpcLink(REGION, "vl-1")).thenReturn(vpcLink("vl-1", List.of("subnet-a")));
+        when(apiGatewayV2Service.createVpcLink(eq(REGION), anyMap())).thenReturn(vpcLink("vl-2", List.of("subnet-b")));
+
+        StackResource link = provisionVpcLink("""
+                {"Name":"my-link","SubnetIds":["subnet-b"]}
+                """, "vl-1", Map.of("VpcLinkId", "vl-1"));
+
+        assertEquals("vl-2", link.getPhysicalId());
+        assertEquals("vl-2", link.getAttributes().get("VpcLinkId"));
+        verify(apiGatewayV2Service, never()).updateVpcLink(anyString(), anyString(), anyMap());
+        assertTrue(provisioner.hasReplacementUpdate(link), "the displaced link is deleted after the update");
+    }
+
+    @Test
+    void vpcLinkWithoutSubnetIdsFailsBeforeCallingTheService() throws Exception {
+        StackResource link = provisionVpcLink("""
+                {"Name":"my-link"}
+                """, null, Map.of());
+
+        assertEquals("CREATE_FAILED", link.getStatus());
+        assertTrue(link.getStatusReason().contains("requires SubnetIds"), link.getStatusReason());
+        verify(apiGatewayV2Service, never()).createVpcLink(anyString(), anyMap());
+    }
+
+    @Test
+    void rollbackOfAnInPlaceVpcLinkUpdateRestoresNameAndTags() throws Exception {
+        VpcLink prior = vpcLink("vl-1", List.of("subnet-a"));
+        prior.setName("old-name");
+        prior.setTags(new HashMap<>(Map.of("Env", "old")));
+        when(apiGatewayV2Service.getVpcLink(REGION, "vl-1")).thenReturn(prior);
+        when(apiGatewayV2Service.getTags(anyString())).thenReturn(Map.of("Env", "new"));
+        StackResource link = provisionVpcLink("""
+                {"Name":"new-name","SubnetIds":["subnet-a"],"Tags":{"Env":"new"}}
+                """, "vl-1", Map.of("VpcLinkId", "vl-1"));
+
+        assertTrue(provisioner.rollbackUpdate(link));
+
+        verify(apiGatewayV2Service).updateVpcLink(REGION, "vl-1", Map.of("name", "old-name"));
+        verify(apiGatewayV2Service).tagResource("arn:aws:apigateway:us-east-1::/vpclinks/vl-1", Map.of("Env", "old"));
+        assertFalse(link.getAttributes().containsKey("__FlociVpcLinkUpdateSnapshot"));
+    }
+
+    @Test
+    void integrationPassesItsVpcLinkConnection() throws Exception {
+        Integration integration = new Integration();
+        integration.setIntegrationId("int-1");
+        when(apiGatewayV2Service.createIntegration(eq(REGION), eq(API_ID), anyMap())).thenReturn(integration);
+
+        provisioner.provision("Integration", "AWS::ApiGatewayV2::Integration", mapper.readTree("""
+                        {"ApiId":"api-123","IntegrationType":"HTTP_PROXY",
+                         "IntegrationUri":"arn:aws:elasticloadbalancing:us-east-1:000000000000:listener/app/alb/1/2",
+                         "ConnectionType":"VPC_LINK","ConnectionId":"vl-1"}
+                        """),
+                engine(), REGION, "000000000000", "test-stack", null, Map.of());
+
+        verify(apiGatewayV2Service).createIntegration(eq(REGION), eq(API_ID),
+                argThat(req -> "VPC_LINK".equals(req.get("connectionType")) && "vl-1".equals(req.get("connectionId"))));
+    }
+
+    @Test
+    void failedInPlaceVpcLinkUpdateRestoresTagsAndSendsOnlyChangedTags() throws Exception {
+        String arn = "arn:aws:apigateway:us-east-1::/vpclinks/vl-1";
+        VpcLink prior = vpcLink("vl-1", List.of("subnet-a"));
+        prior.setName("old-name");
+        prior.setTags(new HashMap<>(Map.of("floci:override-id", "vl-1", "Env", "old")));
+        when(apiGatewayV2Service.getVpcLink(REGION, "vl-1")).thenReturn(prior);
+        when(apiGatewayV2Service.getTags(arn)).thenReturn(
+                Map.of("floci:override-id", "vl-1", "Env", "old"),
+                Map.of("floci:override-id", "vl-1", "Env", "new"));
+        when(apiGatewayV2Service.updateVpcLink(REGION, "vl-1", Map.of("name", "new-name")))
+                .thenThrow(new AwsException("BadRequestException", "rename failed", 400));
+
+        StackResource link = provisionVpcLink("""
+                {"Name":"new-name","SubnetIds":["subnet-a"],"Tags":{"floci:override-id":"vl-1","Env":"new"}}
+                """, "vl-1", Map.of("VpcLinkId", "vl-1"));
+
+        assertTrue(link.getStatus().endsWith("_FAILED"), link.getStatus());
+        verify(apiGatewayV2Service).tagResource(arn, Map.of("Env", "new"));
+        verify(apiGatewayV2Service).tagResource(arn, Map.of("Env", "old"));
+        verify(apiGatewayV2Service).updateVpcLink(REGION, "vl-1", Map.of("name", "old-name"));
+        assertFalse(link.getAttributes().containsKey("__FlociUpdateRollbackFailure"));
+        assertFalse(link.getAttributes().containsKey("__FlociVpcLinkUpdateSnapshot"));
+    }
+
+    @Test
+    void integrationUpdateWithoutConnectionResetsItToInternet() throws Exception {
+        stubIntegrationUpdate(priorVpcLinkIntegration());
+
+        StackResource integration = provisionIntegration("""
+                {"ApiId":"api-123","IntegrationType":"HTTP_PROXY","IntegrationUri":"http://backend"}
+                """);
+
+        assertTrue(integration.getStatus().endsWith("_COMPLETE"), integration.getStatus());
+        verify(apiGatewayV2Service).replaceIntegrationConnection(REGION, API_ID, "int-1", "INTERNET", null);
+    }
+
+    @Test
+    void rollbackOfAnIntegrationUpdateRestoresItsConnection() throws Exception {
+        stubIntegrationUpdate(priorVpcLinkIntegration());
+        StackResource integration = provisionIntegration("""
+                {"ApiId":"api-123","IntegrationType":"HTTP_PROXY","IntegrationUri":"http://backend",
+                 "ConnectionType":"VPC_LINK","ConnectionId":"vl-2"}
+                """);
+
+        assertTrue(provisioner.rollbackUpdate(integration));
+
+        verify(apiGatewayV2Service).replaceIntegrationConnection(REGION, API_ID, "int-1", "VPC_LINK", "vl-1");
+        assertFalse(integration.getAttributes().containsKey("__FlociIntegrationConnectionSnapshot"));
+    }
+
+    @Test
+    void rollbackOfAnIntegrationUpdateWithOtherChangesRestoresConnectionButReportsFailure() throws Exception {
+        stubIntegrationUpdate(priorVpcLinkIntegration());
+        StackResource integration = provisionIntegration("""
+                {"ApiId":"api-123","IntegrationType":"HTTP_PROXY","IntegrationUri":"http://other-backend",
+                 "ConnectionType":"VPC_LINK","ConnectionId":"vl-2"}
+                """);
+
+        assertFalse(provisioner.rollbackUpdate(integration), "the IntegrationUri change has no rollback");
+
+        verify(apiGatewayV2Service).replaceIntegrationConnection(REGION, API_ID, "int-1", "VPC_LINK", "vl-1");
+    }
+
+    @Test
+    void failedIntegrationUpdateRestoresItsConnection() throws Exception {
+        stubIntegrationUpdate(priorVpcLinkIntegration());
+        when(apiGatewayV2Service.updateIntegration(eq(REGION), eq(API_ID), eq("int-1"), anyMap()))
+                .thenThrow(new AwsException("NotFoundException", "Integration not found", 404));
+
+        StackResource integration = provisionIntegration("""
+                {"ApiId":"api-123","IntegrationType":"HTTP_PROXY","IntegrationUri":"http://backend",
+                 "ConnectionType":"VPC_LINK","ConnectionId":"vl-2"}
+                """);
+
+        assertTrue(integration.getStatus().endsWith("_FAILED"), integration.getStatus());
+        InOrder order = inOrder(apiGatewayV2Service);
+        order.verify(apiGatewayV2Service).replaceIntegrationConnection(REGION, API_ID, "int-1", "VPC_LINK", "vl-2");
+        order.verify(apiGatewayV2Service).updateIntegration(eq(REGION), eq(API_ID), eq("int-1"), anyMap());
+        order.verify(apiGatewayV2Service).replaceIntegrationConnection(REGION, API_ID, "int-1", "VPC_LINK", "vl-1");
+        assertFalse(integration.getAttributes().containsKey("__FlociUpdateRollbackFailure"));
+        assertFalse(integration.getAttributes().containsKey("__FlociIntegrationConnectionSnapshot"));
+    }
+
+    @Test
+    void integrationCreatePassesMethodParametersTemplatesTimeoutAndSelectionExpression() throws Exception {
+        Integration integration = new Integration();
+        integration.setIntegrationId("int-1");
+        when(apiGatewayV2Service.createIntegration(eq(REGION), eq(API_ID), anyMap())).thenReturn(integration);
+
+        provisioner.provision("Integration", "AWS::ApiGatewayV2::Integration", mapper.readTree(INTEGRATION_PROPERTIES),
+                engine(), REGION, "000000000000", "test-stack", null, Map.of());
+
+        verify(apiGatewayV2Service).createIntegration(eq(REGION), eq(API_ID), argThat(this::carriesIntegrationProperties));
+    }
+
+    @Test
+    void integrationUpdatePassesMethodParametersTemplatesTimeoutAndSelectionExpression() throws Exception {
+        stubIntegrationUpdate(priorVpcLinkIntegration());
+
+        StackResource integration = provisionIntegration(INTEGRATION_PROPERTIES);
+
+        assertTrue(integration.getStatus().endsWith("_COMPLETE"), integration.getStatus());
+        verify(apiGatewayV2Service).updateIntegration(eq(REGION), eq(API_ID), eq("int-1"),
+                argThat(this::carriesIntegrationProperties));
+    }
+
+    @Test
+    void integrationRequestParametersResolveIntrinsics() throws Exception {
+        Integration integration = new Integration();
+        integration.setIntegrationId("int-1");
+        when(apiGatewayV2Service.createIntegration(eq(REGION), eq(API_ID), anyMap())).thenReturn(integration);
+
+        provisioner.provision("Integration", "AWS::ApiGatewayV2::Integration", mapper.readTree("""
+                        {"ApiId":"api-123","IntegrationType":"HTTP_PROXY","IntegrationUri":"http://backend",
+                         "RequestParameters":{"overwrite:header.x-stack":{"Ref":"AWS::StackName"}}}
+                        """),
+                engine(), REGION, "000000000000", "test-stack", null, Map.of());
+
+        verify(apiGatewayV2Service).createIntegration(eq(REGION), eq(API_ID), argThat(req ->
+                Map.of("overwrite:header.x-stack", "test-stack").equals(req.get("requestParameters"))));
+    }
+
+    @Test
+    void integrationWithNonNumericTimeoutIsRejected() throws Exception {
+        StackResource integration = provisioner.provision("Integration", "AWS::ApiGatewayV2::Integration",
+                mapper.readTree("""
+                        {"ApiId":"api-123","IntegrationType":"HTTP_PROXY","IntegrationUri":"http://backend",
+                         "TimeoutInMillis":"soon"}
+                        """),
+                engine(), REGION, "000000000000", "test-stack", null, Map.of());
+
+        assertEquals("CREATE_FAILED", integration.getStatus());
+        verify(apiGatewayV2Service, never()).createIntegration(any(), any(), anyMap());
+    }
+
+    @Test
+    void integrationUpdateWithoutSettingsReplacesThemWithNull() throws Exception {
+        stubIntegrationUpdate(priorVpcLinkIntegration());
+
+        StackResource integration = provisionIntegration("""
+                {"ApiId":"api-123","IntegrationType":"HTTP_PROXY","IntegrationUri":"http://backend",
+                 "ConnectionType":"VPC_LINK","ConnectionId":"vl-1"}
+                """);
+
+        assertTrue(integration.getStatus().endsWith("_COMPLETE"), integration.getStatus());
+        verify(apiGatewayV2Service).replaceIntegrationSettings(REGION, API_ID, "int-1", null, null, 0, null, null);
+    }
+
+    @Test
+    void integrationUpdateKeepsTheSettingsTheTemplateStillSets() throws Exception {
+        stubIntegrationUpdate(priorVpcLinkIntegration());
+
+        provisionIntegration(INTEGRATION_PROPERTIES);
+
+        verify(apiGatewayV2Service).replaceIntegrationSettings(REGION, API_ID, "int-1", "ANY",
+                "${request.method}", 15000, Map.of("append:header.x-request-id", "$context.requestId",
+                        "overwrite:header.x-example", "static-value"),
+                Map.of("application/json", "{\"a\":1}"));
+    }
+
+    @Test
+    void integrationMappingEntryWithNoValueIsOmitted() throws Exception {
+        Integration integration = new Integration();
+        integration.setIntegrationId("int-1");
+        when(apiGatewayV2Service.createIntegration(eq(REGION), eq(API_ID), anyMap())).thenReturn(integration);
+
+        provisioner.provision("Integration", "AWS::ApiGatewayV2::Integration", mapper.readTree("""
+                        {"ApiId":"api-123","IntegrationType":"HTTP_PROXY","IntegrationUri":"http://backend",
+                         "RequestParameters":{"overwrite:header.x-on":"yes",
+                           "overwrite:header.x-off":{"Fn::If":["Off",{"Ref":"AWS::NoValue"},"no"]}}}
+                        """),
+                engine(Map.of("Off", true)), REGION, "000000000000", "test-stack", null, Map.of());
+
+        verify(apiGatewayV2Service).createIntegration(eq(REGION), eq(API_ID), argThat(req ->
+                Map.of("overwrite:header.x-on", "yes").equals(req.get("requestParameters"))));
+    }
+
+    @Test
+    void rollbackOfAnIntegrationUpdateRestoresItsSettings() throws Exception {
+        Integration prior = priorVpcLinkIntegration();
+        prior.setIntegrationMethod("GET");
+        prior.setTemplateSelectionExpression("${request.method}");
+        prior.setTimeoutInMillis(15000);
+        prior.setRequestParameters(Map.of("overwrite:header.x-example", "old"));
+        prior.setRequestTemplates(Map.of("application/json", "{}"));
+        stubIntegrationUpdate(prior);
+        StackResource integration = provisionIntegration("""
+                {"ApiId":"api-123","IntegrationType":"HTTP_PROXY","IntegrationUri":"http://backend",
+                 "ConnectionType":"VPC_LINK","ConnectionId":"vl-1","IntegrationMethod":"POST",
+                 "TimeoutInMillis":"3000","RequestParameters":{"overwrite:header.x-example":"new"}}
+                """);
+
+        assertTrue(provisioner.rollbackUpdate(integration));
+
+        InOrder order = inOrder(apiGatewayV2Service);
+        order.verify(apiGatewayV2Service).replaceIntegrationSettings(REGION, API_ID, "int-1", "POST", null, 3000,
+                Map.of("overwrite:header.x-example", "new"), null);
+        order.verify(apiGatewayV2Service).replaceIntegrationSettings(REGION, API_ID, "int-1", "GET",
+                "${request.method}", 15000, Map.of("overwrite:header.x-example", "old"),
+                Map.of("application/json", "{}"));
+    }
+
+    @Test
+    void failedIntegrationUpdateRestoresItsSettings() throws Exception {
+        Integration prior = priorVpcLinkIntegration();
+        prior.setRequestParameters(Map.of("overwrite:header.x-example", "old"));
+        stubIntegrationUpdate(prior);
+        when(apiGatewayV2Service.updateIntegration(eq(REGION), eq(API_ID), eq("int-1"), anyMap()))
+                .thenThrow(new AwsException("NotFoundException", "Integration not found", 404));
+
+        StackResource integration = provisionIntegration("""
+                {"ApiId":"api-123","IntegrationType":"HTTP_PROXY","IntegrationUri":"http://backend",
+                 "ConnectionType":"VPC_LINK","ConnectionId":"vl-1"}
+                """);
+
+        assertTrue(integration.getStatus().endsWith("_FAILED"), integration.getStatus());
+        verify(apiGatewayV2Service).replaceIntegrationSettings(REGION, API_ID, "int-1", null, null, 0, null, null);
+        verify(apiGatewayV2Service).replaceIntegrationSettings(REGION, API_ID, "int-1", null, null, 0,
+                Map.of("overwrite:header.x-example", "old"), null);
+    }
+
+    private static final String NO_VALUE_SETTINGS = """
+            {"ApiId":"api-123","IntegrationType":"HTTP_PROXY","IntegrationUri":"http://backend",
+             "IntegrationMethod":{"Fn::If":["Off",{"Ref":"AWS::NoValue"},"ANY"]},
+             "TemplateSelectionExpression":{"Ref":"AWS::NoValue"},
+             "TimeoutInMillis":{"Fn::If":["Off",{"Ref":"AWS::NoValue"},"15000"]}}
+            """;
+
+    @Test
+    void integrationCreateTreatsNoValueScalarsAsAbsent() throws Exception {
+        Integration integration = new Integration();
+        integration.setIntegrationId("int-1");
+        when(apiGatewayV2Service.createIntegration(eq(REGION), eq(API_ID), anyMap())).thenReturn(integration);
+
+        StackResource resource = provisioner.provision("Integration", "AWS::ApiGatewayV2::Integration",
+                mapper.readTree(NO_VALUE_SETTINGS), engine(Map.of("Off", true)), REGION, "000000000000",
+                "test-stack", null, Map.of());
+
+        assertTrue(resource.getStatus().endsWith("_COMPLETE"), resource.getStatus());
+        verify(apiGatewayV2Service).createIntegration(eq(REGION), eq(API_ID), argThat(req ->
+                req.get("integrationMethod") == null && req.get("templateSelectionExpression") == null
+                        && !req.containsKey("timeoutInMillis")));
+    }
+
+    @Test
+    void integrationUpdateTreatsNoValueScalarsAsAbsent() throws Exception {
+        stubIntegrationUpdate(priorVpcLinkIntegration());
+
+        StackResource resource = provisioner.provision("Integration", "AWS::ApiGatewayV2::Integration",
+                mapper.readTree(NO_VALUE_SETTINGS), engine(Map.of("Off", true)), REGION, "000000000000",
+                "test-stack", "int-1", Map.of("IntegrationId", "int-1"));
+
+        assertTrue(resource.getStatus().endsWith("_COMPLETE"), resource.getStatus());
+        verify(apiGatewayV2Service).replaceIntegrationSettings(REGION, API_ID, "int-1", null, null, 0, null, null);
+    }
+
+    @Test
+    void integrationScalarsKeepTheBranchAnFnIfSelects() throws Exception {
+        stubIntegrationUpdate(priorVpcLinkIntegration());
+
+        provisioner.provision("Integration", "AWS::ApiGatewayV2::Integration",
+                mapper.readTree(NO_VALUE_SETTINGS), engine(Map.of("Off", false)), REGION, "000000000000",
+                "test-stack", "int-1", Map.of("IntegrationId", "int-1"));
+
+        verify(apiGatewayV2Service).replaceIntegrationSettings(REGION, API_ID, "int-1", "ANY", null, 15000,
+                null, null);
+    }
+
+    @Test
+    void stageVariablesDroppedFromTheTemplateAreClearedOnUpdate() throws Exception {
+        provisionStageUpdate("""
+                {"ApiId":"api-123","StageName":"prod","StageVariables":{"color":"blue"}}
+                """, """
+                {"ApiId":"api-123","StageName":"prod"}
+                """);
+
+        assertEquals(Map.of(), updatedStageRequest().get("stageVariables"));
+    }
+
+    @Test
+    void emptyStageVariablesInTheTemplateStayEmpty() throws Exception {
+        provisionStageUpdate("""
+                {"ApiId":"api-123","StageName":"prod","StageVariables":{"color":"blue"}}
+                """, """
+                {"ApiId":"api-123","StageName":"prod","StageVariables":{}}
+                """);
+
+        assertEquals(Map.of(), updatedStageRequest().get("stageVariables"));
+    }
+
+    @Test
+    void changedStageVariablesStillApply() throws Exception {
+        provisionStageUpdate("""
+                {"ApiId":"api-123","StageName":"prod","StageVariables":{"color":"blue"}}
+                """, """
+                {"ApiId":"api-123","StageName":"prod","StageVariables":{"color":"green","size":"2"}}
+                """);
+
+        assertEquals(Map.of("color", "green", "size", "2"), updatedStageRequest().get("stageVariables"));
+    }
+
+    @Test
+    void stageVariablesSetOutsideTheStackSurviveAnUpdateThatNeverDeclaredThem() throws Exception {
+        provisionStageUpdate("""
+                {"ApiId":"api-123","StageName":"prod"}
+                """, """
+                {"ApiId":"api-123","StageName":"prod","AutoDeploy":true}
+                """);
+
+        assertNull(updatedStageRequest().get("stageVariables"));
+    }
+
+    @Test
+    void createStageSendsTheDeclaredStageVariables() throws Exception {
+        provisioner.provision("Stage", "AWS::ApiGatewayV2::Stage", mapper.readTree("""
+                {"ApiId":"api-123","StageName":"prod","StageVariables":{"color":"blue"}}
+                """), engine(), REGION, "000000000000", "test-stack", null, Map.of());
+
+        ArgumentCaptor<Map<String, Object>> request = requestCaptor();
+        verify(apiGatewayV2Service).createStage(eq(REGION), eq(API_ID), request.capture());
+        assertEquals(Map.of("color", "blue"), request.getValue().get("stageVariables"));
+    }
+
+    @Test
+    void droppingAutoDeployGoesBackToFalseAndDroppingStageNameKeepsTheStage() throws Exception {
+        provisionStageUpdate("{\"ApiId\": \"api-123\", \"StageName\": \"prod\", \"AutoDeploy\": true}",
+                "{\"ApiId\": \"api-123\"}");
+
+        Map<String, Object> request = updatedStageRequest();
+        assertEquals("false", request.get("autoDeploy"));
+        assertNull(request.get("stageName"));
+    }
+
+    private static final String INTEGRATION_PROPERTIES = """
+            {"ApiId":"api-123","IntegrationType":"HTTP_PROXY","IntegrationUri":"http://backend",
+             "IntegrationMethod":"ANY","PayloadFormatVersion":"1.0","TimeoutInMillis":"15000",
+             "TemplateSelectionExpression":"${request.method}",
+             "RequestParameters":{"append:header.x-request-id":"$context.requestId",
+                                  "overwrite:header.x-example":"static-value"},
+             "RequestTemplates":{"application/json":"{\\"a\\":1}"}}
+            """;
+
+    private boolean carriesIntegrationProperties(Map<String, Object> req) {
+        return "ANY".equals(req.get("integrationMethod"))
+                && Integer.valueOf(15000).equals(req.get("timeoutInMillis"))
+                && "${request.method}".equals(req.get("templateSelectionExpression"))
+                && Map.of("append:header.x-request-id", "$context.requestId",
+                        "overwrite:header.x-example", "static-value").equals(req.get("requestParameters"))
+                && Map.of("application/json", "{\"a\":1}").equals(req.get("requestTemplates"));
+    }
+
+    private static Integration priorVpcLinkIntegration() {
+        Integration prior = new Integration();
+        prior.setIntegrationId("int-1");
+        prior.setIntegrationType("HTTP_PROXY");
+        prior.setIntegrationUri("http://backend");
+        prior.setPayloadFormatVersion("2.0");
+        prior.setConnectionType("VPC_LINK");
+        prior.setConnectionId("vl-1");
+        return prior;
+    }
+
+    private void stubIntegrationUpdate(Integration prior) {
+        when(apiGatewayV2Service.getIntegration(REGION, API_ID, "int-1")).thenReturn(prior);
+        when(apiGatewayV2Service.updateIntegration(eq(REGION), eq(API_ID), eq("int-1"), anyMap())).thenReturn(prior);
+        when(apiGatewayV2Service.replaceIntegrationConnection(eq(REGION), eq(API_ID), eq("int-1"), anyString(), any()))
+                .thenReturn(prior);
+    }
+
+    private void provisionStageUpdate(String previous, String current) throws Exception {
+        provisioner.provision("Stage", "AWS::ApiGatewayV2::Stage", mapper.readTree(current), engine(), REGION,
+                "000000000000", "test-stack", "prod", Map.of(), event -> {}, mapper.readTree(previous));
+    }
+
+    private Map<String, Object> updatedStageRequest() {
+        ArgumentCaptor<Map<String, Object>> request = requestCaptor();
+        verify(apiGatewayV2Service).updateStage(eq(REGION), eq(API_ID), eq("prod"), request.capture());
+        return request.getValue();
+    }
+
+    @SuppressWarnings("unchecked")
+    private static ArgumentCaptor<Map<String, Object>> requestCaptor() {
+        return ArgumentCaptor.forClass((Class<Map<String, Object>>) (Class<?>) Map.class);
+    }
+
+    private StackResource provisionIntegration(String properties) throws Exception {
+        return provisioner.provision("Integration", "AWS::ApiGatewayV2::Integration", mapper.readTree(properties),
+                engine(), REGION, "000000000000", "test-stack", "int-1", Map.of("IntegrationId", "int-1"));
+    }
+
+    private StackResource provision(JsonNode properties, String existingPhysicalId,
+                                    Map<String, String> existingAttributes) {
+        return provisioner.provision("HttpApi", "AWS::ApiGatewayV2::Api", properties, engine(), REGION,
+                "000000000000", "test-stack", existingPhysicalId, existingAttributes);
+    }
+
+    private StackResource provisionVpcLink(String properties, String existingPhysicalId,
+                                           Map<String, String> existingAttributes) throws Exception {
+        return provisioner.provision("VpcLink", "AWS::ApiGatewayV2::VpcLink", mapper.readTree(properties),
+                engine(), REGION, "000000000000", "test-stack", existingPhysicalId, existingAttributes);
+    }
+
+    private static VpcLink vpcLink(String id, List<String> subnetIds) {
+        VpcLink link = new VpcLink();
+        link.setVpcLinkId(id);
+        link.setName("my-link");
+        link.setSubnetIds(subnetIds);
+        return link;
+    }
+
+    private JsonNode body(String body) throws Exception {
+        return mapper.readTree("""
+                {"Name":"test-api","ProtocolType":"HTTP","Body":%s}
+                """.formatted(body));
+    }
+
+    private JsonNode propertiesWithoutBody() throws Exception {
+        return mapper.readTree("""
+                {"Name":"test-api","ProtocolType":"HTTP"}
+                """);
+    }
+
+    private CloudFormationTemplateEngine engine() {
+        return engine(Map.of());
+    }
+
+    private CloudFormationTemplateEngine engine(Map<String, Boolean> conditions) {
+        return new CloudFormationTemplateEngine("000000000000", REGION, "test-stack", "stack/id",
+                Map.of(), Map.of(), Map.of(), conditions, Map.of(), mapper,
+                (Function<String, String>) name -> null);
+    }
+
+    private static Route route(String id, String routeKey) {
+        Route route = new Route();
+        route.setRouteId(id);
+        route.setRouteKey(routeKey);
+        return route;
+    }
+}

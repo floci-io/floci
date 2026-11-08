@@ -1,0 +1,21 @@
+{
+  "error": "Resource with id [Fn] is invalid. Property 'EventInvokeConfig.DestinationConfig.OnFailure' should be a map.",
+  "input": {
+    "Resources": {
+      "Fn": {
+        "Properties": {
+          "CodeUri": "s3://b/k",
+          "EventInvokeConfig": {
+            "DestinationConfig": {
+              "OnFailure": "nope"
+            }
+          },
+          "Handler": "index.handler",
+          "Runtime": "python3.12"
+        },
+        "Type": "AWS::Serverless::Function"
+      }
+    },
+    "Transform": "AWS::Serverless-2016-10-31"
+  }
+}

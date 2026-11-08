@@ -1,0 +1,193 @@
+package io.floci.aws.services.bedrockagentcorecontrol;
+
+import com.fasterxml.jackson.core.type.TypeReference;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.node.ObjectNode;
+import io.floci.aws.core.common.RegionResolver;
+import io.floci.aws.core.storage.InMemoryStorage;
+import io.floci.aws.core.storage.PersistentStorage;
+import io.floci.aws.core.storage.WalStorage;
+import io.floci.aws.services.bedrockagentcorecontrol.model.AgentRuntime;
+import io.floci.aws.services.bedrockagentcorecontrol.model.Memory;
+import jakarta.ws.rs.core.HttpHeaders;
+import jakarta.ws.rs.core.Response;
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.io.TempDir;
+
+import java.io.IOException;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.util.Map;
+
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.mockito.Mockito.mock;
+
+/**
+ * Persistence-across-restart coverage: writes a fully-populated agent runtime through
+ * {@link PersistentStorage} to disk and reloads it into a fresh instance (a simulated
+ * restart), verifying that JsonNode config blobs, {@code Instant} timestamps, version
+ * snapshots, endpoints, tags, and env vars all survive serialization. This is the path
+ * exercised by {@code persistent}/{@code hybrid}/{@code wal} storage modes and native image.
+ */
+class BedrockAgentCorePersistenceTest {
+
+    private static final String REGION = "us-east-1";
+    private final ObjectMapper mapper = new ObjectMapper();
+
+    @Test
+    void agentRuntimeSurvivesPersistentStorageRoundTrip(@TempDir Path dir) {
+        BedrockAgentCoreControlService svc = new BedrockAgentCoreControlService(
+                new InMemoryStorage<>(), new RegionResolver(REGION, "000000000000"));
+
+        ObjectNode artifact = mapper.createObjectNode();
+        artifact.putObject("containerConfiguration").put("containerUri", "x:latest");
+        ObjectNode network = mapper.createObjectNode();
+        network.put("networkMode", "PUBLIC");
+        ObjectNode authorizer = mapper.createObjectNode();
+        authorizer.putObject("customJWTAuthorizer").put("discoveryUrl", "https://issuer/.well-known");
+
+        AgentRuntime created = svc.createAgentRuntime("persistAgent", artifact, network,
+                "arn:aws:iam::000000000000:role/agent", "v1", Map.of("K", "V"),
+                authorizer, null, null, REGION);
+        String id = created.getAgentRuntimeId();
+        svc.updateAgentRuntime(id, artifact, network,
+                "arn:aws:iam::000000000000:role/agent", "v2", Map.of("K", "V"), authorizer, null, REGION);
+        svc.createEndpoint(id, "prod", "1", "prod ep", Map.of("stage", "live"), null, REGION);
+        AgentRuntime before = svc.getAgentRuntime(id, REGION);
+        svc.tagByArn(REGION, svc.arn(before, "1", REGION), Map.of("env", "prod"));
+        before = svc.getAgentRuntime(id, REGION);
+
+        // Write to disk, then reload into a brand-new backend (simulated restart).
+        Path file = dir.resolve("bedrock-agentcore-runtimes.json");
+        TypeReference<Map<String, AgentRuntime>> ref = new TypeReference<>() {};
+        PersistentStorage<String, AgentRuntime> writer = new PersistentStorage<>(file, ref);
+        writer.put("runtime:" + REGION + ":" + id, before);
+        writer.flush();
+
+        PersistentStorage<String, AgentRuntime> reader = new PersistentStorage<>(file, ref);
+        reader.load();
+        AgentRuntime loaded = reader.get("runtime:" + REGION + ":" + id).orElseThrow();
+
+        assertEquals("persistAgent", loaded.getAgentRuntimeName());
+        assertEquals(2, loaded.getLatestVersion());
+        assertEquals(2, loaded.getVersions().size());
+        assertNotNull(loaded.getCreatedAt());
+        // JsonNode config blobs survive.
+        assertEquals("x:latest", loaded.getAgentRuntimeArtifact()
+                .path("containerConfiguration").path("containerUri").asText());
+        assertEquals("https://issuer/.well-known", loaded.getAuthorizerConfiguration()
+                .path("customJWTAuthorizer").path("discoveryUrl").asText());
+        // Per-version snapshot JsonNode survives.
+        assertNotNull(loaded.getVersions().get(0).getAgentRuntimeArtifact());
+        // Env vars + tags + endpoints (DEFAULT + prod) survive.
+        assertEquals("V", loaded.getEnvironmentVariables().get("K"));
+        assertEquals("prod", loaded.getTags().get("env"));
+        assertEquals(2, loaded.getEndpoints().size());
+        assertTrue(loaded.getEndpoints().stream().anyMatch(e -> "prod".equals(e.getName())));
+        assertEquals(Map.of("stage", "live"), loaded.getEndpoints().stream()
+                .filter(e -> "prod".equals(e.getName())).findFirst().orElseThrow().getTags());
+        assertTrue(loaded.getEndpoints().stream().anyMatch(e -> "DEFAULT".equals(e.getName())));
+    }
+
+    @Test
+    void tagsSentToCreateAgentRuntimeAreInTheWalRecord(@TempDir Path dir) throws IOException {
+        TypeReference<Map<String, AgentRuntime>> ref = new TypeReference<>() {};
+        Path wal = dir.resolve("runtimes.wal");
+        Path walAfterCrash = dir.resolve("runtimes-after-crash.wal");
+        WalStorage<String, AgentRuntime> writer =
+                new WalStorage<>(dir.resolve("runtimes.json"), wal, ref, 3_600_000L);
+        try {
+            writer.load();
+            RegionResolver regionResolver = new RegionResolver(REGION, "000000000000");
+            BedrockAgentCoreControlController controller = new BedrockAgentCoreControlController(
+                    new BedrockAgentCoreControlService(writer, regionResolver), regionResolver, mapper);
+
+            Response response = controller.createAgentRuntime(mock(HttpHeaders.class), """
+                    {
+                      "agentRuntimeName": "walAgent",
+                      "agentRuntimeArtifact": {"containerConfiguration": {"containerUri": "x:latest"}},
+                      "networkConfiguration": {"networkMode": "PUBLIC"},
+                      "roleArn": "arn:aws:iam::000000000000:role/agent",
+                      "tags": {"team": "ml"}
+                    }""");
+            assertEquals(202, response.getStatus());
+            String id = ((ObjectNode) response.getEntity()).path("agentRuntimeId").asText();
+
+            // A copy of the WAL is what a crash leaves behind: nothing later rewrites the runtime.
+            Files.copy(wal, walAfterCrash);
+            WalStorage<String, AgentRuntime> reader =
+                    new WalStorage<>(dir.resolve("runtimes-after-crash.json"), walAfterCrash, ref, 3_600_000L);
+            try {
+                reader.load();
+                assertEquals(Map.of("team", "ml"), reader.get("runtime:" + REGION + ":" + id).orElseThrow().getTags());
+            } finally {
+                reader.shutdown();
+            }
+        } finally {
+            writer.shutdown();
+        }
+    }
+
+    @Test
+    void memorySurvivesPersistentStorageRoundTrip(@TempDir Path dir) {
+        BedrockAgentCoreMemoryService svc = new BedrockAgentCoreMemoryService(
+                new InMemoryStorage<>(), new RegionResolver(REGION, "000000000000"));
+
+        Memory created = svc.create("persistMem", 45, "a memory",
+                "arn:aws:kms:us-east-1:000000000000:key/mem-key",
+                "arn:aws:iam::000000000000:role/mem-role",
+                Map.of("team", "core"), null, REGION);
+        String id = created.getMemoryId();
+        svc.tagByArn(REGION, svc.arn(created, REGION), Map.of("env", "prod"));
+        Memory before = svc.get(id, REGION);
+
+        Path file = dir.resolve("bedrock-agentcore-memories.json");
+        TypeReference<Map<String, Memory>> ref = new TypeReference<>() {};
+        PersistentStorage<String, Memory> writer = new PersistentStorage<>(file, ref);
+        writer.put("memory:" + REGION + ":" + id, before);
+        writer.flush();
+
+        PersistentStorage<String, Memory> reader = new PersistentStorage<>(file, ref);
+        reader.load();
+        Memory loaded = reader.get("memory:" + REGION + ":" + id).orElseThrow();
+
+        assertEquals("persistMem", loaded.getName());
+        assertEquals(45, loaded.getEventExpiryDuration());
+        assertEquals("arn:aws:kms:us-east-1:000000000000:key/mem-key", loaded.getEncryptionKeyArn());
+        assertEquals("arn:aws:iam::000000000000:role/mem-role", loaded.getMemoryExecutionRoleArn());
+        assertEquals("core", loaded.getTags().get("team"));
+        assertEquals("prod", loaded.getTags().get("env"));
+        assertNotNull(loaded.getCreatedAt());
+        assertNotNull(loaded.getUpdatedAt());
+    }
+
+    @Test
+    void toolDeleteIdempotencySurvivesPersistentStorageRestart(@TempDir Path dir) {
+        Path file = dir.resolve("bedrock-agentcore-tools.json");
+        TypeReference<Map<String, ObjectNode>> ref = new TypeReference<>() {};
+        RegionResolver regionResolver = new RegionResolver(REGION, "000000000000");
+
+        PersistentStorage<String, ObjectNode> writer = new PersistentStorage<>(file, ref);
+        BedrockAgentCoreToolsService beforeRestart = new BedrockAgentCoreToolsService(writer, regionResolver);
+
+        ObjectNode request = mapper.createObjectNode();
+        request.put("name", "persistBrowser");
+        request.putObject("networkConfiguration").put("networkMode", "PUBLIC");
+        String browserId = beforeRestart.createBrowser(request, REGION).path("browserId").asText();
+        String clientToken = "persist-delete-browser-token-00000001";
+
+        ObjectNode firstDelete = beforeRestart.deleteBrowser(browserId, clientToken, REGION);
+        assertEquals("DELETING", firstDelete.path("status").asText());
+        writer.flush();
+
+        PersistentStorage<String, ObjectNode> reader = new PersistentStorage<>(file, ref);
+        reader.load();
+        BedrockAgentCoreToolsService afterRestart = new BedrockAgentCoreToolsService(reader, regionResolver);
+
+        ObjectNode replayedDelete = afterRestart.deleteBrowser(browserId, clientToken, REGION);
+        assertEquals("DELETING", replayedDelete.path("status").asText());
+        assertEquals(browserId, replayedDelete.path("browserId").asText());
+    }
+}

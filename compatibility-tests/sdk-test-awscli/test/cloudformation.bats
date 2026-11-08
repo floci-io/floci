@@ -5,9 +5,15 @@ setup() {
     load 'test_helper/common-setup'
     STACK_NAME="bats-cfn-stack-$(unique_name)"
     TEMPLATE_FILE=$(mktemp /tmp/cfn-bats-XXXXXX.yaml)
+    LB_ARN=""
 }
 
 teardown() {
+    # A load balancer a test put on the stack's subnets goes first: EC2 refuses to delete a subnet
+    # a load balancer still uses, so delete-stack could not remove the subnets.
+    if [ -n "$LB_ARN" ]; then
+        aws_cmd elbv2 delete-load-balancer --load-balancer-arn "$LB_ARN" >/dev/null 2>&1 || true
+    fi
     aws_cmd cloudformation delete-stack --stack-name "$STACK_NAME" >/dev/null 2>&1 || true
     [ -n "$TEMPLATE_FILE" ] && rm -f "$TEMPLATE_FILE"
 }
@@ -197,6 +203,7 @@ EOF
     assert_success
     local lb_arn
     lb_arn=$(json_get "$output" '.LoadBalancers[0].LoadBalancerArn')
+    LB_ARN="$lb_arn"
     [ -n "$lb_arn" ]
     [[ "$lb_arn" == *":loadbalancer/"* ]]
 }
@@ -307,4 +314,101 @@ EOF
     # The empty managed bucket must be gone.
     run aws_cmd s3api head-bucket --bucket "$bucket"
     assert_failure
+}
+
+# ── SAM AutoPublishAlias (regression: issue #5676) ────────────────────────────
+#
+# The alias AutoPublishAlias generates must point at the version the stack
+# published, not at $LATEST, and a template code change must publish the next
+# version and move the alias to it, as AWS SAM does.
+# https://github.com/floci-io/floci/issues/5676
+
+sam_alias_template() {
+    cat << EOF
+Transform: AWS::Serverless-2016-10-31
+Resources:
+  Fn:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: $1
+      Runtime: nodejs20.x
+      Handler: index.handler
+      AutoPublishAlias: live
+      InlineCode: "exports.handler = async () => ({ release: '$2' });"
+EOF
+}
+
+@test "CloudFormation: SAM AutoPublishAlias points the alias at the published version (issue #5676)" {
+    local fn
+    fn=$(unique_name bats-sam-alias)
+    sam_alias_template "$fn" first > "$TEMPLATE_FILE"
+    run aws_cmd cloudformation deploy \
+        --stack-name "$STACK_NAME" \
+        --template-file "$TEMPLATE_FILE" \
+        --capabilities CAPABILITY_IAM CAPABILITY_AUTO_EXPAND
+    assert_success
+
+    run aws_cmd lambda get-alias --function-name "$fn" --name live
+    assert_success
+    [ "$(json_get "$output" '.FunctionVersion')" = "1" ]
+
+    # A code change publishes the next version and the alias moves to it.
+    sam_alias_template "$fn" second > "$TEMPLATE_FILE"
+    run aws_cmd cloudformation deploy \
+        --stack-name "$STACK_NAME" \
+        --template-file "$TEMPLATE_FILE" \
+        --capabilities CAPABILITY_IAM CAPABILITY_AUTO_EXPAND
+    assert_success
+
+    run aws_cmd lambda get-alias --function-name "$fn" --name live
+    assert_success
+    [ "$(json_get "$output" '.FunctionVersion')" = "2" ]
+
+    run aws_cmd lambda list-versions-by-function --function-name "$fn"
+    assert_success
+    [ "$(json_get "$output" '[.Versions[].Version] | join(",")')" = '$LATEST,1,2' ]
+}
+
+sam_version_description_template() {
+    cat << EOF
+Transform: AWS::Serverless-2016-10-31
+Resources:
+  Fn:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: $1
+      Runtime: nodejs20.x
+      Handler: index.handler
+      AutoPublishAlias: live
+      VersionDescription: release $2
+      InlineCode: "exports.handler = async () => ({ release: '$2' });"
+EOF
+}
+
+@test "CloudFormation: SAM VersionDescription describes each published version" {
+    local fn
+    fn=$(unique_name bats-sam-version-description)
+    sam_version_description_template "$fn" first > "$TEMPLATE_FILE"
+    run aws_cmd cloudformation deploy \
+        --stack-name "$STACK_NAME" \
+        --template-file "$TEMPLATE_FILE" \
+        --capabilities CAPABILITY_IAM CAPABILITY_AUTO_EXPAND
+    assert_success
+
+    run aws_cmd lambda get-function-configuration --function-name "$fn" --qualifier live
+    assert_success
+    [ "$(json_get "$output" '.Version')" = "1" ]
+    [ "$(json_get "$output" '.Description')" = "release first" ]
+
+    # The next version takes the new description, and the first keeps its own.
+    sam_version_description_template "$fn" second > "$TEMPLATE_FILE"
+    run aws_cmd cloudformation deploy \
+        --stack-name "$STACK_NAME" \
+        --template-file "$TEMPLATE_FILE" \
+        --capabilities CAPABILITY_IAM CAPABILITY_AUTO_EXPAND
+    assert_success
+
+    run aws_cmd lambda list-versions-by-function --function-name "$fn"
+    assert_success
+    [ "$(json_get "$output" '[.Versions[] | select(.Version != "$LATEST") | .Version + "=" + .Description] | join(",")')" = '1=release first,2=release second' ]
 }

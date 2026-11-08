@@ -7,9 +7,34 @@ setup() {
 }
 
 teardown() {
-    # Clean up all objects in bucket
+    local buckets bucket_present
+    buckets=$(aws_cmd s3api list-buckets) || return 1
+    bucket_present=$(jq -r --arg name "$BUCKET" '.Buckets | any(.Name == $name)' <<< "$buckets") || return 1
+    if [[ "$bucket_present" == "false" ]]; then
+        return
+    fi
+    [[ "$bucket_present" == "true" ]] || return 1
+
     aws_cmd s3 rm "s3://$BUCKET" --recursive >/dev/null 2>&1 || true
-    aws_cmd s3api delete-bucket --bucket "$BUCKET" >/dev/null 2>&1 || true
+    local versions entries entry key version_id
+    versions=$(aws_cmd s3api list-object-versions --bucket "$BUCKET") || return 1
+    jq -es 'length == 1
+        and (.[0] | type == "object")
+        and (.[0] | (has("Versions") | not) or (.Versions | type == "array"))
+        and (.[0] | (has("DeleteMarkers") | not) or (.DeleteMarkers | type == "array"))' \
+        <<< "$versions" >/dev/null || return 1
+    entries=$(jq -c '(.Versions[]?, .DeleteMarkers[]?) | {Key, VersionId}' <<< "$versions") || return 1
+    if [[ -n "$entries" ]]; then
+        while IFS= read -r entry; do
+            key=$(jq -er '.Key' <<< "$entry") || return 1
+            version_id=$(jq -er '.VersionId' <<< "$entry") || return 1
+            aws_cmd s3api delete-object --bucket "$BUCKET" --key "$key" --version-id "$version_id" >/dev/null || return 1
+        done <<< "$entries"
+    fi
+    aws_cmd s3api delete-bucket --bucket "$BUCKET" >/dev/null || return 1
+    buckets=$(aws_cmd s3api list-buckets) || return 1
+    bucket_present=$(jq -r --arg name "$BUCKET" '.Buckets | any(.Name == $name)' <<< "$buckets") || return 1
+    [[ "$bucket_present" == "false" ]]
 }
 
 @test "S3: create bucket" {
@@ -241,7 +266,7 @@ teardown() {
     local part1_file part2_file
     part1_file=$(mktemp)
     part2_file=$(mktemp)
-    echo -n "part-one" > "$part1_file"
+    dd if=/dev/zero of="$part1_file" bs=1048576 count=5 2>/dev/null
     echo -n "part-two" > "$part2_file"
 
     output=$(aws_cmd s3api upload-part \

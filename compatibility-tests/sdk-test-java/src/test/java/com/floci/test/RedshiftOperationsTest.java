@@ -17,25 +17,46 @@ import software.amazon.awssdk.services.redshift.model.CreateClusterResponse;
 import software.amazon.awssdk.services.redshift.model.CreateClusterSnapshotRequest;
 import software.amazon.awssdk.services.redshift.model.CreateClusterSnapshotResponse;
 import software.amazon.awssdk.services.redshift.model.CreateClusterSubnetGroupRequest;
+import software.amazon.awssdk.services.redshift.model.CreateSnapshotCopyGrantRequest;
+import software.amazon.awssdk.services.redshift.model.CreateSnapshotCopyGrantResponse;
 import software.amazon.awssdk.services.redshift.model.CreateTagsRequest;
 import software.amazon.awssdk.services.redshift.model.DeleteClusterParameterGroupRequest;
 import software.amazon.awssdk.services.redshift.model.DeleteClusterRequest;
 import software.amazon.awssdk.services.redshift.model.DeleteClusterSnapshotRequest;
 import software.amazon.awssdk.services.redshift.model.DeleteClusterSubnetGroupRequest;
+import software.amazon.awssdk.services.redshift.model.DeleteSnapshotCopyGrantRequest;
 import software.amazon.awssdk.services.redshift.model.DeleteTagsRequest;
 import software.amazon.awssdk.services.redshift.model.DescribeClusterParameterGroupsRequest;
 import software.amazon.awssdk.services.redshift.model.DescribeClusterParameterGroupsResponse;
+import software.amazon.awssdk.services.redshift.model.DescribeClusterParametersRequest;
 import software.amazon.awssdk.services.redshift.model.DescribeClusterSnapshotsRequest;
 import software.amazon.awssdk.services.redshift.model.DescribeClusterSnapshotsResponse;
 import software.amazon.awssdk.services.redshift.model.DescribeClusterSubnetGroupsRequest;
+import software.amazon.awssdk.services.redshift.model.DescribeClusterSubnetGroupsResponse;
 import software.amazon.awssdk.services.redshift.model.DescribeClustersRequest;
 import software.amazon.awssdk.services.redshift.model.DescribeClustersResponse;
+import software.amazon.awssdk.services.redshift.model.DescribeOrderableClusterOptionsRequest;
+import software.amazon.awssdk.services.redshift.model.DescribeSnapshotCopyGrantsRequest;
+import software.amazon.awssdk.services.redshift.model.DescribeSnapshotCopyGrantsResponse;
 import software.amazon.awssdk.services.redshift.model.DescribeTagsRequest;
+import software.amazon.awssdk.services.redshift.model.DescribeTagsResponse;
+import software.amazon.awssdk.services.redshift.model.ModifyClusterIamRolesRequest;
+import software.amazon.awssdk.services.redshift.model.ModifyClusterIamRolesResponse;
+import software.amazon.awssdk.services.redshift.model.ModifyClusterParameterGroupRequest;
 import software.amazon.awssdk.services.redshift.model.ModifyClusterRequest;
+import software.amazon.awssdk.services.redshift.model.ModifyClusterResponse;
+import software.amazon.awssdk.services.redshift.model.Parameter;
 import software.amazon.awssdk.services.redshift.model.RebootClusterRequest;
+import software.amazon.awssdk.services.redshift.model.RebootClusterResponse;
+import software.amazon.awssdk.services.redshift.model.RedshiftException;
+import software.amazon.awssdk.services.redshift.model.ResetClusterParameterGroupRequest;
+import software.amazon.awssdk.services.redshift.model.ResetClusterParameterGroupResponse;
 import software.amazon.awssdk.services.redshift.model.RestoreFromClusterSnapshotRequest;
 import software.amazon.awssdk.services.redshift.model.RestoreFromClusterSnapshotResponse;
 import software.amazon.awssdk.services.redshift.model.Snapshot;
+import software.amazon.awssdk.services.redshift.model.SnapshotCopyGrant;
+import software.amazon.awssdk.services.redshift.model.SnapshotCopyGrantAlreadyExistsException;
+import software.amazon.awssdk.services.redshift.model.SnapshotCopyGrantNotFoundException;
 import software.amazon.awssdk.services.redshift.model.Tag;
 
 import java.sql.Connection;
@@ -52,6 +73,7 @@ import java.util.logging.Level;
 import java.util.logging.Logger;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 @DisplayName("Redshift Operations")
 @TestMethodOrder(MethodOrderer.OrderAnnotation.class)
@@ -68,6 +90,7 @@ class RedshiftOperationsTest {
     private static final List<String> snapshotsToCleanup = new ArrayList<>();
     private static final List<String> parameterGroupsToCleanup = new ArrayList<>();
     private static final List<String> subnetGroupsToCleanup = new ArrayList<>();
+    private static final List<String> snapshotCopyGrantsToCleanup = new ArrayList<>();
 
     @BeforeAll
     static void setup() {
@@ -81,6 +104,7 @@ class RedshiftOperationsTest {
                 try {
                     client.deleteCluster(DeleteClusterRequest.builder()
                             .clusterIdentifier(clusterId)
+                            .skipFinalClusterSnapshot(true)
                             .build());
                 } catch (Exception e) {
                     LOG.log(Level.WARNING, "Failed to clean up Redshift cluster " + clusterId, e);
@@ -113,21 +137,32 @@ class RedshiftOperationsTest {
                     LOG.log(Level.WARNING, "Failed to clean up Redshift cluster subnet group " + subnetGroupName, e);
                 }
             }
+            for (String grantName : snapshotCopyGrantsToCleanup) {
+                try {
+                    client.deleteSnapshotCopyGrant(DeleteSnapshotCopyGrantRequest.builder()
+                            .snapshotCopyGrantName(grantName)
+                            .build());
+                } catch (Exception e) {
+                    LOG.log(Level.WARNING, "Failed to clean up Redshift snapshot copy grant " + grantName, e);
+                }
+            }
             client.close();
         }
     }
 
     @Test
     @Order(1)
-    @DisplayName("Create cluster, insert data, snapshot, restore to new cluster, verify data")
+    @DisplayName("Create cluster, insert data, take final snapshot on deletion, restore and verify data")
     void testSnapshotAndRestoreLifecycle() throws Exception {
         String sourceClusterId = TestFixtures.uniqueName("rs-source");
         String restoredClusterId = TestFixtures.uniqueName("rs-restored");
         String snapshotId = TestFixtures.uniqueName("rs-snap");
+        String finalSnapshotId = TestFixtures.uniqueName("rs-final");
 
         clustersToCleanup.add(sourceClusterId);
         clustersToCleanup.add(restoredClusterId);
         snapshotsToCleanup.add(snapshotId);
+        snapshotsToCleanup.add(finalSnapshotId);
 
         // 1. Create source cluster
         CreateClusterResponse createRes = client.createCluster(CreateClusterRequest.builder()
@@ -173,17 +208,23 @@ class RedshiftOperationsTest {
         assertThat(descSnapRes.snapshots()).isNotEmpty();
         assertThat(descSnapRes.snapshots().get(0).snapshotIdentifier()).isEqualTo(snapshotId);
 
-        // 4. Delete source cluster
+        // 4. Delete source cluster with a separate final snapshot.
         client.deleteCluster(DeleteClusterRequest.builder()
                 .clusterIdentifier(sourceClusterId)
+                .finalClusterSnapshotIdentifier(finalSnapshotId)
+                .finalClusterSnapshotRetentionPeriod(7)
                 .build());
         clustersToCleanup.remove(sourceClusterId);
+        Snapshot finalSnapshot = client.describeClusterSnapshots(request -> request.snapshotIdentifier(finalSnapshotId))
+                .snapshots().get(0);
+        assertThat(finalSnapshot.manualSnapshotRetentionPeriod()).isEqualTo(7);
+        assertThat(finalSnapshot.clusterIdentifier()).isEqualTo(sourceClusterId);
 
         // 5. Restore from snapshot to a new cluster identifier
         RestoreFromClusterSnapshotResponse restoreRes = client.restoreFromClusterSnapshot(
                 RestoreFromClusterSnapshotRequest.builder()
                         .clusterIdentifier(restoredClusterId)
-                        .snapshotIdentifier(snapshotId)
+                        .snapshotIdentifier(finalSnapshotId)
                         .nodeType("dc2.large")
                         .build());
 
@@ -206,6 +247,7 @@ class RedshiftOperationsTest {
         // Cleanup restored cluster and snapshot
         client.deleteCluster(DeleteClusterRequest.builder()
                 .clusterIdentifier(restoredClusterId)
+                .skipFinalClusterSnapshot(true)
                 .build());
         clustersToCleanup.remove(restoredClusterId);
 
@@ -251,6 +293,43 @@ class RedshiftOperationsTest {
         assertThat(foundPg.parameterGroupFamily()).isEqualTo("redshift-1.0");
         assertThat(foundPg.description()).isEqualTo("Test parameter group for Redshift");
 
+        DescribeClusterParametersRequest describeParameters = DescribeClusterParametersRequest.builder()
+                .parameterGroupName(pgName).build();
+        List<Parameter> defaults = client.describeClusterParameters(describeParameters).parameters();
+        String cursorDefault = defaults.stream()
+                .filter(parameter -> "max_cursor_result_set_size".equals(parameter.parameterName()))
+                .findFirst().orElseThrow().parameterValue();
+        client.modifyClusterParameterGroup(ModifyClusterParameterGroupRequest.builder()
+                .parameterGroupName(pgName)
+                .parameters(Parameter.builder().parameterName("max_cursor_result_set_size").parameterValue("1000").build(),
+                        Parameter.builder().parameterName("wlm_json_configuration").parameterValue("[{\"query_concurrency\":3}]").build())
+                .build());
+
+        assertThatThrownBy(() -> client.resetClusterParameterGroup(ResetClusterParameterGroupRequest.builder()
+                .parameterGroupName(pgName).parameters(Parameter.builder().parameterValue("1000").build()).build()))
+                .isInstanceOf(RedshiftException.class).hasMessageContaining("ParameterName");
+
+        ResetClusterParameterGroupResponse reset = client.resetClusterParameterGroup(ResetClusterParameterGroupRequest.builder()
+                .parameterGroupName(pgName).resetAllParameters(false)
+                .parameters(Parameter.builder().parameterName("max_cursor_result_set_size").build()).build());
+
+        assertThat(reset.parameterGroupName()).isEqualTo(pgName);
+        assertThat(reset.parameterGroupStatus()).isNotBlank();
+        List<Parameter> afterPartialReset = client.describeClusterParameters(describeParameters).parameters();
+        assertThat(afterPartialReset).anySatisfy(parameter -> {
+            assertThat(parameter.parameterName()).isEqualTo("max_cursor_result_set_size");
+            assertThat(parameter.parameterValue()).isEqualTo(cursorDefault);
+            assertThat(parameter.source()).isEqualTo("engine-default");
+        });
+        assertThat(client.describeClusterParameters(describeParameters.toBuilder().source("user").build()).parameters())
+                .extracting(Parameter::parameterName).containsExactly("wlm_json_configuration");
+
+        client.resetClusterParameterGroup(ResetClusterParameterGroupRequest.builder()
+                .parameterGroupName(pgName).resetAllParameters(true).build());
+        assertThat(client.describeClusterParameters(describeParameters).parameters())
+                .allSatisfy(parameter -> assertThat(parameter.source()).isEqualTo("engine-default"));
+        assertThat(client.describeClusterParameters(describeParameters.toBuilder().source("user").build()).parameters()).isEmpty();
+
         // 3. Delete cluster parameter group
         client.deleteClusterParameterGroup(DeleteClusterParameterGroupRequest.builder()
                 .parameterGroupName(pgName)
@@ -270,7 +349,7 @@ class RedshiftOperationsTest {
                 .build());
         subnetGroupsToCleanup.add(subnetGroupName);
 
-        var describedGroups = client.describeClusterSubnetGroups(
+        DescribeClusterSubnetGroupsResponse describedGroups = client.describeClusterSubnetGroups(
                 DescribeClusterSubnetGroupsRequest.builder()
                         .clusterSubnetGroupName(subnetGroupName)
                         .build());
@@ -286,14 +365,14 @@ class RedshiftOperationsTest {
                 .masterUserPassword(PASSWORD)
                 .build());
         clustersToCleanup.add(clusterId);
-        String arn = "arn:aws:redshift:us-east-1:000000000000:cluster:" + clusterId;
+        String arn = TestFixtures.arn("redshift", "000000000000", "cluster:" + clusterId);
 
         client.createTags(CreateTagsRequest.builder()
                 .resourceName(arn)
                 .tags(Tag.builder().key("env").value("test").build())
                 .build());
 
-        var described = client.describeTags(DescribeTagsRequest.builder()
+        DescribeTagsResponse described = client.describeTags(DescribeTagsRequest.builder()
                 .resourceName(arn)
                 .build());
         assertThat(described.taggedResources()).anyMatch(t -> "env".equals(t.tag().key()) && "test".equals(t.tag().value()));
@@ -303,16 +382,135 @@ class RedshiftOperationsTest {
                 .tagKeys("env")
                 .build());
 
-        var modified = client.modifyCluster(ModifyClusterRequest.builder()
+        ModifyClusterResponse modified = client.modifyCluster(ModifyClusterRequest.builder()
                 .clusterIdentifier(clusterId)
                 .nodeType("ra3.xlplus")
                 .build());
         assertThat(modified.cluster().nodeType()).isEqualTo("ra3.xlplus");
 
-        var rebooted = client.rebootCluster(RebootClusterRequest.builder()
+        String roleArn = TestFixtures.globalArn("iam", "000000000000", "role/rs-copy-role");
+        ModifyClusterIamRolesResponse withRole = client.modifyClusterIamRoles(ModifyClusterIamRolesRequest.builder()
+                .clusterIdentifier(clusterId)
+                .addIamRoles(roleArn)
+                .build());
+        assertThat(withRole.cluster().iamRoles())
+                .anyMatch(r -> roleArn.equals(r.iamRoleArn()) && "in-sync".equals(r.applyStatus()));
+        ModifyClusterIamRolesResponse withoutRole = client.modifyClusterIamRoles(ModifyClusterIamRolesRequest.builder()
+                .clusterIdentifier(clusterId)
+                .removeIamRoles(roleArn)
+                .build());
+        assertThat(withoutRole.cluster().iamRoles()).isEmpty();
+
+        assertThat(client.describeClusterVersions().clusterVersions())
+                .anyMatch(v -> "redshift-1.0".equals(v.clusterParameterGroupFamily()));
+        assertThat(client.describeOrderableClusterOptions(DescribeOrderableClusterOptionsRequest.builder()
+                .nodeType("ra3.xlplus")
+                .build()).orderableClusterOptions())
+                .isNotEmpty()
+                .allMatch(o -> "ra3.xlplus".equals(o.nodeType()));
+
+        RebootClusterResponse rebooted = client.rebootCluster(RebootClusterRequest.builder()
                 .clusterIdentifier(clusterId)
                 .build());
         assertThat(rebooted.cluster().clusterStatus()).isEqualTo("available");
+    }
+
+    @Test
+    @Order(4)
+    void testSnapshotCopyGrantLifecycle() {
+        String grantName = TestFixtures.uniqueName("rs-copy-grant");
+        String otherGrantName = TestFixtures.uniqueName("rs-copy-grant-other");
+
+        CreateSnapshotCopyGrantResponse created = client.createSnapshotCopyGrant(
+                CreateSnapshotCopyGrantRequest.builder()
+                        .snapshotCopyGrantName(grantName)
+                        .kmsKeyId("key-abc")
+                        .tags(Tag.builder().key("env").value("test").build())
+                        .build());
+        snapshotCopyGrantsToCleanup.add(grantName);
+
+        assertThat(created.snapshotCopyGrant().snapshotCopyGrantName()).isEqualTo(grantName);
+        assertThat(created.snapshotCopyGrant().kmsKeyId()).isEqualTo("key-abc");
+        assertThat(created.snapshotCopyGrant().tags())
+                .anyMatch(t -> "env".equals(t.key()) && "test".equals(t.value()));
+
+        // KmsKeyId is optional: AWS substitutes the account's default Redshift key.
+        CreateSnapshotCopyGrantResponse withDefaultKey = client.createSnapshotCopyGrant(
+                CreateSnapshotCopyGrantRequest.builder()
+                        .snapshotCopyGrantName(otherGrantName)
+                        .build());
+        snapshotCopyGrantsToCleanup.add(otherGrantName);
+        assertThat(withDefaultKey.snapshotCopyGrant().kmsKeyId()).isNotBlank();
+
+        assertThatThrownBy(() -> client.createSnapshotCopyGrant(CreateSnapshotCopyGrantRequest.builder()
+                .snapshotCopyGrantName(grantName)
+                .build()))
+                .isInstanceOf(SnapshotCopyGrantAlreadyExistsException.class);
+
+        // Filtered describe returns only the named grant, with its fields intact through
+        // the real unmarshaller.
+        DescribeSnapshotCopyGrantsResponse filtered = client.describeSnapshotCopyGrants(
+                DescribeSnapshotCopyGrantsRequest.builder()
+                        .snapshotCopyGrantName(grantName)
+                        .build());
+        assertThat(filtered.snapshotCopyGrants()).hasSize(1);
+        SnapshotCopyGrant found = filtered.snapshotCopyGrants().get(0);
+        assertThat(found.snapshotCopyGrantName()).isEqualTo(grantName);
+        assertThat(found.kmsKeyId()).isEqualTo("key-abc");
+        assertThat(found.tags()).anyMatch(t -> "env".equals(t.key()) && "test".equals(t.value()));
+
+        DescribeSnapshotCopyGrantsResponse all = client.describeSnapshotCopyGrants(
+                DescribeSnapshotCopyGrantsRequest.builder().build());
+        assertThat(all.snapshotCopyGrants())
+                .extracting(SnapshotCopyGrant::snapshotCopyGrantName)
+                .contains(grantName, otherGrantName);
+
+        client.deleteSnapshotCopyGrant(DeleteSnapshotCopyGrantRequest.builder()
+                .snapshotCopyGrantName(grantName)
+                .build());
+        snapshotCopyGrantsToCleanup.remove(grantName);
+
+        assertThatThrownBy(() -> client.describeSnapshotCopyGrants(DescribeSnapshotCopyGrantsRequest.builder()
+                .snapshotCopyGrantName(grantName)
+                .build()))
+                .isInstanceOf(SnapshotCopyGrantNotFoundException.class);
+
+        assertThatThrownBy(() -> client.deleteSnapshotCopyGrant(DeleteSnapshotCopyGrantRequest.builder()
+                .snapshotCopyGrantName(grantName)
+                .build()))
+                .isInstanceOf(SnapshotCopyGrantNotFoundException.class);
+    }
+
+    @Test
+    @Order(5)
+    void testSnapshotCopyGrantPaginator() {
+        String prefix = TestFixtures.uniqueName("rs-page-grant");
+        int total = 21;
+        for (int i = 1; i <= total; i++) {
+            String name = String.format("%s-%02d", prefix, i);
+            client.createSnapshotCopyGrant(CreateSnapshotCopyGrantRequest.builder()
+                    .snapshotCopyGrantName(name)
+                    .build());
+            snapshotCopyGrantsToCleanup.add(name);
+        }
+
+        // MaxRecords below the number of grants forces the SDK's paginator to follow a
+        // Marker, which is the only way to prove the continuation token round-trips.
+        int pages = 0;
+        List<String> paged = new ArrayList<>();
+        for (DescribeSnapshotCopyGrantsResponse page : client.describeSnapshotCopyGrantsPaginator(
+                DescribeSnapshotCopyGrantsRequest.builder().maxRecords(20).build())) {
+            pages++;
+            page.snapshotCopyGrants().stream()
+                    .map(SnapshotCopyGrant::snapshotCopyGrantName)
+                    .filter(name -> name.startsWith(prefix))
+                    .forEach(paged::add);
+        }
+
+        assertThat(pages).isGreaterThan(1);
+        assertThat(paged).hasSize(total);
+        assertThat(paged).doesNotHaveDuplicates();
+        assertThat(paged).isSorted();
     }
 
     private static Connection awaitPostgresConnection(String host, int port, String username, String password) throws Exception {

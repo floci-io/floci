@@ -1,12 +1,10 @@
 package com.floci.test;
 
 import org.junit.jupiter.api.Test;
-import software.amazon.awssdk.auth.credentials.AwsBasicCredentials;
-import software.amazon.awssdk.auth.credentials.StaticCredentialsProvider;
-import software.amazon.awssdk.regions.Region;
+import org.junit.jupiter.api.parallel.ResourceLock;
 import software.amazon.awssdk.services.organizations.OrganizationsClient;
-import software.amazon.awssdk.services.organizations.model.Account;
 import software.amazon.awssdk.services.organizations.model.AccessDeniedException;
+import software.amazon.awssdk.services.organizations.model.Account;
 import software.amazon.awssdk.services.organizations.model.AwsOrganizationsNotInUseException;
 import software.amazon.awssdk.services.organizations.model.ChildType;
 import software.amazon.awssdk.services.organizations.model.ConstraintViolationException;
@@ -14,6 +12,8 @@ import software.amazon.awssdk.services.organizations.model.CreateAccountState;
 import software.amazon.awssdk.services.organizations.model.CreateAccountStatus;
 import software.amazon.awssdk.services.organizations.model.Handshake;
 import software.amazon.awssdk.services.organizations.model.HandshakeState;
+import software.amazon.awssdk.services.organizations.model.InvalidInputException;
+import software.amazon.awssdk.services.organizations.model.InvalidInputExceptionReason;
 import software.amazon.awssdk.services.organizations.model.Organization;
 import software.amazon.awssdk.services.organizations.model.OrganizationFeatureSet;
 import software.amazon.awssdk.services.organizations.model.OrganizationalUnit;
@@ -23,6 +23,8 @@ import software.amazon.awssdk.services.organizations.model.PolicyInUseException;
 import software.amazon.awssdk.services.organizations.model.PolicyType;
 import software.amazon.awssdk.services.organizations.model.Root;
 import software.amazon.awssdk.services.organizations.model.TargetType;
+import software.amazon.awssdk.services.sts.StsClient;
+import software.amazon.awssdk.services.sts.model.Credentials;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
@@ -35,6 +37,7 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
  * <p>The test tears the organization down at the end so it can be re-run against the same
  * Floci instance.
  */
+@ResourceLock("organizations")
 public class OrganizationsTest {
 
     private static final String SCP_CONTENT =
@@ -46,36 +49,32 @@ public class OrganizationsTest {
 
     private final OrganizationsClient client = TestFixtures.organizationsClient();
 
-    /** A client whose 12-digit access key id makes Floci treat the caller as that account. */
-    private static OrganizationsClient clientFor(String accountId) {
-        return OrganizationsClient.builder()
-                .endpointOverride(TestFixtures.endpoint())
-                .region(Region.US_EAST_1)
-                .credentialsProvider(StaticCredentialsProvider.create(
-                        AwsBasicCredentials.create(accountId, "test")))
-                .build();
-    }
-
     @Test
     public void testFullLifecycle() {
         // 1. Create the organization.
         Organization organization = client.createOrganization(r -> r.featureSet(OrganizationFeatureSet.ALL))
                 .organization();
-        assertThat(organization.id()).matches("o-[a-z0-9]{10}");
-        assertThat(organization.featureSet()).isEqualTo(OrganizationFeatureSet.ALL);
-        assertThat(organization.arn()).startsWith("arn:aws:organizations::");
-        assertThat(organization.masterAccountId()).isNotBlank();
-
         String managementAccountId = organization.masterAccountId();
 
+        // Every assertion runs inside the try, so a failure still deletes the organization: one left
+        // behind makes the caller its management account for every later test in the run.
         try {
+            assertThat(organization.id()).matches("o-[a-z0-9]{10}");
+            assertThat(organization.featureSet()).isEqualTo(OrganizationFeatureSet.ALL);
+            assertThat(organization.arn()).startsWith("arn:" + TestFixtures.partition() + ":organizations::");
+            assertThat(managementAccountId).isNotBlank();
+
             assertThat(client.describeOrganization().organization().id()).isEqualTo(organization.id());
 
-            // 2. The root exists and carries the AWS-managed FullAWSAccess SCP.
+            // 2. The root exists with no policy types enabled, and carries the AWS-managed
+            //    FullAWSAccess SCP. SCPs have to be enabled on it before one can be created.
             Root root = client.listRoots().roots().get(0);
             assertThat(root.id()).matches("r-[a-z0-9]{4}");
             assertThat(root.name()).isEqualTo("Root");
-            assertThat(root.policyTypes()).anyMatch(p -> p.type() == PolicyType.SERVICE_CONTROL_POLICY);
+            assertThat(root.policyTypes()).isEmpty();
+            client.enablePolicyType(r -> r.rootId(root.id()).policyType(PolicyType.SERVICE_CONTROL_POLICY));
+            assertThat(client.listRoots().roots().get(0).policyTypes())
+                    .anyMatch(p -> p.type() == PolicyType.SERVICE_CONTROL_POLICY);
 
             assertThat(client.listPoliciesForTarget(r -> r.targetId(root.id())
                             .filter(PolicyType.SERVICE_CONTROL_POLICY)).policies())
@@ -107,6 +106,38 @@ public class OrganizationsTest {
             String memberAccountId = status.accountId();
             assertThat(client.describeCreateAccountStatus(r -> r.createAccountRequestId(status.id()))
                     .createAccountStatus().accountId()).isEqualTo(memberAccountId);
+
+            // 4b. The account access role AWS preconfigures in the new account: the management
+            //     account can assume it right away, and a RoleName renames it.
+            try (StsClient sts = TestFixtures.stsClient()) {
+                Credentials accessRoleCredentials = sts.assumeRole(r -> r
+                                .roleArn(TestFixtures.globalArn("iam", memberAccountId,
+                                        "role/OrganizationAccountAccessRole"))
+                                .roleSessionName("compat-access-role"))
+                        .credentials();
+                assertThat(accessRoleCredentials.accessKeyId()).startsWith("ASIA");
+                assertThat(accessRoleCredentials.sessionToken()).isNotBlank();
+            }
+
+            CreateAccountStatus customRoleAccount = client.createAccount(r -> r
+                    .email("compat-role@example.com").accountName("CompatRole")
+                    .roleName("CompatAccessRole")).createAccountStatus();
+            assertThat(customRoleAccount.state()).isEqualTo(CreateAccountState.SUCCEEDED);
+            try (StsClient sts = TestFixtures.stsClient()) {
+                assertThat(sts.assumeRole(r -> r
+                                .roleArn(TestFixtures.globalArn("iam", customRoleAccount.accountId(),
+                                        "role/CompatAccessRole"))
+                                .roleSessionName("compat-access-role"))
+                        .credentials().accessKeyId()).startsWith("ASIA");
+            }
+
+            // 4c. The RoleName the reference refuses, with the Reason member an SDK caller reads.
+            assertThatThrownBy(() -> client.createAccount(r -> r
+                            .email("compat-bad@example.com").accountName("CompatBad")
+                            .roleName("AWSServiceRoleForOrganizations")))
+                    .isInstanceOfSatisfying(InvalidInputException.class, error ->
+                            assertThat(error.reason())
+                                    .isEqualTo(InvalidInputExceptionReason.INVALID_ROLE_NAME));
 
             Account member = client.describeAccount(r -> r.accountId(memberAccountId)).account();
             assertThat(member.email()).isEqualTo("compat-dev@example.com");
@@ -217,7 +248,7 @@ public class OrganizationsTest {
             client.deleteResourcePolicy(r -> { });
 
             // 10. The invitation handshake, driven from both sides.
-            try (OrganizationsClient invitedClient = clientFor(INVITED_ACCOUNT)) {
+            try (OrganizationsClient invitedClient = TestFixtures.organizationsClient(INVITED_ACCOUNT)) {
                 assertThatThrownBy(invitedClient::describeOrganization)
                         .isInstanceOf(AwsOrganizationsNotInUseException.class);
 
@@ -236,7 +267,8 @@ public class OrganizationsTest {
                         .isEqualTo(organization.id());
                 assertThatThrownBy(() -> invitedClient.createOrganizationalUnit(r -> r
                         .parentId(root.id()).name("Nope")))
-                        .isInstanceOf(AccessDeniedException.class);
+                        .isInstanceOfSatisfying(AccessDeniedException.class,
+                                error -> assertThat(error.statusCode()).isEqualTo(400));
 
                 assertThat(client.listHandshakesForOrganization().handshakes())
                         .extracting(Handshake::id).contains(invitation.id());
@@ -248,6 +280,7 @@ public class OrganizationsTest {
 
             // 11. Tear the organization down.
             client.removeAccountFromOrganization(r -> r.accountId(memberAccountId));
+            client.removeAccountFromOrganization(r -> r.accountId(customRoleAccount.accountId()));
             client.deleteOrganizationalUnit(r -> r.organizationalUnitId(production.id()));
             client.deleteOrganizationalUnit(r -> r.organizationalUnitId(workloads.id()));
         } finally {

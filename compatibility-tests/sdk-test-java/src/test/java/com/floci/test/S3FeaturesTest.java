@@ -39,14 +39,22 @@ class S3FeaturesTest {
     @AfterAll
     static void cleanup() {
         if (s3 == null) return;
-        deleteBucketContents(BUCKET_VERSIONS);
-        deleteBucketContents(BUCKET_PAB);
-        deleteBucketContents(BUCKET_PAGINATE);
-        deleteBucketContents(BUCKET_334);
+        for (String bucket : List.of(BUCKET_VERSIONS, BUCKET_PAB, BUCKET_PAGINATE, BUCKET_334)) {
+            try {
+                TestFixtures.deleteBucketContents(s3, bucket);
+            } catch (Exception ignored) {
+                // Continue with other buckets; the final assertion reports any cleanup leak.
+            }
+        }
         quietDeleteBucket(BUCKET_VERSIONS);
         quietDeleteBucket(BUCKET_PAB);
         quietDeleteBucket(BUCKET_PAGINATE);
         quietDeleteBucket(BUCKET_334);
+        assertThat(s3.listBuckets().buckets()).noneMatch(bucket ->
+                bucket.name().equals(BUCKET_VERSIONS)
+                        || bucket.name().equals(BUCKET_PAB)
+                        || bucket.name().equals(BUCKET_PAGINATE)
+                        || bucket.name().equals(BUCKET_334));
         s3.close();
     }
 
@@ -386,40 +394,6 @@ class S3FeaturesTest {
         try {
             s3.createBucket(CreateBucketRequest.builder().bucket(bucket).build());
         } catch (BucketAlreadyOwnedByYouException ignored) {}
-    }
-
-    private static void deleteBucketContents(String bucket) {
-        try {
-            // Delete all ordinary objects
-            String token = null;
-            do {
-                ListObjectsV2Response resp = s3.listObjectsV2(ListObjectsV2Request.builder()
-                        .bucket(bucket).continuationToken(token).build());
-                for (S3Object obj : resp.contents()) {
-                    s3.deleteObject(DeleteObjectRequest.builder().bucket(bucket).key(obj.key()).build());
-                }
-                token = resp.isTruncated() ? resp.nextContinuationToken() : null;
-            } while (token != null);
-
-            // Delete all versions and delete-markers
-            String keyMarker = null;
-            String versionMarker = null;
-            do {
-                ListObjectVersionsResponse resp = s3.listObjectVersions(
-                        ListObjectVersionsRequest.builder()
-                                .bucket(bucket).keyMarker(keyMarker).versionIdMarker(versionMarker).build());
-                for (ObjectVersion v : resp.versions()) {
-                    s3.deleteObject(DeleteObjectRequest.builder()
-                            .bucket(bucket).key(v.key()).versionId(v.versionId()).build());
-                }
-                for (DeleteMarkerEntry dm : resp.deleteMarkers()) {
-                    s3.deleteObject(DeleteObjectRequest.builder()
-                            .bucket(bucket).key(dm.key()).versionId(dm.versionId()).build());
-                }
-                keyMarker = resp.isTruncated() ? resp.nextKeyMarker() : null;
-                versionMarker = resp.isTruncated() ? resp.nextVersionIdMarker() : null;
-            } while (keyMarker != null);
-        } catch (Exception ignored) {}
     }
 
     private static void quietDeleteBucket(String bucket) {

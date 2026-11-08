@@ -4,6 +4,7 @@ import json
 import time
 
 import pytest
+from botocore.exceptions import ClientError
 
 
 class TestSQSQueue:
@@ -99,6 +100,18 @@ class TestSQSMessages:
         )
         assert len(response["Successful"]) == 3
         assert len(response.get("Failed", [])) == 0
+
+    def test_send_message_batch_rejects_more_than_ten_entries(self, sqs_client, test_queue):
+        """Test SendMessageBatch with 11 entries fails and sends nothing."""
+        entries = [{"Id": f"m{i}", "MessageBody": f"Batch {i}"} for i in range(11)]
+        with pytest.raises(ClientError) as error:
+            sqs_client.send_message_batch(QueueUrl=test_queue, Entries=entries)
+        assert error.value.response["Error"]["Code"] in (
+            "TooManyEntriesInBatchRequest",
+            "AWS.SimpleQueueService.TooManyEntriesInBatchRequest",
+        )
+        response = sqs_client.receive_message(QueueUrl=test_queue, MaxNumberOfMessages=10)
+        assert len(response.get("Messages", [])) == 0
 
     def test_delete_message_batch(self, sqs_client, test_queue):
         """Test DeleteMessageBatch deletes multiple messages."""

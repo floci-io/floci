@@ -1,0 +1,128 @@
+package io.floci.aws.services.ec2;
+
+import io.floci.aws.services.ec2.model.Instance;
+import io.floci.aws.services.ec2.model.Placement;
+import io.floci.aws.services.ec2.model.Tag;
+import org.junit.jupiter.api.Test;
+
+import java.util.List;
+import java.util.Set;
+
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertTrue;
+
+class Ec2MetadataServerTest {
+
+    @Test
+    void reconciliationAndTerminationPreserveOtherInstances() {
+        Ec2MetadataServer server = new Ec2MetadataServer(null, null, null);
+        Instance first = new Instance();
+        first.setInstanceId("i-first");
+        Instance second = new Instance();
+        second.setInstanceId("i-second");
+        server.reconcileContainerAddresses(Set.of("192.0.2.1", "192.0.2.2"), first);
+        server.reconcileContainerAddresses(Set.of("192.0.2.2", "192.0.2.3"), second);
+        server.reconcileContainerAddresses(Set.of("192.0.2.4"), first);
+        assertTrue(server.registeredContainer("192.0.2.1").isEmpty());
+        assertEquals(second, server.registeredContainer("192.0.2.2").orElseThrow());
+        server.unregisterInstance(null);
+        assertEquals(first, server.registeredContainer("192.0.2.4").orElseThrow());
+        server.unregisterInstance(first);
+        assertTrue(server.registeredContainer("192.0.2.4").isEmpty());
+        assertEquals(second, server.registeredContainer("192.0.2.3").orElseThrow());
+    }
+
+    @Test
+    void instanceMetadataListsTagKeys() {
+        Instance instance = new Instance();
+        instance.setTags(List.of(
+                new Tag("Environment", "dev"),
+                new Tag("Service", "orders")));
+
+        assertEquals("Environment\nService", Ec2MetadataServer.instanceTagKeys(instance));
+    }
+
+    @Test
+    void instanceMetadataReturnsTagValue() {
+        Instance instance = new Instance();
+        instance.setTags(List.of(
+                new Tag("Environment", "dev"),
+                new Tag("Service", "orders")));
+
+        assertEquals("orders", Ec2MetadataServer.instanceTagValue(instance, "Service").orElseThrow());
+    }
+
+    @Test
+    void instanceMetadataReturnsEmptyValueForEmptyTag() {
+        Instance instance = new Instance();
+        instance.setTags(List.of(new Tag("Owner", null)));
+
+        assertTrue(Ec2MetadataServer.instanceTagValue(instance, "Owner").isPresent());
+        assertEquals("", Ec2MetadataServer.instanceTagValue(instance, "Owner").orElseThrow());
+    }
+
+    @Test
+    void instanceMetadataReturnsMissingForUnknownTag() {
+        Instance instance = new Instance();
+        instance.setTags(List.of(new Tag("Environment", "dev")));
+
+        assertTrue(Ec2MetadataServer.instanceTagValue(instance, "Missing").isEmpty());
+    }
+
+    @Test
+    void identityDocumentUsesInstanceArchitectureWithX8664Fallback() {
+        Instance instance = new Instance();
+        instance.setInstanceId("i-arm");
+        instance.setArchitecture("arm64");
+        instance.setImageId("ami-arm");
+        instance.setInstanceType("t4g.medium");
+        instance.setPlacement(new Placement("us-west-2a"));
+        instance.setPrivateIpAddress("10.0.0.10");
+        instance.setRegion("us-west-2");
+
+        assertTrue(Ec2MetadataServer.instanceIdentityDocument(instance, "000000000000", "us-west-2a")
+                .contains("\"architecture\":\"arm64\""));
+
+        instance.setArchitecture(null);
+        assertTrue(Ec2MetadataServer.instanceIdentityDocument(instance, "000000000000", "us-west-2a")
+                .contains("\"architecture\":\"x86_64\""));
+    }
+
+    @Test
+    void identityDocumentOfAnInstanceWithoutPlacementReportsTheConfiguredZone() {
+        Instance instance = new Instance();
+        instance.setInstanceId("i-china");
+        instance.setRegion("cn-north-1");
+
+        assertTrue(Ec2MetadataServer.instanceIdentityDocument(instance, "000000000000", "cn-north-1b")
+                .contains("\"availabilityZone\":\"cn-north-1b\""));
+    }
+
+    @Test
+    void staleContainerUnregisterDoesNotRemoveCurrentRegistration() {
+        Ec2MetadataServer server = new Ec2MetadataServer(null, null, null);
+        Instance oldInstance = new Instance();
+        oldInstance.setInstanceId("i-old");
+        Instance currentInstance = new Instance();
+        currentInstance.setInstanceId("i-current");
+
+        server.registerContainer("192.168.215.7", oldInstance.getInstanceId(), oldInstance);
+        server.registerContainer("192.168.215.7", currentInstance.getInstanceId(), currentInstance);
+        server.unregisterContainer("192.168.215.7", oldInstance);
+
+        assertEquals(
+                currentInstance,
+                server.registeredContainer("192.168.215.7").orElseThrow());
+    }
+
+    @Test
+    void unregisteredContainerMessageExplainsMissingEc2Record() {
+        String message = Ec2MetadataServer.unregisteredContainerMessage("172.17.0.9");
+
+        assertTrue(message.startsWith("Instance not found"));
+        assertTrue(message.contains("172.17.0.9"));
+        assertTrue(message.contains("RunInstances"));
+        assertTrue(message.contains("SSM managed instance"));
+    }
+
+}

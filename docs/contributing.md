@@ -122,13 +122,13 @@ add or change, and leave unrelated cleanups for their own PR.
 - [ ] Commit messages follow Conventional Commits
 - [ ] Code follows the style rules above
 
-Please keep at most **5 open PRs** at a time. A bot leaves an advisory note (label `over-pr-limit`) on PRs opened beyond that. See [CONTRIBUTING.md](https://github.com/floci-io/floci/blob/main/CONTRIBUTING.md#pull-request-guidelines) for details.
+Please keep **no more than 4 open pull requests**, drafts included, and **no more than 2 of them ready for review**. A bot turns a 3rd ready PR back into a draft and closes new ones opened while you already have 4 open. See [CONTRIBUTING.md](https://github.com/floci-io/floci/blob/main/CONTRIBUTING.md#pull-request-limits-and-review-bandwidth) for details.
 
 ## Releases
 
-Stable releases ship on the **1st and 3rd Tuesday of each month**. Merging to `main` does not cut a release: the change rides the next train, and reaches the `nightly` image on the next nightly build.
+Stable releases ship on the **15th and the last day of each month**. Merging to `main` does not cut a release: the change rides the next train, and reaches the `nightly` image on the next nightly build.
 
-Maintainers cut releases from `main` with the Release Cut workflow, which runs semantic-release over the Conventional Commits since the last tag. That is why the commit type matters: `feat:` and `fix:` move the version, `docs:` and `chore:` do not. `CHANGELOG.md` is generated from those messages and is not edited by hand; a genuine correction goes in a PR carrying the `changelog-edit` label.
+Releases are cut from `main` by the Release Cut workflow, scheduled at 00:30 US Central time on those days (maintainers can also run it by hand). It runs semantic-release over the Conventional Commits since the last tag. That is why the commit type matters: `feat:` and `fix:` move the version, `docs:` and `chore:` do not. `CHANGELOG.md` is generated from those messages and is not edited by hand; a genuine correction goes in a PR carrying the `changelog-edit` label.
 
 ## Reporting Security Issues
 

@@ -71,6 +71,45 @@ class S3PresignTest {
     }
 
     @Test
+    @DisplayName("#5965 presigned PUT ignores the JS SDK's hoisted empty-body checksum")
+    void presignedPutWithHoistedEmptyBodyChecksumUploadsSuccessfully() throws Exception {
+        String content = "not an empty body";
+        PutObjectRequest request = PutObjectRequest.builder()
+                .bucket(BUCKET)
+                .key(KEY)
+                .overrideConfiguration(config -> config
+                        .putRawQueryParameter("x-amz-checksum-crc32", "AAAAAA==")
+                        .putRawQueryParameter("x-amz-sdk-checksum-algorithm", "CRC32"))
+                .build();
+        PresignedPutObjectRequest presigned = presigner.presignPutObject(
+                PutObjectPresignRequest.builder()
+                        .signatureDuration(Duration.ofMinutes(10))
+                        .putObjectRequest(request)
+                        .build());
+        assertThat(presigned.url().toURI().getRawQuery()).contains("x-amz-checksum-crc32=AAAAAA%3D%3D");
+
+        HttpURLConnection connection = (HttpURLConnection) presigned.url().openConnection();
+        try {
+            connection.setRequestMethod("PUT");
+            connection.setDoOutput(true);
+            byte[] body = content.getBytes(StandardCharsets.UTF_8);
+            connection.setFixedLengthStreamingMode(body.length);
+            try (OutputStream output = connection.getOutputStream()) {
+                output.write(body);
+            }
+            assertThat(connection.getResponseCode()).isEqualTo(200);
+            try (InputStream response = connection.getInputStream()) {
+                assertThat(response.readAllBytes()).isEmpty();
+            }
+        } finally {
+            connection.disconnect();
+        }
+
+        assertThat(s3.getObjectAsBytes(GetObjectRequest.builder().bucket(BUCKET).key(KEY).build())
+                .asUtf8String()).isEqualTo(content);
+    }
+
+    @Test
     @DisplayName("#932 presigned PUT with tagging signed header uploads successfully")
     void presignedPutWithTaggingSignedHeaderUploadsSuccessfully() throws Exception {
         String content = "uploaded via presigned PUT with tagging signed header";

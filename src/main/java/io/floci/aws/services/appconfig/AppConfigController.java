@@ -1,0 +1,325 @@
+package io.floci.aws.services.appconfig;
+
+import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.node.ArrayNode;
+import com.fasterxml.jackson.databind.node.ObjectNode;
+import io.floci.aws.core.common.Pagination;
+import io.floci.aws.services.appconfig.AppConfigDataService.LegacyConfiguration;
+import io.floci.aws.services.appconfig.model.Application;
+import io.floci.aws.services.appconfig.model.ConfigurationProfile;
+import io.floci.aws.services.appconfig.model.Deployment;
+import io.floci.aws.services.appconfig.model.DeploymentStrategy;
+import io.floci.aws.services.appconfig.model.Environment;
+import io.floci.aws.services.appconfig.model.HostedConfigurationVersion;
+import io.floci.aws.services.appconfig.model.HostedConfigurationVersionSummary;
+import jakarta.inject.Inject;
+import jakarta.ws.rs.Consumes;
+import jakarta.ws.rs.DELETE;
+import jakarta.ws.rs.GET;
+import jakarta.ws.rs.HeaderParam;
+import jakarta.ws.rs.PATCH;
+import jakarta.ws.rs.POST;
+import jakarta.ws.rs.Path;
+import jakarta.ws.rs.PathParam;
+import jakarta.ws.rs.Produces;
+import jakarta.ws.rs.QueryParam;
+import jakarta.ws.rs.core.Context;
+import jakarta.ws.rs.core.MediaType;
+import jakarta.ws.rs.core.Response;
+import jakarta.ws.rs.core.UriInfo;
+
+import java.io.IOException;
+import java.util.List;
+import java.util.Map;
+
+@Path("/")
+@Produces(MediaType.APPLICATION_JSON)
+@Consumes(MediaType.APPLICATION_JSON)
+public class AppConfigController {
+    private final AppConfigService service;
+    private final AppConfigDataService dataService;
+    private final ObjectMapper objectMapper;
+
+    @Inject
+    public AppConfigController(AppConfigService service, AppConfigDataService dataService,
+                               ObjectMapper objectMapper) {
+        this.service = service;
+        this.dataService = dataService;
+        this.objectMapper = objectMapper;
+    }
+
+    // ──────────────────────────── Application ────────────────────────────
+
+    @POST
+    @Path("/applications")
+    public Response createApplication(String body) throws IOException {
+        @SuppressWarnings("unchecked")
+        Map<String, Object> request = objectMapper.readValue(body, Map.class);
+        Application app = service.createApplication(request);
+        return Response.status(201).entity(app).build();
+    }
+
+    @GET
+    @Path("/applications/{id}")
+    public Response getApplication(@PathParam("id") String id) {
+        return Response.ok(service.getApplication(id)).build();
+    }
+
+    @PATCH
+    @Path("/applications/{id}")
+    public Response updateApplication(@PathParam("id") String id, String body) throws IOException {
+        @SuppressWarnings("unchecked")
+        Map<String, Object> request = objectMapper.readValue(body, Map.class);
+        return Response.ok(service.updateApplication(id, request)).build();
+    }
+
+    @GET
+    @Path("/applications")
+    public Response listApplications() {
+        List<Application> apps = service.listApplications();
+        ObjectNode root = objectMapper.createObjectNode();
+        ArrayNode items = root.putArray("Items");
+        apps.forEach(items::addPOJO);
+        return Response.ok(root).build();
+    }
+
+    @DELETE
+    @Path("/applications/{id}")
+    public Response deleteApplication(@PathParam("id") String id) {
+        service.deleteApplication(id);
+        return Response.noContent().build();
+    }
+
+    // ──────────────────────────── Environment ────────────────────────────
+
+    @POST
+    @Path("/applications/{appId}/environments")
+    public Response createEnvironment(@PathParam("appId") String appId, String body) throws IOException {
+        @SuppressWarnings("unchecked")
+        Map<String, Object> request = objectMapper.readValue(body, Map.class);
+        Environment env = service.createEnvironment(appId, request);
+        return Response.status(201).entity(env).build();
+    }
+
+    @GET
+    @Path("/applications/{appId}/environments/{envId}")
+    public Response getEnvironment(@PathParam("appId") String appId, @PathParam("envId") String envId) {
+        return Response.ok(service.getEnvironment(appId, envId)).build();
+    }
+
+    @DELETE
+    @Path("/applications/{appId}/environments/{envId}")
+    public Response deleteEnvironment(@PathParam("appId") String appId, @PathParam("envId") String envId) {
+        service.deleteEnvironment(appId, envId);
+        return Response.noContent().build();
+    }
+
+    @GET
+    @Path("/applications/{appId}/environments")
+    public Response listEnvironments(@PathParam("appId") String appId) {
+        List<Environment> envs = service.listEnvironments(appId);
+        ObjectNode root = objectMapper.createObjectNode();
+        ArrayNode items = root.putArray("Items");
+        envs.forEach(items::addPOJO);
+        return Response.ok(root).build();
+    }
+
+    // ──────────────────────────── Configuration Profile ────────────────────────────
+
+    @POST
+    @Path("/applications/{appId}/configurationprofiles")
+    public Response createConfigurationProfile(@PathParam("appId") String appId, String body) throws IOException {
+        @SuppressWarnings("unchecked")
+        Map<String, Object> request = objectMapper.readValue(body, Map.class);
+        ConfigurationProfile profile = service.createConfigurationProfile(appId, request);
+        return Response.status(201).entity(profile).build();
+    }
+
+    @GET
+    @Path("/applications/{appId}/configurationprofiles/{profileId}")
+    public Response getConfigurationProfile(@PathParam("appId") String appId, @PathParam("profileId") String profileId) {
+        return Response.ok(service.getConfigurationProfile(appId, profileId)).build();
+    }
+
+    @GET
+    @Path("/applications/{appId}/configurationprofiles")
+    public Response listConfigurationProfiles(@PathParam("appId") String appId) {
+        List<ConfigurationProfile> profiles = service.listConfigurationProfiles(appId);
+        ObjectNode root = objectMapper.createObjectNode();
+        ArrayNode items = root.putArray("Items");
+        profiles.forEach(items::addPOJO);
+        return Response.ok(root).build();
+    }
+
+    @DELETE
+    @Path("/applications/{appId}/configurationprofiles/{profileId}")
+    public Response deleteConfigurationProfile(@PathParam("appId") String appId, @PathParam("profileId") String profileId) {
+        service.deleteConfigurationProfile(appId, profileId);
+        return Response.noContent().build();
+    }
+
+    // ──────────────────────────── Hosted Configuration Version ────────────────────────────
+
+    @GET
+    @Path("/applications/{appId}/configurationprofiles/{profileId}/hostedconfigurationversions")
+    public Response listHostedConfigurationVersions(@PathParam("appId") String appId,
+                                                    @PathParam("profileId") String profileId) {
+        List<HostedConfigurationVersionSummary> items = service.listHostedConfigurationVersions(appId, profileId);
+        ObjectNode root = objectMapper.createObjectNode();
+        ArrayNode arr = root.putArray("Items");
+        items.forEach(arr::addPOJO);
+        return Response.ok(root).build();
+    }
+
+    @POST
+    @Path("/applications/{appId}/configurationprofiles/{profileId}/hostedconfigurationversions")
+    @Consumes(MediaType.WILDCARD)
+    public Response createHostedConfigurationVersion(@PathParam("appId") String appId,
+                                                     @PathParam("profileId") String profileId,
+                                                     @HeaderParam("Content-Type") String contentType,
+                                                     @HeaderParam("Description") String description,
+                                                     byte[] content) {
+        HostedConfigurationVersion version = service.createHostedConfigurationVersion(appId, profileId, content, contentType, description);
+        return versionResponse(version, 201);
+    }
+
+    @GET
+    @Path("/applications/{appId}/configurationprofiles/{profileId}/hostedconfigurationversions/{versionNumber}")
+    public Response getHostedConfigurationVersion(@PathParam("appId") String appId,
+                                                  @PathParam("profileId") String profileId,
+                                                  @PathParam("versionNumber") int versionNumber) {
+        HostedConfigurationVersion version = service.getHostedConfigurationVersion(appId, profileId, versionNumber);
+        return versionResponse(version, 200);
+    }
+
+    @DELETE
+    @Path("/applications/{appId}/configurationprofiles/{profileId}/hostedconfigurationversions/{versionNumber}")
+    public Response deleteHostedConfigurationVersion(@PathParam("appId") String appId,
+                                                     @PathParam("profileId") String profileId,
+                                                     @PathParam("versionNumber") int versionNumber) {
+        service.deleteHostedConfigurationVersion(appId, profileId, versionNumber);
+        return Response.noContent().build();
+    }
+
+    private Response versionResponse(HostedConfigurationVersion v, int status) {
+        Response.ResponseBuilder rb = Response.status(status).entity(v.getContent());
+        rb.header("Application-Id", v.getApplicationId());
+        rb.header("Configuration-Profile-Id", v.getConfigurationProfileId());
+        rb.header("Version-Number", v.getVersionNumber());
+        rb.header("Content-Type", v.getContentType());
+        if (v.getDescription() != null) rb.header("Description", v.getDescription());
+        return rb.build();
+    }
+
+    // ──────────────────────────── Deployment Strategy ────────────────────────────
+
+    @POST
+    @Path("/deploymentstrategies")
+    public Response createDeploymentStrategy(String body) throws IOException {
+        @SuppressWarnings("unchecked")
+        Map<String, Object> request = objectMapper.readValue(body, Map.class);
+        DeploymentStrategy strategy = service.createDeploymentStrategy(request);
+        return Response.status(201).entity(strategy).build();
+    }
+
+    @GET
+    @Path("/deploymentstrategies/{id}")
+    public Response getDeploymentStrategy(@PathParam("id") String id) {
+        return Response.ok(service.getDeploymentStrategy(id)).build();
+    }
+
+    @GET
+    @Path("/deploymentstrategies")
+    public Response listDeploymentStrategies() {
+        List<DeploymentStrategy> items = service.listDeploymentStrategies();
+        ObjectNode root = objectMapper.createObjectNode();
+        ArrayNode arr = root.putArray("Items");
+        items.forEach(arr::addPOJO);
+        return Response.ok(root).build();
+    }
+
+    // AWS's own API model spells this path "deployementstrategies" (extra "e") - every other
+    // deployment-strategy operation correctly uses "deploymentstrategies". Confirmed against the
+    // real API reference (both the Request Syntax and Sample Request sections agree) and
+    // reproduced against the real AWS SDK for Java v2, which sends the misspelled path literally -
+    // matching that typo, not "fixing" it, is what real AWS wire-protocol compatibility means here.
+    @DELETE
+    @Path("/deployementstrategies/{id}")
+    public Response deleteDeploymentStrategy(@PathParam("id") String id) {
+        service.deleteDeploymentStrategy(id);
+        return Response.noContent().build();
+    }
+
+    // ──────────────────────────── Deployment ────────────────────────────
+
+    @POST
+    @Path("/applications/{appId}/environments/{envId}/deployments")
+    public Response startDeployment(@PathParam("appId") String appId, @PathParam("envId") String envId, String body) throws IOException {
+        @SuppressWarnings("unchecked")
+        Map<String, Object> request = objectMapper.readValue(body, Map.class);
+        Deployment deployment = service.startDeployment(appId, envId, request);
+        return Response.status(201).entity(deployment).build();
+    }
+
+    @GET
+    @Path("/applications/{appId}/environments/{envId}/deployments")
+    public Response listDeployments(@PathParam("appId") String appId,
+                                     @PathParam("envId") String envId,
+                                     @QueryParam("max_results") String maxResults,
+                                     @QueryParam("next_token") String nextToken) {
+        AppConfigService.DeploymentPage page = service.listDeployments(appId, envId,
+                Pagination.parseMaxResults(maxResults, "BadRequestException"), nextToken);
+        ObjectNode root = objectMapper.createObjectNode();
+        ArrayNode items = root.putArray("Items");
+        page.items().forEach(items::addPOJO);
+        if (page.nextToken() != null) {
+            root.put("NextToken", page.nextToken());
+        }
+        return Response.ok(root).build();
+    }
+
+    @GET
+    @Path("/applications/{appId}/environments/{envId}/deployments/{deploymentNumber}")
+    public Response getDeployment(@PathParam("appId") String appId, @PathParam("envId") String envId, @PathParam("deploymentNumber") int deploymentNumber) {
+        return Response.ok(service.getDeployment(appId, envId, deploymentNumber)).build();
+    }
+
+    @DELETE
+    @Path("/applications/{appId}/environments/{envId}/deployments/{deploymentNumber}")
+    public Response stopDeployment(@PathParam("appId") String appId, @PathParam("envId") String envId,
+                                   @PathParam("deploymentNumber") int deploymentNumber,
+                                   @HeaderParam("Allow-Revert") boolean allowRevert) {
+        return Response.status(202).entity(service.stopDeployment(appId, envId, deploymentNumber, allowRevert)).build();
+    }
+
+    // ──────────────────────────── Configuration ────────────────────────────
+
+    // The deprecated GetConfiguration: superseded by AppConfigData, but still an AppConfig operation.
+    // The response type comes from the stored version (Ion for variant flags when Accept asks for it),
+    // never from negotiation, so a non-JSON Accept header is not refused.
+    @GET
+    @Path("/applications/{appId}/environments/{envId}/configurations/{configuration}")
+    @Produces(MediaType.WILDCARD)
+    public Response getConfiguration(@PathParam("appId") String appId,
+                                     @PathParam("envId") String envId,
+                                     @PathParam("configuration") String configuration,
+                                     @QueryParam("client_id") String clientId,
+                                     @HeaderParam("Accept") String accept,
+                                     @Context UriInfo uriInfo) {
+        // Read raw: @QueryParam turns an empty value into null, but AWS rejects an empty version.
+        String clientVersion = uriInfo.getQueryParameters().getFirst("client_configuration_version");
+        LegacyConfiguration data = dataService.getConfiguration(
+                appId, envId, configuration, clientId, clientVersion, accept);
+        if (data.configurationVersion().equals(clientVersion)) {
+            return Response.noContent()
+                    .header("Configuration-Version", data.configurationVersion())
+                    .build();
+        }
+        // A version stored without a content type would otherwise go out as the */* of @Produces.
+        String contentType = data.contentType() != null ? data.contentType() : MediaType.APPLICATION_OCTET_STREAM;
+        return Response.ok(data.content())
+                .header("Content-Type", contentType)
+                .header("Configuration-Version", data.configurationVersion())
+                .build();
+    }
+}

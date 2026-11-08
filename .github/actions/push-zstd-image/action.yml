@@ -1,0 +1,93 @@
+name: Build and push with zstd -19 layers
+description: >-
+  Builds an image and pushes it with every layer compressed by zstd at level 19. BuildKit
+  compresses zstd at about level 11 at most, so the image is first exported to an OCI layout,
+  recompressed there, and pushed by a second build that only names it: BuildKit keeps the
+  recompressed layers and still attaches provenance and the SBOM to the digests it pushes.
+  Pulling zstd layers needs Docker Engine 23.0 or later.
+
+inputs:
+  file:
+    description: Dockerfile, relative to the repository root
+    required: true
+  platforms:
+    description: Target platforms
+    required: true
+  tags:
+    description: Tags to push
+    required: true
+  build-args:
+    description: Build arguments
+    required: false
+  labels:
+    description: Labels added to the pushed image
+    required: false
+  cache-from:
+    description: Cache import for the image build
+    required: false
+  cache-to:
+    description: Cache export for the image build
+    required: false
+  provenance:
+    description: Provenance attestation of the pushed image
+    required: false
+  sbom:
+    description: Whether to attach an SBOM attestation to the pushed image
+    required: false
+  source-date-epoch:
+    description: SOURCE_DATE_EPOCH for both builds
+    required: false
+
+outputs:
+  digest:
+    description: Digest of the pushed image index
+    value: ${{ steps.push.outputs.digest }}
+
+runs:
+  using: composite
+  steps:
+    - name: Create the OCI layout directory
+      id: layout
+      shell: bash
+      run: |
+        dir=$(mktemp -d "$RUNNER_TEMP/oci-layout.XXXXXX")
+        echo "dir=$dir" >> "$GITHUB_OUTPUT"
+
+    - name: Build the image into an OCI layout
+      uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+      env:
+        SOURCE_DATE_EPOCH: ${{ inputs.source-date-epoch }}
+      with:
+        context: .
+        file: ${{ inputs.file }}
+        platforms: ${{ inputs.platforms }}
+        build-args: ${{ inputs.build-args }}
+        outputs: type=oci,dest=${{ steps.layout.outputs.dir }},tar=false,oci-mediatypes=true,compression=uncompressed
+        provenance: false
+        sbom: false
+        cache-from: ${{ inputs.cache-from }}
+        cache-to: ${{ inputs.cache-to }}
+
+    - name: Recompress the layers with zstd -19
+      id: recompress
+      shell: bash
+      env:
+        LAYOUT: ${{ steps.layout.outputs.dir }}
+      run: |
+        digest=$(python3 "$GITHUB_ACTION_PATH/recompress.py" "$LAYOUT" 19)
+        echo "digest=$digest" >> "$GITHUB_OUTPUT"
+
+    - name: Push the recompressed image
+      id: push
+      uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+      env:
+        SOURCE_DATE_EPOCH: ${{ inputs.source-date-epoch }}
+      with:
+        context: ${{ github.action_path }}
+        build-contexts: image=oci-layout://${{ steps.layout.outputs.dir }}@${{ steps.recompress.outputs.digest }}
+        platforms: ${{ inputs.platforms }}
+        outputs: type=image,push=true,compression=zstd,oci-mediatypes=true
+        tags: ${{ inputs.tags }}
+        labels: ${{ inputs.labels }}
+        provenance: ${{ inputs.provenance }}
+        sbom: ${{ inputs.sbom }}

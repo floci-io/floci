@@ -1,0 +1,722 @@
+package io.floci.aws.services.mwaa;
+
+import com.github.dockerjava.api.command.InspectContainerResponse;
+import com.github.dockerjava.api.exception.NotFoundException;
+import com.github.dockerjava.api.model.ContainerNetwork;
+import io.floci.aws.config.EmulatorConfig;
+import io.floci.aws.core.common.AwsArnUtils;
+import io.floci.aws.core.common.Base64Url;
+import io.floci.aws.core.common.docker.ContainerBuilder;
+import io.floci.aws.core.common.docker.ContainerDetector;
+import io.floci.aws.core.common.docker.ContainerExec;
+import io.floci.aws.core.common.docker.ContainerLifecycleManager;
+import io.floci.aws.core.common.docker.ContainerLifecycleManager.ContainerInfo;
+import io.floci.aws.core.common.docker.ContainerSpec;
+import io.floci.aws.core.common.docker.ContainerStorageHelper;
+import io.floci.aws.core.common.docker.LaunchedContainerAwsEnv;
+import io.floci.aws.core.common.docker.RetryingTarCopier;
+import io.floci.aws.services.mwaa.model.Environment;
+import jakarta.enterprise.context.ApplicationScoped;
+import jakarta.inject.Inject;
+import org.jboss.logging.Logger;
+
+import java.io.ByteArrayOutputStream;
+import java.io.IOException;
+import java.io.InputStream;
+import java.net.HttpURLConnection;
+import java.net.URI;
+import java.nio.charset.StandardCharsets;
+import java.security.SecureRandom;
+import java.util.ArrayList;
+import java.util.Base64;
+import java.util.List;
+import java.util.Locale;
+import java.util.Map;
+import java.util.Optional;
+import java.util.Set;
+import java.util.concurrent.TimeUnit;
+import java.util.stream.Collectors;
+
+/**
+ * Manages the Docker lifecycle of the Postgres + Apache Airflow container pair backing a real-mode
+ * MWAA environment. Not used when {@code floci.services.mwaa.mock=true}.
+ *
+ * <p>Neither container publishes a host port for the Postgres side — it is only ever reached by the
+ * sibling Airflow container, over the Docker network, so its address is resolved directly from the
+ * Docker daemon (container IP), the same way {@code EksClusterManager} avoids relying on
+ * container-name DNS on the default bridge network. The Airflow container, unlike Postgres, must
+ * also be reachable by Floci itself (the readiness poller and {@code MwaaWebProxy}'s relay target),
+ * so it follows the same host-port pattern as the Neptune/RDS backend containers: a dynamic host
+ * port when Floci runs natively, none when Floci itself runs inside Docker.
+ */
+@ApplicationScoped
+public class MwaaEnvironmentManager {
+
+    private static final Logger LOG = Logger.getLogger(MwaaEnvironmentManager.class);
+
+    private static final int POSTGRES_PORT = 5432;
+    private static final int AIRFLOW_WEBSERVER_PORT = 8080;
+    private static final String DAGS_MOUNT = "/opt/airflow/dags";
+    private static final String LOGS_MOUNT = "/opt/airflow/logs";
+    /** The OS user the stock apache/airflow image runs its process as (uid 50000) — distinct from
+     *  the Airflow web-UI admin login username configured via {@code _AIRFLOW_WWW_USER_USERNAME}. */
+    private static final String CONTAINER_OS_USER = "airflow";
+    private static final Set<String> MWAA_CLI_COMMANDS = Set.of("cheat-sheet", "version");
+    private static final Map<String, Set<String>> MWAA_CLI_SUBCOMMANDS = Map.of(
+            "connections", Set.of("add", "delete"),
+            "dags", Set.of("backfill", "delete", "list", "list-import-errors", "list-jobs",
+                    "list-runs", "next-execution", "pause", "report", "reserialize", "show",
+                    "state", "test", "trigger", "unpause"),
+            "db", Set.of("clean"),
+            "providers", Set.of("behaviours", "get", "hooks", "links", "list", "notifications",
+                    "secrets", "triggerer", "widgets"),
+            "roles", Set.of("add-perms", "create", "del-perms", "list"),
+            "tasks", Set.of("clear", "failed-deps", "list", "render", "run", "state",
+                    "states-for-dag-run", "test"),
+            "variables", Set.of("delete", "get", "list", "set"));
+
+    private final ContainerBuilder containerBuilder;
+    private final ContainerLifecycleManager lifecycleManager;
+    private final ContainerDetector containerDetector;
+    private final EmulatorConfig config;
+    private final LaunchedContainerAwsEnv awsEnv;
+
+    @Inject
+    public MwaaEnvironmentManager(ContainerBuilder containerBuilder,
+                                  ContainerLifecycleManager lifecycleManager,
+                                  ContainerDetector containerDetector,
+                                  EmulatorConfig config,
+                                  LaunchedContainerAwsEnv awsEnv) {
+        this.containerBuilder = containerBuilder;
+        this.lifecycleManager = lifecycleManager;
+        this.containerDetector = containerDetector;
+        this.config = config;
+        this.awsEnv = awsEnv;
+    }
+
+    /**
+     * Starts the Postgres metadata database, waits for it to accept connections, then starts the
+     * Airflow container (LocalExecutor) wired to it. Updates {@code environment} with the resolved
+     * container ids and the Airflow container's Floci-reachable host/port. Throws on failure; the
+     * caller (MwaaService) is responsible for catching and marking the environment CREATE_FAILED.
+     *
+     * @param startupScriptContent the {@code StartupScriptS3Path} object's bytes (already fetched
+     *                              from S3 by the caller), or {@code null}/empty if the environment
+     *                              has none configured
+     */
+    public void startEnvironment(Environment environment, String airflowVersion, byte[] startupScriptContent) {
+        String name = environment.getName();
+        String dbPassword = generateSecret(24);
+        environment.setDbPassword(dbPassword);
+
+        String dbContainerName = dbContainerName(config, environment);
+        String dbVolume = dbContainerName;
+        lifecycleManager.removeIfExists(dbContainerName);
+        lifecycleManager.ensureVolume(dbVolume);
+
+        ContainerSpec dbSpec = containerBuilder.newContainer(config.services().mwaa().defaultPostgresImage())
+                .withName(dbContainerName)
+                .withEnv(List.of(
+                        "POSTGRES_USER=airflow",
+                        "POSTGRES_PASSWORD=" + dbPassword,
+                        "POSTGRES_DB=airflow"))
+                .withNamedVolume(dbVolume, "/var/lib/postgresql/data")
+                .withDockerNetwork(config.services().mwaa().dockerNetwork())
+                .withExposedPort(POSTGRES_PORT)
+                .withLogRotation()
+                .withLabels(ContainerStorageHelper.resourceIdentityLabels(
+                        "mwaa", name, environmentAccount(environment), regionOf(environment)))
+                .build();
+
+        String dbContainerId = lifecycleManager.create(dbSpec);
+        lifecycleManager.startCreated(dbContainerId, dbSpec);
+        environment.setDbContainerId(dbContainerId);
+        waitForPostgresReady(dbContainerId);
+        String dbIp = resolveContainerIp(dbContainerId, dbSpec.networkMode());
+
+        LOG.infov("MWAA Postgres container {0} ready for environment {1} at {2}:{3}",
+                dbContainerId, name, dbIp, String.valueOf(POSTGRES_PORT));
+
+        startAirflowContainer(environment, airflowVersion, dbIp, dbPassword, startupScriptContent);
+    }
+
+    // Package-private (not private) so MwaaEnvironmentManagerTest can exercise container-spec
+    // construction directly with a mocked ContainerLifecycleManager, without needing to also mock
+    // the exec-based Postgres readiness wait that startEnvironment() performs first.
+    void startAirflowContainer(Environment environment, String airflowVersion, String dbIp, String dbPassword,
+                               byte[] startupScriptContent) {
+        String name = environment.getName();
+        String airflowContainerName = airflowContainerName(config, environment);
+        String dagsVolume = airflowContainerName + "-dags";
+        String logsVolume = airflowContainerName + "-logs";
+
+        lifecycleManager.removeIfExists(airflowContainerName);
+        lifecycleManager.ensureVolume(dagsVolume);
+        lifecycleManager.ensureVolume(logsVolume);
+
+        String image = "apache/airflow:%s-%s".formatted(airflowVersion, pythonTagFor(airflowVersion));
+        String adminUser = "admin";
+        String adminPassword = generateSecret(24);
+        String sqlAlchemyConn = "postgresql+psycopg2://airflow:" + dbPassword + "@" + dbIp + ":" + POSTGRES_PORT + "/airflow";
+
+        // Points DAG code's own AWS SDK calls (boto3, botocore) at Floci itself, the same way
+        // Lambda/ECS containers already do via LaunchedContainerAwsEnv — otherwise a real DAG's
+        // boto3.client("s3") etc. would target real AWS instead of this emulator.
+        List<String> env = new ArrayList<>(awsEnv.sdkBaselineEnv(regionOf(environment), Optional.empty()));
+        env.addAll(List.of(
+                "AIRFLOW__CORE__EXECUTOR=LocalExecutor",
+                "AIRFLOW__DATABASE__SQL_ALCHEMY_CONN=" + sqlAlchemyConn,
+                "AIRFLOW__CORE__SQL_ALCHEMY_CONN=" + sqlAlchemyConn,
+                "AIRFLOW__CORE__FERNET_KEY=" + generateFernetKey(),
+                "AIRFLOW__WEBSERVER__SECRET_KEY=" + generateSecret(32),
+                "AIRFLOW__CORE__LOAD_EXAMPLES=false",
+                "_AIRFLOW_WWW_USER_USERNAME=" + adminUser,
+                "_AIRFLOW_WWW_USER_PASSWORD=" + adminPassword));
+        env.addAll(airflowConfigurationOptionsEnv(environment.getAirflowConfigurationOptions()));
+
+        ContainerBuilder.Builder specBuilder = containerBuilder.newContainer(image)
+                .withName(airflowContainerName)
+                .withEnv(env)
+                // Overrides the stock apache/airflow entrypoint, which is designed to run a single
+                // role per container. This runs migrations, the admin bootstrap (using the stock
+                // _AIRFLOW_WWW_USER_* var names, since the stock entrypoint's own auto-creation
+                // logic is bypassed along with the rest of it), then backgrounds the scheduler and
+                // execs the webserver as PID 1 so container signals reach it directly.
+                .withEntrypoint(List.of("sh", "-c"))
+                .withCmd(List.of(airflowBootstrapScript()))
+                .withNamedVolume(dagsVolume, DAGS_MOUNT)
+                .withNamedVolume(logsVolume, LOGS_MOUNT)
+                .withDockerNetwork(config.services().mwaa().dockerNetwork())
+                .withLogRotation()
+                .withLabels(ContainerStorageHelper.resourceIdentityLabels(
+                        "mwaa", name, environmentAccount(environment), regionOf(environment)));
+
+        if (!containerDetector.isRunningInContainer()) {
+            specBuilder.withDynamicPort(AIRFLOW_WEBSERVER_PORT);
+        } else {
+            specBuilder.withExposedPort(AIRFLOW_WEBSERVER_PORT);
+        }
+
+        ContainerSpec spec = specBuilder.build();
+        // create -> inject startup.sh (if configured) + the sudoers grant -> start, so both exist
+        // before the entrypoint runs — same sequencing EksClusterManager uses to inject
+        // registries.yaml/the webhook kubeconfig before the k3s container's entrypoint boots.
+        String containerId = lifecycleManager.create(spec);
+        ContainerInfo info;
+        try {
+            // Real MWAA documents startup scripts using "sudo yum install ..." as the baseline way
+            // to install OS packages — sudo is assumed to just work for the airflow user. The stock
+            // apache/airflow image ships sudo but requires a password, so without this grant every
+            // sudo line in a script copied from AWS's own docs would hang/fail. Granted unconditionally
+            // (not only when a startup script is configured), matching that it's a baseline capability
+            // of the environment on real MWAA, not something tied to having a script at all.
+            // Best-effort: absence of sudo access doesn't mean requested configuration was silently
+            // skipped, just that "sudo" lines in a startup script won't work.
+            copyFileIntoContainer(containerId, "/etc/sudoers.d", "floci-airflow-nopasswd",
+                    (CONTAINER_OS_USER + " ALL=(ALL) NOPASSWD:ALL\n").getBytes(StandardCharsets.UTF_8));
+            if (startupScriptContent != null && startupScriptContent.length > 0) {
+                // Unlike the sudoers grant (best-effort infra) or DAG-file sync (a bad DAG must never
+                // fail the environment), a *configured* startup script is the user's explicit request —
+                // if injection fails, the entrypoint's "if [ -f /startup.sh ]" guard would just silently
+                // skip it and the environment would reach AVAILABLE without ever having applied the
+                // requested setup. Hard-fail instead, matching real MWAA gating environment creation on
+                // startup-script failure.
+                if (!copyFileIntoContainer(containerId, "/", "startup.sh", startupScriptContent)) {
+                    throw new IllegalStateException(
+                            "Could not inject the configured startup script into MWAA container "
+                                    + containerId + " for environment " + environment.getName());
+                }
+            }
+            info = lifecycleManager.startCreated(containerId, spec);
+        } catch (Exception e) {
+            lifecycleManager.removeIfExists(containerId);
+            throw e;
+        }
+        environment.setAirflowContainerId(info.containerId());
+
+        ContainerLifecycleManager.EndpointInfo endpoint = info.getEndpoint(AIRFLOW_WEBSERVER_PORT);
+        if (endpoint != null) {
+            environment.setAirflowInternalHost(endpoint.host());
+            environment.setAirflowInternalPort(endpoint.port());
+        } else {
+            environment.setAirflowInternalHost("localhost");
+            environment.setAirflowInternalPort(AIRFLOW_WEBSERVER_PORT);
+        }
+
+        LOG.infov("Started Airflow container {0} for MWAA environment {1} (image {2}), reachable at {3}:{4}",
+                info.containerId(), name, image, environment.getAirflowInternalHost(),
+                String.valueOf(environment.getAirflowInternalPort()));
+    }
+
+    /**
+     * Polls the Airflow container's unauthenticated {@code /health} endpoint and requires both
+     * {@code metadatabase.status} and {@code scheduler.status} to be {@code "healthy"}.
+     */
+    public boolean isReady(Environment environment) {
+        String host = environment.getAirflowInternalHost();
+        if (host == null || environment.getAirflowContainerId() == null) {
+            return false;
+        }
+        String url = "http://" + host + ":" + environment.getAirflowInternalPort() + "/health";
+        try {
+            HttpURLConnection conn = (HttpURLConnection) URI.create(url).toURL().openConnection();
+            conn.setRequestMethod("GET");
+            conn.setConnectTimeout(2000);
+            conn.setReadTimeout(2000);
+            if (conn.getResponseCode() != 200) {
+                return false;
+            }
+            String body;
+            try (InputStream in = conn.getInputStream()) {
+                body = new String(in.readAllBytes(), StandardCharsets.UTF_8);
+            }
+            return body.contains("\"metadatabase\"") && body.contains("\"scheduler\"")
+                    && healthySection(body, "metadatabase") && healthySection(body, "scheduler");
+        } catch (Exception e) {
+            return false;
+        }
+    }
+
+    /**
+     * True when either container backing this environment, Postgres or Airflow, was created but is
+     * no longer running: for example a startup script or {@code airflow db migrate} failing
+     * partway through kills the Airflow container, or the Postgres container itself dies (out of
+     * memory, its volume filling up), which never surfaces as an Airflow-side failure since the
+     * Airflow process itself keeps running, just never reporting {@code metadatabase} healthy.
+     * {@code docker start} only launches a container's entrypoint and returns immediately, so
+     * nothing else observes either of those; {@link MwaaService}'s readiness poller uses this to
+     * stop waiting on containers that will never let the environment answer {@code /health},
+     * instead of leaving the environment at CREATING forever.
+     */
+    public boolean hasAnyContainerExited(Environment environment) {
+        return hasContainerExited(environment.getDbContainerId(), "Postgres", environment)
+                || hasContainerExited(environment.getAirflowContainerId(), "Airflow", environment);
+    }
+
+    private boolean hasContainerExited(String containerId, String label, Environment environment) {
+        if (containerId == null) {
+            return false;
+        }
+        try {
+            InspectContainerResponse inspect = lifecycleManager.getDockerClient().inspectContainerCmd(containerId).exec();
+            return !Boolean.TRUE.equals(inspect.getState().getRunning());
+        } catch (NotFoundException e) {
+            return true;
+        } catch (Exception e) {
+            // Inconclusive (a transient Docker daemon issue, not "the container is gone"): treat as
+            // still running, like isReady()'s own catch-all does for a failed /health call, so one
+            // bad inspect doesn't wrongly fail this environment or, since the readiness poller
+            // shares one loop across every CREATING environment, escape and starve every other
+            // environment's check for this poll tick.
+            LOG.warnv("Could not inspect {0} container {1} for environment {2}: {3}",
+                    label, containerId, environment.getName(), e.getMessage());
+            return false;
+        }
+    }
+
+    /** Crude but dependency-free check for {@code "<section>":{"status":"healthy"...}} in the /health JSON. */
+    static boolean healthySection(String body, String section) {
+        int idx = body.indexOf("\"" + section + "\"");
+        if (idx < 0) {
+            return false;
+        }
+        int statusIdx = body.indexOf("\"status\"", idx);
+        if (statusIdx < 0) {
+            return false;
+        }
+        int healthyIdx = body.indexOf("\"healthy\"", statusIdx);
+        int nextSectionCommaIdx = body.indexOf("},", idx);
+        return healthyIdx >= 0 && (nextSectionCommaIdx < 0 || healthyIdx < nextSectionCommaIdx + 2);
+    }
+
+    /** Stops and removes both containers and all three named volumes for the given environment. */
+    public void stopEnvironment(Environment environment) {
+        String name = environment.getName();
+        if (environment.getAirflowContainerId() != null) {
+            lifecycleManager.stopAndRemove(environment.getAirflowContainerId(), null);
+        }
+        if (environment.getDbContainerId() != null) {
+            lifecycleManager.stopAndRemove(environment.getDbContainerId(), null);
+        }
+        String airflowContainerName = airflowContainerName(config, environment);
+        lifecycleManager.removeVolume(dbContainerName(config, environment));
+        lifecycleManager.removeVolume(airflowContainerName + "-dags");
+        lifecycleManager.removeVolume(airflowContainerName + "-logs");
+        LOG.infov("Stopped MWAA containers for environment {0}", name);
+    }
+
+    /** Writes {@code content} to {@code DAGS_MOUNT/relativePath} inside the Airflow container. */
+    public void copyDagFile(Environment environment, String relativePath, byte[] content) {
+        copyFileIntoContainer(environment.getAirflowContainerId(), DAGS_MOUNT, relativePath, content);
+    }
+
+    /** Removes {@code DAGS_MOUNT/relativePath} from the Airflow container (best-effort). */
+    public void removeDagFile(Environment environment, String relativePath) {
+        try {
+            execInContainer(environment.getAirflowContainerId(), new String[]{"rm", "-f", DAGS_MOUNT + "/" + relativePath});
+        } catch (Exception e) {
+            LOG.warnv("Could not remove DAG {0} from environment {1}: {2}",
+                    relativePath, environment.getName(), e.getMessage());
+        }
+    }
+
+    /** Writes requirements.txt into the container and runs {@code pip install -r} against it. */
+    public void installRequirements(Environment environment, byte[] requirementsContent) {
+        String containerId = environment.getAirflowContainerId();
+        if (containerId == null) {
+            return;
+        }
+        copyFileIntoContainer(containerId, "/tmp", "mwaa-requirements.txt", requirementsContent);
+        try {
+            ContainerExec.Result result = execInContainer(containerId,
+                    new String[]{"pip", "install", "--no-cache-dir", "-r", "/tmp/mwaa-requirements.txt"});
+            if (result.exitCode() != 0) {
+                LOG.warnv("pip install -r requirements.txt exited {0} for environment {1}: {2}",
+                        String.valueOf(result.exitCode()), environment.getName(), result.stderr());
+            } else {
+                LOG.infov("Installed requirements.txt for MWAA environment {0}", environment.getName());
+            }
+        } catch (Exception e) {
+            LOG.warnv("Failed to install requirements for environment {0}: {1}", environment.getName(), e.getMessage());
+        }
+    }
+
+    /**
+     * Runs {@code airflow <cliCommand>} inside the Airflow container. The command is split into
+     * arguments with POSIX quoting rules and executed without a shell, so shell syntax such as
+     * {@code ;}, {@code |} or {@code $(...)} reaches Airflow as plain arguments.
+     */
+    public ContainerExec.Result runAirflowCli(String airflowContainerId, String cliCommand) throws Exception {
+        List<String> arguments = splitCliArguments(cliCommand);
+        if (!isSupportedCliCommand(arguments)) {
+            return new ContainerExec.Result(1, "", "Command is not supported by Amazon MWAA\n", false);
+        }
+        List<String> argv = new ArrayList<>();
+        argv.add("airflow");
+        argv.addAll(arguments);
+        return execInContainer(airflowContainerId, argv.toArray(new String[0]));
+    }
+
+    static boolean isSupportedCliCommand(List<String> arguments) {
+        if (arguments.isEmpty()) {
+            return false;
+        }
+        if (MWAA_CLI_COMMANDS.contains(arguments.getFirst())) {
+            return true;
+        }
+        Set<String> subcommands = MWAA_CLI_SUBCOMMANDS.get(arguments.getFirst());
+        return arguments.size() >= 2 && subcommands != null && subcommands.contains(arguments.get(1));
+    }
+
+    /**
+     * Splits a CLI command line into arguments using POSIX shell quoting without any expansion:
+     * spaces, tabs and newlines separate arguments, single quotes are literal, double quotes honour
+     * backslash escapes of {@code $}, backtick, {@code "}, backslash and newline, an unquoted
+     * backslash escapes the next character, and a backslash-newline pair is removed.
+     */
+    private static List<String> splitCliArguments(String command) {
+        List<String> args = new ArrayList<>();
+        StringBuilder current = new StringBuilder();
+        boolean inWord = false;
+        int i = 0;
+        while (i < command.length()) {
+            char c = command.charAt(i);
+            if (c == ' ' || c == '\t' || c == '\n') {
+                if (inWord) {
+                    args.add(current.toString());
+                    current.setLength(0);
+                    inWord = false;
+                }
+                i++;
+            } else if (c == '\'') {
+                int end = command.indexOf('\'', i + 1);
+                if (end < 0) {
+                    throw new IllegalArgumentException("Unterminated single quote in CLI command");
+                }
+                current.append(command, i + 1, end);
+                inWord = true;
+                i = end + 1;
+            } else if (c == '"') {
+                i++;
+                boolean closed = false;
+                while (i < command.length()) {
+                    char d = command.charAt(i);
+                    if (d == '"') {
+                        closed = true;
+                        i++;
+                        break;
+                    }
+                    if (d == '\\' && i + 1 < command.length() && "$`\"\\\n".indexOf(command.charAt(i + 1)) >= 0) {
+                        if (command.charAt(i + 1) != '\n') {
+                            current.append(command.charAt(i + 1));
+                        }
+                        i += 2;
+                    } else {
+                        current.append(d);
+                        i++;
+                    }
+                }
+                if (!closed) {
+                    throw new IllegalArgumentException("Unterminated double quote in CLI command");
+                }
+                inWord = true;
+            } else if (c == '\\') {
+                if (i + 1 >= command.length()) {
+                    throw new IllegalArgumentException("Trailing backslash in CLI command");
+                }
+                if (command.charAt(i + 1) != '\n') {
+                    current.append(command.charAt(i + 1));
+                    inWord = true;
+                }
+                i += 2;
+            } else {
+                current.append(c);
+                inWord = true;
+                i++;
+            }
+        }
+        if (inWord) {
+            args.add(current.toString());
+        }
+        return args;
+    }
+
+    /** Routed through {@link ContainerStorageHelper} so multiple Floci instances sharing one Docker
+     *  daemon (via {@code FLOCI_DOCKER_RESOURCE_NAMESPACE}) don't collide, same as every other
+     *  Docker-backed service (EKS, RDS, ...). {@code config} may be {@code null} — the helper treats
+     *  that as "no namespace configured" and applies only the {@code floci-aws-} prefix. */
+    static String dbContainerName(EmulatorConfig config, Environment environment) {
+        return ContainerStorageHelper.dockerName(config, "mwaa-" + environmentIdentity(config, environment) + "-db");
+    }
+
+    static String airflowContainerName(EmulatorConfig config, Environment environment) {
+        return ContainerStorageHelper.dockerName(config,
+                "mwaa-" + environmentIdentity(config, environment) + "-airflow");
+    }
+
+    private static String environmentIdentity(EmulatorConfig config, Environment environment) {
+        String defaultRegion = config != null ? config.defaultRegion() : null;
+        return environmentAccount(environment) + "." + environmentRegion(environment, defaultRegion) + "."
+                + environment.getName();
+    }
+
+    static String environmentAccount(Environment environment) {
+        return environment.getAccountId() != null
+                ? environment.getAccountId()
+                : AwsArnUtils.accountOrDefault(environment.getArn(), "000000000000");
+    }
+
+    private String regionOf(Environment environment) {
+        return environmentRegion(environment, config.defaultRegion());
+    }
+
+    /** The region the environment's ARN names; {@code defaultRegion} answers for one without an ARN. */
+    static String environmentRegion(Environment environment, String defaultRegion) {
+        return AwsArnUtils.regionOrDefault(environment.getArn(), defaultRegion);
+    }
+
+    /**
+     * The Python minor version tag real Amazon MWAA runs for a given {@code AirflowVersion}, so
+     * the emulated image matches the same Airflow/Python pairing a requirements.txt built the way
+     * AWS documents (a constraint file pinned to that pairing) expects. Per AWS's own Airflow
+     * versions table, every version through 2.10.x runs Python 3.11, and 2.11.0 onward (including
+     * every 3.x release) runs Python 3.12.
+     */
+    static String pythonTagFor(String airflowVersion) {
+        String[] parts = airflowVersion.split("\\.", 3);
+        int major = Integer.parseInt(parts[0]);
+        int minor = parts.length > 1 ? Integer.parseInt(parts[1]) : 0;
+        return (major > 2 || (major == 2 && minor >= 11)) ? "python3.12" : "python3.11";
+    }
+
+    /**
+     * Translates {@code AirflowConfigurationOptions} ({@code "section.key"} to value, e.g.
+     * {@code core.dags_are_paused_at_creation}) into the {@code AIRFLOW__SECTION__KEY} environment
+     * variables real Amazon MWAA sets for the same option, matching Airflow's own {@code conf.get}
+     * section/key model. An entry without a non-empty section and key on both sides of the dot is
+     * malformed per AWS's own format and is skipped rather than guessed at. An entry that would
+     * collide with one of {@link #PROTECTED_ENV_VARS} is skipped too and logged: those are Floci's
+     * own required LocalExecutor/DB/security wiring, not something a configuration option request
+     * gets to override.
+     */
+    static List<String> airflowConfigurationOptionsEnv(Map<String, String> options) {
+        if (options == null || options.isEmpty()) {
+            return List.of();
+        }
+        List<String> env = new ArrayList<>();
+        for (Map.Entry<String, String> entry : options.entrySet()) {
+            String dotted = entry.getKey();
+            int dot = dotted.indexOf('.');
+            if (dot <= 0 || dot == dotted.length() - 1) {
+                LOG.warnv("Ignoring malformed AirflowConfigurationOptions key ''{0}'', expected "
+                        + "the AWS \"section.key\" format", dotted);
+                continue;
+            }
+            String key = "AIRFLOW__" + dotted.substring(0, dot).toUpperCase(Locale.ROOT)
+                    + "__" + dotted.substring(dot + 1).toUpperCase(Locale.ROOT);
+            if (PROTECTED_ENV_VARS.contains(key)) {
+                LOG.warnv("Ignoring AirflowConfigurationOptions entry ''{0}'': it maps to {1}, "
+                        + "which Floci itself manages for this environment", dotted, key);
+                continue;
+            }
+            env.add(key + "=" + entry.getValue());
+        }
+        return env;
+    }
+
+    /**
+     * Environment variables a startup script must not be able to permanently override — mirrors
+     * real MWAA's documented "reserved environment variables" (which AWS silently restores after a
+     * startup script runs), scoped to the subset Floci itself configures and depends on: the
+     * LocalExecutor/DB/security wiring generated in {@link #startAirflowContainer}, plus the
+     * AWS-SDK-redirection vars from {@link LaunchedContainerAwsEnv} that this environment's own
+     * AWS-facing DAG code relies on to reach Floci instead of real AWS. Unlike AWS's full ~30-entry
+     * list, this omits Celery/StatsD-only vars Floci never sets — LocalExecutor has no broker, so
+     * there is nothing of Floci's there to protect.
+     */
+    private static final List<String> PROTECTED_ENV_VARS = List.of(
+            "AIRFLOW__CORE__EXECUTOR",
+            "AIRFLOW__DATABASE__SQL_ALCHEMY_CONN",
+            "AIRFLOW__CORE__SQL_ALCHEMY_CONN",
+            "AIRFLOW__CORE__FERNET_KEY",
+            "AIRFLOW__WEBSERVER__SECRET_KEY",
+            "AIRFLOW__CORE__LOAD_EXAMPLES",
+            "AIRFLOW_HOME",
+            "AWS_DEFAULT_REGION",
+            "AWS_REGION",
+            "AWS_ACCESS_KEY_ID",
+            "AWS_SECRET_ACCESS_KEY",
+            "AWS_SESSION_TOKEN",
+            "AWS_ENDPOINT_URL",
+            "FLOCI_HOSTNAME",
+            "FLOCI_ENDPOINT");
+
+    /**
+     * Overridden ENTRYPOINT script: run the optional startup script (if {@code /startup.sh} was
+     * injected before the container started), migrate the metadata database, idempotently
+     * bootstrap the admin user from the stock {@code _AIRFLOW_WWW_USER_*} env var names,
+     * background the scheduler, then {@code exec} the webserver so it becomes PID 1.
+     *
+     * <p>The startup script is {@code .}-sourced (not run as a subshell) so any environment
+     * variables it exports — its documented purpose on real MWAA, mirroring
+     * {@code StartupScriptS3Path} — are visible to the migrate/scheduler/webserver steps that
+     * follow in the same shell. {@code || exit 1} converts a failing sourced script (one that
+     * doesn't itself call {@code exit}) into a hard stop of this whole entrypoint, so — matching
+     * real MWAA gating environment creation on startup-script failure — a broken startup script
+     * prevents Airflow from ever starting rather than being silently ignored.
+     *
+     * <p>{@link #PROTECTED_ENV_VARS} are snapshotted to {@code _FLOCI_ORIG_*} names before the
+     * script runs and re-exported from those snapshots immediately after, so a script that
+     * overwrites e.g. {@code AIRFLOW__CORE__FERNET_KEY} or {@code AWS_ENDPOINT_URL} — accidentally
+     * or otherwise — can't actually corrupt the environment Floci just set up, matching real MWAA
+     * restoring reserved variables to their managed values.
+     *
+     * <p>The migrate + user-create steps are joined with {@code &&} (each blocks until the
+     * previous succeeds) and only "airflow scheduler" is backgrounded with {@code &} — backgrounding
+     * the whole chain (as in {@code "migrate && scheduler & exec webserver"}) would let the webserver
+     * start racing the migration instead of after it, since {@code &} has lower precedence than
+     * {@code &&} and would apply to the entire left-hand chain.
+     */
+    static String airflowBootstrapScript() {
+        String snapshot = PROTECTED_ENV_VARS.stream()
+                .map(v -> "_FLOCI_ORIG_" + v + "=\"$" + v + "\"")
+                .collect(Collectors.joining("\n", "", "\n"));
+        String restore = PROTECTED_ENV_VARS.stream()
+                .map(v -> "export " + v + "=\"$_FLOCI_ORIG_" + v + "\"")
+                .collect(Collectors.joining("\n", "", "\n"));
+
+        return snapshot
+                + "if [ -f /startup.sh ]; then . /startup.sh || exit 1; fi\n"
+                + restore
+                + "airflow db migrate && "
+                + "(airflow users create --username \"$_AIRFLOW_WWW_USER_USERNAME\" "
+                + "--password \"$_AIRFLOW_WWW_USER_PASSWORD\" --firstname Admin --lastname User "
+                + "--role Admin --email admin@example.com || true); "
+                + "airflow scheduler & "
+                + "exec airflow webserver";
+    }
+
+    /**
+     * Probes over TCP loopback on purpose. The official image runs first-boot init against a
+     * temporary server that listens only on the Unix socket, so a socket probe can pass before
+     * the final server accepts the Airflow container's TCP connections.
+     */
+    private void waitForPostgresReady(String containerId) {
+        Exception last = null;
+        for (int attempt = 1; attempt <= 60; attempt++) {
+            try {
+                ContainerExec.Result result = execInContainer(containerId,
+                        new String[]{"pg_isready", "-h", "127.0.0.1", "-U", "airflow"});
+                if (result.exitCode() == 0) {
+                    return;
+                }
+            } catch (Exception e) {
+                last = e;
+            }
+            try {
+                TimeUnit.SECONDS.sleep(1);
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                throw new IllegalStateException("Interrupted waiting for MWAA Postgres readiness", e);
+            }
+        }
+        throw new IllegalStateException("Timed out waiting for MWAA Postgres container " + containerId
+                + " to become ready" + (last != null ? ": " + last.getMessage() : ""));
+    }
+
+    private String resolveContainerIp(String containerId, String preferredNetwork) {
+        InspectContainerResponse inspect = lifecycleManager.getDockerClient().inspectContainerCmd(containerId).exec();
+        Map<String, ContainerNetwork> networks = inspect.getNetworkSettings().getNetworks();
+        if (networks != null) {
+            if (preferredNetwork != null && networks.containsKey(preferredNetwork)) {
+                String ip = networks.get(preferredNetwork).getIpAddress();
+                if (ip != null && !ip.isBlank()) {
+                    return ip;
+                }
+            }
+            for (ContainerNetwork net : networks.values()) {
+                if (net.getIpAddress() != null && !net.getIpAddress().isBlank()) {
+                    return net.getIpAddress();
+                }
+            }
+        }
+        return inspect.getNetworkSettings().getIpAddress();
+    }
+
+    /**
+     * @return {@code true} on success, {@code false} on failure (logged as a warning either way).
+     *         Callers for whom a missing file is tolerable (DAG sync, the sudoers grant) can ignore
+     *         the result; callers for whom it isn't (the configured startup script) must check it.
+     */
+    private boolean copyFileIntoContainer(String containerId, String remoteDir, String relativePath, byte[] content) {
+        if (containerId == null) {
+            return false;
+        }
+        try {
+            RetryingTarCopier.copyBytes(lifecycleManager.getDockerClient(), containerId, remoteDir,
+                    relativePath, content, 0644);
+            return true;
+        } catch (Exception e) {
+            LOG.warnv("Could not copy {0} into MWAA container {1}: {2}", relativePath, containerId, e.getMessage());
+            return false;
+        }
+    }
+
+    ContainerExec.Result execInContainer(String containerId, String[] cmd) throws Exception {
+        return ContainerExec.run(lifecycleManager.getDockerClient(), containerId, cmd, 30).throwIfTimedOut(containerId);
+    }
+
+    private static String generateSecret(int bytes) {
+        byte[] buf = new byte[bytes];
+        new SecureRandom().nextBytes(buf);
+        return Base64Url.encode(buf);
+    }
+
+    /** A Fernet key must be 32 url-safe base64-encoded bytes (Airflow's {@code AIRFLOW__CORE__FERNET_KEY}). */
+    private static String generateFernetKey() {
+        byte[] buf = new byte[32];
+        new SecureRandom().nextBytes(buf);
+        return Base64.getUrlEncoder().encodeToString(buf);
+    }
+
+}

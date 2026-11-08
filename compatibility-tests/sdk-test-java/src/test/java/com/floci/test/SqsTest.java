@@ -390,4 +390,42 @@ class SqsTest {
         queueUrl = null;
         dlqUrl = null;
     }
+
+    @Test
+    @Order(22)
+    void listQueuesPaginatorVisitsEveryQueueOnce() {
+        List<String> created = new ArrayList<>();
+        try {
+            for (String suffix : List.of("a", "b", "c")) {
+                created.add(sqs.createQueue(CreateQueueRequest.builder()
+                        .queueName("sdk-list-paging-" + suffix)
+                        .build()).queueUrl());
+            }
+
+            List<ListQueuesResponse> pages = new ArrayList<>();
+            sqs.listQueuesPaginator(ListQueuesRequest.builder()
+                    .queueNamePrefix("sdk-list-paging-")
+                    .maxResults(1)
+                    .build()).forEach(pages::add);
+
+            assertThat(pages).hasSize(3);
+            assertThat(pages).allSatisfy(p -> assertThat(p.queueUrls()).hasSize(1));
+            assertThat(pages.get(2).nextToken()).isNull();
+            assertThat(pages.stream().flatMap(p -> p.queueUrls().stream()).toList())
+                    .containsExactlyElementsOf(created);
+
+            assertThatThrownBy(() -> sqs.listQueues(ListQueuesRequest.builder().maxResults(1001).build()))
+                    .isInstanceOf(SqsException.class)
+                    .satisfies(e -> assertThat(((SqsException) e).awsErrorDetails().errorCode())
+                            .isEqualTo("InvalidParameterValue"));
+        } finally {
+            for (String url : created) {
+                try {
+                    sqs.deleteQueue(DeleteQueueRequest.builder().queueUrl(url).build());
+                } catch (QueueDoesNotExistException ignored) {
+                    // Already gone, which is the state cleanup wants; any other failure propagates.
+                }
+            }
+        }
+    }
 }

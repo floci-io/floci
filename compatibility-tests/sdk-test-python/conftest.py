@@ -1,16 +1,21 @@
 """Shared fixtures for AWS service integration tests."""
 
+import datetime
+import io
+import logging
 import os
 import uuid
-import io
 import zipfile
-
-import logging
+from contextlib import ExitStack, closing
 
 import boto3
 import pytest
 from botocore.config import Config
 from botocore.exceptions import ClientError
+from cryptography import x509
+from cryptography.hazmat.primitives import hashes, serialization
+from cryptography.hazmat.primitives.asymmetric import rsa
+from cryptography.x509.oid import NameOID
 
 logger = logging.getLogger(__name__)
 
@@ -211,6 +216,25 @@ def iot_jobs_data_client(aws_config, client_config):
     return boto3.client("iot-jobs-data", config=client_config, **aws_config)
 
 
+@pytest.fixture
+def ec2_client(aws_config, client_config):
+    """Create EC2 client."""
+    return boto3.client("ec2", config=client_config, **aws_config)
+
+
+@pytest.fixture
+def autoscaling_client(aws_config, client_config):
+    """Create an Auto Scaling client and close it after the test."""
+    with closing(boto3.client("autoscaling", config=client_config, **aws_config)) as client:
+        yield client
+
+
+@pytest.fixture
+def elbv2_client(aws_config, client_config):
+    """Create Elastic Load Balancing v2 client."""
+    return boto3.client("elbv2", config=client_config, **aws_config)
+
+
 # ============================================
 # Utility Fixtures
 # ============================================
@@ -238,9 +262,61 @@ def minimal_lambda_zip():
     return buf.getvalue()
 
 
+@pytest.fixture
+def make_self_signed_certificate():
+    """Return a factory for a self-signed certificate and its private key.
+
+    The factory takes the common name and returns a tuple of (cert_pem, key_pem) bytes.
+    """
+
+    def _make(common_name="test.example.com"):
+        key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+        subject = issuer = x509.Name(
+            [x509.NameAttribute(NameOID.COMMON_NAME, common_name)]
+        )
+        cert = (
+            x509.CertificateBuilder()
+            .subject_name(subject)
+            .issuer_name(issuer)
+            .public_key(key.public_key())
+            .serial_number(x509.random_serial_number())
+            .not_valid_before(datetime.datetime.now(datetime.timezone.utc))
+            .not_valid_after(
+                datetime.datetime.now(datetime.timezone.utc)
+                + datetime.timedelta(days=365)
+            )
+            .sign(key, hashes.SHA256())
+        )
+        cert_pem = cert.public_bytes(serialization.Encoding.PEM)
+        key_pem = key.private_bytes(
+            serialization.Encoding.PEM,
+            serialization.PrivateFormat.TraditionalOpenSSL,
+            serialization.NoEncryption(),
+        )
+        return cert_pem, key_pem
+
+    return _make
+
+
 # ============================================
 # Resource Fixtures with Cleanup
 # ============================================
+
+
+@pytest.fixture
+def test_launch_template(ec2_client, unique_name):
+    """Create an image and launch template, cleaning up both after the test."""
+    with ExitStack() as cleanup:
+        image = ec2_client.register_image(
+            Name=unique_name, Architecture="x86_64", RootDeviceName="/dev/sda1"
+        )["ImageId"]
+        cleanup.callback(ec2_client.deregister_image, ImageId=image)
+        template = ec2_client.create_launch_template(
+            LaunchTemplateName=unique_name,
+            LaunchTemplateData={"ImageId": image, "InstanceType": "t3.nano"},
+        )["LaunchTemplate"]["LaunchTemplateId"]
+        cleanup.callback(ec2_client.delete_launch_template, LaunchTemplateId=template)
+        yield template
 
 
 @pytest.fixture

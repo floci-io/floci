@@ -1,0 +1,1903 @@
+package io.floci.aws.services.iot;
+
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.node.ObjectNode;
+import io.floci.aws.config.EmulatorConfig;
+import io.floci.aws.config.FlociCertificateAuthority;
+import io.floci.aws.core.common.AwsException;
+import io.floci.aws.core.common.RegionResolver;
+import io.floci.aws.core.storage.AccountAwareStorageBackend;
+import io.floci.aws.services.acm.CertificateGenerator;
+import io.floci.aws.services.acm.model.KeyAlgorithm;
+import io.floci.aws.services.cloudwatch.logs.CloudWatchLogsService;
+import io.floci.aws.services.dynamodb.DynamoDbFacade;
+import io.floci.aws.services.dynamodb.backend.DynamoDbItemAccess;
+import io.floci.aws.services.dynamodb.backend.DynamoDbOperations.Scope;
+import io.floci.aws.services.dynamodb.backend.DynamoDbTableAccess;
+import io.floci.aws.services.firehose.FirehoseService;
+import io.floci.aws.services.firehose.model.Record;
+import io.floci.aws.services.iam.IamPolicyEvaluator;
+import io.floci.aws.services.iot.model.IotPolicy;
+import io.floci.aws.services.iot.model.IotShadow;
+import io.floci.aws.services.iot.model.IotTopicRule;
+import io.floci.aws.services.iot.model.Thing;
+import io.floci.aws.services.kinesis.KinesisService;
+import io.floci.aws.services.lambda.LambdaService;
+import io.floci.aws.services.lambda.model.InvocationType;
+import io.floci.aws.services.s3.S3Service;
+import io.floci.aws.services.sns.SnsService;
+import io.floci.aws.services.sqs.SqsService;
+import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.function.Executable;
+import org.mockito.ArgumentCaptor;
+
+import java.nio.charset.StandardCharsets;
+import java.util.ArrayList;
+import java.util.Base64;
+import java.util.HashMap;
+import java.util.LinkedHashMap;
+import java.util.LinkedHashSet;
+import java.util.List;
+import java.util.Map;
+import java.util.Set;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.Executor;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
+import java.util.concurrent.TimeUnit;
+
+import static io.floci.aws.testing.InlineMocks.inlineMock;
+import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyInt;
+import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.ArgumentMatchers.isNull;
+import static org.mockito.Mockito.RETURNS_DEEP_STUBS;
+import static org.mockito.Mockito.clearInvocations;
+import static org.mockito.Mockito.doThrow;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.times;
+import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.verifyNoInteractions;
+import static org.mockito.Mockito.when;
+
+/**
+ * Rules engine behaviour of {@link IotService} with in-memory stores and mocked action targets:
+ * one failing action never fails the publish or the other actions, the error action receives the
+ * failure document, and the {@code firehose} and {@code cloudwatchLogs} actions deliver the payload.
+ * Also the five-version cap on a policy, including under racing creates, the device shadow
+ * events that reach MQTT subscribers and topic rules on the AWS response topics, and one stored
+ * registration when identical RegisterCertificateWithoutCA calls race. Last, how UpdateThing and
+ * DeleteThing treat the attributes, the thing type and the expected version, including racing merges
+ * and racing versioned updates and deletes.
+ */
+class IotServiceTest {
+
+    private static final String REGION = "us-east-1";
+    private static final String ACCOUNT = "000000000000";
+    private static final String TOPIC = "devices/d1/metrics";
+    private static final String QUEUE_URL = "http://localhost:4566/000000000000/metrics";
+    private static final String FUNCTION_ARN = "arn:aws:lambda:us-east-1:000000000000:function:handler";
+    private static final String ERROR_FUNCTION_ARN = "arn:aws:lambda:us-east-1:000000000000:function:errors";
+    private static final String SHADOW_QUEUE_URL = "http://localhost:4566/000000000000/shadow-events";
+    private static final String CLASSIC_QUEUE_URL = "http://localhost:4566/000000000000/classic-shadow-events";
+    private static final String BUILDING_RULE_SQL = "SELECT *, topic() AS topic, clientid() AS cid "
+            + "FROM '$aws/things/+/shadow/name/building/update/accepted' WHERE endswith(clientToken, 'inbound')";
+    private static final String BUILDING_UPDATE = "$aws/things/sensor-1/shadow/name/building/update";
+    private static final String NESTED_SHADOW_UPDATE = """
+        {"state": {"desired": {"lights": {"color": {"r": 255, "g": 255, "b": 255}, "on": true}, "arr": [1, 2], "same": {"x": 1}},
+                   "reported": {"lights": {"color": {"r": 255, "g": 0, "b": 255}, "on": true}, "arr": [1, 3], "same": {"x": 1}}}}
+        """;
+    private static final String NESTED_DELTA = "{\"lights\":{\"color\":{\"g\":255}},\"arr\":[1,2]}";
+    private static final String TEOS_STORED_SENSORS = """
+        {"state": {"reported": {"sensors": {"IDT_O1": 22.3, "ODT": -14.1}}},
+         "metadata": {"reported": {"sensors": {"IDT_O1": {"timestamp": 1000}, "ODT": {"timestamp": 1000}}}},
+         "version": 1, "timestamp": 1000}
+        """;
+    private static final String TEOS_SENSOR_UPDATE =
+            "{\"state\":{\"reported\":{\"sensors\":{\"IDT_O1\":26.3},\"tz\":\"Europe/Stockholm\"}}}";
+
+    private final ObjectMapper mapper = new ObjectMapper();
+    private final SqsService sqs = mock(SqsService.class);
+    private final LambdaService lambda = mock(LambdaService.class);
+    private final DynamoDbItemAccess dynamoDb = mock(DynamoDbItemAccess.class);
+    private final FirehoseService firehose = mock(FirehoseService.class);
+    private final CloudWatchLogsService logs = mock(CloudWatchLogsService.class);
+    private final IotPublishEventRecorder recorder = new IotPublishEventRecorder();
+    private final IotMqttBrokerService broker = mock(IotMqttBrokerService.class);
+    private final AccountAwareStorageBackend<IotShadow> shadows = AccountAwareStorageBackend.inMemory(ACCOUNT);
+    private IotService service;
+
+    @BeforeEach
+    void setUp() {
+        EmulatorConfig config = mock(EmulatorConfig.class, RETURNS_DEEP_STUBS);
+        when(config.defaultRegion()).thenReturn(REGION);
+        when(config.services().iot().ruleSqlStrict()).thenReturn(false);
+        service = new IotService(
+                AccountAwareStorageBackend.inMemory(ACCOUNT),
+                AccountAwareStorageBackend.inMemory(ACCOUNT),
+                AccountAwareStorageBackend.inMemory(ACCOUNT),
+                AccountAwareStorageBackend.inMemory(ACCOUNT),
+                AccountAwareStorageBackend.inMemory(ACCOUNT),
+                shadows,
+                AccountAwareStorageBackend.inMemory(ACCOUNT),
+                AccountAwareStorageBackend.inMemory(ACCOUNT),
+                AccountAwareStorageBackend.inMemory(ACCOUNT),
+                AccountAwareStorageBackend.inMemory(ACCOUNT),
+                AccountAwareStorageBackend.inMemory(ACCOUNT),
+                AccountAwareStorageBackend.inMemory(ACCOUNT),
+                AccountAwareStorageBackend.inMemory(ACCOUNT),
+                config,
+                new RegionResolver(REGION, ACCOUNT),
+                mapper,
+                recorder,
+                broker,
+                sqs,
+                mock(SnsService.class),
+                mock(S3Service.class),
+                mock(KinesisService.class),
+                new DynamoDbFacade(dynamoDb, mock(DynamoDbTableAccess.class), new RegionResolver(REGION, ACCOUNT)),
+                lambda,
+                firehose,
+                logs,
+                inlineMock(FlociCertificateAuthority.class),
+                new IamPolicyEvaluator(mapper));
+    }
+
+    private IotTopicRule createRule(String name, String payloadJson) throws Exception {
+        return service.createTopicRule(name, mapper.readTree(payloadJson), REGION);
+    }
+
+    /** A rule whose SQS action targets a queue that does not exist and whose Lambda action works. */
+    private static String sqsThenLambdaRule(String errorActionJson) {
+        String errorAction = errorActionJson == null ? "" : ", \"errorAction\": " + errorActionJson;
+        return """
+            {
+              "sql": "SELECT * FROM 'devices/+/metrics'",
+              "actions": [
+                {"sqs": {"queueUrl": "%s", "roleArn": "arn:aws:iam::000000000000:role/rule"}},
+                {"lambda": {"functionArn": "%s"}}
+              ]%s
+            }
+            """.formatted(QUEUE_URL, FUNCTION_ARN, errorAction);
+    }
+
+    private static String lambdaErrorAction() {
+        return "{\"lambda\": {\"functionArn\": \"" + ERROR_FUNCTION_ARN + "\"}}";
+    }
+
+    private void queueIsMissing() {
+        when(sqs.sendMessage(eq(QUEUE_URL), anyString(), anyInt(), anyString()))
+                .thenThrow(new AwsException("AWS.SimpleQueueService.NonExistentQueue",
+                        "The specified queue does not exist for this wsdl version.", 400));
+    }
+
+    private void publish(String payload) {
+        service.handlePublish(TOPIC, payload.getBytes(StandardCharsets.UTF_8), true, REGION, null, Runnable::run);
+    }
+
+    private JsonNode capturedInvocationPayload(String functionArn) throws Exception {
+        ArgumentCaptor<byte[]> payload = ArgumentCaptor.forClass(byte[].class);
+        verify(lambda).invoke(eq(REGION), eq(functionArn), payload.capture(), eq(InvocationType.Event));
+        return mapper.readTree(payload.getValue());
+    }
+
+    @Test
+    void publishRecordsAndStoresTheRetainedMessageAtOnceButRunsTheRulesOnlyOnTheRuleRunner() throws Exception {
+        createRule("metricsRule", sqsThenLambdaRule(null));
+        List<Runnable> deferred = new ArrayList<>();
+        byte[] payload = "{\"v\":1}".getBytes(StandardCharsets.UTF_8);
+
+        service.publish(TOPIC, payload, true, 1, null, "sensor-1", deferred::add);
+
+        assertEquals(TOPIC, recorder.recentEvents().get(0).topic());
+        assertEquals(Base64.getEncoder().encodeToString(payload), service.getRetainedMessage(TOPIC).getPayload());
+        verifyNoInteractions(sqs, lambda);
+        assertEquals(1, deferred.size());
+
+        deferred.get(0).run();
+
+        verify(sqs).sendMessage(eq(QUEUE_URL), eq("{\"v\":1}"), eq(0), eq(REGION));
+        verify(lambda).invoke(eq(REGION), eq(FUNCTION_ARN), any(), eq(InvocationType.Event));
+    }
+
+    @Test
+    void publishWithoutARuleRunnerRunsTheRuleActionsBeforeItReturns() throws Exception {
+        createRule("metricsRule", sqsThenLambdaRule(null));
+
+        service.publish(TOPIC, "{\"v\":1}".getBytes(StandardCharsets.UTF_8), false, 0, null, null);
+
+        verify(sqs).sendMessage(eq(QUEUE_URL), eq("{\"v\":1}"), eq(0), eq(REGION));
+        verify(lambda).invoke(eq(REGION), eq(FUNCTION_ARN), any(), eq(InvocationType.Event));
+    }
+
+    /** As AWS IoT does for rule topic filters: a wildcard first level does not match a lifecycle topic. */
+    @Test
+    void aRuleWhoseTopicFilterStartsWithAWildcardDoesNotFireForALifecycleTopic() throws Exception {
+        String everything = "http://localhost:4566/000000000000/everything";
+        String anyPresence = "http://localhost:4566/000000000000/any-presence";
+        String presence = "http://localhost:4566/000000000000/presence";
+        createRule("everything", sqsRule("SELECT * FROM '#'", everything));
+        createRule("anyPresence", sqsRule("SELECT * FROM '+/events/presence/+/+'", anyPresence));
+        createRule("presence", sqsRule("SELECT * FROM '$aws/events/presence/connected/+'", presence));
+
+        service.handlePublish("$aws/events/presence/connected/x", "{\"clientId\":\"x\"}".getBytes(StandardCharsets.UTF_8),
+                true, REGION, "x", Runnable::run);
+
+        verify(sqs, never()).sendMessage(eq(everything), anyString(), anyInt(), anyString());
+        verify(sqs, never()).sendMessage(eq(anyPresence), anyString(), anyInt(), anyString());
+        verify(sqs).sendMessage(eq(presence), eq("{\"clientId\":\"x\"}"), eq(0), eq(REGION));
+
+        service.handlePublish("a/b", "{\"v\":1}".getBytes(StandardCharsets.UTF_8), true, REGION, null, Runnable::run);
+
+        verify(sqs).sendMessage(eq(everything), eq("{\"v\":1}"), eq(0), eq(REGION));
+    }
+
+    @Test
+    void aFailingActionDoesNotFailThePublishOrStopTheOtherActions() throws Exception {
+        createRule("metricsRule", sqsThenLambdaRule(null));
+        queueIsMissing();
+
+        assertDoesNotThrow(() -> publish("{\"v\":1}"));
+
+        assertEquals("{\"v\":1}", capturedInvocationPayload(FUNCTION_ARN).toString());
+    }
+
+    @Test
+    void theErrorActionReceivesTheFailureDocumentWhenAnActionFails() throws Exception {
+        createRule("metricsRule", sqsThenLambdaRule(lambdaErrorAction()));
+        queueIsMissing();
+
+        publish("{\"v\":1}");
+
+        JsonNode document = capturedInvocationPayload(ERROR_FUNCTION_ARN);
+        assertEquals("metricsRule", document.get("ruleName").asText());
+        assertEquals(TOPIC, document.get("topic").asText());
+        assertEquals(Base64.getEncoder().encodeToString("{\"v\":1}".getBytes(StandardCharsets.UTF_8)),
+                document.get("base64OriginalPayload").asText());
+        assertEquals(1, document.get("failures").size());
+        JsonNode failure = document.get("failures").get(0);
+        assertEquals("SqsAction", failure.get("failedAction").asText());
+        assertEquals(QUEUE_URL, failure.get("failedResource").asText());
+        assertTrue(failure.get("errorMessage").asText().contains("does not exist"), failure.toString());
+    }
+
+    @Test
+    void theErrorActionDoesNotRunWhenEveryActionSucceeds() throws Exception {
+        createRule("metricsRule", sqsThenLambdaRule(lambdaErrorAction()));
+
+        publish("{\"v\":1}");
+
+        verify(lambda).invoke(eq(REGION), eq(FUNCTION_ARN), any(), eq(InvocationType.Event));
+        verify(lambda, never()).invoke(eq(REGION), eq(ERROR_FUNCTION_ARN), any(), any());
+    }
+
+    @Test
+    void aFailingErrorActionIsLoggedNotThrown() throws Exception {
+        createRule("metricsRule", sqsThenLambdaRule(lambdaErrorAction()));
+        queueIsMissing();
+        when(lambda.invoke(eq(REGION), eq(ERROR_FUNCTION_ARN), any(), any()))
+                .thenThrow(new AwsException("ResourceNotFoundException", "Function not found: errors", 404));
+
+        assertDoesNotThrow(() -> publish("{\"v\":1}"));
+
+        verify(lambda, times(1)).invoke(eq(REGION), eq(ERROR_FUNCTION_ARN), any(), eq(InvocationType.Event));
+    }
+
+    @Test
+    void everyFailingActionIsListedInTheFailureDocument() throws Exception {
+        createRule("metricsRule", """
+            {
+              "sql": "SELECT * FROM 'devices/+/metrics'",
+              "actions": [
+                {"sqs": {"queueUrl": "%s", "roleArn": "arn:aws:iam::000000000000:role/rule"}},
+                {"dynamoDBv2": {"putItem": {"tableName": "metrics"}, "roleArn": "arn:aws:iam::000000000000:role/rule"}}
+              ],
+              "errorAction": %s
+            }
+            """.formatted(QUEUE_URL, lambdaErrorAction()));
+        queueIsMissing();
+
+        publish("not json");
+
+        JsonNode failures = capturedInvocationPayload(ERROR_FUNCTION_ARN).get("failures");
+        assertEquals(2, failures.size());
+        assertEquals("SqsAction", failures.get(0).get("failedAction").asText());
+        assertEquals("DynamoDBv2Action", failures.get(1).get("failedAction").asText());
+        assertEquals("metrics", failures.get(1).get("failedResource").asText());
+    }
+
+    private static String firehoseRule(String separator, boolean batchMode) {
+        String separatorMember = separator == null ? "" : ", \"separator\": \"" + separator + "\"";
+        return """
+            {
+              "sql": "SELECT * FROM 'devices/+/metrics'",
+              "actions": [{"firehose": {"deliveryStreamName": "metrics", "roleArn": "arn:aws:iam::000000000000:role/rule"%s, "batchMode": %s}}]
+            }
+            """.formatted(separatorMember, batchMode);
+    }
+
+    private static String text(Record record) {
+        return new String(record.getData(), StandardCharsets.UTF_8);
+    }
+
+    @Test
+    void firehoseActionPutsThePayloadWithTheSeparatorAppended() throws Exception {
+        createRule("metricsRule", firehoseRule("\\n", false));
+
+        publish("{\"v\":1}");
+
+        ArgumentCaptor<Record> record = ArgumentCaptor.forClass(Record.class);
+        verify(firehose).putRecord(eq("metrics"), record.capture());
+        assertEquals("{\"v\":1}\n", text(record.getValue()));
+    }
+
+    @Test
+    void firehoseActionWithoutASeparatorPutsThePayloadAsIs() throws Exception {
+        createRule("metricsRule", firehoseRule(null, false));
+
+        publish("{\"v\":1}");
+
+        ArgumentCaptor<Record> record = ArgumentCaptor.forClass(Record.class);
+        verify(firehose).putRecord(eq("metrics"), record.capture());
+        assertEquals("{\"v\":1}", text(record.getValue()));
+    }
+
+    @Test
+    void firehoseActionInBatchModeDeliversEachElementOfAJsonArrayAsOneRecord() throws Exception {
+        createRule("metricsRule", firehoseRule("\\n", true));
+
+        publish("[{\"v\":1},{\"v\":2}]");
+
+        @SuppressWarnings("unchecked")
+        ArgumentCaptor<List<Record>> records = ArgumentCaptor.forClass(List.class);
+        verify(firehose).putRecordBatch(eq("metrics"), records.capture());
+        assertEquals(List.of("{\"v\":1}\n", "{\"v\":2}\n"), records.getValue().stream().map(IotServiceTest::text).toList());
+        verify(firehose, never()).putRecord(anyString(), any());
+    }
+
+    @Test
+    void firehoseActionInBatchModeDeliversAnythingElseAsOneRecord() throws Exception {
+        createRule("metricsRule", firehoseRule(null, true));
+
+        publish("plain text");
+
+        ArgumentCaptor<Record> record = ArgumentCaptor.forClass(Record.class);
+        verify(firehose).putRecord(eq("metrics"), record.capture());
+        assertEquals("plain text", text(record.getValue()));
+    }
+
+    @Test
+    void firehoseActionAcceptsEverySeparatorTheApiAllows() throws Exception {
+        List<String> separators = List.of("\\n", "\\t", "\\r\\n", ",");
+        for (int i = 0; i < separators.size(); i++) {
+            createRule("rule" + i, firehoseRule(separators.get(i), false));
+        }
+    }
+
+    @Test
+    void firehoseActionRejectsAnySeparatorTheApiDoesNotAllow() {
+        for (String separator : List.of("|", ";", "", " ", "\\n\\n")) {
+            AwsException e = assertThrows(AwsException.class, () -> createRule("metricsRule", firehoseRule(separator, false)));
+            assertEquals("InvalidRequestException", e.getErrorCode(), separator);
+            assertEquals(400, e.getHttpStatus());
+        }
+        assertThrows(AwsException.class, () -> createRule("metricsRule", """
+            {"sql": "SELECT * FROM 'devices/+/metrics'", "actions": [],
+             "errorAction": {"firehose": {"deliveryStreamName": "errors", "roleArn": "arn:aws:iam::000000000000:role/rule", "separator": "|"}}}
+            """));
+    }
+
+    @Test
+    void firehoseActionFailureIsReportedWithTheDeliveryStreamName() throws Exception {
+        createRule("metricsRule", """
+            {"sql": "SELECT * FROM 'devices/+/metrics'",
+             "actions": [{"firehose": {"deliveryStreamName": "metrics", "roleArn": "arn:aws:iam::000000000000:role/rule"}}],
+             "errorAction": %s}
+            """.formatted(lambdaErrorAction()));
+        doThrow(new AwsException("ResourceNotFoundException", "Delivery stream not found: metrics", 400))
+                .when(firehose).putRecord(eq("metrics"), any());
+
+        publish("{\"v\":1}");
+
+        JsonNode failure = capturedInvocationPayload(ERROR_FUNCTION_ARN).get("failures").get(0);
+        assertEquals("FirehoseAction", failure.get("failedAction").asText());
+        assertEquals("metrics", failure.get("failedResource").asText());
+    }
+
+    private static String cloudwatchLogsRule(boolean batchMode) {
+        return """
+            {
+              "sql": "SELECT * FROM 'devices/+/metrics'",
+              "actions": [{"cloudwatchLogs": {"logGroupName": "/iot/metrics", "roleArn": "arn:aws:iam::000000000000:role/rule", "batchMode": %s}}]
+            }
+            """.formatted(batchMode);
+    }
+
+    private List<Map<String, Object>> capturedLogEvents() {
+        @SuppressWarnings("unchecked")
+        ArgumentCaptor<List<Map<String, Object>>> events = ArgumentCaptor.forClass(List.class);
+        verify(logs).putLogEvents(eq("/iot/metrics"), eq("metricsRule"), events.capture(), eq(REGION));
+        return events.getValue();
+    }
+
+    @Test
+    void cloudwatchLogsActionWritesThePayloadToAStreamNamedAfterTheRule() throws Exception {
+        createRule("metricsRule", cloudwatchLogsRule(false));
+
+        publish("{\"v\":1}");
+
+        verify(logs).createLogStream("/iot/metrics", "metricsRule", REGION);
+        List<Map<String, Object>> events = capturedLogEvents();
+        assertEquals(1, events.size());
+        assertEquals("{\"v\":1}", events.get(0).get("message"));
+        assertTrue(events.get(0).get("timestamp") instanceof Long);
+    }
+
+    @Test
+    void cloudwatchLogsActionReusesAnExistingStream() throws Exception {
+        createRule("metricsRule", cloudwatchLogsRule(false));
+        doThrow(new AwsException("ResourceAlreadyExistsException", "The specified log stream already exists", 400))
+                .when(logs).createLogStream("/iot/metrics", "metricsRule", REGION);
+
+        assertDoesNotThrow(() -> publish("{\"v\":1}"));
+
+        assertEquals("{\"v\":1}", capturedLogEvents().get(0).get("message"));
+    }
+
+    @Test
+    void cloudwatchLogsActionInBatchModeTakesTimestampAndMessageFromEachArrayElement() throws Exception {
+        createRule("metricsRule", cloudwatchLogsRule(true));
+
+        publish("""
+            [
+              {"timestamp": 1673520691093, "message": "Test message 1"},
+              {"timestamp": 1673520692879, "message": "Test message 2"},
+              {"timestamp": 1673520693442, "message": "Test message 3"}
+            ]
+            """);
+
+        List<Map<String, Object>> events = capturedLogEvents();
+        assertEquals(List.of("Test message 1", "Test message 2", "Test message 3"),
+                events.stream().map(event -> event.get("message")).toList());
+        assertEquals(List.of(1673520691093L, 1673520692879L, 1673520693442L),
+                events.stream().map(event -> event.get("timestamp")).toList());
+    }
+
+    @Test
+    void cloudwatchLogsActionInBatchModeFallsBackToThePublishTimeAndTheElementText() throws Exception {
+        createRule("metricsRule", cloudwatchLogsRule(true));
+        long before = System.currentTimeMillis();
+
+        publish("[{\"v\":1}, {\"timestamp\": \"1673520691093\", \"message\": {\"nested\": true}}, \"plain\"]");
+
+        List<Map<String, Object>> events = capturedLogEvents();
+        assertEquals(List.of("{\"v\":1}", "{\"nested\":true}", "\"plain\""),
+                events.stream().map(event -> event.get("message")).toList());
+        events.forEach(event -> assertTrue((Long) event.get("timestamp") >= before));
+    }
+
+    @Test
+    void cloudwatchLogsActionFailsWhenTheLogGroupDoesNotExist() throws Exception {
+        createRule("metricsRule", """
+            {"sql": "SELECT * FROM 'devices/+/metrics'",
+             "actions": [{"cloudwatchLogs": {"logGroupName": "/iot/missing", "roleArn": "arn:aws:iam::000000000000:role/rule"}}],
+             "errorAction": %s}
+            """.formatted(lambdaErrorAction()));
+        doThrow(new AwsException("ResourceNotFoundException", "The specified log group does not exist.", 400))
+                .when(logs).createLogStream("/iot/missing", "metricsRule", REGION);
+
+        assertDoesNotThrow(() -> publish("{\"v\":1}"));
+
+        JsonNode failure = capturedInvocationPayload(ERROR_FUNCTION_ARN).get("failures").get(0);
+        assertEquals("CloudwatchLogsAction", failure.get("failedAction").asText());
+        assertEquals("/iot/missing", failure.get("failedResource").asText());
+        verify(logs, never()).putLogEvents(anyString(), anyString(), any(), anyString());
+    }
+
+    @Test
+    void topicRuleKeepsTheSqlVersionAndTheErrorAction() throws Exception {
+        createRule("versionedRule", """
+            {
+              "sql": "SELECT * FROM 'devices/+/metrics'",
+              "awsIotSqlVersion": "2016-03-23",
+              "actions": [{"lambda": {"functionArn": "%s"}}],
+              "errorAction": {"sqs": {"queueUrl": "%s", "roleArn": "arn:aws:iam::000000000000:role/rule"}}
+            }
+            """.formatted(FUNCTION_ARN, QUEUE_URL));
+
+        IotTopicRule rule = service.getTopicRule("versionedRule", REGION);
+
+        assertEquals("2016-03-23", rule.getAwsIotSqlVersion());
+        assertEquals(QUEUE_URL, mapper.readTree(rule.getErrorActionJson()).at("/sqs/queueUrl").asText());
+    }
+
+    @Test
+    void topicRuleWithoutTheOptionalMembersStoresNothingForThem() throws Exception {
+        createRule("plainRule", sqsThenLambdaRule(null));
+
+        IotTopicRule rule = service.getTopicRule("plainRule", REGION);
+
+        assertNull(rule.getAwsIotSqlVersion());
+        assertNull(rule.getErrorActionJson());
+    }
+
+    @Test
+    void replacingATopicRuleReplacesTheOptionalMembersToo() throws Exception {
+        createRule("versionedRule", """
+            {"sql": "SELECT * FROM 'a'", "awsIotSqlVersion": "2016-03-23", "actions": [],
+             "errorAction": {"sqs": {"queueUrl": "http://dlq", "roleArn": "r"}}}
+            """);
+
+        service.replaceTopicRule("versionedRule", mapper.readTree("{\"sql\": \"SELECT * FROM 'b'\", \"actions\": []}"), REGION);
+
+        IotTopicRule rule = service.getTopicRule("versionedRule", REGION);
+        assertNull(rule.getAwsIotSqlVersion());
+        assertNull(rule.getErrorActionJson());
+    }
+
+    private JsonNode capturedDynamoDbItem(String tableName) {
+        ArgumentCaptor<ObjectNode> item = ArgumentCaptor.forClass(ObjectNode.class);
+        verify(dynamoDb).putItem(eq(new Scope(ACCOUNT, REGION)), eq(tableName), item.capture(),
+                isNull(), isNull(), isNull());
+        return item.getValue();
+    }
+
+    @Test
+    void dynamoDBv2ActionMapsNestedValuesToDynamoDbMapsAndLists() throws Exception {
+        createRule("metricsRule", """
+            {"sql": "SELECT * FROM 'devices/+/metrics'",
+             "actions": [{"dynamoDBv2": {"putItem": {"tableName": "metrics"}, "roleArn": "arn:aws:iam::000000000000:role/rule"}}]}
+            """);
+
+        publish("{\"device\": {\"id\": \"d1\", \"ok\": true}, \"readings\": [1.5, \"x\", null]}");
+
+        JsonNode item = capturedDynamoDbItem("metrics");
+        assertEquals("d1", item.at("/device/M/id/S").asText());
+        assertTrue(item.at("/device/M/ok/BOOL").asBoolean());
+        assertEquals("1.5", item.at("/readings/L/0/N").asText());
+        assertEquals("x", item.at("/readings/L/1/S").asText());
+        assertTrue(item.at("/readings/L/2/NULL").asBoolean());
+    }
+
+    @Test
+    void aDynamoDbErrorActionKeepsEveryFailureInTheItem() throws Exception {
+        createRule("metricsRule", """
+            {"sql": "SELECT * FROM 'devices/+/metrics'",
+             "actions": [{"sqs": {"queueUrl": "%s", "roleArn": "arn:aws:iam::000000000000:role/rule"}}],
+             "errorAction": {"dynamoDBv2": {"putItem": {"tableName": "rule-errors"}, "roleArn": "arn:aws:iam::000000000000:role/rule"}}}
+            """.formatted(QUEUE_URL));
+        queueIsMissing();
+
+        publish("{\"v\":1}");
+
+        JsonNode item = capturedDynamoDbItem("rule-errors");
+        assertEquals("metricsRule", item.at("/ruleName/S").asText());
+        assertEquals(TOPIC, item.at("/topic/S").asText());
+        assertEquals("SqsAction", item.at("/failures/L/0/M/failedAction/S").asText());
+        assertEquals(QUEUE_URL, item.at("/failures/L/0/M/failedResource/S").asText());
+        assertTrue(item.at("/failures/L/0/M/errorMessage/S").asText().contains("does not exist"));
+    }
+
+    @Test
+    void anActionWithoutATypeOrOfAnUnsupportedTypeIsSkippedAndTheOthersStillRun() throws Exception {
+        createRule("metricsRule", """
+            {"sql": "SELECT * FROM 'devices/+/metrics'",
+             "actions": [
+               {"comment": "not an action"},
+               {"kafka": {"destinationArn": "arn:aws:iot:us-east-1:000000000000:ruledestination/kafka/x", "topic": "t"}},
+               {"lambda": {"functionArn": "%s"}}
+             ],
+             "errorAction": {"note": "no type either"}}
+            """.formatted(FUNCTION_ARN));
+
+        assertDoesNotThrow(() -> publish("{\"v\":1}"));
+
+        verify(lambda).invoke(eq(REGION), eq(FUNCTION_ARN), any(), eq(InvocationType.Event));
+        verify(lambda, never()).invoke(eq(REGION), eq(ERROR_FUNCTION_ARN), any(), any());
+    }
+
+    @Test
+    void aPolicyHoldsAtMostFiveVersionsUntilOneIsDeleted() {
+        service.createPolicy("capped", "{\"v\":1}", REGION);
+        for (int v = 2; v <= 5; v++) {
+            assertEquals(Integer.toString(v),
+                    service.createPolicyVersion("capped", "{\"v\":" + v + "}", true, REGION).getVersionId());
+        }
+
+        AwsException e = assertThrows(AwsException.class,
+                () -> service.createPolicyVersion("capped", "{\"v\":6}", true, REGION));
+
+        assertEquals("VersionsLimitExceededException", e.getErrorCode());
+        assertEquals(409, e.getHttpStatus());
+        assertEquals(5, service.listPolicyVersions("capped", REGION).size());
+        assertEquals("5", service.getPolicy("capped", REGION).getDefaultVersionId());
+        service.deletePolicyVersion("capped", "2", REGION);
+        assertEquals("6", service.createPolicyVersion("capped", "{\"v\":6}", true, REGION).getVersionId());
+        assertEquals("6", service.getPolicy("capped", REGION).getDefaultVersionId());
+    }
+
+    @Test
+    void racingIdenticalRegistrationsStoreOneCertificateAndRejectTheRest() throws Exception {
+        String pem = new CertificateGenerator()
+                .generateSelfSignedCertificate("raced-device", List.of(), KeyAlgorithm.RSA_2048)
+                .certificatePem();
+        int writers = 8;
+        CountDownLatch start = new CountDownLatch(1);
+        ExecutorService pool = Executors.newFixedThreadPool(writers);
+        List<Future<Boolean>> outcomes = new ArrayList<>();
+        try {
+            for (int i = 0; i < writers; i++) {
+                outcomes.add(pool.submit(() -> {
+                    start.await();
+                    try {
+                        service.registerCertificateWithoutCa(pem, "ACTIVE", REGION);
+                        return true;
+                    } catch (AwsException e) {
+                        assertEquals("ResourceAlreadyExistsException", e.getErrorCode());
+                        return false;
+                    }
+                }));
+            }
+            start.countDown();
+            int registered = 0;
+            for (Future<Boolean> outcome : outcomes) {
+                if (outcome.get()) {
+                    registered++;
+                }
+            }
+            assertEquals(1, registered);
+            assertEquals(1, service.listCertificates(REGION).size());
+            assertEquals("SNI_ONLY", service.listCertificates(REGION).getFirst().getCertificateMode());
+        } finally {
+            pool.shutdownNow();
+        }
+    }
+
+    @Test
+    void racingVersionCreatesNeverPushAPolicyPastFiveVersions() throws Exception {
+        service.createPolicy("raced", "{\"v\":1}", REGION);
+        int writers = 8;
+        CountDownLatch start = new CountDownLatch(1);
+        ExecutorService pool = Executors.newFixedThreadPool(writers);
+        List<Future<Boolean>> outcomes = new ArrayList<>();
+        try {
+            for (int i = 0; i < writers; i++) {
+                outcomes.add(pool.submit(() -> {
+                    start.await();
+                    try {
+                        service.createPolicyVersion("raced", "{\"v\":true}", false, REGION);
+                        return true;
+                    } catch (AwsException e) {
+                        assertEquals("VersionsLimitExceededException", e.getErrorCode());
+                        return false;
+                    }
+                }));
+            }
+            start.countDown();
+            int created = 0;
+            for (Future<Boolean> outcome : outcomes) {
+                if (outcome.get()) {
+                    created++;
+                }
+            }
+            assertEquals(4, created, "exactly four of eight racing creates fit under the cap");
+        } finally {
+            pool.shutdownNow();
+        }
+        assertEquals(5, service.listPolicyVersions("raced", REGION).size());
+    }
+
+    @Test
+    void deletingTheOldestVersionRemovesTheNumericallySmallestIdAndKeepsTheDefault() {
+        service.createPolicy("pruned", "{\"v\":1}", REGION);
+        for (int v = 2; v <= 10; v++) {
+            if (service.listPolicyVersions("pruned", REGION).size() == IotService.MAX_POLICY_VERSIONS) {
+                service.makeRoomForPolicyVersion("pruned", REGION);
+            }
+            service.createPolicyVersion("pruned", "{\"v\":" + v + "}", true, REGION);
+        }
+        assertEquals(List.of(6, 7, 8, 9, 10), versionIds("pruned"));
+
+        // Sorted as text, "10" would come before "6"; the oldest version is the numerically smallest id.
+        service.makeRoomForPolicyVersion("pruned", REGION);
+
+        assertEquals(List.of(7, 8, 9, 10), versionIds("pruned"));
+        assertEquals("10", service.getPolicy("pruned", REGION).getDefaultVersionId());
+    }
+
+    @Test
+    void deletingTheOldestVersionMovesTheDefaultToTheNewestWhenTheOldestIsTheDefault() {
+        service.createPolicy("pinned", "{\"v\":1}", REGION);
+        for (int v = 2; v <= 5; v++) {
+            service.createPolicyVersion("pinned", "{\"v\":" + v + "}", false, REGION);
+        }
+        assertEquals("1", service.getPolicy("pinned", REGION).getDefaultVersionId());
+
+        service.makeRoomForPolicyVersion("pinned", REGION);
+
+        assertEquals(List.of(2, 3, 4, 5), versionIds("pinned"));
+        assertEquals("5", service.getPolicy("pinned", REGION).getDefaultVersionId());
+        assertEquals("{\"v\":5}", service.getPolicy("pinned", REGION).getPolicyDocument());
+    }
+
+    @Test
+    void makingRoomOnAPolicyStoredWithMoreThanFiveVersionsDeletesDownToFourInOneStep() {
+        // A policy persisted before the cap existed can hold more than five versions; the stores
+        // hand out the live object, so adding to it is the same as having persisted it that way.
+        service.createPolicy("legacy", "{\"v\":1}", REGION);
+        for (int v = 2; v <= 5; v++) {
+            service.createPolicyVersion("legacy", "{\"v\":" + v + "}", true, REGION);
+        }
+        IotPolicy stored = service.getPolicy("legacy", REGION);
+        List<IotPolicy.PolicyVersion> versions = new ArrayList<>(stored.getVersions());
+        for (int v = 6; v <= 8; v++) {
+            IotPolicy.PolicyVersion version = new IotPolicy.PolicyVersion();
+            version.setVersionId(Integer.toString(v));
+            version.setDocument("{\"v\":" + v + "}");
+            versions.add(version);
+        }
+        stored.setVersions(versions);
+        assertEquals(List.of(1, 2, 3, 4, 5, 6, 7, 8), versionIds("legacy"));
+
+        service.makeRoomForPolicyVersion("legacy", REGION);
+
+        assertEquals(List.of(5, 6, 7, 8), versionIds("legacy"));
+        assertEquals("5", service.getPolicy("legacy", REGION).getDefaultVersionId());
+        assertEquals("9", service.createPolicyVersion("legacy", "{\"v\":9}", true, REGION).getVersionId());
+    }
+
+    @Test
+    void aPolicyDeletedWhileVersionsAreBeingCreatedStaysDeleted() throws Exception {
+        for (int round = 0; round < 20; round++) {
+            String name = "vanishing-" + round;
+            service.createPolicy(name, "{\"v\":1}", REGION);
+            CountDownLatch start = new CountDownLatch(1);
+            ExecutorService pool = Executors.newFixedThreadPool(4);
+            List<Future<?>> outcomes = new ArrayList<>();
+            try {
+                for (int i = 0; i < 3; i++) {
+                    outcomes.add(pool.submit(() -> {
+                        start.await();
+                        try {
+                            service.createPolicyVersion(name, "{\"v\":2}", false, REGION);
+                        } catch (AwsException e) {
+                            assertEquals("ResourceNotFoundException", e.getErrorCode());
+                        }
+                        return null;
+                    }));
+                }
+                outcomes.add(pool.submit(() -> {
+                    start.await();
+                    service.deletePolicy(name, REGION);
+                    return null;
+                }));
+                start.countDown();
+                for (Future<?> outcome : outcomes) {
+                    outcome.get();
+                }
+            } finally {
+                pool.shutdownNow();
+            }
+            AwsException e = assertThrows(AwsException.class, () -> service.getPolicy(name, REGION));
+            assertEquals("ResourceNotFoundException", e.getErrorCode(), "round " + round + " brought the policy back");
+        }
+    }
+
+    private List<Integer> versionIds(String policyName) {
+        return service.listPolicyVersions(policyName, REGION).stream()
+                .map(version -> Integer.parseInt(version.getVersionId()))
+                .sorted()
+                .toList();
+    }
+
+    private JsonNode json(String value) throws Exception {
+        return mapper.readTree(value);
+    }
+
+    /** The node as it reads back from its JSON text, so a long and an int of the same value compare equal. */
+    private JsonNode reparse(JsonNode node) throws Exception {
+        return mapper.readTree(node.toString());
+    }
+
+    private static String leaf(long timestamp) {
+        return "{\"timestamp\":" + timestamp + "}";
+    }
+
+    private static Set<String> fieldNames(JsonNode node) {
+        Set<String> names = new LinkedHashSet<>();
+        node.fieldNames().forEachRemaining(names::add);
+        return names;
+    }
+
+    private List<String> recordedTopics() {
+        return recorder.recentEvents().stream().map(IotPublishEvent::topic).toList();
+    }
+
+    private JsonNode recordedPayload(String topic) throws Exception {
+        List<IotPublishEvent> matching = recorder.recentEvents().stream()
+                .filter(event -> topic.equals(event.topic()))
+                .toList();
+        assertEquals(1, matching.size(), "events recorded on " + topic);
+        return mapper.readTree(matching.get(0).payload());
+    }
+
+    private static String sqsRule(String sql, String queueUrl) {
+        return """
+            {"sql": "%s", "actions": [{"sqs": {"queueUrl": "%s", "roleArn": "arn:aws:iam::000000000000:role/rule"}}]}
+            """.formatted(sql, queueUrl);
+    }
+
+    private void storeShadow(String thingName, String document) throws Exception {
+        IotShadow shadow = new IotShadow();
+        shadow.setThingName(thingName);
+        shadow.setDocument(document);
+        shadow.setVersion(json(document).path("version").asLong());
+        shadows.put("shadow:" + REGION + ":" + thingName + ":", shadow);
+    }
+
+    @Test
+    void shadowUpdateReturnsTheRequestStateAsSentWithItsMetadataVersionTimestampAndClientToken() throws Exception {
+        JsonNode request = json("""
+            {"state": {"desired": {"color": "blue", "modes": ["eco", "boost"], "schedule": {"start": 8}, "legacy": null},
+                       "reported": null},
+             "clientToken": "tok-1"}
+            """);
+
+        JsonNode accepted = service.updateThingShadow("sensor-1", null, request, REGION);
+
+        long timestamp = accepted.get("timestamp").asLong();
+        assertEquals(Set.of("state", "metadata", "version", "timestamp", "clientToken"), fieldNames(accepted));
+        assertEquals(request.get("state"), accepted.get("state"));
+        assertEquals(json("""
+            {"desired": {"color": %1$s, "modes": [%1$s, %1$s], "schedule": {"start": %1$s}, "legacy": %1$s},
+             "reported": %1$s}
+            """.formatted(leaf(timestamp))), reparse(accepted.get("metadata")));
+        assertEquals(1, accepted.get("version").asLong());
+        assertEquals("tok-1", accepted.get("clientToken").asText());
+        assertTrue(Math.abs(System.currentTimeMillis() / 1000 - timestamp) <= 5, "timestamp is in epoch seconds");
+
+        JsonNode second = service.updateThingShadow("sensor-1", null, json("{\"state\":{\"reported\":{\"color\":\"blue\"}}}"), REGION);
+
+        assertEquals(Set.of("state", "metadata", "version", "timestamp"), fieldNames(second));
+        assertEquals(2, second.get("version").asLong());
+    }
+
+    @Test
+    void aBlankClientTokenIsEchoedInTheUpdateResponse() throws Exception {
+        JsonNode accepted = service.updateThingShadow("sensor-15", null,
+                json("{\"state\":{\"desired\":{\"c\":\"x\"}},\"clientToken\":\" \"}"), REGION);
+
+        assertEquals(" ", accepted.path("clientToken").asText());
+    }
+
+    @Test
+    void shadowUpdatePublishesAcceptedDocumentsAndDeltaInThatOrderOnceEach() throws Exception {
+        JsonNode accepted = service.updateThingShadow("sensor-1", "building",
+                json("{\"state\":{\"desired\":{\"color\":\"blue\"}},\"clientToken\":\"tok-1\"}"), REGION);
+        long first = accepted.get("timestamp").asLong();
+
+        assertEquals(List.of(BUILDING_UPDATE + "/accepted", BUILDING_UPDATE + "/documents", BUILDING_UPDATE + "/delta"),
+                recordedTopics());
+        assertEquals(reparse(accepted), recordedPayload(BUILDING_UPDATE + "/accepted"));
+        JsonNode currentAfterFirst = json("""
+            {"state": {"desired": {"color": "blue"}}, "metadata": {"desired": {"color": %s}}, "version": 1}
+            """.formatted(leaf(first)));
+        JsonNode documents = recordedPayload(BUILDING_UPDATE + "/documents");
+        assertEquals(Set.of("previous", "current", "timestamp", "clientToken"), fieldNames(documents));
+        assertTrue(documents.get("previous").isNull(), "previous is JSON null on the first update");
+        assertEquals(currentAfterFirst, documents.get("current"));
+        assertEquals(first, documents.get("timestamp").asLong());
+        assertEquals("tok-1", documents.get("clientToken").asText());
+        assertEquals(json("""
+            {"version": 1, "timestamp": %d, "state": {"color": "blue"}, "metadata": {"color": %s}, "clientToken": "tok-1"}
+            """.formatted(first, leaf(first))), recordedPayload(BUILDING_UPDATE + "/delta"));
+        for (String topic : recordedTopics()) {
+            ArgumentCaptor<byte[]> fannedOut = ArgumentCaptor.forClass(byte[].class);
+            verify(broker, times(1)).publish(eq(topic), fannedOut.capture());
+            assertEquals(recordedPayload(topic), mapper.readTree(fannedOut.getValue()));
+        }
+
+        recorder.clear();
+        JsonNode reported = service.updateThingShadow("sensor-1", "building",
+                json("{\"state\":{\"reported\":{\"color\":\"blue\"}}}"), REGION);
+        long second = reported.get("timestamp").asLong();
+
+        assertEquals(List.of(BUILDING_UPDATE + "/accepted", BUILDING_UPDATE + "/documents"), recordedTopics(),
+                "no delta once reported matches desired");
+        JsonNode secondDocuments = recordedPayload(BUILDING_UPDATE + "/documents");
+        assertEquals(Set.of("previous", "current", "timestamp"), fieldNames(secondDocuments));
+        assertEquals(currentAfterFirst, secondDocuments.get("previous"));
+        assertEquals(json("""
+            {"state": {"desired": {"color": "blue"}, "reported": {"color": "blue"}},
+             "metadata": {"desired": {"color": %s}, "reported": {"color": %s}},
+             "version": 2}
+            """.formatted(leaf(first), leaf(second))), secondDocuments.get("current"));
+    }
+
+    @Test
+    void storedMetadataKeepsTheTimestampOfEveryKeyTheUpdateDidNotTouch() throws Exception {
+        storeShadow("sensor-2", """
+            {"state": {"desired": {"color": "red", "mode": "auto"}, "reported": {"color": "red"}},
+             "metadata": {"desired": {"color": {"timestamp": 1000}, "mode": {"timestamp": 1000}},
+                          "reported": {"color": {"timestamp": 1000}}},
+             "version": 4, "timestamp": 1000}
+            """);
+
+        JsonNode accepted = service.updateThingShadow("sensor-2", null,
+                json("{\"version\":4,\"state\":{\"desired\":{\"color\":\"blue\"}}}"), REGION);
+
+        long timestamp = accepted.get("timestamp").asLong();
+        JsonNode documents = recordedPayload("$aws/things/sensor-2/shadow/update/documents");
+        assertEquals(json("""
+            {"state": {"desired": {"color": "red", "mode": "auto"}, "reported": {"color": "red"}},
+             "metadata": {"desired": {"color": {"timestamp": 1000}, "mode": {"timestamp": 1000}},
+                          "reported": {"color": {"timestamp": 1000}}},
+             "version": 4}
+            """), documents.get("previous"));
+        assertEquals(json("""
+            {"state": {"desired": {"color": "blue", "mode": "auto"}, "reported": {"color": "red"}},
+             "metadata": {"desired": {"color": %s, "mode": {"timestamp": 1000}}, "reported": {"color": {"timestamp": 1000}}},
+             "version": 5}
+            """.formatted(leaf(timestamp))), documents.get("current"));
+        JsonNode delta = recordedPayload("$aws/things/sensor-2/shadow/update/delta");
+        assertEquals(json("{\"color\":\"blue\",\"mode\":\"auto\"}"), delta.get("state"));
+        assertEquals(json("{\"color\":" + leaf(timestamp) + ",\"mode\":{\"timestamp\":1000}}"), delta.get("metadata"));
+    }
+
+    @Test
+    void aNullKeyOrSectionRemovesItFromStateAndMetadata() throws Exception {
+        storeShadow("sensor-2", """
+            {"state": {"desired": {"color": "red", "mode": "auto"}, "reported": {"color": "red"}},
+             "metadata": {"desired": {"color": {"timestamp": 1000}, "mode": {"timestamp": 1000}},
+                          "reported": {"color": {"timestamp": 1000}}},
+             "version": 4, "timestamp": 1000}
+            """);
+
+        service.updateThingShadow("sensor-2", null, json("{\"state\":{\"desired\":{\"mode\":null},\"reported\":null}}"), REGION);
+
+        JsonNode current = recordedPayload("$aws/things/sensor-2/shadow/update/documents").get("current");
+        assertEquals(json("{\"desired\":{\"color\":\"red\"}}"), current.get("state"));
+        assertEquals(json("{\"desired\":{\"color\":{\"timestamp\":1000}}}"), current.get("metadata"));
+        JsonNode stored = service.getThingShadow("sensor-2", null, REGION);
+        assertEquals(json("{\"desired\":{\"color\":{\"timestamp\":1000}}}"), reparse(stored.get("metadata")));
+    }
+
+    /** The documents current and the stored shadow after TEOS_SENSOR_UPDATE onto TEOS_STORED_SENSORS. */
+    private void assertTeosSensorUpdateMerged(String thingName, long timestamp) throws Exception {
+        JsonNode current = json("""
+            {"state": {"reported": {"sensors": {"IDT_O1": 26.3, "ODT": -14.1}, "tz": "Europe/Stockholm"}},
+             "metadata": {"reported": {"sensors": {"IDT_O1": %1$s, "ODT": {"timestamp": 1000}}, "tz": %1$s}},
+             "version": 2}
+            """.formatted(leaf(timestamp)));
+        assertEquals(current, recordedPayload("$aws/things/" + thingName + "/shadow/update/documents").get("current"));
+        JsonNode shadow = service.getThingShadow(thingName, null, REGION);
+        assertEquals(current.get("state"), reparse(shadow.get("state")));
+        assertEquals(current.get("metadata"), reparse(shadow.get("metadata")));
+        assertEquals(2, shadow.get("version").asLong());
+    }
+
+    @Test
+    void aNestedUpdateMergesKeyByKeyAndKeepsTheTimestampOfEveryUntouchedLeaf() throws Exception {
+        storeShadow("teos-1", TEOS_STORED_SENSORS);
+
+        JsonNode accepted = service.updateThingShadow("teos-1", null, json(TEOS_SENSOR_UPDATE), REGION);
+
+        assertEquals(json(TEOS_SENSOR_UPDATE).get("state"), accepted.get("state"));
+        assertTeosSensorUpdateMerged("teos-1", accepted.get("timestamp").asLong());
+    }
+
+    @Test
+    void anMqttNestedUpdateMergesKeyByKeyAsTheRestUpdateDoes() throws Exception {
+        storeShadow("teos-2", TEOS_STORED_SENSORS);
+
+        mqttShadowRequest("$aws/things/teos-2/shadow/update", TEOS_SENSOR_UPDATE);
+
+        long timestamp = recordedPayload("$aws/things/teos-2/shadow/update/accepted").get("timestamp").asLong();
+        assertTeosSensorUpdateMerged("teos-2", timestamp);
+    }
+
+    @Test
+    void aNestedNullRemovesTheLeafAndItsMetadataAndAnEmptiedObjectStays() throws Exception {
+        storeShadow("teos-3", TEOS_STORED_SENSORS);
+
+        service.updateThingShadow("teos-3", null, json("{\"state\":{\"reported\":{\"sensors\":{\"ODT\":null}}}}"), REGION);
+
+        JsonNode afterOne = service.getThingShadow("teos-3", null, REGION);
+        assertEquals(json("{\"reported\":{\"sensors\":{\"IDT_O1\":22.3}}}"), reparse(afterOne.get("state")));
+        assertEquals(json("{\"reported\":{\"sensors\":{\"IDT_O1\":{\"timestamp\":1000}}}}"), reparse(afterOne.get("metadata")));
+
+        service.updateThingShadow("teos-3", null, json("{\"state\":{\"reported\":{\"sensors\":{\"IDT_O1\":null}}}}"), REGION);
+
+        JsonNode afterBoth = service.getThingShadow("teos-3", null, REGION);
+        assertEquals(json("{\"reported\":{\"sensors\":{}}}"), reparse(afterBoth.get("state")));
+        assertEquals(json("{\"reported\":{\"sensors\":{}}}"), reparse(afterBoth.get("metadata")));
+    }
+
+    @Test
+    void anArrayReplacesTheStoredArrayWholeWithFreshMetadata() throws Exception {
+        JsonNode first = service.updateThingShadow("teos-4", null, json("""
+            {"state": {"reported": {"arr": [1, 2, 3], "cfg": {"objs": [{"a": 1}, {"b": 2}], "keep": 1}}}}
+            """), REGION);
+
+        JsonNode second = service.updateThingShadow("teos-4", null,
+                json("{\"state\":{\"reported\":{\"arr\":[4],\"cfg\":{\"objs\":[{\"c\":3}]}}}}"), REGION);
+
+        long timestamp = second.get("timestamp").asLong();
+        JsonNode shadow = service.getThingShadow("teos-4", null, REGION);
+        assertEquals(json("{\"reported\":{\"arr\":[4],\"cfg\":{\"objs\":[{\"c\":3}],\"keep\":1}}}"), reparse(shadow.get("state")));
+        assertEquals(json("{\"reported\":{\"arr\":[%1$s],\"cfg\":{\"objs\":[{\"c\":%1$s}],\"keep\":%2$s}}}"
+                .formatted(leaf(timestamp), leaf(first.get("timestamp").asLong()))), reparse(shadow.get("metadata")));
+    }
+
+    @Test
+    void anObjectOntoAScalarOrAnArrayReplacesItAsSentNullsIncluded() throws Exception {
+        storeShadow("teos-5", """
+            {"state": {"reported": {"cfg": {"s": 5, "arr": [1], "keep": 1}}},
+             "metadata": {"reported": {"cfg": {"s": {"timestamp": 1000}, "arr": [{"timestamp": 1000}], "keep": {"timestamp": 1000}}}},
+             "version": 1, "timestamp": 1000}
+            """);
+
+        JsonNode accepted = service.updateThingShadow("teos-5", null,
+                json("{\"state\":{\"reported\":{\"cfg\":{\"s\":{\"a\":null},\"arr\":{\"a\":null}}}}}"), REGION);
+
+        long timestamp = accepted.get("timestamp").asLong();
+        JsonNode shadow = service.getThingShadow("teos-5", null, REGION);
+        assertEquals(json("{\"reported\":{\"cfg\":{\"s\":{\"a\":null},\"arr\":{\"a\":null},\"keep\":1}}}"),
+                reparse(shadow.get("state")));
+        assertEquals(json("{\"reported\":{\"cfg\":{\"s\":{\"a\":%1$s},\"arr\":{\"a\":%1$s},\"keep\":{\"timestamp\":1000}}}}"
+                .formatted(leaf(timestamp))), reparse(shadow.get("metadata")));
+    }
+
+    @Test
+    void anObjectOntoAMissingKeyAddsOnlyItsValuesAndNullsAloneAddNothing() throws Exception {
+        storeShadow("teos-6", """
+            {"state": {"reported": {"keep": 1}}, "metadata": {"reported": {"keep": {"timestamp": 1000}}},
+             "version": 1, "timestamp": 1000}
+            """);
+
+        JsonNode accepted = service.updateThingShadow("teos-6", null, json("""
+            {"state": {"reported": {"n": {"a": null, "b": 1}, "m": {"a": null}, "t": {"u": {"v": null}},
+                                    "t2": {"u": {}}, "w": {"a": null, "b": {}}, "e": {}, "missing": null}}}
+            """), REGION);
+
+        long timestamp = accepted.get("timestamp").asLong();
+        JsonNode shadow = service.getThingShadow("teos-6", null, REGION);
+        assertEquals(json("{\"reported\":{\"keep\":1,\"n\":{\"b\":1},\"t2\":{\"u\":{}},\"w\":{\"b\":{}},\"e\":{}}}"),
+                reparse(shadow.get("state")));
+        assertEquals(json("{\"reported\":{\"keep\":{\"timestamp\":1000},\"n\":{\"b\":%s},\"t2\":{\"u\":{}},\"w\":{\"b\":{}},\"e\":{}}}"
+                .formatted(leaf(timestamp))), reparse(shadow.get("metadata")));
+    }
+
+    @Test
+    void anEmptyObjectOntoAStoredObjectChangesNothingButTheVersion() throws Exception {
+        storeShadow("teos-7", """
+            {"state": {"reported": {"x": {"y": 2}}}, "metadata": {"reported": {"x": {"y": {"timestamp": 1000}}}},
+             "version": 1, "timestamp": 1000}
+            """);
+
+        service.updateThingShadow("teos-7", null, json("{\"state\":{\"reported\":{\"x\":{}}}}"), REGION);
+
+        JsonNode shadow = service.getThingShadow("teos-7", null, REGION);
+        assertEquals(json("{\"reported\":{\"x\":{\"y\":2}}}"), reparse(shadow.get("state")));
+        assertEquals(json("{\"reported\":{\"x\":{\"y\":{\"timestamp\":1000}}}}"), reparse(shadow.get("metadata")));
+        assertEquals(2, shadow.get("version").asLong());
+    }
+
+    @Test
+    void aSectionSentEmptyOrLeftEmptyIsNotStored() throws Exception {
+        service.updateThingShadow("teos-8", null, json("{\"state\":{\"desired\":{}}}"), REGION);
+
+        JsonNode empty = service.getThingShadow("teos-8", null, REGION);
+        assertEquals(json("{}"), reparse(empty.get("state")));
+        assertEquals(json("{}"), reparse(empty.get("metadata")));
+
+        service.updateThingShadow("teos-8", null, json("{\"state\":{\"desired\":{\"b\":1},\"reported\":{\"a\":1}}}"), REGION);
+        recorder.clear();
+        service.updateThingShadow("teos-8", null, json("{\"state\":{\"reported\":{\"a\":null}}}"), REGION);
+
+        JsonNode current = recordedPayload("$aws/things/teos-8/shadow/update/documents").get("current");
+        assertEquals(json("{\"desired\":{\"b\":1}}"), current.get("state"));
+        assertEquals(Set.of("desired"), fieldNames(current.get("metadata")));
+
+        recorder.clear();
+        service.updateThingShadow("teos-8", null, json("{\"state\":{\"desired\":{\"b\":null}}}"), REGION);
+
+        assertEquals(json("{\"state\":{},\"metadata\":{},\"version\":4}"),
+                recordedPayload("$aws/things/teos-8/shadow/update/documents").get("current"));
+    }
+
+    @Test
+    void aNestedDesiredChangeGivesTheDeltaAndDocumentsOfTheMergedShadow() throws Exception {
+        String stored = """
+            {"state": {"desired": {"lights": {"color": {"r": 1, "g": 2}}}, "reported": {"lights": {"color": {"r": 1, "g": 3}}}},
+             "metadata": {"desired": {"lights": {"color": {"r": {"timestamp": 1000}, "g": {"timestamp": 1000}}}},
+                          "reported": {"lights": {"color": {"r": {"timestamp": 1000}, "g": {"timestamp": 1000}}}}},
+             "version": 5, "timestamp": 1000}
+            """;
+        storeShadow("teos-9", stored);
+
+        JsonNode accepted = service.updateThingShadow("teos-9", null,
+                json("{\"state\":{\"desired\":{\"lights\":{\"color\":{\"b\":9}}}}}"), REGION);
+
+        long timestamp = accepted.get("timestamp").asLong();
+        JsonNode delta = recordedPayload("$aws/things/teos-9/shadow/update/delta");
+        assertEquals(json("{\"lights\":{\"color\":{\"b\":9,\"g\":2}}}"), delta.get("state"));
+        assertEquals(json("{\"lights\":{\"color\":{\"b\":%s,\"g\":{\"timestamp\":1000}}}}".formatted(leaf(timestamp))),
+                delta.get("metadata"));
+        assertEquals(6, delta.get("version").asLong());
+        JsonNode documents = recordedPayload("$aws/things/teos-9/shadow/update/documents");
+        JsonNode previous = json(stored);
+        ((ObjectNode) previous).remove("timestamp");
+        assertEquals(previous, documents.get("previous"));
+        assertEquals(json("""
+            {"state": {"desired": {"lights": {"color": {"r": 1, "g": 2, "b": 9}}}, "reported": {"lights": {"color": {"r": 1, "g": 3}}}},
+             "metadata": {"desired": {"lights": {"color": {"r": {"timestamp": 1000}, "g": {"timestamp": 1000}, "b": %s}}},
+                          "reported": {"lights": {"color": {"r": {"timestamp": 1000}, "g": {"timestamp": 1000}}}}},
+             "version": 6}
+            """.formatted(leaf(timestamp))), documents.get("current"));
+    }
+
+    @Test
+    void aStoredShadowWithoutMetadataIsUpdatedWithMetadataFromItsStoredTimestamp() throws Exception {
+        storeShadow("sensor-3", "{\"state\":{\"desired\":{\"color\":\"red\"}},\"version\":2,\"timestamp\":1000}");
+
+        JsonNode accepted = service.updateThingShadow("sensor-3", null,
+                json("{\"state\":{\"reported\":{\"color\":\"red\"}}}"), REGION);
+
+        long timestamp = accepted.get("timestamp").asLong();
+        JsonNode documents = recordedPayload("$aws/things/sensor-3/shadow/update/documents");
+        assertEquals(json("""
+            {"state": {"desired": {"color": "red"}}, "metadata": {"desired": {"color": {"timestamp": 1000}}}, "version": 2}
+            """), documents.get("previous"));
+        assertEquals(json("""
+            {"state": {"desired": {"color": "red"}, "reported": {"color": "red"}},
+             "metadata": {"desired": {"color": {"timestamp": 1000}}, "reported": {"color": %s}}, "version": 3}
+            """.formatted(leaf(timestamp))), documents.get("current"));
+    }
+
+    @Test
+    void aShadowStoredWithoutMetadataGetsMetadataFromItsStoredTimestamp() throws Exception {
+        storeShadow("sensor-9", """
+            {"state": {"desired": {"color": "red", "n": 1}, "reported": {"color": "blue"}}, "version": 3, "timestamp": 100}
+            """);
+
+        JsonNode shadow = service.getThingShadow("sensor-9", null, REGION);
+
+        assertEquals(json("""
+            {"desired": {"color": {"timestamp": 100}, "n": {"timestamp": 100}}, "reported": {"color": {"timestamp": 100}}}
+            """), reparse(shadow.get("metadata")));
+
+        service.updateThingShadow("sensor-9", null, json("{\"state\":{\"reported\":{\"n\":1}}}"), REGION);
+
+        JsonNode delta = recordedPayload("$aws/things/sensor-9/shadow/update/delta");
+        assertEquals(json("{\"color\":\"red\"}"), delta.get("state"));
+        assertEquals(json("{\"color\":{\"timestamp\":100}}"), delta.get("metadata"));
+    }
+
+    @Test
+    void anEmptyShadowNameIsTheClassicShadow() throws Exception {
+        service.updateThingShadow("sensor-6", "", json("{\"state\":{\"desired\":{\"color\":\"blue\"}}}"), REGION);
+
+        assertEquals("$aws/things/sensor-6/shadow/update/accepted", recordedTopics().get(0));
+        assertEquals("blue", service.getThingShadow("sensor-6", null, REGION).at("/state/desired/color").asText());
+    }
+
+    @Test
+    void aShadowNameOutsideThePatternIsRejectedAndLeavesTheClassicShadowIntact() throws Exception {
+        JsonNode update = json("{\"state\":{\"desired\":{\"color\":\"blue\"}}}");
+        service.updateThingShadow("sensor-6", null, update, REGION);
+
+        List<Executable> calls = List.of(
+                () -> service.getThingShadow("sensor-6", " ", REGION),
+                () -> service.updateThingShadow("sensor-6", " ", update, REGION),
+                () -> service.deleteThingShadow("sensor-6", " ", REGION),
+                () -> service.getThingShadow("sensor-6", "bad!", REGION));
+        for (Executable call : calls) {
+            AwsException e = assertThrows(AwsException.class, call);
+            assertEquals("InvalidRequestException", e.getErrorCode());
+            assertEquals(400, e.getHttpStatus());
+            assertEquals("Bad Request", e.getMessage());
+        }
+
+        JsonNode classic = service.getThingShadow("sensor-6", null, REGION);
+        assertEquals("blue", classic.at("/state/desired/color").asText());
+        assertEquals(1, classic.get("version").asLong());
+    }
+
+    @Test
+    void aShadowNameWithADollarOtherThanPackageIsAnInvalidShadowName() throws Exception {
+        JsonNode update = json("{\"state\":{\"desired\":{\"color\":\"blue\"}}}");
+        for (String name : List.of("$", "$PACKAGE", "$package2", "a$b")) {
+            AwsException e = assertThrows(AwsException.class,
+                    () -> service.updateThingShadow("sensor-14", name, update, REGION));
+            assertEquals("InvalidRequestException", e.getErrorCode());
+            assertEquals(400, e.getHttpStatus());
+            assertEquals("Invalid shadow name : " + name, e.getMessage());
+        }
+    }
+
+    @Test
+    void theReservedPackageShadowIsUpdatedReadAndDeleted() throws Exception {
+        service.updateThingShadow("sensor-14", "$package",
+                json("{\"state\":{\"reported\":{\"samplePackage\":{\"version\":\"1.0.0\"}}}}"), REGION);
+
+        assertEquals("1.0.0", service.getThingShadow("sensor-14", "$package", REGION)
+                .at("/state/reported/samplePackage/version").asText());
+        assertEquals(1, service.deleteThingShadow("sensor-14", "$package", REGION).get("version").asLong());
+        assertThrows(AwsException.class, () -> service.getThingShadow("sensor-14", "$package", REGION));
+    }
+
+    @Test
+    void aRuleOnTheNamedShadowAcceptedTopicReceivesTheProjectionWithNoMqttClient() throws Exception {
+        createRule("buildingRule", sqsRule(BUILDING_RULE_SQL, SHADOW_QUEUE_URL));
+
+        JsonNode accepted = service.updateThingShadow("sensor-1", "building",
+                json("{\"state\":{\"desired\":{\"temp\":21}},\"clientToken\":\"job:inbound\"}"), REGION);
+
+        ArgumentCaptor<String> body = ArgumentCaptor.forClass(String.class);
+        verify(sqs).sendMessage(eq(SHADOW_QUEUE_URL), body.capture(), eq(0), eq(REGION));
+        JsonNode message = mapper.readTree(body.getValue());
+        assertEquals(BUILDING_UPDATE + "/accepted", message.get("topic").asText());
+        assertEquals("N/A", message.get("cid").asText());
+        assertEquals("job:inbound", message.get("clientToken").asText());
+        assertEquals(21, message.at("/state/desired/temp").asInt());
+        assertEquals(accepted.get("version").asLong(), message.get("version").asLong());
+        assertEquals(accepted.get("timestamp").asLong(), message.get("timestamp").asLong());
+        assertEquals(reparse(accepted.get("metadata")), message.get("metadata"));
+    }
+
+    @Test
+    void aRuleWhoseFilterStartsWithAWildcardReceivesShadowEvents() throws Exception {
+        createRule("everythingRule", sqsRule("SELECT topic() AS topic FROM '#'", SHADOW_QUEUE_URL));
+        createRule("anyPrefixRule", sqsRule("SELECT topic() AS topic FROM '+/things/sensor-13/shadow/#'", SHADOW_QUEUE_URL));
+
+        service.updateThingShadow("sensor-13", null, json("{\"state\":{\"desired\":{\"temp\":21}}}"), REGION);
+
+        ArgumentCaptor<String> body = ArgumentCaptor.forClass(String.class);
+        verify(sqs, times(6)).sendMessage(eq(SHADOW_QUEUE_URL), body.capture(), eq(0), eq(REGION));
+        List<String> topics = new ArrayList<>();
+        for (String message : body.getAllValues()) {
+            topics.add(mapper.readTree(message).get("topic").asText());
+        }
+        String update = "$aws/things/sensor-13/shadow/update";
+        assertEquals(List.of(update + "/accepted", update + "/accepted", update + "/delta", update + "/delta",
+                update + "/documents", update + "/documents"), topics.stream().sorted().toList());
+    }
+
+    @Test
+    void theNamedShadowRuleSkipsAnotherTokenTheClassicShadowAndAnotherShadowName() throws Exception {
+        createRule("buildingRule", sqsRule(BUILDING_RULE_SQL, SHADOW_QUEUE_URL));
+        String inbound = "{\"state\":{\"desired\":{\"temp\":21}},\"clientToken\":\"job:inbound\"}";
+
+        service.updateThingShadow("sensor-1", "building",
+                json("{\"state\":{\"desired\":{\"temp\":21}},\"clientToken\":\"job:outbound\"}"), REGION);
+        service.updateThingShadow("sensor-1", null, json(inbound), REGION);
+        service.updateThingShadow("sensor-1", "other", json(inbound), REGION);
+
+        verify(sqs, never()).sendMessage(anyString(), anyString(), anyInt(), anyString());
+    }
+
+    @Test
+    void aRuleOnTheClassicShadowAcceptedTopicFiresForTheClassicShadowOnly() throws Exception {
+        createRule("classicRule", sqsRule("SELECT * FROM '$aws/things/+/shadow/update/accepted'", CLASSIC_QUEUE_URL));
+        String update = "{\"state\":{\"desired\":{\"temp\":21}}}";
+
+        service.updateThingShadow("sensor-1", "building", json(update), REGION);
+        verify(sqs, never()).sendMessage(anyString(), anyString(), anyInt(), anyString());
+
+        service.updateThingShadow("sensor-1", null, json(update), REGION);
+        verify(sqs, times(1)).sendMessage(eq(CLASSIC_QUEUE_URL), anyString(), eq(0), eq(REGION));
+    }
+
+    @Test
+    void shadowEventsReachOnlyTheRulesOfTheShadowsRegion() throws Exception {
+        service.createTopicRule("buildingRule", json(sqsRule(BUILDING_RULE_SQL, SHADOW_QUEUE_URL)), "eu-west-1");
+        String inbound = "{\"state\":{\"desired\":{\"temp\":21}},\"clientToken\":\"job:inbound\"}";
+
+        service.updateThingShadow("sensor-1", "building", json(inbound), REGION);
+        verify(sqs, never()).sendMessage(anyString(), anyString(), anyInt(), anyString());
+
+        service.updateThingShadow("sensor-1", "building", json(inbound), "eu-west-1");
+        verify(sqs, times(1)).sendMessage(eq(SHADOW_QUEUE_URL), anyString(), eq(0), eq("eu-west-1"));
+    }
+
+    @Test
+    void deleteReturnsTheDeletedVersionAndPublishesItOnDeleteAccepted() throws Exception {
+        service.updateThingShadow("sensor-4", null, json("{\"state\":{\"desired\":{\"color\":\"blue\"}}}"), REGION);
+        service.updateThingShadow("sensor-4", null, json("{\"state\":{\"desired\":{\"color\":\"red\"}}}"), REGION);
+        recorder.clear();
+
+        JsonNode deleted = service.deleteThingShadow("sensor-4", null, REGION);
+
+        assertEquals(Set.of("version", "timestamp"), fieldNames(deleted));
+        assertEquals(2, deleted.get("version").asLong());
+        assertEquals(List.of("$aws/things/sensor-4/shadow/delete/accepted"), recordedTopics());
+        assertEquals(reparse(deleted), recordedPayload("$aws/things/sensor-4/shadow/delete/accepted"));
+        verify(broker, times(1)).publish(eq("$aws/things/sensor-4/shadow/delete/accepted"), any());
+        AwsException e = assertThrows(AwsException.class, () -> service.getThingShadow("sensor-4", null, REGION));
+        assertEquals(404, e.getHttpStatus());
+    }
+
+    @Test
+    void getReturnsStateWithDeltaTheStoredMetadataVersionAndTimestampAndPublishesNothing() throws Exception {
+        JsonNode accepted = service.updateThingShadow("sensor-5", null, json("""
+            {"state": {"desired": {"color": "blue", "mode": "auto"}, "reported": {"color": "red", "mode": "auto"}}}
+            """), REGION);
+        long timestamp = accepted.get("timestamp").asLong();
+        recorder.clear();
+
+        JsonNode shadow = service.getThingShadow("sensor-5", null, REGION);
+
+        assertEquals(Set.of("state", "metadata", "version", "timestamp"), fieldNames(shadow));
+        assertEquals(json("""
+            {"desired": {"color": "blue", "mode": "auto"}, "reported": {"color": "red", "mode": "auto"},
+             "delta": {"color": "blue"}}
+            """), reparse(shadow.get("state")));
+        assertEquals(json("""
+            {"desired": {"color": %1$s, "mode": %1$s}, "reported": {"color": %1$s, "mode": %1$s}}
+            """.formatted(leaf(timestamp))), reparse(shadow.get("metadata")));
+        assertEquals(1, shadow.get("version").asLong());
+        assertTrue(shadow.get("timestamp").asLong() >= timestamp);
+        assertTrue(recorder.recentEvents().isEmpty(), "GetThingShadow publishes nothing");
+    }
+
+    @Test
+    void getLeavesOutTheDeltaWhenDesiredAndReportedAgree() throws Exception {
+        service.updateThingShadow("sensor-5", null,
+                json("{\"state\":{\"desired\":{\"color\":\"blue\"},\"reported\":{\"color\":\"blue\"}}}"), REGION);
+
+        assertFalse(service.getThingShadow("sensor-5", null, REGION).get("state").has("delta"));
+    }
+
+    @Test
+    void getComparesNumbersAsAwsDoesThroughNestedObjectsAndArraysExactly() throws Exception {
+        service.updateThingShadow("sensor-15", null, json("{\"state\":{"
+                + "\"desired\":{\"n\":1.0,\"nested\":{\"n\":1.0},\"arr\":[1],\"objs\":[{\"n\":1}],"
+                + "\"max\":9223372036854775807,\"big\":10000000000000000000000,\"long\":9007199254740993,"
+                + "\"mixed\":9007199254740993,\"over\":9223372036854775807},"
+                + "\"reported\":{\"n\":1,\"nested\":{\"n\":1},\"arr\":[1.0],\"objs\":[{\"n\":1.0}],"
+                + "\"max\":9.223372036854776e18,\"big\":1e22,\"long\":9007199254740992,"
+                + "\"mixed\":9007199254740992.0,\"over\":1e19}}}"), REGION);
+
+        JsonNode shadow = service.getThingShadow("sensor-15", null, REGION);
+
+        assertEquals(json("{\"arr\":[1],\"objs\":[{\"n\":1}],\"big\":10000000000000000000000,"
+                + "\"long\":9007199254740993,\"mixed\":9007199254740993,\"over\":9223372036854775807}"),
+                reparse(shadow.at("/state/delta")));
+    }
+
+    @Test
+    void anUpdateWithANumberBeyondTheDoubleRangeDoesNotThrow() throws Exception {
+        JsonNode update = json("{\"state\":{\"desired\":{\"n\":1e309},\"reported\":{\"n\":0}}}");
+
+        assertDoesNotThrow(() -> service.updateThingShadow("sensor-16", null, update, REGION));
+    }
+
+    @Test
+    void getComputesTheDeltaThroughNestedObjectsAndComparesArraysWhole() throws Exception {
+        service.updateThingShadow("sensor-7", null, json(NESTED_SHADOW_UPDATE), REGION);
+
+        JsonNode shadow = service.getThingShadow("sensor-7", null, REGION);
+
+        assertEquals(json(NESTED_DELTA), reparse(shadow.get("state").get("delta")));
+    }
+
+    @Test
+    void deltaEventCarriesOnlyTheNestedDifferencesAndTheirStoredMetadata() throws Exception {
+        JsonNode accepted = service.updateThingShadow("sensor-7", null, json(NESTED_SHADOW_UPDATE), REGION);
+        long timestamp = accepted.get("timestamp").asLong();
+
+        JsonNode delta = recordedPayload("$aws/things/sensor-7/shadow/update/delta");
+
+        assertEquals(json(NESTED_DELTA), delta.get("state"));
+        assertEquals(json("""
+            {"lights": {"color": {"g": %1$s}}, "arr": [%1$s, %1$s]}
+            """.formatted(leaf(timestamp))), delta.get("metadata"));
+    }
+
+    @Test
+    void racingShadowUpdatesEachGetTheirOwnConsecutiveVersion() throws Exception {
+        int writers = 8;
+        int updatesEach = 25;
+        CountDownLatch start = new CountDownLatch(1);
+        ExecutorService pool = Executors.newFixedThreadPool(writers);
+        List<Future<?>> outcomes = new ArrayList<>();
+        try {
+            for (int i = 0; i < writers; i++) {
+                String key = "k" + i;
+                outcomes.add(pool.submit(() -> {
+                    start.await();
+                    for (int n = 0; n < updatesEach; n++) {
+                        service.updateThingShadow("raced", null,
+                                json("{\"state\":{\"reported\":{\"" + key + "\":" + n + "}}}"), REGION);
+                    }
+                    return null;
+                }));
+            }
+            start.countDown();
+            for (Future<?> outcome : outcomes) {
+                outcome.get();
+            }
+        } finally {
+            pool.shutdownNow();
+        }
+
+        assertEquals(writers * updatesEach, service.getThingShadow("raced", null, REGION).get("version").asLong());
+        Set<Long> versions = new LinkedHashSet<>();
+        for (IotPublishEvent event : recorder.recentEvents()) {
+            if (event.topic().endsWith("/documents")) {
+                JsonNode documents = mapper.readTree(event.payload());
+                long current = documents.at("/current/version").asLong();
+                versions.add(current);
+                assertEquals(current - 1, documents.get("previous").isNull() ? 0 : documents.at("/previous/version").asLong());
+            }
+        }
+        assertEquals(writers * updatesEach, versions.size());
+    }
+
+    private void mqttShadowRequest(String topic, String payload) {
+        Executor inline = Runnable::run;
+        service.handleReservedMqttPublish(topic, payload.getBytes(StandardCharsets.UTF_8), inline);
+    }
+
+    /** The payload fanned out on the topic, verifying the broker received exactly one publish on it. */
+    private JsonNode fannedOut(String topic) throws Exception {
+        ArgumentCaptor<byte[]> payload = ArgumentCaptor.forClass(byte[].class);
+        verify(broker, times(1)).publish(eq(topic), payload.capture());
+        return mapper.readTree(payload.getValue());
+    }
+
+    @Test
+    void anMqttShadowUpdateFansOutRecordsAndAnswersEachEventOnce() throws Exception {
+        String update = "$aws/things/sensor-7/shadow/name/building/update";
+
+        mqttShadowRequest(update, "{\"state\":{\"desired\":{\"color\":\"blue\"}},\"clientToken\":\"c-1\"}");
+
+        List<String> topics = List.of(update + "/accepted", update + "/documents", update + "/delta");
+        assertEquals(topics, recordedTopics());
+        for (String topic : topics) {
+            assertEquals(recordedPayload(topic), fannedOut(topic));
+            assertEquals("c-1", recordedPayload(topic).get("clientToken").asText());
+        }
+        verify(broker, times(3)).publish(anyString(), any());
+        assertEquals("blue", service.getThingShadow("sensor-7", "building", REGION).at("/state/desired/color").asText());
+    }
+
+    @Test
+    void anMqttShadowUpdateRunsTheRulesOnTheGivenRuleRunnerWithNoMqttClient() throws Exception {
+        createRule("classicRule", sqsRule(
+                "SELECT clientid() AS cid, topic() AS topic FROM '$aws/things/+/shadow/update/accepted'", CLASSIC_QUEUE_URL));
+        List<Runnable> deferred = new ArrayList<>();
+
+        service.handleReservedMqttPublish("$aws/things/sensor-10/shadow/update",
+                "{\"state\":{\"desired\":{\"color\":\"blue\"}}}".getBytes(StandardCharsets.UTF_8), deferred::add);
+
+        verifyNoInteractions(sqs);
+        assertEquals(3, deferred.size(), "one rule evaluation per event");
+        deferred.forEach(Runnable::run);
+        ArgumentCaptor<String> body = ArgumentCaptor.forClass(String.class);
+        verify(sqs).sendMessage(eq(CLASSIC_QUEUE_URL), body.capture(), eq(0), eq(REGION));
+        assertEquals(json("{\"cid\":\"N/A\",\"topic\":\"$aws/things/sensor-10/shadow/update/accepted\"}"),
+                mapper.readTree(body.getValue()));
+    }
+
+    @Test
+    void anMqttShadowGetPublishesGetAcceptedWithTheRequestClientToken() throws Exception {
+        service.updateThingShadow("sensor-8", null, json("{\"state\":{\"desired\":{\"color\":\"blue\"}}}"), REGION);
+        recorder.clear();
+        clearInvocations(broker);
+
+        mqttShadowRequest("$aws/things/sensor-8/shadow/get", "{\"clientToken\":\"g-1\"}");
+
+        JsonNode accepted = fannedOut("$aws/things/sensor-8/shadow/get/accepted");
+        assertEquals(Set.of("state", "metadata", "version", "timestamp", "clientToken"), fieldNames(accepted));
+        assertEquals("blue", accepted.at("/state/delta/color").asText());
+        assertEquals("g-1", accepted.get("clientToken").asText());
+        assertEquals(List.of("$aws/things/sensor-8/shadow/get/accepted"), recordedTopics());
+    }
+
+    @Test
+    void anMqttShadowDeletePublishesDeleteAcceptedWithTheVersionAndClientToken() throws Exception {
+        service.updateThingShadow("sensor-8", null, json("{\"state\":{\"desired\":{\"color\":\"blue\"}}}"), REGION);
+        service.updateThingShadow("sensor-8", null, json("{\"state\":{\"desired\":{\"color\":\"red\"}}}"), REGION);
+        recorder.clear();
+        clearInvocations(broker);
+
+        mqttShadowRequest("$aws/things/sensor-8/shadow/delete", "{\"clientToken\":\"d-1\"}");
+
+        JsonNode accepted = fannedOut("$aws/things/sensor-8/shadow/delete/accepted");
+        assertEquals(Set.of("version", "timestamp", "clientToken"), fieldNames(accepted));
+        assertEquals(2, accepted.get("version").asLong());
+        assertEquals("d-1", accepted.get("clientToken").asText());
+        assertEquals(List.of("$aws/things/sensor-8/shadow/delete/accepted"), recordedTopics());
+    }
+
+    @Test
+    void anMqttVersionConflictPublishesRejectedWithTheHttpStatusAndClientToken() throws Exception {
+        service.updateThingShadow("sensor-9", null, json("{\"state\":{\"desired\":{\"color\":\"blue\"}}}"), REGION);
+        recorder.clear();
+        clearInvocations(broker);
+
+        mqttShadowRequest("$aws/things/sensor-9/shadow/update",
+                "{\"version\":7,\"state\":{\"desired\":{\"color\":\"red\"}},\"clientToken\":\"c-9\"}");
+
+        assertEquals(json("{\"code\":409,\"message\":\"Version conflict\",\"clientToken\":\"c-9\"}"),
+                fannedOut("$aws/things/sensor-9/shadow/update/rejected"));
+        assertEquals(List.of("$aws/things/sensor-9/shadow/update/rejected"), recordedTopics());
+        verify(broker, times(1)).publish(anyString(), any());
+    }
+
+    @Test
+    void restVersionConflictIsConflictExceptionWithStatus409() throws Exception {
+        service.updateThingShadow("sensor-9", null, json("{\"state\":{\"desired\":{\"color\":\"blue\"}}}"), REGION);
+        recorder.clear();
+
+        AwsException e = assertThrows(AwsException.class, () -> service.updateThingShadow("sensor-9", null,
+                json("{\"version\":7,\"state\":{\"desired\":{\"color\":\"red\"}}}"), REGION));
+
+        assertEquals("ConflictException", e.getErrorCode());
+        assertEquals(409, e.getHttpStatus());
+        assertEquals("Version conflict", e.getMessage());
+        assertTrue(recorder.recentEvents().isEmpty(), "a REST error publishes nothing");
+    }
+
+    @Test
+    void malformedMqttShadowJsonPublishesRejectedInvalidJsonWithoutAClientToken() throws Exception {
+        mqttShadowRequest("$aws/things/sensor-9/shadow/update", "{\"clientToken\":\"c-9\",");
+
+        assertEquals(json("{\"code\":400,\"message\":\"Invalid JSON\"}"),
+                fannedOut("$aws/things/sensor-9/shadow/update/rejected"));
+    }
+
+    @Test
+    void anMqttGetOfAMissingShadowPublishesRejected404WithTheClientToken() throws Exception {
+        mqttShadowRequest("$aws/things/nobody/shadow/name/building/get", "{\"clientToken\":\"g-2\"}");
+
+        JsonNode rejected = fannedOut("$aws/things/nobody/shadow/name/building/get/rejected");
+        assertEquals(Set.of("code", "message", "clientToken"), fieldNames(rejected));
+        assertEquals(404, rejected.get("code").asInt());
+        assertEquals("g-2", rejected.get("clientToken").asText());
+    }
+
+    @Test
+    void anUnsupportedMqttShadowOperationPublishesRejected400WithTheClientToken() throws Exception {
+        mqttShadowRequest("$aws/things/sensor-9/shadow/name/building/list", "{\"clientToken\":\"u-1\"}");
+
+        assertEquals(json("{\"code\":400,\"message\":\"Unsupported shadow operation: list\",\"clientToken\":\"u-1\"}"),
+                fannedOut("$aws/things/sensor-9/shadow/name/building/list/rejected"));
+    }
+
+    @Test
+    void anMqttPublishOnAShadowResponseTopicIsNotProcessedAsARequest() throws Exception {
+        mqttShadowRequest("$aws/things/sensor-11/shadow/update/accepted", "{\"state\":{\"desired\":{\"color\":\"blue\"}}}");
+        mqttShadowRequest("$aws/things/sensor-11/shadow/name/building/update/delta", "{\"state\":{\"color\":\"blue\"}}");
+
+        verifyNoInteractions(broker);
+        assertTrue(recorder.recentEvents().isEmpty());
+        assertThrows(AwsException.class, () -> service.getThingShadow("sensor-11", null, REGION));
+    }
+
+    @Test
+    void anMqttRequestOnANamedTopicWithAnInvalidNameIsIgnored() throws Exception {
+        service.updateThingShadow("sensor-12", null, json("{\"state\":{\"desired\":{\"color\":\"blue\"}}}"), REGION);
+        recorder.clear();
+        clearInvocations(broker);
+        String update = "{\"state\":{\"desired\":{\"color\":\"green\"}},\"clientToken\":\"t\"}";
+
+        mqttShadowRequest("$aws/things/sensor-12/shadow/name/ /update", update);
+        mqttShadowRequest("$aws/things/sensor-12/shadow/name//update", update);
+        mqttShadowRequest("$aws/things/sensor-12/shadow/name/bad!/delete", "{}");
+        mqttShadowRequest("$aws/things/sensor-12/shadow/name/ /get", "{}");
+
+        assertEquals(List.of(), recordedTopics());
+        verifyNoInteractions(broker);
+        JsonNode classic = service.getThingShadow("sensor-12", null, REGION);
+        assertEquals("blue", classic.at("/state/desired/color").asText());
+        assertEquals(1, classic.get("version").asLong());
+    }
+
+    @Test
+    void anMqttUpdateOnTheReservedPackageShadowIsApplied() throws Exception {
+        String update = "$aws/things/sensor-14/shadow/name/$package/update";
+
+        mqttShadowRequest(update, "{\"state\":{\"reported\":{\"samplePackage\":{\"version\":\"1.0.0\"}}}}");
+
+        assertEquals(1, fannedOut(update + "/accepted").get("version").asLong());
+        assertEquals("1.0.0", service.getThingShadow("sensor-14", "$package", REGION)
+                .at("/state/reported/samplePackage/version").asText());
+    }
+
+    @Test
+    void anMqttUpdateOnADollarShadowNameOtherThanPackagePublishesRejected400() throws Exception {
+        String update = "$aws/things/sensor-14/shadow/name/a$b/update";
+
+        mqttShadowRequest(update, "{\"state\":{\"desired\":{\"color\":\"blue\"}},\"clientToken\":\"c-14\"}");
+
+        assertEquals(json("{\"code\":400,\"message\":\"Invalid shadow name : a$b\",\"clientToken\":\"c-14\"}"),
+                fannedOut(update + "/rejected"));
+        assertEquals(List.of(update + "/rejected"), recordedTopics());
+        assertEquals(List.of(), service.listNamedShadowsForThing("sensor-14", REGION));
+    }
+
+    @Test
+    void updateThingWithMergePutsTheGivenAttributesAndRemovesTheEmptyOnes() {
+        service.createThing("merged", Map.of("a", "1", "b", "2"), REGION);
+
+        Thing updated = service.updateThing("merged", Map.of("b", "", "c", "3", "missing", ""), true, null, false, null, REGION);
+
+        assertEquals(2L, updated.getVersion());
+        assertEquals(Map.of("a", "1", "c", "3"), service.describeThing("merged", REGION).getAttributes());
+    }
+
+    @Test
+    void updateThingWithoutMergeReplacesTheAttributesAndDropsTheEmptyOnes() {
+        service.createThing("replaced", Map.of("a", "1", "b", "2"), REGION);
+
+        service.updateThing("replaced", Map.of("e", "5", "f", ""), false, null, false, null, REGION);
+
+        assertEquals(Map.of("e", "5"), service.describeThing("replaced", REGION).getAttributes());
+    }
+
+    @Test
+    void updateThingWithoutAttributesKeepsThemAndAnEmptyMapClearsThemOnlyWithoutMerge() {
+        service.createThing("kept", Map.of("a", "1"), REGION);
+
+        service.updateThing("kept", null, true, null, false, null, REGION);
+        service.updateThing("kept", null, false, null, false, null, REGION);
+        service.updateThing("kept", Map.of(), true, null, false, null, REGION);
+
+        Thing kept = service.describeThing("kept", REGION);
+        assertEquals(Map.of("a", "1"), kept.getAttributes());
+        assertEquals(4L, kept.getVersion());
+
+        service.updateThing("kept", Map.of(), false, null, false, null, REGION);
+
+        Thing cleared = service.describeThing("kept", REGION);
+        assertEquals(Map.of(), cleared.getAttributes());
+        assertEquals(5L, cleared.getVersion());
+    }
+
+    @Test
+    void updateThingSetsAndRemovesTheThingTypeAndKeepsTheAttributes() {
+        service.createThingType("sensor-type", mapper.createObjectNode(), REGION);
+        service.createThing("typed", Map.of("a", "1"), REGION);
+
+        service.updateThing("typed", null, false, "sensor-type", false, null, REGION);
+
+        Thing typed = service.describeThing("typed", REGION);
+        assertEquals("sensor-type", typed.getThingTypeName());
+        assertEquals(Map.of("a", "1"), typed.getAttributes());
+
+        service.updateThing("typed", null, false, null, true, null, REGION);
+        assertNull(service.describeThing("typed", REGION).getThingTypeName());
+        assertDoesNotThrow(() -> service.updateThing("typed", null, false, null, true, null, REGION));
+
+        Thing untyped = service.describeThing("typed", REGION);
+        assertNull(untyped.getThingTypeName());
+        assertEquals(Map.of("a", "1"), untyped.getAttributes());
+        assertEquals(4L, untyped.getVersion());
+    }
+
+    @Test
+    void updateThingRejectsRemovingTheTypeWhileNamingOneBeforeLookingUpTheThing() {
+        service.createThingType("sensor-type", mapper.createObjectNode(), REGION);
+        service.createThing("typed", Map.of("a", "1"), REGION);
+
+        for (String thingName : List.of("typed", "no-such-thing")) {
+            AwsException e = assertThrows(AwsException.class,
+                    () -> service.updateThing(thingName, null, false, "sensor-type", true, 99L, REGION));
+            assertEquals("InvalidRequestException", e.getErrorCode(), thingName);
+            assertEquals(400, e.getHttpStatus(), thingName);
+            assertEquals("Cannot remove thing type when thing type is not null", e.getMessage(), thingName);
+        }
+        Thing unchanged = service.describeThing("typed", REGION);
+        assertNull(unchanged.getThingTypeName());
+        assertEquals(1L, unchanged.getVersion());
+    }
+
+    @Test
+    void updateThingLooksUpTheThingTypeBeforeTheVersionAndRejectsADeprecatedType() {
+        service.createThing("typed", Map.of("a", "1"), REGION);
+        service.createThingType("old-type", mapper.createObjectNode(), REGION);
+        service.deprecateThingType("old-type", REGION);
+
+        AwsException missing = assertThrows(AwsException.class,
+                () -> service.updateThing("typed", null, false, "no-such-type", false, 99L, REGION));
+        assertEquals("ResourceNotFoundException", missing.getErrorCode());
+        assertEquals(404, missing.getHttpStatus());
+
+        AwsException deprecated = assertThrows(AwsException.class,
+                () -> service.updateThing("typed", Map.of("b", "2"), false, "old-type", false, 99L, REGION));
+        assertEquals("InvalidRequestException", deprecated.getErrorCode());
+        assertEquals(400, deprecated.getHttpStatus());
+        assertEquals("Can not update a thing to use deprecated thing type: old-type", deprecated.getMessage());
+
+        Thing unchanged = service.describeThing("typed", REGION);
+        assertNull(unchanged.getThingTypeName());
+        assertEquals(Map.of("a", "1"), unchanged.getAttributes());
+        assertEquals(1L, unchanged.getVersion());
+    }
+
+    @Test
+    void updateThingRejectsAnEmptyOrMalformedThingTypeName() {
+        service.createThingType("sensor-type", mapper.createObjectNode(), REGION);
+        service.createThing("typed", Map.of("a", "1"), "sensor-type", REGION);
+
+        String tooLong = "a".repeat(129);
+        String tooLongWithSpace = "a".repeat(128) + " ";
+        String emptyMessage = "2 validation errors detected: "
+                + "Value '' at 'thingTypeName' failed to satisfy constraint: "
+                + "Member must have length greater than or equal to 1; "
+                + "Value '' at 'thingTypeName' failed to satisfy constraint: "
+                + "Member must satisfy regular expression pattern: [a-zA-Z0-9:_-]+";
+        Map<String, String> expectedMessages = new LinkedHashMap<>();
+        expectedMessages.put("", emptyMessage);
+        expectedMessages.put("  ", "1 validation error detected: "
+                + "Value '  ' at 'thingTypeName' failed to satisfy constraint: "
+                + "Member must satisfy regular expression pattern: [a-zA-Z0-9:_-]+");
+        expectedMessages.put("bad type", "1 validation error detected: "
+                + "Value 'bad type' at 'thingTypeName' failed to satisfy constraint: "
+                + "Member must satisfy regular expression pattern: [a-zA-Z0-9:_-]+");
+        expectedMessages.put(tooLong, "1 validation error detected: "
+                + "Value '" + tooLong + "' at 'thingTypeName' failed to satisfy constraint: "
+                + "Member must have length less than or equal to 128");
+        expectedMessages.put(tooLongWithSpace, "2 validation errors detected: "
+                + "Value '" + tooLongWithSpace + "' at 'thingTypeName' failed to satisfy constraint: "
+                + "Member must have length less than or equal to 128; "
+                + "Value '" + tooLongWithSpace + "' at 'thingTypeName' failed to satisfy constraint: "
+                + "Member must satisfy regular expression pattern: [a-zA-Z0-9:_-]+");
+
+        for (Map.Entry<String, String> expected : expectedMessages.entrySet()) {
+            String thingTypeName = expected.getKey();
+            AwsException e = assertThrows(AwsException.class,
+                    () -> service.updateThing("typed", null, false, thingTypeName, false, null, REGION));
+            assertEquals("InvalidRequestException", e.getErrorCode(), thingTypeName);
+            assertEquals(400, e.getHttpStatus(), thingTypeName);
+            assertEquals(expected.getValue(), e.getMessage(), thingTypeName);
+        }
+        AwsException removeWithEmpty = assertThrows(AwsException.class,
+                () -> service.updateThing("typed", null, false, "", true, null, REGION));
+        assertEquals("InvalidRequestException", removeWithEmpty.getErrorCode());
+        assertEquals(400, removeWithEmpty.getHttpStatus());
+        assertEquals(emptyMessage, removeWithEmpty.getMessage());
+
+        Thing unchanged = service.describeThing("typed", REGION);
+        assertEquals("sensor-type", unchanged.getThingTypeName());
+        assertEquals(Map.of("a", "1"), unchanged.getAttributes());
+        assertEquals(1L, unchanged.getVersion());
+    }
+
+    @Test
+    void concurrentMergeUpdatesKeepEveryAttribute() throws Exception {
+        service.createThing("raced", Map.of(), REGION);
+        int writers = 8;
+        int updatesPerWriter = 50;
+        CountDownLatch start = new CountDownLatch(1);
+        ExecutorService pool = Executors.newFixedThreadPool(writers);
+        List<Future<?>> outcomes = new ArrayList<>();
+        try {
+            for (int i = 0; i < writers; i++) {
+                int writer = i;
+                outcomes.add(pool.submit(() -> {
+                    start.await();
+                    for (int update = 0; update < updatesPerWriter; update++) {
+                        service.updateThing("raced", Map.of("t" + writer + "-" + update, "v"), true, null, false, null, REGION);
+                    }
+                    return null;
+                }));
+            }
+            start.countDown();
+            for (Future<?> outcome : outcomes) {
+                outcome.get(60, TimeUnit.SECONDS);
+            }
+        } finally {
+            pool.shutdownNow();
+        }
+
+        Map<String, String> expected = new HashMap<>();
+        for (int writer = 0; writer < writers; writer++) {
+            for (int update = 0; update < updatesPerWriter; update++) {
+                expected.put("t" + writer + "-" + update, "v");
+            }
+        }
+        Thing raced = service.describeThing("raced", REGION);
+        assertEquals(expected, raced.getAttributes());
+        assertEquals(writers * updatesPerWriter + 1L, raced.getVersion());
+    }
+
+    @Test
+    void racingVersionedUpdatesAndDeletesConsumeAnExpectedVersionOnce() throws Exception {
+        Set<String> losers = Set.of("VersionConflictException", "ResourceNotFoundException");
+        ExecutorService pool = Executors.newFixedThreadPool(4);
+        try {
+            for (int round = 0; round < 200; round++) {
+                String name = "cas-" + round;
+                service.createThing(name, Map.of("a", "1"), REGION);
+                CountDownLatch start = new CountDownLatch(1);
+                List<Future<String>> outcomes = new ArrayList<>();
+                for (int i = 0; i < 2; i++) {
+                    outcomes.add(pool.submit(() -> {
+                        start.await();
+                        try {
+                            service.updateThing(name, Map.of("b", "2"), true, null, false, 1L, REGION);
+                            return "update";
+                        } catch (AwsException e) {
+                            return e.getErrorCode();
+                        }
+                    }));
+                    outcomes.add(pool.submit(() -> {
+                        start.await();
+                        try {
+                            service.deleteThing(name, 1L, REGION);
+                            return "delete";
+                        } catch (AwsException e) {
+                            return e.getErrorCode();
+                        }
+                    }));
+                }
+                start.countDown();
+                List<String> results = new ArrayList<>();
+                for (Future<String> outcome : outcomes) {
+                    results.add(outcome.get(60, TimeUnit.SECONDS));
+                }
+
+                String context = "round " + round + ": " + results;
+                List<String> winners = new ArrayList<>();
+                for (String result : results) {
+                    if (result.equals("update") || result.equals("delete")) {
+                        winners.add(result);
+                    } else {
+                        assertTrue(losers.contains(result), context);
+                    }
+                }
+                assertEquals(1, winners.size(), context);
+                if (winners.getFirst().equals("update")) {
+                    Thing updated = service.describeThing(name, REGION);
+                    assertEquals(2L, updated.getVersion(), context);
+                    assertEquals(Map.of("a", "1", "b", "2"), updated.getAttributes(), context);
+                } else {
+                    AwsException gone = assertThrows(AwsException.class, () -> service.describeThing(name, REGION), context);
+                    assertEquals("ResourceNotFoundException", gone.getErrorCode(), context);
+                }
+            }
+        } finally {
+            pool.shutdownNow();
+        }
+    }
+
+    @Test
+    void aStaleExpectedVersionIsAVersionConflictOnUpdateAndDeleteAndKeepsTheThing() {
+        service.createThing("versioned", Map.of("a", "1"), REGION);
+        service.updateThing("versioned", Map.of("a", "2"), false, null, false, 1L, REGION);
+        String message = "The version for thing versioned does not match the expected version.";
+
+        AwsException update = assertThrows(AwsException.class,
+                () -> service.updateThing("versioned", Map.of("a", "3"), false, null, false, 1L, REGION));
+        AwsException delete = assertThrows(AwsException.class, () -> service.deleteThing("versioned", 1L, REGION));
+
+        for (AwsException e : List.of(update, delete)) {
+            assertEquals("VersionConflictException", e.getErrorCode());
+            assertEquals(409, e.getHttpStatus());
+            assertEquals(message, e.getMessage());
+        }
+        Thing kept = service.describeThing("versioned", REGION);
+        assertEquals(Map.of("a", "2"), kept.getAttributes());
+        assertEquals(2L, kept.getVersion());
+
+        service.deleteThing("versioned", 2L, REGION);
+
+        assertEquals("ResourceNotFoundException",
+                assertThrows(AwsException.class, () -> service.describeThing("versioned", REGION)).getErrorCode());
+    }
+}

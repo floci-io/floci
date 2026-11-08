@@ -40,6 +40,35 @@ Set `FLOCI_SERVICES_MEMORYDB_MOCK=true` to manage clusters as control-plane-only
 | `FLOCI_SERVICES_MEMORYDB_PROXY_MAX_PORT` | `6419` | Last host port in the MemoryDB proxy range |
 | `FLOCI_SERVICES_MEMORYDB_DEFAULT_IMAGE` | `valkey/valkey:8` | Docker image for Redis/Valkey containers |
 
+### Persistence and restart
+
+With `FLOCI_STORAGE_MODE=persistent`, `hybrid`, or `wal`, MemoryDB stores backend data
+in a per-cluster volume or the configured host persistent path. Redis/Valkey uses
+an append-only file with synchronous writes. Persist Floci's metadata directory
+as well as backend storage to restore the cluster after restarting Floci.
+
+Startup reserves each cluster's proxy port and restores its backend and authentication
+under the stored account and region. A cluster is `creating` while its backend starts.
+Restoration failures are logged and do not leave a reachable-Docker failure advertised
+as `available`. As on creation, an unreachable Docker daemon permits metadata-only
+operation; mock mode starts no backend.
+
+Clusters in the configured default account and region keep the short Docker name
+`floci-aws-memorydb-<name>` and engine log group
+`/aws/memorydb/cluster/<name>/engine-log`. Internal runtime and proxy keys remain
+account- and region-scoped. Other scopes use `<account>_<region>_<name>` in Docker
+names to distinguish them from default-scope cluster names containing the old
+hyphenated owner prefix. Docker resource namespaces still apply.
+
+Named volumes follow `FLOCI_STORAGE_PRUNE_VOLUMES_ON_DELETE`. Recreating a deleted
+cluster uses fresh storage even when its previous volume was retained. Memory storage
+mode remains ephemeral. Previously unpersisted data cannot be recovered from metadata.
+
+Legacy metadata migrates using its stored account and ARN region. Existing scoped
+records take precedence. Conflicting legacy records remain in the metadata snapshot
+under the owning account's `legacy-clusters/` keys for manual recovery and are not
+started. Contradictory ownership is reported without allocating a backend.
+
 ### Docker Compose
 
 MemoryDB requires the Docker socket and port range exposure. For private registry authentication and other Docker settings see [Docker Configuration](../configuration/docker.md).

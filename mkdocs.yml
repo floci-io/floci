@@ -86,6 +86,7 @@ nav:
     - Docker Configuration: configuration/docker.md
     - Ports Reference: configuration/ports.md
     - Multi-Account Isolation: configuration/multi-account.md
+    - AWS Partitions: configuration/partitions.md
     - Storage Modes: configuration/storage.md
     - TLS / HTTPS: configuration/tls.md
     - Initialization Hooks: configuration/initialization-hooks.md
@@ -104,6 +105,7 @@ nav:
     - DynamoDB: services/dynamodb.md
     - Lambda: services/lambda.md
     - Lambda MicroVMs: services/lambda-microvms.md
+    - Lambda Web Functions: services/lambda-web-functions.md
     - API Gateway: services/api-gateway.md
     - Cognito: services/cognito.md
     - Cognito Identity: services/cognitoidentity.md
@@ -138,30 +140,42 @@ nav:
     - AWS Service Catalog: services/service-catalog.md
     - ElastiCache: services/elasticache.md
     - MemoryDB: services/memorydb.md
+    - Aurora DSQL: services/dsql.md
     - RDS: services/rds.md
     - RDS Data API: services/rds-data.md
+    - Timestream for InfluxDB: services/timestream-influxdb.md
     - MSK (Kafka): services/msk.md
     - Amazon MQ: services/amazonmq.md
     - Glue: services/glue.md
     - Lake Formation: services/lakeformation.md
     - Neptune: services/neptune.md
     - DocumentDB: services/docdb.md
+    - DMS: services/dms.md
     - Athena: services/athena.md
+    - QuickSight: services/quicksight.md
     - Redshift: services/redshift.md
     - Redshift Data API: services/redshift-data.md
+    - Redshift Serverless: services/redshift-serverless.md
     - Data Firehose: services/firehose.md
     - EventBridge: services/eventbridge.md
+    - EventBridge V2: services/eventbridgev2.md
     - EventBridge Pipes: services/pipes.md
     - EventBridge Scheduler: services/scheduler.md
     - CloudWatch: services/cloudwatch.md
+    - CloudWatch Metric Filter Verification: services/cloudwatch-metric-filters-verification.md
+    - CloudWatch OAM: services/oam.md
     - CloudWatch RUM: services/rum.md
     - Managed Prometheus (AMP): services/managed-prometheus.md
     - GuardDuty: services/guardduty.md
     - Connect: services/connect.md
     - AppIntegrations: services/appintegrations.md
+    - Amazon Data Lifecycle Manager: services/dlm.md
     - ACM: services/acm.md
+    - Payment Cryptography: services/payment-cryptography.md
+    - Payment Cryptography data plane: services/payment-cryptography-data.md
     - ECS: services/ecs.md
     - ECR: services/ecr.md
+    - AWS Resource Groups: services/resource-groups.md
     - Resource Groups Tagging API: services/resource-groups-tagging.md
     - Resource Explorer 2: services/resource-explorer.md
     - EKS: services/eks.md
@@ -180,8 +194,10 @@ nav:
     - Elastic Beanstalk: services/elastic-beanstalk.md
     - CodeBuild: services/codebuild.md
     - AWS Batch: services/batch.md
+    - SageMaker: services/sagemaker.md
     - CodeDeploy: services/codedeploy.md
     - CodeGuru Reviewer: services/codegurureviewer.md
+    - CodeArtifact: services/codeartifact.md
     - CodePipeline: services/codepipeline.md
     - Service Quotas: services/servicequotas.md
     - AWS RAM: services/ram.md
@@ -189,6 +205,7 @@ nav:
     - AWS FIS: services/fis.md
     - CloudTrail: services/cloudtrail.md
     - CloudFront: services/cloudfront.md
+    - CloudFront Private S3 Origin: services/cloudfront-private-origin.md
     - Route53: services/route53.md
     - Route 53 Resolver: services/route53resolver.md
     - AWS Cloud Map: services/cloudmap.md
@@ -209,11 +226,18 @@ nav:
     - Pricing: services/pricing.md
     - Cost Explorer: services/ce.md
     - Cost and Usage Reports: services/cur.md
+    - BCM Pricing Calculator: services/bcm-pricing-calculator.md
     - BCM Data Exports: services/bcm-data-exports.md
+  - Web Console:
+    - Overview: ui/index.md
+    - Console Contract v1: ui/console-contract.md
   - Testcontainers:
     - Overview: testcontainers/index.md
     - Java: testcontainers/java.md
     - Node.js / TypeScript: testcontainers/nodejs.md
     - Python: testcontainers/python.md
+    - .NET: testcontainers/dotnet.md
     - Go: testcontainers/go.md
-  - Contributing: contributing.md
+  - Development:
+    - Contributing: contributing.md
+    - Local concurrency primitives: concurrency.md

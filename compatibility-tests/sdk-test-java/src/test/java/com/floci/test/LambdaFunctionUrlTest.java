@@ -6,6 +6,8 @@ import software.amazon.awssdk.services.lambda.LambdaClient;
 import software.amazon.awssdk.services.lambda.model.*;
 import software.amazon.awssdk.services.lambda.model.Runtime;
 
+import java.util.List;
+
 import static org.assertj.core.api.Assertions.*;
 
 @DisplayName("Lambda Function URL Config")
@@ -18,6 +20,8 @@ class LambdaFunctionUrlTest {
 
     @BeforeAll
     static void setup() {
+        Assumptions.assumeFalse(List.of("aws-cn", "aws-us-gov").contains(TestFixtures.partition()),
+                "Lambda function URLs are not available in the China and GovCloud partitions");
         lambda = TestFixtures.lambdaClient();
         lambda.createFunction(CreateFunctionRequest.builder()
                 .functionName(FUNCTION_NAME)

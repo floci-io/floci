@@ -4,6 +4,7 @@ import org.jboss.logging.Logger;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 import software.amazon.awssdk.services.accessanalyzer.AccessAnalyzerClient;
+import software.amazon.awssdk.services.accessanalyzer.model.ListAnalyzersResponse;
 import software.amazon.awssdk.services.accessanalyzer.model.ServiceQuotaExceededException;
 import software.amazon.awssdk.services.accessanalyzer.model.Type;
 
@@ -28,7 +29,7 @@ class AccessAnalyzerTest {
                 client.createAnalyzer(request -> request.analyzerName(accountName).type(Type.ACCOUNT));
                 client.createAnalyzer(request -> request.analyzerName(unusedName).type(Type.ACCOUNT_UNUSED_ACCESS));
 
-                var listed = client.listAnalyzers(request -> {});
+                ListAnalyzersResponse listed = client.listAnalyzers(request -> {});
                 assertThat(listed.analyzers())
                         .extracting(analyzer -> analyzer.name())
                         .contains(accountName, unusedName);

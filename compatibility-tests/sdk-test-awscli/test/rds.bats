@@ -6,12 +6,14 @@ setup() {
     DB_ID="bats-rds-$(unique_name)"
     DB_ID_2="bats-rds-2-$(unique_name)"
     RDS_CLUSTER_ID="bats-rds-cluster-$(unique_name)"
+    PROXY_NAME="bats-proxy-$(unique_name)"
 }
 
 teardown() {
     aws_cmd rds delete-db-instance --db-instance-identifier "$DB_ID" --skip-final-snapshot >/dev/null 2>&1 || true
     aws_cmd rds delete-db-instance --db-instance-identifier "$DB_ID_2" --skip-final-snapshot >/dev/null 2>&1 || true
     aws_cmd rds delete-db-cluster --db-cluster-identifier "$RDS_CLUSTER_ID" --skip-final-snapshot >/dev/null 2>&1 || true
+    aws_cmd rds delete-db-proxy --db-proxy-name "$PROXY_NAME" >/dev/null 2>&1 || true
     if [ -n "${MANAGED_SECRET_ARN:-}" ]; then
         aws_cmd secretsmanager delete-secret --secret-id "$MANAGED_SECRET_ARN" \
             --force-delete-without-recovery >/dev/null 2>&1 || true
@@ -383,6 +385,38 @@ teardown() {
     assert_output --partial 'true'
 }
 
+@test "rds: certificates list, an override applies to a new instance and is removed" {
+    run aws_cmd rds describe-certificates --certificate-identifier rds-ca-rsa2048-g1
+    assert_success
+    [ "$(json_get "$output" '.Certificates[0].CertificateType')" = "CA" ]
+    [ "$(json_get "$output" '.DefaultCertificateForNewLaunches')" = "rds-ca-rsa2048-g1" ]
+
+    run aws_cmd rds modify-certificates --certificate-identifier rds-ca-ecc384-g1
+    assert_success
+    [ "$(json_get "$output" '.Certificate.CustomerOverride')" = "true" ]
+
+    run aws_cmd rds create-db-instance --db-instance-identifier "$DB_ID" --engine postgres \
+        --db-instance-class db.t3.micro --allocated-storage 10
+    status_create=$status
+    create_output=$output
+    run aws_cmd rds modify-certificates --remove-customer-override
+    assert_success
+    [ "$status_create" -eq 0 ]
+    [ "$(json_get "$create_output" '.DBInstance.CACertificateIdentifier')" = "rds-ca-ecc384-g1" ]
+
+    run aws_cmd rds modify-db-instance --db-instance-identifier "$DB_ID" \
+        --ca-certificate-identifier rds-ca-rsa4096-g1 --apply-immediately
+    assert_success
+    run aws_cmd rds describe-db-instances --db-instance-identifier "$DB_ID" \
+        --query 'DBInstances[0].CertificateDetails.CAIdentifier' --output text
+    assert_success
+    assert_output 'rds-ca-rsa4096-g1'
+
+    run aws_cmd rds describe-certificates --certificate-identifier rds-ca-2019
+    assert_failure
+    assert_output --partial 'CertificateNotFound'
+}
+
 @test "rds: a KmsKeyId that names no key is refused as on AWS" {
     run aws_cmd rds create-db-instance \
         --db-instance-identifier "$DB_ID" \
@@ -403,4 +437,112 @@ teardown() {
         --no-storage-encrypted --kms-key-id "arn:aws:kms:us-east-1:000000000000:key/00000000-0000-0000-0000-000000000000"
     assert_failure
     assert_output --partial 'InvalidParameterCombination'
+}
+
+@test "rds: a master username longer than 16 characters is accepted on postgres, as on AWS" {
+    run aws_cmd rds create-db-instance \
+        --db-instance-identifier "$DB_ID" \
+        --engine postgres \
+        --db-instance-class db.t3.micro \
+        --allocated-storage 10 \
+        --master-username application_db_admin_user \
+        --master-user-password "secret99password"
+    assert_success
+
+    run aws_cmd rds describe-db-instances --db-instance-identifier "$DB_ID" \
+        --query 'DBInstances[0].MasterUsername'
+    assert_success
+    assert_output --partial 'application_db_admin_user'
+
+    # 64 characters is one past what PostgreSQL accepts on a live account
+    long_username="a$(printf 'b%.0s' $(seq 63))"
+    run aws_cmd rds create-db-instance \
+        --db-instance-identifier "$DB_ID_2" \
+        --engine postgres \
+        --db-instance-class db.t3.micro \
+        --allocated-storage 10 \
+        --master-username "$long_username" \
+        --master-user-password "secret99password"
+    assert_failure
+    assert_output --partial 'InvalidParameterValue'
+}
+
+@test "rds: a proxy endpoint is added, renamed and deleted" {
+    run aws_cmd ec2 describe-subnets --query 'Subnets[?DefaultForAz].SubnetId'
+    assert_success
+    subnet_a=$(json_get "$output" '.[0]')
+    subnet_b=$(json_get "$output" '.[1]')
+
+    run aws_cmd rds create-db-proxy --db-proxy-name "$PROXY_NAME" --engine-family POSTGRESQL \
+        --role-arn arn:aws:iam::000000000000:role/rds-proxy \
+        --vpc-subnet-ids "$subnet_a" "$subnet_b" \
+        --auth AuthScheme=SECRETS,SecretArn=arn:aws:secretsmanager:us-east-1:000000000000:secret:db-AbCdEf
+    assert_success
+
+    reader="$PROXY_NAME-reader"
+    run aws_cmd rds create-db-proxy-endpoint --db-proxy-name "$PROXY_NAME" \
+        --db-proxy-endpoint-name "$reader" --vpc-subnet-ids "$subnet_a" "$subnet_b" --target-role READ_ONLY
+    assert_success
+    [ "$(json_get "$output" '.DBProxyEndpoint.TargetRole')" = "READ_ONLY" ]
+    [ "$(json_get "$output" '.DBProxyEndpoint.IsDefault')" = "false" ]
+
+    run aws_cmd rds describe-db-proxy-endpoints --db-proxy-name "$PROXY_NAME"
+    assert_success
+    [ "$(json_get "$output" '.DBProxyEndpoints[0].DBProxyEndpointName')" = "default" ]
+    [ "$(json_get "$output" '.DBProxyEndpoints[0].IsDefault')" = "true" ]
+    [ "$(json_get "$output" '.DBProxyEndpoints[1].DBProxyEndpointName')" = "$reader" ]
+
+    renamed="$PROXY_NAME-analytics"
+    run aws_cmd rds modify-db-proxy-endpoint --db-proxy-endpoint-name "$reader" \
+        --new-db-proxy-endpoint-name "$renamed"
+    assert_success
+    [ "$(json_get "$output" '.DBProxyEndpoint.DBProxyEndpointName')" = "$renamed" ]
+
+    run aws_cmd rds delete-db-proxy-endpoint --db-proxy-endpoint-name "$renamed"
+    assert_success
+    run aws_cmd rds delete-db-proxy-endpoint --db-proxy-endpoint-name "$renamed"
+    assert_failure
+    assert_output --partial 'DBProxyEndpointNotFoundFault'
+}
+
+@test "rds: a deleted instance keeps its automated backup, which replicates and is deleted" {
+    aws_west() { aws --endpoint-url "$FLOCI_ENDPOINT" --region us-west-2 --output json "$@" 2>&1; }
+    run aws_cmd rds create-db-instance --db-instance-identifier "$DB_ID" --engine postgres \
+        --db-instance-class db.t3.micro --allocated-storage 10 --backup-retention-period 2
+    assert_success
+    dbi="$(json_get "$output" '.DBInstance.DbiResourceId')"
+    source_arn="$(json_get "$output" '.DBInstance.DBInstanceArn')"
+
+    run aws_cmd rds describe-db-instance-automated-backups --dbi-resource-id "$dbi"
+    assert_success
+    [ "$(json_get "$output" '.DBInstanceAutomatedBackups[0].Status')" = "active" ]
+
+    run aws_west rds start-db-instance-automated-backups-replication --source-db-instance-arn "$source_arn"
+    assert_success
+    [ "$(json_get "$output" '.DBInstanceAutomatedBackup.Status')" = "replicating" ]
+    replica_arn="$(json_get "$output" '.DBInstanceAutomatedBackup.DBInstanceAutomatedBackupsArn')"
+    run aws_cmd rds describe-db-instances --db-instance-identifier "$DB_ID" \
+        --query 'DBInstances[0].DBInstanceAutomatedBackupsReplications[0].DBInstanceAutomatedBackupsArn' --output text
+    assert_success
+    assert_output "$replica_arn"
+    run aws_west rds stop-db-instance-automated-backups-replication --source-db-instance-arn "$source_arn"
+    assert_success
+    [ "$(json_get "$output" '.DBInstanceAutomatedBackup.Status')" = "retained" ]
+    run aws_west rds delete-db-instance-automated-backup --db-instance-automated-backups-arn "$replica_arn"
+    assert_success
+
+    run aws_cmd rds delete-db-instance --db-instance-identifier "$DB_ID" --skip-final-snapshot \
+        --no-delete-automated-backups
+    assert_success
+    run aws_cmd rds describe-db-instance-automated-backups --dbi-resource-id "$dbi" \
+        --query 'DBInstanceAutomatedBackups[0].Status' --output text
+    assert_success
+    assert_output 'retained'
+
+    run aws_cmd rds delete-db-instance-automated-backup --dbi-resource-id "$dbi"
+    assert_success
+    [ "$(json_get "$output" '.DBInstanceAutomatedBackup.Status')" = "deleting" ]
+    run aws_cmd rds describe-db-instance-automated-backups --dbi-resource-id "$dbi"
+    assert_failure
+    assert_output --partial 'DBInstanceAutomatedBackupNotFound'
 }

@@ -1,20 +1,72 @@
 """ACM integration tests."""
 
-import datetime
+import json
 import re
+import uuid
+from contextlib import closing
 
+import boto3
 import pytest
+from botocore.config import Config
 from botocore.exceptions import ClientError
 from cryptography import x509
-from cryptography.hazmat.primitives import hashes, serialization
+from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric import ec, rsa
-from cryptography.x509.oid import NameOID
 
 FAKE_ARN = "arn:aws:acm:us-east-1:000000000000:certificate/00000000-0000-0000-0000-000000000000"
 
 
 class TestACMCertificateLifecycle:
     """Test ACM certificate lifecycle operations."""
+
+    def test_request_certificate_rejects_empty_sans(self, aws_config, client_config):
+        """Disable SDK validation so the empty list reaches the server."""
+        with closing(boto3.client(
+            "acm",
+            config=client_config.merge(Config(parameter_validation=False)),
+            **aws_config,
+        )) as client:
+            with pytest.raises(ClientError) as error:
+                response = client.request_certificate(
+                    DomainName="empty-sans.example.com", SubjectAlternativeNames=[]
+                )
+                client.delete_certificate(CertificateArn=response["CertificateArn"])
+            assert error.value.response["ResponseMetadata"]["HTTPStatusCode"] == 400
+            assert error.value.response["Error"]["Code"] == "ValidationException"
+
+    @pytest.mark.parametrize("sans", [None, [], ["alt.san-probe.example.com"]])
+    def test_cloudformation_certificate_sans(
+        self, cloudformation_client, acm_client, sans
+    ):
+        stack = f"acm-sans-{uuid.uuid4().hex[:12]}"
+        properties = {
+            "DomainName": "san-probe.example.com",
+            "ValidationMethod": "DNS",
+        }
+        if sans is not None:
+            properties["SubjectAlternativeNames"] = sans
+        template = {"Resources": {"Certificate": {
+            "Type": "AWS::CertificateManager::Certificate",
+            "Properties": properties,
+        }}}
+        cloudformation_client.create_stack(
+            StackName=stack, TemplateBody=json.dumps(template)
+        )
+        try:
+            cloudformation_client.get_waiter("stack_create_complete").wait(
+                StackName=stack, WaiterConfig={"Delay": 1, "MaxAttempts": 60}
+            )
+            resource = cloudformation_client.describe_stack_resource(
+                StackName=stack, LogicalResourceId="Certificate"
+            )["StackResourceDetail"]
+            certificate = acm_client.describe_certificate(
+                CertificateArn=resource["PhysicalResourceId"]
+            )["Certificate"]
+            assert set(certificate["SubjectAlternativeNames"]) == {
+                properties["DomainName"], *(sans or [])
+            }
+        finally:
+            cloudformation_client.delete_stack(StackName=stack)
 
     def test_request_certificate(self, acm_client):
         """Test RequestCertificate creates a certificate and returns a valid ARN."""
@@ -109,41 +161,9 @@ class TestACMCertificateLifecycle:
 class TestACMImportExport:
     """Test ACM import and export operations."""
 
-    @staticmethod
-    def _generate_self_signed_cert():
-        """Generate a self-signed certificate and private key.
-
-        Returns:
-            Tuple of (cert_pem_bytes, key_pem_bytes).
-        """
-        key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
-        subject = issuer = x509.Name(
-            [x509.NameAttribute(NameOID.COMMON_NAME, "test.example.com")]
-        )
-        cert = (
-            x509.CertificateBuilder()
-            .subject_name(subject)
-            .issuer_name(issuer)
-            .public_key(key.public_key())
-            .serial_number(x509.random_serial_number())
-            .not_valid_before(datetime.datetime.now(datetime.timezone.utc))
-            .not_valid_after(
-                datetime.datetime.now(datetime.timezone.utc)
-                + datetime.timedelta(days=365)
-            )
-            .sign(key, hashes.SHA256())
-        )
-        cert_pem = cert.public_bytes(serialization.Encoding.PEM)
-        key_pem = key.private_bytes(
-            serialization.Encoding.PEM,
-            serialization.PrivateFormat.TraditionalOpenSSL,
-            serialization.NoEncryption(),
-        )
-        return cert_pem, key_pem
-
-    def test_import_certificate(self, acm_client):
+    def test_import_certificate(self, acm_client, make_self_signed_certificate):
         """Test ImportCertificate with self-signed cert returns ARN."""
-        cert_pem, key_pem = self._generate_self_signed_cert()
+        cert_pem, key_pem = make_self_signed_certificate()
 
         response = acm_client.import_certificate(
             Certificate=cert_pem, PrivateKey=key_pem
@@ -156,9 +176,9 @@ class TestACMImportExport:
         finally:
             acm_client.delete_certificate(CertificateArn=arn)
 
-    def test_import_certificate_with_chain(self, acm_client):
+    def test_import_certificate_with_chain(self, acm_client, make_self_signed_certificate):
         """Test ImportCertificate with certificate chain returns ARN."""
-        cert_pem, key_pem = self._generate_self_signed_cert()
+        cert_pem, key_pem = make_self_signed_certificate()
 
         response = acm_client.import_certificate(
             Certificate=cert_pem,
@@ -173,9 +193,9 @@ class TestACMImportExport:
         finally:
             acm_client.delete_certificate(CertificateArn=arn)
 
-    def test_get_imported_certificate(self, acm_client):
+    def test_get_imported_certificate(self, acm_client, make_self_signed_certificate):
         """Test GetCertificate on imported cert returns matching body."""
-        cert_pem, key_pem = self._generate_self_signed_cert()
+        cert_pem, key_pem = make_self_signed_certificate()
 
         import_response = acm_client.import_certificate(
             Certificate=cert_pem, PrivateKey=key_pem
@@ -189,9 +209,9 @@ class TestACMImportExport:
         finally:
             acm_client.delete_certificate(CertificateArn=arn)
 
-    def test_export_certificate(self, acm_client):
+    def test_export_certificate(self, acm_client, make_self_signed_certificate):
         """Test ExportCertificate returns the imported key, encrypted under the passphrase."""
-        cert_pem, key_pem = self._generate_self_signed_cert()
+        cert_pem, key_pem = make_self_signed_certificate()
         passphrase = b"test-passphrase"
 
         import_response = acm_client.import_certificate(

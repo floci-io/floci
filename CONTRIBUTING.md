@@ -39,6 +39,12 @@ cd floci
 
 If you prefer to use your own Maven installation (3.9+), you can use `mvn` instead of `./mvnw`.
 
+`make help` lists the repository's shortcuts: `make dev`, `make test T=SsmIntegrationTest`,
+`make native` and `make native-image` for the native binary and its Docker image with the flags CI
+uses, `make native-host` and `make run-native` for a binary built and run on your machine without
+Docker, `make native-up` to run the image, and `make compat SUITES="sdk-test-java"` to run compatibility
+suites in Docker against it.
+
 ### Run Tests
 
 ```bash
@@ -49,7 +55,7 @@ If you prefer to use your own Maven installation (3.9+), you can use `mvn` inste
 
 ## Branching Model
 
-Floci uses a **tag-driven release model**. Merging a PR never publishes a release image. `main` is published once a day as the `nightly` channel, and a stable release is published only when a maintainer runs the "Release Cut" workflow (`.github/workflows/release-cut.yml`, `workflow_dispatch`). That workflow runs semantic-release, which bumps `pom.xml`, writes `CHANGELOG.md`, commits, and pushes the `X.Y.Z` tag. The tag then triggers `.github/workflows/release.yml`, which builds and publishes the release images to Docker Hub and public ECR.
+Floci uses a **tag-driven release model**. Merging a PR never publishes a release image. `main` is published once a day as the `nightly` channel, and a stable release is published only when the "Release Cut" workflow (`.github/workflows/release-cut.yml`) runs: on its schedule at 00:30 US Central time on the 15th and the last day of each month, or when a maintainer dispatches it. That workflow runs semantic-release, which bumps `pom.xml`, writes `CHANGELOG.md`, commits, and pushes the `X.Y.Z` tag. The tag then triggers `.github/workflows/release.yml`, which builds and publishes the release images to Docker Hub and public ECR.
 
 | Branch / tag | Purpose | Docker published? |
 |---|---|---|
@@ -120,7 +126,7 @@ wip: still working on this          # "wip" is not a recognised type
 
 Do not include `Co-Authored-By` trailers for AI tools in commit messages. Attribution should be limited to human contributors.
 
-CI enforces this: the **Commits omit AI attribution trailers** check fails a pull request whose commits carry a `Co-Authored-By` for an identity that is not a person (one whose GitHub address belongs to a bot account, or that uses a `noreply@` mailbox), along with the session and generator lines such tools add on their own. It never judges a co-author by name, so co-authoring a person is always fine; that trailer is how GitHub credits reviewers on a squash merge. `dependabot[bot]` is allowlisted. If the check fires, drop the offending lines with `git commit --amend` (or a rebase for several commits) and force-push.
+CI enforces this: the **Commits omit AI attribution trailers** step of the **PR hygiene** check fails a pull request whose commits carry a `Co-Authored-By` for an identity that is not a person (one whose GitHub address belongs to a bot account, or that uses a `noreply@` mailbox), along with the session and generator lines such tools add on their own. It never judges a co-author by name, so co-authoring a person is always fine; that trailer is how GitHub credits reviewers on a squash merge. `dependabot[bot]` is allowlisted. If the check fires, drop the offending lines with `git commit --amend` (or a rebase for several commits) and force-push.
 
 ## Architecture
 
@@ -139,6 +145,8 @@ ln -s AGENTS.md COPILOT.md
 [AGENTS.md](AGENTS.md#code-style) carries the full list. The rules worth knowing
 before your first PR:
 
+- **Pass Checkstyle.** Run `./mvnw checkstyle:check`. The rules live in
+  `tools/checkstyle/checkstyle.xml`.
 - **Write explicit types. Do not use `var`.** Floci reproduces AWS wire contracts,
   so the concrete type at a call site is usually what a reviewer needs to see:
   whether a value is a `LinkedHashMap` or a `Map`, an AWS model type or a JDK one.
@@ -147,6 +155,9 @@ before your first PR:
   `new ArrayList<>()`, never `new java.util.ArrayList<>()`. Qualify inline only for
   a genuine name collision in that file, and say in a comment what collides.
 - **No wildcard imports in `src/main`.** Static wildcards are fine in tests.
+- **Keep imports ordered.** Alphabetize non-JDK imports, then `javax`, then
+  `java`, then static imports. Use blank lines between sections, except between
+  `javax` and `java`, matching IntelliJ's default layout.
 - **Never leave a `catch` block empty.** If swallowing is correct, name the
   variable `ignored` or `expected` and say why in a comment.
 - **Always use braces in conditionals**, and use constructor injection.
@@ -166,21 +177,29 @@ you add or change; leave unrelated cleanups for their own PR.
 6. Add `floci.services.<key>.enabled` to both `src/main/resources/application.yml` and `src/test/resources/application.yml`
 7. Wire controller/handler dispatch for the service (JSON 1.1 handlers are injected into `AwsJson11Controller`)
 8. Obtain storage through `StorageFactory` and implement `Resettable`; list any static `Random` or `SecureRandom` field under `--initialize-at-run-time` in `application.yml`
-9. Add `*ServiceTest.java` and `*IntegrationTest.java` tests
-10. Document it: `docs/services/<service>.md`, a `mkdocs.yml` nav entry, a Service Matrix row in `docs/services/index.md`, and a row in the README category table
-11. Register the handler in `tools/docs/services.yaml`, then run `make docs-sync` and `make docs-check`
-12. Add a client factory in the compat suite's `TestFixtures` and a `<Svc>Test` under `compatibility-tests/sdk-test-java`
+9. Check every timestamp member you emit for a `TimestampFormatTrait` before reaching for the
+   epoch-seconds idiom. It is the awsJson1.1 default, but a model can override it per member,
+   and a mismatch is invisible to the AWS CLI because botocore coerces the value, while strict
+   SDKs (Go, Java) reject the whole response. `javap -c` on the SDK model class shows the
+   traits attached to each `SdkField`. In Redshift Serverless, for instance,
+   `Namespace.creationDate` is `ISO_8601` while roughly half the model's other timestamp
+   members carry no trait and use the epoch default. The trait is per member, so check each
+   one you emit
+10. Add `*ServiceTest.java` and `*IntegrationTest.java` tests
+11. Document it: `docs/services/<service>.md`, a `mkdocs.yml` nav entry, a Service Matrix row in `docs/services/index.md`, and a row in the README category table
+12. Register the handler in `tools/docs/services.yaml`, then run `make docs-sync` and `make docs-check`
+13. Add a client factory in the compat suite's `TestFixtures` and a `<Svc>Test` under `compatibility-tests/sdk-test-java`
 
-`ServiceRegistry`, `ServiceEnabledFilter`, and `StorageFactory` resolve service metadata from the descriptor catalog. Adding a service should not require new service-keyed switch statements in those consumers. `make docs-check` gates steps 10 and 11: a registered service with no matrix row, a `docs/services` page with no matrix row, and a stale action table all fail CI.
+`ServiceRegistry`, `ServiceEnabledFilter`, and `StorageFactory` resolve service metadata from the descriptor catalog. Adding a service should not require new service-keyed switch statements in those consumers. `make docs-check` gates steps 11 and 12: a registered service with no matrix row, a `docs/services` page with no matrix row, and a stale action table all fail CI.
 
 Always implement the **real AWS wire protocol**. Never invent custom endpoints. The AWS SDK must work against Floci without modification.
 
 ## Adding a CloudFormation Resource Type
 
-CloudFormation resource types live in **per-service provisioner classes**, not in
-`CloudFormationResourceProvisioner`. That class is a legacy monolith being dismantled, so please do
-not add cases to it. If the service you need already has a `*CfnProvisioner`, add your type there;
-otherwise create one.
+CloudFormation resource types live in **per-service provisioner classes** under
+`services/cloudformation/provisioners/`; `CfnResourceDispatcher` only routes a resource to the
+registry and stubs what nothing serves, so please do not add type-specific code to it. If the
+service you need already has a `*CfnProvisioner`, add your type there; otherwise create one.
 
 1. Create `services/cloudformation/provisioners/<Service>CfnProvisioner.java`, annotate it
    `@ApplicationScoped`, and inject **only** the service it wraps. Registration is automatic:
@@ -229,6 +248,10 @@ otherwise create one.
     `src/test/resources/cloudformation/getatt-attribute-gaps.tsv` with the reason.
     `CfnSchemaCoverageTest` requires every unset attribute to be either fixed or recorded, so
     "not emulated" stays distinguishable from "forgotten".
+    A new type also needs its row in `schema-surface.tsv` (same directory): run
+    `make cfn-schema-surface-sync`. A writable property the provisioner never reads goes in
+    `writable-property-gaps.tsv`. A provisioner arm that calls `droppedProperties` records, for each
+    writable property it reads, what a drop does in `drop-policy.tsv` (same directory).
 
 `SqsCfnProvisioner` is the smallest reference implementation; `Ec2LaunchTemplateCfnProvisioner`
 shows update-in-place and replacement handling; `LogsCfnProvisioner` shows a full reconcile-vs-replace
@@ -241,17 +264,29 @@ update path.
 3. CI runs tests automatically. All checks must pass before merge.
 4. Keep PRs focused: one feature or fix per PR.
 5. Reference any related issues in the PR description.
-6. Keep at most **5 open PRs** at a time. A bot leaves an advisory note and an `over-pr-limit` label on PRs opened beyond that. Nothing gets closed or blocked, but please land or close your existing PRs before opening more.
+6. Keep at most **4 open PRs**, drafts included, and at most **2 of them ready for review**: see [Pull Request Limits and Review Bandwidth](#pull-request-limits-and-review-bandwidth).
 
 Docker images are built on contributor PRs only for the compatibility suite (`.github/workflows/compatibility.yml`, on changes under `src/**` and the compat test trees) and are never published, so merging to `main` is always cheap.
 
+### Pull Request Limits and Review Bandwidth
+
+To make sure every contribution gets a thorough, high-quality review in a reasonable time, we ask contributors to keep **no more than 4 open pull requests**, drafts included, at any time in this repository, and **no more than 2 of them ready for review**.
+
+- **Why this policy exists:** maintainer review time is limited. Capping concurrent open PRs prevents review backlogs, reduces context switching, and keeps PR cycle times short for everyone.
+- **Dependent work:** if your work depends on a PR that has not been merged yet, build on that branch or note the dependency in the discussion instead of opening separate, uncoordinated PRs.
+- **Draft PRs:** drafts do not count against the limit of 2 ready pull requests, but they do count toward the total of 4. You can have, for example, 2 ready and 2 drafts, or 1 ready and 3 drafts. Use drafts for work in progress, not as a queue of finished changes waiting for a review slot, and mark a draft as ready for review only when you have review capacity available.
+- **How it is applied:** a bot turns a pull request back into a draft if it would be your 3rd ready for review, and closes a pull request opened while you already have 4 open, drafts included. Your branch and commits are always kept: mark the draft ready again once one of your ready pull requests is merged, closed or turned into a draft, and reopen a closed pull request once you have fewer than 4 open. Maintainers and dependency bots are not counted.
+
+Once your current pull requests are reviewed, merged, or closed, you are welcome to open new ones!
+
 ## Release Process (maintainers)
 
-Stable releases ship on the **1st and 3rd Tuesday of each month**. Merging to `main` does
-not cut a release: the change rides the next train, and reaches the `nightly` image on the
-next nightly build.
+Stable releases ship on the **15th and the last day of each month**. Merging to `main`
+does not cut a release: the change rides the next train, and reaches the `nightly` image on
+the next nightly build.
 
-Releases are cut from `main` with the **Release Cut** workflow
+Releases are cut from `main` by the **Release Cut** workflow, which runs on a schedule at
+00:30 US Central time (America/Chicago) on those days. Maintainers can also run it by hand
 (Actions → Release Cut → Run workflow). semantic-release analyzes the
 Conventional Commits since the last tag, bumps `pom.xml`, regenerates
 `CHANGELOG.md`, commits, tags, and publishes the GitHub Release; the tag
@@ -302,6 +337,53 @@ hand-written and preserved across regeneration, keyed by action name.
 - `make docs-test` runs the tooling's unit tests.
 
 Registering a new service's action table is one entry in `tools/docs/services.yaml`.
+
+### Partition literals
+
+Floci serves every AWS partition, so `src/main/java` must not bake the commercial one in.
+`make partition-check` (run in CI) inventories `arn:aws:` prefixes, `amazonaws.com` hosts,
+Route 53 hosted-zone ids and hand-rolled partition regexes per file against
+`tools/partition/baseline.tsv`: a literal in a new file fails, growth fails, and a drop
+fails until you run `make partition-baseline` and commit the smaller baseline.
+`make partition-audit` prints what is left per package; `make partition-test` runs the
+tooling's unit tests. Mint ARNs through `AwsArnUtils` and derive hosts from the region's
+DNS suffix; a literal that really is partition-invariant goes in
+`tools/partition/allowlist.yaml` with a reason, or ends its line with
+`// partition-literal: <reason>`.
+
+The partition catalog itself (`src/main/resources/aws/partitions.json`: ids, DNS suffixes,
+regions, opt-in flags, global endpoints) is generated from botocore's published data by
+`make aws-data-sync` and checked by `make aws-data-check` in CI; never hand-edit it. Move to
+a newer botocore with `make botocore-bump VERSION=<release>`: it sets the pin in
+`tools/aws/requirements.txt`, moves `local/aws/botocore` to that release's tag, then regenerates
+and checks only the botocore-derived data, so the bump and its regenerated files land in one pull
+request with nothing from the other `local/aws` sources: the region flags `partitions.json` takes
+from `local/aws/aws-cdk` stay as they are until a `make aws-data-sync`. Dependabot does not track
+botocore for that reason: its bump alone fails `make aws-data-check`. `make aws-data-sync` also
+regenerates the IAM managed-policy catalog (`src/main/resources/iam/managed-polic*`) from the
+`local/aws/iam-dataset` checkout; without that checkout, as in CI, `make aws-data-check` only
+verifies the catalog's shape.
+
+### Botocore pin of record
+
+[tools/aws/requirements.txt](tools/aws/requirements.txt) is the botocore pin of record
+for AWS model audits and vendored AWS data. CI installs this file before running
+`make aws-data-check`. Use an isolated environment installed from this file when checking
+whether botocore models an operation, request member, endpoint, or partition.
+
+[compatibility-tests/sdk-test-python/requirements.txt](compatibility-tests/sdk-test-python/requirements.txt)
+pins the boto3 and botocore clients used by the Python compatibility suite. Those client
+versions can differ from the generator pin; they are not the model-audit reference.
+Updating a compatibility client alone does not change the vendored AWS data.
+
+Generators using `resolve_botocore_data`, including partitions and request shapes, prefer
+an explicit `--botocore-data` directory, then `local/aws/botocore/botocore/data`, then the
+installed botocore package. The region-facts generator instead requires its local sources
+(or explicit source paths); it does not fall back to the installed package, and `--check`
+only verifies shape when its sources are missing. When a local checkout or explicit
+directory is selected, ensure it matches the tools pin too: checking only the installed
+package version does not establish which data is being read.
+Keep a generator-pin change and its required regenerated data together, as described above.
 
 ## Reporting Security Issues
 

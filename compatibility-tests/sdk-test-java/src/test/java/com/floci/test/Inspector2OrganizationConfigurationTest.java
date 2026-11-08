@@ -3,16 +3,26 @@ package com.floci.test;
 import org.jboss.logging.Logger;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.parallel.ResourceLock;
 import software.amazon.awssdk.services.inspector2.Inspector2Client;
 import software.amazon.awssdk.services.inspector2.model.AutoEnable;
+import software.amazon.awssdk.services.inspector2.model.BatchGetAccountStatusResponse;
+import software.amazon.awssdk.services.inspector2.model.DescribeOrganizationConfigurationResponse;
+import software.amazon.awssdk.services.inspector2.model.DisableDelegatedAdminAccountResponse;
+import software.amazon.awssdk.services.inspector2.model.DisableResponse;
+import software.amazon.awssdk.services.inspector2.model.EnableDelegatedAdminAccountResponse;
+import software.amazon.awssdk.services.inspector2.model.EnableResponse;
 import software.amazon.awssdk.services.inspector2.model.ResourceScanType;
+import software.amazon.awssdk.services.inspector2.model.UpdateOrganizationConfigurationResponse;
 import software.amazon.awssdk.services.organizations.OrganizationsClient;
 import software.amazon.awssdk.services.organizations.model.AlreadyInOrganizationException;
+import software.amazon.awssdk.services.organizations.model.CreateAccountResponse;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.junit.jupiter.api.Assumptions.assumeFalse;
 
 @DisplayName("Amazon Inspector organization configuration")
+@ResourceLock("organizations")
 class Inspector2OrganizationConfigurationTest {
     private static final Logger LOG = Logger.getLogger(Inspector2OrganizationConfigurationTest.class);
     private static final String MANAGEMENT_ACCOUNT = "test";
@@ -37,7 +47,7 @@ class Inspector2OrganizationConfigurationTest {
                      Inspector2Client administrator = TestFixtures.inspector2Client(delegatedAdminAccount)) {
                     assertThat(management.listDelegatedAdminAccounts(request -> {}).delegatedAdminAccounts()).isEmpty();
 
-                    var enabled = management.enableDelegatedAdminAccount(request -> request
+                    EnableDelegatedAdminAccountResponse enabled = management.enableDelegatedAdminAccount(request -> request
                             .delegatedAdminAccountId(delegatedAdminAccount));
                     delegatedAdminEnabled = true;
                     assertThat(enabled.delegatedAdminAccountId()).isEqualTo(delegatedAdminAccount);
@@ -49,7 +59,7 @@ class Inspector2OrganizationConfigurationTest {
                                 assertThat(account.statusAsString()).isEqualTo("ENABLED");
                             });
 
-                    var enableMember = administrator.enable(request -> request
+                    EnableResponse enableMember = administrator.enable(request -> request
                             .accountIds(inspectedMemberAccount)
                             .resourceTypes(ResourceScanType.EC2));
                     assertThat(enableMember.accounts()).singleElement().satisfies(account -> {
@@ -58,7 +68,7 @@ class Inspector2OrganizationConfigurationTest {
                         assertThat(account.resourceStatus().ecrAsString()).isEqualTo("DISABLED");
                     });
 
-                    var firstStatus = administrator.batchGetAccountStatus(
+                    BatchGetAccountStatusResponse firstStatus = administrator.batchGetAccountStatus(
                             request -> request.accountIds(inspectedMemberAccount));
                     assertThat(firstStatus.accounts()).singleElement().satisfies(account -> {
                         assertThat(account.accountId()).isEqualTo(inspectedMemberAccount);
@@ -66,7 +76,7 @@ class Inspector2OrganizationConfigurationTest {
                         assertThat(account.resourceState().ec2().statusAsString()).isEqualTo("ENABLING");
                         assertThat(account.resourceState().ecr().statusAsString()).isEqualTo("DISABLED");
                     });
-                    var converged = administrator.batchGetAccountStatus(
+                    BatchGetAccountStatusResponse converged = administrator.batchGetAccountStatus(
                             request -> request.accountIds(inspectedMemberAccount));
                     assertThat(converged.accounts()).singleElement().satisfies(account -> {
                         assertThat(account.state().statusAsString()).isEqualTo("ENABLED");
@@ -74,7 +84,27 @@ class Inspector2OrganizationConfigurationTest {
                         assertThat(account.resourceState().ecr().statusAsString()).isEqualTo("DISABLED");
                     });
 
-                    var updated = administrator.updateOrganizationConfiguration(request -> request
+                    DisableResponse disableMember = administrator.disable(request -> request
+                            .accountIds(inspectedMemberAccount)
+                            .resourceTypes(ResourceScanType.EC2));
+                    assertThat(disableMember.accounts()).singleElement().satisfies(account -> {
+                        assertThat(account.accountId()).isEqualTo(inspectedMemberAccount);
+                        assertThat(account.statusAsString()).isEqualTo("DISABLING");
+                        assertThat(account.resourceStatus().ec2AsString()).isEqualTo("DISABLING");
+                    });
+                    administrator.batchGetAccountStatus(request -> request.accountIds(inspectedMemberAccount));
+                    assertThat(administrator.batchGetAccountStatus(request -> request.accountIds(inspectedMemberAccount))
+                            .accounts()).singleElement().satisfies(account -> {
+                                assertThat(account.state().statusAsString()).isEqualTo("DISABLED");
+                                assertThat(account.resourceState().ec2().statusAsString()).isEqualTo("DISABLED");
+                            });
+                    assertThat(administrator.disable(request -> request.accountIds(inspectedMemberAccount)).accounts())
+                            .singleElement().satisfies(account -> {
+                                assertThat(account.accountId()).isEqualTo(inspectedMemberAccount);
+                                assertThat(account.statusAsString()).isEqualTo("DISABLED");
+                            });
+
+                    UpdateOrganizationConfigurationResponse updated = administrator.updateOrganizationConfiguration(request -> request
                             .autoEnable(AutoEnable.builder()
                                     .ec2(true)
                                     .ecr(true)
@@ -86,10 +116,10 @@ class Inspector2OrganizationConfigurationTest {
                     assertThat(updated.autoEnable().ecr()).isTrue();
                     assertThat(updated.autoEnable().codeRepository()).isTrue();
 
-                    var described = administrator.describeOrganizationConfiguration(request -> {});
+                    DescribeOrganizationConfigurationResponse described = administrator.describeOrganizationConfiguration(request -> {});
                     assertThat(described.autoEnable().codeRepository()).isTrue();
 
-                    var disabled = management.disableDelegatedAdminAccount(request -> request
+                    DisableDelegatedAdminAccountResponse disabled = management.disableDelegatedAdminAccount(request -> request
                             .delegatedAdminAccountId(delegatedAdminAccount));
                     delegatedAdminEnabled = false;
                     assertThat(disabled.delegatedAdminAccountId()).isEqualTo(delegatedAdminAccount);
@@ -149,7 +179,7 @@ class Inspector2OrganizationConfigurationTest {
 
     private static String createMemberAccount(OrganizationsClient organizations, String prefix) {
         String suffix = TestFixtures.uniqueName(prefix);
-        var response = organizations.createAccount(request -> request
+        CreateAccountResponse response = organizations.createAccount(request -> request
                 .accountName(suffix)
                 .email(suffix + "@example.com"));
         return response.createAccountStatus().accountId();

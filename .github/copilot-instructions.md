@@ -26,10 +26,9 @@ Raise concerns when a PR introduces any of the following without strong justific
 - `var` where an explicit type belongs. Floci reproduces AWS wire contracts, so the
   concrete type at a call site is usually what a reviewer needs to see. The one
   exception is a record deconstruction pattern.
-- Fully-qualified class names written inline instead of imported. Flag
-  `new java.util.ArrayList<>()`. Do not flag it when the file has a genuine name
-  collision, such as `apigateway` versus `apigatewayv2` model types, CDI `Instance`
-  versus the EC2 model `Instance`, or a service `Record` versus `java.lang.Record`.
+- Fully-qualified class names written inline instead of imported, such as
+  `new java.util.ArrayList<>()`. A genuine name clash inside one file is fine.
+  Checkstyle catches this except in the files it still suppresses.
 - Wildcard imports in `src/main`. Static wildcards in tests are fine.
 - An empty `catch` block. A tolerated exception is logged, or named `ignored` or
   `expected` with a comment saying why swallowing is safe.

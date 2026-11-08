@@ -170,16 +170,16 @@ aws ecr create-repository --repository-name floci-it/app --endpoint-url $AWS_END
 # Authenticate
 aws ecr get-login-password --endpoint-url $AWS_ENDPOINT_URL \
   | docker login --username AWS --password-stdin \
-        000000000000.dkr.ecr.us-east-1.localhost:5100
+        000000000000.dkr.ecr.us-east-1.localhost:4566
 
 # Push
 docker pull alpine:3.19
-docker tag  alpine:3.19 000000000000.dkr.ecr.us-east-1.localhost:5100/floci-it/app:v1
-docker push             000000000000.dkr.ecr.us-east-1.localhost:5100/floci-it/app:v1
+docker tag  alpine:3.19 000000000000.dkr.ecr.us-east-1.localhost:4566/floci-it/app:v1
+docker push             000000000000.dkr.ecr.us-east-1.localhost:4566/floci-it/app:v1
 
 # Pull from a clean local image store
-docker rmi  000000000000.dkr.ecr.us-east-1.localhost:5100/floci-it/app:v1
-docker pull 000000000000.dkr.ecr.us-east-1.localhost:5100/floci-it/app:v1
+docker rmi  000000000000.dkr.ecr.us-east-1.localhost:4566/floci-it/app:v1
+docker pull 000000000000.dkr.ecr.us-east-1.localhost:4566/floci-it/app:v1
 ```
 
 See the [ECR service docs](../services/ecr.md) for the full action surface, image-backed Lambda integration, and CDK `DockerImageFunction` support.
@@ -194,12 +194,18 @@ When Floci runs **natively on a Linux host** (not Docker Desktop), Lambda functi
 sudo ufw allow in on docker0 comment 'floci: containers reach host'
 ```
 
-If you want to scope it tighter to just the Lambda Runtime API and the ECR registry port ranges:
+If you want to scope it tighter to the Lambda Runtime API and Floci's ECR data plane:
 
 ```bash
 sudo ufw allow in on docker0 to any port 12000:12499 proto tcp comment 'floci lambda runtime api'
-sudo ufw allow in on docker0 to any port 5100:5199 proto tcp comment 'floci ecr registry'
+sudo ufw allow in on docker0 to any port 4566 proto tcp comment 'floci ecr data plane'
 ```
+
+Floci itself keeps listening on `127.0.0.1`. Containers reach it through the bridge gateway
+(`172.17.0.1` by default): at startup Floci opens a relay on that address, which belongs to the host
+but is not reachable from the network, and logs `Containers reach Floci through 172.17.0.1:4566`.
+There is no need to listen on `0.0.0.0` for SDK calls made from inside a Lambda function, ECS task or
+CodeBuild build.
 
 **Docker Desktop** (macOS / Windows / Linux) does not need this — it routes container → host through the Docker VM, which Floci's `DockerHostResolver` detects automatically.
 

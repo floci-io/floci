@@ -57,7 +57,7 @@ class ApiGatewayV2WebSocketAndExtendedOpsTest {
     @Test @Order(1)
     @DisplayName("CreateApi (HTTP) populates AWS defaults")
     void createHttpApiWithDefaults() {
-        var res = gw.createApi(CreateApiRequest.builder()
+        CreateApiResponse res = gw.createApi(CreateApiRequest.builder()
                 .name(TestFixtures.uniqueName("http-ext"))
                 .protocolType(ProtocolType.HTTP)
                 .build());
@@ -75,7 +75,7 @@ class ApiGatewayV2WebSocketAndExtendedOpsTest {
     @DisplayName("GetApi (HTTP) returns persisted defaults")
     void getHttpApiVerifyDefaults() {
         requireHttpApi();
-        var res = gw.getApi(GetApiRequest.builder().apiId(httpApiId).build());
+        GetApiResponse res = gw.getApi(GetApiRequest.builder().apiId(httpApiId).build());
 
         assertThat(res.routeSelectionExpression()).isEqualTo("${request.method} ${request.path}");
         assertThat(res.apiKeySelectionExpression()).isEqualTo("$request.header.x-api-key");
@@ -86,7 +86,7 @@ class ApiGatewayV2WebSocketAndExtendedOpsTest {
     @Test @Order(10)
     @DisplayName("CreateApi (WEBSOCKET) with routeSelectionExpression")
     void createWebSocketApi() {
-        var res = gw.createApi(CreateApiRequest.builder()
+        CreateApiResponse res = gw.createApi(CreateApiRequest.builder()
                 .name(TestFixtures.uniqueName("ws-ext"))
                 .protocolType(ProtocolType.WEBSOCKET)
                 .routeSelectionExpression("$request.body.action")
@@ -116,7 +116,7 @@ class ApiGatewayV2WebSocketAndExtendedOpsTest {
     @DisplayName("UpdateApi preserves unmodified fields")
     void updateWebSocketApi() {
         requireWsApi();
-        var res = gw.updateApi(UpdateApiRequest.builder()
+        UpdateApiResponse res = gw.updateApi(UpdateApiRequest.builder()
                 .apiId(wsApiId)
                 .name("ws-updated-java")
                 .build());
@@ -143,7 +143,7 @@ class ApiGatewayV2WebSocketAndExtendedOpsTest {
     @DisplayName("CreateRoute with routeResponseSelectionExpression")
     void createRouteWithRrse() {
         requireWsApi();
-        var res = gw.createRoute(CreateRouteRequest.builder()
+        CreateRouteResponse res = gw.createRoute(CreateRouteRequest.builder()
                 .apiId(wsApiId)
                 .routeKey("$default")
                 .authorizationType("NONE")
@@ -160,7 +160,7 @@ class ApiGatewayV2WebSocketAndExtendedOpsTest {
     @DisplayName("UpdateRoute preserves unmodified fields")
     void updateRoute() {
         requireWsApi(); requireWsRoute();
-        var res = gw.updateRoute(UpdateRouteRequest.builder()
+        UpdateRouteResponse res = gw.updateRoute(UpdateRouteRequest.builder()
                 .apiId(wsApiId)
                 .routeId(wsRouteId)
                 .target("integrations/fake-id")
@@ -177,7 +177,7 @@ class ApiGatewayV2WebSocketAndExtendedOpsTest {
     @DisplayName("CreateIntegration")
     void createIntegration() {
         requireWsApi();
-        var res = gw.createIntegration(CreateIntegrationRequest.builder()
+        CreateIntegrationResponse res = gw.createIntegration(CreateIntegrationRequest.builder()
                 .apiId(wsApiId)
                 .integrationType(IntegrationType.HTTP_PROXY)
                 .integrationUri("https://example.com")
@@ -192,7 +192,7 @@ class ApiGatewayV2WebSocketAndExtendedOpsTest {
     @DisplayName("UpdateIntegration preserves unmodified fields")
     void updateIntegration() {
         requireWsApi(); requireIntegration();
-        var res = gw.updateIntegration(UpdateIntegrationRequest.builder()
+        UpdateIntegrationResponse res = gw.updateIntegration(UpdateIntegrationRequest.builder()
                 .apiId(wsApiId)
                 .integrationId(integrationId)
                 .integrationUri("https://updated.example.com")
@@ -209,7 +209,7 @@ class ApiGatewayV2WebSocketAndExtendedOpsTest {
     @DisplayName("CreateAuthorizer (JWT) with string identitySource")
     void createAuthorizer() {
         requireWsApi();
-        var res = gw.createAuthorizer(CreateAuthorizerRequest.builder()
+        CreateAuthorizerResponse res = gw.createAuthorizer(CreateAuthorizerRequest.builder()
                 .apiId(wsApiId)
                 .name("jwt-ext-auth")
                 .authorizerType(AuthorizerType.JWT)
@@ -227,7 +227,7 @@ class ApiGatewayV2WebSocketAndExtendedOpsTest {
     @DisplayName("UpdateAuthorizer preserves unmodified fields")
     void updateAuthorizer() {
         requireWsApi(); requireAuthorizer();
-        var res = gw.updateAuthorizer(UpdateAuthorizerRequest.builder()
+        UpdateAuthorizerResponse res = gw.updateAuthorizer(UpdateAuthorizerRequest.builder()
                 .apiId(wsApiId)
                 .authorizerId(authorizerId)
                 .name("jwt-updated")
@@ -244,7 +244,7 @@ class ApiGatewayV2WebSocketAndExtendedOpsTest {
     @DisplayName("CreateDeployment")
     void createDeployment() {
         requireWsApi();
-        var res = gw.createDeployment(CreateDeploymentRequest.builder()
+        CreateDeploymentResponse res = gw.createDeployment(CreateDeploymentRequest.builder()
                 .apiId(wsApiId)
                 .description("ext-deploy")
                 .build());
@@ -257,7 +257,7 @@ class ApiGatewayV2WebSocketAndExtendedOpsTest {
     @DisplayName("UpdateDeployment preserves unmodified fields")
     void updateDeployment() {
         requireWsApi(); requireDeployment();
-        var res = gw.updateDeployment(UpdateDeploymentRequest.builder()
+        UpdateDeploymentResponse res = gw.updateDeployment(UpdateDeploymentRequest.builder()
                 .apiId(wsApiId)
                 .deploymentId(deploymentId)
                 .description("updated-deploy")
@@ -278,7 +278,7 @@ class ApiGatewayV2WebSocketAndExtendedOpsTest {
                 .autoDeploy(false)
                 .build());
 
-        var res = gw.updateStage(UpdateStageRequest.builder()
+        UpdateStageResponse res = gw.updateStage(UpdateStageRequest.builder()
                 .apiId(wsApiId)
                 .stageName("dev")
                 .autoDeploy(true)
@@ -297,7 +297,7 @@ class ApiGatewayV2WebSocketAndExtendedOpsTest {
         requireWsApi(); requireWsRoute();
 
         // Create
-        var createRes = gw.createRouteResponse(CreateRouteResponseRequest.builder()
+        CreateRouteResponseResponse createRes = gw.createRouteResponse(CreateRouteResponseRequest.builder()
                 .apiId(wsApiId)
                 .routeId(wsRouteId)
                 .routeResponseKey("$default")
@@ -308,17 +308,17 @@ class ApiGatewayV2WebSocketAndExtendedOpsTest {
         assertThat(createRes.routeResponseKey()).isEqualTo("$default");
 
         // Get
-        var getRes = gw.getRouteResponse(GetRouteResponseRequest.builder()
+        GetRouteResponseResponse getRes = gw.getRouteResponse(GetRouteResponseRequest.builder()
                 .apiId(wsApiId).routeId(wsRouteId).routeResponseId(routeResponseId).build());
         assertThat(getRes.routeResponseId()).isEqualTo(routeResponseId);
 
         // List
-        var listRes = gw.getRouteResponses(GetRouteResponsesRequest.builder()
+        GetRouteResponsesResponse listRes = gw.getRouteResponses(GetRouteResponsesRequest.builder()
                 .apiId(wsApiId).routeId(wsRouteId).build());
         assertThat(listRes.items()).extracting(RouteResponse::routeResponseId).contains(routeResponseId);
 
         // Update
-        var updateRes = gw.updateRouteResponse(UpdateRouteResponseRequest.builder()
+        UpdateRouteResponseResponse updateRes = gw.updateRouteResponse(UpdateRouteResponseRequest.builder()
                 .apiId(wsApiId).routeId(wsRouteId).routeResponseId(routeResponseId)
                 .routeResponseKey("$updated")
                 .build());
@@ -340,7 +340,7 @@ class ApiGatewayV2WebSocketAndExtendedOpsTest {
         requireWsApi(); requireIntegration();
 
         // Create
-        var createRes = gw.createIntegrationResponse(CreateIntegrationResponseRequest.builder()
+        CreateIntegrationResponseResponse createRes = gw.createIntegrationResponse(CreateIntegrationResponseRequest.builder()
                 .apiId(wsApiId)
                 .integrationId(integrationId)
                 .integrationResponseKey("$default")
@@ -351,19 +351,19 @@ class ApiGatewayV2WebSocketAndExtendedOpsTest {
         assertThat(createRes.contentHandlingStrategy()).hasToString("CONVERT_TO_TEXT");
 
         // Get
-        var getRes = gw.getIntegrationResponse(GetIntegrationResponseRequest.builder()
+        GetIntegrationResponseResponse getRes = gw.getIntegrationResponse(GetIntegrationResponseRequest.builder()
                 .apiId(wsApiId).integrationId(integrationId)
                 .integrationResponseId(integrationResponseId).build());
         assertThat(getRes.integrationResponseId()).isEqualTo(integrationResponseId);
 
         // List
-        var listRes = gw.getIntegrationResponses(GetIntegrationResponsesRequest.builder()
+        GetIntegrationResponsesResponse listRes = gw.getIntegrationResponses(GetIntegrationResponsesRequest.builder()
                 .apiId(wsApiId).integrationId(integrationId).build());
         assertThat(listRes.items()).extracting(IntegrationResponse::integrationResponseId)
                 .contains(integrationResponseId);
 
         // Update
-        var updateRes = gw.updateIntegrationResponse(UpdateIntegrationResponseRequest.builder()
+        UpdateIntegrationResponseResponse updateRes = gw.updateIntegrationResponse(UpdateIntegrationResponseRequest.builder()
                 .apiId(wsApiId).integrationId(integrationId)
                 .integrationResponseId(integrationResponseId)
                 .contentHandlingStrategy("CONVERT_TO_BINARY")
@@ -388,7 +388,7 @@ class ApiGatewayV2WebSocketAndExtendedOpsTest {
         requireWsApi();
 
         // Create
-        var createRes = gw.createModel(CreateModelRequest.builder()
+        CreateModelResponse createRes = gw.createModel(CreateModelRequest.builder()
                 .apiId(wsApiId)
                 .name("PetModel")
                 .schema("{\"type\":\"object\"}")
@@ -400,17 +400,17 @@ class ApiGatewayV2WebSocketAndExtendedOpsTest {
         assertThat(createRes.name()).isEqualTo("PetModel");
 
         // Get
-        var getRes = gw.getModel(GetModelRequest.builder()
+        GetModelResponse getRes = gw.getModel(GetModelRequest.builder()
                 .apiId(wsApiId).modelId(modelId).build());
         assertThat(getRes.name()).isEqualTo("PetModel");
         assertThat(getRes.contentType()).isEqualTo("application/json");
 
         // List
-        var listRes = gw.getModels(GetModelsRequest.builder().apiId(wsApiId).build());
+        GetModelsResponse listRes = gw.getModels(GetModelsRequest.builder().apiId(wsApiId).build());
         assertThat(listRes.items()).extracting(Model::modelId).contains(modelId);
 
         // Update (merge-patch)
-        var updateRes = gw.updateModel(UpdateModelRequest.builder()
+        UpdateModelResponse updateRes = gw.updateModel(UpdateModelRequest.builder()
                 .apiId(wsApiId).modelId(modelId)
                 .description("updated description")
                 .build());
@@ -431,13 +431,13 @@ class ApiGatewayV2WebSocketAndExtendedOpsTest {
     @DisplayName("Create API with tags, TagResource, UntagResource, GetTags")
     void tagging() {
         // Create API with initial tags
-        var createRes = gw.createApi(CreateApiRequest.builder()
+        CreateApiResponse createRes = gw.createApi(CreateApiRequest.builder()
                 .name(TestFixtures.uniqueName("tag-java"))
                 .protocolType(ProtocolType.HTTP)
                 .tags(Map.of("initial", "tag"))
                 .build());
         String tagApiId = createRes.apiId();
-        String arn = "arn:aws:apigateway:us-east-1::/apis/" + tagApiId;
+        String arn = TestFixtures.arn("apigateway", "", "/apis/" + tagApiId);
 
         try {
             // Verify tags on create
@@ -449,7 +449,7 @@ class ApiGatewayV2WebSocketAndExtendedOpsTest {
                     .tags(Map.of("env", "production", "team", "platform"))
                     .build());
 
-            var tags = gw.getTags(GetTagsRequest.builder().resourceArn(arn).build()).tags();
+            Map<String, String> tags = gw.getTags(GetTagsRequest.builder().resourceArn(arn).build()).tags();
             assertThat(tags).containsEntry("initial", "tag");
             assertThat(tags).containsEntry("env", "production");
             assertThat(tags).containsEntry("team", "platform");
@@ -460,7 +460,7 @@ class ApiGatewayV2WebSocketAndExtendedOpsTest {
                     .tagKeys("initial", "team")
                     .build());
 
-            var tagsAfter = gw.getTags(GetTagsRequest.builder().resourceArn(arn).build()).tags();
+            Map<String, String> tagsAfter = gw.getTags(GetTagsRequest.builder().resourceArn(arn).build()).tags();
             assertThat(tagsAfter).containsEntry("env", "production");
             assertThat(tagsAfter).doesNotContainKey("initial");
             assertThat(tagsAfter).doesNotContainKey("team");
@@ -473,15 +473,15 @@ class ApiGatewayV2WebSocketAndExtendedOpsTest {
     @Test @Order(91)
     @DisplayName("GetTags on API with no tags returns empty map")
     void getTagsEmpty() {
-        var createRes = gw.createApi(CreateApiRequest.builder()
+        CreateApiResponse createRes = gw.createApi(CreateApiRequest.builder()
                 .name(TestFixtures.uniqueName("notag-java"))
                 .protocolType(ProtocolType.HTTP)
                 .build());
         String noTagApiId = createRes.apiId();
-        String arn = "arn:aws:apigateway:us-east-1::/apis/" + noTagApiId;
+        String arn = TestFixtures.arn("apigateway", "", "/apis/" + noTagApiId);
 
         try {
-            var tags = gw.getTags(GetTagsRequest.builder().resourceArn(arn).build()).tags();
+            Map<String, String> tags = gw.getTags(GetTagsRequest.builder().resourceArn(arn).build()).tags();
             assertThat(tags).isEmpty();
         } finally {
             safeDelete(() -> gw.deleteApi(DeleteApiRequest.builder().apiId(noTagApiId).build()));
@@ -492,7 +492,7 @@ class ApiGatewayV2WebSocketAndExtendedOpsTest {
     @DisplayName("TagResource on non-existent API returns 404")
     void tagResourceNotFound() {
         assertThatThrownBy(() -> gw.tagResource(TagResourceRequest.builder()
-                .resourceArn("arn:aws:apigateway:us-east-1::/apis/nonexistent999")
+                .resourceArn(TestFixtures.arn("apigateway", "", "/apis/nonexistent999"))
                 .tags(Map.of("k", "v"))
                 .build()))
                 .isInstanceOf(NotFoundException.class);

@@ -10,6 +10,7 @@ import org.junit.jupiter.api.MethodOrderer;
 import org.junit.jupiter.api.Order;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.TestMethodOrder;
+import org.junit.jupiter.api.parallel.Isolated;
 import software.amazon.awssdk.services.cognitoidentityprovider.CognitoIdentityProviderClient;
 import software.amazon.awssdk.services.cognitoidentityprovider.model.AdminGetUserResponse;
 import software.amazon.awssdk.services.cognitoidentityprovider.model.AttributeType;
@@ -35,6 +36,7 @@ import static org.assertj.core.api.Assertions.assertThat;
  * Compatibility tests for Cognito ConfirmSignUp verified attribute updates (Issue #1654).
  */
 @TestMethodOrder(MethodOrderer.OrderAnnotation.class)
+@Isolated("Clears the shared SES and SNS inspection stores")
 class CognitoConfirmSignUpVerificationTest {
 
     private static final ObjectMapper JSON = new ObjectMapper();
@@ -195,8 +197,9 @@ class CognitoConfirmSignUpVerificationTest {
     }
 
     private static String fetchVerificationCodeFromSes(String recipient) throws Exception {
-        URI uri = TestFixtures.endpoint()
-                .resolve("/_aws/ses?email=" + URLEncoder.encode(recipient, StandardCharsets.UTF_8));
+        // The mailbox's email parameter filters by message source, so the message sent to the
+        // recipient is picked out of the full list.
+        URI uri = TestFixtures.endpoint().resolve("/_aws/ses");
 
         HttpResponse<String> resp = HTTP.send(
                 HttpRequest.newBuilder()
@@ -207,13 +210,24 @@ class CognitoConfirmSignUpVerificationTest {
                 HttpResponse.BodyHandlers.ofString()
         );
 
-        JsonNode messages = JSON.readTree(resp.body()).path("messages");
-        assertThat(messages.isArray() && !messages.isEmpty())
+        JsonNode message = firstMessageTo(JSON.readTree(resp.body()).path("messages"), recipient);
+        assertThat(message)
                 .as("SES should have received a verification email for %s", recipient)
-                .isTrue();
+                .isNotNull();
 
-        String body = messages.get(0).path("Body").path("text_part").asText();
+        String body = message.path("Body").path("text_part").asText();
         return extractSixDigitCode(body);
+    }
+
+    private static JsonNode firstMessageTo(JsonNode messages, String recipient) {
+        for (JsonNode message : messages) {
+            for (JsonNode to : message.path("Destination").path("ToAddresses")) {
+                if (recipient.equals(to.asText())) {
+                    return message;
+                }
+            }
+        }
+        return null;
     }
 
     private static String fetchVerificationCodeFromSns(String phoneNumber) throws Exception {

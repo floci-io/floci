@@ -36,10 +36,14 @@ The block below mirrors `src/main/resources/application.yml`, it's the effective
 
 ```yaml
 floci:
-  base-url: "http://localhost:4566"  # Used to build response URLs (SQS QueueUrl, SNS endpoints, etc.)
+  base-url: "http://localhost:4566"  # Used to build response URLs (SQS QueueUrl unless sqs.endpoint-strategy is aws, SNS endpoints, etc.)
   # hostname: ""                     # When set, overrides the host in base-url for multi-container Docker
-  default-region: us-east-1
+  default-region: us-east-1           # Also selects the partition (cn-north-1 -> aws-cn)
   default-account-id: "000000000000"
+  partitions:
+    # id: aws                         # Pin the partition explicitly; derived from default-region when unset
+    strict: false                     # true rejects services AWS does not publish in the request's partition
+    allow-unknown-regions: false      # true serves a scope region no partition publishes or matches by pattern
 
   storage:
     mode: memory                      # memory | persistent | hybrid | wal
@@ -55,6 +59,8 @@ floci:
       # mount-user: "1001:1001"    # PosixUser: run mounting containers as uid[:gid]
       # mount-group-add: 2000      # supplementary gid added to mounting containers
     wal:
+      # Also the cadence at which journaled stores under persistent mode (CloudWatch Logs events and
+      # metric datapoints, the S3 object index) fold their .wal file into the store's JSON file.
       compaction-interval-ms: 30000
     services:
       ssm:
@@ -66,7 +72,7 @@ floci:
       lambda:
         flush-interval-ms: 5000
       cloudwatchlogs:
-        flush-interval-ms: 5000
+        flush-interval-ms: 15000
       cloudwatchmetrics:
         flush-interval-ms: 5000
       secretsmanager:
@@ -87,8 +93,18 @@ floci:
     # extra-suffixes:
     #   - localhost.localstack.cloud
 
+    # Transparent endpoint injection: resolve every AWS partition's DNS and dual-stack
+    # suffix (amazonaws.com, api.aws, amazonaws.eu, amazonaws.com.cn and the rest; see
+    # environment-variables.md for the full list) and every subdomain to Floci's
+    # container IP inside spawned containers, so SDK clients built with explicit
+    # real-AWS endpoints (which override AWS_ENDPOINT_URL) land on the emulator.
+    # Live suffixes like api.aws and amazonaws.eu resolve to Floci while this is on.
+    # Combine with tls.enabled for clients that hardcode https://.
+    # Via env var: FLOCI_DNS_SPOOF_AWS_ENDPOINTS=true
+    spoof-aws-endpoints: false
+
   auth:
-    validate-signatures: false               # Set to true to verify S3 presigned URL signatures
+    validate-signatures: false               # Set to true to verify SigV4 signatures for every service (S3: header, presigned URL, presigned POST; others: header)
     presign-secret: local-emulator-secret    # HMAC secret for S3 pre-signed URL verification
 
   tls:
@@ -104,6 +120,8 @@ floci:
     log-max-size: "10m"                      # Max size per container log file before rotation
     log-max-file: "3"                        # Number of rotated log files to retain
     docker-host: unix:///var/run/docker.sock # Docker daemon socket (shared by Lambda, RDS, ElastiCache)
+    max-connections: 1024                    # Docker client connection pool; each live Lambda container holds 1
+    streaming-max-connections: 512           # Separate pool for container log-follow streams
     docker-config-path: ""                   # Path to dir containing Docker's config.json (e.g. /root/.docker)
     registry-credentials: []                 # Per-registry explicit credentials for private registries
 
@@ -115,15 +133,24 @@ floci:
     sqs:
       enabled: true
       default-visibility-timeout: 30         # Seconds
-      max-message-size: 1048576              # Bytes (1 MB)
+      max-message-size: 1048576              # Bytes (1 MiB, the AWS maximum)
       clear-fifo-deduplication-cache-on-purge: false  # When true, PurgeQueue clears SQS FIFO dedup and SNS FIFO topic dedup for topics subscribed to that queue
+      receipt-handle-secret: local-emulator-secret  # HMAC secret that signs receipt handles
+      cloudwatch-metrics-enabled: true       # Publish AWS/SQS queue metrics to CloudWatch once a minute
+      endpoint-strategy: floci               # QueueUrl shape: floci is <base-url>/<account>/<name>, aws is https://sqs.<region>.<dns-suffix>/<account>/<name>
 
     s3:
       enabled: true
       default-presign-expiry-seconds: 3600
+      lifecycle-sweep-enabled: true            # Apply bucket lifecycle expiration rules in the background
+      lifecycle-sweep-interval-seconds: 60     # Seconds between lifecycle sweeps
 
     dynamodb:
       enabled: true
+      backend: native                         # native | local (forward calls to DynamoDB Local)
+      # local-endpoint: http://dynamodb-local:8000  # DynamoDB Local base URL, required when backend is local
+      local-connect-timeout-seconds: 2        # Seconds to wait for a connection to DynamoDB Local
+      local-request-timeout-seconds: 10       # Seconds to wait for DynamoDB Local to answer a forwarded request
 
     sns:
       enabled: true
@@ -131,7 +158,10 @@ floci:
     lambda:
       enabled: true
       ephemeral: false                        # true = remove container after each invocation
+      docker-flags: ""                        # Extra Docker create flags for Lambda containers
       ecr-base-uri: public.ecr.aws            # Registry for Lambda runtime images (legacy: floci.ecr-base-uri / FLOCI_ECR_BASE_URI)
+      runtime-images:                         # Optional per-runtime image references
+        "python3.12": "registry.example/lambda-python:3.12"
       honour-architectures: false             # true = select the declared Lambda Docker architecture
       default-memory-mb: 128
       default-timeout-seconds: 3
@@ -140,7 +170,11 @@ floci:
       code-path: ./data/lambda-code           # Where ZIP archives are stored
       zip-max-entries: 100000                  # Maximum ZIP entries extracted per deployment package
       poll-interval-ms: 1000
+      async-retry-delay-seconds: 60           # Wait before the first retry of a failed Event invocation; the second waits twice this
       container-idle-timeout-seconds: 300     # Remove idle containers after this
+      init-timeout-seconds: 10                # Time a cold runtime has to request its first invocation; the function's Timeout wins when longer
+      # warm-pool-max-per-function:           # Idle containers kept per function (default max(4, cpus))
+      warm-pool-max-total: 0                  # Idle containers kept across all functions; 0 = unbounded
       region-concurrency-limit: 1000          # Concurrent executions ceiling per region
       unreserved-concurrency-min: 100         # Minimum unreserved capacity PutFunctionConcurrency must leave
       hot-reload:
@@ -148,6 +182,9 @@ floci:
         # allowed-paths:                      # Optional allowlist of host paths that may be bind-mounted
         #   - /home/user/projects
         #   - /tmp
+      reactive-s3-sync:
+        enabled: true                         # Re-deploy a function when the S3 object it was deployed from is overwritten
+        async: false                          # true = re-deploy in the background so the upload does not wait
 
     apigateway:
       enabled: true
@@ -186,10 +223,12 @@ floci:
       # default-postgres-image: "registry.example.com/postgres:16-alpine"
       # default-mysql-image: "registry.example.com/mysql:8.0"
       # default-mariadb-image: "registry.example.com/mariadb:11"
+      default-sql-server-image: "mcr.microsoft.com/mssql/server:2022-latest"
 
     rds-data:
       enabled: true
       transaction-ttl-seconds: 180
+      database-resuming-exception-enabled: false
 
     eventbridge:
       enabled: true
@@ -200,6 +239,7 @@ floci:
     cloudwatchlogs:
       enabled: true
       max-events-per-query: 10000
+      max-stored-events: 20000   # per account; oldest events are evicted once the store exceeds this
 
     cloudwatchmetrics:
       enabled: true
@@ -216,12 +256,18 @@ floci:
 
     cognito:
       enabled: true
+      enforce-token-validity-limits: true  # Reject app clients whose token validity is outside AWS's limits; false allows shorter tokens
 
     stepfunctions:
       enabled: true
 
     cloudformation:
       enabled: true
+
+    cloudcontrol:
+      enabled: true
+      create-worker-threads: 4                # Threads that run CreateResource provisioning
+      create-queue-capacity: 64               # Creates that may wait for a thread before ThrottlingException
 
     acm:
       enabled: true
@@ -253,6 +299,12 @@ floci:
     ecs:
       enabled: true
       mock: false                             # true = tasks go to RUNNING without Docker (useful for CI)
+      docker-network: floci-net               # required for task-role credentials; must be user-defined
+      image-pull-behavior: default            # as ECS_IMAGE_PULL_BEHAVIOR: default | always | once | prefer-cached
+      task-role-credentials:
+        enabled: false                        # vend real task IAM role credentials to task containers
+        ttl-seconds: 21600                    # six hours, matching AWS
+        port: 51679                           # Floci-side port; containers always use 169.254.170.2:80
 
     appsync:
       enabled: true
@@ -270,7 +322,7 @@ floci:
       enabled: true
       registry-image: "registry:2"
       registry-container-name: floci-ecr-registry
-      registry-base-port: 5100
+      registry-base-port: 5100              # private loopback backing port range
       registry-max-port: 5199
       data-path: ./data/ecr
       tls-enabled: false
@@ -294,19 +346,28 @@ All keys in this table are declared on `EmulatorConfig` and accept environment v
 | `FLOCI_DEFAULT_AVAILABILITY_ZONE`                  | `us-east-1a`     | Default AZ reported by EC2, RDS, and other AZ-aware services  |
 | `FLOCI_DEFAULT_ACCOUNT_ID`                         | `000000000000`   | Default AWS account ID used in ARNs                           |
 | `FLOCI_SERVICES_LAMBDA_ECR_BASE_URI`               | `public.ecr.aws` | Registry used when pulling Lambda runtime images (legacy: `FLOCI_ECR_BASE_URI`) |
+| `FLOCI_SERVICES_LAMBDA_RUNTIME_IMAGES__PYTHON3_12__` | *(unset)* | Image reference for `python3.12`; double underscores quote the dotted runtime key |
 | `FLOCI_DNS_EXTRA_SUFFIXES`                         | *(unset)*        | Comma-separated extra hostname suffixes the embedded DNS server resolves to Floci's container IP. E.g. `localhost.localstack.cloud,localhost.example.internal` |
 | `FLOCI_SERVICES_SSM_MAX_PARAMETER_HISTORY`         | `5`              | Max parameter versions kept                                   |
 | `FLOCI_SERVICES_SQS_DEFAULT_VISIBILITY_TIMEOUT`    | `30`             | Default visibility timeout (seconds)                          |
 | `FLOCI_SERVICES_SQS_MAX_MESSAGE_SIZE`              | `1048576`        | Max message size (bytes)                                      |
 | `FLOCI_SERVICES_SQS_CLEAR_FIFO_DEDUPLICATION_CACHE_ON_PURGE` | `false` | When `true`, `PurgeQueue` clears the FIFO 5-minute deduplication cache for the target queue and matching SNS FIFO topic dedup entries |
+| `FLOCI_SERVICES_SQS_RECEIPT_HANDLE_SECRET` | `local-emulator-secret` | HMAC secret that signs receipt handles, so a handle that was edited or built by hand is rejected |
+| `FLOCI_SERVICES_SQS_ENDPOINT_STRATEGY` | `floci` | Shape of the returned `QueueUrl`. `floci` gives `<FLOCI_BASE_URL>/<account>/<name>` and `aws` gives `https://sqs.<region>.<dns-suffix>/<account>/<name>`. Both forms are accepted as input |
+| `FLOCI_SERVICES_SQS_CLOUDWATCH_METRICS_ENABLED` | `true` | Publish the `AWS/SQS` metrics of active queues to CloudWatch once a minute |
 | `FLOCI_SERVICES_S3_DEFAULT_PRESIGN_EXPIRY_SECONDS` | `3600`           | Pre-signed URL expiry                                         |
 | `FLOCI_SERVICES_DOCKER_NETWORK`                    | *(unset)*        | Shared Docker network for Lambda, RDS, ElastiCache containers |
 | `FLOCI_SERVICES_RDS_DATA_ENABLED`                  | `true`           | Enable the RDS Data API service                               |
 | `FLOCI_SERVICES_RDS_DATA_TRANSACTION_TTL_SECONDS`  | `180`            | Idle timeout, in seconds, before leaked RDS Data API transactions expire |
+| `FLOCI_SERVICES_RDS_DATA_DATABASE_RESUMING_EXCEPTION_ENABLED` | `false` | Return HTTP 400 `DatabaseResumingException` during Aurora resume instead of waiting |
 | `FLOCI_SERVICES_ECS_MOCK`                          | `false`          | Skip Docker; tasks go straight to RUNNING (useful for CI)     |
 | `FLOCI_SERVICES_ECS_DOCKER_NETWORK`                | *(unset)*        | Docker network for ECS task containers                        |
 | `FLOCI_SERVICES_ECS_DEFAULT_MEMORY_MB`             | `512`            | Default memory (MB) when task definition omits it             |
 | `FLOCI_SERVICES_ECS_DEFAULT_CPU_UNITS`             | `256`            | Default CPU units when task definition omits it               |
+| `FLOCI_SERVICES_ECS_HOST_VOLUME_ROOTS`             | *(unset)*        | Comma-separated allowlist of parent directories for host volume bind mounts and container devices; by default (unset, and `ALLOW_UNSAFE_HOST_VOLUMES=false`) every host volume `sourcePath` and device `hostPath` is rejected |
+| `FLOCI_SERVICES_ECS_ALLOW_UNSAFE_HOST_VOLUMES`     | `false`          | Allow any host path, bypassing the host-volume-roots allowlist (traversal, bare root, and the Docker socket or an ancestor directory of it are still always rejected) |
+| `FLOCI_SERVICES_ECS_RECONCILE_CONTAINERS_ON_STARTUP` | `true`         | Remove the ECS containers a previous run of this Floci left on the daemon before replacement tasks start |
+| `FLOCI_SERVICES_ECS_IMAGE_PULL_BEHAVIOR`           | `default`        | How task images are pulled at launch, as the ECS agent's `ECS_IMAGE_PULL_BEHAVIOR`: `default`, `always`, `once` or `prefer-cached` |
 | `FLOCI_SERVICES_IAM_ENFORCEMENT_ENABLED`           | `false`          | Enforce IAM identity-based policies on every request when `true` |
 | `FLOCI_SERVICES_OPENSEARCH_MOCK`                   | `false`          | Skip Docker; domains appear active immediately (useful for CI)   |
 | `FLOCI_SERVICES_OPENSEARCH_KEEP_RUNNING_ON_SHUTDOWN` | `false`        | Leave OpenSearch containers running after Floci stops            |
@@ -356,10 +417,10 @@ Floci ships with `quarkus.log.min-level: TRACE`, so raising a single category to
 
 ```bash
 # SQS: log SendMessage/ReceiveMessage/DeleteMessage bodies and attributes
-QUARKUS_LOG_CATEGORY__IO_GITHUB_HECTORVENT_FLOCI_SERVICES_SQS__LEVEL=TRACE
+QUARKUS_LOG_CATEGORY__IO_FLOCI_AWS_SERVICES_SQS__LEVEL=TRACE
 
 # DynamoDB: log PutItem/GetItem/UpdateItem/DeleteItem items, Query/Scan counts
-QUARKUS_LOG_CATEGORY__IO_GITHUB_HECTORVENT_FLOCI_SERVICES_DYNAMODB__LEVEL=TRACE
+QUARKUS_LOG_CATEGORY__IO_FLOCI_AWS_SERVICES_DYNAMODB__LEVEL=TRACE
 ```
 
 **Or in `application.yml`:**
@@ -368,9 +429,9 @@ QUARKUS_LOG_CATEGORY__IO_GITHUB_HECTORVENT_FLOCI_SERVICES_DYNAMODB__LEVEL=TRACE
 quarkus:
   log:
     category:
-      "io.github.hectorvent.floci.services.sqs":
+      "io.floci.aws.services.sqs":
         level: TRACE
-      "io.github.hectorvent.floci.services.dynamodb":
+      "io.floci.aws.services.dynamodb":
         level: TRACE
 ```
 
@@ -379,7 +440,7 @@ quarkus:
 ```java
 new GenericContainer<>("floci/floci:latest")
     .withExposedPorts(4566)
-    .withEnv("QUARKUS_LOG_CATEGORY__IO_GITHUB_HECTORVENT_FLOCI_SERVICES_SQS__LEVEL", "TRACE");
+    .withEnv("QUARKUS_LOG_CATEGORY__IO_FLOCI_AWS_SERVICES_SQS__LEVEL", "TRACE");
 ```
 
 TRACE output includes the payload alongside the existing DEBUG line:

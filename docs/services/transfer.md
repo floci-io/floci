@@ -111,5 +111,6 @@ aws transfer delete-server --server-id s-01234567890abcdef
 ## Notes
 
 - **Phase 1** covers the management-plane API only. Data-plane SFTP connectivity (actual file transfer) is not emulated.
+- CloudFormation provisions `AWS::Transfer::Server` through the management-plane service. `Ref` returns the server ARN; `Fn::GetAtt` exposes `Arn`, `ServerId`, and `State`. AS2 managed egress IP allocation is not modeled, so `As2ServiceManagedEgressIpAddresses` is not exposed. CloudFormation also provisions `AWS::Transfer::User`: `Ref` returns the user ARN, `Fn::GetAtt` exposes `Arn` (the only attribute the registry schema declares), `Policy` and `PosixProfile` fail explicitly, and a `ServerId` or `UserName` change replaces the user. Server properties not supported by the management-plane implementation fail explicitly. Changing `Domain` requires replacement, which is not yet supported. `IdentityProviderType` changes are also not supported by Floci, although AWS supports updating that property without replacement.
 - Server `EndpointType` defaults to `PUBLIC`. The `State` field transitions between `ONLINE` and `OFFLINE` via `StartServer` / `StopServer`.
 - SSH key bodies are stored and returned as-is; no cryptographic validation is performed.

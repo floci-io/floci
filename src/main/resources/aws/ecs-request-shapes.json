@@ -1,0 +1,2903 @@
+{
+  "_source": {
+    "generator": "tools/aws/regen_ecs_shapes.py",
+    "botocore": "botocore 1.43.118 (local/aws/botocore)"
+  },
+  "operations": {
+    "AssociateGatewayWithCluster": "AssociateGatewayWithClusterRequest",
+    "ContinueServiceDeployment": "ContinueServiceDeploymentRequest",
+    "CreateCapacityProvider": "CreateCapacityProviderRequest",
+    "CreateCluster": "CreateClusterRequest",
+    "CreateDaemon": "CreateDaemonRequest",
+    "CreateExpressGatewayService": "CreateExpressGatewayServiceRequest",
+    "CreateGateway": "CreateGatewayRequest",
+    "CreateService": "CreateServiceRequest",
+    "CreateTaskSet": "CreateTaskSetRequest",
+    "DeleteAccountSetting": "DeleteAccountSettingRequest",
+    "DeleteAttributes": "DeleteAttributesRequest",
+    "DeleteCapacityProvider": "DeleteCapacityProviderRequest",
+    "DeleteCluster": "DeleteClusterRequest",
+    "DeleteDaemon": "DeleteDaemonRequest",
+    "DeleteDaemonTaskDefinition": "DeleteDaemonTaskDefinitionRequest",
+    "DeleteExpressGatewayService": "DeleteExpressGatewayServiceRequest",
+    "DeleteGateway": "DeleteGatewayRequest",
+    "DeleteService": "DeleteServiceRequest",
+    "DeleteTaskDefinitions": "DeleteTaskDefinitionsRequest",
+    "DeleteTaskSet": "DeleteTaskSetRequest",
+    "DeregisterContainerInstance": "DeregisterContainerInstanceRequest",
+    "DeregisterTaskDefinition": "DeregisterTaskDefinitionRequest",
+    "DescribeCapacityProviders": "DescribeCapacityProvidersRequest",
+    "DescribeClusters": "DescribeClustersRequest",
+    "DescribeContainerInstances": "DescribeContainerInstancesRequest",
+    "DescribeDaemon": "DescribeDaemonRequest",
+    "DescribeDaemonDeployments": "DescribeDaemonDeploymentsRequest",
+    "DescribeDaemonRevisions": "DescribeDaemonRevisionsRequest",
+    "DescribeDaemonTaskDefinition": "DescribeDaemonTaskDefinitionRequest",
+    "DescribeExpressGatewayService": "DescribeExpressGatewayServiceRequest",
+    "DescribeGateway": "DescribeGatewayRequest",
+    "DescribeGatewayResources": "DescribeGatewayResourcesRequest",
+    "DescribeGatewayRoute": "DescribeGatewayRouteRequest",
+    "DescribeServiceDeployments": "DescribeServiceDeploymentsRequest",
+    "DescribeServiceRevisions": "DescribeServiceRevisionsRequest",
+    "DescribeServices": "DescribeServicesRequest",
+    "DescribeTaskDefinition": "DescribeTaskDefinitionRequest",
+    "DescribeTaskSets": "DescribeTaskSetsRequest",
+    "DescribeTasks": "DescribeTasksRequest",
+    "DisassociateGatewayFromCluster": "DisassociateGatewayFromClusterRequest",
+    "DiscoverPollEndpoint": "DiscoverPollEndpointRequest",
+    "ExecuteCommand": "ExecuteCommandRequest",
+    "GetTaskProtection": "GetTaskProtectionRequest",
+    "ListAccountSettings": "ListAccountSettingsRequest",
+    "ListAttributes": "ListAttributesRequest",
+    "ListClusters": "ListClustersRequest",
+    "ListContainerInstances": "ListContainerInstancesRequest",
+    "ListDaemonDeployments": "ListDaemonDeploymentsRequest",
+    "ListDaemonTaskDefinitions": "ListDaemonTaskDefinitionsRequest",
+    "ListDaemons": "ListDaemonsRequest",
+    "ListGatewayClusterAssociations": "ListGatewayClusterAssociationsRequest",
+    "ListGatewayRoutes": "ListGatewayRoutesRequest",
+    "ListGateways": "ListGatewaysRequest",
+    "ListServiceDeployments": "ListServiceDeploymentsRequest",
+    "ListServices": "ListServicesRequest",
+    "ListServicesByNamespace": "ListServicesByNamespaceRequest",
+    "ListTagsForResource": "ListTagsForResourceRequest",
+    "ListTaskDefinitionFamilies": "ListTaskDefinitionFamiliesRequest",
+    "ListTaskDefinitions": "ListTaskDefinitionsRequest",
+    "ListTasks": "ListTasksRequest",
+    "PutAccountSetting": "PutAccountSettingRequest",
+    "PutAccountSettingDefault": "PutAccountSettingDefaultRequest",
+    "PutAttributes": "PutAttributesRequest",
+    "PutClusterCapacityProviders": "PutClusterCapacityProvidersRequest",
+    "RegisterContainerInstance": "RegisterContainerInstanceRequest",
+    "RegisterDaemonTaskDefinition": "RegisterDaemonTaskDefinitionRequest",
+    "RegisterTaskDefinition": "RegisterTaskDefinitionRequest",
+    "RunTask": "RunTaskRequest",
+    "StartTask": "StartTaskRequest",
+    "StopServiceDeployment": "StopServiceDeploymentRequest",
+    "StopTask": "StopTaskRequest",
+    "SubmitAttachmentStateChanges": "SubmitAttachmentStateChangesRequest",
+    "SubmitContainerStateChange": "SubmitContainerStateChangeRequest",
+    "SubmitTaskStateChange": "SubmitTaskStateChangeRequest",
+    "TagResource": "TagResourceRequest",
+    "UntagResource": "UntagResourceRequest",
+    "UpdateCapacityProvider": "UpdateCapacityProviderRequest",
+    "UpdateCluster": "UpdateClusterRequest",
+    "UpdateClusterSettings": "UpdateClusterSettingsRequest",
+    "UpdateContainerAgent": "UpdateContainerAgentRequest",
+    "UpdateContainerInstancesState": "UpdateContainerInstancesStateRequest",
+    "UpdateDaemon": "UpdateDaemonRequest",
+    "UpdateExpressGatewayService": "UpdateExpressGatewayServiceRequest",
+    "UpdateGateway": "UpdateGatewayRequest",
+    "UpdateService": "UpdateServiceRequest",
+    "UpdateServicePrimaryTaskSet": "UpdateServicePrimaryTaskSetRequest",
+    "UpdateTaskProtection": "UpdateTaskProtectionRequest",
+    "UpdateTaskSet": "UpdateTaskSetRequest"
+  },
+  "shapes": {
+    "AcceleratorCountRequest": {
+      "type": "structure",
+      "members": {
+        "min": "BoxedInteger",
+        "max": "BoxedInteger"
+      }
+    },
+    "AcceleratorManufacturer": {
+      "type": "string"
+    },
+    "AcceleratorManufacturerSet": {
+      "type": "list",
+      "member": "AcceleratorManufacturer"
+    },
+    "AcceleratorName": {
+      "type": "string"
+    },
+    "AcceleratorNameSet": {
+      "type": "list",
+      "member": "AcceleratorName"
+    },
+    "AcceleratorTotalMemoryMiBRequest": {
+      "type": "structure",
+      "members": {
+        "min": "BoxedInteger",
+        "max": "BoxedInteger"
+      }
+    },
+    "AcceleratorType": {
+      "type": "string"
+    },
+    "AcceleratorTypeSet": {
+      "type": "list",
+      "member": "AcceleratorType"
+    },
+    "AccessType": {
+      "type": "string"
+    },
+    "AccessTypeList": {
+      "type": "list",
+      "member": "AccessType"
+    },
+    "AdvancedConfiguration": {
+      "type": "structure",
+      "members": {
+        "alternateTargetGroupArn": "String",
+        "productionListenerRule": "String",
+        "testListenerRule": "String",
+        "roleArn": "String"
+      }
+    },
+    "AllowedInstanceType": {
+      "type": "string"
+    },
+    "AllowedInstanceTypeSet": {
+      "type": "list",
+      "member": "AllowedInstanceType"
+    },
+    "ApplicationProtocol": {
+      "type": "string"
+    },
+    "AssignPublicIp": {
+      "type": "string"
+    },
+    "AssociateGatewayWithClusterRequest": {
+      "type": "structure",
+      "members": {
+        "gateway": "String",
+        "cluster": "String"
+      }
+    },
+    "AttachmentStateChange": {
+      "type": "structure",
+      "members": {
+        "attachmentArn": "String",
+        "status": "String"
+      }
+    },
+    "AttachmentStateChanges": {
+      "type": "list",
+      "member": "AttachmentStateChange"
+    },
+    "Attribute": {
+      "type": "structure",
+      "members": {
+        "name": "String",
+        "value": "String",
+        "targetType": "TargetType",
+        "targetId": "String"
+      }
+    },
+    "Attributes": {
+      "type": "list",
+      "member": "Attribute"
+    },
+    "AutoRepairActionsStatus": {
+      "type": "string"
+    },
+    "AutoRepairConfiguration": {
+      "type": "structure",
+      "members": {
+        "actionsStatus": "AutoRepairActionsStatus"
+      }
+    },
+    "AutoScalingGroupProvider": {
+      "type": "structure",
+      "members": {
+        "autoScalingGroupArn": "String",
+        "managedScaling": "ManagedScaling",
+        "managedTerminationProtection": "ManagedTerminationProtection",
+        "managedDraining": "ManagedDraining"
+      }
+    },
+    "AutoScalingGroupProviderUpdate": {
+      "type": "structure",
+      "members": {
+        "managedScaling": "ManagedScaling",
+        "managedTerminationProtection": "ManagedTerminationProtection",
+        "managedDraining": "ManagedDraining"
+      }
+    },
+    "AvailabilityZoneRebalancing": {
+      "type": "string"
+    },
+    "AwsVpcConfiguration": {
+      "type": "structure",
+      "members": {
+        "subnets": "StringList",
+        "securityGroups": "StringList",
+        "assignPublicIp": "AssignPublicIp"
+      }
+    },
+    "BareMetal": {
+      "type": "string"
+    },
+    "BaselineEbsBandwidthMbpsRequest": {
+      "type": "structure",
+      "members": {
+        "min": "BoxedInteger",
+        "max": "BoxedInteger"
+      }
+    },
+    "Boolean": {
+      "type": "boolean"
+    },
+    "BoxedBoolean": {
+      "type": "boolean"
+    },
+    "BoxedDouble": {
+      "type": "double"
+    },
+    "BoxedInteger": {
+      "type": "integer"
+    },
+    "BurstablePerformance": {
+      "type": "string"
+    },
+    "CPUArchitecture": {
+      "type": "string"
+    },
+    "CanaryConfiguration": {
+      "type": "structure",
+      "members": {
+        "canaryPercent": "Double",
+        "canaryBakeTimeInMinutes": "Integer"
+      }
+    },
+    "CapacityOptionType": {
+      "type": "string"
+    },
+    "CapacityProviderField": {
+      "type": "string"
+    },
+    "CapacityProviderFieldList": {
+      "type": "list",
+      "member": "CapacityProviderField"
+    },
+    "CapacityProviderStrategy": {
+      "type": "list",
+      "member": "CapacityProviderStrategyItem"
+    },
+    "CapacityProviderStrategyItem": {
+      "type": "structure",
+      "members": {
+        "capacityProvider": "String",
+        "weight": "CapacityProviderStrategyItemWeight",
+        "base": "CapacityProviderStrategyItemBase"
+      }
+    },
+    "CapacityProviderStrategyItemBase": {
+      "type": "integer"
+    },
+    "CapacityProviderStrategyItemWeight": {
+      "type": "integer"
+    },
+    "CapacityReservationPreference": {
+      "type": "string"
+    },
+    "CapacityReservationRequest": {
+      "type": "structure",
+      "members": {
+        "reservationGroupArn": "String",
+        "reservationPreference": "CapacityReservationPreference"
+      }
+    },
+    "ClusterConfiguration": {
+      "type": "structure",
+      "members": {
+        "executeCommandConfiguration": "ExecuteCommandConfiguration",
+        "managedStorageConfiguration": "ManagedStorageConfiguration"
+      }
+    },
+    "ClusterField": {
+      "type": "string"
+    },
+    "ClusterFieldList": {
+      "type": "list",
+      "member": "ClusterField"
+    },
+    "ClusterServiceConnectDefaultsRequest": {
+      "type": "structure",
+      "members": {
+        "namespace": "String"
+      }
+    },
+    "ClusterSetting": {
+      "type": "structure",
+      "members": {
+        "name": "ClusterSettingName",
+        "value": "String"
+      }
+    },
+    "ClusterSettingName": {
+      "type": "string"
+    },
+    "ClusterSettings": {
+      "type": "list",
+      "member": "ClusterSetting"
+    },
+    "Compatibility": {
+      "type": "string"
+    },
+    "CompatibilityList": {
+      "type": "list",
+      "member": "Compatibility"
+    },
+    "ContainerCondition": {
+      "type": "string"
+    },
+    "ContainerDefinition": {
+      "type": "structure",
+      "members": {
+        "name": "String",
+        "image": "String",
+        "repositoryCredentials": "RepositoryCredentials",
+        "cpu": "Integer",
+        "memory": "BoxedInteger",
+        "memoryReservation": "BoxedInteger",
+        "links": "StringList",
+        "portMappings": "PortMappingList",
+        "essential": "BoxedBoolean",
+        "restartPolicy": "ContainerRestartPolicy",
+        "entryPoint": "StringList",
+        "command": "StringList",
+        "environment": "EnvironmentVariables",
+        "environmentFiles": "EnvironmentFiles",
+        "mountPoints": "MountPointList",
+        "volumesFrom": "VolumeFromList",
+        "linuxParameters": "LinuxParameters",
+        "secrets": "SecretList",
+        "dependsOn": "ContainerDependencies",
+        "startTimeout": "BoxedInteger",
+        "stopTimeout": "BoxedInteger",
+        "versionConsistency": "VersionConsistency",
+        "hostname": "String",
+        "user": "String",
+        "workingDirectory": "String",
+        "disableNetworking": "BoxedBoolean",
+        "privileged": "BoxedBoolean",
+        "readonlyRootFilesystem": "BoxedBoolean",
+        "dnsServers": "StringList",
+        "dnsSearchDomains": "StringList",
+        "extraHosts": "HostEntryList",
+        "dockerSecurityOptions": "StringList",
+        "interactive": "BoxedBoolean",
+        "pseudoTerminal": "BoxedBoolean",
+        "dockerLabels": "DockerLabelsMap",
+        "ulimits": "UlimitList",
+        "logConfiguration": "LogConfiguration",
+        "healthCheck": "HealthCheck",
+        "systemControls": "SystemControls",
+        "resourceRequirements": "ResourceRequirements",
+        "firelensConfiguration": "FirelensConfiguration",
+        "credentialSpecs": "StringList"
+      }
+    },
+    "ContainerDefinitions": {
+      "type": "list",
+      "member": "ContainerDefinition"
+    },
+    "ContainerDependencies": {
+      "type": "list",
+      "member": "ContainerDependency"
+    },
+    "ContainerDependency": {
+      "type": "structure",
+      "members": {
+        "containerName": "String",
+        "condition": "ContainerCondition"
+      }
+    },
+    "ContainerInstanceField": {
+      "type": "string"
+    },
+    "ContainerInstanceFieldList": {
+      "type": "list",
+      "member": "ContainerInstanceField"
+    },
+    "ContainerInstanceStatus": {
+      "type": "string"
+    },
+    "ContainerOverride": {
+      "type": "structure",
+      "members": {
+        "name": "String",
+        "command": "StringList",
+        "environment": "EnvironmentVariables",
+        "environmentFiles": "EnvironmentFiles",
+        "cpu": "BoxedInteger",
+        "memory": "BoxedInteger",
+        "memoryReservation": "BoxedInteger",
+        "resourceRequirements": "ResourceRequirements"
+      }
+    },
+    "ContainerOverrides": {
+      "type": "list",
+      "member": "ContainerOverride"
+    },
+    "ContainerRestartPolicy": {
+      "type": "structure",
+      "members": {
+        "enabled": "BoxedBoolean",
+        "ignoredExitCodes": "IntegerList",
+        "restartAttemptPeriod": "BoxedInteger"
+      }
+    },
+    "ContainerStateChange": {
+      "type": "structure",
+      "members": {
+        "containerName": "String",
+        "imageDigest": "String",
+        "runtimeId": "String",
+        "exitCode": "BoxedInteger",
+        "networkBindings": "NetworkBindings",
+        "reason": "String",
+        "status": "String"
+      }
+    },
+    "ContainerStateChanges": {
+      "type": "list",
+      "member": "ContainerStateChange"
+    },
+    "ContinueServiceDeploymentRequest": {
+      "type": "structure",
+      "members": {
+        "serviceDeploymentArn": "String",
+        "hookId": "String",
+        "action": "DeploymentLifecycleHookAction"
+      }
+    },
+    "CpuManufacturer": {
+      "type": "string"
+    },
+    "CpuManufacturerSet": {
+      "type": "list",
+      "member": "CpuManufacturer"
+    },
+    "CreateCapacityProviderRequest": {
+      "type": "structure",
+      "members": {
+        "name": "String",
+        "cluster": "String",
+        "autoScalingGroupProvider": "AutoScalingGroupProvider",
+        "managedInstancesProvider": "CreateManagedInstancesProviderConfiguration",
+        "tags": "Tags"
+      }
+    },
+    "CreateClusterRequest": {
+      "type": "structure",
+      "members": {
+        "clusterName": "String",
+        "tags": "Tags",
+        "settings": "ClusterSettings",
+        "configuration": "ClusterConfiguration",
+        "capacityProviders": "StringList",
+        "defaultCapacityProviderStrategy": "CapacityProviderStrategy",
+        "serviceConnectDefaults": "ClusterServiceConnectDefaultsRequest"
+      }
+    },
+    "CreateDaemonRequest": {
+      "type": "structure",
+      "members": {
+        "daemonName": "String",
+        "clusterArn": "String",
+        "daemonTaskDefinitionArn": "String",
+        "capacityProviderArns": "StringList",
+        "deploymentConfiguration": "DaemonDeploymentConfiguration",
+        "tags": "Tags",
+        "propagateTags": "DaemonPropagateTags",
+        "enableECSManagedTags": "Boolean",
+        "enableExecuteCommand": "Boolean",
+        "clientToken": "String",
+        "critical": "BoxedBoolean"
+      }
+    },
+    "CreateExpressGatewayServiceRequest": {
+      "type": "structure",
+      "members": {
+        "executionRoleArn": "String",
+        "infrastructureRoleArn": "String",
+        "serviceName": "String",
+        "cluster": "String",
+        "healthCheckPath": "String",
+        "primaryContainer": "ExpressGatewayContainer",
+        "taskRoleArn": "String",
+        "networkConfiguration": "ExpressGatewayServiceNetworkConfiguration",
+        "cpu": "String",
+        "memory": "String",
+        "cpuArchitecture": "ExpressCpuArchitecture",
+        "scalingTarget": "ExpressGatewayScalingTarget",
+        "tags": "Tags",
+        "taskDefinitionArn": "String"
+      }
+    },
+    "CreateGatewayRequest": {
+      "type": "structure",
+      "members": {
+        "name": "String",
+        "infrastructureRoleArn": "String",
+        "clientToken": "String",
+        "deletionProtection": "BoxedBoolean",
+        "configuration": "GatewayConfiguration",
+        "tags": "Tags",
+        "propagateTags": "PropagateGatewayTags"
+      }
+    },
+    "CreateManagedInstancesProviderConfiguration": {
+      "type": "structure",
+      "members": {
+        "infrastructureRoleArn": "String",
+        "instanceLaunchTemplate": "InstanceLaunchTemplate",
+        "propagateTags": "PropagateMITags",
+        "infrastructureOptimization": "InfrastructureOptimization",
+        "autoRepairConfiguration": "AutoRepairConfiguration"
+      }
+    },
+    "CreateServiceRequest": {
+      "type": "structure",
+      "members": {
+        "cluster": "String",
+        "serviceName": "String",
+        "taskDefinition": "String",
+        "availabilityZoneRebalancing": "AvailabilityZoneRebalancing",
+        "loadBalancers": "LoadBalancers",
+        "serviceRegistries": "ServiceRegistries",
+        "desiredCount": "BoxedInteger",
+        "clientToken": "String",
+        "launchType": "LaunchType",
+        "capacityProviderStrategy": "CapacityProviderStrategy",
+        "platformVersion": "String",
+        "role": "String",
+        "deploymentConfiguration": "DeploymentConfiguration",
+        "placementConstraints": "PlacementConstraints",
+        "placementStrategy": "PlacementStrategies",
+        "networkConfiguration": "NetworkConfiguration",
+        "healthCheckGracePeriodSeconds": "BoxedInteger",
+        "schedulingStrategy": "SchedulingStrategy",
+        "deploymentController": "DeploymentController",
+        "tags": "Tags",
+        "enableECSManagedTags": "Boolean",
+        "propagateTags": "PropagateTags",
+        "enableExecuteCommand": "Boolean",
+        "serviceConnectConfiguration": "ServiceConnectConfiguration",
+        "volumeConfigurations": "ServiceVolumeConfigurations",
+        "vpcLatticeConfigurations": "VpcLatticeConfigurations",
+        "gatewayConnectors": "GatewayConnectorList",
+        "monitoring": "MonitoringConfiguration"
+      }
+    },
+    "CreateTaskSetRequest": {
+      "type": "structure",
+      "members": {
+        "service": "String",
+        "cluster": "String",
+        "externalId": "String",
+        "taskDefinition": "String",
+        "networkConfiguration": "NetworkConfiguration",
+        "loadBalancers": "LoadBalancers",
+        "serviceRegistries": "ServiceRegistries",
+        "launchType": "LaunchType",
+        "capacityProviderStrategy": "CapacityProviderStrategy",
+        "platformVersion": "String",
+        "scale": "Scale",
+        "clientToken": "String",
+        "tags": "Tags"
+      }
+    },
+    "CreatedAt": {
+      "type": "structure",
+      "members": {
+        "before": "Timestamp",
+        "after": "Timestamp"
+      }
+    },
+    "DaemonAlarmConfiguration": {
+      "type": "structure",
+      "members": {
+        "alarmNames": "StringList",
+        "enable": "Boolean"
+      }
+    },
+    "DaemonContainerDefinition": {
+      "type": "structure",
+      "members": {
+        "name": "String",
+        "image": "String",
+        "memory": "BoxedInteger",
+        "memoryReservation": "BoxedInteger",
+        "repositoryCredentials": "RepositoryCredentials",
+        "healthCheck": "HealthCheck",
+        "cpu": "Integer",
+        "essential": "BoxedBoolean",
+        "entryPoint": "StringList",
+        "command": "StringList",
+        "workingDirectory": "String",
+        "environmentFiles": "EnvironmentFiles",
+        "environment": "EnvironmentVariables",
+        "secrets": "SecretList",
+        "readonlyRootFilesystem": "BoxedBoolean",
+        "mountPoints": "MountPointList",
+        "logConfiguration": "LogConfiguration",
+        "firelensConfiguration": "FirelensConfiguration",
+        "privileged": "BoxedBoolean",
+        "user": "String",
+        "ulimits": "UlimitList",
+        "linuxParameters": "DaemonLinuxParameters",
+        "dependsOn": "ContainerDependencies",
+        "startTimeout": "BoxedInteger",
+        "stopTimeout": "BoxedInteger",
+        "systemControls": "SystemControls",
+        "interactive": "BoxedBoolean",
+        "pseudoTerminal": "BoxedBoolean",
+        "restartPolicy": "ContainerRestartPolicy"
+      }
+    },
+    "DaemonContainerDefinitionList": {
+      "type": "list",
+      "member": "DaemonContainerDefinition"
+    },
+    "DaemonDeploymentConfiguration": {
+      "type": "structure",
+      "members": {
+        "drainPercent": "DaemonDrainPercent",
+        "alarms": "DaemonAlarmConfiguration",
+        "bakeTimeInMinutes": "Integer"
+      }
+    },
+    "DaemonDeploymentStatus": {
+      "type": "string"
+    },
+    "DaemonDeploymentStatusList": {
+      "type": "list",
+      "member": "DaemonDeploymentStatus"
+    },
+    "DaemonDrainPercent": {
+      "type": "double"
+    },
+    "DaemonIpcMode": {
+      "type": "string"
+    },
+    "DaemonLinuxParameters": {
+      "type": "structure",
+      "members": {
+        "capabilities": "KernelCapabilities",
+        "devices": "DevicesList",
+        "initProcessEnabled": "BoxedBoolean",
+        "tmpfs": "TmpfsList"
+      }
+    },
+    "DaemonPidMode": {
+      "type": "string"
+    },
+    "DaemonPropagateTags": {
+      "type": "string"
+    },
+    "DaemonTaskDefinitionRevisionFilter": {
+      "type": "string"
+    },
+    "DaemonTaskDefinitionStatusFilter": {
+      "type": "string"
+    },
+    "DaemonVolume": {
+      "type": "structure",
+      "members": {
+        "name": "String",
+        "host": "HostVolumeProperties"
+      }
+    },
+    "DaemonVolumeList": {
+      "type": "list",
+      "member": "DaemonVolume"
+    },
+    "DeleteAccountSettingRequest": {
+      "type": "structure",
+      "members": {
+        "name": "SettingName",
+        "principalArn": "String"
+      }
+    },
+    "DeleteAttributesRequest": {
+      "type": "structure",
+      "members": {
+        "cluster": "String",
+        "attributes": "Attributes"
+      }
+    },
+    "DeleteCapacityProviderRequest": {
+      "type": "structure",
+      "members": {
+        "capacityProvider": "String",
+        "cluster": "String"
+      }
+    },
+    "DeleteClusterRequest": {
+      "type": "structure",
+      "members": {
+        "cluster": "String"
+      }
+    },
+    "DeleteDaemonRequest": {
+      "type": "structure",
+      "members": {
+        "daemonArn": "String"
+      }
+    },
+    "DeleteDaemonTaskDefinitionRequest": {
+      "type": "structure",
+      "members": {
+        "daemonTaskDefinition": "String"
+      }
+    },
+    "DeleteExpressGatewayServiceRequest": {
+      "type": "structure",
+      "members": {
+        "serviceArn": "String"
+      }
+    },
+    "DeleteGatewayRequest": {
+      "type": "structure",
+      "members": {
+        "gateway": "String"
+      }
+    },
+    "DeleteServiceRequest": {
+      "type": "structure",
+      "members": {
+        "cluster": "String",
+        "service": "String",
+        "force": "BoxedBoolean"
+      }
+    },
+    "DeleteTaskDefinitionsRequest": {
+      "type": "structure",
+      "members": {
+        "taskDefinitions": "StringList"
+      }
+    },
+    "DeleteTaskSetRequest": {
+      "type": "structure",
+      "members": {
+        "cluster": "String",
+        "service": "String",
+        "taskSet": "String",
+        "force": "BoxedBoolean"
+      }
+    },
+    "DeploymentAlarms": {
+      "type": "structure",
+      "members": {
+        "alarmNames": "StringList",
+        "rollback": "Boolean",
+        "enable": "Boolean"
+      }
+    },
+    "DeploymentCircuitBreaker": {
+      "type": "structure",
+      "members": {
+        "enable": "Boolean",
+        "rollback": "Boolean",
+        "resetOnHealthyTask": "BoxedBoolean",
+        "thresholdConfiguration": "ThresholdConfiguration"
+      }
+    },
+    "DeploymentConfiguration": {
+      "type": "structure",
+      "members": {
+        "deploymentCircuitBreaker": "DeploymentCircuitBreaker",
+        "maximumPercent": "BoxedInteger",
+        "minimumHealthyPercent": "BoxedInteger",
+        "alarms": "DeploymentAlarms",
+        "strategy": "DeploymentStrategy",
+        "bakeTimeInMinutes": "BoxedInteger",
+        "lifecycleHooks": "DeploymentLifecycleHookList",
+        "linearConfiguration": "LinearConfiguration",
+        "canaryConfiguration": "CanaryConfiguration",
+        "earlySuccessCriteria": "DeploymentEarlySuccessCriteria"
+      }
+    },
+    "DeploymentController": {
+      "type": "structure",
+      "members": {
+        "type": "DeploymentControllerType"
+      }
+    },
+    "DeploymentControllerType": {
+      "type": "string"
+    },
+    "DeploymentEarlySuccessCriteria": {
+      "type": "structure",
+      "members": {
+        "enable": "Boolean",
+        "healthyPercent": "HealthyPercentInteger",
+        "sourceServiceRevisionCleanup": "ServiceRevisionCleanup"
+      }
+    },
+    "DeploymentLifecycleHook": {
+      "type": "structure",
+      "members": {
+        "targetType": "DeploymentLifecycleHookTargetType",
+        "hookTargetArn": "String",
+        "roleArn": "IAMRoleArn",
+        "lifecycleStages": "DeploymentLifecycleHookStageList",
+        "hookDetails": "HookDetails",
+        "timeoutConfiguration": "DeploymentLifecycleHookTimeoutConfiguration"
+      }
+    },
+    "DeploymentLifecycleHookAction": {
+      "type": "string"
+    },
+    "DeploymentLifecycleHookDuration": {
+      "type": "integer"
+    },
+    "DeploymentLifecycleHookList": {
+      "type": "list",
+      "member": "DeploymentLifecycleHook"
+    },
+    "DeploymentLifecycleHookStage": {
+      "type": "string"
+    },
+    "DeploymentLifecycleHookStageList": {
+      "type": "list",
+      "member": "DeploymentLifecycleHookStage"
+    },
+    "DeploymentLifecycleHookTargetType": {
+      "type": "string"
+    },
+    "DeploymentLifecycleHookTimeoutConfiguration": {
+      "type": "structure",
+      "members": {
+        "timeoutInMinutes": "DeploymentLifecycleHookDuration",
+        "action": "DeploymentLifecycleHookAction"
+      }
+    },
+    "DeploymentStrategy": {
+      "type": "string"
+    },
+    "DeregisterContainerInstanceRequest": {
+      "type": "structure",
+      "members": {
+        "cluster": "String",
+        "containerInstance": "String",
+        "force": "BoxedBoolean"
+      }
+    },
+    "DeregisterTaskDefinitionRequest": {
+      "type": "structure",
+      "members": {
+        "taskDefinition": "String"
+      }
+    },
+    "DescribeCapacityProvidersRequest": {
+      "type": "structure",
+      "members": {
+        "capacityProviders": "StringList",
+        "cluster": "String",
+        "include": "CapacityProviderFieldList",
+        "maxResults": "BoxedInteger",
+        "nextToken": "String"
+      }
+    },
+    "DescribeClustersRequest": {
+      "type": "structure",
+      "members": {
+        "clusters": "StringList",
+        "include": "ClusterFieldList"
+      }
+    },
+    "DescribeContainerInstancesRequest": {
+      "type": "structure",
+      "members": {
+        "cluster": "String",
+        "containerInstances": "StringList",
+        "include": "ContainerInstanceFieldList"
+      }
+    },
+    "DescribeDaemonDeploymentsRequest": {
+      "type": "structure",
+      "members": {
+        "daemonDeploymentArns": "StringList"
+      }
+    },
+    "DescribeDaemonRequest": {
+      "type": "structure",
+      "members": {
+        "daemonArn": "String"
+      }
+    },
+    "DescribeDaemonRevisionsRequest": {
+      "type": "structure",
+      "members": {
+        "daemonRevisionArns": "StringList"
+      }
+    },
+    "DescribeDaemonTaskDefinitionRequest": {
+      "type": "structure",
+      "members": {
+        "daemonTaskDefinition": "String"
+      }
+    },
+    "DescribeExpressGatewayServiceRequest": {
+      "type": "structure",
+      "members": {
+        "serviceArn": "String",
+        "include": "ExpressGatewayServiceIncludeList"
+      }
+    },
+    "DescribeGatewayRequest": {
+      "type": "structure",
+      "members": {
+        "gateway": "String"
+      }
+    },
+    "DescribeGatewayResourcesRequest": {
+      "type": "structure",
+      "members": {
+        "gateway": "String",
+        "maxResults": "BoxedInteger",
+        "nextToken": "String"
+      }
+    },
+    "DescribeGatewayRouteRequest": {
+      "type": "structure",
+      "members": {
+        "gatewayRouteArn": "String"
+      }
+    },
+    "DescribeServiceDeploymentsRequest": {
+      "type": "structure",
+      "members": {
+        "serviceDeploymentArns": "StringList"
+      }
+    },
+    "DescribeServiceRevisionsRequest": {
+      "type": "structure",
+      "members": {
+        "serviceRevisionArns": "StringList"
+      }
+    },
+    "DescribeServicesRequest": {
+      "type": "structure",
+      "members": {
+        "cluster": "String",
+        "services": "StringList",
+        "include": "ServiceFieldList"
+      }
+    },
+    "DescribeTaskDefinitionRequest": {
+      "type": "structure",
+      "members": {
+        "taskDefinition": "String",
+        "include": "TaskDefinitionFieldList"
+      }
+    },
+    "DescribeTaskSetsRequest": {
+      "type": "structure",
+      "members": {
+        "cluster": "String",
+        "service": "String",
+        "taskSets": "StringList",
+        "include": "TaskSetFieldList"
+      }
+    },
+    "DescribeTasksRequest": {
+      "type": "structure",
+      "members": {
+        "cluster": "String",
+        "tasks": "StringList",
+        "include": "TaskFieldList"
+      }
+    },
+    "DesiredStatus": {
+      "type": "string"
+    },
+    "Device": {
+      "type": "structure",
+      "members": {
+        "hostPath": "String",
+        "containerPath": "String",
+        "permissions": "DeviceCgroupPermissions"
+      }
+    },
+    "DeviceCgroupPermission": {
+      "type": "string"
+    },
+    "DeviceCgroupPermissions": {
+      "type": "list",
+      "member": "DeviceCgroupPermission"
+    },
+    "DevicesList": {
+      "type": "list",
+      "member": "Device"
+    },
+    "DisassociateGatewayFromClusterRequest": {
+      "type": "structure",
+      "members": {
+        "gateway": "String",
+        "cluster": "String"
+      }
+    },
+    "DiscoverPollEndpointRequest": {
+      "type": "structure",
+      "members": {
+        "containerInstance": "String",
+        "cluster": "String"
+      }
+    },
+    "DockerLabelsMap": {
+      "type": "map",
+      "value": "String"
+    },
+    "DockerVolumeConfiguration": {
+      "type": "structure",
+      "members": {
+        "scope": "Scope",
+        "autoprovision": "BoxedBoolean",
+        "driver": "String",
+        "driverOpts": "StringMap",
+        "labels": "StringMap"
+      }
+    },
+    "Double": {
+      "type": "double"
+    },
+    "Duration": {
+      "type": "integer"
+    },
+    "EBSKMSKeyId": {
+      "type": "string"
+    },
+    "EBSResourceType": {
+      "type": "string"
+    },
+    "EBSSnapshotId": {
+      "type": "string"
+    },
+    "EBSTagSpecification": {
+      "type": "structure",
+      "members": {
+        "resourceType": "EBSResourceType",
+        "tags": "Tags",
+        "propagateTags": "PropagateTags"
+      }
+    },
+    "EBSTagSpecifications": {
+      "type": "list",
+      "member": "EBSTagSpecification"
+    },
+    "EBSVolumeType": {
+      "type": "string"
+    },
+    "ECSVolumeName": {
+      "type": "string"
+    },
+    "EFSAuthorizationConfig": {
+      "type": "structure",
+      "members": {
+        "accessPointId": "String",
+        "iam": "EFSAuthorizationConfigIAM"
+      }
+    },
+    "EFSAuthorizationConfigIAM": {
+      "type": "string"
+    },
+    "EFSTransitEncryption": {
+      "type": "string"
+    },
+    "EFSVolumeConfiguration": {
+      "type": "structure",
+      "members": {
+        "fileSystemId": "String",
+        "rootDirectory": "String",
+        "transitEncryption": "EFSTransitEncryption",
+        "transitEncryptionPort": "BoxedInteger",
+        "authorizationConfig": "EFSAuthorizationConfig"
+      }
+    },
+    "EnvironmentFile": {
+      "type": "structure",
+      "members": {
+        "value": "String",
+        "type": "EnvironmentFileType"
+      }
+    },
+    "EnvironmentFileType": {
+      "type": "string"
+    },
+    "EnvironmentFiles": {
+      "type": "list",
+      "member": "EnvironmentFile"
+    },
+    "EnvironmentVariables": {
+      "type": "list",
+      "member": "KeyValuePair"
+    },
+    "EphemeralStorage": {
+      "type": "structure",
+      "members": {
+        "sizeInGiB": "Integer"
+      }
+    },
+    "ExcludedInstanceType": {
+      "type": "string"
+    },
+    "ExcludedInstanceTypeSet": {
+      "type": "list",
+      "member": "ExcludedInstanceType"
+    },
+    "ExecuteCommandConfiguration": {
+      "type": "structure",
+      "members": {
+        "kmsKeyId": "String",
+        "logging": "ExecuteCommandLogging",
+        "logConfiguration": "ExecuteCommandLogConfiguration"
+      }
+    },
+    "ExecuteCommandLogConfiguration": {
+      "type": "structure",
+      "members": {
+        "cloudWatchLogGroupName": "String",
+        "cloudWatchEncryptionEnabled": "Boolean",
+        "s3BucketName": "String",
+        "s3EncryptionEnabled": "Boolean",
+        "s3KeyPrefix": "String"
+      }
+    },
+    "ExecuteCommandLogging": {
+      "type": "string"
+    },
+    "ExecuteCommandRequest": {
+      "type": "structure",
+      "members": {
+        "cluster": "String",
+        "container": "String",
+        "command": "String",
+        "interactive": "Boolean",
+        "task": "String"
+      }
+    },
+    "ExpressCpuArchitecture": {
+      "type": "string"
+    },
+    "ExpressGatewayContainer": {
+      "type": "structure",
+      "members": {
+        "image": "String",
+        "containerPort": "BoxedInteger",
+        "awsLogsConfiguration": "ExpressGatewayServiceAwsLogsConfiguration",
+        "repositoryCredentials": "ExpressGatewayRepositoryCredentials",
+        "command": "StringList",
+        "environment": "EnvironmentVariables",
+        "secrets": "SecretList"
+      }
+    },
+    "ExpressGatewayRepositoryCredentials": {
+      "type": "structure",
+      "members": {
+        "credentialsParameter": "String"
+      }
+    },
+    "ExpressGatewayScalingTarget": {
+      "type": "structure",
+      "members": {
+        "minTaskCount": "BoxedInteger",
+        "maxTaskCount": "BoxedInteger",
+        "autoScalingMetric": "ExpressGatewayServiceScalingMetric",
+        "autoScalingTargetValue": "BoxedInteger"
+      }
+    },
+    "ExpressGatewayServiceAwsLogsConfiguration": {
+      "type": "structure",
+      "members": {
+        "logGroup": "String",
+        "logStreamPrefix": "String"
+      }
+    },
+    "ExpressGatewayServiceInclude": {
+      "type": "string"
+    },
+    "ExpressGatewayServiceIncludeList": {
+      "type": "list",
+      "member": "ExpressGatewayServiceInclude"
+    },
+    "ExpressGatewayServiceNetworkConfiguration": {
+      "type": "structure",
+      "members": {
+        "securityGroups": "StringList",
+        "subnets": "StringList"
+      }
+    },
+    "ExpressGatewayServiceScalingMetric": {
+      "type": "string"
+    },
+    "FSxWindowsFileServerAuthorizationConfig": {
+      "type": "structure",
+      "members": {
+        "credentialsParameter": "String",
+        "domain": "String"
+      }
+    },
+    "FSxWindowsFileServerVolumeConfiguration": {
+      "type": "structure",
+      "members": {
+        "fileSystemId": "String",
+        "rootDirectory": "String",
+        "authorizationConfig": "FSxWindowsFileServerAuthorizationConfig"
+      }
+    },
+    "FirelensConfiguration": {
+      "type": "structure",
+      "members": {
+        "type": "FirelensConfigurationType",
+        "options": "FirelensConfigurationOptionsMap"
+      }
+    },
+    "FirelensConfigurationOptionsMap": {
+      "type": "map",
+      "value": "String"
+    },
+    "FirelensConfigurationType": {
+      "type": "string"
+    },
+    "GatewayAlbDesyncMitigationMode": {
+      "type": "string"
+    },
+    "GatewayAlbProtocol": {
+      "type": "string"
+    },
+    "GatewayAlbTestTrafficRules": {
+      "type": "structure",
+      "members": {
+        "header": "GatewayTestTrafficHeader"
+      }
+    },
+    "GatewayClusterAssociationStatus": {
+      "type": "string"
+    },
+    "GatewayClusterAssociationStatusList": {
+      "type": "list",
+      "member": "GatewayClusterAssociationStatus"
+    },
+    "GatewayConfiguration": {
+      "type": "structure",
+      "members": {
+        "hostSharedAlb": "HostSharedAlbConfiguration"
+      }
+    },
+    "GatewayConnector": {
+      "type": "structure",
+      "members": {
+        "portName": "String",
+        "healthCheck": "GatewayConnectorHealthCheck",
+        "filters": "GatewayConnectorFilters"
+      }
+    },
+    "GatewayConnectorFilters": {
+      "type": "structure",
+      "members": {
+        "accessTypes": "AccessTypeList"
+      }
+    },
+    "GatewayConnectorHealthCheck": {
+      "type": "structure",
+      "members": {
+        "healthCheckProtocol": "GatewayConnectorHealthCheckProtocol",
+        "healthCheckPort": "BoxedInteger",
+        "healthCheckPath": "String",
+        "healthCheckTimeoutSeconds": "BoxedInteger",
+        "healthCheckIntervalSeconds": "BoxedInteger",
+        "healthyThresholdCount": "BoxedInteger",
+        "unhealthyThresholdCount": "BoxedInteger",
+        "matcher": "GatewayConnectorHealthCheckMatcher"
+      }
+    },
+    "GatewayConnectorHealthCheckMatcher": {
+      "type": "structure",
+      "members": {
+        "httpCode": "String",
+        "grpcCode": "String"
+      }
+    },
+    "GatewayConnectorHealthCheckProtocol": {
+      "type": "string"
+    },
+    "GatewayConnectorList": {
+      "type": "list",
+      "member": "GatewayConnector"
+    },
+    "GatewayElbAccessLogConfiguration": {
+      "type": "structure",
+      "members": {
+        "destination": "GatewayElbAccessLogDestination"
+      }
+    },
+    "GatewayElbAccessLogDestination": {
+      "type": "structure",
+      "members": {
+        "s3": "GatewayElbAccessLogS3Destination"
+      }
+    },
+    "GatewayElbAccessLogS3Destination": {
+      "type": "structure",
+      "members": {
+        "bucket": "String",
+        "prefix": "String"
+      }
+    },
+    "GatewayElbIpAddressType": {
+      "type": "string"
+    },
+    "GatewayElbNetworkConfiguration": {
+      "type": "structure",
+      "members": {
+        "inboundSecurityGroup": "String",
+        "subnets": "StringList",
+        "ipAddressType": "GatewayElbIpAddressType"
+      }
+    },
+    "GatewayElbScheme": {
+      "type": "string"
+    },
+    "GatewayRouteStatus": {
+      "type": "string"
+    },
+    "GatewayRouteStatusList": {
+      "type": "list",
+      "member": "GatewayRouteStatus"
+    },
+    "GatewayStatus": {
+      "type": "string"
+    },
+    "GatewayStatusList": {
+      "type": "list",
+      "member": "GatewayStatus"
+    },
+    "GatewayTestTrafficHeader": {
+      "type": "structure",
+      "members": {
+        "name": "String",
+        "values": "StringList"
+      }
+    },
+    "GetTaskProtectionRequest": {
+      "type": "structure",
+      "members": {
+        "cluster": "String",
+        "tasks": "StringList"
+      }
+    },
+    "HealthCheck": {
+      "type": "structure",
+      "members": {
+        "command": "StringList",
+        "interval": "BoxedInteger",
+        "timeout": "BoxedInteger",
+        "retries": "BoxedInteger",
+        "startPeriod": "BoxedInteger"
+      }
+    },
+    "HealthyPercentInteger": {
+      "type": "integer"
+    },
+    "HookDetails": {
+      "type": "structure",
+      "members": {}
+    },
+    "HostEntry": {
+      "type": "structure",
+      "members": {
+        "hostname": "String",
+        "ipAddress": "String"
+      }
+    },
+    "HostEntryList": {
+      "type": "list",
+      "member": "HostEntry"
+    },
+    "HostSharedAlbConfiguration": {
+      "type": "structure",
+      "members": {
+        "networkConfiguration": "GatewayElbNetworkConfiguration",
+        "scheme": "GatewayElbScheme",
+        "webACLArn": "String",
+        "accessLogs": "GatewayElbAccessLogConfiguration",
+        "port": "BoxedInteger",
+        "protocol": "GatewayAlbProtocol",
+        "maxAlbCount": "BoxedInteger",
+        "httpDesync": "GatewayAlbDesyncMitigationMode",
+        "testTrafficRules": "GatewayAlbTestTrafficRules"
+      }
+    },
+    "HostVolumeProperties": {
+      "type": "structure",
+      "members": {
+        "sourcePath": "String"
+      }
+    },
+    "IAMRoleArn": {
+      "type": "string"
+    },
+    "InferenceAccelerator": {
+      "type": "structure",
+      "members": {
+        "deviceName": "String",
+        "deviceType": "String"
+      }
+    },
+    "InferenceAcceleratorOverride": {
+      "type": "structure",
+      "members": {
+        "deviceName": "String",
+        "deviceType": "String"
+      }
+    },
+    "InferenceAcceleratorOverrides": {
+      "type": "list",
+      "member": "InferenceAcceleratorOverride"
+    },
+    "InferenceAccelerators": {
+      "type": "list",
+      "member": "InferenceAccelerator"
+    },
+    "InfrastructureOptimization": {
+      "type": "structure",
+      "members": {
+        "scaleInAfter": "BoxedInteger"
+      }
+    },
+    "InstanceGeneration": {
+      "type": "string"
+    },
+    "InstanceGenerationSet": {
+      "type": "list",
+      "member": "InstanceGeneration"
+    },
+    "InstanceLaunchTemplate": {
+      "type": "structure",
+      "members": {
+        "ec2InstanceProfileArn": "String",
+        "networkConfiguration": "ManagedInstancesNetworkConfiguration",
+        "storageConfiguration": "ManagedInstancesStorageConfiguration",
+        "localStorageConfiguration": "ManagedInstancesLocalStorageConfiguration",
+        "monitoring": "ManagedInstancesMonitoringOptions",
+        "capacityOptionType": "CapacityOptionType",
+        "instanceMetadataTagsPropagation": "BoxedBoolean",
+        "instanceRequirements": "InstanceRequirementsRequest",
+        "fipsEnabled": "BoxedBoolean",
+        "capacityReservations": "CapacityReservationRequest"
+      }
+    },
+    "InstanceLaunchTemplateUpdate": {
+      "type": "structure",
+      "members": {
+        "ec2InstanceProfileArn": "String",
+        "networkConfiguration": "ManagedInstancesNetworkConfiguration",
+        "storageConfiguration": "ManagedInstancesStorageConfiguration",
+        "instanceMetadataTagsPropagation": "BoxedBoolean",
+        "localStorageConfiguration": "ManagedInstancesLocalStorageConfiguration",
+        "monitoring": "ManagedInstancesMonitoringOptions",
+        "instanceRequirements": "InstanceRequirementsRequest",
+        "capacityReservations": "CapacityReservationRequest"
+      }
+    },
+    "InstanceRequirementsRequest": {
+      "type": "structure",
+      "members": {
+        "vCpuCount": "VCpuCountRangeRequest",
+        "memoryMiB": "MemoryMiBRequest",
+        "cpuManufacturers": "CpuManufacturerSet",
+        "memoryGiBPerVCpu": "MemoryGiBPerVCpuRequest",
+        "excludedInstanceTypes": "ExcludedInstanceTypeSet",
+        "instanceGenerations": "InstanceGenerationSet",
+        "spotMaxPricePercentageOverLowestPrice": "BoxedInteger",
+        "onDemandMaxPricePercentageOverLowestPrice": "BoxedInteger",
+        "bareMetal": "BareMetal",
+        "burstablePerformance": "BurstablePerformance",
+        "requireHibernateSupport": "BoxedBoolean",
+        "networkInterfaceCount": "NetworkInterfaceCountRequest",
+        "localStorage": "LocalStorage",
+        "localStorageTypes": "LocalStorageTypeSet",
+        "totalLocalStorageGB": "TotalLocalStorageGBRequest",
+        "baselineEbsBandwidthMbps": "BaselineEbsBandwidthMbpsRequest",
+        "acceleratorTypes": "AcceleratorTypeSet",
+        "acceleratorCount": "AcceleratorCountRequest",
+        "acceleratorManufacturers": "AcceleratorManufacturerSet",
+        "acceleratorNames": "AcceleratorNameSet",
+        "acceleratorTotalMemoryMiB": "AcceleratorTotalMemoryMiBRequest",
+        "networkBandwidthGbps": "NetworkBandwidthGbpsRequest",
+        "allowedInstanceTypes": "AllowedInstanceTypeSet",
+        "maxSpotPriceAsPercentageOfOptimalOnDemandPrice": "BoxedInteger"
+      }
+    },
+    "Integer": {
+      "type": "integer"
+    },
+    "IntegerList": {
+      "type": "list",
+      "member": "BoxedInteger"
+    },
+    "IpcMode": {
+      "type": "string"
+    },
+    "KernelCapabilities": {
+      "type": "structure",
+      "members": {
+        "add": "StringList",
+        "drop": "StringList"
+      }
+    },
+    "KeyValuePair": {
+      "type": "structure",
+      "members": {
+        "name": "String",
+        "value": "String"
+      }
+    },
+    "LaunchType": {
+      "type": "string"
+    },
+    "LinearConfiguration": {
+      "type": "structure",
+      "members": {
+        "stepPercent": "Double",
+        "stepBakeTimeInMinutes": "Integer"
+      }
+    },
+    "LinuxParameters": {
+      "type": "structure",
+      "members": {
+        "capabilities": "KernelCapabilities",
+        "devices": "DevicesList",
+        "initProcessEnabled": "BoxedBoolean",
+        "sharedMemorySize": "BoxedInteger",
+        "tmpfs": "TmpfsList",
+        "maxSwap": "BoxedInteger",
+        "swappiness": "BoxedInteger"
+      }
+    },
+    "ListAccountSettingsRequest": {
+      "type": "structure",
+      "members": {
+        "name": "SettingName",
+        "value": "String",
+        "principalArn": "String",
+        "effectiveSettings": "Boolean",
+        "nextToken": "String",
+        "maxResults": "Integer"
+      }
+    },
+    "ListAttributesRequest": {
+      "type": "structure",
+      "members": {
+        "cluster": "String",
+        "targetType": "TargetType",
+        "attributeName": "String",
+        "attributeValue": "String",
+        "nextToken": "String",
+        "maxResults": "BoxedInteger"
+      }
+    },
+    "ListClustersRequest": {
+      "type": "structure",
+      "members": {
+        "nextToken": "String",
+        "maxResults": "BoxedInteger"
+      }
+    },
+    "ListContainerInstancesRequest": {
+      "type": "structure",
+      "members": {
+        "cluster": "String",
+        "filter": "String",
+        "nextToken": "String",
+        "maxResults": "BoxedInteger",
+        "status": "ContainerInstanceStatus"
+      }
+    },
+    "ListDaemonDeploymentsRequest": {
+      "type": "structure",
+      "members": {
+        "daemonArn": "String",
+        "status": "DaemonDeploymentStatusList",
+        "createdAt": "CreatedAt",
+        "maxResults": "BoxedInteger",
+        "nextToken": "String"
+      }
+    },
+    "ListDaemonTaskDefinitionsRequest": {
+      "type": "structure",
+      "members": {
+        "familyPrefix": "String",
+        "family": "String",
+        "revision": "DaemonTaskDefinitionRevisionFilter",
+        "status": "DaemonTaskDefinitionStatusFilter",
+        "sort": "SortOrder",
+        "nextToken": "String",
+        "maxResults": "BoxedInteger"
+      }
+    },
+    "ListDaemonsRequest": {
+      "type": "structure",
+      "members": {
+        "clusterArn": "String",
+        "capacityProviderArns": "StringList",
+        "maxResults": "BoxedInteger",
+        "nextToken": "String"
+      }
+    },
+    "ListGatewayClusterAssociationsRequest": {
+      "type": "structure",
+      "members": {
+        "gateway": "String",
+        "cluster": "String",
+        "status": "GatewayClusterAssociationStatusList",
+        "maxResults": "BoxedInteger",
+        "nextToken": "String"
+      }
+    },
+    "ListGatewayRoutesRequest": {
+      "type": "structure",
+      "members": {
+        "gateway": "String",
+        "cluster": "String",
+        "service": "String",
+        "serviceContainerPortName": "String",
+        "status": "GatewayRouteStatusList",
+        "maxResults": "BoxedInteger",
+        "nextToken": "String"
+      }
+    },
+    "ListGatewaysRequest": {
+      "type": "structure",
+      "members": {
+        "names": "StringList",
+        "status": "GatewayStatusList",
+        "maxResults": "BoxedInteger",
+        "nextToken": "String"
+      }
+    },
+    "ListServiceDeploymentsRequest": {
+      "type": "structure",
+      "members": {
+        "service": "String",
+        "cluster": "String",
+        "status": "ServiceDeploymentStatusList",
+        "createdAt": "CreatedAt",
+        "nextToken": "String",
+        "maxResults": "BoxedInteger"
+      }
+    },
+    "ListServicesByNamespaceRequest": {
+      "type": "structure",
+      "members": {
+        "namespace": "String",
+        "nextToken": "String",
+        "maxResults": "BoxedInteger"
+      }
+    },
+    "ListServicesRequest": {
+      "type": "structure",
+      "members": {
+        "cluster": "String",
+        "nextToken": "String",
+        "maxResults": "BoxedInteger",
+        "launchType": "LaunchType",
+        "schedulingStrategy": "SchedulingStrategy",
+        "resourceManagementType": "ResourceManagementType"
+      }
+    },
+    "ListTagsForResourceRequest": {
+      "type": "structure",
+      "members": {
+        "resourceArn": "String"
+      }
+    },
+    "ListTaskDefinitionFamiliesRequest": {
+      "type": "structure",
+      "members": {
+        "familyPrefix": "String",
+        "status": "TaskDefinitionFamilyStatus",
+        "nextToken": "String",
+        "maxResults": "BoxedInteger"
+      }
+    },
+    "ListTaskDefinitionsRequest": {
+      "type": "structure",
+      "members": {
+        "familyPrefix": "String",
+        "status": "TaskDefinitionStatus",
+        "sort": "SortOrder",
+        "nextToken": "String",
+        "maxResults": "BoxedInteger"
+      }
+    },
+    "ListTasksRequest": {
+      "type": "structure",
+      "members": {
+        "cluster": "String",
+        "containerInstance": "String",
+        "family": "String",
+        "nextToken": "String",
+        "maxResults": "BoxedInteger",
+        "startedBy": "String",
+        "serviceName": "String",
+        "desiredStatus": "DesiredStatus",
+        "launchType": "LaunchType",
+        "daemonName": "String"
+      }
+    },
+    "LoadBalancer": {
+      "type": "structure",
+      "members": {
+        "targetGroupArn": "String",
+        "loadBalancerName": "String",
+        "containerName": "String",
+        "containerPort": "BoxedInteger",
+        "advancedConfiguration": "AdvancedConfiguration"
+      }
+    },
+    "LoadBalancers": {
+      "type": "list",
+      "member": "LoadBalancer"
+    },
+    "LocalStorage": {
+      "type": "string"
+    },
+    "LocalStorageType": {
+      "type": "string"
+    },
+    "LocalStorageTypeSet": {
+      "type": "list",
+      "member": "LocalStorageType"
+    },
+    "LogConfiguration": {
+      "type": "structure",
+      "members": {
+        "logDriver": "LogDriver",
+        "options": "LogConfigurationOptionsMap",
+        "secretOptions": "SecretList"
+      }
+    },
+    "LogConfigurationOptionsMap": {
+      "type": "map",
+      "value": "String"
+    },
+    "LogDriver": {
+      "type": "string"
+    },
+    "Long": {
+      "type": "long"
+    },
+    "ManagedAgentName": {
+      "type": "string"
+    },
+    "ManagedAgentStateChange": {
+      "type": "structure",
+      "members": {
+        "containerName": "String",
+        "managedAgentName": "ManagedAgentName",
+        "status": "String",
+        "reason": "String"
+      }
+    },
+    "ManagedAgentStateChanges": {
+      "type": "list",
+      "member": "ManagedAgentStateChange"
+    },
+    "ManagedDraining": {
+      "type": "string"
+    },
+    "ManagedInstancesLocalStorageConfiguration": {
+      "type": "structure",
+      "members": {
+        "useLocalStorage": "Boolean"
+      }
+    },
+    "ManagedInstancesMonitoringOptions": {
+      "type": "string"
+    },
+    "ManagedInstancesNetworkConfiguration": {
+      "type": "structure",
+      "members": {
+        "subnets": "StringList",
+        "securityGroups": "StringList"
+      }
+    },
+    "ManagedInstancesStorageConfiguration": {
+      "type": "structure",
+      "members": {
+        "storageSizeGiB": "TaskVolumeStorageGiB"
+      }
+    },
+    "ManagedScaling": {
+      "type": "structure",
+      "members": {
+        "status": "ManagedScalingStatus",
+        "targetCapacity": "ManagedScalingTargetCapacity",
+        "minimumScalingStepSize": "ManagedScalingStepSize",
+        "maximumScalingStepSize": "ManagedScalingStepSize",
+        "instanceWarmupPeriod": "ManagedScalingInstanceWarmupPeriod"
+      }
+    },
+    "ManagedScalingInstanceWarmupPeriod": {
+      "type": "integer"
+    },
+    "ManagedScalingStatus": {
+      "type": "string"
+    },
+    "ManagedScalingStepSize": {
+      "type": "integer"
+    },
+    "ManagedScalingTargetCapacity": {
+      "type": "integer"
+    },
+    "ManagedStorageConfiguration": {
+      "type": "structure",
+      "members": {
+        "kmsKeyId": "String",
+        "fargateEphemeralStorageKmsKeyId": "String"
+      }
+    },
+    "ManagedTerminationProtection": {
+      "type": "string"
+    },
+    "MemoryGiBPerVCpuRequest": {
+      "type": "structure",
+      "members": {
+        "min": "BoxedDouble",
+        "max": "BoxedDouble"
+      }
+    },
+    "MemoryMiBRequest": {
+      "type": "structure",
+      "members": {
+        "min": "BoxedInteger",
+        "max": "BoxedInteger"
+      }
+    },
+    "MetricConfiguration": {
+      "type": "structure",
+      "members": {
+        "metricNames": "MetricNamesList",
+        "resolutionSeconds": "MetricResolutionSeconds"
+      }
+    },
+    "MetricConfigurationList": {
+      "type": "list",
+      "member": "MetricConfiguration"
+    },
+    "MetricName": {
+      "type": "string"
+    },
+    "MetricNamesList": {
+      "type": "list",
+      "member": "MetricName"
+    },
+    "MetricResolutionSeconds": {
+      "type": "integer"
+    },
+    "MonitoringConfiguration": {
+      "type": "structure",
+      "members": {
+        "metricConfigurations": "MetricConfigurationList"
+      }
+    },
+    "MountPoint": {
+      "type": "structure",
+      "members": {
+        "sourceVolume": "String",
+        "containerPath": "String",
+        "readOnly": "BoxedBoolean"
+      }
+    },
+    "MountPointList": {
+      "type": "list",
+      "member": "MountPoint"
+    },
+    "NetworkBandwidthGbpsRequest": {
+      "type": "structure",
+      "members": {
+        "min": "BoxedDouble",
+        "max": "BoxedDouble"
+      }
+    },
+    "NetworkBinding": {
+      "type": "structure",
+      "members": {
+        "bindIP": "String",
+        "containerPort": "BoxedInteger",
+        "hostPort": "BoxedInteger",
+        "protocol": "TransportProtocol",
+        "containerPortRange": "String",
+        "hostPortRange": "String"
+      }
+    },
+    "NetworkBindings": {
+      "type": "list",
+      "member": "NetworkBinding"
+    },
+    "NetworkConfiguration": {
+      "type": "structure",
+      "members": {
+        "awsvpcConfiguration": "AwsVpcConfiguration"
+      }
+    },
+    "NetworkInterfaceCountRequest": {
+      "type": "structure",
+      "members": {
+        "min": "BoxedInteger",
+        "max": "BoxedInteger"
+      }
+    },
+    "NetworkMode": {
+      "type": "string"
+    },
+    "OSFamily": {
+      "type": "string"
+    },
+    "PidMode": {
+      "type": "string"
+    },
+    "PlacementConstraint": {
+      "type": "structure",
+      "members": {
+        "type": "PlacementConstraintType",
+        "expression": "String"
+      }
+    },
+    "PlacementConstraintType": {
+      "type": "string"
+    },
+    "PlacementConstraints": {
+      "type": "list",
+      "member": "PlacementConstraint"
+    },
+    "PlacementStrategies": {
+      "type": "list",
+      "member": "PlacementStrategy"
+    },
+    "PlacementStrategy": {
+      "type": "structure",
+      "members": {
+        "type": "PlacementStrategyType",
+        "field": "String"
+      }
+    },
+    "PlacementStrategyType": {
+      "type": "string"
+    },
+    "PlatformDevice": {
+      "type": "structure",
+      "members": {
+        "id": "String",
+        "type": "PlatformDeviceType"
+      }
+    },
+    "PlatformDeviceType": {
+      "type": "string"
+    },
+    "PlatformDevices": {
+      "type": "list",
+      "member": "PlatformDevice"
+    },
+    "PortMapping": {
+      "type": "structure",
+      "members": {
+        "containerPort": "BoxedInteger",
+        "hostPort": "BoxedInteger",
+        "protocol": "TransportProtocol",
+        "name": "String",
+        "appProtocol": "ApplicationProtocol",
+        "containerPortRange": "String"
+      }
+    },
+    "PortMappingList": {
+      "type": "list",
+      "member": "PortMapping"
+    },
+    "PortNumber": {
+      "type": "integer"
+    },
+    "PropagateGatewayTags": {
+      "type": "string"
+    },
+    "PropagateMITags": {
+      "type": "string"
+    },
+    "PropagateTags": {
+      "type": "string"
+    },
+    "ProxyConfiguration": {
+      "type": "structure",
+      "members": {
+        "type": "ProxyConfigurationType",
+        "containerName": "String",
+        "properties": "ProxyConfigurationProperties"
+      }
+    },
+    "ProxyConfigurationProperties": {
+      "type": "list",
+      "member": "KeyValuePair"
+    },
+    "ProxyConfigurationType": {
+      "type": "string"
+    },
+    "PutAccountSettingDefaultRequest": {
+      "type": "structure",
+      "members": {
+        "name": "SettingName",
+        "value": "String"
+      }
+    },
+    "PutAccountSettingRequest": {
+      "type": "structure",
+      "members": {
+        "name": "SettingName",
+        "value": "String",
+        "principalArn": "String"
+      }
+    },
+    "PutAttributesRequest": {
+      "type": "structure",
+      "members": {
+        "cluster": "String",
+        "attributes": "Attributes"
+      }
+    },
+    "PutClusterCapacityProvidersRequest": {
+      "type": "structure",
+      "members": {
+        "cluster": "String",
+        "capacityProviders": "StringList",
+        "defaultCapacityProviderStrategy": "CapacityProviderStrategy"
+      }
+    },
+    "RegisterContainerInstanceRequest": {
+      "type": "structure",
+      "members": {
+        "cluster": "String",
+        "instanceIdentityDocument": "String",
+        "instanceIdentityDocumentSignature": "String",
+        "totalResources": "Resources",
+        "versionInfo": "VersionInfo",
+        "containerInstanceArn": "String",
+        "attributes": "Attributes",
+        "platformDevices": "PlatformDevices",
+        "tags": "Tags"
+      }
+    },
+    "RegisterDaemonTaskDefinitionRequest": {
+      "type": "structure",
+      "members": {
+        "family": "String",
+        "taskRoleArn": "String",
+        "executionRoleArn": "String",
+        "containerDefinitions": "DaemonContainerDefinitionList",
+        "cpu": "String",
+        "memory": "String",
+        "volumes": "DaemonVolumeList",
+        "tags": "Tags",
+        "pidMode": "DaemonPidMode",
+        "ipcMode": "DaemonIpcMode"
+      }
+    },
+    "RegisterTaskDefinitionRequest": {
+      "type": "structure",
+      "members": {
+        "family": "String",
+        "taskRoleArn": "String",
+        "executionRoleArn": "String",
+        "networkMode": "NetworkMode",
+        "containerDefinitions": "ContainerDefinitions",
+        "volumes": "VolumeList",
+        "placementConstraints": "TaskDefinitionPlacementConstraints",
+        "requiresCompatibilities": "CompatibilityList",
+        "cpu": "String",
+        "memory": "String",
+        "tags": "Tags",
+        "pidMode": "PidMode",
+        "ipcMode": "IpcMode",
+        "proxyConfiguration": "ProxyConfiguration",
+        "inferenceAccelerators": "InferenceAccelerators",
+        "ephemeralStorage": "EphemeralStorage",
+        "runtimePlatform": "RuntimePlatform",
+        "enableFaultInjection": "BoxedBoolean"
+      }
+    },
+    "RepositoryCredentials": {
+      "type": "structure",
+      "members": {
+        "credentialsParameter": "String"
+      }
+    },
+    "Resource": {
+      "type": "structure",
+      "members": {
+        "name": "String",
+        "type": "String",
+        "doubleValue": "Double",
+        "longValue": "Long",
+        "integerValue": "Integer",
+        "stringSetValue": "StringList"
+      }
+    },
+    "ResourceManagementType": {
+      "type": "string"
+    },
+    "ResourceRequirement": {
+      "type": "structure",
+      "members": {
+        "value": "String",
+        "type": "ResourceType"
+      }
+    },
+    "ResourceRequirements": {
+      "type": "list",
+      "member": "ResourceRequirement"
+    },
+    "ResourceType": {
+      "type": "string"
+    },
+    "Resources": {
+      "type": "list",
+      "member": "Resource"
+    },
+    "RunTaskRequest": {
+      "type": "structure",
+      "members": {
+        "capacityProviderStrategy": "CapacityProviderStrategy",
+        "cluster": "String",
+        "count": "BoxedInteger",
+        "enableECSManagedTags": "Boolean",
+        "enableExecuteCommand": "Boolean",
+        "group": "String",
+        "launchType": "LaunchType",
+        "networkConfiguration": "NetworkConfiguration",
+        "overrides": "TaskOverride",
+        "placementConstraints": "PlacementConstraints",
+        "placementStrategy": "PlacementStrategies",
+        "platformVersion": "String",
+        "propagateTags": "PropagateTags",
+        "referenceId": "String",
+        "startedBy": "String",
+        "tags": "Tags",
+        "taskDefinition": "String",
+        "clientToken": "String",
+        "volumeConfigurations": "TaskVolumeConfigurations"
+      }
+    },
+    "RuntimePlatform": {
+      "type": "structure",
+      "members": {
+        "cpuArchitecture": "CPUArchitecture",
+        "operatingSystemFamily": "OSFamily"
+      }
+    },
+    "S3FilesVolumeConfiguration": {
+      "type": "structure",
+      "members": {
+        "fileSystemArn": "String",
+        "rootDirectory": "String",
+        "transitEncryptionPort": "BoxedInteger",
+        "accessPointArn": "String"
+      }
+    },
+    "Scale": {
+      "type": "structure",
+      "members": {
+        "value": "Double",
+        "unit": "ScaleUnit"
+      }
+    },
+    "ScaleUnit": {
+      "type": "string"
+    },
+    "SchedulingStrategy": {
+      "type": "string"
+    },
+    "Scope": {
+      "type": "string"
+    },
+    "Secret": {
+      "type": "structure",
+      "members": {
+        "name": "String",
+        "valueFrom": "String"
+      }
+    },
+    "SecretList": {
+      "type": "list",
+      "member": "Secret"
+    },
+    "ServiceConnectAccessLogConfiguration": {
+      "type": "structure",
+      "members": {
+        "format": "ServiceConnectAccessLoggingFormat",
+        "includeQueryParameters": "ServiceConnectIncludeQueryParameters"
+      }
+    },
+    "ServiceConnectAccessLoggingFormat": {
+      "type": "string"
+    },
+    "ServiceConnectClientAlias": {
+      "type": "structure",
+      "members": {
+        "port": "PortNumber",
+        "dnsName": "String",
+        "testTrafficRules": "ServiceConnectTestTrafficRules"
+      }
+    },
+    "ServiceConnectClientAliasList": {
+      "type": "list",
+      "member": "ServiceConnectClientAlias"
+    },
+    "ServiceConnectConfiguration": {
+      "type": "structure",
+      "members": {
+        "enabled": "Boolean",
+        "namespace": "String",
+        "services": "ServiceConnectServiceList",
+        "logConfiguration": "LogConfiguration",
+        "accessLogConfiguration": "ServiceConnectAccessLogConfiguration",
+        "containerConfigurations": "ServiceConnectContainerConfigurations"
+      }
+    },
+    "ServiceConnectContainerConfiguration": {
+      "type": "structure",
+      "members": {
+        "logLevel": "ServiceConnectContainerLogLevel"
+      }
+    },
+    "ServiceConnectContainerConfigurations": {
+      "type": "list",
+      "member": "ServiceConnectContainerConfiguration"
+    },
+    "ServiceConnectContainerLogLevel": {
+      "type": "string"
+    },
+    "ServiceConnectIncludeQueryParameters": {
+      "type": "string"
+    },
+    "ServiceConnectService": {
+      "type": "structure",
+      "members": {
+        "portName": "String",
+        "discoveryName": "String",
+        "clientAliases": "ServiceConnectClientAliasList",
+        "ingressPortOverride": "PortNumber",
+        "timeout": "TimeoutConfiguration",
+        "tls": "ServiceConnectTlsConfiguration"
+      }
+    },
+    "ServiceConnectServiceList": {
+      "type": "list",
+      "member": "ServiceConnectService"
+    },
+    "ServiceConnectTestTrafficHeaderMatchRules": {
+      "type": "structure",
+      "members": {
+        "exact": "String"
+      }
+    },
+    "ServiceConnectTestTrafficHeaderRules": {
+      "type": "structure",
+      "members": {
+        "name": "String",
+        "value": "ServiceConnectTestTrafficHeaderMatchRules"
+      }
+    },
+    "ServiceConnectTestTrafficRules": {
+      "type": "structure",
+      "members": {
+        "header": "ServiceConnectTestTrafficHeaderRules"
+      }
+    },
+    "ServiceConnectTlsCertificateAuthority": {
+      "type": "structure",
+      "members": {
+        "awsPcaAuthorityArn": "String"
+      }
+    },
+    "ServiceConnectTlsConfiguration": {
+      "type": "structure",
+      "members": {
+        "issuerCertificateAuthority": "ServiceConnectTlsCertificateAuthority",
+        "kmsKey": "String",
+        "roleArn": "String"
+      }
+    },
+    "ServiceDeploymentStatus": {
+      "type": "string"
+    },
+    "ServiceDeploymentStatusList": {
+      "type": "list",
+      "member": "ServiceDeploymentStatus"
+    },
+    "ServiceField": {
+      "type": "string"
+    },
+    "ServiceFieldList": {
+      "type": "list",
+      "member": "ServiceField"
+    },
+    "ServiceManagedEBSVolumeConfiguration": {
+      "type": "structure",
+      "members": {
+        "encrypted": "BoxedBoolean",
+        "kmsKeyId": "EBSKMSKeyId",
+        "volumeType": "EBSVolumeType",
+        "sizeInGiB": "BoxedInteger",
+        "snapshotId": "EBSSnapshotId",
+        "volumeInitializationRate": "BoxedInteger",
+        "iops": "BoxedInteger",
+        "throughput": "BoxedInteger",
+        "tagSpecifications": "EBSTagSpecifications",
+        "roleArn": "IAMRoleArn",
+        "filesystemType": "TaskFilesystemType"
+      }
+    },
+    "ServiceRegistries": {
+      "type": "list",
+      "member": "ServiceRegistry"
+    },
+    "ServiceRegistry": {
+      "type": "structure",
+      "members": {
+        "registryArn": "String",
+        "port": "BoxedInteger",
+        "containerName": "String",
+        "containerPort": "BoxedInteger"
+      }
+    },
+    "ServiceRevisionCleanup": {
+      "type": "string"
+    },
+    "ServiceVolumeConfiguration": {
+      "type": "structure",
+      "members": {
+        "name": "ECSVolumeName",
+        "managedEBSVolume": "ServiceManagedEBSVolumeConfiguration"
+      }
+    },
+    "ServiceVolumeConfigurations": {
+      "type": "list",
+      "member": "ServiceVolumeConfiguration"
+    },
+    "SettingName": {
+      "type": "string"
+    },
+    "SortOrder": {
+      "type": "string"
+    },
+    "StartTaskRequest": {
+      "type": "structure",
+      "members": {
+        "cluster": "String",
+        "containerInstances": "StringList",
+        "enableECSManagedTags": "Boolean",
+        "enableExecuteCommand": "Boolean",
+        "group": "String",
+        "networkConfiguration": "NetworkConfiguration",
+        "overrides": "TaskOverride",
+        "propagateTags": "PropagateTags",
+        "referenceId": "String",
+        "startedBy": "String",
+        "tags": "Tags",
+        "taskDefinition": "String",
+        "volumeConfigurations": "TaskVolumeConfigurations"
+      }
+    },
+    "StopServiceDeploymentRequest": {
+      "type": "structure",
+      "members": {
+        "serviceDeploymentArn": "String",
+        "stopType": "StopServiceDeploymentStopType"
+      }
+    },
+    "StopServiceDeploymentStopType": {
+      "type": "string"
+    },
+    "StopTaskRequest": {
+      "type": "structure",
+      "members": {
+        "cluster": "String",
+        "task": "String",
+        "reason": "String"
+      }
+    },
+    "String": {
+      "type": "string"
+    },
+    "StringList": {
+      "type": "list",
+      "member": "String"
+    },
+    "StringMap": {
+      "type": "map",
+      "value": "String"
+    },
+    "SubmitAttachmentStateChangesRequest": {
+      "type": "structure",
+      "members": {
+        "cluster": "String",
+        "attachments": "AttachmentStateChanges"
+      }
+    },
+    "SubmitContainerStateChangeRequest": {
+      "type": "structure",
+      "members": {
+        "cluster": "String",
+        "task": "String",
+        "containerName": "String",
+        "runtimeId": "String",
+        "status": "String",
+        "exitCode": "BoxedInteger",
+        "reason": "String",
+        "networkBindings": "NetworkBindings"
+      }
+    },
+    "SubmitTaskStateChangeRequest": {
+      "type": "structure",
+      "members": {
+        "cluster": "String",
+        "task": "String",
+        "status": "String",
+        "reason": "String",
+        "containers": "ContainerStateChanges",
+        "attachments": "AttachmentStateChanges",
+        "managedAgents": "ManagedAgentStateChanges",
+        "pullStartedAt": "Timestamp",
+        "pullStoppedAt": "Timestamp",
+        "executionStoppedAt": "Timestamp"
+      }
+    },
+    "SystemControl": {
+      "type": "structure",
+      "members": {
+        "namespace": "String",
+        "value": "String"
+      }
+    },
+    "SystemControls": {
+      "type": "list",
+      "member": "SystemControl"
+    },
+    "Tag": {
+      "type": "structure",
+      "members": {
+        "key": "TagKey",
+        "value": "TagValue"
+      }
+    },
+    "TagKey": {
+      "type": "string"
+    },
+    "TagKeys": {
+      "type": "list",
+      "member": "TagKey"
+    },
+    "TagResourceRequest": {
+      "type": "structure",
+      "members": {
+        "resourceArn": "String",
+        "tags": "Tags"
+      }
+    },
+    "TagValue": {
+      "type": "string"
+    },
+    "Tags": {
+      "type": "list",
+      "member": "Tag"
+    },
+    "TargetType": {
+      "type": "string"
+    },
+    "TaskDefinitionFamilyStatus": {
+      "type": "string"
+    },
+    "TaskDefinitionField": {
+      "type": "string"
+    },
+    "TaskDefinitionFieldList": {
+      "type": "list",
+      "member": "TaskDefinitionField"
+    },
+    "TaskDefinitionPlacementConstraint": {
+      "type": "structure",
+      "members": {
+        "type": "TaskDefinitionPlacementConstraintType",
+        "expression": "String"
+      }
+    },
+    "TaskDefinitionPlacementConstraintType": {
+      "type": "string"
+    },
+    "TaskDefinitionPlacementConstraints": {
+      "type": "list",
+      "member": "TaskDefinitionPlacementConstraint"
+    },
+    "TaskDefinitionStatus": {
+      "type": "string"
+    },
+    "TaskField": {
+      "type": "string"
+    },
+    "TaskFieldList": {
+      "type": "list",
+      "member": "TaskField"
+    },
+    "TaskFilesystemType": {
+      "type": "string"
+    },
+    "TaskManagedEBSVolumeConfiguration": {
+      "type": "structure",
+      "members": {
+        "encrypted": "BoxedBoolean",
+        "kmsKeyId": "EBSKMSKeyId",
+        "volumeType": "EBSVolumeType",
+        "sizeInGiB": "BoxedInteger",
+        "snapshotId": "EBSSnapshotId",
+        "volumeInitializationRate": "BoxedInteger",
+        "iops": "BoxedInteger",
+        "throughput": "BoxedInteger",
+        "tagSpecifications": "EBSTagSpecifications",
+        "roleArn": "IAMRoleArn",
+        "terminationPolicy": "TaskManagedEBSVolumeTerminationPolicy",
+        "filesystemType": "TaskFilesystemType"
+      }
+    },
+    "TaskManagedEBSVolumeTerminationPolicy": {
+      "type": "structure",
+      "members": {
+        "deleteOnTermination": "BoxedBoolean"
+      }
+    },
+    "TaskOverride": {
+      "type": "structure",
+      "members": {
+        "containerOverrides": "ContainerOverrides",
+        "cpu": "String",
+        "inferenceAcceleratorOverrides": "InferenceAcceleratorOverrides",
+        "executionRoleArn": "String",
+        "memory": "String",
+        "taskRoleArn": "String",
+        "ephemeralStorage": "EphemeralStorage"
+      }
+    },
+    "TaskSetField": {
+      "type": "string"
+    },
+    "TaskSetFieldList": {
+      "type": "list",
+      "member": "TaskSetField"
+    },
+    "TaskVolumeConfiguration": {
+      "type": "structure",
+      "members": {
+        "name": "ECSVolumeName",
+        "managedEBSVolume": "TaskManagedEBSVolumeConfiguration"
+      }
+    },
+    "TaskVolumeConfigurations": {
+      "type": "list",
+      "member": "TaskVolumeConfiguration"
+    },
+    "TaskVolumeStorageGiB": {
+      "type": "integer"
+    },
+    "ThresholdConfiguration": {
+      "type": "structure",
+      "members": {
+        "type": "ThresholdType",
+        "value": "Integer"
+      }
+    },
+    "ThresholdType": {
+      "type": "string"
+    },
+    "TimeoutConfiguration": {
+      "type": "structure",
+      "members": {
+        "idleTimeoutSeconds": "Duration",
+        "perRequestTimeoutSeconds": "Duration"
+      }
+    },
+    "Timestamp": {
+      "type": "timestamp"
+    },
+    "Tmpfs": {
+      "type": "structure",
+      "members": {
+        "containerPath": "String",
+        "size": "Integer",
+        "mountOptions": "StringList"
+      }
+    },
+    "TmpfsList": {
+      "type": "list",
+      "member": "Tmpfs"
+    },
+    "TotalLocalStorageGBRequest": {
+      "type": "structure",
+      "members": {
+        "min": "BoxedDouble",
+        "max": "BoxedDouble"
+      }
+    },
+    "TransportProtocol": {
+      "type": "string"
+    },
+    "Ulimit": {
+      "type": "structure",
+      "members": {
+        "name": "UlimitName",
+        "softLimit": "Integer",
+        "hardLimit": "Integer"
+      }
+    },
+    "UlimitList": {
+      "type": "list",
+      "member": "Ulimit"
+    },
+    "UlimitName": {
+      "type": "string"
+    },
+    "UntagResourceRequest": {
+      "type": "structure",
+      "members": {
+        "resourceArn": "String",
+        "tagKeys": "TagKeys"
+      }
+    },
+    "UpdateCapacityProviderRequest": {
+      "type": "structure",
+      "members": {
+        "name": "String",
+        "cluster": "String",
+        "autoScalingGroupProvider": "AutoScalingGroupProviderUpdate",
+        "managedInstancesProvider": "UpdateManagedInstancesProviderConfiguration"
+      }
+    },
+    "UpdateClusterRequest": {
+      "type": "structure",
+      "members": {
+        "cluster": "String",
+        "settings": "ClusterSettings",
+        "configuration": "ClusterConfiguration",
+        "serviceConnectDefaults": "ClusterServiceConnectDefaultsRequest"
+      }
+    },
+    "UpdateClusterSettingsRequest": {
+      "type": "structure",
+      "members": {
+        "cluster": "String",
+        "settings": "ClusterSettings"
+      }
+    },
+    "UpdateContainerAgentRequest": {
+      "type": "structure",
+      "members": {
+        "cluster": "String",
+        "containerInstance": "String"
+      }
+    },
+    "UpdateContainerInstancesStateRequest": {
+      "type": "structure",
+      "members": {
+        "cluster": "String",
+        "containerInstances": "StringList",
+        "status": "ContainerInstanceStatus"
+      }
+    },
+    "UpdateDaemonRequest": {
+      "type": "structure",
+      "members": {
+        "daemonArn": "String",
+        "daemonTaskDefinitionArn": "String",
+        "capacityProviderArns": "StringList",
+        "deploymentConfiguration": "DaemonDeploymentConfiguration",
+        "propagateTags": "DaemonPropagateTags",
+        "enableECSManagedTags": "Boolean",
+        "enableExecuteCommand": "Boolean",
+        "critical": "BoxedBoolean"
+      }
+    },
+    "UpdateExpressGatewayServiceRequest": {
+      "type": "structure",
+      "members": {
+        "serviceArn": "String",
+        "executionRoleArn": "String",
+        "healthCheckPath": "String",
+        "primaryContainer": "ExpressGatewayContainer",
+        "taskRoleArn": "String",
+        "networkConfiguration": "ExpressGatewayServiceNetworkConfiguration",
+        "cpu": "String",
+        "memory": "String",
+        "cpuArchitecture": "ExpressCpuArchitecture",
+        "scalingTarget": "ExpressGatewayScalingTarget",
+        "taskDefinitionArn": "String"
+      }
+    },
+    "UpdateGatewayAlbConfiguration": {
+      "type": "structure",
+      "members": {
+        "networkConfiguration": "UpdateGatewayNetworkConfiguration",
+        "maxAlbCount": "BoxedInteger",
+        "webACLArn": "String",
+        "accessLogs": "GatewayElbAccessLogConfiguration",
+        "httpDesync": "GatewayAlbDesyncMitigationMode",
+        "testTrafficRules": "GatewayAlbTestTrafficRules"
+      }
+    },
+    "UpdateGatewayConfiguration": {
+      "type": "structure",
+      "members": {
+        "hostSharedAlb": "UpdateGatewayAlbConfiguration"
+      }
+    },
+    "UpdateGatewayNetworkConfiguration": {
+      "type": "structure",
+      "members": {
+        "inboundSecurityGroup": "String"
+      }
+    },
+    "UpdateGatewayRequest": {
+      "type": "structure",
+      "members": {
+        "gateway": "String",
+        "infrastructureRoleArn": "String",
+        "deletionProtection": "BoxedBoolean",
+        "configuration": "UpdateGatewayConfiguration",
+        "propagateTags": "PropagateGatewayTags"
+      }
+    },
+    "UpdateManagedInstancesProviderConfiguration": {
+      "type": "structure",
+      "members": {
+        "infrastructureRoleArn": "String",
+        "instanceLaunchTemplate": "InstanceLaunchTemplateUpdate",
+        "propagateTags": "PropagateMITags",
+        "infrastructureOptimization": "InfrastructureOptimization",
+        "autoRepairConfiguration": "AutoRepairConfiguration"
+      }
+    },
+    "UpdateServicePrimaryTaskSetRequest": {
+      "type": "structure",
+      "members": {
+        "cluster": "String",
+        "service": "String",
+        "primaryTaskSet": "String"
+      }
+    },
+    "UpdateServiceRequest": {
+      "type": "structure",
+      "members": {
+        "cluster": "String",
+        "service": "String",
+        "desiredCount": "BoxedInteger",
+        "taskDefinition": "String",
+        "capacityProviderStrategy": "CapacityProviderStrategy",
+        "deploymentConfiguration": "DeploymentConfiguration",
+        "availabilityZoneRebalancing": "AvailabilityZoneRebalancing",
+        "networkConfiguration": "NetworkConfiguration",
+        "placementConstraints": "PlacementConstraints",
+        "placementStrategy": "PlacementStrategies",
+        "platformVersion": "String",
+        "forceNewDeployment": "Boolean",
+        "healthCheckGracePeriodSeconds": "BoxedInteger",
+        "deploymentController": "DeploymentController",
+        "enableExecuteCommand": "BoxedBoolean",
+        "enableECSManagedTags": "BoxedBoolean",
+        "loadBalancers": "LoadBalancers",
+        "propagateTags": "PropagateTags",
+        "serviceRegistries": "ServiceRegistries",
+        "serviceConnectConfiguration": "ServiceConnectConfiguration",
+        "volumeConfigurations": "ServiceVolumeConfigurations",
+        "vpcLatticeConfigurations": "VpcLatticeConfigurations",
+        "gatewayConnectors": "GatewayConnectorList",
+        "monitoring": "MonitoringConfiguration"
+      }
+    },
+    "UpdateTaskProtectionRequest": {
+      "type": "structure",
+      "members": {
+        "cluster": "String",
+        "tasks": "StringList",
+        "protectionEnabled": "Boolean",
+        "expiresInMinutes": "BoxedInteger"
+      }
+    },
+    "UpdateTaskSetRequest": {
+      "type": "structure",
+      "members": {
+        "cluster": "String",
+        "service": "String",
+        "taskSet": "String",
+        "scale": "Scale"
+      }
+    },
+    "VCpuCountRangeRequest": {
+      "type": "structure",
+      "members": {
+        "min": "BoxedInteger",
+        "max": "BoxedInteger"
+      }
+    },
+    "VersionConsistency": {
+      "type": "string"
+    },
+    "VersionInfo": {
+      "type": "structure",
+      "members": {
+        "agentVersion": "String",
+        "agentHash": "String",
+        "dockerVersion": "String"
+      }
+    },
+    "Volume": {
+      "type": "structure",
+      "members": {
+        "name": "String",
+        "host": "HostVolumeProperties",
+        "dockerVolumeConfiguration": "DockerVolumeConfiguration",
+        "efsVolumeConfiguration": "EFSVolumeConfiguration",
+        "s3filesVolumeConfiguration": "S3FilesVolumeConfiguration",
+        "fsxWindowsFileServerVolumeConfiguration": "FSxWindowsFileServerVolumeConfiguration",
+        "configuredAtLaunch": "BoxedBoolean"
+      }
+    },
+    "VolumeFrom": {
+      "type": "structure",
+      "members": {
+        "sourceContainer": "String",
+        "readOnly": "BoxedBoolean"
+      }
+    },
+    "VolumeFromList": {
+      "type": "list",
+      "member": "VolumeFrom"
+    },
+    "VolumeList": {
+      "type": "list",
+      "member": "Volume"
+    },
+    "VpcLatticeAdvancedConfiguration": {
+      "type": "structure",
+      "members": {
+        "alternateTargetGroupArn": "String",
+        "productionListenerRule": "String",
+        "testListenerRule": "String"
+      }
+    },
+    "VpcLatticeConfiguration": {
+      "type": "structure",
+      "members": {
+        "roleArn": "IAMRoleArn",
+        "targetGroupArn": "String",
+        "portName": "String",
+        "advancedConfiguration": "VpcLatticeAdvancedConfiguration"
+      }
+    },
+    "VpcLatticeConfigurations": {
+      "type": "list",
+      "member": "VpcLatticeConfiguration"
+    }
+  }
+}

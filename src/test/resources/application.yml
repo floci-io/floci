@@ -2,20 +2,25 @@ quarkus:
   http:
     port: 0
     test-port: 0
+    # Integration signatures use localhost as the public test authority. Keep the test listener
+    # explicit so the production loopback default does not change the signed host.
+    host: 0.0.0.0
     limits:
       max-body-size: ${floci.protocols.max-request-size}M
-  datasource:
-    active: false
-  # Groovy (a REST Assured dependency) starts DFA-cache-cleaner threads that never stop.
-  # Loaded parent-first they live in the shared system classloader, so they cannot pin a
-  # per-profile application classloader across the many app restarts of a test run.
-  class-loading:
-    parent-first-artifacts: org.apache.groovy:groovy
+      max-header-size: 256K
+      max-initial-line-length: 262144
 
 floci:
   base-url: "http://localhost:4566"
+  network:
+    security-group-enforcement:
+      enabled: true
+      helper-image: floci/network-helper:local
   default-region: us-east-1
   default-account-id: "000000000000"
+  partitions:
+    strict: false
+    allow-unknown-regions: false
   ai-mock-config-file: ${AI_MOCK_CONFIG:src/test/resources/fixtures/ai-mock-config.json}
   storage:
     mode: memory
@@ -36,11 +41,15 @@ floci:
         flush-interval-ms: 60000
       cloudwatchmetrics:
         flush-interval-ms: 60000
+      paymentcryptography:
+        flush-interval-ms: 60000
       secretsmanager:
         flush-interval-ms: 60000
       acm:
         flush-interval-ms: 60000
       opensearch:
+        flush-interval-ms: 60000
+      sagemaker:
         flush-interval-ms: 60000
       batch:
         flush-interval-ms: 60000
@@ -62,6 +71,9 @@ floci:
         flush-interval-ms: 60000
       codedeploy:
         flush-interval-ms: 60000
+      resource-groups:
+        mode: ${FLOCI_STORAGE_SERVICES_RESOURCE_GROUPS_MODE:}
+        flush-interval-ms: ${FLOCI_STORAGE_SERVICES_RESOURCE_GROUPS_FLUSH_INTERVAL_MS:5000}
       tagging:
         flush-interval-ms: 60000
       elasticbeanstalk:
@@ -92,8 +104,13 @@ floci:
     extra-cors-allowed-headers: ${EXTRA_CORS_ALLOWED_HEADERS:}
     extra-cors-expose-headers: ${EXTRA_CORS_EXPOSE_HEADERS:}
     disable-cors-headers: false
+    # The test listener binds all interfaces so Quarkus keeps localhost as its test authority.
+    # This is test-only; production keeps the loopback default.
+    allow-unsafe-network-exposure: true
+    allow-private-jwt-targets: true
 
   init-hooks:
+    dir: /etc/floci/init
     shell-executable: /bin/sh
     timeout-seconds: 5
     shutdown-grace-period-seconds: 2
@@ -119,24 +136,43 @@ floci:
       enabled: true
       default-visibility-timeout: 30
       max-message-size: 1048576
+      endpoint-strategy: floci
+      cloudwatch-metrics-enabled: false   # tests publish themselves, so no tick stamps another test's queue behind its back
     s3:
       enabled: true
       enforce-auth: false
       default-presign-expiry-seconds: 3600
       global-bucket-namespace: false
+      lifecycle-sweep-enabled: false   # tests run the sweep themselves, so no bucket's rules apply behind another test's back
+      lifecycle-sweep-interval-seconds: 60
     dynamodb:
       enabled: true
+      vector-index-allocation-seconds: 0
+      vector-index-backfill-seconds: 0
+      latest-restorable-lag-seconds: 0
+      backend: native
     sns:
       enabled: true
     lambda:
       enabled: true
+      container-drain-timeout-seconds: 15
+      docker-flags: ""
       honour-architectures: false
       zip-max-entries: 100000
+      async-retry-delay-seconds: 1
+      durable-sweep-enabled: true
+      durable-sweep-interval-seconds: 1
       # aws-config-path:
       hot-reload:
         enabled: true
+      reactive-s3-sync:
+        enabled: true
+        async: false
     apigateway:
       enabled: true
+      vtl-max-loops: 10000
+      vtl-max-output-chars: 1048576
+      vtl-timeout-millis: 5000
     apigatewayv2:
       enabled: true
     iam:
@@ -146,6 +182,7 @@ floci:
     msk:
       enabled: true
       mock: true
+      scram-reconciliation-interval-ms: 5000
       default-image: "redpandadata/redpanda:latest"
     amazonmq:
       enabled: true
@@ -171,28 +208,62 @@ floci:
       default-image: "valkey/valkey:8"
     redshift:
       enabled: true
+      automated-snapshots-enabled: false
+      cloudwatch-metrics-enabled: true
+      snapshot-sweep-interval-seconds: 60
+      snapshot-copy-enabled: false
+      snapshot-copy-sweep-interval-seconds: 60
       default-port: 5439
       image-version: postgres:15-alpine
+      poll-interval-ms: 1000
       proxy-base-port: 7100
       proxy-max-port: 7199
       default-credential-duration-seconds: 900
+      proxy-handshake-timeout-millis: 10000
+      proxy-backend-connect-timeout-millis: 5000
+      proxy-max-connections: 2000
+      spectrum-max-rows: 1000000
     rds:
       enabled: true
       mock: false
       proxy-base-port: 7001
       proxy-max-port: 7099
+      default-sql-server-image: "mcr.microsoft.com/mssql/server:2022-latest"
+      proxy-handshake-timeout-millis: 10000
+      proxy-backend-connect-timeout-millis: 5000
+      proxy-max-connections: 100
+      aurora-auto-pause-enabled: true
+      aurora-resume-delay-millis: 0
     rds-data:
       enabled: true
       transaction-ttl-seconds: 180
+      database-resuming-exception-enabled: false
+    dsql:
+      enabled: true
+      mock: true
+      port: 0
     redshift-data:
       enabled: true
       result-ttl-hours: 24
+      max-concurrent-statements: 10
+      queue-capacity: 100
+      shutdown-timeout-seconds: 10
+    redshift-serverless:
+      enabled: true
+      snapshot-expiration-enabled: false
+      snapshot-expiration-sweep-interval-seconds: 60
+      snapshot-copy-enabled: false
+      snapshot-copy-sweep-interval-seconds: 60
+      scheduled-actions-enabled: false
+      scheduled-action-sweep-interval-seconds: 60
     neptune:
       enabled: true
       proxy-base-port: 8182
       proxy-max-port: 8282
       default-image: "tinkerpop/gremlin-server:3.7.3"
     eventbridge:
+      enabled: true
+    eventbridgev2:
       enabled: true
     cloudmap:
       enabled: true
@@ -207,30 +278,39 @@ floci:
       max-events-per-query: 10000
     cloudwatchmetrics:
       enabled: true
+    paymentcryptography:
+      enabled: true
     secretsmanager:
       enabled: true
       default-recovery-window-days: 30
     kinesis:
       enabled: true
+      list-shards-next-token-ttl-millis: 300000
     firehose:
       enabled: true
-      tick-interval-seconds: 10
+      tick-interval-seconds: 1
       flush-record-count: 0
       staging-bucket: floci-firehose-staging
     kms:
       enabled: true
     cognito:
       enabled: true
+      google-issuer: https://accounts.google.com
+      enforce-token-validity-limits: true
     stepfunctions:
       enabled: true
       allow-plaintext-http: true
       mock-config-file: ${SFN_MOCK_CONFIG:src/test/resources/fixtures/sfn-mock-config.json}
+      max-wait-seconds: 30
     swf:
       enabled: true
       timeout-sweep-enabled: true
       timeout-sweep-interval-seconds: 1
     cloudformation:
       enabled: true
+      # Pinned to the shipped default: the retention tests advance the test clock past this
+      # window by name, so the value they assume is spelled out rather than inherited.
+      deleted-stack-retention-seconds: 30
       # Fail an AWS::Lambda::Function whose S3 code cannot be read, as real CloudFormation
       # does. Set true to fall back to the built-in stub handler instead (issue #2648).
       allow-stub-lambda-code: false
@@ -253,6 +333,11 @@ floci:
       proxy-base-port: 9400
       proxy-max-port: 9499
     ec2:
+      # Opt-in Standard On-Demand vCPU admission. FLOCI_SERVICES_EC2_ENFORCE_VCPU_QUOTAS
+      enforce-vcpu-quotas: false
+      # Optional complete catalog override for locally built guest images.
+      image-catalog-path: ${FLOCI_SERVICES_EC2_IMAGE_CATALOG_PATH:}
+      managed-prefix-list-catalog-path: ${FLOCI_SERVICES_EC2_MANAGED_PREFIX_LIST_CATALOG_PATH:}
       enabled: true
       imds-port: 9169
       ssh-port-range-start: 2200
@@ -262,7 +347,11 @@ floci:
       app-port-range-end: 30999
       max-published-ports-per-instance: 20
       socat-image: alpine/socat
+      volume-block-devices: false
+      volume-helper-image: alpine:3.21
       mock: true
+      mock-public-addresses: none
+      instance-resource-limits: true
       aws-faithful-private-ip: false
       # container-ips-routable: true  # see src/main/resources/application.yml
       # Off explicitly, not merely by implication of mock: true above. Tests must not create or
@@ -272,12 +361,18 @@ floci:
     ecs:
       enabled: true
       mock: true
+      dynamic-awsvpc-host-ports: false
+      host-volume-roots: []
+      allow-unsafe-host-volumes: false
+      allow-privileged-containers: false
+      image-pull-behavior: prefer-cached
     appconfig:
       enabled: true
     appconfigdata:
       enabled: true
     ecr:
       enabled: true
+      tls-uri: false
     ui:
       enabled: true
     bedrock:
@@ -287,7 +382,13 @@ floci:
     eks:
       enabled: true
       mock: true
+      max-memory-mib: 0
+      max-vcpus: 0
       ecr-registry-mirror: true
+      default-storage-class: false
+      imds: false
+      irsa-signing-key: true
+      embedded-dns: true
     mwaa:
       enabled: true
       mock: true
@@ -299,9 +400,26 @@ floci:
     elbv2:
       enabled: true
       mock: true
+      backend-keep-alive: true
+      backend-keep-alive-timeout-seconds: 60
     codebuild:
       enabled: true
       # docker-network: floci-network
+    sagemaker:
+      enabled: true
+      # docker-network: floci-network
+      gpu:
+        # Off by default: an existing deployment keeps launching CPU-only
+        # containers. How many GPUs an ml.* type has is shipped in
+        # sagemaker/instance-type-catalog.yaml; this is only about which of
+        # this machine's devices Floci may hand out.
+        enabled: false
+        # cdi | device-ids | count. Podman resolves only cdi, and accepts
+        # count while attaching no device, so cdi fails loudly instead.
+        mode: cdi
+        # Required for cdi and device-ids modes; unset allows no device.
+        # devices:
+        #   - nvidia.com/gpu=GPU-<uuid>
     batch:
       enabled: true
       runner-mode: immediate
@@ -309,6 +427,8 @@ floci:
       enabled: true
     codepipeline:
       enabled: true
+      source-poll-interval-ms: 100   # a shorter cycle so the "did not trigger" tests wait less
+      worker-poll-interval-ms: 1
     autoscaling:
       enabled: true
     applicationautoscaling:
@@ -339,9 +459,16 @@ floci:
     cur:
       enabled: true
       emit-mode: off
+    bcm-pricing-calculator:
+      enabled: true
+    timestream-influxdb:
+      enabled: true
+      mock: true
     bcm-data-exports:
       enabled: true
       emit-mode: off
+    oam:
+      enabled: true
     cloudtrail:
       enabled: true
       flush-interval-seconds: 3600
@@ -358,6 +485,9 @@ floci:
       enabled: true
       schema-worker-threads: 4
       schema-worker-shutdown-timeout-seconds: 30
+      vtl-max-loops: 10000
+      vtl-max-output-chars: 1048576
+      vtl-timeout-millis: 5000
     s3vectors:
       enabled: true
     s3tables:
@@ -389,6 +519,8 @@ floci:
       enabled: true
     emrserverless:
       enabled: true
+      job-run-duration-seconds: 0   # 0 = BATCH job runs succeed as soon as they start
+      runner-mode: immediate
     ssoadmin:
       enabled: true
     ssooidc:
@@ -422,6 +554,8 @@ floci:
       enabled: true
     appintegrations:
       enabled: true
+    dlm:
+      enabled: true
     cognitoidentity:
       enabled: true
     globalaccelerator:
@@ -431,6 +565,8 @@ floci:
     aps:
       enabled: true
     lakeformation:
+      enabled: true
+    resource-groups:
       enabled: true
     tagging:
       enabled: true
@@ -448,12 +584,19 @@ floci:
       enabled: true
     servicequotas:
       enabled: true
+      standard-on-demand-vcpus: 5
     verifiedpermissions:
       enabled: true
-      cedar-url: http://127.0.0.1:18180
     ram:
       enabled: true
     codegurureviewer:
       enabled: true
+    codeartifact:
+      enabled: true
+    quicksight:
+      enabled: true
+      embed-base-url: ${floci.base-url}
     marketplace:
+      enabled: true
+    dms:
       enabled: true

@@ -17,6 +17,9 @@ Floci emulates Amazon MSK by orchestrating **Redpanda** containers. This provide
 | `DescribeClusterV2` | Get cluster metadata and state using V2 API |
 | `DeleteCluster` | Stops and removes the Redpanda container |
 | `GetBootstrapBrokers` | Get the connection strings for the cluster |
+| `BatchAssociateScramSecret` | Associate secret SCRAM credential with cluster |
+| `ListScramSecrets` | List the secret ARNs associated with a cluster |
+| `BatchDisassociateScramSecret` | Remove secret SCRAM credential associated with cluster |
 | `CreateConfiguration` | Create a broker configuration (`server.properties`) |
 | `ListConfigurations` | List all configurations |
 | `DescribeConfiguration` | Get configuration metadata and latest revision |
@@ -35,13 +38,19 @@ Floci emulates Amazon MSK by orchestrating **Redpanda** containers. This provide
 | `FLOCI_SERVICES_MSK_ENABLED` | `true` | Enable or disable the service |
 | `FLOCI_SERVICES_MSK_MOCK` | `false` | `true` = metadata-only CRUD, no Docker containers |
 | `FLOCI_SERVICES_MSK_DEFAULT_IMAGE` | `redpandadata/redpanda:latest` | Docker image for Redpanda (Kafka) containers |
+| `FLOCI_SERVICES_MSK_KAFKA_HOST_PORT_BASE` | `9300` | First host port a broker's Kafka listener can be published on |
+| `FLOCI_SERVICES_MSK_KAFKA_HOST_PORT_MAX` | `9399` | Last host port a broker's Kafka listener can be published on |
+| `FLOCI_SERVICES_MSK_SCRAM_RECONCILIATION_INTERVAL_MS` | `5000` | SCRAM secret reconciliation interval (ms) |
+| `FLOCI_SERVICES_MSK_BOOTSTRAP_HOSTNAME` | _(unset)_ | Floci in a container only: hostname the host listener advertises, and when set, `GetBootstrapBrokers` returns `<container-name>:9092,<hostname>:<host port>` instead of the Docker-network address |
 
 ## How it works
 
 When `mock` is set to `false` (default), Floci uses the Docker API to start a Redpanda container for each created cluster. For Docker socket setup, private registry authentication, and other Docker settings see [Docker Configuration](../configuration/docker.md).
 
-- **Port Mapping**: The Kafka API (9092) is mapped to a dynamic host port.
-- **Persistence**: Each cluster gets a named Docker volume (`floci-msk-{volumeId}`). In memory mode the volume is removed on cluster delete; in persistent modes it is retained unless `FLOCI_STORAGE_PRUNE_VOLUMES_ON_DELETE=true`.
+- **Networking**: Kafka clients connect to whatever address the broker advertises, so the advertised address has to be reachable from the client.
+    - Floci on the host: the Kafka API (9092) is published on a host port from the `kafka-host-port` range and advertised as `localhost:<port>`.
+    - Floci in a container: the broker has two listeners. `internal` (9092) advertises `<container-name>:9092` for containers on the same Docker network. `host` (9093) is published on a host port from the `kafka-host-port` range and advertised as `<bootstrap-hostname or localhost>:<port>` for clients on the Docker host. `GetBootstrapBrokers` returns the Docker-network address. When `FLOCI_SERVICES_MSK_BOOTSTRAP_HOSTNAME` is set, it returns both listeners, `<container-name>:9092,<hostname>:<port>`: a client connects through whichever entry it can reach, and the broker then advertises that listener's address. The two entries are two listeners on the same broker, not two brokers.
+- **Persistence**: Each cluster gets a named Docker volume (`floci-aws-msk-{volumeId}`). In memory mode the volume is removed on cluster delete; in persistent modes it is retained unless `FLOCI_STORAGE_PRUNE_VOLUMES_ON_DELETE=true`.
 - **Readiness**: The cluster state transitions to `ACTIVE` once the Redpanda `/ready` endpoint is reachable.
 
 ## Cluster metadata
@@ -69,7 +78,7 @@ Two details worth knowing:
   `configurationRevision`, which is where the Terraform AWS provider reads it from.
 - Members AWS defaults server-side are defaulted here too, so a `terraform plan` converges:
   `enhancedMonitoring` becomes `DEFAULT`, and `encryptionInfo.encryptionInTransit` becomes
-  `clientBroker: TLS_PLAINTEXT` / `inCluster: true` when the request omits them.
+  `clientBroker: TLS` / `inCluster: true` when the request omits them.
 
 ### Serverless clusters
 
@@ -107,6 +116,36 @@ Cluster and configuration tags are managed through `/v1/tags/{resourceArn}`
 Configuration tags are reachable only through the tag endpoints, because AWS's
 `DescribeConfiguration` response has no tags member.
 
+### SCRAM Secrets Association
+
+Manages credentials only: the broker does not enable SASL authentication or
+validate these users when clients connect. Clients can still connect without
+credentials. Authenticated SASL_SSL listeners is not implemented.
+
+`BatchAssociateScramSecret` accepts up to 10 Secrets Manager ARNs and creates kafka
+`SCRAM-SHA-512` users.
+Secrets must belong to the cluster's account, region and partition, use the `AmazonMSK_`
+name prefix and a customer-managed symmetric KMS key ID, not an `alias/...` reference.
+The secrets must contain JSON such as `{"username":"alice","password":"pw"}`.
+
+`ListScramSecrets` supports pagination. `BatchDisassociateScramSecret` removes up to
+10 associations. Item failures appear in
+`unprocessedScramSecrets`; reassociation and removal of an unassociated ARN return
+`InvalidSecretArn`.
+
+Floci schedules SCRAM reconciliation jobs every five seconds by default, measured as
+a delay after each scheduling sweep. Sweeps do not wait for broker operations to finish,
+and clusters with queued or running jobs are skipped. Set
+`FLOCI_SERVICES_MSK_SCRAM_RECONCILIATION_INTERVAL_MS` to change this delay in milliseconds.
+This is Floci's timing, not an AWS synchronization guarantee.
+
+When an associated secret is scheduled for deletion or permanently deleted, reconciliation
+revokes its broker user but retains the association in `ListScramSecrets`. Restoring a secret
+whose deletion was scheduled causes reconciliation to recreate its broker user using the
+current credentials, without requiring reassociation. Permanently deleted secrets cannot
+be restored; creating a secret with the same name produces a different ARN and requires
+a new association.
+
 ## Examples
 
 ```bash
@@ -126,6 +165,12 @@ aws kafka list-clusters --endpoint-url $AWS_ENDPOINT_URL
 # Get bootstrap brokers
 CLUSTER_ARN=$(aws kafka list-clusters --query 'ClusterInfoList[0].ClusterArn' --output text --endpoint-url $AWS_ENDPOINT_URL)
 aws kafka get-bootstrap-brokers --cluster-arn $CLUSTER_ARN --endpoint-url $AWS_ENDPOINT_URL
+
+# Associate an existing secret
+aws kafka batch-associate-scram-secret \
+  --cluster-arn "$CLUSTER_ARN" \
+  --secret-arn-list "arn:aws:secretsmanager:us-east-1:000000000000:secret:AmazonMSK_my-user" \
+  --endpoint-url $AWS_ENDPOINT_URL
 
 # Delete a cluster
 aws kafka delete-cluster --cluster-arn $CLUSTER_ARN --endpoint-url $AWS_ENDPOINT_URL

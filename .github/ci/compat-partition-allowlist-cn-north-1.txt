@@ -1,0 +1,6 @@
+# Known failures of the Java SDK suite against a Floci deployed in cn-north-1, with the
+# fixture clients signing for cn-north-1 (.github/workflows/compat-partitions.yml).
+# Checked by .github/ci/compat-allowlist-check.py: one `Class#method` per line; a failure
+# missing from this list, or an entry that no longer fails, fails the run. Delete an entry
+# as soon as its test passes. Measured 2026-10-01 on main 231655b70 plus #4787, JVM image;
+# failures that also occur in the commercial control run are environmental and not listed.

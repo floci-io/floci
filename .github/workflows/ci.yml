@@ -10,38 +10,67 @@ on:
       - '.github/ci/**'
       - '.github/workflows/ci.yml'
   pull_request:
+    # ready_for_review is not a default type: without it, marking a draft ready
+    # would not start the run the draft skipped.
+    types: [opened, synchronize, reopened, ready_for_review]
     paths:
       - 'src/**'
       - 'pom.xml'
       - '.github/ci/**'
       - '.github/workflows/ci.yml'
+  # Runs each merge queue entry against main plus the PRs queued ahead of it. paths does not
+  # apply to merge_group, so a queued PR is always checked.
+  merge_group:
+    types: [checks_requested]
 
 permissions:
   contents: read
 
+# A new push to a pull request cancels its older run: only the latest head matters there.
+# On main a running run is left to finish. A run takes about 18 minutes and merges often
+# land closer together than that, so cancelling stopped 77 of 138 main runs partway through
+# between 2026-10-05 and 2026-10-09 and left most main commits with no result.
+# Without cancelling, the concurrency group still holds at most one pending run: a newer
+# merge replaces the waiting one before it starts, so a burst of merges is tested once, at
+# its newest commit, and no run is stopped halfway.
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 env:
   # Hardcoded on purpose: strategy.job-total counts EVERY matrix job, so adding an
   # unrelated matrix entry later would change the modulus and silently leave part
   # of the suite running in no shard. Keep in sync with the matrix below.
-  SHARD_TOTAL: 4
+  SHARD_TOTAL: 5
 
 jobs:
   test:
     name: Build and Test (shard ${{ matrix.shard }})
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    # A runaway-job kill switch, not a budget: Actions bills the minutes a job actually uses, so a
+    # higher ceiling adds cost only when a job runs longer. It stopped being a kill switch once the
+    # suite grew into it: on 2026-11-02 one shard was cut here twice at 25m15s and 25m26s with no
+    # test having failed, which is why the suite runs in five shards rather than four. A later
+    # shard's Run tests step was canceled at the 25-minute job limit; leave room for normal variance.
+    timeout-minutes: 35
+    # Drafts skip the suite to spare runners; it runs once the PR is ready for review.
+    # Written on the job rather than as a gate job so it costs no runner. Pushes to main
+    # always run; `closed` and `edited` are excluded so widening the trigger types cannot
+    # let those events through.
+    if: >-
+      github.event_name != 'pull_request' || (
+        github.event.pull_request.draft == false &&
+        github.event.pull_request.state != 'closed' &&
+        github.event.action != 'edited'
+      )
     strategy:
       fail-fast: false
       matrix:
-        shard: [1, 2, 3, 4]
+        shard: [1, 2, 3, 4, 5]
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
-      - uses: actions/setup-java@dd06d9cba3e5552c54d9f8ea23572deb30010f7c # v6.0.0
+      - uses: actions/setup-java@b843ebf9b913146b38da2eaa7aeddf76074ae1ad # v6.1.0
         with:
           java-version: '25'
           distribution: 'temurin'
@@ -49,7 +78,7 @@ jobs:
           # fails with Path Validation Error); explicit cache steps below.
 
       # Restore on every shard; save from shard 1 only. With a combined cache step
-      # all four shards would race the same save key: one wins, three spend
+      # every shard would race the same save key: one wins, the rest spend
       # post-job time reserving-then-failing plus redundant multi-hundred-MB uploads.
       - uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
@@ -58,19 +87,17 @@ jobs:
           restore-keys: |
             maven-${{ runner.os }}-
 
-      - name: Prefetch this shard's Docker images (background)
-        run: .github/ci/prefetch-images.sh shard.txt || true
-
-      - name: Compile
-        run: ./mvnw test-compile -B
-
+      # Derived from test sources, not target/test-classes, so shard.txt exists
+      # before Compile and the image prefetch below overlaps the compile instead
+      # of starting moments before the tests that need the images. Every test is
+      # a top-level class in src/test/java, so the file name is the class name;
+      # the step after Compile fails the shard if that ever stops being true.
       - name: Compute shard include list
         run: |
-          cd target/test-classes
-          find . \( -name '*Test.class' -o -name 'Test*.class' \
-                    -o -name '*Tests.class' -o -name '*TestCase.class' \) \
-                  ! -name '*$*' \
-            | sed 's|^\./||; s|\.class$||' | LC_ALL=C sort \
+          cd src/test/java
+          find . \( -name '*Test.java' -o -name 'Test*.java' \
+                    -o -name '*Tests.java' -o -name '*TestCase.java' \) \
+            | sed 's|^\./||; s|\.java$||' | LC_ALL=C sort \
             > "$GITHUB_WORKSPACE/all-classes.txt"
           cd "$GITHUB_WORKSPACE"
           .github/ci/partition.sh all-classes.txt "$SHARD_TOTAL" "${{ matrix.shard }}" > shard.txt
@@ -78,13 +105,56 @@ jobs:
           # and run the ENTIRE suite into this shard's timeout.
           test -s shard.txt
           echo "shard ${{ matrix.shard }}/$SHARD_TOTAL: $(wc -l < shard.txt) classes"
-          .github/ci/prefetch-images.sh shard.txt || true
 
+      - name: Prefetch this shard's Docker images (background)
+        run: .github/ci/prefetch-images.sh shard.txt || true
+
+      - name: Compile
+        run: ./mvnw test-compile -B
+
+      # all-classes.txt is derived from file names, so a test class whose name
+      # differs from its file would drop out of both it and the shard union
+      # without the completeness check noticing. The compiled classes are the
+      # ground truth; fail here if the two lists ever disagree.
+      - name: Verify shard list matches compiled test classes
+        run: |
+          cd target/test-classes
+          find . \( -name '*Test.class' -o -name 'Test*.class' \
+                    -o -name '*Tests.class' -o -name '*TestCase.class' \) \
+                  ! -name '*$*' \
+            | sed 's|^\./||; s|\.class$||' | LC_ALL=C sort \
+            > "$RUNNER_TEMP/compiled-classes.txt"
+          cd "$GITHUB_WORKSPACE"
+          cmp -s all-classes.txt "$RUNNER_TEMP/compiled-classes.txt" \
+            || { echo "::error::test class list from src/test/java differs from target/test-classes:"; diff all-classes.txt "$RUNNER_TEMP/compiled-classes.txt" | head -50; exit 1; }
+
+      # surefire.timeout bounds the reused test fork for 25 minutes from its first test set,
+      # including deadlocks or blocking I/O that ignore JUnit's interrupt. The 35-minute job
+      # ceiling also covers compilation, test startup, and report upload.
       - name: Run tests
         run: >
           ./mvnw surefire:test -B
           -Dsurefire.includesFile="$GITHUB_WORKSPACE/shard.txt"
           -Dsurefire.failIfNoTests=true
+          -Dsurefire.timeout=1500
+
+      # The prefetch runs in the background past its own step, so its per-image
+      # results are only complete once the tests are done. A pull still running
+      # here (after an early exit) has no result line yet, so list it. The
+      # prefetch is best-effort by design, so a key that no longer matches a
+      # class, a pin the script could not read, or an image back on ECR Public
+      # that Docker Hub also carries (only the Lambda runtimes and the EMR
+      # Serverless images belong there) is an annotation, not a failure.
+      - name: Image prefetch results
+        if: always()
+        run: |
+          cat prefetch-images.log 2>/dev/null || echo "no prefetch log"
+          pgrep -af 'docker pull' | sed 's/^/still running: /' || true
+          grep -E 'stale prefetch key|prefetch skipped' prefetch-images.log 2>/dev/null \
+            | sed 's/^/::warning title=prefetch-images.sh::/' || true
+          grep -E '(prefetched|prefetch failed) public\.ecr\.aws/' prefetch-images.log 2>/dev/null \
+            | grep -vE 'public\.ecr\.aws/(lambda|emr-serverless)/' \
+            | sed 's/^/::warning title=prefetch-images.sh::pull it from Docker Hub, not ECR Public: /' || true
 
       # Save from main only, and from shard 1 only. Actions caches are ref-scoped:
       # a pull_request run's write lands in refs/pull/N/merge where no other PR can
@@ -106,12 +176,13 @@ jobs:
 
       - name: Upload shard manifest and results
         if: always()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: shard-${{ matrix.shard }}
           path: |
             shard.txt
             all-classes.txt
+            prefetch-images.log
             target/surefire-reports/
           if-no-files-found: error
 
@@ -124,7 +195,16 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     needs: test
-    if: always()
+    # always() so a failed shard still reaches the partition check and report, but not on a
+    # draft: there the shards are skipped and this would fail on them. Same condition as the shards.
+    if: >-
+      always() && (
+        github.event_name != 'pull_request' || (
+          github.event.pull_request.draft == false &&
+          github.event.pull_request.state != 'closed' &&
+          github.event.action != 'edited'
+        )
+      )
     steps:
       - name: Fail if any shard failed
         if: needs.test.result != 'success'
@@ -132,7 +212,7 @@ jobs:
           echo "shard matrix concluded: ${{ needs.test.result }}"
           exit 1
 
-      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           pattern: shard-*
           path: shards

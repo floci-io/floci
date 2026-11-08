@@ -1,0 +1,17 @@
+{
+  "error": "Resource with id [Fn] is invalid. Property 'EventInvokeConfig' should be a map.",
+  "input": {
+    "Resources": {
+      "Fn": {
+        "Properties": {
+          "CodeUri": "s3://b/k",
+          "EventInvokeConfig": "oops",
+          "Handler": "index.handler",
+          "Runtime": "python3.12"
+        },
+        "Type": "AWS::Serverless::Function"
+      }
+    },
+    "Transform": "AWS::Serverless-2016-10-31"
+  }
+}

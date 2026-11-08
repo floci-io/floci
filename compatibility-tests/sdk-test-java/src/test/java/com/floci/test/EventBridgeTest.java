@@ -7,6 +7,7 @@ import software.amazon.awssdk.services.eventbridge.model.ResourceNotFoundExcepti
 import software.amazon.awssdk.services.sqs.SqsClient;
 import software.amazon.awssdk.services.sqs.model.*;
 
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 
@@ -234,6 +235,24 @@ class EventBridgeTest {
         }
     }
 
+    @Test
+    @Order(26)
+    void putEventsToAnEventBusThatDoesNotExistIsAnsweredAsPublished() {
+        PutEventsResponse response = eb.putEvents(PutEventsRequest.builder()
+                .entries(PutEventsRequestEntry.builder()
+                        .eventBusName(TestFixtures.uniqueName("eb-missing-bus"))
+                        .source("com.myapp")
+                        .detailType("OrderPlaced")
+                        .detail("{}")
+                        .build())
+                .build());
+
+        assertThat(response.failedEntryCount()).isZero();
+        assertThat(response.entries()).hasSize(1);
+        assertThat(response.entries().get(0).eventId()).isNotBlank();
+        assertThat(response.entries().get(0).errorCode()).isNull();
+    }
+
     // ──────────────────────────── InputTransformer ────────────────────────────
 
     @Test
@@ -301,6 +320,139 @@ class EventBridgeTest {
         String body = msg.messages().get(0).body();
         assertThat(body).contains("com.myapp").contains("OrderShipped");
         assertThat(body).doesNotContain("orderId");
+    }
+
+    // ──────────────────────────── Retry and dead-letter ────────────────────────────
+
+    @Test
+    @Order(35)
+    void undeliverableEventIsSentToTheTargetDeadLetterQueue() {
+        String dlqUrl = sqs.createQueue(CreateQueueRequest.builder()
+                .queueName(TestFixtures.uniqueName("eb-dlq")).build()).queueUrl();
+        String dlqArn = sqs.getQueueAttributes(GetQueueAttributesRequest.builder()
+                .queueUrl(dlqUrl).attributeNamesWithStrings("QueueArn").build())
+                .attributesAsStrings().get("QueueArn");
+        String missingQueueArn = dlqArn + "-missing";
+        String source = TestFixtures.uniqueName("com.floci.dlq");
+        String dlqRuleName = TestFixtures.uniqueName("eb-dlq-rule");
+        String ruleArn = eb.putRule(PutRuleRequest.builder()
+                .name(dlqRuleName)
+                .eventPattern("{\"source\":[\"" + source + "\"]}")
+                .state(RuleState.ENABLED)
+                .build()).ruleArn();
+        try {
+            eb.putTargets(PutTargetsRequest.builder()
+                    .rule(dlqRuleName)
+                    .targets(Target.builder()
+                            .id("missing-queue")
+                            .arn(missingQueueArn)
+                            .retryPolicy(RetryPolicy.builder()
+                                    .maximumRetryAttempts(2).maximumEventAgeInSeconds(60).build())
+                            .deadLetterConfig(DeadLetterConfig.builder().arn(dlqArn).build())
+                            .build())
+                    .build());
+
+            Target stored = eb.listTargetsByRule(ListTargetsByRuleRequest.builder().rule(dlqRuleName).build())
+                    .targets().get(0);
+            assertThat(stored.retryPolicy().maximumRetryAttempts()).isEqualTo(2);
+            assertThat(stored.retryPolicy().maximumEventAgeInSeconds()).isEqualTo(60);
+            assertThat(stored.deadLetterConfig().arn()).isEqualTo(dlqArn);
+
+            eb.putEvents(PutEventsRequest.builder()
+                    .entries(PutEventsRequestEntry.builder()
+                            .source(source).detailType("Undeliverable").detail("{\"id\":\"1\"}").build())
+                    .build());
+
+            List<Message> messages = sqs.receiveMessage(ReceiveMessageRequest.builder()
+                    .queueUrl(dlqUrl)
+                    .messageAttributeNames("All")
+                    .waitTimeSeconds(2)
+                    .build()).messages();
+            assertThat(messages).hasSize(1);
+            assertThat(messages.get(0).body()).contains(source).contains("Undeliverable");
+            Map<String, MessageAttributeValue> attributes = messages.get(0).messageAttributes();
+            assertThat(attributes.get("RULE_ARN").stringValue()).isEqualTo(ruleArn);
+            assertThat(attributes.get("TARGET_ARN").stringValue()).isEqualTo(missingQueueArn);
+            assertThat(attributes.get("ERROR_CODE").stringValue()).isEqualTo("NO_RESOURCE");
+            assertThat(attributes.get("RETRY_ATTEMPTS").stringValue()).isEqualTo("0");
+        } finally {
+            eb.removeTargets(RemoveTargetsRequest.builder().rule(dlqRuleName).ids("missing-queue").build());
+            eb.deleteRule(DeleteRuleRequest.builder().name(dlqRuleName).build());
+            sqs.deleteQueue(DeleteQueueRequest.builder().queueUrl(dlqUrl).build());
+        }
+    }
+
+    @Test
+    @Order(36)
+    void putTargetsRejectsOutOfRangeRetryPolicy() {
+        assertThatThrownBy(() -> eb.putTargets(PutTargetsRequest.builder()
+                .rule(ruleName)
+                .targets(Target.builder()
+                        .id("bad-retry")
+                        .arn(sinkQueueArn)
+                        .retryPolicy(RetryPolicy.builder().maximumEventAgeInSeconds(0).build())
+                        .build())
+                .build()))
+                .isInstanceOfSatisfying(EventBridgeException.class, e -> {
+                    assertThat(e.statusCode()).isEqualTo(400);
+                    assertThat(e.awsErrorDetails().errorCode()).isEqualTo("ValidationException");
+                    assertThat(e.getMessage()).contains("targets.1.member.retryPolicy.maximumEventAgeInSeconds");
+                });
+    }
+
+    @Test
+    @Order(37)
+    void listRulesPagesWithLimitAndNextToken() {
+        String prefix = TestFixtures.uniqueName("eb-page") + "-";
+        List<String> names = List.of(prefix + "a", prefix + "b", prefix + "c");
+        try {
+            for (String name : names) {
+                eb.putRule(PutRuleRequest.builder()
+                        .name(name)
+                        .eventBusName(busName)
+                        .eventPattern("{\"source\":[\"paging\"]}")
+                        .build());
+            }
+
+            List<String> seen = new ArrayList<>();
+            String token = null;
+            do {
+                ListRulesResponse page = eb.listRules(ListRulesRequest.builder()
+                        .eventBusName(busName)
+                        .namePrefix(prefix)
+                        .limit(1)
+                        .nextToken(token)
+                        .build());
+                assertThat(page.rules()).hasSize(1);
+                seen.add(page.rules().get(0).name());
+                token = page.nextToken();
+            } while (token != null);
+
+            assertThat(seen).containsExactlyElementsOf(names);
+        } finally {
+            for (String name : names) {
+                try {
+                    eb.deleteRule(DeleteRuleRequest.builder().name(name).eventBusName(busName).build());
+                } catch (ResourceNotFoundException ignored) {
+                    // The rule was never created because an earlier putRule failed; nothing to clean up.
+                }
+            }
+        }
+    }
+
+    @Test
+    @Order(38)
+    void listRulesRejectsOutOfRangeLimitAndUnknownToken() {
+        assertThatThrownBy(() -> eb.listRules(ListRulesRequest.builder().limit(101).build()))
+                .isInstanceOfSatisfying(EventBridgeException.class, e -> {
+                    assertThat(e.statusCode()).isEqualTo(400);
+                    assertThat(e.awsErrorDetails().errorCode()).isEqualTo("ValidationException");
+                });
+        assertThatThrownBy(() -> eb.listRules(ListRulesRequest.builder().limit(1).nextToken("not-a-token!").build()))
+                .isInstanceOfSatisfying(EventBridgeException.class, e -> {
+                    assertThat(e.statusCode()).isEqualTo(400);
+                    assertThat(e.awsErrorDetails().errorCode()).isEqualTo("InvalidToken");
+                });
     }
 
     // ──────────────────────────── Tags ────────────────────────────

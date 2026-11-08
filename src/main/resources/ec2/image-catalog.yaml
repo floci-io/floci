@@ -8,8 +8,10 @@ images:
       - /aws/service/ami-amazon-linux-latest/amzn2-ami-hvm-x86_64-gp2
       - /aws/service/ami-amazon-linux-latest/amzn2-ami-hvm-x86_64-ebs
       - /aws/service/ami-amazon-linux-latest/amzn2-ami-kernel-5.10-hvm-x86_64-gp2
+      - /aws/service/eks/optimized-ami/{k8s-version}/amazon-linux-2/recommended/image_id
     dockerImage: public.ecr.aws/amazonlinux/amazonlinux:2
     name: amzn2-ami-hvm-2.0.20230404.0-x86_64-gp2
+    rootVolumeType: gp2
     description: Amazon Linux 2 AMI
     ownerId: "137112412989"
     imageOwnerAlias: amazon
@@ -23,6 +25,14 @@ images:
       - /aws/service/ami-amazon-linux-latest/al2023-ami-kernel-default-x86_64
       - /aws/service/ami-amazon-linux-latest/al2023-ami-minimal-kernel-default-x86_64
       - /aws/service/ami-amazon-linux-latest/al2023-ami-kernel-6.1-x86_64
+      - /aws/service/eks/optimized-ami/{k8s-version}/amazon-linux-2023/x86_64/standard/recommended/image_id
+      - /aws/service/ecs/optimized-ami/amazon-linux-2023/recommended
+      - /aws/service/ecs/optimized-ami/amazon-linux-2023/recommended/schema_version
+      - /aws/service/ecs/optimized-ami/amazon-linux-2023/recommended/image_name
+      - /aws/service/ecs/optimized-ami/amazon-linux-2023/recommended/image_id
+      - /aws/service/ecs/optimized-ami/amazon-linux-2023/recommended/os
+      - /aws/service/ecs/optimized-ami/amazon-linux-2023/recommended/ecs_agent_version
+      - /aws/service/ecs/optimized-ami/amazon-linux-2023/recommended/ecs_runtime_version
     dockerImage: public.ecr.aws/amazonlinux/amazonlinux:2023
     name: al2023-ami-2023.0.20230315.0-kernel-6.1-x86_64
     description: Amazon Linux 2023 AMI
@@ -31,9 +41,33 @@ images:
     architecture: x86_64
     creationDate: "2023-03-15T00:00:00.000Z"
 
+  - imageId: ami-amazonlinux2023-arm64
+    publicParameterNames:
+      - /aws/service/ami-amazon-linux-latest/al2023-ami-kernel-default-arm64
+      - /aws/service/ami-amazon-linux-latest/al2023-ami-minimal-kernel-default-arm64
+      - /aws/service/ami-amazon-linux-latest/al2023-ami-kernel-6.1-arm64
+      - /aws/service/eks/optimized-ami/{k8s-version}/amazon-linux-2023/arm64/standard/recommended/image_id
+      - /aws/service/ecs/optimized-ami/amazon-linux-2023/arm64/recommended
+      - /aws/service/ecs/optimized-ami/amazon-linux-2023/arm64/recommended/schema_version
+      - /aws/service/ecs/optimized-ami/amazon-linux-2023/arm64/recommended/image_name
+      - /aws/service/ecs/optimized-ami/amazon-linux-2023/arm64/recommended/image_id
+      - /aws/service/ecs/optimized-ami/amazon-linux-2023/arm64/recommended/os
+      - /aws/service/ecs/optimized-ami/amazon-linux-2023/arm64/recommended/ecs_agent_version
+      - /aws/service/ecs/optimized-ami/amazon-linux-2023/arm64/recommended/ecs_runtime_version
+    dockerImage: public.ecr.aws/amazonlinux/amazonlinux:2023
+    name: al2023-ami-2023.0.20230315.0-kernel-6.1-arm64
+    description: Amazon Linux 2023 AMI
+    ownerId: "137112412989"
+    imageOwnerAlias: amazon
+    architecture: arm64
+    creationDate: "2023-03-15T00:00:00.000Z"
+
   - imageId: ami-0abcdef1234567892
     aliases:
       - ami-ubuntu2004
+    publicParameterNames:
+      - /aws/service/canonical/ubuntu/server/20.04/stable/current/amd64/hvm/ebs-gp2/ami-id
+      - /aws/service/canonical/ubuntu/server/focal/stable/current/amd64/hvm/ebs-gp2/ami-id
     dockerImage: public.ecr.aws/docker/library/ubuntu:20.04
     name: ubuntu/images/hvm-ssd/ubuntu-focal-20.04-amd64-server-20230324
     description: Canonical, Ubuntu, 20.04 LTS
@@ -43,6 +77,9 @@ images:
     creationDate: "2023-03-24T00:00:00.000Z"
 
   - imageId: ami-ubuntu2204
+    publicParameterNames:
+      - /aws/service/canonical/ubuntu/server/22.04/stable/current/amd64/hvm/ebs-gp2/ami-id
+      - /aws/service/canonical/ubuntu/server/jammy/stable/current/amd64/hvm/ebs-gp2/ami-id
     dockerImage: public.ecr.aws/docker/library/ubuntu:22.04
     name: ubuntu/images/hvm-ssd/ubuntu-jammy-22.04-amd64-server-20230420
     description: Canonical, Ubuntu, 22.04 LTS
@@ -54,8 +91,12 @@ images:
   - imageId: ami-ubuntu2404-arm64
     aliases:
       - ami-ubuntu2404
+    publicParameterNames:
+      - /aws/service/canonical/ubuntu/server/24.04/stable/current/arm64/hvm/ebs-gp3/ami-id
+      - /aws/service/canonical/ubuntu/server/noble/stable/current/arm64/hvm/ebs-gp3/ami-id
     dockerImage: public.ecr.aws/docker/library/ubuntu:24.04
     name: ubuntu/images/hvm-ssd-gp3/ubuntu-noble-24.04-arm64-server-20260515
+    rootVolumeType: gp3
     description: Canonical, Ubuntu, 24.04 LTS
     ownerId: "099720109477"
     imageOwnerAlias: canonical
@@ -63,8 +104,12 @@ images:
     creationDate: "2026-05-15T00:00:00.000Z"
 
   - imageId: ami-ubuntu2404-amd64
+    publicParameterNames:
+      - /aws/service/canonical/ubuntu/server/24.04/stable/current/amd64/hvm/ebs-gp3/ami-id
+      - /aws/service/canonical/ubuntu/server/noble/stable/current/amd64/hvm/ebs-gp3/ami-id
     dockerImage: public.ecr.aws/docker/library/ubuntu:24.04
     name: ubuntu/images/hvm-ssd-gp3/ubuntu-noble-24.04-amd64-server-20260515
+    rootVolumeType: gp3
     description: Canonical, Ubuntu, 24.04 LTS
     ownerId: "099720109477"
     imageOwnerAlias: canonical
@@ -76,6 +121,7 @@ images:
       - ami-ubuntu2404-cloud
     dockerImage: floci/ami-ubuntu:24.04-arm64
     name: ubuntu/images/hvm-ssd-gp3/ubuntu-noble-24.04-arm64-server-20260515
+    rootVolumeType: gp3
     description: Canonical, Ubuntu, 24.04 LTS cloud image
     ownerId: "099720109477"
     imageOwnerAlias: canonical
@@ -108,3 +154,181 @@ images:
     architecture: x86_64
     platform: windows
     creationDate: "2023-04-12T00:00:00.000Z"
+
+  # SUSE and Red Hat family images under their publishers' owner ids. Each runs its family's
+  # base container image, or the nearest one where the family publishes none.
+  - imageId: ami-opensuse-leap160
+    dockerImage: registry.opensuse.org/opensuse/leap:16.0
+    name: openSUSE-Leap-16-0-v20260101-hvm-ssd-x86_64
+    description: openSUSE Leap 16.0
+    ownerId: "679593333241"
+    imageOwnerAlias: aws-marketplace
+    architecture: x86_64
+    creationDate: "2026-01-01T00:00:00.000Z"
+
+  - imageId: ami-sles15sp4-byos
+    dockerImage: registry.suse.com/bci/bci-base:15.4
+    name: suse-sles-15-sp4-byos-v20260101-hvm-ssd-x86_64
+    description: SUSE Linux Enterprise Server 15 SP4 (BYOS)
+    ownerId: "679593333241"
+    imageOwnerAlias: aws-marketplace
+    architecture: x86_64
+    creationDate: "2026-01-01T00:00:00.000Z"
+
+  - imageId: ami-sles15sp5-byos
+    dockerImage: registry.suse.com/bci/bci-base:15.5
+    name: suse-sles-15-sp5-byos-v20260101-hvm-ssd-x86_64
+    description: SUSE Linux Enterprise Server 15 SP5 (BYOS)
+    ownerId: "679593333241"
+    imageOwnerAlias: aws-marketplace
+    architecture: x86_64
+    creationDate: "2026-01-01T00:00:00.000Z"
+
+  - imageId: ami-sles15sp6-byos
+    dockerImage: registry.suse.com/bci/bci-base:15.6
+    name: suse-sles-15-sp6-byos-v20260101-hvm-ssd-x86_64
+    description: SUSE Linux Enterprise Server 15 SP6 (BYOS)
+    ownerId: "679593333241"
+    imageOwnerAlias: aws-marketplace
+    architecture: x86_64
+    creationDate: "2026-01-01T00:00:00.000Z"
+
+  - imageId: ami-sles15sp7-byos
+    dockerImage: registry.suse.com/bci/bci-base:15.7
+    name: suse-sles-15-sp7-byos-v20260101-hvm-ssd-x86_64
+    description: SUSE Linux Enterprise Server 15 SP7 (BYOS)
+    ownerId: "679593333241"
+    imageOwnerAlias: aws-marketplace
+    architecture: x86_64
+    creationDate: "2026-01-01T00:00:00.000Z"
+
+  - imageId: ami-sles12sp5-byos
+    dockerImage: registry.suse.com/bci/bci-base:15.7
+    name: suse-sles-12-sp5-byos-v20260101-hvm-ssd-x86_64
+    description: SUSE Linux Enterprise Server 12 SP5 (BYOS)
+    ownerId: "679593333241"
+    imageOwnerAlias: aws-marketplace
+    architecture: x86_64
+    creationDate: "2026-01-01T00:00:00.000Z"
+
+  - imageId: ami-sles-sap15sp5
+    dockerImage: registry.suse.com/bci/bci-base:15.5
+    name: suse-sles-sap-15-sp5-v20260101-hvm-ssd-x86_64
+    description: SUSE Linux Enterprise Server for SAP 15 SP5
+    ownerId: "679593333241"
+    imageOwnerAlias: aws-marketplace
+    architecture: x86_64
+    creationDate: "2026-01-01T00:00:00.000Z"
+
+  - imageId: ami-smlm-server51-x86-64
+    dockerImage: registry.suse.com/bci/bci-base:15.7
+    name: suse-multi-linux-manager-server-5-1-v1-ltd-x86_64
+    description: SUSE Multi-Linux Manager Server 5.1
+    ownerId: "679593333241"
+    imageOwnerAlias: aws-marketplace
+    architecture: x86_64
+    creationDate: "2026-01-01T00:00:00.000Z"
+
+  - imageId: ami-smlm-server51-arm64
+    dockerImage: registry.suse.com/bci/bci-base:15.7
+    name: suse-multi-linux-manager-server-5-1-v1-ltd-arm64
+    description: SUSE Multi-Linux Manager Server 5.1
+    ownerId: "679593333241"
+    imageOwnerAlias: aws-marketplace
+    architecture: arm64
+    creationDate: "2026-01-01T00:00:00.000Z"
+
+  - imageId: ami-smlm-proxy51-x86-64
+    dockerImage: registry.suse.com/bci/bci-base:15.7
+    name: suse-multi-linux-manager-proxy-5-1-byos-v1-x86_64
+    description: SUSE Multi-Linux Manager Proxy 5.1 (BYOS)
+    ownerId: "679593333241"
+    imageOwnerAlias: aws-marketplace
+    architecture: x86_64
+    creationDate: "2026-01-01T00:00:00.000Z"
+
+  - imageId: ami-smlm-proxy51-arm64
+    dockerImage: registry.suse.com/bci/bci-base:15.7
+    name: suse-multi-linux-manager-proxy-5-1-byos-v1-arm64
+    description: SUSE Multi-Linux Manager Proxy 5.1 (BYOS)
+    ownerId: "679593333241"
+    imageOwnerAlias: aws-marketplace
+    architecture: arm64
+    creationDate: "2026-01-01T00:00:00.000Z"
+
+  - imageId: ami-sles12sp5
+    dockerImage: registry.suse.com/bci/bci-base:15.7
+    name: suse-sles-12-sp5-v20260101-hvm-ssd-x86_64
+    description: SUSE Linux Enterprise Server 12 SP5
+    ownerId: "013907871322"
+    imageOwnerAlias: amazon
+    architecture: x86_64
+    creationDate: "2026-01-01T00:00:00.000Z"
+
+  - imageId: ami-sles15sp5
+    dockerImage: registry.suse.com/bci/bci-base:15.5
+    name: suse-sles-15-sp5-v20260101-hvm-ssd-x86_64
+    description: SUSE Linux Enterprise Server 15 SP5
+    ownerId: "013907871322"
+    imageOwnerAlias: amazon
+    architecture: x86_64
+    creationDate: "2026-01-01T00:00:00.000Z"
+
+  - imageId: ami-sles15sp6
+    dockerImage: registry.suse.com/bci/bci-base:15.6
+    name: suse-sles-15-sp6-v20260101-hvm-ssd-x86_64
+    description: SUSE Linux Enterprise Server 15 SP6
+    ownerId: "013907871322"
+    imageOwnerAlias: amazon
+    architecture: x86_64
+    creationDate: "2026-01-01T00:00:00.000Z"
+
+  - imageId: ami-sles15sp7
+    dockerImage: registry.suse.com/bci/bci-base:15.7
+    name: suse-sles-15-sp7-v20260101-hvm-ssd-x86_64
+    description: SUSE Linux Enterprise Server 15 SP7
+    ownerId: "013907871322"
+    imageOwnerAlias: amazon
+    architecture: x86_64
+    creationDate: "2026-01-01T00:00:00.000Z"
+
+  - imageId: ami-sles160
+    dockerImage: registry.suse.com/bci/bci-base:16.0
+    name: suse-sles-16-0-v20260101-hvm-ssd-x86_64
+    description: SUSE Linux Enterprise Server 16.0
+    ownerId: "013907871322"
+    imageOwnerAlias: amazon
+    architecture: x86_64
+    creationDate: "2026-01-01T00:00:00.000Z"
+
+  - imageId: ami-rocky9
+    dockerImage: quay.io/rockylinux/rockylinux:9.6
+    name: Rocky-9-EC2-Base-9.6-20260101.0.x86_64
+    description: Rocky Linux 9
+    ownerId: "792107900819"
+    architecture: x86_64
+    creationDate: "2026-01-01T00:00:00.000Z"
+
+  - imageId: ami-rocky10
+    dockerImage: quay.io/rockylinux/rockylinux:10.0
+    name: Rocky-10-EC2-Base-10.0-20260101.0.x86_64
+    description: Rocky Linux 10
+    ownerId: "792107900819"
+    architecture: x86_64
+    creationDate: "2026-01-01T00:00:00.000Z"
+
+  - imageId: ami-rhel8
+    dockerImage: registry.access.redhat.com/ubi8/ubi:8.10
+    name: RHEL-8.10.0_HVM-20260101-x86_64-0-Hourly2-GP3
+    description: Provided by Red Hat, Inc.
+    ownerId: "309956199498"
+    architecture: x86_64
+    creationDate: "2026-01-01T00:00:00.000Z"
+
+  - imageId: ami-rhel9
+    dockerImage: registry.access.redhat.com/ubi9/ubi:9.5
+    name: RHEL-9.5.0_HVM-20260101-x86_64-0-Hourly2-GP3
+    description: Provided by Red Hat, Inc.
+    ownerId: "309956199498"
+    architecture: x86_64
+    creationDate: "2026-01-01T00:00:00.000Z"

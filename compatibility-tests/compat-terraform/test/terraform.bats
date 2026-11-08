@@ -382,7 +382,7 @@ sha256_composite_by_sizes() {
 
 @test "Terraform: Route53 hosted zone created" {
     ZONE_ID=$(aws_cmd route53 list-hosted-zones \
-        --query "HostedZones[?Name=='floci-compat.internal.'].Id | [0]" \
+        --query "HostedZones[?Name=='floci-compat.internal.' && !(Config.PrivateZone)].Id | [0]" \
         --output text | sed 's|/hostedzone/||')
     [ -n "$ZONE_ID" ]
     run aws_cmd route53 get-hosted-zone --id "$ZONE_ID"
@@ -392,7 +392,7 @@ sha256_composite_by_sizes() {
 
 @test "Terraform: Route53 A record created" {
     ZONE_ID=$(aws_cmd route53 list-hosted-zones \
-        --query "HostedZones[?Name=='floci-compat.internal.'].Id | [0]" \
+        --query "HostedZones[?Name=='floci-compat.internal.' && !(Config.PrivateZone)].Id | [0]" \
         --output text | sed 's|/hostedzone/||')
     run aws_cmd route53 list-resource-record-sets --hosted-zone-id "$ZONE_ID"
     assert_success
@@ -402,7 +402,7 @@ sha256_composite_by_sizes() {
 
 @test "Terraform: Route53 zone has auto-created SOA and NS records" {
     ZONE_ID=$(aws_cmd route53 list-hosted-zones \
-        --query "HostedZones[?Name=='floci-compat.internal.'].Id | [0]" \
+        --query "HostedZones[?Name=='floci-compat.internal.' && !(Config.PrivateZone)].Id | [0]" \
         --output text | sed 's|/hostedzone/||')
     run aws_cmd route53 list-resource-record-sets --hosted-zone-id "$ZONE_ID"
     assert_success
@@ -423,7 +423,7 @@ sha256_composite_by_sizes() {
 
 @test "Terraform: Route53 zone tags persisted" {
     ZONE_ID=$(aws_cmd route53 list-hosted-zones \
-        --query "HostedZones[?Name=='floci-compat.internal.'].Id | [0]" \
+        --query "HostedZones[?Name=='floci-compat.internal.' && !(Config.PrivateZone)].Id | [0]" \
         --output text | sed 's|/hostedzone/||')
     run aws_cmd route53 list-tags-for-resource \
         --resource-type hostedzone --resource-id "$ZONE_ID"

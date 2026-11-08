@@ -14,11 +14,13 @@ import software.amazon.awssdk.services.mq.model.CreateBrokerRequest;
 import software.amazon.awssdk.services.mq.model.CreateBrokerResponse;
 import software.amazon.awssdk.services.mq.model.CreateUserRequest;
 import software.amazon.awssdk.services.mq.model.DeleteBrokerRequest;
+import software.amazon.awssdk.services.mq.model.DeleteBrokerResponse;
 import software.amazon.awssdk.services.mq.model.DeploymentMode;
 import software.amazon.awssdk.services.mq.model.DescribeBrokerRequest;
 import software.amazon.awssdk.services.mq.model.DescribeBrokerResponse;
 import software.amazon.awssdk.services.mq.model.EngineType;
 import software.amazon.awssdk.services.mq.model.ListBrokersRequest;
+import software.amazon.awssdk.services.mq.model.ListBrokersResponse;
 import software.amazon.awssdk.services.mq.model.MqException;
 import software.amazon.awssdk.services.mq.model.User;
 
@@ -109,7 +111,7 @@ class AmazonMqTest {
     void listBrokersIncludesCreated() {
         requireBroker();
 
-        var response = mq.listBrokers(ListBrokersRequest.builder().build());
+        ListBrokersResponse response = mq.listBrokers(ListBrokersRequest.builder().build());
         assertThat(response.brokerSummaries()).anyMatch(b -> b.brokerId().equals(brokerId));
     }
 
@@ -132,7 +134,7 @@ class AmazonMqTest {
     void deleteBroker() {
         requireBroker();
 
-        var response = mq.deleteBroker(DeleteBrokerRequest.builder().brokerId(brokerId).build());
+        DeleteBrokerResponse response = mq.deleteBroker(DeleteBrokerRequest.builder().brokerId(brokerId).build());
         assertThat(response.brokerId()).isEqualTo(brokerId);
         brokerId = null;
     }

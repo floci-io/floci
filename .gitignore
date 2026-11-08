@@ -1,4 +1,6 @@
 target/
+# make native stages the container-built binary here for docker/Dockerfile.native-package
+native/
 data/
 *.class
 *.jar
@@ -31,7 +33,6 @@ test-results.xml
 *.log
 test-results
 
-scripts/node_modules/
 
 # Python tooling caches
 __pycache__/

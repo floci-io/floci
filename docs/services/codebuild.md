@@ -21,7 +21,7 @@ Floci implements the CodeBuild API — stored-state management plus real build e
 | `UpdateProject` | Partial update — only supplied fields are modified |
 | `DeleteProject` | Removes project by name |
 | `BatchGetProjects` | Returns found projects and a `projectsNotFound` list |
-| `ListProjects` | Returns all project names in the region |
+| `ListProjects` | Returns project names in the region, with optional name, creation-time, or last-modified-time sorting |
 
 ### Build Execution
 

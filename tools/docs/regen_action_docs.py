@@ -26,6 +26,9 @@ from pathlib import Path
 
 import yaml
 
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from java_sources import SERVICES_PACKAGE_DIR, package_source  # noqa: E402
+
 MARKER_START = "<!-- floci:actions:start -->"
 MARKER_END = "<!-- floci:actions:end -->"
 
@@ -90,13 +93,10 @@ def extract_switch_actions(java_source: str) -> list[str]:
     return out
 
 
-def extract_rest_actions(java_source: str) -> list[str]:
-    """ucfirst(method name) of @GET/@POST/@PUT/@DELETE/@PATCH methods, source order.
+CLASS_EXTENDS_RE = re.compile(r"public\s+(?:abstract\s+)?class\s+\w+\s+extends\s+([A-Za-z0-9_]+)")
 
-    Only applies to classes containing a class-level @Path. Returns [] otherwise.
-    """
-    if not CLASS_PATH_RE.search(java_source):
-        return []
+
+def _extract_raw_rest_methods(java_source: str) -> list[str]:
     actions: list[str] = []
     pending = False
     for line in java_source.splitlines():
@@ -119,6 +119,26 @@ def extract_rest_actions(java_source: str) -> list[str]:
     return actions
 
 
+def extract_rest_actions(java_source: str, source_path: Path | None = None) -> list[str]:
+    """ucfirst(method name) of @GET/@POST/@PUT/@DELETE/@PATCH methods, source order.
+
+    Only applies to classes containing a class-level @Path. Returns [] otherwise.
+    Inherited methods from a superclass in the same directory are included first.
+    """
+    if not CLASS_PATH_RE.search(java_source):
+        return []
+    actions: list[str] = []
+    if source_path is not None:
+        extends_match = CLASS_EXTENDS_RE.search(java_source)
+        if extends_match:
+            super_name = extends_match.group(1)
+            super_path = source_path.parent / f"{super_name}.java"
+            if super_path.exists():
+                actions.extend(_extract_raw_rest_methods(super_path.read_text(encoding="utf-8")))
+    actions.extend(_extract_raw_rest_methods(java_source))
+    return actions
+
+
 def extract_actions(entry: ServiceEntry) -> list[str]:
     """Merged, deduped, override-corrected action list for a service.
 
@@ -133,7 +153,7 @@ def extract_actions(entry: ServiceEntry) -> list[str]:
         if source.mode == "switch":
             raw = extract_switch_actions(text)
         elif source.mode == "rest":
-            raw = extract_rest_actions(text)
+            raw = extract_rest_actions(text, source.path)
         else:
             raise ValueError(f"unknown mode: {source.mode!r}")
         for name in raw:
@@ -308,7 +328,7 @@ def _load_registry(repo_root: Path) -> tuple[list[ServiceEntry], set[Path]]:
     entries: list[ServiceEntry] = []
     for item in raw.get("services") or []:
         sources = [
-            Source(path=repo_root / s["path"], mode=s["mode"])
+            Source(path=repo_root / package_source(s["path"]), mode=s["mode"])
             for s in item.get("sources") or []
         ]
         handler = item.get("handler")
@@ -319,11 +339,11 @@ def _load_registry(repo_root: Path) -> tuple[list[ServiceEntry], set[Path]]:
                 sources=sources,
                 rename_actions=dict(item.get("rename_actions") or {}),
                 exclude_actions=frozenset(item.get("exclude_actions") or []),
-                handler=repo_root / handler if handler else None,
+                handler=repo_root / package_source(handler) if handler else None,
             )
         )
     deferred = {
-        (repo_root / d["path"]).resolve()
+        (repo_root / package_source(d["path"])).resolve()
         for d in raw.get("deferred_handlers") or []
     }
     return entries, deferred
@@ -352,7 +372,7 @@ def _find_unregistered_handlers(
     or added to deferred_handlers (with a reason), or this fails --strict. REST
     controllers are opt-in (per-judgment) and not flagged here.
     """
-    services_root = repo_root / "src/main/java/io/github/hectorvent/floci/services"
+    services_root = repo_root / SERVICES_PACKAGE_DIR
     registered = {s.path.resolve() for entry in entries for s in entry.sources}
     registered |= {entry.handler.resolve() for entry in entries if entry.handler}
     registered |= deferred

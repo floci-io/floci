@@ -1,0 +1,943 @@
+package io.floci.aws.services.emr;
+
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.node.ArrayNode;
+import com.fasterxml.jackson.databind.node.ObjectNode;
+import io.floci.aws.core.common.AwsEndpoints;
+import io.floci.aws.core.common.AwsErrorResponse;
+import io.floci.aws.core.common.AwsException;
+import io.floci.aws.core.common.AwsJson11Controller;
+import io.floci.aws.core.common.AwsJsonTimestamp;
+import io.floci.aws.core.common.AwsRegions;
+import io.floci.aws.core.common.JsonErrorResponseUtils;
+import io.floci.aws.core.common.PaginatedResult;
+import io.floci.aws.core.common.SmithyValidationErrors;
+import io.floci.aws.services.emr.model.EmrBlockPublicAccess;
+import io.floci.aws.services.emr.model.EmrCluster;
+import io.floci.aws.services.emr.model.EmrInstanceFleet;
+import io.floci.aws.services.emr.model.EmrInstanceGroup;
+import io.floci.aws.services.emr.model.EmrStep;
+import io.floci.aws.services.emr.model.SecurityConfiguration;
+import jakarta.enterprise.context.ApplicationScoped;
+import jakarta.inject.Inject;
+import jakarta.ws.rs.core.Response;
+import org.jboss.logging.Logger;
+
+import java.math.BigDecimal;
+import java.time.Instant;
+import java.time.temporal.ChronoUnit;
+import java.util.ArrayList;
+import java.util.LinkedHashMap;
+import java.util.List;
+import java.util.Map;
+
+/**
+ * EMR (elasticmapreduce) JSON 1.1 handler. Dispatched from {@link AwsJson11Controller}
+ * under the {@code ElasticMapReduce.} target prefix.
+ */
+@ApplicationScoped
+public class EmrHandler {
+
+    private static final Logger LOG = Logger.getLogger(EmrHandler.class);
+
+    private final EmrService service;
+    private final ObjectMapper objectMapper;
+
+    @Inject
+    public EmrHandler(EmrService service, ObjectMapper objectMapper) {
+        this.service = service;
+        this.objectMapper = objectMapper;
+    }
+
+    public Response handle(String action, JsonNode request, String region) {
+        LOG.debugv("EMR action: {0}", action);
+        try {
+            return switch (action) {
+                case "RunJobFlow" -> handleRunJobFlow(request, region);
+                case "DescribeCluster" -> handleDescribeCluster(request);
+                case "ListClusters" -> handleListClusters(request, region);
+                case "TerminateJobFlows" -> handleTerminateJobFlows(request);
+                case "SetTerminationProtection" -> handleSetTerminationProtection(request);
+                case "SetVisibleToAllUsers" -> handleSetVisibleToAllUsers(request);
+                case "SetKeepJobFlowAliveWhenNoSteps" -> handleSetKeepAlive(request);
+                case "SetUnhealthyNodeReplacement" -> handleSetUnhealthyNodeReplacement(request);
+                case "ModifyCluster" -> handleModifyCluster(request);
+                case "AddJobFlowSteps" -> handleAddJobFlowSteps(request);
+                case "DescribeStep" -> handleDescribeStep(request);
+                case "ListSteps" -> handleListSteps(request);
+                case "CancelSteps" -> handleCancelSteps(request);
+                case "AddInstanceGroups" -> handleAddInstanceGroups(request);
+                case "ListInstanceGroups" -> handleListInstanceGroups(request);
+                case "AddInstanceFleet" -> handleAddInstanceFleet(request);
+                case "ListInstanceFleets" -> handleListInstanceFleets(request);
+                case "ListInstances" -> handleListInstances(request);
+                case "CreateSecurityConfiguration" -> handleCreateSecurityConfiguration(request);
+                case "DescribeSecurityConfiguration" -> handleDescribeSecurityConfiguration(request);
+                case "DeleteSecurityConfiguration" -> handleDeleteSecurityConfiguration(request);
+                case "ListSecurityConfigurations" -> handleListSecurityConfigurations();
+                case "AddTags" -> handleAddTags(request);
+                case "RemoveTags" -> handleRemoveTags(request);
+                case "ModifyInstanceGroups" -> handleModifyInstanceGroups(request, region);
+                case "ModifyInstanceFleet" -> handleModifyInstanceFleet(request);
+                case "ListBootstrapActions" -> handleListBootstrapActions(request);
+                case "PutManagedScalingPolicy" -> handlePutManagedScalingPolicy(request);
+                case "GetManagedScalingPolicy" -> handleGetManagedScalingPolicy(request);
+                case "RemoveManagedScalingPolicy" -> handleRemoveManagedScalingPolicy(request);
+                case "PutAutoTerminationPolicy" -> handlePutAutoTerminationPolicy(request);
+                case "GetAutoTerminationPolicy" -> handleGetAutoTerminationPolicy(request);
+                case "RemoveAutoTerminationPolicy" -> handleRemoveAutoTerminationPolicy(request);
+                case "PutAutoScalingPolicy" -> handlePutAutoScalingPolicy(request);
+                case "RemoveAutoScalingPolicy" -> handleRemoveAutoScalingPolicy(request);
+                case "ListReleaseLabels" -> handleListReleaseLabels(request);
+                case "DescribeReleaseLabel" -> handleDescribeReleaseLabel(request);
+                case "ListSupportedInstanceTypes" -> handleListSupportedInstanceTypes(request);
+                case "GetBlockPublicAccessConfiguration" -> handleGetBlockPublicAccessConfiguration(region);
+                case "PutBlockPublicAccessConfiguration" -> handlePutBlockPublicAccessConfiguration(request, region);
+                default -> Response.status(400)
+                        .entity(new AwsErrorResponse("InvalidRequestException",
+                                "Operation " + action + " is not supported."))
+                        .build();
+            };
+        } catch (AwsException e) {
+            if (e.getExtendedData() != null) {
+                // Members an error adds to its message, such as InvalidRequestException's ErrorCode.
+                return JsonErrorResponseUtils.createErrorResponse(e);
+            }
+            return Response.status(e.getHttpStatus())
+                    .entity(new AwsErrorResponse(e.jsonType(), e.getMessage()))
+                    .build();
+        } catch (Exception e) {
+            LOG.errorv("EMR error processing action {0}: {1}", action, e.getMessage());
+            return Response.status(500)
+                    .entity(new AwsErrorResponse("InternalServerException", e.getMessage()))
+                    .build();
+        }
+    }
+
+    // ──────────────────────────── Cluster lifecycle ────────────────────────────
+
+    private Response handleRunJobFlow(JsonNode request, String region) {
+        EmrCluster cluster = new EmrCluster();
+        cluster.setName(text(request, "Name"));
+        cluster.setReleaseLabel(text(request, "ReleaseLabel"));
+        cluster.setLogUri(text(request, "LogUri"));
+        cluster.setServiceRole(text(request, "ServiceRole"));
+        cluster.setJobFlowRole(text(request, "JobFlowRole"));
+        cluster.setAutoScalingRole(text(request, "AutoScalingRole"));
+        cluster.setScaleDownBehavior(text(request, "ScaleDownBehavior"));
+        cluster.setSecurityConfiguration(text(request, "SecurityConfiguration"));
+        cluster.setCustomAmiId(text(request, "CustomAmiId"));
+        cluster.setVisibleToAllUsers(request.path("VisibleToAllUsers").asBoolean(true));
+        cluster.setStepConcurrencyLevel(request.path("StepConcurrencyLevel").asInt(1));
+        cluster.setEbsRootVolumeSize(request.path("EbsRootVolumeSize").asInt(0));
+        cluster.setApplications(rawArray(request.path("Applications")));
+        cluster.setConfigurations(rawArray(request.path("Configurations")));
+        cluster.setTags(parseTags(request.path("Tags")));
+        JsonNode bootstrapActions = request.path("BootstrapActions");
+        if (!bootstrapActions.isMissingNode() && !bootstrapActions.isNull()) {
+            EmrService.validateBootstrapActions(bootstrapActions);
+            cluster.setBootstrapActions(rawArray(bootstrapActions));
+        }
+        JsonNode managedScaling = request.path("ManagedScalingPolicy");
+        if (!managedScaling.isMissingNode() && !managedScaling.isNull()) {
+            EmrService.validateManagedScalingPolicy(managedScaling);
+            cluster.setManagedScalingPolicy(managedScaling.toString());
+        }
+        JsonNode autoTermination = request.path("AutoTerminationPolicy");
+        if (!autoTermination.isMissingNode() && !autoTermination.isNull()) {
+            EmrService.validateAutoTerminationPolicy(autoTermination);
+            cluster.setAutoTerminationPolicy(autoTermination.toString());
+        }
+
+        JsonNode instances = request.path("Instances");
+        cluster.setKeepJobFlowAliveWhenNoSteps(instances.path("KeepJobFlowAliveWhenNoSteps").asBoolean(false));
+        cluster.setTerminationProtected(instances.path("TerminationProtected").asBoolean(false));
+        cluster.setUnhealthyNodeReplacement(instances.path("UnhealthyNodeReplacement").asBoolean(false));
+        cluster.setEc2Attributes(buildEc2Attributes(instances));
+        cluster.setInstanceGroups(parseInstanceGroups(instances.path("InstanceGroups")));
+        cluster.setInstanceFleets(parseInstanceFleets(instances.path("InstanceFleets")));
+        cluster.setSteps(parseSteps(request.path("Steps"), text(request, "StepExecutionRoleArn")));
+
+        EmrCluster created = service.runJobFlow(cluster, region);
+        ObjectNode response = objectMapper.createObjectNode();
+        response.put("JobFlowId", created.getId());
+        response.put("ClusterArn", created.getClusterArn());
+        return Response.ok(response).build();
+    }
+
+    private Response handleDescribeCluster(JsonNode request) {
+        EmrCluster cluster = service.describeCluster(text(request, "ClusterId"));
+        ObjectNode response = objectMapper.createObjectNode();
+        response.set("Cluster", clusterNode(cluster));
+        return Response.ok(response).build();
+    }
+
+    private Response handleListClusters(JsonNode request, String region) {
+        List<String> states = stringList(request.path("ClusterStates"));
+        Instant createdAfter = AwsJsonTimestamp.epochSeconds(request, "CreatedAfter", "InvalidRequestException");
+        Instant createdBefore = AwsJsonTimestamp.epochSeconds(request, "CreatedBefore", "InvalidRequestException");
+        ObjectNode response = objectMapper.createObjectNode();
+        ArrayNode arr = response.putArray("Clusters");
+        for (EmrCluster c : service.listClusters(region, states, createdAfter, createdBefore)) {
+            arr.add(clusterSummaryNode(c));
+        }
+        return Response.ok(response).build();
+    }
+
+    private Response handleTerminateJobFlows(JsonNode request) {
+        requireMembers(request, "JobFlowIds");
+        service.terminateJobFlows(stringList(request.path("JobFlowIds")));
+        return Response.ok(objectMapper.createObjectNode()).build();
+    }
+
+    private Response handleSetTerminationProtection(JsonNode request) {
+        requireMembers(request, "JobFlowIds", "TerminationProtected");
+        service.setTerminationProtection(stringList(request.path("JobFlowIds")),
+                request.path("TerminationProtected").asBoolean(false));
+        return Response.ok(objectMapper.createObjectNode()).build();
+    }
+
+    private Response handleSetVisibleToAllUsers(JsonNode request) {
+        requireMembers(request, "JobFlowIds", "VisibleToAllUsers");
+        service.setVisibleToAllUsers(stringList(request.path("JobFlowIds")),
+                request.path("VisibleToAllUsers").asBoolean(true));
+        return Response.ok(objectMapper.createObjectNode()).build();
+    }
+
+    private Response handleSetKeepAlive(JsonNode request) {
+        requireMembers(request, "JobFlowIds", "KeepJobFlowAliveWhenNoSteps");
+        service.setKeepJobFlowAliveWhenNoSteps(stringList(request.path("JobFlowIds")),
+                request.path("KeepJobFlowAliveWhenNoSteps").asBoolean(false));
+        return Response.ok(objectMapper.createObjectNode()).build();
+    }
+
+    private Response handleSetUnhealthyNodeReplacement(JsonNode request) {
+        requireMembers(request, "JobFlowIds", "UnhealthyNodeReplacement");
+        service.setUnhealthyNodeReplacement(stringList(request.path("JobFlowIds")),
+                request.path("UnhealthyNodeReplacement").asBoolean(false));
+        return Response.ok(objectMapper.createObjectNode()).build();
+    }
+
+    private Response handleModifyCluster(JsonNode request) {
+        Integer level = request.has("StepConcurrencyLevel") ? request.path("StepConcurrencyLevel").asInt() : null;
+        int result = service.modifyCluster(text(request, "ClusterId"), level);
+        return Response.ok(objectMapper.createObjectNode().put("StepConcurrencyLevel", result)).build();
+    }
+
+    // ──────────────────────────── Steps ────────────────────────────
+
+    private Response handleAddJobFlowSteps(JsonNode request) {
+        List<String> ids = service.addJobFlowSteps(text(request, "JobFlowId"),
+                parseSteps(request.path("Steps"), text(request, "ExecutionRoleArn")));
+        ObjectNode response = objectMapper.createObjectNode();
+        ArrayNode arr = response.putArray("StepIds");
+        ids.forEach(arr::add);
+        return Response.ok(response).build();
+    }
+
+    private Response handleDescribeStep(JsonNode request) {
+        EmrStep step = service.describeStep(text(request, "ClusterId"), text(request, "StepId"));
+        ObjectNode response = objectMapper.createObjectNode();
+        response.set("Step", stepNode(step, true));
+        return Response.ok(response).build();
+    }
+
+    private Response handleListSteps(JsonNode request) {
+        List<EmrStep> steps = service.listSteps(text(request, "ClusterId"),
+                stringList(request.path("StepStates")), stringList(request.path("StepIds")));
+        ObjectNode response = objectMapper.createObjectNode();
+        ArrayNode arr = response.putArray("Steps");
+        for (EmrStep step : steps) {
+            arr.add(stepNode(step, false));
+        }
+        return Response.ok(response).build();
+    }
+
+    private Response handleCancelSteps(JsonNode request) {
+        requireMembers(request, "StepIds");
+        List<EmrService.CancelStepInfo> infos = service.cancelSteps(
+                text(request, "ClusterId"), stringList(request.path("StepIds")));
+        ObjectNode response = objectMapper.createObjectNode();
+        ArrayNode arr = response.putArray("CancelStepsInfoList");
+        for (EmrService.CancelStepInfo info : infos) {
+            ObjectNode node = objectMapper.createObjectNode();
+            node.put("StepId", info.stepId());
+            node.put("Status", info.status());
+            if (info.reason() != null) {
+                node.put("Reason", info.reason());
+            }
+            arr.add(node);
+        }
+        return Response.ok(response).build();
+    }
+
+    // ──────────────────────────── Instance groups / fleets ────────────────────────────
+
+    private Response handleAddInstanceGroups(JsonNode request) {
+        List<String> ids = service.addInstanceGroups(text(request, "JobFlowId"),
+                parseInstanceGroups(request.path("InstanceGroups")));
+        ObjectNode response = objectMapper.createObjectNode();
+        response.put("JobFlowId", text(request, "JobFlowId"));
+        ArrayNode arr = response.putArray("InstanceGroupIds");
+        ids.forEach(arr::add);
+        return Response.ok(response).build();
+    }
+
+    private Response handleListInstanceGroups(JsonNode request) {
+        List<EmrInstanceGroup> groups = service.listInstanceGroups(text(request, "ClusterId"));
+        ObjectNode response = objectMapper.createObjectNode();
+        ArrayNode arr = response.putArray("InstanceGroups");
+        for (EmrInstanceGroup g : groups) {
+            arr.add(instanceGroupNode(g));
+        }
+        return Response.ok(response).build();
+    }
+
+    private Response handleAddInstanceFleet(JsonNode request) {
+        EmrInstanceFleet fleet = parseInstanceFleet(request.path("InstanceFleet"));
+        String id = service.addInstanceFleet(text(request, "ClusterId"), fleet);
+        ObjectNode response = objectMapper.createObjectNode();
+        response.put("ClusterId", text(request, "ClusterId"));
+        response.put("InstanceFleetId", id);
+        return Response.ok(response).build();
+    }
+
+    private Response handleListInstanceFleets(JsonNode request) {
+        List<EmrInstanceFleet> fleets = service.listInstanceFleets(text(request, "ClusterId"));
+        ObjectNode response = objectMapper.createObjectNode();
+        ArrayNode arr = response.putArray("InstanceFleets");
+        for (EmrInstanceFleet f : fleets) {
+            arr.add(instanceFleetNode(f));
+        }
+        return Response.ok(response).build();
+    }
+
+    private Response handleListInstances(JsonNode request) {
+        EmrCluster cluster = service.getClusterForInstances(text(request, "ClusterId"));
+        ObjectNode response = objectMapper.createObjectNode();
+        ArrayNode arr = response.putArray("Instances");
+        boolean terminated = EmrClusterLifecycle.isTerminated(cluster.getState());
+        List<String> states = stringList(request.path("InstanceStates"));
+        if ((!states.isEmpty() && !states.contains(terminated ? "TERMINATED" : "RUNNING"))
+                || (terminated && !withinTerminatedInstanceRetention(cluster.getEndDateTime(), Instant.now()))) {
+            return Response.ok(response).build();
+        }
+        // Listed in their groups' order, the first MASTER group's instances numbered first, so the primary node keeps
+        // its id and address, DescribeCluster's MasterPublicDnsName, while the other groups resize, as an instance
+        // does; any other group's follow, each after those before it.
+        EmrInstanceGroup primary = cluster.getInstanceGroups().stream().filter(EmrService::isMasterGroup)
+                .findFirst().orElse(null);
+        int next = primary == null ? 1 : 1 + listedInstanceCount(primary, terminated);
+        for (EmrInstanceGroup group : cluster.getInstanceGroups()) {
+            int count = listedInstanceCount(group, terminated);
+            int first = group == primary ? 1 : next;
+            for (int i = 0; i < count; i++) {
+                arr.add(syntheticInstanceNode(cluster, group, first + i, terminated));
+            }
+            if (group != primary) {
+                next += count;
+            }
+        }
+        return Response.ok(response).build();
+    }
+
+    static boolean withinTerminatedInstanceRetention(Instant endedAt, Instant now) {
+        return endedAt != null && !endedAt.isBefore(now.minus(30, ChronoUnit.DAYS));
+    }
+
+    static int listedInstanceCount(EmrInstanceGroup group, boolean terminated) {
+        if (terminated && group.getTerminatedInstanceCount() > 0) {
+            return group.getTerminatedInstanceCount();
+        }
+        return group.getRunningInstanceCount();
+    }
+
+    // ──────────────────────────── Security configurations ────────────────────────────
+
+    private Response handleCreateSecurityConfiguration(JsonNode request) {
+        SecurityConfiguration sc = service.createSecurityConfiguration(
+                text(request, "Name"), text(request, "SecurityConfiguration"));
+        ObjectNode response = objectMapper.createObjectNode();
+        response.put("Name", sc.getName());
+        response.put("CreationDateTime", epoch(sc.getCreationDateTime()));
+        return Response.ok(response).build();
+    }
+
+    private Response handleDescribeSecurityConfiguration(JsonNode request) {
+        SecurityConfiguration sc = service.describeSecurityConfiguration(text(request, "Name"));
+        ObjectNode response = objectMapper.createObjectNode();
+        response.put("Name", sc.getName());
+        response.put("SecurityConfiguration", sc.getSecurityConfiguration());
+        response.put("CreationDateTime", epoch(sc.getCreationDateTime()));
+        return Response.ok(response).build();
+    }
+
+    private Response handleDeleteSecurityConfiguration(JsonNode request) {
+        service.deleteSecurityConfiguration(text(request, "Name"));
+        return Response.ok(objectMapper.createObjectNode()).build();
+    }
+
+    // ──────────────────────────── Release catalogue ────────────────────────────
+
+    private Response handleListReleaseLabels(JsonNode request) {
+        JsonNode filters = request.path("Filters");
+        PaginatedResult<String> page = service.listReleaseLabels(
+                filters.path("Prefix").asText(null), filters.path("Application").asText(null),
+                request.path("NextToken").asText(null), intOrNull(request.path("MaxResults")));
+        ObjectNode response = objectMapper.createObjectNode();
+        ArrayNode labels = response.putArray("ReleaseLabels");
+        page.items().forEach(labels::add);
+        if (page.nextToken() != null) {
+            response.put("NextToken", page.nextToken());
+        }
+        return Response.ok(response).build();
+    }
+
+    private Response handleDescribeReleaseLabel(JsonNode request) {
+        // MaxResults and NextToken are "reserved for future use" and AWS answers every application.
+        EmrReleaseCatalog.Release release = service.describeReleaseLabel(request.path("ReleaseLabel").asText(null));
+        ObjectNode response = objectMapper.createObjectNode();
+        response.put("ReleaseLabel", release.label());
+        ArrayNode apps = response.putArray("Applications");
+        for (EmrReleaseCatalog.Application app : release.applications()) {
+            apps.addObject().put("Name", app.name()).put("Version", app.version());
+        }
+        ArrayNode os = response.putArray("AvailableOSReleases");
+        release.osReleases().forEach(label -> os.addObject().put("Label", label));
+        return Response.ok(response).build();
+    }
+
+    private Response handleListSupportedInstanceTypes(JsonNode request) {
+        PaginatedResult<EmrReleaseCatalog.InstanceType> page = service.listSupportedInstanceTypes(
+                request.path("ReleaseLabel").asText(null), request.path("Marker").asText(null));
+        ObjectNode response = objectMapper.createObjectNode();
+        ArrayNode types = response.putArray("SupportedInstanceTypes");
+        for (EmrReleaseCatalog.InstanceType t : page.items()) {
+            types.addObject()
+                    .put("Type", t.type())
+                    .put("MemoryGB", t.memoryGb())
+                    .put("StorageGB", t.storageGb())
+                    .put("VCPU", t.vcpu())
+                    .put("Is64BitsOnly", true)
+                    .put("InstanceFamilyId", t.instanceFamilyId())
+                    .put("EbsOptimizedAvailable", true)
+                    .put("EbsOptimizedByDefault", true)
+                    .put("NumberOfDisks", t.numberOfDisks())
+                    .put("EbsStorageOnly", t.ebsStorageOnly())
+                    .put("Architecture", t.architecture());
+        }
+        if (page.nextToken() != null) {
+            response.put("Marker", page.nextToken());
+        }
+        return Response.ok(response).build();
+    }
+
+    private static Integer intOrNull(JsonNode node) {
+        if (node == null || node.isMissingNode() || node.isNull()) {
+            return null;
+        }
+        if (!node.canConvertToInt()) {
+            throw new AwsException("InvalidRequestException", "MaxResults must be an integer.", 400);
+        }
+        return node.asInt();
+    }
+
+    private Response handleListSecurityConfigurations() {
+        ObjectNode response = objectMapper.createObjectNode();
+        ArrayNode arr = response.putArray("SecurityConfigurations");
+        for (SecurityConfiguration sc : service.listSecurityConfigurations()) {
+            ObjectNode node = objectMapper.createObjectNode();
+            node.put("Name", sc.getName());
+            node.put("CreationDateTime", epoch(sc.getCreationDateTime()));
+            arr.add(node);
+        }
+        return Response.ok(response).build();
+    }
+
+    // ──────────────────────────── Tags ────────────────────────────
+
+    private Response handleAddTags(JsonNode request) {
+        service.addTags(text(request, "ResourceId"), parseTags(request.path("Tags")));
+        return Response.ok(objectMapper.createObjectNode()).build();
+    }
+
+    private Response handleRemoveTags(JsonNode request) {
+        service.removeTags(text(request, "ResourceId"), stringList(request.path("TagKeys")));
+        return Response.ok(objectMapper.createObjectNode()).build();
+    }
+
+    // ──────────────────────────── Builders ────────────────────────────
+
+    private Response handleModifyInstanceGroups(JsonNode request, String region) {
+        List<EmrService.InstanceGroupModification> modifications = new ArrayList<>();
+        // Only a list names groups, as the other list members here and the IAM check read one: any other
+        // InstanceGroups names none, which the service refuses.
+        JsonNode groups = request.path("InstanceGroups");
+        if (groups.isArray()) {
+            for (JsonNode g : groups) {
+                JsonNode count = g.path("InstanceCount");
+                JsonNode configurations = g.path("Configurations");
+                modifications.add(new EmrService.InstanceGroupModification(
+                        g.path("InstanceGroupId").asText(null),
+                        count.isMissingNode() || count.isNull() ? null : count.asInt(),
+                        configurations.isArray() ? configurations.toString() : null));
+            }
+        }
+        service.modifyInstanceGroups(text(request, "ClusterId"), region, modifications);
+        return Response.ok(objectMapper.createObjectNode()).build();
+    }
+
+    private Response handleModifyInstanceFleet(JsonNode request) {
+        JsonNode fleet = request.path("InstanceFleet");
+        JsonNode onDemand = fleet.path("TargetOnDemandCapacity");
+        JsonNode spot = fleet.path("TargetSpotCapacity");
+        service.modifyInstanceFleet(text(request, "ClusterId"), fleet.path("InstanceFleetId").asText(null),
+                onDemand.isMissingNode() || onDemand.isNull() ? null : onDemand.asInt(),
+                spot.isMissingNode() || spot.isNull() ? null : spot.asInt());
+        return Response.ok(objectMapper.createObjectNode()).build();
+    }
+
+    /** Each BootstrapActionConfig given to RunJobFlow, as the Command shape: Name, ScriptPath and Args. */
+    private Response handleListBootstrapActions(JsonNode request) {
+        String raw = service.listBootstrapActions(text(request, "ClusterId"));
+        ObjectNode response = objectMapper.createObjectNode();
+        ArrayNode arr = response.putArray("BootstrapActions");
+        if (raw == null) {
+            return Response.ok(response).build();
+        }
+        try {
+            for (JsonNode action : objectMapper.readTree(raw)) {
+                ObjectNode command = arr.addObject();
+                command.put("Name", action.path("Name").asText());
+                JsonNode script = action.path("ScriptBootstrapAction");
+                command.put("ScriptPath", script.path("Path").asText());
+                ArrayNode args = command.putArray("Args");
+                script.path("Args").forEach(args::add);
+            }
+        } catch (Exception e) {
+            LOG.warnv("Failed to parse stored BootstrapActions JSON; list left empty. Value: {0}", raw);
+        }
+        return Response.ok(response).build();
+    }
+
+    private Response handlePutManagedScalingPolicy(JsonNode request) {
+        service.putManagedScalingPolicy(text(request, "ClusterId"), request.get("ManagedScalingPolicy"));
+        return Response.ok(objectMapper.createObjectNode()).build();
+    }
+
+    private Response handleGetManagedScalingPolicy(JsonNode request) {
+        ObjectNode response = objectMapper.createObjectNode();
+        setRawJson(response, "ManagedScalingPolicy", service.getManagedScalingPolicy(text(request, "ClusterId")));
+        return Response.ok(response).build();
+    }
+
+    private Response handleRemoveManagedScalingPolicy(JsonNode request) {
+        service.removeManagedScalingPolicy(text(request, "ClusterId"));
+        return Response.ok(objectMapper.createObjectNode()).build();
+    }
+
+    private Response handlePutAutoTerminationPolicy(JsonNode request) {
+        service.putAutoTerminationPolicy(text(request, "ClusterId"), request.path("AutoTerminationPolicy"));
+        return Response.ok(objectMapper.createObjectNode()).build();
+    }
+
+    private Response handleGetAutoTerminationPolicy(JsonNode request) {
+        ObjectNode response = objectMapper.createObjectNode();
+        setRawJson(response, "AutoTerminationPolicy", service.getAutoTerminationPolicy(text(request, "ClusterId")));
+        return Response.ok(response).build();
+    }
+
+    private Response handleRemoveAutoTerminationPolicy(JsonNode request) {
+        service.removeAutoTerminationPolicy(text(request, "ClusterId"));
+        return Response.ok(objectMapper.createObjectNode()).build();
+    }
+
+    private Response handlePutAutoScalingPolicy(JsonNode request) {
+        String clusterId = text(request, "ClusterId");
+        EmrInstanceGroup group = service.putAutoScalingPolicy(clusterId, text(request, "InstanceGroupId"),
+                request.get("AutoScalingPolicy"));
+        ObjectNode response = objectMapper.createObjectNode();
+        response.put("ClusterId", clusterId);
+        response.put("InstanceGroupId", group.getId());
+        response.set("AutoScalingPolicy", autoScalingPolicyNode(group.getAutoScalingPolicy()));
+        response.put("ClusterArn", service.describeCluster(clusterId).getClusterArn());
+        return Response.ok(response).build();
+    }
+
+    private Response handleRemoveAutoScalingPolicy(JsonNode request) {
+        service.removeAutoScalingPolicy(text(request, "ClusterId"), text(request, "InstanceGroupId"));
+        return Response.ok(objectMapper.createObjectNode()).build();
+    }
+
+    private Response handleGetBlockPublicAccessConfiguration(String region) {
+        EmrBlockPublicAccess setting = service.getBlockPublicAccess(region);
+        ObjectNode response = objectMapper.createObjectNode();
+        setRawJson(response, "BlockPublicAccessConfiguration", setting.getConfiguration());
+        ObjectNode metadata = response.putObject("BlockPublicAccessConfigurationMetadata");
+        putEpoch(metadata, "CreationDateTime", setting.getCreationDateTime());
+        metadata.put("CreatedByArn", setting.getCreatedByArn());
+        return Response.ok(response).build();
+    }
+
+    private Response handlePutBlockPublicAccessConfiguration(JsonNode request, String region) {
+        service.putBlockPublicAccess(region, request.get("BlockPublicAccessConfiguration"));
+        return Response.ok(objectMapper.createObjectNode()).build();
+    }
+
+    private ObjectNode clusterNode(EmrCluster c) {
+        ObjectNode node = objectMapper.createObjectNode();
+        node.put("Id", c.getId());
+        node.put("Name", c.getName());
+        node.set("Status", clusterStatusNode(c));
+        setRawJson(node, "Ec2InstanceAttributes", c.getEc2Attributes());
+        if (c.getInstanceCollectionType() != null) {
+            node.put("InstanceCollectionType", c.getInstanceCollectionType());
+        }
+        if (c.getLogUri() != null) {
+            node.put("LogUri", c.getLogUri());
+        }
+        if (c.getReleaseLabel() != null) {
+            node.put("ReleaseLabel", c.getReleaseLabel());
+        }
+        node.put("AutoTerminate", c.isAutoTerminate());
+        node.put("TerminationProtected", c.isTerminationProtected());
+        node.put("UnhealthyNodeReplacement", c.isUnhealthyNodeReplacement());
+        node.put("VisibleToAllUsers", c.isVisibleToAllUsers());
+        setRawJson(node, "Applications", c.getApplications());
+        setRawJson(node, "Configurations", c.getConfigurations());
+        node.set("Tags", tagArray(c.getTags()));
+        if (c.getServiceRole() != null) {
+            node.put("ServiceRole", c.getServiceRole());
+        }
+        node.put("NormalizedInstanceHours", c.getNormalizedInstanceHours());
+        if (c.getMasterPublicDnsName() != null) {
+            node.put("MasterPublicDnsName", EmrService.masterDnsName(c.getRegion()));
+        }
+        if (c.getAutoScalingRole() != null) {
+            node.put("AutoScalingRole", c.getAutoScalingRole());
+        }
+        if (c.getScaleDownBehavior() != null) {
+            node.put("ScaleDownBehavior", c.getScaleDownBehavior());
+        }
+        if (c.getCustomAmiId() != null) {
+            node.put("CustomAmiId", c.getCustomAmiId());
+        }
+        node.put("EbsRootVolumeSize", c.getEbsRootVolumeSize());
+        node.put("StepConcurrencyLevel", c.getStepConcurrencyLevel());
+        node.put("ClusterArn", c.getClusterArn());
+        return node;
+    }
+
+    private ObjectNode clusterSummaryNode(EmrCluster c) {
+        ObjectNode node = objectMapper.createObjectNode();
+        node.put("Id", c.getId());
+        node.put("Name", c.getName());
+        node.set("Status", clusterStatusNode(c));
+        node.put("NormalizedInstanceHours", c.getNormalizedInstanceHours());
+        node.put("ClusterArn", c.getClusterArn());
+        return node;
+    }
+
+    private ObjectNode clusterStatusNode(EmrCluster c) {
+        ObjectNode status = objectMapper.createObjectNode();
+        status.put("State", c.getState());
+        ObjectNode reason = status.putObject("StateChangeReason");
+        if (c.getStateChangeReasonCode() != null) {
+            reason.put("Code", c.getStateChangeReasonCode());
+        }
+        if (c.getStateChangeMessage() != null) {
+            reason.put("Message", c.getStateChangeMessage());
+        }
+        ObjectNode timeline = status.putObject("Timeline");
+        putEpoch(timeline, "CreationDateTime", c.getCreationDateTime());
+        putEpoch(timeline, "ReadyDateTime", c.getReadyDateTime());
+        putEpoch(timeline, "EndDateTime", c.getEndDateTime());
+        return status;
+    }
+
+    private ObjectNode stepNode(EmrStep step, boolean includeExecutionRole) {
+        ObjectNode node = objectMapper.createObjectNode();
+        node.put("Id", step.getId());
+        node.put("Name", step.getName());
+        ObjectNode config = node.putObject("Config");
+        if (step.getJar() != null) {
+            config.put("Jar", step.getJar());
+        }
+        if (step.getMainClass() != null) {
+            config.put("MainClass", step.getMainClass());
+        }
+        ArrayNode args = config.putArray("Args");
+        step.getArgs().forEach(args::add);
+        ObjectNode props = config.putObject("Properties");
+        step.getProperties().forEach(props::put);
+        node.put("ActionOnFailure", step.getActionOnFailure());
+        if (includeExecutionRole && step.getExecutionRoleArn() != null) {
+            node.put("ExecutionRoleArn", step.getExecutionRoleArn());
+        }
+        ObjectNode status = node.putObject("Status");
+        status.put("State", step.getState());
+        if (step.getStateChangeReason() != null) {
+            status.putObject("StateChangeReason").put("Message", step.getStateChangeReason());
+        }
+        if (step.getFailureReason() != null) {
+            ObjectNode failure = status.putObject("FailureDetails").put("Reason", step.getFailureReason());
+            if (step.getFailureMessage() != null) {
+                failure.put("Message", step.getFailureMessage());
+            }
+        }
+        ObjectNode timeline = status.putObject("Timeline");
+        putEpoch(timeline, "CreationDateTime", step.getCreationDateTime());
+        putEpoch(timeline, "StartDateTime", step.getStartDateTime());
+        putEpoch(timeline, "EndDateTime", step.getEndDateTime());
+        return node;
+    }
+
+    private ObjectNode instanceGroupNode(EmrInstanceGroup g) {
+        ObjectNode node = objectMapper.createObjectNode();
+        node.put("Id", g.getId());
+        if (g.getName() != null) {
+            node.put("Name", g.getName());
+        }
+        node.put("InstanceGroupType", g.getInstanceGroupType());
+        node.put("InstanceType", g.getInstanceType());
+        if (g.getMarket() != null) {
+            node.put("Market", g.getMarket());
+        }
+        if (g.getBidPrice() != null) {
+            node.put("BidPrice", g.getBidPrice());
+        }
+        node.put("RequestedInstanceCount", g.getRequestedInstanceCount());
+        node.put("RunningInstanceCount", g.getRunningInstanceCount());
+        node.putObject("Status").put("State", g.getState());
+        if (g.getAutoScalingPolicy() != null) {
+            node.set("AutoScalingPolicy", autoScalingPolicyNode(g.getAutoScalingPolicy()));
+        }
+        if (g.getConfigurations() != null) {
+            // Floci applies a reconfiguration at once, so the applied configuration is the requested one.
+            setRawJson(node, "Configurations", g.getConfigurations());
+            node.put("ConfigurationsVersion", g.getConfigurationsVersion());
+            setRawJson(node, "LastSuccessfullyAppliedConfigurations", g.getConfigurations());
+            node.put("LastSuccessfullyAppliedConfigurationsVersion", g.getConfigurationsVersion());
+        }
+        return node;
+    }
+
+    /** An AutoScalingPolicyDescription: the stored Constraints and Rules with an ATTACHED status. */
+    private ObjectNode autoScalingPolicyNode(String rawPolicy) {
+        ObjectNode node = objectMapper.createObjectNode();
+        node.putObject("Status").put("State", "ATTACHED");
+        try {
+            JsonNode policy = objectMapper.readTree(rawPolicy);
+            node.set("Constraints", policy.path("Constraints"));
+            node.set("Rules", policy.path("Rules"));
+        } catch (Exception e) {
+            LOG.warnv("Failed to parse stored AutoScalingPolicy JSON; policy omitted. Value: {0}", rawPolicy);
+        }
+        return node;
+    }
+
+    private ObjectNode instanceFleetNode(EmrInstanceFleet f) {
+        ObjectNode node = objectMapper.createObjectNode();
+        node.put("Id", f.getId());
+        if (f.getName() != null) {
+            node.put("Name", f.getName());
+        }
+        node.put("InstanceFleetType", f.getInstanceFleetType());
+        node.put("TargetOnDemandCapacity", f.getTargetOnDemandCapacity());
+        node.put("TargetSpotCapacity", f.getTargetSpotCapacity());
+        node.put("ProvisionedOnDemandCapacity", f.getProvisionedOnDemandCapacity());
+        node.put("ProvisionedSpotCapacity", f.getProvisionedSpotCapacity());
+        node.putObject("Status").put("State", f.getState());
+        return node;
+    }
+
+    private ObjectNode syntheticInstanceNode(EmrCluster cluster, EmrInstanceGroup group, int index,
+                                             boolean terminated) {
+        ObjectNode node = objectMapper.createObjectNode();
+        node.put("Id", "ci-" + index + cluster.getId());
+        node.put("Ec2InstanceId", EmrService.ec2InstanceId(index));
+        node.put("PublicDnsName", AwsEndpoints.ec2PublicDns("203.0.113." + index, cluster.getRegion()));
+        String privateIp = EmrService.privateIpAddress(index);
+        node.put("PrivateDnsName", AwsRegions.ec2PrivateIpDnsName(privateIp, cluster.getRegion()));
+        node.put("PrivateIpAddress", privateIp);
+        node.put("InstanceGroupId", group.getId());
+        if (group.getMarket() != null) {
+            node.put("Market", group.getMarket());
+        }
+        node.put("InstanceType", group.getInstanceType());
+        node.putObject("Status").put("State", terminated ? "TERMINATED" : "RUNNING");
+        return node;
+    }
+
+    private ArrayNode tagArray(Map<String, String> tags) {
+        ArrayNode out = objectMapper.createArrayNode();
+        tags.forEach((k, v) -> {
+            ObjectNode tag = objectMapper.createObjectNode();
+            tag.put("Key", k);
+            tag.put("Value", v);
+            out.add(tag);
+        });
+        return out;
+    }
+
+    // ──────────────────────────── Parsing ────────────────────────────
+
+    private List<EmrStep> parseSteps(JsonNode stepsNode, String executionRoleArn) {
+        List<EmrStep> steps = new ArrayList<>();
+        if (!stepsNode.isArray()) {
+            return steps;
+        }
+        for (JsonNode s : stepsNode) {
+            EmrStep step = new EmrStep();
+            step.setName(s.path("Name").asText(null));
+            step.setActionOnFailure(s.path("ActionOnFailure").asText(null));
+            step.setExecutionRoleArn(executionRoleArn);
+            JsonNode jar = s.path("HadoopJarStep");
+            step.setJar(jar.path("Jar").asText(null));
+            step.setMainClass(jar.path("MainClass").asText(null));
+            step.setArgs(stringList(jar.path("Args")));
+            JsonNode props = jar.path("Properties");
+            if (props.isArray()) {
+                Map<String, String> map = new LinkedHashMap<>();
+                props.forEach(p -> map.put(p.path("Key").asText(), p.path("Value").asText()));
+                step.setProperties(map);
+            }
+            steps.add(step);
+        }
+        return steps;
+    }
+
+    private List<EmrInstanceGroup> parseInstanceGroups(JsonNode groupsNode) {
+        List<EmrInstanceGroup> groups = new ArrayList<>();
+        if (!groupsNode.isArray()) {
+            return groups;
+        }
+        for (JsonNode g : groupsNode) {
+            EmrInstanceGroup group = new EmrInstanceGroup();
+            group.setName(g.path("Name").asText(null));
+            group.setInstanceGroupType(g.path("InstanceRole").asText(null));
+            group.setInstanceType(g.path("InstanceType").asText(null));
+            group.setMarket(g.path("Market").asText(null));
+            group.setBidPrice(g.path("BidPrice").asText(null));
+            group.setRequestedInstanceCount(g.path("InstanceCount").asInt(0));
+            // Kept as given, an empty list included, so creation reads back like ModifyInstanceGroups.
+            JsonNode configurations = g.path("Configurations");
+            group.setConfigurations(configurations.isArray() ? configurations.toString() : null);
+            JsonNode autoScaling = g.path("AutoScalingPolicy");
+            if (!autoScaling.isMissingNode() && !autoScaling.isNull()) {
+                EmrService.validateAutoScalingPolicy(autoScaling, group.getInstanceGroupType());
+                group.setAutoScalingPolicy(autoScaling.toString());
+            }
+            groups.add(group);
+        }
+        return groups;
+    }
+
+    private List<EmrInstanceFleet> parseInstanceFleets(JsonNode fleetsNode) {
+        List<EmrInstanceFleet> fleets = new ArrayList<>();
+        if (!fleetsNode.isArray()) {
+            return fleets;
+        }
+        for (JsonNode f : fleetsNode) {
+            fleets.add(parseInstanceFleet(f));
+        }
+        return fleets;
+    }
+
+    private EmrInstanceFleet parseInstanceFleet(JsonNode f) {
+        EmrInstanceFleet fleet = new EmrInstanceFleet();
+        fleet.setName(f.path("Name").asText(null));
+        fleet.setInstanceFleetType(f.path("InstanceFleetType").asText(null));
+        fleet.setTargetOnDemandCapacity(f.path("TargetOnDemandCapacity").asInt(0));
+        fleet.setTargetSpotCapacity(f.path("TargetSpotCapacity").asInt(0));
+        return fleet;
+    }
+
+    private String buildEc2Attributes(JsonNode instances) {
+        ObjectNode ec2 = objectMapper.createObjectNode();
+        copyText(instances, "Ec2KeyName", ec2, "Ec2KeyName");
+        copyText(instances, "Ec2SubnetId", ec2, "Ec2SubnetId");
+        copyText(instances, "EmrManagedMasterSecurityGroup", ec2, "EmrManagedMasterSecurityGroup");
+        copyText(instances, "EmrManagedSlaveSecurityGroup", ec2, "EmrManagedSlaveSecurityGroup");
+        copyText(instances, "ServiceAccessSecurityGroup", ec2, "ServiceAccessSecurityGroup");
+        return ec2.isEmpty() ? null : ec2.toString();
+    }
+
+    private void copyText(JsonNode src, String srcField, ObjectNode dst, String dstField) {
+        JsonNode v = src.path(srcField);
+        if (!v.isMissingNode() && !v.isNull() && !v.asText().isEmpty()) {
+            dst.put(dstField, v.asText());
+        }
+    }
+
+    private Map<String, String> parseTags(JsonNode tagsNode) {
+        Map<String, String> tags = new LinkedHashMap<>();
+        if (tagsNode.isArray()) {
+            for (JsonNode tag : tagsNode) {
+                String key = tag.path("Key").asText(null);
+                if (key != null) {
+                    tags.put(key, tag.path("Value").asText(null));
+                }
+            }
+        }
+        return tags;
+    }
+
+    private List<String> stringList(JsonNode node) {
+        List<String> values = new ArrayList<>();
+        if (node != null && node.isArray()) {
+            node.forEach(v -> values.add(v.asText()));
+        }
+        return values;
+    }
+
+    /**
+     * Refuses a request that leaves out members its model requires, which would otherwise read as an
+     * empty list or a default flag and succeed on nothing. The wording is AWS's framework validation, as
+     * for RunJobFlow's Name; an explicitly empty JobFlowIds is still a valid list.
+     */
+    private static void requireMembers(JsonNode request, String... members) {
+        List<String> violations = new ArrayList<>();
+        for (String member : members) {
+            JsonNode value = request.path(member);
+            if (value.isMissingNode() || value.isNull()) {
+                violations.add(SmithyValidationErrors.notNull(
+                        Character.toLowerCase(member.charAt(0)) + member.substring(1)));
+            }
+        }
+        if (!violations.isEmpty()) {
+            throw SmithyValidationErrors.validationException(violations);
+        }
+    }
+
+    private String text(JsonNode request, String field) {
+        JsonNode node = request.path(field);
+        return node.isMissingNode() || node.isNull() ? null : node.asText(null);
+    }
+
+    private String rawArray(JsonNode node) {
+        return (node != null && node.isArray() && !node.isEmpty()) ? node.toString() : null;
+    }
+
+    private void setRawJson(ObjectNode target, String field, String rawJson) {
+        if (rawJson == null) {
+            return;
+        }
+        try {
+            target.set(field, objectMapper.readTree(rawJson));
+        } catch (Exception e) {
+            LOG.warnv("Failed to parse stored {0} JSON; field omitted. Value: {1}", field, rawJson);
+        }
+    }
+
+    private BigDecimal epoch(Instant instant) {
+        return instant == null ? BigDecimal.ZERO : BigDecimal.valueOf(instant.toEpochMilli(), 3);
+    }
+
+    private void putEpoch(ObjectNode node, String field, Instant instant) {
+        if (instant != null) {
+            node.put(field, epoch(instant));
+        }
+    }
+}

@@ -1,8 +1,5 @@
 package com.floci.test;
 
-import java.util.logging.Level;
-import java.util.logging.Logger;
-
 import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.DisplayName;
@@ -12,6 +9,9 @@ import software.amazon.awssdk.services.sfn.model.DescribeStateMachineResponse;
 import software.amazon.awssdk.services.sfn.model.IncludedData;
 import software.amazon.awssdk.services.sfn.model.LogLevel;
 import software.amazon.awssdk.services.sfn.model.UpdateStateMachineResponse;
+
+import java.util.logging.Level;
+import java.util.logging.Logger;
 
 import static org.assertj.core.api.Assertions.assertThat;
 

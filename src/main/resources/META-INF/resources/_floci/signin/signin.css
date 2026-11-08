@@ -125,6 +125,18 @@ p + p {
   font-weight: 700;
 }
 
+.verification-code {
+  padding: 12px;
+  border: 1px solid #ff990052;
+  border-radius: 6px;
+  color: var(--floci-ink);
+  background: #fff7e8;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: .9em;
+  overflow-wrap: anywhere;
+  user-select: all;
+}
+
 .notice {
   display: flex;
   gap: 12px;

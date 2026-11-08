@@ -4,8 +4,9 @@
 
 | Port / Range | Protocol | Purpose | docker-compose mapping required? |
 |---|---|---|---|
-| `4566` | HTTP | All AWS API calls (every service) | Yes |
-| `5100–5199` | HTTP | ECR Registry sidecar — bound directly by the `registry:2` container | **No** (see note) |
+| `4566` | HTTP | AWS APIs and ECR Docker Distribution | Yes |
+| `4500` | HTTP | Web console sidecar, bound directly by the console container | **No** (see note) |
+| `5100–5199` | HTTP | ECR Registry backing container, loopback-only implementation ports | No |
 | `5672–5699` | AMQP | Amazon MQ (RabbitMQ) AMQP listener, bound directly by each broker container | **No** |
 | `6379–6399` | TCP | ElastiCache Redis proxy (inside Floci) | Yes |
 | `6400–6419` | TCP | MemoryDB proxy (inside Floci) | Yes |
@@ -31,14 +32,14 @@ host:6379  →  [docker-compose ports mapping]  →  Floci container:6379  →  
 
 Because the listener is inside the Floci container, `ports:` in `docker-compose.yml` is required to make it reachable from the host.
 
-### Direct container binding (ECR, EKS, OpenSearch, Amazon MQ)
+### Direct container binding (web console, EKS, OpenSearch, Amazon MQ)
 
 Floci tells the Docker daemon to start a sidecar/service container and bind its port **directly on the host**. Floci itself communicates with the container via the shared Docker network (container name + internal port). The host port is bound by Docker, not by Floci.
 
 ```
 host:9400  ←──  opensearch container:9200  (Docker binds 9400 directly on the host)
                         ↑
-       Floci reaches it via Docker network: floci-opensearch-{name}:9200
+       Floci reaches it via Docker network: floci-aws-opensearch-{name}:9200
 ```
 
 No `docker-compose.yml` `ports:` mapping is needed — the port is already on the host.
@@ -75,7 +76,7 @@ redis-cli -h localhost -p 6379
 
 When you create an EKS cluster in real mode, Floci asks the Docker daemon to start a k3s container and bind its API server port (6443) to the next available host port in `6500–6599`. The port is bound directly on the host by Docker — no `docker-compose.yml` mapping is needed.
 
-The `endpoint` field returned by `DescribeCluster` points to `https://localhost:<hostPort>` when running outside a container, or `https://floci-eks-<name>:6443` when Floci is running inside Docker.
+The `endpoint` field returned by `DescribeCluster` points to `https://localhost:<hostPort>` when running outside a container, or `https://floci-aws-eks-<name>:6443` when Floci is running inside Docker.
 
 ```bash
 aws eks create-cluster \
@@ -122,7 +123,7 @@ Configure the range with `FLOCI_SERVICES_LAMBDA_RUNTIME_API_BASE_PORT` and `FLOC
 
 When you create an OpenSearch domain in real mode, Floci asks the Docker daemon to start an `opensearchproject/opensearch` container and bind its REST port (9200) to the next available host port in `9400–9499`. The port is bound directly on the host by Docker — no `docker-compose.yml` mapping is needed.
 
-The `endpoint` field returned by `DescribeDomain` points to `http://localhost:<hostPort>` when running outside a container, or `http://floci-opensearch-<name>:9200` when Floci is running inside Docker.
+The `endpoint` field returned by `DescribeDomain` points to `http://localhost:<hostPort>` when running outside a container, or `http://floci-aws-opensearch-<name>:9200` when Floci is running inside Docker.
 
 ```bash
 aws opensearch create-domain \
@@ -158,22 +159,16 @@ aws mq create-broker --broker-name my-broker --engine-type RABBITMQ \
 !!! note
     Configure the ranges with `FLOCI_SERVICES_AMAZONMQ_AMQP_HOST_PORT_BASE` / `_MAX` and `FLOCI_SERVICES_AMAZONMQ_CONSOLE_HOST_PORT_BASE` / `_MAX`.
 
-## Ports 5100–5199 — ECR Registry
+## Ports 5100–5199: ECR Registry backing ports
 
-ECR is backed by a separate `registry:2` sidecar container (`floci-ecr-registry`) that Floci starts on the first ECR API call. That container binds its port directly on the host — **do not** add `5100-5199` to the floci service's `ports` in Docker Compose. Doing so pre-allocates those ports on the Floci container and prevents the sidecar from binding them.
-
-```
-host:5100  ←──  floci-ecr-registry (registry:2 container, started by Floci)
-```
-
-`docker login localhost:5100` works because the sidecar has a direct host port binding.
-
-!!! warning "Do not expose ECR port range on the floci service"
-    Adding `- "5100-5199:5100-5199"` to the floci service ports will conflict with the ECR sidecar and break `docker push` / `docker pull`.
+ECR uses the Floci `4566` listener for Docker Distribution and AWS API traffic. The `registry:2`
+backing container binds a loopback-only implementation port in `5100-5199`; clients must use the
+repository URI returned by `CreateRepository`, for example
+`000000000000.dkr.ecr.us-east-1.localhost:4566/my-repo`.
 
 ## Exposing Ports in Docker Compose
 
-Only the proxy-based services (ElastiCache, MemoryDB, RDS, Neptune, MWAA) need port mappings in `docker-compose.yml`. Direct-binding services (ECR, EKS, OpenSearch, Amazon MQ) bind their ports on the host automatically via Docker:
+Only the proxy-based services (ElastiCache, MemoryDB, RDS, Neptune, MWAA) need port mappings in `docker-compose.yml`. Direct-binding services (EKS, OpenSearch, Amazon MQ) bind their ports on the host automatically via Docker:
 
 ```yaml
 services:
@@ -190,6 +185,6 @@ services:
       - /var/run/docker.sock:/var/run/docker.sock
 ```
 
-EKS (6500–6599), OpenSearch (9400–9499) and Amazon MQ (5672–5699, 15672–15699) ports are bound directly on the host by Docker and are accessible without any `ports:` entry. ECR (5100–5199) must not be added.
+EKS (6500–6599), OpenSearch (9400–9499) and Amazon MQ (5672–5699, 15672–15699) ports are bound directly on the host by Docker and are accessible without any `ports:` entry. ECR uses the existing `4566` mapping.
 
 If your application runs inside the same Docker Compose network, it can reach Floci directly on container port `4566` — the host port mapping is only needed for tools running on the host (CLI, IDE plugins, etc.).

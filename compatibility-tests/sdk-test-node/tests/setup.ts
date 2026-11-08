@@ -41,17 +41,22 @@ export function sleep(ms: number): Promise<void> {
 const SIX_DIGIT_CODE = /\b(\d{6})\b/;
 
 export async function fetchLatestSesVerificationCode(recipient: string): Promise<string> {
-  const response = await fetch(
-    `${ENDPOINT}/_aws/ses?email=${encodeURIComponent(recipient)}`
-  );
+  // The mailbox's email parameter filters by message source, so the message sent to the
+  // recipient is picked out of the full list.
+  const response = await fetch(`${ENDPOINT}/_aws/ses`);
   if (!response.ok) {
     throw new Error(`failed to fetch SES messages: ${response.status}`);
   }
 
   const payload = (await response.json()) as {
-    messages?: Array<{ Body?: { text_part?: string } }>;
+    messages?: Array<{
+      Destination?: { ToAddresses?: string[] };
+      Body?: { text_part?: string };
+    }>;
   };
-  const firstMessage = payload.messages?.[0];
+  const firstMessage = payload.messages?.find((message) =>
+    message.Destination?.ToAddresses?.includes(recipient)
+  );
   const body =
     firstMessage?.Body?.text_part ??
     (firstMessage?.Body as { html_part?: string } | undefined)?.html_part ??

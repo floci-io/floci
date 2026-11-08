@@ -1,5 +1,6 @@
 package com.floci.test;
 
+import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.junit.jupiter.api.*;
 import software.amazon.awssdk.services.sfn.SfnClient;
@@ -7,6 +8,7 @@ import software.amazon.awssdk.services.sfn.model.*;
 import software.amazon.awssdk.services.sqs.SqsClient;
 import software.amazon.awssdk.services.sqs.model.DeleteQueueRequest;
 
+import java.time.Duration;
 import java.util.List;
 
 import static org.assertj.core.api.Assertions.*;
@@ -49,10 +51,10 @@ class StepFunctionsExecutionHistoryTest {
 
     @Test
     void taskEventsAreEmittedInOrderWithChainedPreviousEventId() throws Exception {
-        var queueUrl = sqs.createQueue(b -> b.queueName(TestFixtures.uniqueName("sfn-history-queue")))
+        String queueUrl = sqs.createQueue(b -> b.queueName(TestFixtures.uniqueName("sfn-history-queue")))
                 .queueUrl();
 
-        var smDef = """
+        String smDef = """
                 {
                   "StartAt": "Send",
                   "States": {
@@ -69,25 +71,26 @@ class StepFunctionsExecutionHistoryTest {
                 }
                 """.formatted(queueUrl);
 
-        var smArn = sfn.createStateMachine(b -> b
+        String smArn = sfn.createStateMachine(b -> b
                 .name(TestFixtures.uniqueName("sfn-history-sm"))
                 .definition(smDef)
                 .roleArn(ROLE_ARN)).stateMachineArn();
 
         try {
-            var execArn = sfn.startExecution(b -> b
+            String execArn = sfn.startExecution(b -> b
                     .stateMachineArn(smArn)
                     .input("{}")).executionArn();
 
-            var execution = pollUntilDone(execArn);
+            DescribeExecutionResponse execution =
+                    TestFixtures.awaitExecutionTerminal(sfn, execArn, Duration.ofSeconds(60));
             assertThat(execution.status()).isEqualTo(ExecutionStatus.SUCCEEDED);
 
-            var history = sfn.getExecutionHistory(b -> b
+            GetExecutionHistoryResponse history = sfn.getExecutionHistory(b -> b
                     .executionArn(execArn)
                     .includeExecutionData(true));
-            var events = history.events();
+            List<HistoryEvent> events = history.events();
 
-            var types = events.stream().map(HistoryEvent::type).toList();
+            List<HistoryEventType> types = events.stream().map(HistoryEvent::type).toList();
             assertThat(types).containsExactly(
                     HistoryEventType.EXECUTION_STARTED,
                     HistoryEventType.TASK_STATE_ENTERED,
@@ -97,26 +100,26 @@ class StepFunctionsExecutionHistoryTest {
                     HistoryEventType.TASK_STATE_EXITED,
                     HistoryEventType.EXECUTION_SUCCEEDED);
 
-            var expectedPreviousEventIds = List.of(0L, 0L, 2L, 3L, 4L, 5L, 6L);
-            for (var i = 0; i < events.size(); i++) {
-                var event = events.get(i);
+            List<Long> expectedPreviousEventIds = List.of(0L, 0L, 2L, 3L, 4L, 5L, 6L);
+            for (int i = 0; i < events.size(); i++) {
+                HistoryEvent event = events.get(i);
                 assertThat(event.id()).isEqualTo(i + 1L);
                 assertThat(event.previousEventId()).isEqualTo(expectedPreviousEventIds.get(i));
             }
 
-            var scheduled = events.get(2).taskScheduledEventDetails();
+            TaskScheduledEventDetails scheduled = events.get(2).taskScheduledEventDetails();
             assertThat(scheduled.resourceType()).isEqualTo("sqs");
             assertThat(scheduled.resource()).isEqualTo("sendMessage");
             assertThat(scheduled.region()).isNotBlank();
-            var parameters = MAPPER.readTree(scheduled.parameters());
+            JsonNode parameters = MAPPER.readTree(scheduled.parameters());
             assertThat(parameters.path("QueueUrl").asText()).isEqualTo(queueUrl);
             assertThat(parameters.path("MessageBody").asText()).isEqualTo("hello");
 
-            var started = events.get(3).taskStartedEventDetails();
+            TaskStartedEventDetails started = events.get(3).taskStartedEventDetails();
             assertThat(started.resourceType()).isEqualTo("sqs");
             assertThat(started.resource()).isEqualTo("sendMessage");
 
-            var succeeded = events.get(4).taskSucceededEventDetails();
+            TaskSucceededEventDetails succeeded = events.get(4).taskSucceededEventDetails();
             assertThat(succeeded.resourceType()).isEqualTo("sqs");
             assertThat(succeeded.resource()).isEqualTo("sendMessage");
             assertThat(succeeded.output()).contains("MessageId");
@@ -134,7 +137,7 @@ class StepFunctionsExecutionHistoryTest {
      */
     @Test
     void parallelBranchesAndMapIterationsPublishTheirEvents() throws Exception {
-        var smDef = """
+        String smDef = """
                 {
                   "StartAt": "P",
                   "States": {
@@ -160,24 +163,25 @@ class StepFunctionsExecutionHistoryTest {
                 }
                 """;
 
-        var smArn = sfn.createStateMachine(b -> b
+        String smArn = sfn.createStateMachine(b -> b
                 .name(TestFixtures.uniqueName("sfn-history-branches-sm"))
                 .definition(smDef)
                 .roleArn(ROLE_ARN)).stateMachineArn();
 
         try {
-            var execArn = sfn.startExecution(b -> b
+            String execArn = sfn.startExecution(b -> b
                     .stateMachineArn(smArn)
                     .input("{\"items\": [1, 2]}")).executionArn();
 
-            var execution = pollUntilDone(execArn);
+            DescribeExecutionResponse execution =
+                    TestFixtures.awaitExecutionTerminal(sfn, execArn, Duration.ofSeconds(60));
             assertThat(execution.status()).isEqualTo(ExecutionStatus.SUCCEEDED);
 
-            var events = sfn.getExecutionHistory(b -> b
+            List<HistoryEvent> events = sfn.getExecutionHistory(b -> b
                     .executionArn(execArn)
                     .includeExecutionData(true)).events();
 
-            var types = events.stream().map(HistoryEvent::type).toList();
+            List<HistoryEventType> types = events.stream().map(HistoryEvent::type).toList();
             assertThat(types).containsExactly(
                     HistoryEventType.EXECUTION_STARTED,
                     HistoryEventType.PARALLEL_STATE_ENTERED,
@@ -200,10 +204,10 @@ class StepFunctionsExecutionHistoryTest {
                     HistoryEventType.MAP_STATE_EXITED,
                     HistoryEventType.EXECUTION_SUCCEEDED);
 
-            var expectedPreviousEventIds = List.of(0L, 0L, 2L, 3L, 4L, 5L, 5L, 7L, 8L, 9L, 10L, 11L, 12L,
+            List<Long> expectedPreviousEventIds = List.of(0L, 0L, 2L, 3L, 4L, 5L, 5L, 7L, 8L, 9L, 10L, 11L, 12L,
                     9L, 14L, 15L, 16L, 17L, 17L, 19L);
-            for (var i = 0; i < events.size(); i++) {
-                var event = events.get(i);
+            for (int i = 0; i < events.size(); i++) {
+                HistoryEvent event = events.get(i);
                 assertThat(event.id()).isEqualTo(i + 1L);
                 assertThat(event.previousEventId()).as("previousEventId of event %d", i + 1)
                         .isEqualTo(expectedPreviousEventIds.get(i));
@@ -223,7 +227,7 @@ class StepFunctionsExecutionHistoryTest {
     /** Issue #2868: the cause of a failure inside a branch names the branch state, as on AWS. */
     @Test
     void failureInsideABranchNamesTheBranchStateInItsCause() throws Exception {
-        var smDef = """
+        String smDef = """
                 {
                   "StartAt": "P",
                   "States": {
@@ -238,24 +242,25 @@ class StepFunctionsExecutionHistoryTest {
                 }
                 """;
 
-        var smArn = sfn.createStateMachine(b -> b
+        String smArn = sfn.createStateMachine(b -> b
                 .name(TestFixtures.uniqueName("sfn-history-branch-failure-sm"))
                 .definition(smDef)
                 .roleArn(ROLE_ARN)).stateMachineArn();
 
         try {
-            var execArn = sfn.startExecution(b -> b
+            String execArn = sfn.startExecution(b -> b
                     .stateMachineArn(smArn)
                     .input("{\"x\":\"a\"}")).executionArn();
 
-            var execution = pollUntilDone(execArn);
+            DescribeExecutionResponse execution =
+                    TestFixtures.awaitExecutionTerminal(sfn, execArn, Duration.ofSeconds(60));
             assertThat(execution.status()).isEqualTo(ExecutionStatus.FAILED);
             assertThat(execution.error()).isEqualTo("States.Runtime");
             assertThat(execution.cause()).isEqualTo(
                     "An error occurred while executing the state 'Fast' (entered at the event id #4). "
                     + "The JSONPath '$.nope' specified for the field 'm.$' could not be found in the input '{\"x\":\"a\"}'");
 
-            var events = sfn.getExecutionHistory(b -> b.executionArn(execArn)).events();
+            List<HistoryEvent> events = sfn.getExecutionHistory(b -> b.executionArn(execArn)).events();
             assertThat(events.stream().map(HistoryEvent::type).toList()).containsExactly(
                     HistoryEventType.EXECUTION_STARTED,
                     HistoryEventType.PARALLEL_STATE_ENTERED,
@@ -269,14 +274,57 @@ class StepFunctionsExecutionHistoryTest {
         }
     }
 
-    private DescribeExecutionResponse pollUntilDone(String execArn) throws InterruptedException {
-        for (var i = 0; i < 120; i++) {
-            var resp = sfn.describeExecution(b -> b.executionArn(execArn));
-            if (resp.status() != ExecutionStatus.RUNNING) {
-                return resp;
-            }
-            Thread.sleep(500);
+    /**
+     * GetExecutionHistory pages by 100 events unless maxResults says otherwise, and reverseOrder
+     * starts from the newest event. The SDK paginator follows nextToken to the last page in either
+     * order.
+     */
+    @Test
+    void historyPagesThroughTheSdkPaginatorInBothOrders() throws Exception {
+        StringBuilder states = new StringBuilder();
+        for (int index = 0; index < 60; index++) {
+            states.append(index == 0 ? "" : ",").append("\"S%02d\": {\"Type\": \"Pass\", %s}".formatted(
+                    index, index < 59 ? "\"Next\": \"S%02d\"".formatted(index + 1) : "\"End\": true"));
         }
-        throw new AssertionError("Execution did not complete within 60s: " + execArn);
+        String smArn = sfn.createStateMachine(b -> b
+                .name(TestFixtures.uniqueName("sfn-history-pages-sm"))
+                .definition("{\"StartAt\": \"S00\", \"States\": {" + states + "}}")
+                .roleArn(ROLE_ARN)).stateMachineArn();
+
+        try {
+            String execArn = sfn.startExecution(b -> b.stateMachineArn(smArn).input("{}")).executionArn();
+            assertThat(TestFixtures.awaitExecutionTerminal(sfn, execArn, Duration.ofSeconds(60)).status())
+                    .isEqualTo(ExecutionStatus.SUCCEEDED);
+
+            GetExecutionHistoryResponse firstPage = sfn.getExecutionHistory(b -> b.executionArn(execArn));
+            assertThat(firstPage.events()).hasSize(100);
+            assertThat(firstPage.nextToken()).isNotNull();
+
+            List<Long> ids = sfn.getExecutionHistoryPaginator(b -> b.executionArn(execArn).maxResults(25))
+                    .events().stream().map(HistoryEvent::id).toList();
+            List<Long> reversed = sfn.getExecutionHistoryPaginator(b -> b
+                    .executionArn(execArn).reverseOrder(true).maxResults(25))
+                    .events().stream().map(HistoryEvent::id).toList();
+            assertThat(ids).hasSize(122);
+            assertThat(reversed).hasSize(122);
+            for (int i = 0; i < ids.size(); i++) {
+                assertThat(ids.get(i)).isEqualTo(i + 1L);
+                assertThat(reversed.get(i)).isEqualTo(122L - i);
+            }
+
+            GetExecutionHistoryResponse newest = sfn.getExecutionHistory(b -> b
+                    .executionArn(execArn).reverseOrder(true).maxResults(1));
+            assertThat(newest.events()).extracting(HistoryEvent::type)
+                    .containsExactly(HistoryEventType.EXECUTION_SUCCEEDED);
+            assertThat(newest.events().get(0).id()).isEqualTo(122L);
+            assertThat(newest.nextToken()).isNotNull();
+        } finally {
+            try {
+                sfn.deleteStateMachine(b -> b.stateMachineArn(smArn));
+            } catch (Exception ignored) {
+                // Cleanup only: the state machine has a unique name, so one left behind cannot
+                // affect another test, and a failure here must not hide the test's own result.
+            }
+        }
     }
 }

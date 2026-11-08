@@ -1,0 +1,5178 @@
+package io.floci.aws.services.dynamodb;
+
+import com.fasterxml.jackson.core.type.TypeReference;
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.node.ArrayNode;
+import com.fasterxml.jackson.databind.node.ObjectNode;
+import io.floci.aws.core.common.AwsException;
+import io.floci.aws.core.common.RegionResolver;
+import io.floci.aws.core.storage.AccountAwareStorageBackend;
+import io.floci.aws.core.storage.InMemoryStorage;
+import io.floci.aws.core.storage.PersistentStorage;
+import io.floci.aws.core.storage.StorageBackend;
+import io.floci.aws.services.dynamodb.model.AttributeDefinition;
+import io.floci.aws.services.dynamodb.model.ConditionalCheckFailedException;
+import io.floci.aws.services.dynamodb.model.ExportDescription;
+import io.floci.aws.services.dynamodb.model.GlobalSecondaryIndex;
+import io.floci.aws.services.dynamodb.model.ImportTableDescription;
+import io.floci.aws.services.dynamodb.model.KeySchemaElement;
+import io.floci.aws.services.dynamodb.model.LocalSecondaryIndex;
+import io.floci.aws.services.dynamodb.model.PointInTimeChange;
+import io.floci.aws.services.dynamodb.model.TableBackup;
+import io.floci.aws.services.dynamodb.model.TableDefinition;
+import io.floci.aws.services.s3.S3Service;
+import io.floci.aws.services.s3.model.MultipartUpload;
+import io.floci.aws.services.s3.model.S3Object;
+import io.floci.aws.testing.MutableClock;
+import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.function.Executable;
+import org.junit.jupiter.api.io.TempDir;
+import org.mockito.ArgumentCaptor;
+
+import java.io.ByteArrayInputStream;
+import java.io.ByteArrayOutputStream;
+import java.io.IOException;
+import java.math.BigDecimal;
+import java.nio.charset.StandardCharsets;
+import java.nio.file.Path;
+import java.time.Duration;
+import java.time.Instant;
+import java.time.temporal.ChronoUnit;
+import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.HashSet;
+import java.util.LinkedHashMap;
+import java.util.List;
+import java.util.Map;
+import java.util.Set;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.TimeoutException;
+import java.util.zip.GZIPInputStream;
+import java.util.zip.GZIPOutputStream;
+
+import static org.junit.jupiter.api.Assertions.*;
+import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.ArgumentMatchers.endsWith;
+import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.ArgumentMatchers.isNull;
+import static org.mockito.Mockito.atLeastOnce;
+import static org.mockito.Mockito.doAnswer;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.times;
+import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.verifyNoInteractions;
+import static org.mockito.Mockito.when;
+
+class DynamoDbServiceTest {
+
+    private static final String USERS_ARN = "arn:aws:dynamodb:us-east-1:000000000000:table/Users";
+
+    private DynamoDbService service;
+    private ObjectMapper mapper;
+    // Moves on by a millisecond each time it is read, so a read falls between two writes.
+    private final MutableClock clock = new MutableClock();
+
+    @BeforeEach
+    void setUp() {
+        service = new DynamoDbService(new InMemoryStorage<>());
+        mapper = new ObjectMapper();
+    }
+
+    private TableDefinition createUsersTable(String region) {
+        return service.createTable("Users",
+                List.of(new KeySchemaElement("userId", "HASH")),
+                List.of(new AttributeDefinition("userId", "S")),
+                5L, 5L, region);
+    }
+
+    private static String tableArn(String region, String tableName) {
+        return "arn:aws:dynamodb:" + region + ":000000000000:table/" + tableName;
+    }
+
+    private TableDefinition createOrdersTable(String region) {
+        return service.createTable("Orders",
+                List.of(
+                        new KeySchemaElement("customerId", "HASH"),
+                        new KeySchemaElement("orderId", "RANGE")),
+                List.of(
+                        new AttributeDefinition("customerId", "S"),
+                        new AttributeDefinition("orderId", "S")),
+                5L, 5L, region);
+    }
+
+    private ObjectNode attributeValue(String type, String value) {
+        ObjectNode attrValue = mapper.createObjectNode();
+        attrValue.put(type, value);
+        return attrValue;
+    }
+
+    private ObjectNode item(String... kvPairs) {
+        ObjectNode node = mapper.createObjectNode();
+        for (int i = 0; i < kvPairs.length; i += 2) {
+            node.set(kvPairs[i], attributeValue("S", kvPairs[i + 1]));
+        }
+        return node;
+    }
+
+    @Test
+    void transactWriteDoesNotPartiallyApplyAfterFailedConditionCheck() throws Exception {
+        String region = "eu-west-1";
+        createUsersTable(region);
+        JsonNode put = mapper.readTree("""
+                {"Put":{"TableName":"Users","Item":{"userId":{"S":"new"},"name":{"S":"created"}}}}
+                """);
+        JsonNode invalidUpdate = mapper.readTree("""
+                {"ConditionCheck":{"TableName":"Users","Key":{"userId":{"S":"missing"}},
+                  "ConditionExpression":"attribute_exists(userId)"}}
+                """);
+
+        assertThrows(AwsException.class, () -> service.transactWriteItems(List.of(put, invalidUpdate), region));
+
+        assertNull(service.getItem("Users", mapper.readTree("{\"userId\":{\"S\":\"new\"}}"), region));
+    }
+
+    @Test
+    void transactWriteDoesNotPartiallyApplyAcrossTablesAfterFailedConditionCheck() throws Exception {
+        String region = "eu-west-1";
+        createUsersTable(region);
+        createOrdersTable(region);
+        JsonNode put = mapper.readTree("""
+                {"Put":{"TableName":"Users","Item":{"userId":{"S":"new"}}}}
+                """);
+        JsonNode invalidUpdate = mapper.readTree("""
+                {"ConditionCheck":{"TableName":"Orders","Key":{"customerId":{"S":"c"},"orderId":{"S":"o"}},
+                  "ConditionExpression":"attribute_exists(customerId)"}}
+                """);
+
+        assertThrows(AwsException.class, () -> service.transactWriteItems(List.of(put, invalidUpdate), region));
+
+        assertNull(service.getItem("Users", mapper.readTree("{\"userId\":{\"S\":\"new\"}}"), region));
+        assertNull(service.getItem("Orders", mapper.readTree("{\"customerId\":{\"S\":\"c\"},\"orderId\":{\"S\":\"o\"}}"), region));
+    }
+
+    @Test
+    void failedTransactWritePublishesNoStreamOrKinesisEvents() throws Exception {
+        String region = "eu-west-1";
+        DynamoDbStreamService stream = mock(DynamoDbStreamService.class);
+        KinesisStreamingForwarder kinesis = mock(KinesisStreamingForwarder.class);
+        service = new DynamoDbService(new InMemoryStorage<>(), null,
+                new RegionResolver(region, "000000000000"), stream, kinesis);
+        createUsersTable(region);
+        JsonNode put = mapper.readTree("""
+                {"Put":{"TableName":"Users","Item":{"userId":{"S":"new"}}}}
+                """);
+        JsonNode invalidUpdate = mapper.readTree("""
+                {"ConditionCheck":{"TableName":"Users","Key":{"userId":{"S":"missing"}},
+                  "ConditionExpression":"attribute_exists(userId)"}}
+                """);
+
+        assertThrows(AwsException.class, () -> service.transactWriteItems(List.of(put, invalidUpdate), region));
+
+        verifyNoInteractions(stream, kinesis);
+    }
+
+    @Test
+    void updateItemThatCreatesTheItemEmitsInsertToStreamAndKinesis() throws Exception {
+        String region = "eu-west-1";
+        DynamoDbStreamService stream = mock(DynamoDbStreamService.class);
+        KinesisStreamingForwarder kinesis = mock(KinesisStreamingForwarder.class);
+        service = new DynamoDbService(new InMemoryStorage<>(), null,
+                new RegionResolver(region, "000000000000"), stream, kinesis);
+        createUsersTable(region);
+
+        service.updateItem("Users", mapper.readTree("{\"userId\":{\"S\":\"new\"}}"), null,
+                "SET #name = :name", mapper.readTree("{\"#name\":\"name\"}"),
+                mapper.readTree("{\":name\":{\"S\":\"created\"}}"), "NONE", region);
+
+        verify(stream).captureEvent(eq("INSERT"), isNull(), any(), any(), eq(region));
+        verify(kinesis).forward(eq("INSERT"), isNull(), any(), any(), eq(region), eq("000000000000"));
+    }
+
+    @Test
+    void updateItemOnAnExistingItemEmitsModifyToStreamAndKinesis() throws Exception {
+        String region = "eu-west-1";
+        DynamoDbStreamService stream = mock(DynamoDbStreamService.class);
+        KinesisStreamingForwarder kinesis = mock(KinesisStreamingForwarder.class);
+        service = new DynamoDbService(new InMemoryStorage<>(), null,
+                new RegionResolver(region, "000000000000"), stream, kinesis);
+        createUsersTable(region);
+        service.putItem("Users", item("userId", "existing", "name", "before"), region);
+
+        service.updateItem("Users", mapper.readTree("{\"userId\":{\"S\":\"existing\"}}"), null,
+                "SET #name = :name", mapper.readTree("{\"#name\":\"name\"}"),
+                mapper.readTree("{\":name\":{\"S\":\"after\"}}"), "NONE", region);
+
+        verify(stream).captureEvent(eq("MODIFY"), any(), any(), any(), eq(region));
+        verify(kinesis).forward(eq("MODIFY"), any(), any(), any(), eq(region), eq("000000000000"));
+    }
+
+    @Test
+    void transactUpdateThatCreatesTheItemEmitsInsertToStreamAndKinesis() throws Exception {
+        String region = "eu-west-1";
+        DynamoDbStreamService stream = mock(DynamoDbStreamService.class);
+        KinesisStreamingForwarder kinesis = mock(KinesisStreamingForwarder.class);
+        service = new DynamoDbService(new InMemoryStorage<>(), null,
+                new RegionResolver(region, "000000000000"), stream, kinesis);
+        createUsersTable(region);
+        JsonNode update = mapper.readTree("""
+                {"Update":{"TableName":"Users","Key":{"userId":{"S":"new"}},
+                  "UpdateExpression":"SET #name = :name",
+                  "ExpressionAttributeNames":{"#name":"name"},
+                  "ExpressionAttributeValues":{":name":{"S":"created"}}}}
+                """);
+
+        service.transactWriteItems(List.of(update), region);
+
+        verify(stream).captureEvent(eq("INSERT"), isNull(), any(), any(), eq(region));
+        verify(kinesis).forward(eq("INSERT"), isNull(), any(), any(), eq(region), eq("000000000000"));
+    }
+
+    @Test
+    void validTransactWriteCommitsAllMutations() throws Exception {
+        String region = "eu-west-1";
+        createUsersTable(region);
+        JsonNode put = mapper.readTree("""
+                {"Put":{"TableName":"Users","Item":{"userId":{"S":"new"}}}}
+                """);
+        JsonNode update = mapper.readTree("""
+                {"Update":{"TableName":"Users","Key":{"userId":{"S":"existing"}},
+                  "UpdateExpression":"SET #name = :name",
+                  "ExpressionAttributeNames":{"#name":"name"},
+                  "ExpressionAttributeValues":{":name":{"S":"updated"}}}}
+                """);
+
+        service.putItem("Users", mapper.readTree("{\"userId\":{\"S\":\"existing\"}}"), region);
+        service.transactWriteItems(List.of(put, update), region);
+
+        assertNotNull(service.getItem("Users", mapper.readTree("{\"userId\":{\"S\":\"new\"}}"), region));
+        assertEquals("updated", service.getItem("Users", mapper.readTree("{\"userId\":{\"S\":\"existing\"}}"), region).path("name").path("S").asText());
+    }
+
+    @Test
+    void failedTransactWriteLeavesExistingItemsUnchanged() throws Exception {
+        String region = "eu-west-1";
+        createUsersTable(region);
+        service.putItem("Users", item("userId", "existing", "name", "before"), region);
+        JsonNode invalidUpdate = mapper.readTree("""
+                {"ConditionCheck":{"TableName":"Users","Key":{"userId":{"S":"existing"}},
+                  "ConditionExpression":"attribute_not_exists(userId)"}}
+                """);
+
+        assertThrows(AwsException.class, () -> service.transactWriteItems(List.of(invalidUpdate), region));
+
+        assertEquals("before", service.getItem("Users", mapper.readTree("{\"userId\":{\"S\":\"existing\"}}"), region).path("name").path("S").asText());
+    }
+
+    @Test
+    void createTable() {
+        TableDefinition table = createUsersTable("eu-west-1");
+        assertEquals("Users", table.getTableName());
+        assertEquals("ACTIVE", table.getTableStatus());
+        assertNotNull(table.getTableArn());
+        assertEquals("userId", table.getPartitionKeyName());
+        assertNull(table.getSortKeyName());
+    }
+
+    @Test
+    void createTableWithSortKey() {
+        TableDefinition table = createOrdersTable("eu-west-1");
+        assertEquals("customerId", table.getPartitionKeyName());
+        assertEquals("orderId", table.getSortKeyName());
+    }
+
+    @Test
+    void createDuplicateTableThrows() {
+        String region = "eu-west-1";
+        createUsersTable(region);
+        assertThrows(AwsException.class, () -> createUsersTable(region));
+    }
+
+    @Test
+    void createTableRejectsArnInput() {
+        AwsException ex = assertThrows(AwsException.class, () ->
+                service.createTable("arn:aws:dynamodb:us-east-1:000000000000:table/Users",
+                        List.of(new KeySchemaElement("userId", "HASH")),
+                        List.of(new AttributeDefinition("userId", "S")),
+                        5L, 5L, "eu-west-1"));
+        assertEquals("ValidationException", ex.getErrorCode());
+        assertEquals(400, ex.getHttpStatus());
+    }
+
+    @Test
+    void createTableRejectsLocalSecondaryIndexWithMultipleSortKeyAttributes() {
+        LocalSecondaryIndex lsi = new LocalSecondaryIndex(
+                "LSI1",
+                List.of(
+                        new KeySchemaElement("PK", "HASH"),
+                        new KeySchemaElement("LSI1A", "RANGE"),
+                        new KeySchemaElement("LSI1B", "RANGE")),
+                null, "ALL");
+
+        AwsException ex = assertThrows(AwsException.class, () -> service.createTable("lsi-multi-sort",
+                List.of(
+                        new KeySchemaElement("PK", "HASH"),
+                        new KeySchemaElement("SK", "RANGE")),
+                List.of(
+                        new AttributeDefinition("PK", "S"),
+                        new AttributeDefinition("SK", "S"),
+                        new AttributeDefinition("LSI1A", "S"),
+                        new AttributeDefinition("LSI1B", "S")),
+                5L, 5L, List.of(), List.of(lsi), "eu-west-1"));
+
+        assertEquals("ValidationException", ex.getErrorCode());
+        assertEquals(400, ex.getHttpStatus());
+    }
+
+    @Test
+    void createTableRejectsLocalSecondaryIndexWithNoSortKey() {
+        LocalSecondaryIndex lsi = new LocalSecondaryIndex(
+                "LSI1",
+                List.of(new KeySchemaElement("PK", "HASH")),
+                null, "ALL");
+
+        AwsException ex = assertThrows(AwsException.class, () -> service.createTable("lsi-no-sort",
+                List.of(
+                        new KeySchemaElement("PK", "HASH"),
+                        new KeySchemaElement("SK", "RANGE")),
+                List.of(
+                        new AttributeDefinition("PK", "S"),
+                        new AttributeDefinition("SK", "S")),
+                5L, 5L, List.of(), List.of(lsi), "eu-west-1"));
+
+        assertEquals("ValidationException", ex.getErrorCode());
+        assertEquals(400, ex.getHttpStatus());
+    }
+
+    @Test
+    void createTableRejectsGsiWithMoreThanFourSortKeyAttributes() {
+        GlobalSecondaryIndex gsi = new GlobalSecondaryIndex(
+                "GSI1",
+                List.of(
+                        new KeySchemaElement("PK", "HASH"),
+                        new KeySchemaElement("A", "RANGE"),
+                        new KeySchemaElement("B", "RANGE"),
+                        new KeySchemaElement("C", "RANGE"),
+                        new KeySchemaElement("D", "RANGE"),
+                        new KeySchemaElement("E", "RANGE")),
+                null, "ALL", null);
+
+        AwsException ex = assertThrows(AwsException.class, () -> service.createTable("gsi-too-many-sort-keys",
+                List.of(new KeySchemaElement("PK", "HASH")),
+                List.of(
+                        new AttributeDefinition("PK", "S"),
+                        new AttributeDefinition("A", "S"),
+                        new AttributeDefinition("B", "S"),
+                        new AttributeDefinition("C", "S"),
+                        new AttributeDefinition("D", "S"),
+                        new AttributeDefinition("E", "S")),
+                5L, 5L, List.of(gsi), "eu-west-1"));
+
+        assertEquals("ValidationException", ex.getErrorCode());
+        assertEquals(400, ex.getHttpStatus());
+    }
+
+    @Test
+    void createTableRejectsGsiWithMoreThanFourPartitionKeyAttributes() {
+        GlobalSecondaryIndex gsi = new GlobalSecondaryIndex(
+                "GSI1",
+                List.of(
+                        new KeySchemaElement("A", "HASH"),
+                        new KeySchemaElement("B", "HASH"),
+                        new KeySchemaElement("C", "HASH"),
+                        new KeySchemaElement("D", "HASH"),
+                        new KeySchemaElement("E", "HASH")),
+                null, "ALL", null);
+
+        AwsException ex = assertThrows(AwsException.class, () -> service.createTable("gsi-too-many-hash-keys",
+                List.of(new KeySchemaElement("PK", "HASH")),
+                List.of(
+                        new AttributeDefinition("PK", "S"),
+                        new AttributeDefinition("A", "S"),
+                        new AttributeDefinition("B", "S"),
+                        new AttributeDefinition("C", "S"),
+                        new AttributeDefinition("D", "S"),
+                        new AttributeDefinition("E", "S")),
+                5L, 5L, List.of(gsi), "eu-west-1"));
+
+        assertEquals("ValidationException", ex.getErrorCode());
+        assertEquals(400, ex.getHttpStatus());
+    }
+
+    @Test
+    void updateTableRejectsGsiCreateWithMoreThanFourSortKeyAttributes() {
+        createUsersTable("eu-west-1");
+        GlobalSecondaryIndex gsi = new GlobalSecondaryIndex(
+                "GSI1",
+                List.of(
+                        new KeySchemaElement("userId", "HASH"),
+                        new KeySchemaElement("A", "RANGE"),
+                        new KeySchemaElement("B", "RANGE"),
+                        new KeySchemaElement("C", "RANGE"),
+                        new KeySchemaElement("D", "RANGE"),
+                        new KeySchemaElement("E", "RANGE")),
+                null, "ALL", null);
+        List<AttributeDefinition> newAttrs = List.of(
+                new AttributeDefinition("A", "S"), new AttributeDefinition("B", "S"),
+                new AttributeDefinition("C", "S"), new AttributeDefinition("D", "S"),
+                new AttributeDefinition("E", "S"));
+
+        AwsException ex = assertThrows(AwsException.class, () -> service.updateTable(
+                "Users", null, null, List.of(gsi), List.of(), newAttrs, "eu-west-1"));
+
+        assertEquals("ValidationException", ex.getErrorCode());
+        assertEquals(400, ex.getHttpStatus());
+    }
+
+    @Test
+    void updateTableRejectsGsiArityWithoutApplyingThroughputChange() {
+        String region = "eu-west-1";
+        createUsersTable(region);
+        GlobalSecondaryIndex invalidGsi = new GlobalSecondaryIndex(
+                "GSI1",
+                List.of(
+                        new KeySchemaElement("A", "HASH"),
+                        new KeySchemaElement("B", "HASH"),
+                        new KeySchemaElement("C", "HASH"),
+                        new KeySchemaElement("D", "HASH"),
+                        new KeySchemaElement("E", "HASH")),
+                null, "ALL", null);
+        List<AttributeDefinition> newAttrs = List.of(
+                new AttributeDefinition("A", "S"), new AttributeDefinition("B", "S"),
+                new AttributeDefinition("C", "S"), new AttributeDefinition("D", "S"),
+                new AttributeDefinition("E", "S"));
+
+        assertThrows(AwsException.class, () -> service.updateTable(
+                "Users", 10L, 10L, List.of(invalidGsi), List.of(), newAttrs, region));
+
+        TableDefinition after = service.describeTable("Users", region);
+        assertEquals(5L, after.getProvisionedThroughput().getReadCapacityUnits());
+        assertEquals(5L, after.getProvisionedThroughput().getWriteCapacityUnits());
+        assertTrue(after.getGlobalSecondaryIndexes().isEmpty());
+    }
+
+    @Test
+    void createTableRejectsMissingKeyAttributeDefinition() {
+        AwsException error = assertThrows(AwsException.class, () -> service.createTable(
+                "Users",
+                List.of(new KeySchemaElement("userId", "HASH")),
+                List.of(),
+                5L, 5L, "eu-west-1"));
+
+        assertEquals("ValidationException", error.getErrorCode());
+        assertEquals("Invalid KeySchema: Some index key attribute have no definition", error.getMessage());
+    }
+
+    @Test
+    void describeTable() {
+        String region = "eu-west-1";
+        createUsersTable(region);
+        TableDefinition table = service.describeTable("Users", region);
+        assertEquals("Users", table.getTableName());
+    }
+
+    @Test
+    void describeTableAcceptsArn() {
+        createUsersTable("us-east-1");
+        TableDefinition table = service.describeTable(tableArn("us-east-1", "Users"), "us-east-1");
+        assertEquals("Users", table.getTableName());
+    }
+
+    @Test
+    void describeTableNotFound() {
+        assertThrows(AwsException.class, () -> service.describeTable("NonExistent", "eu-west-1"));
+    }
+
+    @Test
+    void applyReplicaUpdatesRejectsBlankRegion() {
+        createUsersTable("us-east-1");
+
+        AwsException exception = assertThrows(AwsException.class,
+                () -> service.applyReplicaUpdates("Users", List.of(" "), List.of(), "us-east-1"));
+
+        assertEquals("ValidationException", exception.getErrorCode());
+        assertEquals(400, exception.getHttpStatus());
+    }
+
+    @Test
+    void repeatedReplicaCreateAndDeleteAreIdempotent() {
+        createUsersTable("us-east-1");
+
+        service.applyReplicaUpdates("Users", List.of("eu-west-1"), List.of(), "us-east-1");
+        service.applyReplicaUpdates("Users", List.of("eu-west-1"), List.of(), "us-east-1");
+
+        assertEquals(List.of("eu-west-1"),
+                service.describeTable("Users", "us-east-1").getReplicaRegions());
+
+        service.applyReplicaUpdates("Users", List.of(), List.of("eu-west-1"), "us-east-1");
+        service.applyReplicaUpdates("Users", List.of(), List.of("eu-west-1"), "us-east-1");
+
+        assertTrue(service.describeTable("Users", "us-east-1").getReplicaRegions().isEmpty());
+    }
+
+    @Test
+    void addingAReplicaMarksTheTableGlobalHomedInTheUpdateRegion() {
+        createUsersTable("us-east-1");
+        assertNull(service.describeTable("Users", "us-east-1").getGlobalTableHomeRegion());
+
+        service.applyReplicaUpdates("Users", List.of("eu-west-1"), List.of(), "us-east-1");
+
+        assertEquals("us-east-1", service.describeTable("Users", "us-east-1").getGlobalTableHomeRegion());
+        // The home region stays a global table even after the last replica is removed.
+        service.applyReplicaUpdates("Users", List.of(), List.of("eu-west-1"), "us-east-1");
+        assertEquals("us-east-1", service.describeTable("Users", "us-east-1").getGlobalTableHomeRegion());
+    }
+
+    @Test
+    void ensureGlobalTableMarksTheHomeRegionAndIsIdempotent() {
+        createUsersTable("us-east-1");
+
+        service.ensureGlobalTable("Users", "us-east-1");
+        service.ensureGlobalTable("Users", "us-east-1");
+
+        assertEquals("us-east-1", service.describeTable("Users", "us-east-1").getGlobalTableHomeRegion());
+        assertTrue(service.describeTable("Users", "us-east-1").getReplicaRegions().isEmpty());
+    }
+
+    @Test
+    void invalidReplicaUpdateLeavesExistingReplicasUnchanged() {
+        createUsersTable("us-east-1");
+        service.applyReplicaUpdates(
+                "Users", List.of("eu-west-1"), List.of(), List.of(), "us-east-1");
+
+        AwsException exception = assertThrows(AwsException.class, () ->
+                service.applyReplicaUpdates(
+                        "Users", List.of(), List.of(), List.of("ap-south-1"), "us-east-1"));
+
+        assertEquals("ValidationException", exception.getErrorCode());
+        assertEquals(List.of("eu-west-1"),
+                service.describeTable("Users", "us-east-1").getReplicaRegions());
+    }
+
+    @Test
+    void deleteTable() {
+        String region = "eu-west-1";
+        createUsersTable(region);
+        service.deleteTable("Users", region);
+        assertThrows(AwsException.class, () -> service.describeTable("Users", region));
+    }
+
+    @Test
+    void listTables() {
+        String region = "eu-west-1";
+        createUsersTable(region);
+        createOrdersTable(region);
+        List<String> tables = service.listTables(region);
+        assertEquals(2, tables.size());
+        assertTrue(tables.contains("Users"));
+        assertTrue(tables.contains("Orders"));
+    }
+
+    @Test
+    void putAndGetItem() {
+        String region = "eu-west-1";
+        createUsersTable(region);
+        ObjectNode userItem = item("userId", "user-1", "name", "Alice", "email", "alice@test.com");
+        service.putItem("Users", userItem, region);
+
+        ObjectNode key = item("userId", "user-1");
+        JsonNode retrieved = service.getItem("Users", key, region);
+        assertNotNull(retrieved);
+        assertEquals("Alice", retrieved.get("name").get("S").asText());
+    }
+
+    @Test
+    void putAndGetItemAcceptArnTableName() {
+        createUsersTable("us-east-1");
+        ObjectNode userItem = item("userId", "user-1", "name", "Alice");
+        String usersArn = tableArn("us-east-1", "Users");
+
+        service.putItem(usersArn, userItem, "us-east-1");
+
+        JsonNode retrieved = service.getItem(usersArn, item("userId", "user-1"), "us-east-1");
+        assertNotNull(retrieved);
+        assertEquals("Alice", retrieved.get("name").get("S").asText());
+    }
+
+    @Test
+    void batchGetPreservesRequestKeyButResolvesArn() {
+        createUsersTable("us-east-1");
+        service.putItem("Users", item("userId", "user-1", "name", "Alice"), "us-east-1");
+
+        ObjectNode request = mapper.createObjectNode();
+        request.set("Keys", mapper.createArrayNode().add(item("userId", "user-1")));
+        String usersArn = tableArn("us-east-1", "Users");
+
+        DynamoDbService.BatchGetResult result = service.batchGetItem(Map.of(usersArn, request), "us-east-1");
+
+        assertTrue(result.responses().containsKey(usersArn));
+        assertEquals("Alice", result.responses().get(usersArn).getFirst().get("name").get("S").asText());
+    }
+
+    @Test
+    void transactWriteConditionChecksAcceptArnTableName() {
+        createUsersTable("us-east-1");
+        service.putItem("Users", item("userId", "user-1", "name", "Alice"), "us-east-1");
+        String usersArn = tableArn("us-east-1", "Users");
+
+        ObjectNode exprValues = mapper.createObjectNode();
+        exprValues.set(":name", attributeValue("S", "Alice"));
+
+        ObjectNode exprNames = mapper.createObjectNode();
+        exprNames.put("#n", "name");
+
+        ObjectNode update = mapper.createObjectNode();
+        update.put("TableName", usersArn);
+        update.set("Key", item("userId", "user-1"));
+        update.put("ConditionExpression", "#n = :name");
+        update.put("UpdateExpression", "SET email = :name");
+        update.set("ExpressionAttributeNames", exprNames);
+        update.set("ExpressionAttributeValues", exprValues);
+
+        ObjectNode transactItem = mapper.createObjectNode();
+        transactItem.set("Update", update);
+
+        assertDoesNotThrow(() -> service.transactWriteItems(List.of(transactItem), "us-east-1", null, null));
+        assertEquals("Alice", service.getItem("Users", item("userId", "user-1"), "us-east-1").get("email").get("S").asText());
+    }
+
+    @Test
+    void describeTableRejectsRegionMismatchArn() {
+        createUsersTable("us-east-1");
+
+        AwsException ex = assertThrows(AwsException.class,
+                () -> service.describeTable(tableArn("eu-west-1", "Users"), "us-east-1"));
+        assertEquals("ValidationException", ex.getErrorCode());
+        assertEquals(400, ex.getHttpStatus());
+    }
+
+    @Test
+    void getItemNotFound() {
+        String region = "eu-west-1";
+        createUsersTable(region);
+        ObjectNode key = item("userId", "nonexistent");
+        JsonNode result = service.getItem("Users", key, region);
+        assertNull(result);
+    }
+
+    @Test
+    void putItemOverwrites() {
+        String region = "eu-west-1";
+        createUsersTable(region);
+        service.putItem("Users", item("userId", "user-1", "name", "Alice"), region);
+        service.putItem("Users", item("userId", "user-1", "name", "Bob"), region);
+
+        JsonNode retrieved = service.getItem("Users", item("userId", "user-1"), region);
+        assertEquals("Bob", retrieved.get("name").get("S").asText());
+    }
+
+    @Test
+    void deleteItem() {
+        String region = "eu-west-1";
+        createUsersTable(region);
+        service.putItem("Users", item("userId", "user-1", "name", "Alice"), region);
+        service.deleteItem("Users", item("userId", "user-1"), region);
+
+        assertNull(service.getItem("Users", item("userId", "user-1"), region));
+    }
+
+    @Test
+    void putAndGetWithCompositeKey() {
+        String region = "eu-west-1";
+        createOrdersTable(region);
+        service.putItem("Orders", item("customerId", "c1", "orderId", "o1", "total", "100"), region);
+        service.putItem("Orders", item("customerId", "c1", "orderId", "o2", "total", "200"), region);
+        service.putItem("Orders", item("customerId", "c2", "orderId", "o1", "total", "50"), region);
+
+        JsonNode result = service.getItem("Orders", item("customerId", "c1", "orderId", "o1"), region);
+        assertNotNull(result);
+        assertEquals("100", result.get("total").get("S").asText());
+    }
+
+    @Test
+    void queryByPartitionKey() {
+        String region = "eu-west-1";
+        createOrdersTable(region);
+        service.putItem("Orders", item("customerId", "c1", "orderId", "o1", "total", "100"), region);
+        service.putItem("Orders", item("customerId", "c1", "orderId", "o2", "total", "200"), region);
+        service.putItem("Orders", item("customerId", "c2", "orderId", "o1", "total", "50"), region);
+
+        // Build KeyConditions
+        ObjectNode keyConditions = mapper.createObjectNode();
+        ObjectNode pkCondition = mapper.createObjectNode();
+        pkCondition.put("ComparisonOperator", "EQ");
+        ArrayNode attrList = mapper.createArrayNode();
+        ObjectNode pkVal = mapper.createObjectNode();
+        pkVal.put("S", "c1");
+        attrList.add(pkVal);
+        pkCondition.set("AttributeValueList", attrList);
+        keyConditions.set("customerId", pkCondition);
+
+        DynamoDbService.QueryResult results = service.query("Orders", keyConditions, null, null, null, null, region);
+        assertEquals(2, results.items().size());
+    }
+
+    @Test
+    void queryWithKeyConditionExpression() {
+        String region = "eu-west-1";
+        createOrdersTable(region);
+        service.putItem("Orders", item("customerId", "c1", "orderId", "o1"), region);
+        service.putItem("Orders", item("customerId", "c1", "orderId", "o2"), region);
+        service.putItem("Orders", item("customerId", "c2", "orderId", "o1"), region);
+
+        ObjectNode exprValues = mapper.createObjectNode();
+        ObjectNode val = mapper.createObjectNode();
+        val.put("S", "c1");
+        exprValues.set(":pk", val);
+
+        DynamoDbService.QueryResult results = service.query("Orders", null, exprValues,
+                "customerId = :pk", null, null, region);
+        assertEquals(2, results.items().size());
+    }
+
+    @Test
+    void queryWithTheSortKeyValueOnTheLeft() {
+        String region = "eu-west-1";
+        createOrdersTable(region);
+        service.putItem("Orders", item("customerId", "c1", "orderId", "o1"), region);
+        service.putItem("Orders", item("customerId", "c1", "orderId", "o3"), region);
+
+        ObjectNode exprValues = mapper.createObjectNode();
+        exprValues.set(":pk", mapper.createObjectNode().put("S", "c1"));
+        exprValues.set(":lo", mapper.createObjectNode().put("S", "o2"));
+
+        DynamoDbService.QueryResult results = service.query("Orders", null, exprValues,
+                "customerId = :pk AND :lo <= orderId", null, null, region);
+        assertEquals(1, results.items().size());
+        assertEquals("o3", results.items().getFirst().get("orderId").get("S").asText());
+    }
+
+    @Test
+    void queryWithBeginsWith() {
+        String region = "eu-west-1";
+        createOrdersTable(region);
+        service.putItem("Orders", item("customerId", "c1", "orderId", "2024-01-01"), region);
+        service.putItem("Orders", item("customerId", "c1", "orderId", "2024-01-15"), region);
+        service.putItem("Orders", item("customerId", "c1", "orderId", "2024-02-01"), region);
+
+        ObjectNode exprValues = mapper.createObjectNode();
+        ObjectNode pkVal = mapper.createObjectNode();
+        pkVal.put("S", "c1");
+        exprValues.set(":pk", pkVal);
+        ObjectNode skVal = mapper.createObjectNode();
+        skVal.put("S", "2024-01");
+        exprValues.set(":sk", skVal);
+
+        DynamoDbService.QueryResult results = service.query("Orders", null, exprValues,
+                "customerId = :pk AND begins_with(orderId, :sk)", null, null, region);
+        assertEquals(2, results.items().size());
+    }
+
+    @Test
+    void queryWithBetweenOnSortKey() {
+        String region = "eu-west-1";
+        createOrdersTable(region);
+        service.putItem("Orders", item("customerId", "c1", "orderId", "2024-01-01"), region);
+        service.putItem("Orders", item("customerId", "c1", "orderId", "2024-01-15"), region);
+        service.putItem("Orders", item("customerId", "c1", "orderId", "2024-02-01"), region);
+
+        ObjectNode exprValues = mapper.createObjectNode();
+        exprValues.set(":pk", attributeValue("S", "c1"));
+        exprValues.set(":from", attributeValue("S", "2024-01-10"));
+        exprValues.set(":to", attributeValue("S", "2024-01-31"));
+
+        DynamoDbService.QueryResult results = service.query("Orders", null, exprValues,
+                "customerId = :pk AND orderId BETWEEN :from AND :to", null, null, region);
+
+        assertEquals(1, results.items().size());
+        assertEquals("2024-01-15", results.items().getFirst().get("orderId").get("S").asText());
+    }
+
+    @Test
+    void queryWithScanIndexForwardFalseReturnsDescendingOrder() {
+        createOrdersTable("us-east-1");
+        service.putItem("Orders", item("customerId", "c1", "orderId", "o1"), "us-east-1");
+        service.putItem("Orders", item("customerId", "c1", "orderId", "o2"), "us-east-1");
+        service.putItem("Orders", item("customerId", "c1", "orderId", "o3"), "us-east-1");
+
+        ObjectNode exprValues = mapper.createObjectNode();
+        exprValues.set(":pk", attributeValue("S", "c1"));
+
+        DynamoDbService.QueryResult results = service.query("Orders", null, exprValues,
+                "customerId = :pk", null, null, false, null, null, null, "us-east-1");
+
+        assertEquals(List.of("o3", "o2", "o1"), results.items().stream()
+                .map(result -> result.get("orderId").get("S").asText())
+                .toList());
+    }
+
+    /**
+     * Regression for floci-io/floci#1675: a GSI whose sort key is composite (more than one RANGE
+     * attribute) must order by ALL sort-key attributes in schema order, so ScanIndexForward=false
+     * yields the reverse of the full composite order. Previously only the first RANGE attribute
+     * (here {@code state}, identical across the rows) was used, so {@code createdAt} never
+     * participated and ordering/reversal were effectively ignored.
+     */
+    @Test
+    void queryOnCompositeSortKeyGsiRespectsScanIndexForward() {
+        String region = "us-east-1";
+        createRequestsTableWithCompositeSortKeyGsi(region);
+
+        // Same memberName + state. Deliberately make base-table key order (requestId: a, b, c)
+        // DISAGREE with createdAt order, so a correct result can only come from sorting on the
+        // second composite component (createdAt) — not from incidental storage order.
+        service.putItem("Requests", item("requestId", "a", "memberName", "alice",
+                "state", "ACTIVE", "createdAt", "2026-07-14T00:00:03Z"), region);
+        service.putItem("Requests", item("requestId", "b", "memberName", "alice",
+                "state", "ACTIVE", "createdAt", "2026-07-14T00:00:01Z"), region);
+        service.putItem("Requests", item("requestId", "c", "memberName", "alice",
+                "state", "ACTIVE", "createdAt", "2026-07-14T00:00:02Z"), region);
+
+        ObjectNode exprValues = mapper.createObjectNode();
+        exprValues.set(":pk", attributeValue("S", "alice"));
+        exprValues.set(":st", attributeValue("S", "ACTIVE"));
+        exprValues.set(":from", attributeValue("S", "1970-01-01T00:00:00Z"));
+        exprValues.set(":to", attributeValue("S", "2100-01-01T00:00:00Z"));
+        String kce = "memberName = :pk AND state = :st AND createdAt BETWEEN :from AND :to";
+
+        DynamoDbService.QueryResult ascending = service.query("Requests", null, exprValues,
+                kce, null, null, true, "memberIndex", null, null, region);
+        assertEquals(
+                List.of("2026-07-14T00:00:01Z", "2026-07-14T00:00:02Z", "2026-07-14T00:00:03Z"),
+                ascending.items().stream()
+                        .map(result -> result.get("createdAt").get("S").asText())
+                        .toList());
+
+        DynamoDbService.QueryResult descending = service.query("Requests", null, exprValues,
+                kce, null, null, false, "memberIndex", null, null, region);
+        assertEquals(
+                List.of("2026-07-14T00:00:03Z", "2026-07-14T00:00:02Z", "2026-07-14T00:00:01Z"),
+                descending.items().stream()
+                        .map(result -> result.get("createdAt").get("S").asText())
+                        .toList());
+    }
+
+    @Test
+    void queryOnCompositeSortKeyGsiExcludesItemsMissingTrailingIndexKey() {
+        String region = "us-east-1";
+        createRequestsTableWithCompositeSortKeyGsi(region);
+        service.putItem("Requests", item("requestId", "complete", "memberName", "alice",
+                "state", "ACTIVE", "createdAt", "2026-07-14T00:00:01Z"), region);
+        service.putItem("Requests", item("requestId", "incomplete", "memberName", "alice",
+                "state", "ACTIVE"), region);
+
+        ObjectNode exprValues = mapper.createObjectNode();
+        exprValues.set(":pk", attributeValue("S", "alice"));
+
+        DynamoDbService.QueryResult results = service.query("Requests", null, exprValues,
+                "memberName = :pk", null, null, true, "memberIndex", null, null, region);
+
+        assertEquals(List.of("complete"), results.items().stream()
+                .map(result -> result.get("requestId").get("S").asText())
+                .toList());
+    }
+
+    private void createRequestsTableWithCompositeSortKeyGsi(String region) {
+        GlobalSecondaryIndex gsi = new GlobalSecondaryIndex(
+                "memberIndex",
+                List.of(
+                        new KeySchemaElement("memberName", "HASH"),
+                        new KeySchemaElement("state", "RANGE"),
+                        new KeySchemaElement("createdAt", "RANGE")),
+                null, "ALL", null);
+        service.createTable("Requests",
+                List.of(new KeySchemaElement("requestId", "HASH")),
+                List.of(
+                        new AttributeDefinition("requestId", "S"),
+                        new AttributeDefinition("memberName", "S"),
+                        new AttributeDefinition("state", "S"),
+                        new AttributeDefinition("createdAt", "S")),
+                5L, 5L, List.of(gsi), region);
+    }
+
+    private void createTableWithCompositePartitionKeyGsi(String region) {
+        GlobalSecondaryIndex gsi = new GlobalSecondaryIndex(
+                "tenantRegionIndex",
+                List.of(
+                        new KeySchemaElement("tenantId", "HASH"),
+                        new KeySchemaElement("region", "HASH"),
+                        new KeySchemaElement("createdAt", "RANGE")),
+                null, "ALL", null);
+        service.createTable("Accounts",
+                List.of(new KeySchemaElement("id", "HASH")),
+                List.of(
+                        new AttributeDefinition("id", "S"),
+                        new AttributeDefinition("tenantId", "S"),
+                        new AttributeDefinition("region", "S"),
+                        new AttributeDefinition("createdAt", "S")),
+                5L, 5L, List.of(gsi), region);
+        service.putItem("Accounts",
+                item("id", "1", "tenantId", "acme", "region", "us", "createdAt", "2026-01-01"), region);
+        service.putItem("Accounts",
+                item("id", "2", "tenantId", "acme", "region", "eu", "createdAt", "2026-01-02"), region);
+    }
+
+    @Test
+    void queryOnCompositePartitionKeyGsiRequiresEveryHashAttribute() {
+        String region = "eu-west-1";
+        createTableWithCompositePartitionKeyGsi(region);
+
+        ObjectNode exprValues = mapper.createObjectNode();
+        exprValues.set(":t", attributeValue("S", "acme"));
+
+        AwsException error = assertThrows(AwsException.class, () -> service.query(
+                "Accounts", null, exprValues, "tenantId = :t",
+                null, null, null, "tenantRegionIndex", null, null, region));
+        assertEquals("ValidationException", error.getErrorCode());
+    }
+
+    @Test
+    void queryOnCompositePartitionKeyGsiFiltersByEveryHashAttribute() {
+        String region = "eu-west-1";
+        createTableWithCompositePartitionKeyGsi(region);
+
+        ObjectNode exprValues = mapper.createObjectNode();
+        exprValues.set(":t", attributeValue("S", "acme"));
+        exprValues.set(":r", attributeValue("S", "us"));
+
+        DynamoDbService.QueryResult results = service.query(
+                "Accounts", null, exprValues, "tenantId = :t AND region = :r",
+                null, null, null, "tenantRegionIndex", null, null, region);
+
+        assertEquals(List.of("1"), results.items().stream()
+                .map(item -> item.get("id").get("S").asText())
+                .toList());
+    }
+
+    @Test
+    void legacyQueryOnCompositePartitionKeyGsiFiltersByEveryHashAttribute() {
+        String region = "eu-west-1";
+        createTableWithCompositePartitionKeyGsi(region);
+
+        ObjectNode keyConditions = mapper.createObjectNode();
+        keyConditions.set("tenantId", legacyEqCondition("acme"));
+        keyConditions.set("region", legacyEqCondition("us"));
+
+        DynamoDbService.QueryResult results = service.query("Accounts", keyConditions, null, null,
+                null, null, null, "tenantRegionIndex", null, null, region);
+
+        assertEquals(List.of("1"), results.items().stream()
+                .map(item -> item.get("id").get("S").asText())
+                .toList());
+    }
+
+    private ObjectNode legacyEqCondition(String value) {
+        ObjectNode condition = mapper.createObjectNode();
+        condition.put("ComparisonOperator", "EQ");
+        ArrayNode attrList = mapper.createArrayNode();
+        attrList.add(attributeValue("S", value));
+        condition.set("AttributeValueList", attrList);
+        return condition;
+    }
+
+    @Test
+    void queryAppliesFilterExpressionAfterKeyCondition() {
+        String region = "eu-west-1";
+        createOrdersTable(region);
+
+        ObjectNode first = item("customerId", "c1", "orderId", "o1");
+        first.set("total", attributeValue("N", "100"));
+        service.putItem("Orders", first, region);
+
+        ObjectNode second = item("customerId", "c1", "orderId", "o2");
+        second.set("total", attributeValue("N", "100"));
+        service.putItem("Orders", second, region);
+
+        ObjectNode third = item("customerId", "c1", "orderId", "o3");
+        third.set("total", attributeValue("N", "99"));
+        service.putItem("Orders", third, region);
+
+        ObjectNode exprValues = mapper.createObjectNode();
+        exprValues.set(":pk", attributeValue("S", "c1"));
+        exprValues.set(":min", attributeValue("N", "100"));
+
+        DynamoDbService.QueryResult results = service.query("Orders", null, exprValues,
+                "customerId = :pk", "total >= :min", null, region);
+
+        assertEquals(2, results.items().size());
+        assertEquals(3, results.scannedCount());
+        assertEquals(List.of("o1", "o2"), results.items().stream()
+                .map(result -> result.get("orderId").get("S").asText())
+                .toList());
+    }
+
+    @Test
+    void queryWithFilterExpressionAndLimitUsesPreFilterPageState() {
+        createOrdersTable("us-east-1");
+
+        ObjectNode first = item("customerId", "c1", "orderId", "o1");
+        first.set("total", attributeValue("N", "100"));
+        service.putItem("Orders", first, "us-east-1");
+
+        ObjectNode second = item("customerId", "c1", "orderId", "o2");
+        second.set("total", attributeValue("N", "99"));
+        service.putItem("Orders", second, "us-east-1");
+
+        ObjectNode third = item("customerId", "c1", "orderId", "o3");
+        third.set("total", attributeValue("N", "100"));
+        service.putItem("Orders", third, "us-east-1");
+
+        ObjectNode exprValues = mapper.createObjectNode();
+        exprValues.set(":pk", attributeValue("S", "c1"));
+        exprValues.set(":min", attributeValue("N", "100"));
+
+        DynamoDbService.QueryResult firstPage = service.query("Orders", null, exprValues,
+                "customerId = :pk", "total >= :min", 2, null, null, null, null, "us-east-1");
+
+        assertEquals(1, firstPage.items().size());
+        assertEquals("o1", firstPage.items().get(0).get("orderId").get("S").asText());
+        assertEquals(2, firstPage.scannedCount());
+        assertNotNull(firstPage.lastEvaluatedKey());
+        assertEquals("o2", firstPage.lastEvaluatedKey().get("orderId").get("S").asText());
+
+        DynamoDbService.QueryResult secondPage = service.query("Orders", null, exprValues,
+                "customerId = :pk", "total >= :min", 2, null, null,
+                firstPage.lastEvaluatedKey(), null, "us-east-1");
+
+        assertEquals(1, secondPage.items().size());
+        assertEquals("o3", secondPage.items().get(0).get("orderId").get("S").asText());
+        assertEquals(1, secondPage.scannedCount());
+        assertNull(secondPage.lastEvaluatedKey());
+    }
+
+    @Test
+    void scan() {
+        String region = "eu-west-1";
+        createUsersTable(region);
+        service.putItem("Users", item("userId", "u1", "name", "Alice"), region);
+        service.putItem("Users", item("userId", "u2", "name", "Bob"), region);
+        service.putItem("Users", item("userId", "u3", "name", "Charlie"), region);
+
+        DynamoDbService.ScanResult result = service.scan("Users", null, null, null, null, null, null, region);
+        assertEquals(3, result.items().size());
+    }
+
+    @Test
+    void scanWithScanFilter() {
+        String region = "eu-west-1";
+        createUsersTable(region);
+        service.putItem("Users", item("userId", "u1", "name", "Alice"), region);
+        service.putItem("Users", item("userId", "u2", "name", "Bob"), region);
+        service.putItem("Users", item("userId", "u3", "name", "Charlie"), region);
+
+        ObjectNode scanFilter = mapper.createObjectNode();
+        ObjectNode condition = mapper.createObjectNode();
+        condition.put("ComparisonOperator", "EQ");
+        ArrayNode attrList = mapper.createArrayNode();
+        ObjectNode val = mapper.createObjectNode();
+        val.put("S", "Alice");
+        attrList.add(val);
+        condition.set("AttributeValueList", attrList);
+        scanFilter.set("name", condition);
+
+        DynamoDbService.ScanResult result = service.scan("Users", null, null, null, scanFilter, null, null, region);
+        assertEquals(1, result.items().size());
+        assertEquals("Alice", result.items().get(0).get("name").get("S").asText());
+    }
+
+    @Test
+    void scanWithScanFilterGE() {
+        String region = "eu-west-1";
+        createUsersTable(region);
+        service.putItem("Users", item("userId", "u1", "name", "Alice"), region);
+        service.putItem("Users", item("userId", "u2", "name", "Bob"), region);
+        service.putItem("Users", item("userId", "u3", "name", "Charlie"), region);
+
+        ObjectNode scanFilter = mapper.createObjectNode();
+        ObjectNode condition = mapper.createObjectNode();
+        condition.put("ComparisonOperator", "GE");
+        ArrayNode attrList = mapper.createArrayNode();
+        ObjectNode val = mapper.createObjectNode();
+        val.put("S", "Bob");
+        attrList.add(val);
+        condition.set("AttributeValueList", attrList);
+        scanFilter.set("name", condition);
+
+        DynamoDbService.ScanResult result = service.scan("Users", null, null, null, scanFilter, null, null, region);
+        assertEquals(2, result.items().size());
+    }
+
+    @Test
+    void scanWithLimit() {
+        String region = "eu-west-1";
+        createUsersTable(region);
+        service.putItem("Users", item("userId", "u1"), region);
+        service.putItem("Users", item("userId", "u2"), region);
+        service.putItem("Users", item("userId", "u3"), region);
+
+        DynamoDbService.ScanResult result = service.scan("Users", null, null, null, null, 2, null, region);
+        assertEquals(2, result.items().size());
+    }
+
+    @Test
+    void operationsOnNonExistentTableThrow() {
+        String region = "eu-west-1";
+        assertThrows(AwsException.class, () -> service.putItem("NoTable", item("id", "1"), region));
+        assertThrows(AwsException.class, () -> service.getItem("NoTable", item("id", "1"), region));
+        assertThrows(AwsException.class, () -> service.deleteItem("NoTable", item("id", "1"), region));
+        assertThrows(AwsException.class, () -> service.query("NoTable", null, null, null, null, null, region));
+        assertThrows(AwsException.class, () -> service.scan("NoTable", null, null, null, null, null, null, region));
+    }
+
+    @Test
+    void scanRejectsUnknownIndexOnEmptyTable() {
+        String region = "eu-west-1";
+        createOrdersTable(region);
+
+        AwsException error = assertThrows(AwsException.class, () -> service.scan(
+                "Orders", null, null, null, null, null, null, "missing-index", region));
+
+        assertEquals("ValidationException", error.getErrorCode());
+        assertEquals("The table does not have the specified index: missing-index", error.getMessage());
+    }
+
+    @Test
+    void queryRejectsNonKeyConditionOnEmptyTable() {
+        String region = "eu-west-1";
+        createOrdersTable(region);
+        ObjectNode values = mapper.createObjectNode();
+        values.set(":customer", attributeValue("S", "c1"));
+        values.set(":total", attributeValue("N", "10"));
+
+        AwsException error = assertThrows(AwsException.class, () -> service.query(
+                "Orders", null, values, "customerId = :customer AND total > :total",
+                null, null, null, null, null, null, region));
+
+        assertEquals("ValidationException", error.getErrorCode());
+        assertEquals("Query key condition not supported", error.getMessage());
+    }
+
+    @Test
+    void updateItemSetIfNotExistsOnNonExistentItemCreatesAttribute() {
+        String region = "eu-west-1";
+        createOrdersTable(region);
+
+        ObjectNode key = item("customerId", "1", "orderId", "sort1");
+
+        ObjectNode exprValues = mapper.createObjectNode();
+        ObjectNode priceVal = mapper.createObjectNode();
+        priceVal.put("N", "100");
+        exprValues.set(":val", priceVal);
+
+        service.updateItem("Orders", key, null,
+                "SET price = if_not_exists(price, :val)",
+                null, exprValues, null, region);
+
+        JsonNode stored = service.getItem("Orders", key, region);
+        assertNotNull(stored, "item should have been created");
+        assertTrue(stored.has("price"), "price attribute must be present on a newly created item");
+        assertEquals("100", stored.get("price").get("N").asText());
+    }
+
+    @Test
+    void updateItemSetIfNotExistsPreservesExistingValue() {
+        String region = "eu-west-1";
+        createOrdersTable(region);
+
+        // Put an item that already has price = 200
+        ObjectNode existing = mapper.createObjectNode();
+        ObjectNode pkVal = mapper.createObjectNode(); pkVal.put("S", "1");
+        ObjectNode skVal = mapper.createObjectNode(); skVal.put("S", "sort1");
+        ObjectNode priceExisting = mapper.createObjectNode(); priceExisting.put("N", "200");
+        existing.set("customerId", pkVal);
+        existing.set("orderId", skVal);
+        existing.set("price", priceExisting);
+        service.putItem("Orders", existing, region);
+
+        ObjectNode key = item("customerId", "1", "orderId", "sort1");
+
+        ObjectNode exprValues = mapper.createObjectNode();
+        ObjectNode fallback = mapper.createObjectNode(); fallback.put("N", "100");
+        exprValues.set(":val", fallback);
+
+        service.updateItem("Orders", key, null,
+                "SET price = if_not_exists(price, :val)",
+                null, exprValues, null, region);
+
+        JsonNode stored = service.getItem("Orders", key, region);
+        assertNotNull(stored);
+        // Existing value must NOT be overwritten
+        assertEquals("200", stored.get("price").get("N").asText(),
+                "if_not_exists should preserve the existing value");
+    }
+
+    @Test
+    void updateItemSetIfNotExistsSetsAttributeWhenMissingFromExistingItem() {
+        String region = "eu-west-1";
+        createOrdersTable(region);
+
+        // Put an item that does NOT have a price attribute
+        service.putItem("Orders", item("customerId", "1", "orderId", "sort1"), region);
+
+        ObjectNode key = item("customerId", "1", "orderId", "sort1");
+
+        ObjectNode exprValues = mapper.createObjectNode();
+        ObjectNode fallback = mapper.createObjectNode(); fallback.put("N", "99");
+        exprValues.set(":val", fallback);
+
+        service.updateItem("Orders", key, null,
+                "SET price = if_not_exists(price, :val)",
+                null, exprValues, null, region);
+
+        JsonNode stored = service.getItem("Orders", key, region);
+        assertNotNull(stored);
+        assertTrue(stored.has("price"),
+                "price should be set when it was absent from an existing item");
+        assertEquals("99", stored.get("price").get("N").asText());
+    }
+
+    @Test
+    void updateItemSetIfNotExistsMultipleAttributesOnNewItem() {
+        String region = "eu-west-1";
+        createUsersTable(region);
+
+        ObjectNode key = item("userId", "u-new");
+
+        ObjectNode exprValues = mapper.createObjectNode();
+        ObjectNode nameVal = mapper.createObjectNode(); nameVal.put("S", "DefaultName");
+        ObjectNode scoreVal = mapper.createObjectNode(); scoreVal.put("N", "0");
+        exprValues.set(":name", nameVal);
+        exprValues.set(":score", scoreVal);
+
+        ObjectNode exprNames = mapper.createObjectNode();
+        exprNames.put("#n", "name");
+
+        service.updateItem("Users", key, null,
+                "SET #n = if_not_exists(#n, :name), score = if_not_exists(score, :score)",
+                exprNames, exprValues, null, region);
+
+        JsonNode stored = service.getItem("Users", key, region);
+        assertNotNull(stored, "item should have been created");
+        assertTrue(stored.has("name"), "name attribute must be present");
+        assertEquals("DefaultName", stored.get("name").get("S").asText());
+        assertTrue(stored.has("score"), "score attribute must be present");
+        assertEquals("0", stored.get("score").get("N").asText());
+    }
+
+    @Test
+    void updateItemSetIfNotExistsCopiesSourceAttributeWhenAttrNameDiffersFromCheckAttr() {
+        String region = "eu-west-1";
+        // SET a = if_not_exists(b, :v) where b exists → a must be set to b's current value
+        createUsersTable(region);
+
+        // Put an item that has "source" but not "target"
+        ObjectNode existing = mapper.createObjectNode();
+        ObjectNode userIdVal = mapper.createObjectNode(); userIdVal.put("S", "u-copy");
+        ObjectNode sourceVal = mapper.createObjectNode(); sourceVal.put("S", "copied-value");
+        existing.set("userId", userIdVal);
+        existing.set("source", sourceVal);
+        service.putItem("Users", existing, region);
+
+        ObjectNode key = item("userId", "u-copy");
+
+        ObjectNode exprValues = mapper.createObjectNode();
+        ObjectNode fallbackVal = mapper.createObjectNode(); fallbackVal.put("S", "fallback");
+        exprValues.set(":v", fallbackVal);
+
+        ObjectNode exprNames = mapper.createObjectNode();
+        exprNames.put("#src", "source");
+
+        // target = if_not_exists(source, :v) — source exists, so target should receive source's value
+        service.updateItem("Users", key, null,
+                "SET target = if_not_exists(#src, :v)",
+                exprNames, exprValues, null, region);
+
+        JsonNode stored = service.getItem("Users", key, region);
+        assertNotNull(stored);
+        assertTrue(stored.has("target"), "target attribute must be present");
+        assertEquals("copied-value", stored.get("target").get("S").asText(),
+                "target should receive source's value when source exists");
+    }
+
+    @Test
+    void updateItemSetIfNotExistsUsesFallbackWhenCheckAttrAbsentAndAttrNameDiffers() {
+        String region = "eu-west-1";
+        // SET a = if_not_exists(b, :v) where b is absent → a must be set to :v
+        createUsersTable(region);
+
+        // Item has no "source" attribute
+        service.putItem("Users", item("userId", "u-fallback"), region);
+
+        ObjectNode key = item("userId", "u-fallback");
+
+        ObjectNode exprValues = mapper.createObjectNode();
+        ObjectNode fallbackVal = mapper.createObjectNode(); fallbackVal.put("S", "fallback");
+        exprValues.set(":v", fallbackVal);
+
+        ObjectNode exprNames = mapper.createObjectNode();
+        exprNames.put("#src", "source");
+
+        service.updateItem("Users", key, null,
+                "SET target = if_not_exists(#src, :v)",
+                exprNames, exprValues, null, region);
+
+        JsonNode stored = service.getItem("Users", key, region);
+        assertNotNull(stored);
+        assertTrue(stored.has("target"), "target attribute must be present");
+        assertEquals("fallback", stored.get("target").get("S").asText(),
+                "target should receive the fallback value when source is absent");
+    }
+
+    @Test
+    void updateItemSetArithmeticIncrement() {
+        String region = "eu-west-1";
+        createUsersTable(region);
+
+        // Put an item with counter = 100
+        ObjectNode existing = mapper.createObjectNode();
+        existing.set("userId", attributeValue("S", "u1"));
+        ObjectNode counterVal = mapper.createObjectNode();
+        counterVal.put("N", "100");
+        existing.set("counter", counterVal);
+        service.putItem("Users", existing, region);
+
+        ObjectNode key = item("userId", "u1");
+        ObjectNode exprValues = mapper.createObjectNode();
+        ObjectNode incVal = mapper.createObjectNode();
+        incVal.put("N", "1");
+        exprValues.set(":inc", incVal);
+
+        ObjectNode exprNames = mapper.createObjectNode();
+        exprNames.put("#cnt", "counter");
+
+        service.updateItem("Users", key, null,
+                "SET #cnt = #cnt + :inc",
+                exprNames, exprValues, null, region);
+
+        JsonNode stored = service.getItem("Users", key, region);
+        assertNotNull(stored);
+        assertEquals("101", stored.get("counter").get("N").asText(),
+                "counter should be incremented from 100 to 101");
+    }
+
+    @Test
+    void updateItemSetArithmeticDecrement() {
+        String region = "eu-west-1";
+        createUsersTable(region);
+
+        ObjectNode existing = mapper.createObjectNode();
+        existing.set("userId", attributeValue("S", "u1"));
+        ObjectNode counterVal = mapper.createObjectNode();
+        counterVal.put("N", "50");
+        existing.set("counter", counterVal);
+        service.putItem("Users", existing, region);
+
+        ObjectNode key = item("userId", "u1");
+        ObjectNode exprValues = mapper.createObjectNode();
+        ObjectNode decVal = mapper.createObjectNode();
+        decVal.put("N", "3");
+        exprValues.set(":dec", decVal);
+
+        ObjectNode exprNames = mapper.createObjectNode();
+        exprNames.put("#cnt", "counter");
+
+        service.updateItem("Users", key, null,
+                "SET #cnt = #cnt - :dec",
+                exprNames, exprValues, null, region);
+
+        JsonNode stored = service.getItem("Users", key, region);
+        assertNotNull(stored);
+        assertEquals("47", stored.get("counter").get("N").asText(),
+                "counter should be decremented from 50 to 47");
+    }
+
+    @Test
+    void updateItemSetIfNotExistsWithArithmeticOnNewItem() {
+        String region = "eu-west-1";
+        createUsersTable(region);
+
+        ObjectNode key = item("userId", "u1");
+        ObjectNode exprValues = mapper.createObjectNode();
+        ObjectNode startVal = mapper.createObjectNode();
+        startVal.put("N", "60000000");
+        ObjectNode incVal = mapper.createObjectNode();
+        incVal.put("N", "1");
+        exprValues.set(":start", startVal);
+        exprValues.set(":inc", incVal);
+
+        ObjectNode exprNames = mapper.createObjectNode();
+        exprNames.put("#cnt", "counter");
+
+        service.updateItem("Users", key, null,
+                "SET #cnt = if_not_exists(#cnt, :start) + :inc",
+                exprNames, exprValues, null, region);
+
+        JsonNode stored = service.getItem("Users", key, region);
+        assertNotNull(stored);
+        assertEquals("60000001", stored.get("counter").get("N").asText(),
+                "counter should be if_not_exists default (60000000) + 1 = 60000001");
+    }
+
+    @Test
+    void updateItemSetIfNotExistsWithArithmeticOnExistingItem() {
+        String region = "eu-west-1";
+        createUsersTable(region);
+
+        ObjectNode existing = mapper.createObjectNode();
+        existing.set("userId", attributeValue("S", "u1"));
+        ObjectNode counterVal = mapper.createObjectNode();
+        counterVal.put("N", "60000005");
+        existing.set("counter", counterVal);
+        service.putItem("Users", existing, region);
+
+        ObjectNode key = item("userId", "u1");
+        ObjectNode exprValues = mapper.createObjectNode();
+        ObjectNode startVal = mapper.createObjectNode();
+        startVal.put("N", "60000000");
+        ObjectNode incVal = mapper.createObjectNode();
+        incVal.put("N", "1");
+        exprValues.set(":start", startVal);
+        exprValues.set(":inc", incVal);
+
+        ObjectNode exprNames = mapper.createObjectNode();
+        exprNames.put("#cnt", "counter");
+
+        service.updateItem("Users", key, null,
+                "SET #cnt = if_not_exists(#cnt, :start) + :inc",
+                exprNames, exprValues, null, region);
+
+        JsonNode stored = service.getItem("Users", key, region);
+        assertNotNull(stored);
+        assertEquals("60000006", stored.get("counter").get("N").asText(),
+                "counter should be existing (60000005) + 1 = 60000006");
+    }
+
+    @Test
+    void updateItemSetArithmeticConsecutiveIncrements() {
+        String region = "eu-west-1";
+        createUsersTable(region);
+
+        ObjectNode key = item("userId", "u1");
+        ObjectNode exprValues = mapper.createObjectNode();
+        ObjectNode startVal = mapper.createObjectNode();
+        startVal.put("N", "0");
+        ObjectNode incVal = mapper.createObjectNode();
+        incVal.put("N", "1");
+        exprValues.set(":start", startVal);
+        exprValues.set(":inc", incVal);
+
+        ObjectNode exprNames = mapper.createObjectNode();
+        exprNames.put("#cnt", "counter");
+
+        // Three consecutive increments
+        for (int i = 0; i < 3; i++) {
+            service.updateItem("Users", key, null,
+                    "SET #cnt = if_not_exists(#cnt, :start) + :inc",
+                    exprNames, exprValues, null, region);
+        }
+
+        JsonNode stored = service.getItem("Users", key, region);
+        assertNotNull(stored);
+        assertEquals("3", stored.get("counter").get("N").asText(),
+                "counter should be 3 after three increments starting from 0");
+    }
+
+    @Test
+    void scanWithBoolFilterExpression() {
+        String region = "eu-west-1";
+        createUsersTable(region);
+        ObjectNode u1 = item("userId", "u1");
+        u1.set("deleted", boolAttributeValue(false));
+        service.putItem("Users", u1, region);
+
+        ObjectNode u2 = item("userId", "u2");
+        u2.set("deleted", boolAttributeValue(true));
+        service.putItem("Users", u2, region);
+
+        ObjectNode u3 = item("userId", "u3");
+        u3.set("deleted", boolAttributeValue(false));
+        service.putItem("Users", u3, region);
+
+        ObjectNode exprValues = mapper.createObjectNode();
+        exprValues.set(":d", boolAttributeValue(true));
+
+        DynamoDbService.ScanResult result = service.scan("Users", "deleted <> :d", null, exprValues, null, null, null, region);
+        assertEquals(2, result.items().size());
+    }
+
+    @Test
+    void scanContainsOnListAttribute() {
+        String region = "eu-west-1";
+        createUsersTable(region);
+        ObjectNode u1 = item("userId", "u1");
+        u1.set("tags", listAttributeValue("a", "b"));
+        service.putItem("Users", u1, region);
+
+        ObjectNode u2 = item("userId", "u2");
+        u2.set("tags", listAttributeValue("a", "c"));
+        service.putItem("Users", u2, region);
+
+        ObjectNode u3 = item("userId", "u3");
+        u3.set("tags", listAttributeValue("b", "c"));
+        service.putItem("Users", u3, region);
+
+        ObjectNode exprValues = mapper.createObjectNode();
+        exprValues.set(":v", attributeValue("S", "a"));
+
+        DynamoDbService.ScanResult result = service.scan("Users", "contains(tags, :v)", null, exprValues, null, null, null, region);
+        assertEquals(2, result.items().size());
+    }
+
+    @Test
+    void scanContainsOnStringSetAttribute() {
+        String region = "eu-west-1";
+        createUsersTable(region);
+        ObjectNode u1 = item("userId", "u1");
+        u1.set("roles", stringSetAttributeValue("admin", "user"));
+        service.putItem("Users", u1, region);
+
+        ObjectNode u2 = item("userId", "u2");
+        u2.set("roles", stringSetAttributeValue("user"));
+        service.putItem("Users", u2, region);
+
+        ObjectNode exprValues = mapper.createObjectNode();
+        exprValues.set(":r", attributeValue("S", "admin"));
+
+        ObjectNode exprNames = mapper.createObjectNode();
+        exprNames.put("#r", "roles");
+
+        DynamoDbService.ScanResult result = service.scan("Users", "contains(#r, :r)", exprNames, exprValues, null, null, null, region);
+        assertEquals(1, result.items().size());
+    }
+
+    @Test
+    void scanAttributeExistsOnNestedMapPath() {
+        String region = "eu-west-1";
+        createUsersTable(region);
+        ObjectNode u1 = item("userId", "u1");
+        u1.set("info", mapAttributeValue("name", "Alice"));
+        service.putItem("Users", u1, region);
+
+        ObjectNode u2 = item("userId", "u2");
+        ObjectNode emptyMap = mapper.createObjectNode();
+        ObjectNode mapWrapper = mapper.createObjectNode();
+        mapWrapper.set("M", emptyMap);
+        u2.set("info", mapWrapper);
+        service.putItem("Users", u2, region);
+
+        ObjectNode u3 = item("userId", "u3");
+        u3.set("info", mapAttributeValue("name", "Bob"));
+        service.putItem("Users", u3, region);
+
+        ObjectNode exprNames = mapper.createObjectNode();
+        exprNames.put("#n", "name");
+
+        DynamoDbService.ScanResult result = service.scan("Users", "attribute_exists(info.#n)", exprNames, null, null, null, null, region);
+        assertEquals(2, result.items().size());
+
+        DynamoDbService.ScanResult result2 = service.scan("Users", "attribute_not_exists(info.#n)", exprNames, null, null, null, null, region);
+        assertEquals(1, result2.items().size());
+    }
+
+    private ObjectNode boolAttributeValue(boolean value) {
+        ObjectNode node = mapper.createObjectNode();
+        node.put("BOOL", value);
+        return node;
+    }
+
+    private ObjectNode listAttributeValue(String... values) {
+        ObjectNode node = mapper.createObjectNode();
+        ArrayNode arrayNode = mapper.createArrayNode();
+        for (String v : values) {
+            arrayNode.add(attributeValue("S", v));
+        }
+        node.set("L", arrayNode);
+        return node;
+    }
+
+    private ObjectNode stringSetAttributeValue(String... values) {
+        ObjectNode node = mapper.createObjectNode();
+        ArrayNode arrayNode = mapper.createArrayNode();
+        for (String v : values) {
+            arrayNode.add(v);
+        }
+        node.set("SS", arrayNode);
+        return node;
+    }
+
+    private ObjectNode mapAttributeValue(String key, String value) {
+        ObjectNode inner = mapper.createObjectNode();
+        inner.set(key, attributeValue("S", value));
+        return mapAttributeValue(inner);
+    }
+
+    private ObjectNode mapAttributeValue(ObjectNode inner) {
+        ObjectNode node = mapper.createObjectNode();
+        node.set("M", inner);
+        return node;
+    }
+
+    private ObjectNode numberSetAttributeValue(String... values) {
+        ObjectNode node = mapper.createObjectNode();
+        ArrayNode arrayNode = mapper.createArrayNode();
+        for (String v : values) {
+            arrayNode.add(v);
+        }
+        node.set("NS", arrayNode);
+        return node;
+    }
+
+    private ObjectNode binarySetAttributeValue(String... base64Values) {
+        ObjectNode node = mapper.createObjectNode();
+        ArrayNode arrayNode = mapper.createArrayNode();
+        for (String v : base64Values) {
+            arrayNode.add(v);
+        }
+        node.set("BS", arrayNode);
+        return node;
+    }
+
+    @Test
+    void scanContainsOnNumberSetWithNumericNormalization() {
+        String region = "eu-west-1";
+        createUsersTable(region);
+        ObjectNode u1 = item("userId", "u1");
+        u1.set("scores", numberSetAttributeValue("1", "2", "3"));
+        service.putItem("Users", u1, region);
+
+        ObjectNode u2 = item("userId", "u2");
+        u2.set("scores", numberSetAttributeValue("4", "5"));
+        service.putItem("Users", u2, region);
+
+        // Search for "1.0" — should match "1" via numeric comparison
+        ObjectNode exprValues = mapper.createObjectNode();
+        exprValues.set(":v", attributeValue("N", "1.0"));
+
+        DynamoDbService.ScanResult result = service.scan("Users", "contains(scores, :v)", null, exprValues, null, null, null, region);
+        assertEquals(1, result.items().size(), "contains() on NS should match 1.0 == 1 numerically");
+    }
+
+    @Test
+    void scanContainsOnBinarySet() {
+        String region = "eu-west-1";
+        createUsersTable(region);
+        ObjectNode u1 = item("userId", "u1");
+        u1.set("bins", binarySetAttributeValue("AQID", "BAUG"));  // base64 for [1,2,3] and [4,5,6]
+        service.putItem("Users", u1, region);
+
+        ObjectNode u2 = item("userId", "u2");
+        u2.set("bins", binarySetAttributeValue("BwgJ"));
+        service.putItem("Users", u2, region);
+
+        ObjectNode exprValues = mapper.createObjectNode();
+        exprValues.set(":v", attributeValue("B", "AQID"));
+
+        DynamoDbService.ScanResult result = service.scan("Users", "contains(bins, :v)", null, exprValues, null, null, null, region);
+        assertEquals(1, result.items().size());
+    }
+
+    @Test
+    void listAppendIfNotExistsCreatesListWhenAttributeMissing() {
+        String region = "eu-west-1";
+        createUsersTable(region);
+
+        ObjectNode key = item("userId", "u-list-new");
+
+        ObjectNode exprValues = mapper.createObjectNode();
+        exprValues.set(":e", listAttributeValue());
+        exprValues.set(":val", listAttributeValue("a"));
+
+        ObjectNode exprNames = mapper.createObjectNode();
+        exprNames.put("#items", "items");
+
+        service.updateItem("Users", key, null,
+                "SET #items = list_append(if_not_exists(#items, :e), :val)",
+                exprNames, exprValues, null, region);
+
+        JsonNode stored = service.getItem("Users", key, region);
+        assertNotNull(stored);
+        assertTrue(stored.has("items"), "items attribute must be created");
+        assertEquals(1, stored.get("items").get("L").size());
+        assertEquals("a", stored.get("items").get("L").get(0).get("S").asText());
+    }
+
+    @Test
+    void listAppendIfNotExistsAppendsWhenAttributePresent() {
+        String region = "eu-west-1";
+        createUsersTable(region);
+
+        ObjectNode existing = item("userId", "u-list-existing");
+        existing.set("items", listAttributeValue("a"));
+        service.putItem("Users", existing, region);
+
+        ObjectNode key = item("userId", "u-list-existing");
+        ObjectNode exprValues = mapper.createObjectNode();
+        exprValues.set(":e", listAttributeValue());
+        exprValues.set(":val", listAttributeValue("b"));
+
+        ObjectNode exprNames = mapper.createObjectNode();
+        exprNames.put("#items", "items");
+
+        service.updateItem("Users", key, null,
+                "SET #items = list_append(if_not_exists(#items, :e), :val)",
+                exprNames, exprValues, null, region);
+
+        JsonNode stored = service.getItem("Users", key, region);
+        assertNotNull(stored);
+        assertEquals(2, stored.get("items").get("L").size());
+        assertEquals("a", stored.get("items").get("L").get(0).get("S").asText());
+        assertEquals("b", stored.get("items").get("L").get(1).get("S").asText());
+    }
+
+    @Test
+    void listAppendAgainstNullAttributeThrowsValidationException() {
+        String region = "eu-west-1";
+        createUsersTable(region);
+
+        ObjectNode existing = mapper.createObjectNode();
+        existing.set("userId", attributeValue("S", "u-null-list"));
+        ObjectNode nullAttr = mapper.createObjectNode();
+        nullAttr.put("NULL", true);
+        existing.set("tags", nullAttr);
+        service.putItem("Users", existing, region);
+
+        ObjectNode key = item("userId", "u-null-list");
+        ObjectNode exprValues = mapper.createObjectNode();
+        exprValues.set(":new", listAttributeValue("tag-a"));
+
+        ObjectNode exprNames = mapper.createObjectNode();
+        exprNames.put("#t", "tags");
+
+        AwsException ex = assertThrows(AwsException.class, () ->
+                service.updateItem("Users", key, null,
+                        "SET #t = list_append(#t, :new)",
+                        exprNames, exprValues, null, region));
+        assertEquals("ValidationException", ex.getErrorCode());
+        assertTrue(ex.getMessage().contains("An operand in the update expression has an incorrect data type"));
+    }
+
+    @Test
+    void listAppendAgainstMissingAttributeThrowsValidationException() {
+        String region = "eu-west-1";
+        createUsersTable(region);
+
+        service.putItem("Users", item("userId", "u-no-tags"), region);
+
+        ObjectNode key = item("userId", "u-no-tags");
+        ObjectNode exprValues = mapper.createObjectNode();
+        exprValues.set(":new", listAttributeValue("tag-a"));
+
+        ObjectNode exprNames = mapper.createObjectNode();
+        exprNames.put("#t", "tags");
+
+        AwsException ex = assertThrows(AwsException.class, () ->
+                service.updateItem("Users", key, null,
+                        "SET #t = list_append(#t, :new)",
+                        exprNames, exprValues, null, region));
+        assertEquals("ValidationException", ex.getErrorCode());
+        assertTrue(ex.getMessage().contains("The provided expression refers to an attribute that does not exist in the item"));
+    }
+
+    @Test
+    void scanContainsOnListWithNumericElements() {
+        String region = "eu-west-1";
+        createUsersTable(region);
+        ObjectNode u1 = item("userId", "u1");
+        ArrayNode list = mapper.createArrayNode();
+        list.add(attributeValue("N", "10"));
+        list.add(attributeValue("N", "20"));
+        ObjectNode listNode = mapper.createObjectNode();
+        listNode.set("L", list);
+        u1.set("values", listNode);
+        service.putItem("Users", u1, region);
+
+        ObjectNode u2 = item("userId", "u2");
+        ArrayNode list2 = mapper.createArrayNode();
+        list2.add(attributeValue("N", "30"));
+        ObjectNode listNode2 = mapper.createObjectNode();
+        listNode2.set("L", list2);
+        u2.set("values", listNode2);
+        service.putItem("Users", u2, region);
+
+        // Search for N:10.0 — should match N:10 via type-aware comparison
+        ObjectNode exprValues = mapper.createObjectNode();
+        exprValues.set(":v", attributeValue("N", "10.0"));
+
+        ObjectNode exprNames = mapper.createObjectNode();
+        exprNames.put("#vals", "values");
+
+        DynamoDbService.ScanResult result = service.scan("Users", "contains(#vals, :v)", exprNames, exprValues, null, null, null, region);
+        assertEquals(1, result.items().size(), "contains() on List with N elements should use type-aware numeric comparison");
+    }
+
+    @Test
+    void updateItemSetAddsToStringSet() {
+        String region = "eu-west-1";
+        createOrdersTable(region);
+
+        ObjectNode key = item("customerId", "1", "orderId", "sort1");
+
+        ObjectNode exprValues = mapper.createObjectNode();
+        ObjectNode priceVal = mapper.createObjectNode();
+        priceVal.put("N", "100");
+
+        // Use SS (String Set) type for ADD operation
+        ObjectNode tagVal = mapper.createObjectNode();
+        ArrayNode tagArray = tagVal.putArray("SS");
+        tagArray.add("a");
+        exprValues.set(":val", priceVal);
+        exprValues.set(":newTag", tagVal);
+
+        service.updateItem("Orders", key, null,
+                "SET price = if_not_exists(price, :val) ADD tags :newTag",
+                null, exprValues, null, region);
+
+        // And add another tag to the same item, to verify that the ADD works on existing items as well
+        ObjectNode tagVal2 = mapper.createObjectNode();
+        ArrayNode tagArray2 = tagVal2.putArray("SS");
+        tagArray2.add("b");
+        exprValues.set(":newTag", tagVal2);
+        DynamoDbService.UpdateResult updateResult = service.updateItem("Orders", key, null,
+                "SET price = if_not_exists(price, :val) ADD tags :newTag",
+                null, exprValues, null, region);
+
+        JsonNode stored = service.getItem("Orders", key, region);
+        assertNotNull(stored, "item should have been created");
+        assertTrue(stored.has("tags"), "tags attribute must be present on item after ADD");
+
+        // Verify tags is a String Set (SS) with both values
+        JsonNode tagsNode = stored.get("tags");
+        assertTrue(tagsNode.has("SS"), "tags should be of type SS (String Set)");
+        JsonNode ssArray = tagsNode.get("SS");
+        assertEquals(2, ssArray.size(), "tags should have 2 elements");
+
+        // Verify values from the SS array
+        Set<String> tagValues = new HashSet<>();
+        ssArray.forEach(node -> tagValues.add(node.asText()));
+        assertEquals(2, tagValues.size());
+        assertTrue(tagValues.containsAll(Arrays.asList("a", "b")));
+    }
+
+    /**
+     * Test update with SET and REMOVE in the same expression.
+     * This mimics how the DynamoDB Enhanced Client generates expressions
+     * when ignoreNulls is false - it sets non-null fields and removes null fields.
+     *
+     * Using Spring Boot 4.0.5, AWS SDK v2 2.42.24, setting a boolean field to true after it was not created at row-creation time, would not set the value to true.
+     */
+    @Test
+    void testUpdateWithSetAndRemoveCombined() {
+        String region = "eu-west-1";
+        createUsersTable(region);
+
+        // Put initial item WITHOUT the boolean field
+        ObjectNode initialItem = mapper.createObjectNode();
+        initialItem.set("userId", attributeValue("S", "user-123"));
+        initialItem.set("created", attributeValue("N", "1234567890"));
+        initialItem.set("entries", attributeValue("S", "initial"));
+        initialItem.set("tempField", attributeValue("S", "to be removed"));
+        service.putItem("Users", initialItem, region);
+
+        // Verify initial state - isActive doesn't exist
+        ObjectNode key = mapper.createObjectNode();
+        key.set("userId", attributeValue("S", "user-123"));
+        JsonNode beforeUpdate = service.getItem("Users", key, region);
+        assertFalse(beforeUpdate.has("isActive"), "isActive should not exist initially");
+        assertTrue(beforeUpdate.has("tempField"), "tempField should exist initially");
+
+        // Update with SET and REMOVE - like Enhanced Client does
+        ObjectNode exprAttrNames = mapper.createObjectNode();
+        exprAttrNames.put("#entries", "entries");
+        exprAttrNames.put("#isActive", "isActive");
+        exprAttrNames.put("#tempField", "tempField");
+        exprAttrNames.put("#created", "created");
+
+        ObjectNode exprAttrValues = mapper.createObjectNode();
+        exprAttrValues.set(":entries", attributeValue("S", "updated entries"));
+        exprAttrValues.set(":isActive", boolAttributeValue(true));
+
+        // This is the key expression: SET multiple fields, then REMOVE multiple fields
+        String updateExpr = "SET #entries = :entries, #isActive = :isActive REMOVE #tempField, #created";
+
+        DynamoDbService.UpdateResult result = service.updateItem("Users", key, null,
+                updateExpr, exprAttrNames, exprAttrValues, "ALL_NEW", region);
+
+        // Verify the result
+        JsonNode newItem = result.newItem();
+        assertNotNull(newItem, "result should have newItem");
+
+        // Boolean should be set to true
+        assertTrue(newItem.has("isActive"), "isActive should exist");
+        assertTrue(newItem.get("isActive").has("BOOL"), "isActive should be BOOL type");
+        assertTrue(newItem.get("isActive").get("BOOL").asBoolean(), "isActive should be true");
+
+        // entries should be updated
+        assertEquals("updated entries", newItem.get("entries").get("S").asText());
+
+        // tempField and created should be removed
+        assertFalse(newItem.has("tempField"), "tempField should be removed");
+        assertFalse(newItem.has("created"), "created should be removed");
+
+        // Get item to double-check persistence
+        JsonNode stored = service.getItem("Users", key, region);
+        assertTrue(stored.get("isActive").get("BOOL").asBoolean(),
+                "isActive should still be true after get");
+    }
+    
+    @Test
+    void updateItemSetListIndexPastEndAppendsWithoutNullPadding() {
+        String region = "eu-west-1";
+        createUsersTable(region);
+
+        ObjectNode initialItem = item("userId", "list-test");
+        ObjectNode listValue = mapper.createObjectNode();
+        ArrayNode list = listValue.putArray("L");
+
+        list.add(attributeValue("S", "a"));
+        list.add(attributeValue("S", "b"));
+        initialItem.set("l", listValue);
+
+        service.putItem("Users", initialItem, region);
+
+        ObjectNode key = item("userId", "list-test");
+
+        ObjectNode exprValues = mapper.createObjectNode();
+        exprValues.set(":v", attributeValue("S", "c"));
+
+        DynamoDbService.UpdateResult result = service.updateItem(
+                "Users",
+                key,
+                null,
+                "SET l[10] = :v",
+                null,
+                exprValues,
+                "ALL_NEW",
+                region);
+
+        JsonNode updatedList = result.newItem().get("l").get("L");
+
+        assertEquals(3, updatedList.size());
+        assertEquals("a", updatedList.get(0).get("S").asText());
+        assertEquals("b", updatedList.get(1).get("S").asText());
+        assertEquals("c", updatedList.get(2).get("S").asText());
+    }
+    @Test
+    void updateItemSetHugeListIndexAppendsWithoutAllocatingPadding() {
+        String region = "eu-west-1";
+        createUsersTable(region);
+
+        ObjectNode initialItem = item("userId", "huge-index-test");
+        ObjectNode listValue = mapper.createObjectNode();
+        ArrayNode list = listValue.putArray("L");
+
+        list.add(attributeValue("S", "a"));
+        list.add(attributeValue("S", "b"));
+        initialItem.set("l", listValue);
+
+        service.putItem("Users", initialItem, region);
+
+        ObjectNode key = item("userId", "huge-index-test");
+
+        ObjectNode exprValues = mapper.createObjectNode();
+        exprValues.set(":v", attributeValue("S", "c"));
+
+        DynamoDbService.UpdateResult result = service.updateItem(
+                "Users",
+                key,
+                null,
+                "SET l[2000000000] = :v",
+                null,
+                exprValues,
+                "ALL_NEW",
+                region);
+
+        JsonNode updatedList = result.newItem().get("l").get("L");
+
+        assertEquals(3, updatedList.size());
+        assertEquals("c", updatedList.get(2).get("S").asText());
+    }
+    @Test
+    void updateItemSetMaximumValidListIndexAppends() {
+        String region = "eu-west-1";
+        createUsersTable(region);
+
+        ObjectNode initialItem = item("userId", "max-index-test");
+        ObjectNode listValue = mapper.createObjectNode();
+        ArrayNode list = listValue.putArray("L");
+
+        list.add(attributeValue("S", "a"));
+        list.add(attributeValue("S", "b"));
+        initialItem.set("l", listValue);
+
+        service.putItem("Users", initialItem, region);
+
+        ObjectNode key = item("userId", "max-index-test");
+
+        ObjectNode exprValues = mapper.createObjectNode();
+        exprValues.set(":v", attributeValue("S", "c"));
+
+        DynamoDbService.UpdateResult result = service.updateItem(
+                "Users",
+                key,
+                null,
+                "SET l[4294967294] = :v",
+                null,
+                exprValues,
+                "ALL_NEW",
+                region);
+
+        JsonNode updatedList = result.newItem().get("l").get("L");
+
+        assertEquals(3, updatedList.size());
+        assertEquals("c", updatedList.get(2).get("S").asText());
+    }
+    @Test
+    void updateItemSetListIndexAboveMaximumThrowsValidationException() {
+        String region = "eu-west-1";
+        createUsersTable(region);
+
+        ObjectNode initialItem = item("userId", "invalid-index-test");
+        ObjectNode listValue = mapper.createObjectNode();
+        ArrayNode list = listValue.putArray("L");
+
+        list.add(attributeValue("S", "a"));
+        list.add(attributeValue("S", "b"));
+        initialItem.set("l", listValue);
+
+        service.putItem("Users", initialItem, region);
+
+        ObjectNode key = item("userId", "invalid-index-test");
+
+        ObjectNode exprValues = mapper.createObjectNode();
+        exprValues.set(":v", attributeValue("S", "c"));
+
+        AwsException exception = assertThrows(AwsException.class, () ->
+                service.updateItem(
+                        "Users",
+                        key,
+                        null,
+                        "SET l[4294967295] = :v",
+                        null,
+                        exprValues,
+                        "ALL_NEW",
+                        region));
+
+        assertEquals("ValidationException", exception.getErrorCode());
+        assertEquals(400, exception.getHttpStatus());
+        assertTrue(exception.getMessage().contains("List index is not within the allowable range"));
+        assertTrue(exception.getMessage().contains("4294967295"));
+    }
+    /**
+     * Test REMOVE with nested map paths (e.g. "ratings.foo").
+     * Reproduces GitHub issue #402: REMOVE on a map key succeeds but data is unchanged.
+     */
+    @Test
+    void testRemoveNestedMapKey() {
+        String region = "eu-west-1";
+        createUsersTable(region);
+
+        // Put item with a map attribute containing two keys
+        ObjectNode initialItem = mapper.createObjectNode();
+        initialItem.set("userId", attributeValue("S", "user-1"));
+        ObjectNode ratingsInner = mapper.createObjectNode();
+        ratingsInner.set("foo", attributeValue("S", "5"));
+        ratingsInner.set("bar", attributeValue("S", "3"));
+        ObjectNode ratingsMap = mapper.createObjectNode();
+        ratingsMap.set("M", ratingsInner);
+        initialItem.set("ratings", ratingsMap);
+        service.putItem("Users", initialItem, region);
+
+        ObjectNode key = mapper.createObjectNode();
+        key.set("userId", attributeValue("S", "user-1"));
+
+        // Verify both keys exist
+        JsonNode before = service.getItem("Users", key, region);
+        assertTrue(before.get("ratings").get("M").has("foo"));
+        assertTrue(before.get("ratings").get("M").has("bar"));
+
+        // REMOVE ratings.foo
+        DynamoDbService.UpdateResult result = service.updateItem("Users", key, null,
+                "REMOVE ratings.foo", null, null, "ALL_NEW", region);
+
+        JsonNode updated = result.newItem();
+        assertFalse(updated.get("ratings").get("M").has("foo"),
+                "foo should be removed from ratings map");
+        assertTrue(updated.get("ratings").get("M").has("bar"),
+                "bar should still exist in ratings map");
+        assertEquals("3", updated.get("ratings").get("M").get("bar").get("S").asText());
+    }
+
+    /**
+     * Test REMOVE with nested map paths using expression attribute names.
+     */
+    @Test
+    void testRemoveNestedMapKeyWithExpressionNames() {
+        String region = "eu-west-1";
+        createUsersTable(region);
+
+        ObjectNode initialItem = mapper.createObjectNode();
+        initialItem.set("userId", attributeValue("S", "user-2"));
+        ObjectNode metaInner = mapper.createObjectNode();
+        metaInner.set("temp", attributeValue("S", "value"));
+        metaInner.set("keep", attributeValue("S", "important"));
+        ObjectNode metaMap = mapper.createObjectNode();
+        metaMap.set("M", metaInner);
+        initialItem.set("metadata", metaMap);
+        service.putItem("Users", initialItem, region);
+
+        ObjectNode key = mapper.createObjectNode();
+        key.set("userId", attributeValue("S", "user-2"));
+
+        // REMOVE #meta.#tmp using expression attribute names
+        ObjectNode exprAttrNames = mapper.createObjectNode();
+        exprAttrNames.put("#meta", "metadata");
+        exprAttrNames.put("#tmp", "temp");
+
+        DynamoDbService.UpdateResult result = service.updateItem("Users", key, null,
+                "REMOVE #meta.#tmp", exprAttrNames, null, "ALL_NEW", region);
+
+        JsonNode updated = result.newItem();
+        assertFalse(updated.get("metadata").get("M").has("temp"),
+                "temp should be removed from metadata map");
+        assertTrue(updated.get("metadata").get("M").has("keep"),
+                "keep should still exist in metadata map");
+    }
+
+    /**
+     * Test REMOVE on a non-existent nested path does not fail.
+     */
+    @Test
+    void testRemoveNonExistentNestedPath() {
+        String region = "eu-west-1";
+        createUsersTable(region);
+
+        ObjectNode initialItem = mapper.createObjectNode();
+        initialItem.set("userId", attributeValue("S", "user-3"));
+        initialItem.set("name", attributeValue("S", "Alice"));
+        service.putItem("Users", initialItem, region);
+
+        ObjectNode key = mapper.createObjectNode();
+        key.set("userId", attributeValue("S", "user-3"));
+
+        // REMOVE on a path where the parent map doesn't exist - should not fail
+        DynamoDbService.UpdateResult result = service.updateItem("Users", key, null,
+                "REMOVE nonexistent.child", null, null, "ALL_NEW", region);
+
+        JsonNode updated = result.newItem();
+        assertEquals("Alice", updated.get("name").get("S").asText(),
+                "existing attributes should be unchanged");
+    }
+
+    /**
+     * Test REMOVE with deeply nested map paths (3 levels).
+     */
+    @Test
+    void testRemoveDeeplyNestedMapKey() {
+        String region = "eu-west-1";
+        createUsersTable(region);
+
+        // Build: settings.notifications.email = "on", settings.notifications.sms = "off"
+        ObjectNode initialItem = mapper.createObjectNode();
+        initialItem.set("userId", attributeValue("S", "user-4"));
+
+        ObjectNode notifInner = mapper.createObjectNode();
+        notifInner.set("email", attributeValue("S", "on"));
+        notifInner.set("sms", attributeValue("S", "off"));
+        ObjectNode notifMap = mapper.createObjectNode();
+        notifMap.set("M", notifInner);
+
+        ObjectNode settingsInner = mapper.createObjectNode();
+        settingsInner.set("notifications", notifMap);
+        ObjectNode settingsMap = mapper.createObjectNode();
+        settingsMap.set("M", settingsInner);
+
+        initialItem.set("settings", settingsMap);
+        service.putItem("Users", initialItem, region);
+
+        ObjectNode key = mapper.createObjectNode();
+        key.set("userId", attributeValue("S", "user-4"));
+
+        // REMOVE settings.notifications.sms
+        DynamoDbService.UpdateResult result = service.updateItem("Users", key, null,
+                "REMOVE settings.notifications.sms", null, null, "ALL_NEW", region);
+
+        JsonNode updated = result.newItem();
+        JsonNode notifs = updated.get("settings").get("M").get("notifications").get("M");
+        assertTrue(notifs.has("email"), "email should still exist");
+        assertFalse(notifs.has("sms"), "sms should be removed");
+    }
+
+    @Test
+    void updateItemAddResolvesNestedPlaceholderPath() {
+        String region = "eu-west-1";
+        createUsersTable(region);
+
+        ObjectNode invocationSummary = mapper.createObjectNode();
+        invocationSummary.set("eventsAvailable", attributeValue("N", "0"));
+        ObjectNode functionInvocationSummaries = mapper.createObjectNode();
+        functionInvocationSummaries.set("ISA_10136", mapAttributeValue(invocationSummary));
+
+        ObjectNode initialItem = item("userId", "nested-add-placeholder");
+        initialItem.set("functionInvocationSummaries", mapAttributeValue(functionInvocationSummaries));
+        service.putItem("Users", initialItem, region);
+
+        ObjectNode names = mapper.createObjectNode();
+        names.put("#fis", "functionInvocationSummaries");
+        names.put("#isa", "ISA_10136");
+        names.put("#ea", "eventsAvailable");
+        ObjectNode values = mapper.createObjectNode();
+        values.set(":one", attributeValue("N", "1"));
+
+        service.updateItem("Users", userIdKey("nested-add-placeholder"), null,
+                "ADD #fis.#isa.#ea :one", names, values, "ALL_NEW", region);
+
+        JsonNode stored = service.getItem("Users", userIdKey("nested-add-placeholder"), region);
+        assertEquals(1, stored.path("functionInvocationSummaries").path("M")
+                .path("ISA_10136").path("M").path("eventsAvailable").path("N").asInt());
+        assertFalse(stored.has("#fis.#isa.#ea"), "ADD must not create a phantom top-level attribute");
+    }
+
+    @Test
+    void updateItemAddTraversesLiteralDottedPath() {
+        String region = "eu-west-1";
+        createUsersTable(region);
+
+        ObjectNode nested = mapper.createObjectNode();
+        nested.set("c", attributeValue("N", "4"));
+        ObjectNode parent = mapper.createObjectNode();
+        parent.set("b", mapAttributeValue(nested));
+        ObjectNode initialItem = item("userId", "nested-add-literal");
+        initialItem.set("a", mapAttributeValue(parent));
+        service.putItem("Users", initialItem, region);
+
+        ObjectNode values = mapper.createObjectNode();
+        values.set(":three", attributeValue("N", "3"));
+
+        service.updateItem("Users", userIdKey("nested-add-literal"), null,
+                "ADD a.b.c :three", null, values, "ALL_NEW", region);
+
+        JsonNode stored = service.getItem("Users", userIdKey("nested-add-literal"), region);
+        assertEquals("7", stored.path("a").path("M").path("b").path("M").path("c").path("N").asText());
+        assertFalse(stored.has("a.b.c"), "ADD must not create a phantom top-level attribute");
+    }
+
+    @Test
+    void updateItemAddSeedsMissingNestedLeafUnderExistingParents() {
+        String region = "eu-west-1";
+        createUsersTable(region);
+
+        ObjectNode parent = mapper.createObjectNode();
+        parent.set("b", mapAttributeValue(mapper.createObjectNode()));
+        ObjectNode initialItem = item("userId", "nested-add-missing-leaf");
+        initialItem.set("a", mapAttributeValue(parent));
+        service.putItem("Users", initialItem, region);
+
+        ObjectNode values = mapper.createObjectNode();
+        values.set(":five", attributeValue("N", "5"));
+
+        service.updateItem("Users", userIdKey("nested-add-missing-leaf"), null,
+                "ADD a.b.c :five", null, values, "ALL_NEW", region);
+
+        JsonNode stored = service.getItem("Users", userIdKey("nested-add-missing-leaf"), region);
+        assertEquals("5", stored.path("a").path("M").path("b").path("M").path("c").path("N").asText());
+        assertFalse(stored.has("a.b.c"), "ADD must write the missing leaf at its document path");
+    }
+
+    @Test
+    void updateItemAddUnionsNestedSetAtPlaceholderPath() {
+        String region = "eu-west-1";
+        createUsersTable(region);
+
+        ObjectNode metadata = mapper.createObjectNode();
+        metadata.set("tags", stringSetAttributeValue("alpha", "beta"));
+        ObjectNode initialItem = item("userId", "nested-add-set");
+        initialItem.set("metadata", mapAttributeValue(metadata));
+        service.putItem("Users", initialItem, region);
+
+        ObjectNode names = mapper.createObjectNode();
+        names.put("#meta", "metadata");
+        names.put("#tags", "tags");
+        ObjectNode values = mapper.createObjectNode();
+        values.set(":tags", stringSetAttributeValue("beta", "gamma"));
+
+        service.updateItem("Users", userIdKey("nested-add-set"), null,
+                "ADD #meta.#tags :tags", names, values, "ALL_NEW", region);
+
+        JsonNode stored = service.getItem("Users", userIdKey("nested-add-set"), region);
+        Set<String> tags = new HashSet<>();
+        stored.path("metadata").path("M").path("tags").path("SS").forEach(value -> tags.add(value.asText()));
+        assertEquals(Set.of("alpha", "beta", "gamma"), tags);
+        assertFalse(stored.has("#meta.#tags"), "ADD must not create a phantom top-level attribute");
+    }
+
+    @Test
+    void updateItemDeleteMutatesAndRemovesNestedSetAtPlaceholderPath() {
+        String region = "eu-west-1";
+        createUsersTable(region);
+
+        ObjectNode settings = mapper.createObjectNode();
+        settings.set("labels", stringSetAttributeValue("keep", "drop"));
+        ObjectNode initialItem = item("userId", "nested-delete-set");
+        initialItem.set("settings", mapAttributeValue(settings));
+        service.putItem("Users", initialItem, region);
+
+        ObjectNode names = mapper.createObjectNode();
+        names.put("#settings", "settings");
+        names.put("#labels", "labels");
+        ObjectNode values = mapper.createObjectNode();
+        values.set(":labels", stringSetAttributeValue("drop"));
+
+        service.updateItem("Users", userIdKey("nested-delete-set"), null,
+                "DELETE #settings.#labels :labels", names, values, "ALL_NEW", region);
+
+        JsonNode stored = service.getItem("Users", userIdKey("nested-delete-set"), region);
+        JsonNode remaining = stored.path("settings").path("M").path("labels").path("SS");
+        assertEquals(1, remaining.size());
+        assertEquals("keep", remaining.get(0).asText());
+
+        values.set(":labels", stringSetAttributeValue("keep"));
+        service.updateItem("Users", userIdKey("nested-delete-set"), null,
+                "DELETE #settings.#labels :labels", names, values, "ALL_NEW", region);
+
+        stored = service.getItem("Users", userIdKey("nested-delete-set"), region);
+        assertFalse(stored.path("settings").path("M").has("labels"),
+                "DELETE must remove a nested attribute when its set becomes empty");
+        assertFalse(stored.has("#settings.#labels"), "DELETE must not create a phantom top-level attribute");
+
+        assertDoesNotThrow(() -> service.updateItem("Users", userIdKey("nested-delete-set"), null,
+                "DELETE #settings.#labels :labels", names, values, "ALL_NEW", region));
+        JsonNode afterMissingPathDelete = service.getItem("Users", userIdKey("nested-delete-set"), region);
+        assertFalse(afterMissingPathDelete.path("settings").path("M").has("labels"),
+                "DELETE on a missing nested path must be a no-op");
+    }
+
+    @Test
+    void updateItemTopLevelAddAndDeleteRemainUnchanged() {
+        String region = "eu-west-1";
+        createUsersTable(region);
+
+        ObjectNode initialItem = item("userId", "top-level-add-delete");
+        initialItem.set("counter", attributeValue("N", "2"));
+        initialItem.set("tags", stringSetAttributeValue("keep", "drop"));
+        service.putItem("Users", initialItem, region);
+
+        ObjectNode names = mapper.createObjectNode();
+        names.put("#counter", "counter");
+        names.put("#tags", "tags");
+        ObjectNode values = mapper.createObjectNode();
+        values.set(":three", attributeValue("N", "3"));
+        values.set(":drop", stringSetAttributeValue("drop"));
+
+        service.updateItem("Users", userIdKey("top-level-add-delete"), null,
+                "ADD #counter :three DELETE #tags :drop", names, values, "ALL_NEW", region);
+
+        JsonNode stored = service.getItem("Users", userIdKey("top-level-add-delete"), region);
+        assertEquals("5", stored.path("counter").path("N").asText());
+        assertEquals(1, stored.path("tags").path("SS").size());
+        assertEquals("keep", stored.path("tags").path("SS").get(0).asText());
+    }
+
+    // --- UpdateExpression clause separator tests ---
+    //
+    // The Go AWS SDK v2 expression.Builder joins top-level clauses with '\n',
+    // emitting expressions like "SET #a = :a\nADD #b :b". Each of the cases
+    // below hits a different edge of the clause-boundary / clause-advancement
+    // logic. See GitHub issue #430 for the full repro.
+
+    private void seedCounterItem(String id, long counterValue, String nameValue) {
+        ObjectNode initialItem = mapper.createObjectNode();
+        initialItem.set("userId", attributeValue("S", id));
+        initialItem.set("counter", attributeValue("N", Long.toString(counterValue)));
+        initialItem.set("name", attributeValue("S", nameValue));
+        service.putItem("Users", initialItem, "eu-west-1");
+    }
+
+    private ObjectNode userIdKey(String id) {
+        ObjectNode key = mapper.createObjectNode();
+        key.set("userId", attributeValue("S", id));
+        return key;
+    }
+
+    @Test
+    void updateItemWithDifferentSortKeysCreatesSeparateItems() {
+        String region = "eu-west-1";
+        createOrdersTable(region);
+
+        ObjectNode key1 = item("customerId", "c1", "orderId", "app1");
+        ObjectNode exprValues = mapper.createObjectNode();
+        exprValues.set(":owner", attributeValue("S", "owner-1"));
+        ObjectNode exprNames = mapper.createObjectNode();
+        exprNames.put("#owner", "owner");
+
+        service.updateItem("Orders", key1, null,
+                "SET #owner = :owner", exprNames, exprValues, null, region);
+
+        ObjectNode key2 = item("customerId", "c1", "orderId", "app2");
+        exprValues = mapper.createObjectNode();
+        exprValues.set(":owner", attributeValue("S", "owner-2"));
+
+        service.updateItem("Orders", key2, null,
+                "SET #owner = :owner", exprNames, exprValues, null, region);
+
+        DynamoDbService.ScanResult scanResult = service.scan("Orders", null, null, null, null, null, null, region);
+        assertEquals(2, scanResult.items().size(),
+                "two items with same partition key but different sort keys must be stored separately");
+
+        JsonNode item1 = service.getItem("Orders", key1, region);
+        assertNotNull(item1);
+        assertEquals("owner-1", item1.get("owner").get("S").asText());
+
+        JsonNode item2 = service.getItem("Orders", key2, region);
+        assertNotNull(item2);
+        assertEquals("owner-2", item2.get("owner").get("S").asText());
+    }
+
+    private void createEventsTableWithNumericSortKey(String region) {
+        service.createTable("Events",
+                List.of(
+                        new KeySchemaElement("deviceId", "HASH"),
+                        new KeySchemaElement("timestamp", "RANGE")),
+                List.of(
+                        new AttributeDefinition("deviceId", "S"),
+                        new AttributeDefinition("timestamp", "N")),
+                5L, 5L, region);
+    }
+
+    @Test
+    void updateItem_numericSortKeyWithEquivalentRepresentation_updatesStoredItem() throws Exception {
+        String region = "eu-west-1";
+        createEventsTableWithNumericSortKey(region);
+        service.putItem("Events", mapper.readTree("""
+                {"deviceId":{"S":"d1"},"timestamp":{"N":"1700000000"},"status":{"S":"before"}}
+                """), region);
+
+        JsonNode key = mapper.readTree("""
+                {"deviceId":{"S":"d1"},"timestamp":{"N":"1700000000.0"}}
+                """);
+        ObjectNode exprValues = mapper.createObjectNode();
+        exprValues.set(":status", attributeValue("S", "after"));
+        ObjectNode exprNames = mapper.createObjectNode();
+        exprNames.put("#status", "status");
+
+        assertDoesNotThrow(() -> service.updateItem("Events", key, null,
+                "SET #status = :status", exprNames, exprValues, null, region));
+
+        JsonNode stored = service.getItem("Events", mapper.readTree("""
+                {"deviceId":{"S":"d1"},"timestamp":{"N":"1700000000"}}
+                """), region);
+        assertEquals("after", stored.path("status").path("S").asText());
+    }
+
+    @Test
+    void transactWriteUpdate_numericSortKeyWithEquivalentRepresentation_updatesStoredItem() throws Exception {
+        String region = "eu-west-1";
+        createEventsTableWithNumericSortKey(region);
+        service.putItem("Events", mapper.readTree("""
+                {"deviceId":{"S":"d1"},"timestamp":{"N":"1700000000"},"status":{"S":"before"}}
+                """), region);
+        JsonNode update = mapper.readTree("""
+                {"Update":{"TableName":"Events",
+                  "Key":{"deviceId":{"S":"d1"},"timestamp":{"N":"1700000000.0"}},
+                  "UpdateExpression":"SET #status = :status",
+                  "ExpressionAttributeNames":{"#status":"status"},
+                  "ExpressionAttributeValues":{":status":{"S":"after"}}}}
+                """);
+
+        assertDoesNotThrow(() -> service.transactWriteItems(List.of(update), region));
+
+        JsonNode stored = service.getItem("Events", mapper.readTree("""
+                {"deviceId":{"S":"d1"},"timestamp":{"N":"1700000000"}}
+                """), region);
+        assertEquals("after", stored.path("status").path("S").asText());
+    }
+
+    @Test
+    void updateItem_numericSortKeyChangedToDifferentValue_throwsValidationException() throws Exception {
+        String region = "eu-west-1";
+        createEventsTableWithNumericSortKey(region);
+        service.putItem("Events", mapper.readTree("""
+                {"deviceId":{"S":"d1"},"timestamp":{"N":"1700000000"}}
+                """), region);
+
+        JsonNode key = mapper.readTree("""
+                {"deviceId":{"S":"d1"},"timestamp":{"N":"1700000000.0"}}
+                """);
+        ObjectNode exprValues = mapper.createObjectNode();
+        exprValues.set(":ts", attributeValue("N", "1700000001"));
+        ObjectNode exprNames = mapper.createObjectNode();
+        exprNames.put("#ts", "timestamp");
+
+        AwsException ex = assertThrows(AwsException.class, () ->
+                service.updateItem("Events", key, null,
+                        "SET #ts = :ts", exprNames, exprValues, null, region));
+        assertEquals("ValidationException", ex.getErrorCode());
+        assertTrue(ex.getMessage().contains("Cannot update attribute timestamp"));
+    }
+
+    @Test
+    void updateItem_sortKeySetToValueWithExtraTypeMember_throwsValidationException() throws Exception {
+        String region = "eu-west-1";
+        createEventsTableWithNumericSortKey(region);
+        service.putItem("Events", mapper.readTree("""
+                {"deviceId":{"S":"d1"},"timestamp":{"N":"1700000000"}}
+                """), region);
+
+        JsonNode key = mapper.readTree("""
+                {"deviceId":{"S":"d1"},"timestamp":{"N":"1700000000"}}
+                """);
+        ObjectNode exprValues = (ObjectNode) mapper.readTree("""
+                {":ts":{"N":"1700000000","S":"extra"}}
+                """);
+        ObjectNode exprNames = mapper.createObjectNode();
+        exprNames.put("#ts", "timestamp");
+
+        AwsException ex = assertThrows(AwsException.class, () ->
+                service.updateItem("Events", key, null,
+                        "SET #ts = :ts", exprNames, exprValues, null, region));
+        assertEquals("ValidationException", ex.getErrorCode());
+        assertTrue(ex.getMessage().contains("more than one datatypes"));
+
+        JsonNode stored = service.getItem("Events", key, region);
+        assertFalse(stored.path("timestamp").has("S"));
+    }
+
+    @Test
+    void updateItem_partitionKeySetToValueWithExtraTypeMember_throwsValidationException() throws Exception {
+        String region = "eu-west-1";
+        createEventsTableWithNumericSortKey(region);
+        service.putItem("Events", mapper.readTree("""
+                {"deviceId":{"S":"d1"},"timestamp":{"N":"1700000000"}}
+                """), region);
+
+        JsonNode key = mapper.readTree("""
+                {"deviceId":{"S":"d1"},"timestamp":{"N":"1700000000"}}
+                """);
+        ObjectNode exprValues = (ObjectNode) mapper.readTree("""
+                {":id":{"S":"d1","N":"5"}}
+                """);
+        ObjectNode exprNames = mapper.createObjectNode();
+        exprNames.put("#id", "deviceId");
+
+        AwsException ex = assertThrows(AwsException.class, () ->
+                service.updateItem("Events", key, null,
+                        "SET #id = :id", exprNames, exprValues, null, region));
+        assertEquals("ValidationException", ex.getErrorCode());
+        assertTrue(ex.getMessage().contains("more than one datatypes"));
+
+        JsonNode stored = service.getItem("Events", key, region);
+        assertFalse(stored.path("deviceId").has("N"));
+    }
+
+    @Test
+    void updateItemMissingSortKeyThrowsValidationException() {
+        String region = "eu-west-1";
+        createOrdersTable(region);
+
+        ObjectNode keyMissingSk = item("customerId", "c1");
+        ObjectNode exprValues = mapper.createObjectNode();
+        exprValues.set(":val", attributeValue("S", "test"));
+
+        AwsException ex = assertThrows(AwsException.class, () ->
+                service.updateItem("Orders", keyMissingSk, null,
+                        "SET name = :val", null, exprValues, null, region));
+        assertEquals("ValidationException", ex.getErrorCode());
+    }
+
+    @Test
+    void getItemMissingSortKeyThrowsValidationException() {
+        String region = "eu-west-1";
+        createOrdersTable(region);
+        service.putItem("Orders", item("customerId", "c1", "orderId", "o1", "total", "100"), region);
+
+        ObjectNode keyMissingSk = item("customerId", "c1");
+        AwsException ex = assertThrows(AwsException.class, () ->
+                service.getItem("Orders", keyMissingSk, region));
+        assertEquals("ValidationException", ex.getErrorCode());
+    }
+
+    @Test
+    void deleteItemMissingSortKeyThrowsValidationException() {
+        String region = "eu-west-1";
+        createOrdersTable(region);
+        service.putItem("Orders", item("customerId", "c1", "orderId", "o1", "total", "100"), region);
+
+        ObjectNode keyMissingSk = item("customerId", "c1");
+        AwsException ex = assertThrows(AwsException.class, () ->
+                service.deleteItem("Orders", keyMissingSk, region));
+        assertEquals("ValidationException", ex.getErrorCode());
+    }
+
+    @Test
+    void putItemMissingSortKeyThrowsValidationException() {
+        String region = "eu-west-1";
+        createOrdersTable(region);
+
+        ObjectNode itemMissingSk = item("customerId", "c1", "total", "100");
+        AwsException ex = assertThrows(AwsException.class, () ->
+                service.putItem("Orders", itemMissingSk, region));
+        assertEquals("ValidationException", ex.getErrorCode());
+    }
+
+    @Test
+    void putItemNullPartitionKeyThrowsTypeMismatch() {
+        String region = "eu-west-1";
+        createUsersTable(region);
+
+        ObjectNode nullKeyItem = mapper.createObjectNode();
+        nullKeyItem.set("userId", mapper.createObjectNode().put("NULL", true));
+        nullKeyItem.set("name", attributeValue("S", "created"));
+
+        AwsException ex = assertThrows(AwsException.class, () ->
+                service.putItem("Users", nullKeyItem, region));
+        assertEquals("ValidationException", ex.getErrorCode());
+        assertEquals("One or more parameter values were invalid: "
+                + "Type mismatch for key userId expected: S actual: NULL", ex.getMessage());
+    }
+
+    @Test
+    void putItemWrongScalarTypePartitionKeyThrowsTypeMismatch() {
+        String region = "eu-west-1";
+        createUsersTable(region);
+
+        ObjectNode numberKeyItem = mapper.createObjectNode();
+        numberKeyItem.set("userId", attributeValue("N", "42"));
+
+        AwsException ex = assertThrows(AwsException.class, () ->
+                service.putItem("Users", numberKeyItem, region));
+        assertEquals("ValidationException", ex.getErrorCode());
+        assertEquals("One or more parameter values were invalid: "
+                + "Type mismatch for key userId expected: S actual: N", ex.getMessage());
+    }
+
+    @Test
+    void putItemNullSortKeyThrowsTypeMismatch() {
+        String region = "eu-west-1";
+        createOrdersTable(region);
+
+        ObjectNode nullSkItem = item("customerId", "c1");
+        nullSkItem.set("orderId", mapper.createObjectNode().put("NULL", true));
+
+        AwsException ex = assertThrows(AwsException.class, () ->
+                service.putItem("Orders", nullSkItem, region));
+        assertEquals("ValidationException", ex.getErrorCode());
+        assertEquals("One or more parameter values were invalid: "
+                + "Type mismatch for key orderId expected: S actual: NULL", ex.getMessage());
+    }
+
+    @Test
+    void putItemNullNonKeyAttributeIsAccepted() {
+        String region = "eu-west-1";
+        createUsersTable(region);
+
+        ObjectNode nullAttrItem = item("userId", "u1");
+        nullAttrItem.set("name", mapper.createObjectNode().put("NULL", true));
+        service.putItem("Users", nullAttrItem, region);
+
+        JsonNode stored = service.getItem("Users", item("userId", "u1"), region);
+        assertNotNull(stored);
+        assertTrue(stored.get("name").get("NULL").asBoolean());
+    }
+
+    @Test
+    void putItemMultiTypeKeyValueThrowsValidationException() {
+        String region = "eu-west-1";
+        createUsersTable(region);
+
+        ObjectNode multiTypeItem = mapper.createObjectNode();
+        multiTypeItem.set("userId", mapper.createObjectNode().put("S", "1").put("NULL", true));
+
+        AwsException ex = assertThrows(AwsException.class, () ->
+                service.putItem("Users", multiTypeItem, region));
+        assertEquals("ValidationException", ex.getErrorCode());
+        assertEquals("Supplied AttributeValue has more than one datatypes set, "
+                + "must contain exactly one of the supported datatypes", ex.getMessage());
+    }
+
+    @Test
+    void putItemEmptyKeyValueThrowsValidationException() {
+        String region = "eu-west-1";
+        createUsersTable(region);
+
+        ObjectNode emptyValueItem = mapper.createObjectNode();
+        emptyValueItem.set("userId", mapper.createObjectNode());
+
+        AwsException ex = assertThrows(AwsException.class, () ->
+                service.putItem("Users", emptyValueItem, region));
+        assertEquals("ValidationException", ex.getErrorCode());
+        assertEquals("Supplied AttributeValue is empty, "
+                + "must contain exactly one of the supported datatypes", ex.getMessage());
+    }
+
+    @Test
+    void putItemNonObjectKeyValueThrowsSerializationException() {
+        String region = "eu-west-1";
+        createUsersTable(region);
+
+        ObjectNode rawValueItem = mapper.createObjectNode();
+        rawValueItem.put("userId", "1");
+
+        AwsException ex = assertThrows(AwsException.class, () ->
+                service.putItem("Users", rawValueItem, region));
+        assertEquals("SerializationException", ex.getErrorCode());
+    }
+
+    private TableDefinition createIndexedTable(String region) {
+        GlobalSecondaryIndex gsi = new GlobalSecondaryIndex("gsi1",
+                List.of(new KeySchemaElement("gsiKey", "HASH")), null, "ALL", null);
+        LocalSecondaryIndex lsi = new LocalSecondaryIndex("lsi1",
+                List.of(
+                        new KeySchemaElement("customerId", "HASH"),
+                        new KeySchemaElement("lsiKey", "RANGE")), null, "ALL");
+        return service.createTable("Indexed",
+                List.of(
+                        new KeySchemaElement("customerId", "HASH"),
+                        new KeySchemaElement("orderId", "RANGE")),
+                List.of(
+                        new AttributeDefinition("customerId", "S"),
+                        new AttributeDefinition("orderId", "S"),
+                        new AttributeDefinition("gsiKey", "S"),
+                        new AttributeDefinition("lsiKey", "N")),
+                5L, 5L, List.of(gsi), List.of(lsi), region);
+    }
+
+    @Test
+    void putItemNullGsiKeyThrowsIndexTypeMismatch() {
+        String region = "eu-west-1";
+        createIndexedTable(region);
+
+        ObjectNode nullGsiItem = item("customerId", "c1", "orderId", "o1");
+        nullGsiItem.set("gsiKey", mapper.createObjectNode().put("NULL", true));
+
+        AwsException ex = assertThrows(AwsException.class, () ->
+                service.putItem("Indexed", nullGsiItem, region));
+        assertEquals("ValidationException", ex.getErrorCode());
+        assertEquals("One or more parameter values were invalid: "
+                + "Type mismatch for Index Key gsiKey Expected: S Actual: NULL IndexName: gsi1",
+                ex.getMessage());
+    }
+
+    @Test
+    void putItemWrongTypeLsiKeyThrowsIndexTypeMismatch() {
+        String region = "eu-west-1";
+        createIndexedTable(region);
+
+        ObjectNode wrongLsiItem = item("customerId", "c1", "orderId", "o1", "lsiKey", "oops");
+
+        AwsException ex = assertThrows(AwsException.class, () ->
+                service.putItem("Indexed", wrongLsiItem, region));
+        assertEquals("ValidationException", ex.getErrorCode());
+        assertEquals("One or more parameter values were invalid: "
+                + "Type mismatch for Index Key lsiKey Expected: N Actual: S IndexName: lsi1",
+                ex.getMessage());
+    }
+
+    @Test
+    void putItemOmittingIndexKeyAttributesIsAccepted() {
+        String region = "eu-west-1";
+        createIndexedTable(region);
+
+        // Sparse index: absent GSI/LSI key attributes are valid.
+        service.putItem("Indexed", item("customerId", "c1", "orderId", "o1"), region);
+
+        assertNotNull(service.getItem("Indexed",
+                item("customerId", "c1", "orderId", "o1"), region));
+    }
+
+    @Test
+    void updateItemSettingWrongTypeGsiKeyThrowsIndexTypeMismatch() {
+        String region = "eu-west-1";
+        createIndexedTable(region);
+        service.putItem("Indexed", item("customerId", "c1", "orderId", "o1"), region);
+
+        ObjectNode exprValues = mapper.createObjectNode();
+        exprValues.set(":v", mapper.createObjectNode().put("NULL", true));
+
+        AwsException ex = assertThrows(AwsException.class, () ->
+                service.updateItem("Indexed", item("customerId", "c1", "orderId", "o1"), null,
+                        "SET gsiKey = :v", null, exprValues, null, region));
+        assertEquals("ValidationException", ex.getErrorCode());
+        assertEquals("One or more parameter values were invalid: "
+                + "Type mismatch for Index Key gsiKey Expected: S Actual: NULL IndexName: gsi1",
+                ex.getMessage());
+    }
+
+    @Test
+    void putItemMultiTypeGsiKeyValueThrowsValidationException() {
+        String region = "eu-west-1";
+        createIndexedTable(region);
+
+        ObjectNode multiTypeGsiItem = item("customerId", "c1", "orderId", "o1");
+        multiTypeGsiItem.set("gsiKey", mapper.createObjectNode().put("S", "x").put("N", "1"));
+
+        AwsException ex = assertThrows(AwsException.class, () ->
+                service.putItem("Indexed", multiTypeGsiItem, region));
+        assertEquals("ValidationException", ex.getErrorCode());
+        assertEquals("Supplied AttributeValue has more than one datatypes set, "
+                + "must contain exactly one of the supported datatypes", ex.getMessage());
+    }
+
+    @Test
+    void putItemEmptyObjectGsiKeyValueThrowsValidationException() {
+        String region = "eu-west-1";
+        createIndexedTable(region);
+
+        ObjectNode emptyGsiItem = item("customerId", "c1", "orderId", "o1");
+        emptyGsiItem.set("gsiKey", mapper.createObjectNode());
+
+        AwsException ex = assertThrows(AwsException.class, () ->
+                service.putItem("Indexed", emptyGsiItem, region));
+        assertEquals("ValidationException", ex.getErrorCode());
+        assertEquals("Supplied AttributeValue is empty, "
+                + "must contain exactly one of the supported datatypes", ex.getMessage());
+    }
+
+    @Test
+    void putItemNonObjectGsiKeyValueThrowsSerializationException() {
+        String region = "eu-west-1";
+        createIndexedTable(region);
+
+        ObjectNode rawGsiItem = item("customerId", "c1", "orderId", "o1");
+        rawGsiItem.put("gsiKey", "x");
+
+        AwsException ex = assertThrows(AwsException.class, () ->
+                service.putItem("Indexed", rawGsiItem, region));
+        assertEquals("SerializationException", ex.getErrorCode());
+    }
+
+    @Test
+    void putItemEmptyStringGsiKeyThrowsValidationException() {
+        String region = "eu-west-1";
+        createIndexedTable(region);
+
+        ObjectNode emptyStringGsiItem = item("customerId", "c1", "orderId", "o1", "gsiKey", "");
+
+        AwsException ex = assertThrows(AwsException.class, () ->
+                service.putItem("Indexed", emptyStringGsiItem, region));
+        assertEquals("ValidationException", ex.getErrorCode());
+        assertEquals("One or more parameter values are not valid. A value specified for a secondary "
+                + "index key is not supported. The AttributeValue for a key attribute cannot "
+                + "contain an empty string value. IndexName: gsi1, IndexKey: gsiKey", ex.getMessage());
+    }
+
+    @Test
+    void updateItemSettingEmptyStringGsiKeyThrowsValidationException() {
+        String region = "eu-west-1";
+        createIndexedTable(region);
+        service.putItem("Indexed", item("customerId", "c1", "orderId", "o1"), region);
+
+        ObjectNode exprValues = mapper.createObjectNode();
+        exprValues.set(":v", attributeValue("S", ""));
+
+        AwsException ex = assertThrows(AwsException.class, () ->
+                service.updateItem("Indexed", item("customerId", "c1", "orderId", "o1"), null,
+                        "SET gsiKey = :v", null, exprValues, null, region));
+        assertEquals("ValidationException", ex.getErrorCode());
+        assertEquals("One or more parameter values are not valid. The update expression attempted to "
+                + "update a secondary index key to a value that is not supported. "
+                + "The AttributeValue for a key attribute cannot contain an empty string value.", ex.getMessage());
+    }
+
+    private void createBinaryIndexedTable(String region) {
+        GlobalSecondaryIndex gsi = new GlobalSecondaryIndex("gsib",
+                List.of(new KeySchemaElement("bidx", "HASH")), null, "ALL", null);
+        service.createTable("BinaryIndexed",
+                List.of(new KeySchemaElement("pk", "HASH")),
+                List.of(
+                        new AttributeDefinition("pk", "S"),
+                        new AttributeDefinition("bidx", "B")),
+                5L, 5L, List.of(gsi), region);
+    }
+
+    @Test
+    void putItemEmptyBinaryGsiKeyThrowsValidationException() {
+        String region = "eu-west-1";
+        createBinaryIndexedTable(region);
+
+        ObjectNode item = item("pk", "p1");
+        item.set("bidx", attributeValue("B", ""));
+
+        AwsException ex = assertThrows(AwsException.class, () ->
+                service.putItem("BinaryIndexed", item, region));
+        assertEquals("ValidationException", ex.getErrorCode());
+        assertEquals("One or more parameter values are not valid. A value specified for a secondary "
+                + "index key is not supported. The AttributeValue for a key attribute cannot "
+                + "contain an empty binary value. IndexName: gsib, IndexKey: bidx", ex.getMessage());
+    }
+
+    @Test
+    void updateItemSettingEmptyBinaryGsiKeyThrowsValidationException() {
+        String region = "eu-west-1";
+        createBinaryIndexedTable(region);
+
+        ObjectNode exprValues = mapper.createObjectNode();
+        exprValues.set(":v", attributeValue("B", ""));
+
+        AwsException ex = assertThrows(AwsException.class, () ->
+                service.updateItem("BinaryIndexed", item("pk", "p1"), null,
+                        "SET bidx = :v", null, exprValues, null, region));
+        assertEquals("ValidationException", ex.getErrorCode());
+        assertEquals("One or more parameter values are not valid. The update expression attempted to "
+                + "update a secondary index key to a value that is not supported. "
+                + "The AttributeValue for a key attribute cannot contain an empty binary value.", ex.getMessage());
+    }
+
+    @Test
+    void updateItemNullPartitionKeyThrowsValidationException() {
+        String region = "eu-west-1";
+        createUsersTable(region);
+
+        ObjectNode nullKey = mapper.createObjectNode();
+        nullKey.set("userId", mapper.createObjectNode().put("NULL", true));
+        ObjectNode exprValues = mapper.createObjectNode();
+        exprValues.set(":val", attributeValue("S", "updated"));
+
+        AwsException ex = assertThrows(AwsException.class, () ->
+                service.updateItem("Users", nullKey, null,
+                        "SET name = :val", null, exprValues, null, region));
+        assertEquals("ValidationException", ex.getErrorCode());
+        assertEquals("The provided key element does not match the schema", ex.getMessage());
+    }
+
+    @Test
+    void getItemNullPartitionKeyThrowsValidationException() {
+        String region = "eu-west-1";
+        createUsersTable(region);
+
+        ObjectNode nullKey = mapper.createObjectNode();
+        nullKey.set("userId", mapper.createObjectNode().put("NULL", true));
+
+        AwsException ex = assertThrows(AwsException.class, () ->
+                service.getItem("Users", nullKey, region));
+        assertEquals("ValidationException", ex.getErrorCode());
+        assertEquals("The provided key element does not match the schema", ex.getMessage());
+    }
+
+    @Test
+    void deleteItemNullPartitionKeyThrowsValidationException() {
+        String region = "eu-west-1";
+        createUsersTable(region);
+
+        ObjectNode nullKey = mapper.createObjectNode();
+        nullKey.set("userId", mapper.createObjectNode().put("NULL", true));
+
+        AwsException ex = assertThrows(AwsException.class, () ->
+                service.deleteItem("Users", nullKey, region));
+        assertEquals("ValidationException", ex.getErrorCode());
+        assertEquals("The provided key element does not match the schema", ex.getMessage());
+    }
+
+    @Test
+    void updateExpressionAcceptsNewlineBetweenSetAndAdd() {
+        String region = "eu-west-1";
+        // "SET ... \n ADD ..." — previously both clauses were silently dropped:
+        // applySetClause greedily consumed ":newName\nADD counter :inc" as the
+        // value and failed the lookup, so neither SET nor ADD ran.
+        createUsersTable(region);
+        seedCounterItem("u1", 1L, "old");
+
+        ObjectNode names = mapper.createObjectNode();
+        names.put("#n", "name");
+        names.put("#c", "counter");
+        ObjectNode values = mapper.createObjectNode();
+        values.set(":newName", attributeValue("S", "new"));
+        values.set(":inc", attributeValue("N", "5"));
+
+        service.updateItem("Users", userIdKey("u1"), null,
+                "SET #n = :newName\nADD #c :inc", names, values, "ALL_NEW", region);
+
+        JsonNode stored = service.getItem("Users", userIdKey("u1"), region);
+        assertEquals("new", stored.get("name").get("S").asText(),
+                "SET clause must apply across a newline boundary");
+        assertEquals("6", stored.get("counter").get("N").asText(),
+                "ADD clause must apply across a newline boundary");
+    }
+
+    @Test
+    void updateExpressionAcceptsNewlineBetweenAddAndSet() {
+        String region = "eu-west-1";
+        createUsersTable(region);
+        seedCounterItem("u2", 10L, "old");
+
+        ObjectNode names = mapper.createObjectNode();
+        names.put("#n", "name");
+        names.put("#c", "counter");
+        ObjectNode values = mapper.createObjectNode();
+        values.set(":newName", attributeValue("S", "new"));
+        values.set(":inc", attributeValue("N", "3"));
+
+        service.updateItem("Users", userIdKey("u2"), null,
+                "ADD #c :inc\nSET #n = :newName", names, values, "ALL_NEW", region);
+
+        JsonNode stored = service.getItem("Users", userIdKey("u2"), region);
+        assertEquals("new", stored.get("name").get("S").asText());
+        assertEquals("13", stored.get("counter").get("N").asText());
+    }
+
+    @Test
+    void updateExpressionAcceptsTabBetweenClauses() {
+        String region = "eu-west-1";
+        createUsersTable(region);
+        seedCounterItem("u3", 0L, "old");
+
+        ObjectNode names = mapper.createObjectNode();
+        names.put("#n", "name");
+        names.put("#c", "counter");
+        ObjectNode values = mapper.createObjectNode();
+        values.set(":newName", attributeValue("S", "new"));
+        values.set(":inc", attributeValue("N", "1"));
+
+        service.updateItem("Users", userIdKey("u3"), null,
+                "SET #n = :newName\tADD #c :inc", names, values, "ALL_NEW", region);
+
+        JsonNode stored = service.getItem("Users", userIdKey("u3"), region);
+        assertEquals("new", stored.get("name").get("S").asText());
+        assertEquals("1", stored.get("counter").get("N").asText());
+    }
+
+    @Test
+    void updateExpressionAcceptsCrlfBetweenClauses() {
+        String region = "eu-west-1";
+        createUsersTable(region);
+        seedCounterItem("u4", 100L, "old");
+
+        ObjectNode names = mapper.createObjectNode();
+        names.put("#n", "name");
+        names.put("#c", "counter");
+        ObjectNode values = mapper.createObjectNode();
+        values.set(":newName", attributeValue("S", "new"));
+        values.set(":inc", attributeValue("N", "7"));
+
+        service.updateItem("Users", userIdKey("u4"), null,
+                "SET #n = :newName\r\nADD #c :inc", names, values, "ALL_NEW", region);
+
+        JsonNode stored = service.getItem("Users", userIdKey("u4"), region);
+        assertEquals("new", stored.get("name").get("S").asText());
+        assertEquals("107", stored.get("counter").get("N").asText());
+    }
+
+    @Test
+    void updateExpressionAcceptsThreeNewlineSeparatedClauses() {
+        String region = "eu-west-1";
+        // Canonical Go SDK shape: SET + ADD + DELETE joined by '\n'.
+        createUsersTable(region);
+
+        ObjectNode initialItem = mapper.createObjectNode();
+        initialItem.set("userId", attributeValue("S", "u5"));
+        initialItem.set("counter", attributeValue("N", "2"));
+        ObjectNode ss = mapper.createObjectNode();
+        ss.putArray("SS").add("keep").add("drop");
+        initialItem.set("tagsToClear", ss);
+        service.putItem("Users", initialItem, region);
+
+        ObjectNode names = mapper.createObjectNode();
+        names.put("#a", "alpha");
+        names.put("#b", "beta");
+        names.put("#c", "counter");
+        names.put("#d", "tagsToClear");
+        ObjectNode values = mapper.createObjectNode();
+        values.set(":a", attributeValue("S", "A"));
+        values.set(":b", attributeValue("S", "B"));
+        values.set(":inc", attributeValue("N", "4"));
+        ObjectNode dropSet = mapper.createObjectNode();
+        dropSet.putArray("SS").add("drop");
+        values.set(":d", dropSet);
+
+        service.updateItem("Users", userIdKey("u5"), null,
+                "SET #a = :a, #b = :b\nADD #c :inc\nDELETE #d :d",
+                names, values, "ALL_NEW", region);
+
+        JsonNode stored = service.getItem("Users", userIdKey("u5"), region);
+        assertEquals("A", stored.get("alpha").get("S").asText());
+        assertEquals("B", stored.get("beta").get("S").asText());
+        assertEquals("6", stored.get("counter").get("N").asText());
+        assertTrue(stored.has("tagsToClear"), "tagsToClear should still exist");
+        JsonNode remaining = stored.get("tagsToClear").get("SS");
+        assertEquals(1, remaining.size());
+        assertEquals("keep", remaining.get(0).asText());
+    }
+
+    @Test
+    void updateExpressionAcceptsNewlineBetweenRemoveAndSet() {
+        String region = "eu-west-1";
+        createUsersTable(region);
+
+        ObjectNode initialItem = mapper.createObjectNode();
+        initialItem.set("userId", attributeValue("S", "u6"));
+        initialItem.set("tempField", attributeValue("S", "bye"));
+        initialItem.set("name", attributeValue("S", "old"));
+        service.putItem("Users", initialItem, region);
+
+        ObjectNode names = mapper.createObjectNode();
+        names.put("#t", "tempField");
+        names.put("#n", "name");
+        ObjectNode values = mapper.createObjectNode();
+        values.set(":newName", attributeValue("S", "new"));
+
+        service.updateItem("Users", userIdKey("u6"), null,
+                "REMOVE #t\nSET #n = :newName", names, values, "ALL_NEW", region);
+
+        JsonNode stored = service.getItem("Users", userIdKey("u6"), region);
+        assertFalse(stored.has("tempField"), "tempField should be removed");
+        assertEquals("new", stored.get("name").get("S").asText());
+    }
+
+    @Test
+    void updateExpressionAcceptsNewlineBetweenDeleteAndAdd() {
+        String region = "eu-west-1";
+        createUsersTable(region);
+
+        ObjectNode initialItem = mapper.createObjectNode();
+        initialItem.set("userId", attributeValue("S", "u7"));
+        initialItem.set("counter", attributeValue("N", "10"));
+        ObjectNode ss = mapper.createObjectNode();
+        ss.putArray("SS").add("keep").add("drop");
+        initialItem.set("tags", ss);
+        service.putItem("Users", initialItem, region);
+
+        ObjectNode names = mapper.createObjectNode();
+        names.put("#c", "counter");
+        names.put("#tag", "tags");
+        ObjectNode values = mapper.createObjectNode();
+        values.set(":inc", attributeValue("N", "2"));
+        ObjectNode dropSet = mapper.createObjectNode();
+        dropSet.putArray("SS").add("drop");
+        values.set(":d", dropSet);
+
+        service.updateItem("Users", userIdKey("u7"), null,
+                "DELETE #tag :d\nADD #c :inc", names, values, "ALL_NEW", region);
+
+        JsonNode stored = service.getItem("Users", userIdKey("u7"), region);
+        assertEquals("12", stored.get("counter").get("N").asText());
+        JsonNode remaining = stored.get("tags").get("SS");
+        assertEquals(1, remaining.size());
+        assertEquals("keep", remaining.get(0).asText());
+    }
+
+    @Test
+    void updateExpressionAddBeforeSetDoesNotSwallowSetKeywordAtIntraSetComma() {
+        String region = "eu-west-1";
+        // Regression for Bug 2: before the advancement alignment fix,
+        // applyAddClause preferred the next comma (inside the SET clause's
+        // "b = :b, c = :c") over the SET keyword, consuming the keyword and
+        // dropping the SET entirely.
+        createUsersTable(region);
+        seedCounterItem("u8", 0L, "old");
+
+        ObjectNode names = mapper.createObjectNode();
+        names.put("#c", "counter");
+        names.put("#n", "name");
+        ObjectNode values = mapper.createObjectNode();
+        values.set(":inc", attributeValue("N", "1"));
+        values.set(":newName", attributeValue("S", "new"));
+        values.set(":other", attributeValue("S", "x"));
+
+        service.updateItem("Users", userIdKey("u8"), null,
+                "ADD #c :inc SET #n = :newName, extra = :other", names, values, "ALL_NEW", region);
+
+        JsonNode stored = service.getItem("Users", userIdKey("u8"), region);
+        assertEquals("1", stored.get("counter").get("N").asText(), "ADD must apply");
+        assertEquals("new", stored.get("name").get("S").asText(), "SET must apply");
+        assertEquals("x", stored.get("extra").get("S").asText(), "second SET assignment must apply");
+    }
+
+    @Test
+    void updateExpressionRemoveBeforeSetDoesNotSwallowSetKeywordAtIntraSetComma() {
+        String region = "eu-west-1";
+        createUsersTable(region);
+
+        ObjectNode initialItem = mapper.createObjectNode();
+        initialItem.set("userId", attributeValue("S", "u9"));
+        initialItem.set("tempField", attributeValue("S", "bye"));
+        initialItem.set("name", attributeValue("S", "old"));
+        service.putItem("Users", initialItem, region);
+
+        ObjectNode names = mapper.createObjectNode();
+        names.put("#t", "tempField");
+        names.put("#n", "name");
+        ObjectNode values = mapper.createObjectNode();
+        values.set(":newName", attributeValue("S", "new"));
+        values.set(":other", attributeValue("S", "x"));
+
+        service.updateItem("Users", userIdKey("u9"), null,
+                "REMOVE #t SET #n = :newName, extra = :other", names, values, "ALL_NEW", region);
+
+        JsonNode stored = service.getItem("Users", userIdKey("u9"), region);
+        assertFalse(stored.has("tempField"), "REMOVE must apply");
+        assertEquals("new", stored.get("name").get("S").asText(), "SET must apply");
+        assertEquals("x", stored.get("extra").get("S").asText(), "second SET assignment must apply");
+    }
+
+    @Test
+    void updateExpressionDeleteBeforeSetDoesNotSwallowSetKeywordAtIntraSetComma() {
+        String region = "eu-west-1";
+        createUsersTable(region);
+
+        ObjectNode initialItem = mapper.createObjectNode();
+        initialItem.set("userId", attributeValue("S", "u10"));
+        initialItem.set("name", attributeValue("S", "old"));
+        ObjectNode ss = mapper.createObjectNode();
+        ss.putArray("SS").add("keep").add("drop");
+        initialItem.set("tags", ss);
+        service.putItem("Users", initialItem, region);
+
+        ObjectNode names = mapper.createObjectNode();
+        names.put("#tag", "tags");
+        names.put("#n", "name");
+        ObjectNode values = mapper.createObjectNode();
+        ObjectNode dropSet = mapper.createObjectNode();
+        dropSet.putArray("SS").add("drop");
+        values.set(":d", dropSet);
+        values.set(":newName", attributeValue("S", "new"));
+        values.set(":other", attributeValue("S", "x"));
+
+        service.updateItem("Users", userIdKey("u10"), null,
+                "DELETE #tag :d SET #n = :newName, extra = :other", names, values, "ALL_NEW", region);
+
+        JsonNode stored = service.getItem("Users", userIdKey("u10"), region);
+        JsonNode remaining = stored.get("tags").get("SS");
+        assertEquals(1, remaining.size());
+        assertEquals("keep", remaining.get(0).asText());
+        assertEquals("new", stored.get("name").get("S").asText());
+        assertEquals("x", stored.get("extra").get("S").asText());
+    }
+
+    @Test
+    void updateExpressionFindsValidKeywordAfterAttributeNameSuffix() {
+        String region = "eu-west-1";
+        // Regression for the indexOfKeyword loop: an attribute name ending in
+        // a keyword substring ("oldSET") must not mask a following real clause.
+        createUsersTable(region);
+
+        ObjectNode initialItem = mapper.createObjectNode();
+        initialItem.set("userId", attributeValue("S", "u12"));
+        initialItem.set("oldSET", attributeValue("S", "bye"));
+        service.putItem("Users", initialItem, region);
+
+        ObjectNode values = mapper.createObjectNode();
+        values.set(":v", attributeValue("S", "hi"));
+
+        service.updateItem("Users", userIdKey("u12"), null,
+                "REMOVE oldSET SET newAttr = :v", null, values, "ALL_NEW", region);
+
+        JsonNode stored = service.getItem("Users", userIdKey("u12"), region);
+        assertFalse(stored.has("oldSET"), "oldSET should be removed");
+        assertEquals("hi", stored.get("newAttr").get("S").asText(),
+                "SET must still be recognised past the oldSET attribute name");
+    }
+
+    @Test
+    void updateExpressionDoesNotMatchKeywordInsideAttributeName() {
+        String region = "eu-west-1";
+        // False-positive guard for the indexOfKeyword boundary relaxation.
+        // An attribute literally named "prefixSET" must not be treated as a
+        // clause keyword, and a following comma must still split the SET clause.
+        createUsersTable(region);
+
+        ObjectNode initialItem = mapper.createObjectNode();
+        initialItem.set("userId", attributeValue("S", "u11"));
+        service.putItem("Users", initialItem, region);
+
+        ObjectNode values = mapper.createObjectNode();
+        values.set(":v1", attributeValue("S", "one"));
+        values.set(":v2", attributeValue("S", "two"));
+
+        ObjectNode names = mapper.createObjectNode();
+        names.put("#other", "other");
+
+        service.updateItem("Users", userIdKey("u11"), null,
+                "SET prefixSET = :v1, #other = :v2", names, values, "ALL_NEW", region);
+
+        JsonNode stored = service.getItem("Users", userIdKey("u11"), region);
+        assertEquals("one", stored.get("prefixSET").get("S").asText());
+        assertEquals("two", stored.get("other").get("S").asText());
+    }
+
+    @Test
+    void queryWithParenthesizedBetweenKeyCondition() {
+        String region = "eu-west-1";
+        createOrdersTable(region);
+        service.putItem("Orders", item("customerId", "c1", "orderId", "2026-01-01Z#a"), region);
+        service.putItem("Orders", item("customerId", "c1", "orderId", "2026-06-15Z#b"), region);
+        service.putItem("Orders", item("customerId", "c1", "orderId", "2026-12-31Z#c"), region);
+
+        ObjectNode exprValues = mapper.createObjectNode();
+        exprValues.set(":pk", attributeValue("S", "c1"));
+        exprValues.set(":start", attributeValue("S", "2026-01-01Z#"));
+        exprValues.set(":end", attributeValue("S", "2026-12-31Z#z"));
+
+        DynamoDbService.QueryResult result = service.query("Orders", null, exprValues,
+                "customerId = :pk AND (orderId BETWEEN :start AND :end)", null, null, region);
+        assertEquals(3, result.items().size(), "parenthesized BETWEEN should work");
+    }
+
+    @Test
+    void queryWithCompactAndBetweenKeyCondition() {
+        createOrdersTable("us-east-1");
+        service.putItem("Orders", item("customerId", "c1", "orderId", "2026-01-01Z#a"), "us-east-1");
+        service.putItem("Orders", item("customerId", "c1", "orderId", "2026-06-15Z#b"), "us-east-1");
+
+        ObjectNode exprNames = mapper.createObjectNode();
+        exprNames.put("#f0", "customerId");
+        exprNames.put("#f1", "orderId");
+        ObjectNode exprValues = mapper.createObjectNode();
+        exprValues.set(":v0", attributeValue("S", "c1"));
+        exprValues.set(":v1", attributeValue("S", "2026-01-01Z#"));
+        exprValues.set(":v2", attributeValue("S", "2026-12-31Z#z"));
+
+        DynamoDbService.QueryResult result = service.query("Orders", null, exprValues,
+                "(#f0 = :v0)AND(#f1 BETWEEN :v1 AND :v2)", null, null, null, null, null, exprNames, "us-east-1");
+        assertEquals(2, result.items().size(), "compact AND with BETWEEN should work");
+    }
+
+    @Test
+    void batchWriteItemReportsAKeySchemaMismatchTheWayAwsDoes() {
+        createUsersTable("us-east-1");
+        ObjectNode wrongType = mapper.createObjectNode();
+        wrongType.set("userId", attributeValue("N", "5"));
+
+        AwsException error = assertThrows(AwsException.class, () -> service.batchWriteItem(
+                Map.of("Users", List.of(putRequest(wrongType))), "us-east-1"));
+        assertEquals("The provided key element does not match the schema", error.getMessage());
+    }
+
+    @Test
+    void batchWriteItemReportsAMissingKeyAsASchemaMismatch() {
+        createUsersTable("us-east-1");
+        ObjectNode noKey = mapper.createObjectNode();
+        noKey.set("name", attributeValue("S", "x"));
+
+        AwsException putError = assertThrows(AwsException.class, () -> service.batchWriteItem(
+                Map.of("Users", List.of(putRequest(noKey))), "us-east-1"));
+        assertEquals("The provided key element does not match the schema", putError.getMessage());
+
+        AwsException deleteError = assertThrows(AwsException.class, () -> service.batchWriteItem(
+                Map.of("Users", List.of(deleteRequest(noKey))), "us-east-1"));
+        assertEquals("The provided key element does not match the schema", deleteError.getMessage());
+    }
+
+    @Test
+    void putItemStillNamesTheMismatchedKeyTypes() {
+        createUsersTable("us-east-1");
+        ObjectNode wrongType = mapper.createObjectNode();
+        wrongType.set("userId", attributeValue("N", "5"));
+
+        AwsException error = assertThrows(AwsException.class,
+                () -> service.putItem("Users", wrongType, "us-east-1"));
+        assertEquals("One or more parameter values were invalid: Type mismatch for key userId "
+                + "expected: S actual: N", error.getMessage());
+    }
+
+    @Test
+    void everySurfaceUsesTheSameEmptyStringKeyWording() {
+        createUsersTable("us-east-1");
+        ObjectNode emptyKey = mapper.createObjectNode();
+        emptyKey.set("userId", attributeValue("S", ""));
+        String expected = "One or more parameter values are not valid. The AttributeValue for a key "
+                + "attribute cannot contain an empty string value. Key: userId";
+
+        AwsException batchError = assertThrows(AwsException.class, () -> service.batchWriteItem(
+                Map.of("Users", List.of(putRequest(emptyKey))), "us-east-1"));
+        assertEquals(expected, batchError.getMessage());
+
+        AwsException putError = assertThrows(AwsException.class,
+                () -> service.putItem("Users", emptyKey, "us-east-1"));
+        assertEquals(expected, putError.getMessage());
+
+        AwsException getError = assertThrows(AwsException.class,
+                () -> service.getItem("Users", emptyKey, "us-east-1"));
+        assertEquals(expected, getError.getMessage());
+    }
+
+    @Test
+    void rejectsAnEmptyBinaryKeyValue() {
+        service.createTable("Binaries",
+                List.of(new KeySchemaElement("pk", "HASH")),
+                List.of(new AttributeDefinition("pk", "B")),
+                5L, 5L, "us-east-1");
+        ObjectNode emptyBinary = mapper.createObjectNode();
+        emptyBinary.set("pk", attributeValue("B", ""));
+
+        AwsException error = assertThrows(AwsException.class,
+                () -> service.putItem("Binaries", emptyBinary, "us-east-1"));
+        assertEquals("One or more parameter values are not valid. The AttributeValue for a key "
+                + "attribute cannot contain an empty binary value. Key: pk", error.getMessage());
+    }
+
+    private JsonNode putRequest(ObjectNode item) {
+        ObjectNode request = mapper.createObjectNode();
+        request.set("PutRequest", mapper.createObjectNode().set("Item", item));
+        return request;
+    }
+
+    private JsonNode deleteRequest(ObjectNode key) {
+        ObjectNode request = mapper.createObjectNode();
+        request.set("DeleteRequest", mapper.createObjectNode().set("Key", key));
+        return request;
+    }
+
+    @Test
+    void updateItemRejectsSetThroughMissingIntermediateMapPath() {
+        createOrdersTable("us-east-1");
+        service.putItem("Orders", item("customerId", "c9", "orderId", "o9"), "us-east-1");
+
+        ObjectNode exprNames = mapper.createObjectNode();
+        exprNames.put("#missing", "missing");
+        ObjectNode exprValues = mapper.createObjectNode();
+        exprValues.set(":val", attributeValue("S", "x"));
+
+        ObjectNode key = mapper.createObjectNode();
+        key.set("customerId", attributeValue("S", "c9"));
+        key.set("orderId", attributeValue("S", "o9"));
+
+        AwsException ex = assertThrows(AwsException.class, () -> service.updateItem("Orders", key, null,
+                "SET #missing.subkey = :val", exprNames, exprValues, "NONE", null, "us-east-1", "NONE"));
+        assertEquals("The document path provided in the update expression is invalid for update", ex.getMessage());
+    }
+
+    @Test
+    void updateItemWithNestedDottedPathSetAndRemove() {
+        createOrdersTable("us-east-1");
+        // AWS requires every intermediate of a document path to already exist,
+        // so the details map is seeded before SET #details.subkey runs.
+        ObjectNode initialItem = item("customerId", "c1", "orderId", "o1");
+        initialItem.set("details", mapAttributeValue(mapper.createObjectNode()));
+        service.putItem("Orders", initialItem, "us-east-1");
+
+        ObjectNode exprNames = mapper.createObjectNode();
+        exprNames.put("#details", "details");
+        exprNames.put("#status", "status");
+
+        ObjectNode exprValues = mapper.createObjectNode();
+        exprValues.set(":val", attributeValue("S", "hello"));
+        exprValues.set(":s", attributeValue("S", "active"));
+
+        // SET a nested map field via dotted path: #details.subkey = :val, #status = :s
+        ObjectNode key = mapper.createObjectNode();
+        key.set("customerId", attributeValue("S", "c1"));
+        key.set("orderId", attributeValue("S", "o1"));
+
+        DynamoDbService.UpdateResult result = service.updateItem("Orders", key, null,
+                "SET #details.subkey = :val, #status = :s", exprNames, exprValues, "ALL_NEW", null, "us-east-1", "NONE");
+
+        JsonNode updated = result.newItem();
+        assertNotNull(updated);
+        // status should be set at top level
+        assertEquals("active", updated.get("status").get("S").asText());
+        // details.subkey should be set in a nested map
+        assertNotNull(updated.get("details"), "details map should exist");
+        assertTrue(updated.get("details").has("M"), "details should be a DynamoDB Map");
+        assertEquals("hello", updated.get("details").get("M").get("subkey").get("S").asText());
+
+        // Now REMOVE the nested field
+        result = service.updateItem("Orders", key, null,
+                "REMOVE #details.subkey", exprNames, null, "ALL_NEW", null, "us-east-1", "NONE");
+
+        updated = result.newItem();
+        // The subkey should be removed from the nested map
+        assertFalse(updated.get("details").get("M").has("subkey"), "subkey should be removed");
+        // status should still be there
+        assertEquals("active", updated.get("status").get("S").asText());
+    }
+
+    @Test
+    void updateItemSetFollowedByRemovePreservesAllAssignments() {
+        // Reproduces the bug where SET's last assignment was lost because findNextComma
+        // consumed into the REMOVE clause's comma-separated list.
+        createOrdersTable("us-east-1");
+        service.putItem("Orders", item("customerId", "c1", "orderId", "o1"), "us-east-1");
+
+        ObjectNode exprNames = mapper.createObjectNode();
+        exprNames.put("#a", "fieldA");
+        exprNames.put("#b", "fieldB");
+        exprNames.put("#c", "fieldC");
+        exprNames.put("#d", "fieldD");
+
+        ObjectNode exprValues = mapper.createObjectNode();
+        exprValues.set(":v1", attributeValue("S", "val1"));
+        exprValues.set(":v2", attributeValue("S", "val2"));
+
+        ObjectNode key = mapper.createObjectNode();
+        key.set("customerId", attributeValue("S", "c1"));
+        key.set("orderId", attributeValue("S", "o1"));
+
+        // First, set all four fields
+        service.updateItem("Orders", key, null,
+                "SET #a = :v1, #b = :v1, #c = :v1, #d = :v1", exprNames, exprValues, "NONE", null, "us-east-1", "NONE");
+
+        // SET last two assignments, then REMOVE two fields (comma-separated)
+        DynamoDbService.UpdateResult result = service.updateItem("Orders", key, null,
+                "SET #a = :v1, #b = :v2 REMOVE #c, #d", exprNames, exprValues, "ALL_NEW", null, "us-east-1", "NONE");
+
+        JsonNode updated = result.newItem();
+        assertNotNull(updated);
+        assertEquals("val1", updated.get("fieldA").get("S").asText(), "fieldA should be set");
+        assertEquals("val2", updated.get("fieldB").get("S").asText(), "fieldB should be set (last SET before REMOVE)");
+        assertNull(updated.get("fieldC"), "fieldC should be removed");
+        assertNull(updated.get("fieldD"), "fieldD should be removed");
+    }
+
+    @Test
+    void updateItemConditionFailedReturnValuesNone() {
+        createOrdersTable("us-east-1");
+
+        ObjectNode order = item("customerId", "1", "orderId", "sort1", "testAttr", "testVal");
+        ObjectNode key = item("customerId", "1", "orderId", "sort1");
+        service.putItem("Orders", order, "us-east-1");
+
+        ObjectNode exprValues = mapper.createObjectNode();
+        ObjectNode newVal = attributeValue("S", "newVal");
+        ObjectNode conditionVal = attributeValue("S", "testVal");
+        exprValues.set(":val", newVal);
+        exprValues.set(":test", conditionVal);
+
+        ConditionalCheckFailedException ex = assertThrows(ConditionalCheckFailedException.class, () -> service.updateItem("Orders", key, null,
+                "SET newAttr = :val",
+                null, exprValues, "NONE", "testAttr <> :test", "us-east-1", "NONE"));
+
+        JsonNode stored = service.getItem("Orders", key, "us-east-1");
+        assertNotNull(stored, "item should exist");
+        assertFalse(stored.has("newAttr"), "new attribute should not have been added");
+
+        assertNull(ex.getItem());
+    }
+
+    @Test
+    void updateItemConditionFailedReturnValuesAllOld() {
+        createOrdersTable("us-east-1");
+
+        ObjectNode order = item("customerId", "1", "orderId", "sort1", "testAttr", "testVal");
+        ObjectNode key = item("customerId", "1", "orderId", "sort1");
+        service.putItem("Orders", order, "us-east-1");
+
+        ObjectNode exprValues = mapper.createObjectNode();
+        ObjectNode newVal = attributeValue("S", "newVal");
+        ObjectNode conditionVal = attributeValue("S", "testVal");
+        exprValues.set(":val", newVal);
+        exprValues.set(":test", conditionVal);
+
+        ConditionalCheckFailedException ex = assertThrows(ConditionalCheckFailedException.class, () -> service.updateItem("Orders", key, null,
+                "SET newAttr = :val",
+                null, exprValues, "NONE", "testAttr <> :test", "us-east-1", "ALL_OLD"));
+
+        JsonNode stored = service.getItem("Orders", key, "us-east-1");
+        assertNotNull(stored, "item should exist");
+        assertFalse(stored.has("newAttr"), "new attribute should not have been added");
+
+        JsonNode returnedItem = ex.getItem();
+        assertNotNull(returnedItem);
+        assertTrue(returnedItem.has("testAttr"), "returned item should have testAttr");
+        assertEquals("testVal", returnedItem.get("testAttr").get("S").asText());
+    }
+
+    @Test
+    void putItemNetNewConditionFailedReturnValuesNone() {
+        createOrdersTable("us-east-1");
+
+        ObjectNode order = item("customerId", "1", "orderId", "sort1", "testAttr", "testVal");
+        ObjectNode key = item("customerId", "1", "orderId", "sort1");
+        ConditionalCheckFailedException ex = assertThrows(ConditionalCheckFailedException.class, () ->
+            service.putItem("Orders", order, "attribute_exists(customerId)", null, null, "us-east-1", "NONE"));
+
+        JsonNode stored = service.getItem("Orders", key, "us-east-1");
+        assertNull(stored, "item should not exist");
+
+        assertNull(ex.getItem());
+    }
+
+    @Test
+    void putItemNetNewConditionFailedReturnValuesAllOld() {
+        createOrdersTable("us-east-1");
+
+        ObjectNode order = item("customerId", "1", "orderId", "sort1", "testAttr", "testVal");
+        ObjectNode key = item("customerId", "1", "orderId", "sort1");
+        ConditionalCheckFailedException ex = assertThrows(ConditionalCheckFailedException.class, () ->
+            service.putItem("Orders", order, "attribute_exists(customerId)", null, null, "us-east-1", "ALL_OLD"));
+
+        JsonNode stored = service.getItem("Orders", key, "us-east-1");
+        assertNull(stored, "item should not exist");
+
+        assertNull(ex.getItem());
+    }
+
+    @Test
+    void putItemExistingConditionFailedReturnValuesNone() {
+        createOrdersTable("us-east-1");
+
+        ObjectNode order1 = item("customerId", "1", "orderId", "sort1", "testAttr", "testVal");
+        ObjectNode order2 = item("customerId", "1", "orderId", "sort1", "testAttr", "testVal1");
+        ObjectNode key = item("customerId", "1", "orderId", "sort1");
+
+        service.putItem("Orders", order1, "us-east-1");
+
+        ConditionalCheckFailedException ex = assertThrows(ConditionalCheckFailedException.class, () ->
+            service.putItem("Orders", order2, "attribute_exists(someAttr)", null, null, "us-east-1", "NONE"));
+
+        JsonNode stored = service.getItem("Orders", key, "us-east-1");
+        assertNotNull(stored, "item should exist");
+        assertTrue(stored.has("testAttr"), "item should have testAttr");
+        assertEquals("testVal", stored.get("testAttr").get("S").asText());
+
+        assertNull(ex.getItem());
+    }
+
+    @Test
+    void putItemExistingConditionFailedReturnValuesAllOld() {
+        createOrdersTable("us-east-1");
+
+        ObjectNode order1 = item("customerId", "1", "orderId", "sort1", "testAttr", "testVal");
+        ObjectNode order2 = item("customerId", "1", "orderId", "sort1", "testAttr", "testVal1");
+        ObjectNode key = item("customerId", "1", "orderId", "sort1");
+
+        service.putItem("Orders", order1, "us-east-1");
+
+        ConditionalCheckFailedException ex = assertThrows(ConditionalCheckFailedException.class, () ->
+            service.putItem("Orders", order2, "attribute_exists(someAttr)", null, null, "us-east-1", "ALL_OLD"));
+
+        JsonNode stored = service.getItem("Orders", key, "us-east-1");
+        assertNotNull(stored, "item should exist");
+        assertTrue(stored.has("testAttr"), "item should have testAttr");
+        assertEquals("testVal", stored.get("testAttr").get("S").asText());
+
+        JsonNode returnedItem = ex.getItem();
+        assertNotNull(returnedItem);
+        assertTrue(returnedItem.has("testAttr"), "returned item should have testAttr");
+        assertEquals("testVal", returnedItem.get("testAttr").get("S").asText());
+    }
+
+
+
+    @Test
+    void deleteItemConditionFailedReturnValuesNone() {
+        createOrdersTable("us-east-1");
+
+        ObjectNode order = item("customerId", "1", "orderId", "sort1");
+        ObjectNode key = item("customerId", "1", "orderId", "sort1");
+
+        service.putItem("Orders", order, "us-east-1");
+
+        ConditionalCheckFailedException ex = assertThrows(ConditionalCheckFailedException.class, () ->
+            service.deleteItem("Orders", key, "attribute_exists(someAttr)", null, null, "us-east-1", "NONE"));
+
+        JsonNode stored = service.getItem("Orders", key, "us-east-1");
+        assertNotNull(stored, "item should exist");
+
+        assertNull(ex.getItem());
+    }
+
+    @Test
+    void deleteItemConditionFailedReturnValuesAllOld() {
+        createOrdersTable("us-east-1");
+
+        ObjectNode order = item("customerId", "1", "orderId", "sort1");
+        ObjectNode key = item("customerId", "1", "orderId", "sort1");
+
+        service.putItem("Orders", order, "us-east-1");
+
+        ConditionalCheckFailedException ex = assertThrows(ConditionalCheckFailedException.class, () ->
+            service.deleteItem("Orders", key, "attribute_exists(someAttr)", null, null, "us-east-1", "ALL_OLD"));
+
+        JsonNode stored = service.getItem("Orders", key, "us-east-1");
+        assertNotNull(stored, "item should exist");
+
+        JsonNode returnedItem = ex.getItem();
+        assertNotNull(returnedItem);
+        assertTrue(returnedItem.has("customerId"), "returned item should have customerId");
+        assertEquals("1", returnedItem.get("customerId").get("S").asText());
+    }
+
+    // ── Regression tests: cross-attribute SET, parenthesized arithmetic,
+    //    and TransactWriteItems ClientRequestToken idempotency ──
+
+    @Test
+    void updateItemSetCrossAttributeReferenceUsesPreUpdateValue() {
+        String region = "eu-west-1";
+        // "SET a = :new, b = a" must write the ORIGINAL value of a into b.
+        // AWS DynamoDB applies SET actions atomically; attribute references on the RHS
+        // resolve to pre-update values.
+        createUsersTable(region);
+
+        ObjectNode existing = mapper.createObjectNode();
+        existing.set("userId", attributeValue("S", "u1"));
+        existing.set("a", attributeValue("S", "original_a"));
+        existing.set("b", attributeValue("S", "original_b"));
+        service.putItem("Users", existing, region);
+
+        ObjectNode key = item("userId", "u1");
+        ObjectNode exprValues = mapper.createObjectNode();
+        exprValues.set(":new_a", attributeValue("S", "new_a_value"));
+
+        service.updateItem("Users", key, null,
+                "SET a = :new_a, b = a",
+                null, exprValues, null, region);
+
+        JsonNode stored = service.getItem("Users", key, region);
+        assertNotNull(stored);
+        assertEquals("new_a_value", stored.get("a").get("S").asText(),
+                "a should be updated to the new value");
+        assertEquals("original_a", stored.get("b").get("S").asText(),
+                "b should receive a's pre-update value (atomic application)");
+    }
+
+    @Test
+    void updateItemSetCrossAttributeReferenceWithExpressionAttributeNames() {
+        String region = "eu-west-1";
+        // Same as above but using #placeholder names — the form most client libraries emit.
+        createUsersTable(region);
+
+        ObjectNode existing = mapper.createObjectNode();
+        existing.set("userId", attributeValue("S", "u1"));
+        existing.set("status", attributeValue("S", "ISSUED"));
+        existing.set("previousStatus", attributeValue("S", "NONE"));
+        service.putItem("Users", existing, region);
+
+        ObjectNode key = item("userId", "u1");
+        ObjectNode exprAttrNames = mapper.createObjectNode();
+        exprAttrNames.put("#s", "status");
+        exprAttrNames.put("#p", "previousStatus");
+        ObjectNode exprValues = mapper.createObjectNode();
+        exprValues.set(":v", attributeValue("S", "VOID"));
+
+        service.updateItem("Users", key, null,
+                "SET #s = :v, #p = #s",
+                exprAttrNames, exprValues, null, region);
+
+        JsonNode stored = service.getItem("Users", key, region);
+        assertEquals("VOID", stored.get("status").get("S").asText());
+        assertEquals("ISSUED", stored.get("previousStatus").get("S").asText(),
+                "previousStatus should receive the pre-update value of status");
+    }
+
+    @Test
+    void updateItemSetArithmeticOverflowThrowsValidationException() {
+        String region = "eu-west-1";
+        createUsersTable(region);
+        ObjectNode exprValues = mapper.createObjectNode();
+        exprValues.set(":a", attributeValue("N", "9.9e125"));
+        exprValues.set(":b", attributeValue("N", "9.9e125"));
+
+        AwsException ex = assertThrows(AwsException.class, () ->
+                service.updateItem("Users", item("userId", "u1"), null,
+                        "SET n = :a + :b", null, exprValues, null, region));
+        assertEquals("ValidationException", ex.getErrorCode());
+        assertEquals("Number overflow. Attempting to store a number with magnitude larger than supported range",
+                ex.getMessage());
+        assertNull(service.getItem("Users", item("userId", "u1"), region));
+    }
+
+    @Test
+    void updateItemAddOverflowThrowsValidationException() {
+        String region = "eu-west-1";
+        createUsersTable(region);
+        ObjectNode existing = item("userId", "u1");
+        existing.set("n", attributeValue("N", "9.9e125"));
+        service.putItem("Users", existing, region);
+        ObjectNode exprValues = mapper.createObjectNode();
+        exprValues.set(":a", attributeValue("N", "9.9e125"));
+
+        AwsException ex = assertThrows(AwsException.class, () ->
+                service.updateItem("Users", item("userId", "u1"), null,
+                        "ADD n :a", null, exprValues, null, region));
+        assertEquals("ValidationException", ex.getErrorCode());
+        assertEquals("Number overflow. Attempting to store a number with magnitude larger than supported range",
+                ex.getMessage());
+    }
+
+    @Test
+    void updateItemSetArithmeticTrimsTrailingZeros() {
+        String region = "eu-west-1";
+        createUsersTable(region);
+        ObjectNode exprValues = mapper.createObjectNode();
+        exprValues.set(":a", attributeValue("N", "10"));
+        exprValues.set(":b", attributeValue("N", "9.0"));
+
+        service.updateItem("Users", item("userId", "u1"), null,
+                "SET n = :a - :b", null, exprValues, null, region);
+
+        assertEquals("1", service.getItem("Users", item("userId", "u1"), region).get("n").get("N").asText());
+    }
+
+    @Test
+    void updateItemAddTrimsTrailingZeros() {
+        String region = "eu-west-1";
+        createUsersTable(region);
+        ObjectNode existing = item("userId", "u1");
+        existing.set("n", attributeValue("N", "1.5"));
+        service.putItem("Users", existing, region);
+        ObjectNode exprValues = mapper.createObjectNode();
+        exprValues.set(":a", attributeValue("N", "1.5"));
+
+        service.updateItem("Users", item("userId", "u1"), null,
+                "ADD n :a", null, exprValues, null, region);
+
+        assertEquals("3", service.getItem("Users", item("userId", "u1"), region).get("n").get("N").asText());
+    }
+
+    @Test
+    void updateItemAddToAMissingAttributeTrimsTrailingZeros() {
+        String region = "eu-west-1";
+        createUsersTable(region);
+        ObjectNode exprValues = mapper.createObjectNode();
+        exprValues.set(":a", attributeValue("N", "1.50"));
+
+        service.updateItem("Users", item("userId", "u1"), null,
+                "ADD n :a", null, exprValues, null, region);
+
+        assertEquals("1.5", service.getItem("Users", item("userId", "u1"), region).get("n").get("N").asText());
+    }
+
+    @Test
+    void updateItemSetValueTrimsTrailingZeros() {
+        String region = "eu-west-1";
+        createUsersTable(region);
+        ObjectNode exprValues = mapper.createObjectNode();
+        exprValues.set(":a", attributeValue("N", "01.50"));
+
+        service.updateItem("Users", item("userId", "u1"), null,
+                "SET n = :a", null, exprValues, null, region);
+
+        assertEquals("1.5", service.getItem("Users", item("userId", "u1"), region).get("n").get("N").asText());
+    }
+
+    @Test
+    void updateItemSetParenthesizedArithmeticAppliesSubtraction() {
+        String region = "eu-west-1";
+        // "SET c = (c - :v)" must subtract identically to the unwrapped form.
+        // Previously, findArithmeticOperator only returned operators at paren-depth 0,
+        // so wrapped arithmetic silently no-oped.
+        createUsersTable(region);
+
+        ObjectNode existing = mapper.createObjectNode();
+        existing.set("userId", attributeValue("S", "u1"));
+        ObjectNode counterVal = mapper.createObjectNode();
+        counterVal.put("N", "5");
+        existing.set("counter", counterVal);
+        service.putItem("Users", existing, region);
+
+        ObjectNode key = item("userId", "u1");
+        ObjectNode exprAttrNames = mapper.createObjectNode();
+        exprAttrNames.put("#c", "counter");
+        ObjectNode exprValues = mapper.createObjectNode();
+        ObjectNode vNode = mapper.createObjectNode();
+        vNode.put("N", "1");
+        exprValues.set(":v", vNode);
+
+        service.updateItem("Users", key, null,
+                "SET #c = (#c - :v)",
+                exprAttrNames, exprValues, null, region);
+
+        JsonNode stored = service.getItem("Users", key, region);
+        assertEquals("4", stored.get("counter").get("N").asText(),
+                "parenthesized arithmetic should subtract identically to the unwrapped form");
+    }
+
+    @Test
+    void updateItemSetParenthesizedIfNotExistsArithmeticAlongsidePlainAssignment() {
+        String region = "eu-west-1";
+        // ElectroDB-style emission: "SET c = (if_not_exists(c, :d) - :v), other = :s".
+        // Previously the parenthesized arithmetic was silently dropped while the simple
+        // SET clause applied — a confusing partial-success outcome.
+        createUsersTable(region);
+
+        ObjectNode existing = mapper.createObjectNode();
+        existing.set("userId", attributeValue("S", "u1"));
+        ObjectNode counterVal = mapper.createObjectNode();
+        counterVal.put("N", "5");
+        existing.set("counter", counterVal);
+        existing.set("other", attributeValue("S", "old"));
+        service.putItem("Users", existing, region);
+
+        ObjectNode key = item("userId", "u1");
+        ObjectNode exprAttrNames = mapper.createObjectNode();
+        exprAttrNames.put("#c", "counter");
+        exprAttrNames.put("#o", "other");
+        ObjectNode exprValues = mapper.createObjectNode();
+        ObjectNode vNode = mapper.createObjectNode(); vNode.put("N", "1");
+        ObjectNode dNode = mapper.createObjectNode(); dNode.put("N", "0");
+        exprValues.set(":v", vNode);
+        exprValues.set(":d", dNode);
+        exprValues.set(":s", attributeValue("S", "new"));
+
+        service.updateItem("Users", key, null,
+                "SET #c = (if_not_exists(#c, :d) - :v), #o = :s",
+                exprAttrNames, exprValues, null, region);
+
+        JsonNode stored = service.getItem("Users", key, region);
+        assertEquals("4", stored.get("counter").get("N").asText(),
+                "parenthesized arithmetic should apply alongside a simple SET clause");
+        assertEquals("new", stored.get("other").get("S").asText(),
+                "the non-parenthesized clause should still apply");
+    }
+
+    @Test
+    void updateItemSetDoubledOuterParensStillApplies() {
+        String region = "eu-west-1";
+        // Defence-in-depth: even multiply-wrapped expressions should parse the same as bare.
+        createUsersTable(region);
+
+        ObjectNode existing = mapper.createObjectNode();
+        existing.set("userId", attributeValue("S", "u1"));
+        ObjectNode counterVal = mapper.createObjectNode(); counterVal.put("N", "10");
+        existing.set("counter", counterVal);
+        service.putItem("Users", existing, region);
+
+        ObjectNode key = item("userId", "u1");
+        ObjectNode exprValues = mapper.createObjectNode();
+        ObjectNode vNode = mapper.createObjectNode(); vNode.put("N", "3");
+        exprValues.set(":v", vNode);
+
+        ObjectNode exprNames = mapper.createObjectNode();
+        exprNames.put("#cnt", "counter");
+
+        service.updateItem("Users", key, null,
+                "SET #cnt = ((#cnt - :v))",
+                exprNames, exprValues, null, region);
+
+        JsonNode stored = service.getItem("Users", key, region);
+        assertEquals("7", stored.get("counter").get("N").asText());
+    }
+
+    @Test
+    void transactWriteItemsReplayWithSameTokenAndBodyIsNoOp() {
+        // ClientRequestToken contract: same token + same body → no re-application of writes.
+        createUsersTable("us-east-1");
+        service.putItem("Users", item("userId", "u1"), "us-east-1");
+
+        ObjectNode update = mapper.createObjectNode();
+        update.put("TableName", "Users");
+        update.set("Key", item("userId", "u1"));
+        ObjectNode exprValues = mapper.createObjectNode();
+        ObjectNode oneVal = mapper.createObjectNode(); oneVal.put("N", "1");
+        exprValues.set(":one", oneVal);
+        ObjectNode exprNames = mapper.createObjectNode();
+        exprNames.put("#c", "counter");
+        update.put("UpdateExpression", "ADD #c :one");
+        update.set("ExpressionAttributeNames", exprNames);
+        update.set("ExpressionAttributeValues", exprValues);
+
+        ObjectNode transactItem = mapper.createObjectNode();
+        transactItem.set("Update", update);
+
+        ObjectNode rawRequest = mapper.createObjectNode();
+        rawRequest.putArray("TransactItems").add(transactItem);
+        rawRequest.put("ClientRequestToken", "tok-replay");
+
+        // First call applies the ADD: counter becomes 1.
+        service.transactWriteItems(List.of(transactItem), "us-east-1", "tok-replay", rawRequest);
+        // Replay must be a no-op.
+        service.transactWriteItems(List.of(transactItem), "us-east-1", "tok-replay", rawRequest);
+
+        JsonNode stored = service.getItem("Users", item("userId", "u1"), "us-east-1");
+        assertEquals("1", stored.get("counter").get("N").asText(),
+                "replay with the same ClientRequestToken must not re-apply the write");
+    }
+
+    @Test
+    void transactWriteItemsReplayWithSameTokenButDifferentBodyThrowsIdempotentMismatch() {
+        // ClientRequestToken contract: same token + different body → IdempotentParameterMismatchException.
+        createUsersTable("us-east-1");
+        service.putItem("Users", item("userId", "u1"), "us-east-1");
+
+        ObjectNode exprNames = mapper.createObjectNode();
+        exprNames.put("#c", "counter");
+
+        // First request: ADD #c :x with :x = 1
+        ObjectNode update1 = mapper.createObjectNode();
+        update1.put("TableName", "Users");
+        update1.set("Key", item("userId", "u1"));
+        ObjectNode exprValues1 = mapper.createObjectNode();
+        ObjectNode oneVal = mapper.createObjectNode(); oneVal.put("N", "1");
+        exprValues1.set(":x", oneVal);
+        update1.put("UpdateExpression", "ADD #c :x");
+        update1.set("ExpressionAttributeNames", exprNames);
+        update1.set("ExpressionAttributeValues", exprValues1);
+        ObjectNode tx1 = mapper.createObjectNode(); tx1.set("Update", update1);
+        ObjectNode raw1 = mapper.createObjectNode();
+        raw1.putArray("TransactItems").add(tx1);
+        raw1.put("ClientRequestToken", "tok-mismatch");
+
+        service.transactWriteItems(List.of(tx1), "us-east-1", "tok-mismatch", raw1);
+
+        // Second request reuses the token but changes :x to 2.
+        ObjectNode update2 = mapper.createObjectNode();
+        update2.put("TableName", "Users");
+        update2.set("Key", item("userId", "u1"));
+        ObjectNode exprValues2 = mapper.createObjectNode();
+        ObjectNode twoVal = mapper.createObjectNode(); twoVal.put("N", "2");
+        exprValues2.set(":x", twoVal);
+        update2.put("UpdateExpression", "ADD #c :x");
+        update2.set("ExpressionAttributeNames", exprNames);
+        update2.set("ExpressionAttributeValues", exprValues2);
+        ObjectNode tx2 = mapper.createObjectNode(); tx2.set("Update", update2);
+        ObjectNode raw2 = mapper.createObjectNode();
+        raw2.putArray("TransactItems").add(tx2);
+        raw2.put("ClientRequestToken", "tok-mismatch");
+
+        AwsException ex = assertThrows(AwsException.class, () ->
+                service.transactWriteItems(List.of(tx2), "us-east-1", "tok-mismatch", raw2));
+        assertEquals("IdempotentParameterMismatchException", ex.getErrorCode());
+
+        // First call applied; second was rejected — counter remains 1.
+        JsonNode stored = service.getItem("Users", item("userId", "u1"), "us-east-1");
+        assertEquals("1", stored.get("counter").get("N").asText());
+    }
+
+    @Test
+    void transactWriteItemsNullClientRequestTokenSkipsIdempotencyCheck() {
+        // When no token is supplied, two calls with identical bodies should both apply
+        // (i.e. counter ends at 2). This is the pre-existing behaviour and must remain.
+        createUsersTable("us-east-1");
+        service.putItem("Users", item("userId", "u1"), "us-east-1");
+
+        ObjectNode update = mapper.createObjectNode();
+        update.put("TableName", "Users");
+        update.set("Key", item("userId", "u1"));
+        ObjectNode exprNames = mapper.createObjectNode();
+        exprNames.put("#c", "counter");
+        ObjectNode exprValues = mapper.createObjectNode();
+        ObjectNode oneVal = mapper.createObjectNode(); oneVal.put("N", "1");
+        exprValues.set(":one", oneVal);
+        update.put("UpdateExpression", "ADD #c :one");
+        update.set("ExpressionAttributeNames", exprNames);
+        update.set("ExpressionAttributeValues", exprValues);
+        ObjectNode tx = mapper.createObjectNode(); tx.set("Update", update);
+
+        service.transactWriteItems(List.of(tx), "us-east-1", null, null);
+        service.transactWriteItems(List.of(tx), "us-east-1", null, null);
+
+        JsonNode stored = service.getItem("Users", item("userId", "u1"), "us-east-1");
+        assertEquals("2", stored.get("counter").get("N").asText());
+    }
+
+    @Test
+    void transactWriteItemsReplayDuringTheFirstCallWaitsForItsCapacity() throws Exception {
+        @SuppressWarnings("unchecked")
+        StorageBackend<String, Map<String, JsonNode>> itemStore = mock(StorageBackend.class);
+        DynamoDbService svc = new DynamoDbService(
+                new InMemoryStorage<>(), itemStore, new RegionResolver("us-east-1", "000000000000"));
+        svc.createTable("Users",
+                List.of(new KeySchemaElement("userId", "HASH")),
+                List.of(new AttributeDefinition("userId", "S")),
+                5L, 5L, "us-east-1");
+        CountDownLatch committing = new CountDownLatch(1);
+        CountDownLatch release = new CountDownLatch(1);
+        doAnswer(invocation -> {
+            committing.countDown();
+            release.await();
+            return null;
+        }).when(itemStore).put(any(), any());
+        JsonNode put = mapper.readTree("""
+                {"Put":{"TableName":"Users","Item":{"userId":{"S":"u1"}}}}
+                """);
+        JsonNode rawRequest = mapper.readTree("""
+                {"ClientRequestToken":"tok-wait","TransactItems":[{"Put":{"TableName":"Users","Item":{"userId":{"S":"u1"}}}}]}
+                """);
+
+        ExecutorService executor = Executors.newFixedThreadPool(2);
+        try {
+            Future<DynamoDbService.TransactWriteResult> first = executor.submit(() ->
+                    svc.transactWriteItems(List.of(put), "us-east-1", "tok-wait", rawRequest));
+            assertTrue(committing.await(5, TimeUnit.SECONDS));
+            Future<DynamoDbService.TransactWriteResult> replay = executor.submit(() ->
+                    svc.transactWriteItems(List.of(put), "us-east-1", "tok-wait", rawRequest));
+            assertThrows(TimeoutException.class, () -> replay.get(200, TimeUnit.MILLISECONDS));
+            release.countDown();
+
+            assertFalse(first.get(5, TimeUnit.SECONDS).replayed());
+            DynamoDbService.TransactWriteResult replayed = replay.get(5, TimeUnit.SECONDS);
+            assertTrue(replayed.replayed());
+            assertEquals(2.0, replayed.capacity().get("Users").table());
+        } finally {
+            release.countDown();
+            executor.shutdownNow();
+        }
+    }
+
+    @Test
+    void transactWriteItemsCancelledCallDoesNotKeepItsToken() throws Exception {
+        createUsersTable("us-east-1");
+        JsonNode put = mapper.readTree("""
+                {"Put":{"TableName":"Users","Item":{"userId":{"S":"u1"}},"ConditionExpression":"attribute_exists(userId)"}}
+                """);
+        ObjectNode rawRequest = mapper.createObjectNode();
+        rawRequest.putArray("TransactItems").add(put);
+        rawRequest.put("ClientRequestToken", "tok-cancel");
+
+        assertThrows(TransactionCanceledException.class, () ->
+                service.transactWriteItems(List.of(put), "us-east-1", "tok-cancel", rawRequest));
+        assertThrows(TransactionCanceledException.class, () ->
+                service.transactWriteItems(List.of(put), "us-east-1", "tok-cancel", rawRequest));
+
+        service.putItem("Users", item("userId", "u1"), "us-east-1");
+        assertFalse(service.transactWriteItems(List.of(put), "us-east-1", "tok-cancel", rawRequest).replayed());
+        assertTrue(service.transactWriteItems(List.of(put), "us-east-1", "tok-cancel", rawRequest).replayed());
+    }
+
+    @Test
+    void batchWriteItem_flushesOncePerTable_notPerItem() {
+        @SuppressWarnings("unchecked")
+        StorageBackend<String, Map<String, JsonNode>> mockItemStore = mock(StorageBackend.class);
+        StorageBackend<String, TableDefinition> tableStore = new InMemoryStorage<>();
+        DynamoDbService serviceWithMock = new DynamoDbService(
+                tableStore, mockItemStore, new RegionResolver("us-east-1", "000000000000"));
+
+        serviceWithMock.createTable("Users",
+                List.of(new KeySchemaElement("userId", "HASH")),
+                List.of(new AttributeDefinition("userId", "S")),
+                5L, 5L, "us-east-1");
+
+        List<JsonNode> writeRequests = new ArrayList<>();
+        for (int i = 0; i < 5; i++) {
+            ObjectNode item = mapper.createObjectNode();
+            item.set("userId", attributeValue("S", "u" + i));
+            ObjectNode putReq = mapper.createObjectNode();
+            putReq.set("Item", item);
+            ObjectNode req = mapper.createObjectNode();
+            req.set("PutRequest", putReq);
+            writeRequests.add(req);
+        }
+
+        serviceWithMock.batchWriteItem(Map.of("Users", writeRequests), "us-east-1");
+
+        // Verify that itemStore.put was called exactly once for the table, not 5 times
+        verify(mockItemStore, times(1))
+                .put(eq("us-east-1::Users"), any());
+    }
+
+    @Test
+    void transactWriteItems_flushesOncePerTable_notPerItem() {
+        @SuppressWarnings("unchecked")
+        StorageBackend<String, Map<String, JsonNode>> mockItemStore = mock(StorageBackend.class);
+        StorageBackend<String, TableDefinition> tableStore = new InMemoryStorage<>();
+        DynamoDbService serviceWithMock = new DynamoDbService(
+                tableStore, mockItemStore, new RegionResolver("us-east-1", "000000000000"));
+
+        serviceWithMock.createTable("Users",
+                List.of(new KeySchemaElement("userId", "HASH")),
+                List.of(new AttributeDefinition("userId", "S")),
+                5L, 5L, "us-east-1");
+
+        List<JsonNode> transactItems = new ArrayList<>();
+        for (int i = 0; i < 5; i++) {
+            ObjectNode item = mapper.createObjectNode();
+            item.set("userId", attributeValue("S", "tx-u" + i));
+            ObjectNode put = mapper.createObjectNode();
+            put.put("TableName", "Users");
+            put.set("Item", item);
+            ObjectNode txItem = mapper.createObjectNode();
+            txItem.set("Put", put);
+            transactItems.add(txItem);
+        }
+
+        serviceWithMock.transactWriteItems(transactItems, "us-east-1");
+
+        verify(mockItemStore, times(1))
+                .put(eq("us-east-1::Users"), any());
+    }
+
+    @Test
+    void batchWriteItem_whenLaterItemFailsValidation_noWritesAppliedAndNoPersistence() {
+        @SuppressWarnings("unchecked")
+        StorageBackend<String, Map<String, JsonNode>> mockItemStore = mock(StorageBackend.class);
+        StorageBackend<String, TableDefinition> tableStore = new InMemoryStorage<>();
+        DynamoDbService serviceWithMock = new DynamoDbService(
+                tableStore, mockItemStore, new RegionResolver("us-east-1", "000000000000"));
+
+        serviceWithMock.createTable("Users",
+                List.of(new KeySchemaElement("userId", "HASH")),
+                List.of(new AttributeDefinition("userId", "S")),
+                5L, 5L, "us-east-1");
+
+        // 1st item valid
+        ObjectNode item1 = mapper.createObjectNode();
+        item1.set("userId", attributeValue("S", "u1"));
+        ObjectNode putReq1 = mapper.createObjectNode();
+        putReq1.set("Item", item1);
+        ObjectNode req1 = mapper.createObjectNode();
+        req1.set("PutRequest", putReq1);
+
+        // 2nd item invalid (missing partition key "userId")
+        ObjectNode item2 = mapper.createObjectNode();
+        item2.set("otherAttr", attributeValue("S", "val"));
+        ObjectNode putReq2 = mapper.createObjectNode();
+        putReq2.set("Item", item2);
+        ObjectNode req2 = mapper.createObjectNode();
+        req2.set("PutRequest", putReq2);
+
+        assertThrows(AwsException.class, () ->
+                serviceWithMock.batchWriteItem(Map.of("Users", List.of(req1, req2)), "us-east-1"));
+
+        // Verify that itemStore.put was never called and first item was not saved in memory
+        verify(mockItemStore, never())
+                .put(any(), any());
+        assertNull(serviceWithMock.getItem("Users", item("userId", "u1"), "us-east-1"));
+    }
+
+    @Test
+    void transactWriteItems_whenLaterItemFailsValidation_noWritesAppliedAndNoPersistence() {
+        @SuppressWarnings("unchecked")
+        StorageBackend<String, Map<String, JsonNode>> mockItemStore = mock(StorageBackend.class);
+        StorageBackend<String, TableDefinition> tableStore = new InMemoryStorage<>();
+        DynamoDbService serviceWithMock = new DynamoDbService(
+                tableStore, mockItemStore, new RegionResolver("us-east-1", "000000000000"));
+
+        serviceWithMock.createTable("Users",
+                List.of(new KeySchemaElement("userId", "HASH")),
+                List.of(new AttributeDefinition("userId", "S")),
+                5L, 5L, "us-east-1");
+
+        // 1st item: valid Put
+        ObjectNode item1 = mapper.createObjectNode();
+        item1.set("userId", attributeValue("S", "tx-u1"));
+        ObjectNode put = mapper.createObjectNode();
+        put.put("TableName", "Users");
+        put.set("Item", item1);
+        ObjectNode txItem1 = mapper.createObjectNode();
+        txItem1.set("Put", put);
+
+        // 2nd item: invalid Update that attempts to modify key attribute "userId"
+        ObjectNode key2 = mapper.createObjectNode();
+        key2.set("userId", attributeValue("S", "tx-u2"));
+        ObjectNode upd = mapper.createObjectNode();
+        upd.put("TableName", "Users");
+        upd.set("Key", key2);
+        upd.put("UpdateExpression", "SET userId = :newId");
+        ObjectNode exprValues = mapper.createObjectNode();
+        exprValues.set(":newId", attributeValue("S", "tx-u2-modified"));
+        upd.set("ExpressionAttributeValues", exprValues);
+        ObjectNode txItem2 = mapper.createObjectNode();
+        txItem2.set("Update", upd);
+
+        assertThrows(AwsException.class, () ->
+                serviceWithMock.transactWriteItems(List.of(txItem1, txItem2), "us-east-1"));
+
+        // Verify that itemStore.put was never called and first item was not retained in memory
+        verify(mockItemStore, never())
+                .put(any(), any());
+        assertNull(serviceWithMock.getItem("Users", item("userId", "tx-u1"), "us-east-1"));
+    }
+
+    @Test
+    void transactWriteItems_whenMultipleOperationsOnSameItem_failsWithValidationException() {
+        @SuppressWarnings("unchecked")
+        StorageBackend<String, Map<String, JsonNode>> mockItemStore = mock(StorageBackend.class);
+        StorageBackend<String, TableDefinition> tableStore = new InMemoryStorage<>();
+        DynamoDbService serviceWithMock = new DynamoDbService(
+                tableStore, mockItemStore, new RegionResolver("us-east-1", "000000000000"));
+
+        serviceWithMock.createTable("Users",
+                List.of(new KeySchemaElement("userId", "HASH")),
+                List.of(new AttributeDefinition("userId", "S")),
+                5L, 5L, "us-east-1");
+
+        // 1st operation on userId "u1": Put
+        ObjectNode item1 = mapper.createObjectNode();
+        item1.set("userId", attributeValue("S", "u1"));
+        item1.set("name", attributeValue("S", "Initial"));
+        ObjectNode put = mapper.createObjectNode();
+        put.put("TableName", "Users");
+        put.set("Item", item1);
+        ObjectNode txItem1 = mapper.createObjectNode();
+        txItem1.set("Put", put);
+
+        // 2nd operation on SAME userId "u1": Update
+        ObjectNode key2 = mapper.createObjectNode();
+        key2.set("userId", attributeValue("S", "u1"));
+        ObjectNode upd = mapper.createObjectNode();
+        upd.put("TableName", "Users");
+        upd.set("Key", key2);
+        upd.put("UpdateExpression", "SET #n = :val");
+        ObjectNode exprNames = mapper.createObjectNode();
+        exprNames.put("#n", "name");
+        upd.set("ExpressionAttributeNames", exprNames);
+        ObjectNode exprValues = mapper.createObjectNode();
+        exprValues.set(":val", attributeValue("S", "Updated"));
+        upd.set("ExpressionAttributeValues", exprValues);
+        ObjectNode txItem2 = mapper.createObjectNode();
+        txItem2.set("Update", upd);
+
+        AwsException ex = assertThrows(AwsException.class, () ->
+                serviceWithMock.transactWriteItems(List.of(txItem1, txItem2), "us-east-1"));
+        assertEquals("ValidationException", ex.getErrorCode());
+        assertTrue(ex.getMessage().contains("Transaction request cannot include multiple operations on one item"));
+
+        verify(mockItemStore, never())
+                .put(any(), any());
+        assertNull(serviceWithMock.getItem("Users", item("userId", "u1"), "us-east-1"));
+    }
+
+    @Test
+    void batchWriteItem_whenDuplicateKeysInBatch_failsWithValidationException() {
+        @SuppressWarnings("unchecked")
+        StorageBackend<String, Map<String, JsonNode>> mockItemStore = mock(StorageBackend.class);
+        StorageBackend<String, TableDefinition> tableStore = new InMemoryStorage<>();
+        DynamoDbService serviceWithMock = new DynamoDbService(
+                tableStore, mockItemStore, new RegionResolver("us-east-1", "000000000000"));
+
+        serviceWithMock.createTable("Users",
+                List.of(new KeySchemaElement("userId", "HASH")),
+                List.of(new AttributeDefinition("userId", "S")),
+                5L, 5L, "us-east-1");
+
+        ObjectNode item1 = mapper.createObjectNode();
+        item1.set("userId", attributeValue("S", "u1"));
+        ObjectNode putReq1 = mapper.createObjectNode();
+        putReq1.set("Item", item1);
+        ObjectNode req1 = mapper.createObjectNode();
+        req1.set("PutRequest", putReq1);
+
+        ObjectNode item2 = mapper.createObjectNode();
+        item2.set("userId", attributeValue("S", "u1"));
+        ObjectNode putReq2 = mapper.createObjectNode();
+        putReq2.set("Item", item2);
+        ObjectNode req2 = mapper.createObjectNode();
+        req2.set("PutRequest", putReq2);
+
+        AwsException ex = assertThrows(AwsException.class, () ->
+                serviceWithMock.batchWriteItem(Map.of("Users", List.of(req1, req2)), "us-east-1"));
+        assertEquals("ValidationException", ex.getErrorCode());
+        assertTrue(ex.getMessage().contains("Provided list of item keys contains duplicates"));
+
+        verify(mockItemStore, never())
+                .put(any(), any());
+        assertNull(serviceWithMock.getItem("Users", item("userId", "u1"), "us-east-1"));
+    }
+
+    // --- ImportTable ---
+
+    private DynamoDbService serviceWithS3(S3Service s3, StorageBackend<String, ImportTableDescription> importStore) {
+        return new DynamoDbService(new InMemoryStorage<>(), new InMemoryStorage<>(), null, importStore,
+                new RegionResolver("us-east-1", "000000000000"), null, null, s3, mapper);
+    }
+
+    private void createUsersTableInCreating(DynamoDbService svc) {
+        svc.createTable("Users",
+                List.of(new KeySchemaElement("userId", "HASH")),
+                List.of(new AttributeDefinition("userId", "S")),
+                5L, 5L, "us-east-1").setTableStatus("CREATING");
+    }
+
+    private ImportTableDescription importDescription(String bucket, String prefix, String compression) {
+        ImportTableDescription desc = new ImportTableDescription();
+        desc.setImportArn("arn:aws:dynamodb:us-east-1:000000000000:table/Users/import/1-abc");
+        ObjectNode source = mapper.createObjectNode();
+        source.put("S3Bucket", bucket);
+        source.put("S3KeyPrefix", prefix);
+        desc.setS3BucketSource(source);
+        desc.setInputCompressionType(compression);
+        return desc;
+    }
+
+    private ObjectNode importRequest(String tableName, String inputFormat) {
+        ObjectNode request = mapper.createObjectNode();
+        request.putObject("S3BucketSource").put("S3Bucket", "bucket").put("S3KeyPrefix", "imp/");
+        request.put("InputFormat", inputFormat);
+        request.putObject("TableCreationParameters").put("TableName", tableName);
+        return request;
+    }
+
+    private static byte[] gzip(String text) throws Exception {
+        ByteArrayOutputStream out = new ByteArrayOutputStream();
+        try (GZIPOutputStream gz = new GZIPOutputStream(out)) {
+            gz.write(text.getBytes(StandardCharsets.UTF_8));
+        }
+        return out.toByteArray();
+    }
+
+    private static S3Object s3Object(String key, byte[] data) {
+        return new S3Object("bucket", key, data, "application/octet-stream");
+    }
+
+    private static S3Service s3With(S3Object... objects) {
+        S3Service s3 = mock(S3Service.class);
+        when(s3.listObjects("bucket", "imp/", null, Integer.MAX_VALUE)).thenReturn(List.of(objects));
+        for (S3Object object : objects) {
+            when(s3.getObjectMetadata("bucket", object.getKey(), null)).thenReturn(object);
+            when(s3.openObjectStream("bucket", object.getKey(), null))
+                    .thenAnswer(invocation -> new ByteArrayInputStream(object.getData()));
+        }
+        return s3;
+    }
+
+    /** DescribeTable names the missing table, an item call does not. */
+    @Test
+    void itemCalls_missingTable_returnResourceNotFoundWithoutTableName() {
+        DynamoDbService svc = serviceWithS3(mock(S3Service.class), new InMemoryStorage<>());
+        String region = "us-east-1";
+        ObjectNode key = item("userId", "u1");
+        ObjectNode keys = mapper.createObjectNode();
+        keys.set("Keys", mapper.createArrayNode().add(key));
+        ObjectNode putRequest = mapper.createObjectNode();
+        putRequest.putObject("PutRequest").set("Item", key);
+        ObjectNode transactPut = mapper.createObjectNode();
+        transactPut.putObject("Put").put("TableName", "Users").set("Item", key);
+        ObjectNode transactGet = mapper.createObjectNode();
+        transactGet.putObject("Get").put("TableName", "Users").set("Key", key);
+
+        List<Executable> itemCalls = List.of(
+                () -> svc.getItem("Users", key, region),
+                () -> svc.putItem("Users", key, null, null, null, region, "NONE"),
+                () -> svc.updateItem("Users", key, null, "SET x = :v", null, item("v", "1"), "NONE", region),
+                () -> svc.deleteItem("Users", key, region),
+                () -> svc.query("Users", null, item("pk", "u1"), "userId = :pk", null, null, region),
+                () -> svc.scan("Users", null, null, null, null, null, null, null, region),
+                () -> svc.batchGetItem(Map.of("Users", keys), region),
+                () -> svc.batchWriteItem(Map.of("Users", List.of(putRequest)), region),
+                () -> svc.transactWriteItems(List.of(transactPut), region, null, null),
+                () -> svc.transactGetItems(List.of(transactGet), region));
+        for (Executable call : itemCalls) {
+            AwsException e = assertThrows(AwsException.class, call);
+            assertEquals("ResourceNotFoundException", e.getErrorCode());
+            assertEquals("Requested resource not found", e.getMessage());
+        }
+
+        AwsException describe = assertThrows(AwsException.class, () -> svc.describeTable("Users", region));
+        assertEquals("Requested resource not found: Table: Users not found", describe.getMessage());
+    }
+
+    /** Checked against real DynamoDB: every item call on a CREATING table fails this way, DescribeTable still works. */
+    @Test
+    void itemCalls_creatingTable_returnResourceNotFoundWithoutTableName() {
+        DynamoDbService svc = serviceWithS3(mock(S3Service.class), new InMemoryStorage<>());
+        createUsersTableInCreating(svc);
+        String region = "us-east-1";
+        ObjectNode key = item("userId", "u1");
+        ObjectNode keys = mapper.createObjectNode();
+        keys.set("Keys", mapper.createArrayNode().add(key));
+        ObjectNode putRequest = mapper.createObjectNode();
+        putRequest.putObject("PutRequest").set("Item", key);
+        ObjectNode transactPut = mapper.createObjectNode();
+        transactPut.putObject("Put").put("TableName", "Users").set("Item", key);
+        ObjectNode transactGet = mapper.createObjectNode();
+        transactGet.putObject("Get").put("TableName", "Users").set("Key", key);
+
+        List<Executable> itemCalls = List.of(
+                () -> svc.getItem("Users", key, region),
+                () -> svc.putItem("Users", key, null, null, null, region, "NONE"),
+                () -> svc.updateItem("Users", key, null, "SET x = :v", null, item("v", "1"), "NONE", region),
+                () -> svc.deleteItem("Users", key, region),
+                () -> svc.query("Users", null, item("pk", "u1"), "userId = :pk", null, null, region),
+                () -> svc.scan("Users", null, null, null, null, null, null, null, region),
+                () -> svc.batchGetItem(Map.of("Users", keys), region),
+                () -> svc.batchWriteItem(Map.of("Users", List.of(putRequest)), region),
+                () -> svc.transactWriteItems(List.of(transactPut), region, null, null),
+                () -> svc.transactGetItems(List.of(transactGet), region));
+        for (Executable call : itemCalls) {
+            AwsException e = assertThrows(AwsException.class, call);
+            assertEquals("ResourceNotFoundException", e.getErrorCode());
+            assertEquals("Requested resource not found", e.getMessage());
+        }
+        assertEquals("CREATING", svc.describeTable("Users", region).getTableStatus());
+    }
+
+    @Test
+    void runImport_loadsGzipLinesAndCountsBadOnes() throws Exception {
+        S3Object object = s3Object("imp/part-0.json.gz",
+                gzip("{\"Item\":{\"userId\":{\"S\":\"u1\"}}}\nnot json\n{\"Item\":{\"userId\":{\"S\":\"u2\"}}}\n"));
+        InMemoryStorage<String, ImportTableDescription> importStore = new InMemoryStorage<>();
+        DynamoDbService svc = serviceWithS3(s3With(object), importStore);
+        createUsersTableInCreating(svc);
+        ImportTableDescription desc = importDescription("bucket", "imp/", "GZIP");
+
+        svc.runImport(desc, "Users", "us-east-1");
+
+        assertEquals("COMPLETED", desc.getImportStatus());
+        assertEquals(3L, desc.getProcessedItemCount());
+        assertEquals(2L, desc.getImportedItemCount());
+        assertEquals(1L, desc.getErrorCount());
+        assertTrue(desc.getProcessedSizeBytes() > 0);
+        assertNotNull(desc.getEndTime());
+        assertEquals("COMPLETED", importStore.get(desc.getImportArn()).orElseThrow().getImportStatus());
+        assertEquals("ACTIVE", svc.describeTable("Users", "us-east-1").getTableStatus());
+        assertEquals("u2", svc.getItem("Users", item("userId", "u2"), "us-east-1").get("userId").get("S").asText());
+    }
+
+    /** Checked against real DynamoDB: another account's bucket fails this way when no policy grants access. */
+    @Test
+    void runImport_bucketOfAnotherAccount_failsWithS3AccessDeniedWithoutReadingS3() {
+        S3Service s3 = mock(S3Service.class);
+        DynamoDbService svc = serviceWithS3(s3, new InMemoryStorage<>());
+        createUsersTableInCreating(svc);
+        ImportTableDescription desc = importDescription("bucket", "imp/", "NONE");
+        ((ObjectNode) desc.getS3BucketSource()).put("S3BucketOwner", "111111111111");
+
+        svc.runImport(desc, "Users", "us-east-1");
+
+        assertEquals("FAILED", desc.getImportStatus());
+        assertEquals("S3AccessDenied", desc.getFailureCode());
+        assertEquals("Access Denied (Service: Amazon S3; Status Code: 403; Error Code: AccessDenied)", desc.getFailureMessage());
+        verifyNoInteractions(s3);
+        assertEquals("ACTIVE", svc.describeTable("Users", "us-east-1").getTableStatus());
+    }
+
+    @Test
+    void runImport_bucketOwnerIsTheCaller_readsTheBucket() {
+        S3Object object = s3Object("imp/data.json", "{\"Item\":{\"userId\":{\"S\":\"u1\"}}}\n".getBytes(StandardCharsets.UTF_8));
+        DynamoDbService svc = serviceWithS3(s3With(object), new InMemoryStorage<>());
+        createUsersTableInCreating(svc);
+        ImportTableDescription desc = importDescription("bucket", "imp/", "NONE");
+        ((ObjectNode) desc.getS3BucketSource()).put("S3BucketOwner", "000000000000");
+
+        svc.runImport(desc, "Users", "us-east-1");
+
+        assertEquals("COMPLETED", desc.getImportStatus());
+        assertEquals(1L, desc.getImportedItemCount());
+    }
+
+    @Test
+    void runImport_persistsLoadedItems() {
+        S3Object object = s3Object("imp/data.json",
+                "{\"Item\":{\"userId\":{\"S\":\"u1\"}}}\n{\"Item\":{\"userId\":{\"S\":\"u2\"}}}\n".getBytes(StandardCharsets.UTF_8));
+        InMemoryStorage<String, Map<String, JsonNode>> itemStore = new InMemoryStorage<>();
+        DynamoDbService svc = new DynamoDbService(new InMemoryStorage<>(), itemStore, null, new InMemoryStorage<>(),
+                new RegionResolver("us-east-1", "000000000000"), null, null, s3With(object), mapper);
+        createUsersTableInCreating(svc);
+
+        svc.runImport(importDescription("bucket", "imp/", "NONE"), "Users", "us-east-1");
+
+        assertEquals(1, itemStore.scan(k -> true).size());
+        assertEquals(2, itemStore.scan(k -> true).getFirst().size());
+    }
+
+    @Test
+    void runImport_unreadableObject_isCountedAndTheRestIsLoaded() throws Exception {
+        S3Object data = s3Object("imp/data.json.gz", gzip("{\"Item\":{\"userId\":{\"S\":\"u1\"}}}\n"));
+        S3Object manifest = s3Object("imp/manifest-summary.json", "{}".getBytes(StandardCharsets.UTF_8));
+        DynamoDbService svc = serviceWithS3(s3With(data, manifest), new InMemoryStorage<>());
+        createUsersTableInCreating(svc);
+        ImportTableDescription desc = importDescription("bucket", "imp/", "GZIP");
+
+        svc.runImport(desc, "Users", "us-east-1");
+
+        assertEquals("COMPLETED", desc.getImportStatus());
+        assertEquals(1L, desc.getImportedItemCount());
+        assertEquals(1L, desc.getErrorCount());
+        assertEquals("ACTIVE", svc.describeTable("Users", "us-east-1").getTableStatus());
+    }
+
+    @Test
+    void runImport_malformedAttributeValue_isCountedNotFatal() {
+        S3Object object = s3Object("imp/data.json",
+                ("{\"Item\":{\"userId\":{\"S\":\"u1\"},\"m\":{\"M\":\"not a map\"}}}\n"
+                + "{\"Item\":{\"userId\":{\"S\":\"u2\"}}}\n").getBytes(StandardCharsets.UTF_8));
+        DynamoDbService svc = serviceWithS3(s3With(object), new InMemoryStorage<>());
+        createUsersTableInCreating(svc);
+        ImportTableDescription desc = importDescription("bucket", "imp/", "NONE");
+
+        svc.runImport(desc, "Users", "us-east-1");
+
+        assertEquals("COMPLETED", desc.getImportStatus());
+        assertEquals(1L, desc.getImportedItemCount());
+        assertEquals(1L, desc.getErrorCount());
+    }
+
+    @Test
+    void runImport_missingBucket_failsWithS3NoSuchBucket() {
+        S3Service s3 = mock(S3Service.class);
+        when(s3.listObjects("missing", "imp/", null, Integer.MAX_VALUE))
+                .thenThrow(new AwsException("NoSuchBucket", "The specified bucket does not exist.", 404));
+        DynamoDbService svc = serviceWithS3(s3, new InMemoryStorage<>());
+        createUsersTableInCreating(svc);
+        ImportTableDescription desc = importDescription("missing", "imp/", "NONE");
+
+        svc.runImport(desc, "Users", "us-east-1");
+
+        assertEquals("FAILED", desc.getImportStatus());
+        assertEquals("S3NoSuchBucket", desc.getFailureCode());
+        assertNotNull(desc.getEndTime());
+        assertEquals("ACTIVE", svc.describeTable("Users", "us-east-1").getTableStatus());
+    }
+
+    @Test
+    void runImport_otherS3Error_reportsAnS3FailureCode() {
+        S3Service s3 = mock(S3Service.class);
+        when(s3.listObjects("bucket", "imp/", null, Integer.MAX_VALUE))
+                .thenThrow(new AwsException("AccessDenied", "Access Denied", 403));
+        DynamoDbService svc = serviceWithS3(s3, new InMemoryStorage<>());
+        createUsersTableInCreating(svc);
+        ImportTableDescription desc = importDescription("bucket", "imp/", "NONE");
+
+        svc.runImport(desc, "Users", "us-east-1");
+
+        assertEquals("FAILED", desc.getImportStatus());
+        assertEquals("S3AccessDenied", desc.getFailureCode());
+    }
+
+    @Test
+    void deleteTable_whileCreating_returnsResourceInUseException() {
+        createUsersTableInCreating(service);
+
+        AwsException e = assertThrows(AwsException.class, () -> service.deleteTable("Users", "us-east-1"));
+
+        assertEquals("ResourceInUseException", e.getErrorCode());
+        assertEquals("CREATING", service.describeTable("Users", "us-east-1").getTableStatus());
+    }
+
+    @Test
+    void updateTable_whileCreating_returnsResourceInUseException() {
+        createUsersTableInCreating(service);
+
+        AwsException e = assertThrows(AwsException.class, () -> service.updateTable("Users", 10L, 10L, "us-east-1"));
+
+        assertEquals("ResourceInUseException", e.getErrorCode());
+    }
+
+    @Test
+    void exportTable_whileCreating_returnsTableNotFoundException() {
+        createUsersTableInCreating(service);
+        String tableArn = "arn:aws:dynamodb:us-east-1:000000000000:table/Users";
+        Map<String, Object> request = Map.of("TableArn", tableArn, "S3Bucket", "bucket");
+
+        AwsException e = assertThrows(AwsException.class,
+                () -> service.exportTable(request, Instant.EPOCH, null, "us-east-1"));
+
+        assertEquals("TableNotFoundException", e.getErrorCode());
+        assertEquals("Table not found: " + tableArn, e.getMessage());
+    }
+
+    @Test
+    void exportAbortsTheUploadOfAFileItCannotWrite() {
+        S3Service s3 = mock(S3Service.class);
+        MultipartUpload upload = new MultipartUpload("bucket", "_started", "application/octet-stream");
+        when(s3.initiateMultipartUpload(eq("bucket"), anyString(), eq("application/octet-stream"))).thenReturn(upload);
+        when(s3.uploadPart(eq("bucket"), anyString(), eq(upload.getUploadId()), eq(1), any(byte[].class)))
+                .thenThrow(new AwsException("InternalError", "We encountered an internal error. Please try again.", 500));
+        DynamoDbService svc = inlineExportService(s3);
+
+        String exportArn = svc.exportTable(Map.of("TableArn", USERS_ARN, "S3Bucket", "bucket"), null, null, "us-east-1")
+                .getExportArn();
+
+        verify(s3).abortMultipartUpload(eq("bucket"), endsWith("/_started"), eq(upload.getUploadId()));
+        assertEquals("FAILED", svc.describeExport(exportArn).getExportStatus());
+    }
+
+    @Test
+    void exportPutsItsFilesUnderThePrefix() {
+        S3Service s3 = exportBucket();
+        DynamoDbService svc = inlineExportService(s3);
+        String longest = "a".repeat(948);
+
+        String slashed = svc.exportTable(Map.of("TableArn", USERS_ARN, "S3Bucket", "bucket", "S3Prefix", "ends-with/"),
+                null, null, "us-east-1").getExportArn();
+        svc.exportTable(Map.of("TableArn", USERS_ARN, "S3Bucket", "bucket", "S3Prefix", longest), null, null, "us-east-1");
+
+        String slashedId = slashed.substring(slashed.lastIndexOf('/') + 1);
+        verify(s3).initiateMultipartUpload("bucket", "ends-with/AWSDynamoDB/" + slashedId + "/_started",
+                "application/octet-stream");
+        assertEquals("COMPLETED", svc.describeExport(slashed).getExportStatus());
+        ArgumentCaptor<String> keys = ArgumentCaptor.forClass(String.class);
+        verify(s3, atLeastOnce()).initiateMultipartUpload(eq("bucket"), keys.capture(), eq("application/octet-stream"));
+        assertEquals(1024, keys.getAllValues().stream().filter(key -> key.startsWith(longest))
+                .mapToInt(key -> key.getBytes(StandardCharsets.UTF_8).length).max().orElseThrow());
+    }
+
+    @Test
+    void ionExportWritesIonLines() throws Exception {
+        S3Service s3 = exportBucket();
+        DynamoDbService svc = inlineExportService(s3);
+        svc.putItem("Users", mapper.readTree("{\"userId\": {\"S\": \"u1\"}, \"total\": {\"N\": \"150\"}}"), "us-east-1");
+
+        String exportArn = svc.exportTable(Map.of("TableArn", USERS_ARN, "S3Bucket", "bucket", "S3Prefix", "exports-ion",
+                "ExportFormat", "ION"), null, null, "us-east-1").getExportArn();
+
+        ExportDescription described = svc.describeExport(exportArn);
+        assertEquals("COMPLETED", described.getExportStatus());
+        assertEquals("ION", described.getExportFormat());
+        Map<String, byte[]> files = uploadedFiles(s3);
+        String dir = "exports-ion/AWSDynamoDB/" + exportArn.substring(exportArn.lastIndexOf('/') + 1) + "/";
+        String dataKey = files.keySet().stream().filter(key -> key.endsWith(".ion.gz")).findFirst().orElseThrow();
+        assertTrue(dataKey.matches(dir + "data/[a-z2-7]{26}\\.ion\\.gz"), dataKey);
+        assertEquals("$ion_1_0 {Item:{userId:\"u1\",total:15d1}}\n", gunzip(files.get(dataKey)));
+        assertEquals("ION", mapper.readTree(files.get(dir + "manifest-summary.json")).get("outputFormat").asText());
+    }
+
+    @Test
+    void jsonExportWritesCharactersAboveUffffAsUtf8() throws Exception {
+        S3Service s3 = exportBucket();
+        DynamoDbService svc = inlineExportService(s3);
+        svc.putItem("Users", item("userId", "u1", "😀", "😀"), "us-east-1");
+
+        svc.exportTable(Map.of("TableArn", USERS_ARN, "S3Bucket", "bucket"), null, null, "us-east-1");
+
+        byte[] dataFile = uploadedFiles(s3).entrySet().stream().filter(file -> file.getKey().endsWith(".json.gz"))
+                .findFirst().orElseThrow().getValue();
+        assertEquals("{\"Item\":{\"userId\":{\"S\":\"u1\"},\"😀\":{\"S\":\"😀\"}}}\n", gunzip(dataFile));
+    }
+
+    @Test
+    void incrementalExportWritesARecordForEachChangedItem() throws Exception {
+        S3Service s3 = exportBucket();
+        DynamoDbService svc = incrementalExportService(s3);
+        for (String id : List.of("updated", "deleted", "same", "twice", "deletedThenPut")) {
+            svc.putItem("Users", item("userId", id, "v", "before"), "us-east-1");
+        }
+        clock.advance(Duration.ofSeconds(1));
+        Instant from = clock.instant();
+        svc.putItem("Users", item("userId", "updated", "v", "after"), "us-east-1");
+        svc.deleteItem("Users", item("userId", "deleted"), "us-east-1");
+        svc.putItem("Users", item("userId", "new", "v", "new 😀"), "us-east-1");
+        svc.putItem("Users", item("userId", "newThenDeleted", "v", "new"), "us-east-1");
+        svc.deleteItem("Users", item("userId", "newThenDeleted"), "us-east-1");
+        svc.putItem("Users", item("userId", "same", "v", "before"), "us-east-1");
+        svc.putItem("Users", item("userId", "twice", "v", "first"), "us-east-1");
+        Instant beforeLastWrite = clock.instant();
+        svc.putItem("Users", item("userId", "twice", "v", "second"), "us-east-1");
+        svc.deleteItem("Users", item("userId", "deletedThenPut"), "us-east-1");
+        svc.putItem("Users", item("userId", "deletedThenPut", "v", "put"), "us-east-1");
+        clock.advance(Duration.ofMinutes(15));
+        Instant to = clock.instant();
+        svc.putItem("Users", item("userId", "updated", "v", "after the period"), "us-east-1");
+
+        String exportArn = svc.exportTable(Map.of("TableArn", USERS_ARN, "S3Bucket", "bucket", "S3Prefix", "inc",
+                "ExportType", "INCREMENTAL_EXPORT"), null, new DynamoDbService.IncrementalExportRequest(from, to, null),
+                "us-east-1").getExportArn();
+
+        assertTrue(exportArn.matches(".*/export/\\d{11}000-[0-9a-f]{8}"), exportArn);
+        ExportDescription described = svc.describeExport(exportArn);
+        assertEquals("COMPLETED", described.getExportStatus());
+        assertEquals("INCREMENTAL_EXPORT", described.getExportType());
+        assertNull(described.getExportTime());
+        assertEquals(BigDecimal.valueOf(from.toEpochMilli(), 3),
+                described.getIncrementalExportSpecification().getExportFromTime());
+        assertEquals(BigDecimal.valueOf(to.toEpochMilli(), 3), described.getIncrementalExportSpecification().getExportToTime());
+        assertEquals("NEW_AND_OLD_IMAGES", described.getIncrementalExportSpecification().getExportViewType());
+        Map<String, byte[]> files = uploadedFiles(s3);
+        String dataKey = files.keySet().stream().filter(key -> key.endsWith(".json.gz")).findFirst().orElseThrow();
+        assertTrue(dataKey.matches("inc/AWSDynamoDB/data/[a-z2-7]{26}\\.json\\.gz"), dataKey);
+        String[] records = gunzip(files.get(dataKey)).split("\n");
+        assertEquals(List.of(
+                "{\"Metadata\":{\"WriteTimestampMicros\":{\"N\":\"T\"}},\"Keys\":{\"userId\":{\"S\":\"updated\"}},"
+                        + "\"OldImage\":{\"userId\":{\"S\":\"updated\"},\"v\":{\"S\":\"before\"}},"
+                        + "\"NewImage\":{\"userId\":{\"S\":\"updated\"},\"v\":{\"S\":\"after\"}}}",
+                "{\"Metadata\":{\"WriteTimestampMicros\":{\"N\":\"T\"}},\"Keys\":{\"userId\":{\"S\":\"deleted\"}},"
+                        + "\"OldImage\":{\"userId\":{\"S\":\"deleted\"},\"v\":{\"S\":\"before\"}}}",
+                "{\"Metadata\":{\"WriteTimestampMicros\":{\"N\":\"T\"}},\"Keys\":{\"userId\":{\"S\":\"new\"}},"
+                        + "\"NewImage\":{\"userId\":{\"S\":\"new\"},\"v\":{\"S\":\"new 😀\"}}}",
+                "{\"Metadata\":{\"WriteTimestampMicros\":{\"N\":\"T\"}},\"Keys\":{\"userId\":{\"S\":\"twice\"}},"
+                        + "\"OldImage\":{\"userId\":{\"S\":\"twice\"},\"v\":{\"S\":\"before\"}},"
+                        + "\"NewImage\":{\"userId\":{\"S\":\"twice\"},\"v\":{\"S\":\"second\"}}}",
+                "{\"Metadata\":{\"WriteTimestampMicros\":{\"N\":\"T\"}},\"Keys\":{\"userId\":{\"S\":\"deletedThenPut\"}},"
+                        + "\"OldImage\":{\"userId\":{\"S\":\"deletedThenPut\"},\"v\":{\"S\":\"before\"}},"
+                        + "\"NewImage\":{\"userId\":{\"S\":\"deletedThenPut\"},\"v\":{\"S\":\"put\"}}}"),
+                Arrays.stream(records).map(r -> r.replaceFirst("\"N\":\"\\d+\"", "\"N\":\"T\"")).toList());
+        assertEquals(5L, described.getItemCount());
+        assertEquals(10_000_000L, described.getBilledSizeBytes());
+        long lastWriteMicros = mapper.readTree(records[3]).at("/Metadata/WriteTimestampMicros/N").asLong();
+        assertTrue(ChronoUnit.MICROS.between(Instant.EPOCH, beforeLastWrite) < lastWriteMicros);
+        assertTrue(lastWriteMicros < ChronoUnit.MICROS.between(Instant.EPOCH, to));
+        String exportId = exportArn.substring(exportArn.lastIndexOf('/') + 1);
+        JsonNode summary = mapper.readTree(files.get("inc/AWSDynamoDB/" + exportId + "/manifest-summary.json"));
+        List<String> summaryFields = new ArrayList<>();
+        summary.fieldNames().forEachRemaining(summaryFields::add);
+        assertEquals(List.of("version", "exportArn", "startTime", "endTime", "tableArn", "tableId", "exportFromTime",
+                "exportToTime", "s3Bucket", "s3Prefix", "s3SseAlgorithm", "s3SseKmsKeyId", "manifestFilesS3Key",
+                "billedSizeBytes", "itemCount", "outputFormat", "outputView", "exportType"), summaryFields);
+        assertEquals("2023-08-01", summary.get("version").asText());
+        assertEquals("NEW_AND_OLD_IMAGES", summary.get("outputView").asText());
+        assertEquals("INCREMENTAL_EXPORT", summary.get("exportType").asText());
+    }
+
+    @Test
+    void incrementalIonExportOfNewImagesLeavesOutOldImages() throws Exception {
+        S3Service s3 = exportBucket();
+        DynamoDbService svc = incrementalExportService(s3);
+        svc.putItem("Users", item("userId", "updated", "v", "before"), "us-east-1");
+        svc.putItem("Users", item("userId", "deleted", "v", "before"), "us-east-1");
+        clock.advance(Duration.ofSeconds(1));
+        Instant from = clock.instant();
+        svc.putItem("Users", item("userId", "updated", "v", "after"), "us-east-1");
+        svc.deleteItem("Users", item("userId", "deleted"), "us-east-1");
+        clock.advance(Duration.ofMinutes(20));
+
+        String exportArn = svc.exportTable(Map.of("TableArn", USERS_ARN, "S3Bucket", "bucket", "ExportFormat", "ION",
+                "ExportType", "INCREMENTAL_EXPORT"), null,
+                new DynamoDbService.IncrementalExportRequest(from, null, "NEW_IMAGE"), "us-east-1").getExportArn();
+
+        ExportDescription described = svc.describeExport(exportArn);
+        assertEquals("COMPLETED", described.getExportStatus());
+        assertEquals(described.getStartTime(), described.getIncrementalExportSpecification().getExportToTime());
+        assertEquals(0, described.getStartTime().remainder(BigDecimal.ONE).signum());
+        Map<String, byte[]> files = uploadedFiles(s3);
+        String dataKey = files.keySet().stream().filter(key -> key.endsWith(".ion.gz")).findFirst().orElseThrow();
+        assertTrue(dataKey.matches("AWSDynamoDB/data/[a-z2-7]{26}\\.ion\\.gz"), dataKey);
+        assertEquals("""
+                $ion_1_0 {Record:{Keys:{userId:"updated"},Metadata:{WriteTimestampMicros:T},NewImage:{userId:"updated",v:"after"}}}
+                $ion_1_0 {Record:{Keys:{userId:"deleted"},Metadata:{WriteTimestampMicros:T}}}
+                """, gunzip(files.get(dataKey)).replaceAll("WriteTimestampMicros:\\d+d\\d+", "WriteTimestampMicros:T"));
+    }
+
+    @Test
+    void incrementalExportChecksThePeriodInTheAwsOrder() {
+        DynamoDbService svc = incrementalExportService(exportBucket());
+        svc.createTable("NoBackups", List.of(new KeySchemaElement("userId", "HASH")),
+                List.of(new AttributeDefinition("userId", "S")), 5L, 5L, "us-east-1");
+        Instant creationSecond = svc.describeTable("NoBackups", "us-east-1").getCreationDateTime()
+                .truncatedTo(ChronoUnit.SECONDS);
+        clock.advance(Duration.ofHours(25));
+        Instant now = clock.instant();
+
+        Instant beforeCreation = creationSecond.minusMillis(1);
+        expectInvalidExportTime(svc, "NoBackups", beforeCreation, now.plusSeconds(60),
+                "Incremental export period from time cannot be less than the table creation time : " + beforeCreation);
+        Instant afterNow = now.plusSeconds(60);
+        expectInvalidExportTime(svc, "NoBackups", afterNow.plusSeconds(60), afterNow,
+                "Incremental export period to time cannot be greater than the current time : " + afterNow);
+        expectInvalidExportTime(svc, "NoBackups", creationSecond, creationSecond,
+                "Incremental export period from time should not be greater or equal to incremental export period to time");
+        expectInvalidExportTime(svc, "NoBackups", creationSecond, creationSecond.plus(Duration.ofMinutes(15)).minusMillis(1),
+                "Difference between export period from time and export period to time is less than 15 minutes");
+        Instant overADay = creationSecond.plus(Duration.ofHours(24)).plusSeconds(1);
+        String overADayMessage = "Difference between export period from time and export period to time is greater than 24 hours";
+        expectInvalidExportTime(svc, "NoBackups", creationSecond, overADay, overADayMessage);
+        for (Duration period : List.of(Duration.ofMinutes(15), Duration.ofHours(24).plusMillis(1))) {
+            AwsException noBackups = assertThrows(AwsException.class, () -> incrementalExport(svc, "NoBackups",
+                    creationSecond, creationSecond.plus(period)));
+            assertEquals("PointInTimeRecoveryUnavailableException", noBackups.getErrorCode());
+        }
+        svc.updateContinuousBackups("Users", false, null, "us-east-1");
+        svc.updateContinuousBackups("Users", true, null, "us-east-1");
+        expectInvalidExportTime(svc, "Users", creationSecond, overADay, overADayMessage);
+        expectInvalidExportTime(svc, "Users", creationSecond, creationSecond.plus(Duration.ofMinutes(15)),
+                "Export period from time cannot be earlier than the Point in Time Recovery window");
+    }
+
+    private static void expectInvalidExportTime(DynamoDbService svc, String table, Instant from, Instant to,
+                                                String message) {
+        AwsException e = assertThrows(AwsException.class, () -> incrementalExport(svc, table, from, to));
+        assertEquals("InvalidExportTimeException", e.getErrorCode());
+        assertEquals(message, e.getMessage());
+    }
+
+    private static ExportDescription incrementalExport(DynamoDbService svc, String table, Instant from, Instant to) {
+        return svc.exportTable(Map.of("TableArn", "arn:aws:dynamodb:us-east-1:000000000000:table/" + table,
+                "S3Bucket", "bucket", "ExportType", "INCREMENTAL_EXPORT"), null,
+                new DynamoDbService.IncrementalExportRequest(from, to, null), "us-east-1");
+    }
+
+    /** Every file the export uploaded, by key. */
+    private static Map<String, byte[]> uploadedFiles(S3Service s3) {
+        ArgumentCaptor<String> keys = ArgumentCaptor.forClass(String.class);
+        ArgumentCaptor<byte[]> parts = ArgumentCaptor.forClass(byte[].class);
+        verify(s3, atLeastOnce()).uploadPart(eq("bucket"), keys.capture(), anyString(), eq(1), parts.capture());
+        Map<String, byte[]> files = new LinkedHashMap<>();
+        for (int i = 0; i < keys.getAllValues().size(); i++) {
+            files.put(keys.getAllValues().get(i), parts.getAllValues().get(i));
+        }
+        return files;
+    }
+
+    private static String gunzip(byte[] data) throws IOException {
+        try (GZIPInputStream gzip = new GZIPInputStream(new ByteArrayInputStream(data))) {
+            return new String(gzip.readAllBytes(), StandardCharsets.UTF_8);
+        }
+    }
+
+    /** A bucket that takes every upload, each completing with a one-part ETag. */
+    private static S3Service exportBucket() {
+        S3Service s3 = mock(S3Service.class);
+        when(s3.initiateMultipartUpload(eq("bucket"), anyString(), eq("application/octet-stream")))
+                .thenAnswer(invocation -> new MultipartUpload("bucket", invocation.getArgument(1), "application/octet-stream"));
+        when(s3.completeMultipartUpload(eq("bucket"), anyString(), anyString(), eq(List.of(1)), isNull(), isNull()))
+                .thenReturn(new S3Object("bucket", "file", new byte[0], "application/octet-stream", "\"0123-1\""));
+        return s3;
+    }
+
+    /** Runs each export on the calling thread, with Users created and point-in-time recovery on. */
+    private DynamoDbService inlineExportService(S3Service s3) {
+        DynamoDbService svc = new DynamoDbService(new InMemoryStorage<>(), new InMemoryStorage<>(), new InMemoryStorage<>(),
+                new InMemoryStorage<>(), new InMemoryStorage<>(), new InMemoryStorage<>(),
+                new RegionResolver("us-east-1", "000000000000"), null, null, s3, mapper, 0, 0, 0, clock, Runnable::run);
+        svc.createTable("Users", List.of(new KeySchemaElement("userId", "HASH")),
+                List.of(new AttributeDefinition("userId", "S")), 5L, 5L, "us-east-1");
+        svc.updateContinuousBackups("Users", true, null, "us-east-1");
+        return svc;
+    }
+
+    /** Tables take their creation time from the system clock, so this clock starts after it. */
+    private DynamoDbService incrementalExportService(S3Service s3) {
+        clock.advance(Duration.between(clock.instant(), Instant.now()).plusSeconds(1));
+        return inlineExportService(s3);
+    }
+
+    @Test
+    void validateImportRequest_rejectsUnsupportedFormatWithoutUnsupportedOperationWording() {
+        AwsException e = assertThrows(AwsException.class,
+                () -> service.validateImportRequest(importRequest("Users", "CSV")));
+
+        assertEquals("ValidationException", e.getErrorCode());
+        assertTrue(e.getMessage().contains("CSV"));
+        assertFalse(e.getMessage().toLowerCase().contains("not supported"));
+    }
+
+    @Test
+    void validateImportRequest_blankClientToken_returnsValidationException() {
+        ObjectNode request = importRequest("Users", "DYNAMODB_JSON");
+        request.put("ClientToken", "");
+
+        AwsException e = assertThrows(AwsException.class, () -> service.validateImportRequest(request));
+
+        assertEquals("ValidationException", e.getErrorCode());
+    }
+
+    @Test
+    void validateImportRequest_sameClientToken_returnsExistingImport() {
+        InMemoryStorage<String, ImportTableDescription> importStore = new InMemoryStorage<>();
+        ObjectNode request = importRequest("Users", "DYNAMODB_JSON");
+        request.put("ClientToken", "token-1");
+        ImportTableDescription existing = importDescription("bucket", "imp/", "NONE");
+        existing.setClientToken("token-1");
+        existing.setInputFormat("DYNAMODB_JSON");
+        existing.setTableCreationParameters(request.get("TableCreationParameters"));
+        importStore.put(existing.getImportArn(), existing);
+        DynamoDbService svc = serviceWithS3(mock(S3Service.class), importStore);
+
+        assertSame(existing, svc.validateImportRequest(request));
+    }
+
+    @Test
+    void validateImportRequest_sameClientTokenDifferentParameters_returnsImportConflictException() {
+        InMemoryStorage<String, ImportTableDescription> importStore = new InMemoryStorage<>();
+        ImportTableDescription existing = importDescription("bucket", "imp/", "NONE");
+        existing.setClientToken("token-1");
+        existing.setInputFormat("DYNAMODB_JSON");
+        existing.setTableCreationParameters(mapper.createObjectNode().put("TableName", "Users"));
+        importStore.put(existing.getImportArn(), existing);
+        DynamoDbService svc = serviceWithS3(mock(S3Service.class), importStore);
+        ObjectNode request = importRequest("Other", "DYNAMODB_JSON");
+        request.put("ClientToken", "token-1");
+
+        AwsException e = assertThrows(AwsException.class, () -> svc.validateImportRequest(request));
+
+        assertEquals("ImportConflictException", e.getErrorCode());
+    }
+
+    @Test
+    void listImports_pageSizeBelowOne_returnsValidationException() {
+        DynamoDbService svc = serviceWithS3(mock(S3Service.class), new InMemoryStorage<>());
+
+        AwsException e = assertThrows(AwsException.class, () -> svc.listImports(null, 0, null));
+
+        assertEquals("ValidationException", e.getErrorCode());
+    }
+
+    @Test
+    void listImports_walksPagesByNextToken() {
+        InMemoryStorage<String, ImportTableDescription> importStore = new InMemoryStorage<>();
+        for (int i = 1; i <= 3; i++) {
+            ImportTableDescription desc = importDescription("bucket", "imp/", "NONE");
+            desc.setImportArn("arn:aws:dynamodb:us-east-1:000000000000:table/Users/import/" + i + "-abc");
+            importStore.put(desc.getImportArn(), desc);
+        }
+        DynamoDbService svc = serviceWithS3(mock(S3Service.class), importStore);
+
+        DynamoDbService.ListImportsResult first = svc.listImports(null, 2, null);
+        DynamoDbService.ListImportsResult second = svc.listImports(null, 2, first.nextToken());
+
+        assertEquals(2, first.importSummaryList().size());
+        assertNotNull(first.nextToken());
+        assertEquals(1, second.importSummaryList().size());
+        assertNull(second.nextToken());
+    }
+
+    @Test
+    void constructor_failsInterruptedJobsAndActivatesCreatingTables() {
+        RegionResolver resolver = new RegionResolver("us-east-1", "000000000000");
+        AccountAwareStorageBackend<TableDefinition> tables = new AccountAwareStorageBackend<>(new InMemoryStorage<>(), null, "000000000000");
+        AccountAwareStorageBackend<ExportDescription> exports = new AccountAwareStorageBackend<>(new InMemoryStorage<>(), null, "000000000000");
+        AccountAwareStorageBackend<ImportTableDescription> imports = new AccountAwareStorageBackend<>(new InMemoryStorage<>(), null, "000000000000");
+        DynamoDbService before = new DynamoDbService(tables, new InMemoryStorage<>(), exports, imports,
+                resolver, null, null, mock(S3Service.class), mapper);
+        createUsersTableInCreating(before);
+        ImportTableDescription importDesc = importDescription("bucket", "imp/", "NONE");
+        importDesc.setImportStatus("IN_PROGRESS");
+        imports.put(importDesc.getImportArn(), importDesc);
+        ExportDescription exportDesc = new ExportDescription();
+        exportDesc.setExportArn("arn:aws:dynamodb:us-east-1:000000000000:table/Users/export/1-abc");
+        exportDesc.setExportStatus("IN_PROGRESS");
+        exports.put(exportDesc.getExportArn(), exportDesc);
+
+        DynamoDbService restarted = new DynamoDbService(tables, new InMemoryStorage<>(), exports, imports,
+                resolver, null, null, mock(S3Service.class), mapper);
+
+        assertEquals("ACTIVE", restarted.describeTable("Users", "us-east-1").getTableStatus());
+        assertEquals("FAILED", restarted.describeImport(importDesc.getImportArn()).getImportStatus());
+        assertEquals("InterruptedByRestart", restarted.describeImport(importDesc.getImportArn()).getFailureCode());
+        assertEquals("FAILED", restarted.describeExport(exportDesc.getExportArn()).getExportStatus());
+    }
+
+    @Test
+    void backupKeepsItsSnapshotAcrossLaterWritesAndARestart(@TempDir Path dir) {
+        RegionResolver resolver = new RegionResolver("us-east-1", "000000000000");
+        StorageBackend<String, TableDefinition> tables = new InMemoryStorage<>();
+        StorageBackend<String, Map<String, JsonNode>> items = new InMemoryStorage<>();
+        Path backupFile = dir.resolve("dynamodb-backups.json");
+        TypeReference<Map<String, TableBackup>> backupType = new TypeReference<>() {};
+        DynamoDbService before = new DynamoDbService(tables, items, null, null,
+                new PersistentStorage<>(backupFile, backupType), resolver, null, null, null, mapper, 0, 0);
+        before.createTable("Users", List.of(new KeySchemaElement("userId", "HASH")),
+                List.of(new AttributeDefinition("userId", "S")), 5L, 5L, "us-east-1");
+        before.putItem("Users", item("userId", "u1"), null, null, null, "us-east-1", null);
+        TableBackup backup = before.createBackup("Users", "nightly", "us-east-1");
+        before.putItem("Users", item("userId", "u2"), null, null, null, "us-east-1", null);
+        before.updateTimeToLive("Users", "expiresAt", true, "us-east-1");
+        assertFalse(before.describeBackup(backup.getBackupArn(), "us-east-1").getTable().isTtlEnabled());
+
+        PersistentStorage<String, TableBackup> reloadedBackups = new PersistentStorage<>(backupFile, backupType);
+        reloadedBackups.load();
+        DynamoDbService restarted = new DynamoDbService(tables, items, null, null, reloadedBackups, resolver,
+                null, null, null, mapper, 0, 0);
+        TableBackup reloaded = restarted.describeBackup(backup.getBackupArn(), "us-east-1");
+
+        assertEquals("nightly", reloaded.getBackupName());
+        assertEquals(backup.getCreationDateTime(), reloaded.getCreationDateTime());
+        assertEquals(List.of("u1"), reloaded.getItems().stream().map(i -> i.path("userId").path("S").asText()).toList());
+        assertEquals(1, reloaded.getTable().getItemCount());
+        assertFalse(reloaded.getTable().isTtlEnabled());
+    }
+
+    @Test
+    void pointInTimeStateUndoesATtlDeletionAfterTheRestoreTime() {
+        String region = "us-east-1";
+        DynamoDbService pitr = pointInTimeService(new InMemoryStorage<>(), new InMemoryStorage<>(),
+                new InMemoryStorage<>(), new InMemoryStorage<>(), 0);
+        pitr.createTable("Users", List.of(new KeySchemaElement("userId", "HASH")),
+                List.of(new AttributeDefinition("userId", "S")), 5L, 5L, region);
+        pitr.updateTimeToLive("Users", "expiresAt", true, region);
+        pitr.updateContinuousBackups("Users", true, null, region);
+        ObjectNode expired = item("userId", "u1");
+        expired.set("expiresAt", attributeValue("N", "1"));
+        pitr.putItem("Users", expired, null, null, null, region, null);
+        Instant beforeSweep = clock.instant();
+        pitr.deleteExpiredItems();
+
+        assertEquals(List.of("u1"), userIds(pitr.pointInTimeState("Users", region, region, false, beforeSweep)));
+        assertEquals(List.of(), userIds(pitr.pointInTimeState("Users", region, region, true, null)));
+    }
+
+    @Test
+    void pointInTimeHistorySurvivesARestart(@TempDir Path dir) {
+        StorageBackend<String, TableDefinition> tables = new InMemoryStorage<>();
+        StorageBackend<String, Map<String, JsonNode>> items = new InMemoryStorage<>();
+        Path historyFile = dir.resolve("dynamodb-point-in-time.json");
+        TypeReference<Map<String, PointInTimeChange>> historyType = new TypeReference<>() {};
+        DynamoDbService before = pointInTimeService(tables, items, new InMemoryStorage<>(),
+                new PersistentStorage<>(historyFile, historyType), 0);
+        before.createTable("Users", List.of(new KeySchemaElement("userId", "HASH")),
+                List.of(new AttributeDefinition("userId", "S")), 5L, 5L, "us-east-1");
+        before.updateContinuousBackups("Users", true, null, "us-east-1");
+        before.putItem("Users", item("userId", "u1"), null, null, null, "us-east-1", null);
+        Instant t1 = clock.instant();
+        before.putItem("Users", item("userId", "u2"), null, null, null, "us-east-1", null);
+        Instant earliest = before.describeContinuousBackups("Users", "us-east-1").window().earliest();
+
+        PersistentStorage<String, PointInTimeChange> reloaded = new PersistentStorage<>(historyFile, historyType);
+        reloaded.load();
+        DynamoDbService restarted = pointInTimeService(tables, items, new InMemoryStorage<>(), reloaded, 0);
+
+        assertEquals(earliest, restarted.describeContinuousBackups("Users", "us-east-1").window().earliest());
+        assertEquals(List.of("u1"), userIds(restarted.pointInTimeState("Users", "us-east-1", "us-east-1", false, t1)));
+        assertEquals(List.of("u1", "u2"),
+                userIds(restarted.pointInTimeState("Users", "us-east-1", "us-east-1", true, null)));
+    }
+
+    @Test
+    void pointInTimeRestoreTakesTimesAfterTheReportedLatestUpToNow() {
+        String region = "us-east-1";
+        DynamoDbService lagged = pointInTimeService(new InMemoryStorage<>(), new InMemoryStorage<>(),
+                new InMemoryStorage<>(), new InMemoryStorage<>(), 300);
+        lagged.createTable("Users", List.of(new KeySchemaElement("userId", "HASH")),
+                List.of(new AttributeDefinition("userId", "S")), 5L, 5L, region);
+        DynamoDbPointInTimeRecovery.RestoreWindow window =
+                lagged.updateContinuousBackups("Users", true, null, region).window();
+        assertEquals(window.earliest(), window.latest());
+        lagged.putItem("Users", item("userId", "u1"), null, null, null, region, null);
+        Instant afterWrite = clock.instant();
+
+        assertEquals(List.of("u1"), userIds(lagged.pointInTimeState("Users", region, region, false, afterWrite)));
+        assertEquals(List.of(), userIds(lagged.pointInTimeState("Users", region, region, true, null)));
+        AwsException future = assertThrows(AwsException.class, () ->
+                lagged.pointInTimeState("Users", region, region, false, clock.instant().plusSeconds(60)));
+        assertEquals("InvalidRestoreTimeException", future.getErrorCode());
+    }
+
+    @Test
+    void pointInTimeChangesAreStoredOneByOneAndDroppedWithTheirTable() {
+        String region = "us-east-1";
+        StorageBackend<String, PointInTimeChange> changes = new InMemoryStorage<>();
+        DynamoDbService pitr = pointInTimeService(new InMemoryStorage<>(), new InMemoryStorage<>(),
+                new InMemoryStorage<>(), changes, 0);
+        pitr.createTable("Users", List.of(new KeySchemaElement("userId", "HASH")),
+                List.of(new AttributeDefinition("userId", "S")), 5L, 5L, region);
+        pitr.updateContinuousBackups("Users", true, null, region);
+        pitr.putItem("Users", item("userId", "u1"), null, null, null, region, null);
+        pitr.putItem("Users", item("userId", "u1", "name", "one"), null, null, null, region, null);
+        pitr.deleteItem("Users", item("userId", "u1"), region);
+        assertEquals(3, changes.keys().size());
+
+        pitr.updateContinuousBackups("Users", false, null, region);
+        assertEquals(Set.of(), changes.keys());
+        pitr.updateContinuousBackups("Users", true, null, region);
+        pitr.putItem("Users", item("userId", "u2"), null, null, null, region, null);
+        assertEquals(1, changes.keys().size());
+        pitr.deleteTable("Users", region);
+        assertEquals(Set.of(), changes.keys());
+    }
+
+    @Test
+    void aTableEnabledBeforeTheHistoryExistedKeepsItsEarliestTimeAcrossARestart(@TempDir Path dir) {
+        String region = "us-east-1";
+        Path tableFile = dir.resolve("dynamodb-tables.json");
+        TypeReference<Map<String, TableDefinition>> tableType = new TypeReference<>() {};
+        PersistentStorage<String, TableDefinition> tables = new PersistentStorage<>(tableFile, tableType);
+        DynamoDbService before = pointInTimeService(tables, new InMemoryStorage<>(), new InMemoryStorage<>(),
+                new InMemoryStorage<>(), 0);
+        before.createTable("Users", List.of(new KeySchemaElement("userId", "HASH")),
+                List.of(new AttributeDefinition("userId", "S")), 5L, 5L, region);
+        TableDefinition legacy = tables.get(region + "::Users").orElseThrow();
+        legacy.setPointInTimeRecoveryEnabled(true);
+        tables.put(region + "::Users", legacy);
+        Instant earliest = before.describeContinuousBackups("Users", region).window().earliest();
+        clock.advance(Duration.ofSeconds(1));
+
+        PersistentStorage<String, TableDefinition> reloaded = new PersistentStorage<>(tableFile, tableType);
+        reloaded.load();
+        DynamoDbService restarted = pointInTimeService(reloaded, new InMemoryStorage<>(), new InMemoryStorage<>(),
+                new InMemoryStorage<>(), 0);
+
+        assertEquals(earliest, restarted.describeContinuousBackups("Users", region).window().earliest());
+    }
+
+    @Test
+    void theTtlSweepDeletesAnExpiredSystemBackup() {
+        String region = "us-east-1";
+        StorageBackend<String, TableBackup> backups = new InMemoryStorage<>();
+        DynamoDbService swept = pointInTimeService(new InMemoryStorage<>(), new InMemoryStorage<>(), backups,
+                new InMemoryStorage<>(), 0);
+        for (String table : List.of("Expired", "Kept")) {
+            swept.createTable(table, List.of(new KeySchemaElement("userId", "HASH")),
+                    List.of(new AttributeDefinition("userId", "S")), 5L, 5L, region);
+            swept.updateContinuousBackups(table, true, null, region);
+            swept.deleteTable(table, region);
+            clock.advance(Duration.ofDays(20));
+        }
+
+        swept.deleteExpiredItems();
+
+        assertEquals(List.of("Kept"), backups.scan(key -> true).stream().map(b -> b.getTable().getTableName()).toList());
+    }
+
+    private DynamoDbService pointInTimeService(StorageBackend<String, TableDefinition> tables,
+                                               StorageBackend<String, Map<String, JsonNode>> items,
+                                               StorageBackend<String, TableBackup> backups,
+                                               StorageBackend<String, PointInTimeChange> changes,
+                                               int latestRestorableLagSeconds) {
+        return new DynamoDbService(tables, items, null, null, backups, changes,
+                new RegionResolver("us-east-1", "000000000000"), null, null, null, mapper, 0, 0,
+                latestRestorableLagSeconds, clock);
+    }
+
+    private static List<String> userIds(DynamoDbService.PointInTimeState state) {
+        return state.items().stream().map(i -> i.path("userId").path("S").asText()).sorted().toList();
+    }
+}

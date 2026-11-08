@@ -29,6 +29,11 @@
         "message": "chore(release): ${nextRelease.version}\n\n${nextRelease.notes}"
       }
     ],
-    "@semantic-release/github"
+    [
+      "@semantic-release/github",
+      {
+        "releaseBodyTemplate": "<%\nvar limit = 120000;\nvar notes = nextRelease.notes;\nif (notes.length > limit) {\n  var footer = '\\n---\\n\\nGitHub caps a release description at 125000 characters, so this list is shortened. Every change is in [CHANGELOG.md](https://github.com/floci-io/floci/blob/' + nextRelease.gitTag + '/CHANGELOG.md).\\n';\n  var budget = limit - footer.length;\n  var sections = notes.split(/\\n(?=### )/);\n  var out = sections.shift().replace(/\\s+$/, '') + '\\n';\n  var rank = function (s) { return /^### .*BREAKING/.test(s) ? 0 : /^### Features/.test(s) ? 1 : /^### Bug Fixes/.test(s) ? 3 : 2; };\n  sections.sort(function (a, b) { return rank(a) - rank(b); });\n  sections.forEach(function (section) {\n    section = section.replace(/\\s+$/, '') + '\\n';\n    if (out.length + section.length + 1 <= budget) {\n      out += '\\n' + section;\n      return;\n    }\n    var lines = section.split('\\n');\n    var kept = [];\n    var omitted = 0;\n    var used = out.length + 1 + 200;\n    lines.forEach(function (line) {\n      if (omitted === 0 && used + line.length + 1 <= budget) {\n        kept.push(line);\n        used += line.length + 1;\n      } else if (/^\\* /.test(line)) {\n        omitted++;\n      }\n    });\n    out += '\\n' + kept.join('\\n').replace(/\\s+$/, '') + '\\n';\n    if (omitted > 0) {\n      out += '\\n...and ' + omitted + ' more in this section.\\n';\n    }\n  });\n  notes = out + footer;\n}\n%><%= notes %>"
+      }
+    ]
   ]
 }

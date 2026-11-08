@@ -1,0 +1,29 @@
+{
+  "error": "Transforming resource with id [Fn] attempts to create a new resource with id [FnEventInvokeConfigOnFailureQueue] and type \"AWS::SQS::Queue\". A resource with that id already exists within this template. Please use a different id for that resource.",
+  "input": {
+    "Resources": {
+      "Fn": {
+        "Properties": {
+          "CodeUri": "s3://b/k",
+          "EventInvokeConfig": {
+            "DestinationConfig": {
+              "OnFailure": {
+                "Type": "SQS"
+              }
+            }
+          },
+          "Handler": "index.handler",
+          "Runtime": "python3.12"
+        },
+        "Type": "AWS::Serverless::Function"
+      },
+      "FnEventInvokeConfigOnFailureQueue": {
+        "Properties": {
+          "QueueName": "mine"
+        },
+        "Type": "AWS::SQS::Queue"
+      }
+    },
+    "Transform": "AWS::Serverless-2016-10-31"
+  }
+}

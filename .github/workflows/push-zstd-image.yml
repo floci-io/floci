@@ -1,0 +1,87 @@
+name: zstd image action
+
+# Only release.yml and nightly.yml call .github/actions/push-zstd-image, so this checks it on the
+# pull requests that change it: recompress.py against fixture layouts, then the whole action
+# pushing a two-platform image to a registry on the runner.
+
+on:
+  pull_request:
+    paths:
+      - '.github/actions/push-zstd-image/**'
+      - '.github/workflows/push-zstd-image.yml'
+  push:
+    branches:
+      - main
+    paths:
+      - '.github/actions/push-zstd-image/**'
+      - '.github/workflows/push-zstd-image.yml'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  # Cancel a superseded run only on pull requests; a run on main is left to finish (see ci.yml).
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  test:
+    name: Test the zstd image action
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    services:
+      registry:
+        image: registry:3@sha256:d4032d4cc323c1731c707931ecada07a53076eac38e3b61ae57533f170f2c6c3
+        ports:
+          - 5000:5000
+
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Test recompress.py
+        run: python3 .github/actions/push-zstd-image/test_recompress.py
+
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+        with:
+          driver-opts: network=host
+          buildkitd-config-inline: |
+            [registry."localhost:5000"]
+              http = true
+
+      - name: Push a two-platform image through the action
+        id: push
+        uses: ./.github/actions/push-zstd-image
+        with:
+          file: .github/actions/push-zstd-image/test/Dockerfile
+          platforms: linux/amd64,linux/arm64
+          tags: localhost:5000/floci/zstd-test:ci
+          provenance: mode=max
+          sbom: true
+
+      - name: Check the pushed image
+        # Every layer must be zstd and every platform image must carry its attestations, and the
+        # runner's Docker must be able to pull and run the result.
+        env:
+          DIGEST: ${{ steps.push.outputs.digest }}
+        run: |
+          registry=http://localhost:5000/v2/floci/zstd-test
+          accept='Accept: application/vnd.oci.image.index.v1+json,application/vnd.oci.image.manifest.v1+json'
+          index=$(curl -fsS -H "$accept" "$registry/manifests/$DIGEST")
+          images=$(jq -r '.manifests[] | select(.platform.os == "linux") | .digest' <<<"$index")
+          if [ "$(wc -w <<<"$images")" -ne 2 ]; then
+            echo "::error::expected two platform images in $DIGEST, got: $images"
+            exit 1
+          fi
+          for image in $images; do
+            types=$(curl -fsS -H "$accept" "$registry/manifests/$image" | jq -r '[.layers[].mediaType] | unique | join(" ")')
+            if [ "$types" != application/vnd.oci.image.layer.v1.tar+zstd ]; then
+              echo "::error::$image has layers of type $types"
+              exit 1
+            fi
+            if ! jq -e --arg image "$image" 'any(.manifests[]; .annotations["vnd.docker.reference.digest"] == $image)' <<<"$index" > /dev/null; then
+              echo "::error::$image has no attestation manifest"
+              exit 1
+            fi
+          done
+          docker run --rm "localhost:5000/floci/zstd-test@$DIGEST" ls -l /usr/local/bin/healthcheck.sh

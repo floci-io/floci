@@ -42,12 +42,6 @@ on:
       jvm-digest-ref:
         description: Immutable JVM image reference
         value: ${{ jobs.publish.outputs.jvm-digest-ref }}
-      cedar-ref:
-        description: Commit-tagged Cedar sidecar image reference
-        value: ${{ jobs.publish.outputs.cedar-ref }}
-      cedar-digest-ref:
-        description: Immutable Cedar sidecar image reference
-        value: ${{ jobs.publish.outputs.cedar-digest-ref }}
       native-ref:
         description: Commit-tagged native image reference when publish-native is true
         value: ${{ jobs.publish.outputs.native-ref }}
@@ -168,7 +162,9 @@ jobs:
     name: Build native artifact (amd64)
     if: inputs.publish-native
     needs: prepare
-    runs-on: ubuntu-latest
+    # Pinned, like the arm64 jobs. Built on ubuntu-26.04 the binary asks glibc for x86-64-v3
+    # whatever -march says, and no longer starts on x86-64-v2 CPUs.
+    runs-on: ubuntu-24.04
     timeout-minutes: 45
     permissions:
       contents: read
@@ -179,7 +175,7 @@ jobs:
           persist-credentials: false
           ref: ${{ needs.prepare.outputs.source-sha }}
 
-      - uses: graalvm/setup-graalvm@5298d94fb55a4f185c602eeac5de1b553882abe2 # v1
+      - uses: graalvm/setup-graalvm@27b360dbb857524eaf0b4c4cef364d38e5b4f173 # v1
         with:
           java-version: '25'
           distribution: mandrel
@@ -194,7 +190,7 @@ jobs:
         # The flag only exists on Mandrel, so it is passed here rather than in application.yml.
         run: ./mvnw clean package -Dnative -DskipTests -B -Dquarkus.native.additional-build-args-append="-march=x86-64-v2,-H:-AOTSingleCallsiteInline"
 
-      - uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: floci-native-amd64-${{ needs.prepare.outputs.image-tag }}
           path: |
@@ -219,7 +215,7 @@ jobs:
           persist-credentials: false
           ref: ${{ needs.prepare.outputs.source-sha }}
 
-      - uses: graalvm/setup-graalvm@5298d94fb55a4f185c602eeac5de1b553882abe2 # v1
+      - uses: graalvm/setup-graalvm@27b360dbb857524eaf0b4c4cef364d38e5b4f173 # v1
         with:
           java-version: '25'
           distribution: mandrel
@@ -234,7 +230,7 @@ jobs:
         # The flag only exists on Mandrel, so it is passed here rather than in application.yml.
         run: ./mvnw clean package -Dnative -DskipTests -B -Dquarkus.native.additional-build-args-append="-H:-AOTSingleCallsiteInline"
 
-      - uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: floci-native-arm64-${{ needs.prepare.outputs.image-tag }}
           path: |
@@ -265,8 +261,6 @@ jobs:
       compat-digest-ref: ${{ steps.provenance.outputs.compat-digest-ref }}
       jvm-ref: ${{ steps.provenance.outputs.jvm-ref }}
       jvm-digest-ref: ${{ steps.provenance.outputs.jvm-digest-ref }}
-      cedar-ref: ${{ steps.provenance.outputs.cedar-ref }}
-      cedar-digest-ref: ${{ steps.provenance.outputs.cedar-digest-ref }}
       native-ref: ${{ steps.provenance.outputs.native-ref }}
       native-digest-ref: ${{ steps.provenance.outputs.native-digest-ref }}
 
@@ -276,13 +270,13 @@ jobs:
           persist-credentials: false
           ref: ${{ needs.prepare.outputs.source-sha }}
 
-      - uses: actions/download-artifact@70fc10c6e5e1ce46ad2ea6f2b72d43f7d47b13c3 # v8.0.0
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         if: inputs.publish-native
         with:
           name: floci-native-amd64-${{ needs.prepare.outputs.image-tag }}
           path: native/amd64/
 
-      - uses: actions/download-artifact@70fc10c6e5e1ce46ad2ea6f2b72d43f7d47b13c3 # v8.0.0
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         if: inputs.publish-native
         with:
           name: floci-native-arm64-${{ needs.prepare.outputs.image-tag }}
@@ -299,11 +293,11 @@ jobs:
           echo "created=$(date -u +'%Y-%m-%dT%H:%M:%SZ')" >> "$GITHUB_OUTPUT"
           echo "source-date-epoch=$(git log -1 --pretty=%ct)" >> "$GITHUB_OUTPUT"
 
-      - uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e # v4.3.0
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
 
       - name: Log in to GitHub Container Registry
         if: needs.prepare.outputs.registry == 'ghcr.io'
-        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
+        uses: docker/login-action@81c6f93d4bc991e510b342a00b419b3bb4efc5c6 # v4.7.0
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
@@ -311,7 +305,7 @@ jobs:
 
       - name: Log in to configured registry
         if: needs.prepare.outputs.registry != 'ghcr.io'
-        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
+        uses: docker/login-action@81c6f93d4bc991e510b342a00b419b3bb4efc5c6 # v4.7.0
         with:
           registry: ${{ needs.prepare.outputs.registry }}
           username: ${{ secrets.REGISTRY_USERNAME }}
@@ -319,7 +313,7 @@ jobs:
 
       - name: Build and publish JVM image
         id: jvm
-        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
         env:
           SOURCE_DATE_EPOCH: ${{ steps.metadata.outputs.source-date-epoch }}
         with:
@@ -342,33 +336,10 @@ jobs:
           cache-from: type=gha,scope=floci-jvm
           cache-to: type=gha,scope=floci-jvm,mode=max
 
-      - name: Build and publish Cedar sidecar image
-        id: cedar
-        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
-        env:
-          SOURCE_DATE_EPOCH: ${{ steps.metadata.outputs.source-date-epoch }}
-        with:
-          context: .
-          file: sidecars/cedar/Dockerfile
-          platforms: linux/amd64,linux/arm64
-          push: true
-          tags: ${{ needs.prepare.outputs.image }}:${{ needs.prepare.outputs.image-tag }}-cedar
-          labels: |
-            org.opencontainers.image.version=${{ needs.prepare.outputs.product-version }}
-            org.opencontainers.image.revision=${{ needs.prepare.outputs.source-sha }}
-            org.opencontainers.image.vcs-ref=${{ needs.prepare.outputs.source-sha }}
-            org.opencontainers.image.created=${{ steps.metadata.outputs.created }}
-            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
-            version=${{ needs.prepare.outputs.product-version }}
-            build-date=${{ steps.metadata.outputs.created }}
-            vcs-ref=${{ needs.prepare.outputs.source-sha }}
-          cache-from: type=gha,scope=floci-cedar
-          cache-to: type=gha,scope=floci-cedar,mode=max
-
       - name: Build and publish native image
         id: native
         if: inputs.publish-native
-        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
         env:
           SOURCE_DATE_EPOCH: ${{ steps.metadata.outputs.source-date-epoch }}
         with:
@@ -394,7 +365,7 @@ jobs:
       - name: Build and publish compat image
         id: compat
         if: inputs.publish-native
-        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
         env:
           SOURCE_DATE_EPOCH: ${{ steps.metadata.outputs.source-date-epoch }}
         with:
@@ -421,7 +392,6 @@ jobs:
       - name: Record image provenance
         id: provenance
         env:
-          CEDAR_DIGEST: ${{ steps.cedar.outputs.digest }}
           COMPAT_DIGEST: ${{ steps.compat.outputs.digest }}
           CREATED: ${{ steps.metadata.outputs.created }}
           IMAGE: ${{ needs.prepare.outputs.image }}
@@ -440,8 +410,6 @@ jobs:
         run: |
           jvm_ref="$IMAGE:$IMAGE_TAG"
           jvm_digest_ref="$IMAGE@$JVM_DIGEST"
-          cedar_ref="$IMAGE:$IMAGE_TAG-cedar"
-          cedar_digest_ref="$IMAGE@$CEDAR_DIGEST"
           native_ref="$IMAGE:$IMAGE_TAG-native"
           compat_ref="$IMAGE:$IMAGE_TAG-native-compat"
           native_digest_ref="$IMAGE@$NATIVE_DIGEST"
@@ -461,10 +429,7 @@ jobs:
             --arg jvmRef "$jvm_ref" \
             --arg jvmDigest "$JVM_DIGEST" \
             --arg jvmDigestRef "$jvm_digest_ref" \
-            --arg cedarRef "$cedar_ref" \
-            --arg cedarDigest "$CEDAR_DIGEST" \
-            --arg cedarDigestRef "$cedar_digest_ref" \
-            '{source: {sha: $sourceSha, requestedRef: $requestedSourceRef, repository: $repository}, workflow: {runId: $runId, attempt: $runAttempt, url: $runUrl}, created: $created, imageTag: $imageTag, productVersion: $productVersion, images: {jvm: {ref: $jvmRef, digest: $jvmDigest, digestRef: $jvmDigestRef, dockerfile: "docker/Dockerfile"}, cedar: {ref: $cedarRef, digest: $cedarDigest, digestRef: $cedarDigestRef, dockerfile: "sidecars/cedar/Dockerfile"}}, platforms: ["linux/amd64", "linux/arm64"]}' \
+            '{source: {sha: $sourceSha, requestedRef: $requestedSourceRef, repository: $repository}, workflow: {runId: $runId, attempt: $runAttempt, url: $runUrl}, created: $created, imageTag: $imageTag, productVersion: $productVersion, images: {jvm: {ref: $jvmRef, digest: $jvmDigest, digestRef: $jvmDigestRef, dockerfile: "docker/Dockerfile"}}, platforms: ["linux/amd64", "linux/arm64"]}' \
             > floci-image-provenance.json
 
           if [[ "$PUBLISH_NATIVE" == "true" ]]; then
@@ -484,8 +449,6 @@ jobs:
           {
             echo "jvm-ref=$jvm_ref"
             echo "jvm-digest-ref=$jvm_digest_ref"
-            echo "cedar-ref=$cedar_ref"
-            echo "cedar-digest-ref=$cedar_digest_ref"
             if [[ "$PUBLISH_NATIVE" == "true" ]]; then
               echo "native-ref=$native_ref"
               echo "native-digest-ref=$native_digest_ref"
@@ -503,14 +466,13 @@ jobs:
             echo "| Image tag | Immutable digest reference |"
             echo "| --- | --- |"
             echo "| \`$jvm_ref\` | \`$jvm_digest_ref\` |"
-            echo "| \`$cedar_ref\` | \`$cedar_digest_ref\` |"
             if [[ "$PUBLISH_NATIVE" == "true" ]]; then
               echo "| \`$native_ref\` | \`$native_digest_ref\` |"
               echo "| \`$compat_ref\` | \`$compat_digest_ref\` |"
             fi
           } >> "$GITHUB_STEP_SUMMARY"
 
-      - uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: floci-image-provenance-${{ needs.prepare.outputs.image-tag }}
           path: floci-image-provenance.json

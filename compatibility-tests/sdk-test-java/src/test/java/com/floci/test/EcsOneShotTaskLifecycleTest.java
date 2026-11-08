@@ -1,7 +1,6 @@
 package com.floci.test;
 
 import org.junit.jupiter.api.*;
-import software.amazon.awssdk.core.waiters.WaiterOverrideConfiguration;
 import software.amazon.awssdk.core.waiters.WaiterResponse;
 import software.amazon.awssdk.services.ecs.EcsClient;
 import software.amazon.awssdk.services.ecs.model.*;
@@ -123,19 +122,15 @@ class EcsOneShotTaskLifecycleTest {
     @Order(2)
     @DisplayName("WaitTasksStopped - transitions to STOPPED within 60 s")
     void waitForTaskStopped() {
-        // The container runs for ~2 s; the reconciler fires every 5 s; the waiter
-        // polls every 6 s. Allow 60 s total to be CI-safe.
-        WaiterOverrideConfiguration overrides = WaiterOverrideConfiguration.builder()
-                .waitTimeout(Duration.ofSeconds(60))
-                .build();
-
+        // The container runs for ~2 s and the reconciler fires every 5 s. Allow 60 s total to be
+        // CI-safe.
         try (EcsWaiter waiter = EcsWaiter.builder().client(ecs).build()) {
             WaiterResponse<DescribeTasksResponse> response = waiter.waitUntilTasksStopped(
                     DescribeTasksRequest.builder()
                             .cluster(clusterName)
                             .tasks(taskArn)
                             .build(),
-                    overrides);
+                    TestFixtures.waiterOverride(Duration.ofSeconds(60)));
 
             assertThat(response.matched().response()).isPresent();
             Task task = response.matched().response().get().tasks().get(0);
@@ -195,8 +190,8 @@ class EcsOneShotTaskLifecycleTest {
 
     @Test
     @Order(7)
-    @DisplayName("StopTask - explicit stop populates exitCode when already stopped")
-    void explicitStopExitCode() {
+    @DisplayName("StopTask - explicit stop requests terminal status")
+    void explicitStopRequestsTerminalStatus() {
         // Register and run a second task; stop it explicitly before it exits naturally.
         String family2 = family + "-explicit";
         ecs.registerTaskDefinition(RegisterTaskDefinitionRequest.builder()
@@ -207,7 +202,9 @@ class EcsOneShotTaskLifecycleTest {
                 .containerDefinitions(ContainerDefinition.builder()
                         .name("main")
                         .image("busybox:latest")
-                        .command("sh", "-c", "sleep 300")
+                        // PID 1 gets no default SIGTERM handler, so a bare "sleep 300" sits out the
+                        // whole stopTimeout grace period when the test stops it.
+                        .command("sh", "-c", "trap 'exit 0' TERM; sleep 300 & wait")
                         .essential(true)
                         .cpu(256)
                         .memory(64)
@@ -221,21 +218,14 @@ class EcsOneShotTaskLifecycleTest {
                 .count(1)
                 .build()).tasks().get(0).taskArn();
 
-        Task stopped = ecs.stopTask(StopTaskRequest.builder()
+        Task stopping = ecs.stopTask(StopTaskRequest.builder()
                 .cluster(clusterName)
                 .task(explicitTaskArn)
                 .reason("test-explicit-stop")
                 .build()).task();
 
-        assertThat(stopped.lastStatus()).isEqualTo("STOPPED");
-        assertThat(stopped.stoppedAt()).isNotNull();
-
-        // exitCode should be present (Docker assigns 137 for SIGKILL on explicit stop)
-        assertThat(stopped.containers()).isNotEmpty();
-        stopped.containers().forEach(c ->
-                assertThat(c.exitCode())
-                        .as("explicit stopTask must populate exitCode on container %s", c.name())
-                        .isNotNull());
+        assertThat(stopping.desiredStatus()).isEqualTo("STOPPED");
+        assertThat(stopping.stoppedReason()).isEqualTo("test-explicit-stop");
     }
 
     // ── Helpers ──────────────────────────────────────────────────────────────

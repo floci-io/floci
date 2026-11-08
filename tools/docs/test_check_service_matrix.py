@@ -88,6 +88,161 @@ def test_extract_matrix_slugs_strips_anchor():
     md = "## Service Matrix\n\n| [API Gateway v2](api-gateway.md#v2) | | | 48 |\n\n## Common Setup\n"
     assert c.extract_matrix_slugs(md) == {"api-gateway"}
 
+def test_extract_matrix_action_counts():
+    md = """
+# Services Overview
+
+## Service Matrix
+
+| Service | Endpoint | Protocol | Supported operations |
+|---|---|---|---|
+| [SSM](ssm.md) | ... | JSON 1.1 | 22 |
+| [CloudFormation](cloudformation.md) | ... | Query | 19 |
+| [API Gateway v2](api-gateway.md#v2) | ... | REST JSON | 53 + data-plane |
+
+## Common Setup
+"""
+
+    assert c.extract_matrix_action_counts(md) == {
+        "ssm": 22,
+        "cloudformation": 19,
+    }
+
+
+def test_extract_matrix_action_counts_ignores_links_outside_matrix():
+    md = """
+# Services Overview
+
+A link to [SSM](ssm.md) outside the matrix must not be counted.
+
+## Service Matrix
+
+| Service | Endpoint | Protocol | Supported operations |
+|---|---|---|---|
+| [CloudFormation](cloudformation.md) | ... | Query | 19 |
+
+## Common Setup
+
+Another link to [SQS](sqs.md).
+"""
+
+    assert c.extract_matrix_action_counts(md) == {
+        "cloudformation": 19,
+    }
+
+
+@pytest.mark.parametrize("slug,handler", [
+    ("ec2", "ec2/Ec2QueryHandler.java"),
+    ("ecs", "ecs/EcsJsonHandler.java"),
+    ("elb", "elbv2/ElbV2QueryHandler.java"),
+    ("glue", "glue/GlueJsonHandler.java"),
+])
+def test_non_tabular_action_counts_follow_dispatcher(slug, handler):
+    root = c._repo_root()
+    source = root / c.PACKAGE_DIR / "services" / handler
+    expected = len(set(c.regen_action_docs.extract_switch_actions(
+        source.read_text(encoding="utf-8")
+    )))
+
+    assert c.extract_action_counts(root)[slug] == expected
+
+
+def test_non_tabular_action_count_tracks_new_dispatch_cases(tmp_path):
+    matrix = tmp_path / "docs/services/index.md"
+    matrix.parent.mkdir(parents=True)
+    matrix.write_text(
+        "## Service Matrix\n\n| [Glue](glue.md) | Query | JSON | 2 |\n\n## Common Setup\n",
+        encoding="utf-8",
+    )
+    registry = tmp_path / "tools/docs/service_matrix.yaml"
+    registry.parent.mkdir(parents=True)
+    registry.write_text("action_count_sources:\n  glue: services/GlueJsonHandler.java\n", encoding="utf-8")
+    handler = tmp_path / c.PACKAGE_DIR / "services/GlueJsonHandler.java"
+    handler.parent.mkdir(parents=True)
+    handler.write_text(
+        'case "CreateTable" -> create();\ncase "GetTable" -> get();\n',
+        encoding="utf-8",
+    )
+
+    assert c.extract_action_counts(tmp_path)["glue"] == 2
+
+    handler.write_text(
+        handler.read_text(encoding="utf-8") + 'case "DeleteTable" -> delete();\n',
+        encoding="utf-8",
+    )
+    assert c.extract_action_counts(tmp_path)["glue"] == 3
+
+
+def test_generated_action_table_requires_numeric_matrix_count(tmp_path):
+    matrix = tmp_path / "docs/services/index.md"
+    matrix.parent.mkdir(parents=True)
+    matrix.write_text(
+        "## Service Matrix\n\n| [EFS](efs.md) | REST | REST | TBD |\n"
+        "| [Glue](glue.md) | Query | JSON | 2 |\n\n## Common Setup\n",
+        encoding="utf-8",
+    )
+    (matrix.parent / "efs.md").write_text(
+        "<!-- floci:actions:start -->\n| Action | Description |\n"
+        "| --- | --- |\n| CreateFileSystem | Creates a file system |\n"
+        "<!-- floci:actions:end -->\n",
+        encoding="utf-8",
+    )
+    registry = tmp_path / "tools/docs/service_matrix.yaml"
+    registry.parent.mkdir(parents=True)
+    registry.write_text("action_count_sources:\n  glue: services/GlueJsonHandler.java\n", encoding="utf-8")
+    handler = tmp_path / c.PACKAGE_DIR / "services/GlueJsonHandler.java"
+    handler.parent.mkdir(parents=True)
+    handler.write_text('case "CreateTable" -> create();\ncase "GetTable" -> get();\n', encoding="utf-8")
+
+    with pytest.raises(ValueError, match="efs.*numeric matrix row"):
+        c.extract_action_counts(tmp_path)
+
+
+@pytest.mark.parametrize("source_entry", ["[]", "{}", "null"])
+def test_non_tabular_action_sources_cannot_be_disabled(tmp_path, source_entry):
+    matrix = tmp_path / "docs/services/index.md"
+    matrix.parent.mkdir(parents=True)
+    matrix.write_text(
+        "## Service Matrix\n\n| [Glue](glue.md) | Query | JSON | 2 |\n\n## Common Setup\n",
+        encoding="utf-8",
+    )
+    registry = tmp_path / "tools/docs/service_matrix.yaml"
+    registry.parent.mkdir(parents=True)
+    registry.write_text(f"action_count_sources: {source_entry}\n", encoding="utf-8")
+
+    with pytest.raises(ValueError, match="non-empty mapping"):
+        c.extract_action_counts(tmp_path)
+
+
+def test_non_tabular_action_source_cannot_be_removed_silently(tmp_path):
+    matrix = tmp_path / "docs/services/index.md"
+    matrix.parent.mkdir(parents=True)
+    matrix.write_text(
+        "## Service Matrix\n\n| [Glue](glue.md) | Query | JSON | 2 |\n"
+        "| [EC2](ec2.md) | Query | Query | 1 |\n\n## Common Setup\n",
+        encoding="utf-8",
+    )
+    registry = tmp_path / "tools/docs/service_matrix.yaml"
+    registry.parent.mkdir(parents=True)
+    registry.write_text(
+        "action_count_sources:\n  glue: services/GlueJsonHandler.java\n"
+        "  ec2: services/Ec2QueryHandler.java\n", encoding="utf-8",
+    )
+    source_dir = tmp_path / c.PACKAGE_DIR / "services"
+    source_dir.mkdir(parents=True)
+    (source_dir / "GlueJsonHandler.java").write_text(
+        'case "CreateTable" -> create();\ncase "GetTable" -> get();\n', encoding="utf-8",
+    )
+    (source_dir / "Ec2QueryHandler.java").write_text(
+        'case "DescribeInstances" -> describe();\n', encoding="utf-8",
+    )
+
+    required = frozenset({"glue", "ec2"})
+    assert c.extract_action_counts(tmp_path, required) == {"glue": 2, "ec2": 1}
+    registry.write_text("action_count_sources:\n  glue: services/GlueJsonHandler.java\n", encoding="utf-8")
+    with pytest.raises(ValueError, match="required action count source\\(s\\) missing: ec2"):
+        c.extract_action_counts(tmp_path, required)
+
 
 def test_extract_matrix_slugs_raises_on_missing_heading():
     # A renamed/reordered heading must fail loudly rather than silently returning an
@@ -199,3 +354,20 @@ def test_find_unlinked_pages_ignores_non_markdown(tmp_path):
     (tmp_path / "ssm.md").write_text("# page\n")
     (tmp_path / "diagram.svg").write_text("<svg/>")
     assert c.find_unlinked_pages(tmp_path, slugs={"ssm"}, facet_pages=set()) == []
+
+
+def test_action_count_source_paths_are_relative_to_the_package_root(tmp_path):
+    matrix = tmp_path / "docs/services/index.md"
+    matrix.parent.mkdir(parents=True)
+    matrix.write_text(
+        "## Service Matrix\n\n| [Glue](glue.md) | Query | JSON | 2 |\n\n## Common Setup\n",
+        encoding="utf-8",
+    )
+    registry = tmp_path / "tools/docs/service_matrix.yaml"
+    registry.parent.mkdir(parents=True)
+    registry.write_text(
+        f"action_count_sources:\n  glue: {c.PACKAGE_DIR}/services/GlueJsonHandler.java\n", encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match="relative to"):
+        c.extract_action_counts(tmp_path)

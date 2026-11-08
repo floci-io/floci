@@ -203,14 +203,9 @@ class LambdaConcurrencyTest {
     @Test
     @Order(12)
     void invoke_withVersionQualifier_stillHonorsReservedOnLatest() {
-        // Regression guard: if a future change adds Qualifier routing that
-        // resolves to a published version snapshot, the snapshot currently
-        // has reservedConcurrentExecutions=null and would silently bypass a
-        // reserved=0 on $LATEST. Today Floci ignores the qualifier and
-        // routes the invoke to $LATEST, so reserved=0 must still throttle.
-        // Keeping this test green after a qualifier-routing change will
-        // require copying the reservation onto the snapshot (or keying the
-        // limiter off the base ARN).
+        // Reserved concurrency is function-wide: Qualifier routes the invoke to
+        // the published version, whose snapshot carries no reservation, and the
+        // function's reserved=0 must still throttle it.
         lambda.publishVersion(PublishVersionRequest.builder()
                 .functionName(FUNCTION_NAME).build());
         lambda.putFunctionConcurrency(PutFunctionConcurrencyRequest.builder()

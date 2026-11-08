@@ -94,6 +94,40 @@ Floci emulates EventBridge Pipes with the following supported source and target 
 - SNS topics
 - Kinesis streams
 - Step Functions state machines
+- Amazon Redshift clusters and Redshift Serverless workgroups, through the Data API (see below)
+
+## Redshift Target
+
+A pipe whose target is a Redshift cluster (`arn:aws:redshift:...:cluster:<id>`) or a Redshift Serverless
+workgroup (`arn:aws:redshift-serverless:...:workgroup/<id>`) submits its SQL to the Redshift Data API as
+a `BatchExecuteStatement`, so the statements of one delivery run as a single transaction. The target
+parameters follow `PipeTargetRedshiftDataParameters`:
+
+```bash
+aws pipes create-pipe   --name sqs-to-redshift   --source "arn:aws:sqs:us-east-1:000000000000:events"   --target "arn:aws:redshift:us-east-1:000000000000:cluster:warehouse"   --role-arn "arn:aws:iam::000000000000:role/pipe-role"   --target-parameters '{"RedshiftDataParameters":{"Database":"dev","DbUser":"admin","Sqls":["$.body.statement"]}}'   --endpoint-url $AWS_ENDPOINT_URL
+```
+
+- `Sqls` is required, with 1 to 40 statements of at most 100,000 characters each; `CreatePipe` and
+  `UpdatePipe` reject anything else with `ValidationException`. `Database`, `DbUser`,
+  `SecretManagerArn`, `StatementName` and `WithEvent` are passed to the Data API.
+- A parameter that is wholly a dynamic path, such as `$.body.statement`, is read from the source event as
+  it arrived (for SQS, the path starts at the message, so the body is `$.body`). Input transformation does
+  not apply to a Redshift target, and a path that resolves to nothing fails the delivery with
+  `ValidationException`. A path embedded in a longer string is sent as written.
+- The pipe's role must trust `pipes.amazonaws.com` (an `aws:SourceArn` condition naming the pipe is
+  honored) and, with `FLOCI_SERVICES_IAM_ENFORCEMENT_ENABLED=true`, be allowed
+  `redshift-data:BatchExecuteStatement` and the action that authenticates the statement
+  (`secretsmanager:GetSecretValue`, `redshift:GetClusterCredentials` or
+  `redshift-serverless:GetCredentials`). A refusal fails the delivery and the record follows the pipe's
+  dead-letter queue. Floci does not assume the role: the statements run with the role ARN recorded on the
+  pipe, and `GetClusterCredentialsWithIAM` is not supported.
+- The Data API accepts the statements and the pipe does not wait for them. A statement that fails afterwards
+  is visible through `DescribeStatement`, but does not fail the delivery or get retried. A delivery that is
+  retried, because the Data API refused it or the source batch was redelivered, submits its statements
+  again, so write statements that tolerate being run twice.
+- Each source record is a delivery of its own, as for the other non-Lambda targets, so a batch of N SQS
+  messages makes N `BatchExecuteStatement` calls. How AWS maps a batch onto the Data API call has not been
+  verified, and this is a Floci choice.
 
 ## ParallelizationFactor
 
@@ -119,9 +153,23 @@ the field on a source its parameter block does not describe, for example
 !!! note "Enforcement status"
     The configured `ParallelizationFactor` is persisted and returned on the wire, but the poller
     does not yet process concurrent batches per shard. Floci opens an iterator on a single shard
-    (`shardId-000000000000`) per Kinesis or DynamoDB Streams pipe and delivers one batch at a time
-    regardless of the configured value. Multi-shard polling and real per-shard concurrency are
-    tracked as follow-ups.
+    (`shardId-000000000000`) per Kinesis pipe, and reads the shards of a DynamoDB stream one batch
+    at a time, regardless of the configured value. Multi-shard Kinesis polling and real per-shard
+    concurrency are tracked as follow-ups.
+
+## DynamoDB Streams Source
+
+- `StartingPosition` `TRIM_HORIZON` and `LATEST` are honored. `LATEST` is pinned on the pipe's
+  first poll, so only records written after that poll are delivered.
+- Progress survives `StopPipe` and `StartPipe`: a restarted pipe resumes after the last record it
+  delivered or sent to the DLQ. The progress is kept in memory, so it is lost when Floci restarts.
+- Records are delivered in the AWS DynamoDB Streams record shape (`eventName`, `dynamodb.Keys`,
+  `dynamodb.NewImage` and so on) with `eventSourceARN` set to the stream ARN, so filter patterns on
+  `dynamodb.*` fields match as on AWS.
+- A failed batch is retried until it is delivered or sent to the `DeadLetterConfig` queue. When
+  some records of a batch reach a non-Lambda target and others fail, the whole batch is retried.
+- `MaximumRetryAttempts`, `MaximumRecordAgeInSeconds` and `OnPartialBatchItemFailure` are accepted
+  and returned but not enforced, so they do not bound or split those retries.
 
 ## Enrichment
 

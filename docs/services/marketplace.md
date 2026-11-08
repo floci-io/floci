@@ -69,9 +69,17 @@ Floci emulates AWS Marketplace APIs under the shared `aws-marketplace` SigV4 sig
 
 Catalog change sets use AWS states (`PREPARING`, `APPLYING`, `SUCCEEDED`, and `CANCELLED`). Floci applies supported entity mutations locally when a change set is observed and persists entities, change sets, tags, resource policies, and assessments through `StorageFactory`, isolated by AWS account.
 
+### Known deviations
+
+- `ListEntities` rejects the `EntityTypeFilters` and `EntityTypeSort` request members with a `ValidationException`. AWS accepts these entity-type-specific filter and sort documents; Floci only supports the generic `FilterList` and `Sort` members.
+- Change sets do not progress asynchronously. A change set stays in `PREPARING` until it is next observed through `DescribeChangeSet` or `ListChangeSets`, at which point Floci applies it and moves it straight to `SUCCEEDED` in the same call. The `APPLYING` state is never returned, and change sets never reach `FAILED`; `CancelChangeSet` only succeeds while a change set is still unobserved.
+- The Marketplace Catalog API is served only in `us-east-1`, matching the single AWS endpoint. Requests signed for any other region are rejected with a `ValidationException` instead of being routed to a regional endpoint.
+
 ## Marketplace Agreement
 
 Agreement request acceptance persists the resulting agreement and exposes it through subsequent read and search operations. State is isolated by AWS account through `StorageFactory`.
+
+The API is served in the regions AWS publishes an endpoint for: `us-east-1`, `us-iso-east-1`, `us-isob-east-1`, `us-isof-south-1` and `eusc-de-east-1`. Requests signed for any other region are rejected with a `ValidationException`.
 
 ### Known deviations
 
@@ -81,6 +89,8 @@ Agreement request acceptance persists the resulting agreement and exposes it thr
 ## Marketplace Entitlement
 
 AWS exposes this service as read-only: `GetEntitlements` is the only public operation. Floci therefore does not add a non-AWS mutation endpoint. Entitlement records are loaded from the shared `StorageFactory` backend (`marketplace-entitlements.json` in persistent mode), so tests and local environments can pre-seed AWS-shaped entitlement state while preserving account isolation.
+
+`GetEntitlements` is served in the regions AWS publishes an endpoint for: `us-east-1`, `cn-northwest-1` and `eusc-de-east-1`. Requests signed for any other region are rejected with an `InvalidParameterException`.
 
 
 ## Marketplace Deployment

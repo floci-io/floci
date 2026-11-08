@@ -1,13 +1,17 @@
 package com.floci.test;
 
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import org.junit.jupiter.api.*;
 import software.amazon.awssdk.services.eventbridge.EventBridgeClient;
 import software.amazon.awssdk.services.eventbridge.model.*;
 import software.amazon.awssdk.services.sqs.SqsClient;
 import software.amazon.awssdk.services.sqs.model.*;
 
+import java.time.Duration;
 import java.time.Instant;
-import java.util.List;
+import java.util.HashMap;
+import java.util.Map;
 
 import static org.assertj.core.api.Assertions.*;
 
@@ -137,7 +141,7 @@ class EventBridgeReplayTest {
 
     @Test
     @Order(11)
-    void putEventsAreArchivedAndDelivered() {
+    void putEventsAreArchivedAndDelivered() throws Exception {
         beforePut = Instant.now().minusSeconds(1);
 
         PutEventsResponse response = eb.putEvents(PutEventsRequest.builder()
@@ -163,17 +167,14 @@ class EventBridgeReplayTest {
         DescribeArchiveResponse desc = eb.describeArchive(
                 DescribeArchiveRequest.builder().archiveName(archiveName).build());
         assertThat(desc.eventCount()).isEqualTo(2);
+        assertOrdersDelivered();
     }
 
     // ──────────────────────────── Replay ────────────────────────────
 
     @Test
     @Order(20)
-    void startReplay() throws InterruptedException {
-        // Drain events already delivered by putEvents
-        sqs.receiveMessage(ReceiveMessageRequest.builder()
-                .queueUrl(queueUrl).maxNumberOfMessages(10).build());
-
+    void startReplay() throws Exception {
         Instant afterPut = Instant.now().plusSeconds(1);
         String replayName = TestFixtures.uniqueName("replay");
 
@@ -196,11 +197,25 @@ class EventBridgeReplayTest {
         }
         assertThat(state).isEqualTo(ReplayState.COMPLETED);
 
-        // Verify 2 replayed events arrived in the queue
-        List<Message> messages = sqs.receiveMessage(ReceiveMessageRequest.builder()
-                .queueUrl(queueUrl).maxNumberOfMessages(10).waitTimeSeconds(2).build())
-                .messages();
-        assertThat(messages).hasSize(2);
+        assertOrdersDelivered();
+    }
+
+    private void assertOrdersDelivered() throws Exception {
+        Map<String, String> orders = new HashMap<>();
+        ObjectMapper mapper = new ObjectMapper();
+        long deadline = System.nanoTime() + Duration.ofSeconds(5).toNanos();
+        while (orders.size() < 2 && System.nanoTime() < deadline) {
+            // SQS may return fewer than the requested maximum; exercise separate batches.
+            for (Message message : sqs.receiveMessage(ReceiveMessageRequest.builder()
+                    .queueUrl(queueUrl).maxNumberOfMessages(1).waitTimeSeconds(1).build()).messages()) {
+                JsonNode event = mapper.readTree(message.body());
+                assertThat(event.path("source").asText()).isEqualTo("compat.replay.test");
+                orders.put(event.path("detail").path("orderId").asText(), event.path("detail-type").asText());
+                sqs.deleteMessage(DeleteMessageRequest.builder()
+                        .queueUrl(queueUrl).receiptHandle(message.receiptHandle()).build());
+            }
+        }
+        assertThat(orders).containsExactlyInAnyOrderEntriesOf(Map.of("A1", "OrderCreated", "A2", "OrderShipped"));
     }
 
     @Test

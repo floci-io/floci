@@ -25,22 +25,32 @@ if [ "$(id -u)" = '0' ]; then
         fi
     fi
 
-    # Re-own state dir for the case where a host bind-mount arrives with
-    # ownership the floci user cannot write to. Ignore errors (read-only
-    # mounts, unusual filesystems) so the container still starts.
-    if [ -d /app/data ]; then
-        chown -R floci:root /app/data 2>/dev/null || true
+    # Re-own the state dir for the case where a volume or host bind-mount
+    # arrives with ownership the floci user cannot write to. This is the same
+    # directory the writability probe below checks, so a volume mounted at a
+    # custom FLOCI_STORAGE_PERSISTENT_PATH is fixed up too. The path is resolved
+    # physically first, then compared by inode rather than by string: bash keeps a leading //
+    # (POSIX leaves it implementation-defined), so a string test would let // through.
+    # --preserve-root is the second guard. Ignore errors
+    # (read-only mounts, unusual filesystems) so the container still starts.
+    state_dir="${FLOCI_STORAGE_PERSISTENT_PATH:-/app/data}"
+    if [ -d "$state_dir" ]; then
+        # CDPATH is cleared so a relative path cannot be looked up elsewhere (and echoed).
+        state_dir_physical="$(CDPATH= cd -P -- "$state_dir" 2>/dev/null && pwd -P)" || state_dir_physical=''
+        if [ "$state_dir_physical" -ef / ]; then
+            echo "WARNING: not changing ownership of $state_dir, it resolves to /." >&2
+        elif [ -n "$state_dir_physical" ]; then
+            chown --preserve-root -R floci:root "$state_dir_physical" 2>/dev/null || true
+        fi
     fi
 
     # `chroot /` changes nothing but the identity: uid 1001, primary gid 0, plus the socket's
     # group. Supplementary groups are set by number, so the group needs no /etc/group entry.
     # --skip-chdir keeps the working directory (/app, where relative data paths resolve); GNU
     # chroot would otherwise chdir to the new root.
-    exec chroot --userspec=1001:0 --groups="$groups" --skip-chdir / "$0" "$@"
-fi
-
-if [ "${LOCALSTACK_PARITY:-true}" != "false" ]; then
-    . /usr/local/bin/localstack-parity.sh
+    if [ "${FLOCI_RUN_AS_ROOT:-false}" != 'true' ]; then
+        exec chroot --userspec=1001:0 --groups="$groups" --skip-chdir / "$0" "$@"
+    fi
 fi
 
 # Probe the state dir as the unprivileged user and warn loudly when it is not
@@ -71,11 +81,13 @@ fi
 # ignores its argv entirely, so this keeps drop-in parity.
 # The default matches the CMD of the image variant: native images ship
 # /app/application, JVM images ship /app/quarkus-app/quarkus-run.jar.
+# Both listen on 0.0.0.0 so a published port reaches Floci, which it only
+# accepts with explicit consent. The JVM reads -D options only before -jar.
 if [ $# -eq 0 ]; then
     if [ -x /app/application ]; then
-        set -- /app/application -Dquarkus.http.host=0.0.0.0
+        set -- /app/application -Dquarkus.http.host=0.0.0.0 -Dfloci.security.allow-unsafe-network-exposure=true
     else
-        set -- java -jar /app/quarkus-app/quarkus-run.jar -Dquarkus.http.host=0.0.0.0
+        set -- java -Dquarkus.http.host=0.0.0.0 -Dfloci.security.allow-unsafe-network-exposure=true -jar /app/quarkus-app/quarkus-run.jar
     fi
 fi
 

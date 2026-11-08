@@ -13,8 +13,6 @@ RUN mvn clean package -DskipTests -q
 # Stage 2: Runtime
 FROM eclipse-temurin:25-jre-noble
 
-ARG VERSION=latest
-ENV FLOCI_VERSION=${VERSION}
 ENV FLOCI_STORAGE_PERSISTENT_PATH=/app/data
 
 ENV AWS_DEFAULT_REGION=us-east-1
@@ -23,7 +21,7 @@ ENV AWS_SECRET_ACCESS_KEY=test
 ENV AWS_CONFIG_FILE=/etc/floci/aws/config
 
 # Privilege drop happens in the entrypoint through coreutils chroot, so no gosu
-# download; wget stays for the HEALTHCHECK below.
+# download.
 RUN set -eux; \
     apt-get update; \
     apt-get install -y --no-install-recommends ca-certificates passwd python3 python3-pip wget; \
@@ -37,8 +35,13 @@ RUN set -eux; \
 
 WORKDIR /app
 
+# cli_follow_urlparam: the bundled CLI is v1 (pip ships no v2), where a parameter value that looks
+# like a URL is *fetched* and its body used as the value. An init hook putting an SSM parameter such
+# as MY_API_URL=https://example.com then fails with "Unable to retrieve https://…", and a hook that
+# backgrounds its calls loses that silently. AWS CLI v2 dropped the behaviour, so this only shows up
+# in the image, never when the same script is run from a host with v2.
 RUN mkdir -p /app/data /etc/floci/aws \
-    && printf '[default]\nendpoint_url = http://localhost:4566\n' > /etc/floci/aws/config \
+    && printf '[default]\nendpoint_url = http://localhost:4566\ncli_follow_urlparam = false\n' > /etc/floci/aws/config \
     && chown 1001:root /app \
     && chmod "g+rwX" /app \
     && chown 1001:root /app/data
@@ -47,7 +50,10 @@ COPY --from=build /build/target/quarkus-app/ quarkus-app/
 RUN chown -R 1001:root /app/quarkus-app
 
 COPY --chmod=755 docker/entrypoint.sh /usr/local/bin/docker-entrypoint.sh
-COPY --chmod=755 docker/localstack-parity.sh /usr/local/bin/localstack-parity.sh
+COPY --chmod=755 docker/healthcheck.sh /usr/local/bin/
+
+ARG VERSION=latest
+ENV FLOCI_VERSION=${VERSION}
 
 VOLUME /app/data
 
@@ -77,8 +83,11 @@ EXPOSE 6397
 EXPOSE 6398
 EXPOSE 6399
 
-HEALTHCHECK --interval=5s --timeout=3s --retries=5 \
-    CMD wget -q --spider http://localhost:4566/_floci/health || exit 1
+# Probe every 50 ms while Floci starts, so a wait for "healthy" ends right after startup instead of
+# at the first 5 s check. The start period must stay above the 5 s fallback in healthcheck.sh.
+# Docker Engine before 25.0 ignores --start-interval when it runs the image, and cannot build this file.
+HEALTHCHECK --interval=5s --timeout=3s --retries=5 --start-period=10s --start-interval=50ms CMD ["/usr/local/bin/healthcheck.sh"]
 
 ENTRYPOINT ["/usr/local/bin/docker-entrypoint.sh"]
-CMD ["java", "--enable-native-access=ALL-UNNAMED", "-jar", "/app/quarkus-app/quarkus-run.jar"]
+# A published port needs 0.0.0.0 inside the container, which Floci only accepts with explicit consent.
+CMD ["java", "--enable-native-access=ALL-UNNAMED", "-Dquarkus.http.host=0.0.0.0", "-Dfloci.security.allow-unsafe-network-exposure=true", "-jar", "/app/quarkus-app/quarkus-run.jar"]

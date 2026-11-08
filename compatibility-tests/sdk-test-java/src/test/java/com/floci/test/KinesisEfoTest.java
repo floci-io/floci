@@ -12,9 +12,12 @@ import software.amazon.awssdk.services.kinesis.KinesisAsyncClient;
 import software.amazon.awssdk.services.kinesis.KinesisClient;
 import software.amazon.awssdk.services.kinesis.model.ConsumerStatus;
 import software.amazon.awssdk.services.kinesis.model.DescribeStreamConsumerRequest;
+import software.amazon.awssdk.services.kinesis.model.DescribeStreamConsumerResponse;
 import software.amazon.awssdk.services.kinesis.model.DescribeStreamRequest;
+import software.amazon.awssdk.services.kinesis.model.DescribeStreamResponse;
 import software.amazon.awssdk.services.kinesis.model.PutRecordRequest;
 import software.amazon.awssdk.services.kinesis.model.RegisterStreamConsumerRequest;
+import software.amazon.awssdk.services.kinesis.model.RegisterStreamConsumerResponse;
 import software.amazon.awssdk.services.kinesis.model.ShardIteratorType;
 import software.amazon.awssdk.services.kinesis.model.StartingPosition;
 import software.amazon.awssdk.services.kinesis.model.SubscribeToShardEvent;
@@ -50,7 +53,7 @@ class KinesisEfoTest {
 
         assertDoesNotThrow(() -> kinesis.createStream(r -> r.streamName(STREAM_NAME).shardCount(1)));
 
-        var desc = kinesis.describeStream(DescribeStreamRequest.builder().streamName(STREAM_NAME).build());
+        DescribeStreamResponse desc = kinesis.describeStream(DescribeStreamRequest.builder().streamName(STREAM_NAME).build());
         streamArn = desc.streamDescription().streamARN();
         shardId = desc.streamDescription().shards().get(0).shardId();
 
@@ -73,7 +76,7 @@ class KinesisEfoTest {
     @Test
     @Order(1)
     void registerStreamConsumer() {
-        var response = assertDoesNotThrow(() ->
+        RegisterStreamConsumerResponse response = assertDoesNotThrow(() ->
                 kinesis.registerStreamConsumer(RegisterStreamConsumerRequest.builder()
                         .streamARN(streamArn)
                         .consumerName(CONSUMER_NAME)
@@ -90,7 +93,7 @@ class KinesisEfoTest {
     void describeStreamConsumer() {
         assertThat(consumerArn).as("consumerArn must be set by registerStreamConsumer").isNotBlank();
 
-        var response = assertDoesNotThrow(() ->
+        DescribeStreamConsumerResponse response = assertDoesNotThrow(() ->
                 kinesis.describeStreamConsumer(DescribeStreamConsumerRequest.builder()
                         .consumerARN(consumerArn)
                         .build()));

@@ -4,10 +4,14 @@ import org.junit.jupiter.api.*;
 import software.amazon.awssdk.core.SdkBytes;
 import software.amazon.awssdk.services.lambda.LambdaClient;
 import software.amazon.awssdk.services.lambda.model.*;
+import software.amazon.awssdk.services.lambda.model.ImageConfig;
+import software.amazon.awssdk.services.lambda.model.PackageType;
 import software.amazon.awssdk.services.lambda.model.Runtime;
 
 import java.time.OffsetDateTime;
 import java.time.format.DateTimeFormatter;
+import java.util.List;
+import java.util.Map;
 
 import static org.assertj.core.api.Assertions.*;
 
@@ -156,7 +160,7 @@ class LambdaFunctionConfigTest {
                     .runtime(Runtime.NODEJS20_X)
                     .role(ROLE)
                     .handler("index.handler")
-                    .architectures(java.util.List.of(Architecture.ARM64))
+                    .architectures(List.of(Architecture.ARM64))
                     .code(FunctionCode.builder()
                             .zipFile(SdkBytes.fromByteArray(LambdaUtils.minimalZip()))
                             .build())
@@ -201,7 +205,7 @@ class LambdaFunctionConfigTest {
                 UpdateFunctionConfigurationRequest.builder()
                         .functionName(FN)
                         .environment(Environment.builder()
-                                .variables(java.util.Map.of("KEY_A", "value-a", "KEY_B", "value-b"))
+                                .variables(Map.of("KEY_A", "value-a", "KEY_B", "value-b"))
                                 .build())
                         .build());
 
@@ -237,12 +241,12 @@ class LambdaFunctionConfigTest {
         try {
             CreateFunctionResponse createResp = lambda.createFunction(CreateFunctionRequest.builder()
                     .functionName(imageFn)
-                    .packageType(software.amazon.awssdk.services.lambda.model.PackageType.IMAGE)
+                    .packageType(PackageType.IMAGE)
                     .role(ROLE)
                     .code(FunctionCode.builder()
                             .imageUri("000000000000.dkr.ecr.us-east-1.amazonaws.com/fake-repo:latest")
                             .build())
-                    .imageConfig(software.amazon.awssdk.services.lambda.model.ImageConfig.builder()
+                    .imageConfig(ImageConfig.builder()
                             .workingDirectory("/app")
                             .build())
                     .build());
@@ -261,7 +265,7 @@ class LambdaFunctionConfigTest {
             UpdateFunctionConfigurationResponse updateResp = lambda.updateFunctionConfiguration(
                     UpdateFunctionConfigurationRequest.builder()
                             .functionName(imageFn)
-                            .imageConfig(software.amazon.awssdk.services.lambda.model.ImageConfig.builder()
+                            .imageConfig(ImageConfig.builder()
                                     .workingDirectory("/updated")
                                     .build())
                             .build());
@@ -274,5 +278,89 @@ class LambdaFunctionConfigTest {
                 lambda.deleteFunction(DeleteFunctionRequest.builder().functionName(imageFn).build());
             } catch (Exception ignored) {}
         }
+    }
+
+    @Test
+    @Order(7)
+    @DisplayName("DurableConfig round-trips via create, update and get")
+    void durableConfigRoundTrips() {
+        String durableFn = TestFixtures.uniqueName("fn-durable");
+        try {
+            CreateFunctionResponse createResp = lambda.createFunction(CreateFunctionRequest.builder()
+                    .functionName(durableFn)
+                    .runtime(Runtime.NODEJS20_X)
+                    .role(ROLE)
+                    .handler("index.handler")
+                    .code(FunctionCode.builder()
+                            .zipFile(SdkBytes.fromByteArray(LambdaUtils.minimalZip()))
+                            .build())
+                    .durableConfig(DurableConfig.builder().executionTimeout(3600).build())
+                    .build());
+
+            assertThat(createResp.durableConfig().executionTimeout()).isEqualTo(3600);
+            assertThat(createResp.durableConfig().retentionPeriodInDays())
+                    .as("RetentionPeriodInDays defaults to 14")
+                    .isEqualTo(14);
+            assertThat(createResp.timeout())
+                    .as("Timeout of a durable function defaults to the 15 minute cap")
+                    .isEqualTo(900);
+
+            UpdateFunctionConfigurationResponse updateResp = lambda.updateFunctionConfiguration(
+                    UpdateFunctionConfigurationRequest.builder()
+                            .functionName(durableFn)
+                            .durableConfig(DurableConfig.builder().retentionPeriodInDays(7).build())
+                            .build());
+            assertThat(updateResp.durableConfig().executionTimeout())
+                    .as("a member left out of the update keeps its value")
+                    .isEqualTo(3600);
+            assertThat(updateResp.durableConfig().retentionPeriodInDays()).isEqualTo(7);
+
+            GetFunctionConfigurationResponse getResp = lambda.getFunctionConfiguration(
+                    GetFunctionConfigurationRequest.builder().functionName(durableFn).build());
+            assertThat(getResp.durableConfig().retentionPeriodInDays()).isEqualTo(7);
+
+            GetFunctionConfigurationResponse plain = lambda.getFunctionConfiguration(
+                    GetFunctionConfigurationRequest.builder().functionName(FN).build());
+            assertThat(plain.durableConfig())
+                    .as("a function created without DurableConfig has none")
+                    .isNull();
+        } finally {
+            try {
+                lambda.deleteFunction(DeleteFunctionRequest.builder().functionName(durableFn).build());
+            } catch (Exception ignored) {
+                // Cleanup only. A failed delete must not hide the test result.
+            }
+        }
+    }
+
+    @Test
+    @Order(8)
+    @DisplayName("a log level under Text is refused on create and on update, as Lambda refuses it")
+    void logLevelUnderTextIsRefused() {
+        // Measured on Lambda (eu-west-1, 2026-10-18), with the format named or left to its default.
+        String refused = "LogLevel is not supported when LogFormat is set to \"Text\". Remove LogLevel from your "
+                + "request or change the LogFormat to \"JSON\" and try again.";
+        assertThatThrownBy(() -> lambda.createFunction(CreateFunctionRequest.builder()
+                .functionName(TestFixtures.uniqueName("fn-text-level"))
+                .runtime(Runtime.NODEJS20_X)
+                .role(ROLE)
+                .handler("index.handler")
+                .code(FunctionCode.builder()
+                        .zipFile(SdkBytes.fromByteArray(LambdaUtils.minimalZip()))
+                        .build())
+                .loggingConfig(LoggingConfig.builder()
+                        .logFormat(LogFormat.TEXT)
+                        .applicationLogLevel(ApplicationLogLevel.WARN)
+                        .build())
+                .build()))
+                .isInstanceOf(InvalidParameterValueException.class)
+                .hasMessageContaining(refused);
+
+        assertThatThrownBy(() -> lambda.updateFunctionConfiguration(UpdateFunctionConfigurationRequest.builder()
+                .functionName(FN)
+                .loggingConfig(LoggingConfig.builder().systemLogLevel(SystemLogLevel.WARN).build())
+                .build()))
+                .isInstanceOf(InvalidParameterValueException.class)
+                .hasMessageContaining(refused);
     }
 }

@@ -1,0 +1,469 @@
+package io.floci.aws.services.scheduler;
+
+import com.fasterxml.jackson.core.JsonProcessingException;
+import com.fasterxml.jackson.core.type.TypeReference;
+import com.fasterxml.jackson.databind.DeserializationFeature;
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.ObjectReader;
+import io.floci.aws.core.common.AwsArnUtils;
+import io.floci.aws.core.common.AwsException;
+import io.floci.aws.core.common.RegionResolver;
+import io.floci.aws.core.common.SmithyValidationErrors;
+import io.floci.aws.core.storage.AccountAwareStorageBackend;
+import io.floci.aws.core.storage.StorageBackend;
+import io.floci.aws.core.storage.StorageFactory;
+import io.floci.aws.services.scheduler.model.Schedule;
+import io.floci.aws.services.scheduler.model.ScheduleGroup;
+import io.floci.aws.services.scheduler.model.ScheduleRequest;
+import jakarta.enterprise.context.ApplicationScoped;
+import jakarta.inject.Inject;
+import org.jboss.logging.Logger;
+
+import java.time.DateTimeException;
+import java.time.Instant;
+import java.util.List;
+import java.util.Map;
+import java.util.regex.Pattern;
+
+@ApplicationScoped
+public class SchedulerService {
+
+    private static final Logger LOG = Logger.getLogger(SchedulerService.class);
+
+    // AWS EventBridge Scheduler name constraints: [0-9a-zA-Z-_.]+, 1-64 chars.
+    private static final Pattern NAME_PATTERN = Pattern.compile("[0-9a-zA-Z\\-_.]{1,64}");
+    private static final Pattern ROLE_ARN_PATTERN = Pattern.compile(
+            "arn:(?:" + AwsArnUtils.PARTITION_REGEX + "):iam::\\d{12}:role/[\\w+=,.@/-]+");
+    private static final String ROLE_ARN_MODEL_PATTERN = "^arn:aws(-[a-z]+)?:iam::\\d{12}:role\\/[\\w+=,.@\\/-]+$"; // partition-literal: the Scheduler model's RoleArn pattern, quoted verbatim in the error message
+    private static final String DEFAULT_GROUP = "default";
+    // FAIL_ON_TRAILING_TOKENS matters here: without it an Input of "{} garbage" parses as the
+    // leading object and the rest is silently dropped, so a value AWS rejects would be stored.
+    private static final ObjectReader JSON = new ObjectMapper()
+            .enable(DeserializationFeature.FAIL_ON_TRAILING_TOKENS)
+            .readerFor(JsonNode.class);
+
+    private final StorageBackend<String, ScheduleGroup> groupStore;
+    private final StorageBackend<String, Schedule> scheduleStore;
+    private final RegionResolver regionResolver;
+
+    @Inject
+    public SchedulerService(StorageFactory storageFactory, RegionResolver regionResolver) {
+        this(
+                storageFactory.create("scheduler", "scheduler-groups.json",
+                        new TypeReference<Map<String, ScheduleGroup>>() {}),
+                storageFactory.create("scheduler", "scheduler-schedules.json",
+                        new TypeReference<Map<String, Schedule>>() {}),
+                regionResolver
+        );
+    }
+
+    SchedulerService(StorageBackend<String, ScheduleGroup> groupStore,
+                     StorageBackend<String, Schedule> scheduleStore,
+                     RegionResolver regionResolver) {
+        this.groupStore = groupStore;
+        this.scheduleStore = scheduleStore;
+        this.regionResolver = regionResolver;
+    }
+
+    // ──────────────────────────── Schedule Groups ────────────────────────────
+
+    public ScheduleGroup getOrCreateDefaultGroup(String region) {
+        String key = groupKey(region, DEFAULT_GROUP);
+        return groupStore.get(key).orElseGet(() -> {
+            Instant now = Instant.now();
+            ScheduleGroup group = new ScheduleGroup(
+                    DEFAULT_GROUP,
+                    buildGroupArn(region, DEFAULT_GROUP),
+                    "ACTIVE",
+                    now,
+                    now
+            );
+            groupStore.put(key, group);
+            return group;
+        });
+    }
+
+    public ScheduleGroup createScheduleGroup(String name, Map<String, String> tags, String region) {
+        validateName(name);
+        if (DEFAULT_GROUP.equals(name)) {
+            throw new AwsException("ConflictException",
+                    "ScheduleGroup already exists: " + name, 409);
+        }
+        String key = groupKey(region, name);
+        if (groupStore.get(key).isPresent()) {
+            throw new AwsException("ConflictException",
+                    "ScheduleGroup already exists: " + name, 409);
+        }
+        Instant now = Instant.now();
+        ScheduleGroup group = new ScheduleGroup(
+                name,
+                buildGroupArn(region, name),
+                "ACTIVE",
+                now,
+                now
+        );
+        if (tags != null) {
+            group.getTags().putAll(tags);
+        }
+        groupStore.put(key, group);
+        LOG.infov("Created schedule group: {0} in region {1}", name, region);
+        return group;
+    }
+
+    public ScheduleGroup getScheduleGroup(String name, String region) {
+        String effectiveName = (name == null || name.isBlank()) ? DEFAULT_GROUP : name;
+        if (DEFAULT_GROUP.equals(effectiveName)) {
+            return getOrCreateDefaultGroup(region);
+        }
+        validateName(effectiveName);
+        return groupStore.get(groupKey(region, effectiveName))
+                .orElseThrow(() -> new AwsException("ResourceNotFoundException",
+                        "ScheduleGroup not found: " + effectiveName, 404));
+    }
+
+    public void deleteScheduleGroup(String name, String region) {
+        validateName(name);
+        if (DEFAULT_GROUP.equals(name)) {
+            throw new AwsException("ValidationException",
+                    "Cannot delete the default schedule group.", 400);
+        }
+        String key = groupKey(region, name);
+        groupStore.get(key)
+                .orElseThrow(() -> new AwsException("ResourceNotFoundException",
+                        "ScheduleGroup not found: " + name, 404));
+
+        // Cascade-delete all schedules in this group (matches AWS behavior)
+        String schedulePrefix = "schedule:" + region + ":" + name + ":";
+        List<String> orphanKeys = scheduleStore.scan(k -> k.startsWith(schedulePrefix))
+                .stream()
+                .map(s -> scheduleKey(region, name, s.getName()))
+                .toList();
+        orphanKeys.forEach(scheduleStore::delete);
+
+        groupStore.delete(key);
+        LOG.infov("Deleted schedule group: {0} (removed {1} schedules)", name, orphanKeys.size());
+    }
+
+    public Map<String, String> getScheduleGroupTags(String name, String region) {
+        ScheduleGroup group = getScheduleGroup(name, region);
+        return Map.copyOf(group.getTags());
+    }
+
+    public void tagScheduleGroup(String name, String region, Map<String, String> tags) {
+        if (tags == null || tags.isEmpty()) {
+            return;
+        }
+        ScheduleGroup group = getScheduleGroup(name, region);
+        group.getTags().putAll(tags);
+        group.setLastModificationDate(Instant.now());
+        groupStore.put(groupKey(region, group.getName()), group);
+    }
+
+    public void untagScheduleGroup(String name, String region, List<String> tagKeys) {
+        if (tagKeys == null || tagKeys.isEmpty()) {
+            return;
+        }
+        ScheduleGroup group = getScheduleGroup(name, region);
+        tagKeys.forEach(group.getTags()::remove);
+        group.setLastModificationDate(Instant.now());
+        groupStore.put(groupKey(region, group.getName()), group);
+    }
+
+    public List<ScheduleGroup> listScheduleGroups(String namePrefix, String region) {
+        getOrCreateDefaultGroup(region);
+        String storagePrefix = "group:" + region + ":";
+        return groupStore.scan(k -> {
+            if (!k.startsWith(storagePrefix)) {
+                return false;
+            }
+            if (namePrefix == null || namePrefix.isBlank()) {
+                return true;
+            }
+            String groupName = k.substring(storagePrefix.length());
+            return groupName.startsWith(namePrefix);
+        });
+    }
+
+    // ──────────────────────────── Schedules ────────────────────────────
+
+    public Schedule createSchedule(ScheduleRequest req, String region) {
+        validateName(req.getName());
+        validateScheduleRequest(req);
+        String effectiveGroup = resolveAndValidateGroup(req.getGroupName());
+        getScheduleGroup(effectiveGroup, region); // verify group exists
+
+        String key = scheduleKey(region, effectiveGroup, req.getName());
+        if (scheduleStore.get(key).isPresent()) {
+            throw new AwsException("ConflictException",
+                    "Schedule already exists: " + req.getName(), 409);
+        }
+
+        Instant now = Instant.now();
+        Schedule schedule = new Schedule();
+        schedule.setName(req.getName());
+        schedule.setArn(buildScheduleArn(region, effectiveGroup, req.getName()));
+        schedule.setGroupName(effectiveGroup);
+        schedule.setState(req.getState() != null ? req.getState() : "ENABLED");
+        schedule.setScheduleExpression(req.getScheduleExpression());
+        schedule.setScheduleExpressionTimezone(req.getScheduleExpressionTimezone());
+        schedule.setFlexibleTimeWindow(req.getFlexibleTimeWindow());
+        schedule.setTarget(req.getTarget());
+        schedule.setDescription(req.getDescription());
+        schedule.setActionAfterCompletion(req.getActionAfterCompletion());
+        schedule.setStartDate(req.getStartDate());
+        schedule.setEndDate(req.getEndDate());
+        schedule.setKmsKeyArn(req.getKmsKeyArn());
+        schedule.setCreationDate(now);
+        schedule.setLastModificationDate(now);
+        schedule.setAccountId(regionResolver.getAccountId());
+
+        scheduleStore.put(key, schedule);
+        LOG.infov("Created schedule: {0} in group {1}, region {2}", req.getName(), effectiveGroup, region);
+        return schedule;
+    }
+
+    public Schedule getSchedule(String name, String groupName, String region) {
+        validateName(name);
+        String effectiveGroup = resolveAndValidateGroup(groupName);
+        return scheduleStore.get(scheduleKey(region, effectiveGroup, name))
+                .orElseThrow(() -> new AwsException("ResourceNotFoundException",
+                        "Schedule not found: " + name, 404));
+    }
+
+    public Schedule updateSchedule(ScheduleRequest req, String region) {
+        validateName(req.getName());
+        validateScheduleRequest(req);
+        String effectiveGroup = resolveAndValidateGroup(req.getGroupName());
+        String key = scheduleKey(region, effectiveGroup, req.getName());
+        Schedule existing = scheduleStore.get(key)
+                .orElseThrow(() -> new AwsException("ResourceNotFoundException",
+                        "Schedule not found: " + req.getName(), 404));
+
+        Instant now = Instant.now();
+        Schedule updated = new Schedule();
+        updated.setName(req.getName());
+        updated.setArn(existing.getArn());
+        updated.setAccountId(existing.getAccountId());
+        updated.setGroupName(effectiveGroup);
+        updated.setState(req.getState() != null ? req.getState() : "ENABLED");
+        updated.setScheduleExpression(req.getScheduleExpression());
+        updated.setScheduleExpressionTimezone(req.getScheduleExpressionTimezone());
+        updated.setFlexibleTimeWindow(req.getFlexibleTimeWindow());
+        updated.setTarget(req.getTarget());
+        updated.setDescription(req.getDescription());
+        updated.setActionAfterCompletion(req.getActionAfterCompletion());
+        updated.setStartDate(req.getStartDate());
+        updated.setEndDate(req.getEndDate());
+        updated.setKmsKeyArn(req.getKmsKeyArn());
+        updated.setCreationDate(existing.getCreationDate());
+        updated.setLastModificationDate(now);
+
+        scheduleStore.put(key, updated);
+        LOG.infov("Updated schedule: {0} in group {1}", req.getName(), effectiveGroup);
+        return updated;
+    }
+
+    public void deleteSchedule(String name, String groupName, String region) {
+        validateName(name);
+        String effectiveGroup = resolveAndValidateGroup(groupName);
+        String key = scheduleKey(region, effectiveGroup, name);
+        scheduleStore.get(key)
+                .orElseThrow(() -> new AwsException("ResourceNotFoundException",
+                        "Schedule not found: " + name, 404));
+        scheduleStore.delete(key);
+        LOG.infov("Deleted schedule: {0} in group {1}", name, effectiveGroup);
+    }
+
+    /**
+     * Return every persisted schedule across all regions, groups, and accounts.
+     * Used by {@link ScheduleDispatcher} to evaluate due schedules; other callers
+     * should prefer {@link #listSchedules}.
+     */
+    public List<Schedule> listAllSchedules() {
+        if (scheduleStore instanceof AccountAwareStorageBackend<Schedule> aware) {
+            return aware.scanAllAccounts();
+        }
+        return scheduleStore.scan(k -> k.startsWith("schedule:"));
+    }
+
+    public void deleteScheduleForAccount(String accountId, String name, String groupName, String region) {
+        String effectiveGroup = resolveAndValidateGroup(groupName);
+        String key = scheduleKey(region, effectiveGroup, name);
+        if (scheduleStore instanceof AccountAwareStorageBackend<Schedule> aware) {
+            aware.deleteForAccount(accountId, key);
+        } else {
+            scheduleStore.delete(key);
+        }
+        LOG.infov("Deleted schedule: {0} in group {1}", name, effectiveGroup);
+    }
+
+    public List<Schedule> listSchedules(String groupName, String namePrefix, String state, String region) {
+        String storagePrefix;
+        if (groupName != null && !groupName.isBlank()) {
+            validateName(groupName);
+            storagePrefix = "schedule:" + region + ":" + groupName + ":";
+        } else {
+            storagePrefix = "schedule:" + region + ":";
+        }
+        return scheduleStore.scan(k -> {
+            if (!k.startsWith(storagePrefix)) {
+                return false;
+            }
+            // Extract schedule name (last segment after the last colon)
+            String scheduleName = k.substring(k.lastIndexOf(':') + 1);
+            if (namePrefix != null && !namePrefix.isBlank() && !scheduleName.startsWith(namePrefix)) {
+                return false;
+            }
+            return true;
+        }).stream().filter(s -> {
+            if (state != null && !state.isBlank()) {
+                return state.equals(s.getState());
+            }
+            return true;
+        }).toList();
+    }
+
+    // ──────────────────────────── Helpers ────────────────────────────
+
+    public static boolean isValidName(String name) {
+        return name != null && NAME_PATTERN.matcher(name).matches();
+    }
+
+    private void validateName(String name) {
+        if (name == null || name.isBlank()) {
+            throw new AwsException("ValidationException", "Name is required.", 400);
+        }
+        if (!isValidName(name)) {
+            throw new AwsException("ValidationException",
+                    "Name must match pattern [0-9a-zA-Z-_.]{1,64}: " + name, 400);
+        }
+    }
+
+    private String resolveAndValidateGroup(String groupName) {
+        if (groupName == null || groupName.isBlank()) {
+            return DEFAULT_GROUP;
+        }
+        validateName(groupName);
+        return groupName;
+    }
+
+    private void validateScheduleRequest(ScheduleRequest req) {
+        if (req.getScheduleExpression() == null || req.getScheduleExpression().isBlank()) {
+            throw SmithyValidationErrors.validationException(
+                    SmithyValidationErrors.notNull("scheduleExpression"));
+        }
+        if (req.getScheduleExpression().length() > 256) {
+            throw SmithyValidationErrors.validationException(
+                    "Value '" + req.getScheduleExpression()
+                            + "' at 'scheduleExpression' failed to satisfy constraint: Member must have length less than or equal to 256");
+        }
+        try {
+            SchedulerExpressionParser.validate(req.getScheduleExpression(), req.getScheduleExpressionTimezone());
+        } catch (IllegalArgumentException | DateTimeException | ArithmeticException e) {
+            throw new AwsException("ValidationException",
+                    "Invalid ScheduleExpression: " + e.getMessage(), 400);
+        }
+        if (req.getFlexibleTimeWindow() == null) {
+            throw SmithyValidationErrors.validationException(
+                    SmithyValidationErrors.notNull("flexibleTimeWindow"));
+        }
+        String flexibleTimeWindowMode = req.getFlexibleTimeWindow().getMode();
+        if (flexibleTimeWindowMode == null || flexibleTimeWindowMode.isBlank()) {
+            throw SmithyValidationErrors.validationException(
+                    SmithyValidationErrors.notNull("flexibleTimeWindow.mode"));
+        }
+        flexibleTimeWindowMode = flexibleTimeWindowMode.trim();
+        if (!"OFF".equals(flexibleTimeWindowMode) && !"FLEXIBLE".equals(flexibleTimeWindowMode)) {
+            throw SmithyValidationErrors.validationException(
+                    "Value '" + flexibleTimeWindowMode + "' at 'flexibleTimeWindow.mode' failed to satisfy constraint: Member must satisfy enum value set: [OFF, FLEXIBLE]");
+        }
+        if ("FLEXIBLE".equals(flexibleTimeWindowMode)
+                && req.getFlexibleTimeWindow().getMaximumWindowInMinutes() == null) {
+            throw SmithyValidationErrors.validationException(
+                    SmithyValidationErrors.notNull("flexibleTimeWindow.maximumWindowInMinutes"));
+        }
+        if ("OFF".equals(flexibleTimeWindowMode)
+                && req.getFlexibleTimeWindow().getMaximumWindowInMinutes() != null) {
+            throw SmithyValidationErrors.validationException(
+                    "Value at 'flexibleTimeWindow.maximumWindowInMinutes' failed to satisfy constraint: Member must be null when flexibleTimeWindow.mode is OFF");
+        }
+        if (req.getTarget() == null) {
+            throw SmithyValidationErrors.validationException(
+                    SmithyValidationErrors.notNull("target"));
+        }
+        if (req.getTarget().getArn() == null || req.getTarget().getArn().isBlank()) {
+            throw SmithyValidationErrors.validationException(
+                    SmithyValidationErrors.notNull("target.arn"));
+        }
+        if (req.getTarget().getRoleArn() == null || req.getTarget().getRoleArn().isBlank()) {
+            throw SmithyValidationErrors.validationException(
+                    SmithyValidationErrors.notNull("target.roleArn"));
+        }
+        if (req.getTarget().getRoleArn().length() > 1600) {
+            throw SmithyValidationErrors.validationException(
+                    "Value '" + req.getTarget().getRoleArn()
+                            + "' at 'target.roleArn' failed to satisfy constraint: Member must have length less than or equal to 1600");
+        }
+        if (!ROLE_ARN_PATTERN.matcher(req.getTarget().getRoleArn()).matches()) {
+            throw SmithyValidationErrors.validationException(
+                    "Value '" + req.getTarget().getRoleArn()
+                            + "' at 'target.roleArn' failed to satisfy constraint: Member must satisfy regular expression pattern: "
+                            + ROLE_ARN_MODEL_PATTERN);
+        }
+        if (req.getTarget().getDeadLetterConfig() != null
+                && (req.getTarget().getDeadLetterConfig().getArn() == null
+                || req.getTarget().getDeadLetterConfig().getArn().isBlank())) {
+            throw SmithyValidationErrors.validationException(
+                    SmithyValidationErrors.notNull("target.deadLetterConfig.arn"));
+        }
+        String input = req.getTarget().getInput();
+        if (input != null && requiresJsonInput(req.getTarget().getArn()) && !isWellFormedJson(input)) {
+            throw SmithyValidationErrors.validationException(
+                    "Value at 'target.input' failed to satisfy constraint: Member must be well-formed JSON for Lambda, Step Functions, and EventBridge targets");
+        }
+    }
+
+    /**
+     * Templated Lambda, Step Functions and EventBridge targets require well-formed JSON
+     * {@code Input} (API reference, {@code Target.Input}); other templated targets accept any
+     * text, and universal ({@code aws-sdk}) targets are only checked when invoked.
+     */
+    private static boolean requiresJsonInput(String targetArn) {
+        return AwsArnUtils.isArnFor(targetArn, "lambda")
+                || AwsArnUtils.isArnFor(targetArn, "states")
+                || AwsArnUtils.isArnFor(targetArn, "events");
+    }
+
+    /**
+     * A blank value is rejected up front: {@code Input} has a minimum length of 1, and
+     * {@code readTree} returns a missing node for it instead of failing.
+     */
+    private static boolean isWellFormedJson(String value) {
+        if (value.isBlank()) {
+            return false;
+        }
+        try {
+            JSON.readTree(value);
+            return true;
+        } catch (JsonProcessingException e) {
+            return false;
+        }
+    }
+
+    private String buildGroupArn(String region, String name) {
+        return regionResolver.buildArn("scheduler", region, "schedule-group/" + name);
+    }
+
+    private static String groupKey(String region, String name) {
+        return "group:" + region + ":" + name;
+    }
+
+    private String buildScheduleArn(String region, String groupName, String name) {
+        return regionResolver.buildArn("scheduler", region, "schedule/" + groupName + "/" + name);
+    }
+
+    private static String scheduleKey(String region, String groupName, String name) {
+        return "schedule:" + region + ":" + groupName + ":" + name;
+    }
+}

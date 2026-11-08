@@ -18,6 +18,7 @@ Floci emulates Amazon Athena with **real SQL execution** powered by a [floci-duc
 | `GetWorkGroup` | Returns information about a workgroup |
 | `ListWorkGroups` | Lists all workgroups |
 | `CreateWorkGroup` | Creates a new workgroup |
+| `UpdateWorkGroup` | Updates a workgroup's description, state and configuration |
 | `ListDataCatalogs` | Lists the built-in `AwsDataCatalog` plus every registered data catalog |
 | `GetDataCatalog` | Returns one data catalog, or `InvalidRequestException` when it does not exist |
 | `CreateDataCatalog` | Registers a `LAMBDA`, `GLUE`, `HIVE` or `FEDERATED` data catalog |
@@ -32,6 +33,37 @@ Floci emulates Amazon Athena with **real SQL execution** powered by a [floci-duc
 | `DeleteWorkGroup` | Deletes a workgroup |
 <!-- floci:actions:end -->
 
+`ListDataCatalogs` accepts `MaxResults` from 2 to 50. Floci uses 50 when it is
+omitted, since the API reference does not document a default. The built-in
+`AwsDataCatalog` stays first, followed by registered catalogs in name order.
+`GetDataCatalog`, `ListDatabases`, `ListTableMetadata` and `GetTableMetadata`
+read `AwsDataCatalog` when the request names no catalog or a JSON null.
+Pass the opaque `NextToken` to continue; final pages omit it. Tokens are scoped
+to the action, caller account, and request region and remain resumable after a
+cursor catalog is deleted. Malformed tokens, tokens outside the 1-to-1024
+character range, and invalid page sizes return `InvalidRequestException`.
+
+`ListQueryExecutions` returns at most `MaxResults` IDs from the requested
+`WorkGroup`, defaulting to `primary`. Floci uses a bounded page of 50 when the
+page size is omitted, null, or zero; the API reference permits zero but does not
+specify its behavior or a default. Positive page sizes must not exceed 50.
+IDs are ordered deterministically, and the final page omits `NextToken`.
+Continuation tokens are scoped to the action, account, region, and workgroup;
+invalid sizes, malformed tokens, and tokens outside 1 to 1024 characters return
+`InvalidRequestException`.
+
+A workgroup reports what its request gave and AWS's defaults for the rest. With
+no `ResultConfiguration`, it reports none (`primary` reports an empty one, as on
+AWS); a query then names its own output location, and Floci writes results to
+`s3://floci-athena-results/results/` when neither does. With no `EngineVersion`,
+it selects `AUTO`, reported with the effective version `Athena engine version 3`.
+`ManagedQueryResultsConfiguration` (`Enabled` and an optional
+`EncryptionConfiguration.KmsKey`) and `EnableMinimumEncryptionConfiguration`
+round-trip through `CreateWorkGroup`, `UpdateWorkGroup`
+(`ManagedQueryResultsConfigurationUpdates`, with `RemoveEncryptionConfiguration`)
+and `GetWorkGroup`; Floci records the setting and keeps no separate managed
+results storage.
+
 ## How it works
 
 1. **Lazy sidecar start**: On the first `StartQueryExecution` call, Floci checks for a local `floci/floci-duck:latest` image and starts the container. Subsequent queries reuse the running container.
@@ -41,7 +73,9 @@ Floci emulates Amazon Athena with **real SQL execution** powered by a [floci-duc
 
 ## Format inference
 
-The DuckDB read function is chosen from the Glue table's `StorageDescriptor`:
+**Iceberg tables are checked first**, ahead of the `StorageDescriptor` heuristic below: a table whose `Parameters.table_type` is `ICEBERG` (case-insensitive), as set by `pyiceberg`'s `GlueCatalog` and AWS's own Glue-Iceberg integration, is read via `iceberg_scan('<metadata_location>')`, using `Parameters.metadata_location` from the same Glue table. Iceberg tables never populate `InputFormat`/`SerializationLibrary` (they aren't read via a Hive input format), so without this check they always fell through to `read_csv_auto` and failed on the table's binary Parquet data files. `iceberg_scan` resolves the table through its real manifest list, so multi-snapshot tables (after updates, deletes, or repeated appends) read correctly instead of a naive glob picking up every data file ever written under the table's location. The `iceberg` DuckDB extension is installed and loaded once when the generated DDL contains at least one Iceberg table. A table flagged `ICEBERG` but missing `metadata_location` falls back to the format-sniffed heuristic below instead of emitting an unusable `iceberg_scan('')`.
+
+For every other table, the DuckDB read function is chosen from the Glue table's `StorageDescriptor`:
 
 | Condition | Read function |
 |---|---|

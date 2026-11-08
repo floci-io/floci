@@ -103,3 +103,92 @@ teardown() {
     assert_failure
     [[ "$output" == *"RepositoryNotFoundException"* ]]
 }
+
+@test "ECR: an image pushed with the layer API retags with batch-get-image and put-image" {
+    aws_cmd ecr create-repository --repository-name "$REPO_NAME" >/dev/null
+    printf '{"architecture":"amd64","os":"linux"}' > "$BATS_TEST_TMPDIR/config"
+    printf 'floci layer bytes' > "$BATS_TEST_TMPDIR/layer"
+
+    for blob in config layer; do
+        file="$BATS_TEST_TMPDIR/$blob"
+        size=$(wc -c < "$file" | tr -d ' ')
+        digest="sha256:$(sha256sum "$file" | cut -d' ' -f1)"
+        upload=$(aws_cmd ecr initiate-layer-upload --repository-name "$REPO_NAME" | jq -r '.uploadId')
+        run aws_cmd ecr upload-layer-part --repository-name "$REPO_NAME" --upload-id "$upload" \
+            --part-first-byte 0 --part-last-byte $((size - 1)) --layer-part-blob "fileb://$file"
+        assert_success
+        run aws_cmd ecr complete-layer-upload --repository-name "$REPO_NAME" --upload-id "$upload" \
+            --layer-digests "$digest"
+        assert_success
+        [ "$(json_get "$output" '.layerDigest')" = "$digest" ]
+        eval "${blob}_digest=$digest ${blob}_size=$size"
+    done
+
+    manifest=$(printf '{"schemaVersion":2,"mediaType":"application/vnd.oci.image.manifest.v1+json","config":{"mediaType":"application/vnd.oci.image.config.v1+json","size":%s,"digest":"%s"},"layers":[{"mediaType":"application/vnd.oci.image.layer.v1.tar","size":%s,"digest":"%s"}]}' \
+        "$config_size" "$config_digest" "$layer_size" "$layer_digest")
+    run aws_cmd ecr put-image --repository-name "$REPO_NAME" --image-tag v1 --image-manifest "$manifest"
+    assert_success
+    digest=$(json_get "$output" '.image.imageId.imageDigest')
+
+    read_back=$(aws_cmd ecr batch-get-image --repository-name "$REPO_NAME" --image-ids imageTag=v1 \
+        --query 'images[0].imageManifest' --output text)
+    run aws_cmd ecr put-image --repository-name "$REPO_NAME" --image-tag release --image-manifest "$read_back"
+    assert_success
+    [ "$(json_get "$output" '.image.imageId.imageDigest')" = "$digest" ]
+
+    run aws_cmd ecr describe-images --repository-name "$REPO_NAME" --image-ids imageTag=release
+    assert_success
+    [ "$(json_get "$output" '.imageDetails[0].imageDigest')" = "$digest" ]
+}
+
+@test "ECR: registry policy, replication and scanning configuration round-trip" {
+    policy='{"Version":"2012-10-17","Statement":[{"Sid":"Replicate","Effect":"Allow","Principal":{"AWS":"arn:aws:iam::111111111111:root"},"Action":["ecr:CreateRepository","ecr:ReplicateImage"],"Resource":"*"}]}'
+    run aws_cmd ecr put-registry-policy --policy-text "$policy"
+    assert_success
+    run aws_cmd ecr get-registry-policy
+    assert_success
+    [ "$(json_get "$output" '.policyText')" = "$policy" ]
+
+    run aws_cmd ecr put-replication-configuration --replication-configuration \
+        'rules=[{destinations=[{region=us-west-2,registryId=111111111111}],repositoryFilters=[{filter=prod,filterType=PREFIX_MATCH}]}]'
+    assert_success
+    run aws_cmd ecr describe-registry
+    assert_success
+    [ "$(json_get "$output" '.replicationConfiguration.rules[0].destinations[0].region')" = "us-west-2" ]
+
+    run aws_cmd ecr put-registry-scanning-configuration --scan-type ENHANCED \
+        --rules '[{"scanFrequency":"SCAN_ON_PUSH","repositoryFilters":[{"filter":"*","filterType":"WILDCARD"}]}]'
+    assert_success
+    run aws_cmd ecr get-registry-scanning-configuration
+    assert_success
+    [ "$(json_get "$output" '.scanningConfiguration.scanType')" = "ENHANCED" ]
+
+    aws_cmd ecr delete-registry-policy >/dev/null
+    aws_cmd ecr put-replication-configuration --replication-configuration 'rules=[]' >/dev/null
+    aws_cmd ecr put-registry-scanning-configuration --scan-type BASIC --rules '[]' >/dev/null
+    run aws_cmd ecr get-registry-policy
+    assert_failure
+    [[ "$output" == *"RegistryPolicyNotFoundException"* ]]
+}
+
+@test "ECR: repository creation templates round-trip" {
+    prefix="floci-cli-$(unique_name)"
+    run aws_cmd ecr create-repository-creation-template --prefix "$prefix" \
+        --applied-for PULL_THROUGH_CACHE --description "cli template"
+    assert_success
+    [ "$(json_get "$output" '.repositoryCreationTemplate.encryptionConfiguration.encryptionType')" = "AES256" ]
+
+    run aws_cmd ecr update-repository-creation-template --prefix "$prefix" --image-tag-mutability IMMUTABLE
+    assert_success
+    [ "$(json_get "$output" '.repositoryCreationTemplate.imageTagMutability')" = "IMMUTABLE" ]
+
+    run aws_cmd ecr describe-repository-creation-templates --prefixes "$prefix"
+    assert_success
+    [ "$(json_get "$output" '.repositoryCreationTemplates[0].description')" = "cli template" ]
+
+    run aws_cmd ecr delete-repository-creation-template --prefix "$prefix"
+    assert_success
+    run aws_cmd ecr delete-repository-creation-template --prefix "$prefix"
+    assert_failure
+    [[ "$output" == *"TemplateNotFoundException"* ]]
+}

@@ -11,6 +11,7 @@ For Testcontainers 1.x, use the versions as indicated in the table below.
 | Java | `io.floci:testcontainers-floci` | `1.14.0` | [Maven Central](https://mvnrepository.com/artifact/io.floci/testcontainers-floci) | [GitHub](https://github.com/floci-io/testcontainers-floci) |
 | Node.js | `@floci/testcontainers` | `0.1.0` | [npm](https://www.npmjs.com/package/@floci/testcontainers) | [GitHub](https://github.com/floci-io/testcontainers-floci-node) |
 | Python | `testcontainers-floci` | `0.1.1` | [PyPI](https://pypi.org/project/testcontainers-floci/) | [GitHub](https://github.com/floci-io/testcontainers-floci-python) |
+| .NET | `Testcontainers.Floci` | see releases | [GitHub Packages](https://github.com/orgs/floci-io/packages?repo_name=testcontainers-floci-dotnet) | [GitHub](https://github.com/floci-io/testcontainers-floci-dotnet) |
 | Go | — | 🚧 In progress | — | [GitHub](https://github.com/floci-io/testcontainers-floci-go) |
 
 For Testcontainers 2.x / Spring Boot 4.x, use version `2.15.0`.
@@ -33,4 +34,5 @@ You pass these values directly into any AWS SDK client — no manual configurati
 - [Java](java.md) — JUnit 5, Spring Boot `@ServiceConnection`
 - [Node.js / TypeScript](nodejs.md) — Jest, Vitest
 - [Python](python.md) — pytest
+- [.NET](dotnet.md): xUnit
 - [Go](go.md) — in progress

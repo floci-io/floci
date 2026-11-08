@@ -5,10 +5,10 @@ import software.amazon.awssdk.core.document.Document;
 import software.amazon.awssdk.services.s3vectors.S3VectorsClient;
 import software.amazon.awssdk.services.s3vectors.model.*;
 
-import static org.assertj.core.api.Assertions.*;
-
 import java.util.List;
 import java.util.Map;
+
+import static org.assertj.core.api.Assertions.*;
 
 @DisplayName("S3 Vectors Compatibility Tests")
 @TestMethodOrder(MethodOrderer.OrderAnnotation.class)
@@ -51,7 +51,7 @@ class S3VectorsTest {
                         .vectorBucketName(bucketName)
                         .build()
         );
-        assertThat(response.vectorBucketArn()).isNotBlank().contains("arn:aws:s3vectors:");
+        assertThat(response.vectorBucketArn()).isNotBlank().contains("arn:" + TestFixtures.partition() + ":s3vectors:");
     }
 
     @Test
@@ -88,7 +88,7 @@ class S3VectorsTest {
                         .dataType("float32")
                         .build()
         );
-        assertThat(response.indexArn()).isNotBlank().contains("arn:aws:s3vectors:");
+        assertThat(response.indexArn()).isNotBlank().contains("arn:" + TestFixtures.partition() + ":s3vectors:");
     }
 
     @Test

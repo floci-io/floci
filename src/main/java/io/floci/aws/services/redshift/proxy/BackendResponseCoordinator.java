@@ -1,0 +1,381 @@
+package io.floci.aws.services.redshift.proxy;
+
+import java.nio.charset.StandardCharsets;
+import java.util.ArrayDeque;
+import java.util.HashMap;
+import java.util.Map;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.locks.Condition;
+import java.util.concurrent.locks.ReentrantLock;
+import java.util.function.BiConsumer;
+
+final class BackendResponseCoordinator {
+
+    private final ExtendedQuerySession session;
+    private final ReentrantLock lock = new ReentrantLock(true);
+    private final Condition changed = lock.newCondition();
+    private final ArrayDeque<PendingOperation> pending = new ArrayDeque<>();
+    private final Map<Long, GateResult> resolvedGates = new HashMap<>();
+    private long nextSequence = 1;
+    private boolean discardingUntilSync;
+    private boolean closed;
+    private char lastReadyStatus = 'I';
+
+    BackendResponseCoordinator(ExtendedQuerySession session) {
+        this.session = session;
+    }
+
+    Ticket register(Operation operation, ExtendedQuerySession.Mutation mutation) {
+        return register(operation, mutation, null);
+    }
+
+    Ticket register(Operation operation, ExtendedQuerySession.Mutation mutation, BiConsumer<Character, byte[]> response) {
+        lock.lock();
+        try {
+            Ticket ticket = new Ticket(nextSequence++, operation);
+            if (discardingUntilSync && operation != Operation.SYNC) {
+                if (mutation != null) {
+                    session.rejectFrom(mutation);
+                }
+                if (operation == Operation.EXECUTE) {
+                    resolvedGates.put(ticket.sequence(), GateResult.SKIPPED_AFTER_ERROR);
+                }
+            } else {
+                pending.addLast(new PendingOperation(ticket, mutation, response));
+            }
+            changed.signalAll();
+            return ticket;
+        } finally {
+            lock.unlock();
+        }
+    }
+
+    GateResult awaitTurn(Ticket ticket) throws InterruptedException {
+        lock.lockInterruptibly();
+        try {
+            while (true) {
+                if (closed) {
+                    return GateResult.CLOSED;
+                }
+                GateResult resolved = resolvedGates.remove(ticket.sequence());
+                if (resolved != null) {
+                    return resolved;
+                }
+                PendingOperation head = pending.peekFirst();
+                if (!discardingUntilSync && head != null && head.ticket().equals(ticket)) {
+                    return GateResult.READY;
+                }
+                changed.await();
+            }
+        } finally {
+            lock.unlock();
+        }
+    }
+
+    GateResult awaitExtendedExecuteTurn(Ticket ticket) throws InterruptedException {
+        lock.lockInterruptibly();
+        try {
+            while (true) {
+                if (closed) {
+                    return GateResult.CLOSED;
+                }
+                GateResult resolved = resolvedGates.remove(ticket.sequence());
+                if (resolved != null) {
+                    return resolved;
+                }
+                if (!discardingUntilSync && canOwnExtendedExecute(ticket)) {
+                    return GateResult.READY;
+                }
+                changed.await();
+            }
+        } finally {
+            lock.unlock();
+        }
+    }
+
+    boolean awaitIdle(long timeout, TimeUnit unit) throws InterruptedException {
+        long remaining = unit.toNanos(timeout);
+        lock.lockInterruptibly();
+        try {
+            while ((!pending.isEmpty() || discardingUntilSync) && !closed) {
+                if (remaining <= 0) {
+                    return false;
+                }
+                remaining = changed.awaitNanos(remaining);
+            }
+            return !closed && pending.isEmpty() && !discardingUntilSync;
+        } finally {
+            lock.unlock();
+        }
+    }
+
+    boolean awaitSyncTurn(Ticket ticket, long timeout, TimeUnit unit) throws InterruptedException {
+        long remaining = unit.toNanos(timeout);
+        lock.lockInterruptibly();
+        try {
+            while (!closed) {
+                PendingOperation head = pending.peekFirst();
+                if (head != null && head.ticket().equals(ticket)) {
+                    return true;
+                }
+                if (remaining <= 0) {
+                    return false;
+                }
+                remaining = changed.awaitNanos(remaining);
+            }
+            return false;
+        } finally {
+            lock.unlock();
+        }
+    }
+
+    void onBackendFrame(char type, byte[] body) {
+        lock.lock();
+        try {
+            if (type == 'C') {
+                updateStatusFromCommandTag(new String(body, StandardCharsets.UTF_8));
+            }
+            if (type == 'Z') {
+                updateReadyStatus(body);
+            }
+            if (isAsynchronous(type)) {
+                return;
+            }
+
+            PendingOperation head = pending.peekFirst();
+            if (head == null) {
+                changed.signalAll();
+                return;
+            }
+
+            Operation operation = head.ticket().operation();
+            if (head.response() != null) {
+                head.response().accept(type, body);
+            }
+            if (type == 'E') {
+                if (operation != Operation.SIMPLE_QUERY) {
+                    pending.removeFirst();
+                    reject(head);
+                    resolveSkippedGate(head);
+                    discardingUntilSync = true;
+                    discardQueuedOperationsBeforeSync();
+                }
+                changed.signalAll();
+                return;
+            }
+
+            if (completes(operation, type)) {
+                pending.removeFirst();
+                confirm(head);
+                if (operation == Operation.SYNC) {
+                    discardingUntilSync = false;
+                }
+                changed.signalAll();
+            }
+        } finally {
+            lock.unlock();
+        }
+    }
+
+    void completeOwnedExecute(Ticket ticket, boolean failed) {
+        lock.lock();
+        try {
+            PendingOperation owned = pending.stream()
+                    .filter(operation -> operation.ticket().equals(ticket))
+                    .findFirst()
+                    .orElse(null);
+            if (owned == null) {
+                return;
+            }
+            if (ticket.operation() != Operation.EXECUTE) {
+                throw new IllegalStateException("Only an Execute ticket can be completed as backend-owned");
+            }
+            pending.remove(owned);
+            confirm(owned);
+            if (failed) {
+                discardingUntilSync = true;
+                discardQueuedOperationsBeforeSync();
+            }
+            changed.signalAll();
+        } finally {
+            lock.unlock();
+        }
+    }
+
+    void discardUntilSync() {
+        lock.lock();
+        try {
+            discardingUntilSync = true;
+            discardQueuedOperationsBeforeSync();
+            changed.signalAll();
+        } finally {
+            lock.unlock();
+        }
+    }
+
+    boolean isDiscardingUntilSync() {
+        lock.lock();
+        try {
+            return discardingUntilSync;
+        } finally {
+            lock.unlock();
+        }
+    }
+
+    char lastReadyStatus() {
+        lock.lock();
+        try {
+            return lastReadyStatus;
+        } finally {
+            lock.unlock();
+        }
+    }
+
+    void transactionEnded() {
+        lock.lock();
+        try {
+            lastReadyStatus = 'I';
+            session.transactionEnded();
+            changed.signalAll();
+        } finally {
+            lock.unlock();
+        }
+    }
+
+    void close() {
+        lock.lock();
+        try {
+            closed = true;
+            pending.clear();
+            resolvedGates.clear();
+            session.clear();
+            changed.signalAll();
+        } finally {
+            lock.unlock();
+        }
+    }
+
+    private void discardQueuedOperationsBeforeSync() {
+        while (!pending.isEmpty() && pending.peekFirst().ticket().operation() != Operation.SYNC) {
+            PendingOperation skipped = pending.removeFirst();
+            reject(skipped);
+            resolveSkippedGate(skipped);
+        }
+    }
+
+    private void resolveSkippedGate(PendingOperation operation) {
+        if (operation.ticket().operation() == Operation.EXECUTE) {
+            resolvedGates.put(operation.ticket().sequence(), GateResult.SKIPPED_AFTER_ERROR);
+        }
+    }
+
+    /**
+     * Tracks transaction boundaries as the tag arrives, so a statement pipelined after COMMIT sees them. The
+     * ROLLBACK tag is also sent for ROLLBACK TO SAVEPOINT, which leaves the transaction open, so only the
+     * ReadyForQuery status can say that a rollback ended it.
+     */
+    private void updateStatusFromCommandTag(String tag) {
+        boolean transactionEnded = switch (tag) {
+            case "BEGIN\0" -> {
+                lastReadyStatus = 'T';
+                yield false;
+            }
+            case "COMMIT\0", "END\0" -> {
+                lastReadyStatus = 'I';
+                yield true;
+            }
+            default -> false;
+        };
+        if (transactionEnded) {
+            session.transactionEnded();
+        }
+    }
+
+    private void updateReadyStatus(byte[] body) {
+        if (body != null && body.length == 1) {
+            lastReadyStatus = (char) body[0];
+            if (lastReadyStatus == 'I') {
+                session.transactionEnded();
+            }
+        }
+    }
+
+    private void confirm(PendingOperation operation) {
+        if (operation.mutation() != null) {
+            session.confirm(operation.mutation());
+        }
+    }
+
+    private void reject(PendingOperation operation) {
+        if (operation.mutation() != null) {
+            session.rejectFrom(operation.mutation());
+        }
+    }
+
+    boolean isFirstPending(Ticket ticket) {
+        lock.lock();
+        try {
+            return !pending.isEmpty() && pending.getFirst().ticket().equals(ticket);
+        } finally {
+            lock.unlock();
+        }
+    }
+
+    private boolean canOwnExtendedExecute(Ticket ticket) {
+        for (PendingOperation operation : pending) {
+            if (operation.ticket().equals(ticket)) {
+                return true;
+            }
+            if (!isExtendedExecutePreamble(operation.ticket().operation())) {
+                return false;
+            }
+        }
+        return false;
+    }
+
+    private static boolean isExtendedExecutePreamble(Operation operation) {
+        return operation == Operation.PARSE
+                || operation == Operation.BIND
+                || operation == Operation.DESCRIBE_STATEMENT
+                || operation == Operation.DESCRIBE_PORTAL;
+    }
+
+    private static boolean isAsynchronous(char type) {
+        return type == 'N' || type == 'A' || type == 'S';
+    }
+
+    private static boolean completes(Operation operation, char responseType) {
+        return switch (operation) {
+            case SIMPLE_QUERY, SYNC -> responseType == 'Z';
+            case PARSE -> responseType == '1';
+            case BIND -> responseType == '2';
+            case DESCRIBE_STATEMENT, DESCRIBE_PORTAL -> responseType == 'T' || responseType == 'n';
+            case CLOSE -> responseType == '3';
+            case EXECUTE -> responseType == 'C' || responseType == 'I' || responseType == 's';
+        };
+    }
+
+    enum Operation {
+        SIMPLE_QUERY,
+        PARSE,
+        BIND,
+        DESCRIBE_STATEMENT,
+        DESCRIBE_PORTAL,
+        CLOSE,
+        EXECUTE,
+        SYNC
+    }
+
+    enum GateResult {
+        READY,
+        SKIPPED_AFTER_ERROR,
+        CLOSED
+    }
+
+    record Ticket(long sequence, Operation operation) {
+    }
+
+    private record PendingOperation(Ticket ticket, ExtendedQuerySession.Mutation mutation,
+                                    BiConsumer<Character, byte[]> response) {
+    }
+}

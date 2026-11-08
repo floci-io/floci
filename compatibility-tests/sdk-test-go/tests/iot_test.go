@@ -318,7 +318,41 @@ func TestIoT(t *testing.T) {
 		principals, err := svc.ListThingPrincipals(ctx, &iot.ListThingPrincipalsInput{ThingName: aws.String(thingName)})
 		require.NoError(t, err)
 		assert.Contains(t, principals.Principals, certArn)
+		principalsV2, err := svc.ListThingPrincipalsV2(ctx, &iot.ListThingPrincipalsV2Input{ThingName: aws.String(thingName)})
+		require.NoError(t, err)
+		require.Len(t, principalsV2.ThingPrincipalObjects, 1)
+		assert.Equal(t, certArn, aws.ToString(principalsV2.ThingPrincipalObjects[0].Principal))
+		assert.Equal(t, iottypes.ThingPrincipalTypeNonExclusiveThing, principalsV2.ThingPrincipalObjects[0].ThingPrincipalType)
+		thingsV2, err := svc.ListPrincipalThingsV2(ctx, &iot.ListPrincipalThingsV2Input{Principal: aws.String(certArn)})
+		require.NoError(t, err)
+		require.Len(t, thingsV2.PrincipalThingObjects, 1)
+		assert.Equal(t, thingName, aws.ToString(thingsV2.PrincipalThingObjects[0].ThingName))
+		assert.Equal(t, iottypes.ThingPrincipalTypeNonExclusiveThing, thingsV2.PrincipalThingObjects[0].ThingPrincipalType)
 		_, err = svc.DetachThingPrincipal(ctx, &iot.DetachThingPrincipalInput{ThingName: aws.String(thingName), Principal: aws.String(certArn)})
+		require.NoError(t, err)
+	})
+
+	t.Run("RegisterCertificateWithoutCA", func(t *testing.T) {
+		certPEM, _ := generateSelfSignedCert()
+		registered, err := svc.RegisterCertificateWithoutCA(ctx, &iot.RegisterCertificateWithoutCAInput{
+			CertificatePem: aws.String(string(certPEM)),
+			Status:         iottypes.CertificateStatusActive,
+		})
+		require.NoError(t, err)
+		described, err := svc.DescribeCertificate(ctx, &iot.DescribeCertificateInput{CertificateId: registered.CertificateId})
+		require.NoError(t, err)
+		assert.Equal(t, iottypes.CertificateStatusActive, described.CertificateDescription.Status)
+		assert.Equal(t, iottypes.CertificateModeSniOnly, described.CertificateDescription.CertificateMode)
+
+		_, err = svc.RegisterCertificateWithoutCA(ctx, &iot.RegisterCertificateWithoutCAInput{CertificatePem: aws.String(string(certPEM))})
+		var exists *iottypes.ResourceAlreadyExistsException
+		require.ErrorAs(t, err, &exists)
+		assert.Equal(t, aws.ToString(registered.CertificateId), aws.ToString(exists.ResourceId))
+		assert.Equal(t, aws.ToString(registered.CertificateArn), aws.ToString(exists.ResourceArn))
+
+		_, err = svc.UpdateCertificate(ctx, &iot.UpdateCertificateInput{CertificateId: registered.CertificateId, NewStatus: iottypes.CertificateStatusInactive})
+		require.NoError(t, err)
+		_, err = svc.DeleteCertificate(ctx, &iot.DeleteCertificateInput{CertificateId: registered.CertificateId})
 		require.NoError(t, err)
 	})
 
@@ -371,6 +405,38 @@ func TestIoT(t *testing.T) {
 		require.NoError(t, err)
 		_, err = dataSvc.DeleteThingShadow(ctx, &iotdataplane.DeleteThingShadowInput{ThingName: aws.String(thingName)})
 		require.NoError(t, err)
+	})
+
+	t.Run("IoTDataRetainedMessages", func(t *testing.T) {
+		dataSvc := testutil.IoTDataClient()
+		topic := "devices/go-iot-retained/status"
+
+		_, err := dataSvc.Publish(ctx, &iotdataplane.PublishInput{
+			Topic: aws.String(topic), Payload: []byte("online"), Qos: 1, Retain: true,
+		})
+		require.NoError(t, err)
+		t.Cleanup(func() {
+			dataSvc.Publish(ctx, &iotdataplane.PublishInput{Topic: aws.String(topic), Retain: true})
+		})
+
+		// lastModifiedTime is epoch milliseconds; the delta tolerates clock skew to a containerised emulator.
+		retained, err := dataSvc.GetRetainedMessage(ctx, &iotdataplane.GetRetainedMessageInput{Topic: aws.String(topic)})
+		require.NoError(t, err)
+		assert.Equal(t, []byte("online"), retained.Payload)
+		assert.InDelta(t, time.Now().UnixMilli(), retained.LastModifiedTime, float64(time.Minute.Milliseconds()))
+
+		var listed int64
+		paginator := iotdataplane.NewListRetainedMessagesPaginator(dataSvc, &iotdataplane.ListRetainedMessagesInput{})
+		for paginator.HasMorePages() && listed == 0 {
+			page, err := paginator.NextPage(ctx)
+			require.NoError(t, err)
+			for _, summary := range page.RetainedTopics {
+				if aws.ToString(summary.Topic) == topic {
+					listed = summary.LastModifiedTime
+				}
+			}
+		}
+		assert.Equal(t, retained.LastModifiedTime, listed)
 	})
 
 	t.Run("TopicRuleCrudAndRuleActions", func(t *testing.T) {

@@ -40,13 +40,13 @@ class SqsMd5Test {
         String queueUrl = sqs.createQueue(CreateQueueRequest.builder()
                 .queueName(queueName).build()).queueUrl();
 
-        var attrs = Map.of(
+        Map<String, MessageAttributeValue> attrs = Map.of(
                 "trace-id", MessageAttributeValue.builder()
                         .dataType("String").stringValue("abc-123").build(),
                 "priority", MessageAttributeValue.builder()
                         .dataType("Number").stringValue("42").build());
 
-        var resp = sqs.sendMessage(SendMessageRequest.builder()
+        SendMessageResponse resp = sqs.sendMessage(SendMessageRequest.builder()
                 .queueUrl(queueUrl)
                 .messageBody("hello standard")
                 .messageAttributes(attrs)
@@ -55,6 +55,40 @@ class SqsMd5Test {
         assertThat(resp.md5OfMessageAttributes()).isNotNull();
 
         sqs.deleteQueue(DeleteQueueRequest.builder().queueUrl(queueUrl).build());
+    }
+
+    @Test
+    void receiveMessageWithSelectedAttributePassesSdkMd5Validation() {
+        String queueUrl = sqs.createQueue(CreateQueueRequest.builder()
+                .queueName("md5-receive-" + UUID.randomUUID()).build()).queueUrl();
+        try {
+            sqs.sendMessage(SendMessageRequest.builder()
+                    .queueUrl(queueUrl)
+                    .messageBody("filter-test")
+                    .messageAttributes(Map.of(
+                            "color.primary", MessageAttributeValue.builder()
+                                    .dataType("String").stringValue("red").build(),
+                            "color", MessageAttributeValue.builder()
+                                    .dataType("String").stringValue("blue").build(),
+                            "colorful", MessageAttributeValue.builder()
+                                    .dataType("String").stringValue("bright").build(),
+                            "secret", MessageAttributeValue.builder()
+                                    .dataType("String").stringValue("private").build()))
+                    .build());
+
+            ReceiveMessageResponse response = sqs.receiveMessage(ReceiveMessageRequest.builder()
+                    .queueUrl(queueUrl)
+                    .messageAttributeNames("color.*")
+                    .build());
+
+            assertThat(response.messages()).hasSize(1);
+            assertThat(response.messages().get(0).messageAttributes())
+                    .containsOnlyKeys("color", "colorful", "color.primary");
+            assertThat(response.messages().get(0).md5OfMessageAttributes())
+                    .isEqualTo("46db9885b8f221ea04082f03e3a63d14");
+        } finally {
+            sqs.deleteQueue(DeleteQueueRequest.builder().queueUrl(queueUrl).build());
+        }
     }
 
     @Test
@@ -67,13 +101,13 @@ class SqsMd5Test {
                         QueueAttributeName.CONTENT_BASED_DEDUPLICATION, "true"))
                 .build()).queueUrl();
 
-        var attrs = Map.of(
+        Map<String, MessageAttributeValue> attrs = Map.of(
                 "trace-id", MessageAttributeValue.builder()
                         .dataType("String").stringValue("abc-123").build(),
                 "priority", MessageAttributeValue.builder()
                         .dataType("Number").stringValue("42").build());
 
-        var resp = sqs.sendMessage(SendMessageRequest.builder()
+        SendMessageResponse resp = sqs.sendMessage(SendMessageRequest.builder()
                 .queueUrl(queueUrl)
                 .messageBody("hello fifo")
                 .messageGroupId("g1")
@@ -99,17 +133,17 @@ class SqsMd5Test {
                 .attributes(Map.of(QueueAttributeName.FIFO_QUEUE, "true"))
                 .build()).queueUrl();
 
-        var firstAttrs = Map.of(
+        Map<String, MessageAttributeValue> firstAttrs = Map.of(
                 "k", MessageAttributeValue.builder().dataType("String").stringValue("v1").build());
-        var secondAttrs = Map.of(
+        Map<String, MessageAttributeValue> secondAttrs = Map.of(
                 "k", MessageAttributeValue.builder().dataType("String").stringValue("v2").build());
 
-        var firstResponse = sqs.sendMessage(SendMessageRequest.builder()
+        SendMessageResponse firstResponse = sqs.sendMessage(SendMessageRequest.builder()
                 .queueUrl(queueUrl).messageBody("body-1").messageGroupId("g1")
                 .messageDeduplicationId("same-dedup")
                 .messageAttributes(firstAttrs).build());
 
-        var secondResponse = sqs.sendMessage(SendMessageRequest.builder()
+        SendMessageResponse secondResponse = sqs.sendMessage(SendMessageRequest.builder()
                 .queueUrl(queueUrl).messageBody("body-2").messageGroupId("g1")
                 .messageDeduplicationId("same-dedup")
                 .messageAttributes(secondAttrs).build());
@@ -134,7 +168,7 @@ class SqsMd5Test {
                         QueueAttributeName.CONTENT_BASED_DEDUPLICATION, "true"))
                 .build()).queueUrl();
 
-        var attrs = Map.of(
+        Map<String, MessageAttributeValue> attrs = Map.of(
                 "blob", MessageAttributeValue.builder()
                         .dataType("Binary")
                         .binaryValue(SdkBytes.fromByteArray(new byte[]{1, 2, 3, 4, 5}))
@@ -157,7 +191,7 @@ class SqsMd5Test {
                         QueueAttributeName.CONTENT_BASED_DEDUPLICATION, "true"))
                 .build()).queueUrl();
 
-        var attrs = Map.of(
+        Map<String, MessageAttributeValue> attrs = Map.of(
                 "priority", MessageAttributeValue.builder()
                         .dataType("Number.int").stringValue("42").build());
 
@@ -180,7 +214,7 @@ class SqsMd5Test {
                         QueueAttributeName.FIFO_THROUGHPUT_LIMIT, "perMessageGroupId"))
                 .build()).queueUrl();
 
-        var attrs = Map.of(
+        Map<String, MessageAttributeValue> attrs = Map.of(
                 "key", MessageAttributeValue.builder()
                         .dataType("String").stringValue("value").build());
 

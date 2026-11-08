@@ -1,1 +1,3 @@
-io.github.hectorvent.floci.config.TlsConfigSource
+io.floci.aws.config.TlsConfigSource
+io.floci.aws.config.HostDefaultsConfigSource
+io.floci.aws.config.LocalStackParityConfigSource

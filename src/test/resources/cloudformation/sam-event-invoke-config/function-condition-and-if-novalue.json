@@ -1,0 +1,131 @@
+{
+  "expected": {
+    "FnEventInvokeConfig": {
+      "Condition": "Deploy",
+      "Properties": {
+        "DestinationConfig": {
+          "OnFailure": {
+            "Destination": {
+              "Fn::If": [
+                "NOTUseOwnef6eca6cf7",
+                {
+                  "Fn::GetAtt": [
+                    "FnEventInvokeConfigOnFailureQueue",
+                    "Arn"
+                  ]
+                },
+                "arn:aws:sqs:us-east-1:123456789012:q"
+              ]
+            }
+          }
+        },
+        "FunctionName": {
+          "Ref": "Fn"
+        },
+        "Qualifier": "$LATEST"
+      },
+      "Type": "AWS::Lambda::EventInvokeConfig"
+    },
+    "FnEventInvokeConfigOnFailureQueue": {
+      "Condition": "DeployANDNOTUseOwnef6eca6cf797f22050b4",
+      "Properties": {},
+      "Type": "AWS::SQS::Queue"
+    },
+    "FnRole": {
+      "Condition": "Deploy",
+      "Policies": [
+        {
+          "PolicyDocument": {
+            "Statement": [
+              {
+                "Action": "sqs:SendMessage",
+                "Effect": "Allow",
+                "Resource": {
+                  "Fn::If": [
+                    "NOTUseOwnef6eca6cf7",
+                    {
+                      "Fn::GetAtt": [
+                        "FnEventInvokeConfigOnFailureQueue",
+                        "Arn"
+                      ]
+                    },
+                    "arn:aws:sqs:us-east-1:123456789012:q"
+                  ]
+                }
+              }
+            ]
+          },
+          "PolicyName": "FnEventInvokeConfigOnFailureSQSPolicy"
+        }
+      ],
+      "Type": "AWS::IAM::Role"
+    }
+  },
+  "expectedConditions": {
+    "DeployANDNOTUseOwnef6eca6cf797f22050b4": {
+      "Fn::And": [
+        {
+          "Condition": {
+            "Condition": "Deploy"
+          }
+        },
+        {
+          "Condition": {
+            "Condition": "NOTUseOwnef6eca6cf7"
+          }
+        }
+      ]
+    },
+    "NOTUseOwnef6eca6cf7": {
+      "Fn::Not": [
+        {
+          "Condition": "UseOwn"
+        }
+      ]
+    }
+  },
+  "input": {
+    "Conditions": {
+      "Deploy": {
+        "Fn::Equals": [
+          "a",
+          "a"
+        ]
+      },
+      "UseOwn": {
+        "Fn::Equals": [
+          "a",
+          "b"
+        ]
+      }
+    },
+    "Resources": {
+      "Fn": {
+        "Condition": "Deploy",
+        "Properties": {
+          "CodeUri": "s3://b/k",
+          "EventInvokeConfig": {
+            "DestinationConfig": {
+              "OnFailure": {
+                "Destination": {
+                  "Fn::If": [
+                    "UseOwn",
+                    "arn:aws:sqs:us-east-1:123456789012:q",
+                    {
+                      "Ref": "AWS::NoValue"
+                    }
+                  ]
+                },
+                "Type": "SQS"
+              }
+            }
+          },
+          "Handler": "index.handler",
+          "Runtime": "python3.12"
+        },
+        "Type": "AWS::Serverless::Function"
+      }
+    },
+    "Transform": "AWS::Serverless-2016-10-31"
+  }
+}

@@ -235,6 +235,35 @@ create_image() {
     CONNECTOR_ID=""
 }
 
+@test "MicroVMs: a network connector update makes the next version" {
+    name=$(unique_name "cli-conn-ver")
+    run aws_cmd lambda-core create-network-connector \
+        --name "$name" \
+        --operator-role "arn:aws:iam::000000000000:role/microvm-connector-operator" \
+        --configuration "VpcEgressConfiguration={AssociatedComputeResourceTypes=WebFunction,NetworkProtocol=IPv4,SubnetIds=subnet-0000000000000cli1,SecurityGroupIds=sg-0000000000000cli1}"
+    assert_success
+    CONNECTOR_ID=$(json_get "$output" '.Id')
+    [ "$(json_get "$output" '.Version')" = "1" ]
+
+    run aws_cmd lambda-core update-network-connector --identifier "$CONNECTOR_ID" \
+        --configuration '{"VpcEgressConfiguration":{"SubnetIds":["subnet-0000000000000cli1","subnet-0000000000000cli2"]}}'
+    assert_success
+    [ "$(json_get "$output" '.Version')" = "2" ]
+
+    run aws_cmd lambda-core get-network-connector --identifier "$name:1"
+    assert_success
+    [ "$(json_get "$output" '.Version')" = "1" ]
+    [ "$(json_get "$output" '.Configuration.VpcEgressConfiguration.SubnetIds | length')" = "1" ]
+
+    run aws_cmd lambda-core list-network-connector-versions --identifier "$CONNECTOR_ID"
+    assert_success
+    [ "$(json_get "$output" '[.NetworkConnectorVersions[].Version] | map(tostring) | join(",")')" = "1,2" ]
+
+    run aws_cmd lambda-core delete-network-connector --identifier "$CONNECTOR_ID"
+    assert_success
+    CONNECTOR_ID=""
+}
+
 @test "MicroVMs: get a nonexistent connector returns not found" {
     run aws_cmd lambda-core get-network-connector --id "nc-00000000000000cli"
     assert_failure

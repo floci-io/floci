@@ -1,0 +1,332 @@
+package io.floci.aws.core.common.docker;
+
+import com.github.dockerjava.api.DockerClient;
+import com.github.dockerjava.api.command.CreateContainerCmd;
+import com.github.dockerjava.api.command.CreateContainerResponse;
+import com.github.dockerjava.api.command.CreateVolumeCmd;
+import com.github.dockerjava.api.command.InspectVolumeCmd;
+import com.github.dockerjava.api.command.RemoveContainerCmd;
+import com.github.dockerjava.api.command.StartContainerCmd;
+import com.github.dockerjava.api.command.WaitContainerCmd;
+import com.github.dockerjava.api.exception.NotFoundException;
+import com.github.dockerjava.api.model.Capability;
+import com.github.dockerjava.api.model.HostConfig;
+import com.github.dockerjava.core.command.WaitContainerResultCallback;
+import io.floci.aws.config.EmulatorConfig;
+import io.floci.aws.services.lambda.launcher.ImageCacheService;
+import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.DisplayName;
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.extension.ExtendWith;
+import org.mockito.ArgumentCaptor;
+import org.mockito.Mock;
+import org.mockito.junit.jupiter.MockitoExtension;
+
+import java.util.HashMap;
+import java.util.List;
+import java.util.Map;
+import java.util.Optional;
+import java.util.OptionalInt;
+
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertNotEquals;
+import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyLong;
+import static org.mockito.Mockito.RETURNS_SELF;
+import static org.mockito.Mockito.lenient;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.when;
+
+/**
+ * Asserts the default Docker labels at the single choke point every emulator-created
+ * container and volume passes through. All container-backed services funnel into
+ * {@link ContainerLifecycleManager#create}, so asserting here covers every service
+ * by construction.
+ */
+@ExtendWith(MockitoExtension.class)
+@DisplayName("ContainerLifecycleManager — default emulator labels")
+class ContainerLifecycleManagerLabelsTest {
+
+    @Mock
+    DockerClient dockerClient;
+
+    @Mock
+    ImageCacheService imageCacheService;
+
+    @Mock
+    ContainerDetector containerDetector;
+
+    @Mock
+    EmulatorConfig config;
+
+    @Mock
+    EmulatorConfig.DockerConfig dockerConfig;
+
+    @Mock
+    EmulatorConfig.TlsConfig tlsConfig;
+
+    @BeforeEach
+    void setUp() {
+        lenient().when(config.docker()).thenReturn(dockerConfig);
+        lenient().when(config.tls()).thenReturn(tlsConfig);
+        lenient().when(dockerConfig.resourceNamespace()).thenReturn(Optional.empty());
+        lenient().when(imageCacheService.ensureImageExists(any()))
+                .thenAnswer(invocation -> invocation.getArgument(0));
+    }
+
+    @Test
+    void createAppliesDefaultLabelsToEveryContainer() {
+        CreateContainerCmd createCmd = stubCreateContainer();
+
+        manager().create(new ContainerSpec("busybox:stable"));
+
+        assertEquals(
+                Map.of("floci", "true", "floci_emulator", "floci-aws"),
+                capturedLabels(createCmd));
+        verify(imageCacheService).ensureImageExists("busybox:stable");
+    }
+
+    @Test
+    void createMergesSpecLabelsOverDefaults() {
+        CreateContainerCmd createCmd = stubCreateContainer();
+        ContainerSpec spec = specWithLabels(Map.of("floci_service", "lambda"));
+
+        manager().create(spec);
+
+        assertEquals(
+                Map.of("floci", "true", "floci_emulator", "floci-aws", "floci_service", "lambda"),
+                capturedLabels(createCmd));
+    }
+
+    @Test
+    void createWritesTheLegacyAliasOfEachNewKeyWithTheSameValue() {
+        CreateContainerCmd createCmd = stubCreateContainer();
+        ContainerSpec spec = specWithLabels(Map.of(
+                ContainerStorageHelper.OWNER_LABEL, "alpha/4566",
+                ContainerStorageHelper.ECS_RUN_LABEL, "run-1"));
+
+        manager().create(spec);
+
+        assertEquals(
+                Map.of("floci", "true", "floci_emulator", "floci-aws",
+                        "io.floci.owner", "alpha/4566", "floci_owner_port", "alpha/4566",
+                        "io.floci.ecs.run", "run-1", "floci.ecs-run", "run-1"),
+                capturedLabels(createCmd));
+    }
+
+    @Test
+    void protectedWorkloadCannotAdministerOrSpoofItsNetwork() {
+        CreateContainerCmd createCmd = stubCreateContainer();
+
+        manager().create(specWithLabels(Map.of(ContainerStorageHelper.SECURITY_GROUP_WORKLOAD_LABEL, "true")));
+
+        ArgumentCaptor<HostConfig> hostConfig = ArgumentCaptor.forClass(HostConfig.class);
+        verify(createCmd).withHostConfig(hostConfig.capture());
+        List<Capability> dropped = List.of(hostConfig.getValue().getCapDrop());
+        assertTrue(dropped.contains(Capability.NET_ADMIN));
+        assertTrue(dropped.contains(Capability.NET_RAW));
+    }
+
+    @Test
+    void protectedWorkloadSpecWithOnlyTheLegacyLabelStillDropsNetworkAdministration() {
+        CreateContainerCmd createCmd = stubCreateContainer();
+
+        manager().create(specWithLabels(Map.of("floci.security-group-workload", "true")));
+
+        ArgumentCaptor<HostConfig> hostConfig = ArgumentCaptor.forClass(HostConfig.class);
+        verify(createCmd).withHostConfig(hostConfig.capture());
+        List<Capability> dropped = List.of(hostConfig.getValue().getCapDrop());
+        assertTrue(dropped.contains(Capability.NET_ADMIN));
+        assertTrue(dropped.contains(Capability.NET_RAW));
+    }
+
+    @Test
+    void firewallHelperGetsNetAdminInsteadOfFullPrivilege() {
+        CreateContainerCmd createCmd = stubCreateContainer();
+
+        manager().create(specWithLabels(Map.of("floci.security-group-helper", "true")));
+
+        ArgumentCaptor<HostConfig> hostConfig = ArgumentCaptor.forClass(HostConfig.class);
+        verify(createCmd).withHostConfig(hostConfig.capture());
+        assertEquals(List.of(Capability.NET_ADMIN), List.of(hostConfig.getValue().getCapAdd()));
+        assertNotEquals(Boolean.TRUE, hostConfig.getValue().getPrivileged());
+    }
+
+    @Test
+    void firewallHelperSpecWithTheNewLabelGetsNetAdmin() {
+        CreateContainerCmd createCmd = stubCreateContainer();
+
+        manager().create(specWithLabels(Map.of(ContainerStorageHelper.SECURITY_GROUP_HELPER_LABEL, "true")));
+
+        ArgumentCaptor<HostConfig> hostConfig = ArgumentCaptor.forClass(HostConfig.class);
+        verify(createCmd).withHostConfig(hostConfig.capture());
+        assertEquals(List.of(Capability.NET_ADMIN), List.of(hostConfig.getValue().getCapAdd()));
+    }
+
+    @Test
+    void specLabelWinsOverDefaultOnKeyConflict() {
+        CreateContainerCmd createCmd = stubCreateContainer();
+        ContainerSpec spec = specWithLabels(Map.of("floci_emulator", "custom-value"));
+
+        manager().create(spec);
+
+        assertEquals(
+                Map.of("floci", "true", "floci_emulator", "custom-value"),
+                capturedLabels(createCmd));
+    }
+
+    @Test
+    void createUsesRequestedDockerPlatform() {
+        when(imageCacheService.ensureImageExists("busybox:stable", "linux/arm64"))
+                .thenReturn("sha256:arm64");
+        CreateContainerCmd createCmd = stubCreateContainer("sha256:arm64");
+
+        manager().create(new ContainerSpec("busybox:stable"), "linux/arm64");
+
+        verify(imageCacheService).ensureImageExists("busybox:stable", "linux/arm64");
+        verify(dockerClient).createContainerCmd("sha256:arm64");
+        verify(createCmd).withPlatform("linux/arm64");
+    }
+
+    @Test
+    void createUsesResolvedImageForDaemonDefaultPlatform() {
+        when(imageCacheService.ensureImageExists("busybox:stable"))
+                .thenReturn("sha256:native");
+        CreateContainerCmd createCmd = stubCreateContainer("sha256:native");
+
+        manager().create(new ContainerSpec("busybox:stable"));
+
+        verify(dockerClient).createContainerCmd("sha256:native");
+        verify(createCmd, never()).withPlatform(any());
+    }
+
+    @Test
+    void createOmitsExtraHostsForContainerNetworkMode() {
+        CreateContainerCmd createCmd = stubCreateContainer();
+        ContainerSpec spec = new ContainerSpec(
+                "busybox:stable", null, List.of(), null, null, null, Map.of(), List.of(),
+                "container:router-id", List.of(), List.of(), List.of("host.docker.internal:host-gateway"),
+                Map.of(), null, false, null, List.of(), null, null, List.of());
+
+        manager().create(spec);
+
+        ArgumentCaptor<HostConfig> hostConfig = ArgumentCaptor.forClass(HostConfig.class);
+        verify(createCmd).withHostConfig(hostConfig.capture());
+        assertTrue(hostConfig.getValue().getExtraHosts() == null
+                || hostConfig.getValue().getExtraHosts().length == 0);
+    }
+
+    @Test
+    void createOmitsDnsForContainerNetworkMode() {
+        CreateContainerCmd createCmd = stubCreateContainer();
+        ContainerSpec spec = new ContainerSpec(
+                "busybox:stable", null, List.of(), null, null, null, Map.of(), List.of(),
+                "container:router-id", List.of(), List.of(), List.of(),
+                Map.of(), null, false, null, List.of("172.18.0.2"), null, null, List.of());
+
+        manager().create(spec);
+
+        ArgumentCaptor<HostConfig> hostConfig = ArgumentCaptor.forClass(HostConfig.class);
+        verify(createCmd).withHostConfig(hostConfig.capture());
+        assertTrue(hostConfig.getValue().getDns() == null || hostConfig.getValue().getDns().length == 0);
+    }
+
+    @Test
+    void createIncludesNamespaceLabelWhenConfigured() {
+        when(dockerConfig.resourceNamespace()).thenReturn(Optional.of("run-one"));
+        CreateContainerCmd createCmd = stubCreateContainer();
+
+        manager().create(new ContainerSpec("busybox:stable"));
+
+        assertEquals(
+                Map.of("floci", "true", "floci_emulator", "floci-aws", "floci_namespace", "run-one"),
+                capturedLabels(createCmd));
+    }
+
+    @Test
+    void ensureVolumeAppliesTheSameDefaultLabels() {
+        InspectVolumeCmd inspectVolumeCmd = mock(InspectVolumeCmd.class);
+        when(dockerClient.inspectVolumeCmd("volume-1")).thenReturn(inspectVolumeCmd);
+        when(inspectVolumeCmd.exec()).thenThrow(new NotFoundException("missing"));
+        CreateVolumeCmd createVolumeCmd = mock(CreateVolumeCmd.class, RETURNS_SELF);
+        when(dockerClient.createVolumeCmd()).thenReturn(createVolumeCmd);
+
+        manager().ensureVolume("volume-1");
+
+        ArgumentCaptor<Map<String, String>> labels = labelsCaptor();
+        verify(createVolumeCmd).withLabels(labels.capture());
+        assertEquals(Map.of("floci", "true", "floci_emulator", "floci-aws"), labels.getValue());
+    }
+
+    @Test
+    void sharedVolumeInitHelperCarriesDefaultLabels() {
+        InspectVolumeCmd inspectVolumeCmd = mock(InspectVolumeCmd.class);
+        when(dockerClient.inspectVolumeCmd("shared")).thenReturn(inspectVolumeCmd);
+        when(inspectVolumeCmd.exec()).thenThrow(new NotFoundException("missing"));
+        CreateVolumeCmd createVolumeCmd = mock(CreateVolumeCmd.class, RETURNS_SELF);
+        when(dockerClient.createVolumeCmd()).thenReturn(createVolumeCmd);
+
+        CreateContainerCmd createCmd = stubCreateContainer();
+        when(dockerClient.startContainerCmd("container-id")).thenReturn(mock(StartContainerCmd.class));
+        WaitContainerCmd waitCmd = mock(WaitContainerCmd.class);
+        when(dockerClient.waitContainerCmd("container-id")).thenReturn(waitCmd);
+        WaitContainerResultCallback waitCallback = mock(WaitContainerResultCallback.class);
+        when(waitCmd.exec(any(WaitContainerResultCallback.class))).thenReturn(waitCallback);
+        when(waitCallback.awaitStatusCode(anyLong(), any())).thenReturn(0);
+        when(dockerClient.removeContainerCmd("container-id"))
+                .thenReturn(mock(RemoveContainerCmd.class, RETURNS_SELF));
+
+        manager().ensureSharedVolume("shared", OptionalInt.of(1001), OptionalInt.of(1001),
+                Optional.of("2775"), "busybox:stable");
+
+        assertEquals(
+                Map.of("floci", "true", "floci_emulator", "floci-aws"),
+                capturedLabels(createCmd));
+    }
+
+    private ContainerLifecycleManager manager() {
+        return new ContainerLifecycleManager(
+                dockerClient, imageCacheService, containerDetector, config);
+    }
+
+    private static ContainerSpec specWithLabels(Map<String, String> labels) {
+        return new ContainerSpec(
+                "busybox:stable", null, List.of(), null, null, null, Map.of(), List.of(), List.of(), null,
+                List.of(), List.of(), List.of(), labels, null, false, null, List.of(), null,
+                null, List.of());
+    }
+
+    private CreateContainerCmd stubCreateContainer() {
+        return stubCreateContainer("busybox:stable");
+    }
+
+    private CreateContainerCmd stubCreateContainer(String image) {
+        CreateContainerCmd createCmd = mock(CreateContainerCmd.class, RETURNS_SELF);
+        when(dockerClient.createContainerCmd(image)).thenReturn(createCmd);
+        CreateContainerResponse response = mock(CreateContainerResponse.class);
+        when(response.getId()).thenReturn("container-id");
+        when(createCmd.exec()).thenReturn(response);
+        return createCmd;
+    }
+
+    /**
+     * Strips the per-call {@code ContainerLifecycleManager.CREATE_ATTEMPT_LABEL}, a random id
+     * generated fresh on every {@code create()} call for conflict-recovery adoption safety,
+     * orthogonal to the default-label behavior this test file covers.
+     */
+    private Map<String, String> capturedLabels(CreateContainerCmd createCmd) {
+        ArgumentCaptor<Map<String, String>> labels = labelsCaptor();
+        verify(createCmd).withLabels(labels.capture());
+        Map<String, String> captured = new HashMap<>(labels.getValue());
+        captured.remove(ContainerLifecycleManager.CREATE_ATTEMPT_LABEL);
+        return captured;
+    }
+
+    @SuppressWarnings("unchecked")
+    private static ArgumentCaptor<Map<String, String>> labelsCaptor() {
+        return ArgumentCaptor.forClass((Class<Map<String, String>>) (Class<?>) Map.class);
+    }
+}

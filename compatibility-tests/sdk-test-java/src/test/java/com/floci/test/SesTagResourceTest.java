@@ -7,7 +7,7 @@ import org.junit.jupiter.api.MethodOrderer;
 import org.junit.jupiter.api.Order;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.TestMethodOrder;
-
+import org.junit.jupiter.api.parallel.ResourceLock;
 import software.amazon.awssdk.services.sesv2.SesV2Client;
 import software.amazon.awssdk.services.sesv2.model.CreateConfigurationSetRequest;
 import software.amazon.awssdk.services.sesv2.model.CreateContactListRequest;
@@ -42,6 +42,7 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 @DisplayName("SES V2 TagResource / UntagResource / ListTagsForResource")
 @TestMethodOrder(MethodOrderer.OrderAnnotation.class)
+@ResourceLock("ses-account")
 class SesTagResourceTest {
 
     private static SesV2Client sesV2;
@@ -66,18 +67,18 @@ class SesTagResourceTest {
         sesV2 = TestFixtures.sesV2Client();
         String suffix = TestFixtures.uniqueName();
         configSetName = "sdk-tag-cs-" + suffix;
-        configSetArn = "arn:aws:ses:us-east-1:000000000000:configuration-set/" + configSetName;
+        configSetArn = TestFixtures.arn("ses", "000000000000", "configuration-set/" + configSetName);
         templateName = "sdk-tag-tpl-" + suffix;
-        templateArn = "arn:aws:ses:us-east-1:000000000000:template/" + templateName;
+        templateArn = TestFixtures.arn("ses", "000000000000", "template/" + templateName);
         identityValue = "sdk-tag-id-" + suffix + "@example.com";
-        identityArn = "arn:aws:ses:us-east-1:000000000000:identity/" + identityValue;
+        identityArn = TestFixtures.arn("ses", "000000000000", "identity/" + identityValue);
         contactListName = "sdk-tag-cl-" + suffix;
-        contactListArn = "arn:aws:ses:us-east-1:000000000000:contact-list/" + contactListName;
+        contactListArn = TestFixtures.arn("ses", "000000000000", "contact-list/" + contactListName);
         cvetFrom = "sdk-tag-cvet-sender-" + suffix + "@example.com";
         cvetName = "sdk-tag-cvet-" + suffix;
-        cvetArn = "arn:aws:ses:us-east-1:000000000000:custom-verification-email-template/" + cvetName;
+        cvetArn = TestFixtures.arn("ses", "000000000000", "custom-verification-email-template/" + cvetName);
         poolName = "sdk-tag-pool-" + suffix;
-        poolArn = "arn:aws:ses:us-east-1:000000000000:dedicated-ip-pool/" + poolName;
+        poolArn = TestFixtures.arn("ses", "000000000000", "dedicated-ip-pool/" + poolName);
         tenantName = "sdk-tag-tenant-" + suffix;
 
         sesV2.createConfigurationSet(CreateConfigurationSetRequest.builder()
@@ -202,7 +203,8 @@ class SesTagResourceTest {
     @Test
     @Order(5)
     void tagResource_unknownConfigurationSet_throwsNotFound() {
-        String missingArn = "arn:aws:ses:us-east-1:000000000000:configuration-set/missing-" + TestFixtures.uniqueName();
+        String missingArn = TestFixtures.arn("ses", "000000000000",
+                "configuration-set/missing-" + TestFixtures.uniqueName());
         assertThatThrownBy(() -> sesV2.tagResource(TagResourceRequest.builder()
                 .resourceArn(missingArn)
                 .tags(Tag.builder().key("k").value("v").build())

@@ -16,6 +16,7 @@ import software.amazon.awssdk.services.eventbridge.model.DescribeEventBusRequest
 import software.amazon.awssdk.services.eventbridge.model.DescribeEventBusResponse;
 import software.amazon.awssdk.services.eventbridge.model.ListTagsForResourceRequest;
 import software.amazon.awssdk.services.eventbridge.model.ResourceNotFoundException;
+import software.amazon.awssdk.services.eventbridge.model.Tag;
 
 import java.util.List;
 import java.util.Map;
@@ -69,7 +70,7 @@ class CloudFormationEventBusTest {
                 .stacks().get(0);
         Map<String, String> outputs = createdStack.outputs().stream()
                 .collect(Collectors.toMap(Output::outputKey, Output::outputValue));
-        String busArn = "arn:aws:events:us-east-1:000000000000:event-bus/" + busName;
+        String busArn = TestFixtures.arn("events", "000000000000", "event-bus/" + busName);
         assertThat(outputs)
                 .containsEntry("BusRef", busName)
                 .containsEntry("BusName", busName)
@@ -84,10 +85,13 @@ class CloudFormationEventBusTest {
                 .containsEntry("keep", "old")
                 .containsEntry("remove", "old");
 
-        cloudFormation.updateStack(r -> r
+        // An update with nothing to change is refused, as CloudFormation refuses it.
+        assertThatThrownBy(() -> cloudFormation.updateStack(r -> r
                 .stackName(stackName)
-                .templateBody(template("before", "old", "remove")));
-        assertThat(waitForTerminal(stackName, 30)).isEqualTo("UPDATE_COMPLETE");
+                .templateBody(template("before", "old", "remove"))))
+                .isInstanceOf(CloudFormationException.class)
+                .hasMessageContaining("No updates are to be performed.");
+        assertThat(waitForTerminal(stackName, 30)).isEqualTo("CREATE_COMPLETE");
 
         cloudFormation.updateStack(r -> r
                 .stackName(stackName)
@@ -115,8 +119,8 @@ class CloudFormationEventBusTest {
                         .build())
                 .tags().stream()
                 .collect(Collectors.toMap(
-                        software.amazon.awssdk.services.eventbridge.model.Tag::key,
-                        software.amazon.awssdk.services.eventbridge.model.Tag::value));
+                        Tag::key,
+                        Tag::value));
     }
 
     private static String template(String description, String keepValue, String secondTagKey) {

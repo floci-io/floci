@@ -4,8 +4,11 @@ import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 import software.amazon.awssdk.services.bedrockagentcorecontrol.BedrockAgentCoreControlClient;
 import software.amazon.awssdk.services.bedrockagentcorecontrol.model.DeleteResourcePolicyRequest;
+import software.amazon.awssdk.services.bedrockagentcorecontrol.model.DeleteResourcePolicyResponse;
 import software.amazon.awssdk.services.bedrockagentcorecontrol.model.GetResourcePolicyRequest;
+import software.amazon.awssdk.services.bedrockagentcorecontrol.model.GetResourcePolicyResponse;
 import software.amazon.awssdk.services.bedrockagentcorecontrol.model.PutResourcePolicyRequest;
+import software.amazon.awssdk.services.bedrockagentcorecontrol.model.PutResourcePolicyResponse;
 import software.amazon.awssdk.services.bedrockagentcorecontrol.model.ResourceNotFoundException;
 
 import static org.assertj.core.api.Assertions.assertThat;
@@ -31,13 +34,13 @@ class BedrockAgentCoreResourcePolicyTest {
     void putAndGetResourcePolicy() {
         try (BedrockAgentCoreControlClient client = TestFixtures.bedrockAgentCoreControlClient()) {
             String policy = "{\"Version\":\"2012-10-17\",\"Statement\":[]}";
-            var put = client.putResourcePolicy(PutResourcePolicyRequest.builder()
+            PutResourcePolicyResponse put = client.putResourcePolicy(PutResourcePolicyRequest.builder()
                     .resourceArn(RESOURCE_ARN)
                     .policy(policy)
                     .build());
             assertThat(put.policy()).isEqualTo(policy);
 
-            var get = client.getResourcePolicy(GetResourcePolicyRequest.builder()
+            GetResourcePolicyResponse get = client.getResourcePolicy(GetResourcePolicyRequest.builder()
                     .resourceArn(RESOURCE_ARN)
                     .build());
             assertThat(get.policy()).isEqualTo(policy);
@@ -53,7 +56,7 @@ class BedrockAgentCoreResourcePolicyTest {
                     .policy(policy)
                     .build());
 
-            var deleted = client.deleteResourcePolicy(DeleteResourcePolicyRequest.builder()
+            DeleteResourcePolicyResponse deleted = client.deleteResourcePolicy(DeleteResourcePolicyRequest.builder()
                     .resourceArn(RESOURCE_ARN)
                     .build());
             assertThat(deleted.sdkHttpResponse().statusCode()).isEqualTo(204);

@@ -15,11 +15,19 @@ management surfaces over one underlying export pipeline.
 |-----------|-------|
 | `CreateExport` | Creates an export; rejects duplicate `Name` with `ValidationException` |
 | `GetExport` | Returns one export by ARN; missing ARN returns `ResourceNotFoundException` |
-| `ListExports` | Returns every export owned by the calling account |
+| `ListExports` | Returns a page of exports owned by the calling account |
 | `UpdateExport` | Replaces mutable fields on an existing export |
 | `DeleteExport` | Idempotent; deletes orphan executions too |
-| `ListExecutions` | Returns all execution records for an export |
+| `ListExecutions` | Returns a page of execution records for an export |
 | `GetExecution` | Returns one execution record |
+
+`ListExports` and `ListExecutions` accept `MaxResults` from 1 to 300 and an optional
+`NextToken` of up to 8192 characters. Floci defaults to 300 results per page. It
+returns `NextToken` only when more results remain. Cursors use stable export ARN
+or execution ID order and can resume after a previously returned item is deleted.
+Tokens are scoped to the action and calling account, and execution tokens also
+belong to the requested export. Invalid pagination fields return
+`ValidationException` (400).
 
 ## Validation rules
 

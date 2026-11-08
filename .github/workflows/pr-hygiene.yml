@@ -1,0 +1,450 @@
+name: PR Hygiene
+
+# The per-PR checks that need no build: commit signatures, AI attribution
+# trailers, Conventional Commits, em-dashes in new files and the PR template.
+# They used to be five workflows with one job each. Every push then started
+# five runners for about ten seconds of work apiece, and at busy times those
+# jobs queued for up to twenty minutes behind the CI shards and the
+# compatibility suites under the account's concurrent-job limit. One job with
+# one step per check keeps each check's name, log section and annotations
+# while taking a single runner.
+#
+# Every check step runs under `!cancelled()`, so a failure in one does not
+# hide the others: the job fails if any of them failed, and the step that
+# failed names the check.
+#
+# All five checks run on every event, including `edited`. With one job, the
+# latest run's result replaces the previous one, so skipping the signature
+# check on a title or body edit would turn an unsigned PR green. It is one
+# API call, so running it on edits costs nothing.
+
+on:
+  pull_request:
+    # "edited" also fires when the PR is retargeted to a different base
+    # branch, which changes the commit range and what counts as a new file.
+    types: [opened, edited, synchronize, reopened]
+
+permissions:
+  contents: read
+  pull-requests: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  hygiene:
+    name: PR hygiene
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+
+      - name: Commits are signed and verified
+        if: ${{ !cancelled() }}
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: |
+          # The repo's branch protection already requires every commit to be
+          # signed and verified before a PR can merge, but that only shows up
+          # as a generic red status on the merge button. This front-runs it
+          # with a per-commit annotation, using the same signal GitHub's merge
+          # gate uses (the commit's `verification` field from the API).
+          #
+          # Local `git log --show-signature` only verifies against keys the
+          # runner already trusts, which is nobody's, so it would report every
+          # commit as unsigned. Merge commits are skipped via --no-merges,
+          # matching the other commit checks below.
+          #
+          # An unresolvable API call is a hard failure here, unlike the AI
+          # attribution check, which lets a commit through when it cannot
+          # resolve an author. A false positive there accuses a person of
+          # being a bot; an unverifiable signature here only withholds a
+          # verdict that branch protection enforces at the merge button
+          # anyway, so failing closed costs a re-run, not a blocked person.
+
+          FAILED=0
+          UNSIGNED=0
+
+          # One call gets verification for up to 250 commits (the endpoint's
+          # documented cap); any sha it does not cover falls back to the
+          # per-commit call below. --paginate re-runs --jq per page, so this
+          # emits one JSON object per commit, which jq reads as a stream.
+          pr_commits=$(gh api "repos/$REPO/pulls/$PR_NUMBER/commits" --paginate --jq '.[] | {sha: .sha, verification: .commit.verification}') || pr_commits=''
+
+          for sha in $(git log --no-merges --format=%H "$BASE_SHA".."$HEAD_SHA"); do
+            subject=$(git show -s --format=%s "$sha")
+
+            verification=$(echo "$pr_commits" | jq -c --arg sha "$sha" 'select(.sha == $sha) | .verification')
+
+            if [ -z "$verification" ] && ! verification=$(gh api "repos/$REPO/commits/$sha" --jq '.commit.verification'); then
+              echo "::error::Could not check verification status for commit: $sha $subject (GitHub API call failed - this is not a signature failure, re-run the job)"
+              FAILED=1
+              continue
+            fi
+
+            verified=$(echo "$verification" | jq -r '.verified')
+            reason=$(echo "$verification" | jq -r '.reason')
+
+            if [ "$verified" = "true" ]; then
+              echo "ok: $sha $subject"
+            else
+              echo "::error::Commit is not signed/verified: $sha $subject ($reason)"
+              UNSIGNED=1
+              FAILED=1
+            fi
+          done
+
+          if [ "$UNSIGNED" -ne 0 ]; then
+            echo ""
+            echo "  This repo requires every commit to be GPG or SSH signed and verified"
+            echo "  by GitHub before a PR can merge - the commit(s) flagged above aren't."
+            echo ""
+            echo "  Set up commit signing (GPG or SSH):"
+            echo "    https://docs.github.com/en/authentication/managing-commit-signature-verification"
+            echo ""
+            echo "  Then re-sign the commits this PR adds and force-push:"
+            echo "    git rebase --exec 'git commit --amend --no-edit -S' origin/main"
+            echo "    git push --force-with-lease"
+          fi
+
+          exit $FAILED
+
+      - name: Commits omit AI attribution trailers
+        if: ${{ !cancelled() }}
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          # CONTRIBUTING.md and AGENTS.md both state:
+          #
+          #   "Do not include Co-Authored-By trailers for AI tools in commit
+          #    messages. Attribution should be limited to human contributors."
+          #
+          # This does NOT try to recognise an AI by its name. Names are not a
+          # usable signal in either direction: Claude and Devin are ordinary
+          # human given names, so matching on them rejects real contributors,
+          # while any list of product names is stale the moment a new agent
+          # ships.
+          #
+          # Instead a co-author is rejected only on evidence that the identity
+          # is not a person:
+          #
+          #   1. Its GitHub privacy address resolves to an account of type Bot.
+          #      GitHub is the authority here, and agents commit through GitHub
+          #      Apps, so this keeps working for tools that do not exist yet.
+          #   2. Its address is a noreply@ mailbox on some other domain - a
+          #      fabricated, uncontactable address. No person's git identity is
+          #      noreply@.
+          #
+          # A false positive costs far more than a false negative here: a
+          # missed trailer is untidy attribution, but a blocked contributor is
+          # a person turned away by a linter. So anything this cannot resolve
+          # is allowed through, and a GitHub API failure never fails the build.
+          #
+          # Merge commits are skipped via --no-merges.
+
+          # Bot accounts that may legitimately co-author. Keep this short.
+          ALLOWED_BOTS='dependabot[bot]'
+
+          # Trailer keys and generator markers that are AI-only by construction.
+          # These are literal strings no person writes, not identity matching.
+          AI_ONLY_TRAILER='^(claude-session|codex-session|chatgpt-session):'
+          AI_MARKER='(Generated with \[Claude Code\]|🤖 Generated with)'
+
+          CACHE=$(mktemp)
+          FAILED=0
+
+          # Prints "bot <login>" if the address belongs to a bot account,
+          # "noreply" for a fabricated noreply mailbox, nothing otherwise.
+          classify() {
+            local email="$1" local_part login id cached type
+            local_part=${email%@*}
+
+            case "$email" in
+              *@users.noreply.github.com)
+                case "$local_part" in
+                  *+*) id=${local_part%%+*}; login=${local_part#*+} ;;
+                  *)   id=""; login=$local_part ;;
+                esac
+
+                # A [bot] suffix is GitHub's own convention; no lookup needed.
+                case "$login" in
+                  *'[bot]'*) printf 'bot %s' "$login"; return ;;
+                esac
+
+                cached=$(grep -m1 "^${id}|${login} " "$CACHE" 2>/dev/null || true)
+                if [ -n "$cached" ]; then
+                  type=${cached##* }
+                else
+                  if [ -n "$id" ]; then
+                    type=$(gh api "user/$id" --jq .type 2>/dev/null || echo "")
+                  else
+                    type=$(gh api "users/$login" --jq .type 2>/dev/null || echo "")
+                  fi
+                  # Unresolvable (deleted account, API trouble) is not evidence.
+                  [ -z "$type" ] && type="Unknown"
+                  printf '%s|%s %s\n' "$id" "$login" "$type" >> "$CACHE"
+                fi
+
+                if [ "$type" = "Bot" ]; then
+                  printf 'bot %s' "$login"
+                fi
+                ;;
+              *)
+                # noreply@example.com, but not GitHub's own privacy domain.
+                case "$local_part" in
+                  noreply|no-reply) printf 'noreply' ;;
+                esac
+                ;;
+            esac
+            # Never let a "this is a person" verdict look like a failure:
+            # the step runs under set -e and this is called in a $( ).
+            return 0
+          }
+
+          for sha in $(git log --no-merges --format=%H "$BASE_SHA".."$HEAD_SHA"); do
+            subject=$(git show -s --format=%s "$sha")
+            offending=""
+
+            while IFS= read -r line; do
+              lower=$(printf '%s' "$line" | tr '[:upper:]' '[:lower:]')
+
+              case "$lower" in
+                co-authored-by:*)
+                  email=$(printf '%s' "$lower" | sed -n 's/.*<\(.*\)>.*/\1/p')
+                  [ -z "$email" ] && continue
+
+                  verdict=$(classify "$email")
+                  case "$verdict" in
+                    bot\ *)
+                      login=${verdict#bot }
+                      # -F because a login like dependabot[bot] is not a pattern.
+                      if ! printf '%s\n' "$ALLOWED_BOTS" | grep -Fxq "$login"; then
+                        offending="${offending}${line}    <- ${login} is a bot account"$'\n'
+                      fi
+                      ;;
+                    noreply)
+                      offending="${offending}${line}    <- noreply address, not a contactable person"$'\n'
+                      ;;
+                  esac
+                  ;;
+                *)
+                  offending="${offending}${line}"$'\n'
+                  ;;
+              esac
+            done < <(git show -s --format=%B "$sha" | grep -iE "^co-authored-by:|$AI_ONLY_TRAILER|$AI_MARKER" || true)
+
+            if [ -n "$offending" ]; then
+              echo "::error::Commit carries AI attribution: $sha $subject"
+              echo ""
+              echo "  Commit: $sha"
+              echo "  $subject"
+              echo ""
+              echo "  Offending line(s):"
+              printf '%s' "$offending" | sed 's/^/    /'
+              echo ""
+              FAILED=1
+            else
+              echo "ok: $sha $subject"
+            fi
+          done
+
+          if [ "$FAILED" -ne 0 ]; then
+            echo ""
+            echo "  CONTRIBUTING.md: \"Do not include Co-Authored-By trailers for AI tools in"
+            echo "  commit messages. Attribution should be limited to human contributors.\""
+            echo ""
+            echo "  Co-authoring a person is fine and is never rejected: this only fires when"
+            echo "  the address belongs to a bot account or is a noreply mailbox."
+            echo ""
+            echo "  To fix a single commit:"
+            echo "    git commit --amend            # delete the trailer lines, save"
+            echo "    git push --force-with-lease"
+            echo ""
+            echo "  To fix several:"
+            echo "    git rebase --root -x 'git commit --amend --no-edit'"
+            echo ""
+            echo "  Configure your agent not to add them in the first place. For Claude Code,"
+            echo "  set includeCoAuthoredBy: false in .claude/settings.json."
+          fi
+
+          exit $FAILED
+
+      - name: Title and commits follow Conventional Commits
+        if: ${{ !cancelled() }}
+        env:
+          PR_TITLE: ${{ github.event.pull_request.title }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          # Conventional Commits pattern:
+          #   <type>[optional scope]: <description>
+          #
+          # Types recognised by semantic-release (commit-analyzer defaults):
+          #   feat, fix, perf, revert, docs, style, chore, refactor, test, build, ci
+          #
+          # Breaking changes are signalled by appending ! before the colon:
+          #   feat!: or feat(scope)!:
+          #
+          # References:
+          #   https://www.conventionalcommits.org/en/v1.0.0/
+          PATTERN: '^(feat|fix|perf|revert|docs|style|chore|refactor|test|build|ci)(\([-a-zA-Z0-9_.,]+\))?!?: .{1,}'
+        run: |
+          # The PR title is checked as well as the commits: the title becomes
+          # the squash-merge commit title on main, which is what
+          # semantic-release reads, so it must be conventional even when the
+          # commits on the branch are WIP history that gets squashed away.
+          # Merge commits are skipped via --no-merges.
+
+          FAILED=0
+
+          usage() {
+            echo ""
+            echo "  Got: $1"
+            echo ""
+            echo "  Expected format: <type>[optional scope]: <description>"
+            echo "  Examples:"
+            echo "    feat(dynamodb): add PartiQL ExecuteStatement support"
+            echo "    fix(s3): make us-east-1 bucket creation idempotent"
+            echo "    chore: release 1.5.16"
+            echo "    feat!: remove legacy endpoint"
+            echo ""
+            echo "  Valid types: feat, fix, perf, revert, docs, style, chore, refactor, test, build, ci"
+            echo "  See: https://www.conventionalcommits.org/en/v1.0.0/"
+          }
+
+          if echo "$PR_TITLE" | grep -qE "$PATTERN"; then
+            echo "ok: PR title: $PR_TITLE"
+          else
+            echo "::error::PR title does not follow Conventional Commits: $PR_TITLE"
+            usage "$PR_TITLE"
+            FAILED=1
+          fi
+
+          while IFS= read -r msg; do
+            if echo "$msg" | grep -qE "$PATTERN"; then
+              echo "ok: $msg"
+            else
+              echo "::error::Commit does not follow Conventional Commits: $msg"
+              usage "$msg"
+              FAILED=1
+            fi
+          done < <(git log --no-merges --format="%s" "$BASE_SHA".."$HEAD_SHA")
+
+          exit $FAILED
+
+      - name: New files omit em-dashes
+        if: ${{ !cancelled() }}
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          # AGENTS.md: "No em-dashes anywhere, in any content. Use colons,
+          # commas, or periods."
+          #
+          # Scoped to files this PR adds, not lines changed in existing ones:
+          # plenty of existing content already has em-dashes, and flagging
+          # every PR that happens to touch one of those files would make this
+          # check noise rather than signal. New files start clean.
+
+          # Written as an escape, not the literal glyph: this workflow file is
+          # itself a new file the first time it is added, and the check below
+          # would otherwise flag itself for containing the character it is
+          # searching for.
+          EM_DASH=$'\u2014'
+          FAILED=0
+
+          # -z / -d '' throughout: plain --name-only C-quotes paths with
+          # non-ASCII or special characters (e.g. "caf\303\251.md"), which then
+          # fail to match the real file on disk and get silently skipped.
+          # NUL-delimited output/reads sidestep that.
+          while IFS= read -r -d '' file; do
+            [ -z "$file" ] && continue
+
+            MATCHES=$(grep -InH "$EM_DASH" -- "$file" || true)
+            [ -z "$MATCHES" ] && continue
+
+            FAILED=1
+            while IFS=: read -r path lineno content; do
+              echo "::error file=$path,line=$lineno::Em-dash found in new file (AGENTS.md: no em-dashes anywhere, in any content)"
+              echo "  $path:$lineno: $content"
+            done <<< "$MATCHES"
+          done < <(git diff -z --diff-filter=A --name-only "$BASE_SHA" "$HEAD_SHA")
+
+          if [ "$FAILED" -eq 1 ]; then
+            echo ""
+            echo "Use colons, commas, or periods instead of em-dashes (U+2014). See AGENTS.md, Documentation Style."
+          fi
+
+          exit $FAILED
+
+      - name: PR body keeps the required template sections
+        # Bot PRs (dependabot) do not use the template.
+        if: ${{ !cancelled() && github.event.pull_request.user.type != 'Bot' }}
+        env:
+          PR_BODY: ${{ github.event.pull_request.body }}
+        run: |
+          # Guards against PRs that dropped the pull request template (or
+          # stripped a section) rather than filling it in. It only checks that
+          # the required section headers survive in the body: what a
+          # contributor wrote under each one is a human review call.
+          #
+          # AWS Compatibility is deliberately not required: plenty of PRs are
+          # not AWS-behaviour changes (chores, refactors, docs).
+          #
+          # Keep REQUIRED_HEADERS in sync with .github/pull_request_template.md.
+          REQUIRED_HEADERS=(
+            "## Summary"
+            "## Type of change"
+            "## Checklist"
+          )
+
+          # Single pass over lines, tracking fenced code blocks so a header
+          # string quoted or pasted inside one does not count. Leading
+          # indentation is restricted to 0-3 plain spaces (no tab): CommonMark
+          # treats a tab, or 4+ spaces, as an indented code block rather than
+          # an ATX heading, and so does this check.
+          declare -A FOUND
+          for header in "${REQUIRED_HEADERS[@]}"; do FOUND["$header"]=0; done
+          FENCE_RE='^[[:space:]]{0,3}(```|~~~)'
+          in_fence=0
+
+          while IFS= read -r line; do
+            if [[ "$line" =~ $FENCE_RE ]]; then
+              in_fence=$((1 - in_fence))
+              continue
+            fi
+            [ "$in_fence" -eq 1 ] && continue
+
+            for header in "${REQUIRED_HEADERS[@]}"; do
+              header_re="^[ ]{0,3}${header}[[:space:]]*\$"
+              [[ "$line" =~ $header_re ]] && FOUND["$header"]=1
+            done
+          done <<< "$PR_BODY"
+
+          MISSING=()
+          for header in "${REQUIRED_HEADERS[@]}"; do
+            [ "${FOUND[$header]}" -eq 0 ] && MISSING+=("$header")
+          done
+
+          if [ "${#MISSING[@]}" -eq 0 ]; then
+            echo "ok: all required template sections present"
+            exit 0
+          fi
+
+          echo "::error::PR description is missing required template section(s):"
+          for header in "${MISSING[@]}"; do
+            echo "::error::  - $header"
+          done
+          echo ""
+          echo "  It looks like the pull request template was edited or removed."
+          echo "  Please restore the missing section(s) from .github/pull_request_template.md"
+          echo "  and fill them in: you can edit the PR description directly on GitHub."
+          exit 1

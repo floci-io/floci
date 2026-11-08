@@ -1,0 +1,25 @@
+defaultDockerImage: example/base:1
+images:
+  - imageId: ami-kubelet-worker
+    aliases: [ami-kubelet-alias]
+    dockerImage: example/kubelet-worker:1
+    name: kubelet-worker
+    description: Guest owns Kubernetes Node registration
+    architecture: arm64
+    creationDate: '2026-01-01T00:00:00.000Z'
+    guestRuntime: systemd
+    kubeletRegistersNode: true
+  - imageId: ami-systemd-guest
+    dockerImage: example/systemd-guest:1
+    name: systemd-guest
+    description: Systemd alone does not imply a kubelet
+    architecture: x86_64
+    creationDate: '2026-01-01T00:00:00.000Z'
+    guestRuntime: systemd
+  - imageId: ami-simulated-worker
+    dockerImage: example/base:1
+    name: simulated-worker
+    description: Explicitly simulated Kubernetes Node registration
+    architecture: x86_64
+    creationDate: '2026-01-01T00:00:00.000Z'
+    kubeletRegistersNode: false

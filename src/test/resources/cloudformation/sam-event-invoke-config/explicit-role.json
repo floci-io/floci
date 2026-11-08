@@ -1,0 +1,55 @@
+{
+  "expected": {
+    "FnEventInvokeConfig": {
+      "Properties": {
+        "DestinationConfig": {
+          "OnFailure": {
+            "Destination": {
+              "Fn::GetAtt": [
+                "Dlq",
+                "Arn"
+              ]
+            }
+          }
+        },
+        "FunctionName": {
+          "Ref": "Fn"
+        },
+        "MaximumRetryAttempts": 1,
+        "Qualifier": "$LATEST"
+      },
+      "Type": "AWS::Lambda::EventInvokeConfig"
+    }
+  },
+  "input": {
+    "Resources": {
+      "Dlq": {
+        "Type": "AWS::SQS::Queue"
+      },
+      "Fn": {
+        "Properties": {
+          "CodeUri": "s3://b/k",
+          "EventInvokeConfig": {
+            "DestinationConfig": {
+              "OnFailure": {
+                "Destination": {
+                  "Fn::GetAtt": [
+                    "Dlq",
+                    "Arn"
+                  ]
+                },
+                "Type": "SQS"
+              }
+            },
+            "MaximumRetryAttempts": 1
+          },
+          "Handler": "index.handler",
+          "Role": "arn:aws:iam::123456789012:role/given",
+          "Runtime": "python3.12"
+        },
+        "Type": "AWS::Serverless::Function"
+      }
+    },
+    "Transform": "AWS::Serverless-2016-10-31"
+  }
+}

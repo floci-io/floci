@@ -38,7 +38,7 @@
 | `DeleteConfigurationRecorder` | Delete a configuration recorder |
 | `StartConfigurationRecorder` | Start recording configuration changes |
 | `StopConfigurationRecorder` | Stop recording configuration changes |
-| `DescribeConfigurationRecorderStatus` | Get the status of configuration recorders |
+| `DescribeConfigurationRecorderStatus` | Get the status of configuration recorders. Whether a recorder is recording, and when it last started and stopped, persist with the recorder, so a started recorder is still recording after a restart |
 
 ### Delivery Channel
 
@@ -64,6 +64,14 @@
 | `DeleteConformancePack` | Delete a conformance pack |
 | `DescribeConformancePacks` | List conformance packs, paginated via `Limit`/`NextToken` |
 | `DescribeConformancePackStatus` | Get the deployment status of conformance packs |
+
+### Aggregation Authorizations
+
+| Action | Description |
+|---|---|
+| `PutAggregationAuthorization` | Authorize an account and region to aggregate this account's Config data |
+| `DescribeAggregationAuthorizations` | List aggregation authorizations, paginated via `Limit`/`NextToken` |
+| `DeleteAggregationAuthorization` | Revoke an aggregation authorization |
 
 ### Tagging
 
@@ -144,6 +152,14 @@ aws configservice put-conformance-pack \
 # List conformance packs
 aws configservice describe-conformance-packs
 
+# Authorize another account to aggregate this account's data
+aws configservice put-aggregation-authorization \
+  --authorized-account-id 111122223333 \
+  --authorized-aws-region eu-west-1
+
+# List aggregation authorizations
+aws configservice describe-aggregation-authorizations
+
 # Tag a resource
 aws configservice tag-resource \
   --resource-arn arn:aws:config:us-east-1:000000000000:config-rule/config-rule-abc123 \
@@ -174,3 +190,19 @@ aws configservice delete-config-rule --config-rule-name s3-bucket-versioning
       configuration items or snapshots are produced.
     - Conformance pack status is always `CREATE_SUCCESSFUL`; pack templates are stored,
       not evaluated.
+    - `PutAggregationAuthorization` records the authorization and returns its ARN, but no
+      data is aggregated: configuration aggregators are not emulated.
+      `DeleteAggregationAuthorization` on an authorization that does not exist succeeds,
+      because the Config API models no "not found" error for that operation.
+    - `TagResource`, `UntagResource` and `ListTagsForResource` answer
+      `ResourceNotFoundException` for a config rule, conformance pack or aggregation
+      authorization ARN that does not name an existing resource in the caller's account and
+      region. ARNs of resource kinds Floci does not model (configuration aggregators, stored
+      queries, organization rules and packs, recorders) are accepted without a check.
+    - `PutConfigRule` applies its `Tags` only when it creates the rule; a later
+      `PutConfigRule` for the same rule leaves its tags unchanged, as AWS documents. Use
+      `TagResource` and `UntagResource` to change them. `DeleteConfigRule` drops the rule's tags.
+    - `PutConfigRule` and `PutAggregationAuthorization` reject more than 50 `Tags`, a tag
+      without a 1-128 character `Key`, or a `Value` over 256 characters with
+      `InvalidParameterValueException`, and store nothing. A tag with no `Value` is stored with
+      an empty value.

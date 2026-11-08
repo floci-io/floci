@@ -1,10 +1,12 @@
 package com.floci.test;
 
 import org.junit.jupiter.api.*;
-import software.amazon.awssdk.core.waiters.WaiterOverrideConfiguration;
+import org.junit.jupiter.api.parallel.Isolated;
 import software.amazon.awssdk.core.waiters.WaiterResponse;
 import software.amazon.awssdk.services.ecs.EcsClient;
 import software.amazon.awssdk.services.ecs.model.*;
+import software.amazon.awssdk.services.ecs.model.Tag;
+import software.amazon.awssdk.services.ecs.model.TaskSet;
 
 import java.time.Duration;
 import java.util.List;
@@ -13,6 +15,7 @@ import static org.assertj.core.api.Assertions.*;
 
 @DisplayName("ECS Elastic Container Service")
 @TestMethodOrder(MethodOrderer.OrderAnnotation.class)
+@Isolated
 class EcsTests {
 
     private static EcsClient ecs;
@@ -289,8 +292,8 @@ class EcsTests {
     void tagResource() {
         ecs.tagResource(TagResourceRequest.builder()
                 .resourceArn(cluster.clusterArn())
-                .tags(software.amazon.awssdk.services.ecs.model.Tag.builder().key("env").value("test").build(),
-                      software.amazon.awssdk.services.ecs.model.Tag.builder().key("team").value("sdk").build())
+                .tags(Tag.builder().key("env").value("test").build(),
+                      Tag.builder().key("team").value("sdk").build())
                 .build());
     }
 
@@ -298,7 +301,7 @@ class EcsTests {
     @Order(16)
     @DisplayName("ListTagsForResource - verify tags")
     void listTagsForResource() {
-        List<software.amazon.awssdk.services.ecs.model.Tag> tags = ecs.listTagsForResource(ListTagsForResourceRequest.builder()
+        List<Tag> tags = ecs.listTagsForResource(ListTagsForResourceRequest.builder()
                 .resourceArn(cluster.clusterArn())
                 .build()).tags();
 
@@ -315,7 +318,7 @@ class EcsTests {
                 .tagKeys("team")
                 .build());
 
-        List<software.amazon.awssdk.services.ecs.model.Tag> tags = ecs.listTagsForResource(ListTagsForResourceRequest.builder()
+        List<Tag> tags = ecs.listTagsForResource(ListTagsForResourceRequest.builder()
                 .resourceArn(cluster.clusterArn())
                 .build()).tags();
 
@@ -508,7 +511,11 @@ class EcsTests {
     @Order(25)
     @DisplayName("PutAttributes - set attributes")
     void putAttributes() {
-        String targetId = cluster.clusterArn();
+        // An attribute targets a container instance of the cluster; ECS rejects anything else with
+        // a TargetNotFoundException, so this test registers one rather than aiming at the cluster.
+        String targetId = ecs.registerContainerInstance(RegisterContainerInstanceRequest.builder()
+                .cluster(clusterName)
+                .build()).containerInstance().containerInstanceArn();
         List<Attribute> stored = ecs.putAttributes(PutAttributesRequest.builder()
                 .cluster(clusterName)
                 .attributes(
@@ -534,6 +541,14 @@ class EcsTests {
                 .build()).attributes();
 
         assertThat(deleted).isNotEmpty();
+
+        // The instance existed only as an attribute target. Deregister it, because ECS refuses to
+        // delete a cluster that still has one and the delete-cluster tests below rely on that.
+        ecs.deregisterContainerInstance(DeregisterContainerInstanceRequest.builder()
+                .cluster(clusterName)
+                .containerInstance(targetId)
+                .force(true)
+                .build());
     }
 
     @Test
@@ -841,9 +856,7 @@ class EcsTests {
                         .cluster(clusterName)
                         .services(serviceName)
                         .build(),
-                WaiterOverrideConfiguration.builder()
-                        .waitTimeout(Duration.ofSeconds(30))
-                        .build());
+                TestFixtures.waiterOverride(Duration.ofSeconds(30)));
 
         assertThat(response.matched().response()).isPresent();
         assertThat(response.matched().response().get().services().get(0).deployments()).hasSize(1);
@@ -919,12 +932,24 @@ class EcsTests {
 
     @Test
     @Order(50)
-    @DisplayName("CreateTaskSet - create task set")
+    @DisplayName("CreateTaskSet - the full lifecycle on an EXTERNAL-controller service")
     void createTaskSet() {
-        software.amazon.awssdk.services.ecs.model.TaskSet ts =
+        // Task sets only exist on a service that uses the EXTERNAL or CODE_DEPLOY deployment
+        // controller; the rolling service the rest of this class uses cannot hold one.
+        String externalService = serviceName + "-external";
+        ecs.createService(CreateServiceRequest.builder()
+                .cluster(clusterName)
+                .serviceName(externalService)
+                .taskDefinition(family + ":1")
+                .desiredCount(3)
+                .deploymentController(dc -> dc.type(DeploymentControllerType.EXTERNAL))
+                .launchType(LaunchType.FARGATE)
+                .build());
+
+        TaskSet ts =
                 ecs.createTaskSet(CreateTaskSetRequest.builder()
                         .cluster(clusterName)
-                        .service(serviceName)
+                        .service(externalService)
                         .taskDefinition(family + ":1")
                         .launchType(LaunchType.FARGATE)
                         .scale(Scale.builder().value(50.0).unit(ScaleUnit.PERCENT).build())
@@ -933,52 +958,82 @@ class EcsTests {
         assertThat(ts).isNotNull();
         assertThat(ts.taskSetArn()).isNotNull();
         assertThat(ts.status()).isEqualTo("ACTIVE");
+        // 3 desired at 50 percent is 1.5, which ECS rounds up.
+        assertThat(ts.computedDesiredCount()).isEqualTo(2);
+        // Floci places no tasks for a task set, so it reports steady rather than stabilising
+        // towards a count nothing will reach: a client waiting for stability would never return.
+        assertThat(ts.stabilityStatus()).isEqualTo(StabilityStatus.STEADY_STATE);
+        assertThat(ts.stabilityStatusAt()).isNotNull();
+        assertThat(ts.platformVersion()).isNotBlank();
 
         String taskSetArn = ts.taskSetArn();
 
         // Describe task sets
-        List<software.amazon.awssdk.services.ecs.model.TaskSet> sets =
+        List<TaskSet> sets =
                 ecs.describeTaskSets(DescribeTaskSetsRequest.builder()
                         .cluster(clusterName)
-                        .service(serviceName)
+                        .service(externalService)
                         .taskSets(taskSetArn)
                         .build()).taskSets();
 
         assertThat(sets).hasSize(1);
         assertThat(sets.get(0).taskSetArn()).isEqualTo(taskSetArn);
 
+        // An unknown task set is a MISSING failure, not a dropped reference.
+        DescribeTaskSetsResponse missing = ecs.describeTaskSets(DescribeTaskSetsRequest.builder()
+                .cluster(clusterName)
+                .service(externalService)
+                .taskSets("ecs-svc/does-not-exist")
+                .build());
+        assertThat(missing.taskSets()).isEmpty();
+        assertThat(missing.failures()).singleElement()
+                .satisfies(failure -> assertThat(failure.reason()).isEqualTo("MISSING"));
+
         // Update task set
-        software.amazon.awssdk.services.ecs.model.TaskSet updated =
+        TaskSet updated =
                 ecs.updateTaskSet(UpdateTaskSetRequest.builder()
                         .cluster(clusterName)
-                        .service(serviceName)
+                        .service(externalService)
                         .taskSet(taskSetArn)
                         .scale(Scale.builder().value(100.0).unit(ScaleUnit.PERCENT).build())
                         .build()).taskSet();
 
         assertThat(updated).isNotNull();
         assertThat(updated.scale().value()).isEqualTo(100.0);
+        assertThat(updated.computedDesiredCount()).isEqualTo(3);
 
         // Update primary task set
-        software.amazon.awssdk.services.ecs.model.TaskSet primary =
+        TaskSet primary =
                 ecs.updateServicePrimaryTaskSet(UpdateServicePrimaryTaskSetRequest.builder()
                         .cluster(clusterName)
-                        .service(serviceName)
+                        .service(externalService)
                         .primaryTaskSet(taskSetArn)
                         .build()).taskSet();
 
         assertThat(primary).isNotNull();
         assertThat(primary.status()).isEqualTo("PRIMARY");
 
-        // Delete task set
-        software.amazon.awssdk.services.ecs.model.TaskSet deleted =
+        // A task set that has not been scaled down to zero needs force to delete.
+        assertThatThrownBy(() -> ecs.deleteTaskSet(DeleteTaskSetRequest.builder()
+                .cluster(clusterName)
+                .service(externalService)
+                .taskSet(taskSetArn)
+                .build()))
+                .isInstanceOf(EcsException.class)
+                .hasMessageContaining("scaled down to zero");
+
+        TaskSet deleted =
                 ecs.deleteTaskSet(DeleteTaskSetRequest.builder()
                         .cluster(clusterName)
-                        .service(serviceName)
+                        .service(externalService)
                         .taskSet(taskSetArn)
+                        .force(true)
                         .build()).taskSet();
 
-        assertThat(deleted).isNotNull();
+        assertThat(deleted.status()).isEqualTo("DRAINING");
+
+        ecs.deleteService(DeleteServiceRequest.builder()
+                .cluster(clusterName).service(externalService).force(true).build());
     }
 
     @Test

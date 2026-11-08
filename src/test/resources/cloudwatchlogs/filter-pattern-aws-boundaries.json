@@ -1,0 +1,271 @@
+{
+  "provenance": {
+    "source": "AWS CloudWatch Logs TestMetricFilter",
+    "capturedAt": "2026-09-16T08:35:06.272542+00:00",
+    "region": "eu-west-1",
+    "endpoint": "https://logs.eu-west-1.amazonaws.com",
+    "inputs": "Synthetic only. No resource writes or user logs.",
+    "eventNumberBase": 1,
+    "reference": "https://docs.aws.amazon.com/AmazonCloudWatchLogs/latest/APIReference/API_TestMetricFilter.html"
+  },
+  "cases": [
+    {
+      "id": "boundary-array-true",
+      "request": {
+        "filterPattern": "{ $.a IS TRUE }",
+        "logEventMessages": [
+          "{\"a\":true}",
+          "{\"a\":false}",
+          "{\"a\":[true,false]}",
+          "{\"a\":[null]}",
+          "{\"a\":[[null]]}",
+          "{\"a\":[{\"b\":2},{\"b\":1}]}",
+          "{\"a\":[{}]}",
+          "{}"
+        ]
+      },
+      "response": {
+        "matches": [
+          {
+            "eventNumber": 1,
+            "eventMessage": "{\"a\":true}",
+            "extractedValues": {}
+          }
+        ]
+      }
+    },
+    {
+      "id": "boundary-array-false",
+      "request": {
+        "filterPattern": "{ $.a IS FALSE }",
+        "logEventMessages": [
+          "{\"a\":true}",
+          "{\"a\":false}",
+          "{\"a\":[true,false]}",
+          "{\"a\":[null]}",
+          "{\"a\":[[null]]}",
+          "{\"a\":[{\"b\":2},{\"b\":1}]}",
+          "{\"a\":[{}]}",
+          "{}"
+        ]
+      },
+      "response": {
+        "matches": [
+          {
+            "eventNumber": 2,
+            "eventMessage": "{\"a\":false}",
+            "extractedValues": {}
+          }
+        ]
+      }
+    },
+    {
+      "id": "boundary-array-null",
+      "request": {
+        "filterPattern": "{ $.a IS NULL }",
+        "logEventMessages": [
+          "{\"a\":true}",
+          "{\"a\":false}",
+          "{\"a\":[true,false]}",
+          "{\"a\":[null]}",
+          "{\"a\":[[null]]}",
+          "{\"a\":[{\"b\":2},{\"b\":1}]}",
+          "{\"a\":[{}]}",
+          "{}"
+        ]
+      },
+      "response": {
+        "matches": [
+          {
+            "eventNumber": 4,
+            "eventMessage": "{\"a\":[null]}",
+            "extractedValues": {}
+          }
+        ]
+      }
+    },
+    {
+      "id": "boundary-nested-negative",
+      "request": {
+        "filterPattern": "{ $.a[*].b != 2 }",
+        "logEventMessages": [
+          "{\"a\":true}",
+          "{\"a\":false}",
+          "{\"a\":[true,false]}",
+          "{\"a\":[null]}",
+          "{\"a\":[[null]]}",
+          "{\"a\":[{\"b\":2},{\"b\":1}]}",
+          "{\"a\":[{}]}",
+          "{}"
+        ]
+      },
+      "response": {
+        "matches": [
+          {
+            "eventNumber": 1,
+            "eventMessage": "{\"a\":true}",
+            "extractedValues": {}
+          },
+          {
+            "eventNumber": 2,
+            "eventMessage": "{\"a\":false}",
+            "extractedValues": {}
+          },
+          {
+            "eventNumber": 3,
+            "eventMessage": "{\"a\":[true,false]}",
+            "extractedValues": {}
+          },
+          {
+            "eventNumber": 4,
+            "eventMessage": "{\"a\":[null]}",
+            "extractedValues": {}
+          },
+          {
+            "eventNumber": 5,
+            "eventMessage": "{\"a\":[[null]]}",
+            "extractedValues": {}
+          },
+          {
+            "eventNumber": 7,
+            "eventMessage": "{\"a\":[{}]}",
+            "extractedValues": {}
+          }
+        ]
+      }
+    },
+    {
+      "id": "boundary-wildcard-null",
+      "request": {
+        "filterPattern": "{ $.a[*] IS NULL }",
+        "logEventMessages": [
+          "{\"a\":true}",
+          "{\"a\":false}",
+          "{\"a\":[true,false]}",
+          "{\"a\":[null]}",
+          "{\"a\":[[null]]}",
+          "{\"a\":[{\"b\":2},{\"b\":1}]}",
+          "{\"a\":[{}]}",
+          "{}"
+        ]
+      },
+      "response": {
+        "matches": [
+          {
+            "eventNumber": 4,
+            "eventMessage": "{\"a\":[null]}",
+            "extractedValues": {}
+          }
+        ]
+      }
+    },
+    {
+      "id": "boundary-term-slash",
+      "request": {
+        "filterPattern": "a/b",
+        "logEventMessages": [
+          "a/b",
+          "a b"
+        ]
+      },
+      "error": {
+        "code": "InvalidParameterException",
+        "message": "Invalid character(s) in term '/'"
+      }
+    },
+    {
+      "id": "boundary-term-at",
+      "request": {
+        "filterPattern": "a@b",
+        "logEventMessages": [
+          "a@b",
+          "a b"
+        ]
+      },
+      "error": {
+        "code": "InvalidParameterException",
+        "message": "Invalid character(s) in term '@'"
+      }
+    },
+    {
+      "id": "boundary-term-unicode",
+      "request": {
+        "filterPattern": "caf\u00e9",
+        "logEventMessages": [
+          "caf\u00e9",
+          "cafe"
+        ]
+      },
+      "response": {
+        "matches": [
+          {
+            "eventNumber": 1,
+            "eventMessage": "caf\u00e9",
+            "extractedValues": {}
+          }
+        ]
+      }
+    },
+    {
+      "id": "boundary-quoted-space",
+      "request": {
+        "filterPattern": "\" \"",
+        "logEventMessages": [
+          "x",
+          "two words",
+          " "
+        ]
+      },
+      "response": {
+        "matches": [
+          {
+            "eventNumber": 2,
+            "eventMessage": "two words",
+            "extractedValues": {}
+          },
+          {
+            "eventNumber": 3,
+            "eventMessage": " ",
+            "extractedValues": {}
+          }
+        ]
+      }
+    },
+    {
+      "id": "boundary-huge-exponent",
+      "request": {
+        "filterPattern": "{ $.a = 1e2147483648 }",
+        "logEventMessages": [
+          "{\"a\":1}",
+          "{\"a\":\"1e2147483648\"}"
+        ]
+      },
+      "error": {
+        "code": "InvalidParameterException",
+        "message": "Invalid metric filter pattern"
+      }
+    },
+    {
+      "id": "boundary-bare-negative",
+      "request": {
+        "filterPattern": "a-b",
+        "logEventMessages": [
+          "a",
+          "b",
+          "a-b",
+          "ab",
+          "a b"
+        ]
+      },
+      "response": {
+        "matches": [
+          {
+            "eventNumber": 1,
+            "eventMessage": "a",
+            "extractedValues": {}
+          }
+        ]
+      }
+    }
+  ]
+}

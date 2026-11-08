@@ -110,6 +110,16 @@ public final class LambdaUtils {
     }
 
     /**
+     * ZIP containing a Node.js handler that always throws, for asynchronous failure handling tests.
+     */
+    public static byte[] failingZip() {
+        String code = """
+                exports.handler = async () => { throw new Error('boom'); };
+                """;
+        return createZip("index.js", code);
+    }
+
+    /**
      * Minimal valid ZIP containing a stub index.js.
      */
     public static byte[] minimalZip() {
@@ -249,6 +259,120 @@ public final class LambdaUtils {
                     const res = await dns.lookup(host);
                     console.log('[public-dns] resolved', host, '->', res.address);
                     return { resolved: true, host, address: res.address };
+                };
+                """;
+        return createZip("index.js", code);
+    }
+
+    /**
+     * A Python durable function that speaks the checkpoint protocol through the image's boto3
+     * client: one step, one wait of {@code event.wait} seconds (default 2), then a result. An input
+     * of {@code {"fail": true}} fails the execution instead.
+     */
+    public static byte[] durablePythonZip() {
+        String code = """
+                import json
+                import boto3
+
+                client = boto3.client("lambda")
+
+
+                def handler(event, context):
+                    operations = {op["Id"]: op for op in event["InitialExecutionState"]["Operations"]}
+                    root = next(op for op in operations.values() if op["Type"] == "EXECUTION")
+                    request = json.loads(root["ExecutionDetails"].get("InputPayload") or "{}")
+                    if request.get("fail"):
+                        return {"Status": "FAILED",
+                                "Error": {"ErrorMessage": "asked to fail", "ErrorType": "TestFailure"}}
+                    if request.get("chain"):
+                        if "chain" not in operations:
+                            client.checkpoint_durable_execution(
+                                DurableExecutionArn=event["DurableExecutionArn"],
+                                CheckpointToken=event["CheckpointToken"],
+                                Updates=[{"Id": "chain", "Name": "greet", "Type": "CHAINED_INVOKE",
+                                          "SubType": "ChainedInvoke", "Action": "START",
+                                          "Payload": json.dumps({"name": "Durable"}),
+                                          "ChainedInvokeOptions": {"FunctionName": request["chain"]}}])
+                            return {"Status": "PENDING"}
+                        chain = operations["chain"]
+                        if chain["Status"] == "STARTED":
+                            return {"Status": "PENDING"}
+                        details = chain.get("ChainedInvokeDetails", {})
+                        return {"Status": "SUCCEEDED",
+                                "Result": details.get("Result") or json.dumps(details.get("Error"))}
+                    if request.get("callback"):
+                        if "callback" not in operations:
+                            client.checkpoint_durable_execution(
+                                DurableExecutionArn=event["DurableExecutionArn"],
+                                CheckpointToken=event["CheckpointToken"],
+                                Updates=[{"Id": "callback", "Name": "approval", "Type": "CALLBACK",
+                                          "SubType": "Callback", "Action": "START",
+                                          "CallbackOptions": {"HeartbeatTimeoutSeconds": 60}}])
+                            return {"Status": "PENDING"}
+                        callback = operations["callback"]
+                        if callback["Status"] == "STARTED":
+                            return {"Status": "PENDING"}
+                        return {"Status": "SUCCEEDED", "Result": callback["CallbackDetails"].get("Result", "")}
+                    if "step" not in operations:
+                        client.checkpoint_durable_execution(
+                            DurableExecutionArn=event["DurableExecutionArn"],
+                            CheckpointToken=event["CheckpointToken"],
+                            Updates=[
+                                {"Id": "step", "Name": "validate", "Type": "STEP", "SubType": "Step",
+                                 "Action": "START"},
+                                {"Id": "step", "Name": "validate", "Type": "STEP", "SubType": "Step",
+                                 "Action": "SUCCEED", "Payload": json.dumps({"validated": True})},
+                                {"Id": "wait", "Type": "WAIT", "SubType": "Wait", "Action": "START",
+                                 "WaitOptions": {"WaitSeconds": request.get("wait", 2)}},
+                            ])
+                        return {"Status": "PENDING"}
+                    if operations["wait"]["Status"] != "SUCCEEDED":
+                        return {"Status": "PENDING"}
+                    step = json.loads(operations["step"]["StepDetails"]["Result"])
+                    return {"Status": "SUCCEEDED", "Result": json.dumps({"done": True, "step": step})}
+                """;
+        return createZip("lambda_function.py", code);
+    }
+
+    /**
+     * ZIP containing a Node.js handler that returns the Lambda proxy result its {@code mode} path
+     * parameter names: one that raises, one without a statusCode, one whose statusCode is not a
+     * number, one whose statusCode is text that spells one, one outside 100 to 599, and bodies an HTTP
+     * API cannot read (an object, base64 that is not, an isBase64Encoded of "yes") or reads ("True").
+     */
+    public static byte[] proxyResponseZip() {
+        String code = """
+                exports.handler = async (event) => {
+                    const mode = (event.pathParameters || {}).mode;
+                    if (mode === 'raise') throw new Error('boom');
+                    if (mode === 'nostatus') return { body: 'x', headers: { 'x-probe': '1' } };
+                    if (mode === 'badstatus') return { statusCode: 'abc', body: 'x' };
+                    if (mode === 'textstatus') return { statusCode: '201', body: 'x' };
+                    if (mode === 'highstatus') return { statusCode: 600, body: 'x' };
+                    if (mode === 'badbase64') return { statusCode: 200, body: 'not base64!', isBase64Encoded: true };
+                    if (mode === 'bodyobject') return { statusCode: 200, body: { a: 1 } };
+                    if (mode === 'base64yes') return { statusCode: 200, body: 'aGVsbG8=', isBase64Encoded: 'yes' };
+                    if (mode === 'base64capital') return { statusCode: 200, body: 'aGVsbG8=', isBase64Encoded: 'True' };
+                    return { statusCode: 200, body: 'ok' };
+                };
+                """;
+        return createZip("index.js", code);
+    }
+
+    /**
+     * ZIP containing a Node.js Cognito CustomMessage handler that writes what its event carried into
+     * the email: the trigger source as the subject, and the code parameter, the user's email and
+     * name and the request's {@code source} metadata as the message.
+     */
+    public static byte[] cognitoCustomMessageZip() {
+        String code = """
+                exports.handler = async (event) => {
+                    const attributes = event.request.userAttributes;
+                    const metadata = event.request.clientMetadata || {};
+                    event.response.emailSubject = event.triggerSource;
+                    event.response.emailMessage = `${event.request.codeParameter} for ${attributes.email}, `
+                        + `${attributes.name}, from ${metadata.source}`;
+                    return event;
                 };
                 """;
         return createZip("index.js", code);

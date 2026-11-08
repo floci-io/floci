@@ -125,12 +125,14 @@ These operations return `UnknownOperationException` rather than a stub success:
   list, so a BYOIP address can be pinned without provisioning a pool.
 - Cross-account attachments (`CreateCrossAccountAttachment` and friends)
 
-Two more gaps are worth calling out:
+`ListAccelerators` supports `MaxResults` (1–100, default 10) and `NextToken`.
+
+Other gaps are worth calling out:
 
 - `IdempotencyToken` is accepted but not deduplicated, so repeating a create produces a
   second resource.
-- The list operations ignore `MaxResults` and return every resource in one page with no
-  `NextToken`. A paginator terminates after the first call.
+- The other list operations ignore `MaxResults` and return every resource in one page
+  with no `NextToken`.
 - `AddEndpoints` returns the endpoint group's whole endpoint list rather than only the
   endpoints the call added.
 

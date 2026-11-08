@@ -1,31 +1,70 @@
 package com.floci.test;
 
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import org.junit.jupiter.api.*;
 import software.amazon.awssdk.services.sns.SnsClient;
+import software.amazon.awssdk.services.sns.model.AddPermissionRequest;
+import software.amazon.awssdk.services.sns.model.CheckIfPhoneNumberIsOptedOutRequest;
+import software.amazon.awssdk.services.sns.model.CreateSmsSandboxPhoneNumberRequest;
 import software.amazon.awssdk.services.sns.model.CreateTopicRequest;
 import software.amazon.awssdk.services.sns.model.CreateTopicResponse;
+import software.amazon.awssdk.services.sns.model.DeleteSmsSandboxPhoneNumberRequest;
 import software.amazon.awssdk.services.sns.model.DeleteTopicRequest;
+import software.amazon.awssdk.services.sns.model.GetSmsAttributesRequest;
+import software.amazon.awssdk.services.sns.model.GetSmsAttributesResponse;
+import software.amazon.awssdk.services.sns.model.GetSmsSandboxAccountStatusRequest;
 import software.amazon.awssdk.services.sns.model.GetTopicAttributesRequest;
 import software.amazon.awssdk.services.sns.model.GetTopicAttributesResponse;
+import software.amazon.awssdk.services.sns.model.InvalidParameterException;
+import software.amazon.awssdk.services.sns.model.LanguageCodeString;
+import software.amazon.awssdk.services.sns.model.ListPhoneNumbersOptedOutRequest;
+import software.amazon.awssdk.services.sns.model.ListSmsSandboxPhoneNumbersRequest;
 import software.amazon.awssdk.services.sns.model.ListSubscriptionsByTopicRequest;
 import software.amazon.awssdk.services.sns.model.ListSubscriptionsByTopicResponse;
 import software.amazon.awssdk.services.sns.model.ListTopicsResponse;
 import software.amazon.awssdk.services.sns.model.MessageAttributeValue;
+import software.amazon.awssdk.services.sns.model.OptInPhoneNumberRequest;
 import software.amazon.awssdk.services.sns.model.PublishBatchRequest;
 import software.amazon.awssdk.services.sns.model.PublishBatchRequestEntry;
 import software.amazon.awssdk.services.sns.model.PublishBatchResponse;
 import software.amazon.awssdk.services.sns.model.PublishRequest;
 import software.amazon.awssdk.services.sns.model.PublishResponse;
+import software.amazon.awssdk.services.sns.model.RemovePermissionRequest;
+import software.amazon.awssdk.services.sns.model.SMSSandboxPhoneNumber;
+import software.amazon.awssdk.services.sns.model.SMSSandboxPhoneNumberVerificationStatus;
+import software.amazon.awssdk.services.sns.model.SetSmsAttributesRequest;
 import software.amazon.awssdk.services.sns.model.SetSubscriptionAttributesRequest;
 import software.amazon.awssdk.services.sns.model.SubscribeRequest;
 import software.amazon.awssdk.services.sns.model.SubscribeResponse;
 import software.amazon.awssdk.services.sns.model.UnsubscribeRequest;
+import software.amazon.awssdk.services.sns.model.VerificationException;
+import software.amazon.awssdk.services.sns.model.VerifySmsSandboxPhoneNumberRequest;
 import software.amazon.awssdk.services.sqs.SqsClient;
 import software.amazon.awssdk.services.sqs.model.*;
+import software.amazon.awssdk.services.sqs.model.CreateQueueRequest;
+import software.amazon.awssdk.services.sqs.model.DeleteMessageRequest;
+import software.amazon.awssdk.services.sqs.model.DeleteQueueRequest;
+import software.amazon.awssdk.services.sqs.model.GetQueueAttributesRequest;
+import software.amazon.awssdk.services.sqs.model.Message;
+import software.amazon.awssdk.services.sqs.model.MessageSystemAttributeName;
+import software.amazon.awssdk.services.sqs.model.QueueAttributeName;
+import software.amazon.awssdk.services.sqs.model.ReceiveMessageRequest;
+import software.amazon.awssdk.services.sqs.model.ReceiveMessageResponse;
 
+import java.net.URI;
+import java.net.URLEncoder;
+import java.net.http.HttpRequest;
+import java.net.http.HttpResponse;
+import java.nio.charset.StandardCharsets;
 import java.util.Map;
+import java.util.concurrent.ThreadLocalRandom;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
+import java.util.stream.Collectors;
 
 import static org.assertj.core.api.Assertions.*;
+import static org.junit.jupiter.api.Assumptions.assumeFalse;
 
 @DisplayName("SNS Simple Notification Service")
 @TestMethodOrder(MethodOrderer.OrderAnnotation.class)
@@ -51,7 +90,7 @@ class SnsTest {
                 sns.deleteTopic(DeleteTopicRequest.builder().topicArn(topicArn).build());
             } catch (Exception ignored) {}
             try {
-                sqs.deleteQueue(software.amazon.awssdk.services.sqs.model.DeleteQueueRequest.builder()
+                sqs.deleteQueue(DeleteQueueRequest.builder()
                         .queueUrl(queueUrl).build());
             } catch (Exception ignored) {}
             sns.close();
@@ -92,13 +131,13 @@ class SnsTest {
     @Order(4)
     void subscribeSqs() {
         String queueName = "sns-test-queue-" + System.currentTimeMillis();
-        queueUrl = sqs.createQueue(software.amazon.awssdk.services.sqs.model.CreateQueueRequest.builder()
+        queueUrl = sqs.createQueue(CreateQueueRequest.builder()
                 .queueName(queueName).build()).queueUrl();
-        queueArn = sqs.getQueueAttributes(software.amazon.awssdk.services.sqs.model.GetQueueAttributesRequest.builder()
+        queueArn = sqs.getQueueAttributes(GetQueueAttributesRequest.builder()
                 .queueUrl(queueUrl)
-                .attributeNames(software.amazon.awssdk.services.sqs.model.QueueAttributeName.QUEUE_ARN)
+                .attributeNames(QueueAttributeName.QUEUE_ARN)
                 .build())
-                .attributes().get(software.amazon.awssdk.services.sqs.model.QueueAttributeName.QUEUE_ARN);
+                .attributes().get(QueueAttributeName.QUEUE_ARN);
 
         SubscribeResponse response = sns.subscribe(SubscribeRequest.builder()
                 .topicArn(topicArn)
@@ -137,8 +176,8 @@ class SnsTest {
     void verifySqsDelivery() throws InterruptedException {
         Thread.sleep(500); // Allow async delivery
 
-        software.amazon.awssdk.services.sqs.model.ReceiveMessageResponse recv = sqs.receiveMessage(
-                software.amazon.awssdk.services.sqs.model.ReceiveMessageRequest.builder()
+        ReceiveMessageResponse recv = sqs.receiveMessage(
+                ReceiveMessageRequest.builder()
                         .queueUrl(queueUrl)
                         .maxNumberOfMessages(1)
                         .waitTimeSeconds(2)
@@ -147,7 +186,7 @@ class SnsTest {
         assertThat(recv.messages()).isNotEmpty();
         assertThat(recv.messages().get(0).body()).contains("hello from sns");
 
-        sqs.deleteMessage(software.amazon.awssdk.services.sqs.model.DeleteMessageRequest.builder()
+        sqs.deleteMessage(DeleteMessageRequest.builder()
                 .queueUrl(queueUrl)
                 .receiptHandle(recv.messages().get(0).receiptHandle())
                 .build());
@@ -167,8 +206,8 @@ class SnsTest {
 
         Thread.sleep(500);
 
-        software.amazon.awssdk.services.sqs.model.ReceiveMessageResponse recv = sqs.receiveMessage(
-                software.amazon.awssdk.services.sqs.model.ReceiveMessageRequest.builder()
+        ReceiveMessageResponse recv = sqs.receiveMessage(
+                ReceiveMessageRequest.builder()
                         .queueUrl(queueUrl)
                         .maxNumberOfMessages(1)
                         .waitTimeSeconds(2)
@@ -177,7 +216,7 @@ class SnsTest {
         assertThat(recv.messages()).isNotEmpty();
         assertThat(recv.messages().get(0).body()).contains("my-value");
 
-        sqs.deleteMessage(software.amazon.awssdk.services.sqs.model.DeleteMessageRequest.builder()
+        sqs.deleteMessage(DeleteMessageRequest.builder()
                 .queueUrl(queueUrl)
                 .receiptHandle(recv.messages().get(0).receiptHandle())
                 .build());
@@ -187,13 +226,13 @@ class SnsTest {
     @Order(9)
     void rawMessageDelivery() throws InterruptedException {
         String rawQueueName = "sns-raw-delivery-" + System.currentTimeMillis();
-        String rawQueueUrl = sqs.createQueue(software.amazon.awssdk.services.sqs.model.CreateQueueRequest.builder()
+        String rawQueueUrl = sqs.createQueue(CreateQueueRequest.builder()
                 .queueName(rawQueueName).build()).queueUrl();
-        String rawQueueArn = sqs.getQueueAttributes(software.amazon.awssdk.services.sqs.model.GetQueueAttributesRequest.builder()
+        String rawQueueArn = sqs.getQueueAttributes(GetQueueAttributesRequest.builder()
                 .queueUrl(rawQueueUrl)
-                .attributeNames(software.amazon.awssdk.services.sqs.model.QueueAttributeName.QUEUE_ARN)
+                .attributeNames(QueueAttributeName.QUEUE_ARN)
                 .build())
-                .attributes().get(software.amazon.awssdk.services.sqs.model.QueueAttributeName.QUEUE_ARN);
+                .attributes().get(QueueAttributeName.QUEUE_ARN);
 
         String rawSubArn = sns.subscribe(SubscribeRequest.builder()
                 .topicArn(topicArn)
@@ -220,8 +259,8 @@ class SnsTest {
 
         Thread.sleep(500);
 
-        software.amazon.awssdk.services.sqs.model.ReceiveMessageResponse rawRecv = sqs.receiveMessage(
-                software.amazon.awssdk.services.sqs.model.ReceiveMessageRequest.builder()
+        ReceiveMessageResponse rawRecv = sqs.receiveMessage(
+                ReceiveMessageRequest.builder()
                         .queueUrl(rawQueueUrl)
                         .maxNumberOfMessages(1)
                         .waitTimeSeconds(2)
@@ -233,15 +272,15 @@ class SnsTest {
         assertThat(body).doesNotContain("\"Type\":\"Notification\"");
         assertThat(body).isEqualTo("raw-delivery-content");
 
-        var msgAttrs = rawRecv.messages().get(0).messageAttributes();
-        assertThat(msgAttrs).containsKey("color");
-        assertThat(msgAttrs.get("color").stringValue()).isEqualTo("blue");
-        assertThat(msgAttrs).containsKey("count");
-        assertThat(msgAttrs.get("count").dataType()).isEqualTo("Number");
+        Message rawMessage = rawRecv.messages().get(0);
+        assertThat(rawMessage.messageAttributes()).containsKey("color");
+        assertThat(rawMessage.messageAttributes().get("color").stringValue()).isEqualTo("blue");
+        assertThat(rawMessage.messageAttributes()).containsKey("count");
+        assertThat(rawMessage.messageAttributes().get("count").dataType()).isEqualTo("Number");
 
         // Cleanup
         sns.unsubscribe(UnsubscribeRequest.builder().subscriptionArn(rawSubArn).build());
-        sqs.deleteQueue(software.amazon.awssdk.services.sqs.model.DeleteQueueRequest.builder()
+        sqs.deleteQueue(DeleteQueueRequest.builder()
                 .queueUrl(rawQueueUrl).build());
     }
 
@@ -262,15 +301,15 @@ class SnsTest {
     @Order(12)
     void fifoExplicitDedup() throws InterruptedException {
         String fifoQueueName = "sns-fifo-explicit-" + System.currentTimeMillis() + ".fifo";
-        String fifoQueueUrl = sqs.createQueue(software.amazon.awssdk.services.sqs.model.CreateQueueRequest.builder()
+        String fifoQueueUrl = sqs.createQueue(CreateQueueRequest.builder()
                 .queueName(fifoQueueName)
-                .attributes(Map.of(software.amazon.awssdk.services.sqs.model.QueueAttributeName.FIFO_QUEUE, "true"))
+                .attributes(Map.of(QueueAttributeName.FIFO_QUEUE, "true"))
                 .build()).queueUrl();
-        String fifoQueueArn = sqs.getQueueAttributes(software.amazon.awssdk.services.sqs.model.GetQueueAttributesRequest.builder()
+        String fifoQueueArn = sqs.getQueueAttributes(GetQueueAttributesRequest.builder()
                 .queueUrl(fifoQueueUrl)
-                .attributeNames(software.amazon.awssdk.services.sqs.model.QueueAttributeName.QUEUE_ARN)
+                .attributeNames(QueueAttributeName.QUEUE_ARN)
                 .build())
-                .attributes().get(software.amazon.awssdk.services.sqs.model.QueueAttributeName.QUEUE_ARN);
+                .attributes().get(QueueAttributeName.QUEUE_ARN);
 
         String fifoTopicName = "sns-fifo-explicit-" + System.currentTimeMillis() + ".fifo";
         String fifoTopicArn = sns.createTopic(CreateTopicRequest.builder()
@@ -294,23 +333,23 @@ class SnsTest {
 
         Thread.sleep(500);
 
-        software.amazon.awssdk.services.sqs.model.ReceiveMessageResponse fifoRecv = sqs.receiveMessage(
-                software.amazon.awssdk.services.sqs.model.ReceiveMessageRequest.builder()
+        ReceiveMessageResponse fifoRecv = sqs.receiveMessage(
+                ReceiveMessageRequest.builder()
                         .queueUrl(fifoQueueUrl)
                         .maxNumberOfMessages(1)
                         .waitTimeSeconds(2)
-                        .messageSystemAttributeNames(software.amazon.awssdk.services.sqs.model.MessageSystemAttributeName.MESSAGE_DEDUPLICATION_ID)
+                        .messageSystemAttributeNames(MessageSystemAttributeName.MESSAGE_DEDUPLICATION_ID)
                         .build());
 
         assertThat(fifoRecv.messages()).isNotEmpty();
         String receivedDedupId = fifoRecv.messages().get(0).attributes()
-                .get(software.amazon.awssdk.services.sqs.model.MessageSystemAttributeName.MESSAGE_DEDUPLICATION_ID);
+                .get(MessageSystemAttributeName.MESSAGE_DEDUPLICATION_ID);
         assertThat(receivedDedupId).isEqualTo(explicitDedupId);
 
         // Cleanup
         sns.unsubscribe(UnsubscribeRequest.builder().subscriptionArn(fifoSubArn).build());
         sns.deleteTopic(DeleteTopicRequest.builder().topicArn(fifoTopicArn).build());
-        sqs.deleteQueue(software.amazon.awssdk.services.sqs.model.DeleteQueueRequest.builder()
+        sqs.deleteQueue(DeleteQueueRequest.builder()
                 .queueUrl(fifoQueueUrl).build());
     }
 
@@ -318,15 +357,15 @@ class SnsTest {
     @Order(13)
     void fifoContentBasedDedup() throws InterruptedException {
         String cbdQueueName = "sns-fifo-cbd-" + System.currentTimeMillis() + ".fifo";
-        String cbdQueueUrl = sqs.createQueue(software.amazon.awssdk.services.sqs.model.CreateQueueRequest.builder()
+        String cbdQueueUrl = sqs.createQueue(CreateQueueRequest.builder()
                 .queueName(cbdQueueName)
-                .attributes(Map.of(software.amazon.awssdk.services.sqs.model.QueueAttributeName.FIFO_QUEUE, "true"))
+                .attributes(Map.of(QueueAttributeName.FIFO_QUEUE, "true"))
                 .build()).queueUrl();
-        String cbdQueueArn = sqs.getQueueAttributes(software.amazon.awssdk.services.sqs.model.GetQueueAttributesRequest.builder()
+        String cbdQueueArn = sqs.getQueueAttributes(GetQueueAttributesRequest.builder()
                 .queueUrl(cbdQueueUrl)
-                .attributeNames(software.amazon.awssdk.services.sqs.model.QueueAttributeName.QUEUE_ARN)
+                .attributeNames(QueueAttributeName.QUEUE_ARN)
                 .build())
-                .attributes().get(software.amazon.awssdk.services.sqs.model.QueueAttributeName.QUEUE_ARN);
+                .attributes().get(QueueAttributeName.QUEUE_ARN);
 
         String cbdTopicName = "sns-fifo-cbd-" + System.currentTimeMillis() + ".fifo";
         String cbdTopicArn = sns.createTopic(CreateTopicRequest.builder()
@@ -351,23 +390,23 @@ class SnsTest {
 
         Thread.sleep(500);
 
-        software.amazon.awssdk.services.sqs.model.ReceiveMessageResponse cbdRecv = sqs.receiveMessage(
-                software.amazon.awssdk.services.sqs.model.ReceiveMessageRequest.builder()
+        ReceiveMessageResponse cbdRecv = sqs.receiveMessage(
+                ReceiveMessageRequest.builder()
                         .queueUrl(cbdQueueUrl)
                         .maxNumberOfMessages(1)
                         .waitTimeSeconds(2)
-                        .messageSystemAttributeNames(software.amazon.awssdk.services.sqs.model.MessageSystemAttributeName.MESSAGE_DEDUPLICATION_ID)
+                        .messageSystemAttributeNames(MessageSystemAttributeName.MESSAGE_DEDUPLICATION_ID)
                         .build());
 
         assertThat(cbdRecv.messages()).isNotEmpty();
         String receivedDedupId = cbdRecv.messages().get(0).attributes()
-                .get(software.amazon.awssdk.services.sqs.model.MessageSystemAttributeName.MESSAGE_DEDUPLICATION_ID);
+                .get(MessageSystemAttributeName.MESSAGE_DEDUPLICATION_ID);
         assertThat(receivedDedupId).isNotEmpty();
 
         // Cleanup
         sns.unsubscribe(UnsubscribeRequest.builder().subscriptionArn(cbdSubArn).build());
         sns.deleteTopic(DeleteTopicRequest.builder().topicArn(cbdTopicArn).build());
-        sqs.deleteQueue(software.amazon.awssdk.services.sqs.model.DeleteQueueRequest.builder()
+        sqs.deleteQueue(DeleteQueueRequest.builder()
                 .queueUrl(cbdQueueUrl).build());
     }
 
@@ -375,13 +414,13 @@ class SnsTest {
     @Order(14)
     void filterPolicyScope_messageBody_topLevelMatch() throws InterruptedException {
         long stamp = System.currentTimeMillis();
-        String mbQueueUrl = sqs.createQueue(software.amazon.awssdk.services.sqs.model.CreateQueueRequest.builder()
+        String mbQueueUrl = sqs.createQueue(CreateQueueRequest.builder()
                 .queueName("sns-mb-filter-" + stamp).build()).queueUrl();
-        String mbQueueArn = sqs.getQueueAttributes(software.amazon.awssdk.services.sqs.model.GetQueueAttributesRequest.builder()
+        String mbQueueArn = sqs.getQueueAttributes(GetQueueAttributesRequest.builder()
                 .queueUrl(mbQueueUrl)
-                .attributeNames(software.amazon.awssdk.services.sqs.model.QueueAttributeName.QUEUE_ARN)
+                .attributeNames(QueueAttributeName.QUEUE_ARN)
                 .build())
-                .attributes().get(software.amazon.awssdk.services.sqs.model.QueueAttributeName.QUEUE_ARN);
+                .attributes().get(QueueAttributeName.QUEUE_ARN);
 
         String mbTopicArn = sns.createTopic(CreateTopicRequest.builder()
                 .name("sns-mb-filter-" + stamp).build()).topicArn();
@@ -414,8 +453,8 @@ class SnsTest {
 
         Thread.sleep(500);
 
-        software.amazon.awssdk.services.sqs.model.ReceiveMessageResponse recv = sqs.receiveMessage(
-                software.amazon.awssdk.services.sqs.model.ReceiveMessageRequest.builder()
+        ReceiveMessageResponse recv = sqs.receiveMessage(
+                ReceiveMessageRequest.builder()
                         .queueUrl(mbQueueUrl)
                         .maxNumberOfMessages(10)
                         .waitTimeSeconds(2)
@@ -426,7 +465,7 @@ class SnsTest {
 
         sns.unsubscribe(UnsubscribeRequest.builder().subscriptionArn(mbSubArn).build());
         sns.deleteTopic(DeleteTopicRequest.builder().topicArn(mbTopicArn).build());
-        sqs.deleteQueue(software.amazon.awssdk.services.sqs.model.DeleteQueueRequest.builder()
+        sqs.deleteQueue(DeleteQueueRequest.builder()
                 .queueUrl(mbQueueUrl).build());
     }
 
@@ -434,13 +473,13 @@ class SnsTest {
     @Order(15)
     void filterPolicyScope_messageBody_nestedKeyDescent() throws InterruptedException {
         long stamp = System.currentTimeMillis();
-        String nestedQueueUrl = sqs.createQueue(software.amazon.awssdk.services.sqs.model.CreateQueueRequest.builder()
+        String nestedQueueUrl = sqs.createQueue(CreateQueueRequest.builder()
                 .queueName("sns-mb-nested-" + stamp).build()).queueUrl();
-        String nestedQueueArn = sqs.getQueueAttributes(software.amazon.awssdk.services.sqs.model.GetQueueAttributesRequest.builder()
+        String nestedQueueArn = sqs.getQueueAttributes(GetQueueAttributesRequest.builder()
                 .queueUrl(nestedQueueUrl)
-                .attributeNames(software.amazon.awssdk.services.sqs.model.QueueAttributeName.QUEUE_ARN)
+                .attributeNames(QueueAttributeName.QUEUE_ARN)
                 .build())
-                .attributes().get(software.amazon.awssdk.services.sqs.model.QueueAttributeName.QUEUE_ARN);
+                .attributes().get(QueueAttributeName.QUEUE_ARN);
 
         String nestedTopicArn = sns.createTopic(CreateTopicRequest.builder()
                 .name("sns-mb-nested-" + stamp).build()).topicArn();
@@ -473,8 +512,8 @@ class SnsTest {
 
         Thread.sleep(500);
 
-        software.amazon.awssdk.services.sqs.model.ReceiveMessageResponse recv = sqs.receiveMessage(
-                software.amazon.awssdk.services.sqs.model.ReceiveMessageRequest.builder()
+        ReceiveMessageResponse recv = sqs.receiveMessage(
+                ReceiveMessageRequest.builder()
                         .queueUrl(nestedQueueUrl)
                         .maxNumberOfMessages(10)
                         .waitTimeSeconds(2)
@@ -485,7 +524,7 @@ class SnsTest {
 
         sns.unsubscribe(UnsubscribeRequest.builder().subscriptionArn(nestedSubArn).build());
         sns.deleteTopic(DeleteTopicRequest.builder().topicArn(nestedTopicArn).build());
-        sqs.deleteQueue(software.amazon.awssdk.services.sqs.model.DeleteQueueRequest.builder()
+        sqs.deleteQueue(DeleteQueueRequest.builder()
                 .queueUrl(nestedQueueUrl).build());
     }
 
@@ -493,13 +532,13 @@ class SnsTest {
     @Order(16)
     void publishBatchPreservesPerEntryMessageAttributes() throws InterruptedException {
         long stamp = System.currentTimeMillis();
-        String batchQueueUrl = sqs.createQueue(software.amazon.awssdk.services.sqs.model.CreateQueueRequest.builder()
+        String batchQueueUrl = sqs.createQueue(CreateQueueRequest.builder()
                 .queueName("sns-batch-attrs-" + stamp).build()).queueUrl();
-        String batchQueueArn = sqs.getQueueAttributes(software.amazon.awssdk.services.sqs.model.GetQueueAttributesRequest.builder()
+        String batchQueueArn = sqs.getQueueAttributes(GetQueueAttributesRequest.builder()
                 .queueUrl(batchQueueUrl)
-                .attributeNames(software.amazon.awssdk.services.sqs.model.QueueAttributeName.QUEUE_ARN)
+                .attributeNames(QueueAttributeName.QUEUE_ARN)
                 .build())
-                .attributes().get(software.amazon.awssdk.services.sqs.model.QueueAttributeName.QUEUE_ARN);
+                .attributes().get(QueueAttributeName.QUEUE_ARN);
 
         String batchTopicArn = sns.createTopic(CreateTopicRequest.builder()
                 .name("sns-batch-attrs-" + stamp).build()).topicArn();
@@ -546,8 +585,8 @@ class SnsTest {
 
         Thread.sleep(500);
 
-        software.amazon.awssdk.services.sqs.model.ReceiveMessageResponse batchRecv = sqs.receiveMessage(
-                software.amazon.awssdk.services.sqs.model.ReceiveMessageRequest.builder()
+        ReceiveMessageResponse batchRecv = sqs.receiveMessage(
+                ReceiveMessageRequest.builder()
                         .queueUrl(batchQueueUrl)
                         .maxNumberOfMessages(10)
                         .waitTimeSeconds(2)
@@ -556,24 +595,155 @@ class SnsTest {
 
         assertThat(batchRecv.messages()).hasSize(2);
 
-        var byBody = batchRecv.messages().stream()
-                .collect(java.util.stream.Collectors.toMap(
-                        software.amazon.awssdk.services.sqs.model.Message::body, m -> m));
+        Map<String, Message> byBody = batchRecv.messages().stream()
+                .collect(Collectors.toMap(
+                        Message::body, m -> m));
 
-        var attrsA = byBody.get("batch-msg-a").messageAttributes();
-        assertThat(attrsA).containsKeys("ce-type", "ce-id");
-        assertThat(attrsA.get("ce-id").stringValue()).isEqualTo("id-a");
-        assertThat(attrsA.get("ce-type").stringValue()).isEqualTo("com.example.test");
+        Message messageA = byBody.get("batch-msg-a");
+        assertThat(messageA.messageAttributes()).containsKeys("ce-type", "ce-id");
+        assertThat(messageA.messageAttributes().get("ce-id").stringValue()).isEqualTo("id-a");
+        assertThat(messageA.messageAttributes().get("ce-type").stringValue()).isEqualTo("com.example.test");
 
-        var attrsB = byBody.get("batch-msg-b").messageAttributes();
-        assertThat(attrsB).containsKeys("ce-type", "ce-id", "count");
-        assertThat(attrsB.get("ce-id").stringValue()).isEqualTo("id-b");
-        assertThat(attrsB.get("count").dataType()).isEqualTo("Number");
-        assertThat(attrsB.get("count").stringValue()).isEqualTo("42");
+        Message messageB = byBody.get("batch-msg-b");
+        assertThat(messageB.messageAttributes()).containsKeys("ce-type", "ce-id", "count");
+        assertThat(messageB.messageAttributes().get("ce-id").stringValue()).isEqualTo("id-b");
+        assertThat(messageB.messageAttributes().get("count").dataType()).isEqualTo("Number");
+        assertThat(messageB.messageAttributes().get("count").stringValue()).isEqualTo("42");
 
         sns.unsubscribe(UnsubscribeRequest.builder().subscriptionArn(batchSubArn).build());
         sns.deleteTopic(DeleteTopicRequest.builder().topicArn(batchTopicArn).build());
-        sqs.deleteQueue(software.amazon.awssdk.services.sqs.model.DeleteQueueRequest.builder()
+        sqs.deleteQueue(DeleteQueueRequest.builder()
                 .queueUrl(batchQueueUrl).build());
+    }
+    @Test
+    @Order(17)
+    void smsPreferencesRoundTrip() {
+        sns.setSMSAttributes(SetSmsAttributesRequest.builder()
+                .attributes(Map.of("DefaultSMSType", "Transactional", "MonthlySpendLimit", "10"))
+                .build());
+
+        GetSmsAttributesResponse selected = sns.getSMSAttributes(GetSmsAttributesRequest.builder()
+                .attributes("DefaultSMSType")
+                .build());
+        assertThat(selected.attributes()).containsExactly(entry("DefaultSMSType", "Transactional"));
+
+        GetSmsAttributesResponse all = sns.getSMSAttributes();
+        assertThat(all.attributes()).containsEntry("DefaultSMSType", "Transactional")
+                .containsEntry("MonthlySpendLimit", "10");
+
+        sns.setSMSAttributes(SetSmsAttributesRequest.builder()
+                .attributes(Map.of("DefaultSMSType", "", "MonthlySpendLimit", ""))
+                .build());
+        assertThat(sns.getSMSAttributes().attributes())
+                .doesNotContainKeys("DefaultSMSType", "MonthlySpendLimit");
+    }
+
+    @Test
+    @Order(18)
+    void topicPermissionsAreAddedToAndRemovedFromThePolicy() throws Exception {
+        String permissionTopic = sns.createTopic(CreateTopicRequest.builder()
+                .name(TestFixtures.uniqueName("sns-permission")).build()).topicArn();
+        try {
+            String account = permissionTopic.split(":")[4];
+            sns.addPermission(AddPermissionRequest.builder()
+                    .topicArn(permissionTopic).label("compat-grant")
+                    .awsAccountIds(account).actionNames("Publish").build());
+
+            JsonNode granted = statementWithSid(permissionTopic, "compat-grant");
+            assertThat(granted).isNotNull();
+            assertThat(granted.path("Principal").path("AWS").asText())
+                    .isEqualTo(TestFixtures.globalArn("iam", account, "root"));
+            assertThat(granted.path("Action").asText()).isEqualTo("SNS:Publish");
+            assertThat(granted.path("Resource").asText()).isEqualTo(permissionTopic);
+
+            assertThatThrownBy(() -> sns.addPermission(AddPermissionRequest.builder()
+                    .topicArn(permissionTopic).label("compat-grant")
+                    .awsAccountIds(account).actionNames("Subscribe").build()))
+                    .isInstanceOf(InvalidParameterException.class);
+
+            sns.removePermission(RemovePermissionRequest.builder()
+                    .topicArn(permissionTopic).label("compat-grant").build());
+            assertThat(statementWithSid(permissionTopic, "compat-grant")).isNull();
+        } finally {
+            sns.deleteTopic(DeleteTopicRequest.builder().topicArn(permissionTopic).build());
+        }
+    }
+
+    @Test
+    @Order(19)
+    void smsSandboxNumbersAreVerifiedWithTheTextedCode() throws Exception {
+        assumeFalse(TestFixtures.isRealAws(), "Reads the code from Floci's SMS inspection endpoint");
+        assertThat(sns.getSMSSandboxAccountStatus(GetSmsSandboxAccountStatusRequest.builder().build())
+                .isInSandbox()).isFalse();
+
+        String phoneNumber = String.format("+1555%07d", ThreadLocalRandom.current().nextInt(10_000_000));
+        sns.createSMSSandboxPhoneNumber(CreateSmsSandboxPhoneNumberRequest.builder()
+                .phoneNumber(phoneNumber).languageCode(LanguageCodeString.EN_US).build());
+        try {
+            assertThat(sandboxStatus(phoneNumber)).isEqualTo(SMSSandboxPhoneNumberVerificationStatus.PENDING);
+
+            String code = textedCode(phoneNumber);
+            String wrong = String.format("%06d", (Integer.parseInt(code) + 1) % 1_000_000);
+            assertThatThrownBy(() -> sns.verifySMSSandboxPhoneNumber(VerifySmsSandboxPhoneNumberRequest.builder()
+                    .phoneNumber(phoneNumber).oneTimePassword(wrong).build()))
+                    .isInstanceOfSatisfying(VerificationException.class,
+                            e -> assertThat(e.status()).isEqualTo("Pending"));
+
+            sns.verifySMSSandboxPhoneNumber(VerifySmsSandboxPhoneNumberRequest.builder()
+                    .phoneNumber(phoneNumber).oneTimePassword(code).build());
+
+            assertThat(sandboxStatus(phoneNumber)).isEqualTo(SMSSandboxPhoneNumberVerificationStatus.VERIFIED);
+        } finally {
+            sns.deleteSMSSandboxPhoneNumber(DeleteSmsSandboxPhoneNumberRequest.builder()
+                    .phoneNumber(phoneNumber).build());
+        }
+    }
+
+    @Test
+    @Order(20)
+    void noNumberIsOptedOutAndOptingInChecksTheFormat() {
+        assumeFalse(TestFixtures.isRealAws(), "A real account's opt-out list is whatever its recipients sent");
+        assertThat(sns.checkIfPhoneNumberIsOptedOut(CheckIfPhoneNumberIsOptedOutRequest.builder()
+                .phoneNumber("+4411111111").build()).isOptedOut()).isFalse();
+        assertThat(sns.listPhoneNumbersOptedOut(ListPhoneNumbersOptedOutRequest.builder().build())
+                .phoneNumbers()).isEmpty();
+
+        sns.optInPhoneNumber(OptInPhoneNumberRequest.builder().phoneNumber("+4411111111").build());
+        assertThatThrownBy(() -> sns.optInPhoneNumber(OptInPhoneNumberRequest.builder()
+                .phoneNumber("invalid").build()))
+                .isInstanceOf(InvalidParameterException.class);
+    }
+
+    private static JsonNode statementWithSid(String topic, String sid) throws Exception {
+        String policy = sns.getTopicAttributes(GetTopicAttributesRequest.builder().topicArn(topic).build())
+                .attributes().get("Policy");
+        for (JsonNode statement : new ObjectMapper().readTree(policy).path("Statement")) {
+            if (sid.equals(statement.path("Sid").asText())) {
+                return statement;
+            }
+        }
+        return null;
+    }
+
+    private static SMSSandboxPhoneNumberVerificationStatus sandboxStatus(String phoneNumber) {
+        return sns.listSMSSandboxPhoneNumbersPaginator(ListSmsSandboxPhoneNumbersRequest.builder().build())
+                .phoneNumbers().stream()
+                .filter(number -> phoneNumber.equals(number.phoneNumber()))
+                .map(SMSSandboxPhoneNumber::status)
+                .findFirst()
+                .orElseThrow(() -> new AssertionError(phoneNumber + " is not in the SMS sandbox list"));
+    }
+
+    private static String textedCode(String phoneNumber) throws Exception {
+        URI uri = URI.create(TestFixtures.endpoint() + "/_aws/sns?phone="
+                + URLEncoder.encode(phoneNumber, StandardCharsets.UTF_8));
+        HttpResponse<String> response = TestFixtures.emulatorHttpClient().send(
+                HttpRequest.newBuilder(uri).GET().build(), HttpResponse.BodyHandlers.ofString());
+        assertThat(response.statusCode()).isEqualTo(200);
+        JsonNode messages = new ObjectMapper().readTree(response.body()).path("messages");
+        assertThat(messages).hasSize(1);
+        Matcher code = Pattern.compile("[0-9]{6}").matcher(messages.get(0).path("Message").asText());
+        assertThat(code.find()).isTrue();
+        return code.group();
     }
 }

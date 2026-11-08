@@ -7,7 +7,7 @@ import org.junit.jupiter.api.MethodOrderer;
 import org.junit.jupiter.api.Order;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.TestMethodOrder;
-
+import org.junit.jupiter.api.parallel.ResourceLock;
 import software.amazon.awssdk.services.ses.SesClient;
 import software.amazon.awssdk.services.ses.model.AlreadyExistsException;
 import software.amazon.awssdk.services.ses.model.CannotDeleteException;
@@ -17,13 +17,15 @@ import software.amazon.awssdk.services.ses.model.DescribeReceiptRuleSetResponse;
 import software.amazon.awssdk.services.ses.model.InvalidSnsTopicException;
 import software.amazon.awssdk.services.ses.model.ListReceiptRuleSetsResponse;
 import software.amazon.awssdk.services.ses.model.ReceiptFilter;
+import software.amazon.awssdk.services.ses.model.ReceiptFilterPolicy;
 import software.amazon.awssdk.services.ses.model.ReceiptRule;
 import software.amazon.awssdk.services.ses.model.RuleDoesNotExistException;
-import software.amazon.awssdk.services.ses.model.ReceiptFilterPolicy;
 import software.amazon.awssdk.services.ses.model.RuleSetDoesNotExistException;
 import software.amazon.awssdk.services.ses.model.SesException;
 import software.amazon.awssdk.services.ses.model.TlsPolicy;
 import software.amazon.awssdk.services.sns.SnsClient;
+
+import java.util.List;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
@@ -38,6 +40,7 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
  */
 @DisplayName("SES V1 ReceiptRuleSet, ReceiptRule, and ReceiptFilter")
 @TestMethodOrder(MethodOrderer.OrderAnnotation.class)
+@ResourceLock("ses-account")
 class SesReceiptRuleSetTest {
 
     private static SesClient ses;
@@ -316,7 +319,7 @@ class SesReceiptRuleSetTest {
         ses.createReceiptFilter(b -> b.filter(f -> f.name(allowFilter)
                 .ipFilter(ip -> ip.policy(ReceiptFilterPolicy.ALLOW).cidr("192.0.2.10"))));
 
-        var filters = ses.listReceiptFilters().filters();
+        List<ReceiptFilter> filters = ses.listReceiptFilters().filters();
         ReceiptFilter block = filters.stream()
                 .filter(f -> blockFilter.equals(f.name())).findFirst().orElseThrow();
         assertThat(block.ipFilter().policy()).isEqualTo(ReceiptFilterPolicy.BLOCK);

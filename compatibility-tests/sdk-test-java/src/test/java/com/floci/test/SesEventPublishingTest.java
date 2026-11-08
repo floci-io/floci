@@ -9,58 +9,21 @@ import org.junit.jupiter.api.MethodOrderer;
 import org.junit.jupiter.api.Order;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.TestMethodOrder;
-
-import software.amazon.awssdk.services.sesv2.SesV2Client;
-import software.amazon.awssdk.services.sesv2.model.Body;
-import software.amazon.awssdk.services.sesv2.model.BulkEmailContent;
-import software.amazon.awssdk.services.sesv2.model.BulkEmailEntry;
-import software.amazon.awssdk.services.sesv2.model.Content;
-import software.amazon.awssdk.services.sesv2.model.CreateConfigurationSetEventDestinationRequest;
-import software.amazon.awssdk.services.sesv2.model.CreateConfigurationSetRequest;
-import software.amazon.awssdk.services.sesv2.model.CreateEmailIdentityRequest;
-import software.amazon.awssdk.services.sesv2.model.DeleteConfigurationSetEventDestinationRequest;
-import software.amazon.awssdk.services.sesv2.model.DeleteConfigurationSetRequest;
-import software.amazon.awssdk.services.sesv2.model.DeleteEmailIdentityRequest;
-import software.amazon.awssdk.services.sesv2.model.Destination;
-import software.amazon.awssdk.services.sesv2.model.EmailContent;
-import software.amazon.awssdk.services.sesv2.model.EmailTemplateContent;
-import software.amazon.awssdk.services.sesv2.model.EventDestinationDefinition;
-import software.amazon.awssdk.services.sesv2.model.EventType;
-import software.amazon.awssdk.services.sesv2.model.Message;
-import software.amazon.awssdk.services.sesv2.model.MessageHeader;
-import software.amazon.awssdk.services.sesv2.model.MessageTag;
-import software.amazon.awssdk.services.sesv2.model.SendBulkEmailRequest;
-import software.amazon.awssdk.services.sesv2.model.SendEmailRequest;
-import software.amazon.awssdk.services.sesv2.model.SnsDestination;
-import software.amazon.awssdk.services.sesv2.model.Template;
-import software.amazon.awssdk.services.sesv2.model.CloudWatchDestination;
-import software.amazon.awssdk.services.sesv2.model.CloudWatchDimensionConfiguration;
-import software.amazon.awssdk.services.sesv2.model.DimensionValueSource;
-import software.amazon.awssdk.services.sesv2.model.EventBridgeDestination;
-import software.amazon.awssdk.services.sesv2.model.KinesisFirehoseDestination;
-
-import software.amazon.awssdk.services.sns.SnsClient;
-import software.amazon.awssdk.services.sns.model.CreateTopicRequest;
-import software.amazon.awssdk.services.sns.model.DeleteTopicRequest;
-import software.amazon.awssdk.services.sns.model.SubscribeRequest;
-import software.amazon.awssdk.services.sns.model.UnsubscribeRequest;
-
-import software.amazon.awssdk.services.sqs.SqsClient;
-import software.amazon.awssdk.services.sqs.model.CreateQueueRequest;
-import software.amazon.awssdk.services.sqs.model.DeleteMessageBatchRequest;
-import software.amazon.awssdk.services.sqs.model.DeleteMessageBatchRequestEntry;
-import software.amazon.awssdk.services.sqs.model.DeleteQueueRequest;
-import software.amazon.awssdk.services.sqs.model.GetQueueAttributesRequest;
-import software.amazon.awssdk.services.sqs.model.QueueAttributeName;
-import software.amazon.awssdk.services.sqs.model.ReceiveMessageRequest;
-import software.amazon.awssdk.services.sqs.model.ReceiveMessageResponse;
-
+import org.junit.jupiter.api.parallel.ResourceLock;
+import software.amazon.awssdk.services.cloudwatch.CloudWatchClient;
+import software.amazon.awssdk.services.cloudwatch.model.ListMetricsRequest;
+import software.amazon.awssdk.services.cloudwatch.model.Metric;
+import software.amazon.awssdk.services.eventbridge.EventBridgeClient;
+import software.amazon.awssdk.services.eventbridge.model.DeleteRuleRequest;
+import software.amazon.awssdk.services.eventbridge.model.PutRuleRequest;
+import software.amazon.awssdk.services.eventbridge.model.PutTargetsRequest;
+import software.amazon.awssdk.services.eventbridge.model.RemoveTargetsRequest;
+import software.amazon.awssdk.services.eventbridge.model.Target;
 import software.amazon.awssdk.services.firehose.FirehoseClient;
 import software.amazon.awssdk.services.firehose.model.BufferingHints;
 import software.amazon.awssdk.services.firehose.model.CreateDeliveryStreamRequest;
 import software.amazon.awssdk.services.firehose.model.DeleteDeliveryStreamRequest;
 import software.amazon.awssdk.services.firehose.model.S3DestinationConfiguration;
-
 import software.amazon.awssdk.services.s3.S3Client;
 import software.amazon.awssdk.services.s3.model.CreateBucketRequest;
 import software.amazon.awssdk.services.s3.model.DeleteBucketRequest;
@@ -70,17 +33,48 @@ import software.amazon.awssdk.services.s3.model.ListObjectsV2Request;
 import software.amazon.awssdk.services.s3.model.ListObjectsV2Response;
 import software.amazon.awssdk.services.s3.model.ObjectIdentifier;
 import software.amazon.awssdk.services.s3.model.S3Object;
-
-import software.amazon.awssdk.services.eventbridge.EventBridgeClient;
-import software.amazon.awssdk.services.eventbridge.model.DeleteRuleRequest;
-import software.amazon.awssdk.services.eventbridge.model.PutRuleRequest;
-import software.amazon.awssdk.services.eventbridge.model.PutTargetsRequest;
-import software.amazon.awssdk.services.eventbridge.model.RemoveTargetsRequest;
-import software.amazon.awssdk.services.eventbridge.model.Target;
-
-import software.amazon.awssdk.services.cloudwatch.CloudWatchClient;
-import software.amazon.awssdk.services.cloudwatch.model.ListMetricsRequest;
-import software.amazon.awssdk.services.cloudwatch.model.Metric;
+import software.amazon.awssdk.services.sesv2.SesV2Client;
+import software.amazon.awssdk.services.sesv2.model.Body;
+import software.amazon.awssdk.services.sesv2.model.BulkEmailContent;
+import software.amazon.awssdk.services.sesv2.model.BulkEmailEntry;
+import software.amazon.awssdk.services.sesv2.model.CloudWatchDestination;
+import software.amazon.awssdk.services.sesv2.model.CloudWatchDimensionConfiguration;
+import software.amazon.awssdk.services.sesv2.model.Content;
+import software.amazon.awssdk.services.sesv2.model.CreateConfigurationSetEventDestinationRequest;
+import software.amazon.awssdk.services.sesv2.model.CreateConfigurationSetRequest;
+import software.amazon.awssdk.services.sesv2.model.CreateEmailIdentityRequest;
+import software.amazon.awssdk.services.sesv2.model.DeleteConfigurationSetEventDestinationRequest;
+import software.amazon.awssdk.services.sesv2.model.DeleteConfigurationSetRequest;
+import software.amazon.awssdk.services.sesv2.model.DeleteEmailIdentityRequest;
+import software.amazon.awssdk.services.sesv2.model.Destination;
+import software.amazon.awssdk.services.sesv2.model.DimensionValueSource;
+import software.amazon.awssdk.services.sesv2.model.EmailContent;
+import software.amazon.awssdk.services.sesv2.model.EmailTemplateContent;
+import software.amazon.awssdk.services.sesv2.model.EventBridgeDestination;
+import software.amazon.awssdk.services.sesv2.model.EventDestinationDefinition;
+import software.amazon.awssdk.services.sesv2.model.EventType;
+import software.amazon.awssdk.services.sesv2.model.KinesisFirehoseDestination;
+import software.amazon.awssdk.services.sesv2.model.Message;
+import software.amazon.awssdk.services.sesv2.model.MessageHeader;
+import software.amazon.awssdk.services.sesv2.model.MessageTag;
+import software.amazon.awssdk.services.sesv2.model.SendBulkEmailRequest;
+import software.amazon.awssdk.services.sesv2.model.SendEmailRequest;
+import software.amazon.awssdk.services.sesv2.model.SnsDestination;
+import software.amazon.awssdk.services.sesv2.model.Template;
+import software.amazon.awssdk.services.sns.SnsClient;
+import software.amazon.awssdk.services.sns.model.CreateTopicRequest;
+import software.amazon.awssdk.services.sns.model.DeleteTopicRequest;
+import software.amazon.awssdk.services.sns.model.SubscribeRequest;
+import software.amazon.awssdk.services.sns.model.UnsubscribeRequest;
+import software.amazon.awssdk.services.sqs.SqsClient;
+import software.amazon.awssdk.services.sqs.model.CreateQueueRequest;
+import software.amazon.awssdk.services.sqs.model.DeleteMessageBatchRequest;
+import software.amazon.awssdk.services.sqs.model.DeleteMessageBatchRequestEntry;
+import software.amazon.awssdk.services.sqs.model.DeleteQueueRequest;
+import software.amazon.awssdk.services.sqs.model.GetQueueAttributesRequest;
+import software.amazon.awssdk.services.sqs.model.QueueAttributeName;
+import software.amazon.awssdk.services.sqs.model.ReceiveMessageRequest;
+import software.amazon.awssdk.services.sqs.model.ReceiveMessageResponse;
 
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
@@ -101,6 +95,7 @@ import static org.assertj.core.api.Assertions.assertThat;
  */
 @DisplayName("SES Event Publishing")
 @TestMethodOrder(MethodOrderer.OrderAnnotation.class)
+@ResourceLock("ses-account")
 class SesEventPublishingTest {
 
     private static final ObjectMapper MAPPER = new ObjectMapper();
@@ -197,8 +192,8 @@ class SesEventPublishingTest {
         firehoseStreamArn = firehose.createDeliveryStream(CreateDeliveryStreamRequest.builder()
                         .deliveryStreamName(firehoseStreamName)
                         .s3DestinationConfiguration(S3DestinationConfiguration.builder()
-                                .bucketARN("arn:aws:s3:::" + firehoseBucket)
-                                .roleARN("arn:aws:iam::000000000000:role/sdk-evt-fh-role")
+                                .bucketARN(TestFixtures.globalArn("s3", "", firehoseBucket))
+                                .roleARN(TestFixtures.globalArn("iam", "000000000000", "role/sdk-evt-fh-role"))
                                 .prefix(firehoseStreamName + "/")
                                 // Floci does not enforce AWS's 60s minimum interval, which keeps
                                 // the delivery wait short (would need 60+ against real AWS).
@@ -219,7 +214,7 @@ class SesEventPublishingTest {
                         .enabled(true)
                         .matchingEventTypes(EventType.SEND)
                         .kinesisFirehoseDestination(KinesisFirehoseDestination.builder()
-                                .iamRoleArn("arn:aws:iam::000000000000:role/sdk-evt-fh-role")
+                                .iamRoleArn(TestFixtures.globalArn("iam", "000000000000", "role/sdk-evt-fh-role"))
                                 .deliveryStreamArn(firehoseStreamArn)
                                 .build())
                         .build())
@@ -244,7 +239,7 @@ class SesEventPublishingTest {
                 .rule(ebRuleName)
                 .targets(Target.builder().id("1").arn(ebQueueArn).build())
                 .build());
-        ebBusArn = "arn:aws:events:us-east-1:000000000000:event-bus/default";
+        ebBusArn = TestFixtures.arn("events", "000000000000", "event-bus/default");
         ses.createConfigurationSet(CreateConfigurationSetRequest.builder()
                 .configurationSetName(csNameEB)
                 .build());
@@ -517,7 +512,7 @@ class SesEventPublishingTest {
             if (!listed.contents().isEmpty()) {
                 break;
             }
-            Thread.sleep(2_000);
+            Thread.sleep(TestFixtures.isRealAws() ? 2_000 : 250);
         }
         assertThat(listed.contents())
                 .as("Firehose should deliver the buffered events within IntervalInSeconds")
@@ -673,7 +668,8 @@ class SesEventPublishingTest {
             if (r.messages().isEmpty()) {
                 continue;
             }
-            for (var m : r.messages()) {
+            // Message is imported from sesv2.
+            for (software.amazon.awssdk.services.sqs.model.Message m : r.messages()) {
                 events.add(MAPPER.readTree(m.body()));
             }
             List<DeleteMessageBatchRequestEntry> entries = new ArrayList<>();
@@ -689,6 +685,29 @@ class SesEventPublishingTest {
                     .build());
         }
         return events;
+    }
+
+    @Test
+    @Order(9)
+    @DisplayName("suppressionlist@simulator publishes a General bounce, not a Reject")
+    void sendToSuppressionListSimulator_publishesABounce() throws Exception {
+        drainQueue();
+        sendEmailTo("suppressionlist@simulator.amazonses.com");
+        List<JsonNode> events = receiveEvents(2);
+
+        assertThat(events).hasSize(2);
+        assertThat(events).noneMatch(e -> "Reject".equals(e.path("eventType").asText()));
+        JsonNode bounce = events.stream()
+                .filter(e -> "Bounce".equals(e.path("eventType").asText()))
+                .findFirst().orElseThrow();
+        // Verified against real SES on 2026-09-21: an ordinary hard bounce whose diagnostic names
+        // the suppression.
+        assertThat(bounce.path("bounce").path("bounceType").asText()).isEqualTo("Permanent");
+        assertThat(bounce.path("bounce").path("bounceSubType").asText()).isEqualTo("General");
+        JsonNode recipient = bounce.path("bounce").path("bouncedRecipients").get(0);
+        assertThat(recipient.path("emailAddress").asText()).isEqualTo("suppressionlist@simulator.amazonses.com");
+        assertThat(recipient.path("status").asText()).isEqualTo("5.1.1");
+        assertThat(recipient.path("diagnosticCode").asText()).contains("suppressed address: suppressionlist@");
     }
 
     private void sendEmailTo(String to) {
@@ -742,7 +761,7 @@ class SesEventPublishingTest {
             if (r.messages().isEmpty()) {
                 continue;
             }
-            for (var m : r.messages()) {
+            for (software.amazon.awssdk.services.sqs.model.Message m : r.messages()) {
                 JsonNode wrapper = MAPPER.readTree(m.body());
                 JsonNode event = MAPPER.readTree(wrapper.path("Message").asText());
                 events.add(event);

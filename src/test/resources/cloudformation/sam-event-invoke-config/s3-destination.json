@@ -1,0 +1,69 @@
+{
+  "expected": {
+    "FnEventInvokeConfig": {
+      "Properties": {
+        "DestinationConfig": {
+          "OnFailure": {
+            "Destination": "arn:aws:s3:::failures"
+          }
+        },
+        "FunctionName": {
+          "Ref": "Fn"
+        },
+        "Qualifier": "$LATEST"
+      },
+      "Type": "AWS::Lambda::EventInvokeConfig"
+    },
+    "FnRole": {
+      "Policies": [
+        {
+          "PolicyDocument": {
+            "Statement": [
+              {
+                "Action": "s3:PutObject",
+                "Effect": "Allow",
+                "Resource": {
+                  "Fn::Join": [
+                    "/",
+                    [
+                      "arn:aws:s3:::failures",
+                      "*"
+                    ]
+                  ]
+                }
+              },
+              {
+                "Action": "s3:ListBucket",
+                "Effect": "Allow",
+                "Resource": "arn:aws:s3:::failures"
+              }
+            ]
+          },
+          "PolicyName": "FnEventInvokeConfigOnFailureS3Policy"
+        }
+      ],
+      "Type": "AWS::IAM::Role"
+    }
+  },
+  "input": {
+    "Resources": {
+      "Fn": {
+        "Properties": {
+          "CodeUri": "s3://b/k",
+          "EventInvokeConfig": {
+            "DestinationConfig": {
+              "OnFailure": {
+                "Destination": "arn:aws:s3:::failures",
+                "Type": "S3Bucket"
+              }
+            }
+          },
+          "Handler": "index.handler",
+          "Runtime": "python3.12"
+        },
+        "Type": "AWS::Serverless::Function"
+      }
+    },
+    "Transform": "AWS::Serverless-2016-10-31"
+  }
+}

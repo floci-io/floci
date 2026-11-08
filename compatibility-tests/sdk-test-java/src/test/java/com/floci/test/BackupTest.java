@@ -429,4 +429,35 @@ class BackupTest {
         assertThatThrownBy(() -> backup.describeBackupVault(r -> r.backupVaultName(VAULT_NAME)))
                 .isInstanceOf(ResourceNotFoundException.class);
     }
+
+    @Test
+    @Order(90)
+    @DisplayName("CreateLogicallyAirGappedBackupVault - DescribeBackupVault reports its type, state and retention")
+    void logicallyAirGappedVaultRoundTrip() {
+        String name = "compat-air-gapped-vault";
+        try {
+            CreateLogicallyAirGappedBackupVaultResponse created = backup.createLogicallyAirGappedBackupVault(r -> r
+                    .backupVaultName(name)
+                    .minRetentionDays(7L)
+                    .maxRetentionDays(30L)
+                    .backupVaultTags(Map.of("env", "compat-test")));
+            assertThat(created.backupVaultName()).isEqualTo(name);
+            assertThat(created.backupVaultArn()).endsWith(":backup-vault:" + name);
+            assertThat(created.creationDate()).isNotNull();
+            assertThat(created.vaultState()).isEqualTo(VaultState.AVAILABLE);
+
+            DescribeBackupVaultResponse described = backup.describeBackupVault(r -> r.backupVaultName(name));
+            assertThat(described.vaultType()).isEqualTo(VaultType.LOGICALLY_AIR_GAPPED_BACKUP_VAULT);
+            assertThat(described.vaultState()).isEqualTo(VaultState.AVAILABLE);
+            assertThat(described.minRetentionDays()).isEqualTo(7L);
+            assertThat(described.maxRetentionDays()).isEqualTo(30L);
+
+            assertThat(backup.listTags(r -> r.resourceArn(created.backupVaultArn())).tags())
+                    .containsEntry("env", "compat-test");
+        } finally {
+            backup.deleteBackupVault(r -> r.backupVaultName(name));
+        }
+        assertThatThrownBy(() -> backup.describeBackupVault(r -> r.backupVaultName(name)))
+                .isInstanceOf(ResourceNotFoundException.class);
+    }
 }

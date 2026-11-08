@@ -7,7 +7,7 @@ import org.junit.jupiter.api.MethodOrderer;
 import org.junit.jupiter.api.Order;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.TestMethodOrder;
-
+import org.junit.jupiter.api.parallel.ResourceLock;
 import software.amazon.awssdk.awscore.exception.AwsServiceException;
 import software.amazon.awssdk.services.ses.SesClient;
 import software.amazon.awssdk.services.ses.model.BulkEmailDestination;
@@ -16,9 +16,9 @@ import software.amazon.awssdk.services.ses.model.DeleteIdentityRequest;
 import software.amazon.awssdk.services.ses.model.DeleteTemplateRequest;
 import software.amazon.awssdk.services.ses.model.GetTemplateRequest;
 import software.amazon.awssdk.services.ses.model.GetTemplateResponse;
+import software.amazon.awssdk.services.ses.model.InvalidRenderingParameterException;
 import software.amazon.awssdk.services.ses.model.ListTemplatesRequest;
 import software.amazon.awssdk.services.ses.model.ListTemplatesResponse;
-import software.amazon.awssdk.services.ses.model.InvalidRenderingParameterException;
 import software.amazon.awssdk.services.ses.model.MissingRenderingAttributeException;
 import software.amazon.awssdk.services.ses.model.SendBulkTemplatedEmailRequest;
 import software.amazon.awssdk.services.ses.model.SendBulkTemplatedEmailResponse;
@@ -29,8 +29,8 @@ import software.amazon.awssdk.services.ses.model.TestRenderTemplateRequest;
 import software.amazon.awssdk.services.ses.model.TestRenderTemplateResponse;
 import software.amazon.awssdk.services.ses.model.UpdateTemplateRequest;
 import software.amazon.awssdk.services.ses.model.VerifyEmailIdentityRequest;
-
 import software.amazon.awssdk.services.sesv2.SesV2Client;
+import software.amazon.awssdk.services.sesv2.model.BadRequestException;
 import software.amazon.awssdk.services.sesv2.model.BulkEmailContent;
 import software.amazon.awssdk.services.sesv2.model.BulkEmailEntry;
 import software.amazon.awssdk.services.sesv2.model.CreateEmailIdentityRequest;
@@ -44,7 +44,6 @@ import software.amazon.awssdk.services.sesv2.model.GetEmailTemplateRequest;
 import software.amazon.awssdk.services.sesv2.model.GetEmailTemplateResponse;
 import software.amazon.awssdk.services.sesv2.model.ListEmailTemplatesRequest;
 import software.amazon.awssdk.services.sesv2.model.ListEmailTemplatesResponse;
-import software.amazon.awssdk.services.sesv2.model.BadRequestException;
 import software.amazon.awssdk.services.sesv2.model.NotFoundException;
 import software.amazon.awssdk.services.sesv2.model.SendBulkEmailRequest;
 import software.amazon.awssdk.services.sesv2.model.SendBulkEmailResponse;
@@ -63,6 +62,7 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
  */
 @DisplayName("SES Email Templates")
 @TestMethodOrder(MethodOrderer.OrderAnnotation.class)
+@ResourceLock("ses-account")
 class SesTemplateTest {
 
     private static SesClient sesV1;
@@ -579,6 +579,7 @@ class SesTemplateTest {
         assertThatThrownBy(() -> sesV1.sendBulkTemplatedEmail(SendBulkTemplatedEmailRequest.builder()
                 .source(v1Sender)
                 .template("sdk-v1-bulk-missing-" + System.currentTimeMillis())
+                .defaultTemplateData("{}")
                 .destinations(BulkEmailDestination.builder()
                         .destination(d -> d.toAddresses("alice@example.com"))
                         .build())

@@ -84,6 +84,8 @@ map as empty.
 |---|---|
 | ACM | `acm:certificate` |
 | Amazon MQ | `mq:broker` |
+| API Gateway | `apigateway:restapis`, `apigateway:restapis/stages`, `apigateway:apikeys`, `apigateway:usageplans`, `apigateway:domainnames` |
+| Bedrock | `bedrock:guardrail` |
 | CloudFormation | `cloudformation:stack` |
 | CloudWatch Logs | `logs:log-group` |
 | Cognito | `cognito-idp:userpool` |
@@ -113,9 +115,14 @@ map as empty.
 | SSM | `ssm:parameter` |
 | Step Functions | `states:statemachine` |
 
-API Gateway and Route 53 are not discoverable yet, each for its own reason: `RestApi` carries no
-Region, and `Route53Service` resolves no account id — a hosted zone's ARN has neither. Both are
-waiting on a field, not on new query support.
+Lambda MicroVM images (`lambda:microvm-image`) and network connectors
+(`lambda:network-connector`) are discoverable through `Search`, `ListResources` and the Resource
+Groups Tagging API, but `ListSupportedResourceTypes` does not list them, because AWS does not
+advertise them.
+
+API Gateway ARNs carry no account; its resources report the calling account as their owner.
+Route 53 is not discoverable yet: `Route53Service` resolves no account id, and a hosted zone's ARN
+has neither a Region nor an account. It is waiting on a field, not on new query support.
 
 ## Query syntax
 

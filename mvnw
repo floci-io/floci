@@ -177,6 +177,8 @@ verbose "Downloading to: $TMP_DOWNLOAD_DIR/$distributionUrlName"
 
 # select .zip or .tar.gz
 if ! command -v unzip >/dev/null; then
+  # distributionSha256Sum is the checksum of the .zip, so the .tar.gz fallback cannot be verified
+  [ -z "${distributionSha256Sum-}" ] || die "unzip is required to install Maven because distributionSha256Sum is set in maven-wrapper.properties. Please install unzip."
   distributionUrl="${distributionUrl%.zip}.tar.gz"
   distributionUrlName="${distributionUrl##*/}"
 fi

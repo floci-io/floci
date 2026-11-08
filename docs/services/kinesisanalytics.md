@@ -32,6 +32,10 @@ state backed by a live Flink job on Floci's Docker network.
 
 ## How it works
 
+Application names are scoped by the signing region. The same name can exist in multiple regions,
+and list, describe, update, start, stop, snapshot, and delete operations only access the requested
+region. Application ARNs use that same request region.
+
 1. **CreateApplication**: registers the application in the `READY` state and stores its
    `ApplicationConfiguration` (the S3 location of the Flink JAR and the parallelism). No container is
    started yet — this mirrors AWS, where a freshly created application is not running.

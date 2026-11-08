@@ -73,8 +73,8 @@ volumes:
 !!! warning "Docker socket"
     Lambda, ElastiCache, RDS, OpenSearch, and MSK require access to the Docker socket (`/var/run/docker.sock`) to spawn and manage containers. If you don't use these services, you can omit that volume.
 
-!!! note "ECR port"
-    ECR is backed by a `registry:2` sidecar container (`floci-ecr-registry`) that Floci starts and manages. That container binds its own host port (default `5100`) directly — do not add `5100-5199` to the Floci service's `ports` list. See [Ports Reference → ECR](./ports.md#ports-51005199--ecr-registry).
+!!! note "ECR data plane"
+    ECR uses Floci's `4566` listener for Docker push and pull. The `registry:2` sidecar has a loopback-only implementation port; no ECR port range belongs in the Floci service's `ports` list. See [Ports Reference: ECR](./ports.md#ports-51005199--ecr-registry-backing-ports).
 
 ## Multi-container Networking
 
@@ -173,7 +173,7 @@ The most frequently set variables when running Floci as a Docker image:
 | `FLOCI_STORAGE_MODE` | `memory` | `memory`, `persistent`, `hybrid`, or `wal` |
 | `FLOCI_STORAGE_PERSISTENT_PATH` | `./data` | Directory for persistent storage |
 | `FLOCI_SERVICES_DOCKER_NETWORK` | _(none)_ | Docker network for spawned containers (Lambda, ElastiCache, RDS, OpenSearch, MSK) |
-| `FLOCI_AUTH_VALIDATE_SIGNATURES` | `false` | Verify S3 presigned URL signatures |
+| `FLOCI_AUTH_VALIDATE_SIGNATURES` | `false` | Verify the SigV4 signature of every signed request, for every service, without evaluating policies |
 | `FLOCI_SERVICES_LAMBDA_EPHEMERAL` | `false` | Remove Lambda containers after each invocation |
 
 For the complete list of every `FLOCI_*` variable, see [Environment Variables Reference](./environment-variables.md).

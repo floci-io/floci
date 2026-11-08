@@ -17,15 +17,15 @@ import software.amazon.awssdk.services.ssm.model.GetParameterHistoryRequest;
 import software.amazon.awssdk.services.ssm.model.GetParameterHistoryResponse;
 import software.amazon.awssdk.services.ssm.model.GetParameterRequest;
 import software.amazon.awssdk.services.ssm.model.GetParameterResponse;
-import software.amazon.awssdk.services.ssm.model.ListCommandInvocationsRequest;
-import software.amazon.awssdk.services.ssm.model.ListCommandInvocationsResponse;
-import software.amazon.awssdk.services.ssm.model.ListCommandsRequest;
-import software.amazon.awssdk.services.ssm.model.ListCommandsResponse;
 import software.amazon.awssdk.services.ssm.model.GetParametersByPathRequest;
 import software.amazon.awssdk.services.ssm.model.GetParametersByPathResponse;
 import software.amazon.awssdk.services.ssm.model.GetParametersRequest;
 import software.amazon.awssdk.services.ssm.model.GetParametersResponse;
 import software.amazon.awssdk.services.ssm.model.LabelParameterVersionRequest;
+import software.amazon.awssdk.services.ssm.model.ListCommandInvocationsRequest;
+import software.amazon.awssdk.services.ssm.model.ListCommandInvocationsResponse;
+import software.amazon.awssdk.services.ssm.model.ListCommandsRequest;
+import software.amazon.awssdk.services.ssm.model.ListCommandsResponse;
 import software.amazon.awssdk.services.ssm.model.ListTagsForResourceRequest;
 import software.amazon.awssdk.services.ssm.model.ListTagsForResourceResponse;
 import software.amazon.awssdk.services.ssm.model.ParameterNotFoundException;
@@ -33,14 +33,18 @@ import software.amazon.awssdk.services.ssm.model.ParameterType;
 import software.amazon.awssdk.services.ssm.model.PutParameterRequest;
 import software.amazon.awssdk.services.ssm.model.PutParameterResponse;
 import software.amazon.awssdk.services.ssm.model.RemoveTagsFromResourceRequest;
+import software.amazon.awssdk.services.ssm.model.ResourceTypeForTagging;
 import software.amazon.awssdk.services.ssm.model.SendCommandRequest;
 import software.amazon.awssdk.services.ssm.model.SendCommandResponse;
 import software.amazon.awssdk.services.ssm.model.SsmException;
-
-import static org.assertj.core.api.Assertions.*;
+import software.amazon.awssdk.services.ssm.model.UnlabelParameterVersionRequest;
+import software.amazon.awssdk.services.ssm.model.UnlabelParameterVersionResponse;
 
 import java.util.List;
 import java.util.Map;
+import java.util.UUID;
+
+import static org.assertj.core.api.Assertions.*;
 
 @DisplayName("SSM Parameter Store")
 @TestMethodOrder(MethodOrderer.OrderAnnotation.class)
@@ -107,6 +111,38 @@ class SsmTest {
                 .parameterVersion(1L)
                 .build());
         // No exception means success
+    }
+
+    @Test
+    void unlabelParameterVersion() {
+        String name = "/sdk-test/unlabel";
+        ssm.putParameter(PutParameterRequest.builder()
+                .name(name)
+                .value("v1")
+                .type(ParameterType.STRING)
+                .overwrite(true)
+                .build());
+        try {
+            ssm.labelParameterVersion(LabelParameterVersionRequest.builder()
+                    .name(name)
+                    .labels("prod", "stable")
+                    .parameterVersion(1L)
+                    .build());
+
+            UnlabelParameterVersionResponse response = ssm.unlabelParameterVersion(
+                    UnlabelParameterVersionRequest.builder()
+                            .name(name)
+                            .parameterVersion(1L)
+                            .labels("prod", "missing")
+                            .build());
+
+            assertThat(response.removedLabels()).containsExactly("prod");
+            assertThat(response.invalidLabels()).containsExactly("missing");
+            assertThat(ssm.getParameterHistory(GetParameterHistoryRequest.builder().name(name).build())
+                    .parameters().get(0).labels()).containsExactly("stable");
+        } finally {
+            ssm.deleteParameter(DeleteParameterRequest.builder().name(name).build());
+        }
     }
 
     @Test
@@ -329,5 +365,66 @@ class SsmTest {
                         .instanceId(COMMAND_INSTANCE_ID)
                         .build());
         assertThat(invocation.status()).isEqualTo(CommandInvocationStatus.CANCELLED);
+    }
+
+    @Test
+    @Order(17)
+    void topLevelParameterArnHasParameterSlashAndAddressesTags() {
+        String name = "sdk-test-arn-" + System.nanoTime();
+        ssm.putParameter(PutParameterRequest.builder()
+                .name(name)
+                .value("v")
+                .type(ParameterType.STRING)
+                .build());
+        try {
+            String arn = ssm.getParameter(GetParameterRequest.builder().name(name).build()).parameter().arn();
+            assertThat(arn).endsWith(":parameter/" + name);
+
+            ssm.addTagsToResource(AddTagsToResourceRequest.builder()
+                    .resourceType(ResourceTypeForTagging.PARAMETER)
+                    .resourceId(arn)
+                    .tags(tag -> tag.key("env").value("dev"))
+                    .build());
+            ListTagsForResourceResponse tags = ssm.listTagsForResource(ListTagsForResourceRequest.builder()
+                    .resourceType(ResourceTypeForTagging.PARAMETER)
+                    .resourceId(arn)
+                    .build());
+            assertThat(tags.tagList())
+                    .singleElement()
+                    .satisfies(tag -> {
+                        assertThat(tag.key()).isEqualTo("env");
+                        assertThat(tag.value()).isEqualTo("dev");
+                    });
+        } finally {
+            ssm.deleteParameter(DeleteParameterRequest.builder().name(name).build());
+        }
+    }
+
+    @Test
+    void paginatorsFollowNextTokenForPathAndHistory() {
+        String path = "/sdk-test/paging-" + UUID.randomUUID();
+        List<String> names = List.of(path + "/p1", path + "/p2", path + "/p3", path + "/p4", path + "/p5");
+        try {
+            names.forEach(name -> ssm.putParameter(PutParameterRequest.builder()
+                    .name(name).value("v1").type(ParameterType.STRING).overwrite(true).build()));
+            for (int version = 2; version <= 3; version++) {
+                ssm.putParameter(PutParameterRequest.builder()
+                        .name(names.get(0)).value("v" + version).type(ParameterType.STRING).overwrite(true).build());
+            }
+
+            List<GetParametersByPathResponse> pathPages = ssm.getParametersByPathPaginator(
+                    GetParametersByPathRequest.builder().path(path).maxResults(2).build()).stream().toList();
+            assertThat(pathPages).hasSize(3).allSatisfy(page -> assertThat(page.parameters()).hasSizeLessThanOrEqualTo(2));
+            assertThat(pathPages.stream().flatMap(page -> page.parameters().stream()).map(p -> p.name()).toList())
+                    .containsExactlyInAnyOrderElementsOf(names);
+
+            List<GetParameterHistoryResponse> historyPages = ssm.getParameterHistoryPaginator(
+                    GetParameterHistoryRequest.builder().name(names.get(0)).maxResults(1).build()).stream().toList();
+            assertThat(historyPages).hasSize(3).allSatisfy(page -> assertThat(page.parameters()).hasSize(1));
+            assertThat(historyPages.stream().flatMap(page -> page.parameters().stream()).map(p -> p.version())
+                    .toList()).containsExactly(1L, 2L, 3L);
+        } finally {
+            ssm.deleteParameters(DeleteParametersRequest.builder().names(names).build());
+        }
     }
 }

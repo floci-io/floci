@@ -16,8 +16,8 @@
         <maven.compiler.source>17</maven.compiler.source>
         <maven.compiler.target>17</maven.compiler.target>
         <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
-        <aws.sdk.version>2.52.0</aws.sdk.version>
-        <awsjavasdk.version>2.52.0</awsjavasdk.version>
+        <aws.sdk.version>2.55.11</aws.sdk.version>
+        <awsjavasdk.version>2.55.11</awsjavasdk.version>
         <jackson.version>2.18.8</jackson.version>
         <kafka.clients.version>3.9.2</kafka.clients.version>
         <netty.version>4.1.135.Final</netty.version>
@@ -74,6 +74,14 @@
     <dependencies>
         <dependency>
             <groupId>software.amazon.awssdk</groupId>
+            <artifactId>quicksight</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>software.amazon.awssdk</groupId>
+            <artifactId>servicequotas</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>software.amazon.awssdk</groupId>
             <artifactId>acm</artifactId>
         </dependency>
         <dependency>
@@ -110,6 +118,10 @@
         </dependency>
         <dependency>
             <groupId>software.amazon.awssdk</groupId>
+            <artifactId>redshiftserverless</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>software.amazon.awssdk</groupId>
             <artifactId>sns</artifactId>
         </dependency>
         <dependency>
@@ -126,6 +138,10 @@
         </dependency>
         <dependency>
             <groupId>software.amazon.awssdk</groupId>
+            <artifactId>lambdaweb</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>software.amazon.awssdk</groupId>
             <artifactId>apigateway</artifactId>
         </dependency>
         <dependency>
@@ -139,6 +155,14 @@
         <dependency>
             <groupId>software.amazon.awssdk</groupId>
             <artifactId>kms</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>software.amazon.awssdk</groupId>
+            <artifactId>paymentcryptography</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>software.amazon.awssdk</groupId>
+            <artifactId>paymentcryptographydata</artifactId>
         </dependency>
         <dependency>
             <groupId>software.amazon.awssdk</groupId>
@@ -162,6 +186,10 @@
         </dependency>
         <dependency>
             <groupId>software.amazon.awssdk</groupId>
+            <artifactId>transfer</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>software.amazon.awssdk</groupId>
             <artifactId>kafka</artifactId>
         </dependency>
         <dependency>
@@ -179,6 +207,10 @@
         <dependency>
             <groupId>software.amazon.awssdk</groupId>
             <artifactId>glue</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>software.amazon.awssdk</groupId>
+            <artifactId>resourcegroups</artifactId>
         </dependency>
         <dependency>
             <groupId>software.amazon.awssdk</groupId>
@@ -221,12 +253,26 @@
         </dependency>
         <dependency>
             <groupId>software.amazon.awssdk</groupId>
+            <artifactId>dsql</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>software.amazon.awssdk</groupId>
             <artifactId>neptune</artifactId>
+        </dependency>
+        <!-- DMS management client -->
+        <dependency>
+            <groupId>software.amazon.awssdk</groupId>
+            <artifactId>databasemigration</artifactId>
         </dependency>
         <!-- EventBridge client -->
         <dependency>
             <groupId>software.amazon.awssdk</groupId>
             <artifactId>eventbridge</artifactId>
+        </dependency>
+        <!-- EventBridge V2 client -->
+        <dependency>
+            <groupId>software.amazon.awssdk</groupId>
+            <artifactId>eventbridgev2</artifactId>
         </dependency>
         <!-- CloudHSM v2 client -->
         <dependency>
@@ -337,6 +383,11 @@
             <groupId>software.amazon.awssdk</groupId>
             <artifactId>emr</artifactId>
         </dependency>
+        <!-- EMR Serverless client -->
+        <dependency>
+            <groupId>software.amazon.awssdk</groupId>
+            <artifactId>emrserverless</artifactId>
+        </dependency>
         <!-- WAF v2 client -->
         <dependency>
             <groupId>software.amazon.awssdk</groupId>
@@ -375,6 +426,11 @@
         <dependency>
             <groupId>software.amazon.awssdk</groupId>
             <artifactId>guardduty</artifactId>
+        </dependency>
+        <!-- CodeArtifact client -->
+        <dependency>
+            <groupId>software.amazon.awssdk</groupId>
+            <artifactId>codeartifact</artifactId>
         </dependency>
         <!-- AWS Resource Access Manager client -->
         <dependency>
@@ -463,6 +519,11 @@
             <groupId>software.amazon.awssdk</groupId>
             <artifactId>elasticloadbalancingv2</artifactId>
         </dependency>
+        <!-- Route 53 Resolver client -->
+        <dependency>
+            <groupId>software.amazon.awssdk</groupId>
+            <artifactId>route53resolver</artifactId>
+        </dependency>
         <!-- Global Accelerator client -->
         <dependency>
             <groupId>software.amazon.awssdk</groupId>
@@ -492,6 +553,16 @@
             <groupId>software.amazon.awssdk</groupId>
             <artifactId>codebuild</artifactId>
         </dependency>
+        <!-- SageMaker client -->
+        <dependency>
+            <groupId>software.amazon.awssdk</groupId>
+            <artifactId>sagemaker</artifactId>
+        </dependency>
+        <!-- SageMaker Runtime client -->
+        <dependency>
+            <groupId>software.amazon.awssdk</groupId>
+            <artifactId>sagemakerruntime</artifactId>
+        </dependency>
         <!-- CodeDeploy client -->
         <dependency>
             <groupId>software.amazon.awssdk</groupId>
@@ -511,6 +582,21 @@
         <dependency>
             <groupId>software.amazon.awssdk</groupId>
             <artifactId>resourceexplorer2</artifactId>
+        </dependency>
+        <!-- CloudWatch OAM client -->
+        <dependency>
+            <groupId>software.amazon.awssdk</groupId>
+            <artifactId>oam</artifactId>
+        </dependency>
+        <!-- BCM Pricing Calculator client -->
+        <dependency>
+            <groupId>software.amazon.awssdk</groupId>
+            <artifactId>bcmpricingcalculator</artifactId>
+        </dependency>
+        <!-- Timestream for InfluxDB client -->
+        <dependency>
+            <groupId>software.amazon.awssdk</groupId>
+            <artifactId>timestreaminfluxdb</artifactId>
         </dependency>
         <!-- SSO credential support (needed for FLOCI_TARGET=aws with SSO profiles) -->
         <dependency>
@@ -560,6 +646,11 @@
             <groupId>software.amazon.awssdk</groupId>
             <artifactId>appintegrations</artifactId>
         </dependency>
+        <!-- Amazon Data Lifecycle Manager client -->
+        <dependency>
+            <groupId>software.amazon.awssdk</groupId>
+            <artifactId>dlm</artifactId>
+        </dependency>
         <!-- DataSync client -->
         <dependency>
             <groupId>software.amazon.awssdk</groupId>
@@ -570,6 +661,11 @@
             <groupId>org.postgresql</groupId>
             <artifactId>postgresql</artifactId>
             <version>42.7.11</version>
+        </dependency>
+        <dependency>
+            <groupId>software.amazon.jdbc</groupId>
+            <artifactId>aws-advanced-jdbc-wrapper</artifactId>
+            <version>4.5.0</version>
         </dependency>
         <dependency>
             <groupId>com.mysql</groupId>
@@ -611,6 +707,20 @@
             <groupId>org.bouncycastle</groupId>
             <artifactId>bcpkix-jdk18on</artifactId>
             <version>1.84</version>
+            <scope>test</scope>
+        </dependency>
+        <!-- MQTT 3.1.1 and MQTT 5 clients for the IoT custom-authorizer WebSocket tests,
+             the versions the emulator module itself tests with -->
+        <dependency>
+            <groupId>org.eclipse.paho</groupId>
+            <artifactId>org.eclipse.paho.client.mqttv3</artifactId>
+            <version>1.2.5</version>
+            <scope>test</scope>
+        </dependency>
+        <dependency>
+            <groupId>org.eclipse.paho</groupId>
+            <artifactId>org.eclipse.paho.mqttv5.client</artifactId>
+            <version>1.2.5</version>
             <scope>test</scope>
         </dependency>
         <!-- Decodes the Snappy variants Firehose delivers to S3 (issue #2328).
