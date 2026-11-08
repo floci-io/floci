@@ -27,6 +27,7 @@ import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.doReturn;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.spy;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
@@ -48,7 +49,7 @@ class AccountContextFilterTest {
     @BeforeEach
     void setUp() {
         accountResolver = new AccountResolver(DEFAULT_ACCOUNT);
-        regionResolver = new RegionResolver(DEFAULT_REGION, DEFAULT_ACCOUNT);
+        regionResolver = spy(new RegionResolver(DEFAULT_REGION, DEFAULT_ACCOUNT));
         requestContext = new RequestContext();
         sessionAccounts = new HashMap<>();
         allowUnknownRegions = false;
@@ -154,6 +155,15 @@ class AccountContextFilterTest {
         filter.filter(ctx);
         assertEquals("000000000001", requestContext.getAccountId());
         assertEquals("us-west-2", requestContext.getRegion());
+    }
+
+    @Test
+    void aHeaderWithoutAColonIsNotParsedForAnAmbiguousRegion() {
+        filter.filter(mockContext(
+                "AWS4-HMAC-SHA256 Credential=AKID/20261015/us-west-2/sqs/aws4_request, SignedHeaders=host, Signature=abc",
+                null));
+        assertEquals("us-west-2", requestContext.getRegion());
+        verify(regionResolver, never()).resolveRegionFromAuthOrNull(any());
     }
 
     @Test
