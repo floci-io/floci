@@ -29,6 +29,9 @@ class EksListClustersPaginationIntegrationTest {
 
     private static final String JSON = "application/json";
     private static final List<String> CLUSTERS = List.of("page-it-a", "page-it-b", "page-it-c");
+    private static final String OTHER_ACCOUNT_AUTH =
+            "AWS4-HMAC-SHA256 Credential=111111111111/20260101/us-east-1/eks/aws4_request, "
+                    + "SignedHeaders=host, Signature=abc";
 
     @Test
     @Order(1)
@@ -38,6 +41,32 @@ class EksListClustersPaginationIntegrationTest {
                     .body("{\"name\":\"" + name + "\",\"roleArn\":\"arn:aws:iam::000000000000:role/eks-role\","
                             + "\"version\":\"1.29\"}")
                     .when().post("/clusters")
+                    .then().statusCode(200);
+        }
+    }
+
+    @Test
+    @Order(6)
+    void listClustersRefusesATokenIssuedToAnotherAccount() {
+        String token = given()
+                .queryParam("maxResults", 1)
+                .when().get("/clusters")
+                .then().statusCode(200)
+                .extract().path("nextToken");
+        given().header("Authorization", OTHER_ACCOUNT_AUTH).contentType(JSON)
+                .body("{\"name\":\"aaa-other-account\",\"roleArn\":\"arn:aws:iam::111111111111:role/eks-role\","
+                        + "\"version\":\"1.29\"}")
+                .when().post("/clusters")
+                .then().statusCode(200);
+        try {
+            given().header("Authorization", OTHER_ACCOUNT_AUTH)
+                    .queryParam("nextToken", token)
+                    .when().get("/clusters")
+                    .then().statusCode(400)
+                    .body("__type", equalTo("InvalidParameterException"));
+        } finally {
+            given().header("Authorization", OTHER_ACCOUNT_AUTH)
+                    .when().delete("/clusters/aaa-other-account")
                     .then().statusCode(200);
         }
     }
@@ -76,7 +105,7 @@ class EksListClustersPaginationIntegrationTest {
     }
 
     @Test
-    @Order(2)
+    @Order(3)
     void listClustersWithoutMaxResultsReturnsEveryClusterWithoutAToken() {
         given()
                 .when().get("/clusters")
@@ -86,7 +115,7 @@ class EksListClustersPaginationIntegrationTest {
     }
 
     @ParameterizedTest
-    @Order(2)
+    @Order(4)
     @ValueSource(ints = {0, 101})
     void listClustersRefusesAMaxResultsOutsideOneToOneHundred(int maxResults) {
         given()
@@ -97,7 +126,7 @@ class EksListClustersPaginationIntegrationTest {
     }
 
     @Test
-    @Order(2)
+    @Order(5)
     void listClustersRefusesAnUnreadableToken() {
         given()
                 .queryParam("nextToken", "not-a-token")

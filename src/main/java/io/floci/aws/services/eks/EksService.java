@@ -867,7 +867,7 @@ public class EksService implements TagHandler, ResourceProvider, Ec2InstanceLaun
             throw new AwsException("InvalidParameterException", "maxResults must be between 1 and 100", 400);
         }
         List<String> names = listClusters().stream().sorted().toList();
-        return Pagination.paginate(names, name -> name, limit, nextToken, "clusters",
+        return Pagination.paginate(names, name -> name, limit, nextToken, "clusters:" + regionResolver.getAccountId(),
                 token -> new AwsException("InvalidParameterException", "Invalid nextToken", 400));
     }
 
