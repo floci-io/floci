@@ -1,5 +1,8 @@
 package io.floci.aws.services.ecs;
 
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.floci.aws.config.EmulatorConfig;
 import io.floci.aws.core.common.RegionResolver;
 import io.floci.aws.services.ecs.container.EcsContainerManager;
@@ -7,6 +10,7 @@ import io.floci.aws.services.ecs.container.EcsTaskHandle;
 import io.floci.aws.services.ecs.model.AwsVpcConfiguration;
 import io.floci.aws.services.ecs.model.Container;
 import io.floci.aws.services.ecs.model.ContainerDefinition;
+import io.floci.aws.services.ecs.model.EcsCluster;
 import io.floci.aws.services.ecs.model.EcsTask;
 import io.floci.aws.services.ecs.model.LaunchType;
 import io.floci.aws.services.ecs.model.ManagedAgent;
@@ -22,6 +26,7 @@ import java.time.Duration;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicReference;
@@ -114,20 +119,44 @@ class EcsRunTaskAsyncLaunchServiceTest {
         vpc.setSubnets(List.of("subnet-12345678"));
         NetworkConfiguration network = new NetworkConfiguration();
         network.setAwsvpcConfiguration(vpc);
+        CountDownLatch monitorHeld = new CountDownLatch(1);
+        CountDownLatch releaseMonitor = new CountDownLatch(1);
+        // Holds the new task's monitor so its launch cannot move it past PROVISIONING until released.
+        doAnswer(invocation -> {
+            EcsTask live = invocation.getArgument(0);
+            new Thread(() -> {
+                synchronized (live) {
+                    monitorHeld.countDown();
+                    try {
+                        releaseMonitor.await(5, TimeUnit.SECONDS);
+                    } catch (InterruptedException e) {
+                        Thread.currentThread().interrupt();
+                    }
+                }
+            }).start();
+            assertTrue(monitorHeld.await(5, TimeUnit.SECONDS));
+            return null;
+        }).when(containerManager).attachTaskNetwork(any(), any(), anyString());
 
         EcsTask response = assertTimeoutPreemptively(Duration.ofSeconds(2), () -> service.runTask(
                 null, "vpc", 1, LaunchType.FARGATE, null, null, List.of(), network, REGION).getFirst());
 
         assertEquals("PROVISIONING", response.getLastStatus());
         assertEquals("PRECREATED", response.getAttachmentStatus());
+        assertEquals("PROVISIONING", describe(service, response).getLastStatus());
+        // ECS counts a task as pending while it is PROVISIONING as well as PENDING.
+        assertPendingCounts(service, 1);
+        releaseMonitor.countDown();
         assertTrue(startEntered.await(5, TimeUnit.SECONDS));
         EcsTask launching = describe(service, response);
         assertEquals("PENDING", launching.getLastStatus());
         assertEquals("ATTACHED", launching.getAttachmentStatus());
         assertTrue(launching.getVersion() > response.getVersion());
+        assertPendingCounts(service, 1);
 
         releaseStart.countDown();
         await().atMost(LAUNCH_BUDGET).until(() -> "RUNNING".equals(describe(service, response).getLastStatus()));
+        assertPendingCounts(service, 0);
     }
 
     @Test
@@ -370,6 +399,21 @@ class EcsRunTaskAsyncLaunchServiceTest {
 
     private static int runningTasksCount(EcsService service) {
         return service.describeClusters(List.of("default"), REGION).getFirst().getRunningTasksCount();
+    }
+
+    /** DescribeClusters' pendingTasksCount and its Fargate statistic, as rendered, which must agree. */
+    private static void assertPendingCounts(EcsService service, long expected) {
+        EcsCluster cluster = service.describeClusters(List.of("default"), REGION).getFirst();
+        ObjectNode rendered = new EcsResponseWriter(service, new ObjectMapper())
+                .clusterNode(cluster, Set.of("STATISTICS"));
+        assertEquals(expected, rendered.get("pendingTasksCount").asLong());
+        String pendingFargate = null;
+        for (JsonNode statistic : rendered.get("statistics")) {
+            if ("pendingFargateTasksCount".equals(statistic.get("name").asText())) {
+                pendingFargate = statistic.get("value").asText();
+            }
+        }
+        assertEquals(String.valueOf(expected), pendingFargate);
     }
 
     private static List<String> containerStatuses(EcsTask task) {

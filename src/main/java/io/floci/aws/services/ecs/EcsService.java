@@ -241,6 +241,9 @@ public class EcsService implements ContainerTeardown, ResourceProvider, Resettab
     private static final String CPU_ARCHITECTURE_ATTRIBUTE = "ecs.cpu-architecture";
     /** The two built-in capacity providers, which place Fargate tasks rather than EC2 ones. */
     private static final Set<String> FARGATE_CAPACITY_PROVIDERS = Set.of("FARGATE", "FARGATE_SPOT");
+    private static final Set<String> RUNNING_TASK_STATUSES = Set.of("RUNNING");
+    /** ECS counts a task as pending from RunTask until it runs, through PROVISIONING and PENDING. */
+    private static final Set<String> PENDING_TASK_STATUSES = Set.of("PROVISIONING", "PENDING");
     /** The bounds the ECS model puts on a capacity provider strategy and on its entries. */
     private static final int MAX_CAPACITY_PROVIDERS_PER_STRATEGY = 20;
     private static final int MAX_CAPACITY_PROVIDER_WEIGHT = 1000;
@@ -825,10 +828,10 @@ public class EcsService implements ContainerTeardown, ResourceProvider, Resettab
                 .filter(s -> clusterArn.equals(s.getClusterArn()))
                 .toList();
         return List.of(
-                statistic("runningEC2TasksCount", countTasks(clusterTasks, "RUNNING", LaunchType.EC2)),
-                statistic("runningFargateTasksCount", countTasks(clusterTasks, "RUNNING", LaunchType.FARGATE)),
-                statistic("pendingEC2TasksCount", countTasks(clusterTasks, "PENDING", LaunchType.EC2)),
-                statistic("pendingFargateTasksCount", countTasks(clusterTasks, "PENDING", LaunchType.FARGATE)),
+                statistic("runningEC2TasksCount", countTasks(clusterTasks, RUNNING_TASK_STATUSES, LaunchType.EC2)),
+                statistic("runningFargateTasksCount", countTasks(clusterTasks, RUNNING_TASK_STATUSES, LaunchType.FARGATE)),
+                statistic("pendingEC2TasksCount", countTasks(clusterTasks, PENDING_TASK_STATUSES, LaunchType.EC2)),
+                statistic("pendingFargateTasksCount", countTasks(clusterTasks, PENDING_TASK_STATUSES, LaunchType.FARGATE)),
                 statistic("activeEC2ServiceCount", countServices(clusterServices, STATUS_ACTIVE, LaunchType.EC2)),
                 statistic("activeFargateServiceCount", countServices(clusterServices, STATUS_ACTIVE, LaunchType.FARGATE)),
                 statistic("drainingEC2ServiceCount", countServices(clusterServices, "DRAINING", LaunchType.EC2)),
@@ -839,9 +842,18 @@ public class EcsService implements ContainerTeardown, ResourceProvider, Resettab
         return new KeyValuePair(name, String.valueOf(value));
     }
 
-    private static long countTasks(List<EcsTask> clusterTasks, String status, LaunchType launchType) {
+    /** DescribeClusters' pendingTasksCount: like ECS, a task still launching counts as pending. */
+    public long pendingTasksCount(EcsCluster cluster) {
+        String clusterArn = cluster.getClusterArn();
+        return tasks.values().stream()
+                .filter(t -> clusterArn.equals(t.getClusterArn()))
+                .filter(t -> PENDING_TASK_STATUSES.contains(t.getLastStatus()))
+                .count();
+    }
+
+    private static long countTasks(List<EcsTask> clusterTasks, Set<String> statuses, LaunchType launchType) {
         return clusterTasks.stream()
-                .filter(t -> status.equals(t.getLastStatus()))
+                .filter(t -> statuses.contains(t.getLastStatus()))
                 .filter(t -> launchType == effectiveLaunchType(t.getLaunchType()))
                 .count();
     }
