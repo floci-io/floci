@@ -17,6 +17,9 @@ client that talks to the control plane does not reach it by accident.
 | `ReEncryptData` | Decrypt under one key and encrypt under another, on `POST /keys/{IncomingKeyIdentifier}/reencrypt` |
 | `GenerateMac` | A MAC of a message under a key, on `POST /mac/generate` |
 | `VerifyMac` | Verify a MAC over a message, on `POST /mac/verify` |
+| `GeneratePinData` | Generate a PIN block and the verification value that goes with it, on `POST /pindata/generate` |
+| `VerifyPinData` | Verify a PIN block against the verification value the issuer holds, on `POST /pindata/verify` |
+| `TranslatePinData` | Re-encipher a PIN block from one key to another, on `POST /pindata/translate` |
 <!-- floci:actions:end -->
 
 ## Emulation Behavior
@@ -40,6 +43,38 @@ client that talks to the control plane does not reach it by accident.
   encrypt arbitrary data, and a key of a MAC usage is not used to encrypt either.
 - **The key's own algorithm is the cipher that runs.** A key of an algorithm this service does
   not cipher with is refused rather than read as bytes it is not.
+- **The PIN operations are the Visa path.** The PIN block is the one of the ISO 9564-1 format
+  the request names: the formats 0 and 3 are eight-byte Triple DES blocks, and the format 4 is
+  a sixteen-byte AES block that binds the PIN to the whole account number rather than to the
+  twelve-digit account field. The blocks are enciphered in ECB mode, which is what the standard
+  defines, and they are not padded. The verification value is the Visa PIN verification value,
+  computed under a key of the `TR31_V2_VISA_PIN_VERIFICATION_KEY` usage, and it is a four-digit
+  verification value. The algorithm's transformed security parameter is sixteen digits: eleven
+  of account number, one of verification key index and four of PIN, so the PIN it is computed
+  over is a four-digit one and a longer PIN has no verification value. A PIN that does not
+  verify fails the request with `VerificationFailedException`, because the answer of a
+  verification has no verdict in it.
+- **A PIN block that is not one the service can read is a different failure.** A block that
+  does not decipher into a PIN field, because the key is another one, the account number is
+  another one, or the block is corrupted, is refused with `ValidationException` and the
+  message the reference uses. A PIN is not translated from one account number to another:
+  `TranslatePinData` refuses a request whose incoming and outgoing `PrimaryAccountNumber`
+  differ, for PCI compliance.
+- **A DUKPT key serial number is the one the Triple DES derivation takes.** The model lets a
+  key serial number be eight, ten or twelve bytes, and the twelve byte one belongs to the AES
+  derivation, which this service does not make; a key serial number of more than ten bytes is
+  refused. The model's DUKPT attributes come in two shapes: the PIN operations take the key
+  serial number and the derivation type, and the translation takes the key serial number, an
+  optional derivation type and an optional key variant. The derivation this path makes is the
+  Triple DES one, so a request that asks for another of the five the model allows is refused,
+  and the PIN key it derives both encrypts and decrypts, so a key variant other than the
+  bidirectional one is refused.
+- **The PIN operations are not the IBM 3624 ones, and the AS2805 translation is not made.** A
+  request that asks for one of them is refused with the error that says so, rather than
+  answered with something of another kind. The EMV PIN change MAC is refused as well: it needs
+  the session key the EMV secure messaging rules define, which this service does not make. It
+  is not one of the actions the service lists as supported. The wrapped-key form of a PIN
+  encryption key is refused too, because the unwrapping is part of the key exchange.
 
 The two-segment paths are moved to an internal prefix for the requests signed for this
 service, so a path-style request for a bucket of that name still reaches S3.

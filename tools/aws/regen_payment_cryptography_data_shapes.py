@@ -26,6 +26,7 @@ MODEL = Path("payment-cryptography-data/2022-02-03")
 OPERATIONS = (
     "EncryptData", "DecryptData", "ReEncryptData",
     "GenerateMac", "VerifyMac",
+    "GeneratePinData", "VerifyPinData", "TranslatePinData", "GenerateMacEmvPinChange",
 )
 
 
