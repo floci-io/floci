@@ -9,6 +9,7 @@ import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
 
 import java.util.List;
+import java.util.Map;
 
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.MatcherAssert.assertThat;
@@ -16,7 +17,9 @@ import static org.hamcrest.Matchers.containsString;
 import static org.hamcrest.Matchers.endsWith;
 import static org.hamcrest.Matchers.equalTo;
 import static org.hamcrest.Matchers.everyItem;
+import static org.hamcrest.Matchers.hasKey;
 import static org.hamcrest.Matchers.hasSize;
+import static org.hamcrest.Matchers.not;
 import static org.hamcrest.Matchers.startsWith;
 
 /**
@@ -211,6 +214,22 @@ class CloudFormationEcsServiceStableIntegrationTest {
                 service.path("services[0].desiredCount"), equalTo(1));
         assertThat(service.path("services[0].networkConfiguration.awsvpcConfiguration.subnets"),
                 equalTo(List.of(subnet)));
+    }
+
+    @Test
+    void updateStack_ecsServiceThatCannotStabilize_isReadBackWithoutTheDeploymentConfigurationItNeverHad() {
+        String name = "cfn-stable-dc-" + Long.toString(System.nanoTime(), 36);
+        String subnet = Ec2Service.defaultSubnetId("us-east-1", "a");
+        stackCall("CreateStack", name, AWSVPC_TEMPLATE.formatted(name, 1, subnet));
+        CfnStackWaits.awaitStatus(name, "CREATE_COMPLETE");
+
+        stackCall("UpdateStack", name, AWSVPC_TEMPLATE.formatted(name, 1, "subnet-does-not-exist")
+                .replace("\"LaunchType\": \"FARGATE\",",
+                        "\"LaunchType\": \"FARGATE\", \"DeploymentConfiguration\": {\"MaximumPercent\": 150},"));
+        CfnStackWaits.awaitStatus(name, "UPDATE_ROLLBACK_COMPLETE");
+
+        Map<String, Object> service = describeService(name).path("services[0]");
+        assertThat(service, not(hasKey("deploymentConfiguration")));
     }
 
     @Test
