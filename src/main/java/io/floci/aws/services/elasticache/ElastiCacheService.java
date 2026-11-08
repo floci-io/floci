@@ -5,6 +5,8 @@ import io.floci.aws.config.EmulatorConfig;
 import io.floci.aws.core.common.AwsArnUtils;
 import io.floci.aws.core.common.AwsException;
 import io.floci.aws.core.common.BackupWindows;
+import io.floci.aws.core.common.PaginatedResult;
+import io.floci.aws.core.common.Pagination;
 import io.floci.aws.core.common.RegionResolver;
 import io.floci.aws.core.resource.ExplorerResource;
 import io.floci.aws.core.resource.ResourceProvider;
@@ -50,6 +52,7 @@ import java.net.UnknownHostException;
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.Collection;
+import java.util.Comparator;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.LinkedHashMap;
@@ -1355,6 +1358,11 @@ public class ElastiCacheService implements ResourceProvider {
      * A cache cluster id names the group it is a member of.
      */
     public ElastiCacheSnapshot createSnapshot(String snapshotName, String groupId, String cacheClusterId) {
+        return createSnapshot(snapshotName, groupId, cacheClusterId, Map.of());
+    }
+
+    public ElastiCacheSnapshot createSnapshot(String snapshotName, String groupId, String cacheClusterId,
+                                              Map<String, String> tags) {
         if (snapshotName == null || snapshotName.isBlank()) {
             throw new AwsException("InvalidParameterValue", "The parameter SnapshotName must be provided.", 400);
         }
@@ -1368,12 +1376,13 @@ public class ElastiCacheService implements ResourceProvider {
         // backend cannot be stopped under the SAVE; the group is read again under it.
         synchronized (lockFor("snapshot:" + snapshotName)) {
             synchronized (lockFor("rg:" + sourceId)) {
-                return createSnapshotOf(snapshotName, getReplicationGroup(sourceId), cacheClusterId);
+                return createSnapshotOf(snapshotName, getReplicationGroup(sourceId), cacheClusterId, tags);
             }
         }
     }
 
-    private ElastiCacheSnapshot createSnapshotOf(String snapshotName, ReplicationGroup group, String cacheClusterId) {
+    private ElastiCacheSnapshot createSnapshotOf(String snapshotName, ReplicationGroup group, String cacheClusterId,
+                                                 Map<String, String> tags) {
         String sourceId = group.getReplicationGroupId();
         if (snapshots.get(snapshotName).isPresent()) {
             throw new AwsException("SnapshotAlreadyExistsFault",
@@ -1414,6 +1423,7 @@ public class ElastiCacheService implements ResourceProvider {
                 "snapshot:" + snapshotName));
         snapshot.setCreatedAt(Instant.now());
         snapshot.setSizeBytes(archive.length() * 3L / 4L);
+        snapshot.setTags(tags != null ? new LinkedHashMap<>(tags) : new LinkedHashMap<>());
         snapshotArchives.put(snapshotName, archive);
         snapshots.put(snapshotName, snapshot);
         LOG.infov("ElastiCache snapshot {0} of {1} created ({2} bytes)",
@@ -1454,6 +1464,23 @@ public class ElastiCacheService implements ResourceProvider {
     public ElastiCacheSnapshot getSnapshot(String snapshotName) {
         return snapshots.get(snapshotName).orElseThrow(() ->
                 new AwsException("SnapshotNotFoundFault", "Snapshot " + snapshotName + " not found.", 404));
+    }
+
+    /**
+     * A page of {@link #describeSnapshots(String, String, String, String)}, in snapshot name order:
+     * {@code MaxRecords} 20 to 50, 50 when not given, and a {@code Marker} from the previous page.
+     */
+    public PaginatedResult<ElastiCacheSnapshot> describeSnapshots(String snapshotName, String groupId,
+                                                                  String cacheClusterId, String snapshotSource,
+                                                                  Integer maxRecords, String marker) {
+        if (maxRecords != null && (maxRecords < 20 || maxRecords > 50)) {
+            throw new AwsException("InvalidParameterValue", "MaxRecords must be between 20 and 50.", 400);
+        }
+        List<ElastiCacheSnapshot> matching = describeSnapshots(snapshotName, groupId, cacheClusterId, snapshotSource)
+                .stream().sorted(Comparator.comparing(ElastiCacheSnapshot::getSnapshotName)).toList();
+        return Pagination.paginate(matching, ElastiCacheSnapshot::getSnapshotName,
+                maxRecords != null ? maxRecords : 50, marker, "elasticache-snapshots",
+                token -> new AwsException("InvalidParameterValue", "Invalid Marker.", 400));
     }
 
     /** Snapshots matching every one of the name, replication group, cache cluster and source given. */
@@ -2297,6 +2324,7 @@ public class ElastiCacheService implements ResourceProvider {
             case "cluster" -> updateCacheClusterTags(ref, tags);
             case "subnetgroup" -> updateCacheSubnetGroupTags(ref, tags);
             case "parametergroup" -> updateCacheParameterGroupTags(ref, tags);
+            case "snapshot" -> updateSnapshotTags(ref, tags, null);
             default -> throw ElastiCacheTagResourceArn.invalid(resourceArn);
         };
     }
@@ -2311,6 +2339,7 @@ public class ElastiCacheService implements ResourceProvider {
             case "cluster" -> removeCacheClusterTags(ref, tagKeys);
             case "subnetgroup" -> removeCacheSubnetGroupTags(ref, tagKeys);
             case "parametergroup" -> removeCacheParameterGroupTags(ref, tagKeys);
+            case "snapshot" -> updateSnapshotTags(ref, Map.of(), tagKeys);
             default -> throw ElastiCacheTagResourceArn.invalid(resourceArn);
         };
     }
@@ -2428,6 +2457,20 @@ public class ElastiCacheService implements ResourceProvider {
             tagKeys.forEach(group.getTags()::remove);
             subnetGroups.put(ref.id(), group);
             return new LinkedHashMap<>(group.getTags());
+        }
+    }
+
+    /** Adds {@code tags} to a snapshot and removes {@code tagKeys}, under the lock its create and delete take. */
+    private Map<String, String> updateSnapshotTags(TagResourceRef ref, Map<String, String> tags, List<String> tagKeys) {
+        synchronized (lockFor("snapshot:" + ref.id())) {
+            ElastiCacheSnapshot snapshot = getSnapshot(ref.id());
+            requireResourceArn(snapshot.getArn(), ref.resourceArn(), "SnapshotNotFoundFault", ref.id());
+            snapshot.getTags().putAll(tags);
+            if (tagKeys != null) {
+                tagKeys.forEach(snapshot.getTags()::remove);
+            }
+            snapshots.put(ref.id(), snapshot);
+            return new LinkedHashMap<>(snapshot.getTags());
         }
     }
 

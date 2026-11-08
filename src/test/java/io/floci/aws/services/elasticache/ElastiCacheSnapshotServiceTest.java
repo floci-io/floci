@@ -2,6 +2,7 @@ package io.floci.aws.services.elasticache;
 
 import io.floci.aws.config.EmulatorConfig;
 import io.floci.aws.core.common.AwsException;
+import io.floci.aws.core.common.PaginatedResult;
 import io.floci.aws.core.common.RegionResolver;
 import io.floci.aws.core.storage.AccountAwareStorageBackend;
 import io.floci.aws.core.storage.StorageFactory;
@@ -17,6 +18,7 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.mockito.InOrder;
 
+import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.concurrent.ConcurrentHashMap;
@@ -244,6 +246,41 @@ class ElastiCacheSnapshotServiceTest {
         assertEquals("InvalidParameterValue", fault(() -> service.deleteSnapshot(null)));
         assertEquals("SnapshotNotFoundFault",
                 fault(() -> service.createReplicationGroupFromSnapshot(request("restored", null), "snap")));
+    }
+
+    @Test
+    void tagsGivenAtCreateAreKeptAndCanBeChanged() {
+        group("source");
+        String arn = service.createSnapshot("snap", "source", null, Map.of("team", "cache")).getArn();
+
+        assertEquals(Map.of("team", "cache"), service.getSnapshot("snap").getTags());
+        assertEquals(Map.of("team", "cache", "env", "test"),
+                service.addTagsToResource(arn, Map.of("env", "test"), "us-east-1"));
+        assertEquals(Map.of("env", "test"), service.removeTagsFromResource(arn, List.of("team"), "us-east-1"));
+        assertEquals(Map.of("env", "test"), service.getSnapshot("snap").getTags());
+    }
+
+    @Test
+    void describeSnapshotsPagesByNameWithMaxRecordsAndMarker() {
+        group("source");
+        for (int i = 0; i < 25; i++) {
+            service.createSnapshot(String.format("snap-%02d", i), "source", null);
+        }
+
+        PaginatedResult<ElastiCacheSnapshot> first = service.describeSnapshots(null, null, null, null, 20, null);
+        PaginatedResult<ElastiCacheSnapshot> second =
+                service.describeSnapshots(null, null, null, null, 20, first.nextToken());
+
+        assertEquals(20, first.items().size());
+        assertEquals("snap-00", first.items().getFirst().getSnapshotName());
+        assertEquals(List.of("snap-20", "snap-21", "snap-22", "snap-23", "snap-24"),
+                second.items().stream().map(ElastiCacheSnapshot::getSnapshotName).toList());
+        assertNull(second.nextToken());
+        assertEquals(25, service.describeSnapshots(null, null, null, null, null, null).items().size());
+        assertEquals("InvalidParameterValue", fault(() -> service.describeSnapshots(null, null, null, null, 19, null)));
+        assertEquals("InvalidParameterValue", fault(() -> service.describeSnapshots(null, null, null, null, 51, null)));
+        assertEquals("InvalidParameterValue",
+                fault(() -> service.describeSnapshots(null, null, null, null, null, "not-a-marker")));
     }
 
     private void group(String id) {

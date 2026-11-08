@@ -242,11 +242,13 @@ public class ElastiCacheContainerManager {
 
     /**
      * A snapshot of the dataset: the server's RDB file, written by SAVE, base64 encoded so it
-     * travels through the exec's text output.
+     * travels through the exec's text output. The CLI exits 0 on an error reply too, so the reply
+     * itself must be OK: a SAVE refused while a BGSAVE runs would otherwise hand back the previous
+     * RDB file.
      */
     public String snapshot(String containerId) {
-        String[] cmd = {"sh", "-c", CLI + "$C SAVE >/dev/null && base64 -w0"
-                + " \"$($C CONFIG GET dir | sed -n 2p)/$($C CONFIG GET dbfilename | sed -n 2p)\""};
+        String[] cmd = {"sh", "-c", CLI + "R=$($C SAVE); if [ \"$R\" != OK ]; then echo \"SAVE: $R\" >&2; exit 1; fi;"
+                + " base64 -w0 \"$($C CONFIG GET dir | sed -n 2p)/$($C CONFIG GET dbfilename | sed -n 2p)\""};
         ContainerExec.Result result = ContainerExec.run(lifecycleManager.getDockerClient(), containerId, cmd, 300);
         if (result.exitCode() != 0) {
             throw new IllegalStateException("SAVE failed with exit code " + result.exitCode() + ": " + result.stderr());

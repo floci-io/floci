@@ -4,6 +4,8 @@ import com.fasterxml.jackson.annotation.JsonIgnoreProperties;
 import io.quarkus.runtime.annotations.RegisterForReflection;
 
 import java.time.Instant;
+import java.util.LinkedHashMap;
+import java.util.Map;
 
 /**
  * A manual snapshot of a cluster-mode-disabled replication group: the record CreateSnapshot and
@@ -26,6 +28,7 @@ public class ElastiCacheSnapshot {
     private String arn;
     private Instant createdAt;
     private long sizeBytes;
+    private Map<String, String> tags = new LinkedHashMap<>();
 
     public ElastiCacheSnapshot() {
     }
@@ -68,4 +71,7 @@ public class ElastiCacheSnapshot {
 
     public long getSizeBytes() { return sizeBytes; }
     public void setSizeBytes(long sizeBytes) { this.sizeBytes = sizeBytes; }
+
+    public Map<String, String> getTags() { return tags; }
+    public void setTags(Map<String, String> tags) { this.tags = tags != null ? tags : new LinkedHashMap<>(); }
 }
