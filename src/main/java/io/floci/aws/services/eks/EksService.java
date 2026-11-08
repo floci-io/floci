@@ -4,6 +4,8 @@ import com.fasterxml.jackson.core.type.TypeReference;
 import io.floci.aws.config.EmulatorConfig;
 import io.floci.aws.core.common.AwsArnUtils;
 import io.floci.aws.core.common.AwsException;
+import io.floci.aws.core.common.PaginatedResult;
+import io.floci.aws.core.common.Pagination;
 import io.floci.aws.core.common.RegionResolver;
 import io.floci.aws.core.common.RequestScopes;
 import io.floci.aws.core.common.ReservedTags;
@@ -857,6 +859,16 @@ public class EksService implements TagHandler, ResourceProvider, Ec2InstanceLaun
         return storage.scan(k -> true).stream()
                 .map(Cluster::getName)
                 .collect(Collectors.toList());
+    }
+
+    public PaginatedResult<String> listClusters(Integer maxResults, String nextToken) {
+        int limit = maxResults == null ? 100 : maxResults;
+        if (limit < 1 || limit > 100) {
+            throw new AwsException("InvalidParameterException", "maxResults must be between 1 and 100", 400);
+        }
+        List<String> names = listClusters().stream().sorted().toList();
+        return Pagination.paginate(names, name -> name, limit, nextToken, "clusters",
+                token -> new AwsException("InvalidParameterException", "Invalid nextToken", 400));
     }
 
     public Cluster deleteCluster(String name) {
