@@ -38,8 +38,7 @@ class DynamoDbPartiQLHandler {
             case Stmt.Insert s -> executeInsert(s, region);
             case Stmt.Update s -> executeUpdate(s, ctx.returnValuesOnConditionCheckFailure(), region);
             case Stmt.Delete s -> executeDelete(s, ctx.returnValuesOnConditionCheckFailure(), region);
-            case Stmt.Exists ignored -> throw new AwsException("ValidationException",
-                    "EXISTS can only be used in ExecuteTransaction write requests.", 400);
+            case Stmt.Exists ignored -> throw new IllegalStateException("EXISTS is parsed only in a transaction");
         };
     }
 

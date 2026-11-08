@@ -837,6 +837,27 @@ class DynamoDbPartiQLIntegrationTest {
             .statusCode(200);
     }
 
+    @Test
+    @Order(39)
+    void existsOutsideATransactionIsRefusedBeforeItsParametersAreCounted() {
+        String exists = "EXISTS(SELECT * FROM \\\"" + TABLE + "\\\" WHERE pk = ?)";
+        String outside = "EXISTS can only be used in ExecuteTransaction write requests.";
+
+        request("DynamoDB_20120810.ExecuteStatement", "{\"Statement\":\"" + exists + "\"}")
+            .statusCode(400)
+            .body("__type", equalTo("ValidationException"))
+            .body("message", equalTo(outside));
+        request("DynamoDB_20120810.BatchExecuteStatement", "{\"Statements\":[{\"Statement\":\"" + exists + "\"}]}")
+            .statusCode(200)
+            .body("Responses[0].Error.Code", equalTo("ValidationError"))
+            .body("Responses[0].Error.Message", equalTo(outside));
+        request("DynamoDB_20120810.ExecuteTransaction",
+                "{\"TransactStatements\":[{\"Statement\":\"" + exists + "\"}]}")
+            .statusCode(400)
+            .body("message", equalTo("Validation failed in TransactStatements[0]: "
+                    + "Number of parameters in request and statement don't match."));
+    }
+
     private static void putItem(String pk, String attributes) {
         request("DynamoDB_20120810.PutItem", """
                 {"TableName":"%s","Item":{"pk":{"S":"%s"},%s}}

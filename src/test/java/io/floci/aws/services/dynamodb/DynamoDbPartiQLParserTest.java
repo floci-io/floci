@@ -17,6 +17,7 @@ import org.junit.jupiter.params.provider.ValueSource;
 import java.math.BigDecimal;
 import java.util.Arrays;
 import java.util.List;
+import java.util.function.UnaryOperator;
 import java.util.stream.Collectors;
 import java.util.stream.IntStream;
 
@@ -612,8 +613,13 @@ class DynamoDbPartiQLParserTest {
     }
 
     private String statementRefusal(String statement, int parameters) {
+        return statementRefusal(statement, parameters, false);
+    }
+
+    private String statementRefusal(String statement, int parameters, boolean transaction) {
         List<JsonNode> values = IntStream.range(0, parameters).mapToObj(i -> json("{\"S\":\"x\"}")).toList();
-        AwsException e = assertThrows(AwsException.class, () -> DynamoDbPartiQLParser.parse(statement, values));
+        AwsException e = assertThrows(AwsException.class,
+                () -> DynamoDbPartiQLParser.parse(statement, values, transaction));
         return e.getMessage();
     }
 
@@ -935,6 +941,33 @@ class DynamoDbPartiQLParserTest {
                 List.of(json("{\"S\":\"x\"}"), json("{\"S\":\"y\"}"))));
     }
 
+    @ParameterizedTest
+    @CsvSource(delimiter = '|', quoteCharacter = '`', textBlock = """
+            EXISTS(SELECT * FROM "t" WHERE pk = ?)                | 0 | EXISTS | COUNT
+            EXISTS(SELECT * FROM "t" WHERE pk = ? AND foo(1))     | 0 | EXISTS | COUNT
+            EXISTS(SELECT * FROM "t" WHERE foo(1) AND pk = ?)     | 0 | EXISTS | Unrecognized function: foo at 1:32:3
+            EXISTS(SELECT * FROM "t" WHERE pk = <<>>)             | 0 | EXISTS | Empty bags are not supported
+            EXISTS(SELECT * FROM "t" WHERE x = [?])               | 0 | EXISTS | Unsupported data type: Parameter under key root[0] at 1:37:1
+            EXISTS(SELECT * FROM "t" WHERE l[99999999999] = 1)    | 0 | EXISTS | List index is not within the allowable range; index: [99999999999] at 1:34:11
+            EXISTS(SELECT * FROM "t" WHERE pk = 1 AND x = 99e999) | 0 | EXISTS | Number overflow. Attempting to store a number with magnitude larger than supported range under root
+            EXISTS(SELECT * FROM "t" WHERE attribute_exists(1))   | 0 | EXISTS | Operator or function requires a document path; operator or function: attribute_exists
+            EXISTS(SELECT * FROM "t" WHERE pk = 1 AND s < true)   | 0 | EXISTS | Incorrect operand type for operator or function; operator or function: <, operand type: BOOL
+            EXISTS(SELECT * FROM "t"."i"."x" WHERE pk = 1)        | 0 | EXISTS | A path may contain at most 2 components in the FROM clause
+            EXISTS(SELECT * FROM "t" AS x WHERE pk = 1)           | 0 | EXISTS | Aliasing is not supported
+            EXISTS(SELECT * FROM "t"."" WHERE pk = 1)             | 0 | EXISTS | Path component cannot be an empty string
+            EXISTS(SELECT * FROM "t" WHERE pk = )                 | 0 | NWF    | NWF
+            """)
+    void refusesExistsOutsideATransactionOnceTheStatementParses(String statement, int parameters, String outside,
+                                                               String inTransaction) {
+        UnaryOperator<String> expand = message -> message
+                .replace("EXISTS", "EXISTS can only be used in ExecuteTransaction write requests.")
+                .replace("COUNT", "Number of parameters in request and statement don't match.")
+                .replace("NWF", "Statement wasn't well formed, can't be processed: Unexpected term");
+
+        assertEquals(expand.apply(outside), statementRefusal(statement, parameters));
+        assertEquals(expand.apply(inTransaction), statementRefusal(statement, parameters, true));
+    }
+
     @Test
     void countsInOperandsWithTheOperandChecks() {
         String tooMany = "The IN operator is provided with too many operands; number of operands: 101";
@@ -1130,7 +1163,6 @@ class DynamoDbPartiQLParserTest {
             UPDATE "t" a SET b = 1e126 WHERE pk = 1e126             | ALIASING
             FROM "t" a WHERE pk = 1 SET b = 1                       | ALIASING
             DELETE FROM "t" a WHERE pk = 1 RETURNING ALL NEW *      | ALIASING
-            EXISTS(SELECT * FROM "t" a WHERE pk = 1)                | ALIASING
             SELECT * FROM ""."i"."x" a WHERE b < [1]                | ALIASING
             SELECT * FROM "t" a WHERE pk =                          | NWF Missing right-hand side expression of infix operator
             SELECT * FROM "t" AS WHERE pk = 1                       | NWF Expected identifier for AS-alias

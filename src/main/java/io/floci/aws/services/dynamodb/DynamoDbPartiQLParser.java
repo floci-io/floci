@@ -156,7 +156,7 @@ public class DynamoDbPartiQLParser {
             return null;
         }
         try {
-            return parse(statement, List.of()).table();
+            return parse(statement, List.of(), true).table();
         } catch (Exception e) {
             try {
                 List<Token> tokens = tokenize(statement.trim());
@@ -491,15 +491,19 @@ public class DynamoDbPartiQLParser {
     }
 
     static Stmt parse(String statement, List<JsonNode> parameters) {
+        return parse(statement, parameters, false);
+    }
+
+    static Stmt parse(String statement, List<JsonNode> parameters, boolean transaction) {
         try {
-            return parseStatement(statement, parameters);
+            return parseStatement(statement, parameters, transaction);
         } catch (StackOverflowError expected) {
             // DynamoDB answers a statement nested too deep for its parser the same way, with no message.
             throw new AwsException("InternalFailure", null, 500);
         }
     }
 
-    private static Stmt parseStatement(String statement, List<JsonNode> parameters) {
+    private static Stmt parseStatement(String statement, List<JsonNode> parameters, boolean transaction) {
         parameters.forEach(DynamoDbAttributeValueValidator::validate);
         DynamoDbPartiQLParser parser = new DynamoDbPartiQLParser(statement, parameters);
         Stmt stmt = parser.parseStmt();
@@ -508,6 +512,10 @@ public class DynamoDbPartiQLParser {
         }
         if (parser.peek().type() != TType.EOF) {
             throw validationEx(UNEXPECTED_TOKEN);
+        }
+        // Outside a transaction DynamoDB refuses EXISTS before it checks anything inside it.
+        if (stmt instanceof Stmt.Exists && !transaction) {
+            throw validationEx("EXISTS can only be used in ExecuteTransaction write requests.");
         }
         if (parser.fromClauseError != null) {
             throw validationEx(parser.fromClauseError);
