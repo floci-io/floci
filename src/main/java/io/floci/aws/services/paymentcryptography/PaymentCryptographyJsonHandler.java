@@ -55,6 +55,8 @@ public class PaymentCryptographyJsonHandler {
             case "ListAliases" -> Response.ok(listAliases(request, region)).build();
             case "UpdateAlias" -> Response.ok(updateAlias(request, region)).build();
             case "DeleteAlias" -> Response.ok(deleteAlias(request, region)).build();
+            case "ExportKey" -> Response.ok(exportKey(request, region)).build();
+            case "ImportKey" -> Response.ok(importKey(request, region)).build();
             case "TagResource" -> Response.ok(tagResource(request, region)).build();
             case "UntagResource" -> Response.ok(untagResource(request, region)).build();
             case "ListTagsForResource" -> Response.ok(listTagsForResource(request, region)).build();
@@ -375,5 +377,116 @@ public class PaymentCryptographyJsonHandler {
             out.put("KeyArn", alias.getKeyArn());
         }
         return out;
+    }
+
+    /**
+     * The key as it leaves the service, in the form the request names.
+     *
+     * <p>The {@code KeyMaterial} union names one form, and the form says how the key is
+     * protected: a TR-31 block under a key the service holds, an RSA-OAEP cryptogram under
+     * the receiver's certificate, a TR-34 block the service signs, a block under a key the
+     * two parties agreed, or an AS2805 cryptogram.
+     */
+    private Map<String, Object> exportKey(JsonNode request, String region) {
+        String keyIdentifier = request.path("ExportKeyIdentifier").asText();
+        if (keyIdentifier.isEmpty()) {
+            throw new AwsException("ValidationException", "ExportKeyIdentifier is required", 400);
+        }
+        JsonNode material = request.path("KeyMaterial");
+        String form = soleForm(material, PaymentCryptographyKeyExchange.EXPORT_FORMS);
+        return service.exportKey(region, keyIdentifier, form, members(material.path(form)),
+                initialKeySerialNumber(request.path("ExportAttributes")));
+    }
+
+    /**
+     * The key that comes into the service, in the form the request names.
+     */
+    private Map<String, Object> importKey(JsonNode request, String region) {
+        JsonNode material = request.path("KeyMaterial");
+        String form = soleForm(material, PaymentCryptographyKeyExchange.IMPORT_FORMS);
+        PaymentCryptographyKey key = service.importKey(region, form, members(material.path(form)));
+        return Map.of("Key", keyObject(key));
+    }
+
+    /**
+     * The serial number of the initial key the request asks to be derived.
+     *
+     * <p>The export attributes name the kind of key that leaves: an initial key for the
+     * DUKPT derivation is derived from the base derivation key and the serial number the
+     * request gives, and it is that derived key which leaves.
+     *
+     * @param attributes the export attributes of the request
+     * @return the serial number, or an empty string when the request names no initial key
+     */
+    private static String initialKeySerialNumber(JsonNode attributes) {
+        JsonNode initial = attributes.path("ExportDukptInitialKey");
+        if (initial.isMissingNode() || initial.isNull()) {
+            return "";
+        }
+        String serialNumber = initial.path("KeySerialNumber").asText();
+        if (serialNumber.isEmpty()) {
+            throw new AwsException("ValidationException",
+                    "ExportAttributes.ExportDukptInitialKey.KeySerialNumber is required", 400);
+        }
+        return serialNumber;
+    }
+
+    /**
+     * The one form of the key material union the request names.
+     *
+     * <p>The union holds a member per form, and a request names exactly one of them. Several
+     * at once is not the same as none: the request says which one it meant, and it cannot be
+     * more than one.
+     */
+    private static String soleForm(JsonNode material, List<String> forms) {
+        List<String> named = new ArrayList<>();
+        for (String form : forms) {
+            if (material.has(form) && !material.path(form).isNull()) {
+                named.add(form);
+            }
+        }
+        if (named.size() > 1) {
+            throw new AwsException("ValidationException",
+                    "KeyMaterial must specify exactly one variant (" + String.join(", ", forms) + ")",
+                    400);
+        }
+        if (named.isEmpty()) {
+            throw new AwsException("ValidationException",
+                    "KeyMaterial must specify exactly one variant (" + String.join(", ", forms) + ")",
+                    400);
+        }
+        return named.get(0);
+    }
+
+    /** The members of a form, as the service reads them. */
+    private static Map<String, Object> members(JsonNode node) {
+        Map<String, Object> out = new LinkedHashMap<>();
+        if (node == null || !node.isObject()) {
+            return out;
+        }
+        node.fields().forEachRemaining(entry -> out.put(entry.getKey(), value(entry.getValue())));
+        return out;
+    }
+
+    /** One member of a form, as the service reads it. */
+    private static Object value(JsonNode node) {
+        if (node == null || node.isNull()) {
+            return null;
+        }
+        if (node.isObject()) {
+            return members(node);
+        }
+        if (node.isArray()) {
+            List<Object> values = new ArrayList<>();
+            node.forEach(child -> values.add(value(child)));
+            return values;
+        }
+        if (node.isBoolean()) {
+            return node.asBoolean();
+        }
+        if (node.isNumber()) {
+            return node.asText();
+        }
+        return node.asText();
     }
 }

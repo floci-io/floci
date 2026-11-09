@@ -11,6 +11,7 @@ import io.floci.aws.core.common.StoredResourceArns;
 import io.floci.aws.core.storage.InMemoryStorage;
 import io.floci.aws.core.storage.StorageBackend;
 import io.floci.aws.core.storage.StorageFactory;
+import io.floci.aws.services.paymentcryptography.crypto.DukptCrypto;
 import io.floci.aws.services.paymentcryptography.model.PaymentCryptographyAlias;
 import io.floci.aws.services.paymentcryptography.model.PaymentCryptographyKey;
 import jakarta.enterprise.context.ApplicationScoped;
@@ -67,6 +68,8 @@ public class PaymentCryptographyService implements Resettable, StoredResourceArn
     private final StorageBackend<String, PaymentCryptographyKey> keyStore;
     private final StorageBackend<String, PaymentCryptographyAlias> aliasStore;
 
+    /** The key exchange: the forms a key may leave in, and the certificates that carry them. */
+    private final PaymentCryptographyKeyExchange exchange;
     private final RegionResolver regionResolver;
     private final SecureRandom secureRandom;
     private final PaymentCryptographyRequestContext requestContext;
@@ -111,6 +114,7 @@ public class PaymentCryptographyService implements Resettable, StoredResourceArn
         this.keyStore = keyStore;
         this.aliasStore = aliasStore;
         this.regionResolver = regionResolver;
+        this.exchange = new PaymentCryptographyKeyExchange(this);
         this.secureRandom = secureRandom;
         this.requestContext = requestContext;
     }
@@ -528,6 +532,154 @@ public class PaymentCryptographyService implements Resettable, StoredResourceArn
     // ---- the key exchange ----------------------------------------------------
 
     /**
+     * The key as it leaves the service, in the form the request names.
+     *
+     * <p>A key that is not exportable does not leave. The form decides how it is protected: a
+     * TR-31 block under a key the service holds, an RSA-OAEP cryptogram under the receiver's
+     * certificate, a TR-34 block the service signs, a block under a key the two parties
+     * agreed, or an AS2805 cryptogram.
+     *
+     * @param region the region the key is in
+     * @param keyIdentifier the key that leaves
+     * @param form the form the request names
+     * @param material the members of the form
+     * @return the material, the format it is in, and the key that protects it
+     */
+    public Map<String, Object> exportKey(String region, String keyIdentifier, String form,
+                                          Map<String, Object> material, String keySerialNumber) {
+        PaymentCryptographyKey key = findKey(region, keyIdentifier);
+        if (key == null) {
+            throw new AwsException("ResourceNotFoundException", "Key not found: " + keyIdentifier, 400);
+        }
+        // An initial key leaves instead of the key itself: the service derives it and does
+        // not keep it.
+        PaymentCryptographyKey leaving = keySerialNumber.isEmpty() ? key : initialKey(key, keySerialNumber);
+        if (!leaving.isExportable() && keySerialNumber.isEmpty()) {
+            throw new AwsException("ValidationException",
+                    "the key " + key.getArn() + " is not exportable", 400);
+        }
+        PaymentCryptographyKeyExchange.Exported exported = exchange.export(region, leaving, form, material);
+        Map<String, Object> wrapped = new LinkedHashMap<>();
+        wrapped.put("KeyMaterial", exported.material());
+        wrapped.put("WrappedKeyMaterialFormat", exported.format());
+        wrapped.put("KeyCheckValue", leaving.getKeyCheckValue());
+        wrapped.put("KeyCheckValueAlgorithm", leaving.getKeyCheckValueAlgorithm());
+        if (exported.wrappingKeyArn() != null) {
+            wrapped.put("WrappingKeyArn", exported.wrappingKeyArn());
+        }
+        return Map.of("WrappedKey", wrapped);
+    }
+
+    /**
+     * The key that comes into the service, in the form the request names.
+     *
+     * @param region the region the key comes into
+     * @param form the form the request names
+     * @param material the members of the form
+     * @return the key
+     */
+    public PaymentCryptographyKey importKey(String region, String form, Map<String, Object> material) {
+        PaymentCryptographyKeyExchange.Imported imported = exchange.importKey(region, form, material);
+        Map<String, Object> attributes = new LinkedHashMap<>();
+        attributes.put("KeyAlgorithm", imported.algorithm());
+        attributes.put("KeyClass", imported.keyClass());
+        attributes.put("KeyUsage", imported.usage());
+        return makeKey(region, attributes, imported.modes(), imported.exportable(), true, Map.of(),
+                imported.material() == null ? null
+                        : PaymentCryptographyCrypto.toHex(imported.material()),
+                imported.publicKeyBase64(), imported.privateKeyBase64(), imported.certificatePem());
+    }
+
+    /**
+     * The initial key of the DUKPT derivation, derived from a base derivation key.
+     *
+     * <p>The derived key is a PIN encryption key of sixteen bytes, and it does not leave the
+     * service again: what leaves is the derived key, not the base one.
+     *
+     * @param base the base derivation key
+     * @param keySerialNumber the serial number of the key the derivation starts from
+     * @return the derived key, as the key that leaves
+     */
+    private static PaymentCryptographyKey initialKey(PaymentCryptographyKey base,
+                                                      String keySerialNumber) {
+        if (!"TR31_B0_BASE_DERIVATION_KEY".equals(base.getKeyUsage())) {
+            throw new AwsException("ValidationException",
+                    "an initial key under export is derived from a base derivation key, but "
+                            + base.getArn() + " is " + base.getKeyUsage(), 400);
+        }
+        byte[] initial;
+        try {
+            initial = DukptCrypto.deriveIpek(base.getKeyMaterialHex(), keySerialNumber);
+        } catch (RuntimeException e) {
+            throw new AwsException("ValidationException",
+                    "the initial key could not be derived: " + e.getMessage(), 400);
+        }
+        PaymentCryptographyKey derived = new PaymentCryptographyKey();
+        derived.setKeyId(base.getKeyId());
+        derived.setArn(base.getArn());
+        derived.setRegion(base.getRegion());
+        derived.setKeyAlgorithm("TDES_2KEY");
+        derived.setKeyClass("SYMMETRIC_KEY");
+        derived.setKeyUsage("TR31_P0_PIN_ENCRYPTION_KEY");
+        derived.setKeyModesOfUse(new LinkedHashMap<>(Map.of("Encrypt", Boolean.TRUE,
+                "Decrypt", Boolean.TRUE)));
+        derived.setKeyMaterialHex(PaymentCryptographyCrypto.toHex(initial));
+        derived.setKeyCheckValue(PaymentCryptographyCrypto.checkValue(derived.getKeyMaterialHex(),
+                PaymentCryptographyKeyAlgorithm.TDES_2KEY));
+        derived.setKeyCheckValueAlgorithm("ANSI_X9_24");
+        // The derived key is for the counterparty's use and does not leave again.
+        derived.setExportable(false);
+        return derived;
+    }
+
+    /**
+     * The number of exchange tokens the service holds.
+     *
+     * <p>For the test that watches the expired ones swept.
+     *
+     * @return how many tokens are held
+     */
+    int issuedTokenCount() {
+        return exchange.issuedTokenCount();
+    }
+
+
+
+    /**
+     * The algorithm a key block carries.
+     *
+     * <p>The block names the algorithm of the key it carries, and the length of the material
+     * says which of that family's keys it is. The algorithm is not guessed from the length
+     * alone, because a TDES key and an AES key of the same length are different keys.
+     *
+     * <p>The header's algorithm byte fixes how long the key may be, so a key of a length the
+     * algorithm does not allow is refused rather than read as a key of another length.
+     */
+    static String algorithmOf(String block, int materialLength) {
+        String family = PaymentCryptographyTr31.algorithmInHeader(block);
+        int length = materialLength;
+        return switch (family) {
+            case "A" -> switch (length) {
+                case 16 -> "AES_128";
+                case 24 -> "AES_192";
+                case 32 -> "AES_256";
+                default -> throw new AwsException("ValidationException",
+                        "the key block carries a " + (length * 8) + "-bit key; AES needs 128/192/256", 400);
+            };
+            case "T" -> switch (length) {
+                case 16 -> "TDES_2KEY";
+                case 24 -> "TDES_3KEY";
+                default -> throw new AwsException("ValidationException",
+                        "the key block carries a " + (length * 8) + "-bit key; TDES needs 128/192", 400);
+            };
+            default -> throw new AwsException("ValidationException",
+                    "the key block's algorithm is '" + family + "', which is not one this service has a key "
+                            + "algorithm for (T for TDES, A for AES)", 400);
+        };
+    }
+
+
+    /**
      * The usages a key block may carry, and the modes of use each of them has.
      *
      * <p>A key block carries the usage of the key it carries, so every usage the service
@@ -847,5 +999,10 @@ public class PaymentCryptographyService implements Resettable, StoredResourceArn
     /** The key store, for the tests. */
     Optional<PaymentCryptographyKey> storedKey(String region, String keyId) {
         return keyStore.get(storageKey(region, keyId));
+    }
+
+    /** The parameters a counterparty needs to import a key into this service. */
+    public Map<String, Object> parametersForImport(String materialType, String algorithm) {
+        return exchange.parametersForImport(materialType, algorithm);
     }
 }

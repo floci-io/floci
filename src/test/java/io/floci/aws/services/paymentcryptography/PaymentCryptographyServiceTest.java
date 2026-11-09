@@ -540,4 +540,204 @@ class PaymentCryptographyServiceTest {
                 service.find("alias", List.of("alias/team/card-key"), "us-east-1"));
         assertEquals(Optional.empty(), service.find("approval-team", List.of("whatever"), "us-east-1"));
     }
+
+    @Test
+    void aKeyLeavesTheServiceAndComesBack() {
+        PaymentCryptographyKey protection = createKey("us-east-1");
+        PaymentCryptographyKey key = createKey("us-east-1");
+
+        Map<String, Object> answer = exportTr31Answer("us-east-1", key.getKeyId(),
+                protection.getKeyId());
+        Map<?, ?> wrapped = (Map<?, ?>) answer.get("WrappedKey");
+        String export = (String) wrapped.get("KeyMaterial");
+
+        assertEquals(protection.getArn(), wrapped.get("WrappingKeyArn"));
+        assertEquals(key.getKeyCheckValue(), wrapped.get("KeyCheckValue"));
+        assertTrue(export.length() > 32, "the block is only its header");
+
+        PaymentCryptographyKey imported = importTr31("us-east-1", protection.getKeyId(), export);
+
+        assertEquals(key.getKeyMaterialHex(), imported.getKeyMaterialHex());
+        assertEquals(key.getKeyCheckValue(), imported.getKeyCheckValue());
+        assertEquals(key.getKeyUsage(), imported.getKeyUsage());
+        assertTrue(imported.isExportable(), "the block said the key is exportable");
+    }
+
+    @Test
+    void aKeyLeavesUnderATdesProtectionKeyAsATypeBBlock() {
+        // The block type follows the protection key's family: a TDES key gives a type B block,
+        // an AES one a type D block. That is the rule the emulator follows.
+        PaymentCryptographyKey protection = service.createKey("us-east-1",
+                attributes("TDES_2KEY", "TR31_K1_KEY_BLOCK_PROTECTION_KEY"),
+                Map.of("Wrap", Boolean.TRUE, "Unwrap", Boolean.TRUE), true, true, Map.of());
+        PaymentCryptographyKey key = service.createKey("us-east-1",
+                attributes("TDES_2KEY", "TR31_D0_SYMMETRIC_DATA_ENCRYPTION_KEY"),
+                Map.of("Encrypt", Boolean.TRUE, "Decrypt", Boolean.TRUE), true, true, Map.of());
+
+        String export = exportTr31("us-east-1", key.getKeyId(), protection.getKeyId());
+
+        assertTrue(export.startsWith("B"), "a TDES protection key gives a type B block");
+        assertEquals("T", export.substring(7, 8), "the block carries a TDES key");
+
+        PaymentCryptographyKey imported = importTr31("us-east-1", protection.getKeyId(), export);
+
+        assertEquals(key.getKeyMaterialHex(), imported.getKeyMaterialHex());
+        assertEquals(key.getKeyCheckValue(), imported.getKeyCheckValue());
+    }
+
+    @Test
+    void aKeyLeavesUnderAnAesProtectionKeyAsATypeDBlock() {
+        PaymentCryptographyKey protection = service.createKey("us-east-1",
+                attributes("AES_256", "TR31_K1_KEY_BLOCK_PROTECTION_KEY"),
+                Map.of("Wrap", Boolean.TRUE, "Unwrap", Boolean.TRUE), true, true, Map.of());
+        PaymentCryptographyKey key = service.createKey("us-east-1",
+                attributes("AES_256", "TR31_D0_SYMMETRIC_DATA_ENCRYPTION_KEY"),
+                Map.of("Encrypt", Boolean.TRUE, "Decrypt", Boolean.TRUE), true, true, Map.of());
+
+        String export = exportTr31("us-east-1", key.getKeyId(), protection.getKeyId());
+
+        assertTrue(export.startsWith("D"), "an AES protection key gives a type D block");
+        assertEquals("A", export.substring(7, 8), "the block carries an AES key");
+    }
+
+    @Test
+    void aKeyUnderAWeakerProtectionKeyIsRefused() {
+        // The wrapping key has to be at least as strong as the key it protects, or the
+        // protection buys nothing. The strengths are the ones the standards count, so a
+        // two-key TDES key is 80 bits and an AES-128 one is 128.
+        PaymentCryptographyKey protection = service.createKey("us-east-1",
+                attributes("AES_128", "TR31_K1_KEY_BLOCK_PROTECTION_KEY"),
+                Map.of("Wrap", Boolean.TRUE, "Unwrap", Boolean.TRUE), true, true, Map.of());
+        PaymentCryptographyKey key = service.createKey("us-east-1",
+                attributes("AES_256", "TR31_D0_SYMMETRIC_DATA_ENCRYPTION_KEY"),
+                Map.of("Encrypt", Boolean.TRUE, "Decrypt", Boolean.TRUE), true, true, Map.of());
+
+        AwsException refused = assertThrows(AwsException.class,
+                () -> exportTr31("us-east-1", key.getKeyId(), protection.getKeyId()));
+
+        assertEquals("ValidationException", refused.getErrorCode());
+        assertTrue(refused.getMessage().contains("at least as strong"), refused.getMessage());
+    }
+
+    @Test
+    void aKeyUnderAStrongerProtectionKeyIsAllowed() {
+        PaymentCryptographyKey protection = service.createKey("us-east-1",
+                attributes("AES_256", "TR31_K1_KEY_BLOCK_PROTECTION_KEY"),
+                Map.of("Wrap", Boolean.TRUE, "Unwrap", Boolean.TRUE), true, true, Map.of());
+        PaymentCryptographyKey key = service.createKey("us-east-1",
+                attributes("AES_128", "TR31_D0_SYMMETRIC_DATA_ENCRYPTION_KEY"),
+                Map.of("Encrypt", Boolean.TRUE, "Decrypt", Boolean.TRUE), true, true, Map.of());
+
+        String export = exportTr31("us-east-1", key.getKeyId(), protection.getKeyId());
+
+        assertTrue(export.startsWith("D"), "an AES protection key gives a type D block");
+    }
+
+    @Test
+    void aKeyOfEveryUsageTheServiceMakesLeavesAsItsOwnUsage() {
+        // A key block carries the usage of the key it carries, so every usage the service
+        // makes has to have a code. A usage without one could not leave the service at all,
+        // and the counterparty could not tell what it had.
+        List<String[]> usages = List.of(
+                new String[] {"TR31_B0_BASE_DERIVATION_KEY", "AES_256"},
+                new String[] {"TR31_C0_CARD_VERIFICATION_KEY", "AES_256"},
+                new String[] {"TR31_D0_SYMMETRIC_DATA_ENCRYPTION_KEY", "AES_256"},
+                new String[] {"TR31_E0_EMV_MKEY_APP_CRYPTOGRAMS", "AES_256"},
+                new String[] {"TR31_E1_EMV_MKEY_CONFIDENTIALITY", "AES_256"},
+                new String[] {"TR31_E2_EMV_MKEY_INTEGRITY", "AES_256"},
+                new String[] {"TR31_E4_EMV_MKEY_DYNAMIC_NUMBERS", "AES_256"},
+                new String[] {"TR31_E5_EMV_MKEY_CARD_PERSONALIZATION", "AES_256"},
+                new String[] {"TR31_E6_EMV_MKEY_OTHER", "AES_256"},
+                new String[] {"TR31_K0_KEY_ENCRYPTION_KEY", "AES_256"},
+                new String[] {"TR31_K1_KEY_BLOCK_PROTECTION_KEY", "AES_256"},
+                // The ISO 9797 MACs are defined over Triple DES.
+                new String[] {"TR31_M0_ISO_16609_MAC_KEY", "TDES_2KEY"},
+                new String[] {"TR31_M1_ISO_9797_1_MAC_KEY", "TDES_2KEY"},
+                new String[] {"TR31_M3_ISO_9797_3_MAC_KEY", "TDES_2KEY"},
+                new String[] {"TR31_M6_ISO_9797_5_CMAC_KEY", "AES_256"},
+                new String[] {"TR31_M7_HMAC_KEY", "AES_256"},
+                new String[] {"TR31_P0_PIN_ENCRYPTION_KEY", "AES_256"},
+                new String[] {"TR31_P1_PIN_GENERATION_KEY", "AES_256"},
+                new String[] {"TR31_S0_ASYMMETRIC_KEY_FOR_DIGITAL_SIGNATURE", "AES_256"},
+                new String[] {"TR31_V1_IBM3624_PIN_VERIFICATION_KEY", "AES_256"},
+                new String[] {"TR31_V2_VISA_PIN_VERIFICATION_KEY", "AES_256"});
+
+        PaymentCryptographyKey protection = service.createKey("us-east-1",
+                attributes("AES_256", "TR31_K1_KEY_BLOCK_PROTECTION_KEY"),
+                Map.of("Wrap", Boolean.TRUE, "Unwrap", Boolean.TRUE), true, true, Map.of());
+
+        for (String[] usage : usages) {
+            PaymentCryptographyKey key = service.createKey("us-east-1",
+                    attributes(usage[1], usage[0]),
+                    Map.of("Encrypt", Boolean.TRUE, "Decrypt", Boolean.TRUE), true, true, Map.of());
+
+            String export = exportTr31("us-east-1", key.getKeyId(), protection.getKeyId());
+
+            PaymentCryptographyKey imported = importTr31("us-east-1", protection.getKeyId(), export);
+
+            assertEquals(usage[0], imported.getKeyUsage(), usage[0] + " did not survive the round trip");
+        }
+    }
+
+    @Test
+    void aKeyThatIsNotExportableDoesNotLeaveTheService() {
+        PaymentCryptographyKey protection = createKey("us-east-1");
+        Map<String, Object> attributes = new LinkedHashMap<>();
+        attributes.put("KeyAlgorithm", "AES_256");
+        attributes.put("KeyClass", "SYMMETRIC_KEY");
+        attributes.put("KeyUsage", "TR31_D0_SYMMETRIC_DATA_ENCRYPTION_KEY");
+        PaymentCryptographyKey key = service.createKey("us-east-1", attributes, Map.of(), false, true, Map.of());
+
+        AwsException refused = assertThrows(AwsException.class,
+                () -> exportTr31("us-east-1", key.getKeyId(), protection.getKeyId()));
+
+        assertEquals("ValidationException", refused.getErrorCode());
+    }
+
+    @Test
+    void aBlockThatIsNotTheKeysDoesNotOpen() {
+        PaymentCryptographyKey protection = createKey("us-east-1");
+        PaymentCryptographyKey other = createKey("us-east-1");
+        PaymentCryptographyKey key = createKey("us-east-1");
+        String export = exportTr31("us-east-1", key.getKeyId(), protection.getKeyId());
+
+        AwsException refused = assertThrows(AwsException.class,
+                () -> importTr31("us-east-1", other.getKeyId(), export));
+
+        assertEquals("ValidationException", refused.getErrorCode());
+    }
+
+    /**
+     * The TR-31 key block a key leaves the service in.
+     */
+    private String exportTr31(String region, String keyId, String wrappingKeyId) {
+        return (String) ((Map<?, ?>) exportTr31Answer(region, keyId, wrappingKeyId)
+                .get("WrappedKey")).get("KeyMaterial");
+    }
+
+    /**
+     * The whole answer of an export, which carries the block and what wrapped it.
+     */
+    private Map<String, Object> exportTr31Answer(String region, String keyId, String wrappingKeyId) {
+        return service.exportKey(region, keyId, "Tr31KeyBlock",
+                Map.of("WrappingKeyIdentifier", wrappingKeyId), "");
+    }
+
+    /**
+     * The key that comes into the service out of a TR-31 key block.
+     */
+    private PaymentCryptographyKey importTr31(String region, String wrappingKeyId, String block) {
+        return service.importKey(region, "Tr31KeyBlock", Map.of(
+                "WrappingKeyIdentifier", wrappingKeyId,
+                "WrappedKeyBlock", block));
+    }
+
+    /** The attributes of a key with that algorithm and usage. */
+    private static Map<String, Object> attributes(String algorithm, String usage) {
+        Map<String, Object> attributes = new LinkedHashMap<>();
+        attributes.put("KeyAlgorithm", algorithm);
+        attributes.put("KeyClass", "SYMMETRIC_KEY");
+        attributes.put("KeyUsage", usage);
+        return attributes;
+    }
 }
