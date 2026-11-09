@@ -6,7 +6,6 @@ import io.quarkus.test.junit.QuarkusTest;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
-import org.junit.jupiter.params.provider.CsvSource;
 import org.junit.jupiter.params.provider.MethodSource;
 import software.amazon.awssdk.auth.credentials.AwsBasicCredentials;
 import software.amazon.awssdk.auth.credentials.StaticCredentialsProvider;
@@ -17,7 +16,6 @@ import software.amazon.awssdk.services.eventbridge.model.InvalidEventPatternExce
 
 import java.net.URI;
 import java.util.List;
-import java.util.stream.Stream;
 
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.equalTo;
@@ -39,39 +37,7 @@ class EventBridgeTestEventPatternIntegrationTest {
     }
 
     @ParameterizedTest
-    @CsvSource(delimiter = '|', textBlock = """
-            7     | ">=",7         | true
-            7     | ">=",6         | true
-            6     | ">=",7         | false
-            7     | ">",7          | false
-            8     | ">",7          | true
-            7     | "<=",7         | true
-            8     | "<",7          | false
-            7.0   | "=",7          | true
-            301.8 | "=",3.018e2    | true
-            7     | ">",6,"<=",7   | true
-            8     | ">",6,"<=",7   | false
-            "7"   | ">=",7         | false
-            null  | ">=",0         | false
-            [3,7] | ">=",7         | true
-            [3,6] | ">=",7         | false
-            [3,9] | ">=",7,"<",9   | false
-            [3,8] | ">=",7,"<",9   | true
-            ["7"] | ">=",7         | false
-            []    | ">=",7         | false
-            6     | ">",6,"<",8     | false
-            7     | ">",6,"<",8     | true
-            8     | ">",6,"<",8     | false
-            6     | ">",6,"<=",8    | false
-            7     | ">",6,"<=",8    | true
-            8     | ">",6,"<=",8    | true
-            6     | ">=",6,"<",8    | true
-            7     | ">=",6,"<",8    | true
-            8     | ">=",6,"<",8    | false
-            6     | ">=",6,"<=",8   | true
-            7     | ">=",6,"<=",8   | true
-            8     | ">=",6,"<=",8   | true
-            """)
+    @MethodSource("io.floci.aws.testing.EventBridgeNumericPatterns#cases")
     void numericComparisonThroughSdk(String value, String comparisons, boolean expected) {
         try (EventBridgeClient client = sdkClient()) {
             String event = """
@@ -94,7 +60,7 @@ class EventBridgeTestEventPatternIntegrationTest {
     }
 
     @ParameterizedTest
-    @MethodSource("invalidNumericPatterns")
+    @MethodSource("io.floci.aws.testing.EventBridgeNumericPatterns#invalidPatterns")
     void invalidNumericPatternsRaiseSdkErrors(String pattern) {
         try (EventBridgeClient client = sdkClient()) {
             for (String detail : List.of("{\"severity\":7}", "{\"severity\":\"7\"}", "{}")) {
@@ -115,28 +81,8 @@ class EventBridgeTestEventPatternIntegrationTest {
         }
     }
 
-    private static Stream<String> invalidNumericPatterns() {
-        Stream<String> invalidFilters = Stream.of("null", "7", "{}", "[]", "[\">=\"]", "[\">=\",7,\"<\"]",
-                "[\"!=\",7]", "[7,7]", "[\">=\",\"7\"]", "[\">=\",null]", "[\">=\",true]",
-                "[\">\",0,\">\",1]", "[\">=\",0,\">\",1]",
-                "[\">\",0,\">=\",1]", "[\">=\",0,\">=\",1]",
-                "[\"<\",9,\"<\",7]", "[\"<=\",9,\"<=\",7]",
-                "[\"=\",7,\">\",6]", "[\">\",6,\"=\",7]",
-                "[\"=\",7,\"=\",7]", "[\"<\",9,\">\",7]",
-                "[\"<=\",9,\">=\",7]", "[\">\",9,\"<\",7]",
-                "[\">=\",9,\"<=\",7]", "[\">\",7,\"<\",7]",
-                "[\">\",7,\"<=\",7]", "[\">=\",7,\"<\",7]",
-                "[\">=\",7,\"<=\",7]", "[\">\",0,\"<\",9,\"<\",8]")
-                .map(filter -> "{\"detail\":{\"severity\":[{\"numeric\":" + filter + "}]}}");
-        return Stream.concat(invalidFilters, Stream.of(
-                "{\"detail\":{\"nested\":{\"severity\":[{\"numeric\":[]}]}}}",
-                "{\"$or\":[{\"source\":[\"example.test\"]},{\"detail\":{\"severity\":[{\"numeric\":[]}]}}]}",
-                "{\"detail\":{\"$or\":[{\"severity\":[7]},{\"severity\":[{\"numeric\":[]}] }]}}",
-                "{\"detail\":{\"severity\":[7,{\"numeric\":[]}]}}"));
-    }
-
     @ParameterizedTest
-    @MethodSource("invalidNumericPatterns")
+    @MethodSource("io.floci.aws.testing.EventBridgeNumericPatterns#invalidPatterns")
     void invalidNumericUpdatePreservesExistingRuleThroughSdk(String pattern) {
         try (EventBridgeClient client = sdkClient()) {
             String name = "numeric-update-preservation";

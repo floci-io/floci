@@ -999,47 +999,7 @@ class EventBridgeServiceTest {
     }
 
     @ParameterizedTest
-    @CsvSource(delimiter = '|', textBlock = """
-            7       | ">=",7          | true
-            7       | ">=",6          | true
-            6       | ">=",7          | false
-            7       | ">",7           | false
-            8       | ">",7           | true
-            6       | "<",7           | true
-            7       | "<",7           | false
-            7       | "<=",7          | true
-            8       | "<=",7          | false
-            7.0     | "=",7           | true
-            3.018e2 | "=",301.8       | true
-            7       | "=",8           | false
-            -2.5    | ">",-3,"<=",0   | true
-            0       | ">",-3,"<=",0   | true
-            -3      | ">",-3,"<=",0   | false
-            1       | ">",-3,"<=",0   | false
-            -0.0    | "=",0           | true
-            "7"     | ">=",7          | false
-            true    | ">=",0          | false
-            null    | ">=",0          | false
-            {}      | ">=",0          | false
-            [3,7]   | ">=",7          | true
-            [3,6]   | ">=",7          | false
-            [3,9]   | ">=",7,"<",9    | false
-            [3,8]   | ">=",7,"<",9    | true
-            ["7"]   | ">=",7          | false
-            []      | ">=",7          | false
-            6       | ">",6,"<",8      | false
-            7       | ">",6,"<",8      | true
-            8       | ">",6,"<",8      | false
-            6       | ">",6,"<=",8     | false
-            7       | ">",6,"<=",8     | true
-            8       | ">",6,"<=",8     | true
-            6       | ">=",6,"<",8     | true
-            7       | ">=",6,"<",8     | true
-            8       | ">=",6,"<",8     | false
-            6       | ">=",6,"<=",8    | true
-            7       | ">=",6,"<=",8    | true
-            8       | ">=",6,"<=",8    | true
-            """)
+    @MethodSource("io.floci.aws.testing.EventBridgeNumericPatterns#cases")
     void matchesPatternByNumericComparison(String value, String comparisons, boolean expected) {
         Map<String, Object> event = Map.of("Detail", "{\"value\":" + value + "}");
         String pattern = "{\"detail\":{\"value\":[{\"numeric\":[" + comparisons + "]}]}}";
@@ -1051,23 +1011,11 @@ class EventBridgeServiceTest {
     }
 
     @ParameterizedTest
-    @ValueSource(strings = {"null", "7", "{}", "[]", "[\">=\"]", "[\">=\",7,\"<\"]",
-            "[\"!=\",7]", "[7,7]", "[\">=\",\"7\"]", "[\">=\",null]", "[\">=\",true]",
-            "[\">\",0,\">\",1]", "[\">=\",0,\">\",1]",
-            "[\">\",0,\">=\",1]", "[\">=\",0,\">=\",1]",
-            "[\"<\",9,\"<\",7]", "[\"<=\",9,\"<=\",7]",
-            "[\"=\",7,\">\",6]", "[\">\",6,\"=\",7]",
-            "[\"=\",7,\"=\",7]", "[\"<\",9,\">\",7]",
-            "[\"<=\",9,\">=\",7]", "[\">\",9,\"<\",7]",
-            "[\">=\",9,\"<=\",7]", "[\">\",7,\"<\",7]",
-            "[\">\",7,\"<=\",7]", "[\">=\",7,\"<\",7]",
-            "[\">=\",7,\"<=\",7]", "[\">\",0,\"<\",9,\"<\",8]"})
-    void malformedNumericComparisonIsRejectedByPublicApis(String comparisons) {
-        String pattern = "{\"detail\":{\"value\":[{\"numeric\":" + comparisons + "}]}}";
-
-        for (String detail : List.of("{\"value\":7}", "{\"value\":\"7\"}", "{}")) {
+    @MethodSource("io.floci.aws.testing.EventBridgeNumericPatterns#invalidPatterns")
+    void malformedNumericComparisonIsRejectedByPublicApis(String pattern) {
+        for (String detail : List.of("{\"severity\":7}", "{\"severity\":\"7\"}", "{}")) {
             AwsException error = assertThrows(AwsException.class,
-                    () -> service.testEventPattern(pattern, "{\"detail\":" + detail + "}"));
+                    () -> service.testEventPattern(pattern, "{\"source\":\"example.test\",\"detail\":" + detail + "}"));
             assertEquals("InvalidEventPatternException", error.getErrorCode());
             assertEquals(400, error.getHttpStatus());
         }
@@ -1076,22 +1024,6 @@ class EventBridgeServiceTest {
         assertEquals("InvalidEventPatternException", error.getErrorCode());
         assertEquals(400, error.getHttpStatus());
         assertTrue(service.listRules(null, null, REGION).isEmpty());
-    }
-
-    @ParameterizedTest
-    @ValueSource(strings = {
-            "{\"detail\":{\"nested\":{\"value\":[{\"numeric\":[]}]}}}",
-            "{\"$or\":[{\"source\":[\"example.test\"]},{\"detail\":{\"value\":[{\"numeric\":[]}]}}]}",
-            "{\"detail\":{\"$or\":[{\"value\":[7]},{\"value\":[{\"numeric\":[]}] }]}}",
-            "{\"detail\":{\"value\":[7,{\"numeric\":[]}]}}"
-    })
-    void numericValidationChecksEveryPatternBranch(String pattern) {
-        AwsException testError = assertThrows(AwsException.class,
-                () -> service.testEventPattern(pattern, "{\"source\":\"example.test\",\"detail\":{\"value\":7}}"));
-        assertEquals("InvalidEventPatternException", testError.getErrorCode());
-        AwsException ruleError = assertThrows(AwsException.class, () -> service.putRule(
-                "invalid-numeric", null, pattern, null, RuleState.ENABLED, null, null, null, REGION));
-        assertEquals("InvalidEventPatternException", ruleError.getErrorCode());
     }
 
     @Test
