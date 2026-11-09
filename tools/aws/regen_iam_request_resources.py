@@ -76,6 +76,11 @@ follow the rule unchanged: a family of a hand-built namespace whose requests nam
 way the rule reads them. `HAND_BUILT` are the namespaces `ResourceArnBuilder` builds resources for itself, and
 `NOT_COVERED` the ones Floci serves that are not read yet, each with its reason;
 `RequestResourceNamespacesIntegrationTest` fails for a served namespace in none of the three.
+`ID_TARGETS` stages heterogeneous id-list namespaces separately: botocore supplies the list member
+and its serialized EC2 Query name (including queryName and capitalization), and documented id
+prefixes distinguish the supported resource types. Each generated `targets` entry preserves the
+request's order and duplicates, including a wildcard for each unsupported id; only resolved ARNs
+use the corresponding target's condition context. Other requests in those namespaces stay on `*`.
 `CORRECTIONS` gives an operation's resources where the rule gets them wrong, each with its reason; a
 resource there may apply only `when` a member has one of some values (`Type` picks the load balancer
 v2 `CreateLoadBalancer` creates), or `unless` it has, a member given a JSON null counting as absent
@@ -159,7 +164,7 @@ OUTPUT = REPO_ROOT / "src/main/resources/aws/iam-request-resources.json"
 # are the ones its handlers mint.
 NAMESPACES = ("access-analyzer", "acm", "application-autoscaling", "athena", "bcm-data-exports",
               "bcm-pricing-calculator", "budgets", "ce", "cloudtrail", "codebuild", "codepipeline", "cognito-identity",
-              "cognito-idp", "cur", "datasync", "ecr", "elasticloadbalancing", "elasticmapreduce", "es", "events",
+              "cognito-idp", "cur", "datasync", "ec2", "ecr", "elasticloadbalancing", "elasticmapreduce", "es", "events",
               "firehose", "globalaccelerator", "kinesisanalytics", "payment-cryptography", "quicksight", "redshift",
               "redshift-data", "rekognition", "servicediscovery", "servicequotas", "sso", "states", "textract",
               "timestream-influxdb", "translate", "signer")
@@ -234,7 +239,6 @@ NOT_COVERED: dict[str, str] = {
     "detective": _REST,
     "dlm": _REST,
     "dms": _LATER,
-    "ec2": _LATER,
     "ec2-instance-connect": _LATER,
     "ecs": _LATER,
     "elasticache": _LATER,
@@ -666,6 +670,13 @@ THROUGH: dict[str, tuple[list[str], str]] = {
 
 # The variables of an ARN format the account, partition and Region fill.
 KNOWN_VARIABLES = {"Partition", "Region", "Account"}
+
+# A staged read of heterogeneous resource-id lists. The model supplies the member and its wire name;
+# the Service Reference supplies the action's types and their ARN formats. EC2 documents instance ids
+# with the i- prefix (EC2 User Guide, resource-ids). Only instances are covered here: other ids retain
+# a wildcard entry, and other EC2 requests retain their existing wildcard authorization until their
+# ARN resolution and condition contexts have coverage. No operation names select this read.
+ID_TARGETS = {"ec2": {"member": "Resources", "prefixes": {"instance": "i-"}}}
 # An ARN format's account given as `${AccountId}`, the account `${Account}` gives in every other format.
 ACCOUNT_ID_SLOT_RE = re.compile(r"^(arn:[^:]*:[^:]*:[^:]*:)\$\{AccountId}:")
 VARIABLE_RE = re.compile(r"\$\{(\w+)}")
@@ -1121,10 +1132,46 @@ def names_type(member: str, kind_stem: str) -> bool:
 # --------------------------------------------------------------------------- #
 # The vendored document
 # --------------------------------------------------------------------------- #
+def id_targets(operation: str, types: list[str], formats: dict[str, str], models: dict[str, dict]) -> dict | None:
+    """A heterogeneous id list, in model and EC2 Query spelling, with each supported type's discriminator."""
+    configured = ID_TARGETS.get(namespace_of(operation))
+    if configured is None:
+        return None
+    found = None
+    for model in models.values():
+        spec = model["operations"].get(operation.split(":", 1)[1], {})
+        if "input" not in spec or "ec2" not in _protocols(model):
+            continue
+        member = model["shapes"][spec["input"]["shape"]].get("members", {}).get(configured["member"])
+        if member is None or _strings(model, model["shapes"][member["shape"]]) != "[]":
+            continue
+        prefixes = {kind: prefix for kind, prefix in configured["prefixes"].items()
+                    if kind in types and kind in formats}
+        if not prefixes:
+            continue
+        for kind in prefixes:
+            variables = set(VARIABLE_RE.findall(formats[kind])) - KNOWN_VARIABLES
+            if len(variables) != 1:
+                raise ValueError(f"{operation}: id target {kind} must have exactly one ARN variable")
+        location = member.get("locationName", configured["member"])
+        query = member.get("queryName", location[:1].upper() + location[1:])
+        target = {"member": configured["member"] + "[]", "query": query, "prefixes": prefixes}
+        if found is not None and found != target:
+            raise ValueError(f"{operation}: clients disagree on the id target's serialization")
+        found = target
+    return found
+
+
 def entry_for(operation: str, upstream: dict, formats: dict[str, str], models: dict[str, dict]) -> dict:
     """What the file says for one operation."""
     types = upstream["types"] or []
     members = request_members(models, operation.split(":", 1)[1])
+    if namespace_of(operation) in ID_TARGETS:
+        entry = {"action": upstream["action"], "types": types, "resources": []}
+        targets = id_targets(operation, types, formats, models)
+        if targets is not None:
+            entry["targets"] = targets
+        return entry
     if operation in CORRECTIONS:
         resources = CORRECTIONS[operation][0]
         endpoints = {model["metadata"]["endpointPrefix"] for model in models.values()}
@@ -1402,7 +1449,7 @@ def validate(document: dict) -> list[str]:
         if not OPERATION_RE.match(operation) or namespace not in namespaces:
             problems.append(f"{operation!r} is not an operation of a namespace the file reads")
             continue
-        if not isinstance(entry, dict) or not {"action", "types", "resources"} <= set(entry) <= {"action", "types", "resources", "creates", "located"}:
+        if not isinstance(entry, dict) or not {"action", "types", "resources"} <= set(entry) <= {"action", "types", "resources", "creates", "located", "targets"}:
             problems.append(f"{operation} is not an action, its types and its resources")
             continue
         if not isinstance(entry["action"], str) or not OPERATION_RE.match(entry["action"]) \
@@ -1416,6 +1463,24 @@ def validate(document: dict) -> list[str]:
             problems += _resource_problems(operation, resource, set(types), formats.get(namespace, {}))
         for created in entry.get("creates", []) if isinstance(entry.get("creates", []), list) else [None]:
             problems += _created_problems(operation, created, set(types), formats.get(namespace, {}))
+        targets = entry.get("targets")
+        if targets is not None:
+            if not isinstance(targets, dict) or set(targets) != {"member", "query", "prefixes"}:
+                problems.append(f"{operation} has malformed id targets")
+            elif not re.fullmatch(r"[A-Za-z][A-Za-z0-9_]*\[\]", str(targets["member"])) \
+                    or not re.fullmatch(r"[A-Za-z][A-Za-z0-9_]*", str(targets["query"])) \
+                    or not isinstance(targets["prefixes"], dict) or not targets["prefixes"]:
+                problems.append(f"{operation} has no list member, Query name or id prefixes")
+            else:
+                prefixes = targets["prefixes"]
+                for kind, prefix in prefixes.items():
+                    arn = formats.get(namespace, {}).get(kind, "")
+                    if kind not in types or not arn or len(set(VARIABLE_RE.findall(arn)) - KNOWN_VARIABLES) != 1 \
+                            or not isinstance(prefix, str) or not prefix:
+                        problems.append(f"{operation} has an invalid id target type or prefix: {kind}")
+                values = [p for p in prefixes.values() if isinstance(p, str)]
+                if any(a.startswith(b) for i, a in enumerate(values) for j, b in enumerate(values) if i != j):
+                    problems.append(f"{operation} has ambiguous id prefixes")
         located = entry.get("located", {})
         if not isinstance(located, dict) or not located and "located" in entry or not all(
                 isinstance(member, str) and PATH_RE.match(member) and isinstance(where, str) and LOCATED_RE.match(where)
