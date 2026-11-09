@@ -181,6 +181,117 @@ class StackSetCfnIntegrationTest {
     }
 
     @Test
+    void removingDeclaredCollectionsAndDescriptionClearsTheirStackSetValues() {
+        String stack = "removed-settings-" + UUID.randomUUID().toString().substring(0, 8);
+        String name = "set-" + stack;
+        ObjectMapper mapper = new ObjectMapper();
+        ObjectNode body = simpleStackSetTemplate(name);
+        ObjectNode properties = (ObjectNode) body.path("Resources").path("Set").path("Properties");
+        properties.put("TemplateBody", "{\"Parameters\":{\"Value\":{\"Type\":\"String\",\"Default\":\"default\"}},"
+                + "\"Resources\":{\"Queue\":{\"Type\":\"AWS::SQS::Queue\"}}}");
+        properties.set("Parameters", mapper.createArrayNode().add(mapper.createObjectNode()
+                .put("ParameterKey", "Value").put("ParameterValue", "explicit")));
+        properties.set("Capabilities", mapper.createArrayNode().add("CAPABILITY_NAMED_IAM"));
+        properties.set("Tags", mapper.createArrayNode().add(mapper.createObjectNode()
+                .put("Key", "declared").put("Value", "value")));
+        cloudFormation("CreateStack", "StackName", stack, "TemplateBody", body.toString()).then().statusCode(200);
+        CfnStackWaits.awaitStatus(stack, "CREATE_COMPLETE", auth(MANAGEMENT, "cloudformation"));
+        cloudFormation("DescribeStackSet", "StackSetName", name).then().statusCode(200)
+                .body(containsString("<Description>original</Description>"))
+                .body(containsString("<ParameterValue>explicit</ParameterValue>"))
+                .body(containsString("<member>CAPABILITY_NAMED_IAM</member>"))
+                .body(containsString("<Key>declared</Key>"));
+
+        for (String key : new String[]{"Description", "Parameters", "Capabilities", "Tags"}) {
+            properties.remove(key);
+        }
+        cloudFormation("UpdateStack", "StackName", stack, "TemplateBody", body.toString()).then().statusCode(200);
+        CfnStackWaits.awaitStatus(stack, "UPDATE_COMPLETE", auth(MANAGEMENT, "cloudformation"));
+        cloudFormation("DescribeStackSet", "StackSetName", name).then().statusCode(200)
+                .body(not(containsString("<Description>original</Description>")))
+                .body(not(containsString("<ParameterValue>explicit</ParameterValue>")))
+                .body(not(containsString("<member>CAPABILITY_NAMED_IAM</member>")))
+                .body(not(containsString("<Key>declared</Key>")));
+        CfnStackWaits.deleteStack(stack, auth(MANAGEMENT, "cloudformation"));
+    }
+
+    @Test
+    void apiUpdateStillKeepsOmittedSettings() {
+        String name = "api-keep-" + UUID.randomUUID().toString().substring(0, 8);
+        String templateBody = "{\"Parameters\":{\"Value\":{\"Type\":\"String\"}},"
+                + "\"Resources\":{\"Queue\":{\"Type\":\"AWS::SQS::Queue\"}}}";
+        cloudFormation("CreateStackSet", "StackSetName", name, "PermissionModel", "SELF_MANAGED",
+                "TemplateBody", templateBody, "Description", "keep",
+                "Parameters.member.1.ParameterKey", "Value", "Parameters.member.1.ParameterValue", "explicit",
+                "Capabilities.member.1", "CAPABILITY_NAMED_IAM", "Tags.member.1.Key", "declared",
+                "Tags.member.1.Value", "value").then().statusCode(200);
+        cloudFormation("UpdateStackSet", "StackSetName", name, "TemplateBody", templateBody)
+                .then().statusCode(200);
+        cloudFormation("DescribeStackSet", "StackSetName", name).then().statusCode(200)
+                .body(containsString("<Description>keep</Description>"))
+                .body(containsString("<ParameterValue>explicit</ParameterValue>"))
+                .body(containsString("<member>CAPABILITY_NAMED_IAM</member>"))
+                .body(containsString("<Key>declared</Key>"));
+        cloudFormation("DeleteStackSet", "StackSetName", name).then().statusCode(200);
+    }
+
+    @Test
+    void removingDeploymentSettingsRestoresTheirDefaults() {
+        organizationsFixture.createWithTrustedAccess(MANAGEMENT);
+        String stack = "removed-deployment-" + UUID.randomUUID().toString().substring(0, 8);
+        String name = "set-" + stack;
+        ObjectMapper mapper = new ObjectMapper();
+        ObjectNode body = simpleStackSetTemplate(name);
+        ObjectNode properties = (ObjectNode) body.path("Resources").path("Set").path("Properties");
+        properties.put("PermissionModel", "SERVICE_MANAGED");
+        properties.set("AutoDeployment", mapper.createObjectNode().put("Enabled", true)
+                .put("RetainStacksOnAccountRemoval", true));
+        properties.set("ManagedExecution", mapper.createObjectNode().put("Active", true));
+        cloudFormation("CreateStack", "StackName", stack, "TemplateBody", body.toString()).then().statusCode(200);
+        CfnStackWaits.awaitStatus(stack, "CREATE_COMPLETE", auth(MANAGEMENT, "cloudformation"));
+        cloudFormation("DescribeStackSet", "StackSetName", name).then().statusCode(200)
+                .body(containsString("<Enabled>true</Enabled>"))
+                .body(containsString("<RetainStacksOnAccountRemoval>true</RetainStacksOnAccountRemoval>"))
+                .body(containsString("<Active>true</Active>"));
+
+        properties.remove("AutoDeployment");
+        properties.remove("ManagedExecution");
+        properties.remove("Description");
+        cloudFormation("UpdateStack", "StackName", stack, "TemplateBody", body.toString()).then().statusCode(200);
+        CfnStackWaits.awaitStatus(stack, "UPDATE_COMPLETE", auth(MANAGEMENT, "cloudformation"));
+        cloudFormation("DescribeStackSet", "StackSetName", name).then().statusCode(200)
+                .body(containsString("<Enabled>false</Enabled>"))
+                .body(containsString("<RetainStacksOnAccountRemoval>false</RetainStacksOnAccountRemoval>"))
+                .body(containsString("<Active>false</Active>"));
+        CfnStackWaits.deleteStack(stack, auth(MANAGEMENT, "cloudformation"));
+    }
+
+    @Test
+    void removingRequiredParameterFailsBeforeChangingTheStackSet() {
+        String stack = "removed-required-" + UUID.randomUUID().toString().substring(0, 8);
+        String name = "set-" + stack;
+        ObjectMapper mapper = new ObjectMapper();
+        ObjectNode body = simpleStackSetTemplate(name);
+        ObjectNode properties = (ObjectNode) body.path("Resources").path("Set").path("Properties");
+        properties.put("TemplateBody", "{\"Parameters\":{\"Value\":{\"Type\":\"String\"}},"
+                + "\"Resources\":{\"Queue\":{\"Type\":\"AWS::SQS::Queue\"}}}");
+        properties.set("Parameters", mapper.createArrayNode().add(mapper.createObjectNode()
+                .put("ParameterKey", "Value").put("ParameterValue", "original")));
+        cloudFormation("CreateStack", "StackName", stack, "TemplateBody", body.toString()).then().statusCode(200);
+        CfnStackWaits.awaitStatus(stack, "CREATE_COMPLETE", auth(MANAGEMENT, "cloudformation"));
+
+        properties.remove("Parameters");
+        properties.put("Description", "must-not-apply");
+        cloudFormation("UpdateStack", "StackName", stack, "TemplateBody", body.toString()).then().statusCode(200);
+        assertEquals("UPDATE_ROLLBACK_COMPLETE", CfnStackWaits.awaitTerminal(stack,
+                auth(MANAGEMENT, "cloudformation")).status());
+        cloudFormation("DescribeStackSet", "StackSetName", name).then().statusCode(200)
+                .body(containsString("<Description>original</Description>"))
+                .body(containsString("<ParameterValue>original</ParameterValue>"));
+        CfnStackWaits.deleteStack(stack, auth(MANAGEMENT, "cloudformation"));
+    }
+
+    @Test
     void conditionalDeploymentSettingsResolveTheirSelectedObjects() throws Exception {
         String root = organizationsFixture.createWithTrustedAccess(MANAGEMENT);
         String suffix = UUID.randomUUID().toString().substring(0, 8);

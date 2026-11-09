@@ -113,8 +113,8 @@ public class StackSetCfnProvisioner implements CfnResourceProvisioner {
                     }
                     return;
                 }
-                requireSuccess(stackSets.updateStackSet(name, templateBody, parameters, capabilities, tags, description,
-                        null, optionalBoolean(autoDeployment, "Enabled", ctx),
+                requireSuccess(stackSets.updateStackSetResource(name, templateBody, parameters, capabilities, tags, description,
+                        optionalBoolean(autoDeployment, "Enabled", ctx),
                         optionalBoolean(autoDeployment, "RetainStacksOnAccountRemoval", ctx),
                         optionalBoolean(props.path("ManagedExecution"), "Active", ctx)));
                 boolean serviceManaged = SERVICE_MANAGED.equals(stackSet.getPermissionModel());
