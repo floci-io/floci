@@ -4,6 +4,7 @@ import io.floci.aws.core.common.XmlParser;
 import io.floci.aws.testing.CfnStackWaits;
 import io.floci.aws.testing.RestAssuredJsonUtils;
 import io.quarkus.test.junit.QuarkusTest;
+import io.restassured.path.json.JsonPath;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
@@ -196,8 +197,8 @@ class CloudFormationEventBusIntegrationTest {
                 """.formatted(busName, statementId);
     }
 
-    private void callEventBridge(String target, String body, int expectedStatus) {
-        given()
+    private JsonPath callEventBridge(String target, String body, int expectedStatus) {
+        return given()
             .contentType("application/x-amz-json-1.1")
             .header("Authorization", EVENTS_AUTH)
             .header("X-Amz-Target", target)
@@ -205,7 +206,8 @@ class CloudFormationEventBusIntegrationTest {
         .when()
             .post("/")
         .then()
-            .statusCode(expectedStatus);
+            .statusCode(expectedStatus)
+            .extract().jsonPath();
     }
 
     private static String eventBusAndRuleTemplate(String busName) {
@@ -653,16 +655,8 @@ class CloudFormationEventBusIntegrationTest {
     }
 
     private Map<String, String> busTags(String busArn) {
-        List<Map<String, String>> tags = given()
-            .contentType("application/x-amz-json-1.1")
-            .header("Authorization", EVENTS_AUTH)
-            .header("X-Amz-Target", "AWSEvents.ListTagsForResource")
-            .body("{\"ResourceARN\":\"" + busArn + "\"}")
-        .when()
-            .post("/")
-        .then()
-            .statusCode(200)
-            .extract().jsonPath().getList("Tags");
+        List<Map<String, String>> tags = callEventBridge("AWSEvents.ListTagsForResource",
+                "{\"ResourceARN\":\"" + busArn + "\"}", 200).getList("Tags");
         Map<String, String> byKey = new HashMap<>();
         for (Map<String, String> tag : tags) {
             byKey.put(tag.get("Key"), tag.get("Value"));
@@ -671,16 +665,7 @@ class CloudFormationEventBusIntegrationTest {
     }
 
     private Map<String, Object> describeBus(String busName) {
-        return given()
-            .contentType("application/x-amz-json-1.1")
-            .header("Authorization", EVENTS_AUTH)
-            .header("X-Amz-Target", "AWSEvents.DescribeEventBus")
-            .body("{\"Name\":\"" + busName + "\"}")
-        .when()
-            .post("/")
-        .then()
-            .statusCode(200)
-            .extract().jsonPath().getMap("");
+        return callEventBridge("AWSEvents.DescribeEventBus", "{\"Name\":\"" + busName + "\"}", 200).getMap("");
     }
 
     @Test
