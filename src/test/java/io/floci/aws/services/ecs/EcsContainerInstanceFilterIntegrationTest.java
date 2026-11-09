@@ -16,8 +16,8 @@ import java.time.Duration;
 import java.util.List;
 import java.util.Set;
 
+import static io.floci.aws.testing.EcsTaskWaits.awaitLastStatus;
 import static io.restassured.RestAssured.given;
-import static org.awaitility.Awaitility.await;
 import static org.hamcrest.Matchers.containsString;
 import static org.hamcrest.Matchers.equalTo;
 import static org.hamcrest.Matchers.hasSize;
@@ -53,13 +53,6 @@ class EcsContainerInstanceFilterIntegrationTest {
                 .when().post("/")
                 .then().statusCode(expectedStatus)
                 .extract().response();
-    }
-
-    /** StartTask answers before the launch; the task reaches its status in the background. */
-    private static void awaitTaskStatus(String cluster, String taskArn, String status) {
-        await().atMost(Duration.ofSeconds(10)).until(() -> status.equals(
-                call("DescribeTasks", "{\"cluster\":\"" + cluster + "\",\"tasks\":[\"" + taskArn + "\"]}")
-                        .jsonPath().getString("tasks[0].lastStatus")));
     }
 
     @Test
@@ -98,8 +91,9 @@ class EcsContainerInstanceFilterIntegrationTest {
                 + "\"containerInstances\":[\"" + excluded + "\"],"
                 + "\"taskDefinition\":\"query-filter-task\"}");
         String task = started.jsonPath().getString("tasks[0].taskArn");
-        awaitTaskStatus(cluster, task, "RUNNING");
-        call("DescribeTasks", "{\"cluster\":\"" + cluster + "\",\"tasks\":[\"" + task + "\"]}")
+        awaitLastStatus(
+                () -> call("DescribeTasks", "{\"cluster\":\"" + cluster + "\",\"tasks\":[\"" + task + "\"]}"),
+                r -> r.jsonPath().getString("tasks[0].lastStatus"), Duration.ofSeconds(10), "RUNNING")
                 .then().body("tasks[0].lastStatus", equalTo("RUNNING"));
         call("DescribeContainerInstances", "{\"cluster\":\"" + cluster
                 + "\",\"containerInstances\":[\"" + excluded + "\"]}")

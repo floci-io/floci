@@ -38,7 +38,7 @@ import java.util.UUID;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicReference;
 
-import static org.awaitility.Awaitility.await;
+import static io.floci.aws.testing.EcsTaskWaits.awaitLastStatus;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.junit.jupiter.api.Assertions.assertNull;
@@ -148,12 +148,9 @@ class EcsImagePullDockerIntegrationTest {
                 null, null, null, null, null, REGION).getFirst();
         taskArns.add(task.getTaskArn());
         // RunTask answers before the launch; wait for it to land the task RUNNING or STOPPED.
-        await().atMost(Duration.ofMinutes(2)).until(() -> {
-            String status = ecsService.describeTasks(clusterName, List.of(task.getTaskArn()), REGION)
-                    .getFirst().getLastStatus();
-            return !"PROVISIONING".equals(status) && !"PENDING".equals(status);
-        });
-        EcsTask described = ecsService.describeTasks(clusterName, List.of(task.getTaskArn()), REGION).getFirst();
+        EcsTask described = awaitLastStatus(
+                () -> ecsService.describeTasks(clusterName, List.of(task.getTaskArn()), REGION).getFirst(),
+                EcsTask::getLastStatus, Duration.ofMinutes(2), "RUNNING", "STOPPED");
         assertEquals("RUNNING", described.getLastStatus(), "the container must be up: " + described.getStoppedReason());
         return described;
     }

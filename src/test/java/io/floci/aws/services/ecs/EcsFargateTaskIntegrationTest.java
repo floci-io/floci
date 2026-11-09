@@ -10,8 +10,8 @@ import org.junit.jupiter.api.Test;
 import java.time.Duration;
 import java.util.List;
 
+import static io.floci.aws.testing.EcsTaskWaits.awaitLastStatus;
 import static io.restassured.RestAssured.given;
-import static org.awaitility.Awaitility.await;
 import static org.hamcrest.Matchers.containsString;
 import static org.hamcrest.Matchers.equalTo;
 import static org.hamcrest.Matchers.hasSize;
@@ -69,18 +69,12 @@ class EcsFargateTaskIntegrationTest {
         return call("DescribeTasks", "{\"cluster\":\"" + CLUSTER + "\",\"tasks\":[\"" + taskArn + "\"]}", 200);
     }
 
-    /** RunTask answers before the launch; the task reaches RUNNING in the background. */
-    private static Response awaitRunning(Response launched) {
-        String taskArn = launched.jsonPath().getString("tasks[0].taskArn");
-        await().atMost(Duration.ofSeconds(10)).until(() ->
-                "RUNNING".equals(describe(taskArn).jsonPath().getString("tasks[0].lastStatus")));
-        return describe(taskArn);
-    }
-
     @Test
     void runTaskReportsThePlatformAndConnectivityMembersOfAFargateTask() {
         String family = seed("fargate-task-platform");
-        Response response = awaitRunning(runTask(family, ""));
+        String taskArn = runTask(family, "").jsonPath().getString("tasks[0].taskArn");
+        Response response = awaitLastStatus(() -> describe(taskArn),
+                r -> r.jsonPath().getString("tasks[0].lastStatus"), Duration.ofSeconds(10), "RUNNING");
 
         response.then()
                 .body("tasks", hasSize(1))
@@ -103,7 +97,9 @@ class EcsFargateTaskIntegrationTest {
     @Test
     void runTaskGivesAnAwsvpcTaskItsOwnEni() {
         String family = seed("fargate-task-eni");
-        Response response = awaitRunning(runTask(family, ""));
+        String taskArn = runTask(family, "").jsonPath().getString("tasks[0].taskArn");
+        Response response = awaitLastStatus(() -> describe(taskArn),
+                r -> r.jsonPath().getString("tasks[0].lastStatus"), Duration.ofSeconds(10), "RUNNING");
 
         // The ENI is what a client waits on to find a Fargate task's address, so it is reported
         // whether or not security-group enforcement is on and whether or not Docker is in play.
@@ -135,7 +131,6 @@ class EcsFargateTaskIntegrationTest {
                 // task has none in the account.
                 .body(not(containsString("<attachment>")));
 
-        String taskArn = response.jsonPath().getString("tasks[0].taskArn");
         call("StopTask", "{\"cluster\":\"" + CLUSTER + "\",\"task\":\"" + taskArn + "\"}", 200)
                 .then().body("task.attachments[0].status", equalTo("DELETED"));
 
@@ -203,8 +198,9 @@ class EcsFargateTaskIntegrationTest {
     @Test
     void stopTaskReportsTheStopCodeAndAdvancesTheVersion() {
         String family = seed("fargate-task-stop");
-        Response launched = awaitRunning(runTask(family, ""));
-        String taskArn = launched.jsonPath().getString("tasks[0].taskArn");
+        String taskArn = runTask(family, "").jsonPath().getString("tasks[0].taskArn");
+        Response launched = awaitLastStatus(() -> describe(taskArn),
+                r -> r.jsonPath().getString("tasks[0].lastStatus"), Duration.ofSeconds(10), "RUNNING");
         long versionWhenRunning = launched.jsonPath().getLong("tasks[0].version");
 
         call("StopTask", "{\"cluster\":\"" + CLUSTER + "\",\"task\":\"" + taskArn

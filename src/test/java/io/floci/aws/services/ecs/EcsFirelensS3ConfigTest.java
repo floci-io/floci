@@ -18,7 +18,7 @@ import java.time.Duration;
 import java.util.List;
 import java.util.Map;
 
-import static org.awaitility.Awaitility.await;
+import static io.floci.aws.testing.EcsTaskWaits.awaitLastStatus;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -123,9 +123,9 @@ class EcsFirelensS3ConfigTest {
 
         // RunTask answers before the launch; the failure lands on the task in the background.
         String taskArn = tasks.getFirst().getTaskArn();
-        await().atMost(Duration.ofSeconds(5)).until(() -> TaskStatus.STOPPED.name().equals(
-                service.describeTasks("test-cluster", List.of(taskArn), "us-east-1").getFirst().getLastStatus()));
-        EcsTask task = service.describeTasks("test-cluster", List.of(taskArn), "us-east-1").getFirst();
+        EcsTask task = awaitLastStatus(
+                () -> service.describeTasks("test-cluster", List.of(taskArn), "us-east-1").getFirst(),
+                EcsTask::getLastStatus, Duration.ofSeconds(5), "STOPPED");
         assertEquals(TaskStatus.STOPPED.name(), task.getLastStatus());
         assertEquals("Unable to download firelens s3 config file: unable to download s3 config "
                         + "extra.conf from bucket firelens-configs: The specified key does not exist.",

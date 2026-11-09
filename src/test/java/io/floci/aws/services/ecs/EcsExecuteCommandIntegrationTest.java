@@ -14,8 +14,8 @@ import java.net.URI;
 import java.time.Duration;
 import java.util.List;
 
+import static io.floci.aws.testing.EcsTaskWaits.awaitLastStatus;
 import static io.restassured.RestAssured.given;
-import static org.awaitility.Awaitility.await;
 import static org.hamcrest.Matchers.containsString;
 import static org.hamcrest.Matchers.equalTo;
 import static org.hamcrest.Matchers.hasSize;
@@ -66,9 +66,9 @@ class EcsExecuteCommandIntegrationTest {
                 + enableExecuteCommand + "}", 200)
                 .jsonPath().getString("tasks[0].taskArn");
         // RunTask answers before the launch; the task reaches RUNNING in the background.
-        await().atMost(Duration.ofSeconds(10)).until(() -> "RUNNING".equals(
-                call("DescribeTasks", "{\"cluster\":\"" + CLUSTER + "\",\"tasks\":[\"" + taskArn + "\"]}", 200)
-                        .jsonPath().getString("tasks[0].lastStatus")));
+        awaitLastStatus(
+                () -> call("DescribeTasks", "{\"cluster\":\"" + CLUSTER + "\",\"tasks\":[\"" + taskArn + "\"]}", 200),
+                r -> r.jsonPath().getString("tasks[0].lastStatus"), Duration.ofSeconds(10), "RUNNING");
         return taskArn;
     }
 

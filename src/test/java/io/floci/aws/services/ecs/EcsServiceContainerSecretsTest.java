@@ -15,7 +15,7 @@ import org.junit.jupiter.api.Test;
 import java.time.Duration;
 import java.util.List;
 
-import static org.awaitility.Awaitility.await;
+import static io.floci.aws.testing.EcsTaskWaits.awaitLastStatus;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
@@ -57,9 +57,9 @@ class EcsServiceContainerSecretsTest {
         assertEquals(1, tasks.size());
         // RunTask answers before the launch; the failure lands on the task in the background.
         String taskArn = tasks.getFirst().getTaskArn();
-        await().atMost(Duration.ofSeconds(5)).until(() -> TaskStatus.STOPPED.name().equals(
-                service.describeTasks("test-cluster", List.of(taskArn), "us-east-1").getFirst().getLastStatus()));
-        EcsTask task = service.describeTasks("test-cluster", List.of(taskArn), "us-east-1").getFirst();
+        EcsTask task = awaitLastStatus(
+                () -> service.describeTasks("test-cluster", List.of(taskArn), "us-east-1").getFirst(),
+                EcsTask::getLastStatus, Duration.ofSeconds(5), "STOPPED");
         assertEquals(TaskStatus.STOPPED.name(), task.getLastStatus());
         assertEquals(TaskStatus.STOPPED.name(), task.getDesiredStatus());
         // A ResourceInitializationError is AWS's exact stopped-reason wording, so it must be

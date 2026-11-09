@@ -31,7 +31,7 @@ import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicReference;
 
-import static org.awaitility.Awaitility.await;
+import static io.floci.aws.testing.EcsTaskWaits.awaitLastStatus;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
@@ -102,7 +102,7 @@ class EcsRunTaskAsyncLaunchServiceTest {
         assertEquals("PENDING", describe(service, response).getLastStatus());
 
         releaseStart.countDown();
-        await().atMost(LAUNCH_BUDGET).until(() -> "RUNNING".equals(describe(service, response).getLastStatus()));
+        awaitLastStatus(() -> describe(service, response), EcsTask::getLastStatus, LAUNCH_BUDGET, "RUNNING");
         assertEquals("PENDING", response.getLastStatus(), "the RunTask response is a snapshot");
         assertEquals(1, runningTasksCount(service));
     }
@@ -155,7 +155,7 @@ class EcsRunTaskAsyncLaunchServiceTest {
         assertPendingCounts(service, 1);
 
         releaseStart.countDown();
-        await().atMost(LAUNCH_BUDGET).until(() -> "RUNNING".equals(describe(service, response).getLastStatus()));
+        awaitLastStatus(() -> describe(service, response), EcsTask::getLastStatus, LAUNCH_BUDGET, "RUNNING");
         assertPendingCounts(service, 0);
     }
 
@@ -168,8 +168,9 @@ class EcsRunTaskAsyncLaunchServiceTest {
 
         assertEquals("PENDING", response.getLastStatus());
         assertEquals(List.of("PENDING"), containerStatuses(response));
-        await().atMost(LAUNCH_BUDGET).until(() -> "RUNNING".equals(describe(service, response).getLastStatus()));
-        assertEquals(List.of("RUNNING"), containerStatuses(describe(service, response)));
+        EcsTask running = awaitLastStatus(() -> describe(service, response), EcsTask::getLastStatus,
+                LAUNCH_BUDGET, "RUNNING");
+        assertEquals(List.of("RUNNING"), containerStatuses(running));
         assertEquals(1, runningTasksCount(service));
         verify(containerManager, never()).startTask(any(), any(), any(), anyString());
     }
@@ -204,8 +205,9 @@ class EcsRunTaskAsyncLaunchServiceTest {
         assertEquals("ExecuteCommandAgent", pending.name());
         assertEquals("PENDING", pending.lastStatus());
         assertNull(pending.lastStartedAt());
-        await().atMost(LAUNCH_BUDGET).until(() -> "RUNNING".equals(describe(service, response).getLastStatus()));
-        ManagedAgent running = describe(service, response).getContainers().getFirst().getManagedAgents().getFirst();
+        EcsTask launched = awaitLastStatus(() -> describe(service, response), EcsTask::getLastStatus,
+                LAUNCH_BUDGET, "RUNNING");
+        ManagedAgent running = launched.getContainers().getFirst().getManagedAgents().getFirst();
         assertEquals("RUNNING", running.lastStatus());
         assertNotNull(running.lastStartedAt());
     }
@@ -225,8 +227,8 @@ class EcsRunTaskAsyncLaunchServiceTest {
         service.stopTask(null, response.getTaskArn(), "scaling in", REGION);
         releaseStart.countDown();
 
-        await().atMost(LAUNCH_BUDGET).until(() -> "STOPPED".equals(describe(service, response).getLastStatus()));
-        EcsTask stopped = describe(service, response);
+        EcsTask stopped = awaitLastStatus(() -> describe(service, response), EcsTask::getLastStatus,
+                LAUNCH_BUDGET, "STOPPED");
         assertEquals("UserInitiated", stopped.getStopCode());
         assertEquals("scaling in", stopped.getStoppedReason());
     }
@@ -241,8 +243,8 @@ class EcsRunTaskAsyncLaunchServiceTest {
         EcsTask response = run(service, "bad-image");
 
         assertEquals("PENDING", response.getLastStatus());
-        await().atMost(LAUNCH_BUDGET).until(() -> "STOPPED".equals(describe(service, response).getLastStatus()));
-        EcsTask stopped = describe(service, response);
+        EcsTask stopped = awaitLastStatus(() -> describe(service, response), EcsTask::getLastStatus,
+                LAUNCH_BUDGET, "STOPPED");
         assertEquals("STOPPED", stopped.getDesiredStatus());
         assertEquals("TaskFailedToStart", stopped.getStopCode());
         assertEquals("Failed to start: CannotPullContainerError: pull access denied", stopped.getStoppedReason());
@@ -268,7 +270,7 @@ class EcsRunTaskAsyncLaunchServiceTest {
         assertEquals("UserInitiated", stopping.getStopCode());
         assertNotNull(stopping.getStoppingAt());
         releaseStart.countDown();
-        await().atMost(LAUNCH_BUDGET).until(() -> "STOPPED".equals(describe(service, response).getLastStatus()));
+        awaitLastStatus(() -> describe(service, response), EcsTask::getLastStatus, LAUNCH_BUDGET, "STOPPED");
         verify(containerManager).stopTaskAndCollectExitCodes(any());
         assertEquals(0, runningTasksCount(service));
     }
@@ -303,9 +305,9 @@ class EcsRunTaskAsyncLaunchServiceTest {
         EcsTask response = run(service, "stop-first");
         runTaskAnswered.countDown();
 
-        await().atMost(LAUNCH_BUDGET).until(() -> "STOPPED".equals(describe(service, response).getLastStatus()));
+        EcsTask stopped = awaitLastStatus(() -> describe(service, response), EcsTask::getLastStatus,
+                LAUNCH_BUDGET, "STOPPED");
         assertEquals("PENDING", statusStopTaskAnswered.get());
-        EcsTask stopped = describe(service, response);
         assertEquals("UserInitiated", stopped.getStopCode());
         assertNull(stopped.getStartedAt());
         assertEquals(List.of("STOPPED"), containerStatuses(stopped));
@@ -341,7 +343,7 @@ class EcsRunTaskAsyncLaunchServiceTest {
                 .when(containerManager).startTask(any(), any(), any(), anyString());
         service.afterReset();
         EcsTask again = run(service, "teardown");
-        await().atMost(LAUNCH_BUDGET).until(() -> "RUNNING".equals(describe(service, again).getLastStatus()));
+        awaitLastStatus(() -> describe(service, again), EcsTask::getLastStatus, LAUNCH_BUDGET, "RUNNING");
     }
 
     @Test

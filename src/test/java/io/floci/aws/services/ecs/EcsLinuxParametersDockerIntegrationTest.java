@@ -26,8 +26,8 @@ import java.util.List;
 import java.util.Map;
 import java.util.UUID;
 
+import static io.floci.aws.testing.EcsTaskWaits.awaitLastStatus;
 import static io.restassured.RestAssured.given;
-import static org.awaitility.Awaitility.await;
 import static org.junit.jupiter.api.Assertions.assertArrayEquals;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -121,7 +121,9 @@ class EcsLinuxParametersDockerIntegrationTest {
         EcsTask task = ecsService.runTask(clusterName, taskDefinitionArn, 1,
                 null, null, null, null, null, REGION).getFirst();
         taskArn = task.getTaskArn();
-        EcsTask described = awaitLaunched();
+        EcsTask described = awaitLastStatus(
+                () -> ecsService.describeTasks(clusterName, List.of(taskArn), REGION).getFirst(),
+                EcsTask::getLastStatus, Duration.ofMinutes(2), "RUNNING", "STOPPED");
         assertEquals("RUNNING", described.getLastStatus(), "the container must be up: " + described.getStoppedReason());
         String containerId = described.getContainers().getFirst().getRuntimeId();
 
@@ -168,20 +170,13 @@ class EcsLinuxParametersDockerIntegrationTest {
         EcsTask task = ecsService.runTask(clusterName, taskDefinitionArn, 1,
                 null, null, null, null, null, REGION).getFirst();
         taskArn = task.getTaskArn();
-        EcsTask described = awaitLaunched();
+        EcsTask described = awaitLastStatus(
+                () -> ecsService.describeTasks(clusterName, List.of(taskArn), REGION).getFirst(),
+                EcsTask::getLastStatus, Duration.ofMinutes(2), "RUNNING", "STOPPED");
         assertEquals("RUNNING", described.getLastStatus(), "the container must be up: " + described.getStoppedReason());
 
         String containerId = described.getContainers().getFirst().getRuntimeId();
         InspectContainerResponse inspected = dockerClient.inspectContainerCmd(containerId).exec();
         assertEquals(Boolean.TRUE, inspected.getHostConfig().getPrivileged());
-    }
-
-    /** RunTask answers before the launch; waits for it to land the task RUNNING or STOPPED. */
-    private EcsTask awaitLaunched() {
-        await().atMost(Duration.ofMinutes(2)).until(() -> {
-            String status = ecsService.describeTasks(clusterName, List.of(taskArn), REGION).getFirst().getLastStatus();
-            return !"PROVISIONING".equals(status) && !"PENDING".equals(status);
-        });
-        return ecsService.describeTasks(clusterName, List.of(taskArn), REGION).getFirst();
     }
 }

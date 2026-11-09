@@ -24,7 +24,7 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 
-import static org.awaitility.Awaitility.await;
+import static io.floci.aws.testing.EcsTaskWaits.awaitLastStatus;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotEquals;
@@ -63,7 +63,7 @@ class EcsServiceTaskOwnershipTest {
 
         EcsTask intruder = service.runTask("own-cluster", "own-fam", 1, LaunchType.FARGATE,
                 "web", "me", null, null, REGION).getFirst();
-        awaitRunning(service, intruder);
+        awaitLastStatus(() -> reload(service, intruder), EcsTask::getLastStatus, Duration.ofSeconds(5), "RUNNING");
 
         // Two ticks: the first launches the service's own task, the second publishes the
         // resulting runningCount (the reconciler counts before it launches).
@@ -94,7 +94,7 @@ class EcsServiceTaskOwnershipTest {
 
         EcsTask intruder = service.runTask("scale-cluster", "own-fam", 1, LaunchType.FARGATE,
                 "api", "me", null, null, REGION).getFirst();
-        awaitRunning(service, intruder);
+        awaitLastStatus(() -> reload(service, intruder), EcsTask::getLastStatus, Duration.ofSeconds(5), "RUNNING");
 
         service.updateService("scale-cluster", "api", null, 0, null, REGION);
         service.reconcileServices();
@@ -292,7 +292,7 @@ class EcsServiceTaskOwnershipTest {
 
         EcsTask intruder = service.startTask("daemon-own", List.of(instance.getContainerInstanceArn()),
                 "own-fam", "agent", "me", REGION).getFirst();
-        awaitRunning(service, intruder);
+        awaitLastStatus(() -> reload(service, intruder), EcsTask::getLastStatus, Duration.ofSeconds(5), "RUNNING");
 
         service.reconcileServices();
 
@@ -317,7 +317,7 @@ class EcsServiceTaskOwnershipTest {
 
         EcsTask intruder = service.runTask("delete-cluster", "own-fam", 1, LaunchType.FARGATE,
                 "worker", "me", null, null, REGION).getFirst();
-        awaitRunning(service, intruder);
+        awaitLastStatus(() -> reload(service, intruder), EcsTask::getLastStatus, Duration.ofSeconds(5), "RUNNING");
 
         service.deleteService("delete-cluster", "worker", true, REGION);
 
@@ -421,11 +421,6 @@ class EcsServiceTaskOwnershipTest {
         EcsTask found = service.describeTasks(null, List.of(task.getTaskArn()), REGION).getFirst();
         assertNotNull(found);
         return found;
-    }
-
-    /** RunTask and StartTask answer before the launch, which runs on the task launcher. */
-    private static void awaitRunning(EcsService service, EcsTask task) {
-        await().atMost(Duration.ofSeconds(5)).until(() -> "RUNNING".equals(reload(service, task).getLastStatus()));
     }
 
     private static void registerTaskDef(EcsService service) {

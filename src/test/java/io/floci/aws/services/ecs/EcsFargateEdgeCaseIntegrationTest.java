@@ -10,6 +10,7 @@ import java.time.Duration;
 import java.util.List;
 import java.util.Map;
 
+import static io.floci.aws.testing.EcsTaskWaits.awaitLastStatus;
 import static io.restassured.RestAssured.given;
 import static org.awaitility.Awaitility.await;
 import static org.hamcrest.Matchers.containsString;
@@ -49,13 +50,6 @@ class EcsFargateEdgeCaseIntegrationTest {
                 .when().post("/")
                 .then().statusCode(expectedStatus)
                 .extract().response();
-    }
-
-    /** RunTask answers before the launch; the task reaches RUNNING in the background. */
-    private static void awaitRunning(String cluster, String taskArn) {
-        await().atMost(Duration.ofSeconds(10)).until(() -> "RUNNING".equals(
-                call("DescribeTasks", "{\"cluster\":\"" + cluster + "\",\"tasks\":[\"" + taskArn + "\"]}", 200)
-                        .jsonPath().getString("tasks[0].lastStatus")));
     }
 
     private static void registerSize(String family, String cpu, String memory, int expectedStatus) {
@@ -563,7 +557,9 @@ class EcsFargateEdgeCaseIntegrationTest {
         String taskArn = call("RunTask", "{\"cluster\":\"" + CLUSTER + "\",\"taskDefinition\":\""
                 + family + "\",\"launchType\":\"FARGATE\"," + NETWORK + "}", 200)
                 .jsonPath().getString("tasks[0].taskArn");
-        awaitRunning(CLUSTER, taskArn);
+        awaitLastStatus(
+                () -> call("DescribeTasks", "{\"cluster\":\"" + CLUSTER + "\",\"tasks\":[\"" + taskArn + "\"]}", 200),
+                r -> r.jsonPath().getString("tasks[0].lastStatus"), Duration.ofSeconds(10), "RUNNING");
 
         Response stopped = call("StopTask", "{\"cluster\":\"" + CLUSTER + "\",\"task\":\""
                 + taskArn + "\",\"reason\":\"edge\"}", 200);
@@ -1025,7 +1021,9 @@ class EcsFargateEdgeCaseIntegrationTest {
         String taskArn = call("RunTask", "{\"cluster\":\"" + cluster + "\",\"taskDefinition\":\"edge-stats\","
                 + "\"launchType\":\"FARGATE\"," + NETWORK + "}", 200)
                 .jsonPath().getString("tasks[0].taskArn");
-        awaitRunning(cluster, taskArn);
+        awaitLastStatus(
+                () -> call("DescribeTasks", "{\"cluster\":\"" + cluster + "\",\"tasks\":[\"" + taskArn + "\"]}", 200),
+                r -> r.jsonPath().getString("tasks[0].lastStatus"), Duration.ofSeconds(10), "RUNNING");
 
         List<Map<String, String>> statistics = call("DescribeClusters",
                 "{\"clusters\":[\"" + cluster + "\"],\"include\":[\"STATISTICS\"]}", 200)
