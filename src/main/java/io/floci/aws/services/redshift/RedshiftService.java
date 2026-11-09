@@ -71,6 +71,7 @@ import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.locks.ReentrantLock;
+import java.util.function.BiPredicate;
 import java.util.function.Consumer;
 import java.util.function.Supplier;
 import java.util.regex.Pattern;
@@ -2052,6 +2053,56 @@ public class RedshiftService implements ManagedSecretRotator {
                 || clusterIdentifier.equals(snapshot.getClusterIdentifier());
     }
 
+    public Snapshot modifyClusterSnapshot(String snapshotIdentifier, Integer manualSnapshotRetentionPeriod) {
+        return modifyClusterSnapshot(snapshotIdentifier, manualSnapshotRetentionPeriod, null);
+    }
+
+    public Snapshot modifyClusterSnapshot(String snapshotIdentifier, Integer manualSnapshotRetentionPeriod, Boolean force) {
+        if (manualSnapshotRetentionPeriod != null) {
+            validateManualRetention(manualSnapshotRetentionPeriod);
+        }
+        String region = regionResolver.getRegion();
+
+        return withResourceLock("snapshot", snapshotIdentifier, () -> {
+            Snapshot snapshot = findSnapshot(snapshotIdentifier).orElseThrow(() -> new AwsException("ClusterSnapshotNotFound",
+                    "Snapshot " + snapshotIdentifier + " not found", 404));
+            if (!"available".equals(snapshot.getStatus())) {
+                throw new AwsException("InvalidClusterSnapshotState",
+                        "Snapshot " + snapshotIdentifier + " is not available", 400);
+            }
+            if (!"manual".equals(snapshot.getSnapshotType())) {
+                throw new AwsException("InvalidClusterSnapshotState",
+                        "Cannot modify an automated snapshot: " + snapshotIdentifier
+                                + ". Only manual snapshots can be modified.", 400);
+            }
+
+            if (manualSnapshotRetentionPeriod == null) {
+                return snapshot;
+            }
+            if (isManualRetentionElapsed(snapshot, manualSnapshotRetentionPeriod, Instant.now())) {
+                if (!Boolean.TRUE.equals(force)) {
+                    throw new AwsException("InvalidRetentionPeriodFault",
+                            "The retention period of " + manualSnapshotRetentionPeriod + " days has already passed for snapshot "
+                                    + snapshotIdentifier + ". Use Force to delete it.", 400);
+                }
+                // Force overrides the fault: the snapshot is already past its new deadline, so it goes now.
+                return mutate(() -> removeSnapshot(snapshotIdentifier, snapshot.getClusterIdentifier()));
+            }
+
+            snapshot.setManualSnapshotRetentionPeriod(manualSnapshotRetentionPeriod);
+            String copyKey = copyKey(region, snapshotIdentifier);
+            if (snapshotCopies.get(copyKey).isPresent()) {
+                snapshotCopies.putAllAtomically(Map.of(copyKey, snapshot));
+                snapshotCopies.flush();
+            } else {
+                snapshots.putAllAtomically(Map.of(snapshotIdentifier, snapshot));
+                snapshots.flush();
+            }
+
+            return snapshot;
+        });
+    }
+
     public Snapshot copyClusterSnapshot(String sourceSnapshotIdentifier, String targetSnapshotIdentifier,
                                         String sourceSnapshotClusterIdentifier, Integer manualRetention) {
         validateSnapshotIdentifier(targetSnapshotIdentifier);
@@ -2981,6 +3032,47 @@ public class RedshiftService implements ManagedSecretRotator {
                         entry.key(), entry.accountId());
             }
         }
+        expireManualSnapshots(now);
+    }
+
+    private static boolean isManualRetentionElapsed(Snapshot snapshot, int retentionDays, Instant now) {
+        return retentionDays > 0 && snapshot.getSnapshotCreateTime() != null
+                && !now.isBefore(snapshot.getSnapshotCreateTime().plus(retentionDays, ChronoUnit.DAYS));
+    }
+
+    /** Expires finite-retention manual snapshots, including final snapshots and CopyClusterSnapshot targets. */
+    private void expireManualSnapshots(Instant now) {
+        expireSnapshots(snapshots, (entry, snapshot) -> isManualSnapshotExpired(snapshot, now));
+    }
+
+    private void expireSnapshots(AccountAwareStorageBackend<Snapshot> store,
+                                 BiPredicate<AccountAwareStorageBackend.AccountEntry<Snapshot>, Snapshot> expired) {
+        for (AccountAwareStorageBackend.AccountEntry<Snapshot> entry : store.scanAllAccountEntries(key -> true)) {
+            if (Thread.currentThread().isInterrupted()) {
+                return;
+            }
+            try {
+                withResourceLock(entry.accountId(), "snapshot", entry.value().getSnapshotIdentifier(), () -> mutate(() -> {
+                    // Read again under the lock: the scanned snapshot may have been modified or deleted meanwhile.
+                    Snapshot current = store.getForAccount(entry.accountId(), entry.key()).orElse(null);
+                    if (current == null || !expired.test(entry, current)) {
+                        return null;
+                    }
+                    store.deleteAllAtomicallyForAccounts(Map.of(entry.accountId(), Set.of(entry.key())));
+                    store.flush();
+                    deleteSnapshotDump(entry.accountId(), current.getSqlDump());
+                    return null;
+                }));
+            } catch (RuntimeException e) {
+                LOG.warnv(e, "Could not expire Redshift snapshot {0} of account {1}; will retry",
+                        entry.key(), entry.accountId());
+            }
+        }
+    }
+
+    private static boolean isManualSnapshotExpired(Snapshot snapshot, Instant now) {
+        return "manual".equals(snapshot.getSnapshotType())
+                && isManualRetentionElapsed(snapshot, snapshot.getManualSnapshotRetentionPeriod(), now);
     }
 
     private void runSnapshotSchedule(String accountId, Cluster cluster, Instant now) {
@@ -3182,7 +3274,7 @@ public class RedshiftService implements ManagedSecretRotator {
             } catch (RuntimeException e) {
                 // The records change in memory before they are flushed, so undo them before the dump goes.
                 rollbackSnapshotCopy(accountId, key, source);
-                deleteCopyDump(accountId, dump == null ? null : dump.toString());
+                deleteSnapshotDump(accountId, dump == null ? null : dump.toString());
                 throw e;
             }
             return null;
@@ -3252,27 +3344,8 @@ public class RedshiftService implements ManagedSecretRotator {
     }
 
     private void expireSnapshotCopies(Instant now) {
-        for (AccountAwareStorageBackend.AccountEntry<Snapshot> entry : snapshotCopies.scanAllAccountEntries(key -> true)) {
-            if (Thread.currentThread().isInterrupted()) {
-                return;
-            }
-            try {
-                withResourceLock(entry.accountId(), "snapshot", entry.value().getSnapshotIdentifier(), () -> mutate(() -> {
-                    // Read again under the lock: the scanned copy may have been replaced by a newer one meanwhile.
-                    Snapshot current = snapshotCopies.getForAccount(entry.accountId(), entry.key()).orElse(null);
-                    if (current == null || !isSnapshotCopyExpired(entry.accountId(), entry.key(), current, now)) {
-                        return null;
-                    }
-                    snapshotCopies.deleteAllAtomicallyForAccounts(Map.of(entry.accountId(), Set.of(entry.key())));
-                    snapshotCopies.flush();
-                    deleteCopyDump(entry.accountId(), current.getSqlDump());
-                    return null;
-                }));
-            } catch (RuntimeException e) {
-                LOG.warnv(e, "Could not expire Redshift snapshot copy {0} of account {1}; will retry",
-                        entry.key(), entry.accountId());
-            }
-        }
+        expireSnapshots(snapshotCopies,
+                (entry, snapshot) -> isSnapshotCopyExpired(entry.accountId(), entry.key(), snapshot, now));
     }
 
     /**
@@ -3297,11 +3370,11 @@ public class RedshiftService implements ManagedSecretRotator {
         } else {
             retention = copy.getManualSnapshotRetentionPeriod();
         }
-        return retention > 0 && !now.isBefore(copy.getSnapshotCreateTime().plus(retention, ChronoUnit.DAYS));
+        return isManualRetentionElapsed(copy, retention, now);
     }
 
-    /** Deletes a copy's dump if it still lies in the account's directory; a failure is logged and the file left. */
-    private void deleteCopyDump(String accountId, String stored) {
+    /** Deletes a snapshot's dump if it still lies in the account's directory; a failure is logged and the file left. */
+    private void deleteSnapshotDump(String accountId, String stored) {
         if (stored == null || stored.isBlank()) {
             return;
         }
@@ -3312,7 +3385,7 @@ public class RedshiftService implements ManagedSecretRotator {
         try {
             Files.deleteIfExists(file);
         } catch (IOException e) {
-            LOG.warnv(e, "Could not delete the dump file {0} of a Redshift snapshot copy", file);
+            LOG.warnv(e, "Could not delete the dump file {0} of a Redshift snapshot", file);
         }
     }
 

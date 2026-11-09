@@ -241,6 +241,23 @@ public class RedshiftQueryHandler {
                     .build();
             return Response.ok(xml).type(MediaType.APPLICATION_XML).build();
         }
+        case "ModifyClusterSnapshot" -> {
+            String snapshotIdentifier = requireParam(params, "SnapshotIdentifier");
+            Integer manualRetention = parseOptionalInteger(params, "ManualSnapshotRetentionPeriod");
+            Boolean force = booleanParam(params, "Force");
+            Snapshot snapshot = service.modifyClusterSnapshot(snapshotIdentifier, manualRetention, force);
+            String xml = new XmlBuilder()
+                    .start("ModifyClusterSnapshotResponse")
+                      .start("ModifyClusterSnapshotResult")
+                        .raw(buildSnapshotXml(snapshot))
+                      .end("ModifyClusterSnapshotResult")
+                      .start("ResponseMetadata")
+                        .elem("RequestId", "test-req-id")
+                      .end("ResponseMetadata")
+                    .end("ModifyClusterSnapshotResponse")
+                    .build();
+            return Response.ok(xml).type(MediaType.APPLICATION_XML).build();
+        }
         case "CopyClusterSnapshot" -> {
             String sourceSnapshotId = requireParam(params, "SourceSnapshotIdentifier");
             String targetSnapshotId = requireParam(params, "TargetSnapshotIdentifier");
