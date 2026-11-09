@@ -543,13 +543,14 @@ final class CognitoAuthFlowHandler {
                 CognitoUser user = applyNewPasswordAttributes(pool, responses);
                 return continueCustomSrpAuth(pool, client, user, session, state, clientMetadata);
             }
+            String username = responses.get("USERNAME");
             PasswordChangeSession pending = session == null ? null : passwordChangeSessions.get(session);
             if (pending == null || sessionExpired(pending.expiresAt())
                     || !pool.getId().equals(pending.userPoolId()) || !client.getClientId().equals(pending.clientId())
-                    || !pending.username().equals(responses.get("USERNAME"))) {
+                    || !service.signInKey(pool, pending.username()).equals(service.signInKey(pool, username))) {
                 throw new AwsException("NotAuthorizedException", "Invalid session for the user.", 400);
             }
-            validateSecretHash(client, responses, pending.username());
+            validateSecretHash(client, responses, username);
             synchronized (pending) {
                 if (passwordChangeSessions.get(session) != pending || sessionExpired(pending.expiresAt())) {
                     throw new AwsException("NotAuthorizedException", "Session not found", 400);

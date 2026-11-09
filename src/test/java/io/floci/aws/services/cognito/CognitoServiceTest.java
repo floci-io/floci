@@ -6038,7 +6038,7 @@ class CognitoServiceTest {
             Map<String, String> proof = new HashMap<>(CognitoSrpTestClient.proof(
                     pool.getId(), user.getUsername(), password, challenge));
             proof.put("SECRET_HASH", secretHash(client, user.getUsername()));
-            Map<String, Object> completed = respondToSrp(admin, pool, client, (String) started.get("Session"), proof);
+            Map<String, Object> completed = respondToChallenge(admin, pool, client, "PASSWORD_VERIFIER", (String) started.get("Session"), proof);
             assertNotNull(completed.get("AuthenticationResult"));
         }
 
@@ -6049,11 +6049,11 @@ class CognitoServiceTest {
                     : service.initiateAuth(client.getClientId(), flow, params);
         }
 
-        private Map<String, Object> respondToSrp(boolean admin, UserPool pool, UserPoolClient client,
-                                                String session, Map<String, String> proof) {
+        private Map<String, Object> respondToChallenge(boolean admin, UserPool pool, UserPoolClient client,
+                                                      String challenge, String session, Map<String, String> responses) {
             return admin ? service.adminRespondToAuthChallenge(pool.getId(), client.getClientId(),
-                    "PASSWORD_VERIFIER", session, proof)
-                    : service.respondToAuthChallenge(client.getClientId(), "PASSWORD_VERIFIER", session, proof);
+                    challenge, session, responses)
+                    : service.respondToAuthChallenge(client.getClientId(), challenge, session, responses);
         }
 
         private String secretHash(UserPoolClient client, String username) throws Exception {
@@ -6086,24 +6086,69 @@ class CognitoServiceTest {
                     pool.getId(), user.getUsername(), password, challenge));
             proof.remove("USERNAME");
             assertEquals("InvalidParameterException", assertThrows(AwsException.class,
-                    () -> respondToSrp(admin, pool, client, session, proof)).getErrorCode());
+                    () -> respondToChallenge(admin, pool, client, "PASSWORD_VERIFIER", session, proof)).getErrorCode());
             proof.put("USERNAME", "other");
             proof.put("SECRET_HASH", secretHash(client, "other"));
             assertEquals("NotAuthorizedException", assertThrows(AwsException.class,
-                    () -> respondToSrp(admin, pool, client, session, proof)).getErrorCode());
+                    () -> respondToChallenge(admin, pool, client, "PASSWORD_VERIFIER", session, proof)).getErrorCode());
             proof.put("USERNAME", "fixture");
             proof.put("SECRET_HASH", secretHash(client, "fixture"));
             if (!"false".equals(setting)) {
                 assertEquals("NotAuthorizedException", assertThrows(AwsException.class,
-                        () -> respondToSrp(admin, pool, client, session, proof)).getErrorCode());
+                        () -> respondToChallenge(admin, pool, client, "PASSWORD_VERIFIER", session, proof)).getErrorCode());
                 proof.put("USERNAME", user.getUsername());
                 proof.put("SECRET_HASH", secretHash(client, user.getUsername()));
             }
-            Map<?, ?> tokens = (Map<?, ?>) respondToSrp(admin, pool, client, session, proof).get("AuthenticationResult");
+            Map<?, ?> tokens = (Map<?, ?>) respondToChallenge(admin, pool, client, "PASSWORD_VERIFIER", session, proof).get("AuthenticationResult");
             String accessToken = (String) tokens.get("AccessToken");
             JsonNode claims = new ObjectMapper().readTree(Base64.getUrlDecoder().decode(accessToken.split("\\.")[1]));
             assertEquals("Fixture", claims.path("username").asText());
             assertEquals(user.getAttributes().get("sub"), claims.path("sub").asText());
+        }
+
+        @ParameterizedTest
+        @CsvSource({"false,false", "true,false", "false,true", "true,true", "false,default", "true,default"})
+        void newPasswordChallengeRespectsUsernameCaseSensitivity(boolean admin, String setting) throws Exception {
+            UserPool pool = service.createUserPool(Map.of("PoolName", "classic-password-case"), "us-east-1");
+            if (!"default".equals(setting)) {
+                pool.setUsernameConfiguration(Map.of("CaseSensitive", Boolean.parseBoolean(setting)));
+            }
+            String temporaryPassword = "Temporary-password123!";
+            CognitoUser user = service.adminCreateUser(pool.getId(), "Fixture", Map.of(), temporaryPassword);
+            UserPoolClient client = service.createUserPoolClient(pool.getId(), "client", true, false, List.of(), List.of());
+            client.setExplicitAuthFlows(List.of("ALLOW_USER_PASSWORD_AUTH", "ALLOW_ADMIN_USER_PASSWORD_AUTH"));
+            String supplied = "false".equals(setting) ? "fixture" : user.getUsername();
+            Map<String, Object> started = initiateAuth(admin, pool, client, "USER_PASSWORD_AUTH",
+                    Map.of("USERNAME", supplied, "PASSWORD", temporaryPassword,
+                            "SECRET_HASH", secretHash(client, supplied)));
+            assertEquals("NEW_PASSWORD_REQUIRED", started.get("ChallengeName"));
+            String session = (String) started.get("Session");
+            String newPassword = "Permanent-password123!";
+            Map<String, String> responses = new HashMap<>(Map.of("NEW_PASSWORD", newPassword));
+            assertEquals("NotAuthorizedException", assertThrows(AwsException.class,
+                    () -> respondToChallenge(admin, pool, client, "NEW_PASSWORD_REQUIRED", session, responses))
+                    .getErrorCode());
+            responses.put("USERNAME", "other");
+            responses.put("SECRET_HASH", secretHash(client, "other"));
+            assertEquals("NotAuthorizedException", assertThrows(AwsException.class,
+                    () -> respondToChallenge(admin, pool, client, "NEW_PASSWORD_REQUIRED", session, responses))
+                    .getErrorCode());
+            responses.put("USERNAME", "fixture");
+            responses.put("SECRET_HASH", secretHash(client, "fixture"));
+            if (!"false".equals(setting)) {
+                assertEquals("NotAuthorizedException", assertThrows(AwsException.class,
+                        () -> respondToChallenge(admin, pool, client, "NEW_PASSWORD_REQUIRED", session, responses))
+                        .getErrorCode());
+                responses.put("USERNAME", user.getUsername());
+                responses.put("SECRET_HASH", secretHash(client, user.getUsername()));
+            }
+            Map<?, ?> tokens = (Map<?, ?>) respondToChallenge(admin, pool, client, "NEW_PASSWORD_REQUIRED",
+                    session, responses).get("AuthenticationResult");
+            assertNotNull(tokens.get("AccessToken"));
+            assertEquals("Fixture", service.adminGetUser(pool.getId(), supplied).getUsername());
+            assertNotNull(initiateAuth(admin, pool, client, "USER_PASSWORD_AUTH",
+                    Map.of("USERNAME", supplied, "PASSWORD", newPassword, "SECRET_HASH", secretHash(client, supplied)))
+                    .get("AuthenticationResult"));
         }
 
         @Test
