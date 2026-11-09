@@ -323,6 +323,9 @@ public class EventsCfnProvisioner implements CfnResourceProvisioner {
         if ("AWS::Events::ApiDestination".equals(resource.getResourceType())) {
             return rollbackApiDestinationUpdate(resource);
         }
+        if ("AWS::Events::EventBus".equals(resource.getResourceType())) {
+            return rollbackEventBusUpdate(resource);
+        }
         String rawSnapshot = resource.getAttributes().get(CfnRollback.RULE_TARGETS_SNAPSHOT_ATTR);
         if (rawSnapshot == null) {
             return false;
@@ -386,6 +389,8 @@ public class EventsCfnProvisioner implements CfnResourceProvisioner {
      * (not the ARN), so the physical id is the name; {@code Fn::GetAtt "Arn"} exposes the ARN.
      */
     private void provisionEventBus(StackResource r, JsonNode props, ProvisionContext ctx) {
+        // A snapshot describes the update in flight; one an earlier update left behind is stale
+        r.getAttributes().remove(CfnRollback.EVENT_BUS_UPDATE_SNAPSHOT_ATTR);
         validateEventBusProperties(props);
         String existingBusName = ctx.isUpdate() ? ctx.priorPhysicalId() : null;
         String busName = ctx.resolveOptional(props, "Name");
@@ -424,7 +429,8 @@ public class EventsCfnProvisioner implements CfnResourceProvisioner {
                 r.getAttributes().remove(CfnRollback.ROLLBACK_OWNED_ATTR);
                 throw e;
             }
-            validateEventBusMutablePropertiesUnchanged(r, bus, description, tags, policy);
+            validateEventBusMutablePropertiesUnchanged(r, bus, description, policy);
+            updateEventBusTags(r, bus, tags, ctx.region());
         }
 
         // Record identity before applying the policy: rollbackCreatedResources skips any resource
@@ -530,25 +536,9 @@ public class EventsCfnProvisioner implements CfnResourceProvisioner {
     }
 
     private void validateEventBusMutablePropertiesUnchanged(
-            StackResource resource, EventBus bus, String requestedDescription,
-            Map<String, String> requestedTags, JsonNode requestedPolicy) {
+            StackResource resource, EventBus bus, String requestedDescription, JsonNode requestedPolicy) {
         if (!Objects.equals(bus.getDescription(), requestedDescription)) {
             throw unsupportedEventBusMutableUpdate();
-        }
-
-        // Stacks persisted by the older EventBus provisioner have no managed-key metadata. There
-        // is no reliable way to distinguish their CloudFormation tags from tags added out of band,
-        // so allow this one-time adoption and start tracking the requested keys afterwards.
-        if (resource.getAttributes().containsKey(EVENT_BUS_MANAGED_TAG_KEYS_ATTR)) {
-            Map<String, String> currentManagedTags = new LinkedHashMap<>();
-            for (String key : eventBusManagedTagKeys(resource)) {
-                if (bus.getTags().containsKey(key)) {
-                    currentManagedTags.put(key, bus.getTags().get(key));
-                }
-            }
-            if (!currentManagedTags.equals(requestedTags)) {
-                throw unsupportedEventBusMutableUpdate();
-            }
         }
 
         String managedPolicy = resource.getAttributes().get(EVENT_BUS_MANAGED_POLICY_ATTR);
@@ -594,8 +584,82 @@ public class EventsCfnProvisioner implements CfnResourceProvisioner {
 
     private AwsException unsupportedEventBusMutableUpdate() {
         return new AwsException("ValidationError",
-                "Updating AWS::Events::EventBus Description, Tags, or Policy is not supported "
+                "Updating AWS::Events::EventBus Description or Policy is not supported "
                         + "until transactional rollback is available.", 400);
+    }
+
+    /**
+     * Drives the tags of the bus the stack already owns to the template's, as AWS's update handler
+     * does: a key the stack set and the template dropped is untagged, and a tag added outside the
+     * stack stays. A bus provisioned before its keys were tracked has none to drop. The tags of the
+     * keys this touches are recorded first, so {@link #rollbackUpdate} can put them back.
+     */
+    private void updateEventBusTags(StackResource r, EventBus bus, Map<String, String> tags, String region) {
+        Set<String> managedKeys = eventBusManagedTagKeys(r);
+        Set<String> touchedKeys = new TreeSet<>(managedKeys);
+        touchedKeys.addAll(tags.keySet());
+        ObjectNode snapshot = MAPPER.createObjectNode();
+        snapshot.put("region", region);
+        snapshot.put("arn", bus.getArn());
+        snapshot.put("managedTagKeys", r.getAttributes().get(EVENT_BUS_MANAGED_TAG_KEYS_ATTR));
+        ArrayNode tagKeys = snapshot.putArray("tagKeys");
+        ObjectNode priorTags = snapshot.putObject("tags");
+        for (String key : touchedKeys) {
+            tagKeys.add(key);
+            if (bus.getTags().containsKey(key)) {
+                priorTags.put(key, bus.getTags().get(key));
+            }
+        }
+        r.getAttributes().put(CfnRollback.EVENT_BUS_UPDATE_SNAPSHOT_ATTR, snapshot.toString());
+
+        List<String> dropped = new ArrayList<>(managedKeys);
+        dropped.removeAll(tags.keySet());
+        retagEventBus(bus.getArn(), dropped, tags, region);
+    }
+
+    /**
+     * Puts the managed tags and tracked keys the bus had before the failed update back, and spends
+     * the snapshot. A bus this update did not reach carries no snapshot, which is the false that
+     * keeps the stack reporting that rollback is not implemented.
+     */
+    private boolean rollbackEventBusUpdate(StackResource resource) {
+        String raw = resource.getAttributes().get(CfnRollback.EVENT_BUS_UPDATE_SNAPSHOT_ATTR);
+        if (raw == null) {
+            return false;
+        }
+        JsonNode snapshot;
+        try {
+            snapshot = MAPPER.readTree(raw);
+        } catch (JsonProcessingException e) {
+            throw new IllegalStateException("Could not read the event bus update snapshot for "
+                    + resource.getLogicalId(), e);
+        }
+        Map<String, String> priorTags = MAPPER.convertValue(
+                snapshot.path("tags"), new TypeReference<Map<String, String>>() { });
+        List<String> added = new ArrayList<>();
+        snapshot.path("tagKeys").forEach(key -> {
+            if (!priorTags.containsKey(key.asText())) {
+                added.add(key.asText());
+            }
+        });
+        retagEventBus(snapshot.path("arn").asText(), added, priorTags, snapshot.path("region").asText());
+        String managedTagKeys = snapshotText(snapshot, "managedTagKeys");
+        if (managedTagKeys == null) {
+            resource.getAttributes().remove(EVENT_BUS_MANAGED_TAG_KEYS_ATTR);
+        } else {
+            resource.getAttributes().put(EVENT_BUS_MANAGED_TAG_KEYS_ATTR, managedTagKeys);
+        }
+        resource.getAttributes().remove(CfnRollback.EVENT_BUS_UPDATE_SNAPSHOT_ATTR);
+        return true;
+    }
+
+    private void retagEventBus(String arn, List<String> untag, Map<String, String> tag, String region) {
+        if (!untag.isEmpty()) {
+            eventBridgeService.untagResource(arn, untag, region);
+        }
+        if (!tag.isEmpty()) {
+            eventBridgeService.tagResource(arn, tag, region);
+        }
     }
 
     private Set<String> eventBusManagedTagKeys(StackResource resource) {

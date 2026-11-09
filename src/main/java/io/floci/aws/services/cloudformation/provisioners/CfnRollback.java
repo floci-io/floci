@@ -152,6 +152,13 @@ public final class CfnRollback {
     public static final String API_DESTINATION_UPDATE_SNAPSHOT_ATTR = "__FlociApiDestinationUpdateSnapshot";
 
     /**
+     * Holds the tags an EventBridge event bus carried, for the keys an in-place update manages,
+     * and the managed tag keys it was tracking, so a failed stack update can put them back. Written
+     * by {@code EventsCfnProvisioner} before its tag calls and spent by its {@code rollbackUpdate}.
+     */
+    public static final String EVENT_BUS_UPDATE_SNAPSHOT_ATTR = "__FlociEventBusUpdateSnapshot";
+
+    /**
      * Holds the name, description and endpoint configuration a REST API had before an in-place
      * update patched them, so a failed stack update can put them back, and a {@code body} flag set
      * once the update's OpenAPI document was applied, which the snapshot cannot undo. Written by

@@ -120,19 +120,28 @@ class EventBusProvisionOwnershipTest {
                 .thenThrow(new AwsException("ResourceAlreadyExistsException", "exists", 400));
         EventBus existingBus = bus(Instant.parse("2026-01-01T00:00:00Z"));
         existingBus.setPolicy("{\"Version\":\"2008-10-17\"}");
+        existingBus.setTags(Map.of("version", "0.1.5"));
         when(eventBridgeService.describeEventBus(BUS, REGION)).thenReturn(existingBus);
+        JsonNode properties = props(true);
+        ((ObjectNode) properties).putArray("Tags")
+                .addObject()
+                .put("Key", "version")
+                .put("Value", "0.1.6");
 
         StackResource r = provisionExisting(
-                Map.of(MANAGED_POLICY_ATTR, "{\"Version\":\"2008-10-17\"}"),
-                props(true));
+                Map.of(MANAGED_POLICY_ATTR, "{\"Version\":\"2008-10-17\"}",
+                        MANAGED_TAG_KEYS_ATTR, "[\"version\"]"),
+                properties);
 
         assertEquals("CREATE_FAILED", r.getStatus());
         assertEquals(
-                "Updating AWS::Events::EventBus Description, Tags, or Policy is not supported "
+                "Updating AWS::Events::EventBus Description or Policy is not supported "
                         + "until transactional rollback is available.",
                 r.getStatusReason());
         verify(eventBridgeService, never())
                 .putPermission(anyString(), any(), any(), any(), any(), anyString(), anyString());
+        verify(eventBridgeService, never()).tagResource(anyString(), any(), anyString());
+        verify(eventBridgeService, never()).untagResource(anyString(), any(), anyString());
     }
 
     @Test
