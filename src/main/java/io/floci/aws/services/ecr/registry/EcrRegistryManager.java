@@ -33,8 +33,10 @@ import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
+import java.time.Clock;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Locale;
 import java.util.Optional;
 import java.util.OptionalInt;
 import java.util.concurrent.TimeUnit;
@@ -62,6 +64,7 @@ public class EcrRegistryManager {
     private static final int REPOSITORY_DELETION_KILL_GRACE_SECONDS = 1;
     private static final String NAMED_VOLUME = "ecr-registry-data";
     private static final String REPOSITORIES_PATH = "/var/lib/registry/docker/registry/v2/repositories/";
+    private static final int GC_KILL_GRACE_SECONDS = 2;
 
     /**
      * Matches an AWS-shaped ECR image URI in any partition:
@@ -97,9 +100,17 @@ public class EcrRegistryManager {
     private final PortAllocator portAllocator;
     private final EmulatorConfig config;
     private final RegionResolver regionResolver;
+    private volatile Clock clock;
+    private volatile Sleeper sleeper;
 
     private volatile boolean started;
+    private volatile boolean ready;
     private volatile boolean reconciled;
+    // Bug #6150: Track active garbage collection window
+    private volatile boolean garbageCollecting;
+    private final Object writeAdmissionLock = new Object();
+    private int admittedWrites;
+    private volatile String activeGcExecId;
     /** host:port Docker reports for the running registry; null until one is started or adopted. */
     private volatile String registryAddress;
     private volatile boolean unavailableLogged;
@@ -107,6 +118,8 @@ public class EcrRegistryManager {
     private volatile String containerId;
     private volatile Closeable logStream;
     private volatile Consumer<List<String>> reconcileHook;
+    /** Whether the Docker daemon is Docker Desktop; null until the daemon has answered. */
+    private volatile Boolean dockerDesktop;
 
     @Inject
     public EcrRegistryManager(ContainerBuilder containerBuilder,
@@ -117,6 +130,21 @@ public class EcrRegistryManager {
                               PortAllocator portAllocator,
                               EmulatorConfig config,
                               RegionResolver regionResolver) {
+        this(containerBuilder, lifecycleManager, logStreamer, containerDetector,
+                currentContainerNetworkResolver, portAllocator, config, regionResolver,
+                Clock.systemUTC(), Thread::sleep);
+    }
+
+    EcrRegistryManager(ContainerBuilder containerBuilder,
+                       ContainerLifecycleManager lifecycleManager,
+                       ContainerLogStreamer logStreamer,
+                       ContainerDetector containerDetector,
+                       CurrentContainerNetworkResolver currentContainerNetworkResolver,
+                       PortAllocator portAllocator,
+                       EmulatorConfig config,
+                       RegionResolver regionResolver,
+                       Clock clock,
+                       Sleeper sleeper) {
         this.containerBuilder = containerBuilder;
         this.lifecycleManager = lifecycleManager;
         this.logStreamer = logStreamer;
@@ -126,6 +154,21 @@ public class EcrRegistryManager {
         this.config = config;
         this.regionResolver = regionResolver;
         this.hostPort = config.services().ecr().registryBasePort();
+        this.clock = clock;
+        this.sleeper = sleeper;
+    }
+
+    @FunctionalInterface
+    interface Sleeper {
+        void sleep(long millis) throws InterruptedException;
+    }
+
+    void setClock(Clock clock) {
+        this.clock = clock;
+    }
+
+    void setSleeper(Sleeper sleeper) {
+        this.sleeper = sleeper;
     }
 
     /**
@@ -160,12 +203,20 @@ public class EcrRegistryManager {
         String region = m.group(2);
         String repoAndTag = m.group(3);
         ensureStarted();
-        // Path style on localhost whatever style the API advertises. A daemon with the
-        // containerd image store, the default from Docker Engine 29, reaches only localhost and
-        // 127.0.0.1 over plain HTTP and takes every other name, *.localhost included, for an
-        // HTTPS registry: Floci's plain port cannot answer that, and its TLS port cannot prove
-        // itself to a daemon that does not trust Floci's CA.
-        String rewritten = "localhost:" + advertisedPort() + "/" + internalRepoName(account, region, repoAndTag);
+        String rewritten;
+        if (dockerDesktop()) {
+            // Docker Desktop's daemon runs in a VM and dials localhost there, where a host port Docker
+            // chose for Floci's container is not bound. It sends any other registry name through its
+            // host proxy, which reaches the port, and pulls *.localhost over plain HTTP.
+            rewritten = account + ".dkr.ecr." + region + ".localhost:" + advertisedPort() + "/" + repoAndTag;
+        } else {
+            // Path style on localhost whatever style the API advertises. A daemon with the
+            // containerd image store, the default from Docker Engine 29, reaches only localhost and
+            // 127.0.0.1 over plain HTTP and takes every other name, *.localhost included, for an
+            // HTTPS registry: Floci's plain port cannot answer that, and its TLS port cannot prove
+            // itself to a daemon that does not trust Floci's CA.
+            rewritten = "localhost:" + advertisedPort() + "/" + internalRepoName(account, region, repoAndTag);
+        }
         LOG.infov("Rewriting ECR image URI {0} -> {1}", image, rewritten);
         return rewritten;
     }
@@ -193,6 +244,23 @@ public class EcrRegistryManager {
                     image, e.getMessage());
             return false;
         }
+    }
+
+    private boolean dockerDesktop() {
+        Boolean cached = dockerDesktop;
+        if (cached != null) {
+            return cached;
+        }
+        try {
+            String os = lifecycleManager.getDockerClient().infoCmd().exec().getOperatingSystem();
+            cached = os != null && os.toLowerCase(Locale.ROOT).contains("docker desktop");
+        } catch (RuntimeException e) {
+            LOG.warnv("Could not read the operating system of the Docker daemon ({0}); pulling ECR images from localhost",
+                    e.getMessage());
+            return false;
+        }
+        dockerDesktop = cached;
+        return cached;
     }
 
     /** Returns the docker-pullable repository URI for the given account/region/name. */
@@ -332,7 +400,21 @@ public class EcrRegistryManager {
      * Lazily starts (or reuses) the {@code registry:2} container. Idempotent and
      * thread-safe. Throws if Docker is unreachable.
      */
-    public synchronized void ensureStarted() {
+    public void ensureStarted() {
+        if (!config.services().ecr().enabled()) {
+            throw new IllegalStateException("ECR is disabled, the backing registry is not started");
+        }
+        // Bug #6150: Fast-path probe avoids acquiring the monitor when already running
+        if (ready) {
+            ContainerPresence presence = lifecycleManager.presenceOf(containerId);
+            if (presence == ContainerPresence.RUNNING || presence == ContainerPresence.UNKNOWN) {
+                return;
+            }
+        }
+        ensureStartedSynchronized();
+    }
+
+    private synchronized void ensureStartedSynchronized() {
         if (!config.services().ecr().enabled()) {
             throw new IllegalStateException("ECR is disabled, the backing registry is not started");
         }
@@ -346,6 +428,7 @@ public class EcrRegistryManager {
             containerId = null;
             registryAddress = null;
             started = false;
+            ready = false;
             if (presence == ContainerPresence.ABSENT) {
                 portAllocator.release(hostPort);
                 hostPort = config.services().ecr().registryBasePort();
@@ -371,6 +454,7 @@ public class EcrRegistryManager {
                 this.activeContainerName = adoptedName;
                 adoptExisting(existing.get());
                 runReconcileOnce();
+                this.ready = true;
                 return;
             }
             // Recreated under the current name; the data volume is resolved by its own probe.
@@ -397,6 +481,7 @@ public class EcrRegistryManager {
             throw new RuntimeException("Failed to start ECR backing registry container: " + e.getMessage(), e);
         }
         runReconcileOnce();
+        this.ready = true;
     }
 
     private ContainerSpec registryContainerSpec(String name, int port) {
@@ -535,54 +620,140 @@ public class EcrRegistryManager {
      * @throws IllegalStateException if the registry is not started
      * @throws RuntimeException if the exec fails, exits non-zero, or times out
      */
-    public synchronized GcResult runGarbageCollect(int timeoutSeconds) {
+    public GcResult runGarbageCollect(int timeoutSeconds) {
         if (!started || containerId == null) {
             throw new IllegalStateException("ECR registry is not started");
         }
-        long startMs = System.currentTimeMillis();
-        StringBuilder output = new StringBuilder();
+        if (garbageCollecting) {
+            throw new IllegalStateException("ECR garbage collection is already in progress");
+        }
 
-        DockerClient dockerClient = lifecycleManager.getDockerClient();
-
-        ExecCreateCmdResponse exec = dockerClient
-                .execCreateCmd(containerId)
-                .withCmd("registry", "garbage-collect", "/etc/docker/registry/config.yml")
-                .withAttachStdout(true)
-                .withAttachStderr(true)
-                .exec();
-
-        try {
-            boolean completed = dockerClient.execStartCmd(exec.getId())
-                    .exec(new ResultCallback.Adapter<Frame>() {
-                        @Override
-                        public void onNext(Frame frame) {
-                            output.append(new String(frame.getPayload(), StandardCharsets.UTF_8));
-                        }
-                    })
-                    .awaitCompletion(timeoutSeconds, TimeUnit.SECONDS);
-
-            if (!completed) {
-                throw new RuntimeException("garbage-collect timed out after " + timeoutSeconds + "s");
+        // Bug #6150: Atomically close write admission and drain admitted writes before starting GC
+        synchronized (writeAdmissionLock) {
+            if (garbageCollecting) {
+                throw new IllegalStateException("ECR garbage collection is already in progress");
             }
-        } catch (InterruptedException e) {
-            Thread.currentThread().interrupt();
-            throw new RuntimeException("garbage-collect interrupted", e);
+            garbageCollecting = true;
+            long deadline = System.currentTimeMillis() + TimeUnit.SECONDS.toMillis(timeoutSeconds);
+            while (admittedWrites > 0) {
+                long remaining = deadline - System.currentTimeMillis();
+                if (remaining <= 0) {
+                    garbageCollecting = false;
+                    writeAdmissionLock.notifyAll();
+                    throw new RuntimeException("garbage-collect timed out waiting for admitted writes to drain");
+                }
+                try {
+                    writeAdmissionLock.wait(remaining);
+                } catch (InterruptedException e) {
+                    garbageCollecting = false;
+                    writeAdmissionLock.notifyAll();
+                    Thread.currentThread().interrupt();
+                    throw new RuntimeException("garbage-collect interrupted while waiting for admitted writes to drain", e);
+                }
+            }
         }
 
-        InspectExecResponse inspect = dockerClient.inspectExecCmd(exec.getId()).exec();
-        long durationMs = System.currentTimeMillis() - startMs;
-        Long exitCode = inspect.getExitCodeLong();
+        // Bug #6150: Mutual exclusion with EcrService manifest delete/restore, pruneStorage, and
+        // deleteRepositoryStorage. Acquire the manager monitor ('this') only after admitted writes drain
+        // to prevent deadlock if an in-flight write requires ensureStartedSynchronized().
+        synchronized (this) {
+            if (!started || containerId == null) {
+                reopenWriteAdmission();
+                throw new IllegalStateException("ECR registry is not started");
+            }
+            boolean execStarted = false;
+            boolean execTerminated = false;
+            String execId = null;
+            try {
+                long startMs = System.currentTimeMillis();
+                StringBuilder output = new StringBuilder();
 
-        if (exitCode == null) {
-            throw new RuntimeException("garbage-collect did not exit (still running after await)");
-        }
-        if (exitCode != 0) {
-            LOG.warnv("ECR GC exited with code {0}: {1}", exitCode, output);
-            throw new RuntimeException("garbage-collect exited with code " + exitCode + ": " + output);
-        }
+                DockerClient dockerClient = lifecycleManager.getDockerClient();
 
-        LOG.infov("ECR GC completed in {0}ms", durationMs);
-        return new GcResult(output.toString(), durationMs);
+                ExecCreateCmdResponse exec = dockerClient
+                        .execCreateCmd(containerId)
+                        .withCmd("timeout", "-k", String.valueOf(GC_KILL_GRACE_SECONDS),
+                                String.valueOf(timeoutSeconds), "registry", "garbage-collect",
+                                "/etc/docker/registry/config.yml")
+                        .withAttachStdout(true)
+                        .withAttachStderr(true)
+                        .exec();
+
+                execId = exec.getId();
+                activeGcExecId = execId;
+                final String finalExecId = execId;
+
+                try {
+                    ResultCallback.Adapter<Frame> asyncCallback = dockerClient.execStartCmd(finalExecId)
+                            .exec(new ResultCallback.Adapter<Frame>() {
+                                @Override
+                                public void onNext(Frame frame) {
+                                    output.append(new String(frame.getPayload(), StandardCharsets.UTF_8));
+                                }
+
+                                @Override
+                                public void onComplete() {
+                                    super.onComplete();
+                                    confirmExecTerminated(finalExecId);
+                                }
+
+                                @Override
+                                public void onError(Throwable throwable) {
+                                    super.onError(throwable);
+                                    confirmExecTerminated(finalExecId);
+                                }
+                            });
+                    execStarted = true;
+                    boolean completed = asyncCallback
+                            .awaitCompletion(timeoutSeconds + GC_KILL_GRACE_SECONDS + 1, TimeUnit.SECONDS);
+
+                    if (!completed) {
+                        execTerminated = awaitTermination(dockerClient, finalExecId, 3);
+                        throw new RuntimeException("garbage-collect timed out after " + timeoutSeconds + "s");
+                    }
+                } catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                    execTerminated = awaitTermination(dockerClient, finalExecId, 3);
+                    throw new RuntimeException("garbage-collect interrupted", e);
+                } catch (Throwable t) {
+                    if (!execStarted) {
+                        reopenWriteAdmission();
+                    }
+                    throw t;
+                }
+
+                InspectExecResponse inspect;
+                try {
+                    inspect = dockerClient.inspectExecCmd(finalExecId).exec();
+                } catch (Throwable t) {
+                    execTerminated = true;
+                    reopenWriteAdmission();
+                    throw new RuntimeException("failed to inspect garbage-collect exec " + finalExecId, t);
+                }
+                long durationMs = System.currentTimeMillis() - startMs;
+                Long exitCode = inspect != null ? inspect.getExitCodeLong() : null;
+
+                if (exitCode != null) {
+                    execTerminated = true;
+                }
+                if (exitCode == null) {
+                    throw new RuntimeException("garbage-collect did not exit (still running after await)");
+                }
+                if (exitCode != 0) {
+                    LOG.warnv("ECR GC exited with code {0}: {1}", exitCode, output);
+                    throw new RuntimeException("garbage-collect exited with code " + exitCode + ": " + output);
+                }
+
+                LOG.infov("ECR GC completed in {0}ms", durationMs);
+                return new GcResult(output.toString(), durationMs);
+            } finally {
+                if (!execStarted || execTerminated) {
+                    reopenWriteAdmission();
+                } else {
+                    LOG.errorv("ECR GC exec {0} did not confirm termination; write admission remains closed for storage safety", execId);
+                }
+            }
+        }
     }
 
     /** Removes repository manifest storage without removing descendant repository directories. */
@@ -665,7 +836,9 @@ public class EcrRegistryManager {
         registryAddress = null;
         logStream = null;
         started = false;
+        ready = false;
         reconciled = false;
+        reopenWriteAdmission();
         hostPort = config.services().ecr().registryBasePort();
     }
 
@@ -714,6 +887,8 @@ public class EcrRegistryManager {
             LOG.warnv("Failed to adopt existing ECR registry container: {0}", e.getMessage());
             this.containerId = null;
             this.registryAddress = null;
+            this.started = false;
+            this.ready = false;
         }
     }
 
@@ -754,8 +929,78 @@ public class EcrRegistryManager {
         }
     }
 
-    // Test seam
-    boolean isStarted() {
+    // Bug #6150: Accessor for active garbage collection status
+    public boolean isGarbageCollecting() {
+        return garbageCollecting;
+    }
+
+    public boolean tryAcquireWriteAdmission() {
+        synchronized (writeAdmissionLock) {
+            if (garbageCollecting) {
+                return false;
+            }
+            admittedWrites++;
+            return true;
+        }
+    }
+
+    public void releaseWriteAdmission() {
+        synchronized (writeAdmissionLock) {
+            if (admittedWrites > 0) {
+                admittedWrites--;
+                if (admittedWrites == 0) {
+                    writeAdmissionLock.notifyAll();
+                }
+            }
+        }
+    }
+
+    boolean awaitTermination(DockerClient dockerClient, String execId, int maxSeconds) {
+        long deadline = clock.millis() + TimeUnit.SECONDS.toMillis(maxSeconds);
+        while (clock.millis() < deadline) {
+            try {
+                InspectExecResponse inspect = dockerClient.inspectExecCmd(execId).exec();
+                if (inspect != null && inspect.getExitCodeLong() != null) {
+                    return true;
+                }
+            } catch (Exception ignored) {
+            }
+            try {
+                // Bug #6150: Pause on every pass even if inspect throws to avoid tight spin loop
+                sleeper.sleep(200);
+            } catch (InterruptedException ie) {
+                Thread.currentThread().interrupt();
+                return false;
+            }
+        }
+        return false;
+    }
+
+    void confirmExecTerminated(String execId) {
+        try {
+            DockerClient dockerClient = lifecycleManager.getDockerClient();
+            InspectExecResponse inspect = dockerClient.inspectExecCmd(execId).exec();
+            if (inspect != null && inspect.getExitCodeLong() != null) {
+                synchronized (writeAdmissionLock) {
+                    if (execId.equals(activeGcExecId)) {
+                        reopenWriteAdmission();
+                    }
+                }
+            }
+        } catch (Exception e) {
+            LOG.debugv("Failed to inspect exec {0} on completion: {1}", execId, e.getMessage());
+        }
+    }
+
+    private void reopenWriteAdmission() {
+        synchronized (writeAdmissionLock) {
+            garbageCollecting = false;
+            activeGcExecId = null;
+            writeAdmissionLock.notifyAll();
+        }
+    }
+
+    public boolean isStarted() {
         return started;
     }
 }

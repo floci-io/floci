@@ -2,7 +2,7 @@
 
 Compatibility tests for [Floci](https://github.com/hectorvent/floci) using the **AWS SDK for Java v2 (2.31.8)**.
 
-Runs 352 tests across 17 test classes against a live Floci instance — no mocks.
+Runs 2981 tests across 436 test classes against a live Floci instance — no mocks.
 
 ## Services Covered
 
@@ -26,6 +26,8 @@ Runs 352 tests across 17 test classes against a live Floci instance — no mocks
 | `Ec2Tests`                       | EC2 instances, VPCs, security groups, subnets            |
 | `AppSyncTest`                    | GraphQL API CRUDL, data sources, resolvers, functions, types, API keys, tags, schema validation |
 | `EcsTests`                       | ECS clusters, task definitions, services                 |
+| `PaymentCryptographyDataPlaneTest` | Payment Cryptography data plane: encrypt, decrypt, MAC |
+| `PaymentCryptographyPinTest`     | Payment Cryptography PIN operations: generate, verify, translate |
 
 ## Adding a New Test
 

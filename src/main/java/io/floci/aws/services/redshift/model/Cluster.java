@@ -85,6 +85,24 @@ public class Cluster {
     public String getLoggingS3TableGranularity() { return loggingS3TableGranularity; }
     public void setLoggingS3TableGranularity(String loggingS3TableGranularity) { this.loggingS3TableGranularity = loggingS3TableGranularity; }
 
+    private Instant lastSuccessfulDeliveryTime;
+    private Instant lastFailureTime;
+    private String lastFailureMessage;
+
+    public Instant getLastSuccessfulDeliveryTime() { return lastSuccessfulDeliveryTime; }
+    public void setLastSuccessfulDeliveryTime(Instant lastSuccessfulDeliveryTime) {
+        this.lastSuccessfulDeliveryTime = lastSuccessfulDeliveryTime;
+    }
+    public Instant getLastFailureTime() { return lastFailureTime; }
+    public void setLastFailureTime(Instant lastFailureTime) { this.lastFailureTime = lastFailureTime; }
+    public String getLastFailureMessage() { return lastFailureMessage; }
+    public void setLastFailureMessage(String lastFailureMessage) { this.lastFailureMessage = lastFailureMessage; }
+
+    private long loggingGeneration;
+
+    public long getLoggingGeneration() { return loggingGeneration; }
+    public void setLoggingGeneration(long loggingGeneration) { this.loggingGeneration = loggingGeneration; }
+
     // Cross-region snapshot copy (EnableSnapshotCopy). Enabled exactly when the destination is set.
     private String snapshotCopyDestinationRegion;
     private Integer snapshotCopyRetentionPeriod;

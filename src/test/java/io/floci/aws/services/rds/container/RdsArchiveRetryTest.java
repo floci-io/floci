@@ -207,6 +207,34 @@ class RdsArchiveRetryTest {
         assertEquals(List.of(List.of("sh", "/tmp/restore.sh", "admin")), commands);
     }
 
+    @Test
+    void mysqlDumpWaitsForTheServerToAcceptTheMasterUser() {
+        DockerArchiveUploadFixture uploads = failingUploads(0, 0);
+        List<List<String>> commands = ContainerExecStubs.completeEveryExec(docker, CONTAINER,
+                List.of(2L, 2L, 0L), "-- dump", "");
+
+        String dump = manager.createMysqlSnapshot(DatabaseEngine.MYSQL, CONTAINER, "admin", "secret");
+
+        assertEquals("-- dump", dump);
+        assertEquals(1, uploads.commands.size());
+        assertEquals(3, commands.size());
+        assertEquals(List.of("env", "MYSQL_PWD=secret", "sh", "/tmp/floci-mysql-dump.sh", "mysql", "mysqldump",
+                "admin"), commands.getFirst().subList(0, 7));
+    }
+
+    @Test
+    void mysqlDumpFailureIsNotRetried() {
+        failingUploads(0, 0);
+        List<List<String>> commands = ContainerExecStubs.completeEveryExec(docker, CONTAINER, 1, "",
+                "Access denied");
+
+        RuntimeException failure = assertThrows(RuntimeException.class,
+                () -> manager.createMysqlSnapshot(DatabaseEngine.MARIADB, CONTAINER, "admin", "secret"));
+
+        assertTrue(failure.getMessage().contains("mariadb-dump failed with exit code 1: Access denied"));
+        assertEquals(1, commands.size());
+    }
+
     private static void assertTarEntry(TarArchiveInputStream tar, String name, String content) throws IOException {
         TarArchiveEntry entry = tar.getNextEntry();
         assertEquals(name, entry.getName());

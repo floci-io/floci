@@ -1190,7 +1190,7 @@ public class RdsService implements Resettable, ResourceProvider {
 
         DbInstance instance = getDbInstance(instanceId, effectiveRegion);
 
-        if (instance.getEngine() != DatabaseEngine.POSTGRES) {
+        if (instance.getEngine() == DatabaseEngine.SQLSERVER) {
             throw new AwsException("InvalidDBInstanceState", "Operation CreateDBSnapshot is not supported for engine " + instance.getEngine() + ".", 400);
         }
 
@@ -1211,7 +1211,10 @@ public class RdsService implements Resettable, ResourceProvider {
         String sqlDump = "";
         if (!config.services().rds().mock()) {
             try {
-                sqlDump = containerManager.createPostgresSnapshot(instance.getContainerId(), instance.getMasterUsername());
+                sqlDump = instance.getEngine() == DatabaseEngine.POSTGRES
+                        ? containerManager.createPostgresSnapshot(instance.getContainerId(), instance.getMasterUsername())
+                        : containerManager.createMysqlSnapshot(instance.getEngine(), instance.getContainerId(),
+                                instance.getMasterUsername(), instance.getMasterPassword());
             } catch (Exception e) {
                 LOG.warnv(e, "Failed to create snapshot {0} of DB instance {1}", snapshotId, instanceId);
                 throw new AwsException("InvalidDBInstanceState", "Failed to create snapshot: " + e.getMessage(), 400);
@@ -1504,7 +1507,12 @@ public class RdsService implements Resettable, ResourceProvider {
 
         if (!config.services().rds().mock()) {
             try {
-                containerManager.restorePostgresSnapshot(instance.getContainerId(), instance.getMasterUsername(), sqlDump);
+                if (instance.getEngine() == DatabaseEngine.POSTGRES) {
+                    containerManager.restorePostgresSnapshot(instance.getContainerId(), instance.getMasterUsername(), sqlDump);
+                } else {
+                    containerManager.restoreMysqlSnapshot(instance.getEngine(), instance.getContainerId(),
+                            instance.getMasterUsername(), instance.getMasterPassword(), sqlDump);
+                }
             } catch (Exception e) {
                 try {
                     deleteDbInstance(instanceId, effectiveRegion);
@@ -5728,6 +5736,12 @@ public class RdsService implements Resettable, ResourceProvider {
         boolean instance = instanceId != null && !instanceId.isBlank()
                 && findInstanceForScope(currentAccountId(), effectiveRegion, instanceId) != null;
         return cluster || instance;
+    }
+
+    /** Whether RDS holds a cluster snapshot of this identifier in the request's region. */
+    public boolean hasClusterSnapshot(String snapshotId, String region) {
+        return snapshotId != null && !snapshotId.isBlank()
+                && findClusterSnapshotForScope(currentAccountId(), effectiveRegion(region), snapshotId) != null;
     }
 
     public DbCluster getDbCluster(String id) {

@@ -17,6 +17,7 @@ import io.floci.aws.core.common.AwsRegions;
 import io.floci.aws.core.common.CloudFrontEdgeDomain;
 import io.floci.aws.core.common.RegionResolver;
 import io.floci.aws.core.common.ReservedTags;
+import io.floci.aws.core.common.Resettable;
 import io.floci.aws.core.common.SmithyValidationErrors;
 import io.floci.aws.core.resource.ExplorerResource;
 import io.floci.aws.core.resource.ResourceProvider;
@@ -24,6 +25,7 @@ import io.floci.aws.core.resource.SupportedResourceType;
 import io.floci.aws.core.storage.AccountAwareStorageBackend;
 import io.floci.aws.core.storage.StorageBackend;
 import io.floci.aws.core.storage.StorageFactory;
+import io.floci.aws.core.storage.WriteProfile;
 import io.floci.aws.services.apigateway.model.Account;
 import io.floci.aws.services.apigateway.model.ApiGatewayResource;
 import io.floci.aws.services.apigateway.model.ApiKey;
@@ -67,10 +69,14 @@ import jakarta.inject.Inject;
 import org.jboss.logging.Logger;
 
 import java.nio.charset.StandardCharsets;
+import java.time.Clock;
+import java.time.DayOfWeek;
+import java.time.Duration;
 import java.time.Instant;
 import java.time.LocalDate;
+import java.time.ZoneOffset;
 import java.time.format.DateTimeParseException;
-import java.time.temporal.ChronoUnit;
+import java.time.temporal.TemporalAdjusters;
 import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.HashMap;
@@ -90,7 +96,7 @@ import java.util.function.Predicate;
 import java.util.regex.Pattern;
 
 @ApplicationScoped
-public class ApiGatewayService implements ResourceProvider {
+public class ApiGatewayService implements ResourceProvider, Resettable {
 
     /** The only partition where API Gateway offers edge-optimized APIs and custom domain names. */
     private static final Set<String> EDGE_OPTIMIZED_PARTITIONS = Set.of("aws");
@@ -147,6 +153,13 @@ public class ApiGatewayService implements ResourceProvider {
      * be undone.
      */
     private final Object usagePlanLock = new Object();
+    /** Calls admitted per UTC day, keyed region::usagePlanId::keyId::yyyy-MM-dd. */
+    private final AccountAwareStorageBackend<Long> usageStore;
+    /** The usage plan throttles' token buckets, keyed account::region::usagePlanId::keyId; in memory only. */
+    private final Map<String, TokenBucket> throttleBuckets = new HashMap<>();
+    /** Guards the usage counts and the token buckets: metering a call is a read-modify-write of both. */
+    private final Object usageLock = new Object();
+    private final Clock clock;
     private final TlsCertificateManager certificateManager;
     private final EmulatorConfig config;
     private final RegionResolver regionResolver;
@@ -186,17 +199,18 @@ public class ApiGatewayService implements ResourceProvider {
     ApiGatewayService(StorageFactory storageFactory, EmulatorConfig config,
                       TlsCertificateManager certificateManager, RegionResolver regionResolver) {
         this(storageFactory, config, certificateManager, regionResolver,
-                new ApiGatewayV2Service(storageFactory, config, regionResolver));
+                new ApiGatewayV2Service(storageFactory, config, regionResolver), Clock.systemUTC());
     }
 
     @Inject
     public ApiGatewayService(StorageFactory storageFactory, EmulatorConfig config,
                              TlsCertificateManager certificateManager, RegionResolver regionResolver,
-                             ApiGatewayV2Service apiGatewayV2Service) {
+                             ApiGatewayV2Service apiGatewayV2Service, Clock clock) {
         this.certificateManager = certificateManager;
         this.config = config;
         this.regionResolver = regionResolver;
         this.apiGatewayV2Service = apiGatewayV2Service;
+        this.clock = clock;
         this.apiStore = storageFactory.create("apigateway", "apigateway-apis.json",
                 new TypeReference<>() {
                 });
@@ -248,6 +262,9 @@ public class ApiGatewayService implements ResourceProvider {
         this.basePathMappingStore = storageFactory.create("apigateway", "apigateway-mappings.json",
                 new TypeReference<>() {
                 });
+        // Every metered call writes a count, so under persistent mode the store is journaled.
+        this.usageStore = storageFactory.create("apigateway", "apigateway-usage.json",
+                new TypeReference<Map<String, Long>>() {}, WriteProfile.APPEND_HEAVY);
     }
 
     // ──────────────────────────── Account ────────────────────────────
@@ -1454,14 +1471,18 @@ public class ApiGatewayService implements ResourceProvider {
     /**
      * Deleting a key detaches it from every usage plan, matching AWS. Usage plan keys hold their own
      * copy of the key value, so leaving the associations behind would keep a deleted key working as a
-     * credential on the data plane and keep it listed by GetUsagePlanKeys.
+     * credential on the data plane and keep it listed by GetUsagePlanKeys. Under the plan lock, so
+     * CreateUsagePlanKey cannot attach the key after the sweep.
      */
     public void deleteApiKey(String region, String apiKeyId) {
-        getApiKey(region, apiKeyId);
-        for (UsagePlan plan : getUsagePlans(region)) {
-            usagePlanKeyStore.delete(usagePlanKeyPathKey(region, plan.getId(), apiKeyId));
+        synchronized (usagePlanLock) {
+            getApiKey(region, apiKeyId);
+            for (UsagePlan plan : getUsagePlans(region)) {
+                usagePlanKeyStore.delete(usagePlanKeyPathKey(region, plan.getId(), apiKeyId));
+            }
+            forgetUsage(meterKey -> meterKey.startsWith(region + "::") && meterKey.endsWith("::" + apiKeyId));
+            apiKeyStore.delete(apiKeyGlobalKey(region, apiKeyId));
         }
-        apiKeyStore.delete(apiKeyGlobalKey(region, apiKeyId));
     }
 
     public ApiKey updateApiKey(String region, String apiKeyId, List<Map<String, String>> patchOperations) {
@@ -1639,10 +1660,29 @@ public class ApiGatewayService implements ResourceProvider {
         return usagePlanStore.scan(k -> k.startsWith(prefix));
     }
 
+    /**
+     * {@code GetUsagePlans} with its {@code keyId} filter, measured on API Gateway: only the plans
+     * the key is added to, an empty list for a key in no plan or no key at all, and every plan for a
+     * blank {@code keyId}.
+     */
+    public List<UsagePlan> getUsagePlans(String region, String keyId) {
+        List<UsagePlan> plans = getUsagePlans(region);
+        if (keyId == null || keyId.isBlank()) {
+            return plans;
+        }
+        return plans.stream()
+                .filter(plan -> usagePlanKeyStore.get(usagePlanKeyPathKey(region, plan.getId(), keyId)).isPresent())
+                .toList();
+    }
+
+    /** Its key associations go with it, or a plan recreated with its id would inherit the old keys. */
     public void deleteUsagePlan(String region, String usagePlanId) {
         synchronized (usagePlanLock) {
             getUsagePlan(region, usagePlanId);
             usagePlanStore.delete(usagePlanKey(region, usagePlanId));
+            String prefix = region + "::" + usagePlanId + "::";
+            usagePlanKeyStore.keys().stream().filter(k -> k.startsWith(prefix)).forEach(usagePlanKeyStore::delete);
+            forgetUsage(meterKey -> meterKey.startsWith(prefix));
         }
     }
 
@@ -1707,22 +1747,25 @@ public class ApiGatewayService implements ResourceProvider {
 
     // ──────────────────────────── Usage Plan Keys ────────────────────────────
 
+    /** Under the plan lock, so a key cannot be written after DeleteUsagePlan or DeleteApiKey swept it. */
     public UsagePlanKey createUsagePlanKey(String region, String usagePlanId, Map<String, Object> request) {
-        getUsagePlan(region, usagePlanId);
-        String keyId = (String) request.get("keyId");
-        String keyType = (String) request.get("keyType");
+        synchronized (usagePlanLock) {
+            getUsagePlan(region, usagePlanId);
+            String keyId = (String) request.get("keyId");
+            String keyType = (String) request.get("keyType");
 
-        ApiKey apiKey = getApiKey(region, keyId);
+            ApiKey apiKey = getApiKey(region, keyId);
 
-        UsagePlanKey usagePlanKey = new UsagePlanKey();
-        usagePlanKey.setId(apiKey.getId());
-        usagePlanKey.setName(apiKey.getName());
-        usagePlanKey.setType(keyType);
-        usagePlanKey.setValue(apiKey.getValue());
+            UsagePlanKey usagePlanKey = new UsagePlanKey();
+            usagePlanKey.setId(apiKey.getId());
+            usagePlanKey.setName(apiKey.getName());
+            usagePlanKey.setType(keyType);
+            usagePlanKey.setValue(apiKey.getValue());
 
-        usagePlanKeyStore.put(usagePlanKeyPathKey(region, usagePlanId, keyId), usagePlanKey);
-        LOG.infov("Created Usage Plan Key {0} for Usage Plan {1}", keyId, usagePlanId);
-        return usagePlanKey;
+            usagePlanKeyStore.put(usagePlanKeyPathKey(region, usagePlanId, keyId), usagePlanKey);
+            LOG.infov("Created Usage Plan Key {0} for Usage Plan {1}", keyId, usagePlanId);
+            return usagePlanKey;
+        }
     }
 
     public UsagePlanKey getUsagePlanKey(String region, String usagePlanId, String keyId) {
@@ -1738,21 +1781,21 @@ public class ApiGatewayService implements ResourceProvider {
      * {@code [used, remaining]} pair per day of the inclusive range. {@code position} is absent
      * when there is no further page, which is what stops a caller's pagination loop.
      *
-     * <p><strong>Both numbers are zero.</strong> Nothing counts requests per API key, so there is no
-     * use to report or to subtract from a plan's quota. Counting on the execute path is the piece
-     * still missing; this method is where it would surface.
+     * <p>{@code used} is what {@link #meterApiKeyCall} admitted that day and {@code remaining} the
+     * quota limit minus the use from the start of that day's quota period through the day, so a day
+     * nothing was called on still reports the limit left. A plan without a quota reports
+     * {@code [0, 0]}, as AWS does.
      */
     public UsageReport getUsage(String region, String usagePlanId, String startDate, String endDate,
                                 String keyId, Integer limit, String position) {
         // Resolving the plan first gives the same NotFoundException an unknown id gets on AWS.
-        getUsagePlan(region, usagePlanId);
+        UsagePlan.Quota quota = getUsagePlan(region, usagePlanId).getQuota();
 
         LocalDate start = parseUsageDate(startDate, "startDate");
         LocalDate end = parseUsageDate(endDate, "endDate");
         if (end.isBefore(start)) {
             throw new AwsException("BadRequestException", "Usage end date must be after start date", 400);
         }
-        int days = (int) ChronoUnit.DAYS.between(start, end) + 1;
         int pageSize = resolveUsageLimit(limit);
 
         List<UsagePlanKey> keys = getUsagePlanKeys(region, usagePlanId).stream()
@@ -1783,17 +1826,31 @@ public class ApiGatewayService implements ResourceProvider {
         boolean more = from + pageSize < keys.size();
 
         Map<String, List<long[]>> items = new LinkedHashMap<>();
-        for (UsagePlanKey key : page) {
-            List<long[]> perDay = new ArrayList<>();
-            for (int day = 0; day < days; day++) {
-                // [used, remaining]: nothing is metered, so there is no use to report or subtract from a quota.
-                perDay.add(new long[] {0L, 0L});
+        // Under the metering lock, so a pair never mixes counts from before and after a call.
+        synchronized (usageLock) {
+            for (UsagePlanKey key : page) {
+                items.put(key.getId(), quota == null
+                        ? start.datesUntil(end.plusDays(1)).map(day -> new long[] {0L, 0L}).toList()
+                        : usagePerDay(usagePlanKeyPathKey(region, usagePlanId, key.getId()), start, end, quota));
             }
-            items.put(key.getId(), perDay);
         }
         // A token only when another page exists; its absence is what ends a caller's loop.
         String next = more && !page.isEmpty() ? page.get(page.size() - 1).getId() : null;
         return new UsageReport(usagePlanId, start.toString(), end.toString(), items, next);
+    }
+
+    /** One pass from the start of {@code start}'s quota period, carrying the period's use from day to day. */
+    private List<long[]> usagePerDay(String meterKey, LocalDate start, LocalDate end, UsagePlan.Quota quota) {
+        List<long[]> perDay = new ArrayList<>();
+        long periodUsed = 0L;
+        for (LocalDate day = quotaPeriodStart(start, quota); !day.isAfter(end); day = day.plusDays(1)) {
+            long used = usageStore.get(meterKey + "::" + day).orElse(0L);
+            periodUsed = (quotaPeriodStart(day, quota).equals(day) ? 0L : periodUsed) + used;
+            if (!day.isBefore(start)) {
+                perDay.add(new long[] {used, Math.max(0L, quota.limit() - periodUsed)});
+            }
+        }
+        return perDay;
     }
 
     /**
@@ -1836,6 +1893,109 @@ public class ApiGatewayService implements ResourceProvider {
         } catch (DateTimeParseException e) {
             throw new AwsException("BadRequestException", field + " must be a date of the form YYYY-MM-DD", 400);
         }
+    }
+
+    /**
+     * Meters one execute-api call made with a key of a usage plan, as measured on a REST API in
+     * eu-west-1: the plan's throttle refuses it first, then its quota, and only an admitted call
+     * counts. Nothing is counted for a plan without a quota, which AWS reports as {@code [0, 0]}.
+     *
+     * @return the gateway response refusing the call, or null when it is admitted
+     */
+    public GatewayResponseType meterApiKeyCall(String region, String usagePlanId, String keyId) {
+        synchronized (usageLock) {
+            UsagePlan plan = usagePlanStore.get(usagePlanKey(region, usagePlanId)).orElse(null);
+            String meterKey = usagePlanKeyPathKey(region, usagePlanId, keyId);
+            // Rechecked here because deletion detaches the key before forgetUsage takes this lock.
+            if (plan == null || usagePlanKeyStore.get(meterKey).isEmpty()) {
+                return null;
+            }
+            // One snapshot, as an update can replace the throttle and quota while this call runs.
+            UsagePlan.Limits limits = plan.limits();
+            Instant now = clock.instant();
+            if (limits.throttle() != null && !takeToken(meterKey, limits.throttle(), now)) {
+                return GatewayResponseType.THROTTLED;
+            }
+            UsagePlan.Quota quota = limits.quota();
+            if (quota == null) {
+                return null;
+            }
+            LocalDate today = LocalDate.ofInstant(now, ZoneOffset.UTC);
+            if (usedBetween(meterKey, quotaPeriodStart(today, quota), today) >= quota.limit()) {
+                return GatewayResponseType.QUOTA_EXCEEDED;
+            }
+            usageStore.put(meterKey + "::" + today, usedBetween(meterKey, today, today) + 1);
+            return null;
+        }
+    }
+
+    /**
+     * A token bucket holding up to {@code burstLimit} calls, starting full and refilled at
+     * {@code rateLimit} a second: measured, burst 0 throttles every call and rate 0 never refills.
+     * ponytail: per-method throttles of the plan's stages are not enforced.
+     */
+    private boolean takeToken(String meterKey, UsagePlan.Throttle throttle, Instant now) {
+        // The usage store is account-scoped by its backend; the buckets are not, so the key carries it.
+        String bucketKey = regionResolver.getAccountId() + "::" + meterKey;
+        TokenBucket bucket = throttleBuckets.get(bucketKey);
+        double tokens = bucket == null ? throttle.burstLimit() : Math.min(throttle.burstLimit(), bucket.tokens()
+                + throttle.rateLimit() * Math.max(0L, Duration.between(bucket.refilledAt(), now).toNanos()) / 1e9);
+        boolean admitted = tokens >= 1;
+        // Never rewound, so a clock stepping back and forth cannot refill the bucket twice.
+        Instant refilledAt = bucket == null || now.isAfter(bucket.refilledAt()) ? now : bucket.refilledAt();
+        throttleBuckets.put(bucketKey, new TokenBucket(admitted ? tokens - 1 : tokens, refilledAt));
+        return admitted;
+    }
+
+    private record TokenBucket(double tokens, Instant refilledAt) {}
+
+    /**
+     * Drops, in one pass, the counts and buckets of each meter key ({@code region::plan::key}) matched,
+     * so a plan or key recreated with its id starts unused.
+     */
+    private void forgetUsage(Predicate<String> meterKey) {
+        synchronized (usageLock) {
+            usageStore.keys().stream().filter(k -> meterKey.test(k.substring(0, k.lastIndexOf("::"))))
+                    .forEach(usageStore::delete);
+            String accountPrefix = regionResolver.getAccountId() + "::";
+            throttleBuckets.keySet().removeIf(k -> k.startsWith(accountPrefix)
+                    && meterKey.test(k.substring(accountPrefix.length())));
+        }
+    }
+
+    /** Storage is wiped before this runs; the in-memory token buckets go with it. */
+    @Override
+    public void clear() {
+        synchronized (usageLock) {
+            throttleBuckets.clear();
+        }
+    }
+
+    private long usedBetween(String meterKey, LocalDate from, LocalDate to) {
+        return from.datesUntil(to.plusDays(1))
+                .mapToLong(day -> usageStore.get(meterKey + "::" + day).orElse(0L))
+                .sum();
+    }
+
+    /**
+     * The first UTC day of the quota period holding {@code day}. Measured, the offset does not
+     * subtract requests as documented, and AWS bounds it below the days of the period (WEEK 0-6,
+     * MONTH 0-27), so it is read as the days the period starts after Sunday or the 1st.
+     * ponytail: that anchor is inferred, as a period boundary cannot be measured within a day.
+     */
+    static LocalDate quotaPeriodStart(LocalDate day, UsagePlan.Quota quota) {
+        return switch (quota.period()) {
+            case "WEEK" -> {
+                LocalDate start = day.with(TemporalAdjusters.previousOrSame(DayOfWeek.SUNDAY))
+                        .plusDays(quota.offset());
+                yield start.isAfter(day) ? start.minusWeeks(1) : start;
+            }
+            case "MONTH" -> {
+                LocalDate start = day.withDayOfMonth(1).plusDays(quota.offset());
+                yield start.isAfter(day) ? day.minusMonths(1).withDayOfMonth(1).plusDays(quota.offset()) : start;
+            }
+            default -> day;
+        };
     }
 
     public List<UsagePlanKey> getUsagePlanKeys(String region, String usagePlanId) {
@@ -3284,8 +3444,13 @@ public class ApiGatewayService implements ResourceProvider {
      * @return the domain's routing scope if found, or null if no domain matches
      */
     public CustomDomainRoute findDomainByName(String domainName) {
+        String keySuffix = "::" + domainName;
+        // Every request of every service gets here, and scanAllAccountEntries copies every key.
+        if (domainStore.scanRaw(rawKey -> rawKey.endsWith(keySuffix)).isEmpty()) {
+            return null;
+        }
         List<AccountAwareStorageBackend.AccountEntry<CustomDomain>> matches =
-                domainStore.scanAllAccountEntries(key -> key.endsWith("::" + domainName));
+                domainStore.scanAllAccountEntries(key -> key.endsWith(keySuffix));
         if (matches.size() > 1) {
             throw new AwsException("ConflictException",
                     "Custom domain '" + domainName + "' is ambiguous across accounts or regions", 409);

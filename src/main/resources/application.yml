@@ -64,7 +64,8 @@ quarkus:
       # The Pricing service reads its bundled snapshot, EC2 reads its image
       # catalog (ec2/image-catalog.yaml), SageMaker reads its instance type
       # catalog (sagemaker/instance-type-catalog.yaml), KMS reads its AWS managed
-      # key catalog (kms/aws-managed-keys.yaml), AppSync's GraphQL
+      # key catalog (kms/aws-managed-keys.yaml), Bedrock reads its model catalog
+      # (bedrock/model-catalog.yaml), AppSync's GraphQL
       # parser reads its message bundles, Lambda Web Functions copy their
       # runtime (lambdaweb/index.mjs) into each environment, EMR writes its S3DistCp program
       # (emr/s3-dist-cp.py) into a step's container, EC2 security group enforcement builds
@@ -88,6 +89,7 @@ quarkus:
         - docker/*.Dockerfile
         - sagemaker/*.yaml
         - kms/*.yaml
+        - bedrock/*.yaml
         - eks/*.json
         - aws/*.json
         - iam/service-linked-roles.tsv
@@ -440,6 +442,7 @@ floci:
       enabled: true
     lambda:
       enabled: true
+      reconcile-containers-on-startup: true  # FLOCI_SERVICES_LAMBDA_RECONCILE_CONTAINERS_ON_STARTUP
       ephemeral: false
       # Extra Docker create flags for Lambda containers, for example: --env KEY=VALUE --volume /host:/container:ro
       docker-flags: ""
@@ -1014,6 +1017,8 @@ floci:
     cloudhsmv2:
       enabled: true
     efs:
+      enabled: true
+    ec2instanceconnect:
       enabled: true
     organizations:
       enabled: true

@@ -292,6 +292,17 @@ class CloudFormationTemplateEngineTest {
     }
 
     @Test
+    void aValueFnSelectChoosesLeavesOutWhatNoValueStandsForInsideIt() {
+        CloudFormationTemplateEngine e = engineWithCondition("Include", false);
+        JsonNode source = json("""
+                {"Fn::Select":[0,[{"Port":{"Fn::If":["Include",80,{"Ref":"AWS::NoValue"}]},
+                  "Names":["a",{"Fn::If":["Include","b",{"Ref":"AWS::NoValue"}]}],"Name":""}]]}
+                """);
+        assertEquals(json("{\"Names\":[\"a\"],\"Name\":\"\"}"), e.resolveNode(source));
+        assertEquals(json("\"\""), e.resolveNode(json("{\"Fn::Select\":[0,[{\"Ref\":\"AWS::NoValue\"}]]}")));
+    }
+
+    @Test
     void optionalNodeResolutionPreservesTheLegacyNoValueContract() {
         JsonNode noValue = json("{\"Ref\":\"AWS::NoValue\"}");
         assertEquals("", engine().resolveNode(noValue).asText());

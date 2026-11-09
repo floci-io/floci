@@ -68,6 +68,7 @@ import io.floci.aws.services.oam.OamController;
 import io.floci.aws.services.opensearch.ElasticsearchController;
 import io.floci.aws.services.opensearch.OpenSearchController;
 import io.floci.aws.services.paymentcryptography.PaymentCryptographyCryptoController;
+import io.floci.aws.services.paymentcryptography.PaymentCryptographyPinController;
 import io.floci.aws.services.pipes.PipesController;
 import io.floci.aws.services.quicksight.QuickSightController;
 import io.floci.aws.services.quicksight.QuickSightEmbedController;
@@ -322,7 +323,8 @@ public class ResolvedServiceCatalog {
                         // signs for the service, which is one scope for both of its planes; the
                         // scope its own plane is named by is an alias of that one.
                         Set.of(), Set.of("payment-cryptography", "payment-cryptography-data"), Set.of(),
-                        Set.of(PaymentCryptographyCryptoController.class)),
+                        Set.of(PaymentCryptographyCryptoController.class,
+                                PaymentCryptographyPinController.class)),
                 descriptor("secretsmanager", "secretsmanager", config.services().secretsmanager().enabled(), true,
                         "secretsmanager", storageMode(config.storage().services().secretsmanager().mode(), config.storage().mode()),
                         config.storage().services().secretsmanager().flushIntervalMs(), null, ServiceProtocol.JSON,
@@ -639,6 +641,10 @@ public class ResolvedServiceCatalog {
                         null, null, 5000L, null, ServiceProtocol.JSON,
                         protocols(ServiceProtocol.JSON),
                         Set.of("AmazonSSMMessageDeliveryService."), Set.of("ec2messages"), Set.of(), Set.of()),
+                descriptor("ec2-instance-connect", "ec2-instance-connect", config.services().ec2instanceconnect().enabled(), false,
+                        null, null, 5000L, null, ServiceProtocol.JSON,
+                        protocols(ServiceProtocol.JSON),
+                        Set.of("AWSEC2InstanceConnectService."), Set.of("ec2-instance-connect"), Set.of(), Set.of()),
                 descriptor("transfer", "transfer", config.services().transfer().enabled(), true,
                         "transfer", config.storage().mode(), 5000L, null, ServiceProtocol.JSON,
                         protocols(ServiceProtocol.JSON),

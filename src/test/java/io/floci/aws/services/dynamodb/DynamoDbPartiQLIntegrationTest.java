@@ -16,6 +16,7 @@ import java.util.stream.Collectors;
 import java.util.stream.IntStream;
 
 import static io.restassured.RestAssured.given;
+import static org.hamcrest.Matchers.contains;
 import static org.hamcrest.Matchers.equalTo;
 import static org.hamcrest.Matchers.nullValue;
 
@@ -778,6 +779,83 @@ class DynamoDbPartiQLIntegrationTest {
             .statusCode(400)
             .body("message", equalTo("The first operand must be distinct from the remaining operands for this "
                     + "operator or function; operator: contains, first operand: [a]"));
+    }
+
+    @Test
+    @Order(37)
+    void anUpdateFunctionChecksItsArguments() {
+        putItem("update-function", "\"tags\":{\"SS\":[\"a\"]},\"items\":{\"L\":[{\"S\":\"a\"}]}");
+        String update = "UPDATE \"" + TABLE + "\" SET ";
+        String key = " WHERE pk = 'update-function'";
+        int function = update.length() + "tags = ".length() + 1;
+
+        statement(update + "tags = set_add(tags)" + key)
+            .statusCode(400)
+            .body("message", equalTo("SET_ADD must have exactly two arguments at 1:" + function + ":7"));
+        statement(update + "tags = set_add(<<'a'>>, <<'b'>>)" + key)
+            .statusCode(400)
+            .body("message", equalTo("The first argument to SET_ADD must equal the assignment value at 1:"
+                    + function + ":7"));
+        statement(update + "items = list_append(items)" + key)
+            .statusCode(400)
+            .body("message", equalTo("Incorrect number of operands for operator or function; "
+                    + "operator or function: list_append, number of operands: 1"));
+        statement(update + "items = list_append(items, 1)" + key)
+            .statusCode(400)
+            .body("message", equalTo("Incorrect operand type for operator or function; "
+                    + "operator or function: list_append, operand type: N"));
+
+        statement(update + "tags = set_add(tags, <<'b'>>), items = list_append(items, ['b'])" + key)
+            .statusCode(200);
+        statement("SELECT * FROM \"" + TABLE + "\"" + key)
+            .statusCode(200)
+            .body("Items[0].tags.SS", contains("a", "b"))
+            .body("Items[0].items.L.S", contains("a", "b"));
+    }
+
+    @Test
+    @Order(38)
+    void aStatementRefusesTooFewParametersAndIgnoresExtraOnes() {
+        String mismatch = "Number of parameters in request and statement don't match.";
+        String select = "SELECT * FROM \\\"" + TABLE + "\\\" WHERE pk = ";
+
+        request("DynamoDB_20120810.ExecuteStatement", "{\"Statement\":\"" + select + "?\"}")
+            .statusCode(400)
+            .body("__type", equalTo("ValidationException"))
+            .body("message", equalTo(mismatch));
+        request("DynamoDB_20120810.BatchExecuteStatement", "{\"Statements\":[{\"Statement\":\"" + select + "?\"}]}")
+            .statusCode(200)
+            .body("Responses[0].Error.Code", equalTo("ValidationError"))
+            .body("Responses[0].Error.Message", equalTo(mismatch));
+        request("DynamoDB_20120810.ExecuteTransaction",
+                "{\"TransactStatements\":[{\"Statement\":\"" + select + "?\"}]}")
+            .statusCode(400)
+            .body("message", equalTo("Validation failed in TransactStatements[0]: " + mismatch));
+
+        request("DynamoDB_20120810.ExecuteStatement",
+                "{\"Statement\":\"" + select + "'x'\",\"Parameters\":[{\"S\":\"y\"}]}")
+            .statusCode(200);
+    }
+
+    @Test
+    @Order(39)
+    void existsOutsideATransactionIsRefusedBeforeItsParametersAreCounted() {
+        String exists = "EXISTS(SELECT * FROM \\\"" + TABLE + "\\\" WHERE pk = ?)";
+        String outside = "EXISTS can only be used in ExecuteTransaction write requests.";
+
+        request("DynamoDB_20120810.ExecuteStatement", "{\"Statement\":\"" + exists + "\"}")
+            .statusCode(400)
+            .body("__type", equalTo("ValidationException"))
+            .body("message", equalTo(outside));
+        request("DynamoDB_20120810.BatchExecuteStatement", "{\"Statements\":[{\"Statement\":\"" + exists + "\"}]}")
+            .statusCode(200)
+            .body("Responses[0].Error.Code", equalTo("ValidationError"))
+            .body("Responses[0].Error.Message", equalTo(outside));
+        request("DynamoDB_20120810.ExecuteTransaction",
+                "{\"TransactStatements\":[{\"Statement\":\"" + exists + "\"}]}")
+            .statusCode(400)
+            .body("message", equalTo("Validation failed in TransactStatements[0]: "
+                    + "Number of parameters in request and statement don't match."));
     }
 
     private static void putItem(String pk, String attributes) {

@@ -156,7 +156,7 @@ public class DynamoDbPartiQLParser {
             return null;
         }
         try {
-            return parse(statement, List.of()).table();
+            return parse(statement, List.of(), true).table();
         } catch (Exception e) {
             try {
                 List<Token> tokens = tokenize(statement.trim());
@@ -491,15 +491,19 @@ public class DynamoDbPartiQLParser {
     }
 
     static Stmt parse(String statement, List<JsonNode> parameters) {
+        return parse(statement, parameters, false);
+    }
+
+    static Stmt parse(String statement, List<JsonNode> parameters, boolean transaction) {
         try {
-            return parseStatement(statement, parameters);
+            return parseStatement(statement, parameters, transaction);
         } catch (StackOverflowError expected) {
             // DynamoDB answers a statement nested too deep for its parser the same way, with no message.
             throw new AwsException("InternalFailure", null, 500);
         }
     }
 
-    private static Stmt parseStatement(String statement, List<JsonNode> parameters) {
+    private static Stmt parseStatement(String statement, List<JsonNode> parameters, boolean transaction) {
         parameters.forEach(DynamoDbAttributeValueValidator::validate);
         DynamoDbPartiQLParser parser = new DynamoDbPartiQLParser(statement, parameters);
         Stmt stmt = parser.parseStmt();
@@ -508,6 +512,10 @@ public class DynamoDbPartiQLParser {
         }
         if (parser.peek().type() != TType.EOF) {
             throw validationEx(UNEXPECTED_TOKEN);
+        }
+        // Outside a transaction DynamoDB refuses EXISTS before it checks anything inside it.
+        if (stmt instanceof Stmt.Exists && !transaction) {
+            throw validationEx("EXISTS can only be used in ExecuteTransaction write requests.");
         }
         if (parser.fromClauseError != null) {
             throw validationEx(parser.fromClauseError);
@@ -762,7 +770,7 @@ public class DynamoDbPartiQLParser {
         if (peek().type() != TType.VALUE) {
             requireTermStart();
             // DynamoDB reads what follows the table name as the items to insert.
-            parseOperand();
+            parseCallArgument(true);
             if (peek().type() == TType.SEMICOLON) {
                 advance();
             }
@@ -1222,15 +1230,29 @@ public class DynamoDbPartiQLParser {
     private static final Map<String, Integer> CONDITION_FUNCTION_OPERANDS = Map.of("attribute_exists", 1,
             "attribute_not_exists", 1, "size", 1, "attribute_type", 2, "begins_with", 2, "contains", 2);
 
+    private static final int LIST_APPEND_OPERANDS = 2;
+
     private static final Set<String> TYPES_WITHOUT_SIZE = Set.of("N", "BOOL", "NULL");
 
     private static final Set<String> BEGINS_WITH_TYPES = Set.of("S", "B");
 
+    private static final Set<String> LIST_TYPE = Set.of("L");
+
+    private static final Set<String> NUMBER_TYPE = Set.of("N");
+
     // Stands in for a term of a statement DynamoDB refuses, so the statement can be read to its end.
     private static final Path PATH_STAND_IN = new Path(List.of(new Seg.Name("call")));
 
-    // A path has no type. A call has a type, and no value Floci can read.
-    private record Argument(Token start, Path path, PVal value, String type) {}
+    // A path has no type. A call has a type, and only list_append has an operand Floci can read.
+    private record Argument(Token start, Operand operand, String type) {
+        Path path() {
+            return operand instanceof Operand.Attribute attribute ? attribute.path() : null;
+        }
+
+        PVal value() {
+            return operand instanceof Operand.Value value ? value.val() : null;
+        }
+    }
 
     private Cond parseCallCondition() {
         Token name = advance();
@@ -1304,14 +1326,14 @@ public class DynamoDbPartiQLParser {
                     + " expression; function: " + function);
         } else if (!isFunctionOf(update, function)) {
             defer("Unrecognized function: " + function + " at " + position(name));
-        } else if (!update) {
+        } else {
             checkOperands(function, arguments);
         }
         return arguments;
     }
 
     private void checkOperands(String function, List<Argument> operands) {
-        if (operands.size() != CONDITION_FUNCTION_OPERANDS.get(function)) {
+        if (operands.size() != CONDITION_FUNCTION_OPERANDS.getOrDefault(function, LIST_APPEND_OPERANDS)) {
             deferExpression("Incorrect number of operands for operator or function; operator or function: "
                     + function + ", number of operands: " + operands.size());
             return;
@@ -1330,6 +1352,7 @@ public class DynamoDbPartiQLParser {
                     deferExpression(incorrectOperandType(function, first.type()));
                 }
             }
+            case "list_append" -> operands.forEach(operand -> requireOperandType(function, LIST_TYPE, operand));
             default -> {
                 if (first.path() != null && first.path().equals(last.path())) {
                     deferExpression("The first operand must be distinct from the remaining operands for this "
@@ -1337,7 +1360,7 @@ public class DynamoDbPartiQLParser {
                             + first.path().display());
                 }
                 if ("begins_with".equals(function)) {
-                    operands.forEach(this::requireBeginsWithType);
+                    operands.forEach(operand -> requireOperandType(function, BEGINS_WITH_TYPES, operand));
                 } else if ("attribute_type".equals(function)) {
                     requireAttributeTypeName(last);
                 }
@@ -1345,9 +1368,9 @@ public class DynamoDbPartiQLParser {
         }
     }
 
-    private void requireBeginsWithType(Argument operand) {
-        if (operand.type() != null && !BEGINS_WITH_TYPES.contains(operand.type())) {
-            deferExpression(incorrectOperandType("begins_with", operand.type()));
+    private void requireOperandType(String function, Set<String> types, Argument operand) {
+        if (operand.type() != null && !types.contains(operand.type())) {
+            deferExpression(incorrectOperandType(function, operand.type()));
         }
     }
 
@@ -1402,14 +1425,18 @@ public class DynamoDbPartiQLParser {
     private Argument parseCallArgument(boolean update) {
         Token start = peek();
         if (peekCall()) {
-            parseCall(advance(), update);
-            return new Argument(start, null, null, "size".equalsIgnoreCase(start.value()) ? "N" : "BOOL");
+            List<Argument> arguments = parseCall(advance(), update);
+            return switch (start.value().toLowerCase(Locale.ROOT)) {
+                case "size" -> new Argument(start, null, "N");
+                case "list_append" -> new Argument(start, listAppend(arguments), "L");
+                default -> new Argument(start, null, "BOOL");
+            };
         }
         if (start.type() == TType.IDENT) {
-            return new Argument(start, parsePath(), null, null);
+            return new Argument(start, new Operand.Attribute(parsePath()), null);
         }
         PVal value = parseValue();
-        return new Argument(start, null, value, typeCode(value));
+        return new Argument(start, new Operand.Value(value), typeCode(value));
     }
 
     private static final Map<String, PartiQLType> TYPE_NAMES = Map.ofEntries(
@@ -1593,39 +1620,50 @@ public class DynamoDbPartiQLParser {
         if (peekFunction("set_add") || peekFunction("set_delete")) {
             return parseSetMutation(path);
         }
-        Operand left = parseOperand();
-        if (peek().type() == TType.PLUS || peek().type() == TType.MINUS) {
-            String op = advance().value();
-            requireRightHandSide();
-            Operand right = parseOperand();
-            requireNumberLiteral(op, left);
-            requireNumberLiteral(op, right);
-            return new Assign(path, left, op, right);
-        }
-        return new Assign(path, left, null, null);
+        Argument left = parseCallArgument(true);
+        return peekArithmetic() ? parseArithmetic(path, left) : new Assign(path, left.operand(), null, null);
     }
 
-    private void requireNumberLiteral(String op, Operand operand) {
-        if (operand instanceof Operand.Value value && !(value.val() instanceof PVal.Num)) {
-            deferExpression(incorrectOperandType(op, typeCode(value.val())));
-        }
+    private boolean peekArithmetic() {
+        return peek().type() == TType.PLUS || peek().type() == TType.MINUS;
+    }
+
+    private SetClause parseArithmetic(Path path, Argument left) {
+        String op = advance().value();
+        requireRightHandSide();
+        Argument right = parseCallArgument(true);
+        requireOperandType(op, NUMBER_TYPE, left);
+        requireOperandType(op, NUMBER_TYPE, right);
+        return new Assign(path, left.operand(), op, right.operand());
     }
 
     private SetClause parseSetMutation(Path target) {
         Token function = advance();
         String name = function.value().toUpperCase(Locale.ROOT);
-        consume(TType.LPAREN);
-        Token firstArgument = peek();
-        if (!parsePath().equals(target)) {
+        String errorBeforeCall = deferredError;
+        List<Argument> arguments = parseCallArguments(function, true);
+        String shapeError = callShapeError(function, addPathSteps(new ArrayList<>()));
+        if (shapeError == null && peekArithmetic()) {
+            defer("Unrecognized function: " + name.toLowerCase(Locale.ROOT) + " at " + position(function));
+            return parseArithmetic(target, new Argument(function, null, null));
+        }
+        if (shapeError == null && arguments.size() != 2) {
+            shapeError = name + " must have exactly two arguments at " + position(function);
+        }
+        if (shapeError != null) {
+            deferredError = errorBeforeCall;
+            defer(shapeError);
+            return new SetAdd(target, null);
+        }
+        Argument first = arguments.getFirst();
+        Argument second = arguments.getLast();
+        if (!target.equals(first.path())) {
             defer("The first argument to " + name + " must equal the assignment value at " + position(function));
+        } else if (second.type() == null || !SET_TYPES.contains(second.type())) {
+            defer("The second argument to " + name + " must be a value with type SET at " + position(first.start()));
         }
-        consume(TType.COMMA);
-        PVal bag = parseValue();
-        consume(TType.RPAREN);
-        if (!SET_TYPES.contains(typeCode(bag))) {
-            defer("The second argument to " + name + " must be a value with type SET at " + position(firstArgument));
-        }
-        return "set_add".equalsIgnoreCase(function.value()) ? new SetAdd(target, bag) : new SetDelete(target, bag);
+        return "set_add".equalsIgnoreCase(function.value())
+                ? new SetAdd(target, second.value()) : new SetDelete(target, second.value());
     }
 
     private String position(Token token) {
@@ -1639,24 +1677,9 @@ public class DynamoDbPartiQLParser {
         return line + ":" + (start - lineStart + 1) + ":" + length;
     }
 
-    private Operand parseOperand() {
-        if (peekFunction("list_append")) {
-            advance();
-            consume(TType.LPAREN);
-            Operand first = parseOperand();
-            consume(TType.COMMA);
-            Operand second = parseOperand();
-            consume(TType.RPAREN);
-            return new Operand.ListAppend(first, second);
-        }
-        if (peekCall()) {
-            parseCall(advance(), true);
-            return new Operand.Value(new PVal.Null());
-        }
-        if (peek().type() == TType.IDENT) {
-            return new Operand.Attribute(parsePath());
-        }
-        return new Operand.Value(parseValue());
+    private static Operand listAppend(List<Argument> arguments) {
+        return arguments.size() == LIST_APPEND_OPERANDS
+                ? new Operand.ListAppend(arguments.getFirst().operand(), arguments.getLast().operand()) : null;
     }
 
     private Path parseSimplePath() {
@@ -1734,8 +1757,7 @@ public class DynamoDbPartiQLParser {
                 case NULL     -> new PVal.Null();
                 case QUESTION -> {
                     if (path != null) {
-                        defer("Unsupported data type: Parameter under key " + path + " at "
-                                + position(t.start(), 1));
+                        defer(refusedMember("Parameter", parent, path) + " at " + position(t));
                     }
                     yield resolveParam();
                 }
@@ -1783,13 +1805,16 @@ public class DynamoDbPartiQLParser {
             return new PVal.Null();
         }
         if (parent != null) {
-            boolean firstInBag = parent.close == TType.RBAG && parent.items.isEmpty();
-            defer((firstInBag ? BAG_MEMBER_TYPES : "Unsupported data type: Call under key " + path) + " at "
-                    + position(name));
+            defer(refusedMember("Call", parent, path) + " at " + position(name));
         }
         parseCall(name, false);
         deferExpression(expectedValue);
         return new PVal.Null();
+    }
+
+    private static String refusedMember(String type, OpenCollection parent, String path) {
+        boolean firstInBag = parent.close == TType.RBAG && parent.items.isEmpty();
+        return firstInBag ? BAG_MEMBER_TYPES : "Unsupported data type: " + type + " under key " + path;
     }
 
     private static final class OpenCollection {
@@ -1953,7 +1978,8 @@ public class DynamoDbPartiQLParser {
 
     private PVal resolveParam() {
         if (paramIdx >= parameters.size()) {
-            throw validationEx("Not enough parameters supplied for ? placeholders");
+            defer("Number of parameters in request and statement don't match.");
+            return new PVal.Null();
         }
         JsonNode p = parameters.get(paramIdx++);
         String type = DynamoDbAttributeValueValidator.typeOf(p);

@@ -882,6 +882,7 @@ public interface EmulatorConfig {
 
         LakeFormationServiceConfig lakeformation();
         EfsServiceConfig efs();
+        Ec2InstanceConnectServiceConfig ec2instanceconnect();
         CodeGuruReviewerServiceConfig codegurureviewer();
         CodeArtifactServiceConfig codeartifact();
         QuickSightServiceConfig quicksight();
@@ -1203,6 +1204,11 @@ public interface EmulatorConfig {
     }
 
     interface LakeFormationServiceConfig {
+        @WithDefault("true")
+        boolean enabled();
+    }
+
+    interface Ec2InstanceConnectServiceConfig {
         @WithDefault("true")
         boolean enabled();
     }
@@ -3090,6 +3096,15 @@ public interface EmulatorConfig {
     interface LambdaServiceConfig {
         @WithDefault("true")
         boolean enabled();
+
+        /**
+         * Remove previous-run Docker Lambda containers at startup and retry incomplete cleanup
+         * on cold starts. Disable when deployments share a daemon and the same owner identity.
+         *
+         * Env var: FLOCI_SERVICES_LAMBDA_RECONCILE_CONTAINERS_ON_STARTUP
+         */
+        @WithDefault("true")
+        boolean reconcileContainersOnStartup();
 
         /**
          * Registry host (optionally with a path prefix) that Lambda runtime images are pulled

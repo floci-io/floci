@@ -2,6 +2,7 @@ package io.floci.aws.services.cloudformation;
 
 import io.floci.aws.services.apigatewayv2.ApiGatewayV2Service;
 import io.floci.aws.services.apigatewayv2.model.Integration;
+import io.floci.aws.services.apigatewayv2.model.Stage;
 import io.floci.aws.services.cloudformation.model.Stack;
 import io.floci.aws.testing.CfnStackWaits;
 import io.floci.aws.testing.RestAssuredJsonUtils;
@@ -18,16 +19,21 @@ import static io.floci.aws.services.cloudformation.ApiGatewayV2StackTestSupport.
 import static io.floci.aws.services.cloudformation.ApiGatewayV2StackTestSupport.integration;
 import static io.floci.aws.services.cloudformation.ApiGatewayV2StackTestSupport.stack;
 import static io.floci.aws.services.cloudformation.ApiGatewayV2StackTestSupport.stackAction;
+import static io.floci.aws.services.cloudformation.ApiGatewayV2StackTestSupport.stage;
 import static io.restassured.RestAssured.given;
+import static org.hamcrest.Matchers.anEmptyMap;
+import static org.hamcrest.Matchers.anyOf;
 import static org.hamcrest.Matchers.equalTo;
 import static org.hamcrest.Matchers.nullValue;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
  * The settings of an AWS::ApiGatewayV2::Integration through a real stack: a setting the template
  * drops on update is removed from the stored integration and from GetIntegration, and a failed
- * update puts the earlier settings back.
+ * update puts the earlier settings back. The stage variables of an AWS::ApiGatewayV2::Stage follow the
+ * same rule: dropped on update, they are cleared from the stage.
  */
 @QuarkusTest
 class CloudFormationApiGatewayV2IntegrationSettingsIntegrationTest {
@@ -106,6 +112,96 @@ class CloudFormationApiGatewayV2IntegrationSettingsIntegrationTest {
         assertEquals(15000, integration.getTimeoutInMillis());
         getIntegrationResponse(rolledBack)
                 .body("requestParameters.'overwrite:header.x-example'", equalTo("original"));
+    }
+
+    @Test
+    void stageVariablesTheTemplateDropsAreClearedFromTheStage() {
+        String stackName = "stage-variables-drop-stack";
+        stackAction("CreateStack", stackName, stageTemplate(",\"StageVariables\":{\"color\":\"blue\"}"));
+        CfnStackWaits.awaitStatus(stackName, "CREATE_COMPLETE");
+        Stack created = stack(cloudFormationService, stackName);
+        assertEquals(Map.of("color", "blue"), stage(apiGatewayV2Service, created).getStageVariables());
+        getStageResponse(created).body("stageVariables.color", equalTo("blue"));
+
+        stackAction("UpdateStack", stackName,
+                stageTemplate(",\"StageVariables\":{\"color\":\"green\",\"size\":\"2\"}"));
+        CfnStackWaits.awaitStatus(stackName, "UPDATE_COMPLETE");
+        assertEquals(Map.of("color", "green", "size", "2"),
+                stage(apiGatewayV2Service, stack(cloudFormationService, stackName)).getStageVariables());
+
+        stackAction("UpdateStack", stackName, stageTemplate(""));
+        CfnStackWaits.awaitStatus(stackName, "UPDATE_COMPLETE");
+        Stack dropped = stack(cloudFormationService, stackName);
+        assertNoStageVariables(stage(apiGatewayV2Service, dropped));
+        getStageResponse(dropped).body("stageVariables", anyOf(nullValue(), anEmptyMap()));
+    }
+
+    @Test
+    void stageVariablesMadeNoValueByAConditionAreClearedFromTheStage() {
+        String stackName = "stage-variables-novalue-stack";
+        stackAction("CreateStack", stackName, stageTemplate(",\"StageVariables\":{\"color\":\"red\"}"));
+        CfnStackWaits.awaitStatus(stackName, "CREATE_COMPLETE");
+        assertEquals(Map.of("color", "red"),
+                stage(apiGatewayV2Service, stack(cloudFormationService, stackName)).getStageVariables());
+
+        stackAction("UpdateStack", stackName, stageTemplate(
+                ",\"StageVariables\":{\"Fn::If\":[\"Off\",{\"Ref\":\"AWS::NoValue\"},{\"color\":\"red\"}]}"));
+        CfnStackWaits.awaitStatus(stackName, "UPDATE_COMPLETE");
+        assertNoStageVariables(stage(apiGatewayV2Service, stack(cloudFormationService, stackName)));
+    }
+
+    @Test
+    void emptyStageVariablesDeclaredByTheTemplateStayEmpty() {
+        String stackName = "stage-variables-empty-stack";
+        stackAction("CreateStack", stackName, stageTemplate(",\"StageVariables\":{\"color\":\"blue\"}"));
+        CfnStackWaits.awaitStatus(stackName, "CREATE_COMPLETE");
+
+        stackAction("UpdateStack", stackName, stageTemplate(",\"StageVariables\":{}"));
+        CfnStackWaits.awaitStatus(stackName, "UPDATE_COMPLETE");
+
+        assertNoStageVariables(stage(apiGatewayV2Service, stack(cloudFormationService, stackName)));
+    }
+
+    @Test
+    void stageVariablesSetOutsideTheStackSurviveAnUpdateThatNeverDeclaredThem() {
+        String stackName = "stage-variables-outside-stack";
+        stackAction("CreateStack", stackName, stageTemplate(""));
+        CfnStackWaits.awaitStatus(stackName, "CREATE_COMPLETE");
+        Stack created = stack(cloudFormationService, stackName);
+        apiGatewayV2Service.updateStage(REGION, created.getResources().get("HttpApi").getPhysicalId(),
+                created.getResources().get("Stage").getPhysicalId(),
+                Map.of("stageVariables", Map.of("outside", "kept")));
+
+        stackAction("UpdateStack", stackName, stageTemplate("").replace("\"AutoDeploy\":false", "\"AutoDeploy\":true"));
+        CfnStackWaits.awaitStatus(stackName, "UPDATE_COMPLETE");
+
+        Stage stage = stage(apiGatewayV2Service, stack(cloudFormationService, stackName));
+        assertTrue(stage.isAutoDeploy());
+        assertEquals(Map.of("outside", "kept"), stage.getStageVariables());
+    }
+
+    private static void assertNoStageVariables(Stage stage) {
+        assertTrue(stage.getStageVariables() == null || stage.getStageVariables().isEmpty(),
+                "expected no stage variables, got " + stage.getStageVariables());
+    }
+
+    private ValidatableResponse getStageResponse(Stack stack) {
+        String apiId = stack.getResources().get("HttpApi").getPhysicalId();
+        String stageName = stack.getResources().get("Stage").getPhysicalId();
+        return given().when().get("/v2/apis/" + apiId + "/stages/" + stageName)
+                .then().statusCode(200);
+    }
+
+    /** An HTTP API and one stage; {@code stageSettings} adds stage properties, starting with a comma. */
+    private static String stageTemplate(String stageSettings) {
+        return """
+                {"Conditions":{"Off":{"Fn::Equals":["a","a"]}},
+                 "Resources":{
+                  "HttpApi":{"Type":"AWS::ApiGatewayV2::Api","Properties":{
+                    "Name":"stage-variables-api","ProtocolType":"HTTP"}},
+                  "Stage":{"Type":"AWS::ApiGatewayV2::Stage","Properties":{
+                    "ApiId":{"Ref":"HttpApi"},"StageName":"prod","AutoDeploy":false%s}}}}
+                """.formatted(stageSettings);
     }
 
     private ValidatableResponse getIntegrationResponse(Stack stack) {

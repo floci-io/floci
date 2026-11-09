@@ -9,6 +9,7 @@ import io.floci.aws.core.common.AwsRegions;
 import io.floci.aws.core.common.PaginatedResult;
 import io.floci.aws.core.common.Pagination;
 import io.floci.aws.core.common.RegionResolver;
+import io.floci.aws.core.common.ServiceCallAuthorizer;
 import io.floci.aws.core.common.docker.DockerHostResolver;
 import io.floci.aws.core.storage.AccountAwareStorageBackend;
 import io.floci.aws.core.storage.StorageFactory;
@@ -16,6 +17,7 @@ import io.floci.aws.services.dynamodb.backend.DynamoDbStreamReader;
 import io.floci.aws.services.dynamodb.model.TableDefinition;
 import io.floci.aws.services.ec2.Ec2Service;
 import io.floci.aws.services.ec2.model.Subnet;
+import io.floci.aws.services.iam.IamPolicyEvaluator.Decision;
 import io.floci.aws.services.rds.proxy.PasswordValidator;
 import io.floci.aws.services.redshift.RedshiftEventCatalog.EventInfo;
 import io.floci.aws.services.redshift.container.RedshiftContainerHandle;
@@ -34,6 +36,7 @@ import io.floci.aws.services.redshift.model.Snapshot;
 import io.floci.aws.services.redshift.model.SnapshotCopyGrant;
 import io.floci.aws.services.redshift.model.SnapshotSchedule;
 import io.floci.aws.services.redshift.proxy.RedshiftProxyManager;
+import io.floci.aws.services.s3.S3Service;
 import io.floci.aws.services.secretsmanager.ManagedSecretRotator;
 import io.floci.aws.services.secretsmanager.RandomPasswordGenerator;
 import io.floci.aws.services.secretsmanager.SecretsManagerService;
@@ -115,6 +118,8 @@ public class RedshiftService implements ManagedSecretRotator {
     private final RedshiftIntegrationEventPublisher integrationEvents;
     private final Ec2Service ec2Service;
     private final RedshiftZeroEtlEndpoints zeroEtlEndpoints;
+    private final S3Service s3Service;
+    private final ServiceCallAuthorizer serviceCallAuthorizer;
     // Proxy ports currently handed out, so allocateProxyPort never double-assigns within this JVM.
     private final Set<Integer> usedPorts = ConcurrentHashMap.newKeySet();
     private final ConcurrentHashMap<ResourceKey, ResourceLock> resourceLocks = new ConcurrentHashMap<>();
@@ -131,7 +136,7 @@ public class RedshiftService implements ManagedSecretRotator {
         return withResourceLock(clusters.accountId(), kind, identifier, work);
     }
 
-    private <T> T withResourceLock(String accountId, String kind, String identifier, Supplier<T> work) {
+    <T> T withResourceLock(String accountId, String kind, String identifier, Supplier<T> work) {
         ResourceKey key = new ResourceKey(accountId, kind, identifier);
         ResourceLock scoped = resourceLocks.compute(key, (ignored, existing) -> {
             ResourceLock selected = existing == null ? new ResourceLock() : existing;
@@ -198,7 +203,8 @@ public class RedshiftService implements ManagedSecretRotator {
                             SecretsManagerService secretsManagerService, ObjectMapper objectMapper,
                             DynamoDbStreamReader streamReader, RedshiftAuditLogPublisher auditLogPublisher,
                             RedshiftEventService events, RedshiftIntegrationEventPublisher integrationEvents,
-                            Ec2Service ec2Service, RedshiftZeroEtlEndpoints zeroEtlEndpoints) {
+                            Ec2Service ec2Service, RedshiftZeroEtlEndpoints zeroEtlEndpoints,
+                            S3Service s3Service, ServiceCallAuthorizer serviceCallAuthorizer) {
         this.clusters = storageFactory.create("redshift", "redshift-clusters.json", new TypeReference<Map<String, Cluster>>() {});
         this.snapshots = storageFactory.create("redshift", "redshift-snapshots.json", new TypeReference<Map<String, Snapshot>>() {});
         this.snapshotCopies = storageFactory.create("redshift", "redshift-snapshot-copies.json", new TypeReference<Map<String, Snapshot>>() {});
@@ -223,6 +229,24 @@ public class RedshiftService implements ManagedSecretRotator {
         this.integrationEvents = integrationEvents;
         this.ec2Service = ec2Service;
         this.zeroEtlEndpoints = zeroEtlEndpoints;
+        this.s3Service = s3Service;
+        this.serviceCallAuthorizer = serviceCallAuthorizer;
+        if (this.auditLogPublisher != null) {
+            this.auditLogPublisher.setDeliveryStatusListener(this::recordAuditDeliveryOutcome);
+        }
+    }
+
+    RedshiftService(StorageFactory storageFactory, RedshiftContainerManager containerManager,
+                    EmulatorConfig config, RegionResolver regionResolver,
+                    RedshiftProxyManager proxyManager, DockerHostResolver dockerHostResolver,
+                    RedshiftCredentialBroker credentialBroker,
+                    SecretsManagerService secretsManagerService, ObjectMapper objectMapper,
+                    DynamoDbStreamReader streamReader, RedshiftAuditLogPublisher auditLogPublisher,
+                    RedshiftEventService events, RedshiftIntegrationEventPublisher integrationEvents,
+                    Ec2Service ec2Service, RedshiftZeroEtlEndpoints zeroEtlEndpoints) {
+        this(storageFactory, containerManager, config, regionResolver, proxyManager, dockerHostResolver,
+                credentialBroker, secretsManagerService, objectMapper, streamReader, auditLogPublisher, events,
+                integrationEvents, ec2Service, zeroEtlEndpoints, null, null);
     }
 
     // Hand-built test constructions need not supply EC2; a null ec2Service skips subnet resolution.
@@ -1480,8 +1504,18 @@ public class RedshiftService implements ManagedSecretRotator {
                                               String s3TableKmsKeyId, String s3TableGranularity) {
         Cluster cluster = clusters.get(clusterIdentifier)
                 .orElseThrow(() -> new AwsException("ClusterNotFound", "Cluster " + clusterIdentifier + " not found", 404));
-        boolean cloudWatch = "cloudwatch".equalsIgnoreCase(logDestinationType);
-        boolean s3Table = "s3table".equalsIgnoreCase(logDestinationType);
+
+        String destination = "s3";
+        if (logDestinationType != null && !logDestinationType.isBlank()) {
+            destination = logDestinationType.trim().toLowerCase();
+            if (!List.of("cloudwatch", "s3", "s3table").contains(destination)) {
+                throw new AwsException("InvalidParameterValue",
+                        "LogDestinationType must be one of: cloudwatch, s3, s3table", 400);
+            }
+        }
+
+        boolean cloudWatch = "cloudwatch".equals(destination);
+        boolean s3Table = "s3table".equals(destination);
         if (s3Table && s3TableGranularity != null
                 && !List.of("cluster", "account").contains(s3TableGranularity)) {
             throw new AwsException("InvalidParameterValue",
@@ -1491,21 +1525,84 @@ public class RedshiftService implements ManagedSecretRotator {
             throw new AwsException("InvalidParameterCombination",
                     "S3-table logging settings are valid only when LogDestinationType is s3table", 400);
         }
-        if (!cloudWatch && !s3Table && (bucketName == null || bucketName.isBlank())) {
-            throw new AwsException("InvalidParameterValue", "BucketName is required for an S3 log destination", 400);
+        if (!cloudWatch && !s3Table) {
+            if (bucketName == null || bucketName.isBlank()) {
+                throw new AwsException("InvalidParameterValue", "BucketName is required for an S3 log destination", 400);
+            }
+            if (s3KeyPrefix != null && s3KeyPrefix.startsWith("/")) {
+                throw new AwsException("InvalidS3KeyPrefixFault",
+                        "The S3 key prefix cannot start with a forward slash (/)", 400);
+            }
+            validateS3BucketLogging(clusters.accountId(), cluster, bucketName, s3KeyPrefix, regionResolver.getRegion());
         }
         cluster.setLoggingEnabled(true);
-        cluster.setLoggingBucketName(bucketName);
-        cluster.setLoggingDestinationType(logDestinationType);
+        cluster.setLoggingGeneration(cluster.getLoggingGeneration() + 1);
+        cluster.setLoggingBucketName(cloudWatch || s3Table ? null : bucketName);
+        cluster.setLoggingDestinationType(destination);
         cluster.setLoggingRegion(regionResolver.getRegion());
         cluster.setLoggingExports(logExports == null || logExports.isEmpty() ? null : List.copyOf(logExports));
-        cluster.setLoggingS3KeyPrefix(s3KeyPrefix);
-        cluster.setLoggingS3TableKmsKeyId(s3TableKmsKeyId);
-        cluster.setLoggingS3TableGranularity(s3TableGranularity);
+        cluster.setLoggingS3KeyPrefix(cloudWatch || s3Table ? null : s3KeyPrefix);
+        cluster.setLoggingS3TableKmsKeyId(s3Table ? s3TableKmsKeyId : null);
+        cluster.setLoggingS3TableGranularity(s3Table ? s3TableGranularity : null);
         clusters.put(clusterIdentifier, cluster);
         clusters.flush();
         registerAuditLogging(clusters.accountId(), cluster);
         return cluster;
+    }
+
+    private void validateS3BucketLogging(String accountId, Cluster cluster, String bucketName,
+                                        String s3KeyPrefix, String region) {
+        if (s3Service == null) {
+            return;
+        }
+        if (!s3Service.bucketExists(bucketName)) {
+            throw new AwsException("BucketNotFoundFault",
+                    "Could not find the specified S3 bucket", 400);
+        }
+        if (serviceCallAuthorizer != null) {
+            String partition = s3Service.bucketPartition(bucketName);
+            String sampleKey = RedshiftAuditLogPublisher.s3DeliveryKey(s3KeyPrefix, accountId, region,
+                    cluster.getClusterIdentifier(), "connectionlog", Instant.now());
+            String bucketArn = AwsArnUtils.Arn.global(partition, "s3", "", bucketName).toString();
+            String objectArn = AwsArnUtils.Arn.global(partition, "s3", "", bucketName + "/" + sampleKey).toString();
+            String clusterArn = AwsArnUtils.Arn.of("redshift", region, accountId,
+                    "cluster:" + cluster.getClusterIdentifier()).toString();
+            Map<String, List<String>> requestKeys = Map.of("aws:RequestedRegion", List.of(region));
+
+            Decision getAcl = serviceCallAuthorizer.authorize("redshift", "s3:GetBucketAcl", bucketArn, clusterArn, accountId, requestKeys);
+            Decision putObj = serviceCallAuthorizer.authorize("redshift", "s3:PutObject", objectArn, clusterArn, accountId, requestKeys);
+            if (getAcl != Decision.ALLOW || putObj != Decision.ALLOW) {
+                throw new AwsException("InsufficientS3BucketPolicyFault",
+                        "The cluster does not have read bucket or put object permissions on the S3 bucket specified when enabling logging.", 400);
+            }
+        }
+    }
+
+    public void recordAuditDeliveryOutcome(String accountId, String clusterIdentifier, long generation,
+                                           Instant timestamp, boolean success, String failureMessage) {
+        try {
+            withResourceLock(accountId, "cluster", clusterIdentifier, () -> mutate(() -> {
+                Optional<Cluster> existing = clusters.getForAccount(accountId, clusterIdentifier);
+                if (existing.isEmpty()) {
+                    return null;
+                }
+                Cluster cluster = existing.get();
+                if (!cluster.isLoggingEnabled() || cluster.getLoggingGeneration() != generation) {
+                    return null;
+                }
+                if (success) {
+                    cluster.setLastSuccessfulDeliveryTime(timestamp);
+                } else {
+                    cluster.setLastFailureTime(timestamp);
+                    cluster.setLastFailureMessage(failureMessage);
+                }
+                clusters.putForAccount(accountId, clusterIdentifier, cluster);
+                clusters.flush();
+                return null;
+            }));
+        } catch (Exception e) {
+            LOG.warnv(e, "Failed to record audit delivery outcome for cluster {0}", clusterIdentifier);
+        }
     }
 
     public Cluster disableLogging(String clusterIdentifier) {
@@ -1516,6 +1613,7 @@ public class RedshiftService implements ManagedSecretRotator {
         Cluster cluster = clusters.get(clusterIdentifier)
                 .orElseThrow(() -> new AwsException("ClusterNotFound", "Cluster " + clusterIdentifier + " not found", 404));
         cluster.setLoggingEnabled(false);
+        cluster.setLoggingGeneration(cluster.getLoggingGeneration() + 1);
         cluster.setLoggingBucketName(null);
         cluster.setLoggingS3KeyPrefix(null);
         cluster.setLoggingDestinationType(null);
@@ -1523,6 +1621,9 @@ public class RedshiftService implements ManagedSecretRotator {
         cluster.setLoggingExports(null);
         cluster.setLoggingS3TableKmsKeyId(null);
         cluster.setLoggingS3TableGranularity(null);
+        cluster.setLastSuccessfulDeliveryTime(null);
+        cluster.setLastFailureTime(null);
+        cluster.setLastFailureMessage(null);
         clusters.put(clusterIdentifier, cluster);
         clusters.flush();
         registerAuditLogging(clusters.accountId(), cluster);
@@ -1949,6 +2050,88 @@ public class RedshiftService implements ManagedSecretRotator {
     private static boolean takenFrom(Snapshot snapshot, String clusterIdentifier) {
         return clusterIdentifier == null || clusterIdentifier.isBlank()
                 || clusterIdentifier.equals(snapshot.getClusterIdentifier());
+    }
+
+    public Snapshot copyClusterSnapshot(String sourceSnapshotIdentifier, String targetSnapshotIdentifier,
+                                        String sourceSnapshotClusterIdentifier, Integer manualRetention) {
+        validateSnapshotIdentifier(targetSnapshotIdentifier);
+        if (manualRetention != null) {
+            validateManualRetention(manualRetention);
+        }
+        String accountId = clusters.accountId();
+        String region = regionResolver.getRegion();
+
+        return withResourceLock("snapshot", targetSnapshotIdentifier, () -> {
+            boolean shadowedByCopy = snapshotCopies.get(copyKey(region, targetSnapshotIdentifier)).isPresent();
+            if (shadowedByCopy || snapshots.get(targetSnapshotIdentifier).isPresent()) {
+                throw new AwsException("ClusterSnapshotAlreadyExists",
+                        "Snapshot " + targetSnapshotIdentifier + " already exists", 400);
+            }
+
+            Snapshot source = findSnapshot(sourceSnapshotIdentifier)
+                    .filter(found -> takenFrom(found, sourceSnapshotClusterIdentifier))
+                    .orElseThrow(() -> new AwsException("ClusterSnapshotNotFound",
+                            "Snapshot " + sourceSnapshotIdentifier + " not found", 404));
+            if (!"available".equals(source.getStatus())) {
+                throw new AwsException("InvalidClusterSnapshotState",
+                        "Snapshot " + sourceSnapshotIdentifier + " is not available", 400);
+            }
+            if (!"automated".equals(source.getSnapshotType())) {
+                throw new AwsException("InvalidClusterSnapshotState",
+                        "Cannot copy a manual snapshot: " + sourceSnapshotIdentifier
+                                + ". Only automated snapshots can be copied.", 400);
+            }
+
+            Snapshot copy = new Snapshot(source);
+            copy.setSnapshotIdentifier(targetSnapshotIdentifier);
+            copy.setSnapshotType("manual");
+            copy.setSnapshotCreateTime(Instant.now());
+            copy.setManualSnapshotRetentionPeriod(
+                    manualRetention != null ? manualRetention : RETAIN_MANUAL_SNAPSHOTS_INDEFINITELY);
+            copy.setAutomatedSnapshotRetentionPeriod(null);
+            copy.setScheduledTime(null);
+            copy.setSnapshotArn(snapshotArn(source.getClusterIdentifier(), targetSnapshotIdentifier));
+            copy.setCopiedToRegions(new LinkedHashSet<>());
+            copy.setSqlDump(null);
+
+            Path copiedDump = null;
+            if (source.getSqlDump() != null && !source.getSqlDump().isBlank()) {
+                Path dumpDir = accountDumpDir(accountId);
+                try {
+                    copiedDump = SnapshotDumpCopier.copy(Paths.get(source.getSqlDump()), dumpDir, dumpDir);
+                } catch (IOException e) {
+                    LOG.warnv(e, "Could not copy the dump of snapshot {0}", sourceSnapshotIdentifier);
+                    throw new AwsException("InternalFailure", "Failed to copy snapshot dump", 500);
+                }
+                copy.setSqlDump(copiedDump.toString());
+            }
+
+            try {
+                snapshots.putAllAtomically(Map.of(targetSnapshotIdentifier, copy));
+                snapshots.flush();
+            } catch (RuntimeException e) {
+                deleteQuietly(copiedDump, e);
+                throw e;
+            }
+
+            emitSnapshotEvent(accountId, region, RedshiftEventCatalog.SNAPSHOT_STARTED,
+                    targetSnapshotIdentifier, "A user snapshot '" + targetSnapshotIdentifier
+                            + "' for Amazon Redshift cluster '" + source.getClusterIdentifier()
+                            + "' was copied from snapshot '" + sourceSnapshotIdentifier + "'.");
+
+            return copy;
+        });
+    }
+
+    private static void deleteQuietly(Path file, Exception cause) {
+        if (file == null) {
+            return;
+        }
+        try {
+            Files.deleteIfExists(file);
+        } catch (IOException cleanupFailure) {
+            cause.addSuppressed(cleanupFailure);
+        }
     }
 
     public Snapshot deleteSnapshot(String snapshotIdentifier) {

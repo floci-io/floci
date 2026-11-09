@@ -510,6 +510,16 @@ public class ApiGatewayExecuteController {
         if (method.isApiKeyRequired() && resolvedApiKey == null) {
             return gatewayResponse(scope, GatewayResponseType.INVALID_API_KEY, 403, "Forbidden");
         }
+        // Measured: a key of the stage's usage plan is metered on every method, whether or not it
+        // requires one, and before request validation, so a call that then fails it still counts.
+        if (resolvedApiKey != null) {
+            GatewayResponseType refusal = apiGatewayService.meterApiKeyCall(region, resolvedApiKey.usagePlanId(),
+                    resolvedApiKey.id());
+            if (refusal != null) {
+                return gatewayResponse(scope, refusal, 429,
+                        refusal == GatewayResponseType.THROTTLED ? "Too Many Requests" : "Limit Exceeded");
+            }
+        }
 
         // 2. Request validation
         Response validationResponse = validateRequest(scope, region, apiId, method, headers, uriInfo, body);
@@ -1426,7 +1436,7 @@ public class ApiGatewayExecuteController {
                 if (apiGatewayService.findApiKey(region, planKey.getId())
                         .filter(ApiKey::isEnabled)
                         .isPresent()) {
-                    return new ResolvedApiKey(planKey.getId(), planKey.getValue());
+                    return new ResolvedApiKey(planKey.getId(), planKey.getValue(), plan.getId());
                 }
             }
         }
@@ -1436,9 +1446,9 @@ public class ApiGatewayExecuteController {
     /**
      * The id and value of an API key matched to a request via a usage plan. A REQUEST authorizer
      * resolves {@code GetApiKey} by id (event.requestContext.identity.apiKeyId), while the key
-     * value is carried separately under identity.apiKey.
+     * value is carried separately under identity.apiKey. The usage plan is the one metering the call.
      */
-    private record ResolvedApiKey(String id, String value) {}
+    private record ResolvedApiKey(String id, String value, String usagePlanId) {}
 
     private String buildMethodArn(String region, String apiId, String stageName, String httpMethod, String requestPath) {
         String normalizedPath = requestPath == null ? "" : requestPath.replaceFirst("^/", "");
@@ -4141,6 +4151,8 @@ public class ApiGatewayExecuteController {
             case AUTHORIZER_FAILURE, AUTHORIZER_CONFIGURATION_ERROR -> "AuthorizerConfigurationException";
             case BAD_REQUEST_PARAMETERS, BAD_REQUEST_BODY, UNSUPPORTED_MEDIA_TYPE -> "BadRequestException";
             case API_CONFIGURATION_ERROR, INTEGRATION_FAILURE -> "InternalServerErrorException";
+            case THROTTLED -> "TooManyRequestsException";
+            case QUOTA_EXCEEDED -> "LimitExceededException";
             default -> null;
         };
     }

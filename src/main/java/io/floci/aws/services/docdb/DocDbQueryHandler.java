@@ -9,6 +9,7 @@ import io.floci.aws.core.common.RdsFamilyQuerySupport;
 import io.floci.aws.core.common.XmlBuilder;
 import io.floci.aws.services.docdb.model.DocDbCluster;
 import io.floci.aws.services.docdb.model.DocDbClusterSettings;
+import io.floci.aws.services.docdb.model.DocDbClusterSnapshot;
 import io.floci.aws.services.docdb.model.DocDbInstance;
 import io.floci.aws.services.docdb.model.DocDbInstanceSettings;
 import jakarta.enterprise.context.ApplicationScoped;
@@ -44,6 +45,10 @@ public class DocDbQueryHandler {
                 case "CreateDBCluster"    -> handleCreateDbCluster(params);
                 case "DescribeDBClusters" -> handleDescribeDbClusters(params);
                 case "DescribeDBClusterSnapshots" -> handleDescribeDbClusterSnapshots(params);
+                case "CreateDBClusterSnapshot" -> handleCreateDbClusterSnapshot(params);
+                case "DeleteDBClusterSnapshot" -> handleDeleteDbClusterSnapshot(params);
+                case "RestoreDBClusterFromSnapshot" -> handleRestoreDbClusterFromSnapshot(params);
+                case "RestoreDBClusterToPointInTime" -> handleRestoreDbClusterToPointInTime(params);
                 case "DescribeGlobalClusters" -> handleDescribeGlobalClusters(params);
                 case "DeleteDBCluster"    -> handleDeleteDbCluster(params);
                 case "ModifyDBCluster"    -> handleModifyDbCluster(params);
@@ -120,6 +125,16 @@ public class DocDbQueryHandler {
         return service.listDbClusters(filterId).stream().map(this::clusterInnerXml).toList();
     }
 
+    /**
+     * The rows the list form of DescribeDBClusterSnapshots would return, for the RDS-family listing
+     * {@code RdsQueryHandler} assembles: a live account lists DocumentDB cluster snapshots from the
+     * RDS endpoint too.
+     */
+    public List<String> clusterSnapshotRowsXml(String clusterId, String snapshotType) {
+        return service.describeDbClusterSnapshots(null, clusterId, snapshotType).stream()
+                .map(this::snapshotInnerXml).toList();
+    }
+
     public List<String> instanceRowsXml(String filterId) {
         return service.listDbInstances(filterId).stream().map(this::instanceInnerXml).toList();
     }
@@ -129,11 +144,102 @@ public class DocDbQueryHandler {
     }
 
     private Response handleDescribeDbClusterSnapshots(MultivaluedMap<String, String> params) {
-        // Snapshots are not modeled by the emulator; return the wire-accurate empty result
-        // the DocDB/RDS Query API uses (empty <DBClusterSnapshots/>, no <Marker>) so SDK
-        // clients complete the read instead of failing on an unsupported action.
-        XmlBuilder xml = new XmlBuilder().start("DBClusterSnapshots").end("DBClusterSnapshots");
+        String clusterId = params.getFirst("DBClusterIdentifier");
+        if (clusterId == null || clusterId.isBlank()) {
+            clusterId = extractFilterValue(params, "db-cluster-id");
+        }
+        List<DocDbClusterSnapshot> found = service.describeDbClusterSnapshots(
+                params.getFirst("DBClusterSnapshotIdentifier"), clusterId, params.getFirst("SnapshotType"));
+        XmlBuilder xml = new XmlBuilder().start("DBClusterSnapshots");
+        for (DocDbClusterSnapshot snapshot : found) {
+            xml.start("DBClusterSnapshot").raw(snapshotInnerXml(snapshot)).end("DBClusterSnapshot");
+        }
+        xml.end("DBClusterSnapshots");
         return Response.ok(AwsQueryResponse.envelope("DescribeDBClusterSnapshots", AwsNamespaces.RDS, xml.build())).build();
+    }
+
+    private Response handleCreateDbClusterSnapshot(MultivaluedMap<String, String> params) {
+        DocDbClusterSnapshot snapshot = service.createDbClusterSnapshot(
+                params.getFirst("DBClusterSnapshotIdentifier"), params.getFirst("DBClusterIdentifier"),
+                parseTags(params));
+        return Response.ok(AwsQueryResponse.envelope("CreateDBClusterSnapshot", AwsNamespaces.RDS,
+                snapshotXml(snapshot))).build();
+    }
+
+    private Response handleDeleteDbClusterSnapshot(MultivaluedMap<String, String> params) {
+        DocDbClusterSnapshot snapshot = service.deleteDbClusterSnapshot(params.getFirst("DBClusterSnapshotIdentifier"));
+        return Response.ok(AwsQueryResponse.envelope("DeleteDBClusterSnapshot", AwsNamespaces.RDS,
+                snapshotXml(snapshot))).build();
+    }
+
+    private Response handleRestoreDbClusterFromSnapshot(MultivaluedMap<String, String> params) {
+        String id = params.getFirst("DBClusterIdentifier");
+        String snapshotId = params.getFirst("SnapshotIdentifier");
+        if (id == null || id.isBlank() || snapshotId == null || snapshotId.isBlank()) {
+            return AwsQueryResponse.error("InvalidParameterValue",
+                    "DBClusterIdentifier and SnapshotIdentifier are required.", AwsNamespaces.RDS, 400);
+        }
+        DocDbCluster cluster = service.restoreDbClusterFromSnapshot(id, snapshotId,
+                params.getFirst("EngineVersion"), clusterSettings(params, true), parseTags(params));
+        return Response.ok(AwsQueryResponse.envelope("RestoreDBClusterFromSnapshot", AwsNamespaces.RDS,
+                clusterXml(cluster))).build();
+    }
+
+    private Response handleRestoreDbClusterToPointInTime(MultivaluedMap<String, String> params) {
+        String id = params.getFirst("DBClusterIdentifier");
+        String sourceId = params.getFirst("SourceDBClusterIdentifier");
+        if (id == null || id.isBlank() || sourceId == null || sourceId.isBlank()) {
+            return AwsQueryResponse.error("InvalidParameterValue",
+                    "DBClusterIdentifier and SourceDBClusterIdentifier are required.", AwsNamespaces.RDS, 400);
+        }
+        // The same checks as RDS's restore; only the latest restorable time is modeled, so a
+        // requested time is refused rather than silently answered with the source's current data.
+        boolean restoreTimeGiven = params.getFirst("RestoreToTime") != null && !params.getFirst("RestoreToTime").isBlank();
+        boolean latestRequested = Boolean.TRUE.equals(optionalBoolean(params.getFirst("UseLatestRestorableTime")));
+        if (restoreTimeGiven && latestRequested) {
+            return AwsQueryResponse.error("InvalidParameterCombination",
+                    "RestoreToTime cannot be specified when UseLatestRestorableTime is true.", AwsNamespaces.RDS, 400);
+        }
+        if (!restoreTimeGiven && !latestRequested) {
+            return AwsQueryResponse.error("InvalidParameterCombination",
+                    "Specify either RestoreToTime or UseLatestRestorableTime.", AwsNamespaces.RDS, 400);
+        }
+        if (restoreTimeGiven) {
+            return AwsQueryResponse.error("InvalidParameterValue",
+                    "Floci restores DocumentDB clusters to the latest restorable time only; use UseLatestRestorableTime.",
+                    AwsNamespaces.RDS, 400);
+        }
+        DocDbCluster cluster = service.restoreDbClusterToPointInTime(id, sourceId,
+                clusterSettings(params, true), parseTags(params));
+        return Response.ok(AwsQueryResponse.envelope("RestoreDBClusterToPointInTime", AwsNamespaces.RDS,
+                clusterXml(cluster))).build();
+    }
+
+    private String snapshotXml(DocDbClusterSnapshot snapshot) {
+        return new XmlBuilder().start("DBClusterSnapshot").raw(snapshotInnerXml(snapshot))
+                .end("DBClusterSnapshot").build();
+    }
+
+    private String snapshotInnerXml(DocDbClusterSnapshot s) {
+        XmlBuilder xml = new XmlBuilder()
+                .elem("DBClusterSnapshotIdentifier", s.getDbClusterSnapshotIdentifier())
+                .elem("DBClusterIdentifier", s.getDbClusterIdentifier())
+                .elem("SnapshotCreateTime", s.getSnapshotCreateTime() != null ? s.getSnapshotCreateTime().toString() : "")
+                .elem("Engine", "docdb")
+                .elem("Status", s.getStatus())
+                .elem("Port", s.getPort())
+                .elem("ClusterCreateTime", s.getClusterCreateTime() != null ? s.getClusterCreateTime().toString() : "")
+                .elem("MasterUsername", s.getMasterUsername())
+                .elem("EngineVersion", s.getEngineVersion())
+                .elem("SnapshotType", s.getSnapshotType())
+                .elem("PercentProgress", 100)
+                .elem("StorageEncrypted", s.isStorageEncrypted())
+                .elem("DBClusterSnapshotArn", s.getDbClusterSnapshotArn());
+        if (s.getKmsKeyId() != null && !s.getKmsKeyId().isBlank()) {
+            xml.elem("KmsKeyId", s.getKmsKeyId());
+        }
+        return xml.start("AvailabilityZones").elem("AvailabilityZone", config.defaultAvailabilityZone())
+                .end("AvailabilityZones").build();
     }
 
     private Response handleDeleteDbCluster(MultivaluedMap<String, String> params) {

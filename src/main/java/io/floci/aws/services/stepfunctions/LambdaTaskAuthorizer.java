@@ -115,12 +115,21 @@ public class LambdaTaskAuthorizer {
             effectiveRoleArn = credentialsRoleArn;
         }
         for (Permission permission : permissions) {
-            Optional<String> refusal = refusal(effectiveRoleArn, permission.action(), permission.resourceArn(),
+            Optional<String> refusal = refusal(effectiveRoleArn, permission.action(), evaluatedOn(permission.resourceArn()),
                     owner.region(), permission.conditionKeys());
             if (refusal.isPresent()) {
                 throw new AslExecutor.FailStateException(deniedError, refusal.get());
             }
         }
+    }
+
+    /**
+     * The ARN a permission is evaluated on, the one a direct request is: S3's global bucket namespace reaches a
+     * bucket in another partition, whose ARN is in the bucket's partition and not the state machine's.
+     */
+    private String evaluatedOn(String resourceArn) {
+        return ANY_RESOURCE.equals(resourceArn) ? resourceArn : ResourcePolicyProviders.resolveResourceArn(
+                resourcePolicies, AwsArnUtils.parse(resourceArn).service(), resourceArn);
     }
 
     /**

@@ -22,6 +22,9 @@ import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.Mockito.RETURNS_DEEP_STUBS;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.spy;
+import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 class ApiGatewayCustomDomainOwnerServiceTest {
@@ -41,7 +44,7 @@ class ApiGatewayCustomDomainOwnerServiceTest {
         StorageFactory storageFactory = mock(StorageFactory.class);
         when(storageFactory.create(anyString(), anyString(), any())).thenAnswer(invocation ->
                 stores.computeIfAbsent(invocation.getArgument(1, String.class),
-                        ignored -> AccountAwareStorageBackend.inMemory(DEFAULT_ACCOUNT)));
+                        ignored -> spy(AccountAwareStorageBackend.inMemory(DEFAULT_ACCOUNT))));
         service = new ApiGatewayService(storageFactory,
                 mock(EmulatorConfig.class, RETURNS_DEEP_STUBS), mock(TlsCertificateManager.class),
                 new RegionResolver(REGION, DEFAULT_ACCOUNT));
@@ -112,13 +115,24 @@ class ApiGatewayCustomDomainOwnerServiceTest {
         assertNull(service.findDomainByRegionalHostname(DOMAIN));
     }
 
-    @SuppressWarnings("unchecked")
+    @Test
+    void anUnknownHostDoesNotCopyTheStoredKeys() {
+        putDomain(OWNER, REGION);
+
+        assertNull(service.findDomainByName("other.example.test"));
+
+        verify(domains(), never()).scanAllAccountEntries(any());
+    }
+
     private void putDomain(String account, String region) {
-        AccountAwareStorageBackend<CustomDomain> domains =
-                (AccountAwareStorageBackend<CustomDomain>) stores.get("apigateway-domains.json");
         CustomDomain domain = new CustomDomain();
         domain.setDomainName(DOMAIN);
-        domains.putForAccount(account, region + "::" + DOMAIN, domain);
+        domains().putForAccount(account, region + "::" + DOMAIN, domain);
+    }
+
+    @SuppressWarnings("unchecked")
+    private AccountAwareStorageBackend<CustomDomain> domains() {
+        return (AccountAwareStorageBackend<CustomDomain>) stores.get("apigateway-domains.json");
     }
 
     @SuppressWarnings("unchecked")

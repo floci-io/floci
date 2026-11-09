@@ -104,6 +104,26 @@ public final class RequestResources {
         return named(resources, formats(table, operation), form, body, partition, region, accountId, stored);
     }
 
+    /**
+     * The ARNs of the resources a JSON request body names, for a call that is not an HTTP request of its own, as a
+     * state machine's task to its integrated service: as {@link #of} reads the same request, whatever endpoint it
+     * would have reached.
+     */
+    public static List<String> ofBody(String operation, JsonNode body, String partition, String region,
+                                      String accountId, StoredResourceArns stored) {
+        RequestResourceMembers.Table table = RequestResourceMembers.table();
+        List<RequestResourceMembers.Resource> resources = operation == null ? null : table.operations().get(operation);
+        if (resources == null || resources.isEmpty()) {
+            return List.of();
+        }
+        return named(resources, formats(table, operation), Map.of(), body, partition, region, accountId, stored);
+    }
+
+    /** Whether the table holds the operation as one with no resource of its own, which is checked on {@code *}. */
+    public static boolean actsOnNoResource(String operation) {
+        return reads(operation) && RequestResourceMembers.table().operations().get(operation).isEmpty();
+    }
+
     /** The ARNs of the resources the request names, as {@link #of} reads them. */
     private static List<String> named(List<RequestResourceMembers.Resource> resources,
                                       Map<String, RequestResourceMembers.ArnFormat> formats, Map<String, String> form,

@@ -2,6 +2,7 @@ package io.floci.aws.services.cloudformation.provisioners;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.floci.aws.core.common.AwsException;
 import io.floci.aws.services.cloudformation.CloudFormationTemplateEngine;
 import io.floci.aws.services.cloudformation.model.StackResource;
@@ -159,11 +160,10 @@ class Ec2InstanceCfnProvisionerTest {
 
     @Test
     void launchTemplateFillsWhatThePropertiesLeaveUnset() throws Exception {
-        LaunchTemplateData data = new LaunchTemplateData();
+        LaunchTemplateData data = templateVersion("lt-1", "1");
         data.setImageId("ami-from-template");
         data.setInstanceType("m5.large");
         data.setKeyName("template-key");
-        when(ec2.resolveLaunchTemplateData("us-east-1", "lt-1", null, "1", false)).thenReturn(data);
         Instance instance = new Instance();
         instance.setInstanceId("i-2");
         stubLaunch(instance);
@@ -309,9 +309,7 @@ class Ec2InstanceCfnProvisionerTest {
                 ctx("i-1"));
 
         assertEquals("i-1", r.getPhysicalId());
-        verify(ec2, times(1)).runInstances(anyString(), any(), anyString(), anyInt(), anyInt(), any(),
-                anyList(), any(), any(), anyList(), any(), any(), any(),
-                any(), anyInt(), any(), any(), any(), any(), anyBoolean(), any(), any(), any(), anyBoolean(), any());
+        runInstancesWithAnyArguments(verify(ec2, times(1)));
     }
 
     @Test
@@ -345,6 +343,254 @@ class Ec2InstanceCfnProvisionerTest {
     }
 
     @Test
+    void droppedUserDataIsClearedAcrossAStopAndAStart() throws Exception {
+        Instance i1 = reusable("i-1");
+        i1.setUserData("old");
+        i1.setState(InstanceState.running());
+        StackResource r = resource("Server");
+
+        provisioner.provision(r, props("{\"ImageId\": \"ami-1\"}"),
+                ctx("i-1", props("{\"ImageId\": \"ami-1\", \"UserData\": \"old\"}")));
+
+        assertEquals("i-1", r.getPhysicalId());
+        InOrder order = inOrder(ec2);
+        order.verify(ec2).stopInstances("us-east-1", List.of("i-1"));
+        order.verify(ec2).modifyInstanceUserData("us-east-1", "i-1", (String) null);
+        order.verify(ec2).startInstances("us-east-1", List.of("i-1"));
+        order.verify(ec2).awaitContainerLaunch(i1);
+    }
+
+    @Test
+    void droppedUserDataOnAStoppedInstanceIsClearedWithoutARestart() throws Exception {
+        Instance i1 = reusable("i-1");
+        i1.setUserData("old");
+        i1.setState(InstanceState.stopped());
+
+        provisioner.provision(resource("Server"), props("{\"ImageId\": \"ami-1\"}"),
+                ctx("i-1", props("{\"ImageId\": \"ami-1\", \"UserData\": \"old\"}")));
+
+        verify(ec2).modifyInstanceUserData("us-east-1", "i-1", (String) null);
+        verify(ec2, never()).stopInstances(anyString(), anyList());
+        verify(ec2, never()).startInstances(anyString(), anyList());
+    }
+
+    @Test
+    void userDataSetOutsideTheStackSurvivesAnUpdateThatNeverDeclaredIt() throws Exception {
+        Instance i1 = reusable("i-1");
+        i1.setUserData("set outside the stack");
+        i1.setState(InstanceState.running());
+
+        provisioner.provision(resource("Server"), props("{\"ImageId\": \"ami-1\"}"),
+                ctx("i-1", props("{\"ImageId\": \"ami-1\"}")));
+
+        verify(ec2, never()).stopInstances(anyString(), anyList());
+        verify(ec2, never()).modifyInstanceUserData(anyString(), anyString(), any());
+        verify(ec2, never()).startInstances(anyString(), anyList());
+    }
+
+    @Test
+    void anInstanceWithoutUserDataAndWithoutADeclarationIsLeftAlone() throws Exception {
+        Instance i1 = reusable("i-1");
+        i1.setState(InstanceState.running());
+
+        provisioner.provision(resource("Server"), props("{\"ImageId\": \"ami-1\"}"),
+                ctx("i-1", props("{\"ImageId\": \"ami-1\"}")));
+
+        verify(ec2, never()).stopInstances(anyString(), anyList());
+        verify(ec2, never()).modifyInstanceUserData(anyString(), anyString(), any());
+    }
+
+    @Test
+    void droppedUserDataOnAnInstanceThatHasNoneStopsNothing() throws Exception {
+        Instance i1 = reusable("i-1");
+        i1.setState(InstanceState.running());
+
+        provisioner.provision(resource("Server"), props("{\"ImageId\": \"ami-1\"}"),
+                ctx("i-1", props("{\"ImageId\": \"ami-1\", \"UserData\": \"old\"}")));
+
+        verify(ec2, never()).stopInstances(anyString(), anyList());
+        verify(ec2, never()).modifyInstanceUserData(anyString(), anyString(), any());
+    }
+
+    // The tests down to droppingMetadataOptionsWhileTheLaunchTemplateSupplies... pin the
+    // drop-policy.tsv rows of the properties they drop: what an update that drops each one does.
+    @Test
+    void droppingInstanceTypeGoesBackToTheDefaultAndSecurityGroupsAreKept() throws Exception {
+        Instance i1 = reusable("i-1");
+        i1.setInstanceType("m5.large");
+        String previous = "{\"ImageId\": \"ami-1\", \"InstanceType\": \"m5.large\", "
+                + "\"SecurityGroupIds\": [\"sg-1\"]}";
+
+        provisioner.provision(resource("Server"), props("{\"ImageId\": \"ami-1\"}"), ctx("i-1", props(previous)));
+
+        verify(ec2).modifyInstanceAttribute("us-east-1", "i-1", "instanceType", "t3.micro");
+        verify(ec2, never()).modifyInstanceGroups(anyString(), anyString(), anyList());
+    }
+
+    @Test
+    void droppingTheLaunchTemplateKeepsTheInstanceAndResizesItToTheDefaultType() throws Exception {
+        Instance i1 = reusable("i-1");
+        i1.setInstanceType("m5.large");
+        StackResource r = resource("Server");
+
+        provisioner.provision(r, props("{\"ImageId\": \"ami-1\"}"),
+                ctx("i-1", props("{\"ImageId\": \"ami-1\", \"LaunchTemplate\": {\"LaunchTemplateId\": \"lt-1\"}}")));
+
+        assertEquals("i-1", r.getPhysicalId());
+        assertFalse(provisioner.hasReplacementUpdate(r));
+        verify(ec2).modifyInstanceAttribute("us-east-1", "i-1", "instanceType", "t3.micro");
+    }
+
+    @Test
+    void droppingTheLaunchTemplateDisassociatesTheProfileItSupplied() throws Exception {
+        StackResource r = launchedWithTemplateProfile();
+
+        provisioner.provision(r, props("{\"ImageId\": \"ami-1\"}"),
+                ctx("i-1", props("{\"LaunchTemplate\": {\"LaunchTemplateId\": \"lt-1\", \"Version\": \"1\"}}")));
+
+        verifyProfileDisassociated();
+    }
+
+    @Test
+    void droppingTheIamInstanceProfileWhileTheLaunchTemplateSuppliesOneSwitchesToIt() throws Exception {
+        ObjectNode previous = fromTemplate("1", PROFILE_B).put("IamInstanceProfile", PROFILE_A);
+        StackResource r = launchedCarrying(previous, PROFILE_A);
+
+        provisioner.provision(r, fromTemplate("1", PROFILE_B), ctx("i-1", previous));
+
+        verifyProfileReplacedWith(PROFILE_B);
+    }
+
+    @Test
+    void droppingCreateOnlyAndLaunchOnlyPropertiesKeepsTheInstance() throws Exception {
+        Instance i1 = reusable("i-1");
+        i1.setKeyName("key");
+        i1.setSubnetId("subnet-1");
+        String previous = "{\"ImageId\": \"ami-1\", \"KeyName\": \"key\", \"SubnetId\": \"subnet-1\", "
+                + "\"NetworkInterfaces\": [{\"AssociatePublicIpAddress\": true}]}";
+        StackResource r = resource("Server");
+
+        provisioner.provision(r, props("{}"), ctx("i-1", props(previous)));
+
+        assertEquals("i-1", r.getPhysicalId());
+        assertFalse(provisioner.hasReplacementUpdate(r));
+        runInstancesWithAnyArguments(verify(ec2, never()));
+    }
+
+    @Test
+    void droppingADeclaredPrivateIpAddressOrAvailabilityZoneReplacesTheInstance() throws Exception {
+        for (String declared : List.of("\"PrivateIpAddress\": \"10.0.0.5\"", "\"AvailabilityZone\": \"us-east-1a\"")) {
+            Instance first = stubLaunches("i-1", "i-2").get(0);
+            StackResource r = resource("Server");
+            provisioner.provision(r, props("{\"ImageId\": \"ami-1\", " + declared + "}"), ctx(null));
+            assertEquals("i-1", r.getPhysicalId());
+            when(ec2.describeInstances("us-east-1", List.of("i-1"), null))
+                    .thenReturn(List.of(reservationOf(first)));
+
+            provisioner.provision(r, props("{\"ImageId\": \"ami-1\"}"),
+                    ctx("i-1", props("{\"ImageId\": \"ami-1\", " + declared + "}")));
+
+            assertEquals("i-2", r.getPhysicalId(), declared);
+            assertTrue(provisioner.hasReplacementUpdate(r), declared);
+        }
+    }
+
+    @Test
+    void droppingImageIdWhileTheLaunchTemplateSuppliesADifferentImageReplacesTheInstance() throws Exception {
+        templateVersion("lt-1", null).setImageId("ami-2");
+        stubLaunches("i-1", "i-2");
+        StackResource r = resource("Server");
+        String previous = "{\"ImageId\": \"ami-1\", \"LaunchTemplate\": {\"LaunchTemplateId\": \"lt-1\"}}";
+        provisioner.provision(r, props(previous), ctx(null));
+        assertEquals("i-1", r.getPhysicalId());
+
+        provisioner.provision(r, props("{\"LaunchTemplate\": {\"LaunchTemplateId\": \"lt-1\"}}"),
+                ctx("i-1", props(previous)));
+
+        assertEquals("i-2", r.getPhysicalId());
+        assertTrue(provisioner.hasReplacementUpdate(r));
+        verify(ec2, times(1)).runInstances(anyString(), eq("ami-2"), anyString(), anyInt(), anyInt(), any(),
+                anyList(), any(), any(), anyList(), any(), any(), any(),
+                any(), anyInt(), any(), any(), any(), any(), anyBoolean(), any(), any(), any(), anyBoolean(), any());
+    }
+
+    @Test
+    void droppingImageIdWhileTheLaunchTemplateSuppliesTheSameImageKeepsTheInstance() throws Exception {
+        templateVersion("lt-1", null);
+        reusable("i-1");
+        StackResource r = resource("Server");
+
+        provisioner.provision(r, props("{\"LaunchTemplate\": {\"LaunchTemplateId\": \"lt-1\"}}"),
+                ctx("i-1", props("{\"ImageId\": \"ami-1\", \"LaunchTemplate\": {\"LaunchTemplateId\": \"lt-1\"}}")));
+
+        assertEquals("i-1", r.getPhysicalId());
+        assertFalse(provisioner.hasReplacementUpdate(r));
+        runInstancesWithAnyArguments(verify(ec2, never()));
+    }
+
+    @Test
+    void droppingKeyNameWhileTheLaunchTemplateSuppliesADifferentKeyReplacesTheInstance() throws Exception {
+        templateVersion("lt-1", null).setKeyName("key-2");
+        List<Instance> instances = stubLaunches("i-1", "i-2");
+        instances.get(0).setKeyName("key-1");
+        StackResource r = resource("Server");
+        String previous = "{\"ImageId\": \"ami-1\", \"KeyName\": \"key-1\", "
+                + "\"LaunchTemplate\": {\"LaunchTemplateId\": \"lt-1\"}}";
+        provisioner.provision(r, props(previous), ctx(null));
+        assertEquals("i-1", r.getPhysicalId());
+
+        provisioner.provision(r, props("{\"LaunchTemplate\": {\"LaunchTemplateId\": \"lt-1\"}}"),
+                ctx("i-1", props(previous)));
+
+        assertEquals("i-2", r.getPhysicalId());
+        assertTrue(provisioner.hasReplacementUpdate(r));
+    }
+
+    @Test
+    void droppingKeyNameWhileTheLaunchTemplateSuppliesTheSameKeyKeepsTheInstance() throws Exception {
+        templateVersion("lt-1", null).setKeyName("key-1");
+        Instance i1 = reusable("i-1");
+        i1.setKeyName("key-1");
+        StackResource r = resource("Server");
+
+        provisioner.provision(r, props("{\"LaunchTemplate\": {\"LaunchTemplateId\": \"lt-1\"}}"),
+                ctx("i-1", props("{\"ImageId\": \"ami-1\", \"KeyName\": \"key-1\", "
+                        + "\"LaunchTemplate\": {\"LaunchTemplateId\": \"lt-1\"}}")));
+
+        assertEquals("i-1", r.getPhysicalId());
+        assertFalse(provisioner.hasReplacementUpdate(r));
+    }
+
+    @Test
+    void droppingMetadataOptionsWhileTheLaunchTemplateSuppliesAMemberAppliesItsValueAndLaunchDefaultsToTheRest()
+            throws Exception {
+        LaunchTemplateData.MetadataOptions supplied = new LaunchTemplateData.MetadataOptions();
+        supplied.setHttpTokens("required");
+        templateVersion("lt-1", null).setMetadataOptions(supplied);
+        Instance i1 = stubLaunches("i-1", "i-2").get(0);
+        StackResource r = resource("Server");
+        String previous = "{\"ImageId\": \"ami-1\", "
+                + "\"MetadataOptions\": {\"HttpTokens\": \"optional\", \"HttpPutResponseHopLimit\": 3}, "
+                + "\"LaunchTemplate\": {\"LaunchTemplateId\": \"lt-1\"}}";
+        provisioner.provision(r, props(previous), ctx(null));
+        LaunchTemplateData.MetadataOptions applied = LaunchTemplateData.MetadataOptions.launchDefaults();
+        applied.setHttpTokens("optional");
+        applied.setHttpPutResponseHopLimit(3);
+        i1.setMetadataOptions(applied);
+
+        provisioner.provision(r, props("{\"LaunchTemplate\": {\"LaunchTemplateId\": \"lt-1\"}}"),
+                ctx("i-1", props(previous)));
+
+        assertEquals("i-1", r.getPhysicalId());
+        assertFalse(provisioner.hasReplacementUpdate(r));
+        ArgumentCaptor<LaunchTemplateData.MetadataOptions> modified =
+                ArgumentCaptor.forClass(LaunchTemplateData.MetadataOptions.class);
+        verify(ec2).modifyInstanceMetadataOptions(eq("us-east-1"), eq("i-1"), modified.capture());
+        assertEquals("required", modified.getValue().getHttpTokens());
+        assertEquals(1, modified.getValue().getHttpPutResponseHopLimit());
+    }
+
+    @Test
     void aStoppedInstanceGetsItsUserDataRewrittenWithoutARestart() throws Exception {
         Instance i1 = reusable("i-1");
         i1.setUserData("old");
@@ -366,41 +612,36 @@ class Ec2InstanceCfnProvisionerTest {
 
         provisioner.provision(r, props("{\"ImageId\": \"ami-1\", \"IamInstanceProfile\": \"web\"}"), ctx("i-1"));
 
-        verify(ec2).associateIamInstanceProfile("us-east-1", "i-1", PROFILE_A);
+        verifyProfileAssociated(PROFILE_A);
         assertEquals(PROFILE_A, r.getAttributes().get("__FlociDeclaredIamInstanceProfile"));
         assertFalse(r.getAttributes().containsKey("IamInstanceProfile"));
     }
 
     @Test
     void changingTheIamInstanceProfileReplacesTheAssociation() throws Exception {
-        Instance i1 = reusable("i-1");
-        i1.setIamInstanceProfileArn(PROFILE_A);
+        reusableWithProfile("i-1", PROFILE_A);
 
-        provisioner.provision(resource("Server"),
-                props("{\"ImageId\": \"ami-1\", \"IamInstanceProfile\": \"" + PROFILE_B + "\"}"), ctx("i-1"));
+        provisioner.provision(resource("Server"), withOwnProfile(PROFILE_B), ctx("i-1"));
 
-        verify(ec2).replaceIamInstanceProfileAssociation("us-east-1",
-                Ec2Service.iamInstanceProfileAssociationId("i-1"), PROFILE_B);
+        verifyProfileReplacedWith(PROFILE_B);
         verify(ec2, never()).associateIamInstanceProfile(anyString(), anyString(), anyString());
     }
 
     @Test
     void droppingADeclaredIamInstanceProfileDisassociatesIt() throws Exception {
-        Instance i1 = reusable("i-1");
-        i1.setIamInstanceProfileArn(PROFILE_A);
+        reusableWithProfile("i-1", PROFILE_A);
         StackResource r = resource("Server");
         r.getAttributes().put("__FlociDeclaredIamInstanceProfile", PROFILE_A);
 
         provisioner.provision(r, props("{\"ImageId\": \"ami-1\"}"), ctx("i-1"));
 
-        verify(ec2).disassociateIamInstanceProfile("us-east-1", Ec2Service.iamInstanceProfileAssociationId("i-1"));
+        verifyProfileDisassociated();
         assertFalse(r.getAttributes().containsKey("__FlociDeclaredIamInstanceProfile"));
     }
 
     @Test
     void aProfileTheTemplateNeverDeclaredIsKeptWhenItStaysUndeclared() throws Exception {
-        Instance i1 = reusable("i-1");
-        i1.setIamInstanceProfileArn(PROFILE_A);
+        reusableWithProfile("i-1", PROFILE_A);
 
         provisioner.provision(resource("Server"), props("{\"ImageId\": \"ami-1\"}"), ctx("i-1"));
 
@@ -410,30 +651,247 @@ class Ec2InstanceCfnProvisionerTest {
 
     @Test
     void launchResolvesAProfileNameThroughIam() throws Exception {
-        Instance instance = new Instance();
-        instance.setInstanceId("i-1");
-        stubLaunch(instance);
         when(ec2.resolveIamInstanceProfileName("web")).thenReturn(PROFILE_A);
-        StackResource r = resource("Server");
 
-        provisioner.provision(r, props("{\"ImageId\": \"ami-1\", \"IamInstanceProfile\": \"web\"}"), ctx());
+        StackResource r = launch(props("{\"ImageId\": \"ami-1\", \"IamInstanceProfile\": \"web\"}"));
 
-        ArgumentCaptor<String> profile = ArgumentCaptor.forClass(String.class);
-        verify(ec2).runInstances(anyString(), any(), anyString(), anyInt(), anyInt(), any(), anyList(),
-                any(), any(), anyList(), any(), profile.capture(), any(),
-                any(), anyInt(), any(), any(), any(), any(), anyBoolean(), any(), any(), any(), anyBoolean(), any());
-        assertEquals(PROFILE_A, profile.getValue());
+        assertLaunchedWithProfile(r, PROFILE_A);
+    }
+
+    @Test
+    void aLaunchTemplatesInstanceProfileAppliesWhenTheInstanceNamesNone() {
+        assertLaunchedWithProfile(launchedWithTemplateProfile(), PROFILE_A);
+    }
+
+    @Test
+    void theInstancesOwnInstanceProfileWinsOverItsLaunchTemplates() {
+        assertLaunchedWithProfile(launch(fromTemplate("1", PROFILE_B).put("IamInstanceProfile", PROFILE_A)), PROFILE_A);
+        // Left unresolved, as the RunInstances handler leaves it.
+        verify(ec2, never()).iamInstanceProfileArn(any());
+    }
+
+    @Test
+    void aTemplateProfileIamDoesNotKnowFailsTheInstance() {
+        JsonNode props = fromTemplate("1", PROFILE_A);
+        when(ec2.iamInstanceProfileArn(any())).thenThrow(
+                new AwsException("InvalidParameterValue", "Invalid IAM Instance Profile: " + PROFILE_A, 400));
+
+        AwsException e = assertThrows(AwsException.class, () -> launch(props));
+
+        assertEquals("InvalidParameterValue", e.getErrorCode());
+    }
+
+    @Test
+    void aNewTemplateVersionWithAnotherProfileReplacesTheAssociation() {
+        StackResource r = updatedFromTemplateProfile(fromTemplate("2", PROFILE_B));
+
+        verifyProfileReplacedWith(PROFILE_B);
+        assertEquals(PROFILE_B, r.getAttributes().get("__FlociDeclaredIamInstanceProfile"));
+    }
+
+    /** An instance launched before its template's profile was applied gets it on the next update. */
+    @Test
+    void anInstanceLaunchedWithoutItsTemplatesProfileGetsItOnTheNextUpdate() {
+        updatedOntoTemplateProfile();
+
+        verifyProfileAssociated(PROFILE_A);
+    }
+
+    @Test
+    void aNewTemplateVersionWithoutAProfileDisassociatesTheOldOne() {
+        StackResource r = updatedFromTemplateProfile(fromTemplate("2", null));
+
+        verifyProfileDisassociated();
+        assertFalse(r.getAttributes().containsKey("__FlociDeclaredIamInstanceProfile"));
+    }
+
+    /**
+     * The profile changes after the tags, so a tag failure, which the engine undoes without a
+     * rollback, leaves it as it was.
+     */
+    @Test
+    void aTagFailureInAnInPlaceUpdateLeavesTheProfileAlone() {
+        StackResource r = launchedWithTemplateProfile();
+        ObjectNode update = fromTemplate("2", PROFILE_B);
+        update.putArray("Tags").addObject().put("Key", "env").put("Value", "prod");
+        failTagging();
+
+        assertThrows(AwsException.class, () -> provisioner.provision(r, update, ctx("i-1")));
+
+        verify(ec2, never()).replaceIamInstanceProfileAssociation(anyString(), anyString(), anyString());
+    }
+
+    @Test
+    void aRolledBackUpdatePutsBackTheProfileItReplaced() {
+        StackResource r = updatedFromTemplateProfile(fromTemplate("2", PROFILE_B));
+
+        assertTrue(rolledBack(r, PROFILE_B));
+
+        verifyProfileReplacedWith(PROFILE_A);
         assertEquals(PROFILE_A, r.getAttributes().get("__FlociDeclaredIamInstanceProfile"));
     }
 
-    /** An instance the update finds and keeps: same image as the template, no createOnly change. */
+    @Test
+    void aRolledBackUpdatePutsBackTheProfileItRemoved() {
+        assertTrue(rolledBack(updatedFromTemplateProfile(fromTemplate("2", null)), null));
+
+        verifyProfileAssociated(PROFILE_A);
+    }
+
+    @Test
+    void aRolledBackUpdateRemovesTheProfileItAdded() {
+        assertTrue(rolledBack(updatedOntoTemplateProfile(), PROFILE_A));
+
+        verifyProfileDisassociated();
+    }
+
+    @Test
+    void aRolledBackUpdatePutsBackAProfileTheInstanceDeclaredItself() {
+        StackResource r = launchedCarrying(withOwnProfile(PROFILE_A), PROFILE_A);
+        provisioner.provision(r, withOwnProfile(PROFILE_B), ctx("i-1"));
+
+        assertTrue(rolledBack(r, PROFILE_B));
+
+        verifyProfileReplacedWith(PROFILE_A);
+    }
+
+    /** A resize in the same update has no rollback, so the profile goes back and the rollback reports it undone. */
+    @Test
+    void aRolledBackUpdateThatAlsoResizedPutsTheProfileBackButReportsItUndone() {
+        StackResource r = updatedFromTemplateProfile(fromTemplate("2", PROFILE_B).put("InstanceType", "t3.large"));
+
+        assertFalse(rolledBack(r, PROFILE_B));
+
+        verifyProfileReplacedWith(PROFILE_A);
+    }
+
+    @Test
+    void aRollbackOfAnInstanceGoneSinceTheUpdateFails() {
+        StackResource r = updatedFromTemplateProfile(fromTemplate("2", PROFILE_B));
+        when(ec2.describeInstances("us-east-1", List.of("i-1"), null)).thenReturn(List.of());
+
+        AwsException e = assertThrows(AwsException.class, () -> provisioner.rollbackUpdate(r));
+
+        assertEquals("InvalidInstanceID.NotFound", e.getErrorCode());
+    }
+
+    /**
+     * An instance the update finds and keeps: same image as the template, no createOnly change, and
+     * the default type, so a template that declares none does not resize it.
+     */
     private Instance reusable(String instanceId) {
         Instance instance = new Instance();
         instance.setInstanceId(instanceId);
         instance.setImageId("ami-1");
+        instance.setInstanceType("t3.micro");
         when(ec2.describeInstances("us-east-1", List.of(instanceId), null))
                 .thenReturn(List.of(reservationOf(instance)));
         return instance;
+    }
+
+    /** A reusable instance that already carries the instance profile {@code profileArn}. */
+    private void reusableWithProfile(String instanceId, String profileArn) {
+        reusable(instanceId).setIamInstanceProfileArn(profileArn);
+    }
+
+    /** Launches i-1 from {@code props}, as a stack create does. */
+    private StackResource launch(JsonNode props) {
+        stubLaunches("i-1");
+        StackResource r = resource("Server");
+        provisioner.provision(r, props, ctx());
+        return r;
+    }
+
+    /** Launches i-1 from {@code props}; the next update finds it carrying the profile {@code profileArn}. */
+    private StackResource launchedCarrying(JsonNode props, String profileArn) {
+        StackResource r = launch(props);
+        reusableWithProfile("i-1", profileArn);
+        return r;
+    }
+
+    /** An instance launched from version 1 of lt-1, which supplies PROFILE_A, as the next update finds it. */
+    private StackResource launchedWithTemplateProfile() {
+        return launchedCarrying(fromTemplate("1", PROFILE_A), PROFILE_A);
+    }
+
+    /** The instance {@link #launchedWithTemplateProfile} gives, updated to {@code update}. */
+    private StackResource updatedFromTemplateProfile(JsonNode update) {
+        StackResource r = launchedWithTemplateProfile();
+        provisioner.provision(r, update, ctx("i-1"));
+        return r;
+    }
+
+    /** A reusable instance with no profile, updated to version 1 of lt-1, which supplies PROFILE_A. */
+    private StackResource updatedOntoTemplateProfile() {
+        reusable("i-1");
+        StackResource r = resource("Server");
+        provisioner.provision(r, fromTemplate("1", PROFILE_A), ctx("i-1"));
+        return r;
+    }
+
+    /**
+     * Rolls back the last update of i-1, which left it carrying {@code profileAfter}; returns whether the
+     * rollback counted as done.
+     */
+    private boolean rolledBack(StackResource r, String profileAfter) {
+        reusableWithProfile("i-1", profileAfter);
+        return provisioner.rollbackUpdate(r);
+    }
+
+    /** Properties declaring image ami-1 and the instance's own profile {@code profileArn}. */
+    private ObjectNode withOwnProfile(String profileArn) {
+        return mapper.createObjectNode().put("ImageId", "ami-1").put("IamInstanceProfile", profileArn);
+    }
+
+    /** Version {@code version} of launch template {@code launchTemplateId}, stubbed to supply image ami-1. */
+    private LaunchTemplateData templateVersion(String launchTemplateId, String version) {
+        LaunchTemplateData data = new LaunchTemplateData();
+        data.setImageId("ami-1");
+        when(ec2.resolveLaunchTemplateData("us-east-1", launchTemplateId, null, version, false)).thenReturn(data);
+        return data;
+    }
+
+    /**
+     * Properties naming version {@code version} of launch template lt-1, whose instance profile
+     * resolves to {@code profileArn}, or which has none when it is null.
+     */
+    private ObjectNode fromTemplate(String version, String profileArn) {
+        when(ec2.iamInstanceProfileArn(templateVersion("lt-1", version))).thenReturn(profileArn);
+        ObjectNode props = mapper.createObjectNode();
+        props.putObject("LaunchTemplate").put("LaunchTemplateId", "lt-1").put("Version", version);
+        return props;
+    }
+
+    /** The profile of instance i-1 was replaced with {@code profileArn} through its association. */
+    private void verifyProfileReplacedWith(String profileArn) {
+        verify(ec2).replaceIamInstanceProfileAssociation("us-east-1",
+                Ec2Service.iamInstanceProfileAssociationId("i-1"), profileArn);
+    }
+
+    /** Makes an update's tagging of i-1 fail. */
+    private void failTagging() {
+        doThrow(new AwsException("InternalError", "tags failed", 500))
+                .when(ec2).createTags(eq("us-east-1"), eq(List.of("i-1")), anyList());
+    }
+
+    /** Instance i-1 was associated with the profile {@code profileArn}. */
+    private void verifyProfileAssociated(String profileArn) {
+        verify(ec2).associateIamInstanceProfile("us-east-1", "i-1", profileArn);
+    }
+
+    /** The profile of instance i-1 was disassociated. */
+    private void verifyProfileDisassociated() {
+        verify(ec2).disassociateIamInstanceProfile("us-east-1", Ec2Service.iamInstanceProfileAssociationId("i-1"));
+    }
+
+    /** The one launch was given {@code profileArn}, and the resource records it as declared. */
+    private void assertLaunchedWithProfile(StackResource r, String profileArn) {
+        ArgumentCaptor<String> profile = ArgumentCaptor.forClass(String.class);
+        verify(ec2).runInstances(anyString(), any(), anyString(), anyInt(), anyInt(), any(), anyList(),
+                any(), any(), anyList(), any(), profile.capture(), any(),
+                any(), anyInt(), any(), any(), any(), any(), anyBoolean(), any(), any(), any(), anyBoolean(), any());
+        assertEquals(profileArn, profile.getValue());
+        assertEquals(profileArn, r.getAttributes().get("__FlociDeclaredIamInstanceProfile"));
     }
 
     @Test
@@ -444,9 +902,7 @@ class Ec2InstanceCfnProvisionerTest {
         Instance i2 = new Instance();
         i2.setInstanceId("i-2");
         i2.setImageId("ami-2");
-        when(ec2.runInstances(anyString(), any(), anyString(), anyInt(), anyInt(), any(), anyList(),
-                any(), any(), anyList(), any(), any(), any(),
-                any(), anyInt(), any(), any(), any(), any(), anyBoolean(), any(), any(), any(), anyBoolean(), any()))
+        when(runInstancesWithAnyArguments(ec2))
                 .thenReturn(reservationOf(i1), reservationOf(i2));
         StackResource r = resource("Server");
         provisioner.provision(r, props("{\"ImageId\": \"ami-1\"}"), ctx(null));
@@ -469,9 +925,7 @@ class Ec2InstanceCfnProvisionerTest {
         Instance i2 = new Instance();
         i2.setInstanceId("i-2");
         i2.setImageId("ami-1");
-        when(ec2.runInstances(anyString(), any(), anyString(), anyInt(), anyInt(), any(), anyList(),
-                any(), any(), anyList(), any(), any(), any(),
-                any(), anyInt(), any(), any(), any(), any(), anyBoolean(), any(), any(), any(), anyBoolean(), any()))
+        when(runInstancesWithAnyArguments(ec2))
                 .thenReturn(reservationOf(i1), reservationOf(i2));
         StackResource r = resource("Server");
         provisioner.provision(r, props("{\"ImageId\": \"ami-1\", \"PrivateIpAddress\": \"10.0.0.5\"}"), ctx(null));
@@ -494,9 +948,7 @@ class Ec2InstanceCfnProvisionerTest {
         Instance i2 = new Instance();
         i2.setInstanceId("i-2");
         i2.setImageId("ami-1");
-        when(ec2.runInstances(anyString(), any(), anyString(), anyInt(), anyInt(), any(), anyList(),
-                any(), any(), anyList(), any(), any(), any(),
-                any(), anyInt(), any(), any(), any(), any(), anyBoolean(), any(), any(), any(), anyBoolean(), any()))
+        when(runInstancesWithAnyArguments(ec2))
                 .thenReturn(reservationOf(i1), reservationOf(i2));
         StackResource r = resource("Server");
         provisioner.provision(r, props("{\"ImageId\": \"ami-1\", \"AvailabilityZone\": \"us-east-1a\"}"), ctx(null));
@@ -525,9 +977,7 @@ class Ec2InstanceCfnProvisionerTest {
         provisioner.provision(r, props(template), ctx("i-1"));
 
         assertEquals("i-1", r.getPhysicalId());
-        verify(ec2, times(1)).runInstances(anyString(), any(), anyString(), anyInt(), anyInt(), any(),
-                anyList(), any(), any(), anyList(), any(), any(), any(),
-                any(), anyInt(), any(), any(), any(), any(), anyBoolean(), any(), any(), any(), anyBoolean(), any());
+        runInstancesWithAnyArguments(verify(ec2, times(1)));
     }
 
     @Test
@@ -546,9 +996,7 @@ class Ec2InstanceCfnProvisionerTest {
         provisioner.provision(r, props("{\"ImageId\": \"ami-1\", \"PrivateIpAddress\": \"10.0.0.5\"}"), ctx("i-1"));
 
         assertEquals("i-1", r.getPhysicalId());
-        verify(ec2, times(1)).runInstances(anyString(), any(), anyString(), anyInt(), anyInt(), any(),
-                anyList(), any(), any(), anyList(), any(), any(), any(),
-                any(), anyInt(), any(), any(), any(), any(), anyBoolean(), any(), any(), any(), anyBoolean(), any());
+        runInstancesWithAnyArguments(verify(ec2, times(1)));
     }
 
     @Test
@@ -615,9 +1063,7 @@ class Ec2InstanceCfnProvisionerTest {
                 ArgumentCaptor.forClass(LaunchTemplateData.MetadataOptions.class);
         verify(ec2).modifyInstanceMetadataOptions(eq("us-east-1"), eq("i-1"), modified.capture());
         assertEquals("optional", modified.getValue().getHttpTokens());
-        verify(ec2, times(1)).runInstances(anyString(), any(), anyString(), anyInt(), anyInt(), any(), anyList(),
-                any(), any(), anyList(), any(), any(), any(),
-                any(), anyInt(), any(), any(), any(), any(), anyBoolean(), any(), any(), any(), anyBoolean(), any());
+        runInstancesWithAnyArguments(verify(ec2, times(1)));
     }
 
     @Test
@@ -655,15 +1101,10 @@ class Ec2InstanceCfnProvisionerTest {
      */
     @Test
     void changingTheInstancesLaunchTemplateKeepsItAndReconcilesWhatItDeclares() throws Exception {
-        LaunchTemplateData withTokens = new LaunchTemplateData();
-        withTokens.setImageId("ami-1");
         LaunchTemplateData.MetadataOptions required = new LaunchTemplateData.MetadataOptions();
         required.setHttpTokens("required");
-        withTokens.setMetadataOptions(required);
-        LaunchTemplateData withoutTokens = new LaunchTemplateData();
-        withoutTokens.setImageId("ami-1");
-        when(ec2.resolveLaunchTemplateData("us-east-1", "lt-1", null, "1", false)).thenReturn(withTokens);
-        when(ec2.resolveLaunchTemplateData("us-east-1", "lt-2", null, "2", false)).thenReturn(withoutTokens);
+        templateVersion("lt-1", "1").setMetadataOptions(required);
+        templateVersion("lt-2", "2");
         Instance i1 = stubLaunches("i-1", "i-2").get(0);
         StackResource r = resource("Server");
         provisioner.provision(r, props("""
@@ -683,9 +1124,7 @@ class Ec2InstanceCfnProvisionerTest {
                 ArgumentCaptor.forClass(LaunchTemplateData.MetadataOptions.class);
         verify(ec2).modifyInstanceMetadataOptions(eq("us-east-1"), eq("i-1"), reset.capture());
         assertEquals("optional", reset.getValue().getHttpTokens());
-        verify(ec2, times(1)).runInstances(anyString(), any(), anyString(), anyInt(), anyInt(), any(), anyList(),
-                any(), any(), anyList(), any(), any(), any(),
-                any(), anyInt(), any(), any(), any(), any(), anyBoolean(), any(), any(), any(), anyBoolean(), any());
+        runInstancesWithAnyArguments(verify(ec2, times(1)));
     }
 
     /**
@@ -781,12 +1220,8 @@ class Ec2InstanceCfnProvisionerTest {
      */
     @Test
     void aNewTemplateVersionWithAnotherImageStillReplacesTheInstance() throws Exception {
-        LaunchTemplateData first = new LaunchTemplateData();
-        first.setImageId("ami-1");
-        LaunchTemplateData second = new LaunchTemplateData();
-        second.setImageId("ami-2");
-        when(ec2.resolveLaunchTemplateData("us-east-1", "lt-1", null, "1", false)).thenReturn(first);
-        when(ec2.resolveLaunchTemplateData("us-east-1", "lt-1", null, "2", false)).thenReturn(second);
+        templateVersion("lt-1", "1");
+        templateVersion("lt-1", "2").setImageId("ami-2");
         stubLaunches("i-1", "i-2");
         StackResource r = resource("Server");
         provisioner.provision(r, props("""
@@ -914,8 +1349,7 @@ class Ec2InstanceCfnProvisionerTest {
         provisioner.provision(r, props("""
                 {"ImageId": "ami-1", "MetadataOptions": {"HttpTokens": "required"}}
                 """), ctx(null));
-        doThrow(new AwsException("InternalError", "tags failed", 500))
-                .when(ec2).createTags(eq("us-east-1"), eq(List.of("i-1")), anyList());
+        failTagging();
 
         assertThrows(AwsException.class, () -> provisioner.provision(r, props("""
                 {"ImageId": "ami-1", "MetadataOptions": {"HttpTokens": "optional"},
@@ -962,9 +1396,7 @@ class Ec2InstanceCfnProvisionerTest {
                 """), ctx(null)));
 
         assertEquals("InvalidParameterValue", failure.getErrorCode());
-        verify(ec2, never()).runInstances(anyString(), any(), anyString(), anyInt(), anyInt(), any(), anyList(),
-                any(), any(), anyList(), any(), any(), any(),
-                any(), anyInt(), any(), any(), any(), any(), anyBoolean(), any(), any(), any(), anyBoolean(), any());
+        runInstancesWithAnyArguments(verify(ec2, never()));
     }
 
     @Test
@@ -1044,15 +1476,9 @@ class Ec2InstanceCfnProvisionerTest {
      */
     @Test
     void reusedInstanceResetsOptionsItsTemplateStopsDeclaring() throws Exception {
-        LaunchTemplateData withTokens = new LaunchTemplateData();
-        withTokens.setImageId("ami-1");
         LaunchTemplateData.MetadataOptions required = new LaunchTemplateData.MetadataOptions();
         required.setHttpTokens("required");
-        withTokens.setMetadataOptions(required);
-        LaunchTemplateData withoutTokens = new LaunchTemplateData();
-        withoutTokens.setImageId("ami-1");
-        when(ec2.resolveLaunchTemplateData("us-east-1", "lt-1", null, "$Latest", false))
-                .thenReturn(withTokens, withoutTokens);
+        templateVersion("lt-1", "$Latest").setMetadataOptions(required);
         Instance i1 = stubLaunches("i-1").get(0);
         StackResource r = resource("Server");
         String template = """
@@ -1062,6 +1488,7 @@ class Ec2InstanceCfnProvisionerTest {
         LaunchTemplateData.MetadataOptions applied = LaunchTemplateData.MetadataOptions.launchDefaults();
         applied.setHttpTokens("required");
         i1.setMetadataOptions(applied);
+        templateVersion("lt-1", "$Latest");
 
         provisioner.provision(r, props(template), ctx("i-1"));
 
@@ -1196,9 +1623,7 @@ class Ec2InstanceCfnProvisionerTest {
         assertDoesNotThrow(() -> provisioner.provision(r, props("{\"ImageId\": \"ami-1\"}"), ctx("i-1")));
 
         assertEquals("i-9", r.getPhysicalId());
-        verify(ec2).runInstances(anyString(), any(), anyString(), anyInt(), anyInt(), any(),
-                anyList(), any(), any(), anyList(), any(), any(), any(),
-                any(), anyInt(), any(), any(), any(), any(), anyBoolean(), any(), any(), any(), anyBoolean(), any());
+        runInstancesWithAnyArguments(verify(ec2));
     }
 
     @Test
@@ -1218,9 +1643,7 @@ class Ec2InstanceCfnProvisionerTest {
         provisioner.provision(r, props("{\"ImageId\": \"ami-1\"}"), ctx("i-1"));
 
         assertEquals("i-9", r.getPhysicalId());
-        verify(ec2).runInstances(anyString(), any(), anyString(), anyInt(), anyInt(), any(),
-                anyList(), any(), any(), anyList(), any(), any(), any(),
-                any(), anyInt(), any(), any(), any(), any(), anyBoolean(), any(), any(), any(), anyBoolean(), any());
+        runInstancesWithAnyArguments(verify(ec2));
     }
 
     @Test
@@ -1232,9 +1655,7 @@ class Ec2InstanceCfnProvisionerTest {
         Instance withoutPublicIp = new Instance();
         withoutPublicIp.setInstanceId("i-2");
         withoutPublicIp.setImageId("ami-2");
-        when(ec2.runInstances(anyString(), any(), anyString(), anyInt(), anyInt(), any(), anyList(),
-                any(), any(), anyList(), any(), any(), any(),
-                any(), anyInt(), any(), any(), any(), any(), anyBoolean(), any(), any(), any(), anyBoolean(), any()))
+        when(runInstancesWithAnyArguments(ec2))
                 .thenReturn(reservationOf(withPublicIp), reservationOf(withoutPublicIp));
         StackResource r = resource("Server");
         provisioner.provision(r, props("{\"ImageId\": \"ami-1\"}"), ctx(null));
@@ -1273,9 +1694,7 @@ class Ec2InstanceCfnProvisionerTest {
             when(ec2.describeInstances("us-east-1", List.of(instanceId), null))
                     .thenReturn(List.of(reservationOf(instance)));
         }
-        when(ec2.runInstances(anyString(), any(), anyString(), anyInt(), anyInt(), any(), anyList(),
-                any(), any(), anyList(), any(), any(), any(),
-                any(), anyInt(), any(), any(), any(), any(), anyBoolean(), any(), any(), any(), anyBoolean(), any()))
+        when(runInstancesWithAnyArguments(ec2))
                 .thenReturn(reservations.get(0), reservations.subList(1, reservations.size()).toArray(Reservation[]::new));
         return instances;
     }
@@ -1291,9 +1710,7 @@ class Ec2InstanceCfnProvisionerTest {
     private void stubLaunch(Instance instance) {
         Reservation reservation = new Reservation();
         reservation.getInstances().add(instance);
-        when(ec2.runInstances(anyString(), any(), anyString(), anyInt(), anyInt(), any(), anyList(),
-                any(), any(), anyList(), any(), any(), any(),
-                any(), anyInt(), any(), any(), any(), any(), anyBoolean(), any(), any(), any(), anyBoolean(), any()))
+        when(runInstancesWithAnyArguments(ec2))
                 .thenReturn(reservation);
     }
 
@@ -1302,6 +1719,10 @@ class Ec2InstanceCfnProvisionerTest {
     }
 
     private ProvisionContext ctx(String priorPhysicalId) {
+        return ctx(priorPhysicalId, null);
+    }
+
+    private ProvisionContext ctx(String priorPhysicalId, JsonNode priorProperties) {
         CloudFormationTemplateEngine engine = mock(CloudFormationTemplateEngine.class);
         when(engine.resolve(any())).thenAnswer(inv -> {
             JsonNode node = inv.getArgument(0);
@@ -1309,7 +1730,8 @@ class Ec2InstanceCfnProvisionerTest {
         });
         when(engine.resolveNode(any())).thenAnswer(inv -> inv.getArgument(0));
         when(engine.omitNoValue(any())).thenAnswer(inv -> inv.getArgument(0));
-        return new ProvisionContext(engine, "us-east-1", "000000000000", "my-stack", priorPhysicalId);
+        return new ProvisionContext(engine, "us-east-1", "000000000000", "my-stack", priorPhysicalId,
+                event -> {}, priorProperties);
     }
 
     private JsonNode props(String json) throws Exception {
@@ -1322,5 +1744,12 @@ class Ec2InstanceCfnProvisionerTest {
         r.setResourceType(TYPE);
         r.setAttributes(new HashMap<>());
         return r;
+    }
+
+    /** The 25-argument {@code runInstances} overload with every argument matched as any. */
+    private static Reservation runInstancesWithAnyArguments(Ec2Service target) {
+        return target.runInstances(anyString(), any(), anyString(), anyInt(), anyInt(), any(), anyList(),
+                any(), any(), anyList(), any(), any(), any(), any(), anyInt(), any(), any(), any(), any(),
+                anyBoolean(), any(), any(), any(), anyBoolean(), any());
     }
 }

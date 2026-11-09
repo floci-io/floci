@@ -17,6 +17,7 @@ import org.junit.jupiter.params.provider.ValueSource;
 import java.math.BigDecimal;
 import java.util.Arrays;
 import java.util.List;
+import java.util.function.UnaryOperator;
 import java.util.stream.Collectors;
 import java.util.stream.IntStream;
 
@@ -608,9 +609,17 @@ class DynamoDbPartiQLParserTest {
     }
 
     private String refusal(String condition, int parameters) {
+        return statementRefusal("SELECT * FROM \"t\" WHERE " + condition, parameters);
+    }
+
+    private String statementRefusal(String statement, int parameters) {
+        return statementRefusal(statement, parameters, false);
+    }
+
+    private String statementRefusal(String statement, int parameters, boolean transaction) {
         List<JsonNode> values = IntStream.range(0, parameters).mapToObj(i -> json("{\"S\":\"x\"}")).toList();
         AwsException e = assertThrows(AwsException.class,
-                () -> DynamoDbPartiQLParser.parse("SELECT * FROM \"t\" WHERE " + condition, values));
+                () -> DynamoDbPartiQLParser.parse(statement, values, transaction));
         return e.getMessage();
     }
 
@@ -695,6 +704,268 @@ class DynamoDbPartiQLParserTest {
         AwsException e = assertThrows(AwsException.class, () -> DynamoDbPartiQLParser.parse(statement, List.of()));
 
         assertEquals(message, e.getMessage());
+    }
+
+    @ParameterizedTest
+    @CsvSource(delimiter = '|', quoteCharacter = '`', textBlock = """
+            UPDATE "t" SET a = set_add() WHERE pk = 1                     | SET_ADD must have exactly two arguments at 1:20:7
+            UPDATE "t" SET a = set_add(a) WHERE pk = 1                    | SET_ADD must have exactly two arguments at 1:20:7
+            UPDATE "t" SET a = set_delete(a, <<1>>, <<2>>) WHERE pk = 1   | SET_DELETE must have exactly two arguments at 1:20:10
+            UPDATE "t" SET a = "SET_ADD"(a) WHERE pk = 1                  | SET_ADD must have exactly two arguments at 1:20:9
+            UPDATE "t" SET a = set_add(foo(1)) WHERE pk = 1               | SET_ADD must have exactly two arguments at 1:20:7
+            UPDATE "t" SET a = set_add(a, <<>>, 1) WHERE pk = 1           | SET_ADD must have exactly two arguments at 1:20:7
+            UPDATE "t" SET a = 'x' + 1, b = set_add(b) WHERE pk = 1       | SET_ADD must have exactly two arguments at 1:33:7
+            UPDATE "t" SET a = list_append(b), c = set_add(c) WHERE pk = 1 | SET_ADD must have exactly two arguments at 1:40:7
+            UPDATE "t" SET a = foo(1), b = set_add(b) WHERE pk = 1        | Unrecognized function: foo at 1:20:3
+            UPDATE "t" SET a = set_add(a), b = foo(1) WHERE pk = 1        | SET_ADD must have exactly two arguments at 1:20:7
+            UPDATE "t" SET a = set_add(b, 1), c = set_add(c) WHERE pk = 1 | The first argument to SET_ADD must equal the assignment value at 1:20:7
+            UPDATE "t" SET a = set_add(a) WHERE foo(1)                    | Unrecognized function: foo at 1:37:3
+            FROM "t" WHERE attribute_exists('x') SET a = set_add(a)       | Operator or function requires a document path; operator or function: attribute_exists
+            UPDATE "t" SET a = set_add(a).b WHERE pk = 1                  | Unexpected path component at 1:20:7
+            UPDATE "t" SET a = set_add(foo(1))[0] WHERE pk = 1            | Unexpected path component at 1:20:7
+            UPDATE "t" SET a = set_add(*) WHERE pk = 1                    | Statement wasn't well formed, can't be processed: set_add(*) is not allowed
+            UPDATE "t" SET a = set_add(a WHERE pk = 1                     | Statement wasn't well formed, can't be processed: Expected RIGHT_PAREN
+            """)
+    void refusesTheWrongNumberOfArgumentsToASetFunction(String statement, String message) {
+        AwsException e = assertThrows(AwsException.class, () -> DynamoDbPartiQLParser.parse(statement, List.of()));
+
+        assertEquals(message, e.getMessage());
+    }
+
+    @ParameterizedTest
+    @CsvSource(delimiter = '|', quoteCharacter = '`', textBlock = """
+            UPDATE "t" SET a = set_add(<<'a'>>, <<'b'>>) WHERE pk = 1     | The first argument to SET_ADD must equal the assignment value at 1:20:7
+            UPDATE "t" SET a = set_delete('a', 'b') WHERE pk = 1          | The first argument to SET_DELETE must equal the assignment value at 1:20:10
+            UPDATE "t" SET a = set_add(1, 2) WHERE pk = 1                 | The first argument to SET_ADD must equal the assignment value at 1:20:7
+            UPDATE "t" SET a = set_add(list_append(a, [1]), 1) WHERE pk = 1 | The first argument to SET_ADD must equal the assignment value at 1:20:7
+            UPDATE "t" SET a = set_add(list_append(1, 2), 1) WHERE pk = 1 | The first argument to SET_ADD must equal the assignment value at 1:20:7
+            UPDATE "t" SET a = set_add(foo(1), <<'b'>>) WHERE pk = 1      | Unrecognized function: foo at 1:28:3
+            UPDATE "t" SET a = set_add(a, foo(1)) WHERE pk = 1            | Unrecognized function: foo at 1:31:3
+            UPDATE "t" SET a = set_add(b, foo(1)) WHERE pk = 1            | Unrecognized function: foo at 1:31:3
+            UPDATE "t" SET a = set_add(<<>>, <<'b'>>) WHERE pk = 1        | Empty bags are not supported
+            UPDATE "t" SET a = set_add(b, <<>>) WHERE pk = 1              | Empty bags are not supported
+            UPDATE "t" SET a = set_add(set_add(a, <<'a'>>), <<'b'>>) WHERE pk = 1 | Unrecognized function: set_add at 1:28:7
+            UPDATE "t" SET a = set_add(size(a), <<'b'>>) WHERE pk = 1     | The function is not allowed in an update expression; function: size
+            UPDATE "t" SET a = set_add(a, size(b)) WHERE pk = 1           | The function is not allowed in an update expression; function: size
+            UPDATE "t" SET a = set_add(a, list_append(b, [1])) WHERE pk = 1 | The second argument to SET_ADD must be a value with type SET at 1:28:1
+            UPDATE "t" SET a = set_add(a, list_append(1, 2)) WHERE pk = 1 | The second argument to SET_ADD must be a value with type SET at 1:28:1
+            UPDATE "t" SET a = set_add(a, b) WHERE pk = 1                 | The second argument to SET_ADD must be a value with type SET at 1:28:1
+            UPDATE "t" SET a = set_add(a, b.c) WHERE pk = 1               | The second argument to SET_ADD must be a value with type SET at 1:28:1
+            """)
+    void refusesASetFunctionArgumentByItsKind(String statement, String message) {
+        AwsException e = assertThrows(AwsException.class, () -> DynamoDbPartiQLParser.parse(statement, List.of()));
+
+        assertEquals(message, e.getMessage());
+    }
+
+    @ParameterizedTest
+    @CsvSource(delimiter = '|', quoteCharacter = '`', textBlock = """
+            UPDATE "t" SET a = set_add(a) + 1 WHERE pk = 1                | Unrecognized function: set_add at 1:20:7
+            UPDATE "t" SET a = set_delete(a, <<'b'>>) - 1 WHERE pk = 1    | Unrecognized function: set_delete at 1:20:10
+            UPDATE "t" SET a = set_add(<<>>) + 1 WHERE pk = 1             | Empty bags are not supported
+            UPDATE "t" SET a = set_add(foo(1)) + 1 WHERE pk = 1           | Unrecognized function: foo at 1:28:3
+            UPDATE "t" SET a = set_add(a) + foo(1) WHERE pk = 1           | Unrecognized function: set_add at 1:20:7
+            UPDATE "t" SET a = set_add(b, 1) + 'x' WHERE pk = 1           | Unrecognized function: set_add at 1:20:7
+            UPDATE "t" SET a = 1 - set_add(a) WHERE pk = 1                | Unrecognized function: set_add at 1:24:7
+            """)
+    void readsASetFunctionBesideAnOperatorAsAnUnknownFunction(String statement, String message) {
+        AwsException e = assertThrows(AwsException.class, () -> DynamoDbPartiQLParser.parse(statement, List.of()));
+
+        assertEquals(message, e.getMessage());
+    }
+
+    @ParameterizedTest
+    @CsvSource(delimiter = '|', quoteCharacter = '`', textBlock = """
+            list_append()                         | 0
+            list_append(a)                        | 1
+            list_append([1])                      | 1
+            LIST_APPEND(1)                        | 1
+            "list_append"('a')                    | 1
+            list_append(a [1])                    | 1
+            list_append(a, [1], [2])              | 3
+            list_append(1, 2, 3, 4)               | 4
+            """)
+    void refusesTheWrongNumberOfListAppendOperands(String call, String count) {
+        AwsException e = assertThrows(AwsException.class, () -> DynamoDbPartiQLParser.parse(
+                "UPDATE \"t\" SET a = " + call + " WHERE pk = 1", List.of()));
+
+        assertEquals("Incorrect number of operands for operator or function; operator or function: list_append, "
+                + "number of operands: " + count, e.getMessage());
+    }
+
+    @ParameterizedTest
+    @CsvSource(delimiter = '|', quoteCharacter = '`', textBlock = """
+            list_append(1, 2)                     | N
+            list_append(a, 'x')                   | S
+            list_append('x', a)                   | S
+            list_append(true, a)                  | BOOL
+            list_append(a, null)                  | NULL
+            list_append(<<'x'>>, a)               | SS
+            list_append(a, <<1>>)                 | NS
+            list_append({'x': 1}, a)              | M
+            LIST_APPEND(1, 2)                     | N
+            list_append(list_append(1, 2))        | N
+            list_append(a, b, list_append(1, 2))  | N
+            list_append(list_append(a, [1]), 1)   | N
+            """)
+    void refusesAListAppendOperandThatIsNotAList(String call, String type) {
+        AwsException e = assertThrows(AwsException.class, () -> DynamoDbPartiQLParser.parse(
+                "UPDATE \"t\" SET a = " + call + " WHERE pk = 1", List.of()));
+
+        assertEquals("Incorrect operand type for operator or function; operator or function: list_append, "
+                + "operand type: " + type, e.getMessage());
+    }
+
+    @ParameterizedTest
+    @CsvSource(delimiter = '|', quoteCharacter = '`', textBlock = """
+            UPDATE "t" SET a = list_append(foo(1)) WHERE pk = 1             | Unrecognized function: foo at 1:32:3
+            UPDATE "t" SET a = list_append(a, foo(1), 1) WHERE pk = 1       | Unrecognized function: foo at 1:35:3
+            UPDATE "t" SET a = list_append(<<>>) WHERE pk = 1               | Empty bags are not supported
+            UPDATE "t" SET a = list_append(size(b)) WHERE pk = 1            | The function is not allowed in an update expression; function: size
+            UPDATE "t" SET a = list_append(l[99999999999]) WHERE pk = 1     | List index is not within the allowable range; index: [99999999999] at 1:34:11
+            UPDATE "t" SET a = list_append(b), c = foo(1) WHERE pk = 1      | Unrecognized function: foo at 1:40:3
+            UPDATE "t" SET a = list_append(1, 2), c = <<>> WHERE pk = 1     | Empty bags are not supported
+            UPDATE "t" SET a = list_append(b) WHERE foo(1)                  | Unrecognized function: foo at 1:41:3
+            FROM "t" WHERE a < true SET a = list_append(b)                  | Incorrect operand type for operator or function; operator or function: <, operand type: BOOL
+            UPDATE "t" SET a = 'x' + 1, b = list_append(c) WHERE pk = 1     | Incorrect operand type for operator or function; operator or function: +, operand type: S
+            UPDATE "t" SET a = list_append(b), c = 'x' + 1 WHERE pk = 1     | Incorrect number of operands for operator or function; operator or function: list_append, number of operands: 1
+            UPDATE "t" SET a = list_append(1, 2), b = list_append(c) WHERE pk = 1 | Incorrect operand type for operator or function; operator or function: list_append, operand type: N
+            UPDATE "t" SET a = list_append(list_append(b)) WHERE pk = 1     | Incorrect number of operands for operator or function; operator or function: list_append, number of operands: 1
+            UPDATE "t" SET a = list_append(1, list_append(b)) WHERE pk = 1  | Incorrect number of operands for operator or function; operator or function: list_append, number of operands: 1
+            UPDATE "t" SET a = list_append(b).c WHERE pk = 1                | Unexpected path component at 1:20:11
+            UPDATE "t" SET a = list_append(foo(1))[0] WHERE pk = 1          | Unexpected path component at 1:20:11
+            UPDATE "t" SET a = list_append(*) WHERE pk = 1                  | Statement wasn't well formed, can't be processed: list_append(*) is not allowed
+            UPDATE "t" SET a = list_append(b WHERE pk = 1                   | Statement wasn't well formed, can't be processed: Expected RIGHT_PAREN
+            """)
+    void reportsAListAppendOperandCheckInItsStage(String statement, String message) {
+        AwsException e = assertThrows(AwsException.class, () -> DynamoDbPartiQLParser.parse(statement, List.of()));
+
+        assertEquals(message, e.getMessage());
+    }
+
+    @ParameterizedTest
+    @CsvSource(delimiter = '|', quoteCharacter = '`', textBlock = """
+            UPDATE "t" SET a = list_append(b, [1]) + 1 WHERE pk = 1         | +, operand type: L
+            UPDATE "t" SET a = 1 - list_append(b, [1]) WHERE pk = 1         | -, operand type: L
+            UPDATE "t" SET a = list_append(b, [1]) + 'x' WHERE pk = 1       | +, operand type: L
+            UPDATE "t" SET a = 'x' + list_append(b, [1]) WHERE pk = 1       | +, operand type: S
+            UPDATE "t" SET a = list_append(1, 2) + 1 WHERE pk = 1           | list_append, operand type: N
+            """)
+    void refusesAListAppendBesideAnOperator(String statement, String operand) {
+        AwsException e = assertThrows(AwsException.class, () -> DynamoDbPartiQLParser.parse(statement, List.of()));
+
+        assertEquals("Incorrect operand type for operator or function; operator or function: " + operand,
+                e.getMessage());
+    }
+
+    @Test
+    void checksAParameterAsTheOperandOfAnUpdateFunction() {
+        List<JsonNode> string = List.of(json("{\"S\":\"x\"}"));
+        List<JsonNode> list = List.of(json("{\"L\":[]}"));
+        List<JsonNode> stringSet = List.of(json("{\"SS\":[\"x\"]}"));
+        String append = "UPDATE \"t\" SET a = list_append(a, ?) WHERE pk = 1";
+        String add = "UPDATE \"t\" SET a = set_add(a, ?) WHERE pk = 1";
+
+        assertDoesNotThrow(() -> DynamoDbPartiQLParser.parse(append, list));
+        assertDoesNotThrow(() -> DynamoDbPartiQLParser.parse(add, stringSet));
+        assertEquals("Incorrect operand type for operator or function; operator or function: list_append, "
+                + "operand type: S",
+                assertThrows(AwsException.class, () -> DynamoDbPartiQLParser.parse(append, string)).getMessage());
+        assertEquals("The second argument to SET_ADD must be a value with type SET at 1:28:1",
+                assertThrows(AwsException.class, () -> DynamoDbPartiQLParser.parse(add, string)).getMessage());
+    }
+
+    @ParameterizedTest
+    @CsvSource(delimiter = '|', quoteCharacter = '`', textBlock = """
+            SELECT * FROM "t" WHERE pk = ?                           | 0 | COUNT
+            SELECT * FROM "t" WHERE pk = ? AND x = ?                 | 1 | COUNT
+            DELETE FROM "t" WHERE pk = ?                             | 0 | COUNT
+            INSERT INTO "t" VALUE {'pk': ?}                          | 0 | COUNT
+            UPDATE "t" SET a = ? WHERE pk = 1                        | 0 | COUNT
+            UPDATE "t" SET a = 1 WHERE pk = ?                        | 0 | COUNT
+            SELECT * FROM "t" WHERE pk = ? AND foo(1)                | 0 | COUNT
+            SELECT * FROM "t" WHERE foo(1) AND pk = ?                | 0 | Unrecognized function: foo at 1:25:3
+            SELECT * FROM "t" WHERE pk = ? AND foo(1) AND x = ?      | 1 | Unrecognized function: foo at 1:36:3
+            SELECT * FROM "t" WHERE pk = ? AND x = ? AND foo(1)      | 1 | COUNT
+            SELECT * FROM "t" WHERE foo(?)                           | 0 | COUNT
+            SELECT * FROM "t" WHERE pk = ? AND x = <<>>              | 0 | COUNT
+            SELECT * FROM "t" WHERE x = <<>> AND pk = ?              | 0 | Empty bags are not supported
+            SELECT * FROM "t" WHERE attribute_exists('a') AND pk = ? | 0 | COUNT
+            SELECT * FROM "t" WHERE pk = ? AND                       | 0 | NWF Missing right-hand side expression of infix operator
+            SELECT * FROM "" WHERE pk = ?                            | 0 | Path component cannot be an empty string
+            SELECT * FROM "t" WHERE x = [?]                          | 0 | Unsupported data type: Parameter under key root[0] at 1:30:1
+            SELECT * FROM "t" WHERE x = <<?>>                        | 0 | BAG at 1:31:1
+            SELECT * FROM "t" WHERE x = <<?>>                        | 1 | BAG at 1:31:1
+            SELECT * FROM "t" WHERE x = <<1, ?>>                     | 0 | Unsupported data type: Parameter under key root at 1:34:1
+            SELECT * FROM "t" WHERE foo(?).a = 1                     | 0 | Unexpected path component at 1:25:3
+            SELECT * FROM "t" WHERE foo(?) IS NULL                   | 0 | IS_LEFT
+            SELECT * FROM "t" WHERE size(?)                          | 0 | COUNT
+            UPDATE "t" SET a = ? WHERE foo(1)                        | 0 | Unrecognized function: foo at 1:28:3
+            UPDATE "t" SET a = ? WHERE attribute_exists('a')         | 0 | DOCUMENT_PATH
+            UPDATE "t" SET a = foo(1) WHERE pk = ?                   | 0 | COUNT
+            UPDATE "t" SET a = ?, b = foo(1) WHERE pk = ?            | 1 | COUNT
+            UPDATE "t" SET a = foo(1), b = ? WHERE pk = 1            | 0 | Unrecognized function: foo at 1:20:3
+            UPDATE "t" SET a = ? REMOVE l[99999999999] WHERE pk = 1  | 0 | COUNT
+            UPDATE "t" REMOVE l[99999999999] SET a = ? WHERE pk = 1  | 0 | LIST_INDEX at 1:21:11
+            FROM "t" WHERE foo(1) SET a = ?                          | 0 | Unrecognized function: foo at 1:16:3
+            FROM "t" WHERE pk = ? SET a = foo(1)                     | 0 | COUNT
+            FROM "t" WHERE pk = ? SET a = foo(1), b = ?              | 1 | Unrecognized function: foo at 1:31:3
+            UPDATE "t" SET ss = set_add(?) WHERE pk = 1              | 0 | SET_ADD must have exactly two arguments at 1:21:7
+            UPDATE "t" SET ss = set_add(ss, ?) WHERE pk = 1          | 0 | COUNT
+            UPDATE "t" SET ss = set_add(ss, ?).a WHERE pk = 1        | 0 | Unexpected path component at 1:21:7
+            UPDATE "t" SET ss = set_add(ss, ?) + 1 WHERE pk = 1      | 0 | COUNT
+            UPDATE "t" SET l = list_append(?) WHERE pk = 1           | 0 | COUNT
+            INSERT INTO "t" ?                                        | 0 | MULTIPLE_ITEMS
+            INSERT INTO "t" VALUE {'pk': 1, 'x': <<>>, 'y': ?}       | 0 | Empty bags are not supported
+            INSERT INTO "t" VALUE {'pk': 1, 'y': ?, 'x': <<>>}       | 0 | COUNT
+            """)
+    void reportsAMissingParameterInStatementOrder(String statement, int parameters, String message) {
+        String expected = message
+                .replace("COUNT", "Number of parameters in request and statement don't match.")
+                .replace("NWF ", "Statement wasn't well formed, can't be processed: ")
+                .replace("BAG", "Unsupported data type in Bag. DynamoDB only supports either numbers or strings in bags")
+                .replace("IS_LEFT", "The left hand side argument to IS must be a Variable Reference, Literal, or Path")
+                .replace("DOCUMENT_PATH", "Operator or function requires a document path; operator or function: "
+                        + "attribute_exists")
+                .replace("LIST_INDEX", "List index is not within the allowable range; index: [99999999999]")
+                .replace("MULTIPLE_ITEMS", "Unsupported operation: Inserting multiple items in a single statement "
+                        + "is not supported, use \"INSERT INTO tableName VALUE item\" instead");
+
+        assertEquals(expected, statementRefusal(statement, parameters));
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"SELECT * FROM \"t\" WHERE pk = 'a'", "SELECT * FROM \"t\" WHERE pk = ?"})
+    void ignoresAParameterTheStatementDoesNotUse(String statement) {
+        assertDoesNotThrow(() -> DynamoDbPartiQLParser.parse(statement,
+                List.of(json("{\"S\":\"x\"}"), json("{\"S\":\"y\"}"))));
+    }
+
+    @ParameterizedTest
+    @CsvSource(delimiter = '|', quoteCharacter = '`', textBlock = """
+            EXISTS(SELECT * FROM "t" WHERE pk = ?)                | 0 | EXISTS | COUNT
+            EXISTS(SELECT * FROM "t" WHERE pk = ? AND foo(1))     | 0 | EXISTS | COUNT
+            EXISTS(SELECT * FROM "t" WHERE foo(1) AND pk = ?)     | 0 | EXISTS | Unrecognized function: foo at 1:32:3
+            EXISTS(SELECT * FROM "t" WHERE pk = <<>>)             | 0 | EXISTS | Empty bags are not supported
+            EXISTS(SELECT * FROM "t" WHERE x = [?])               | 0 | EXISTS | Unsupported data type: Parameter under key root[0] at 1:37:1
+            EXISTS(SELECT * FROM "t" WHERE l[99999999999] = 1)    | 0 | EXISTS | List index is not within the allowable range; index: [99999999999] at 1:34:11
+            EXISTS(SELECT * FROM "t" WHERE pk = 1 AND x = 99e999) | 0 | EXISTS | Number overflow. Attempting to store a number with magnitude larger than supported range under root
+            EXISTS(SELECT * FROM "t" WHERE attribute_exists(1))   | 0 | EXISTS | Operator or function requires a document path; operator or function: attribute_exists
+            EXISTS(SELECT * FROM "t" WHERE pk = 1 AND s < true)   | 0 | EXISTS | Incorrect operand type for operator or function; operator or function: <, operand type: BOOL
+            EXISTS(SELECT * FROM "t"."i"."x" WHERE pk = 1)        | 0 | EXISTS | A path may contain at most 2 components in the FROM clause
+            EXISTS(SELECT * FROM "t" AS x WHERE pk = 1)           | 0 | EXISTS | Aliasing is not supported
+            EXISTS(SELECT * FROM "t"."" WHERE pk = 1)             | 0 | EXISTS | Path component cannot be an empty string
+            EXISTS(SELECT * FROM "t" WHERE pk = )                 | 0 | NWF    | NWF
+            """)
+    void refusesExistsOutsideATransactionOnceTheStatementParses(String statement, int parameters, String outside,
+                                                               String inTransaction) {
+        UnaryOperator<String> expand = message -> message
+                .replace("EXISTS", "EXISTS can only be used in ExecuteTransaction write requests.")
+                .replace("COUNT", "Number of parameters in request and statement don't match.")
+                .replace("NWF", "Statement wasn't well formed, can't be processed: Unexpected term");
+
+        assertEquals(expand.apply(outside), statementRefusal(statement, parameters));
+        assertEquals(expand.apply(inTransaction), statementRefusal(statement, parameters, true));
     }
 
     @Test
@@ -892,7 +1163,6 @@ class DynamoDbPartiQLParserTest {
             UPDATE "t" a SET b = 1e126 WHERE pk = 1e126             | ALIASING
             FROM "t" a WHERE pk = 1 SET b = 1                       | ALIASING
             DELETE FROM "t" a WHERE pk = 1 RETURNING ALL NEW *      | ALIASING
-            EXISTS(SELECT * FROM "t" a WHERE pk = 1)                | ALIASING
             SELECT * FROM ""."i"."x" a WHERE b < [1]                | ALIASING
             SELECT * FROM "t" a WHERE pk =                          | NWF Missing right-hand side expression of infix operator
             SELECT * FROM "t" AS WHERE pk = 1                       | NWF Expected identifier for AS-alias
@@ -909,6 +1179,7 @@ class DynamoDbPartiQLParserTest {
             DELETE FROM "t" WHERE pk = 1 RETURNING ALL NEW * x      | LEFTOVER
             INSERT INTO "t" a VALUE {'pk': 1}                       | LEFTOVER
             INSERT INTO "t" {'pk': 1e126};                          | MULTIPLE_ITEMS
+            INSERT INTO "t" list_append(a)                          | MULTIPLE_ITEMS
             INSERT INTO "t" AS a VALUE {'pk': 1}                    | NWF Unexpected term
             SELECT * FROM "t" WHERE at = 1                          | NWF Unexpected term
             UPDATE "t" SET as = 1 WHERE pk = 1                      | NWF Expected identifier for simple path

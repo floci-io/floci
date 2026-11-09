@@ -182,6 +182,7 @@ nav:
     - MWAA: services/mwaa.md
     - OpenSearch: services/opensearch.md
     - EC2: services/ec2.md
+    - EC2 Instance Connect: services/ec2-instance-connect.md
     - Lightsail: services/lightsail.md
     - AppConfig: services/appconfig.md
     - Bedrock: services/bedrock.md

@@ -4,6 +4,8 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.floci.aws.config.EmulatorConfig;
 import io.floci.aws.core.common.AwsException;
+import io.floci.aws.core.common.RegionResolver;
+import io.floci.aws.services.ecs.container.EcsContainerManager;
 import io.floci.aws.services.ecs.container.HostVolumePolicy;
 import io.floci.aws.services.ecs.model.RegisterTaskDefinitionRequest;
 import io.floci.aws.services.ecs.model.TaskDefinition;
@@ -26,7 +28,8 @@ import static org.mockito.Mockito.when;
  * Unit tests for the RegisterTaskDefinition JSON wire path in {@link EcsJsonHandler}:
  * container-level {@code healthCheck} must be parsed from the request, stored on the
  * container definition, and serialized back in the response with the AWS wire shape,
- * and must stay absent from the response when the request omitted it.
+ * and must stay absent from the response when the request omitted it. A health check without
+ * a command is refused by {@link EcsService}, so the refusal is checked through a real one.
  */
 class EcsJsonHandlerHealthCheckTest {
 
@@ -167,9 +170,10 @@ class EcsJsonHandlerHealthCheckTest {
         JsonNode request = objectMapper.readTree(requestJson);
 
         AwsException ex = assertThrows(AwsException.class, () ->
-                handler.handle("RegisterTaskDefinition", request, "us-east-1"));
+                handlerOverARealService().handle("RegisterTaskDefinition", request, "us-east-1"));
         assertEquals("ClientException", ex.getErrorCode());
         assertEquals(400, ex.getHttpStatus());
+        assertEquals("HealthCheck command is required.", ex.getMessage());
     }
 
     @Test
@@ -191,8 +195,17 @@ class EcsJsonHandlerHealthCheckTest {
         JsonNode request = objectMapper.readTree(requestJson);
 
         AwsException ex = assertThrows(AwsException.class, () ->
-                handler.handle("RegisterTaskDefinition", request, "us-east-1"));
+                handlerOverARealService().handle("RegisterTaskDefinition", request, "us-east-1"));
         assertEquals("ClientException", ex.getErrorCode());
         assertEquals(400, ex.getHttpStatus());
+        assertEquals("HealthCheck command is required.", ex.getMessage());
+    }
+
+    private EcsJsonHandler handlerOverARealService() {
+        EmulatorConfig config = mock(EmulatorConfig.class, RETURNS_DEEP_STUBS);
+        when(config.services().ecs().mock()).thenReturn(true);
+        EcsService service = new EcsService(new RegionResolver("us-east-1", "000000000000"),
+                mock(EcsContainerManager.class), config, mock(EcsLoadBalancerRegistrar.class), null, null);
+        return new EcsJsonHandler(service, objectMapper, new HostVolumePolicy(config));
     }
 }

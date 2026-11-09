@@ -28,8 +28,8 @@ import java.util.Map;
  * besides it, and then the two must agree, so a request cannot act on a key other than the
  * one its path names.
  *
- * <p>{@code /mac}, {@code /pindata}, {@code /cardvalidationdata} and {@code /cryptogram} are
- * two-segment paths, which S3's path-style routes would claim, so
+ * <p>{@code /mac}, {@code /macemvpinchange}, {@code /pindata}, {@code /cardvalidationdata} and
+ * {@code /cryptogram} are two-segment paths, which S3's path-style routes would claim, so
  * {@link PaymentCryptographyDataPlaneRouteFilter} moves them for the requests signed for this
  * service.
  *

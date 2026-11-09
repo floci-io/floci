@@ -101,6 +101,7 @@ class ApiGatewayDeploymentModelTest {
     private ApiGatewayService service(Path directory) {
         EmulatorConfig config = mock(EmulatorConfig.class, RETURNS_DEEP_STUBS);
         when(config.storage().persistentPath()).thenReturn(directory.toString());
+        when(config.storage().wal().compactionIntervalMs()).thenReturn(3_600_000L);
         when(config.defaultAccountId()).thenReturn("000000000000");
         ServiceConfigAccess access = mock(ServiceConfigAccess.class);
         when(access.storageMode(anyString())).thenReturn("persistent");

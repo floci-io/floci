@@ -139,6 +139,14 @@ public final class CfnStackWaits {
                                 stack.stackStatusReason() == null ? "" : stack.stackStatusReason())));
     }
 
+    /** The value of {@code stack}'s output {@code key}; fails when the stack has no such output. */
+    public static String output(Stack stack, String key) {
+        return stack.outputs().stream().filter(output -> key.equals(output.outputKey())).findFirst()
+                .orElseThrow(() -> new AssertionError(
+                        "Stack " + stack.stackName() + " has no output " + key + ": " + stack.outputs()))
+                .outputValue();
+    }
+
     private static boolean hasExpectedStatus(String stackName, String expectedStatus, StackState state) {
         if (expectedStatus.equals(state.status())) {
             return true;

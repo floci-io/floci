@@ -1,5 +1,6 @@
 package io.floci.aws.services.redshiftdata;
 
+import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
@@ -110,9 +111,24 @@ public class RedshiftDataTargetSubmitter {
                 ? AwsArnUtils.Arn.of("redshift", region, account,
                         "cluster:" + request.path("ClusterIdentifier").asText()).toString()
                 : targetArn;
+        List<Permission> permissions = permissions(
+                batch ? "redshift-data:BatchExecuteStatement" : "redshift-data:ExecuteStatement",
+                statementTarget, request, account, region);
+        Optional<String> refusal = roleCheck.refusal(permissions);
+        if (refusal.isPresent()) {
+            throw new AwsException("AccessDeniedException", refusal.get(), 403);
+        }
+    }
+
+    /**
+     * What a Data API call on {@code target} needs: its action there and whatever authenticates it, read from the
+     * request. A call on a session's target, which names neither a cluster nor a workgroup, has a session's own
+     * credentials, so it needs only the action.
+     */
+    public static List<Permission> permissions(String action, String target, JsonNode request, String account,
+                                               String region) {
         List<Permission> permissions = new ArrayList<>();
-        permissions.add(new Permission(
-                batch ? "redshift-data:BatchExecuteStatement" : "redshift-data:ExecuteStatement", statementTarget));
+        permissions.add(new Permission(action, target));
         // The Data API ignores a blank value, so it picks the credentials the same way.
         String secret = request.path("SecretArn").asText("");
         if (!secret.isBlank()) {
@@ -122,8 +138,8 @@ public class RedshiftDataTargetSubmitter {
                 permissions.add(new Permission("secretsmanager:GetSecretValue", secret));
             }
         } else if (request.has("WorkgroupName")) {
-            permissions.add(new Permission("redshift-serverless:GetCredentials", targetArn));
-        } else if (!request.path("DbUser").asText("").isBlank()) {
+            permissions.add(new Permission("redshift-serverless:GetCredentials", target));
+        } else if (request.has("ClusterIdentifier") && !request.path("DbUser").asText("").isBlank()) {
             String cluster = request.path("ClusterIdentifier").asText();
             permissions.add(new Permission("redshift:GetClusterCredentials",
                     AwsArnUtils.Arn.of("redshift", region, account,
@@ -132,10 +148,7 @@ public class RedshiftDataTargetSubmitter {
                     AwsArnUtils.Arn.of("redshift", region, account,
                             "dbname:" + cluster + "/" + request.path("Database").asText()).toString()));
         }
-        Optional<String> refusal = roleCheck.refusal(permissions);
-        if (refusal.isPresent()) {
-            throw new AwsException("AccessDeniedException", refusal.get(), 403);
-        }
+        return permissions;
     }
 
     private static void putIfPresent(ObjectNode request, String field, String value) {

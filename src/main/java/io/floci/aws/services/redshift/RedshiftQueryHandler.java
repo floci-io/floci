@@ -241,6 +241,27 @@ public class RedshiftQueryHandler {
                     .build();
             return Response.ok(xml).type(MediaType.APPLICATION_XML).build();
         }
+        case "CopyClusterSnapshot" -> {
+            String sourceSnapshotId = requireParam(params, "SourceSnapshotIdentifier");
+            String targetSnapshotId = requireParam(params, "TargetSnapshotIdentifier");
+            String sourceClusterId = params.getFirst("SourceSnapshotClusterIdentifier");
+            Integer manualRetention = parseOptionalInteger(params, "ManualSnapshotRetentionPeriod");
+
+            Snapshot snapshot = service.copyClusterSnapshot(sourceSnapshotId, targetSnapshotId,
+                    sourceClusterId, manualRetention);
+
+            String xml = new XmlBuilder()
+                    .start("CopyClusterSnapshotResponse")
+                      .start("CopyClusterSnapshotResult")
+                        .raw(buildSnapshotXml(snapshot))
+                      .end("CopyClusterSnapshotResult")
+                      .start("ResponseMetadata")
+                        .elem("RequestId", "test-req-id")
+                      .end("ResponseMetadata")
+                    .end("CopyClusterSnapshotResponse")
+                    .build();
+            return Response.ok(xml).type(MediaType.APPLICATION_XML).build();
+        }
         case "RestoreFromClusterSnapshot" -> {
             String clusterIdentifier = params.getFirst("ClusterIdentifier");
             String snapshotIdentifier = params.getFirst("SnapshotIdentifier");
@@ -1374,12 +1395,20 @@ public class RedshiftQueryHandler {
         return Response.ok(xml).type(MediaType.APPLICATION_XML).build();
     }
 
-    // No log delivery is emulated, so delivery timestamps and failure fields are omitted.
     private String buildLoggingStatusXml(Cluster cluster) {
+        String lastSuccessful = cluster.getLastSuccessfulDeliveryTime() != null
+                ? DateTimeFormatter.ISO_INSTANT.format(cluster.getLastSuccessfulDeliveryTime())
+                : null;
+        String lastFailure = cluster.getLastFailureTime() != null
+                ? DateTimeFormatter.ISO_INSTANT.format(cluster.getLastFailureTime())
+                : null;
         XmlBuilder builder = new XmlBuilder()
             .elem("LoggingEnabled", cluster.isLoggingEnabled())
             .elem("BucketName", cluster.getLoggingBucketName())
             .elem("S3KeyPrefix", cluster.getLoggingS3KeyPrefix())
+            .elem("LastSuccessfulDeliveryTime", lastSuccessful)
+            .elem("LastFailureTime", lastFailure)
+            .elem("LastFailureMessage", cluster.getLastFailureMessage())
             .elem("LogDestinationType", cluster.getLoggingDestinationType());
         if (cluster.getLoggingExports() != null) {
             builder.start("LogExports");
