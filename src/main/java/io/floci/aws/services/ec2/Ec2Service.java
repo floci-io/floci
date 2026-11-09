@@ -2181,12 +2181,8 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
         return "sg-default-" + region;
     }
 
-    // Resolves the default VPC/security-group id actually on file for a region, falling back to
-    // the pre-lex00/floci#21 unscoped literal ("vpc-default"/"sg-default") when storage was persisted before
-    // ids were made region-scoped. Seeding (ensureDefaultResources) always assigns the new
-    // region-scoped id going forward; these resolvers only cover lookups against what may already
-    // be on disk. Without this, a region seeded under the old scheme would silently lose its
-    // default VPC/security group to every caller that resolves them by computed id.
+    // Persisted default VPCs may retain the unscoped id from before ids became region-scoped.
+    // Resolve against storage so callers still find the existing VPC instead of a computed id.
     public String resolveDefaultVpcId(String region) {
         String scoped = defaultVpcId(region);
         if (vpcs.get(key(region, scoped)).isPresent()) {
@@ -2194,15 +2190,6 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
         }
         String legacy = "vpc-default";
         return vpcs.get(key(region, legacy)).isPresent() ? legacy : scoped;
-    }
-
-    public String resolveDefaultSecurityGroupId(String region) {
-        String scoped = defaultSecurityGroupId(region);
-        if (securityGroups.get(key(region, scoped)).isPresent()) {
-            return scoped;
-        }
-        String legacy = "sg-default";
-        return securityGroups.get(key(region, legacy)).isPresent() ? legacy : scoped;
     }
 
     // Per-resource mutation locks (#1464): storage get() returns the live stored object, so
@@ -4064,11 +4051,8 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
                 sgIdentifiers.add(new GroupIdentifier(sg.getGroupId(), sg.getGroupName()));
             }
         } else {
-            // Use default SG
-            SecurityGroup defaultSg = securityGroups.get(key(region, resolveDefaultSecurityGroupId(region))).orElse(null);
-            if (defaultSg != null) {
-                sgIdentifiers.add(new GroupIdentifier(defaultSg.getGroupId(), defaultSg.getGroupName()));
-            }
+            defaultSecurityGroupOf(region, vpcId).ifPresent(defaultSg ->
+                    sgIdentifiers.add(new GroupIdentifier(defaultSg.getGroupId(), defaultSg.getGroupName())));
         }
 
         String reservationId = "r-" + randomHex(17);
