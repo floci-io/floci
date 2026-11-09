@@ -76,6 +76,7 @@ nav:
   - Getting Started:
     - Quick Start: getting-started/quick-start.md
     - Installation: getting-started/installation.md
+    - Kubernetes (Helm): getting-started/kubernetes.md
     - AWS CLI & SDK Setup: getting-started/aws-setup.md
     - Terraform: getting-started/terraform.md
     - Migrate from LocalStack: getting-started/migrate-from-localstack.md

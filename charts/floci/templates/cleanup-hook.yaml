@@ -1,0 +1,84 @@
+{{- if include "floci.cleanupHook" . }}
+{{- $script := `
+# Best effort: every failure is logged and the script still exits 0, and every API call is
+# time-bounded, so a slow or unreachable API server cannot hold up the uninstall. Uses
+# Floci's own ServiceAccount, so it can do nothing Floci cannot.
+sa=/var/run/secrets/kubernetes.io/serviceaccount
+api=https://kubernetes.default.svc
+token="$(cat "$sa/token")"
+k() { curl -sS --connect-timeout 5 --max-time 20 --cacert "$sa/ca.crt" -H "Authorization: Bearer $token" "$@"; }
+
+selector='app.kubernetes.io%2Fmanaged-by%3Dfloci%2Cfloci.io%2Fservice%3Dlambda'
+pods="$(k "$api/api/v1/namespaces/$LAMBDA_NAMESPACE/pods?labelSelector=$selector" |
+  python3 -c 'import json, sys; print(" ".join(p["metadata"]["name"] for p in json.load(sys.stdin).get("items", [])))')"
+echo "Lambda pods in $LAMBDA_NAMESPACE: ${pods:-none}"
+for pod in $pods; do
+  code="$(k -o /dev/null -w '%{http_code}' -X DELETE "$api/api/v1/namespaces/$LAMBDA_NAMESPACE/pods/$pod?gracePeriodSeconds=0")"
+  echo "delete pod $pod: HTTP $code"
+done
+
+# Also with TLS off now: a revision that ran with TLS on may have left the CA ConfigMap.
+code="$(k -o /dev/null -w '%{http_code}' -X DELETE "$api/api/v1/namespaces/$LAMBDA_NAMESPACE/configmaps/$CA_CONFIG_MAP")"
+echo "delete configmap $CA_CONFIG_MAP: HTTP $code (404 means Floci never ran with TLS here)"
+exit 0
+` }}
+apiVersion: v1
+kind: Pod
+metadata:
+  name: {{ include "floci.fullname" . }}-cleanup
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "floci.labels" . | nindent 4 }}
+    app.kubernetes.io/component: cleanup
+  annotations:
+    helm.sh/hook: pre-delete
+    helm.sh/hook-delete-policy: before-hook-creation,hook-succeeded
+spec:
+  restartPolicy: Never
+  serviceAccountName: {{ include "floci.serviceAccountName" . }}
+  automountServiceAccountToken: true
+  enableServiceLinks: false
+  {{- with .Values.imagePullSecrets }}
+  imagePullSecrets:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+  # Floci's own pod security context, so an override for a platform that assigns its own
+  # UIDs (OpenShift) covers this pod as well.
+  {{- with .Values.podSecurityContext }}
+  securityContext:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+  containers:
+    - name: cleanup
+      image: {{ include "floci.helperImage" . | quote }}
+      imagePullPolicy: {{ .Values.helperImage.pullPolicy }}
+      command: ["/bin/sh", "-c"]
+      args:
+        - |
+          {{- $script | trim | nindent 10 }}
+      env:
+        - name: LAMBDA_NAMESPACE
+          value: {{ include "floci.lambdaNamespace" . | quote }}
+        - name: CA_CONFIG_MAP
+          value: {{ include "floci.caConfigMapName" . | quote }}
+        - name: HOME
+          value: /tmp
+      securityContext:
+        allowPrivilegeEscalation: false
+        readOnlyRootFilesystem: true
+        capabilities:
+          drop:
+            - ALL
+      resources:
+        requests:
+          cpu: 50m
+          memory: 64Mi
+        limits:
+          memory: 128Mi
+      volumeMounts:
+        - name: tmp
+          mountPath: /tmp
+  volumes:
+    - name: tmp
+      emptyDir: {}
+{{- end }}

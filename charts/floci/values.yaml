@@ -1,0 +1,302 @@
+# Default values for the Floci chart.
+#
+# Floci runs as a single pod behind one Service on port 4566. State lives in that pod
+# (in memory, or under /app/data with persistence), so the chart always runs one
+# replica and replaces it with the Recreate strategy.
+#
+# Install and usage examples: docs/getting-started/kubernetes.md, or
+# https://floci.io/floci/getting-started/kubernetes/
+
+# -- Overrides the chart name used in resource names and the app.kubernetes.io/name label.
+nameOverride: ""
+# -- Overrides the full resource name (defaults to "<release>-floci", or the release name
+# when it already contains "floci").
+fullnameOverride: ""
+
+image:
+  # -- Image repository. floci/floci is the native image on UBI 9 micro (bash and coreutils
+  # only). public.ecr.aws/floci/floci carries the same images.
+  repository: floci/floci
+  # -- Image tag. Empty means the chart's appVersion.
+  tag: ""
+  # -- Image variant appended to the tag as "-<variant>". "compat" adds Python 3, the AWS
+  # CLI and boto3, which init hooks that call `aws` need; "baseline" is the ARM64 build
+  # for CPUs without LSE (release tags only).
+  variant: ""
+  # -- Image digest ("sha256:..."). When set it pins the image and takes precedence over the tag.
+  digest: ""
+  # -- Image pull policy.
+  pullPolicy: IfNotPresent
+
+# -- Pull secrets for the Floci image, as a list of {name: <secret>}.
+imagePullSecrets: []
+
+floci:
+  # -- FLOCI_BASE_URL, the URL Floci embeds in responses (SQS QueueUrl, pre-signed URLs).
+  # Empty means the in-cluster Service address,
+  # http://<fullname>.<namespace>.svc.<clusterDomain>:<service.port>. Set it to the Ingress
+  # URL when clients reach Floci from outside the cluster.
+  baseUrl: ""
+  # -- FLOCI_HOSTNAME, which overrides only the hostname part of the base URL.
+  hostname: ""
+  # -- Cluster DNS domain used to build the default base URL.
+  clusterDomain: cluster.local
+  # -- FLOCI_DEFAULT_REGION. Empty keeps Floci's default (us-east-1).
+  defaultRegion: ""
+  # -- FLOCI_DEFAULT_ACCOUNT_ID. Empty keeps Floci's default (000000000000).
+  defaultAccountId: ""
+
+  storage:
+    # -- FLOCI_STORAGE_MODE: memory, persistent, hybrid or wal. Empty selects "persistent"
+    # when persistence.enabled is true and "memory" otherwise.
+    mode: ""
+
+  tls:
+    # -- FLOCI_TLS_ENABLED. Floci then serves HTTPS and plain HTTP on the same port 4566
+    # with a self-signed certificate (download its CA from /_floci/ca.pem).
+    enabled: false
+
+  lambda:
+    # -- FLOCI_SERVICES_LAMBDA_EXECUTOR. "kubernetes" runs every Lambda execution
+    # environment as a pod in lambda.kubernetes.namespace and needs the RBAC below.
+    # "docker" needs a Docker daemon reachable from the pod (set FLOCI_DOCKER_DOCKER_HOST
+    # in floci.env), which most clusters do not offer.
+    executor: kubernetes
+    kubernetes:
+      # -- Namespace Lambda pods are created in. Empty means the release namespace. Use one
+      # release per Lambda namespace: Floci's orphan sweep and the uninstall cleanup hook
+      # delete every Floci Lambda pod in it, and the CA ConfigMap name is fixed.
+      namespace: ""
+      # -- Init container image that downloads function code into the pod (needs sh, wget
+      # and unzip). Empty keeps Floci's default (busybox:1.36).
+      initImage: ""
+      # -- Extra labels for Lambda pods, as "key=value" strings.
+      labels: []
+      # -- Address Lambda pods use to reach Floci. Empty lets Floci advertise its own pod
+      # IP, which is right for an in-cluster install.
+      flociAddress: ""
+
+  # -- Any other Floci setting, as FLOCI_* environment variables (see
+  # docs/configuration/environment-variables.md). Values are rendered as strings. The
+  # variables the chart sets from the settings above, and FLOCI_PORT (the container always
+  # listens on 4566), fail the render here; the error names the value to set instead.
+  env: {}
+    # FLOCI_SERVICES_SQS_ENDPOINT_STRATEGY: aws
+    # FLOCI_SERVICES_LAMBDA_CONTAINER_IDLE_TIMEOUT_SECONDS: "300"
+
+# -- Extra container environment variables in Kubernetes EnvVar form (for valueFrom). The
+# variables the chart sets are refused here as in floci.env.
+extraEnv: []
+  # - name: FLOCI_DOCKER_REGISTRY_CREDENTIALS_0__PASSWORD
+  #   valueFrom:
+  #     secretKeyRef: {name: registry, key: password}
+
+# -- Extra environment sources (ConfigMaps or Secrets) in Kubernetes EnvFromSource form.
+extraEnvFrom: []
+
+# -- Initialization hook scripts, mounted under /etc/floci/init/<phase>.d. Each phase maps
+# a file name (ending in .sh or .py) to its content. Scripts run in lexicographic order
+# and a failing boot, start or ready hook stops Floci (docs/configuration/initialization-hooks.md).
+# Scripts that call the AWS CLI or boto3 need the "-compat" image tag.
+initHooks:
+  boot: {}
+  start: {}
+  ready: {}
+    # 01-seed.sh: |
+    #   #!/bin/sh
+    #   set -eu
+    #   aws s3 mb s3://my-bucket
+  stop: {}
+
+serviceAccount:
+  # -- Create a ServiceAccount for Floci. Its token is mounted only for the kubernetes
+  # Lambda executor, the one feature that calls the Kubernetes API.
+  create: true
+  # -- ServiceAccount name. Empty means the full name when create is true, "default" otherwise.
+  name: ""
+  # -- Annotations for the ServiceAccount.
+  annotations: {}
+
+rbac:
+  # -- Create the Role and RoleBinding the kubernetes Lambda executor needs, in the Lambda
+  # namespace: pods create/get/list/delete, pods/log get and, with TLS, the floci-lambda-ca
+  # ConfigMap (plus its delete for the cleanup hook, with or without TLS). Nothing is
+  # created for the docker executor.
+  create: true
+
+persistence:
+  # -- Keep /app/data on a PersistentVolumeClaim. Without it /app/data is an emptyDir and
+  # state is gone when the pod is replaced.
+  enabled: false
+  # -- Use an existing claim instead of creating one.
+  existingClaim: ""
+  # -- StorageClass of the created claim. Empty uses the cluster default, "-" sets
+  # storageClassName to "" (no dynamic provisioning).
+  storageClass: ""
+  # -- Access modes of the created claim.
+  accessModes:
+    - ReadWriteOnce
+  # -- Size of the created claim.
+  size: 8Gi
+  # -- Annotations for the created claim (for example helm.sh/resource-policy: keep).
+  annotations: {}
+
+# -- Size limit of the emptyDir that holds /app/data when persistence is disabled
+# (for example "2Gi"). Empty means no limit.
+dataSizeLimit: ""
+
+service:
+  # -- Service type.
+  type: ClusterIP
+  # -- Service port for the AWS API endpoint. The container always listens on 4566.
+  port: 4566
+  # -- Node port for NodePort and LoadBalancer services. Empty lets Kubernetes choose.
+  nodePort: ""
+  # -- Annotations for the Service.
+  annotations: {}
+  # -- Extra labels for the Service.
+  labels: {}
+  # -- Source ranges allowed through a LoadBalancer.
+  loadBalancerSourceRanges: []
+  # -- externalTrafficPolicy for NodePort and LoadBalancer services (Cluster or Local).
+  externalTrafficPolicy: ""
+  # -- Port ranges published as one Service port each, for the TCP proxies Floci runs in
+  # its own process for container-backed services, as docker-compose.yml maps them. They
+  # only carry traffic when Floci can reach a Docker daemon (FLOCI_DOCKER_DOCKER_HOST).
+  portRanges: []
+    # - name: elasticache   # 6379-6399, FLOCI_SERVICES_ELASTICACHE_PROXY_BASE_PORT/_MAX_PORT
+    #   start: 6379
+    #   end: 6399
+    # - name: rds           # 7001-7099, FLOCI_SERVICES_RDS_PROXY_BASE_PORT/_MAX_PORT
+    #   start: 7001
+    #   end: 7099
+  # -- Extra Service ports in Kubernetes ServicePort form.
+  extraPorts: []
+
+ingress:
+  # -- Expose the API endpoint through an Ingress.
+  enabled: false
+  # -- IngressClass name.
+  className: ""
+  # -- Annotations for the Ingress. Large S3 uploads may need a body size annotation for
+  # your controller.
+  annotations: {}
+  # -- Hosts and paths routed to the Service.
+  hosts:
+    - host: floci.local
+      paths:
+        - path: /
+          pathType: Prefix
+  # -- TLS configuration, in Kubernetes IngressTLS form.
+  tls: []
+
+# -- Pod security context of Floci, the `helm test` pods and the uninstall cleanup hook.
+# The defaults satisfy the "restricted" Pod Security Standard. On OpenShift, which assigns
+# each namespace its own UID range, set runAsUser, runAsGroup and fsGroup to null: Helm
+# merges a map given here into these defaults, so leaving the keys out keeps them.
+podSecurityContext:
+  runAsNonRoot: true
+  runAsUser: 1001
+  runAsGroup: 1001
+  fsGroup: 1001
+  fsGroupChangePolicy: OnRootMismatch
+  seccompProfile:
+    type: RuntimeDefault
+
+# -- Container security context. Floci writes only to /app/data and /tmp, which the chart
+# mounts as volumes, so the root filesystem stays read-only.
+securityContext:
+  allowPrivilegeEscalation: false
+  readOnlyRootFilesystem: true
+  capabilities:
+    drop:
+      - ALL
+
+# -- Resource requests and limits. Floci keeps state in memory, so raise the memory limit
+# for large S3 objects or many Lambda functions in memory storage mode.
+resources:
+  requests:
+    cpu: 100m
+    memory: 128Mi
+  limits:
+    memory: 1Gi
+
+# -- Startup probe. /_floci/health answers once the HTTP server is up; boot hooks run
+# before that, so the budget (2 minutes) covers them.
+startupProbe:
+  httpGet:
+    path: /_floci/health
+    port: http
+  periodSeconds: 2
+  timeoutSeconds: 3
+  failureThreshold: 60
+
+# -- Liveness probe on /_floci/health.
+livenessProbe:
+  httpGet:
+    path: /_floci/health
+    port: http
+  periodSeconds: 10
+  timeoutSeconds: 3
+  failureThreshold: 3
+
+# -- Readiness probe. Ready once /_floci/init reports the ready phase complete, so the
+# Service only sends traffic after every start and ready hook has run. The image has no
+# curl, so the probe speaks HTTP/1.0 through bash's /dev/tcp like docker/healthcheck.sh.
+readinessProbe:
+  exec:
+    command:
+      - /bin/bash
+      - -c
+      - >-
+        exec 3<>/dev/tcp/127.0.0.1/4566 &&
+        printf 'GET /_floci/init HTTP/1.0\r\nHost: localhost\r\n\r\n' >&3 &&
+        { IFS= read -r -d '' response <&3; [[ $response == "HTTP/1."?" 200"*'"ready":true'* ]]; }
+  periodSeconds: 5
+  timeoutSeconds: 3
+  failureThreshold: 3
+
+# -- Seconds Floci gets to run stop hooks and shut down.
+terminationGracePeriodSeconds: 30
+
+# -- Extra pod annotations.
+podAnnotations: {}
+# -- Extra pod labels.
+podLabels: {}
+# -- PriorityClass of the pod.
+priorityClassName: ""
+# -- Node selector.
+nodeSelector: {}
+# -- Tolerations.
+tolerations: []
+# -- Affinity rules.
+affinity: {}
+
+# -- Extra volumes for the pod.
+extraVolumes: []
+# -- Extra volume mounts for the Floci container.
+extraVolumeMounts: []
+
+# -- Image for the `helm test` pods and the uninstall cleanup hook: AWS CLI v2 on Amazon
+# Linux 2023, which also brings sh, curl and python3. Both pods run under podSecurityContext.
+helperImage:
+  repository: amazon/aws-cli
+  tag: "2.39.6"
+  pullPolicy: IfNotPresent
+
+cleanup:
+  # -- Run a pre-delete hook, under Floci's ServiceAccount, that deletes every Floci Lambda
+  # pod in the Lambda namespace and the floci-lambda-ca ConfigMap, the objects Floci creates
+  # at runtime (so use one release per Lambda namespace). Helm removes the
+  # ServiceAccount while Floci is still shutting down, so Floci's own drain of warm pods
+  # can no longer authenticate and those pods would stay behind until the next install's
+  # orphan sweep. Best effort: its script always exits 0 and bounds every API call. If the
+  # hook pod itself cannot run (its image cannot be pulled), `helm uninstall --no-hooks`
+  # skips it. Applies to the kubernetes executor with rbac.create.
+  enabled: true
+
+tests:
+  lambda:
+    # -- Also run a Python Lambda function in `helm test`. With the kubernetes executor this
+    # starts a real Lambda pod, so the node pulls public.ecr.aws/lambda/python:3.12.
+    enabled: false

@@ -869,7 +869,9 @@ subjects:
 
 #### Running Floci in-cluster
 
-A minimal Deployment (namespace `floci` assumed, RBAC from above bound to the
+The Helm chart in `charts/floci` sets all of this up, with the RBAC above, a Lambda
+namespace of your choice and `helm test` checks: see
+[Kubernetes (Helm)](../getting-started/kubernetes.md). Without Helm, a minimal Deployment (namespace `floci` assumed, RBAC from above bound to the
 `floci` ServiceAccount):
 
 ```yaml

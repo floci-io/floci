@@ -1,0 +1,188 @@
+suite: helm test pods, cleanup hook and notes
+templates:
+  - templates/tests/test-api.yaml
+  - templates/tests/test-lambda.yaml
+  - templates/cleanup-hook.yaml
+  - templates/NOTES.txt
+release:
+  name: floci
+  namespace: aws
+tests:
+  - it: runs the API smoke test against the Service DNS name
+    template: templates/tests/test-api.yaml
+    asserts:
+      - equal:
+          path: metadata.annotations["helm.sh/hook"]
+          value: test
+      - contains:
+          path: spec.containers[0].env
+          content:
+            name: FLOCI_ENDPOINT
+            value: http://floci.aws.svc.cluster.local:4566
+      - equal:
+          path: spec.automountServiceAccountToken
+          value: false
+      - equal:
+          path: spec.containers[0].securityContext.readOnlyRootFilesystem
+          value: true
+
+  - it: runs the test pods and the cleanup hook under Floci's pod security context
+    templates:
+      - templates/tests/test-api.yaml
+      - templates/cleanup-hook.yaml
+    asserts:
+      - equal:
+          path: spec.securityContext
+          value:
+            runAsNonRoot: true
+            runAsUser: 1001
+            runAsGroup: 1001
+            fsGroup: 1001
+            fsGroupChangePolicy: OnRootMismatch
+            seccompProfile:
+              type: RuntimeDefault
+
+  - it: drops the fixed IDs from every pod with the documented OpenShift override
+    templates:
+      - templates/tests/test-api.yaml
+      - templates/tests/test-lambda.yaml
+      - templates/cleanup-hook.yaml
+    set:
+      tests.lambda.enabled: true
+      podSecurityContext:
+        runAsUser: null
+        runAsGroup: null
+        fsGroup: null
+    documentSelector:
+      path: kind
+      value: Pod
+      matchMany: true
+    asserts:
+      - equal:
+          path: spec.securityContext
+          value:
+            runAsNonRoot: true
+            fsGroupChangePolicy: OnRootMismatch
+            seccompProfile:
+              type: RuntimeDefault
+
+  - it: expects https response URLs when TLS is on
+    template: templates/tests/test-api.yaml
+    set:
+      floci.tls.enabled: true
+    asserts:
+      - contains:
+          path: spec.containers[0].env
+          content:
+            name: FLOCI_EFFECTIVE_BASE_URL
+            value: https://floci.aws.svc.cluster.local:4566
+
+  - it: applies floci.hostname to the expected response URLs
+    template: templates/tests/test-api.yaml
+    set:
+      floci.hostname: floci.example.test
+    asserts:
+      - contains:
+          path: spec.containers[0].env
+          content:
+            name: FLOCI_EFFECTIVE_BASE_URL
+            value: http://floci.example.test:4566
+
+  - it: runs the Lambda test only when asked
+    template: templates/tests/test-lambda.yaml
+    asserts:
+      - hasDocuments:
+          count: 0
+
+  - it: ships the function source in a ConfigMap created before the test pod
+    template: templates/tests/test-lambda.yaml
+    set:
+      tests.lambda.enabled: true
+    asserts:
+      - hasDocuments:
+          count: 2
+      - equal:
+          path: metadata.annotations["helm.sh/hook-weight"]
+          value: "-1"
+        documentSelector:
+          path: kind
+          value: ConfigMap
+      - contains:
+          path: spec.volumes
+          content:
+            name: fixtures
+            configMap:
+              name: floci-test-lambda
+        documentSelector:
+          path: kind
+          value: Pod
+
+  - it: cleans up runtime objects before uninstall, under Floci's ServiceAccount
+    template: templates/cleanup-hook.yaml
+    asserts:
+      - equal:
+          path: metadata.annotations["helm.sh/hook"]
+          value: pre-delete
+      - equal:
+          path: spec.serviceAccountName
+          value: floci
+      - contains:
+          path: spec.containers[0].env
+          content:
+            name: LAMBDA_NAMESPACE
+            value: aws
+      # Also with TLS off: an earlier revision with TLS on may have created it.
+      - contains:
+          path: spec.containers[0].env
+          content:
+            name: CA_CONFIG_MAP
+            value: floci-lambda-ca
+
+  - it: cleans up the Lambda namespace with TLS
+    template: templates/cleanup-hook.yaml
+    set:
+      floci.tls.enabled: true
+      floci.lambda.kubernetes.namespace: lambdas
+    asserts:
+      - contains:
+          path: spec.containers[0].env
+          content:
+            name: CA_CONFIG_MAP
+            value: floci-lambda-ca
+      - contains:
+          path: spec.containers[0].env
+          content:
+            name: LAMBDA_NAMESPACE
+            value: lambdas
+
+  - it: skips the cleanup hook when it has nothing to do or no permissions
+    template: templates/cleanup-hook.yaml
+    set:
+      floci.lambda.executor: docker
+    asserts:
+      - hasDocuments:
+          count: 0
+
+  - it: skips the cleanup hook when disabled
+    template: templates/cleanup-hook.yaml
+    set:
+      cleanup.enabled: false
+    asserts:
+      - hasDocuments:
+          count: 0
+
+  - it: prints the in-cluster endpoint and the Lambda namespace
+    template: templates/NOTES.txt
+    asserts:
+      - matchRegexRaw:
+          pattern: "export AWS_ENDPOINT_URL=http://floci.aws.svc.cluster.local:4566"
+      - matchRegexRaw:
+          pattern: "Lambda functions run as pods in namespace aws"
+
+  - it: warns when a durable storage mode has no volume
+    template: templates/NOTES.txt
+    set:
+      floci.storage.mode: hybrid
+    asserts:
+      - matchRegexRaw:
+          pattern: "WARNING: storage mode is hybrid but persistence.enabled is false"
