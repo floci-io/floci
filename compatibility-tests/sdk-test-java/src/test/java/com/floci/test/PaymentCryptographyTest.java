@@ -8,15 +8,21 @@ import software.amazon.awssdk.awscore.exception.AwsServiceException;
 import software.amazon.awssdk.regions.Region;
 import software.amazon.awssdk.services.paymentcryptography.PaymentCryptographyClient;
 import software.amazon.awssdk.services.paymentcryptography.model.Alias;
+import software.amazon.awssdk.services.paymentcryptography.model.ExportKeyResponse;
+import software.amazon.awssdk.services.paymentcryptography.model.GetParametersForExportResponse;
+import software.amazon.awssdk.services.paymentcryptography.model.GetParametersForImportResponse;
+import software.amazon.awssdk.services.paymentcryptography.model.ImportKeyResponse;
 import software.amazon.awssdk.services.paymentcryptography.model.Key;
 import software.amazon.awssdk.services.paymentcryptography.model.KeyAlgorithm;
 import software.amazon.awssdk.services.paymentcryptography.model.KeyAttributes;
 import software.amazon.awssdk.services.paymentcryptography.model.KeyCheckValueAlgorithm;
 import software.amazon.awssdk.services.paymentcryptography.model.KeyClass;
+import software.amazon.awssdk.services.paymentcryptography.model.KeyMaterialType;
 import software.amazon.awssdk.services.paymentcryptography.model.KeyState;
 import software.amazon.awssdk.services.paymentcryptography.model.KeyUsage;
 import software.amazon.awssdk.services.paymentcryptography.model.ListKeysResponse;
 import software.amazon.awssdk.services.paymentcryptography.model.Tag;
+import software.amazon.awssdk.services.paymentcryptography.model.WrappedKeyMaterialFormat;
 
 import java.util.ArrayList;
 import java.util.List;
@@ -79,6 +85,20 @@ class PaymentCryptographyTest {
      */
     private static Key createTdesKey() {
         return createKey(KeyAlgorithm.TDES_2_KEY);
+    }
+
+    /** The key a key block is wrapped under. */
+    private static Key createWrappingKey() {
+        Key key = client.createKey(r -> r
+                .keyAttributes(a -> a
+                        .keyAlgorithm(KeyAlgorithm.AES_256)
+                        .keyClass(KeyClass.SYMMETRIC_KEY)
+                        .keyUsage(KeyUsage.TR31_K1_KEY_BLOCK_PROTECTION_KEY)
+                        .keyModesOfUse(m -> m.wrap(true).unwrap(true)))
+                .exportable(true))
+                .key();
+        keyArns.add(key.keyArn());
+        return key;
     }
 
     /** A key of the given algorithm, for the data the cipher protects. */
@@ -144,6 +164,54 @@ class PaymentCryptographyTest {
         Key read = client.getKey(k -> k.keyIdentifier(created.keyArn())).key();
         assertThat(read.keyCheckValue()).isEqualTo(created.keyCheckValue());
         assertThat(read.keyCheckValueAlgorithm()).isEqualTo(KeyCheckValueAlgorithm.ANSI_X9_24);
+    }
+
+    @Test
+    void theImportAndExportParametersAreServed() {
+        GetParametersForImportResponse importParameters = client.getParametersForImport(r -> r
+                .keyMaterialType(KeyMaterialType.TR34_KEY_BLOCK)
+                .wrappingKeyAlgorithm(KeyAlgorithm.RSA_2048));
+
+        assertThat(importParameters.importToken()).startsWith("import-token-");
+        assertThat(importParameters.wrappingKeyAlgorithm()).isEqualTo(KeyAlgorithm.RSA_2048);
+        assertThat(importParameters.wrappingKeyCertificate()).isNotBlank();
+        assertThat(importParameters.wrappingKeyCertificateChain()).isNotBlank();
+        assertThat(importParameters.parametersValidUntilTimestamp()).isNotNull();
+
+        GetParametersForExportResponse exportParameters = client.getParametersForExport(r -> r
+                .keyMaterialType(KeyMaterialType.TR34_KEY_BLOCK)
+                .signingKeyAlgorithm(KeyAlgorithm.RSA_2048));
+
+        assertThat(exportParameters.exportToken()).startsWith("export-token-");
+        assertThat(exportParameters.signingKeyAlgorithm()).isEqualTo(KeyAlgorithm.RSA_2048);
+        assertThat(exportParameters.signingKeyCertificate()).isNotBlank();
+        assertThat(exportParameters.signingKeyCertificateChain()).isNotBlank();
+        assertThat(exportParameters.parametersValidUntilTimestamp()).isNotNull();
+    }
+
+    @Test
+    void aKeyLeavesTheServiceAndComesBackThroughTheKeyExchange() {
+        Key wrapping = createWrappingKey();
+        Key key = createAesKey();
+
+        ExportKeyResponse exported = client.exportKey(r -> r
+                .exportKeyIdentifier(key.keyArn())
+                .keyMaterial(m -> m.tr31KeyBlock(b -> b.wrappingKeyIdentifier(wrapping.keyArn()))));
+
+        assertThat(exported.wrappedKey().wrappedKeyMaterialFormat())
+                .isEqualTo(WrappedKeyMaterialFormat.TR31_KEY_BLOCK);
+        assertThat(exported.wrappedKey().wrappingKeyArn()).isEqualTo(wrapping.keyArn());
+        assertThat(exported.wrappedKey().keyMaterial()).isNotBlank();
+        assertThat(exported.wrappedKey().keyCheckValue()).isNotBlank();
+
+        ImportKeyResponse imported = client.importKey(r -> r
+                .keyMaterial(m -> m.tr31KeyBlock(b -> b
+                        .wrappingKeyIdentifier(wrapping.keyArn())
+                        .wrappedKeyBlock(exported.wrappedKey().keyMaterial()))));
+
+        assertThat(imported.key().keyArn()).isNotBlank();
+        assertThat(imported.key().keyAttributes().keyUsage())
+                .isEqualTo(KeyUsage.TR31_D0_SYMMETRIC_DATA_ENCRYPTION_KEY);
     }
 
     @Test
