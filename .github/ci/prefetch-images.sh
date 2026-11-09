@@ -108,7 +108,15 @@ starts EmrServerlessHiveDockerIntegrationTest EmrHiveStepsDockerIntegrationTest 
 # package token in shard.txt -> images its tests are known to launch
 # (measured inline pulls; update alongside image-catalog changes)
 grep -q '/docdb/'       "$SHARD_FILE" && pull mongo:7.0
-grep -q '/neptune/'     "$SHARD_FILE" && { pull neo4j:5-community; pull tinkerpop/gremlin-server:3.7.3; }
+if grep -q '/neptune/' "$SHARD_FILE"; then
+    pull neo4j:5-community
+    NEPTUNE_IMAGE="$(awk '/^    neptune:/ { in_service=1; next } in_service && /^    [a-z]/ { exit } in_service && $1 == "default-image:" { gsub(/"/, "", $2); print $2; exit }' src/main/resources/application.yml)"
+    if [ -n "$NEPTUNE_IMAGE" ]; then
+        pull "$NEPTUNE_IMAGE"
+    else
+        echo "$(date -u +%H:%M:%S) prefetch skipped: neptune.default-image not readable" >> "$PREFETCH_LOG"
+    fi
+fi
 grep -q '/elasticache/' "$SHARD_FILE" && { pull valkey/valkey:8; pull memcached:1.6; }
 grep -q '/memorydb/'    "$SHARD_FILE" && pull valkey/valkey:8
 grep -q '/ecr/'         "$SHARD_FILE" && pull registry:2
