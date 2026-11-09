@@ -4,8 +4,6 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.floci.aws.services.lambda.LambdaService;
-import io.floci.aws.services.lambda.model.InvocationType;
-import io.floci.aws.services.lambda.model.InvokeResult;
 import io.floci.aws.testing.CfnRequests;
 import io.floci.aws.testing.CfnStackWaits;
 import io.floci.aws.testing.EventRuleQueue;
@@ -20,8 +18,6 @@ import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
-import java.net.URI;
-import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
@@ -29,7 +25,6 @@ import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.UUID;
-import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 import java.util.function.Predicate;
 
@@ -41,9 +36,6 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.junit.jupiter.api.Assertions.fail;
-import static org.mockito.ArgumentMatchers.any;
-import static org.mockito.ArgumentMatchers.eq;
-import static org.mockito.Mockito.when;
 
 /**
  * What a rule on the default bus receives as a stack's status changes, against what CloudFormation
@@ -90,12 +82,11 @@ class CloudFormationStackStatusEventsIntegrationTest {
     private static final String HELD_SERVICE_TOKEN =
             "arn:aws:lambda:us-east-1:000000000000:function:status-events-held-create";
 
-    /** The ServiceToken Lambda of {@link #heldTemplate()}, holding its Create until the test releases it. */
     @InjectMock
     LambdaService lambdaService;
 
-    private final CountDownLatch createReceived = new CountDownLatch(1);
-    private final CountDownLatch releaseCreate = new CountDownLatch(1);
+    /** The Create of {@link #heldTemplate()}'s custom resource, held until the test releases it. */
+    private CustomResourceProbe.Hold heldCreate;
 
     @BeforeAll
     static void configureRestAssured() {
@@ -104,29 +95,13 @@ class CloudFormationStackStatusEventsIntegrationTest {
 
     @BeforeEach
     void holdTheCustomResourcesCreate() {
-        when(lambdaService.invoke(any(), eq(HELD_SERVICE_TOKEN), any(), eq(InvocationType.RequestResponse)))
-                .thenAnswer(invocation -> {
-                    JsonNode event = MAPPER.readTree((byte[]) invocation.getArgument(2));
-                    if ("Create".equals(event.get("RequestType").asText())) {
-                        createReceived.countDown();
-                        assertTrue(releaseCreate.await(10, TimeUnit.SECONDS), "the test never released the Create");
-                    }
-                    ObjectNode response = MAPPER.createObjectNode()
-                            .put("Status", "SUCCESS")
-                            .put("RequestId", event.get("RequestId").asText())
-                            .put("StackId", event.get("StackId").asText())
-                            .put("LogicalResourceId", event.get("LogicalResourceId").asText())
-                            .put("PhysicalResourceId", "status-events-held-probe");
-                    given().body(response.toString())
-                            .when().put(URI.create(event.get("ResponseURL").asText()).getPath())
-                            .then().statusCode(200);
-                    return new InvokeResult(200, null, "null".getBytes(StandardCharsets.UTF_8), null, "req-1");
-                });
+        heldCreate = CustomResourceProbe.stub(lambdaService, HELD_SERVICE_TOKEN, "status-events-held-probe")
+                .hold(event -> "Create".equals(event.path("RequestType").asText()));
     }
 
     @AfterEach
     void releaseHeldCreate() {
-        releaseCreate.countDown();
+        heldCreate.release();
     }
 
     @BeforeEach
@@ -184,11 +159,11 @@ class CloudFormationStackStatusEventsIntegrationTest {
         try (EventRuleQueue queue = EventRuleQueue.route("us-east-1", stack, ALL_STATUS_CHANGES)) {
             String stackId = createChangeSet(stack, "CREATE", "create", heldTemplate());
             executeChangeSet(stack, "create", "create-token");
-            assertTrue(createReceived.await(10, TimeUnit.SECONDS), "the custom resource was never created");
+            assertTrue(heldCreate.awaitRequest(10, TimeUnit.SECONDS), "the custom resource was never created");
 
             CfnRequests.cfn("DeleteStack", stack).formParam("ClientRequestToken", "delete-token")
                     .when().post("/").then().statusCode(200);
-            releaseCreate.countDown();
+            heldCreate.release();
             CfnStackWaits.awaitStatus(stackId, "DELETE_COMPLETE");
 
             List<JsonNode> events = naming(awaitEvents(queue, stackId, "DELETE_COMPLETE"), stackId);
@@ -505,7 +480,7 @@ class CloudFormationStackStatusEventsIntegrationTest {
         return XmlPath.from(xml).getString("**.find { it.name() == 'StackId' }");
     }
 
-    /** A stack whose create holds at its custom resource until {@link #releaseCreate} is counted down. */
+    /** A stack whose create holds at its custom resource until {@link #heldCreate} is released. */
     private static String heldTemplate() {
         return """
                 {
