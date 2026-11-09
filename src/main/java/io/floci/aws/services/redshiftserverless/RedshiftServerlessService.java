@@ -593,12 +593,17 @@ public class RedshiftServerlessService implements Resettable {
 
     /** A stored dump path is trusted only while it still resolves inside this account's dump directory. */
     private Optional<Path> trustedDump(RedshiftServerlessSnapshot snapshot, String region) {
+        return trustedDump(snapshot, workgroups.accountId(), region);
+    }
+
+    /** A stored dump path is trusted only while it still resolves inside the owning account's dump directory. */
+    private Optional<Path> trustedDump(RedshiftServerlessSnapshot snapshot, String accountId, String region) {
         String stored = snapshot.getSqlDump();
         if (stored == null || stored.isBlank()) {
             return Optional.empty();
         }
         Path file = Paths.get(stored).toAbsolutePath().normalize();
-        return file.startsWith(dumpDir(region)) ? Optional.of(file) : Optional.empty();
+        return file.startsWith(dumpDir(accountId, region)) ? Optional.of(file) : Optional.empty();
     }
 
     private static void deleteDumpQuietly(Path dumpFile) {
@@ -908,6 +913,37 @@ public class RedshiftServerlessService implements Resettable {
         if (ownerAccount != null && !ownerAccount.isBlank() && !ownerAccount.equals(snapshot.getOwnerAccount())) {
             throw snapshotNotFound(snapshotName);
         }
+        return restoreFrom(namespaceName, workgroupName, snapshot, workgroups.accountId(), manageAdminPassword,
+                adminPasswordSecretKmsKeyId, region);
+    }
+
+    /**
+     * Restores a snapshot another account shared. The caller has already been checked against the
+     * snapshot's resource policy; the dump is read from the snapshot owner's directory.
+     */
+    public synchronized RestoreResult restoreFromSharedSnapshot(String namespaceName, String workgroupName,
+                                                                RedshiftServerlessSnapshot snapshot,
+                                                                String snapshotAccountId,
+                                                                Boolean manageAdminPassword,
+                                                                String adminPasswordSecretKmsKeyId, String region) {
+        validateManagedPassword(manageAdminPassword, null, adminPasswordSecretKmsKeyId);
+        validateNamespaceName(namespaceName);
+        requireAvailableSnapshot(snapshot);
+        return restoreFrom(namespaceName, workgroupName, snapshot, snapshotAccountId, manageAdminPassword,
+                adminPasswordSecretKmsKeyId, region);
+    }
+
+    /** The snapshot {@code snapshotName} of {@code accountId} in {@code region}, whoever is calling. */
+    public Optional<RedshiftServerlessSnapshot> findSnapshotOfAccount(String accountId, String snapshotName,
+                                                                      String region) {
+        return snapshotName == null ? Optional.empty()
+                : snapshots.getForAccount(accountId, storageKey(region, snapshotName));
+    }
+
+    private RestoreResult restoreFrom(String namespaceName, String workgroupName, RedshiftServerlessSnapshot snapshot,
+                                      String snapshotAccountId, Boolean manageAdminPassword,
+                                      String adminPasswordSecretKmsKeyId, String region) {
+        String snapshotName = snapshot.getSnapshotName();
         Workgroup workgroup = getWorkgroup(workgroupName, region);
         if (!namespaceName.equals(workgroup.getNamespaceName())) {
             throw ServerlessSupport.validation("The workgroup " + workgroupName + " does not belong to the namespace "
@@ -917,7 +953,7 @@ public class RedshiftServerlessService implements Resettable {
         Runnable restoreCredentials = () -> restoreSnapshotCredentials(namespace, snapshot, manageAdminPassword,
                 adminPasswordSecretKmsKeyId, region);
         if (snapshot.getSqlDump() != null && hasLiveRuntime(workgroup)) {
-            Path dump = trustedDump(snapshot, region).filter(Files::exists).orElseThrow(() -> new AwsException(
+            Path dump = trustedDump(snapshot, snapshotAccountId, region).filter(Files::exists).orElseThrow(() -> new AwsException(
                     "InternalServerException", "The data of snapshot " + snapshotName + " is no longer available.",
                     500));
             runtime.restoreSnapshot(workgroups.accountId(), region, workgroupName, workgroup.getMasterUsername(),

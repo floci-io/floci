@@ -1058,6 +1058,76 @@ class RedshiftServerlessServiceTest {
     }
 
     @Test
+    void restoreFromSharedSnapshotReadsTheSnapshotOfAnotherAccount() throws Exception {
+        String owner = "999999999999";
+        create("shared-ns");
+        createWorkgroup("shared-wg", "shared-ns");
+        RedshiftServerlessSnapshot own = service.createSnapshot("own-snap", "shared-ns", null, null, REGION);
+        Path ownerDump = dumpDir.resolve("redshift-serverless-dumps").resolve(owner).resolve(REGION)
+                .resolve("their-snap.sql").toAbsolutePath().normalize();
+        Files.createDirectories(ownerDump.getParent());
+        Files.writeString(ownerDump, "select 1;");
+        RedshiftServerlessSnapshot theirs = new RedshiftServerlessSnapshot(own);
+        theirs.setSnapshotName("their-snap");
+        theirs.setOwnerAccount(owner);
+        theirs.setSqlDump(ownerDump.toString());
+        snapshotStore.putForAccount(owner, REGION + "::their-snap", theirs);
+
+        assertTrue(service.findSnapshotOfAccount(owner, "their-snap", REGION).isPresent());
+        assertTrue(service.findSnapshotOfAccount(ACCOUNT_ID, "their-snap", REGION).isEmpty());
+        assertTrue(service.findSnapshotOfAccount(owner, "own-snap", REGION).isEmpty());
+
+        RedshiftServerlessService.RestoreResult restored = service.restoreFromSharedSnapshot(
+                "shared-ns", "shared-wg", theirs, owner, null, null, REGION);
+
+        assertEquals("AVAILABLE", restored.namespace().getStatus());
+        assertEquals("their-snap", restored.snapshot().getSnapshotName());
+        assertEquals(owner, restored.snapshot().getOwnerAccount());
+        verify(runtime).restoreSnapshot(eq(ACCOUNT_ID), eq(REGION), eq("shared-wg"), any(), any(), eq(ownerDump),
+                any());
+    }
+
+    @Test
+    void restoreFromSharedSnapshotDoesNotTrustADumpOutsideTheOwnersDirectory() throws Exception {
+        String owner = "999999999999";
+        create("shared-ns");
+        createWorkgroup("shared-wg", "shared-ns");
+        Path callerDump = dumpDir.resolve("redshift-serverless-dumps").resolve(ACCOUNT_ID).resolve(REGION)
+                .resolve("elsewhere.sql").toAbsolutePath().normalize();
+        Files.createDirectories(callerDump.getParent());
+        Files.writeString(callerDump, "select 1;");
+        RedshiftServerlessSnapshot theirs = new RedshiftServerlessSnapshot(
+                service.createSnapshot("own-snap", "shared-ns", null, null, REGION));
+        theirs.setSnapshotName("their-snap");
+        theirs.setOwnerAccount(owner);
+        theirs.setSqlDump(callerDump.toString());
+
+        AwsException untrusted = assertThrows(AwsException.class, () -> service.restoreFromSharedSnapshot(
+                "shared-ns", "shared-wg", theirs, owner, null, null, REGION));
+
+        assertEquals("InternalServerException", untrusted.getErrorCode());
+    }
+
+    @Test
+    void restoreFromSharedSnapshotStillNeedsAnAvailableSnapshotAndAWorkgroup() {
+        String owner = "999999999999";
+        create("shared-ns");
+        RedshiftServerlessSnapshot theirs = new RedshiftServerlessSnapshot(
+                service.createSnapshot("own-snap", "shared-ns", null, null, REGION));
+        theirs.setSnapshotName("their-snap");
+        theirs.setOwnerAccount(owner);
+
+        AwsException noWorkgroup = assertThrows(AwsException.class, () -> service.restoreFromSharedSnapshot(
+                "shared-ns", "missing-wg", theirs, owner, null, null, REGION));
+        assertEquals("ResourceNotFoundException", noWorkgroup.getErrorCode());
+
+        theirs.setStatus("FAILED");
+        AwsException unavailable = assertThrows(AwsException.class, () -> service.restoreFromSharedSnapshot(
+                "shared-ns", "missing-wg", theirs, owner, null, null, REGION));
+        assertEquals("ConflictException", unavailable.getErrorCode());
+    }
+
+    @Test
     void restoreRejectsAWorkgroupOfAnotherNamespace() {
         create("rest-a");
         create("rest-b");

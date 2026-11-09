@@ -67,6 +67,17 @@ public class RedshiftServerlessResourcePolicyService implements Resettable {
         policies.delete(storageKey(region, resourceArn));
     }
 
+    /**
+     * The policy on a snapshot of {@code ownerAccount}, read for whoever is calling. A policy left by a
+     * snapshot since replaced under the same name is not this snapshot's, so it is not returned.
+     */
+    public synchronized Optional<String> policyOfSnapshot(String ownerAccount, RedshiftServerlessSnapshot snapshot,
+                                                          String region) {
+        return policies.getForAccount(ownerAccount, storageKey(region, snapshot.getSnapshotArn()))
+                .filter(stored -> Objects.equals(stored.getSnapshotCreateTime(), snapshot.getSnapshotCreateTime()))
+                .map(ResourcePolicy::getPolicy);
+    }
+
     synchronized void deleteExpiredSnapshotPolicy(
             AccountAwareStorageBackend.AccountEntry<RedshiftServerlessSnapshot> entry) {
         RedshiftServerlessSnapshot snapshot = entry.value();

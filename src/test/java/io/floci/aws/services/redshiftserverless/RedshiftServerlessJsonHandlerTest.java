@@ -77,6 +77,7 @@ class RedshiftServerlessJsonHandlerTest {
 
     private final ObjectMapper mapper = new ObjectMapper();
     private RedshiftServerlessJsonHandler handler;
+    private final RedshiftServerlessSharedSnapshots sharedSnapshots = mock(RedshiftServerlessSharedSnapshots.class);
     private RedshiftIamDbUserResolver iamDbUserResolver;
 
     @BeforeEach
@@ -134,7 +135,7 @@ class RedshiftServerlessJsonHandlerTest {
                         new RedshiftServerlessSnapshotCopyService(storageFactory, regionResolver, service),
                         new RedshiftServerlessScheduledActionService(storageFactory, service,
                                 mock(RedshiftServerlessScheduledActionAuthorizer.class), regionResolver)),
-                customDomains);
+                customDomains, sharedSnapshots);
     }
 
     @SuppressWarnings({"unchecked", "rawtypes"})

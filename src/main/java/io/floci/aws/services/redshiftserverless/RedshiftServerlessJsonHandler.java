@@ -47,19 +47,22 @@ public class RedshiftServerlessJsonHandler {
     private final RedshiftServerlessUsageLimitService usageLimits;
     private final RedshiftServerlessAdminJsonHandler admin;
     private final RedshiftServerlessCustomDomainService customDomains;
+    private final RedshiftServerlessSharedSnapshots sharedSnapshots;
 
     @Inject
     public RedshiftServerlessJsonHandler(RedshiftServerlessService service, ObjectMapper objectMapper,
                                          RedshiftIamDbUserResolver iamDbUserResolver,
                                          RedshiftServerlessUsageLimitService usageLimits,
                                          RedshiftServerlessAdminJsonHandler admin,
-                                         RedshiftServerlessCustomDomainService customDomains) {
+                                         RedshiftServerlessCustomDomainService customDomains,
+                                         RedshiftServerlessSharedSnapshots sharedSnapshots) {
         this.service = service;
         this.objectMapper = objectMapper;
         this.iamDbUserResolver = iamDbUserResolver;
         this.usageLimits = usageLimits;
         this.admin = admin;
         this.customDomains = customDomains;
+        this.sharedSnapshots = sharedSnapshots;
     }
 
     public Response handle(String action, JsonNode request, String region) {
@@ -281,11 +284,22 @@ public class RedshiftServerlessJsonHandler {
     }
 
     private Response handleRestoreFromSnapshot(JsonNode request, String region) {
-        RedshiftServerlessService.RestoreResult result = service.restoreFromSnapshot(
-                ServerlessSupport.text(request, "namespaceName"), ServerlessSupport.text(request, "workgroupName"),
-                snapshotNameOf(request, region), ServerlessSupport.text(request, "ownerAccount"),
-                ServerlessSupport.bool(request, "manageAdminPassword"),
-                ServerlessSupport.text(request, "adminPasswordSecretKmsKeyId"), region);
+        String ownerAccount = ServerlessSupport.text(request, "ownerAccount");
+        String snapshotName = snapshotNameOf(request, region);
+        RedshiftServerlessService.RestoreResult result;
+        if (sharedSnapshots.isOtherAccount(ownerAccount)) {
+            RedshiftServerlessSnapshot shared = sharedSnapshots.requireRestorable(ownerAccount, snapshotName, region);
+            result = service.restoreFromSharedSnapshot(
+                    ServerlessSupport.text(request, "namespaceName"), ServerlessSupport.text(request, "workgroupName"),
+                    shared, ownerAccount, ServerlessSupport.bool(request, "manageAdminPassword"),
+                    ServerlessSupport.text(request, "adminPasswordSecretKmsKeyId"), region);
+        } else {
+            result = service.restoreFromSnapshot(
+                    ServerlessSupport.text(request, "namespaceName"), ServerlessSupport.text(request, "workgroupName"),
+                    snapshotName, ownerAccount,
+                    ServerlessSupport.bool(request, "manageAdminPassword"),
+                    ServerlessSupport.text(request, "adminPasswordSecretKmsKeyId"), region);
+        }
         ObjectNode response = objectMapper.createObjectNode();
         response.set("namespace", namespaceNode(result.namespace()));
         response.put("ownerAccount", result.snapshot().getOwnerAccount());

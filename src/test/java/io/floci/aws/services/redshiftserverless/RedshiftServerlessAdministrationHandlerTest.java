@@ -43,6 +43,7 @@ class RedshiftServerlessAdministrationHandlerTest {
 
     private final ObjectMapper mapper = new ObjectMapper();
     private RedshiftServerlessJsonHandler handler;
+    private final RedshiftServerlessSharedSnapshots sharedSnapshots = mock(RedshiftServerlessSharedSnapshots.class);
     private RedshiftServerlessService serverlessService;
     private Certificate testCert;
 
@@ -95,7 +96,7 @@ class RedshiftServerlessAdministrationHandlerTest {
                         new RedshiftServerlessSnapshotCopyService(storageFactory, regionResolver, serverlessService),
                         new RedshiftServerlessScheduledActionService(storageFactory, serverlessService,
                                 mock(RedshiftServerlessScheduledActionAuthorizer.class), regionResolver)),
-                customDomains);
+                customDomains, sharedSnapshots);
     }
 
     @Test
