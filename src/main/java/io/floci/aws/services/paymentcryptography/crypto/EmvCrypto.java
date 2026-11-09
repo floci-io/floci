@@ -139,21 +139,19 @@ public final class EmvCrypto {
      * EMV Book 2 Option A ICC master key derivation.
      *
      * <pre>
-     *   B  = PAN || PSN as packed BCD, left-zero-padded to an even nibble count
-     *   Y  = the RIGHT-MOST 8 bytes of B
+     *   Y  = the RIGHT-MOST 16 digits of PAN || PSN, left-padded with zeros when shorter
      *   ZR = Y XOR FF..FF
      *   MK = 3DES(IMK, Y) || 3DES(IMK, ZR), odd parity adjusted
      * </pre>
      *
-     * <p>Y is the last 8 bytes, not the first. For a 16-digit PAN the two differ,
-     * and using the first 8 changes the master key and every tag that follows.
+     * <p>Y is the last sixteen digits, not the first. For a 16-digit PAN the two differ,
+     * and using the first changes the master key and every tag that follows. The rule is the
+     * one EMV 4.4 Book 2 Annex A1.4.1 gives, and the Visa Integrated Circuit Card
+     * Specification states it the same way: the rightmost sixteen digits of the PAN and the
+     * sequence number, padded on the left with zeros when they are shorter.
      */
     public static byte[] deriveIccMasterKey(byte[] imk16, String pan, String psn) {
-        byte[] b = packedBcd(pan, psn);
-        if (b.length < 8) {
-            throw new IllegalArgumentException("PAN || PSN must pack to at least 8 bytes");
-        }
-        byte[] y = slice(b, b.length - 8, b.length);
+        byte[] y = masterKeyInput(pan, psn);
         byte[] zr = new byte[8];
         for (int i = 0; i < 8; i++) {
             zr[i] = (byte) (y[i] ^ 0xff);
@@ -325,6 +323,24 @@ public final class EmvCrypto {
             throw new IllegalArgumentException("PAN and PSN must contain digits");
         }
         if (digits.length() % 2 != 0) {
+            digits = "0" + digits;
+        }
+        return HEX.parseHex(digits);
+    }
+
+    /**
+     * The block the ICC master key is derived over: the rightmost sixteen digits of the PAN
+     * and the PAN sequence number, padded on the left with zeros when they are shorter.
+     */
+    private static byte[] masterKeyInput(String pan, String psn) {
+        String digits = PinCrypto.digits(pan) + PinCrypto.digits(psn == null ? "00" : psn);
+        if (digits.isEmpty()) {
+            throw new IllegalArgumentException("PAN and PSN must contain digits");
+        }
+        if (digits.length() > 16) {
+            digits = digits.substring(digits.length() - 16);
+        }
+        while (digits.length() < 16) {
             digits = "0" + digits;
         }
         return HEX.parseHex(digits);

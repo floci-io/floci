@@ -226,11 +226,20 @@ public class PaymentCryptographyAuthCryptogramOperations {
         return new EmvCrypto.Arqc(Arrays.copyOf(mac, 8), sessionKey);
     }
 
-    /** The ICC AC master key for the resolved derivation, which is also the M/Chip ARPC key. */
+    /**
+     * The ICC AC master key for the resolved derivation, which is also the M/Chip ARPC key.
+     *
+     * <p>A derivation the request cannot be read for is refused with the error the model
+     * names, rather than answered with a failure the caller cannot catch.
+     */
     private static byte[] masterKeyOf(SessionKey sk, byte[] imk) {
-        return sk.optionB
-                ? EmvCrypto.deriveIccMasterKeyOptionB(imk, sk.pan, sk.psn)
-                : EmvCrypto.deriveIccMasterKey(imk, sk.pan, sk.psn);
+        try {
+            return sk.optionB
+                    ? EmvCrypto.deriveIccMasterKeyOptionB(imk, sk.pan, sk.psn)
+                    : EmvCrypto.deriveIccMasterKey(imk, sk.pan, sk.psn);
+        } catch (IllegalArgumentException e) {
+            throw validation(e.getMessage());
+        }
     }
 
     /**
@@ -265,15 +274,6 @@ public class PaymentCryptographyAuthCryptogramOperations {
         String pan = text(attrs, "PrimaryAccountNumber");
         String psn = text(attrs, "PanSequenceNumber");
         String atc = text(attrs, "ApplicationTransactionCounter");
-        // The master key derivation takes the last eight bytes of PAN || PSN, so the two together
-        // have to supply eight bytes. A PAN that cannot is refused here, by name, rather than
-        // inside the derivation.
-        int packed = (pan.length() + psn.length() + 1) / 2;
-        if (packed < 8) {
-            throw validation("SessionKeyDerivationAttributes." + variant
-                    + ".PrimaryAccountNumber is too short: the PAN and PanSequenceNumber must "
-                    + "supply at least 8 bytes for the master key derivation");
-        }
         if (mastercard && optionB) {
             // The reference implementation's own constraint: master key derivation option B is
             // not used in practice with this scheme.

@@ -105,6 +105,11 @@ client that talks to the control plane does not reach it by accident.
   number and a longer sequence number are refused rather than read as the digits they
   carry, because the derivation reads the account number and the sequence number as they
   are given.
+- **The master key is derived over the rightmost sixteen digits.** The account number and
+  the PAN sequence number are padded on the left with zeros when they are shorter, which
+  is the rule EMV 4.4 Book 2 gives and the Visa Integrated Circuit Card Specification
+  states the same way. So an account number of twelve digits is read and derived from,
+  rather than refused.
 - **A hexadecimal member of an odd length is refused.** The model states the length of a
   hexadecimal member and does not always state an even one, so an odd number of
   hexadecimal characters is a request the model allows and the cipher cannot read. The
