@@ -324,6 +324,27 @@ class PaymentCryptographyCryptoHandlerTest {
     }
 
     @Test
+    void aPaddingTypeIsRefused() {
+        // The padding type belongs to RSA, and the symmetric cipher does not pad, so a
+        // request that names one is refused rather than answered with a cipher that
+        // ignored it.
+        PaymentCryptographyKey key = createKey("Encrypt", "Decrypt");
+
+        ObjectNode symmetric = mapper.createObjectNode();
+        symmetric.put("Mode", "CBC");
+        symmetric.put("PaddingType", "OAEP_SHA1");
+        ObjectNode attributes = mapper.createObjectNode();
+        attributes.set("Symmetric", symmetric);
+
+        AwsException refused = assertThrows(AwsException.class, () -> handler.encryptData(request(Map.of(
+                "KeyIdentifier", key.getArn(), "PlainText", hex("hello, world!!!!".getBytes()),
+                "EncryptionAttributes", attributes)), "us-east-1"));
+
+        assertEquals("ValidationException", refused.getErrorCode());
+        assertTrue(refused.getMessage().contains("PaddingType"), refused.getMessage());
+    }
+
+    @Test
     void aCipherTextIsAsLongAsThePlainTextItHolds() {
         // The cipher pads no data, so a ciphertext is as long as its plaintext.
         PaymentCryptographyKey key = createKey("Encrypt", "Decrypt");
