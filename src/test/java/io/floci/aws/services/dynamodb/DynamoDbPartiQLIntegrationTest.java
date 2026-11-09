@@ -880,6 +880,24 @@ class DynamoDbPartiQLIntegrationTest {
             .body("message", equalTo("Validation failed in TransactStatements[0]: Unsupported operation in transaction."));
     }
 
+    @Test
+    @Order(41)
+    void aNestedStatementIsReadAsATerm() {
+        statement("SELECT * FROM \"ttt\" WHERE pk = (SELECT * FROM \"ttt\")")
+            .statusCode(400)
+            .body("__type", equalTo("ValidationException"))
+            .body("message", equalTo("Unsupported token in expression: SELECT at 1:33:6"));
+        statement("foo(DELETE FROM \"ttt\" WHERE pk = 1)")
+            .statusCode(400)
+            .body("message", equalTo("Statement wasn't well formed, can't be processed: "
+                    + "Keyword delete only expected at the top level in the query"));
+        request("DynamoDB_20120810.ExecuteTransaction", """
+                {"TransactStatements":[{"Statement":"EXISTS(SELECT * FROM \\"ttt\\" WHERE pk = 1, 1)"}]}
+                """)
+            .statusCode(400)
+            .body("message", equalTo("Validation failed in TransactStatements[0]: Unsupported operation in transaction."));
+    }
+
     private static void putItem(String pk, String attributes) {
         request("DynamoDB_20120810.PutItem", """
                 {"TableName":"%s","Item":{"pk":{"S":"%s"},%s}}

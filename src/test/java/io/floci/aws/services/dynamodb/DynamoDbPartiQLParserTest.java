@@ -1007,6 +1007,68 @@ class DynamoDbPartiQLParserTest {
                 statementRefusal(statement, 0, true));
     }
 
+    @ParameterizedTest
+    @CsvSource(delimiter = '|', quoteCharacter = '`', textBlock = """
+            foo(SELECT * FROM "t" AS x)                                         | CALL
+            foo((SELECT * FROM "t" WHERE pk = ?))                               | CALL
+            EXISTS(SELECT * FROM "t" WHERE pk = 1, 1)                           | CALL
+            EXISTS(SELECT * FROM "t" WHERE pk = 1).a                            | Unsupported operation: Path
+            EXISTS(SELECT * FROM "t" WHERE pk = 1) IS MISSING                   | Unsupported operation: IsType
+            foo(DELETE FROM "u" WHERE pk = 1)                                   | KEYWORD delete
+            foo(UPDATE "u" SET a = 1 WHERE pk = 1)                              | KEYWORD null
+            foo(INSERT INTO "u" VALUE {'pk': 1})                                | NWF Unable to parse statement
+            foo((INSERT INTO "u" VALUE {'pk': 1}))                              | NWF Unable to parse statement
+            count(INSERT INTO "u" VALUE {'pk': 1})                              | NWF Unable to parse statement
+            [INSERT INTO "u" VALUE {'pk': 1}]                                   | NWF Unable to parse statement
+            foo(foo(INSERT INTO "u" VALUE {'pk': 1}))                           | KEYWORD insert_into
+            {'a': INSERT INTO "u" VALUE {'pk': 1}}                              | KEYWORD insert_into
+            foo(INSERT INTO "u" VALUE {'pk': 1}).a                              | KEYWORD insert_into
+            foo(INSERT INTO "u" VALUE {'pk': 1}, DELETE FROM "u" WHERE pk = 1)  | KEYWORD delete
+            foo(SELECT * FROM "u" WHERE a = (INSERT INTO "u" VALUE {'pk': 1}))  | KEYWORD insert_into
+            SELECT * FROM "t" WHERE a = (UPDATE "u" SET a = 1 WHERE pk = 1)     | KEYWORD null
+            SELECT (DELETE FROM "u" WHERE pk = 1) FROM "t"                      | KEYWORD delete
+            UPDATE "t" SET a = INSERT INTO "u" VALUE {'pk': 1} WHERE pk = 1     | KEYWORD insert_into
+            foo(DELETE FROM "u" WHERE pk = 1) x                                 | NWF Unexpected token after expression
+            foo(DELETE FROM "u" WHERE pk = 1, 1 2)                              | NWF Expected RIGHT_PAREN
+            foo(SELECT * FROM "t" WHERE pk = )                                  | NWF Unexpected term
+            EXISTS(SELECT * FROM "t" WHERE pk = 1                               | NWF Expected RIGHT_PAREN
+            EXISTS(SELECT * FROM "t" WHERE pk = 1 AND a = (DELETE FROM "u" WHERE pk = 1)) | KEYWORD delete
+            """)
+    void refusesANestedStatementOnceTheWholeStatementParses(String statement, String message) {
+        String expected = message
+                .replaceAll("KEYWORD (\\S+)", "NWF Keyword $1 only expected at the top level in the query")
+                .replace("NWF ", "Statement wasn't well formed, can't be processed: ");
+
+        assertEquals(expected.replace("CALL", "EXISTS can only be used in ExecuteTransaction write requests."),
+                statementRefusal(statement, 0));
+        assertEquals(expected.replace("CALL", "Unsupported operation in transaction."),
+                statementRefusal(statement, 0, true));
+    }
+
+    @ParameterizedTest
+    @CsvSource(delimiter = '|', quoteCharacter = '`', textBlock = """
+            SELECT * FROM "t" WHERE a = (SELECT * FROM "u")                     | Unsupported token in expression: SELECT at 1:30:6
+            SELECT * FROM "t" WHERE (SELECT * FROM "u") = 1                     | Unsupported token in expression: SELECT at 1:26:6
+            SELECT * FROM "t" WHERE a = select * from "u" WHERE pk = 1          | Unsupported token in expression: SELECT at 1:29:6
+            SELECT * FROM "t" WHERE a IN [SELECT a FROM "u"]                    | Unsupported token in expression: SELECT at 1:31:6
+            SELECT * FROM "t" WHERE attribute_exists(1) AND a = (SELECT * FROM "u" AS x WHERE foo(1)) | Unsupported token in expression: SELECT at 1:54:6
+            SELECT * FROM "t" WHERE foo(1) AND a = (SELECT * FROM "u")          | Unrecognized function: foo at 1:25:3
+            SELECT * FROM "t" WHERE a = <<>> AND b = (SELECT * FROM "u")        | Empty bags are not supported
+            SELECT * FROM "t" AS x WHERE a = (SELECT * FROM "u")                | Aliasing is not supported
+            SELECT * FROM "t" WHERE a = (SELECT a FROM "u").b                   | Unexpected path component at 1:30:6
+            SELECT * FROM "t" WHERE a = [SELECT * FROM "u"]                     | Unsupported data type: Select under key root[0] at 1:30:6
+            SELECT * FROM "t" WHERE a = <<SELECT * FROM "u">>                   | Unsupported data type in Bag. DynamoDB only supports either numbers or strings in bags at 1:31:6
+            SELECT * FROM "t" WHERE a = <<1, SELECT * FROM "u">>                | Unsupported data type: Select under key root at 1:34:6
+            UPDATE "t" SET a = (SELECT * FROM "u") + 1 WHERE pk = 1             | Unsupported token in expression: SELECT at 1:21:6
+            UPDATE "t" SET a = (SELECT * FROM "u") WHERE foo(1)                 | Unrecognized function: foo at 1:46:3
+            INSERT INTO "t" VALUE {'pk': (SELECT * FROM "u")}                   | Unsupported data type: SELECT under key root at 1:31:6
+            SELECT (SELECT * FROM "u") FROM "t"                                 | Unexpected path component at 1:9:6
+            SELECT * FROM "t" WHERE a = (SELECT * FROM "u"                      | Statement wasn't well formed, can't be processed: Expected RIGHT_PAREN
+            """)
+    void refusesANestedSelectWhereItsTermIsChecked(String statement, String message) {
+        assertEquals(message, statementRefusal(statement, 0));
+    }
+
     @Test
     void countsInOperandsWithTheOperandChecks() {
         String tooMany = "The IN operator is provided with too many operands; number of operands: 101";
