@@ -63,7 +63,9 @@ floci:
     # in floci.env), which most clusters do not offer.
     executor: kubernetes
     kubernetes:
-      # -- Namespace Lambda pods are created in. Empty means the release namespace.
+      # -- Namespace Lambda pods are created in. Empty means the release namespace. Use one
+      # release per Lambda namespace: Floci's orphan sweep and the uninstall cleanup hook
+      # delete every Floci Lambda pod in it, and the CA ConfigMap name is fixed.
       namespace: ""
       # -- Init container image that downloads function code into the pod (needs sh, wget
       # and unzip). Empty keeps Floci's default (busybox:1.36).
@@ -283,8 +285,9 @@ helperImage:
   pullPolicy: IfNotPresent
 
 cleanup:
-  # -- Run a pre-delete hook, under Floci's ServiceAccount, that deletes the Lambda pods
-  # and the floci-lambda-ca ConfigMap Floci created at runtime. Helm removes the
+  # -- Run a pre-delete hook, under Floci's ServiceAccount, that deletes every Floci Lambda
+  # pod in the Lambda namespace and the floci-lambda-ca ConfigMap, the objects Floci creates
+  # at runtime (so use one release per Lambda namespace). Helm removes the
   # ServiceAccount while Floci is still shutting down, so Floci's own drain of warm pods
   # can no longer authenticate and those pods would stay behind until the next install's
   # orphan sweep. Best effort: its script always exits 0 and bounds every API call. If the

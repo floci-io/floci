@@ -48,6 +48,7 @@ Check the installation with:
 {{- if include "floci.kubernetesExecutor" . }}
 
 Lambda functions run as pods in namespace {{ include "floci.lambdaNamespace" . }} (label app.kubernetes.io/managed-by=floci).
+Floci deletes every Floci Lambda pod there that it did not create, so keep other releases' Lambda pods out of it.
 {{- if not .Values.rbac.create }}
 rbac.create is false: give ServiceAccount {{ include "floci.serviceAccountName" . }} the pods and pods/log permissions
 listed in templates/rbac.yaml in that namespace, or Lambda invocations will fail.

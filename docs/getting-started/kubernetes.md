@@ -158,8 +158,23 @@ What the chart sets up for it:
   runs under Floci's ServiceAccount, bounds every API call and always exits 0; if its pod cannot
   run at all (for example, the image cannot be pulled), `helm uninstall --no-hooks` skips it.
 
-One Floci instance sweeps every Floci Lambda pod in its Lambda namespace at startup, so give each
-release its own Lambda namespace.
+### One release per Lambda namespace
+
+Floci treats every Lambda pod in its Lambda namespace as its own: the first time a Floci process
+launches a Lambda pod, it deletes the ones it did not create (pods labelled
+`app.kubernetes.io/managed-by=floci` and `floci.io/service=lambda`), and the uninstall hook deletes
+all of them along with the `floci-lambda-ca` ConfigMap, whose name is fixed. Two releases that share
+a Lambda namespace would delete each other's warm Lambda pods after every restart and on uninstall,
+and with TLS each would overwrite the other's CA in that ConfigMap. Give every release a Lambda
+namespace of its own. The default is the release namespace, so two releases in one namespace each
+need their own `floci.lambda.kubernetes.namespace`:
+
+```bash
+helm install ci-a ./floci/charts/floci -n ci --set floci.lambda.kubernetes.namespace=ci-a-lambda
+helm install ci-b ./floci/charts/floci -n ci --set floci.lambda.kubernetes.namespace=ci-b-lambda
+```
+
+The Lambda namespaces must exist before the install, since the chart creates its Role in them.
 
 ## Persistence
 
