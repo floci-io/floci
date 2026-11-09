@@ -89,6 +89,70 @@ class ApiGatewayVtlCompatibilityTest {
     }
 
     @Test
+    @DisplayName("The $foreach loop scope works in native REST response templates")
+    void foreachScopeWorksInNativeImage() throws Exception {
+        Assumptions.assumeFalse(TestFixtures.isRealAws(), "Floci native-image regression test");
+
+        ApiGatewayClient apiGateway = TestFixtures.apiGatewayClient();
+        String apiId = apiGateway.createRestApi(request -> request.name(TestFixtures.uniqueName("apigw-vtl-foreach"))).id();
+
+        try {
+            String rootId = apiGateway.getResources(request -> request.restApiId(apiId)).items().stream()
+                    .filter(resource -> "/".equals(resource.path()))
+                    .findFirst()
+                    .map(Resource::id)
+                    .orElseThrow();
+            String resourceId = apiGateway.createResource(request -> request
+                    .restApiId(apiId)
+                    .parentId(rootId)
+                    .pathPart("foreach")).id();
+
+            apiGateway.putMethod(request -> request
+                    .restApiId(apiId)
+                    .resourceId(resourceId)
+                    .httpMethod("GET")
+                    .authorizationType("NONE"));
+            apiGateway.putIntegration(request -> request
+                    .restApiId(apiId)
+                    .resourceId(resourceId)
+                    .httpMethod("GET")
+                    .type(IntegrationType.MOCK)
+                    .requestTemplates(Map.of("application/json", "{\"statusCode\": 200}")));
+            apiGateway.putMethodResponse(request -> request
+                    .restApiId(apiId)
+                    .resourceId(resourceId)
+                    .httpMethod("GET")
+                    .statusCode("200"));
+
+            String responseTemplate = "#foreach($i in [\"a\",\"b\"])"
+                    + "$i:$foreach.index:$foreach.count:$foreach.hasNext#if($foreach.hasNext),#end#end";
+            apiGateway.putIntegrationResponse(request -> request
+                    .restApiId(apiId)
+                    .resourceId(resourceId)
+                    .httpMethod("GET")
+                    .statusCode("200")
+                    .responseTemplates(Map.of("application/json", responseTemplate)));
+
+            String deploymentId = apiGateway.createDeployment(request -> request.restApiId(apiId)).id();
+            apiGateway.createStage(request -> request
+                    .restApiId(apiId)
+                    .stageName("test")
+                    .deploymentId(deploymentId));
+
+            HttpClient httpClient = TestFixtures.emulatorHttpClient();
+            URI uri = URI.create(TestFixtures.endpoint() + "/execute-api/" + apiId + "/test/foreach");
+            HttpRequest request = HttpRequest.newBuilder(uri).GET().build();
+            HttpResponse<String> response = httpClient.send(request, HttpResponse.BodyHandlers.ofString());
+
+            assertThat(response.statusCode()).isEqualTo(200);
+            assertThat(response.body().trim()).isEqualTo("a:0:1:true,b:1:2:false");
+        } finally {
+            apiGateway.deleteRestApi(request -> request.restApiId(apiId));
+            apiGateway.close();
+        }
+    }
+
+    @Test
     @DisplayName("Header map get and keySet work in the native image")
     void headerMapMethodsWorkInNativeImage() throws Exception {
         Assumptions.assumeFalse(TestFixtures.isRealAws(), "Floci native-image regression test");
