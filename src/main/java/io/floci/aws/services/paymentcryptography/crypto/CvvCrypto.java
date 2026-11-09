@@ -102,9 +102,8 @@ public final class CvvCrypto {
      * when it does not fit it is folded to sixteen bytes with SHA-256 and
      * truncated.
      *
-     * <p><b>As with the dynamic value, this is the emulator's construction</b>,
-     * not the service's published one. The interface, the key type and the
-     * mode of use match.
+     * <p><b>This is the emulator's construction</b>, not the service's published one. The
+     * interface, the key type and the mode of use match.
      */
     public static String computeDynamicCode(String trackDataHex, String atcHex,
                                             String unpredictableNumberHex, String emkHex) {
