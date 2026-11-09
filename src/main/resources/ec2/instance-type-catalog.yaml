@@ -199,6 +199,22 @@ instanceTypes:
       - networkCardIndex: 0
         maximumNetworkInterfaces: 3
 
+  # Storage optimized: one 468 GB AWS Nitro SSD.
+  - instanceType: i4i.large
+    processorManufacturer: Intel
+    vcpu: 2
+    memoryMib: 16384
+    localStorageGiB: 468
+    supportedArchitectures:
+      - x86_64
+    currentGeneration: true
+    encryptionInTransitSupported: true
+    defaultNetworkCardIndex: 0
+    ipv4AddressesPerInterface: 10
+    networkCards:
+      - networkCardIndex: 0
+        maximumNetworkInterfaces: 3
+
   - instanceType: t4g.micro
     processorManufacturer: AWS
     vcpu: 2
