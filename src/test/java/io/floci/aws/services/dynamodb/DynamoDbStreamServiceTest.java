@@ -2,6 +2,7 @@ package io.floci.aws.services.dynamodb;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.floci.aws.core.common.AwsException;
 import io.floci.aws.core.storage.AccountAwareStorageBackend;
 import io.floci.aws.core.storage.InMemoryStorage;
@@ -14,7 +15,13 @@ import io.floci.aws.services.dynamodb.model.TableDefinition;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
+import java.util.ArrayList;
 import java.util.List;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
+import java.util.concurrent.TimeUnit;
 
 import static org.junit.jupiter.api.Assertions.*;
 
@@ -270,6 +277,58 @@ class DynamoDbStreamServiceTest {
 
         assertEquals("000000000000000000001", firstPage.records().get(0).getSequenceNumber());
         assertEquals("000000000000000000002", secondPage.records().get(0).getSequenceNumber());
+    }
+
+    @Test
+    void concurrentCapturesKeepSequenceNumbersInPageOrder() throws Exception {
+        TableDefinition table = createTestTableWithStream();
+        service.enableStream(table.getTableName(), table.getTableArn(), "KEYS_ONLY", "us-east-1");
+        CountDownLatch firstBuildingKeys = new CountDownLatch(1);
+        CountDownLatch resumeFirstCapture = new CountDownLatch(1);
+        ObjectNode firstItem = new ObjectNode(mapper.getNodeFactory()) {
+            @Override
+            public JsonNode get(String fieldName) {
+                if ("userId".equals(fieldName)) {
+                    firstBuildingKeys.countDown();
+                    try {
+                        if (!resumeFirstCapture.await(10, TimeUnit.SECONDS)) {
+                            throw new AssertionError("Timed out waiting to resume the first capture");
+                        }
+                    } catch (InterruptedException e) {
+                        Thread.currentThread().interrupt();
+                        throw new AssertionError("First capture interrupted", e);
+                    }
+                }
+                return super.get(fieldName);
+            }
+        };
+        firstItem.set("userId", mapper.createObjectNode().put("S", "first"));
+        JsonNode secondItem = mapper.readTree("{\"userId\":{\"S\":\"second\"}}");
+
+        try (ExecutorService executor = Executors.newSingleThreadExecutor()) {
+            Future<?> firstCapture = executor.submit(
+                    () -> service.captureEvent("INSERT", null, firstItem, table, "us-east-1"));
+            try {
+                assertTrue(firstBuildingKeys.await(10, TimeUnit.SECONDS));
+                service.captureEvent("INSERT", null, secondItem, table, "us-east-1");
+            } finally {
+                resumeFirstCapture.countDown();
+            }
+            firstCapture.get(10, TimeUnit.SECONDS);
+        }
+
+        String iterator = service.getShardIterator(
+                table.getStreamArn(), DynamoDbStreamService.SHARD_ID, "TRIM_HORIZON", null);
+        List<String> sequenceNumbers = new ArrayList<>();
+        for (int page = 0; page < 2; page++) {
+            DynamoDbStreamService.GetRecordsResult result = service.getRecords(iterator, 1);
+            sequenceNumbers.addAll(result.records().stream().map(DynamoDbStreamRecord::getSequenceNumber).toList());
+            assertNotEquals(iterator, result.nextShardIterator());
+            iterator = result.nextShardIterator();
+        }
+
+        assertEquals(List.of("000000000000000000001", "000000000000000000002"), sequenceNumbers);
+        assertTrue(service.getRecords(iterator, 1).records().isEmpty());
     }
 
     private TableDefinition sharedNameTable(String accountId) {
