@@ -1,5 +1,7 @@
 package io.floci.aws.services.cognito;
 
+import com.fasterxml.jackson.core.JsonProcessingException;
+import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.floci.aws.core.common.AwsException;
@@ -551,10 +553,17 @@ public class CognitoOAuthController {
                     "Only client_credentials, authorization_code and refresh_token are supported");
         }
         String scope = trimToNull(formParams.getFirst("scope"));
+        Map<String, String> clientMetadata;
+        try {
+            clientMetadata = parseClientMetadata(trimToNull(formParams.getFirst("aws_client_metadata")));
+        } catch (JsonProcessingException e) {
+            LOG.debugv(e, "Rejecting malformed aws_client_metadata");
+            return oauthError("invalid_request", "aws_client_metadata must be a JSON object of strings");
+        }
 
         try {
             Map<String, Object> result = cognitoService.issueClientCredentialsToken(
-                    clientId, clientSecret, scope, domainPoolId);
+                    clientId, clientSecret, scope, domainPoolId, clientMetadata);
             return Response.ok(objectMapper.valueToTree(result))
                     .type(MediaType.APPLICATION_JSON)
                     .header("Cache-Control", "no-store")
@@ -576,6 +585,15 @@ public class CognitoOAuthController {
             LOG.error("Failed to issue Cognito OAuth token", e);
             return oauthError("invalid_request", e.getMessage());
         }
+    }
+
+    /** The client-credentials {@code aws_client_metadata} parameter: a JSON object of string values. */
+    private Map<String, String> parseClientMetadata(String raw) throws JsonProcessingException {
+        if (raw == null) {
+            return Map.of();
+        }
+        Map<String, String> metadata = objectMapper.readValue(raw, new TypeReference<>() {});
+        return metadata == null ? Map.of() : metadata;
     }
 
     private Response redeemAuthorizationCode(String clientId, String clientSecret,

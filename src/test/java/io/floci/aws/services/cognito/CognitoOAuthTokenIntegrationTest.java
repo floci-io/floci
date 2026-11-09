@@ -848,6 +848,35 @@ class CognitoOAuthTokenIntegrationTest {
         refreshWithBodySecret(user.clientId(), "wrongsecret", user.refreshToken()).then().statusCode(200);
     }
 
+    @Test
+    @Order(41)
+    void clientCredentialsAcceptsAwsClientMetadata() throws Exception {
+        Response response = given()
+                .header("Authorization", basic(confidentialClientId, confidentialClientSecret))
+                .formParam("grant_type", "client_credentials")
+                .formParam("aws_client_metadata", "{\"environment\": \"dev\", \"language\": \"en-US\"}")
+        .when()
+                .post("/cognito-idp/oauth2/token");
+
+        response.then().statusCode(200);
+        JsonNode payload = decodeJwtPayload(response.jsonPath().getString("access_token"));
+        assertEquals(confidentialClientId, payload.path("client_id").asText());
+    }
+
+    @Test
+    @Order(42)
+    void clientCredentialsRejectsMalformedAwsClientMetadata() {
+        given()
+                .header("Authorization", basic(confidentialClientId, confidentialClientSecret))
+                .formParam("grant_type", "client_credentials")
+                .formParam("aws_client_metadata", "not-json")
+        .when()
+                .post("/cognito-idp/oauth2/token")
+        .then()
+                .statusCode(400)
+                .body("error", equalTo("invalid_request"));
+    }
+
     private static String confidentialRefreshToken(String confidentialId, String secret) throws Exception {
         String username = "confidential-" + System.nanoTime();
         cognitoAction("AdminCreateUser", """
