@@ -4168,7 +4168,8 @@ public class NativeDynamoDbJsonHandler {
         throwValidationErrors(validationErrors);
         String statement = request.path("Statement").asText();
         List<JsonNode> parameters = toPartiQLParams(request.path("Parameters"));
-        DynamoDbPartiQLParser.Stmt stmt = DynamoDbPartiQLParser.parse(statement, parameters);
+        DynamoDbPartiQLParser.Stmt stmt = DynamoDbPartiQLParser.parse(statement, parameters, false,
+                parsed -> partiQLHandler.requireReadableIndex(parsed, region));
         PartiQLExecuteContext ctx = PartiQLExecuteContext.builder()
                 .limit(request.has("Limit") ? request.get("Limit").asInt() : null)
                 .nextToken(request.has("NextToken") ? request.get("NextToken").asText() : null)
@@ -4338,7 +4339,7 @@ public class NativeDynamoDbJsonHandler {
         ObjectNode slot = objectMapper.createObjectNode();
         String tableName = null;
         try {
-            DynamoDbPartiQLParser.Stmt stmt = parsePartiQLStatement(statement);
+            DynamoDbPartiQLParser.Stmt stmt = parsePartiQLStatement(statement, region);
             tableName = stmt.table();
             if (stmt instanceof DynamoDbPartiQLParser.Stmt.Select select) {
                 requireBatchSelectReadsByKey(select, region);
@@ -4403,9 +4404,10 @@ public class NativeDynamoDbJsonHandler {
                 "Select statements within BatchExecuteStatement must specify the primary key in the where clause.", 400);
     }
 
-    private DynamoDbPartiQLParser.Stmt parsePartiQLStatement(JsonNode statement) {
+    private DynamoDbPartiQLParser.Stmt parsePartiQLStatement(JsonNode statement, String region) {
         return DynamoDbPartiQLParser.parse(statement.path("Statement").asText(),
-                toPartiQLParams(statement.path("Parameters")));
+                toPartiQLParams(statement.path("Parameters")), false,
+                parsed -> partiQLHandler.requireReadableIndex(parsed, region));
     }
 
     private List<JsonNode> toPartiQLParams(JsonNode node) {

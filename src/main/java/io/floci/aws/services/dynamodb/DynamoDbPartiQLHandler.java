@@ -44,6 +44,28 @@ class DynamoDbPartiQLHandler {
 
     // --- SELECT ---
 
+    // DynamoDB refuses a read of an index whose key has more than one HASH or RANGE attribute before it
+    // checks any term. The message names tables, but a read of the table itself runs.
+    void requireReadableIndex(Stmt stmt, String region) {
+        if (!(stmt instanceof Stmt.Select select) || select.index() == null) {
+            return;
+        }
+        Optional<TableDefinition> table;
+        try {
+            table = service.findTableForItemCall(select.table(), region);
+        } catch (AwsException ignored) {
+            // The read reports a table name it cannot resolve once the terms pass.
+            return;
+        }
+        boolean multiAttributeKey = table.filter(found -> found.findGsi(select.index()).isPresent())
+                .map(found -> DynamoDbAccessPath.resolve(found, select.index()).hasMultiAttributeKey())
+                .orElse(false);
+        if (multiAttributeKey) {
+            throw new AwsException("ValidationException", "PartiQL statements cannot be executed on tables with "
+                    + "multi-attribute HASH keys or multi-attribute RANGE keys.", 400);
+        }
+    }
+
     private Result executeSelect(Stmt.Select stmt, PartiQLExecuteContext ctx, String region) {
         TableDefinition table = service.requireTableForItemCall(stmt.table(), region);
         // A vector index is reachable through SearchVectors alone, and PartiQL says so

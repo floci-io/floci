@@ -8,6 +8,7 @@ import java.math.BigInteger;
 import java.math.MathContext;
 import java.math.RoundingMode;
 import java.util.*;
+import java.util.function.Consumer;
 import java.util.stream.Collectors;
 import java.util.stream.Stream;
 
@@ -495,15 +496,21 @@ public class DynamoDbPartiQLParser {
     }
 
     static Stmt parse(String statement, List<JsonNode> parameters, boolean transaction) {
+        return parse(statement, parameters, transaction, stmt -> { });
+    }
+
+    // targetCheck runs once the FROM clause checks pass, before any term check.
+    static Stmt parse(String statement, List<JsonNode> parameters, boolean transaction, Consumer<Stmt> targetCheck) {
         try {
-            return parseStatement(statement, parameters, transaction);
+            return parseStatement(statement, parameters, transaction, targetCheck);
         } catch (StackOverflowError expected) {
             // DynamoDB answers a statement nested too deep for its parser the same way, with no message.
             throw new AwsException("InternalFailure", null, 500);
         }
     }
 
-    private static Stmt parseStatement(String statement, List<JsonNode> parameters, boolean transaction) {
+    private static Stmt parseStatement(String statement, List<JsonNode> parameters, boolean transaction,
+                                       Consumer<Stmt> targetCheck) {
         parameters.forEach(DynamoDbAttributeValueValidator::validate);
         DynamoDbPartiQLParser parser = new DynamoDbPartiQLParser(statement, parameters);
         Stmt stmt = parser.parseStmt(transaction);
@@ -520,6 +527,7 @@ public class DynamoDbPartiQLParser {
         if (parser.fromClauseError != null) {
             throw validationEx(parser.fromClauseError);
         }
+        targetCheck.accept(stmt);
         if (parser.deferredError != null) {
             throw validationEx(parser.deferredError);
         }
