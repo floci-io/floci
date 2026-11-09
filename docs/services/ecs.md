@@ -38,8 +38,11 @@ eight documented counts split by launch type (`runningEC2TasksCount`, `runningFa
 `pendingEC2TasksCount`, `pendingFargateTasksCount`, `activeEC2ServiceCount`,
 `activeFargateServiceCount`, `drainingEC2ServiceCount`, `drainingFargateServiceCount`) as
 name/value strings. The API reference spells one of those names `RunningFargateTasksCount`; Floci
-follows the wire, which is lower camel case like the other seven. `ATTACHMENTS` is always an empty
-list, because Floci creates no managed scaling policies to attach.
+follows the wire, which is lower camel case like the other seven. The reference also describes
+`pendingTasksCount` as tasks in the `PENDING` state, but ECS counts a task as pending from
+`RunTask` until it runs, so Floci's count and the two pending statistics include a `PROVISIONING`
+task too. `ATTACHMENTS` is always an empty list, because Floci creates no managed scaling policies
+to attach.
 
 `DescribeClusters` reports a cluster it cannot resolve as a `MISSING` entry in `failures` rather
 than dropping it, as `DescribeServices` and `DescribeTasks` do. `ListClusters` pages with
