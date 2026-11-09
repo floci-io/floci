@@ -4,11 +4,11 @@ import io.floci.aws.config.EmulatorConfig;
 import io.floci.aws.config.TlsCertificateManager;
 import io.floci.aws.core.common.AwsException;
 import io.floci.aws.core.common.RegionResolver;
-import io.floci.aws.core.storage.AccountAwareStorageBackend;
-import io.floci.aws.core.storage.StorageFactory;
 import io.floci.aws.services.apigateway.ApiGatewayService.StoredMapping;
 import io.floci.aws.services.apigateway.model.CustomDomain;
 import io.floci.aws.services.apigatewayv2.ApiGatewayV2Service;
+import io.floci.aws.services.apigatewayv2.ApiGatewayV2ServiceFixture;
+import io.floci.aws.testing.InMemoryStorageFactory;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
@@ -16,18 +16,13 @@ import java.time.Clock;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
-import java.util.Optional;
 import java.util.Set;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
-import static org.mockito.ArgumentMatchers.any;
-import static org.mockito.ArgumentMatchers.anyString;
-import static org.mockito.Mockito.RETURNS_DEEP_STUBS;
 import static org.mockito.Mockito.mock;
-import static org.mockito.Mockito.when;
 
 /**
  * The v2 custom domain and API mapping rules, over real services and in-memory stores: the id a
@@ -53,11 +48,8 @@ class ApiGatewayV2ApiMappingServiceTest {
 
     @BeforeEach
     void setUp() {
-        StorageFactory storageFactory = mock(StorageFactory.class);
-        when(storageFactory.create(anyString(), anyString(), any()))
-                .thenAnswer(invocation -> AccountAwareStorageBackend.inMemory("000000000000"));
-        EmulatorConfig config = mock(EmulatorConfig.class, RETURNS_DEEP_STUBS);
-        when(config.services().cloudfront().domainSuffix()).thenReturn(Optional.empty());
+        InMemoryStorageFactory storageFactory = new InMemoryStorageFactory("000000000000");
+        EmulatorConfig config = ApiGatewayV2ServiceFixture.config();
         RegionResolver regionResolver = new RegionResolver(REGION, "000000000000");
         v2Service = new ApiGatewayV2Service(storageFactory, config, regionResolver);
         service = new ApiGatewayService(storageFactory, config, mock(TlsCertificateManager.class), regionResolver,
