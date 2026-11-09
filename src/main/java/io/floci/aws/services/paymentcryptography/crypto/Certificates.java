@@ -2,6 +2,7 @@ package io.floci.aws.services.paymentcryptography.crypto;
 
 import io.floci.aws.core.common.CertificateMaterialException;
 import io.floci.aws.core.common.Pem;
+import org.bouncycastle.asn1.pkcs.IssuerAndSerialNumber;
 import org.bouncycastle.asn1.x500.X500Name;
 import org.bouncycastle.asn1.x509.BasicConstraints;
 import org.bouncycastle.asn1.x509.Extension;
@@ -80,9 +81,14 @@ public final class Certificates {
         if (decodedText.contains("-----BEGIN")) {
             return readPem(decodedText);
         }
+        return readDer(decoded);
+    }
+
+    /** The certificate a DER document holds. */
+    private static X509Certificate readDer(byte[] der) {
         try {
             return (X509Certificate) CertificateFactory.getInstance("X.509")
-                    .generateCertificate(new ByteArrayInputStream(decoded));
+                    .generateCertificate(new ByteArrayInputStream(der));
         } catch (CertificateException e) {
             throw new IllegalArgumentException("the certificate does not parse: " + e.getMessage());
         }
@@ -152,6 +158,28 @@ public final class Certificates {
             return new Minted(der, toPem(der));
         } catch (GeneralSecurityException | OperatorCreationException | IOException e) {
             throw new IllegalStateException("cannot mint a certificate", e);
+        }
+    }
+
+    /**
+     * The identifier a TR-34 block uses to name its recipient.
+     *
+     * <p>A RecipientInfo carries the receiver's certificate identifier: an
+     * IssuerAndSerialNumber, which is the issuer's name and the certificate's serial number.
+     * Both are taken from the certificate itself, so the identifier is the one the receiver's
+     * own certificate carries.
+     *
+     * @param certDer the certificate in DER
+     * @return the issuer and serial number, as the DER of an IssuerAndSerialNumber
+     */
+    public static byte[] certificateId(byte[] certDer) {
+        X509Certificate certificate = readDer(certDer);
+        try {
+            return new IssuerAndSerialNumber(
+                    new X500Name(certificate.getIssuerX500Principal().getName()),
+                    certificate.getSerialNumber()).getEncoded();
+        } catch (IOException e) {
+            throw new IllegalStateException("cannot encode the certificate identifier", e);
         }
     }
 
