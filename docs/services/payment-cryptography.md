@@ -68,11 +68,15 @@
 - **The key exchange:** `ExportKey` and `ImportKey` take the form of the key material the
   request names, one form per request. A key leaves under a TR-31 block the service wraps
   with a key it holds, under an RSA-OAEP cryptogram the receiver's certificate protects, or
-  under a key the two parties agreed with ECDH; it comes back under the same protections. A
-  key that is not exportable does not leave, a key pair has no material a key block could
-  carry, and a counterparty's certificate that the named authority did not sign is refused.
-  An export may name an initial DUKPT key by its serial number, and the derived key leaves
-  instead of the base derivation key.
+  under a key the two parties agreed with ECDH; it comes back under the same protections, and
+  a public key comes back under the certificate that carries it. A key that is not exportable
+  does not leave, a key pair has no material a key block could carry, and a counterparty's
+  certificate that the named authority did not sign is refused. An export may name an initial
+  DUKPT key by its serial number, and the derived key leaves instead of the base derivation
+  key.
+- **The TR-34 and the AS2805 forms are not made.** A request that asks for one of them is
+  refused with the error that says so, rather than answered with something of another kind,
+  and the refusal names the forms the service serves.
 - **The import and export parameters:** `GetParametersForImport` answers with the token an
   import quotes back, the wrapping key's certificate and the chain, and the moment the
   parameters expire; `GetParametersForExport` answers with the same for an export, over a
