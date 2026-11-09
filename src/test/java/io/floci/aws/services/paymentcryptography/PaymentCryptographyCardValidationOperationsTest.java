@@ -206,6 +206,42 @@ class PaymentCryptographyCardValidationOperationsTest {
     }
 
     @Test
+    void aLengthTheModelDoesNotStateIsRefused() {
+        PaymentCryptographyKey cvk = PaymentCryptographyTestFixtures.createKey(service, "TDES_2KEY", "TR31_C0_CARD_VERIFICATION_KEY",
+                "Generate", "Verify");
+
+        // The model states the length as three to five, so the request is refused against the
+        // model's own constraint rather than by a check of our own.
+        AwsException refused = assertThrows(AwsException.class,
+                () -> cardValidation.generate(PaymentCryptographyTestFixtures.request(Map.of(
+                        "KeyIdentifier", cvk.getArn(),
+                        "PrimaryAccountNumber", PAN,
+                        "ValidationDataLength", 2,
+                        "GenerationAttributes", cardVerificationValue1(EXPIRY, "201"))), "us-east-1"));
+
+        assertEquals("ValidationException", refused.getErrorCode());
+        assertTrue(refused.getMessage().contains("ValidationDataLength"), refused.getMessage());
+    }
+
+    @Test
+    void aValueTheModelDoesNotStateIsRefused() {
+        PaymentCryptographyKey cvk = PaymentCryptographyTestFixtures.createKey(service, "TDES_2KEY", "TR31_C0_CARD_VERIFICATION_KEY",
+                "Generate", "Verify");
+
+        // The model states the value as three to five digits, so a shorter one is refused
+        // against the model's own constraint.
+        AwsException refused = assertThrows(AwsException.class,
+                () -> cardValidation.verify(PaymentCryptographyTestFixtures.request(Map.of(
+                        "KeyIdentifier", cvk.getArn(),
+                        "PrimaryAccountNumber", PAN,
+                        "ValidationData", "99",
+                        "VerificationAttributes", cardVerificationValue1(EXPIRY, "201"))), "us-east-1"));
+
+        assertEquals("ValidationException", refused.getErrorCode());
+        assertTrue(refused.getMessage().contains("ValidationData"), refused.getMessage());
+    }
+
+    @Test
     void aDisabledKeyIsRefused() {
         PaymentCryptographyKey key = PaymentCryptographyTestFixtures.createDisabledKey(service,
                 "TDES_2KEY", "TR31_C0_CARD_VERIFICATION_KEY", "Generate", "Verify");

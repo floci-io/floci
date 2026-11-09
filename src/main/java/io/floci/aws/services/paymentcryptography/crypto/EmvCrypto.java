@@ -10,9 +10,14 @@ import java.util.HexFormat;
  * <pre>
  *   1. ICC master key derivation (EMV Book 2, Option A)   IMK + PAN + PSN -&gt; MK
  *   2. Common session key derivation (EMV Book 2 A1.3.1)  MK  + ATC       -&gt; SK
- *   3. ARQC = ISO 9797-1 MAC algorithm 3 over the CDOL, truncated to 8 bytes
+ *   3. ARQC = ISO 9797-1 MAC algorithm 3 over the transaction data, truncated to 8 bytes
  *   4. ARPC method 1 = 3DES_EDE(SK, ARQC XOR (ARC || 00*6))
  * </pre>
+ *
+ * <p>The transaction data reaches the service already padded, because the caller pads it
+ * the way the card padded it before the card enciphered it. The service enciphers it as
+ * it was sent, and the padding the service applies is the one it applies to the input it
+ * builds itself, which is the issuer authentication cryptogram.
  *
  * <p>All DES is done through three-key TDES rather than a single-DES provider:
  * single DES is expressed as TDES with K||K||K, which keeps the transform clear

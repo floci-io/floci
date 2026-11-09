@@ -68,10 +68,6 @@ public class PaymentCryptographyCardValidationOperations {
         Integer validationDataLength = request.hasNonNull("ValidationDataLength")
                 ? request.path("ValidationDataLength").asInt()
                 : null;
-        if (validationDataLength != null
-                && (validationDataLength < 3 || validationDataLength > 5)) {
-            throw validation("ValidationDataLength must be three to five digits");
-        }
         int length = validationDataLength == null ? DEFAULT_VALIDATION_DATA_LENGTH
                 : validationDataLength;
         CardAttrs attrs = resolveCardAttrs(request.get("GenerationAttributes"));
@@ -96,9 +92,6 @@ public class PaymentCryptographyCardValidationOperations {
         String keyIdentifier = text(request, "KeyIdentifier");
         String pan = text(request, "PrimaryAccountNumber");
         String validationData = text(request, "ValidationData");
-        if (!validationData.matches("[0-9]{3,5}")) {
-            throw validation("ValidationData must be three to five digits");
-        }
         int length = validationData.length();
         CardAttrs attrs = resolveCardAttrs(request.get("VerificationAttributes"));
 

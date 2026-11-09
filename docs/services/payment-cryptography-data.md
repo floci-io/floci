@@ -116,6 +116,10 @@ client that talks to the control plane does not reach it by accident.
   usage.** The key table names `TR31_E0_EMV_MKEY_APP_CRYPTOGRAMS` with a `TDES_2KEY`
   algorithm and the `DeriveKey` mode of use for it, so a key of another usage, another
   algorithm, or without the mode of use is refused.
+- **A key that is disabled does no work, and a key that is not there is a 404.** The
+  service reads a disabled key and tells the caller about it, but it does not compute a card
+  value or a cryptogram under it, and a request that names a key the service does not hold
+  is answered with the not-found error and the status the data plane answers it with.
 - **The card operations and the cryptogram operations read the key through one helper.**
   The usage, the algorithm, the mode of use, whether the key is enabled and whether it
   still holds its material are asked in one place, so the two cannot drift apart on
