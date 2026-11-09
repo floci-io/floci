@@ -4755,9 +4755,11 @@ public class CognitoService implements ResourceProvider {
         validateClientAllowsClientCredentials(client);
         validateClientSecret(client, clientSecret);
         String normalizedScope = resolveAuthorizedScopes(client, pool.getId(), scope);
+        ClaimsOverride override = authFlowHandler.preTokenGenerationForClientCredentials(pool, client,
+                List.of(normalizedScope.split(" ")));
 
         Map<String, Object> response = new LinkedHashMap<>();
-        response.put("access_token", generateClientAccessToken(client, pool, normalizedScope));
+        response.put("access_token", generateClientAccessToken(client, pool, normalizedScope, override));
         response.put("token_type", "Bearer");
         response.put("expires_in", resolveAccessTokenLifetimeSeconds(client));
         return response;
@@ -5282,31 +5284,26 @@ public class CognitoService implements ResourceProvider {
         return signJwt(header, payload, getSigningPrivateKey(pool));
     }
 
-    private String generateClientAccessToken(UserPoolClient client, UserPool pool, String scope) {
-        String headerJson = String.format(
-                "{\"alg\":\"RS256\",\"typ\":\"JWT\",\"kid\":\"%s\"}",
-                escapeJson(getSigningKeyId(pool)));
-        String header = Base64Url.encode(headerJson);
+    private String generateClientAccessToken(UserPoolClient client, UserPool pool, String scope,
+                                             ClaimsOverride override) {
+        String header = encodeJwtHeader(pool);
 
         long now = System.currentTimeMillis() / 1000L;
         long lifetimeSeconds = resolveAccessTokenLifetimeSeconds(client);
-        StringBuilder payloadJson = new StringBuilder();
-        payloadJson.append("{")
-                .append("\"iss\":\"").append(escapeJson(getIssuer(pool.getId()))).append("\",")
-                .append("\"version\":2,")
-                .append("\"sub\":\"").append(escapeJson(client.getClientId())).append("\",")
-                .append("\"client_id\":\"").append(escapeJson(client.getClientId())).append("\",")
-                .append("\"token_use\":\"access\",")
-                .append("\"exp\":").append(now + lifetimeSeconds).append(",")
-                .append("\"iat\":").append(now).append(",")
-                .append("\"jti\":\"").append(UUID.randomUUID()).append("\"");
+        Map<String, Object> claims = new LinkedHashMap<>();
+        claims.put("iss", getIssuer(pool.getId()));
+        claims.put("version", 2);
+        claims.put("sub", client.getClientId());
+        claims.put("client_id", client.getClientId());
+        claims.put("token_use", "access");
+        claims.put("exp", now + lifetimeSeconds);
+        claims.put("iat", now);
+        claims.put("jti", UUID.randomUUID().toString());
         if (scope != null && !scope.isBlank()) {
-            payloadJson.append(",\"scope\":\"").append(escapeJson(scope)).append("\"");
+            claims.put("scope", scope);
         }
-        payloadJson.append("}");
-
-        String payload = Base64Url.encode(payloadJson.toString());
-        return signJwt(header, payload, getSigningPrivateKey(pool));
+        applyClaimsOverride(claims, override, "access");
+        return signJwt(header, encodeJsonBase64Url(claims), getSigningPrivateKey(pool));
     }
 
     private void validateClientSecret(UserPoolClient client, String clientSecret) {

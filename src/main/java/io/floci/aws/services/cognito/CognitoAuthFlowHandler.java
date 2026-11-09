@@ -2286,7 +2286,8 @@ final class CognitoAuthFlowHandler {
 
     private static Map<String, Object> buildGroupConfiguration(CognitoUser user) {
         Map<String, Object> cfg = new HashMap<>();
-        cfg.put("groupsToOverride", user.getGroupNames() == null ? List.of() : new ArrayList<>(user.getGroupNames()));
+        cfg.put("groupsToOverride", user == null || user.getGroupNames() == null ? List.of()
+                : new ArrayList<>(user.getGroupNames()));
         cfg.put("iamRolesToOverride", List.of());
         cfg.put("preferredRole", null);
         return cfg;
@@ -2634,6 +2635,17 @@ final class CognitoAuthFlowHandler {
     CognitoService.ClaimsOverride preTokenGenerationForHostedAuth(UserPool pool, UserPoolClient client,
                                                                   CognitoUser user, List<String> scopes) {
         return firePreTokenGeneration(pool, client, user, Map.of(), "TokenGeneration_HostedAuth", scopes);
+    }
+
+    /**
+     * Fires PreTokenGeneration for a machine-to-machine token: the client_credentials grant has
+     * no user, so the event carries no user attributes and the group configuration is empty.
+     * AWS names this trigger source {@code TokenGeneration_ClientCredentials}. {@code scopes}
+     * are the scopes the token carries, which a V2 lambda may branch on.
+     */
+    CognitoService.ClaimsOverride preTokenGenerationForClientCredentials(UserPool pool, UserPoolClient client,
+                                                                         List<String> scopes) {
+        return firePreTokenGeneration(pool, client, null, Map.of(), "TokenGeneration_ClientCredentials", scopes);
     }
 
     private static String resolveTriggerArn(UserPool pool, String triggerKey) {

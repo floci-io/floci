@@ -10,6 +10,7 @@ import io.floci.aws.core.common.RegionResolver;
 import io.floci.aws.core.storage.InMemoryStorage;
 import io.floci.aws.services.acm.AcmService;
 import io.floci.aws.services.cognito.model.CognitoUser;
+import io.floci.aws.services.cognito.model.ResourceServerScope;
 import io.floci.aws.services.cognito.model.UserPool;
 import io.floci.aws.services.cognito.model.UserPoolClient;
 import io.floci.aws.services.cognito.verification.CognitoMessageDispatcher;
@@ -144,6 +145,15 @@ class CognitoLambdaTriggersTest {
         return service.createUserPoolClient(pool.getId(), "oauth", false, true, List.of("code"), allowedScopes,
                 null, List.of("https://application.example.test/callback"), null, AUTH_FLOWS, null, null,
                 List.of(), null, List.of(), null, null, null, List.of(), null, null);
+    }
+
+    /** A machine-to-machine client for the client_credentials grant, allowed exactly {@code m2m/token}. */
+    private UserPoolClient createMachineTokenClient(UserPool pool) {
+        ResourceServerScope token = new ResourceServerScope();
+        token.setScopeName("token");
+        service.createResourceServer(pool.getId(), "m2m", "m2m", List.of(token));
+        return service.createUserPoolClient(pool.getId(), "m2m", true, true,
+                List.of("client_credentials"), List.of("m2m/token"));
     }
 
     private void seedUser(UserPool pool, String username, String password) {
@@ -1674,6 +1684,81 @@ class CognitoLambdaTriggersTest {
         }
         assertEquals(Set.of("openid", "aws.cognito.signin.user.admin"),
                 Set.of(((String) accessClaims.get("scope")).split(" ")));
+    }
+
+    /**
+     * The client_credentials grant fires PreTokenGeneration with triggerSource
+     * TokenGeneration_ClientCredentials, and a V2 lambda's access-token claims land on the token.
+     */
+    @Test
+    @SuppressWarnings("unchecked")
+    void preTokenGenerationFiresForClientCredentialsTokens() {
+        UserPool pool = createPoolWithLambdaConfig(Map.of("PreTokenGeneration", "arn:aws:lambda:::pre-token"));
+        UserPoolClient client = createMachineTokenClient(pool);
+
+        ArgumentCaptor<byte[]> payloadCap = ArgumentCaptor.forClass(byte[].class);
+        when(lambdaService.invoke(anyString(), eq("arn:aws:lambda:::pre-token"), payloadCap.capture(), any()))
+                .thenReturn(ok(Map.of("claimsAndScopeOverrideDetails", Map.of(
+                        "accessTokenGeneration", Map.of(
+                                "claimsToAddOrOverride", Map.of("marker", "yes"))))));
+
+        Map<String, Object> result = service.issueClientCredentialsToken(
+                client.getClientId(), client.getClientSecret(), "m2m/token", null);
+
+        Map<String, Object> event;
+        Map<String, Object> accessClaims;
+        try {
+            event = MAPPER.readValue(payloadCap.getValue(), new TypeReference<>() {});
+            accessClaims = MAPPER.readValue(decodeJwtPayload((String) result.get("access_token")),
+                    new TypeReference<>() {});
+        } catch (Exception e) {
+            throw new RuntimeException(e);
+        }
+        assertEquals("TokenGeneration_ClientCredentials", event.get("triggerSource"),
+                "AWS uses TokenGeneration_ClientCredentials for the client_credentials grant");
+        assertNull(event.get("userName"), "the grant has no user, so the event carries no user name");
+        assertEquals(List.of("m2m/token"), ((Map<String, Object>) event.get("request")).get("scopes"),
+                "a V2 lambda may branch on the scopes the token carries");
+        assertEquals("yes", accessClaims.get("marker"), "the trigger's claims should reach the access token");
+        assertEquals(client.getClientId(), accessClaims.get("sub"));
+        assertEquals("m2m/token", accessClaims.get("scope"));
+    }
+
+    /** A V1 lambda's claims reach a client_credentials access token the same way. */
+    @Test
+    @SuppressWarnings("unchecked")
+    void preTokenGenerationV1ClaimsReachClientCredentialsTokens() {
+        UserPool pool = createPoolWithLambdaConfig(Map.of("PreTokenGeneration", "arn:aws:lambda:::pre-token"));
+        UserPoolClient client = createMachineTokenClient(pool);
+
+        when(lambdaService.invoke(anyString(), eq("arn:aws:lambda:::pre-token"), any(byte[].class), any()))
+                .thenReturn(ok(Map.of("claimsOverrideDetails", Map.of(
+                        "claimsToAddOrOverride", Map.of("marker", "yes")))));
+
+        Map<String, Object> result = service.issueClientCredentialsToken(
+                client.getClientId(), client.getClientSecret(), "m2m/token", null);
+
+        Map<String, Object> accessClaims;
+        try {
+            accessClaims = MAPPER.readValue(decodeJwtPayload((String) result.get("access_token")),
+                    new TypeReference<>() {});
+        } catch (Exception e) {
+            throw new RuntimeException(e);
+        }
+        assertEquals("yes", accessClaims.get("marker"), "the trigger's claims should reach the access token");
+    }
+
+    /** A client_credentials token still mints when no PreTokenGeneration trigger is configured. */
+    @Test
+    void clientCredentialsTokenMintsWithoutAPreTokenGenerationTrigger() {
+        UserPool pool = createPoolWithLambdaConfig(Map.of());
+        UserPoolClient client = createMachineTokenClient(pool);
+
+        Map<String, Object> result = service.issueClientCredentialsToken(
+                client.getClientId(), client.getClientSecret(), "m2m/token", null);
+
+        assertNotNull(result.get("access_token"));
+        verify(lambdaService, never()).invoke(anyString(), anyString(), any(byte[].class), any());
     }
 
     @Test

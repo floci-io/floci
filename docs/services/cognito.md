@@ -702,7 +702,10 @@ client-credentials flow:
   code and redirects to the registered callback with a one-time Cognito authorization code.
 - `POST /cognito-idp/oauth2/token` redeems that authorization code once, checking its PKCE
   `code_verifier` when the authorization request sent a `code_challenge`, or issues a machine
-  token for `grant_type=client_credentials`.
+  token for `grant_type=client_credentials`. The client-credentials grant fires the pre token
+  generation trigger with `TokenGeneration_ClientCredentials`, so a pool that customises its
+  claims gets them on machine tokens too, and a V2 trigger's `scopesToAdd` and
+  `scopesToSuppress` apply on top of the granted scopes.
 - `POST /cognito-idp/oauth2/token` with `grant_type=refresh_token` and a `refresh_token` renews a
   session as `GetTokensFromRefreshToken` does, firing the pre token generation trigger with
   `TokenGeneration_RefreshTokens`. It accepts a refresh token from managed login or from a
