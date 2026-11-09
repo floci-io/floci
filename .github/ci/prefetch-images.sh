@@ -109,8 +109,13 @@ starts EmrServerlessHiveDockerIntegrationTest EmrHiveStepsDockerIntegrationTest 
 # (measured inline pulls; update alongside image-catalog changes)
 grep -q '/docdb/'       "$SHARD_FILE" && pull mongo:7.0
 if grep -q '/neptune/' "$SHARD_FILE"; then
-    pull neo4j:5-community
-    NEPTUNE_IMAGE="$(awk '/^    neptune:/ { in_service=1; next } in_service && /^    [a-z]/ { exit } in_service && $1 == "default-image:" { gsub(/"/, "", $2); print $2; exit }' src/main/resources/application.yml)"
+    NEO4J_IMAGE="$(bash .github/ci/neptune-image.sh default-neo4j-image)"
+    if [ -n "$NEO4J_IMAGE" ]; then
+        pull "$NEO4J_IMAGE"
+    else
+        echo "$(date -u +%H:%M:%S) prefetch skipped: neptune.default-neo4j-image not readable" >> "$PREFETCH_LOG"
+    fi
+    NEPTUNE_IMAGE="$(bash .github/ci/neptune-image.sh default-image)"
     if [ -n "$NEPTUNE_IMAGE" ]; then
         pull "$NEPTUNE_IMAGE"
     else

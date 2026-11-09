@@ -340,14 +340,14 @@ jobs:
             src/main/resources
 
       # The suite makes Floci pull ~30 images on a fresh runner, about 2 minutes inside the test
-      # window. Pulling the heavy ones in the background here overlaps them with Floci's start, the
-      # checkout and the test image build; a pull still running when a test needs the image is joined
+      # window. Pulling the heavy ones in the background here overlaps them with Floci's start and
+      # the test image build; a pull still running when a test needs the image is joined
       # by the daemon, not repeated. The list follows the "Pulling image:" lines of Floci's log; a
       # stale entry only costs a wasted pull, a missing one only the time it costs today.
       - name: Pre-pull service images
         if: matrix.test == 'sdk-test-java'
         run: |
-          NEPTUNE_IMAGE="$(awk '/^    neptune:/ { in_service=1; next } in_service && /^    [a-z]/ { exit } in_service && $1 == "default-image:" { gsub(/"/, "", $2); print $2; exit }' src/main/resources/application.yml)"
+          NEPTUNE_IMAGE="$(bash .github/ci/neptune-image.sh default-image)"
           if [ -z "$NEPTUNE_IMAGE" ]; then
             echo "::warning::Cannot read Neptune default-image from application.yml; skipping Neptune pre-pull"
           fi
@@ -421,7 +421,7 @@ jobs:
       - name: Pre-pull Neptune image for Node SDK
         if: matrix.test == 'sdk-test-node'
         run: |
-          image="$(awk '/^    neptune:/ { in_service=1; next } in_service && /^    [a-z]/ { exit } in_service && $1 == "default-image:" { gsub(/"/, "", $2); print $2; exit }' src/main/resources/application.yml)"
+          image="$(bash .github/ci/neptune-image.sh default-image)"
           if [ -z "$image" ]; then
             echo "::error::Cannot read Neptune default-image from application.yml"
             exit 1
