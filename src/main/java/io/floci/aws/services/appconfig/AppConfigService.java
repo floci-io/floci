@@ -30,6 +30,7 @@ import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.HashMap;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.Optional;
 import java.util.UUID;
@@ -231,6 +232,18 @@ public class AppConfigService {
                 .toList();
     }
 
+    public PaginatedResult<Environment> listEnvironmentsPage(String applicationIdentifier,
+                                                              Integer maxResults, String nextToken) {
+        String appId = resolveApplication(applicationIdentifier).getId();
+        List<Environment> environments = listEnvironments(appId);
+        if (maxResults == null && nextToken == null) {
+            return new PaginatedResult<>(environments, null);
+        }
+        String scope = "appconfig-environments:" + regions.getAccountId() + ":" + regions.getRegion() + ":" + appId;
+        return Pagination.paginate(environments, Environment::getId, maxResults, nextToken,
+                50, 50, 2048, "BadRequestException", scope, true);
+    }
+
     /** The environment whose ID is exactly {@code environmentId}, in whichever application holds it. */
     public Optional<Environment> findEnvironment(String environmentId) {
         return environmentStore.get(environmentId);
@@ -325,6 +338,18 @@ public class AppConfigService {
         return profileStore.scan(k -> true).stream()
                 .filter(p -> p.getApplicationId().equals(appId))
                 .toList();
+    }
+
+    public PaginatedResult<ConfigurationProfile> listConfigurationProfilesPage(String applicationIdentifier,
+                                                                                Integer maxResults, String nextToken) {
+        String appId = resolveApplication(applicationIdentifier).getId();
+        List<ConfigurationProfile> profiles = listConfigurationProfiles(appId);
+        if (maxResults == null && nextToken == null) {
+            return new PaginatedResult<>(profiles, null);
+        }
+        String scope = "appconfig-profiles:" + regions.getAccountId() + ":" + regions.getRegion() + ":" + appId;
+        return Pagination.paginate(profiles, ConfigurationProfile::getId, maxResults, nextToken,
+                50, 50, 2048, "BadRequestException", scope, true);
     }
 
     /** The configuration profile whose ID is exactly {@code profileId}, in whichever application holds it. */
@@ -447,6 +472,17 @@ public class AppConfigService {
                 .toList();
     }
 
+    public PaginatedResult<HostedConfigurationVersionSummary> listHostedConfigurationVersionsPage(
+            String applicationIdentifier, String profileIdentifier, Integer maxResults, String nextToken) {
+        String appId = resolveApplication(applicationIdentifier).getId();
+        String profileId = resolveConfigurationProfile(appId, profileIdentifier).getId();
+        String scope = "appconfig-hosted-versions:" + regions.getAccountId() + ":" + regions.getRegion()
+                + ":" + appId + ":" + profileId;
+        return Pagination.paginate(listHostedConfigurationVersions(appId, profileId),
+                version -> String.format(Locale.ROOT, "%010d", version.getVersionNumber()),
+                maxResults, nextToken, 50, 50, 2048, "BadRequestException", scope, true);
+    }
+
     public synchronized void deleteHostedConfigurationVersion(String applicationIdentifier,
                                                   String profileIdentifier,
                                                   int versionNumber) {
@@ -493,6 +529,16 @@ public class AppConfigService {
                 builtinStrategy("AppConfig.Canary10Percent20Minutes")));
         result.addAll(strategyStore.scan(k -> true));
         return result;
+    }
+
+    public PaginatedResult<DeploymentStrategy> listDeploymentStrategiesPage(Integer maxResults, String nextToken) {
+        List<DeploymentStrategy> strategies = listDeploymentStrategies();
+        if (maxResults == null && nextToken == null) {
+            return new PaginatedResult<>(strategies, null);
+        }
+        String scope = "appconfig-strategies:" + regions.getAccountId() + ":" + regions.getRegion();
+        return Pagination.paginate(strategies, DeploymentStrategy::getId, maxResults, nextToken,
+                50, 50, 2048, "BadRequestException", scope, true);
     }
 
     /**

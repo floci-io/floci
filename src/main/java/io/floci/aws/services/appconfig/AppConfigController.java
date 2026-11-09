@@ -3,6 +3,7 @@ package io.floci.aws.services.appconfig;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
+import io.floci.aws.core.common.AwsException;
 import io.floci.aws.core.common.PaginatedResult;
 import io.floci.aws.core.common.Pagination;
 import io.floci.aws.services.appconfig.AppConfigDataService.LegacyConfiguration;
@@ -30,7 +31,6 @@ import jakarta.ws.rs.core.Response;
 import jakarta.ws.rs.core.UriInfo;
 
 import java.io.IOException;
-import java.util.List;
 import java.util.Map;
 
 @Path("/")
@@ -125,11 +125,18 @@ public class AppConfigController {
 
     @GET
     @Path("/applications/{appId}/environments")
-    public Response listEnvironments(@PathParam("appId") String appId) {
-        List<Environment> envs = service.listEnvironments(appId);
+    public Response listEnvironments(@PathParam("appId") String appId,
+                                     @QueryParam("max_results") String maxResults,
+                                     @QueryParam("next_token") String nextToken,
+                                     @Context UriInfo uriInfo) {
+        PaginatedResult<Environment> page = service.listEnvironmentsPage(appId,
+                parseListMaxResults(maxResults, uriInfo), rawNextToken(nextToken, uriInfo));
         ObjectNode root = objectMapper.createObjectNode();
         ArrayNode items = root.putArray("Items");
-        envs.forEach(items::addPOJO);
+        page.items().forEach(items::addPOJO);
+        if (page.nextToken() != null) {
+            root.put("NextToken", page.nextToken());
+        }
         return Response.ok(root).build();
     }
 
@@ -152,11 +159,18 @@ public class AppConfigController {
 
     @GET
     @Path("/applications/{appId}/configurationprofiles")
-    public Response listConfigurationProfiles(@PathParam("appId") String appId) {
-        List<ConfigurationProfile> profiles = service.listConfigurationProfiles(appId);
+    public Response listConfigurationProfiles(@PathParam("appId") String appId,
+                                              @QueryParam("max_results") String maxResults,
+                                              @QueryParam("next_token") String nextToken,
+                                              @Context UriInfo uriInfo) {
+        PaginatedResult<ConfigurationProfile> page = service.listConfigurationProfilesPage(appId,
+                parseListMaxResults(maxResults, uriInfo), rawNextToken(nextToken, uriInfo));
         ObjectNode root = objectMapper.createObjectNode();
         ArrayNode items = root.putArray("Items");
-        profiles.forEach(items::addPOJO);
+        page.items().forEach(items::addPOJO);
+        if (page.nextToken() != null) {
+            root.put("NextToken", page.nextToken());
+        }
         return Response.ok(root).build();
     }
 
@@ -172,11 +186,19 @@ public class AppConfigController {
     @GET
     @Path("/applications/{appId}/configurationprofiles/{profileId}/hostedconfigurationversions")
     public Response listHostedConfigurationVersions(@PathParam("appId") String appId,
-                                                    @PathParam("profileId") String profileId) {
-        List<HostedConfigurationVersionSummary> items = service.listHostedConfigurationVersions(appId, profileId);
+                                                    @PathParam("profileId") String profileId,
+                                                    @QueryParam("max_results") String maxResults,
+                                                    @QueryParam("next_token") String nextToken,
+                                                    @Context UriInfo uriInfo) {
+        PaginatedResult<HostedConfigurationVersionSummary> page = service.listHostedConfigurationVersionsPage(
+                appId, profileId, parseListMaxResults(maxResults, uriInfo),
+                rawNextToken(nextToken, uriInfo));
         ObjectNode root = objectMapper.createObjectNode();
         ArrayNode arr = root.putArray("Items");
-        items.forEach(arr::addPOJO);
+        page.items().forEach(arr::addPOJO);
+        if (page.nextToken() != null) {
+            root.put("NextToken", page.nextToken());
+        }
         return Response.ok(root).build();
     }
 
@@ -239,11 +261,17 @@ public class AppConfigController {
 
     @GET
     @Path("/deploymentstrategies")
-    public Response listDeploymentStrategies() {
-        List<DeploymentStrategy> items = service.listDeploymentStrategies();
+    public Response listDeploymentStrategies(@QueryParam("max_results") String maxResults,
+                                             @QueryParam("next_token") String nextToken,
+                                             @Context UriInfo uriInfo) {
+        PaginatedResult<DeploymentStrategy> page = service.listDeploymentStrategiesPage(
+                parseListMaxResults(maxResults, uriInfo), rawNextToken(nextToken, uriInfo));
         ObjectNode root = objectMapper.createObjectNode();
         ArrayNode arr = root.putArray("Items");
-        items.forEach(arr::addPOJO);
+        page.items().forEach(arr::addPOJO);
+        if (page.nextToken() != null) {
+            root.put("NextToken", page.nextToken());
+        }
         return Response.ok(root).build();
     }
 
@@ -330,5 +358,18 @@ public class AppConfigController {
                 .header("Content-Type", contentType)
                 .header("Configuration-Version", data.configurationVersion())
                 .build();
+    }
+
+    private static String rawNextToken(String nextToken, UriInfo uriInfo) {
+        return nextToken == null && uriInfo.getQueryParameters().containsKey("next_token")
+                ? "" : nextToken;
+    }
+
+    private static Integer parseListMaxResults(String maxResults, UriInfo uriInfo) {
+        if (uriInfo.getQueryParameters().containsKey("max_results")
+                && (maxResults == null || maxResults.isBlank())) {
+            throw new AwsException("BadRequestException", "max_results must be an integer.", 400);
+        }
+        return Pagination.parseMaxResults(maxResults, "BadRequestException");
     }
 }
