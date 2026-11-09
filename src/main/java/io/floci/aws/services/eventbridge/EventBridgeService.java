@@ -1771,6 +1771,31 @@ public class EventBridgeService implements ResourceProvider, StoredResourceArns 
         return connection;
     }
 
+    /**
+     * Puts a connection's mutable settings back to the values {@code previous} carries, exactly:
+     * unlike {@link #updateConnection} a null clears the field, and the authorization state and
+     * timestamps come back with it. The ARN, secret ARN and creation time are the stored
+     * connection's own and stay. Used by a failed CloudFormation update to undo an in-place update.
+     */
+    public synchronized Connection restoreConnection(Connection previous, String region) {
+        String key = connectionKey(region, previous.getName());
+        Connection connection = connectionStore.get(key)
+                .orElseThrow(() -> new AwsException("ResourceNotFoundException",
+                        "Connection " + previous.getName() + " does not exist.", 400));
+        connection.setDescription(previous.getDescription());
+        connection.setAuthorizationType(previous.getAuthorizationType());
+        connection.setAuthParameters(previous.getAuthParameters());
+        connection.setInvocationConnectivityParameters(previous.getInvocationConnectivityParameters());
+        connection.setKmsKeyIdentifier(previous.getKmsKeyIdentifier());
+        connection.setConnectionState(previous.getConnectionState());
+        connection.setStateReason(previous.getStateReason());
+        connection.setLastModifiedTime(previous.getLastModifiedTime());
+        connection.setLastAuthorizedTime(previous.getLastAuthorizedTime());
+        connectionStore.put(key, connection);
+        LOG.infov("Restored connection: {0}", previous.getName());
+        return connection;
+    }
+
     public Connection deleteConnection(String name, String region) {
         String key = connectionKey(region, name);
         Connection connection = connectionStore.get(key)

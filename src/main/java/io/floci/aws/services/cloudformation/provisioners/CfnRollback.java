@@ -152,6 +152,15 @@ public final class CfnRollback {
     public static final String API_DESTINATION_UPDATE_SNAPSHOT_ATTR = "__FlociApiDestinationUpdateSnapshot";
 
     /**
+     * Holds the description, authorization type, auth and connectivity parameters, KMS key,
+     * authorization state and timestamps an EventBridge connection carried before an in-place
+     * update changed them, so a failed stack update can put them back. The auth parameters hold the
+     * connection's credentials, as the connection itself does. Written by
+     * {@code EventsCfnProvisioner} before its update call and spent by its {@code rollbackUpdate}.
+     */
+    public static final String CONNECTION_UPDATE_SNAPSHOT_ATTR = "__FlociConnectionUpdateSnapshot";
+
+    /**
      * Holds the name, description and endpoint configuration a REST API had before an in-place
      * update patched them, so a failed stack update can put them back, and a {@code body} flag set
      * once the update's OpenAPI document was applied, which the snapshot cannot undo. Written by

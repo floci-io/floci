@@ -225,6 +225,7 @@ notes:
   AWS::SES::EmailIdentity: 'BYODKIM is not supported by this resource; Easy DKIM DNS attributes use the shared emulator signing zone `dkim.amazonses.com` rather than AWS''s region- and identity-specific zone assignment'
   AWS::SES::ReceiptRule: 'stored in an existing SES receipt rule set; Ref and RuleName return the rule name; management plane only, with no inbound mail delivery'
   AWS::Events::Archive: '`KmsKeyIdentifier` is ignored'
+  AWS::Events::Connection: 'Ref returns the connection name; an update changes the supplied properties in place, while renaming it or removing a property is refused; `KmsKeyIdentifier` and `InvocationConnectivityParameters` are stored and not applied'
   AWS::EventsV2::Subscriber: 'delivers only to Amazon SQS queues; `Transformer` RAW or WITH_METADATA; a target parameter takes a literal or a `$events` path'
   AWS::AppConfig::Environment: '`Tags` and `DeletionProtectionCheck` are accepted and not stored'
   AWS::AppConfig::ConfigurationProfile: '`Tags`, `KmsKeyIdentifier`, `RetrievalRoleArn`, `Validators` and `DeletionProtectionCheck` are accepted and not stored'
