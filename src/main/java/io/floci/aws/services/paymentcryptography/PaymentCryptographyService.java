@@ -1005,4 +1005,9 @@ public class PaymentCryptographyService implements Resettable, StoredResourceArn
     public Map<String, Object> parametersForImport(String materialType, String algorithm) {
         return exchange.parametersForImport(materialType, algorithm);
     }
+
+    /** The parameters a counterparty needs to import a key this service exported. */
+    public Map<String, Object> parametersForExport(String materialType, String algorithm) {
+        return exchange.parametersForExport(materialType, algorithm);
+    }
 }

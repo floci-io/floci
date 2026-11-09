@@ -17,6 +17,10 @@
 | `ListAliases` | List the aliases of a region |
 | `UpdateAlias` | Point an alias name at another key |
 | `DeleteAlias` | Remove an alias name |
+| `ExportKey` | Export a key under a wrapping key, a certificate or an agreed secret |
+| `ImportKey` | Import a key under a wrapping key, a certificate or an agreed secret |
+| `GetParametersForImport` | The token and the wrapping key certificate an import quotes back |
+| `GetParametersForExport` | The token and the signing key certificate an export quotes back |
 | `TagResource` | Add tags to a key |
 | `UntagResource` | Remove tags from a key |
 | `ListTagsForResource` | List the tags of a key |

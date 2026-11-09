@@ -4,18 +4,15 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import io.floci.aws.core.common.AwsException;
 import io.floci.aws.core.common.RegionResolver;
 import io.floci.aws.core.storage.InMemoryStorage;
-import io.floci.aws.services.paymentcryptography.crypto.Asn1;
-import io.floci.aws.services.paymentcryptography.crypto.Hex;
+import io.floci.aws.services.paymentcryptography.crypto.Certificates;
 import io.floci.aws.services.paymentcryptography.crypto.RsaOaep;
-import io.floci.aws.services.paymentcryptography.crypto.X509;
 import io.floci.aws.services.paymentcryptography.model.PaymentCryptographyKey;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
 import java.security.cert.X509Certificate;
-import java.util.Base64;
+import java.util.HexFormat;
 import java.util.LinkedHashMap;
-import java.util.List;
 import java.util.Map;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -61,9 +58,57 @@ class PaymentCryptographyKeyExchangeTest {
 
         assertNotNull(parameters.get("ImportToken"));
         assertNotNull(parameters.get("WrappingKeyCertificate"));
+        assertNotNull(parameters.get("WrappingKeyCertificateChain"));
         assertEquals("RSA_2048", parameters.get("WrappingKeyAlgorithm"));
-        assertNotNull(X509
+        assertNotNull(parameters.get("ParametersValidUntilTimestamp"));
+        assertNotNull(Certificates
                 .parseCertificate((String) parameters.get("WrappingKeyCertificate")));
+    }
+
+    @Test
+    void theExportParametersCarryACertificateAndAToken() {
+        Map<String, Object> parameters = service.parametersForExport("TR34_KEY_BLOCK", "RSA_2048");
+
+        assertNotNull(parameters.get("ExportToken"));
+        assertNotNull(parameters.get("SigningKeyCertificate"));
+        assertNotNull(parameters.get("SigningKeyCertificateChain"));
+        assertEquals("RSA_2048", parameters.get("SigningKeyAlgorithm"));
+        assertNotNull(parameters.get("ParametersValidUntilTimestamp"));
+        assertNotNull(Certificates
+                .parseCertificate((String) parameters.get("SigningKeyCertificate")));
+    }
+
+    @Test
+    void eachTokenIsNamedForTheOperationThatIssuedIt() {
+        String importToken = (String) service.parametersForImport("TR34_KEY_BLOCK", "RSA_2048")
+                .get("ImportToken");
+        String exportToken = (String) service.parametersForExport("TR34_KEY_BLOCK", "RSA_2048")
+                .get("ExportToken");
+
+        assertTrue(importToken.startsWith("import-token-"), importToken);
+        assertTrue(exportToken.startsWith("export-token-"), exportToken);
+    }
+
+    @Test
+    void aMaterialTypeThatTakesNoParametersIsRefused() {
+        AwsException refused = assertThrows(AwsException.class,
+                () -> service.parametersForImport("TR31_KEY_BLOCK", "RSA_2048"));
+        AwsException refusedExport = assertThrows(AwsException.class,
+                () -> service.parametersForExport("KEY_CRYPTOGRAM", "RSA_2048"));
+
+        assertEquals("ValidationException", refused.getErrorCode());
+        assertEquals("ValidationException", refusedExport.getErrorCode());
+    }
+
+    @Test
+    void anAlgorithmThatIsNotAKeyAlgorithmIsRefused() {
+        AwsException refused = assertThrows(AwsException.class,
+                () -> service.parametersForImport("TR34_KEY_BLOCK", "AES_256"));
+        AwsException refusedExport = assertThrows(AwsException.class,
+                () -> service.parametersForExport("TR34_KEY_BLOCK", "AES_256"));
+
+        assertEquals("ValidationException", refused.getErrorCode());
+        assertEquals("ValidationException", refusedExport.getErrorCode());
     }
 
 
@@ -156,9 +201,10 @@ class PaymentCryptographyKeyExchangeTest {
         String token = (String) parameters.get("ImportToken");
         // The cryptogram is built under the wrapping key the parameters carry, so it opens.
         X509Certificate certificate =
-                X509.parseCertificate((String) parameters.get("WrappingKeyCertificate"));
-        String cryptogram = Hex.encodeUpper(RsaOaep.encrypt(certificate.getPublicKey(),
-                Hex.decode("00112233445566778899AABBCCDDEEFF"), "SHA-256"));
+                Certificates.parseCertificate((String) parameters.get("WrappingKeyCertificate"));
+        String cryptogram = HexFormat.of().withUpperCase().formatHex(RsaOaep.encrypt(
+                certificate.getPublicKey(),
+                HexFormat.of().parseHex("00112233445566778899AABBCCDDEEFF"), "SHA-256"));
 
         for (int i = 0; i < 2; i++) {
             PaymentCryptographyKey imported = service.importKey("us-east-1", "KeyCryptogram",

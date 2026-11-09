@@ -1,14 +1,20 @@
 package io.floci.aws.services.paymentcryptography.crypto;
 
-import javax.crypto.Cipher;
-import javax.crypto.spec.OAEPParameterSpec;
-import javax.crypto.spec.PSource;
+import org.bouncycastle.crypto.AsymmetricBlockCipher;
+import org.bouncycastle.crypto.Digest;
+import org.bouncycastle.crypto.InvalidCipherTextException;
+import org.bouncycastle.crypto.digests.SHA256Digest;
+import org.bouncycastle.crypto.digests.SHA512Digest;
+import org.bouncycastle.crypto.encodings.OAEPEncoding;
+import org.bouncycastle.crypto.engines.RSABlindedEngine;
+import org.bouncycastle.crypto.engines.RSAEngine;
+import org.bouncycastle.crypto.params.RSAKeyParameters;
 
-import java.security.GeneralSecurityException;
 import java.security.Key;
 import java.security.PrivateKey;
 import java.security.PublicKey;
-import java.security.spec.MGF1ParameterSpec;
+import java.security.interfaces.RSAPrivateKey;
+import java.security.interfaces.RSAPublicKey;
 
 /**
  * RSA-OAEP, with the parameters built explicitly.
@@ -38,43 +44,45 @@ public final class RsaOaep {
         return null;
     }
 
-    /**
-     * The OAEP parameters Node's {@code oaepHash} produces: the requested digest
-     * for both the OAEP digest and MGF1.
-     */
-    static OAEPParameterSpec params(String digest) {
-        MGF1ParameterSpec mgf1 = "SHA-512".equals(digest)
-                ? MGF1ParameterSpec.SHA512 : MGF1ParameterSpec.SHA256;
-        return new OAEPParameterSpec(digest, "MGF1", mgf1, PSource.PSpecified.DEFAULT);
-    }
-
     /** Decrypt an OAEP-wrapped block. */
     public static byte[] decrypt(PrivateKey key, byte[] ciphertext, String digest) {
-        return run(Cipher.DECRYPT_MODE, key, null, ciphertext, digest);
+        return run(false, key, null, ciphertext, digest);
     }
 
     /** Encrypt to an OAEP-wrapped block. Used by tests and by the demo. */
     public static byte[] encrypt(PublicKey key, byte[] plaintext, String digest) {
-        return run(Cipher.ENCRYPT_MODE, null, key, plaintext, digest);
+        return run(true, null, key, plaintext, digest);
     }
 
-    private static byte[] run(int mode, PrivateKey priv, PublicKey pub,
+    /**
+     * The OAEP encoding, with the requested digest for the OAEP digest and for MGF1.
+     *
+     * <p>The label is empty, which is what the reference implementation's
+     * {@code PSource.PSpecified.DEFAULT} means.
+     */
+    private static OAEPEncoding encoding(String digest, boolean encrypt) {
+        // The public operation is blinded: the exponentiation is made unpredictable, so a
+        // caller cannot tell how far it has come from the timing.
+        AsymmetricBlockCipher engine = encrypt ? new RSABlindedEngine() : new RSAEngine();
+        Digest hash = "SHA-512".equals(digest) ? new SHA512Digest() : new SHA256Digest();
+        return new OAEPEncoding(engine, hash, hash, null);
+    }
+
+    private static byte[] run(boolean encrypt, PrivateKey priv, PublicKey pub,
                               byte[] input, String digest) {
         try {
-            // "ECB" here is part of the JCA transformation name, not a mode:
-            // RSA is not a block cipher, so there is no chaining and no ECB
-            // weakness. The JCA has no other spelling for RSA-OAEP. A scanner
-            // that flags ECB ciphers will flag this line; the flag is a false
-            // positive, and the actual block ciphers this project uses in ECB
-            // mode (TDES/AES-ECB) do so because the wire protocol and the
-            // TR-31 KCV and MAC constructions require it.
-            Cipher cipher = Cipher.getInstance("RSA/ECB/OAEPPadding");            if (mode == Cipher.DECRYPT_MODE) {
-                cipher.init(mode, priv, params(digest));
+            OAEPEncoding oaep = encoding(digest, encrypt);
+            if (encrypt) {
+                RSAPublicKey rsa = (RSAPublicKey) pub;
+                oaep.init(true, new RSAKeyParameters(false, rsa.getModulus(), rsa.getPublicExponent()));
             } else {
-                cipher.init(mode, pub, params(digest));
+                RSAPrivateKey rsa = (RSAPrivateKey) priv;
+                oaep.init(false, new RSAKeyParameters(true, rsa.getModulus(), rsa.getPrivateExponent()));
             }
-            return cipher.doFinal(input);
-        } catch (GeneralSecurityException e) {
+            return oaep.processBlock(input, 0, input.length);
+        } catch (InvalidCipherTextException e) {
+            throw new IllegalArgumentException("RSA-OAEP failed: " + e.getMessage(), e);
+        } catch (RuntimeException e) {
             throw new IllegalArgumentException("RSA-OAEP failed: " + e.getMessage(), e);
         }
     }

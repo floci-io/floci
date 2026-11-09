@@ -39,6 +39,7 @@ public class PaymentCryptographyJsonHandler {
     private static final Set<String> MODEL_CHECKED = Set.of(
             "CreateKey", "GetKey", "ListKeys", "DeleteKey",
             "CreateAlias", "GetAlias", "ListAliases", "UpdateAlias", "DeleteAlias",
+            "ExportKey", "ImportKey", "GetParametersForImport", "GetParametersForExport",
             "TagResource", "UntagResource", "ListTagsForResource");
 
     public Response handle(String action, JsonNode request, String region) {
@@ -57,6 +58,8 @@ public class PaymentCryptographyJsonHandler {
             case "DeleteAlias" -> Response.ok(deleteAlias(request, region)).build();
             case "ExportKey" -> Response.ok(exportKey(request, region)).build();
             case "ImportKey" -> Response.ok(importKey(request, region)).build();
+            case "GetParametersForImport" -> Response.ok(getParametersForImport(request, region)).build();
+            case "GetParametersForExport" -> Response.ok(getParametersForExport(request, region)).build();
             case "TagResource" -> Response.ok(tagResource(request, region)).build();
             case "UntagResource" -> Response.ok(untagResource(request, region)).build();
             case "ListTagsForResource" -> Response.ok(listTagsForResource(request, region)).build();
@@ -399,6 +402,24 @@ public class PaymentCryptographyJsonHandler {
     }
 
     /**
+     * The parameters a counterparty needs to import a key into this service: the token the
+     * import quotes back and the certificate the wrapping key is under.
+     */
+    private Map<String, Object> getParametersForImport(JsonNode request, String region) {
+        return service.parametersForImport(request.path("KeyMaterialType").asText(),
+                request.path("WrappingKeyAlgorithm").asText());
+    }
+
+    /**
+     * The parameters a counterparty needs to import a key this service exported: the token
+     * the export quotes back and the certificate the signing key is under.
+     */
+    private Map<String, Object> getParametersForExport(JsonNode request, String region) {
+        return service.parametersForExport(request.path("KeyMaterialType").asText(),
+                request.path("SigningKeyAlgorithm").asText());
+    }
+
+    /**
      * The key that comes into the service, in the form the request names.
      */
     private Map<String, Object> importKey(JsonNode request, String region) {
@@ -464,7 +485,7 @@ public class PaymentCryptographyJsonHandler {
         if (node == null || !node.isObject()) {
             return out;
         }
-        node.fields().forEachRemaining(entry -> out.put(entry.getKey(), value(entry.getValue())));
+        node.properties().forEach(entry -> out.put(entry.getKey(), value(entry.getValue())));
         return out;
     }
 

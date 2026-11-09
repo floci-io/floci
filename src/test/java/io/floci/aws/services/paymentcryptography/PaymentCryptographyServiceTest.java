@@ -638,6 +638,9 @@ class PaymentCryptographyServiceTest {
         // A key block carries the usage of the key it carries, so every usage the service
         // makes has to have a code. A usage without one could not leave the service at all,
         // and the counterparty could not tell what it had.
+        //
+        // The asymmetric usage is not in the list: a key pair has no material a key block
+        // could carry, so it leaves in a TR-34 block, which this service does not write.
         List<String[]> usages = List.of(
                 new String[] {"TR31_B0_BASE_DERIVATION_KEY", "AES_256"},
                 new String[] {"TR31_C0_CARD_VERIFICATION_KEY", "AES_256"},
@@ -658,7 +661,6 @@ class PaymentCryptographyServiceTest {
                 new String[] {"TR31_M7_HMAC_KEY", "AES_256"},
                 new String[] {"TR31_P0_PIN_ENCRYPTION_KEY", "AES_256"},
                 new String[] {"TR31_P1_PIN_GENERATION_KEY", "AES_256"},
-                new String[] {"TR31_S0_ASYMMETRIC_KEY_FOR_DIGITAL_SIGNATURE", "AES_256"},
                 new String[] {"TR31_V1_IBM3624_PIN_VERIFICATION_KEY", "AES_256"},
                 new String[] {"TR31_V2_VISA_PIN_VERIFICATION_KEY", "AES_256"});
 
@@ -677,6 +679,26 @@ class PaymentCryptographyServiceTest {
 
             assertEquals(usage[0], imported.getKeyUsage(), usage[0] + " did not survive the round trip");
         }
+    }
+
+    @Test
+    void anAsymmetricKeyDoesNotLeaveInAKeyBlock() {
+        // The asymmetric usage is a key pair, and a key pair has no material a key block
+        // could carry. It leaves in a TR-34 block, which this service does not write.
+        PaymentCryptographyKey protection = service.createKey("us-east-1",
+                attributes("AES_256", "TR31_K1_KEY_BLOCK_PROTECTION_KEY"),
+                Map.of("Wrap", Boolean.TRUE, "Unwrap", Boolean.TRUE), true, true, Map.of());
+        Map<String, Object> attributes = new LinkedHashMap<>();
+        attributes.put("KeyAlgorithm", "RSA_2048");
+        attributes.put("KeyClass", "ASYMMETRIC_KEY_PAIR");
+        attributes.put("KeyUsage", "TR31_S0_ASYMMETRIC_KEY_FOR_DIGITAL_SIGNATURE");
+        PaymentCryptographyKey key = service.createKey("us-east-1", attributes,
+                Map.of("Sign", Boolean.TRUE, "Verify", Boolean.TRUE), true, true, Map.of());
+
+        AwsException refused = assertThrows(AwsException.class,
+                () -> exportTr31("us-east-1", key.getKeyId(), protection.getKeyId()));
+
+        assertEquals("ValidationException", refused.getErrorCode());
     }
 
     @Test

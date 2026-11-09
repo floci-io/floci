@@ -351,10 +351,10 @@ final class PaymentCryptographyTr31 {
         byte[] macKey = new byte[parts * 8];
         for (int counter = 1; counter <= parts; counter++) {
             byte[] input = xor(seed, fromHex(typeBConstant(bits, false, counter)));
-            byte[] part = Ciphers.tdesEcbEncrypt(input, wide);
+            byte[] part = Ciphers.tdes3Encrypt(input, wide);
             System.arraycopy(part, 0, encryptionKey, (counter - 1) * 8, 8);
             input = xor(seed, fromHex(typeBConstant(bits, true, counter)));
-            part = Ciphers.tdesEcbEncrypt(input, wide);
+            part = Ciphers.tdes3Encrypt(input, wide);
             System.arraycopy(part, 0, macKey, (counter - 1) * 8, 8);
         }
         return new byte[][] {encryptionKey, macKey};
@@ -376,7 +376,7 @@ final class PaymentCryptographyTr31 {
      * implementation does, and it is not the top bit alone.
      */
     private static byte[] cmacSubkeys(byte[] key, int blockSize, String rbHex) {
-        byte[] s = Ciphers.tdesEcbEncrypt(new byte[blockSize], key);
+        byte[] s = Ciphers.tdes3Encrypt(new byte[blockSize], key);
         byte[] rb = fromHex(rbHex);
         byte[] k1 = shiftXor(s, rb);
         byte[] k2 = shiftXor(k1, rb);

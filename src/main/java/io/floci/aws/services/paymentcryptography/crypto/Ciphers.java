@@ -85,6 +85,34 @@ public final class Ciphers {
     }
 
     /**
+     * Widen a two-key (sixteen-byte) Triple DES key to the three-key form, K1||K2 to
+     * K1||K2||K1.
+     *
+     * <p>The cipher takes the three keys K1||K2||K1, which is what the two-key form means,
+     * and TR-31 derives a type B block's keys from the widened form, so the derivation and
+     * the cipher have to be on the same key. A three-key key is returned as it is.
+     *
+     * @param key the sixteen- or twenty-four-byte key
+     * @return the twenty-four-byte key
+     */
+    public static byte[] widenTdesKey(byte[] key) {
+        if (key == null) {
+            throw new IllegalArgumentException("key is required");
+        }
+        if (key.length == 24) {
+            return key;
+        }
+        if (key.length != 16) {
+            throw new IllegalArgumentException(
+                    "TDES key must be 16 or 24 bytes, got " + key.length);
+        }
+        byte[] out = new byte[24];
+        System.arraycopy(key, 0, out, 0, 16);
+        System.arraycopy(key, 0, out, 16, 8);
+        return out;
+    }
+
+    /**
      * The Triple DES encryption of a block under a two-key key, in ECB mode.
      *
      * <p>The two-key form is K1||K2, and the cipher takes the three keys K1||K2||K1, which

@@ -1,7 +1,10 @@
 package io.floci.aws.services.paymentcryptography.crypto;
 
-import java.security.MessageDigest;
-import java.security.NoSuchAlgorithmException;
+import org.bouncycastle.crypto.Digest;
+import org.bouncycastle.crypto.digests.SHA256Digest;
+import org.bouncycastle.crypto.digests.SHA384Digest;
+import org.bouncycastle.crypto.digests.SHA512Digest;
+
 import java.util.Arrays;
 
 /**
@@ -59,26 +62,22 @@ public final class ConcatKdf {
         if (length <= 0) {
             throw new IllegalArgumentException("the derived length must be positive");
         }
-        MessageDigest digest;
-        try {
-            digest = MessageDigest.getInstance(digestFor(hash));
-        } catch (NoSuchAlgorithmException e) {
-            throw new IllegalArgumentException("unsupported digest '" + hash + "'", e);
-        }
-        int hashBytes = digest.getDigestLength();
+        Digest digest = digestFor(hash);
+        int hashBytes = digest.getDigestSize();
         int reps = (length + hashBytes - 1) / hashBytes;
         byte[] out = new byte[reps * hashBytes];
+        byte[] block = new byte[hashBytes];
         for (int i = 1; i <= reps; i++) {
             digest.reset();
             if (counterFirst) {
-                digest.update(counter(i));
-                digest.update(secret);
+                digest.update(counter(i), 0, 4);
+                digest.update(secret, 0, secret.length);
             } else {
-                digest.update(secret);
-                digest.update(counter(i));
+                digest.update(secret, 0, secret.length);
+                digest.update(counter(i), 0, 4);
             }
-            digest.update(otherInfo);
-            byte[] block = digest.digest();
+            digest.update(otherInfo, 0, otherInfo.length);
+            digest.doFinal(block, 0);
             System.arraycopy(block, 0, out, (i - 1) * hashBytes, hashBytes);
         }
         return Arrays.copyOf(out, length);
@@ -92,20 +91,20 @@ public final class ConcatKdf {
     }
 
     /**
-     * The JCE digest name for a wire hash name.
+     * The digest for a wire hash name.
      *
-     * <p>The service names the digests with an underscore, and the JCE knows
-     * them with a hyphen.
+     * <p>The service names the digests with an underscore, and the library
+     * knows them as the SHA-2 family.
      */
-    private static String digestFor(String hash) {
+    private static Digest digestFor(String hash) {
         if ("SHA_256".equals(hash)) {
-            return "SHA-256";
+            return new SHA256Digest();
         }
         if ("SHA_384".equals(hash)) {
-            return "SHA-384";
+            return new SHA384Digest();
         }
         if ("SHA_512".equals(hash)) {
-            return "SHA-512";
+            return new SHA512Digest();
         }
         throw new IllegalArgumentException("unsupported digest '" + hash
                 + "' (SHA_256, SHA_384, SHA_512)");

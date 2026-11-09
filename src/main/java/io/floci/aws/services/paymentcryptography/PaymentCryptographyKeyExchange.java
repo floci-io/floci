@@ -1,13 +1,11 @@
 package io.floci.aws.services.paymentcryptography;
 
 import io.floci.aws.core.common.AwsException;
+import io.floci.aws.services.paymentcryptography.crypto.Certificates;
 import io.floci.aws.services.paymentcryptography.crypto.ConcatKdf;
-import io.floci.aws.services.paymentcryptography.crypto.Hex;
+import io.floci.aws.services.paymentcryptography.crypto.Ecdh;
 import io.floci.aws.services.paymentcryptography.crypto.RsaOaep;
-import io.floci.aws.services.paymentcryptography.crypto.X509;
 import io.floci.aws.services.paymentcryptography.model.PaymentCryptographyKey;
-
-import javax.crypto.KeyAgreement;
 
 import java.security.GeneralSecurityException;
 import java.security.KeyFactory;
@@ -17,12 +15,15 @@ import java.security.PublicKey;
 import java.security.SecureRandom;
 import java.security.cert.X509Certificate;
 import java.security.interfaces.ECKey;
+import java.security.interfaces.ECPrivateKey;
+import java.security.interfaces.ECPublicKey;
 import java.security.interfaces.RSAKey;
 import java.security.spec.PKCS8EncodedKeySpec;
 import java.security.spec.X509EncodedKeySpec;
 import java.time.Instant;
 import java.time.temporal.ChronoUnit;
 import java.util.Base64;
+import java.util.HexFormat;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -72,8 +73,17 @@ final class PaymentCryptographyKeyExchange {
     /** The key material types that take import parameters. */
     private static final List<String> IMPORT_PARAMETER_TYPES = List.of("KEY_CRYPTOGRAM", "TR34_KEY_BLOCK");
 
+    /** The key material types that take export parameters. */
+    private static final List<String> EXPORT_PARAMETER_TYPES = List.of("TR34_KEY_BLOCK");
+
     /** The kind of material the export token is issued for. */
     private static final String EXPORT_MATERIAL_TYPE = "TR34_KEY_BLOCK";
+
+    /** The prefix an import token's name carries, as the model states it. */
+    private static final String IMPORT_TOKEN_PREFIX = "import-token-";
+
+    /** The prefix an export token's name carries, as the model states it. */
+    private static final String EXPORT_TOKEN_PREFIX = "export-token-";
 
     /** How long an export token is good for, in milliseconds. */
     static long exportTokenTtlMs = 30L * 24 * 3600 * 1000;
@@ -84,6 +94,12 @@ final class PaymentCryptographyKeyExchange {
     /** The RSA moduli the service makes a wrapping key of. */
     private static final Map<String, Integer> RSA_BITS =
             Map.of("RSA_2048", 2048, "RSA_3072", 3072, "RSA_4096", 4096);
+
+    /** The hexadecimal the key material and the cryptograms are written in. */
+    private static final HexFormat HEX = HexFormat.of();
+
+    /** The hexadecimal a cryptogram is written in: the capitals the reference writes it in. */
+    private static final HexFormat HEX_UPPER = HexFormat.of().withUpperCase();
 
     /** The export tokens the service has issued, by token. */
     private final Map<String, Issued> exportTokens = new ConcurrentHashMap<>();
@@ -227,7 +243,7 @@ final class PaymentCryptographyKeyExchange {
                     + "(RSA_OAEP_SHA_256, RSA_OAEP_SHA_512)");
         }
         byte[] encrypted = RsaOaep.encrypt(wrappingKey, clear, digest);
-        return new Exported(Hex.encodeUpper(encrypted), "KEY_CRYPTOGRAM", null);
+        return new Exported(HEX_UPPER.formatHex(encrypted), "KEY_CRYPTOGRAM", null);
     }
 
 
@@ -263,7 +279,7 @@ final class PaymentCryptographyKeyExchange {
         }
         X509Certificate counterparty;
         try {
-            counterparty = X509.parseCertificate(certText);
+            counterparty = Certificates.parseCertificate(certText);
             counterparty.verify(caPublicKey);
         } catch (GeneralSecurityException e) {
             throw validation("the public key certificate is not signed by the certificate authority "
@@ -300,17 +316,14 @@ final class PaymentCryptographyKeyExchange {
 
         byte[] secret;
         try {
-            KeyAgreement agreement = KeyAgreement.getInstance("ECDH");
-            agreement.init(privateKey);
-            agreement.doPhase(counterparty.getPublicKey(), true);
-            secret = agreement.generateSecret();
+            secret = Ecdh.agree((ECPrivateKey) privateKey, (ECPublicKey) counterparty.getPublicKey());
         } catch (GeneralSecurityException e) {
             throw validation("the key agreement failed: " + e.getMessage());
         }
         byte[] derived = "ANSI_X963".equals(kdf)
-                ? ConcatKdf.deriveX963(hash, secret, Hex.decode(sharedInformation),
+                ? ConcatKdf.deriveX963(hash, secret, HEX.parseHex(sharedInformation),
                         deriveAlgorithm.bytes)
-                : ConcatKdf.derive(hash, secret, Hex.decode(sharedInformation),
+                : ConcatKdf.derive(hash, secret, HEX.parseHex(sharedInformation),
                         deriveAlgorithm.bytes);
 
         // The derived key is the wrapping key, so it has to be at least as strong as the key it
@@ -445,7 +458,7 @@ final class PaymentCryptographyKeyExchange {
         }
         byte[] clear;
         try {
-            clear = RsaOaep.decrypt(issued.privateKey, Hex.decode(cryptogram), digest);
+            clear = RsaOaep.decrypt(issued.privateKey, HEX.parseHex(cryptogram), digest);
         } catch (RuntimeException e) {
             throw validation("the cryptogram did not open under the import token: " + e.getMessage());
         }
@@ -502,7 +515,7 @@ final class PaymentCryptographyKeyExchange {
         requireVerify(caKey, "verifying a certificate");
         X509Certificate counterparty;
         try {
-            counterparty = X509.parseCertificate(certText);
+            counterparty = Certificates.parseCertificate(certText);
             counterparty.verify(caPublicKey);
         } catch (GeneralSecurityException e) {
             throw validation("the public key certificate is not signed by the certificate authority "
@@ -549,17 +562,14 @@ final class PaymentCryptographyKeyExchange {
         // The two parties agree the key again, so the block opens under it.
         byte[] secret;
         try {
-            KeyAgreement agreement = KeyAgreement.getInstance("ECDH");
-            agreement.init(privateKey);
-            agreement.doPhase(counterpartyKey, true);
-            secret = agreement.generateSecret();
+            secret = Ecdh.agree((ECPrivateKey) privateKey, (ECPublicKey) counterpartyKey);
         } catch (GeneralSecurityException e) {
             throw validation("the key agreement failed: " + e.getMessage());
         }
         byte[] derived = "ANSI_X963".equals(kdf)
-                ? ConcatKdf.deriveX963(hash, secret, Hex.decode(sharedInformation),
+                ? ConcatKdf.deriveX963(hash, secret, HEX.parseHex(sharedInformation),
                         deriveAlgorithm.bytes)
-                : ConcatKdf.derive(hash, secret, Hex.decode(sharedInformation),
+                : ConcatKdf.derive(hash, secret, HEX.parseHex(sharedInformation),
                         deriveAlgorithm.bytes);
 
         byte[] clear;
@@ -608,12 +618,12 @@ final class PaymentCryptographyKeyExchange {
             if (publicKey == null || privateKey == null) {
                 throw validation("the key " + key.getKeyId() + " has no public key");
             }
-            pem = X509.mintSelfSigned(new KeyPair(publicKey, privateKey), "floci",
-                    Instant.now().minusSeconds(3600), Instant.now().plusSeconds(31536000L)).pem;
+            pem = Certificates.mintSelfSigned(new KeyPair(publicKey, privateKey), "floci",
+                    Instant.now().minusSeconds(3600), Instant.now().plusSeconds(31536000L), random).pem();
         }
         Map<String, Object> out = new LinkedHashMap<>();
         // The reference names the member KeyCertificate.
-        out.put("KeyCertificate", X509.pemBase64(pem));
+        out.put("KeyCertificate", Certificates.pemBase64(pem));
         return out;
     }
 
@@ -665,7 +675,7 @@ final class PaymentCryptographyKeyExchange {
     private static PublicKey publicKeyUnder(String certText, PublicKey caPublicKey, String caArn) {
         X509Certificate certificate;
         try {
-            certificate = X509.parseCertificate(certText);
+            certificate = Certificates.parseCertificate(certText);
         } catch (RuntimeException e) {
             throw validation("the wrapping key certificate is not a certificate: " + e.getMessage());
         }
@@ -708,8 +718,8 @@ final class PaymentCryptographyKeyExchange {
     /** The certificate a caller brought, in PEM. */
     private static String certificatePem(String certText) {
         try {
-            X509Certificate certificate = X509.parseCertificate(certText);
-            return X509.toPem(certificate.getEncoded());
+            X509Certificate certificate = Certificates.parseCertificate(certText);
+            return Certificates.toPem(certificate.getEncoded());
         } catch (GeneralSecurityException | RuntimeException e) {
             return certText;
         }
@@ -858,11 +868,17 @@ final class PaymentCryptographyKeyExchange {
         tokens.values().removeIf(issued -> issued.validUntilMs < now);
     }
 
-    /** A token name the counterparty quotes back. */
-    private String token() {
+    /**
+     * A token name the counterparty quotes back.
+     *
+     * <p>The name says which operation issued it, because the model gives the two kinds
+     * their own patterns: an import token is named {@code import-token-} and an export token
+     * {@code export-token-}, each followed by letters and digits.
+     */
+    private String token(String prefix) {
         byte[] bytes = new byte[12];
         random.nextBytes(bytes);
-        return "export-token-" + Hex.encode(bytes);
+        return prefix + HEX.formatHex(bytes);
     }
 
     /**
@@ -910,21 +926,65 @@ final class PaymentCryptographyKeyExchange {
                     + "(RSA_2048, RSA_3072, RSA_4096)");
         }
         long now = System.currentTimeMillis();
-        KeyPair pair = X509.generateRsaKeyPair(bits);
-        X509.Cert certificate = X509.mintSelfSigned(pair, "floci key-import KRD",
+        KeyPair pair = PaymentCryptographyKeyPairs.rsa(bits, random);
+        Certificates.Minted certificate = Certificates.mintSelfSigned(pair, "floci key-import KRD",
                 Instant.ofEpochMilli(now).minus(1, ChronoUnit.HOURS),
-                Instant.ofEpochMilli(now).plus(7, ChronoUnit.DAYS));
-        Issued issued = new Issued(token(), pair.getPrivate(), certificate.der, wrappingAlgorithm,
-                materialType, now + importTokenTtlMs);
+                Instant.ofEpochMilli(now).plus(7, ChronoUnit.DAYS), random);
+        Issued issued = new Issued(token(IMPORT_TOKEN_PREFIX), pair.getPrivate(), certificate.der(),
+                wrappingAlgorithm, materialType, now + importTokenTtlMs);
         sweep(importTokens);
         importTokens.put(issued.token, issued);
-        String certificate64 = X509.pemBase64(X509.toPem(issued.certificateDer));
+        String certificate64 = Certificates.pemBase64(Certificates.toPem(issued.certificateDer));
         Map<String, Object> out = new LinkedHashMap<>();
         out.put("ImportToken", issued.token);
         out.put("WrappingKeyCertificate", certificate64);
         // Self-signed, so the chain is the certificate itself.
         out.put("WrappingKeyCertificateChain", certificate64);
         out.put("WrappingKeyAlgorithm", wrappingAlgorithm);
+        out.put("ParametersValidUntilTimestamp", issued.validUntilMs / 1000);
+        return out;
+    }
+
+    /**
+     * The parameters a counterparty needs to import a key this service exported.
+     *
+     * <p>The service signs the block it exports, so the parameters carry the signing key's
+     * certificate and the token that names the export. The export token is issued and kept
+     * for as long as the parameters are valid; the model has no member that carries it into
+     * an export, so nothing consumes it yet.
+     *
+     * @param materialType the kind of material the export carries
+     * @param algorithm the signing key's algorithm
+     * @return the parameters the counterparty quotes back
+     */
+    Map<String, Object> parametersForExport(String materialType, String algorithm) {
+        if (!EXPORT_PARAMETER_TYPES.contains(materialType)) {
+            throw validation("KeyMaterialType '" + materialType + "' does not take export "
+                    + "parameters here (" + String.join(", ", EXPORT_PARAMETER_TYPES) + ")");
+        }
+        PaymentCryptographyKeyAlgorithm signing = PaymentCryptographyKeyAlgorithm.from(algorithm);
+        if (signing == null || signing.symmetric()) {
+            throw validation("SigningKeyAlgorithm '" + algorithm + "' not supported "
+                    + "(RSA_2048, RSA_3072, RSA_4096, ECC_NIST_P256, ECC_NIST_P384, ECC_NIST_P521)");
+        }
+        long now = System.currentTimeMillis();
+        KeyPair pair = signing.rsa
+                ? PaymentCryptographyKeyPairs.rsa(signing.bytes * 8, random)
+                : PaymentCryptographyKeyPairs.ec(signing, random);
+        Certificates.Minted certificate = Certificates.mintSelfSigned(pair, "floci key-export KRD",
+                Instant.ofEpochMilli(now).minus(1, ChronoUnit.HOURS),
+                Instant.ofEpochMilli(now).plus(7, ChronoUnit.DAYS), random);
+        Issued issued = new Issued(token(EXPORT_TOKEN_PREFIX), pair.getPrivate(), certificate.der(),
+                algorithm, materialType, now + exportTokenTtlMs);
+        sweep(exportTokens);
+        exportTokens.put(issued.token, issued);
+        String certificate64 = Certificates.pemBase64(Certificates.toPem(issued.certificateDer));
+        Map<String, Object> out = new LinkedHashMap<>();
+        out.put("ExportToken", issued.token);
+        out.put("SigningKeyCertificate", certificate64);
+        // Self-signed, so the chain is the certificate itself.
+        out.put("SigningKeyCertificateChain", certificate64);
+        out.put("SigningKeyAlgorithm", algorithm);
         out.put("ParametersValidUntilTimestamp", issued.validUntilMs / 1000);
         return out;
     }
@@ -938,7 +998,7 @@ final class PaymentCryptographyKeyExchange {
         }
         X509Certificate certificate;
         try {
-            certificate = X509.parseCertificate(certText);
+            certificate = Certificates.parseCertificate(certText);
         } catch (RuntimeException e) {
             throw validation("the public key certificate is not a certificate: " + e.getMessage());
         }
