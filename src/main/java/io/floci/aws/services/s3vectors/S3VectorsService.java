@@ -7,6 +7,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.ObjectReader;
 import io.floci.aws.core.common.AwsArnUtils;
 import io.floci.aws.core.common.AwsException;
+import io.floci.aws.core.common.AwsRegions;
 import io.floci.aws.core.common.RegionResolver;
 import io.floci.aws.core.storage.AccountAwareStorageBackend;
 import io.floci.aws.core.storage.StorageFactory;
@@ -208,23 +209,44 @@ public class S3VectorsService {
                     "Specify either vectorBucketName or vectorBucketArn, not both.", 400);
         }
         if (hasName) {
+            validateBucketName(bucketName);
             return new ResolvedBucket(bucketName, region);
         }
+        AwsArnUtils.Arn parsed = parseS3VectorsArn(bucketArn, "vectorBucketArn");
+        String[] parts = parsed.resource().split("/", -1);
+        if (parts.length != 2 || !"bucket".equals(parts[0]) || parts[1].isBlank() || parsed.accountId().isEmpty()) {
+            throw new AwsException("ValidationException", "Malformed vectorBucketArn: " + bucketArn, 400);
+        }
+        validateBucketName(parts[1]);
+        String arnRegion = parsed.region().isEmpty() ? region : parsed.region();
+        if (!parsed.partition().equals(AwsRegions.partitionFor(arnRegion))) {
+            throw new AwsException("ValidationException", "Malformed vectorBucketArn: " + bucketArn, 400);
+        }
+        if (!parsed.accountId().equals(store.accountId())) {
+            throw new AwsException("NotFoundException",
+                    "The vector bucket " + parts[1] + " does not exist.", 404);
+        }
+        return new ResolvedBucket(parts[1], arnRegion);
+    }
+
+    private static void validateBucketName(String bucketName) {
+        if (bucketName.length() < 3 || bucketName.length() > 63) {
+            throw new AwsException("ValidationException",
+                    "vectorBucketName must be between 3 and 63 characters.", 400);
+        }
+    }
+
+    private static AwsArnUtils.Arn parseS3VectorsArn(String arn, String fieldName) {
         AwsArnUtils.Arn parsed;
         try {
-            parsed = AwsArnUtils.parse(bucketArn);
+            parsed = AwsArnUtils.parse(arn);
         } catch (IllegalArgumentException e) {
-            throw new AwsException("ValidationException", "Malformed vectorBucketArn: " + bucketArn, 400);
+            throw new AwsException("ValidationException", "Malformed " + fieldName + ": " + arn, 400);
         }
         if (!"s3vectors".equals(parsed.service())) {
-            throw new AwsException("ValidationException", "Not an S3 Vectors vectorBucketArn: " + bucketArn, 400);
+            throw new AwsException("ValidationException", "Not an S3 Vectors " + fieldName + ": " + arn, 400);
         }
-        String[] parts = parsed.resource().split("/", -1);
-        if (parts.length != 2 || !"bucket".equals(parts[0]) || parts[1].isBlank()) {
-            throw new AwsException("ValidationException", "Malformed vectorBucketArn: " + bucketArn, 400);
-        }
-        String arnRegion = parsed.region().isEmpty() ? region : parsed.region();
-        return new ResolvedBucket(parts[1], arnRegion);
+        return parsed;
     }
 
     private static void validatePolicyDocument(String policy) {
@@ -418,15 +440,7 @@ public class S3VectorsService {
         if (indexArn == null || indexArn.isBlank()) {
             throw new AwsException("ValidationException", "Either indexName or indexArn is required.", 400);
         }
-        AwsArnUtils.Arn parsed;
-        try {
-            parsed = AwsArnUtils.parse(indexArn);
-        } catch (IllegalArgumentException e) {
-            throw new AwsException("ValidationException", "Malformed indexArn: " + indexArn, 400);
-        }
-        if (!"s3vectors".equals(parsed.service())) {
-            throw new AwsException("ValidationException", "Not an S3 Vectors indexArn: " + indexArn, 400);
-        }
+        AwsArnUtils.Arn parsed = parseS3VectorsArn(indexArn, "indexArn");
         String resource = parsed.resource();
         int marker = resource.lastIndexOf("/index/");
         if (marker < 0 || !resource.startsWith("bucket/")) {

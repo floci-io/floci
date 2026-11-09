@@ -182,54 +182,75 @@ class S3VectorsServiceTest {
         VectorBucket bucket = service.createVectorBucket("bucket", null, REGION);
         VectorIndex index = service.createIndex("bucket", "index", 3, "float32", "cosine", List.of(), REGION);
         String validPolicy = "{\"Version\":\"2012-10-17\",\"Statement\":[]}";
+        service.putVectorBucketPolicy("bucket", null, validPolicy, REGION);
 
-        // Missing bucket returns NotFoundException (404).
+        // Missing bucket or foreign-account ARN returns NotFoundException (404) and leaves local bucket untouched.
+        String foreignAccountArn = "arn:aws:s3vectors:us-east-1:111122223333:bucket/bucket";
         for (Runnable action : List.<Runnable>of(
                 () -> service.putVectorBucketPolicy("missing", null, validPolicy, REGION),
                 () -> service.getVectorBucketPolicy("missing", null, REGION),
-                () -> service.deleteVectorBucketPolicy("missing", null, REGION))) {
+                () -> service.deleteVectorBucketPolicy("missing", null, REGION),
+                () -> service.putVectorBucketPolicy(null, foreignAccountArn, "{\"Statement\":[]}", REGION),
+                () -> service.getVectorBucketPolicy(null, foreignAccountArn, REGION),
+                () -> service.deleteVectorBucketPolicy(null, foreignAccountArn, REGION))) {
             AwsException error = assertThrows(AwsException.class, action::run);
             assertEquals("NotFoundException", error.getErrorCode());
             assertEquals(404, error.getHttpStatus());
+            assertEquals(validPolicy, service.getVectorBucketPolicy("bucket", null, REGION));
         }
 
-        // Neither or both bucket identifiers return ValidationException (400).
+        // Neither, both, or out-of-range (length < 3 or > 63) bucket names return ValidationException (400).
+        String overlongName = "a".repeat(64);
         for (Runnable action : List.<Runnable>of(
                 () -> service.putVectorBucketPolicy(null, null, validPolicy, REGION),
                 () -> service.putVectorBucketPolicy(" ", "", validPolicy, REGION),
+                () -> service.putVectorBucketPolicy("ab", null, validPolicy, REGION),
+                () -> service.putVectorBucketPolicy(overlongName, null, validPolicy, REGION),
                 () -> service.putVectorBucketPolicy("bucket", bucket.getVectorBucketArn(), validPolicy, REGION),
                 () -> service.getVectorBucketPolicy(null, null, REGION),
+                () -> service.getVectorBucketPolicy("ab", null, REGION),
+                () -> service.getVectorBucketPolicy(overlongName, null, REGION),
                 () -> service.getVectorBucketPolicy("bucket", bucket.getVectorBucketArn(), REGION),
                 () -> service.deleteVectorBucketPolicy(null, null, REGION),
+                () -> service.deleteVectorBucketPolicy("ab", null, REGION),
+                () -> service.deleteVectorBucketPolicy(overlongName, null, REGION),
                 () -> service.deleteVectorBucketPolicy("bucket", bucket.getVectorBucketArn(), REGION))) {
             AwsException error = assertThrows(AwsException.class, action::run);
             assertEquals("ValidationException", error.getErrorCode());
             assertEquals(400, error.getHttpStatus());
+            assertEquals(validPolicy, service.getVectorBucketPolicy("bucket", null, REGION));
         }
 
-        // Malformed or wrong-resource ARNs return ValidationException (400).
+        // Malformed, wrong-resource, or partition-mismatched ARNs return ValidationException (400).
         for (String invalidArn : List.of(
                 "not-an-arn",
                 "arn:aws:s3:::bucket",
                 "arn:aws:s3vectors:us-east-1:000000000000:bucket/",
+                "arn:aws:s3vectors:us-east-1:000000000000:bucket/ab",
+                "arn:aws:s3vectors:us-east-1::bucket/bucket",
+                "arn:aws-cn:s3vectors:us-east-1:000000000000:bucket/bucket",
                 index.getIndexArn())) {
             AwsException error = assertThrows(AwsException.class,
                     () -> service.putVectorBucketPolicy(null, invalidArn, validPolicy, REGION));
             assertEquals("ValidationException", error.getErrorCode());
             assertEquals(400, error.getHttpStatus());
+            assertEquals(validPolicy, service.getVectorBucketPolicy("bucket", null, REGION));
         }
 
-        // Non-JSON or non-object policy documents return ValidationException (400).
+        // Non-JSON or non-object policy documents return ValidationException (400) without mutating stored policy.
         for (String invalidPolicy : Collections.singletonList((String) null)) {
             AwsException error = assertThrows(AwsException.class,
                     () -> service.putVectorBucketPolicy("bucket", null, invalidPolicy, REGION));
             assertEquals("ValidationException", error.getErrorCode());
+            assertEquals(400, error.getHttpStatus());
+            assertEquals(validPolicy, service.getVectorBucketPolicy("bucket", null, REGION));
         }
         for (String invalidPolicy : List.of("", "   ", "not-json", "[]", "\"string\"", "{} trailing")) {
             AwsException error = assertThrows(AwsException.class,
                     () -> service.putVectorBucketPolicy("bucket", null, invalidPolicy, REGION));
             assertEquals("ValidationException", error.getErrorCode());
             assertEquals(400, error.getHttpStatus());
+            assertEquals(validPolicy, service.getVectorBucketPolicy("bucket", null, REGION));
         }
     }
 }
