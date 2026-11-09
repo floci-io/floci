@@ -81,8 +81,7 @@
 - **The data plane is a service of its own:** the operations that use a key are on
   [the data plane's page](payment-cryptography-data.md), which is reached at its own
   routes.
-- **Not yet emulated:** the TR-34 and AS2805 key material formats, and the multi-region
-  replication operations.
+- **Not yet emulated:** the multi-region replication operations.
 
 ## Configuration
 
