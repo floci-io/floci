@@ -862,10 +862,7 @@ public class EksService implements TagHandler, ResourceProvider, Ec2InstanceLaun
     }
 
     public PaginatedResult<String> listClusters(Integer maxResults, String nextToken) {
-        int limit = maxResults == null ? 100 : maxResults;
-        if (limit < 1 || limit > 100) {
-            throw new AwsException("InvalidParameterException", "maxResults must be between 1 and 100", 400);
-        }
+        int limit = EksAccessEntryService.pageSize(maxResults);
         List<String> names = listClusters().stream().sorted().toList();
         return Pagination.paginate(names, name -> name, limit, nextToken, "clusters:" + regionResolver.getAccountId(),
                 token -> new AwsException("InvalidParameterException", "Invalid nextToken", 400));
