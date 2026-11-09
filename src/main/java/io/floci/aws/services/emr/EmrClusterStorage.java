@@ -129,16 +129,16 @@ public class EmrClusterStorage implements ClusterStorage, ContainerTeardown {
             "exec setpriv --reuid=hadoop --regid=hadoop --clear-groups bash -c '"
                     + "[ -d /mnt/namenode/current ] || hdfs namenode -format -nonInteractive || exit; "
                     + "cid=$(sed -n \"s/^clusterID=//p\" /mnt/namenode/current/VERSION); "
-                    + "hdfs namenode & hdfs datanode & "
+                    + "hdfs namenode & hdfs datanode & n=2; "
                     + "until curl -sf -m 5 \"" + NAMENODE_JMX + "NameNodeInfo\""
                     + " | grep -q \"\\\"ClusterId\\\" : \\\"$cid\\\"\"; do "
-                    + "[ \"$(jobs -rp | wc -l)\" = 2 ] || exit 1; sleep 0.2; done; "
+                    + "[ \"$(jobs -rp | wc -l)\" = $n ] || exit 1; sleep 0.2; done; "
                     + "until curl -sf -m 5 \"" + NAMENODE_JMX + "FSNamesystemState\""
                     + " | grep -q \"\\\"NumLiveDataNodes\\\" : 1,\"; do "
-                    + "[ \"$(jobs -rp | wc -l)\" = 2 ] || exit 1; sleep 0.2; done; "
+                    + "[ \"$(jobs -rp | wc -l)\" = $n ] || exit 1; sleep 0.2; done; "
                     + "until curl -sf -m 5 \"" + NAMENODE_JMX + "NameNodeInfo\""
                     + " | grep -q \"\\\"Safemode\\\" : \\\"\\\"\"; do "
-                    + "[ \"$(jobs -rp | wc -l)\" = 2 ] || exit 1; sleep 0.2; done; "
+                    + "[ \"$(jobs -rp | wc -l)\" = $n ] || exit 1; sleep 0.2; done; "
                     + "hdfs dfs -mkdir -p /tmp /user/hadoop || exit 1; "
                     + "if [ -n \"$" + HIVE_METASTORE_VARIABLE + "\" ]; then "
                     + "hdfs dfs -mkdir -p /user/hive/warehouse " + HIVE_JARS + " || exit 1; "
@@ -156,12 +156,14 @@ public class EmrClusterStorage implements ClusterStorage, ContainerTeardown {
                     + " --hiveconf datanucleus.schema.autoCreateAll=true"
                     + " --hiveconf hive.metastore.schema.verification=false"
                     + " --hiveconf hive.metastore.warehouse.dir=hdfs://$FLOCI_HDFS_HOST:8020/user/hive/warehouse"
-                    + " \"${site[@]}\" & "
+                    + " \"${site[@]}\" & n=$((n + 1)); "
                     + "until (exec 3<>/dev/tcp/127.0.0.1/" + HIVE_METASTORE_PORT + ") 2>/dev/null; do "
-                    + "[ \"$(jobs -rp | wc -l)\" = 3 ] || exit 1; sleep 0.2; done; "
+                    + "[ \"$(jobs -rp | wc -l)\" = $n ] || exit 1; sleep 0.2; done; "
                     + "fi; "
                     + "touch " + HDFS_READY + "; "
-                    + "wait -n; rm -f " + HDFS_READY + "; kill $(jobs -rp) 2>/dev/null; exit 1'");
+                    // Not wait -n: an emr-6.x image's bash, 4.2, does not have it.
+                    + "while [ \"$(jobs -rp | wc -l)\" = $n ]; do sleep 1; done; rm -f " + HDFS_READY
+                    + "; kill $(jobs -rp) 2>/dev/null; exit 1'");
 
     // One start at a time in a namespace the steps share, whatever the cluster, as it holds one HDFS.
     private final Object sharedNamespaceStarts = new Object();
