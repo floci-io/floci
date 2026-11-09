@@ -166,9 +166,9 @@ OUTPUT = REPO_ROOT / "src/main/resources/aws/iam-request-resources.json"
 NAMESPACES = ("access-analyzer", "acm", "application-autoscaling", "athena", "bcm-data-exports",
               "bcm-pricing-calculator", "budgets", "ce", "cloudtrail", "codebuild", "codepipeline", "cognito-identity",
               "cognito-idp", "controltower", "cur", "datasync", "ec2", "ecr", "elasticloadbalancing", "elasticmapreduce", "es", "events",
-              "firehose", "globalaccelerator", "kinesisanalytics", "payment-cryptography", "quicksight", "redshift",
-              "redshift-data", "rekognition", "servicediscovery", "servicequotas", "sso", "states", "textract",
-              "timestream-influxdb", "translate", "signer")
+              "firehose", "globalaccelerator", "inspector2", "kinesisanalytics", "macie2", "payment-cryptography",
+              "quicksight", "redshift", "redshift-data", "rekognition", "servicediscovery", "servicequotas", "sso",
+              "states", "textract", "timestream-influxdb", "translate", "signer")
 
 # SDK clients the reference lists for a namespace's operations whose requests Floci does not serve, and why: their
 # members are not read.
@@ -252,11 +252,9 @@ NOT_COVERED: dict[str, str] = {
     "glue": _LATER,
     "guardduty": _REST,
     "identitystore": _LATER,
-    "inspector2": _REST,
     "iot": _LATER,
     "kafka": _REST,
     "lightsail": _LATER,
-    "macie2": _REST,
     "memorydb": _LATER,
     "mq": _REST,
     "network-firewall": _LATER,
@@ -581,6 +579,9 @@ CORRECTIONS: dict[str, tuple[list[dict], str]] = {
                                  "Name (ARN) to which you want to add the tag or tags'), whose name does not end in "
                                  "Arn")
        for operation in ("CreateTags", "DeleteTags", "DescribeTags")},
+    "macie2:CreateMember": ([{"type": "Member", "fill": {"ResourceId": "account.accountId"}}],
+                            "the member ARN ends in the account the request associates, which it names as "
+                            "account.accountId, nested where the rule does not look for the member's id"),
 }
 
 # Resource types whose ARN a request may give with a qualifier, one more `:<name>` past its format, which their

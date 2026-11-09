@@ -58,9 +58,12 @@ MODELS: dict[str, str] = {
     "dsql": "dsql",
     "eks": "eks",
     "es": "es",
+    "inspector2": "inspector2",
+    "lakeformation": "lakeformation",
     "lambda": "lambda",
     "lambda-core": "lambda",
     "lambda-microvms": "lambda",
+    "macie2": "macie2",
     "opensearch": "es",
     # The data plane is signed for the service, which is one scope for both of its planes.
     "payment-cryptography-data": "payment-cryptography",
