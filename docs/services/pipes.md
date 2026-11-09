@@ -184,9 +184,10 @@ target input.
   target (with an empty-payload element).
 - **An array response is delivered by target.** An event bus, SQS queue or SNS topic takes one event
   per element, with the target's `InputTemplate` rendered on each element apart. A Lambda function or
-  a Step Functions state machine takes the whole response in one request. A failure on any element
-  fails the batch, and a retried batch runs through the enrichment again, so elements already
-  delivered are delivered again.
+  a Step Functions state machine takes the whole response in one request. An array of more than 10
+  elements for an event bus, queue or topic fails the batch without invoking the target, as on AWS,
+  where 10 is what those targets take in one request. A failure on any element fails the batch, and a
+  retried batch runs through the enrichment again, so elements already delivered are delivered again.
 - **A Lambda enrichment `FunctionError` fails the batch** — the source records are routed to the
   pipe's dead-letter queue rather than silently consumed. Where the pipe has no dead-letter queue or
   the queue refuses them, an SQS message becomes visible again and a DynamoDB stream batch is read
@@ -208,8 +209,8 @@ target input.
 
 - An event bus target's `EventBridgeEventBusParameters` `Source` and `DetailType`, written as a JSON
   path (`$.Source`), are read off the event the target receives, the enrichment's element where the
-  pipe has an enrichment, before the `InputTemplate` renders. A value that does not start `$.` stays
-  as written. A path that names nothing fails the delivery, which is retried or sent to the
+  pipe has an enrichment, before the `InputTemplate` renders. A value that is not wholly a JSON path
+  stays as written. A path that names nothing fails the delivery, which is retried or sent to the
   dead-letter queue like any other failure.
 - An `InputTemplate` that is exactly one placeholder, such as `<$.Detail>`, renders a string as its
   own text with no quotes added, so a serialized object reaches an event bus as that object. A

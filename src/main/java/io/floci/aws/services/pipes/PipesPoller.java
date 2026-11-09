@@ -42,6 +42,11 @@ public class PipesPoller implements Resettable {
     private static final Logger LOG = Logger.getLogger(PipesPoller.class);
     private static final long POLL_INTERVAL_MS = 1000;
     private static final int DEFAULT_BATCH_SIZE = 10;
+    /**
+     * An event bus, queue or topic takes at most this many events in one request, and AWS does not
+     * invoke such a target with an enrichment's array past it: the batch fails instead.
+     */
+    private static final int ENRICHED_BATCH_LIMIT = 10;
 
     private final Vertx vertx;
     private final SqsService sqsService;
@@ -206,34 +211,15 @@ public class PipesPoller implements Resettable {
         // Lambda's SQSRecord[] input) and its response is forwarded to the target.
         if (hasEnrichment(pipe)) {
             if (deliverEnrichedBatch(pipe, filtered, region)) {
-                for (Message msg : messages) {
-                    if (matchedMessageIds.contains(msg.getMessageId())) {
-                        try {
-                            sqsService.deleteMessage(queueUrl, msg.getReceiptHandle(), region);
-                        } catch (Exception e) {
-                            LOG.warnv("Pipe {0}: failed to delete SQS message {1}: {2}",
-                                    pipe.getName(), msg.getMessageId(), e.getMessage());
-                        }
-                    }
-                }
+                deleteMatchedMessages(pipe, queueUrl, messages, matchedMessageIds, region);
             }
             return;
         }
 
         if (isLambdaTarget(pipe)) {
             String eventJson = wrapRecords(filtered);
-            boolean delivered = invokeWithDlq(pipe, eventJson, region);
-            if (delivered) {
-                for (Message msg : messages) {
-                    if (matchedMessageIds.contains(msg.getMessageId())) {
-                        try {
-                            sqsService.deleteMessage(queueUrl, msg.getReceiptHandle(), region);
-                        } catch (Exception e) {
-                            LOG.warnv("Pipe {0}: failed to delete SQS message {1}: {2}",
-                                    pipe.getName(), msg.getMessageId(), e.getMessage());
-                        }
-                    }
-                }
+            if (invokeWithDlq(pipe, eventJson, region)) {
+                deleteMatchedMessages(pipe, queueUrl, messages, matchedMessageIds, region);
             }
         } else {
             Map<String, Message> messagesById = new HashMap<>();
@@ -252,6 +238,21 @@ public class PipesPoller implements Resettable {
                                     pipe.getName(), msg.getMessageId(), e.getMessage());
                         }
                     }
+                }
+            }
+        }
+    }
+
+    /** Deletes the messages a delivered batch consumed, the ones the filter admitted. */
+    private void deleteMatchedMessages(Pipe pipe, String queueUrl, List<Message> messages,
+                                       Set<String> matchedMessageIds, String region) {
+        for (Message msg : messages) {
+            if (matchedMessageIds.contains(msg.getMessageId())) {
+                try {
+                    sqsService.deleteMessage(queueUrl, msg.getReceiptHandle(), region);
+                } catch (Exception e) {
+                    LOG.warnv("Pipe {0}: failed to delete SQS message {1}: {2}",
+                            pipe.getName(), msg.getMessageId(), e.getMessage());
                 }
             }
         }
@@ -582,7 +583,7 @@ public class PipesPoller implements Resettable {
         // Enrichment (source → filter → ENRICHMENT → target) is applied on the SQS and DynamoDB Streams
         // source paths (see deliverEnrichedBatch). Kinesis and Kafka sources deliver the filtered
         // records straight to the target, so a pipe that configures an enrichment on those sources
-        // bypasses it — see docs/services/pipes.md.
+        // bypasses it; see docs/services/pipes.md.
         if (isLambdaTarget(pipe)) {
             return invokeWithDlq(pipe, wrapRecords(records), region) ? 0 : records.size();
         }
@@ -637,7 +638,8 @@ public class PipesPoller implements Resettable {
     /**
      * What each target invocation takes of an enrichment's response. A target with no batch API, Lambda
      * or Step Functions, gets the entire JSON array in one request; any other target gets one event per
-     * element, each rendered through the target's template apart. A response that is no array is one
+     * element, each rendered through the target's template apart, and an array past the target's batch
+     * limit fails the batch, as AWS invokes no target with it. A response that is no array is one
      * event, raw, and only a Lambda target expects it in the batch (JSON array) shape.
      */
     private List<String> enrichedTargetPayloads(Pipe pipe, String enriched) {
@@ -657,6 +659,10 @@ public class PipesPoller implements Resettable {
         }
         if (!response.isArray()) {
             return List.of(enriched);
+        }
+        if (response.size() > ENRICHED_BATCH_LIMIT) {
+            throw new AwsException("InternalException", "Pipe enrichment answered " + response.size()
+                    + " events, more than the " + ENRICHED_BATCH_LIMIT + " the target takes in one batch", 500);
         }
         List<String> elements = new ArrayList<>(response.size());
         response.forEach(element -> elements.add(element.toString()));

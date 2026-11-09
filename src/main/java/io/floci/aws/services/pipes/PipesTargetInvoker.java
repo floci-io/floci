@@ -218,10 +218,11 @@ public class PipesTargetInvoker {
         if (tp != null) {
             JsonNode ebParams = tp.path("EventBridgeEventBusParameters");
             if (ebParams.has("Source")) {
-                source = eventBusParameter("Source", ebParams.get("Source").asText(), event);
+                source = resolveDynamicParameter(ebParams.get("Source").asText(), event, "target parameter Source");
             }
             if (ebParams.has("DetailType")) {
-                detailType = eventBusParameter("DetailType", ebParams.get("DetailType").asText(), event);
+                detailType = resolveDynamicParameter(ebParams.get("DetailType").asText(), event,
+                        "target parameter DetailType");
             }
         }
         Map<String, Object> entry = Map.of(
@@ -243,36 +244,6 @@ public class PipesTargetInvoker {
                             + " entry(ies): " + details);
         }
         LOG.debugv("Pipe delivered to EventBridge: {0}", arn);
-    }
-
-    /**
-     * An event bus parameter's value: as written, or where the whole value is a JSON path, what that
-     * path names in the event. A path naming nothing fails the delivery, so no event goes to the bus
-     * under a literal or empty value.
-     */
-    private String eventBusParameter(String name, String value, String event) {
-        if (!value.startsWith("$.")) {
-            return value;
-        }
-        String extracted = extractJsonPath(value, event);
-        if (extracted == null) {
-            throw new AwsException("InternalException",
-                    "Pipe target parameter " + name + " names nothing in the event: " + value, 500);
-        }
-        return unquoted(extracted);
-    }
-
-    /** The text of a JSON string as {@link #extractJsonPath} gives it; anything else stays as it is. */
-    private String unquoted(String extracted) {
-        if (!extracted.startsWith("\"")) {
-            return extracted;
-        }
-        try {
-            return objectMapper.readTree(extracted).asText();
-        } catch (JsonProcessingException e) {
-            LOG.debugv("Keeping the extracted value, which is no JSON string: {0}", e.getOriginalMessage());
-            return extracted;
-        }
     }
 
     private void invokeStepFunctions(String arn, String payload, String region) {
@@ -310,7 +281,7 @@ public class PipesTargetInvoker {
                 null, sqls, text(parameters, "StatementName"),
                 parameters.path("WithEvent").isBoolean() ? parameters.get("WithEvent").asBoolean() : null);
         redshiftSubmitter.submit(targetArn, statement, pipe.getRoleArn(), account, targetRegion,
-                value -> resolveRedshiftParameter(value, payload),
+                value -> resolveDynamicParameter(value, payload, "Redshift target path"),
                 permissions -> redshiftTargetAuthorizer.refusal(
                         PIPES_PRINCIPAL, pipe.getRoleArn(), account, pipe.getArn(), permissions));
         LOG.debugv("Pipe delivered to Redshift Data API: {0}", targetArn);
@@ -321,14 +292,24 @@ public class PipesTargetInvoker {
         return node.isTextual() ? node.asText() : null;
     }
 
-    private String resolveRedshiftParameter(String value, String payload) {
+    /**
+     * A dynamic target parameter's value: as written, or where the whole value is a JSON path, what
+     * that path names in {@code payload}, a JSON string as its text. A path naming nothing fails the
+     * delivery, named as {@code what}, so nothing reaches the target under a literal or empty value.
+     */
+    private String resolveDynamicParameter(String value, String payload, String what) {
         if (value == null || !DYNAMIC_PARAMETER_PATH.matcher(value).matches()) {
             return value;
         }
         String extracted = extractJsonPath(value, payload);
         if (extracted == null) {
-            throw new AwsException("ValidationException", "Cannot resolve Redshift target path: " + value, 400);
+            throw new AwsException("ValidationException", "Cannot resolve " + what + ": " + value, 400);
         }
+        return unquoted(extracted);
+    }
+
+    /** The text of a JSON string as {@link #extractJsonPath} gives it; any other JSON as it is. */
+    private String unquoted(String extracted) {
         try {
             JsonNode node = objectMapper.readTree(extracted);
             return node.isTextual() ? node.asText() : node.toString();

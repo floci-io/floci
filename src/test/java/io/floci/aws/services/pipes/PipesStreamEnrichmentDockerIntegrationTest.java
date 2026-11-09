@@ -2,8 +2,12 @@ package io.floci.aws.services.pipes;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import io.floci.aws.services.sqs.SqsService;
 import io.floci.aws.testing.DockerAvailability;
+import io.floci.aws.testing.DynamoDbRequests;
+import io.floci.aws.testing.SqsTestQueue;
 import io.quarkus.test.junit.QuarkusTest;
+import jakarta.inject.Inject;
 import org.junit.jupiter.api.Assumptions;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -11,7 +15,6 @@ import org.junit.jupiter.api.Test;
 import java.io.ByteArrayOutputStream;
 import java.nio.charset.StandardCharsets;
 import java.time.Duration;
-import java.util.ArrayList;
 import java.util.Base64;
 import java.util.List;
 import java.util.UUID;
@@ -21,7 +24,6 @@ import java.util.zip.ZipOutputStream;
 import static io.restassured.RestAssured.given;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
-import static org.junit.jupiter.api.Assertions.fail;
 
 /**
  * A table's stream through a real enrichment function onto an event bus: a row the Pipe's filter admits
@@ -35,8 +37,10 @@ class PipesStreamEnrichmentDockerIntegrationTest {
     private static final String ACCOUNT = "000000000000";
     private static final String ROLE = "arn:aws:iam::" + ACCOUNT + ":role/pipe-role";
     private static final Duration DEADLINE = Duration.ofSeconds(90);
-    private static final String SQS_CONTENT_TYPE = "application/x-www-form-urlencoded";
     private static final ObjectMapper MAPPER = new ObjectMapper();
+
+    @Inject
+    SqsService sqsService;
 
     @BeforeEach
     void requireDocker() throws Exception {
@@ -52,10 +56,10 @@ class PipesStreamEnrichmentDockerIntegrationTest {
         String bus = "pipe-bus-" + suffix;
         String rule = "pipe-rule-" + suffix;
         String pipe = "pipe-stream-enrich-" + suffix;
-        String matched = createQueue("pipe-matched-" + suffix);
-        String deadLetters = createQueue("pipe-dlq-" + suffix);
+        SqsTestQueue matched = SqsTestQueue.create(sqsService, ACCOUNT, REGION, "pipe-matched-");
+        SqsTestQueue deadLetters = SqsTestQueue.create(sqsService, ACCOUNT, REGION, "pipe-dlq-");
         try {
-            String streamArn = dynamoDb("CreateTable", """
+            String streamArn = DynamoDbRequests.ddb("CreateTable", """
                     {
                       "TableName": "%s",
                       "AttributeDefinitions": [
@@ -69,7 +73,7 @@ class PipesStreamEnrichmentDockerIntegrationTest {
                       "BillingMode": "PAY_PER_REQUEST",
                       "StreamSpecification": {"StreamEnabled": true, "StreamViewType": "NEW_AND_OLD_IMAGES"}
                     }
-                    """.formatted(table));
+                    """.formatted(table)).statusCode(200).extract().jsonPath().getString("TableDescription.LatestStreamArn");
             createFunction(function);
             events("CreateEventBus", "{\"Name\": \"%s\"}".formatted(bus));
             events("PutRule", """
@@ -86,13 +90,13 @@ class PipesStreamEnrichmentDockerIntegrationTest {
                       "EventBusName": "%s",
                       "Targets": [{"Id": "1", "Arn": "%s"}]
                     }
-                    """.formatted(rule, bus, queueArn(matched)));
-            createPipe(pipe, streamArn, function, bus, queueArn(deadLetters));
+                    """.formatted(rule, bus, matched.arn()));
+            createPipe(pipe, streamArn, function, bus, deadLetters.arn());
 
             putItem(table, "EVENT#r1");
             putItem(table, "OTHER#r2");
 
-            List<JsonNode> events = awaitMessages(matched, 2);
+            List<JsonNode> events = List.of(matched.awaitJson(DEADLINE), matched.awaitJson(DEADLINE));
 
             for (JsonNode event : events) {
                 assertEquals("orders", event.path("source").asText(), event.toString());
@@ -102,72 +106,14 @@ class PipesStreamEnrichmentDockerIntegrationTest {
             }
             assertEquals(3, events.get(0).at("/detail/part").asInt() + events.get(1).at("/detail/part").asInt(),
                     "one event per entry the function answered");
-            assertTrue(receive(matched).isEmpty(), "the filter keeps the other row out");
-            assertTrue(receive(deadLetters).isEmpty(), "nothing failed");
+            assertTrue(matched.receive().isEmpty(), "the filter keeps the other row out");
+            assertTrue(deadLetters.receive().isEmpty(), "nothing failed");
         } finally {
             given().when().delete("/v1/pipes/" + pipe);
             given().when().delete("/2015-03-31/functions/" + function);
-            deleteQueue(matched);
-            deleteQueue(deadLetters);
+            matched.delete();
+            deadLetters.delete();
         }
-    }
-
-    private static String createQueue(String name) {
-        return given()
-                .contentType(SQS_CONTENT_TYPE)
-                .formParam("Action", "CreateQueue")
-                .formParam("QueueName", name)
-        .when()
-                .post("/")
-        .then()
-                .statusCode(200)
-                .extract().xmlPath().getString("CreateQueueResponse.CreateQueueResult.QueueUrl");
-    }
-
-    private static String queueArn(String queueUrl) {
-        return "arn:aws:sqs:" + REGION + ":" + ACCOUNT + ":" + queueUrl.substring(queueUrl.lastIndexOf('/') + 1);
-    }
-
-    private static void deleteQueue(String queueUrl) {
-        given()
-                .contentType(SQS_CONTENT_TYPE)
-                .formParam("Action", "DeleteQueue")
-                .formParam("QueueUrl", queueUrl)
-        .when()
-                .post("/");
-    }
-
-    /** At most one message's body, received without waiting and kept from coming back during the test. */
-    private static String receive(String queueUrl) {
-        return given()
-                .contentType(SQS_CONTENT_TYPE)
-                .formParam("Action", "ReceiveMessage")
-                .formParam("QueueUrl", queueUrl)
-                .formParam("MaxNumberOfMessages", "1")
-                .formParam("VisibilityTimeout", "300")
-        .when()
-                .post("/")
-        .then()
-                .statusCode(200)
-                .extract().xmlPath().getString("ReceiveMessageResponse.ReceiveMessageResult.Message.Body");
-    }
-
-    private static List<JsonNode> awaitMessages(String queueUrl, int count) throws Exception {
-        List<JsonNode> messages = new ArrayList<>();
-        long deadline = System.nanoTime() + DEADLINE.toNanos();
-        while (messages.size() < count) {
-            if (System.nanoTime() > deadline) {
-                fail("no event on the queue a rule on the bus feeds within " + DEADLINE.toSeconds()
-                        + " s: " + messages.size() + " of " + count + ": " + messages);
-            }
-            String body = receive(queueUrl);
-            if (body.isEmpty()) {
-                Thread.sleep(250);
-            } else {
-                messages.add(MAPPER.readTree(body));
-            }
-        }
-        return messages;
     }
 
     private void createPipe(String pipe, String streamArn, String function, String bus, String deadLetterArn) {
@@ -241,21 +187,9 @@ class PipesStreamEnrichmentDockerIntegrationTest {
     }
 
     private static void putItem(String table, String sortKey) {
-        dynamoDb("PutItem", """
+        DynamoDbRequests.ddb("PutItem", """
                 {"TableName": "%s", "Item": {"pk": {"S": "orders"}, "sk": {"S": "%s"}}}
-                """.formatted(table, sortKey));
-    }
-
-    private static String dynamoDb(String action, String body) {
-        return given()
-                .header("X-Amz-Target", "DynamoDB_20120810." + action)
-                .contentType("application/x-amz-json-1.0")
-                .body(body.getBytes(StandardCharsets.UTF_8))
-        .when()
-                .post("/")
-        .then()
-                .statusCode(200)
-                .extract().jsonPath().getString("TableDescription.LatestStreamArn");
+                """.formatted(table, sortKey)).statusCode(200);
     }
 
     private static void events(String action, String body) {

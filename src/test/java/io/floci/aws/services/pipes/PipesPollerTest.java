@@ -792,6 +792,29 @@ class PipesPollerTest {
     }
 
     @Test
+    void anEnrichmentArrayPastTheTargetsBatchLimitFailsTheBatchWithoutInvokingTheTarget() throws Exception {
+        Pipe pipe = enrichedDynamoDbPipe(BUS_ARN);
+        pipe.setSourceParameters(MAPPER.readTree(
+                "{\"DynamoDBStreamParameters\":{\"DeadLetterConfig\":{\"Arn\":\"" + DLQ_ARN + "\"}}}"));
+        streams.shard.add(ddbRecord("001", "active"));
+        StringBuilder eleven = new StringBuilder("[");
+        for (int n = 1; n <= 11; n++) {
+            eleven.append(n > 1 ? "," : "").append("{\"n\":").append(n).append("}");
+        }
+        when(targetInvoker.applyEnrichment(eq(pipe), anyString(), eq("us-east-1")))
+                .thenReturn(eleven.append("]").toString());
+
+        poller.startPolling(pipe);
+        poller.pollDynamoDbStreams(pipe, "us-east-1");
+        poller.pollDynamoDbStreams(pipe, "us-east-1");
+
+        verify(targetInvoker, never()).invoke(any(), anyString(), anyString());
+        List<String> inputs = enrichmentInputs(pipe);
+        assertEquals(1, inputs.size(), "the batch the queue took is committed");
+        verify(sqsService).sendMessage(contains("pipe-dlq"), eq(inputs.get(0)), eq(0), eq("us-east-1"));
+    }
+
+    @Test
     void aFailedElementFailsTheBatchAndItsRetryRunsThroughTheEnrichmentAgain() throws Exception {
         Pipe pipe = enrichedDynamoDbPipe(BUS_ARN);
         streams.shard.add(ddbRecord("001", "active"));
