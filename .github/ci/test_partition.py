@@ -53,6 +53,19 @@ class PartitionTest(unittest.TestCase):
         self.assertEqual([['p/A', 'p/B', 'p/E'], ['p/C', 'p/D', 'p/F']],
                          self.shards(['p/F', 'p/E', 'p/D', 'p/C', 'p/B', 'p/A'], 2))
 
+    def test_profile_augmentation_weight_keeps_plain_classes_on_the_other_shard(self):
+        for name in ('p/A', 'p/B'):
+            self.source(name, '@TestProfile(P.class)')
+        self.assertEqual([['p/A', 'p/B'], ['p/C', 'p/D', 'p/E', 'p/F']],
+                         self.shards(['p/F', 'p/E', 'p/D', 'p/C', 'p/B', 'p/A'], 2))
+
+    def test_larger_profile_groups_are_assigned_before_alphabetically_earlier_groups(self):
+        self.source('p/A', '@TestProfile(Alpha.class)')
+        for name in ('p/B', 'p/C', 'p/D'):
+            self.source(name, '@TestProfile(Zeta.class)')
+        self.assertEqual([['p/B', 'p/C', 'p/D'], ['p/A']],
+                         self.shards(['p/D', 'p/C', 'p/B', 'p/A'], 2))
+
     def test_plain_classes_fill_shards_by_class_count(self):
         self.assertEqual([['p/A', 'p/D'], ['p/B', 'p/E'], ['p/C']],
                          self.shards(['p/E', 'p/D', 'p/C', 'p/B', 'p/A'], 3))
