@@ -828,6 +828,9 @@ class DynamoDbPartiQLEdgeCaseIntegrationTest {
         statement("SELECT * FROM " + table + ".\"multi\" WHERE foo(1) AND h1 = <<>>")
             .statusCode(400)
             .body("message", equalTo(refused));
+        statement("SELECT * FROM " + table + ".\"multi\" WHERE h1 = 1e200")
+            .statusCode(400)
+            .body("message", equalTo(refused));
         statement("SELECT * FROM " + table + ".\"multi\" AS x WHERE h1 = 'a'")
             .statusCode(400)
             .body("message", equalTo("Aliasing is not supported"));
