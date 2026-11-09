@@ -1422,8 +1422,30 @@ public class IamQueryHandler {
 
     private Response handleUpdateAssumeRolePolicy(MultivaluedMap<String, String> params) {
         iamService.updateAssumeRolePolicy(requireParam(params, "RoleName"),
-                requireParam(params, "PolicyDocument"));
+                requireTrustPolicyDocument(params));
         return Response.ok(AwsQueryResponse.envelopeNoResult("UpdateAssumeRolePolicy", AwsNamespaces.IAM)).build();
+    }
+
+    /**
+     * The trust policy this operation writes, which a blank is not. {@code policyDocumentType}
+     * declares a minimum of 1 beside a pattern that admits the space, tab, line feed and carriage
+     * return characters, so the shape does not exclude a blank, and this write replaces the policy
+     * a role is already assumed under: the trust evaluator reads a blank document as matching
+     * nothing, which would leave a role that could be assumed unassumable.
+     *
+     * <p>So the one value the shape lets through here is answered with the modelled
+     * {@code MalformedPolicyDocument}, worded as IAM's trust-policy validator words a document that
+     * does not parse, which is what that validator answers rather than the sentence an identity
+     * policy's gets. Nothing further is read: every other document that is no policy is taken by
+     * this operation and by every other write, which is one gap of its own rather than this
+     * member's.
+     */
+    private String requireTrustPolicyDocument(MultivaluedMap<String, String> params) {
+        String document = requireParam(params, "PolicyDocument");
+        if (document.isBlank()) {
+            throw new AwsException("MalformedPolicyDocument", "This policy contains invalid Json", 400);
+        }
+        return document;
     }
 
     private Response handleTagRole(MultivaluedMap<String, String> params) {
@@ -2427,17 +2449,19 @@ public class IamQueryHandler {
      * {@code PolicySourceArn} held to the 20 to 2048 characters {@code arnType} declares, before
      * the entity it names is resolved. IAM answers that minimum on a sibling ARN member with a
      * {@code ValidationError} naming the length, so a value too short to be any ARN is refused on
-     * its shape rather than resolved to whatever follows its last slash.
+     * its shape rather than resolved to whatever follows its last slash. A blank is such a value:
+     * the request carried it, so it is held to the same minimum, which is the answer
+     * {@code GetContextKeysForPrincipalPolicy} gives for the same member through the walk.
      *
      * <p>A value that clears 20 characters and still parses as no ARN is left to the resolver
      * below, which refuses it as {@code InvalidInput} on a capture of its own: the member publishes
-     * a length and no pattern, so there is no shape to hold it to here. An absent or blank value
-     * is left there too, that resolver reporting it.
+     * a length and no pattern, so there is no shape to hold it to here. An absent member is left
+     * there too, that resolver answering it in the operation's own sentence.
      */
     private String validatedPolicySourceArn(MultivaluedMap<String, String> params) {
         String arn = getParam(params, "PolicySourceArn");
-        if (arn == null || arn.isBlank()) {
-            return arn;
+        if (arn == null) {
+            return null;
         }
         return arnOfDeclaredLength(arn, "policySourceArn");
     }
@@ -3617,14 +3641,23 @@ public class IamQueryHandler {
      * malformed request read as a valid empty answer, so anything the model marks required is read
      * through here instead.
      *
-     * <p>A blank value is a value the request carries, and the constraints read ahead of this
-     * answer it against the minimum length its shape declares. What is left here is a member the
-     * model gives no minimum and an operation the vendored file does not carry, where a blank is
-     * still read as a member that never arrived rather than passed to the operation.
+     * <p>Only an absent member is reported as absent. A blank value is a value the request
+     * carries on this protocol, so what it breaks is the shape declared for it: the constraints
+     * read ahead of this answer every member declaring a minimum, a pattern or a value set.
+     *
+     * <p>Satisfying a shape is not the same as being usable, and this reader does not stand in for
+     * the rules above it. Fourteen required members declare a shape a blank satisfies: a minimum of
+     * 1 beside a pattern admitting the space, tab, line feed and carriage return characters, or
+     * none of the three at all. Seven of those are policy documents, and one that is no policy
+     * document reaches the operation and is stored, because nothing here holds a policy document to
+     * being one on a write; that gap takes a bare {@code +} the same way, so it is wider than a
+     * blank and is not this reader's to close. {@code serviceName} on
+     * {@code CreateServiceSpecificCredential} declares none of the three and answers a service name
+     * nothing supports.
      */
     private String requireParam(MultivaluedMap<String, String> params, String name) {
         String value = params.getFirst(name);
-        if (value == null || value.isBlank()) {
+        if (value == null) {
             throw IamValidationErrors.notNull(memberPath(name));
         }
         return value;
