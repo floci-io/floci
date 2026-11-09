@@ -86,7 +86,9 @@ client that talks to the control plane does not reach it by accident.
 - **The card verification value is the three digit value of the X9 algorithm.** It is computed
   from the account number, the expiry and the service code, enciphered under the card
   verification key, and the value is the decimalized left-most digits of the enciphered block.
-  The static values take a key of the `TR31_C0_CARD_VERIFICATION_KEY` usage.
+  The static values take a key of the `TR31_C0_CARD_VERIFICATION_KEY` usage. The value
+  carries the number of digits the request asks for, which the model states as three to
+  five.
 - **The dynamic value is the one Visa describes for the magstripe data path.** The leftmost
   four digits of the account number are replaced by the transaction counter, and the result,
   the expiry and the service code are enciphered under the card's unique derived key, which

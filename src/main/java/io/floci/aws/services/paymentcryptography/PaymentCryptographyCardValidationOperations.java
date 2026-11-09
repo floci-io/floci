@@ -27,6 +27,9 @@ import java.util.Map;
 @ApplicationScoped
 public class PaymentCryptographyCardValidationOperations {
 
+    /** The length of the value when the request does not name one. */
+    private static final int DEFAULT_VALIDATION_DATA_LENGTH = 3;
+
     /** The service code of the second card verification value, which the service fixes. */
     private static final String CVV2_SERVICE_CODE = "000";
 
@@ -65,16 +68,19 @@ public class PaymentCryptographyCardValidationOperations {
         Integer validationDataLength = request.hasNonNull("ValidationDataLength")
                 ? request.path("ValidationDataLength").asInt()
                 : null;
-        if (validationDataLength != null && validationDataLength != 3) {
-            throw validation("ValidationDataLength other than 3 is not supported by this service");
+        if (validationDataLength != null
+                && (validationDataLength < 3 || validationDataLength > 5)) {
+            throw validation("ValidationDataLength must be three to five digits");
         }
+        int length = validationDataLength == null ? DEFAULT_VALIDATION_DATA_LENGTH
+                : validationDataLength;
         CardAttrs attrs = resolveCardAttrs(request.get("GenerationAttributes"));
 
         PaymentCryptographyKey key = requiredKey(keyIdentifier, region);
         requireKeyForVariant(key, attrs.variant, "Generate");
 
         Map<String, Object> out = new LinkedHashMap<>();
-        out.put("ValidationData", compute(pan, attrs, key));
+        out.put("ValidationData", compute(pan, attrs, key, length));
         out.put("KeyArn", key.getArn());
         out.put("KeyCheckValue", key.getKeyCheckValue());
         return out;
@@ -90,9 +96,10 @@ public class PaymentCryptographyCardValidationOperations {
         String keyIdentifier = text(request, "KeyIdentifier");
         String pan = text(request, "PrimaryAccountNumber");
         String validationData = text(request, "ValidationData");
-        if (!validationData.matches("[0-9]{3}")) {
-            throw validation("ValidationData must be three digits");
+        if (!validationData.matches("[0-9]{3,5}")) {
+            throw validation("ValidationData must be three to five digits");
         }
+        int length = validationData.length();
         CardAttrs attrs = resolveCardAttrs(request.get("VerificationAttributes"));
 
         PaymentCryptographyKey key = requiredKey(keyIdentifier, region);
@@ -100,7 +107,7 @@ public class PaymentCryptographyCardValidationOperations {
 
         String computed;
         try {
-            computed = compute(pan, attrs, key);
+            computed = compute(pan, attrs, key, length);
         } catch (RuntimeException e) {
             throw validation("Unable to compute the card validation value: " + e.getMessage());
         }
@@ -116,18 +123,20 @@ public class PaymentCryptographyCardValidationOperations {
     // ---- the parts -----------------------------------------------------------
 
     /** The value for the variant, under the given key. */
-    private static String compute(String pan, CardAttrs attrs, PaymentCryptographyKey key) {
+    private static String compute(String pan, CardAttrs attrs, PaymentCryptographyKey key,
+                                 int length) {
         if ("DynamicCardVerificationValue".equals(attrs.variant)) {
             return CvvCrypto.computeDynamicValue(pan, attrs.expiry, attrs.serviceCode,
                     attrs.applicationTransactionCounter, key.getKeyMaterialHex(),
-                    attrs.panSequenceNumber);
+                    attrs.panSequenceNumber, length);
         }
         if ("DynamicCardVerificationCode".equals(attrs.variant)) {
             return CvvCrypto.computeDynamicCode(attrs.trackData,
                     attrs.applicationTransactionCounter, attrs.unpredictableNumber,
-                    key.getKeyMaterialHex());
+                    key.getKeyMaterialHex(), length);
         }
-        return CvvCrypto.computeCvv(pan, attrs.expiry, attrs.serviceCode, key.getKeyMaterialHex());
+        return CvvCrypto.computeCvv(pan, attrs.expiry, attrs.serviceCode,
+                key.getKeyMaterialHex(), length);
     }
 
     /**

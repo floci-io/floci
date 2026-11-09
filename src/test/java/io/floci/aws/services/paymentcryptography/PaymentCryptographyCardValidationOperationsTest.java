@@ -85,9 +85,9 @@ class PaymentCryptographyCardValidationOperationsTest {
 
     @Test
     void theCardVerificationValueIsTheOneTheStandardGives() {
-        assertEquals("131", CvvCrypto.computeCvv(PAN, EXPIRY, "201", CVK));
-        assertEquals("886", CvvCrypto.computeCvv(PAN, EXPIRY, "000", CVK));
-        assertEquals("660", CvvCrypto.computeCvv(PAN, EXPIRY, "999", CVK));
+        assertEquals("131", CvvCrypto.computeCvv(PAN, EXPIRY, "201", CVK, 3));
+        assertEquals("886", CvvCrypto.computeCvv(PAN, EXPIRY, "000", CVK, 3));
+        assertEquals("660", CvvCrypto.computeCvv(PAN, EXPIRY, "999", CVK, 3));
     }
 
     @Test
@@ -215,25 +215,25 @@ class PaymentCryptographyCardValidationOperationsTest {
     }
 
     @Test
-    void theValidationDataLengthIsTheOneTheServiceMakes() {
+    void theValidationDataLengthIsTheOneTheModelStates() {
         PaymentCryptographyKey cvk = createKey("TDES_2KEY", "TR31_C0_CARD_VERIFICATION_KEY",
                 "Generate", "Verify");
 
-        // The model lets the length be three to five, and the service makes three.
+        // The model lets the length be three to five, and the value carries that many
+        // digits of the decimalised block.
         cardValidation.generate(request(Map.of(
                 "KeyIdentifier", cvk.getArn(),
                 "PrimaryAccountNumber", PAN,
                 "ValidationDataLength", 3,
                 "GenerationAttributes", cardVerificationValue1(EXPIRY, "201"))), "us-east-1");
 
-        AwsException refused = assertThrows(AwsException.class,
-                () -> cardValidation.generate(request(Map.of(
-                        "KeyIdentifier", cvk.getArn(),
-                        "PrimaryAccountNumber", PAN,
-                        "ValidationDataLength", 4,
-                        "GenerationAttributes", cardVerificationValue1(EXPIRY, "201"))), "us-east-1"));
+        Map<String, Object> longer = cardValidation.generate(request(Map.of(
+                "KeyIdentifier", cvk.getArn(),
+                "PrimaryAccountNumber", PAN,
+                "ValidationDataLength", 5,
+                "GenerationAttributes", cardVerificationValue1(EXPIRY, "201"))), "us-east-1");
 
-        assertEquals("ValidationException", refused.getErrorCode());
+        assertEquals(5, ((String) longer.get("ValidationData")).length());
     }
 
     @Test

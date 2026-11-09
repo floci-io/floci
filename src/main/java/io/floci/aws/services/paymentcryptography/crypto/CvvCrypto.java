@@ -26,13 +26,14 @@ public final class CvvCrypto {
     }
 
     /** Compute the 3-digit card verification value. {@code cvkHex} is CVK-A || CVK-B. */
-    public static String computeCvv(String pan, String expiryYYMM, String serviceCode, String cvkHex) {
+    public static String computeCvv(String pan, String expiryYYMM, String serviceCode,
+                                      String cvkHex, int length) {
         byte[] cvk = HEX.parseHex(cvkHex);
         if (cvk.length != 16) {
             throw new IllegalArgumentException("CVK must be 16 bytes (32 hex)");
         }
         return decimalize(PinCrypto.digits(pan) + PinCrypto.digits(expiryYYMM)
-                + PinCrypto.digits(serviceCode), cvk);
+                + PinCrypto.digits(serviceCode), cvk, length);
     }
 
     /**
@@ -54,10 +55,11 @@ public final class CvvCrypto {
      * counter diversifies the value by the data it is inserted into, not by the key.
      */
     public static String computeDynamicValue(String pan, String expiryYYMM, String serviceCode,
-                                              String atcHex, String emkHex, String psn) {
+                                              String atcHex, String emkHex, String psn,
+                                              int length) {
         byte[] udk = EmvCrypto.deriveIccMasterKey(HEX.parseHex(emkHex), pan, psn);
         return decimalize(alteredPan(pan, atcHex) + PinCrypto.digits(expiryYYMM)
-                + PinCrypto.digits(serviceCode), udk);
+                + PinCrypto.digits(serviceCode), udk, length);
     }
 
     /**
@@ -80,6 +82,9 @@ public final class CvvCrypto {
                         "the transaction counter must be a binary coded decimal counter");
             }
             altered.append(c);
+        }
+        while (altered.length() < 4) {
+            altered.insert(0, '0');
         }
         return altered.append(digits.substring(4)).toString();
     }
@@ -106,7 +111,8 @@ public final class CvvCrypto {
      * interface, the key type and the mode of use match.
      */
     public static String computeDynamicCode(String trackDataHex, String atcHex,
-                                            String unpredictableNumberHex, String emkHex) {
+                                            String unpredictableNumberHex, String emkHex,
+                                            int length) {
         byte[] emk = masterKey(emkHex);
         byte[] sessionKey = EmvCrypto.deriveSessionKeyMastercard(emk, HEX.parseHex(atcHex),
                 HEX.parseHex(unpredictableNumberHex));
@@ -117,12 +123,12 @@ public final class CvvCrypto {
             System.arraycopy(folded, 0, head, 0, 16);
             track = head;
         }
-        return decimalize(HEX.formatHex(track), sessionKey);
+        return decimalize(HEX.formatHex(track), sessionKey, length);
     }
 
     public static boolean verifyCvv(String pan, String expiryYYMM, String serviceCode,
                                     String cvkHex, String cvv) {
-        return computeCvv(pan, expiryYYMM, serviceCode, cvkHex).equals(cvv);
+        return computeCvv(pan, expiryYYMM, serviceCode, cvkHex, cvv.length()).equals(cvv);
     }
 
     /** The EMV master key, which the service also holds as TDES-2KEY. */
@@ -141,7 +147,7 @@ public final class CvvCrypto {
      *
      * @param input hexadecimal input, at most 32 characters, zero-padded
      */
-    private static String decimalize(String input, byte[] key) {
+    private static String decimalize(String input, byte[] key, int length) {
         if (input.length() > 32) {
             throw new IllegalArgumentException("the input exceeds two blocks");
         }
@@ -155,7 +161,7 @@ public final class CvvCrypto {
         byte[] b2 = HEX.parseHex(p.substring(16, 32));
 
         byte[] r = Ciphers.tdes2Encrypt(Ciphers.xor(Ciphers.tdesSingleDesEncrypt(b1, slice(key, 0, 8)), b2), key);
-        return Decimalize.of(HEX.formatHex(r), 3);
+        return Decimalize.of(HEX.formatHex(r), length);
     }
 
     private static byte[] slice(byte[] b, int from, int to) {

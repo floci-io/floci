@@ -41,15 +41,16 @@ class CvvCryptoTest {
     @Test
     void theDynamicValueIsTheOneTheSpecificationGives() {
         assertEquals(dcvv(), CvvCrypto.computeDynamicValue(
-                PAN, EXPIRY, SERVICE_CODE, ATC, IMK, PSN));
+                PAN, EXPIRY, SERVICE_CODE, ATC, IMK, PSN, 3));
     }
 
     @Test
     void theDynamicValueIsNotTheStaticValue() {
         // The counter is inserted into the account number, so the value is bound to the
         // transaction and is not the value of the card's fields.
-        assertEquals(false, CvvCrypto.computeDynamicValue(PAN, EXPIRY, SERVICE_CODE, ATC, IMK, PSN)
-                .equals(CvvCrypto.computeCvv(PAN, EXPIRY, SERVICE_CODE, IMK)));
+        assertEquals(false, CvvCrypto.computeDynamicValue(
+                PAN, EXPIRY, SERVICE_CODE, ATC, IMK, PSN, 3)
+                .equals(CvvCrypto.computeCvv(PAN, EXPIRY, SERVICE_CODE, IMK, 3)));
     }
 
     /**
