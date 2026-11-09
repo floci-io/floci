@@ -734,13 +734,18 @@ regenerates it from AWS's published schemas, and `cfn-schema-drift.yml` compares
 A property the previous template declared and the new template drops is cleared on `UpdateStack`,
 goes back to its create default, or is kept, on the AppSync resources, the EC2 networking types
 (`Subnet`, `InternetGateway`, `RouteTable`, `NatGateway`, `EIP`, `PrefixList`), an
-`AWS::ApiGatewayV2::Stage` and an `AWS::EC2::Instance`. Kept: required members
+`AWS::ApiGatewayV2::Stage`, an `AWS::EC2::Instance` and an `AWS::ECS::Service`. Kept: required members
 (`AuthenticationType`, `Type`, a function's `DataSourceName`), a data source's and a function's `Name`,
 an API key's `Expires`, a GraphQL API's `ApiType` and `Visibility`, a UNIT resolver's `DataSourceName`,
 a `NatGateway`'s `PrivateIpAddress`, a `PrefixList`'s `MaxEntries`, a `Stage`'s `StageName` and an
 `Instance`'s `SecurityGroupIds`, `NetworkInterfaces` and `LaunchTemplate`. A dropped `LaunchTemplate` keeps
 the instance, but the instance type and the `MetadataOptions` members the template supplied go back to
-their defaults, and the instance profile it supplied is disassociated. A `Stage`'s dropped `StageVariables` become empty. An `Instance`'s dropped `UserData` is
+their defaults, and the instance profile it supplied is disassociated. A service's `TaskDefinition`,
+`NetworkConfiguration`, `ServiceName`, `LaunchType`, `LoadBalancers`, `CapacityProviderStrategy` and
+`ServiceRegistries` are kept, and its `DesiredCount` goes back to 1. A service's dropped
+`DeploymentConfiguration` is cleared. An empty `CapacityProviderStrategy` or `ServiceRegistries` in the
+template clears it; a failed stabilisation puts the prior values back, and a deployment configuration
+the service did not have goes back to none. A `Stage`'s dropped `StageVariables` become empty. An `Instance`'s dropped `UserData` is
 cleared: a running instance is stopped for the rewrite and started again, and a stopped one stays stopped.
 An update that drops a `PrefixList`'s `AddressFamily` or `PrefixListName` fails. Create-only members are
 not cleared either.

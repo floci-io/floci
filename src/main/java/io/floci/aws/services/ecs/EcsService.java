@@ -2945,6 +2945,34 @@ public class EcsService implements ContainerTeardown, ResourceProvider, Resettab
         return updateService(request, region);
     }
 
+    /**
+     * Sets the deployment configuration exactly as given, null included, and starts no deployment.
+     * UpdateService keeps a configuration the request leaves out, so it cannot remove one that
+     * CloudFormation dropped.
+     */
+    public EcsServiceModel replaceServiceDeploymentConfiguration(String clusterRef, String serviceName,
+                                                                 Map<String, Object> deploymentConfiguration,
+                                                                 String region) {
+        EcsCluster cluster = resolveClusterOrDefault(clusterRef, region);
+        String name = extractServiceName(serviceName);
+        String key = serviceKey(region, cluster.getClusterName(), name);
+        synchronized (serviceLock(key)) {
+            EcsServiceModel svc = services.get(key);
+            if (svc == null) {
+                throw new AwsException("ServiceNotFoundException", "Service " + name + " not found.", 404);
+            }
+            synchronized (svc) {
+                if ("INACTIVE".equals(svc.getStatus())) {
+                    throw new AwsException("ServiceNotActiveException",
+                            "Service " + name + " is not active.", 400);
+                }
+                svc.setDeploymentConfiguration(deploymentConfiguration);
+                services.put(key, svc);
+                return svc;
+            }
+        }
+    }
+
     public EcsServiceModel updateService(UpdateServiceRequest request, String region) {
         EcsCluster cluster = resolveClusterOrDefault(request.getCluster(), region);
 
