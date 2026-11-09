@@ -2638,7 +2638,6 @@ public class CognitoService implements ResourceProvider {
             canonicalUsername = existing != null ? existing.getUsername() : UUID.randomUUID().toString();
             resolvedAttributes.put("sub", canonicalUsername);
         } else {
-            canonicalUsername = username;
             existing = findUserByUsername(pool, username);
             canonicalUsername = existing == null ? username : existing.getUsername();
         }
@@ -6811,10 +6810,13 @@ public class CognitoService implements ResourceProvider {
         throw new AwsException("InvalidParameterException", expected, 400);
     }
 
-    private String signInKey(UserPool pool, String value) {
-        return value != null && pool.getUsernameConfiguration() != null
-                && Boolean.FALSE.equals(pool.getUsernameConfiguration().get("CaseSensitive"))
-                ? value.toLowerCase(Locale.ROOT) : value;
+    private boolean isCaseInsensitive(UserPool pool) {
+        return pool.getUsernameConfiguration() != null
+                && Boolean.FALSE.equals(pool.getUsernameConfiguration().get("CaseSensitive"));
+    }
+
+    String signInKey(UserPool pool, String value) {
+        return value != null && isCaseInsensitive(pool) ? value.toLowerCase(Locale.ROOT) : value;
     }
 
     private boolean matchesSignInAttribute(UserPool pool, String attribute, String supplied, String stored) {
@@ -6826,8 +6828,7 @@ public class CognitoService implements ResourceProvider {
 
     private CognitoUser findUserByUsername(UserPool pool, String username) {
         CognitoUser exact = userStore.get(userKey(pool.getId(), username)).orElse(null);
-        if (exact != null || usesAliasUsernames(pool) || pool.getUsernameConfiguration() == null
-                || !Boolean.FALSE.equals(pool.getUsernameConfiguration().get("CaseSensitive"))) {
+        if (exact != null || usesAliasUsernames(pool) || !isCaseInsensitive(pool)) {
             return exact;
         }
         String prefix = pool.getId() + "::";

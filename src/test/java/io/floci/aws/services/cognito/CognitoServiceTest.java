@@ -6021,14 +6021,9 @@ class CognitoServiceTest {
             client.setExplicitAuthFlows(List.of("ALLOW_USER_PASSWORD_AUTH", "ALLOW_ADMIN_USER_PASSWORD_AUTH",
                     "ALLOW_USER_SRP_AUTH"));
             String supplied = "Fixture@Example.com";
-            Mac mac = Mac.getInstance("HmacSHA256");
-            mac.init(new SecretKeySpec(client.getClientSecret().getBytes(StandardCharsets.UTF_8), "HmacSHA256"));
-            String secretHash = Base64.getEncoder().encodeToString(
-                    mac.doFinal((supplied + client.getClientId()).getBytes(StandardCharsets.UTF_8)));
+            String secretHash = secretHash(client, supplied);
             Map<String, String> params = Map.of("USERNAME", supplied, "PASSWORD", password, "SECRET_HASH", secretHash);
-            Map<String, Object> authenticated = admin
-                    ? service.adminInitiateAuth(pool.getId(), client.getClientId(), "ADMIN_USER_PASSWORD_AUTH", params)
-                    : service.initiateAuth(client.getClientId(), "USER_PASSWORD_AUTH", params);
+            Map<String, Object> authenticated = initiateAuth(admin, pool, client, "USER_PASSWORD_AUTH", params);
             Map<?, ?> tokens = (Map<?, ?>) authenticated.get("AuthenticationResult");
             String accessToken = (String) tokens.get("AccessToken");
             JsonNode claims = new ObjectMapper().readTree(Base64.getUrlDecoder().decode(accessToken.split("\\.")[1]));
@@ -6037,21 +6032,78 @@ class CognitoServiceTest {
 
             Map<String, String> srpParams = Map.of("USERNAME", supplied,
                     "SRP_A", CognitoSrpTestClient.publicA(), "SECRET_HASH", secretHash);
-            Map<String, Object> started = admin
-                    ? service.adminInitiateAuth(pool.getId(), client.getClientId(), "USER_SRP_AUTH", srpParams)
-                    : service.initiateAuth(client.getClientId(), "USER_SRP_AUTH", srpParams);
+            Map<String, Object> started = initiateAuth(admin, pool, client, "USER_SRP_AUTH", srpParams);
             Map<?, ?> challenge = (Map<?, ?>) started.get("ChallengeParameters");
             assertEquals(user.getUsername(), challenge.get("USER_ID_FOR_SRP"));
             Map<String, String> proof = new HashMap<>(CognitoSrpTestClient.proof(
                     pool.getId(), user.getUsername(), password, challenge));
-            proof.put("SECRET_HASH", Base64.getEncoder().encodeToString(
-                    mac.doFinal((user.getUsername() + client.getClientId()).getBytes(StandardCharsets.UTF_8))));
-            Map<String, Object> completed = admin
-                    ? service.adminRespondToAuthChallenge(pool.getId(), client.getClientId(), "PASSWORD_VERIFIER",
-                            (String) started.get("Session"), proof)
-                    : service.respondToAuthChallenge(client.getClientId(), "PASSWORD_VERIFIER",
-                            (String) started.get("Session"), proof);
+            proof.put("SECRET_HASH", secretHash(client, user.getUsername()));
+            Map<String, Object> completed = respondToSrp(admin, pool, client, (String) started.get("Session"), proof);
             assertNotNull(completed.get("AuthenticationResult"));
+        }
+
+        private Map<String, Object> initiateAuth(boolean admin, UserPool pool, UserPoolClient client,
+                                                 String flow, Map<String, String> params) {
+            return admin ? service.adminInitiateAuth(pool.getId(), client.getClientId(),
+                    "USER_PASSWORD_AUTH".equals(flow) ? "ADMIN_USER_PASSWORD_AUTH" : flow, params)
+                    : service.initiateAuth(client.getClientId(), flow, params);
+        }
+
+        private Map<String, Object> respondToSrp(boolean admin, UserPool pool, UserPoolClient client,
+                                                String session, Map<String, String> proof) {
+            return admin ? service.adminRespondToAuthChallenge(pool.getId(), client.getClientId(),
+                    "PASSWORD_VERIFIER", session, proof)
+                    : service.respondToAuthChallenge(client.getClientId(), "PASSWORD_VERIFIER", session, proof);
+        }
+
+        private String secretHash(UserPoolClient client, String username) throws Exception {
+            Mac mac = Mac.getInstance("HmacSHA256");
+            mac.init(new SecretKeySpec(client.getClientSecret().getBytes(StandardCharsets.UTF_8), "HmacSHA256"));
+            return Base64.getEncoder().encodeToString(
+                    mac.doFinal((username + client.getClientId()).getBytes(StandardCharsets.UTF_8)));
+        }
+
+        @ParameterizedTest
+        @CsvSource({"false,false", "true,false", "false,true", "true,true", "false,default", "true,default"})
+        void srpChallengeRespectsUsernameCaseSensitivity(boolean admin, String setting) throws Exception {
+            UserPool pool = service.createUserPool(Map.of("PoolName", "classic-srp-case"), "us-east-1");
+            if (!"default".equals(setting)) {
+                pool.setUsernameConfiguration(Map.of("CaseSensitive", Boolean.parseBoolean(setting)));
+            }
+            String password = "Valid-password123!";
+            CognitoUser user = service.adminCreateUser(pool.getId(), "Fixture", Map.of(), null);
+            service.adminSetUserPassword(pool.getId(), user.getUsername(), password, true);
+            UserPoolClient client = service.createUserPoolClient(pool.getId(), "client", true, false, List.of(), List.of());
+            client.setExplicitAuthFlows(List.of("ALLOW_USER_SRP_AUTH"));
+            String supplied = "false".equals(setting) ? "fixture" : user.getUsername();
+            Map<String, Object> started = initiateAuth(admin, pool, client, "USER_SRP_AUTH",
+                    Map.of("USERNAME", supplied, "SRP_A", CognitoSrpTestClient.publicA(),
+                            "SECRET_HASH", secretHash(client, supplied)));
+            Map<?, ?> challenge = (Map<?, ?>) started.get("ChallengeParameters");
+            assertEquals("Fixture", challenge.get("USER_ID_FOR_SRP"));
+            String session = (String) started.get("Session");
+            Map<String, String> proof = new HashMap<>(CognitoSrpTestClient.proof(
+                    pool.getId(), user.getUsername(), password, challenge));
+            proof.remove("USERNAME");
+            assertEquals("InvalidParameterException", assertThrows(AwsException.class,
+                    () -> respondToSrp(admin, pool, client, session, proof)).getErrorCode());
+            proof.put("USERNAME", "other");
+            proof.put("SECRET_HASH", secretHash(client, "other"));
+            assertEquals("NotAuthorizedException", assertThrows(AwsException.class,
+                    () -> respondToSrp(admin, pool, client, session, proof)).getErrorCode());
+            proof.put("USERNAME", "fixture");
+            proof.put("SECRET_HASH", secretHash(client, "fixture"));
+            if (!"false".equals(setting)) {
+                assertEquals("NotAuthorizedException", assertThrows(AwsException.class,
+                        () -> respondToSrp(admin, pool, client, session, proof)).getErrorCode());
+                proof.put("USERNAME", user.getUsername());
+                proof.put("SECRET_HASH", secretHash(client, user.getUsername()));
+            }
+            Map<?, ?> tokens = (Map<?, ?>) respondToSrp(admin, pool, client, session, proof).get("AuthenticationResult");
+            String accessToken = (String) tokens.get("AccessToken");
+            JsonNode claims = new ObjectMapper().readTree(Base64.getUrlDecoder().decode(accessToken.split("\\.")[1]));
+            assertEquals("Fixture", claims.path("username").asText());
+            assertEquals(user.getAttributes().get("sub"), claims.path("sub").asText());
         }
 
         @Test
