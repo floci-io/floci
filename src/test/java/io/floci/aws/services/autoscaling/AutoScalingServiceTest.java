@@ -14,6 +14,7 @@ import io.floci.aws.services.autoscaling.model.InstanceRefresh;
 import io.floci.aws.services.autoscaling.model.LaunchConfiguration;
 import io.floci.aws.services.autoscaling.model.LaunchConfigurationBlockDeviceMapping;
 import io.floci.aws.services.autoscaling.model.MixedInstancesPolicy;
+import io.floci.aws.services.autoscaling.model.ScalingActivity;
 import io.floci.aws.services.autoscaling.model.ScheduledAction;
 import io.floci.aws.services.autoscaling.model.WarmPoolConfiguration;
 import io.floci.aws.services.ec2.Ec2Service;
@@ -32,6 +33,7 @@ import org.mockito.ArgumentCaptor;
 
 import java.io.ByteArrayOutputStream;
 import java.io.IOException;
+import java.time.Instant;
 import java.util.Base64;
 import java.util.LinkedHashSet;
 import java.util.List;
@@ -83,6 +85,37 @@ class AutoScalingServiceTest {
                 0,
                 List.of("Default"),
                 Map.of(), Map.of(), AsgOptionalFields.none());
+    }
+
+    @Test
+    void describeScalingActivitiesFiltersIdsInNewestFirstOrder() {
+        ScalingActivity oldest = recordActivityAt(REGION, "test-asg", 0);
+        recordActivityAt(REGION, "test-asg", 1);
+        ScalingActivity newest = recordActivityAt(REGION, "test-asg", 2);
+
+        assertEquals(List.of(newest, oldest), service.describeScalingActivities(REGION, "test-asg",
+                List.of(oldest.getActivityId(), newest.getActivityId(), oldest.getActivityId(), "unknown")));
+        assertTrue(service.describeScalingActivities(REGION, "test-asg", List.of("unknown")).isEmpty());
+    }
+
+    @Test
+    void describeScalingActivitiesRetainsScopeWithOptionalIds() {
+        ScalingActivity activity = recordActivityAt(REGION, "test-asg", 0);
+        ScalingActivity otherGroup = recordActivityAt(REGION, "other-asg", 1);
+        ScalingActivity otherRegion = recordActivityAt("us-west-2", "test-asg", 2);
+        List<String> ids = List.of(activity.getActivityId(), otherGroup.getActivityId(), otherRegion.getActivityId());
+
+        assertEquals(List.of(activity), service.describeScalingActivities(REGION, "test-asg", ids));
+        assertEquals(List.of(otherGroup, activity), service.describeScalingActivities(REGION, null, ids));
+        assertEquals(List.of(activity), service.describeScalingActivities(REGION, "test-asg", null));
+        assertEquals(List.of(activity), service.describeScalingActivities(REGION, "test-asg", List.of()));
+        assertEquals(List.of(activity), service.describeScalingActivities(REGION, "test-asg"));
+    }
+
+    private ScalingActivity recordActivityAt(String region, String groupName, long seconds) {
+        ScalingActivity activity = service.recordActivity(region, groupName, "Scaling activity", "Test", "Successful");
+        activity.setStartTime(Instant.ofEpochSecond(seconds));
+        return activity;
     }
 
     @Test
