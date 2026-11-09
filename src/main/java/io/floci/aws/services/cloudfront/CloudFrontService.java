@@ -298,6 +298,13 @@ public class CloudFrontService implements ServerCertificateReferenceProvider {
         return certificateArn == null || certificateArn.isBlank() ? null : certificateArn;
     }
 
+    /**
+     * The IAM certificate a distribution names, or null when the member is absent or blank. A
+     * blank is what a distribution on the CloudFront domain name sends, so it names no certificate
+     * rather than one that cannot be found. The {@code /cloudfront} upload path AWS documents for a
+     * certificate meant for CloudFront is deliberately not enforced here. Both are set out under
+     * Server Certificates in {@code docs/services/iam.md}.
+     */
     private static String iamCertificateId(DistributionConfig config) {
         if (config == null || config.getViewerCertificate() == null) {
             return null;
