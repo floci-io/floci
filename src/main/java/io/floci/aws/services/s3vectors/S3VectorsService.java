@@ -1,6 +1,10 @@
 package io.floci.aws.services.s3vectors;
 
 import com.fasterxml.jackson.core.type.TypeReference;
+import com.fasterxml.jackson.databind.DeserializationFeature;
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.ObjectReader;
 import io.floci.aws.core.common.AwsArnUtils;
 import io.floci.aws.core.common.AwsException;
 import io.floci.aws.core.common.RegionResolver;
@@ -13,6 +17,7 @@ import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 import org.jboss.logging.Logger;
 
+import java.io.IOException;
 import java.nio.charset.StandardCharsets;
 import java.time.Clock;
 import java.time.Instant;
@@ -29,6 +34,8 @@ import java.util.stream.Collectors;
 @ApplicationScoped
 public class S3VectorsService {
     private static final Logger LOG = Logger.getLogger(S3VectorsService.class);
+    private static final ObjectReader STRICT_JSON_READER =
+            new ObjectMapper().reader().with(DeserializationFeature.FAIL_ON_TRAILING_TOKENS);
 
     private final AccountAwareStorageBackend<VectorBucket> store;
     private final RegionResolver regionResolver;
@@ -152,6 +159,89 @@ public class S3VectorsService {
             LOG.infov("Deleted Vector Bucket: {0}", bucketName);
         }
     }
+
+    public void putVectorBucketPolicy(String bucketName, String bucketArn, String policy, String region) {
+        ResolvedBucket target = resolveBucket(bucketName, bucketArn, region);
+        validatePolicyDocument(policy);
+        synchronized (lockFor(target.bucketName(), target.region())) {
+            VectorBucket bucket = getVectorBucket(target.bucketName(), target.region());
+            bucket.setPolicy(policy);
+            store.put(buildStorageKey(target.region(), target.bucketName()), bucket);
+            LOG.infov("Put policy on Vector Bucket: {0} in region {1}", target.bucketName(), target.region());
+        }
+    }
+
+    public String getVectorBucketPolicy(String bucketName, String bucketArn, String region) {
+        ResolvedBucket target = resolveBucket(bucketName, bucketArn, region);
+        synchronized (lockFor(target.bucketName(), target.region())) {
+            VectorBucket bucket = getVectorBucket(target.bucketName(), target.region());
+            String policy = bucket.getPolicy();
+            if (policy == null) {
+                throw new AwsException("NotFoundException",
+                        "The vector bucket policy for " + target.bucketName() + " does not exist.", 404);
+            }
+            return policy;
+        }
+    }
+
+    public void deleteVectorBucketPolicy(String bucketName, String bucketArn, String region) {
+        ResolvedBucket target = resolveBucket(bucketName, bucketArn, region);
+        synchronized (lockFor(target.bucketName(), target.region())) {
+            VectorBucket bucket = getVectorBucket(target.bucketName(), target.region());
+            if (bucket.getPolicy() != null) {
+                bucket.setPolicy(null);
+                store.put(buildStorageKey(target.region(), target.bucketName()), bucket);
+            }
+            LOG.infov("Deleted policy from Vector Bucket: {0} in region {1}", target.bucketName(), target.region());
+        }
+    }
+
+    private ResolvedBucket resolveBucket(String bucketName, String bucketArn, String region) {
+        boolean hasName = bucketName != null && !bucketName.isBlank();
+        boolean hasArn = bucketArn != null && !bucketArn.isBlank();
+        if (!hasName && !hasArn) {
+            throw new AwsException("ValidationException",
+                    "Either vectorBucketName or vectorBucketArn is required.", 400);
+        }
+        if (hasName && hasArn) {
+            throw new AwsException("ValidationException",
+                    "Specify either vectorBucketName or vectorBucketArn, not both.", 400);
+        }
+        if (hasName) {
+            return new ResolvedBucket(bucketName, region);
+        }
+        AwsArnUtils.Arn parsed;
+        try {
+            parsed = AwsArnUtils.parse(bucketArn);
+        } catch (IllegalArgumentException e) {
+            throw new AwsException("ValidationException", "Malformed vectorBucketArn: " + bucketArn, 400);
+        }
+        if (!"s3vectors".equals(parsed.service())) {
+            throw new AwsException("ValidationException", "Not an S3 Vectors vectorBucketArn: " + bucketArn, 400);
+        }
+        String[] parts = parsed.resource().split("/", -1);
+        if (parts.length != 2 || !"bucket".equals(parts[0]) || parts[1].isBlank()) {
+            throw new AwsException("ValidationException", "Malformed vectorBucketArn: " + bucketArn, 400);
+        }
+        String arnRegion = parsed.region().isEmpty() ? region : parsed.region();
+        return new ResolvedBucket(parts[1], arnRegion);
+    }
+
+    private static void validatePolicyDocument(String policy) {
+        if (policy == null || policy.isBlank()) {
+            throw new AwsException("ValidationException", "Policy must be a non-empty JSON object.", 400);
+        }
+        try {
+            JsonNode parsed = STRICT_JSON_READER.readTree(policy);
+            if (parsed == null || !parsed.isObject()) {
+                throw new AwsException("ValidationException", "Policy must be a valid JSON object.", 400);
+            }
+        } catch (IOException e) {
+            throw new AwsException("ValidationException", "Policy must be a valid JSON object.", 400);
+        }
+    }
+
+    private record ResolvedBucket(String bucketName, String region) {}
 
     public VectorIndex createIndex(String bucketName, String indexName, int dimension, String dataType,
                                    String distanceMetric, List<String> nonFilterableMetadataKeys, String region) {
