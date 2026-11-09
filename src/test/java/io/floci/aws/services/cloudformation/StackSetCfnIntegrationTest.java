@@ -278,6 +278,110 @@ class StackSetCfnIntegrationTest {
                 .then().statusCode(200).extract().xmlPath().getString("**.find { it.name() == 'StackSetId' }");
     }
 
+    @Test
+    void replacementChangesIdentityWhenNameChanges() {
+        replacementRename(false);
+    }
+
+    @Test
+    void replacementHonorsUpdateReplacePolicyRetain() {
+        replacementRename(true);
+    }
+
+    private void replacementRename(boolean retain) {
+        String stack = "replace-name-" + UUID.randomUUID().toString().substring(0, 8);
+        String oldName = "old-" + stack;
+        String newName = "new-" + stack;
+        ObjectNode body = simpleStackSetTemplate(oldName);
+        if (retain) {
+            ((ObjectNode) body.path("Resources").path("Set")).put("UpdateReplacePolicy", "Retain");
+        }
+        cloudFormation("CreateStack", "StackName", stack, "TemplateBody", body.toString()).then().statusCode(200);
+        CfnStackWaits.awaitStatus(stack, "CREATE_COMPLETE", auth(MANAGEMENT, "cloudformation"));
+        String original = output(stack, "Id");
+        ((ObjectNode) body.path("Resources").path("Set").path("Properties")).put("StackSetName", newName);
+        cloudFormation("UpdateStack", "StackName", stack, "TemplateBody", body.toString()).then().statusCode(200);
+        CfnStackWaits.awaitStatus(stack, "UPDATE_COMPLETE", auth(MANAGEMENT, "cloudformation"));
+        assertNotEquals(original, output(stack, "Id"));
+        assertThat(output(stack, "Id"), startsWith(newName + ":"));
+        cloudFormation("DescribeStackSet", "StackSetName", oldName).then().statusCode(retain ? 200 : 404);
+        cloudFormation("DescribeStackSet", "StackSetName", newName).then().statusCode(200);
+        CfnStackWaits.deleteStack(stack, auth(MANAGEMENT, "cloudformation"));
+        if (retain) {
+            cloudFormation("DeleteStackSet", "StackSetName", oldName).then().statusCode(200);
+        }
+    }
+
+    @Test
+    void replacementChangesPermissionModelForGeneratedName() {
+        organizationsFixture.createWithTrustedAccess(MANAGEMENT);
+        String stack = "replace-model-" + UUID.randomUUID().toString().substring(0, 8);
+        ObjectNode body = simpleStackSetTemplate("temporary");
+        ObjectNode properties = (ObjectNode) body.path("Resources").path("Set").path("Properties");
+        properties.remove("StackSetName");
+        cloudFormation("CreateStack", "StackName", stack, "TemplateBody", body.toString()).then().statusCode(200);
+        CfnStackWaits.awaitStatus(stack, "CREATE_COMPLETE", auth(MANAGEMENT, "cloudformation"));
+        String original = output(stack, "Id");
+        properties.put("PermissionModel", "SERVICE_MANAGED");
+        properties.set("AutoDeployment", new ObjectMapper().createObjectNode().put("Enabled", false));
+        cloudFormation("UpdateStack", "StackName", stack, "TemplateBody", body.toString()).then().statusCode(200);
+        CfnStackWaits.awaitStatus(stack, "UPDATE_COMPLETE", auth(MANAGEMENT, "cloudformation"));
+        String replacement = output(stack, "Id");
+        assertNotEquals(original, replacement);
+        cloudFormation("DescribeStackSet", "StackSetName", replacement.substring(0, replacement.indexOf(':')))
+                .then().statusCode(200).body(containsString("<PermissionModel>SERVICE_MANAGED</PermissionModel>"));
+        cloudFormation("DescribeStackSet", "StackSetName", original.substring(0, original.indexOf(':')))
+                .then().statusCode(404);
+        CfnStackWaits.deleteStack(stack, auth(MANAGEMENT, "cloudformation"));
+    }
+
+    @Test
+    void replacementRejectsSameCustomNameBeforeMutation() {
+        String stack = "replace-custom-" + UUID.randomUUID().toString().substring(0, 8);
+        String name = "set-" + stack;
+        ObjectNode body = simpleStackSetTemplate(name);
+        cloudFormation("CreateStack", "StackName", stack, "TemplateBody", body.toString()).then().statusCode(200);
+        CfnStackWaits.awaitStatus(stack, "CREATE_COMPLETE", auth(MANAGEMENT, "cloudformation"));
+        String original = output(stack, "Id");
+        ObjectNode properties = (ObjectNode) body.path("Resources").path("Set").path("Properties");
+        properties.put("PermissionModel", "SERVICE_MANAGED").put("Description", "must-not-apply");
+        properties.set("AutoDeployment", new ObjectMapper().createObjectNode().put("Enabled", false));
+        cloudFormation("UpdateStack", "StackName", stack, "TemplateBody", body.toString()).then().statusCode(200);
+        CfnStackWaits.awaitStatus(stack, "UPDATE_ROLLBACK_COMPLETE", auth(MANAGEMENT, "cloudformation"));
+        assertEquals(original, output(stack, "Id"));
+        cloudFormation("DescribeStackSet", "StackSetName", name).then().statusCode(200)
+                .body(containsString("<Description>original</Description>"))
+                .body(containsString("<PermissionModel>SELF_MANAGED</PermissionModel>"));
+        CfnStackWaits.deleteStack(stack, auth(MANAGEMENT, "cloudformation"));
+    }
+
+    @Test
+    void replacementRollsBackWhenALaterResourceFails() {
+        String stack = "replace-rollback-" + UUID.randomUUID().toString().substring(0, 8);
+        String oldName = "old-" + stack;
+        String newName = "new-" + stack;
+        ObjectMapper mapper = new ObjectMapper();
+        ObjectNode body = simpleStackSetTemplate(oldName);
+        ObjectNode resources = (ObjectNode) body.path("Resources");
+        ObjectNode parameter = mapper.createObjectNode().put("Type", "AWS::SSM::Parameter");
+        parameter.set("Properties", mapper.createObjectNode().put("Name", stack)
+                .put("Type", "String").put("Value", "original"));
+        resources.set("Obstacle", parameter);
+        cloudFormation("CreateStack", "StackName", stack, "TemplateBody", body.toString()).then().statusCode(200);
+        CfnStackWaits.awaitStatus(stack, "CREATE_COMPLETE", auth(MANAGEMENT, "cloudformation"));
+        String original = output(stack, "Id");
+        ((ObjectNode) resources.path("Set").path("Properties")).put("StackSetName", newName);
+        ObjectNode broken = parameter.deepCopy();
+        broken.set("DependsOn", mapper.createArrayNode().add("Set").add("Obstacle"));
+        resources.set("Broken", broken);
+        cloudFormation("UpdateStack", "StackName", stack, "TemplateBody", body.toString()).then().statusCode(200);
+        CfnStackWaits.awaitStatus(stack, "UPDATE_ROLLBACK_COMPLETE", auth(MANAGEMENT, "cloudformation"));
+        assertEquals(original, output(stack, "Id"));
+        cloudFormation("DescribeStackSet", "StackSetName", oldName).then().statusCode(200);
+        cloudFormation("DescribeStackSet", "StackSetName", newName).then().statusCode(404);
+        CfnStackWaits.deleteStack(stack, auth(MANAGEMENT, "cloudformation"));
+    }
+
     @AfterEach
     void deleteOrganization() {
         organizationsFixture.cleanup();

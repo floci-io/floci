@@ -1,6 +1,7 @@
 package io.floci.aws.services.cloudformation.provisioners;
 
 import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import io.floci.aws.core.common.AwsException;
 import io.floci.aws.services.cloudformation.CloudFormationService;
 import io.floci.aws.services.cloudformation.StackSetService;
@@ -14,10 +15,12 @@ import jakarta.enterprise.inject.Instance;
 import jakarta.inject.Inject;
 
 import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
 import java.util.Set;
 
 /**
@@ -34,6 +37,9 @@ public class StackSetCfnProvisioner implements CfnResourceProvisioner {
 
     private static final String STACK_SET = "AWS::CloudFormation::StackSet";
     private static final String SERVICE_MANAGED = "SERVICE_MANAGED";
+    private static final ObjectMapper MAPPER = new ObjectMapper();
+    private static final CreateOnlyInputs CREATE_ONLY_INPUTS =
+            new CreateOnlyInputs("__FlociStackSetInputs", "__FlociStackSetPriorInputs");
 
     private final Instance<StackSetService> stackSetService;
     private final Instance<CloudFormationService> cfnService;
@@ -66,8 +72,47 @@ public class StackSetCfnProvisioner implements CfnResourceProvisioner {
         List<InstanceGroup> groups = resolveGroups(props, ctx);
 
         if (ctx.isUpdate()) {
+            ReplacementCleanup.endRollbackRetry(r);
+        }
+        Map<String, String> attributesBefore = new HashMap<>(r.getAttributes());
+        String explicitName = ctx.resolveOptional(props, "StackSetName");
+        String inputs = createOnlyInputs(explicitName, permissionModel);
+        Runnable create = () -> {
+            String name = explicitName == null ? ctx.generatePhysicalName(r.getLogicalId(), 128, false) : explicitName;
+            StackSet stackSet = stackSets.createStackSet(name, templateBody, parameters, capabilities, tags, description,
+                    permissionModel,
+                    Boolean.TRUE.equals(optionalBoolean(autoDeployment, "Enabled", ctx)),
+                    Boolean.TRUE.equals(optionalBoolean(autoDeployment, "RetainStacksOnAccountRemoval", ctx)),
+                    Boolean.TRUE.equals(optionalBoolean(props.path("ManagedExecution"), "Active", ctx)));
+            setIdentity(r, stackSet);
+            CREATE_ONLY_INPUTS.record(r, ctx, attributesBefore, inputs);
+            ReplacementCleanup.record(r, ctx, attributesBefore);
+            CfnRollback.guarded(r, ctx, true, () -> delete(STACK_SET, stackSet.getStackSetId(), ctx.region()), () -> { },
+                    () -> createInstances(stackSets, name, groups));
+        };
+        boolean updating = ctx.isUpdate() && !CfnResourceDispatcher.isStub(ctx.priorPhysicalId(), attributesBefore);
+        if (updating) {
             boolean updated = stackSets.mutateStackSetResource(ctx.priorPhysicalId(), stackSet -> {
                 String name = stackSet.getStackSetName();
+                String priorInputs = CREATE_ONLY_INPUTS.read(attributesBefore);
+                if (priorInputs == null) {
+                    priorInputs = createOnlyInputs(ctx.previouslyDeclared("StackSetName") ? name : null,
+                            stackSet.getPermissionModel());
+                }
+                if (!inputs.equals(priorInputs)) {
+                    try {
+                        if (name.equals(explicitName)) {
+                            throw CfnExceptions.customNamedReplacement(name);
+                        }
+                        create.run();
+                    } catch (RuntimeException e) {
+                        if (ctx.priorPhysicalId().equals(r.getPhysicalId())) {
+                            r.getAttributes().put(CfnRollback.UPDATE_ROLLBACK_RESTORED_ATTR, "true");
+                        }
+                        throw e;
+                    }
+                    return;
+                }
                 requireSuccess(stackSets.updateStackSet(name, templateBody, parameters, capabilities, tags, description,
                         null, optionalBoolean(autoDeployment, "Enabled", ctx),
                         optionalBoolean(autoDeployment, "RetainStacksOnAccountRemoval", ctx),
@@ -77,23 +122,59 @@ public class StackSetCfnProvisioner implements CfnResourceProvisioner {
                 createInstances(stackSets, name, groups);
                 removeDroppedTargets(stackSets, name, serviceManaged, deployed, groups);
                 setIdentity(r, stackSet);
+                CREATE_ONLY_INPUTS.record(r, ctx, attributesBefore, inputs);
+                ReplacementCleanup.record(r, ctx, attributesBefore);
             });
             if (!updated) {
                 throw new AwsException("StackSetNotFoundException", "The original StackSet no longer exists", 404);
             }
             return;
         }
+        create.run();
+    }
 
-        String explicitName = ctx.resolveOptional(props, "StackSetName");
-        String name = explicitName == null ? ctx.generatePhysicalName(r.getLogicalId(), 128, false) : explicitName;
-        StackSet stackSet = stackSets.createStackSet(name, templateBody, parameters, capabilities, tags, description,
-                permissionModel,
-                Boolean.TRUE.equals(optionalBoolean(autoDeployment, "Enabled", ctx)),
-                Boolean.TRUE.equals(optionalBoolean(autoDeployment, "RetainStacksOnAccountRemoval", ctx)),
-                Boolean.TRUE.equals(optionalBoolean(props.path("ManagedExecution"), "Active", ctx)));
-        setIdentity(r, stackSet);
-        CfnRollback.guarded(r, ctx, true, () -> delete(STACK_SET, stackSet.getStackSetId(), ctx.region()), () -> { },
-                () -> createInstances(stackSets, name, groups));
+    private static String createOnlyInputs(String name, String permissionModel) {
+        return MAPPER.createObjectNode().put("name", name).put("permissionModel", permissionModel).toString();
+    }
+
+    @Override
+    public boolean hasReplacementUpdate(StackResource resource) {
+        return ReplacementCleanup.hasReplacement(resource);
+    }
+
+    @Override
+    public String updateCleanupPhysicalId(StackResource resource) {
+        return ReplacementCleanup.cleanupPhysicalId(resource);
+    }
+
+    @Override
+    public UpdateCleanupResult completeUpdate(StackResource resource) {
+        CREATE_ONLY_INPUTS.clearPrior(resource);
+        return ReplacementCleanup.complete(resource, this::delete);
+    }
+
+    @Override
+    public void clearUpdate(StackResource resource) {
+        CREATE_ONLY_INPUTS.clearPrior(resource);
+        ReplacementCleanup.clear(resource);
+    }
+
+    @Override
+    public void mergeFailedUpdateResourceTracking(StackResource previous, StackResource attempted) {
+        ReplacementCleanup.mergeDisplaced(previous, attempted);
+    }
+
+    @Override
+    public boolean rollbackUpdate(StackResource resource) {
+        String attemptedId = resource.getPhysicalId();
+        boolean hasPriorInputs = CREATE_ONLY_INPUTS.hasPrior(resource);
+        try {
+            return ReplacementCleanup.rollback(resource, this::delete);
+        } finally {
+            if (hasPriorInputs && !Objects.equals(attemptedId, resource.getPhysicalId())) {
+                CREATE_ONLY_INPUTS.restorePrior(resource);
+            }
+        }
     }
 
     @Override
