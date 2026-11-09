@@ -23,10 +23,12 @@ import org.eclipse.microprofile.config.inject.ConfigProperty;
  *   <li>{@code CustomResourceCfnProvisioner}, for the {@code ResponseURL} a custom resource
  *       Lambda PUTs its result to</li>
  *   <li>{@code FlociDuckClient}, for the S3 endpoint the DuckDB sidecar calls</li>
+ *   <li>{@code EksPodIdentityWebhook}, for the {@code AWS_ENDPOINT_URL} of EKS pods, through
+ *       {@link #baseUrl(boolean)} without the embedded DNS server, which a pod cannot use</li>
  * </ul>
  *
- * <p>Kubernetes pods do not use it: {@code KubernetesFlociAddressResolver} builds their endpoint
- * without the embedded DNS server.
+ * <p>Lambda pods on Kubernetes do not use it: {@code KubernetesFlociAddressResolver} builds their
+ * endpoint without the embedded DNS server.
  */
 @ApplicationScoped
 public class ContainerReachableEndpoint {
