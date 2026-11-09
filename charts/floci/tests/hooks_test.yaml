@@ -26,6 +26,46 @@ tests:
           path: spec.containers[0].securityContext.readOnlyRootFilesystem
           value: true
 
+  - it: runs the test pods and the cleanup hook under Floci's pod security context
+    templates:
+      - templates/tests/test-api.yaml
+      - templates/cleanup-hook.yaml
+    asserts:
+      - equal:
+          path: spec.securityContext
+          value:
+            runAsNonRoot: true
+            runAsUser: 1001
+            runAsGroup: 1001
+            fsGroup: 1001
+            fsGroupChangePolicy: OnRootMismatch
+            seccompProfile:
+              type: RuntimeDefault
+
+  - it: drops the fixed IDs from every pod with the documented OpenShift override
+    templates:
+      - templates/tests/test-api.yaml
+      - templates/tests/test-lambda.yaml
+      - templates/cleanup-hook.yaml
+    set:
+      tests.lambda.enabled: true
+      podSecurityContext:
+        runAsUser: null
+        runAsGroup: null
+        fsGroup: null
+    documentSelector:
+      path: kind
+      value: Pod
+      matchMany: true
+    asserts:
+      - equal:
+          path: spec.securityContext
+          value:
+            runAsNonRoot: true
+            fsGroupChangePolicy: OnRootMismatch
+            seccompProfile:
+              type: RuntimeDefault
+
   - it: expects https response URLs when TLS is on
     template: templates/tests/test-api.yaml
     set:

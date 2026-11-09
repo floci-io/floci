@@ -1,6 +1,6 @@
 {{/*
 Shared spec of the `helm test` pods: AWS CLI v2 against the Service's in-cluster DNS name,
-with the same restricted security profile as Floci itself. Called with a dict holding the
+under Floci's own pod security context (podSecurityContext) and a restricted container one. Called with a dict holding the
 root context ("root"), the test name ("name"), the shell script ("script") and optional
 extra volumes and mounts.
 */}}
@@ -21,12 +21,10 @@ spec:
   restartPolicy: Never
   automountServiceAccountToken: false
   enableServiceLinks: false
+  {{- with $root.Values.podSecurityContext }}
   securityContext:
-    runAsNonRoot: true
-    runAsUser: 65534
-    runAsGroup: 65534
-    seccompProfile:
-      type: RuntimeDefault
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
   containers:
     - name: aws-cli
       image: {{ include "floci.helperImage" $root | quote }}

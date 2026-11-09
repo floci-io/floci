@@ -223,14 +223,18 @@ OpenSearch is not in that list: its data plane is published by the Docker daemon
 
 ## OpenShift
 
-OpenShift assigns each namespace its own UID range, so drop the fixed IDs:
+OpenShift assigns each namespace its own UID range, so drop the fixed IDs. Helm merges a map you pass
+into the chart's defaults, so a key you leave out keeps its default; set the IDs to `null` instead:
 
 ```yaml
 podSecurityContext:
-  runAsNonRoot: true
-  seccompProfile:
-    type: RuntimeDefault
+  runAsUser: null
+  runAsGroup: null
+  fsGroup: null
 ```
+
+The `helm test` pods and the uninstall cleanup hook use the same `podSecurityContext`, so this one
+override covers them too.
 
 ## Testing the chart
 

@@ -185,9 +185,10 @@ ingress:
   # -- TLS configuration, in Kubernetes IngressTLS form.
   tls: []
 
-# -- Pod security context. The defaults satisfy the "restricted" Pod Security Standard.
-# On OpenShift, which assigns its own UID range, set this to {} or drop runAsUser,
-# runAsGroup and fsGroup.
+# -- Pod security context of Floci, the `helm test` pods and the uninstall cleanup hook.
+# The defaults satisfy the "restricted" Pod Security Standard. On OpenShift, which assigns
+# each namespace its own UID range, set runAsUser, runAsGroup and fsGroup to null: Helm
+# merges a map given here into these defaults, so leaving the keys out keeps them.
 podSecurityContext:
   runAsNonRoot: true
   runAsUser: 1001
@@ -272,7 +273,7 @@ extraVolumes: []
 extraVolumeMounts: []
 
 # -- Image for the `helm test` pods and the uninstall cleanup hook: AWS CLI v2 on Amazon
-# Linux 2023, which also brings sh, curl and python3.
+# Linux 2023, which also brings sh, curl and python3. Both pods run under podSecurityContext.
 helperImage:
   repository: amazon/aws-cli
   tag: "2.39.6"

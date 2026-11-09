@@ -43,12 +43,12 @@ spec:
   imagePullSecrets:
     {{- toYaml . | nindent 4 }}
   {{- end }}
+  # Floci's own pod security context, so an override for a platform that assigns its own
+  # UIDs (OpenShift) covers this pod as well.
+  {{- with .Values.podSecurityContext }}
   securityContext:
-    runAsNonRoot: true
-    runAsUser: 65534
-    runAsGroup: 65534
-    seccompProfile:
-      type: RuntimeDefault
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
   containers:
     - name: cleanup
       image: {{ include "floci.helperImage" . | quote }}
