@@ -4168,8 +4168,7 @@ public class NativeDynamoDbJsonHandler {
         throwValidationErrors(validationErrors);
         String statement = request.path("Statement").asText();
         List<JsonNode> parameters = toPartiQLParams(request.path("Parameters"));
-        DynamoDbPartiQLParser.Stmt stmt = DynamoDbPartiQLParser.parse(statement, parameters, false,
-                parsed -> partiQLHandler.requireReadableIndex(parsed, region));
+        DynamoDbPartiQLParser.Stmt stmt = parsePartiQLStatement(statement, parameters, region);
         PartiQLExecuteContext ctx = PartiQLExecuteContext.builder()
                 .limit(request.has("Limit") ? request.get("Limit").asInt() : null)
                 .nextToken(request.has("NextToken") ? request.get("NextToken").asText() : null)
@@ -4405,8 +4404,13 @@ public class NativeDynamoDbJsonHandler {
     }
 
     private DynamoDbPartiQLParser.Stmt parsePartiQLStatement(JsonNode statement, String region) {
-        return DynamoDbPartiQLParser.parse(statement.path("Statement").asText(),
-                toPartiQLParams(statement.path("Parameters")), false,
+        return parsePartiQLStatement(statement.path("Statement").asText(),
+                toPartiQLParams(statement.path("Parameters")), region);
+    }
+
+    private DynamoDbPartiQLParser.Stmt parsePartiQLStatement(String statement, List<JsonNode> parameters,
+                                                             String region) {
+        return DynamoDbPartiQLParser.parse(statement, parameters, false,
                 parsed -> partiQLHandler.requireReadableIndex(parsed, region));
     }
 
