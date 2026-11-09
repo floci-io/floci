@@ -35,8 +35,8 @@ import static io.floci.aws.services.paymentcryptography.PaymentCryptographyAttri
  *
  * <p>Two derivations are refused rather than approximated. The American Express one is
  * proprietary and there is nothing to verify it against, and a plausible wrong cryptogram is
- * worse than an error. The EMV 2000 one is the EMV 4.1 tree derivation, which needs the
- * card's public key certificate.
+ * worse than an error. The EMV 2000 one is the EMV 4.1 tree derivation, which is over the
+ * master key and the ATC, and this service does not implement it.
  */
 @ApplicationScoped
 public class PaymentCryptographyAuthCryptogramOperations {
