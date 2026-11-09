@@ -15,8 +15,8 @@ import java.util.HexFormat;
  * </pre>
  *
  * <p>All DES is done through three-key TDES rather than a single-DES provider:
- * single DES is expressed as TDES with K||K||K, which is what the JavaScript
- * does to stay clear of OpenSSL's legacy single-DES provider.
+ * single DES is expressed as TDES with K||K||K, which keeps the transform clear
+ * of OpenSSL's legacy single-DES provider.
  *
  * <p>The full PAN flows into master key derivation. That is correct by
  * construction; truncating it to 12 digits was a bug that appeared across
@@ -50,42 +50,31 @@ public final class EmvCrypto {
     /**
      * The ISO 9797-1 padding method used for an application cryptogram.
      *
-     * <p>Which one applies is scheme-dependent, and the schemes disagree: Visa
-     * CVN 10 requires zeros, while the EMV common session key flows and M/Chip
-     * require a mandatory {@code 0x80}.
+     * <p>The transaction data reaches the service already padded: the user guide tells
+     * the caller to pad it before sending it, because the card padded it the same way
+     * before it enciphered it. The service therefore enciphers the data as it was
+     * given, and padding it again would encipher a block the card never enciphered.
      */
     public enum Padding {
         /**
-         * Method 1: zero-fill to the next 8-byte boundary, and add nothing when
-         * the data is already aligned. Visa CVN 10 requires this.
+         * No padding: the data is enciphered exactly as it was given.
          */
-        METHOD1,
+        NONE,
         /**
          * Method 2: append {@code 0x80}, then zeros to the next boundary,
-         * always adding a block even when the data is already aligned. The EMV
-         * common flows, Visa CVN 2.x and M/Chip require this.
+         * always adding a block even when the data is already aligned. The input of
+         * an issuer authentication cryptogram is built here rather than by the
+         * caller, so it is this one that is padded.
          */
         METHOD2
     }
 
     /** Pad according to the given method. */
     public static byte[] pad(byte[] data, Padding padding) {
-        return padding == Padding.METHOD1 ? padZero(data) : pad80(data);
-    }
-
-    /**
-     * ISO/IEC 9797-1 padding method 1: zero-fill to the next 8-byte boundary.
-     * Aligned data is returned unchanged, so no block is added.
-     */
-    public static byte[] padZero(byte[] data) {
-        if (data.length == 0) {
-            return new byte[8];
-        }
-        int rem = data.length % 8;
-        if (rem == 0) {
-            return data;
-        }
-        return concat(data, new byte[8 - rem]);
+        return switch (padding) {
+            case NONE -> data;
+            case METHOD2 -> pad80(data);
+        };
     }
 
     /**
@@ -166,24 +155,39 @@ public final class EmvCrypto {
      *
      * <pre>
      *   H  = SHA-1(PAN || PSN as packed BCD)
-     *   Y  = the first 16 decimal digits found scanning H left to right
-     *   MK = 3DES(IMK, ZL) || 3DES(IMK, ZL XOR FF..FF)
+     *   Y  = the leftmost 16 digits of {H's decimal digits || H's other nibbles mod 10}
+     *   MK = 3DES(IMK, Y) || 3DES(IMK, Y XOR FF..FF)
      * </pre>
+     *
+     * <p>The decimal digits of the hash come first, in the order they appear, and the
+     * nibbles that are not decimal digits follow them, each reduced modulo ten. A hash
+     * of a packed account number and sequence number holds sixteen decimal digits
+     * almost every time, so the second part is rarely reached.
+     *
+     * <p>A PAN of sixteen digits or fewer is derived the Option A way: the hash is
+     * only there for the longer numbers.
      */
     public static byte[] deriveIccMasterKeyOptionB(byte[] imk16, String pan, String psn) {
+        if (PinCrypto.digits(pan).length() <= 16) {
+            return deriveIccMasterKey(imk16, pan, psn);
+        }
         byte[] b = packedBcd(pan, psn);
         String hash = HEX.formatHex(Digests.sha1(b));
-        StringBuilder y = new StringBuilder(16);
-        for (int i = 0; i < hash.length() && y.length() < 16; i++) {
+        StringBuilder decimal = new StringBuilder(hash.length());
+        StringBuilder other = new StringBuilder(hash.length());
+        for (int i = 0; i < hash.length(); i++) {
             char c = hash.charAt(i);
             if (c >= '0' && c <= '9') {
-                y.append(c);
+                decimal.append(c);
+            } else {
+                other.append((char) ('0' + (c - 'A')));
             }
         }
+        StringBuilder y = new StringBuilder(decimal).append(other);
         if (y.length() < 16) {
-            throw new IllegalArgumentException("Option B: fewer than 16 decimal digits in SHA-1 hash");
+            throw new IllegalArgumentException("Option B: the SHA-1 hash yields fewer than 16 digits");
         }
-        byte[] zl = HEX.parseHex(y.toString());
+        byte[] zl = HEX.parseHex(y.substring(0, 16));
         byte[] zr = new byte[8];
         for (int i = 0; i < 8; i++) {
             zr[i] = (byte) (zl[i] ^ 0xff);
@@ -259,28 +263,6 @@ public final class EmvCrypto {
         }
     }
 
-    /** The ARQC, and the session key, so an ARPC can reuse it. */
-    public static byte[] computeArqc(byte[] imkac, String pan, String psn, byte[] atc, byte[] cdol) {
-        return computeArqcWithSessionKey(imkac, pan, psn, atc, cdol, false, false).arqc;
-    }
-
-    /**
-     * @param deriveModeB use EMV Option B rather than Option A for the master key
-     * @param noSessionKey MAC directly under the master key, rather than deriving one
-     *     (the Visa CVN10 case)
-     * @return the 8-byte ARQC and the session key it was computed under
-     */
-    public static Arqc computeArqcWithSessionKey(byte[] imkac, String pan, String psn, byte[] atc,
-                                                 byte[] cdol, boolean deriveModeB,
-                                                 boolean noSessionKey) {
-        byte[] imk = requireLength(imkac, 16, "IMKac");
-        byte[] mk = deriveModeB
-                ? deriveIccMasterKeyOptionB(imk, pan, psn)
-                : deriveIccMasterKey(imk, pan, psn);
-        byte[] sk = noSessionKey ? mk : deriveSessionKey(mk, atc);
-        return new Arqc(slice(retailMac(sk, cdol), 0, 8), sk);
-    }
-
     /**
      * ARPC method 1: {@code 3DES_EDE(SK, ARQC XOR (ARC || 00*6))}.
      *
@@ -297,18 +279,17 @@ public final class EmvCrypto {
      * ARPC method 2, the CSU-based one: the leftmost 4 bytes of the retail MAC
      * over {@code ARQC || ARC || CSU || proprietary} under the session key.
      *
-     * <p>The response code belongs in the MAC input. Omitting it produces an
-     * ARPC that disagrees with the one an independent implementation computes
-     * even when both sides hold the same session key - which happened.
+     * <p>The response code belongs in the input of the first method. The second
+     * method has none: the card status update and the proprietary data are what
+     * it is made from, and EMV Book 2 section 8.2.2 says so.
      *
      * <p>The request carries no way to ask for the other form: the model gives
      * the card status update and the proprietary data, and nothing else.
      */
-    public static byte[] computeArpcMethod2(byte[] sk, byte[] arqc, String arcHex,
+    public static byte[] computeArpcMethod2(byte[] sk, byte[] arqc,
                                             String csuHex, String padHex) {
         byte[] data = concat(
                 arqc,
-                arcHex == null ? new byte[0] : HEX.parseHex(arcHex),
                 csuHex == null ? new byte[0] : HEX.parseHex(csuHex),
                 padHex == null ? new byte[0] : HEX.parseHex(padHex));
         return slice(retailMac(sk, data, Padding.METHOD2), 0, 4);
@@ -344,14 +325,6 @@ public final class EmvCrypto {
             digits = "0" + digits;
         }
         return HEX.parseHex(digits);
-    }
-
-    private static byte[] requireLength(byte[] b, int n, String what) {
-        if (b == null || b.length != n) {
-            throw new IllegalArgumentException(what + " must be " + n + " bytes, got "
-                    + (b == null ? "null" : b.length));
-        }
-        return b;
     }
 
     private static byte[] slice(byte[] b, int from, int to) {

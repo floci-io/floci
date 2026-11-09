@@ -4,6 +4,7 @@ import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
+import software.amazon.awssdk.services.paymentcryptography.PaymentCryptographyClient;
 import software.amazon.awssdk.services.paymentcryptography.model.KeyAlgorithm;
 import software.amazon.awssdk.services.paymentcryptography.model.KeyClass;
 import software.amazon.awssdk.services.paymentcryptography.model.KeyModesOfUse;
@@ -21,6 +22,7 @@ import software.amazon.awssdk.services.paymentcryptographydata.model.SessionKeyD
 import software.amazon.awssdk.services.paymentcryptographydata.model.SessionKeyEmvCommon;
 import software.amazon.awssdk.services.paymentcryptographydata.model.ValidationException;
 import software.amazon.awssdk.services.paymentcryptographydata.model.VerificationFailedException;
+import software.amazon.awssdk.services.paymentcryptographydata.model.VerificationFailedReason;
 
 import java.util.function.Consumer;
 
@@ -45,8 +47,16 @@ class PaymentCryptographyCardTest {
     /** The transaction counter the session key derivation takes. */
     private static final String ATC = "0001";
 
-    /** The transaction data the cryptogram is computed over. */
-    private static final String TRANSACTION_DATA = "00000000010000000000000000008000";
+    /**
+     * The transaction data the cryptogram is computed over.
+     *
+     * <p>The user guide tells the caller to pad the transaction data before sending
+     * it, and the data here is padded the way its example is: a whole number of
+     * eight-byte blocks, with the {@code 80} and the zeros that method 2 appends.
+     */
+    private static final String TRANSACTION_DATA =
+            "00000000170000000000000008400080008000084016051700000000093800000B1F2201"
+                    + "030000000000000000000000000000000000000000000000000000008000000000000000";
 
     private static PaymentCryptographyDataClient client;
     private static String cardVerificationKeyArn;
@@ -80,14 +90,16 @@ class PaymentCryptographyCardTest {
      */
     private static String createKeyArn(KeyAlgorithm algorithm, KeyUsage usage,
                                        Consumer<KeyModesOfUse.Builder> modes) {
-        return TestFixtures.paymentCryptographyClient().createKey(r -> r
-                .keyAttributes(a -> a
-                        .keyAlgorithm(algorithm)
-                        .keyClass(KeyClass.SYMMETRIC_KEY)
-                        .keyUsage(usage)
-                        .keyModesOfUse(modes))
-                .exportable(true))
-                .key().keyArn();
+        try (PaymentCryptographyClient keyClient = TestFixtures.paymentCryptographyClient()) {
+            return keyClient.createKey(r -> r
+                    .keyAttributes(a -> a
+                            .keyAlgorithm(algorithm)
+                            .keyClass(KeyClass.SYMMETRIC_KEY)
+                            .keyUsage(usage)
+                            .keyModesOfUse(modes))
+                    .exportable(true))
+                    .key().keyArn();
+        }
     }
 
     @AfterAll
@@ -139,7 +151,11 @@ class PaymentCryptographyCardTest {
                                 .serviceCode(SERVICE_CODE)
                                 .build())
                         .build())))
-                .isInstanceOf(VerificationFailedException.class);
+                .isInstanceOf(VerificationFailedException.class)
+                // The exception carries the reason the model names for a card value that
+                // does not verify, so the caller can tell the two failures apart.
+                .extracting(e -> ((VerificationFailedException) e).reason())
+                .isEqualTo(VerificationFailedReason.INVALID_VALIDATION_DATA);
     }
 
     @Test

@@ -11,10 +11,10 @@ import io.floci.aws.services.paymentcryptography.model.PaymentCryptographyKey;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
-import java.util.LinkedHashMap;
 import java.util.Map;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -45,33 +45,6 @@ class PaymentCryptographyCardValidationOperationsTest {
         cardValidation = new PaymentCryptographyCardValidationOperations(service);
     }
 
-    private PaymentCryptographyKey createKey(String algorithm, String usage, String... modes) {
-        Map<String, Object> attributes = new LinkedHashMap<>();
-        attributes.put("KeyAlgorithm", algorithm);
-        attributes.put("KeyClass", "SYMMETRIC_KEY");
-        attributes.put("KeyUsage", usage);
-        Map<String, Boolean> declared = new LinkedHashMap<>();
-        for (String mode : modes) {
-            declared.put(mode, Boolean.TRUE);
-        }
-        return service.createKey("us-east-1", attributes, declared, true, true, Map.of());
-    }
-
-    private static JsonNode request(Map<String, Object> members) {
-        ObjectMapper mapper = new ObjectMapper();
-        ObjectNode node = mapper.createObjectNode();
-        members.forEach((name, value) -> {
-            if (value instanceof JsonNode json) {
-                node.set(name, json);
-            } else if (value instanceof Number number) {
-                node.put(name, number.intValue());
-            } else {
-                node.put(name, String.valueOf(value));
-            }
-        });
-        return node;
-    }
-
     /** The attributes of a card verification value: the expiry and the service code. */
     private static JsonNode cardVerificationValue1(String expiry, String serviceCode) {
         ObjectMapper mapper = new ObjectMapper();
@@ -92,10 +65,10 @@ class PaymentCryptographyCardValidationOperationsTest {
 
     @Test
     void aGeneratedValueVerifies() {
-        PaymentCryptographyKey cvk = createKey("TDES_2KEY", "TR31_C0_CARD_VERIFICATION_KEY",
+        PaymentCryptographyKey cvk = PaymentCryptographyTestFixtures.createKey(service, "TDES_2KEY", "TR31_C0_CARD_VERIFICATION_KEY",
                 "Generate", "Verify");
 
-        Map<String, Object> generated = cardValidation.generate(request(Map.of(
+        Map<String, Object> generated = cardValidation.generate(PaymentCryptographyTestFixtures.request(Map.of(
                 "KeyIdentifier", cvk.getArn(),
                 "PrimaryAccountNumber", PAN,
                 "GenerationAttributes", cardVerificationValue1(EXPIRY, "201"))), "us-east-1");
@@ -104,7 +77,7 @@ class PaymentCryptographyCardValidationOperationsTest {
         assertEquals(3, value.length());
         assertEquals(cvk.getArn(), generated.get("KeyArn"));
 
-        Map<String, Object> verified = cardValidation.verify(request(Map.of(
+        Map<String, Object> verified = cardValidation.verify(PaymentCryptographyTestFixtures.request(Map.of(
                 "KeyIdentifier", cvk.getArn(),
                 "PrimaryAccountNumber", PAN,
                 "ValidationData", value,
@@ -115,11 +88,11 @@ class PaymentCryptographyCardValidationOperationsTest {
 
     @Test
     void aWrongValueIsRefused() {
-        PaymentCryptographyKey cvk = createKey("TDES_2KEY", "TR31_C0_CARD_VERIFICATION_KEY",
+        PaymentCryptographyKey cvk = PaymentCryptographyTestFixtures.createKey(service, "TDES_2KEY", "TR31_C0_CARD_VERIFICATION_KEY",
                 "Generate", "Verify");
 
         AwsException refused = assertThrows(AwsException.class, () -> cardValidation.verify(
-                request(Map.of(
+                PaymentCryptographyTestFixtures.request(Map.of(
                         "KeyIdentifier", cvk.getArn(),
                         "PrimaryAccountNumber", PAN,
                         "ValidationData", "999",
@@ -131,11 +104,11 @@ class PaymentCryptographyCardValidationOperationsTest {
 
     @Test
     void aKeyOfTheWrongUsageIsRefused() {
-        PaymentCryptographyKey wrong = createKey("TDES_2KEY", "TR31_D0_SYMMETRIC_DATA_ENCRYPTION_KEY",
+        PaymentCryptographyKey wrong = PaymentCryptographyTestFixtures.createKey(service, "TDES_2KEY", "TR31_D0_SYMMETRIC_DATA_ENCRYPTION_KEY",
                 "Generate", "Verify");
 
         AwsException refused = assertThrows(AwsException.class,
-                () -> cardValidation.generate(request(Map.of(
+                () -> cardValidation.generate(PaymentCryptographyTestFixtures.request(Map.of(
                         "KeyIdentifier", wrong.getArn(),
                         "PrimaryAccountNumber", PAN,
                         "GenerationAttributes", cardVerificationValue1(EXPIRY, "201"))), "us-east-1"));
@@ -147,11 +120,11 @@ class PaymentCryptographyCardValidationOperationsTest {
 
     @Test
     void aKeyThatMayNotGenerateIsRefused() {
-        PaymentCryptographyKey cvk = createKey("TDES_2KEY", "TR31_C0_CARD_VERIFICATION_KEY",
+        PaymentCryptographyKey cvk = PaymentCryptographyTestFixtures.createKey(service, "TDES_2KEY", "TR31_C0_CARD_VERIFICATION_KEY",
                 "Verify");
 
         AwsException refused = assertThrows(AwsException.class,
-                () -> cardValidation.generate(request(Map.of(
+                () -> cardValidation.generate(PaymentCryptographyTestFixtures.request(Map.of(
                         "KeyIdentifier", cvk.getArn(),
                         "PrimaryAccountNumber", PAN,
                         "GenerationAttributes", cardVerificationValue1(EXPIRY, "201"))), "us-east-1"));
@@ -161,13 +134,13 @@ class PaymentCryptographyCardValidationOperationsTest {
 
     @Test
     void anExpiryThatIsNotFourDigitsIsRefused() {
-        PaymentCryptographyKey cvk = createKey("TDES_2KEY", "TR31_C0_CARD_VERIFICATION_KEY",
+        PaymentCryptographyKey cvk = PaymentCryptographyTestFixtures.createKey(service, "TDES_2KEY", "TR31_C0_CARD_VERIFICATION_KEY",
                 "Generate", "Verify");
 
         // The model states that the expiry is four digits, and the card verification value
         // is computed over the expiry the request carries.
         AwsException refused = assertThrows(AwsException.class,
-                () -> cardValidation.generate(request(Map.of(
+                () -> cardValidation.generate(PaymentCryptographyTestFixtures.request(Map.of(
                         "KeyIdentifier", cvk.getArn(),
                         "PrimaryAccountNumber", PAN,
                         "GenerationAttributes", cardVerificationValue1("30", "201"))), "us-east-1"));
@@ -178,13 +151,13 @@ class PaymentCryptographyCardValidationOperationsTest {
 
     @Test
     void anAccountNumberThatIsNotDigitsIsRefused() {
-        PaymentCryptographyKey cvk = createKey("TDES_2KEY", "TR31_C0_CARD_VERIFICATION_KEY",
+        PaymentCryptographyKey cvk = PaymentCryptographyTestFixtures.createKey(service, "TDES_2KEY", "TR31_C0_CARD_VERIFICATION_KEY",
                 "Generate", "Verify");
 
         // The model states that the account number is digits, so a formatted one is refused
         // rather than read as the digits it carries.
         AwsException refused = assertThrows(AwsException.class,
-                () -> cardValidation.generate(request(Map.of(
+                () -> cardValidation.generate(PaymentCryptographyTestFixtures.request(Map.of(
                         "KeyIdentifier", cvk.getArn(),
                         "PrimaryAccountNumber", "5081-4700-8263-9564",
                         "GenerationAttributes", cardVerificationValue1(EXPIRY, "201"))), "us-east-1"));
@@ -194,40 +167,36 @@ class PaymentCryptographyCardValidationOperationsTest {
     }
 
     @Test
-    void theDynamicCardVerificationCodeIsGeneratedAndVerifies() {
-        PaymentCryptographyKey key = createKey("TDES_2KEY", "TR31_E4_EMV_MKEY_DYNAMIC_NUMBERS",
+    void theDynamicCardVerificationCodeIsRefusedRatherThanApproximated() {
+        PaymentCryptographyKey key = PaymentCryptographyTestFixtures.createKey(service, "TDES_2KEY", "TR31_E4_EMV_MKEY_DYNAMIC_NUMBERS",
                 "Generate", "Verify", "DeriveKey");
 
-        Map<String, Object> generated = cardValidation.generate(request(Map.of(
-                "KeyIdentifier", key.getArn(),
-                "PrimaryAccountNumber", PAN,
-                "GenerationAttributes", dynamicCardVerificationCode())), "us-east-1");
+        // The dynamic code is a Mastercard proprietary construction, and there is nothing
+        // published to check a derivation against.
+        AwsException refused = assertThrows(AwsException.class,
+                () -> cardValidation.generate(PaymentCryptographyTestFixtures.request(Map.of(
+                        "KeyIdentifier", key.getArn(),
+                        "PrimaryAccountNumber", PAN,
+                        "GenerationAttributes", dynamicCardVerificationCode())), "us-east-1"));
 
-        String value = (String) generated.get("ValidationData");
-        assertNotNull(value);
-        assertEquals(3, value.length());
-
-        cardValidation.verify(request(Map.of(
-                "KeyIdentifier", key.getArn(),
-                "PrimaryAccountNumber", PAN,
-                "ValidationData", value,
-                "VerificationAttributes", dynamicCardVerificationCode())), "us-east-1");
+        assertEquals("ValidationException", refused.getErrorCode());
+        assertTrue(refused.getMessage().contains("not implemented"), refused.getMessage());
     }
 
     @Test
     void theValidationDataLengthIsTheOneTheModelStates() {
-        PaymentCryptographyKey cvk = createKey("TDES_2KEY", "TR31_C0_CARD_VERIFICATION_KEY",
+        PaymentCryptographyKey cvk = PaymentCryptographyTestFixtures.createKey(service, "TDES_2KEY", "TR31_C0_CARD_VERIFICATION_KEY",
                 "Generate", "Verify");
 
         // The model lets the length be three to five, and the value carries that many
         // digits of the decimalised block.
-        cardValidation.generate(request(Map.of(
+        cardValidation.generate(PaymentCryptographyTestFixtures.request(Map.of(
                 "KeyIdentifier", cvk.getArn(),
                 "PrimaryAccountNumber", PAN,
                 "ValidationDataLength", 3,
                 "GenerationAttributes", cardVerificationValue1(EXPIRY, "201"))), "us-east-1");
 
-        Map<String, Object> longer = cardValidation.generate(request(Map.of(
+        Map<String, Object> longer = cardValidation.generate(PaymentCryptographyTestFixtures.request(Map.of(
                 "KeyIdentifier", cvk.getArn(),
                 "PrimaryAccountNumber", PAN,
                 "ValidationDataLength", 5,
@@ -237,34 +206,38 @@ class PaymentCryptographyCardValidationOperationsTest {
     }
 
     @Test
-    void aTrackDataOfAnOddLengthIsRefused() {
-        PaymentCryptographyKey key = createKey("TDES_2KEY", "TR31_E4_EMV_MKEY_DYNAMIC_NUMBERS",
-                "Generate", "Verify", "DeriveKey");
+    void aDisabledKeyIsRefused() {
+        PaymentCryptographyKey key = PaymentCryptographyTestFixtures.createDisabledKey(service,
+                "TDES_2KEY", "TR31_C0_CARD_VERIFICATION_KEY", "Generate", "Verify");
 
-        // The model lets the track data be any number of hexadecimal characters, and an odd
-        // number of them is not a byte sequence, so it is refused with the error the model
-        // names rather than answered with a failure the caller cannot catch.
         AwsException refused = assertThrows(AwsException.class,
-                () -> cardValidation.generate(request(Map.of(
+                () -> cardValidation.generate(PaymentCryptographyTestFixtures.request(Map.of(
                         "KeyIdentifier", key.getArn(),
                         "PrimaryAccountNumber", PAN,
-                        "GenerationAttributes", dynamicCardVerificationCode("123"))), "us-east-1"));
+                        "GenerationAttributes", cardVerificationValue1(EXPIRY, "201"))), "us-east-1"));
 
         assertEquals("ValidationException", refused.getErrorCode());
-        assertTrue(refused.getMessage().contains("TrackData"), refused.getMessage());
     }
 
     /** The attributes of the dynamic card verification code, which is computed over the track. */
     private static JsonNode dynamicCardVerificationCode() {
-        return dynamicCardVerificationCode("5081470082639564300303D25061010000000000");
+        return dynamicCardVerificationCode("01", "5081470082639564300303D25061010000000000");
     }
 
     /** The attributes of the dynamic card verification code, over the given track data. */
     private static JsonNode dynamicCardVerificationCode(String trackData) {
+        return dynamicCardVerificationCode("01", trackData);
+    }
+
+    /**
+     * The attributes of the dynamic card verification code of a card with the given
+     * sequence number, over the given track data.
+     */
+    private static JsonNode dynamicCardVerificationCode(String psn, String trackData) {
         ObjectMapper mapper = new ObjectMapper();
         ObjectNode value = mapper.createObjectNode();
         value.put("UnpredictableNumber", "12345678");
-        value.put("PanSequenceNumber", "01");
+        value.put("PanSequenceNumber", psn);
         value.put("ApplicationTransactionCounter", "0001");
         value.put("TrackData", trackData);
         ObjectNode outer = mapper.createObjectNode();

@@ -90,57 +90,6 @@ public final class CvvCrypto {
     }
 
     /**
-     * The dynamic card verification code (dCVC).
-     *
-     * <p>Like the dynamic value, but diversified with the terminal's
-     * unpredictable number as well as the transaction counter, and computed
-     * over the track data rather than over the card's own fields.
-     *
-     * <pre>
-     *   SK  = the session key derived from the EMK, the ATC and the
-     *         unpredictable number
-     *   r   = 3DES_EDE(SK, DES_e(B1, SK-A) XOR B2)   over the track data
-     *   value = decimalize(r, 3)
-     * </pre>
-     *
-     * <p>The cipher takes sixteen bytes. Track data is longer than that, so
-     * when it does not fit it is folded to sixteen bytes with SHA-256 and
-     * truncated.
-     *
-     * <p><b>This is the emulator's construction</b>, not the service's published one. The
-     * interface, the key type and the mode of use match.
-     */
-    public static String computeDynamicCode(String trackDataHex, String atcHex,
-                                            String unpredictableNumberHex, String emkHex,
-                                            int length) {
-        byte[] emk = masterKey(emkHex);
-        byte[] sessionKey = EmvCrypto.deriveSessionKeyMastercard(emk, HEX.parseHex(atcHex),
-                HEX.parseHex(unpredictableNumberHex));
-        byte[] track = HEX.parseHex(trackDataHex);
-        if (track.length > 16) {
-            byte[] folded = Digests.sha256(track);
-            byte[] head = new byte[16];
-            System.arraycopy(folded, 0, head, 0, 16);
-            track = head;
-        }
-        return decimalize(HEX.formatHex(track), sessionKey, length);
-    }
-
-    public static boolean verifyCvv(String pan, String expiryYYMM, String serviceCode,
-                                    String cvkHex, String cvv) {
-        return computeCvv(pan, expiryYYMM, serviceCode, cvkHex, cvv.length()).equals(cvv);
-    }
-
-    /** The EMV master key, which the service also holds as TDES-2KEY. */
-    private static byte[] masterKey(String emkHex) {
-        byte[] emk = HEX.parseHex(emkHex);
-        if (emk.length != 16) {
-            throw new IllegalArgumentException("EMK must be 16 bytes (32 hex)");
-        }
-        return emk;
-    }
-
-    /**
      * The card verification cipher: two blocks, the left one enciphered with
      * the key's left half, exclusive-or the right one, then enciphered again
      * with the whole key.

@@ -9,11 +9,14 @@ import jakarta.inject.Inject;
 
 import java.util.Arrays;
 import java.util.HexFormat;
-import java.util.Iterator;
 import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
+import java.util.List;
 import java.util.Map;
 import java.util.Set;
+
+import static io.floci.aws.services.paymentcryptography.PaymentCryptographyAttributes.soleVariant;
+import static io.floci.aws.services.paymentcryptography.PaymentCryptographyAttributes.text;
 
 /**
  * The authorization request cryptograms.
@@ -51,7 +54,7 @@ public class PaymentCryptographyAuthCryptogramOperations {
 
     /** The variants that use the EMV common session key. */
     private static final Set<String> COMMON_SK =
-            new LinkedHashSet<>(Arrays.asList("EmvCommon", "Emv2000"));
+            new LinkedHashSet<>(Arrays.asList("EmvCommon"));
 
     /** The variants that derive nothing and encipher under the ICC master key. */
     private static final Set<String> DIRECT_SK = new LinkedHashSet<>(Arrays.asList("Visa"));
@@ -69,18 +72,15 @@ public class PaymentCryptographyAuthCryptogramOperations {
         final String psn;
         final String atc;
         final Scheme scheme;
-        /** The ISO 9797-1 padding the scheme requires for the cryptogram input. */
-        final EmvCrypto.Padding padding;
         final String unpredictableNumber;
         final boolean optionB;
 
-        SessionKey(String pan, String psn, String atc, Scheme scheme, EmvCrypto.Padding padding,
+        SessionKey(String pan, String psn, String atc, Scheme scheme,
                    String unpredictableNumber, boolean optionB) {
             this.pan = pan;
             this.psn = psn;
             this.atc = atc;
             this.scheme = scheme;
-            this.padding = padding;
             this.unpredictableNumber = unpredictableNumber;
             this.optionB = optionB;
         }
@@ -94,16 +94,19 @@ public class PaymentCryptographyAuthCryptogramOperations {
     Map<String, Object> generate(JsonNode request, String region) {
         PaymentCryptographyDataRequestShapes.check("GenerateAuthRequestCryptogram", request);
         String keyIdentifier = text(request, "KeyIdentifier");
-        String transactionData = PaymentCryptographyAttributes.hex("TransactionData",
-                text(request, "TransactionData"));
+        String transactionData = PaymentCryptographyAttributes.blocks("TransactionData",
+                PaymentCryptographyAttributes.hex("TransactionData",
+                        text(request, "TransactionData")));
         SessionKey sk = resolveDerivation(request);
 
         PaymentCryptographyKey key = requiredKey(keyIdentifier, region);
-        requireDerive(key);
-        requireSymmetricMaterial(key);
+        PaymentCryptographyKeyRules.requireUsage(key,
+                List.of("TR31_E0_EMV_MKEY_APP_CRYPTOGRAMS"), "computing a cryptogram");
+        PaymentCryptographyKeyRules.requireAlgorithm(key, "TDES_2KEY", "computing a cryptogram");
+        PaymentCryptographyKeyRules.requireDerive(key, "deriving a session key");
+        byte[] material = HEX.parseHex(PaymentCryptographyKeyRules.materialHex(key));
 
-        EmvCrypto.Arqc computed = computeArqc(sk, HEX.parseHex(key.getKeyMaterialHex()),
-                transactionData);
+        EmvCrypto.Arqc computed = computeArqc(sk, material, transactionData);
 
         Map<String, Object> out = new LinkedHashMap<>();
         out.put("KeyArn", key.getArn());
@@ -122,8 +125,9 @@ public class PaymentCryptographyAuthCryptogramOperations {
         PaymentCryptographyDataRequestShapes.check("VerifyAuthRequestCryptogram", request);
         String keyIdentifier = text(request, "KeyIdentifier");
         String arqc = text(request, "AuthRequestCryptogram");
-        String transactionData = PaymentCryptographyAttributes.hex("TransactionData",
-                text(request, "TransactionData"));
+        String transactionData = PaymentCryptographyAttributes.blocks("TransactionData",
+                PaymentCryptographyAttributes.hex("TransactionData",
+                        text(request, "TransactionData")));
         SessionKey sk = resolveDerivation(request);
 
         // The response attributes are optional, and the answer carries the response value only
@@ -164,14 +168,17 @@ public class PaymentCryptographyAuthCryptogramOperations {
         }
 
         PaymentCryptographyKey key = requiredKey(keyIdentifier, region);
-        requireDerive(key);
-        requireSymmetricMaterial(key);
+        PaymentCryptographyKeyRules.requireUsage(key,
+                List.of("TR31_E0_EMV_MKEY_APP_CRYPTOGRAMS"), "computing a cryptogram");
+        PaymentCryptographyKeyRules.requireAlgorithm(key, "TDES_2KEY", "computing a cryptogram");
+        PaymentCryptographyKeyRules.requireDerive(key, "deriving a session key");
+        byte[] material = HEX.parseHex(PaymentCryptographyKeyRules.materialHex(key));
 
-        EmvCrypto.Arqc computed = computeArqc(sk, HEX.parseHex(key.getKeyMaterialHex()),
-                transactionData);
+        EmvCrypto.Arqc computed = computeArqc(sk, material, transactionData);
         String expected = HEX.formatHex(computed.arqc);
         if (!expected.equalsIgnoreCase(arqc)) {
-            throw verificationFailed("ARQC_VERIFICATION_FAILED");
+            throw verificationFailed("the authorization request cryptogram did not verify",
+                    "INVALID_AUTH_REQUEST_CRYPTOGRAM");
         }
 
         Map<String, Object> out = new LinkedHashMap<>();
@@ -188,9 +195,10 @@ public class PaymentCryptographyAuthCryptogramOperations {
             out.put("AuthResponseValue", HEX.formatHex(EmvCrypto.computeArpcMethod1(
                     arpcKey, HEX.parseHex(arqc), arc)));
         } else if ("2".equals(arpcMethod)) {
-            // The response code is inside the MAC.
+            // The second method is made from the card status update and the proprietary
+            // data; the response code belongs to the first method.
             out.put("AuthResponseValue", HEX.formatHex(EmvCrypto.computeArpcMethod2(
-                    arpcKey, HEX.parseHex(arqc), arc, csu, pad)));
+                    arpcKey, HEX.parseHex(arqc), csu, pad)));
         }
         return out;
     }
@@ -222,7 +230,8 @@ public class PaymentCryptographyAuthCryptogramOperations {
                 sessionKey = mk;
                 break;
         }
-        byte[] mac = EmvCrypto.retailMac(sessionKey, HEX.parseHex(transactionData), sk.padding);
+        byte[] mac = EmvCrypto.retailMac(sessionKey, HEX.parseHex(transactionData),
+                EmvCrypto.Padding.NONE);
         return new EmvCrypto.Arqc(Arrays.copyOf(mac, 8), sessionKey);
     }
 
@@ -264,6 +273,10 @@ public class PaymentCryptographyAuthCryptogramOperations {
             throw validation("SessionKeyDerivationAttributes.Amex requires the AEIPS session key "
                     + "derivation, which this service does not implement. It is not approximated.");
         }
+        if ("Emv2000".equals(variant)) {
+            throw validation("SessionKeyDerivationAttributes.Emv2000 requires the EMV 4.1 tree "
+                    + "derivation, which this service does not implement. It is not approximated.");
+        }
         boolean common = COMMON_SK.contains(variant);
         boolean mastercard = "Mastercard".equals(variant);
         if (!common && !mastercard && !DIRECT_SK.contains(variant)) {
@@ -289,10 +302,7 @@ public class PaymentCryptographyAuthCryptogramOperations {
         }
         Scheme scheme = mastercard ? Scheme.MASTERCARD
                 : (common ? Scheme.EMV_COMMON : Scheme.VSDC);
-        // Visa CVN 10 requires zeros; the common flows and M/Chip require 0x80.
-        EmvCrypto.Padding padding = scheme == Scheme.VSDC
-                ? EmvCrypto.Padding.METHOD1 : EmvCrypto.Padding.METHOD2;
-        return new SessionKey(pan, psn, atc, scheme, padding, unpredictableNumber, optionB);
+        return new SessionKey(pan, psn, atc, scheme, unpredictableNumber, optionB);
     }
 
     // ---- the helpers ---------------------------------------------------------
@@ -300,64 +310,17 @@ public class PaymentCryptographyAuthCryptogramOperations {
     private PaymentCryptographyKey requiredKey(String identifier, String region) {
         PaymentCryptographyKey key = service.findKey(region, identifier);
         if (key == null) {
-            throw new AwsException("ResourceNotFoundException", "Key not found: " + identifier, 400);
+            throw new AwsException("ResourceNotFoundException", "Key not found: " + identifier, 404);
         }
+        PaymentCryptographyKeyRules.requireEnabled(key);
         return key;
-    }
-
-    /**
-     * Checks that the key may derive, and that it has material to derive from.
-     */
-    private static void requireDerive(PaymentCryptographyKey key) {
-        Map<String, Boolean> modes = key.getKeyModesOfUse();
-        boolean derives = modes == null
-                || Boolean.TRUE.equals(modes.get("DeriveKey"))
-                || Boolean.TRUE.equals(modes.get("NoRestrictions"));
-        if (!derives) {
-            throw validation("the key " + key.getArn() + " does not have the mode of use "
-                    + "DeriveKey, which it needs to derive a session key");
-        }
-    }
-
-    private static void requireSymmetricMaterial(PaymentCryptographyKey key) {
-        String material = key.getKeyMaterialHex();
-        if (material == null || material.isEmpty()) {
-            throw validation("the key " + key.getArn() + " has no material to derive a session "
-                    + "key from");
-        }
-    }
-
-    /** The one variant of an attributes structure, or null when there is not exactly one. */
-    private static String soleVariant(JsonNode attributes) {
-        if (attributes == null || !attributes.isObject()) {
-            return null;
-        }
-        String found = null;
-        Iterator<Map.Entry<String, JsonNode>> fields = attributes.fields();
-        while (fields.hasNext()) {
-            if (found != null) {
-                return null;
-            }
-            found = fields.next().getKey();
-        }
-        return found;
-    }
-
-    /** The text of a request member. */
-    private static String text(JsonNode request, String member) {
-        if (request == null) {
-            return "";
-        }
-        JsonNode declared = request.get(member);
-        return declared == null || declared.isNull() ? "" : declared.asText("");
     }
 
     private static AwsException validation(String message) {
         return new AwsException("ValidationException", message, 400);
     }
 
-    private static AwsException verificationFailed(String reason) {
-        return new AwsException("VerificationFailedException",
-                "This request failed verification: " + reason, 400);
+    private static AwsException verificationFailed(String message, String reason) {
+        return new AwsException("VerificationFailedException", message, 400, Map.of("Reason", reason));
     }
 }

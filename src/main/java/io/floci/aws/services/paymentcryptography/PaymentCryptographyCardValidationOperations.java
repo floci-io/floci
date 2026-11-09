@@ -9,7 +9,7 @@ import jakarta.inject.Inject;
 
 import java.util.Iterator;
 import java.util.LinkedHashMap;
-import java.util.Locale;
+import java.util.List;
 import java.util.Map;
 
 /**
@@ -80,7 +80,7 @@ public class PaymentCryptographyCardValidationOperations {
         requireKeyForVariant(key, attrs.variant, "Generate");
 
         Map<String, Object> out = new LinkedHashMap<>();
-        out.put("ValidationData", compute(pan, attrs, key, length));
+        out.put("ValidationData", computeValue(pan, attrs, key, length));
         out.put("KeyArn", key.getArn());
         out.put("KeyCheckValue", key.getKeyCheckValue());
         return out;
@@ -105,14 +105,10 @@ public class PaymentCryptographyCardValidationOperations {
         PaymentCryptographyKey key = requiredKey(keyIdentifier, region);
         requireKeyForVariant(key, attrs.variant, "Verify");
 
-        String computed;
-        try {
-            computed = compute(pan, attrs, key, length);
-        } catch (RuntimeException e) {
-            throw validation("Unable to compute the card validation value: " + e.getMessage());
-        }
+        String computed = computeValue(pan, attrs, key, length);
         if (!computed.equals(validationData)) {
-            throw verificationFailed("CARD_VALIDATION_DATA_VERIFICATION_FAILED");
+            throw verificationFailed("the validation data did not verify",
+                    "INVALID_VALIDATION_DATA");
         }
         Map<String, Object> out = new LinkedHashMap<>();
         out.put("KeyArn", key.getArn());
@@ -121,6 +117,21 @@ public class PaymentCryptographyCardValidationOperations {
     }
 
     // ---- the parts -----------------------------------------------------------
+
+    /**
+     * The value for the variant, under the given key.
+     *
+     * <p>A request the derivation cannot read is refused with the error the model names,
+     * rather than answered with a failure the caller cannot catch.
+     */
+    private static String computeValue(String pan, CardAttrs attrs, PaymentCryptographyKey key,
+                                       int length) {
+        try {
+            return compute(pan, attrs, key, length);
+        } catch (RuntimeException e) {
+            throw validation("Unable to compute the card validation value: " + e.getMessage());
+        }
+    }
 
     /** The value for the variant, under the given key. */
     private static String compute(String pan, CardAttrs attrs, PaymentCryptographyKey key,
@@ -131,9 +142,8 @@ public class PaymentCryptographyCardValidationOperations {
                     attrs.panSequenceNumber, length);
         }
         if ("DynamicCardVerificationCode".equals(attrs.variant)) {
-            return CvvCrypto.computeDynamicCode(attrs.trackData,
-                    attrs.applicationTransactionCounter, attrs.unpredictableNumber,
-                    key.getKeyMaterialHex(), length);
+            throw validation("the dynamic card verification code is not implemented: it is a "
+                    + "Mastercard proprietary construction and it is not approximated");
         }
         return CvvCrypto.computeCvv(pan, attrs.expiry, attrs.serviceCode,
                 key.getKeyMaterialHex(), length);
@@ -146,53 +156,22 @@ public class PaymentCryptographyCardValidationOperations {
      * it is checked here rather than left to the cipher.
      */
     private static void requireKeyForVariant(PaymentCryptographyKey key, String variant, String mode) {
-        String usage = key.getKeyUsage();
-        String algorithm = key.getKeyAlgorithm();
         if ("DynamicCardVerificationValue".equals(variant)) {
-            requireUsage(key, usage, "TR31_E6_EMV_MKEY_OTHER", variant);
-            requireAlgorithm(key, algorithm, "TDES_2KEY", variant);
-            requireDerive(key, variant);
-            return;
-        }
-        if ("DynamicCardVerificationCode".equals(variant)) {
-            requireUsage(key, usage, "TR31_E4_EMV_MKEY_DYNAMIC_NUMBERS", variant);
-            requireAlgorithm(key, algorithm, "TDES_2KEY", variant);
-            requireDerive(key, variant);
+            PaymentCryptographyKeyRules.requireUsage(key,
+                    List.of("TR31_E6_EMV_MKEY_OTHER"), "deriving a dynamic card verification value");
+            PaymentCryptographyKeyRules.requireAlgorithm(key, "TDES_2KEY",
+                    "deriving a dynamic card verification value");
+            PaymentCryptographyKeyRules.requireDerive(key, "deriving a dynamic card verification value");
             return;
         }
         // The static values use the card verification key.
-        requireUsage(key, usage, "TR31_C0_CARD_VERIFICATION_KEY", variant);
-        requireAlgorithm(key, algorithm, "TDES_2KEY", variant);
-        requireMode(key, mode, "Generate".equals(mode)
+        PaymentCryptographyKeyRules.requireUsage(key,
+                List.of("TR31_C0_CARD_VERIFICATION_KEY"), "computing a card verification value");
+        PaymentCryptographyKeyRules.requireAlgorithm(key, "TDES_2KEY",
+                "computing a card verification value");
+        PaymentCryptographyKeyRules.requireMode(key, mode, "Generate".equals(mode)
                 ? "generating a card verification value"
                 : "verifying a card verification value");
-    }
-
-    private static void requireUsage(PaymentCryptographyKey key, String usage, String required,
-                                     String variant) {
-        if (!required.equals(usage)) {
-            throw validation("a " + variant.toLowerCase(Locale.ROOT)
-                    + " needs a " + required + " key, but the key is " + usage);
-        }
-    }
-
-    private static void requireAlgorithm(PaymentCryptographyKey key, String algorithm,
-                                         String required, String variant) {
-        if (!required.equals(algorithm)) {
-            throw validation("a " + variant.toLowerCase(Locale.ROOT)
-                    + " needs a " + required + " key, but the key is " + algorithm);
-        }
-    }
-
-    private static void requireDerive(PaymentCryptographyKey key, String variant) {
-        Map<String, Boolean> modes = key.getKeyModesOfUse();
-        boolean derives = modes != null
-                && (Boolean.TRUE.equals(modes.get("DeriveKey"))
-                        || Boolean.TRUE.equals(modes.get("NoRestrictions")));
-        if (!derives) {
-            throw validation("a " + variant.toLowerCase(Locale.ROOT)
-                    + " needs a key with DeriveKey, but the key does not allow it");
-        }
     }
 
     /**
@@ -242,23 +221,11 @@ public class PaymentCryptographyCardValidationOperations {
                 return out;
             }
             case "DynamicCardVerificationCode": {
-                JsonNode value = attributes.get(variant);
-                String psn = text(value, "PanSequenceNumber");
-                String atc = PaymentCryptographyAttributes.hex(
-                        variant + ".ApplicationTransactionCounter",
-                        text(value, "ApplicationTransactionCounter"));
-                String trackData = PaymentCryptographyAttributes.hex(
-                        variant + ".TrackData", text(value, "TrackData"));
-                String unpredictable = PaymentCryptographyAttributes.hex(
-                        variant + ".UnpredictableNumber", text(value, "UnpredictableNumber"));
-                CardAttrs out = new CardAttrs();
-                out.variant = variant;
-                out.panSequenceNumber = psn;
-                out.applicationTransactionCounter = atc;
-                out.trackData = trackData;
-                out.unpredictableNumber = unpredictable;
-                return out;
-            }
+                // Refused rather than approximated: the dynamic code is a Mastercard
+                // proprietary construction, and there is nothing published to check a
+                // derivation against.
+                throw validation("the dynamic card verification code is not implemented: it is a "
+                        + "Mastercard proprietary construction and it is not approximated)");}
             default:
                 throw validation(variant + " not supported by this service "
                         + "(only CardVerificationValue1/CardVerificationValue2"
@@ -285,28 +252,15 @@ public class PaymentCryptographyCardValidationOperations {
     private PaymentCryptographyKey requiredKey(String identifier, String region) {
         PaymentCryptographyKey key = service.findKey(region, identifier);
         if (key == null) {
-            throw new AwsException("ResourceNotFoundException", "Key not found: " + identifier, 400);
+            throw new AwsException("ResourceNotFoundException", "Key not found: " + identifier, 404);
         }
+        PaymentCryptographyKeyRules.requireEnabled(key);
         return key;
     }
 
     /**
      * Checks that the key has the mode of use the operation needs.
      */
-    private static void requireMode(PaymentCryptographyKey key, String mode, String what) {
-        Map<String, Boolean> modes = key.getKeyModesOfUse();
-        if (modes == null) {
-            return;
-        }
-        if (Boolean.TRUE.equals(modes.get("NoRestrictions"))) {
-            return;
-        }
-        if (!Boolean.TRUE.equals(modes.get(mode))) {
-            throw validation("the key " + key.getArn() + " does not have the mode of use " + mode
-                    + ", which it needs to " + what);
-        }
-    }
-
     /** The text of a request member. */
     private static String text(JsonNode request, String member) {
         if (request == null) {
@@ -320,8 +274,7 @@ public class PaymentCryptographyCardValidationOperations {
         return new AwsException("ValidationException", message, 400);
     }
 
-    private static AwsException verificationFailed(String reason) {
-        return new AwsException("VerificationFailedException",
-                "This request failed verification: " + reason, 400);
+    private static AwsException verificationFailed(String message, String reason) {
+        return new AwsException("VerificationFailedException", message, 400, Map.of("Reason", reason));
     }
 }

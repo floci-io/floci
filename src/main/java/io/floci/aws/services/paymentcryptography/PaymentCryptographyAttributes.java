@@ -55,6 +55,27 @@ final class PaymentCryptographyAttributes {
     }
 
     /**
+     * A hexadecimal member that the cipher reads as whole blocks.
+     *
+     * <p>The ISO 9797-1 MAC runs over eight-byte blocks, so the data it reads has to
+     * be a whole number of them. The user guide tells the caller to pad the
+     * transaction data before sending it, and a length that is not a whole number of
+     * blocks is a request the cipher cannot read, so it is refused rather than read
+     * as the blocks that fit.
+     *
+     * @param member the member's path, for the refusal
+     * @param value the member's text
+     * @return the member's text, unchanged
+     */
+    static String blocks(String member, String value) {
+        if (value.length() % 16 != 0) {
+            throw new AwsException("ValidationException",
+                    member + " must be a whole number of eight-byte blocks", 400);
+        }
+        return value;
+    }
+
+    /**
      * Refuses the wrapped-key form of a key.
      *
      * <p>A wrapped key is a TR-31 key block that the service unwraps with a key-encryption

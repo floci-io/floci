@@ -95,18 +95,39 @@ client that talks to the control plane does not reach it by accident.
   the issuer derives from the master key with the account number and the PAN sequence
   number. The value is bound to the transaction, and the counter diversifies it through the
   data it is inserted into rather than through the key. It takes a key of the
-  `TR31_E6_EMV_MKEY_OTHER` usage. The dynamic card verification code is the Mastercard
-  counterpart, over the track data, and takes a key of the
-  `TR31_E4_EMV_MKEY_DYNAMIC_NUMBERS` usage.
+  `TR31_E6_EMV_MKEY_OTHER` usage. The dynamic card verification code, which is the
+  Mastercard counterpart over the track data, is refused rather than approximated: it is a
+  proprietary construction and there is nothing published to check a derivation against.
 - **The authorization cryptogram is the ARQC of the transaction.** It is the ISO 9797-1
   algorithm 3 retail MAC over the transaction data, cut to eight bytes, under a session key
-  the request's derivation produces. Three derivations are served: the EMV common session key
-  and the EMV 2000 one, which is the same, the Mastercard one, which also diversifies with
-  the terminal's unpredictable number, and the Visa one, which derives no session key at all
-  and enciphers the transaction data under the ICC master key.
+  the request's derivation produces. Three derivations are served: the EMV common session key,
+  the Mastercard one, which also diversifies with the terminal's unpredictable number, and
+  the Visa one, which derives no session key at all and enciphers the transaction data under
+  the ICC master key.
+- **The transaction data is enciphered exactly as it is given.** It reaches the service
+  already padded, as the user guide tells the caller to pad it, because the card padded
+  it the same way before it enciphered it. The service therefore pads nothing: padding
+  it again would encipher a block the card never enciphered.
+- **The transaction data has to be a whole number of eight-byte blocks.** The ISO 9797-1
+  MAC runs over eight-byte blocks, and the guide tells the caller to pad the data to a
+  multiple of the block size before sending it, so a length that is not a whole number
+  of blocks is a request the cipher cannot read and is refused.
+- **The authorization cryptogram is made under a key of the application cryptogram
+  usage.** The key table names `TR31_E0_EMV_MKEY_APP_CRYPTOGRAMS` with a `TDES_2KEY`
+  algorithm and the `DeriveKey` mode of use for it, so a key of another usage, another
+  algorithm, or without the mode of use is refused.
+- **The card operations and the cryptogram operations read the key through one helper.**
+  The usage, the algorithm, the mode of use, whether the key is enabled and whether it
+  still holds its material are asked in one place, so the two cannot drift apart on
+  what they accept.
+- **The response value of the second method is made of the card status update.** The first
+  method takes the response code, and the second takes the card status update and the
+  proprietary data, as EMV Book 2 section 8.2.2 has it.
 - **The American Express cryptogram is refused rather than approximated.** The AEIPS session
   key derivation is proprietary and there is nothing to verify it against, and a plausible
-  wrong cryptogram is the one outcome worse than an error.
+  wrong cryptogram is the one outcome worse than an error. The EMV 4.1 tree derivation, the
+  one the `Emv2000` attributes ask for, is refused for the same reason: it needs the card's
+  public key certificate.
 - **The card requests are checked against the model.** The account number is twelve to
   nineteen digits, the expiry is four of them, the service code is three, and the PAN
   sequence number is two: the EMV ones, as the model states them. A formatted account

@@ -101,7 +101,7 @@ create_acg() {
 
     run aws_cmd payment-cryptography-data generate-auth-request-cryptogram \
         --key-identifier "$ACG_ARN" \
-        --transaction-data "00000000010000000000000000008000" \
+        --transaction-data "00000000170000000000000008400080008000084016051700000000093800000B1F2201030000000000000000000000000000000000000000000000000000008000000000000000" \
         --major-key-derivation-mode EMV_OPTION_A \
         --session-key-derivation-attributes 'EmvCommon={PrimaryAccountNumber=5081470082639564,PanSequenceNumber=01,ApplicationTransactionCounter=0001}'
     assert_success
@@ -112,7 +112,7 @@ create_acg() {
 
     run aws_cmd payment-cryptography-data verify-auth-request-cryptogram \
         --key-identifier "$ACG_ARN" \
-        --transaction-data "00000000010000000000000000008000" \
+        --transaction-data "00000000170000000000000008400080008000084016051700000000093800000B1F2201030000000000000000000000000000000000000000000000000000008000000000000000" \
         --auth-request-cryptogram "$CRYPTOGRAM" \
         --major-key-derivation-mode EMV_OPTION_A \
         --session-key-derivation-attributes 'EmvCommon={PrimaryAccountNumber=5081470082639564,PanSequenceNumber=01,ApplicationTransactionCounter=0001}'
@@ -126,7 +126,7 @@ create_acg() {
     # The cryptogram is not the one over the transaction, so the verification fails.
     run aws_cmd payment-cryptography-data verify-auth-request-cryptogram \
         --key-identifier "$ACG_ARN" \
-        --transaction-data "00000000010000000000000000008000" \
+        --transaction-data "00000000170000000000000008400080008000084016051700000000093800000B1F2201030000000000000000000000000000000000000000000000000000008000000000000000" \
         --auth-request-cryptogram "0000000000000000" \
         --major-key-derivation-mode EMV_OPTION_A \
         --session-key-derivation-attributes 'EmvCommon={PrimaryAccountNumber=5081470082639564,PanSequenceNumber=01,ApplicationTransactionCounter=0001}'
@@ -142,7 +142,7 @@ create_acg() {
     # error that says so rather than with a cryptogram of its own making.
     run aws_cmd payment-cryptography-data generate-auth-request-cryptogram \
         --key-identifier "$ACG_ARN" \
-        --transaction-data "00000000010000000000000000008000" \
+        --transaction-data "00000000170000000000000008400080008000084016051700000000093800000B1F2201030000000000000000000000000000000000000000000000000000008000000000000000" \
         --major-key-derivation-mode EMV_OPTION_A \
         --session-key-derivation-attributes 'Amex={PrimaryAccountNumber=5081470082639564,PanSequenceNumber=01}'
     assert_failure
