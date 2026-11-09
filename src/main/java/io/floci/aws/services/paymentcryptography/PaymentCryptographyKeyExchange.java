@@ -76,9 +76,6 @@ final class PaymentCryptographyKeyExchange {
     /** The key material types that take export parameters. */
     private static final List<String> EXPORT_PARAMETER_TYPES = List.of("TR34_KEY_BLOCK");
 
-    /** The kind of material the export token is issued for. */
-    private static final String EXPORT_MATERIAL_TYPE = "TR34_KEY_BLOCK";
-
     /** The prefix an import token's name carries, as the model states it. */
     private static final String IMPORT_TOKEN_PREFIX = "import-token-";
 

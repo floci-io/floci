@@ -391,10 +391,9 @@ public class PaymentCryptographyJsonHandler {
      * two parties agreed, or an AS2805 cryptogram.
      */
     private Map<String, Object> exportKey(JsonNode request, String region) {
+        // The required members are settled by the shape check before the handler runs, so
+        // the identifier is read and not checked again.
         String keyIdentifier = request.path("ExportKeyIdentifier").asText();
-        if (keyIdentifier.isEmpty()) {
-            throw new AwsException("ValidationException", "ExportKeyIdentifier is required", 400);
-        }
         JsonNode material = request.path("KeyMaterial");
         String form = soleForm(material, PaymentCryptographyKeyExchange.EXPORT_FORMS);
         return service.exportKey(region, keyIdentifier, form, members(material.path(form)),
@@ -444,12 +443,8 @@ public class PaymentCryptographyJsonHandler {
         if (initial.isMissingNode() || initial.isNull()) {
             return "";
         }
-        String serialNumber = initial.path("KeySerialNumber").asText();
-        if (serialNumber.isEmpty()) {
-            throw new AwsException("ValidationException",
-                    "ExportAttributes.ExportDukptInitialKey.KeySerialNumber is required", 400);
-        }
-        return serialNumber;
+        // The serial number is required by the model, so the shape check has settled it.
+        return initial.path("KeySerialNumber").asText();
     }
 
     /**

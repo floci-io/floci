@@ -65,11 +65,24 @@
   only the name.
 - **Paging:** `ListKeys`, `ListAliases` and `ListTagsForResource` take `MaxResults`
   and `NextToken`, and answer with one page and the token that asks for the next.
+- **The key exchange:** `ExportKey` and `ImportKey` take the form of the key material the
+  request names, one form per request. A key leaves under a TR-31 block the service wraps
+  with a key it holds, under an RSA-OAEP cryptogram the receiver's certificate protects, or
+  under a key the two parties agreed with ECDH; it comes back under the same protections. A
+  key that is not exportable does not leave, a key pair has no material a key block could
+  carry, and a counterparty's certificate that the named authority did not sign is refused.
+  An export may name an initial DUKPT key by its serial number, and the derived key leaves
+  instead of the base derivation key.
+- **The import and export parameters:** `GetParametersForImport` answers with the token an
+  import quotes back, the wrapping key's certificate and the chain, and the moment the
+  parameters expire; `GetParametersForExport` answers with the same for an export, over a
+  signing key. Each token is named for the operation that issued it, and a token is good
+  until the parameters expire.
 - **The data plane is a service of its own:** the operations that use a key are on
   [the data plane's page](payment-cryptography-data.md), which is reached at its own
   routes.
-- **Not yet emulated:** the import and export formats, and the multi-region replication
-  operations.
+- **Not yet emulated:** the TR-34 and AS2805 key material formats, and the multi-region
+  replication operations.
 
 ## Configuration
 
