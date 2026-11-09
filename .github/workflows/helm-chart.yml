@@ -2,8 +2,9 @@ name: Helm Chart
 
 # Lints, unit-tests and installs charts/floci, and inventories the image it deploys.
 #
-#   lint     helm lint (strict) per CI values file, helm-unittest, and ct lint, which also
-#            fails a pull request that changes the chart without bumping its version.
+#   lint     helm lint (strict) per CI values file, helm-unittest (its signed release), and
+#            ct lint, which also fails a pull request that changes the chart without bumping
+#            its version.
 #   install  ct install on kind, once per supported Kubernetes version: every
 #            charts/floci/ci/*-values.yaml file is installed into a fresh namespace and
 #            `helm test` runs the AWS CLI against the Service. Two of those files also
@@ -43,6 +44,8 @@ env:
   # The versions the chart was verified with locally; bump them together.
   HELM_VERSION: v4.3.1
   HELM_UNITTEST_VERSION: v1.2.1
+  # The key helm-unittest signs its plugin releases with (public-key.asc in its repository).
+  HELM_UNITTEST_KEY_FINGERPRINT: 853008CD0B0A5A2DA04FF8A5616AD47F65B54AC7
 
 jobs:
   lint:
@@ -69,10 +72,21 @@ jobs:
 
       - name: helm-unittest
         run: |
-          # Helm 4 verifies plugin provenance by default; helm-unittest is installed from
-          # its pinned release tag instead.
-          helm plugin install https://github.com/helm-unittest/helm-unittest \
-            --version "$HELM_UNITTEST_VERSION" --verify=false
+          # The signed release tarball: Helm 4 checks its .prov signature against
+          # helm-unittest's public key, and that key must carry the pinned fingerprint, so a
+          # replaced tarball, signature or key fails here instead of running.
+          key="$RUNNER_TEMP/helm-unittest.asc"
+          keyring="$RUNNER_TEMP/helm-unittest.gpg"
+          curl -fsSL -o "$key" \
+            "https://raw.githubusercontent.com/helm-unittest/helm-unittest/$HELM_UNITTEST_VERSION/public-key.asc"
+          fingerprints="$(gpg --show-keys --with-colons "$key" | awk -F: '$1 == "fpr" { print $10 }')"
+          if [ "$fingerprints" != "$HELM_UNITTEST_KEY_FINGERPRINT" ]; then
+            echo "::error::helm-unittest key fingerprint is '$fingerprints', expected $HELM_UNITTEST_KEY_FINGERPRINT"
+            exit 1
+          fi
+          gpg --dearmor --output "$keyring" "$key"
+          helm plugin install --keyring "$keyring" \
+            "https://github.com/helm-unittest/helm-unittest/releases/download/$HELM_UNITTEST_VERSION/unittest-${HELM_UNITTEST_VERSION#v}.tgz"
           helm unittest charts/floci
 
       - uses: helm/chart-testing-action@720270857a28afd41e2426521a7801db09e9b510 # v2.9.0
