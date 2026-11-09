@@ -29,6 +29,7 @@ public final class SignedServiceRoute {
     private final ResolvedServiceCatalog catalog;
     private final Set<String> externalKeys;
     private final String internalPrefix;
+    private final Predicate<String> internalPaths;
     private final Predicate<String> publicPaths;
 
     /**
@@ -58,12 +59,15 @@ public final class SignedServiceRoute {
         this.catalog = catalog;
         this.externalKeys = Set.copyOf(externalKeys);
         this.internalPrefix = internalPrefix;
+        this.internalPaths = under(internalPrefix);
         this.publicPaths = publicPaths;
     }
 
     /** Matches {@code root} itself and every path beneath it. */
     public static Predicate<String> under(String root) {
-        return path -> path.equals(root) || path.startsWith(root + "/");
+        // Every request of every service runs these tests, so the prefix is built once.
+        String beneath = root + "/";
+        return path -> path.equals(root) || path.startsWith(beneath);
     }
 
     /**
@@ -80,7 +84,7 @@ public final class SignedServiceRoute {
         String path = ctx.getUriInfo().getPath();
         String normalizedPath = path.startsWith("/") ? path : "/" + path;
 
-        if (under(internalPrefix).test(normalizedPath)) {
+        if (internalPaths.test(normalizedPath)) {
             if (!signedForService(ctx)) {
                 ctx.abortWith(invalidBucketName());
             }
