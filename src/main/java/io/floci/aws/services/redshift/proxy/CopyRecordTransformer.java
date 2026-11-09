@@ -223,9 +223,13 @@ final class CopyRecordTransformer {
         byte[] value = field.value();
         boolean isVarchar = columnKinds == null
                 || (column < columnKinds.size() && columnKinds.get(column) == ColumnKind.TEXT);
-        if (transforms.trimBlanks() && isVarchar) {
+        // A NULL marker that ends in spaces is matched on the raw field, so trimming must leave it alone.
+        boolean rawNullMarker = !field.quoted() && Arrays.equals(value, nullMarker);
+        if (transforms.trimBlanks() && isVarchar && !rawNullMarker) {
             value = trimTrailingSpaces(value, csv);
         }
+        // Trimming a CSV field down to nothing yields an empty string, which an unquoted empty field would turn into NULL.
+        boolean trimmedToEmpty = csv && !field.quoted() && value.length == 0 && field.value().length > 0;
         boolean emptyField = !field.quoted() && value.length == 0;
         boolean nonCharacter = columnKinds != null && column < columnKinds.size()
                 && columnKinds.get(column) != ColumnKind.TEXT
@@ -235,6 +239,10 @@ final class CopyRecordTransformer {
                 || (emptyField && nonCharacter);
         if (nulled) {
             out.writeBytes(nullMarker);
+            return;
+        }
+        if (trimmedToEmpty && nullMarker.length == 0) {
+            out.writeBytes(new byte[]{DOUBLE_QUOTE, DOUBLE_QUOTE});
             return;
         }
         // A field that already is the NULL marker must not be cut or reformatted: that would turn NULL into data.

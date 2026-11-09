@@ -520,6 +520,30 @@ class CopyRecordTransformerTest {
     }
 
     @Test
+    void trimBlanksKeepsANullMarkerThatEndsInSpaces() {
+        CopyStatementParser.CopyTransforms transforms = new CopyStatementParser.CopyTransforms(
+                false, false, false, false, null, null, null, false, false, 0, true);
+        assertEquals("N |hello\n", apply("|", false, "N ", transforms, "N |hello   \n"));
+        assertEquals("N ,hello\n", apply(",", true, "N ", transforms, "N ,hello   \n"));
+    }
+
+    @Test
+    void trimBlanksQuotesACsvFieldThatTrimsToAnEmptyStringSoItIsNotNull() {
+        CopyStatementParser.CopyTransforms transforms = new CopyStatementParser.CopyTransforms(
+                false, false, false, false, null, null, null, false, false, 0, true);
+        assertEquals("\"\",hello\n", apply(",", true, null, transforms, "   ,hello   \n"));
+        // a field that was empty to begin with stays NULL
+        assertEquals(",hello\n", apply(",", true, null, transforms, ",hello   \n"));
+    }
+
+    @Test
+    void trimBlanksWithEmptyAsNullStillNullsASpaceOnlyCsvField() {
+        CopyStatementParser.CopyTransforms transforms = new CopyStatementParser.CopyTransforms(
+                false, true, false, false, null, null, null, false, false, 0, true);
+        assertEquals(",hello\n", apply(",", true, null, transforms, "   ,hello   \n"));
+    }
+
+    @Test
     void trimBlanksPreservesEscapedTrailingSpacesInTextMode() {
         CopyStatementParser.CopyTransforms transforms = new CopyStatementParser.CopyTransforms(
                 false, false, false, false, null, null, null, false, false, 0, true);
