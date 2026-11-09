@@ -609,7 +609,8 @@ public class PaymentCryptographyService implements Resettable, StoredResourceArn
         }
         byte[] initial;
         try {
-            initial = DukptCrypto.deriveIpek(base.getKeyMaterialHex(), keySerialNumber);
+            initial = DukptCrypto.deriveIpek(PaymentCryptographyKeyRules.materialHex(base),
+                    keySerialNumber);
         } catch (RuntimeException e) {
             throw new AwsException("ValidationException",
                     "the initial key could not be derived: " + e.getMessage(), 400);

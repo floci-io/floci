@@ -192,7 +192,7 @@ final class PaymentCryptographyKeyExchange {
             throw validation(tooWeak);
         }
         String block = PaymentCryptographyTr31.wrap(clear,
-                PaymentCryptographyCrypto.fromHex(protection.getKeyMaterialHex()),
+                PaymentCryptographyKeyRules.material(protection),
                 PaymentCryptographyService.isAes(protection), PaymentCryptographyService.algorithmByte(key),
                 PaymentCryptographyService.usageCode(key.getKeyUsage()), PaymentCryptographyService.modeCode(key),
                 key.isExportable() ? "E" : "N");
@@ -396,7 +396,7 @@ final class PaymentCryptographyKeyExchange {
         byte[] material2;
         try {
             material2 = PaymentCryptographyTr31.unwrap(block,
-                    PaymentCryptographyCrypto.fromHex(protection.getKeyMaterialHex()));
+                    PaymentCryptographyKeyRules.material(protection));
         } catch (RuntimeException e) {
             throw validation("the key block did not open under " + protection.getKeyId() + ": "
                     + e.getMessage());
@@ -722,10 +722,7 @@ final class PaymentCryptographyKeyExchange {
 
     /** The clear material of a key, which an export needs. */
     private static byte[] clearMaterial(PaymentCryptographyKey key) {
-        if (key.getKeyMaterialHex() == null || key.getKeyMaterialHex().isEmpty()) {
-            throw validation("the key " + key.getKeyId() + " has no material to export");
-        }
-        return PaymentCryptographyCrypto.fromHex(key.getKeyMaterialHex());
+        return PaymentCryptographyKeyRules.material(key);
     }
 
     /** The TR-31 header a key carries into a block. */
