@@ -79,6 +79,10 @@ client that talks to the control plane does not reach it by accident.
   the session key the EMV secure messaging rules define, which this service does not make. It
   is not one of the actions the service lists as supported. The wrapped-key form of a PIN
   encryption key is refused too, because the unwrapping is part of the key exchange.
+- **The wrapped key is refused on every operation that carries one.** The encrypt, decrypt
+  and re-encrypt requests hold a wrapped key for the key exchange, and the unwrapping is
+  part of that exchange rather than part of the cipher, so a request that carries one is
+  refused rather than answered as if the key were a fixed one.
 - **The card verification value is the three digit value of the X9 algorithm.** It is computed
   from the account number, the expiry and the service code, enciphered under the card
   verification key, and the value is the decimalized left-most digits of the enciphered block.

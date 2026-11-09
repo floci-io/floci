@@ -55,6 +55,23 @@ final class PaymentCryptographyAttributes {
     }
 
     /**
+     * Refuses the wrapped-key form of a key.
+     *
+     * <p>A wrapped key is a TR-31 key block that the service unwraps with a key-encryption
+     * key, and the unwrapping is part of the key exchange. Until it is made, a request that
+     * carries one is refused rather than answered as if the key were a fixed one.
+     *
+     * @param request the request to read
+     * @param member the member the wrapped key would come in
+     */
+    static void refuseWrappedKey(JsonNode request, String member) {
+        if (request.get(member) != null) {
+            throw new AwsException("ValidationException",
+                    member + " is not supported by this service", 400);
+        }
+    }
+
+    /**
      * The one variant an attributes member holds.
      *
      * <p>An attributes member holds exactly one variant, so a member with none or with two
