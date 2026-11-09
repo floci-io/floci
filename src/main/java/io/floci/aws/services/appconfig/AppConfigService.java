@@ -35,6 +35,7 @@ import java.util.Map;
 import java.util.Optional;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.function.Function;
 import java.util.regex.Pattern;
 
 @ApplicationScoped
@@ -235,13 +236,8 @@ public class AppConfigService {
     public PaginatedResult<Environment> listEnvironmentsPage(String applicationIdentifier,
                                                               Integer maxResults, String nextToken) {
         String appId = resolveApplication(applicationIdentifier).getId();
-        List<Environment> environments = listEnvironments(appId);
-        if (maxResults == null && nextToken == null) {
-            return new PaginatedResult<>(environments, null);
-        }
         String scope = "appconfig-environments:" + regions.getAccountId() + ":" + regions.getRegion() + ":" + appId;
-        return Pagination.paginate(environments, Environment::getId, maxResults, nextToken,
-                50, 50, 2048, "BadRequestException", scope, true);
+        return pageAppConfigList(listEnvironments(appId), Environment::getId, maxResults, nextToken, scope, true);
     }
 
     /** The environment whose ID is exactly {@code environmentId}, in whichever application holds it. */
@@ -343,13 +339,9 @@ public class AppConfigService {
     public PaginatedResult<ConfigurationProfile> listConfigurationProfilesPage(String applicationIdentifier,
                                                                                 Integer maxResults, String nextToken) {
         String appId = resolveApplication(applicationIdentifier).getId();
-        List<ConfigurationProfile> profiles = listConfigurationProfiles(appId);
-        if (maxResults == null && nextToken == null) {
-            return new PaginatedResult<>(profiles, null);
-        }
         String scope = "appconfig-profiles:" + regions.getAccountId() + ":" + regions.getRegion() + ":" + appId;
-        return Pagination.paginate(profiles, ConfigurationProfile::getId, maxResults, nextToken,
-                50, 50, 2048, "BadRequestException", scope, true);
+        return pageAppConfigList(listConfigurationProfiles(appId), ConfigurationProfile::getId,
+                maxResults, nextToken, scope, true);
     }
 
     /** The configuration profile whose ID is exactly {@code profileId}, in whichever application holds it. */
@@ -478,9 +470,9 @@ public class AppConfigService {
         String profileId = resolveConfigurationProfile(appId, profileIdentifier).getId();
         String scope = "appconfig-hosted-versions:" + regions.getAccountId() + ":" + regions.getRegion()
                 + ":" + appId + ":" + profileId;
-        return Pagination.paginate(listHostedConfigurationVersions(appId, profileId),
+        return pageAppConfigList(listHostedConfigurationVersions(appId, profileId),
                 version -> String.format(Locale.ROOT, "%010d", version.getVersionNumber()),
-                maxResults, nextToken, 50, 50, 2048, "BadRequestException", scope, true);
+                maxResults, nextToken, scope, false);
     }
 
     public synchronized void deleteHostedConfigurationVersion(String applicationIdentifier,
@@ -532,12 +524,18 @@ public class AppConfigService {
     }
 
     public PaginatedResult<DeploymentStrategy> listDeploymentStrategiesPage(Integer maxResults, String nextToken) {
-        List<DeploymentStrategy> strategies = listDeploymentStrategies();
-        if (maxResults == null && nextToken == null) {
-            return new PaginatedResult<>(strategies, null);
-        }
         String scope = "appconfig-strategies:" + regions.getAccountId() + ":" + regions.getRegion();
-        return Pagination.paginate(strategies, DeploymentStrategy::getId, maxResults, nextToken,
+        return pageAppConfigList(listDeploymentStrategies(), DeploymentStrategy::getId,
+                maxResults, nextToken, scope, true);
+    }
+
+    private static <T> PaginatedResult<T> pageAppConfigList(List<T> items, Function<T, String> cursorOf,
+                                                              Integer maxResults, String nextToken,
+                                                              String scope, boolean preserveUnpagedDefault) {
+        if (preserveUnpagedDefault && maxResults == null && nextToken == null) {
+            return new PaginatedResult<>(items, null);
+        }
+        return Pagination.paginate(items, cursorOf, maxResults, nextToken,
                 50, 50, 2048, "BadRequestException", scope, true);
     }
 
