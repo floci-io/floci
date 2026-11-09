@@ -291,6 +291,19 @@
         "UpdateVpcLink": {"method": "PATCH", "requestUri": "/v2/vpclinks/{vpcLinkId}"}
       }
     },
+    "cloudfront-keyvaluestore": {
+      "credentialScope": "cloudfront-keyvaluestore",
+      "apiVersion": "2022-07-26",
+      "accessDeniedStatus": 403,
+      "operations": {
+        "DeleteKey": {"method": "DELETE", "requestUri": "/key-value-stores/{KvsARN}/keys/{Key}"},
+        "DescribeKeyValueStore": {"method": "GET", "requestUri": "/key-value-stores/{KvsARN}"},
+        "GetKey": {"method": "GET", "requestUri": "/key-value-stores/{KvsARN}/keys/{Key}"},
+        "ListKeys": {"method": "GET", "requestUri": "/key-value-stores/{KvsARN}/keys"},
+        "PutKey": {"method": "PUT", "requestUri": "/key-value-stores/{KvsARN}/keys/{Key}"},
+        "UpdateKeys": {"method": "POST", "requestUri": "/key-value-stores/{KvsARN}/keys"}
+      }
+    },
     "dsql": {
       "credentialScope": "dsql",
       "apiVersion": "2018-05-10",

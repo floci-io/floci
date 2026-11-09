@@ -366,6 +366,10 @@ and described through the CloudFront control plane, and its keys are managed thr
   account id of that ARN to the endpoint host (`000000000000.localhost.floci.io`), which the embedded DNS
   and the generated TLS certificate already cover. The requests are signed with SigV4A; Floci reads the
   `cloudfront-keyvaluestore` signing name from its credential scope and does not verify the signature.
+  With `floci.auth.validate-signatures` on, these requests are refused: signature validation does not accept
+  SigV4A outside S3 yet, so leave it off when using the data plane.
+- With IAM enforcement on, the data plane is authorized as `cloudfront-keyvaluestore:<Operation>` on the store's ARN.
+  The control plane is not covered by IAM enforcement, like the rest of CloudFront.
 - Keys are listed in key order, 10 per page by default and up to 50 (`MaxResults`).
 - Quotas: a key is at most 512 bytes, a value at most 1,024 bytes and a store at most 5 MiB, counting the
   UTF-8 bytes of every key and value. Exceeding the first two is a `ValidationException`, and exceeding the

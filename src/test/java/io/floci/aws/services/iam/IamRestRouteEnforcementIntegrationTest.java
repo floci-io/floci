@@ -16,6 +16,7 @@ import java.net.URLEncoder;
 import java.nio.charset.StandardCharsets;
 import java.util.HashMap;
 import java.util.Map;
+import java.util.UUID;
 
 import static io.floci.aws.testing.EnforcementFixtures.auth;
 import static io.restassured.RestAssured.given;
@@ -71,6 +72,22 @@ class IamRestRouteEnforcementIntegrationTest {
                 .get("/2018-10-31/layers").then().statusCode(404);
     }
 
+    @Test
+    void cloudFrontKeyValueStoreDataPlaneRoutesAreCheckedByOperation() {
+        String user = user("route-kvs");
+        String arn = "arn:aws:cloudfront::" + ACCOUNT + ":key-value-store/" + UUID.randomUUID();
+        String path = "/key-value-stores/" + URLEncoder.encode(arn, StandardCharsets.UTF_8);
+
+        policy(user, allow("cloudfront-keyvaluestore:ListKeys", "*"));
+        refused(as(user, "cloudfront-keyvaluestore").urlEncodingEnabled(false).get(path).then(),
+                "cloudfront-keyvaluestore:DescribeKeyValueStore");
+        refused(as(user, "cloudfront-keyvaluestore").urlEncodingEnabled(false).header("If-Match", "etag")
+                .body("{\"Value\":\"v\"}").put(path + "/keys/k").then(), "cloudfront-keyvaluestore:PutKey");
+
+        policy(user, allow("cloudfront-keyvaluestore:DescribeKeyValueStore", arn));
+        // Allowed on that store, the request reaches the data plane, which has no such store.
+        as(user, "cloudfront-keyvaluestore").urlEncodingEnabled(false).get(path).then().statusCode(404);
+    }
     @Test
     void aScheduleRequestSignedForAnotherServiceIsStillCheckedAsScheduler() {
         // Checked by the route it reached, not by the credential scope it was signed with: an S3

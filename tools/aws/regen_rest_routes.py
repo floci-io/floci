@@ -52,6 +52,7 @@ MODELS: dict[str, str] = {
     "accessanalyzer": "access-analyzer",
     "apigateway": "apigateway",
     "apigatewayv2": "apigateway",
+    "cloudfront-keyvaluestore": "cloudfront-keyvaluestore",
     "dsql": "dsql",
     "eks": "eks",
     "es": "es",

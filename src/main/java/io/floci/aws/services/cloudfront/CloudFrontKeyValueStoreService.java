@@ -2,6 +2,8 @@ package io.floci.aws.services.cloudfront;
 
 import com.fasterxml.jackson.core.type.TypeReference;
 import io.floci.aws.core.common.AwsException;
+import io.floci.aws.core.common.PaginatedResult;
+import io.floci.aws.core.common.Pagination;
 import io.floci.aws.core.common.RegionResolver;
 import io.floci.aws.core.storage.StorageBackend;
 import io.floci.aws.core.storage.StorageFactory;
@@ -12,13 +14,11 @@ import jakarta.inject.Inject;
 import java.nio.charset.StandardCharsets;
 import java.time.Instant;
 import java.util.ArrayList;
-import java.util.Base64;
 import java.util.Comparator;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
-import java.util.TreeMap;
 import java.util.UUID;
 import java.util.regex.Pattern;
 
@@ -210,26 +210,11 @@ public class CloudFrontKeyValueStoreService {
     /** A page of keys in key order, and the token for the next page when there is one. */
     public KeyPage listKeys(String arn, String nextToken, Integer maxResults) {
         KeyValueStore kvs = describeByArn(arn);
-        int limit = maxResults == null ? DEFAULT_LIST_KEYS : maxResults;
-        if (limit < 1 || limit > MAX_LIST_KEYS) {
-            throw new AwsException("ValidationException",
-                    "MaxResults must be between 1 and " + MAX_LIST_KEYS + ".", 400);
-        }
-        String after = decodeToken(nextToken);
-
-        List<Map.Entry<String, String>> sorted = new ArrayList<>(new TreeMap<>(kvs.getItems()).entrySet());
-        int start = 0;
-        if (after != null) {
-            while (start < sorted.size() && sorted.get(start).getKey().compareTo(after) <= 0) {
-                start++;
-            }
-        }
-        int end = Math.min(sorted.size(), start + limit);
-        List<Map.Entry<String, String>> items = new ArrayList<>(sorted.subList(start, end));
-        String token = end < sorted.size() ? encodeToken(items.get(items.size() - 1).getKey()) : null;
-        return new KeyPage(items, token);
+        PaginatedResult<Map.Entry<String, String>> page = Pagination.paginate(
+                new ArrayList<>(kvs.getItems().entrySet()), Map.Entry::getKey, maxResults, nextToken,
+                DEFAULT_LIST_KEYS, MAX_LIST_KEYS, "ValidationException");
+        return new KeyPage(page.items(), page.nextToken());
     }
-
     public record KeyPage(List<Map.Entry<String, String>> items, String nextToken) {}
 
     public static int itemCount(KeyValueStore kvs) {
@@ -314,21 +299,6 @@ public class CloudFrontKeyValueStoreService {
         if (value != null && utf8Length(value) > MAX_VALUE_BYTES) {
             throw new AwsException("ValidationException",
                     "A value must be at most " + MAX_VALUE_BYTES + " bytes.", 400);
-        }
-    }
-
-    private static String encodeToken(String lastKey) {
-        return Base64.getUrlEncoder().withoutPadding().encodeToString(lastKey.getBytes(StandardCharsets.UTF_8));
-    }
-
-    private static String decodeToken(String token) {
-        if (token == null || token.isEmpty()) {
-            return null;
-        }
-        try {
-            return new String(Base64.getUrlDecoder().decode(token), StandardCharsets.UTF_8);
-        } catch (IllegalArgumentException e) {
-            throw new AwsException("ValidationException", "The NextToken is not valid.", 400);
         }
     }
 }

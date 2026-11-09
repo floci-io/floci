@@ -339,6 +339,7 @@
       "StartPolicyGeneration",
       "ValidatePolicy"
     ],
+    "cloudfront-keyvaluestore": [],
     "dsql": [
       "InjectError",
       "ListClusters"
