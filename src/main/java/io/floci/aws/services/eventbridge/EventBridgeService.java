@@ -1314,6 +1314,17 @@ public class EventBridgeService implements ResourceProvider, StoredResourceArns 
     }
 
     private boolean matchesSingleElement(JsonNode element, JsonNode actual) {
+        if (actual != null && actual.isArray()) {
+            if (element.isObject() && element.has("exists")) {
+                return element.get("exists").asBoolean() != actual.isEmpty();
+            }
+            for (JsonNode item : actual) {
+                if (matchesSingleElement(element, item)) {
+                    return true;
+                }
+            }
+            return false;
+        }
         // Content filter object
         if (element.isObject()) {
             String value = actual != null && actual.isTextual() ? actual.asText() : null;
