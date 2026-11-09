@@ -651,9 +651,6 @@ public class EcsContainerManager {
             containersInDefinitionOrder.forEach(container -> container.setManagedAgents(agents));
         }
         task.setContainers(containersInDefinitionOrder);
-        task.setLastStatus(TaskStatus.RUNNING.name());
-        task.setDesiredStatus(TaskStatus.RUNNING.name());
-        task.setStartedAt(Instant.now());
 
         return new EcsTaskHandle(task.getTaskArn(), containerIds, logStreamsByContainerId,
                 firelensVolumeName,
@@ -739,8 +736,8 @@ public class EcsContainerManager {
      *
      * <p>The wait is bounded by the dependent container's {@code startTimeout}, defaulting to
      * {@value #DEPENDENCY_WAIT_SECONDS} seconds rather than AWS's longer agent default, because
-     * RunTask here is synchronous and a caller is holding the request open. A dependency that does
-     * not get there in time fails the task.
+     * the service scheduler starts a service's tasks on its own thread, which a long wait holds up.
+     * A dependency that does not get there in time fails the task.
      */
     private void awaitDependencies(ContainerDefinition definition, Map<String, String> startedContainerIds) {
         if (definition.getDependsOn() == null || definition.getDependsOn().isEmpty()) {
@@ -2486,7 +2483,4 @@ public class EcsContainerManager {
             hostVolumePolicy.validate(hostPath, HostVolumePolicy.DEVICE_HOST_PATH);
         }
     }
-
-    // Inner enum to avoid import cycle — mirrors model.TaskStatus for readability
-    private enum TaskStatus {RUNNING}
 }
