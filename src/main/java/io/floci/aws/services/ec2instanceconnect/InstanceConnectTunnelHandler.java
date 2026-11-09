@@ -106,17 +106,14 @@ public class InstanceConnectTunnelHandler {
     }
 
     void init(@Observes Router router) {
+        netClient = vertx.createNetClient(new NetClientOptions().setConnectTimeout(CONNECT_TIMEOUT_MILLIS));
         router.route(PATH).handler(this::open);
         LOG.debugv("Registered the EC2 Instance Connect Endpoint tunnel on {0}", PATH);
     }
 
     /** What a valid request resolved to. */
     record Target(InstanceConnectEndpoint endpoint, Instance instance, String host, int port, int maxSeconds,
-                  String fallbackHost, int fallbackPort) {
-        Target(InstanceConnectEndpoint endpoint, Instance instance, String host, int port, int maxSeconds) {
-            this(endpoint, instance, host, port, maxSeconds, null, 0);
-        }
-    }
+                  String fallbackHost, int fallbackPort) { }
 
     /** Thrown for a request the endpoint refuses; the status and message become the HTTP answer. */
     static final class Refusal extends RuntimeException {
@@ -148,9 +145,9 @@ public class InstanceConnectTunnelHandler {
         // Docker network with the instance, whichever host it runs on. Where the host cannot route to
         // containers (Docker Desktop on macOS or Windows) the published SSH port is the way in.
         boolean[] usedFallback = {false};
-        client().connect(target.port(), target.host()).recover(primary -> target.fallbackPort() <= 0
+        netClient.connect(target.port(), target.host()).recover(primary -> target.fallbackPort() <= 0
                 ? Future.<NetSocket>failedFuture(primary)
-                : client().connect(target.fallbackPort(), target.fallbackHost())
+                : netClient.connect(target.fallbackPort(), target.fallbackHost())
                         .onSuccess(ignored -> usedFallback[0] = true)
                         .recover(ignored -> Future.<NetSocket>failedFuture(primary))).onComplete(connected -> {
             if (connected.failed()) {
@@ -159,7 +156,9 @@ public class InstanceConnectTunnelHandler {
                         + ":" + target.port() + ": " + connected.cause().getMessage());
                 return;
             }
-            NetSocket socket = connected.result();
+            // An instance that speaks first (sshd's banner) can write before the upgrade completes;
+            // hold its bytes until the pipe and handlers below exist.
+            NetSocket socket = connected.result().pause();
             ctx.request().resume();
             ctx.request().toWebSocket().onSuccess(webSocket -> {
                 String dialed = usedFallback[0]
@@ -180,6 +179,7 @@ public class InstanceConnectTunnelHandler {
                         webSocket.close();
                     }
                 });
+                socket.resume();
             }).onFailure(cause -> {
                 socket.close();
                 LOG.warnv("EC2 Instance Connect Endpoint tunnel upgrade failed: {0}", cause.getMessage());
@@ -340,12 +340,5 @@ public class InstanceConnectTunnelHandler {
         } catch (NumberFormatException e) {
             throw new Refusal(400, name + " must be an integer");
         }
-    }
-
-    private synchronized NetClient client() {
-        if (netClient == null) {
-            netClient = vertx.createNetClient(new NetClientOptions().setConnectTimeout(CONNECT_TIMEOUT_MILLIS));
-        }
-        return netClient;
     }
 }

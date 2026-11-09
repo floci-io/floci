@@ -13012,16 +13012,10 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
      */
     public boolean instanceConnectEndpointMayReach(InstanceConnectEndpoint endpoint, Instance instance, int port) {
         String region = endpoint.getRegion();
-        List<SecurityGroup> endpointGroups = endpoint.getSecurityGroupIds().stream()
-                .map(id -> securityGroups.get(key(region, id)).orElse(null))
-                .filter(Objects::nonNull)
-                .toList();
+        List<SecurityGroup> endpointGroups = groupsById(region, endpoint.getSecurityGroupIds());
         List<String> instanceGroupIds = instance.getSecurityGroups() == null ? List.of()
                 : instance.getSecurityGroups().stream().map(GroupIdentifier::getGroupId).toList();
-        List<SecurityGroup> instanceGroups = instanceGroupIds.stream()
-                .map(id -> securityGroups.get(key(region, id)).orElse(null))
-                .filter(Objects::nonNull)
-                .toList();
+        List<SecurityGroup> instanceGroups = groupsById(region, instanceGroupIds);
         SecurityGroupPolicy.Peer target = new SecurityGroupPolicy.Peer(instance.getPrivateIpAddress(),
                 instance.getOwnerId(), instance.getVpcId(), new HashSet<>(instanceGroupIds));
         SecurityGroupPolicy.Peer source = new SecurityGroupPolicy.Peer(endpoint.getPrivateIpAddress(),
@@ -13030,6 +13024,11 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
                 policyPrefixLists(region, endpointGroups))
                 && SecurityGroupPolicy.allows(instanceGroups, false, "tcp", port, -1, source,
                         policyPrefixLists(region, instanceGroups));
+    }
+
+    private List<SecurityGroup> groupsById(String region, List<String> ids) {
+        return ids.stream().map(id -> securityGroups.get(key(region, id)).orElse(null))
+                .filter(Objects::nonNull).toList();
     }
 
     private InstanceConnectEndpoint requireInstanceConnectEndpoint(String region, String id) {
