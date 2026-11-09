@@ -25,6 +25,7 @@ import jakarta.inject.Inject;
 import org.jboss.logging.Logger;
 
 import java.util.ArrayList;
+import java.util.Collection;
 import java.util.Collections;
 import java.util.HashSet;
 import java.util.LinkedHashMap;
@@ -607,25 +608,15 @@ public class EventsCfnProvisioner implements CfnResourceProvisioner {
      */
     private void updateEventBusTags(StackResource r, EventBus bus, Map<String, String> tags, String region) {
         Set<String> managedKeys = eventBusManagedTagKeys(r);
-        Set<String> touchedKeys = new TreeSet<>(managedKeys);
+        Set<String> touchedKeys = new HashSet<>(managedKeys);
         touchedKeys.addAll(tags.keySet());
         ObjectNode snapshot = MAPPER.createObjectNode();
         snapshot.put("region", region);
         snapshot.put("arn", bus.getArn());
         snapshot.put("managedTagKeys", r.getAttributes().get(EVENT_BUS_MANAGED_TAG_KEYS_ATTR));
-        ArrayNode tagKeys = snapshot.putArray("tagKeys");
-        ObjectNode priorTags = snapshot.putObject("tags");
-        for (String key : touchedKeys) {
-            tagKeys.add(key);
-            if (bus.getTags().containsKey(key)) {
-                priorTags.put(key, bus.getTags().get(key));
-            }
-        }
+        CfnRollback.putTagSnapshot(snapshot, touchedKeys, bus.getTags());
         r.getAttributes().put(CfnRollback.EVENT_BUS_UPDATE_SNAPSHOT_ATTR, snapshot.toString());
-
-        List<String> dropped = new ArrayList<>(managedKeys);
-        dropped.removeAll(tags.keySet());
-        retagEventBus(bus.getArn(), dropped, tags, region);
+        reconcileEventBusTags(bus.getArn(), managedKeys, tags, region);
     }
 
     /**
@@ -645,15 +636,8 @@ public class EventsCfnProvisioner implements CfnResourceProvisioner {
             throw new IllegalStateException("Could not read the event bus update snapshot for "
                     + resource.getLogicalId(), e);
         }
-        Map<String, String> priorTags = MAPPER.convertValue(
-                snapshot.path("tags"), new TypeReference<Map<String, String>>() { });
-        List<String> added = new ArrayList<>();
-        snapshot.path("tagKeys").forEach(key -> {
-            if (!priorTags.containsKey(key.asText())) {
-                added.add(key.asText());
-            }
-        });
-        retagEventBus(snapshot.path("arn").asText(), added, priorTags, snapshot.path("region").asText());
+        reconcileEventBusTags(snapshot.path("arn").asText(), CfnRollback.snapshotTagKeys(snapshot),
+                CfnRollback.snapshotTags(snapshot), snapshot.path("region").asText());
         String managedTagKeys = snapshotText(snapshot, "managedTagKeys");
         if (managedTagKeys == null) {
             resource.getAttributes().remove(EVENT_BUS_MANAGED_TAG_KEYS_ATTR);
@@ -664,12 +648,20 @@ public class EventsCfnProvisioner implements CfnResourceProvisioner {
         return true;
     }
 
-    private void retagEventBus(String arn, List<String> untag, Map<String, String> tag, String region) {
-        if (!untag.isEmpty()) {
-            eventBridgeService.untagResource(arn, untag, region);
+    /**
+     * Applies {@code desired} and removes the {@code managedKeys} it does not hold, so a tag added
+     * outside the stack stays.
+     */
+    private void reconcileEventBusTags(String arn, Collection<String> managedKeys, Map<String, String> desired,
+                                       String region) {
+        List<String> dropped = managedKeys.stream()
+                .filter(key -> !desired.containsKey(key))
+                .toList();
+        if (!dropped.isEmpty()) {
+            eventBridgeService.untagResource(arn, dropped, region);
         }
-        if (!tag.isEmpty()) {
-            eventBridgeService.tagResource(arn, tag, region);
+        if (!desired.isEmpty()) {
+            eventBridgeService.tagResource(arn, desired, region);
         }
     }
 
