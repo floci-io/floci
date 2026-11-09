@@ -23,6 +23,7 @@ import static org.hamcrest.Matchers.equalTo;
 import static org.hamcrest.Matchers.not;
 import static org.hamcrest.Matchers.startsWith;
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /** {@code AWS::CloudFormation::StackSet} deploys its instances through StackSets, end to end. */
@@ -213,6 +214,68 @@ class StackSetCfnIntegrationTest {
                 .body(containsString("<Enabled>false</Enabled>"))
                 .body(containsString("<Active>false</Active>"));
         CfnStackWaits.deleteStack(stack, auth(MANAGEMENT, "cloudformation"));
+    }
+
+    @Test
+    void deletingAStaleResourceLeavesTheRecreatedStackSetAlone() {
+        String stack = "stale-delete-" + UUID.randomUUID().toString().substring(0, 8);
+        String name = "set-" + stack;
+        ObjectNode body = simpleStackSetTemplate(name);
+        cloudFormation("CreateStack", "StackName", stack, "TemplateBody", body.toString()).then().statusCode(200);
+        CfnStackWaits.awaitStatus(stack, "CREATE_COMPLETE", auth(MANAGEMENT, "cloudformation"));
+        String original = output(stack, "Id");
+        String replacement = recreateStackSetOutsideItsParent(name);
+        assertNotEquals(original, replacement);
+
+        CfnStackWaits.deleteStack(stack, auth(MANAGEMENT, "cloudformation"));
+
+        cloudFormation("DescribeStackSet", "StackSetName", name).then().statusCode(200)
+                .body(containsString("<StackSetId>" + replacement + "</StackSetId>"));
+        cloudFormation("DeleteStackSet", "StackSetName", name).then().statusCode(200);
+    }
+
+    @Test
+    void updatingAStaleResourceDoesNotMutateTheRecreatedStackSet() {
+        String stack = "stale-update-" + UUID.randomUUID().toString().substring(0, 8);
+        String name = "set-" + stack;
+        ObjectNode body = simpleStackSetTemplate(name);
+        cloudFormation("CreateStack", "StackName", stack, "TemplateBody", body.toString()).then().statusCode(200);
+        CfnStackWaits.awaitStatus(stack, "CREATE_COMPLETE", auth(MANAGEMENT, "cloudformation"));
+        String original = output(stack, "Id");
+        String replacement = recreateStackSetOutsideItsParent(name);
+        assertNotEquals(original, replacement);
+        ((ObjectNode) body.path("Resources").path("Set").path("Properties")).put("Description", "requested");
+
+        cloudFormation("UpdateStack", "StackName", stack, "TemplateBody", body.toString()).then().statusCode(200);
+        CfnStackWaits.StackState state = CfnStackWaits.awaitTerminal(stack, auth(MANAGEMENT, "cloudformation"));
+        assertNotEquals("UPDATE_COMPLETE", state.status());
+        cloudFormation("DescribeStackSet", "StackSetName", name).then().statusCode(200)
+                .body(containsString("<Description>replacement</Description>"))
+                .body(containsString("<StackSetId>" + replacement + "</StackSetId>"));
+        CfnStackWaits.deleteStack(stack, auth(MANAGEMENT, "cloudformation"));
+        cloudFormation("DeleteStackSet", "StackSetName", name).then().statusCode(200);
+    }
+
+    private static ObjectNode simpleStackSetTemplate(String name) {
+        ObjectMapper mapper = new ObjectMapper();
+        ObjectNode properties = mapper.createObjectNode().put("StackSetName", name)
+                .put("PermissionModel", "SELF_MANAGED").put("Description", "original")
+                .put("TemplateBody", "{\"Resources\":{\"Queue\":{\"Type\":\"AWS::SQS::Queue\"}}}");
+        ObjectNode resource = mapper.createObjectNode().put("Type", "AWS::CloudFormation::StackSet");
+        resource.set("Properties", properties);
+        ObjectNode body = mapper.createObjectNode();
+        body.set("Resources", mapper.createObjectNode().set("Set", resource));
+        body.set("Outputs", mapper.createObjectNode().set("Id",
+                mapper.createObjectNode().set("Value", mapper.createObjectNode().put("Ref", "Set"))));
+        return body;
+    }
+
+    private static String recreateStackSetOutsideItsParent(String name) {
+        cloudFormation("DeleteStackSet", "StackSetName", name).then().statusCode(200);
+        return cloudFormation("CreateStackSet", "StackSetName", name, "PermissionModel", "SELF_MANAGED",
+                "Description", "replacement", "TemplateBody",
+                "{\"Resources\":{\"Queue\":{\"Type\":\"AWS::SQS::Queue\"}}}")
+                .then().statusCode(200).extract().xmlPath().getString("**.find { it.name() == 'StackSetId' }");
     }
 
     @AfterEach

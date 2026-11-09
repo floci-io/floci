@@ -66,17 +66,21 @@ public class StackSetCfnProvisioner implements CfnResourceProvisioner {
         List<InstanceGroup> groups = resolveGroups(props, ctx);
 
         if (ctx.isUpdate()) {
-            String name = stackSetName(ctx.priorPhysicalId());
-            requireSuccess(stackSets.updateStackSet(name, templateBody, parameters, capabilities, tags, description,
-                    null, optionalBoolean(autoDeployment, "Enabled", ctx),
-                    optionalBoolean(autoDeployment, "RetainStacksOnAccountRemoval", ctx),
-                    optionalBoolean(props.path("ManagedExecution"), "Active", ctx)));
-            StackSet stackSet = stackSets.describeStackSet(name);
-            boolean serviceManaged = SERVICE_MANAGED.equals(stackSet.getPermissionModel());
-            Map<String, Set<String>> deployed = deployedTargets(stackSets, name, serviceManaged);
-            createInstances(stackSets, name, groups);
-            removeDroppedTargets(stackSets, name, serviceManaged, deployed, groups);
-            setIdentity(r, stackSet);
+            boolean updated = stackSets.mutateStackSetResource(ctx.priorPhysicalId(), stackSet -> {
+                String name = stackSet.getStackSetName();
+                requireSuccess(stackSets.updateStackSet(name, templateBody, parameters, capabilities, tags, description,
+                        null, optionalBoolean(autoDeployment, "Enabled", ctx),
+                        optionalBoolean(autoDeployment, "RetainStacksOnAccountRemoval", ctx),
+                        optionalBoolean(props.path("ManagedExecution"), "Active", ctx)));
+                boolean serviceManaged = SERVICE_MANAGED.equals(stackSet.getPermissionModel());
+                Map<String, Set<String>> deployed = deployedTargets(stackSets, name, serviceManaged);
+                createInstances(stackSets, name, groups);
+                removeDroppedTargets(stackSets, name, serviceManaged, deployed, groups);
+                setIdentity(r, stackSet);
+            });
+            if (!updated) {
+                throw new AwsException("StackSetNotFoundException", "The original StackSet no longer exists", 404);
+            }
             return;
         }
 
@@ -88,13 +92,15 @@ public class StackSetCfnProvisioner implements CfnResourceProvisioner {
                 Boolean.TRUE.equals(optionalBoolean(autoDeployment, "RetainStacksOnAccountRemoval", ctx)),
                 Boolean.TRUE.equals(optionalBoolean(props.path("ManagedExecution"), "Active", ctx)));
         setIdentity(r, stackSet);
-        CfnRollback.guarded(r, ctx, true, () -> stackSets.deleteStackSetWithInstances(name), () -> { },
+        CfnRollback.guarded(r, ctx, true, () -> delete(STACK_SET, stackSet.getStackSetId(), ctx.region()), () -> { },
                 () -> createInstances(stackSets, name, groups));
     }
 
     @Override
     public void delete(String resourceType, String physicalId, String region) {
-        stackSetService.get().deleteStackSetWithInstances(stackSetName(physicalId));
+        StackSetService stackSets = stackSetService.get();
+        stackSets.mutateStackSetResource(physicalId,
+                stackSet -> stackSets.deleteStackSetWithInstances(stackSet.getStackSetName()));
     }
 
     /** One {@code StackInstancesGroup} entry: the accounts or the root and OUs it targets, and its Regions. */
@@ -203,9 +209,4 @@ public class StackSetCfnProvisioner implements CfnResourceProvisioner {
         return value == null || value.isBlank() ? null : Boolean.valueOf(value);
     }
 
-    /** A stack set id is {@code <name>:<uuid>}; the name is what the StackSets API addresses it by. */
-    private static String stackSetName(String stackSetId) {
-        int separator = stackSetId.indexOf(':');
-        return separator < 0 ? stackSetId : stackSetId.substring(0, separator);
-    }
 }

@@ -41,6 +41,7 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
 import java.util.concurrent.ThreadFactory;
+import java.util.function.Consumer;
 import java.util.function.Supplier;
 import java.util.regex.Pattern;
 
@@ -301,7 +302,7 @@ public class StackSetService implements PassedRoleLookup, AccountPlacementListen
         }
     }
 
-    public void deleteStackSet(String name) {
+    public synchronized void deleteStackSet(String name) {
         getStackSetOrThrow(name);
         if (!listStackInstances(name, null, null).isEmpty()) {
             throw new AwsException("StackSetNotEmptyException",
@@ -309,6 +310,19 @@ public class StackSetService implements PassedRoleLookup, AccountPlacementListen
         }
         stackSets.delete(name);
         LOG.infov("Deleted StackSet: {0}", name);
+    }
+
+    public synchronized boolean mutateStackSetResource(String stackSetId, Consumer<StackSet> mutation) {
+        if (stackSetId == null || stackSetId.indexOf(':') < 1) {
+            return false;
+        }
+        String name = stackSetId.substring(0, stackSetId.indexOf(':'));
+        StackSet stackSet = stackSets.get(name).orElse(null);
+        if (stackSet == null || !stackSetId.equals(stackSet.getStackSetId())) {
+            return false;
+        }
+        mutation.accept(stackSet);
+        return true;
     }
 
     /**
