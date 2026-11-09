@@ -16,11 +16,14 @@ import org.mockito.Answers;
 import java.time.Clock;
 import java.time.Instant;
 import java.time.ZoneOffset;
+import java.util.List;
+import java.util.Map;
 import java.util.Optional;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.mockito.ArgumentMatchers.anyInt;
+import static org.mockito.ArgumentMatchers.anyMap;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.ArgumentMatchers.nullable;
@@ -162,10 +165,13 @@ class InstanceConnectTunnelHandlerTest {
         resolve(CLI_QUERY);
         verify(enforcement).authorizeAdditionalResource(
                 "AWS4-HMAC-SHA256 Credential=AKIAFLOCITUNNELTEST1/20261019/us-east-1/ec2-instance-connect/aws4_request",
-                "ec2-instance-connect:OpenTunnel", ARN);
+                "ec2-instance-connect:OpenTunnel", ARN, Map.of(
+                        "ec2-instance-connect:remotePort", List.of("22"),
+                        "ec2-instance-connect:privateIpAddress", List.of("10.0.1.10"),
+                        "ec2-instance-connect:maxTunnelDuration", List.of("3600")));
 
         doThrow(new AwsException("AccessDenied", "denied", 403)).when(enforcement)
-                .authorizeAdditionalResource(anyString(), anyString(), anyString());
+                .authorizeAdditionalResource(anyString(), anyString(), anyString(), anyMap());
         assertEquals(403, refusal(CLI_QUERY));
 
         when(iam.isKnownAccessKey("AKIAFLOCITUNNELTEST1")).thenReturn(false);
