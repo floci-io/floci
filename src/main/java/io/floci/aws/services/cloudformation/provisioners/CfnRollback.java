@@ -520,7 +520,7 @@ public final class CfnRollback {
     /** The tags {@link #putTagSnapshot} recorded, which are what the rollback puts back. */
     public static Map<String, String> snapshotTags(JsonNode snapshot) {
         Map<String, String> tags = new LinkedHashMap<>();
-        snapshot.path("tags").properties().forEach(tag -> tags.put(tag.getKey(), tag.getValue().asText()));
+        snapshot.path("tags").properties().forEach(tag -> tags.put(tag.getKey(), tag.getValue().textValue()));
         return tags;
     }
 
