@@ -9,6 +9,8 @@ import com.fasterxml.jackson.databind.ObjectReader;
 import io.floci.aws.core.common.AwsArnUtils;
 import io.floci.aws.core.common.AwsException;
 import io.floci.aws.core.common.AwsRegions;
+import io.floci.aws.core.common.PaginatedResult;
+import io.floci.aws.core.common.Pagination;
 import io.floci.aws.core.common.RegionResolver;
 import io.floci.aws.core.storage.StorageBackend;
 import io.floci.aws.core.storage.StorageFactory;
@@ -140,6 +142,16 @@ public class CloudWatchDashboardsService {
         }
         all.sort(Comparator.comparing(Dashboard::getDashboardName));
         return all;
+    }
+
+    public PaginatedResult<Dashboard> listDashboardsPage(String dashboardNamePrefix,
+                                                         String nextToken, String region) {
+        String prefix = dashboardNamePrefix == null || dashboardNamePrefix.isBlank()
+                ? "" : dashboardNamePrefix;
+        String scope = "cloudwatch-dashboards:" + regionResolver.getAccountId() + ":" + region + ":" + prefix;
+        return Pagination.paginate(listDashboards(prefix, region), Dashboard::getDashboardName,
+                1000, nextToken, scope,
+                token -> new AwsException("InvalidParameterValue", "Invalid NextToken.", 400));
     }
 
     /**
