@@ -1,6 +1,7 @@
 package io.floci.aws.config;
 
 import io.floci.aws.core.common.Digests;
+import io.floci.aws.services.ecr.registry.EcrRegistryManager;
 import io.floci.aws.testing.SidecarContainersProfile;
 import io.quarkus.test.junit.QuarkusTest;
 import io.quarkus.test.junit.TestProfile;
@@ -23,6 +24,7 @@ import java.nio.file.Path;
 import java.util.List;
 import java.util.concurrent.TimeUnit;
 
+import static org.awaitility.Awaitility.await;
 import static org.junit.jupiter.api.Assertions.assertArrayEquals;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
@@ -46,6 +48,9 @@ class EcrTlsDataPlaneDockerIntegrationTest {
     @Inject
     Vertx vertx;
 
+    @Inject
+    EcrRegistryManager registryManager;
+
     @BeforeAll
     static void requireDocker() {
         SidecarContainersProfile.requireDockerAndImage("floci.services.ecr.registry-image");
@@ -53,6 +58,9 @@ class EcrTlsDataPlaneDockerIntegrationTest {
 
     @Test
     void pushAndPullImageOverTlsAndVerifyPlainHttpRegression() throws Exception {
+        registryManager.ensureStarted();
+        await().atMost(10, TimeUnit.SECONDS).until(() -> registryManager.httpClient().ping());
+
         String tlsHost = "000000000000.dkr.ecr.us-east-1.localhost.floci.io";
         HttpClient tlsClient = vertx.createHttpClient(new HttpClientOptions()
                 .setSsl(true)
