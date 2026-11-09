@@ -46,8 +46,8 @@ public final class SigV4RequestValidator {
      * identical fallback in S3Service/PreSignedUrlFilter. Deliberately not a fallback for any
      * other unregistered access key, only this exact, already-public pair is honored.
      */
-    private static final String LEGACY_ACCESS_KEY_ID = "test";
-    private static final String LEGACY_SECRET_KEY = "test";
+    public static final String LEGACY_ACCESS_KEY_ID = "test";
+    public static final String LEGACY_SECRET_KEY = "test";
 
     private final IamService iamService;
 

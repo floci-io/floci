@@ -32,13 +32,14 @@ import java.util.Optional;
 import java.util.Set;
 import java.util.stream.Collectors;
 
+import static io.floci.aws.core.common.auth.SigV4RequestValidator.LEGACY_ACCESS_KEY_ID;
+import static io.floci.aws.core.common.auth.SigV4RequestValidator.LEGACY_SECRET_KEY;
+
 @Provider
 @Priority(Priorities.AUTHENTICATION)
 public class PreSignedUrlFilter implements ContainerRequestFilter {
 
     private static final Logger LOG = Logger.getLogger(PreSignedUrlFilter.class);
-    private static final String LEGACY_ACCESS_KEY_ID = "test";
-    private static final String LEGACY_SECRET_KEY = "test";
     private static final Set<String> PRESIGNED_AUTH_SIGNALS = Set.of(
             "X-Amz-Algorithm",
             "X-Amz-Credential",

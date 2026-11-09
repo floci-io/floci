@@ -41,6 +41,8 @@ import java.util.function.Predicate;
 import java.util.function.Supplier;
 import java.util.regex.Pattern;
 
+import static io.floci.aws.core.common.auth.SigV4RequestValidator.LEGACY_ACCESS_KEY_ID;
+
 @ApplicationScoped
 public class CloudTrailService {
 
@@ -1014,7 +1016,7 @@ public class CloudTrailService {
         ObjectNode identity = mapper.createObjectNode();
         String accountId = regionResolver.getAccountId();
 
-        if (accessKeyId == null || "test".equals(accessKeyId)) {
+        if (accessKeyId == null || LEGACY_ACCESS_KEY_ID.equals(accessKeyId)) {
             identity.put("type", "IAMUser");
             identity.put("principalId", "AIDA" + repeat('A', 17));
             identity.put("arn", regionResolver.buildGlobalArn("iam", accountId, "root"));

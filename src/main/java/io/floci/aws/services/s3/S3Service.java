@@ -102,6 +102,8 @@ import java.util.regex.Pattern;
 import java.util.stream.Collectors;
 import java.util.stream.Stream;
 
+import static io.floci.aws.core.common.auth.SigV4RequestValidator.LEGACY_ACCESS_KEY_ID;
+
 @ApplicationScoped
 public class S3Service implements Resettable, ResourceProvider {
     private String ownerId() {
@@ -123,7 +125,6 @@ public class S3Service implements Resettable, ResourceProvider {
     public static final String REDSHIFT_SPECTRUM_SCRATCH_TAG_VALUE = "redshift-spectrum-scratch";
     private static final String AUTHENTICATED_USERS_GROUP_URI = "http://acs.amazonaws.com/groups/global/AuthenticatedUsers";
     private static final String LOG_DELIVERY_GROUP_URI = "http://acs.amazonaws.com/groups/s3/LogDelivery";
-    private static final String LEGACY_ACCESS_KEY_ID = "test";
     private static final String S3_XML_SCHEMA_ERROR =
             "The XML you provided was not well-formed or did not validate against our published schema.";
     private static final Set<String> OBJECT_OWNERSHIP_VALUES = Set.of(
