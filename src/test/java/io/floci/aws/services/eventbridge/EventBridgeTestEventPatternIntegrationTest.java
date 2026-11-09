@@ -59,18 +59,18 @@ class EventBridgeTestEventPatternIntegrationTest {
             [3,8] | ">=",7,"<",9   | true
             ["7"] | ">=",7         | false
             []    | ">=",7         | false
-            6 | ">",6,"<",8 | false
-            7 | ">",6,"<",8 | true
-            8 | ">",6,"<",8 | false
-            6 | ">",6,"<=",8 | false
-            7 | ">",6,"<=",8 | true
-            8 | ">",6,"<=",8 | true
-            6 | ">=",6,"<",8 | true
-            7 | ">=",6,"<",8 | true
-            8 | ">=",6,"<",8 | false
-            6 | ">=",6,"<=",8 | true
-            7 | ">=",6,"<=",8 | true
-            8 | ">=",6,"<=",8 | true
+            6     | ">",6,"<",8     | false
+            7     | ">",6,"<",8     | true
+            8     | ">",6,"<",8     | false
+            6     | ">",6,"<=",8    | false
+            7     | ">",6,"<=",8    | true
+            8     | ">",6,"<=",8    | true
+            6     | ">=",6,"<",8    | true
+            7     | ">=",6,"<",8    | true
+            8     | ">=",6,"<",8    | false
+            6     | ">=",6,"<=",8   | true
+            7     | ">=",6,"<=",8   | true
+            8     | ">=",6,"<=",8   | true
             """)
     void numericComparisonThroughSdk(String value, String comparisons, boolean expected) {
         try (EventBridgeClient client = sdkClient()) {
