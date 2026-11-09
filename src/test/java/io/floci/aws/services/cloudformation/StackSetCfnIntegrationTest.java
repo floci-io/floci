@@ -7,11 +7,13 @@ import io.floci.aws.testing.CfnStackWaits;
 import io.floci.aws.testing.OrganizationsFixture;
 import io.floci.aws.testing.RestAssuredJsonUtils;
 import io.quarkus.test.junit.QuarkusTest;
+import io.quarkus.test.junit.mockito.InjectSpy;
 import io.restassured.response.Response;
 import io.restassured.specification.RequestSpecification;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
+import org.mockito.Mockito;
 
 import java.util.UUID;
 
@@ -33,6 +35,9 @@ class StackSetCfnIntegrationTest {
     private static final String MANAGEMENT = "676767676767";
     private static final String REGION = "us-east-1";
     private final OrganizationsFixture organizationsFixture = new OrganizationsFixture();
+
+    @InjectSpy
+    StackSetService stackSets;
 
     @BeforeAll
     static void configureRestAssured() {
@@ -464,6 +469,151 @@ class StackSetCfnIntegrationTest {
                 .body(containsString("<Description>original</Description>"))
                 .body(containsString("<PermissionModel>SELF_MANAGED</PermissionModel>"));
         CfnStackWaits.deleteStack(stack, auth(MANAGEMENT, "cloudformation"));
+    }
+
+    @Test
+    void inPlaceRollbackFailureCanBeRetried() {
+        String stack = "inplace-retry-" + UUID.randomUUID().toString().substring(0, 8);
+        String name = "set-" + stack;
+        ObjectMapper mapper = new ObjectMapper();
+        ObjectNode body = simpleStackSetTemplate(name);
+        ObjectNode resources = (ObjectNode) body.path("Resources");
+        ObjectNode obstacle = mapper.createObjectNode().put("Type", "AWS::SSM::Parameter");
+        obstacle.set("Properties", mapper.createObjectNode().put("Name", stack)
+                .put("Type", "String").put("Value", "original"));
+        resources.set("Obstacle", obstacle);
+        cloudFormation("CreateStack", "StackName", stack, "TemplateBody", body.toString()).then().statusCode(200);
+        CfnStackWaits.awaitStatus(stack, "CREATE_COMPLETE", auth(MANAGEMENT, "cloudformation"));
+        Mockito.doThrow(new IllegalStateException("simulated restore failure")).doCallRealMethod()
+                .when(stackSets).updateStackSetResource(Mockito.eq(name), Mockito.anyString(), Mockito.anyMap(),
+                        Mockito.anyList(), Mockito.anyMap(), Mockito.eq("original"), Mockito.any(), Mockito.any(),
+                        Mockito.any());
+        try {
+            ((ObjectNode) resources.path("Set").path("Properties")).put("Description", "attempted");
+            ObjectNode broken = obstacle.deepCopy();
+            broken.set("DependsOn", mapper.createArrayNode().add("Set").add("Obstacle"));
+            resources.set("Broken", broken);
+            cloudFormation("UpdateStack", "StackName", stack, "TemplateBody", body.toString()).then().statusCode(200);
+            assertEquals("UPDATE_ROLLBACK_FAILED", CfnStackWaits.awaitTerminal(stack,
+                    auth(MANAGEMENT, "cloudformation")).status());
+            cloudFormation("DescribeStackSet", "StackSetName", name).then().statusCode(200)
+                    .body(containsString("<Description>attempted</Description>"));
+            CfnStackWaits.continueUpdateRollback(stack, auth(MANAGEMENT, "cloudformation"));
+            assertEquals("UPDATE_ROLLBACK_COMPLETE", CfnStackWaits.awaitTerminal(stack,
+                    auth(MANAGEMENT, "cloudformation")).status());
+            cloudFormation("DescribeStackSet", "StackSetName", name).then().statusCode(200)
+                    .body(containsString("<Description>original</Description>"));
+        } finally {
+            Mockito.reset(stackSets);
+        }
+        CfnStackWaits.deleteStack(stack, auth(MANAGEMENT, "cloudformation"));
+    }
+
+    @Test
+    void inPlaceRollbackRestoresConfigurationAfterALaterResourceFails() {
+        String stack = "inplace-config-" + UUID.randomUUID().toString().substring(0, 8);
+        String name = "set-" + stack;
+        ObjectMapper mapper = new ObjectMapper();
+        ObjectNode body = simpleStackSetTemplate(name);
+        ObjectNode resources = (ObjectNode) body.path("Resources");
+        ObjectNode obstacle = mapper.createObjectNode().put("Type", "AWS::SSM::Parameter");
+        obstacle.set("Properties", mapper.createObjectNode().put("Name", stack)
+                .put("Type", "String").put("Value", "original"));
+        resources.set("Obstacle", obstacle);
+        cloudFormation("CreateStack", "StackName", stack, "TemplateBody", body.toString()).then().statusCode(200);
+        CfnStackWaits.awaitStatus(stack, "CREATE_COMPLETE", auth(MANAGEMENT, "cloudformation"));
+        String original = output(stack, "Id");
+
+        ObjectNode properties = (ObjectNode) resources.path("Set").path("Properties");
+        properties.put("Description", "attempted");
+        properties.set("Tags", mapper.createArrayNode().add(mapper.createObjectNode()
+                .put("Key", "attempted").put("Value", "value")));
+        properties.set("Capabilities", mapper.createArrayNode().add("CAPABILITY_NAMED_IAM"));
+        ObjectNode broken = obstacle.deepCopy();
+        broken.set("DependsOn", mapper.createArrayNode().add("Set").add("Obstacle"));
+        resources.set("Broken", broken);
+        cloudFormation("UpdateStack", "StackName", stack, "TemplateBody", body.toString()).then().statusCode(200);
+        assertEquals("UPDATE_ROLLBACK_COMPLETE", CfnStackWaits.awaitTerminal(stack,
+                auth(MANAGEMENT, "cloudformation")).status());
+        assertEquals(original, output(stack, "Id"));
+        cloudFormation("DescribeStackSet", "StackSetName", name).then().statusCode(200)
+                .body(containsString("<Description>original</Description>"))
+                .body(not(containsString("<Key>attempted</Key>")))
+                .body(not(containsString("<member>CAPABILITY_NAMED_IAM</member>")));
+        CfnStackWaits.deleteStack(stack, auth(MANAGEMENT, "cloudformation"));
+    }
+
+    @Test
+    void inPlaceRollbackRestoresTargetsAndInstancesAfterALaterResourceFails() {
+        rollbackInstances(false);
+    }
+
+    @Test
+    void inPlaceRollbackRemovesInstancesCreatedBeforeAnInvalidTargetFails() {
+        rollbackInstances(true);
+    }
+
+    private static void rollbackInstances(boolean invalidTarget) {
+        String stack = "inplace-targets-" + UUID.randomUUID().toString().substring(0, 8);
+        String name = "set-" + stack;
+        String oldAccount = "515151515151";
+        String newAccount = "525252525252";
+        ObjectMapper mapper = new ObjectMapper();
+        ObjectNode body = simpleStackSetTemplate(name);
+        ObjectNode resources = (ObjectNode) body.path("Resources");
+        ObjectNode properties = (ObjectNode) resources.path("Set").path("Properties");
+        ObjectNode inner = mapper.createObjectNode();
+        ObjectNode parameter = mapper.createObjectNode().put("Type", "AWS::SSM::Parameter");
+        ObjectNode innerProperties = mapper.createObjectNode().put("Name", stack)
+                .put("Type", "String").put("Value", "original");
+        parameter.set("Properties", innerProperties);
+        inner.set("Resources", mapper.createObjectNode().set("Parameter", parameter));
+        properties.put("TemplateBody", inner.toString());
+        ObjectNode group = mapper.createObjectNode();
+        group.set("DeploymentTargets", mapper.createObjectNode().set("Accounts", mapper.createArrayNode()
+                .add(oldAccount)));
+        group.set("Regions", mapper.createArrayNode().add(REGION));
+        properties.set("StackInstancesGroup", mapper.createArrayNode().add(group));
+        if (!invalidTarget) {
+            resources.set("Obstacle", parameter.deepCopy());
+        }
+        cloudFormation("CreateStack", "StackName", stack, "TemplateBody", body.toString()).then().statusCode(200);
+        CfnStackWaits.awaitStatus(stack, "CREATE_COMPLETE", auth(MANAGEMENT, "cloudformation"));
+        assertParameter(oldAccount, stack, "original");
+
+        innerProperties.put("Value", "attempted");
+        properties.put("TemplateBody", inner.toString()).put("Description", "attempted");
+        ((ObjectNode) group.path("DeploymentTargets")).set("Accounts", mapper.createArrayNode().add(newAccount));
+        if (invalidTarget) {
+            ObjectNode badGroup = group.deepCopy();
+            ((ObjectNode) badGroup.path("DeploymentTargets")).set("Accounts", mapper.createArrayNode()
+                    .add("invalid-account"));
+            properties.set("StackInstancesGroup", mapper.createArrayNode().add(group).add(badGroup));
+        } else {
+            ObjectNode broken = parameter.deepCopy();
+            ((ObjectNode) broken.path("Properties")).put("Value", "original");
+            broken.set("DependsOn", mapper.createArrayNode().add("Set").add("Obstacle"));
+            resources.set("Broken", broken);
+        }
+        cloudFormation("UpdateStack", "StackName", stack, "TemplateBody", body.toString()).then().statusCode(200);
+        assertEquals("UPDATE_ROLLBACK_COMPLETE", CfnStackWaits.awaitTerminal(stack,
+                auth(MANAGEMENT, "cloudformation")).status());
+        assertParameter(oldAccount, stack, "original");
+        given().header("Authorization", auth(newAccount, "ssm")).header("X-Amz-Target", "AmazonSSM.GetParameter")
+                .contentType("application/x-amz-json-1.1").body("{\"Name\":\"" + stack + "\"}")
+                .post("/").then().statusCode(400).body(containsString("ParameterNotFound"));
+        cloudFormation("ListStackInstances", "StackSetName", name).then().statusCode(200)
+                .body(containsString("<Account>" + oldAccount + "</Account>"))
+                .body(not(containsString("<Account>" + newAccount + "</Account>")));
+        cloudFormation("DescribeStackSet", "StackSetName", name).then().statusCode(200)
+                .body(containsString("<Description>original</Description>"));
+        CfnStackWaits.deleteStack(stack, auth(MANAGEMENT, "cloudformation"));
+    }
+
+    private static void assertParameter(String account, String name, String value) {
+        given().header("Authorization", auth(account, "ssm")).header("X-Amz-Target", "AmazonSSM.GetParameter")
+                .contentType("application/x-amz-json-1.1").body("{\"Name\":\"" + name + "\"}")
+                .post("/").then().statusCode(200).body("Parameter.Value", equalTo(value));
     }
 
     @Test

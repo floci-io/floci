@@ -127,6 +127,8 @@ public final class CfnRollback {
      */
     public static final String DASHBOARD_UPDATE_SNAPSHOT_ATTR = "__FlociDashboardUpdateSnapshot";
 
+    public static final String STACK_SET_UPDATE_SNAPSHOT_ATTR = "__FlociStackSetUpdateSnapshot";
+
     /**
      * Holds the configuration and tags a Route 53 health check carried before an in-place update
      * changed them, so a failed stack update can put them back. Written by

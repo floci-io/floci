@@ -2,7 +2,9 @@ package io.floci.aws.services.cloudformation.provisioners;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.floci.aws.core.common.AwsException;
+import io.floci.aws.core.common.RequestScopes;
 import io.floci.aws.services.cloudformation.CloudFormationService;
 import io.floci.aws.services.cloudformation.StackSetService;
 import io.floci.aws.services.cloudformation.model.StackInstance;
@@ -72,6 +74,9 @@ public class StackSetCfnProvisioner implements CfnResourceProvisioner {
         List<InstanceGroup> groups = resolveGroups(props, ctx);
 
         if (ctx.isUpdate()) {
+            if (requiresUpdateRecovery(r)) {
+                rollbackUpdate(r);
+            }
             ReplacementCleanup.endRollbackRetry(r);
         }
         Map<String, String> attributesBefore = new HashMap<>(r.getAttributes());
@@ -113,12 +118,16 @@ public class StackSetCfnProvisioner implements CfnResourceProvisioner {
                     }
                     return;
                 }
+                boolean serviceManaged = SERVICE_MANAGED.equals(stackSet.getPermissionModel());
+                Map<String, Set<String>> deployed = deployedTargets(stackSets, name, serviceManaged);
+                ObjectNode snapshot = MAPPER.createObjectNode().put("account", ctx.accountId()).put("region", ctx.region());
+                snapshot.set("stackSet", MAPPER.valueToTree(stackSet));
+                snapshot.set("targets", MAPPER.valueToTree(deployed));
+                r.getAttributes().put(CfnRollback.STACK_SET_UPDATE_SNAPSHOT_ATTR, snapshot.toString());
                 requireSuccess(stackSets.updateStackSetResource(name, templateBody, parameters, capabilities, tags, description,
                         optionalBoolean(autoDeployment, "Enabled", ctx),
                         optionalBoolean(autoDeployment, "RetainStacksOnAccountRemoval", ctx),
                         optionalBoolean(props.path("ManagedExecution"), "Active", ctx)));
-                boolean serviceManaged = SERVICE_MANAGED.equals(stackSet.getPermissionModel());
-                Map<String, Set<String>> deployed = deployedTargets(stackSets, name, serviceManaged);
                 createInstances(stackSets, name, groups);
                 removeDroppedTargets(stackSets, name, serviceManaged, deployed, groups);
                 setIdentity(r, stackSet);
@@ -149,12 +158,14 @@ public class StackSetCfnProvisioner implements CfnResourceProvisioner {
 
     @Override
     public UpdateCleanupResult completeUpdate(StackResource resource) {
+        resource.getAttributes().remove(CfnRollback.STACK_SET_UPDATE_SNAPSHOT_ATTR);
         CREATE_ONLY_INPUTS.clearPrior(resource);
         return ReplacementCleanup.complete(resource, this::delete);
     }
 
     @Override
     public void clearUpdate(StackResource resource) {
+        resource.getAttributes().remove(CfnRollback.STACK_SET_UPDATE_SNAPSHOT_ATTR);
         CREATE_ONLY_INPUTS.clearPrior(resource);
         ReplacementCleanup.clear(resource);
     }
@@ -165,15 +176,62 @@ public class StackSetCfnProvisioner implements CfnResourceProvisioner {
     }
 
     @Override
+    public boolean retainsFailedUpdateState(StackResource resource) {
+        return requiresUpdateRecovery(resource);
+    }
+
+    @Override
+    public boolean requiresUpdateRecovery(StackResource resource) {
+        return resource.getAttributes().containsKey(CfnRollback.STACK_SET_UPDATE_SNAPSHOT_ATTR);
+    }
+
+    @Override
     public boolean rollbackUpdate(StackResource resource) {
         String attemptedId = resource.getPhysicalId();
         boolean hasPriorInputs = CREATE_ONLY_INPUTS.hasPrior(resource);
         try {
+            JsonNode snapshot = CfnRollback.updateSnapshot(resource, CfnRollback.STACK_SET_UPDATE_SNAPSHOT_ATTR);
+            if (snapshot != null) {
+                restoreUpdateSnapshot(snapshot);
+                resource.getAttributes().remove(CfnRollback.STACK_SET_UPDATE_SNAPSHOT_ATTR);
+                ReplacementCleanup.rollback(resource, this::delete);
+                return true;
+            }
             return ReplacementCleanup.rollback(resource, this::delete);
         } finally {
             if (hasPriorInputs && !Objects.equals(attemptedId, resource.getPhysicalId())) {
                 CREATE_ONLY_INPUTS.restorePrior(resource);
             }
+        }
+    }
+
+    private void restoreUpdateSnapshot(JsonNode snapshot) {
+        StackSet prior = MAPPER.convertValue(snapshot.path("stackSet"), StackSet.class);
+        boolean serviceManaged = SERVICE_MANAGED.equals(prior.getPermissionModel());
+        List<InstanceGroup> groups = new ArrayList<>();
+        snapshot.path("targets").properties().forEach(target -> {
+            List<String> regions = new ArrayList<>();
+            target.getValue().forEach(region -> regions.add(region.asText()));
+            List<String> accounts = serviceManaged ? List.of() : List.of(target.getKey());
+            List<String> organizationalUnits = serviceManaged ? List.of(target.getKey()) : List.of();
+            groups.add(new InstanceGroup(accounts, organizationalUnits, regions));
+        });
+        boolean restored = RequestScopes.callAs(snapshot.path("account").asText(), snapshot.path("region").asText(),
+                () -> {
+                    StackSetService stackSets = stackSetService.get();
+                    return stackSets.mutateStackSetResource(prior.getStackSetId(), current -> {
+                        String name = prior.getStackSetName();
+                        removeDroppedTargets(stackSets, name, serviceManaged,
+                                deployedTargets(stackSets, name, serviceManaged), groups);
+                        requireSuccess(stackSets.updateStackSetResource(name, prior.getTemplateBody(),
+                                prior.getParameters(), prior.getCapabilities(), prior.getTags(), prior.getDescription(),
+                                serviceManaged ? prior.isAutoDeploymentEnabled() : null,
+                                prior.isRetainStacksOnAccountRemoval(), prior.isManagedExecutionActive()));
+                        createInstances(stackSets, name, groups);
+                    });
+                });
+        if (!restored) {
+            throw new AwsException("StackSetNotFoundException", "The original StackSet no longer exists", 404);
         }
     }
 
