@@ -95,8 +95,9 @@ class RedshiftSpectrumIntegrationTest {
     private boolean roleCreated;
 
     @BeforeAll
-    static void requireDocker() {
+    static void requireDocker() throws ClassNotFoundException {
         SidecarContainersProfile.requireDocker();
+        Class.forName("org.postgresql.Driver");
     }
 
     private Cluster createClusterWithRole(String identifier) {
