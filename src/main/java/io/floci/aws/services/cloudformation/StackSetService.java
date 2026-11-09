@@ -311,6 +311,30 @@ public class StackSetService implements PassedRoleLookup, AccountPlacementListen
         LOG.infov("Deleted StackSet: {0}", name);
     }
 
+    /**
+     * Deletes every stack instance with its stack, then the stack set, as deleting an
+     * {@code AWS::CloudFormation::StackSet} resource does. A stack set already gone is left alone.
+     */
+    public synchronized void deleteStackSetWithInstances(String name) {
+        StackSet stackSet = stackSets.get(name).orElse(null);
+        if (stackSet == null) {
+            return;
+        }
+        for (StackInstance instance : listStackInstances(name, null, null)) {
+            removeInstance(stackSet, instance, false);
+        }
+        if (listStackInstances(name, null, null).isEmpty()) {
+            deleteAutoDeploymentTargets(name);
+        }
+        deleteStackSet(name);
+    }
+
+    private void deleteAutoDeploymentTargets(String name) {
+        for (StackSetAutoDeploymentTarget target : listStackSetAutoDeploymentTargets(name)) {
+            autoDeploymentTargets.delete(name + "::" + target.getOrganizationalUnitId());
+        }
+    }
+
     // ── Instances ──────────────────────────────────────────────────────────────
 
     public StackSetOperation createStackInstances(String name, List<String> accounts, List<String> regions) {

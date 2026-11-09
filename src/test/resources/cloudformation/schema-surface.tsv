@@ -45,6 +45,7 @@ AWS::BedrockAgentCore::Runtime	AgentRuntimeArn,AgentRuntimeId,AgentRuntimeVersio
 AWS::BedrockAgentCore::RuntimeEndpoint	AgentRuntimeArn,AgentRuntimeEndpointArn,CreatedAt,FailureReason,Id,LastUpdatedAt,LiveVersion,Status,TargetVersion	AgentRuntimeId,AgentRuntimeVersion,Description,Name,Tags
 AWS::CertificateManager::Certificate	CertificateArn	CertificateAuthorityArn,CertificateExport,CertificateTransparencyLoggingPreference,DomainName,DomainValidationOptions,KeyAlgorithm,SubjectAlternativeNames,Tags,ValidationMethod
 AWS::CloudFormation::CustomResource	Id	ServiceTimeout,ServiceToken
+AWS::CloudFormation::StackSet	StackSetId	AdministrationRoleARN,AutoDeployment,CallAs,Capabilities,Description,ExecutionRoleName,ManagedExecution,OperationPreferences,Parameters,PermissionModel,StackInstancesGroup,StackSetName,Tags,TemplateBody,TemplateURL
 AWS::CloudFront::CachePolicy	Id,LastModifiedTime	CachePolicyConfig
 AWS::CloudFront::Distribution	DomainName,Id	DistributionConfig,Tags
 AWS::CloudFront::Function	FunctionARN,Stage	AutoPublish,FunctionCode,FunctionConfig,FunctionMetadata,Name,Tags
