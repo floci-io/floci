@@ -968,6 +968,45 @@ class DynamoDbPartiQLParserTest {
         assertEquals(expand.apply(inTransaction), statementRefusal(statement, parameters, true));
     }
 
+    @ParameterizedTest
+    @CsvSource(delimiter = '|', quoteCharacter = '`', textBlock = """
+            foo(1)               | CALL
+            foo()                | CALL
+            "foo"(1)             | CALL
+            FOO (1)              | CALL
+            foo(?)               | CALL
+            foo(<<>>)            | CALL
+            foo(1e999999)        | CALL
+            foo(foo(1), a.b[0])  | CALL
+            size(1)              | CALL
+            attribute_exists(a)  | CALL
+            upper('a')           | CALL
+            EXISTS()             | CALL
+            EXISTS(1, 2)         | CALL
+            exists(foo(1))       | CALL
+            ((foo(1)));          | CALL
+            count(1)             | Unsupported operation: CallAgg
+            count(*)             | Unsupported operation: CallAgg
+            count(DISTINCT a)    | Unsupported operation: CallAgg
+            foo(1).a             | Unsupported operation: Path
+            foo(1)[0]            | Unsupported operation: Path
+            foo(1) IS MISSING    | Unsupported operation: IsType
+            foo(1)(2)            | NWF Unexpected token after expression
+            foo(1 2)             | NWF Expected RIGHT_PAREN
+            foo(1,)              | NWF Unexpected term
+            foo(a, *)            | NWF Unexpected term
+            foo(*)               | NWF foo(*) is not allowed
+            count()              | NWF Aggregate functions are always unary
+            """)
+    void refusesACallStatementOnceItParses(String statement, String message) {
+        String expected = message.replace("NWF ", "Statement wasn't well formed, can't be processed: ");
+
+        assertEquals(expected.replace("CALL", "EXISTS can only be used in ExecuteTransaction write requests."),
+                statementRefusal(statement, 0));
+        assertEquals(expected.replace("CALL", "Unsupported operation in transaction."),
+                statementRefusal(statement, 0, true));
+    }
+
     @Test
     void countsInOperandsWithTheOperandChecks() {
         String tooMany = "The IN operator is provided with too many operands; number of operands: 101";

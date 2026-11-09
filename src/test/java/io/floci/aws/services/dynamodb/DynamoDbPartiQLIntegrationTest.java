@@ -858,6 +858,28 @@ class DynamoDbPartiQLIntegrationTest {
                     + "Number of parameters in request and statement don't match."));
     }
 
+    @Test
+    @Order(40)
+    void aCallStatementIsRefusedBeforeItsParametersAreCounted() {
+        String outside = "EXISTS can only be used in ExecuteTransaction write requests.";
+
+        statement("foo(?)")
+            .statusCode(400)
+            .body("__type", equalTo("ValidationException"))
+            .body("message", equalTo(outside));
+        request("DynamoDB_20120810.BatchExecuteStatement", """
+                {"Statements":[{"Statement":"foo(1)"}]}
+                """)
+            .statusCode(200)
+            .body("Responses[0].Error.Code", equalTo("ValidationError"))
+            .body("Responses[0].Error.Message", equalTo(outside));
+        request("DynamoDB_20120810.ExecuteTransaction", """
+                {"TransactStatements":[{"Statement":"foo(?)"}]}
+                """)
+            .statusCode(400)
+            .body("message", equalTo("Validation failed in TransactStatements[0]: Unsupported operation in transaction."));
+    }
+
     private static void putItem(String pk, String attributes) {
         request("DynamoDB_20120810.PutItem", """
                 {"TableName":"%s","Item":{"pk":{"S":"%s"},%s}}
