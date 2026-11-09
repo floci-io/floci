@@ -22,6 +22,8 @@ import java.math.BigInteger;
 import java.nio.charset.StandardCharsets;
 import java.security.GeneralSecurityException;
 import java.security.KeyPair;
+import java.security.PrivateKey;
+import java.security.PublicKey;
 import java.security.SecureRandom;
 import java.security.cert.CertificateException;
 import java.security.cert.CertificateFactory;
@@ -111,16 +113,40 @@ public final class Certificates {
      */
     public static Minted mintSelfSigned(KeyPair keyPair, String commonName,
                                          Instant notBefore, Instant notAfter, SecureRandom random) {
-        X500Name dn = new X500Name("CN=" + commonName);
+        return mint(keyPair.getPublic(), commonName, keyPair.getPrivate(), commonName,
+                notBefore, notAfter, random);
+    }
+
+    /**
+     * Mint a certificate over a key pair, signed by an issuer.
+     *
+     * <p>The issuer signs the certificate, so a party that trusts the issuer's public key
+     * trusts the certificate: that is how the key exchange's certificate authority vouches
+     * for the other party's certificate.
+     *
+     * @param subjectPublicKey the public key the certificate is over
+     * @param subjectCommonName the common name of the subject
+     * @param issuerPrivateKey the key that signs the certificate
+     * @param issuerCommonName the common name of the issuer
+     * @param notBefore when the certificate becomes valid
+     * @param notAfter when it stops being valid
+     * @param random the randomness the serial number is made from
+     * @return the certificate in DER and in PEM
+     */
+    public static Minted mint(PublicKey subjectPublicKey, String subjectCommonName,
+                               PrivateKey issuerPrivateKey, String issuerCommonName,
+                               Instant notBefore, Instant notAfter, SecureRandom random) {
+        X500Name subject = new X500Name("CN=" + subjectCommonName);
+        X500Name issuer = new X500Name("CN=" + issuerCommonName);
         try {
-            JcaX509v3CertificateBuilder builder = new JcaX509v3CertificateBuilder(dn,
+            JcaX509v3CertificateBuilder builder = new JcaX509v3CertificateBuilder(issuer,
                     new BigInteger(1, random).setBit(127), Date.from(notBefore), Date.from(notAfter),
-                    dn, keyPair.getPublic());
+                    subject, subjectPublicKey);
             builder.addExtension(Extension.basicConstraints, true, new BasicConstraints(false));
             builder.addExtension(Extension.keyUsage, true,
                     new KeyUsage(KeyUsage.digitalSignature | KeyUsage.keyEncipherment));
-            ContentSigner signer = new JcaContentSignerBuilder(signatureAlgorithm(keyPair))
-                    .build(keyPair.getPrivate());
+            ContentSigner signer = new JcaContentSignerBuilder(signatureAlgorithm(issuerPrivateKey))
+                    .build(issuerPrivateKey);
             X509CertificateHolder holder = builder.build(signer);
             byte[] der = new JcaX509CertificateConverter().getCertificate(holder).getEncoded();
             return new Minted(der, toPem(der));
@@ -156,7 +182,7 @@ public final class Certificates {
     }
 
     /** The signature algorithm the certificate is signed with: SHA-256 over the key's own kind. */
-    private static String signatureAlgorithm(KeyPair keyPair) {
-        return keyPair.getPrivate() instanceof ECKey ? "SHA256withECDSA" : "SHA256withRSA";
+    private static String signatureAlgorithm(PrivateKey issuerKey) {
+        return issuerKey instanceof ECKey ? "SHA256withECDSA" : "SHA256withRSA";
     }
 }

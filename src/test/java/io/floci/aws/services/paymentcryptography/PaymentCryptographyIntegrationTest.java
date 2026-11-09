@@ -102,6 +102,63 @@ class PaymentCryptographyIntegrationTest {
     }
 
     @Test
+    void anInitialKeyLeavesUnderTheBaseKeyItIsDerivedFrom() {
+        // The export names the key that leaves and the attributes that say which key of it
+        // leaves: the initial key is derived from the base key and is not the base key.
+        // The base derivation key is a double-length Triple DES key, which is what the
+        // derivation is defined over.
+        String base = call("CreateKey", "{\"KeyAttributes\":{\"KeyAlgorithm\":\"TDES_2KEY\","
+                + "\"KeyClass\":\"SYMMETRIC_KEY\",\"KeyUsage\":\"TR31_B0_BASE_DERIVATION_KEY\","
+                + "\"KeyModesOfUse\":{\"DeriveKey\":true}},"
+                + "\"Exportable\":true}")
+                .then().statusCode(200)
+                    .extract().path("Key.KeyArn");
+        String protection = call("CreateKey", "{\"KeyAttributes\":{\"KeyAlgorithm\":\"AES_256\","
+                + "\"KeyClass\":\"SYMMETRIC_KEY\","
+                + "\"KeyUsage\":\"TR31_K1_KEY_BLOCK_PROTECTION_KEY\","
+                + "\"KeyModesOfUse\":{\"Wrap\":true,\"Unwrap\":true}},"
+                + "\"Exportable\":true}")
+                .then().statusCode(200)
+                    .extract().path("Key.KeyArn");
+
+        call("ExportKey", """
+                {"ExportKeyIdentifier":"%s",
+                 "ExportAttributes":{"ExportDukptInitialKey":
+                 {"KeySerialNumber":"12345678900000000001"}},
+                 "KeyMaterial":{"Tr31KeyBlock":{"WrappingKeyIdentifier":"%s"}}}
+                """.formatted(base, protection))
+                .then().statusCode(200)
+                    .body("WrappedKey.WrappedKeyMaterialFormat", equalTo("TR31_KEY_BLOCK"))
+                    .body("WrappedKey.WrappingKeyArn", equalTo(protection));
+    }
+
+    @Test
+    void theImportParametersAreServedOverTheWire() {
+        call("GetParametersForImport", """
+                {"KeyMaterialType":"TR34_KEY_BLOCK","WrappingKeyAlgorithm":"RSA_2048"}
+                """)
+                .then().statusCode(200)
+                    .body("ImportToken", matchesPattern("import-token-[0-9a-zA-Z]{16,64}"))
+                    .body("WrappingKeyAlgorithm", equalTo("RSA_2048"))
+                    .body("WrappingKeyCertificate", notNullValue())
+                    .body("WrappingKeyCertificateChain", notNullValue())
+                    .body("ParametersValidUntilTimestamp", greaterThanOrEqualTo(0));
+    }
+
+    @Test
+    void theExportParametersAreServedOverTheWire() {
+        call("GetParametersForExport", """
+                {"KeyMaterialType":"TR34_KEY_BLOCK","SigningKeyAlgorithm":"RSA_2048"}
+                """)
+                .then().statusCode(200)
+                    .body("ExportToken", matchesPattern("export-token-[0-9a-zA-Z]{16,64}"))
+                    .body("SigningKeyAlgorithm", equalTo("RSA_2048"))
+                    .body("SigningKeyCertificate", notNullValue())
+                    .body("SigningKeyCertificateChain", notNullValue())
+                    .body("ParametersValidUntilTimestamp", greaterThanOrEqualTo(0));
+    }
+
+    @Test
     void aKeyThatAsksForACheckValueOfAnotherKindIsRefused() {
         // The kind follows the algorithm, so a request that names another is refused
         // rather than answered with a value of another kind.

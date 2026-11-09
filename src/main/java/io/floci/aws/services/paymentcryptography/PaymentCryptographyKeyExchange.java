@@ -186,9 +186,8 @@ final class PaymentCryptographyKeyExchange {
             throw notFound(wrappingKeyIdentifier);
         }
         if (!PaymentCryptographyService.mayWrap(protection)) {
-            throw new AwsException("InvalidKeyUsageException",
-                    "the key " + protection.getArn() + " does not have the mode of use Wrap, which "
-                            + "it needs to wrap a key", 400);
+            throw validation("the key " + protection.getArn() + " does not have the mode of use "
+                    + "Wrap, which it needs to wrap a key");
         }
         String tooWeak = PaymentCryptographyKeyStrength.refusal(
                 protection.getKeyAlgorithm(), key.getKeyAlgorithm());
@@ -382,9 +381,8 @@ final class PaymentCryptographyKeyExchange {
             throw notFound(wrappingKeyIdentifier);
         }
         if (!PaymentCryptographyService.mayUnwrap(protection)) {
-            throw new AwsException("InvalidKeyUsageException",
-                    "the key " + protection.getArn() + " does not have the mode of use Unwrap, which "
-                            + "it needs to unwrap a key", 400);
+            throw validation("the key " + protection.getArn() + " does not have the mode of use "
+                    + "Unwrap, which it needs to unwrap a key");
         }
         String block = text(material, "WrappedKeyBlock");
         if (block.isEmpty()) {
