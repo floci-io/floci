@@ -77,6 +77,10 @@ record DynamoDbAccessPath(String indexName, Kind kind, List<KeySchemaElement> ke
                 .collect(Collectors.toUnmodifiableSet());
     }
 
+    boolean hasMultiAttributeKey() {
+        return 1 < partitionKeyNames().size() || 1 < sortKeyNames().size();
+    }
+
     boolean isIndex() {
         return kind != Kind.TABLE;
     }

@@ -6,6 +6,7 @@ import io.floci.aws.core.common.AwsNamespaces;
 import io.floci.aws.core.common.AwsQueryResponse;
 import io.floci.aws.core.common.AwsRegions;
 import io.floci.aws.core.common.BackupWindows;
+import io.floci.aws.core.common.PaginatedResult;
 import io.floci.aws.core.common.RegionResolver;
 import io.floci.aws.core.common.XmlBuilder;
 import io.floci.aws.services.elasticache.model.AuthMode;
@@ -13,6 +14,7 @@ import io.floci.aws.services.elasticache.model.CacheCluster;
 import io.floci.aws.services.elasticache.model.CacheParameterGroup;
 import io.floci.aws.services.elasticache.model.CacheSubnetGroup;
 import io.floci.aws.services.elasticache.model.ClusterNode;
+import io.floci.aws.services.elasticache.model.ElastiCacheSnapshot;
 import io.floci.aws.services.elasticache.model.ElastiCacheUser;
 import io.floci.aws.services.elasticache.model.ElastiCacheUserGroup;
 import io.floci.aws.services.elasticache.model.Endpoint;
@@ -96,6 +98,9 @@ public class ElastiCacheQueryHandler {
             case "AddTagsToResource" -> handleAddTagsToResource(params, region);
             case "RemoveTagsFromResource" -> handleRemoveTagsFromResource(params, region);
             case "ListTagsForResource" -> handleListTagsForResource(params);
+            case "CreateSnapshot" -> handleCreateSnapshot(params);
+            case "DescribeSnapshots" -> handleDescribeSnapshots(params);
+            case "DeleteSnapshot" -> handleDeleteSnapshot(params);
             default -> AwsQueryResponse.error("UnsupportedOperation",
                     "Operation " + action + " is not supported.", AwsNamespaces.EC, 400);
         };
@@ -122,7 +127,8 @@ public class ElastiCacheQueryHandler {
         }
 
         try {
-            ReplicationGroup group = service.createReplicationGroup(
+            String snapshotName = params.getFirst("SnapshotName");
+            ElastiCacheService.CreateReplicationGroupRequest request =
                     new ElastiCacheService.CreateReplicationGroupRequest(
                             groupId,
                             description != null ? description : "",
@@ -144,7 +150,10 @@ public class ElastiCacheQueryHandler {
                             replicationGroupSettings(params),
                             parseTags(params),
                             extractMemberList(params, "UserGroupIds.member."),
-                            parseSecurityGroupIds(params)));
+                            parseSecurityGroupIds(params));
+            ReplicationGroup group = snapshotName != null && !snapshotName.isBlank()
+                    ? service.createReplicationGroupFromSnapshot(request, snapshotName)
+                    : service.createReplicationGroup(request);
             String result = replicationGroupXml(group);
             return Response.ok(AwsQueryResponse.envelope("CreateReplicationGroup", AwsNamespaces.EC, result)).build();
         } catch (AwsException e) {
@@ -599,6 +608,72 @@ public class ElastiCacheQueryHandler {
         }
     }
 
+    private Response handleCreateSnapshot(MultivaluedMap<String, String> params) {
+        try {
+            ElastiCacheSnapshot snapshot = service.createSnapshot(params.getFirst("SnapshotName"),
+                    params.getFirst("ReplicationGroupId"), params.getFirst("CacheClusterId"), parseTags(params));
+            XmlBuilder xml = new XmlBuilder();
+            appendSnapshot(xml, snapshot);
+            return Response.ok(AwsQueryResponse.envelope("CreateSnapshot", AwsNamespaces.EC, xml.build())).build();
+        } catch (AwsException e) {
+            return AwsQueryResponse.error(e.getErrorCode(), e.getMessage(), AwsNamespaces.EC, e.getHttpStatus());
+        }
+    }
+
+    private Response handleDescribeSnapshots(MultivaluedMap<String, String> params) {
+        try {
+            PaginatedResult<ElastiCacheSnapshot> page = service.describeSnapshots(params.getFirst("SnapshotName"),
+                    params.getFirst("ReplicationGroupId"), params.getFirst("CacheClusterId"),
+                    params.getFirst("SnapshotSource"), intParam(params, "MaxRecords"), params.getFirst("Marker"));
+            XmlBuilder xml = new XmlBuilder().start("Snapshots");
+            page.items().forEach(snapshot -> appendSnapshot(xml, snapshot));
+            xml.end("Snapshots");
+            if (page.nextToken() != null) {
+                xml.elem("Marker", page.nextToken());
+            }
+            return Response.ok(AwsQueryResponse.envelope("DescribeSnapshots", AwsNamespaces.EC, xml.build())).build();
+        } catch (AwsException e) {
+            return AwsQueryResponse.error(e.getErrorCode(), e.getMessage(), AwsNamespaces.EC, e.getHttpStatus());
+        }
+    }
+
+    private Response handleDeleteSnapshot(MultivaluedMap<String, String> params) {
+        try {
+            ElastiCacheSnapshot snapshot = service.deleteSnapshot(params.getFirst("SnapshotName"));
+            XmlBuilder xml = new XmlBuilder();
+            appendSnapshot(xml, snapshot);
+            return Response.ok(AwsQueryResponse.envelope("DeleteSnapshot", AwsNamespaces.EC, xml.build())).build();
+        } catch (AwsException e) {
+            return AwsQueryResponse.error(e.getErrorCode(), e.getMessage(), AwsNamespaces.EC, e.getHttpStatus());
+        }
+    }
+
+    private static void appendSnapshot(XmlBuilder xml, ElastiCacheSnapshot s) {
+        String created = s.getCreatedAt() != null ? s.getCreatedAt().toString() : "";
+        xml.start("Snapshot")
+                .elem("SnapshotName", s.getSnapshotName())
+                .elem("ReplicationGroupId", s.getReplicationGroupId())
+                .elem("ReplicationGroupDescription", s.getReplicationGroupDescription());
+        if (s.getCacheClusterId() != null) {
+            xml.elem("CacheClusterId", s.getCacheClusterId());
+        }
+        xml.elem("SnapshotStatus", s.getSnapshotStatus())
+                .elem("SnapshotSource", s.getSnapshotSource())
+                .elem("CacheNodeType", s.getCacheNodeType())
+                .elem("Engine", s.getEngine())
+                .elem("EngineVersion", s.getEngineVersion())
+                .elem("NumNodeGroups", 1)
+                .elem("ARN", s.getArn())
+                .start("NodeSnapshots")
+                .start("NodeSnapshot")
+                .elem("NodeGroupId", "0001")
+                .elem("CacheSize", s.getSizeBytes() + " bytes")
+                .elem("SnapshotCreateTime", created)
+                .end("NodeSnapshot")
+                .end("NodeSnapshots")
+                .end("Snapshot");
+    }
+
     private Response handleDescribeCacheSubnetGroups(MultivaluedMap<String, String> params) {
         try {
             List<CacheSubnetGroup> groups =
@@ -836,6 +911,13 @@ private Response handleCreateCacheParameterGroup(MultivaluedMap<String, String> 
                     throw new AwsException("UserNotFound", "User " + arn[6] + " not found.", 404);
                 }
                 tags = user.getTags();
+            }
+            if ("snapshot".equals(arn[5])) {
+                ElastiCacheSnapshot snapshot = service.getSnapshot(arn[6]);
+                if (snapshot.getArn() != null && !snapshot.getArn().equalsIgnoreCase(resourceName)) {
+                    throw new AwsException("SnapshotNotFoundFault", "Snapshot " + arn[6] + " not found.", 404);
+                }
+                tags = snapshot.getTags();
             }
             if ("usergroup".equals(arn[5])) {
                 ElastiCacheUserGroup userGroup = service.getUserGroup(arn[6]);

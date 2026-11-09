@@ -40,14 +40,15 @@ public final class CopyStatementParser {
             CopyTemporalFormat timeFormat,
             boolean acceptAnyDate,
             boolean fillRecord,
-            int maxError) {
+            int maxError,
+            boolean trimBlanks) {
 
         public static final CopyTransforms NONE = new CopyTransforms(false, false, false, false, null);
 
         public CopyTransforms(boolean blanksAsNull, boolean emptyAsNull, boolean removeQuotes,
                               boolean truncateColumns, Character invalidCharReplacement) {
             this(blanksAsNull, emptyAsNull, removeQuotes, truncateColumns, invalidCharReplacement,
-                    null, null, false, false, 0);
+                    null, null, false, false, 0, false);
         }
 
         public CopyTransforms(boolean blanksAsNull, boolean emptyAsNull, boolean removeQuotes,
@@ -55,7 +56,7 @@ public final class CopyStatementParser {
                               CopyTemporalFormat dateFormat, CopyTemporalFormat timeFormat,
                               boolean acceptAnyDate) {
             this(blanksAsNull, emptyAsNull, removeQuotes, truncateColumns, invalidCharReplacement,
-                    dateFormat, timeFormat, acceptAnyDate, false, 0);
+                    dateFormat, timeFormat, acceptAnyDate, false, 0, false);
         }
 
         public CopyTransforms(boolean blanksAsNull, boolean emptyAsNull, boolean removeQuotes,
@@ -63,7 +64,15 @@ public final class CopyStatementParser {
                               CopyTemporalFormat dateFormat, CopyTemporalFormat timeFormat,
                               boolean acceptAnyDate, boolean fillRecord) {
             this(blanksAsNull, emptyAsNull, removeQuotes, truncateColumns, invalidCharReplacement,
-                    dateFormat, timeFormat, acceptAnyDate, fillRecord, 0);
+                    dateFormat, timeFormat, acceptAnyDate, fillRecord, 0, false);
+        }
+
+        public CopyTransforms(boolean blanksAsNull, boolean emptyAsNull, boolean removeQuotes,
+                              boolean truncateColumns, Character invalidCharReplacement,
+                              CopyTemporalFormat dateFormat, CopyTemporalFormat timeFormat,
+                              boolean acceptAnyDate, boolean fillRecord, int maxError) {
+            this(blanksAsNull, emptyAsNull, removeQuotes, truncateColumns, invalidCharReplacement,
+                    dateFormat, timeFormat, acceptAnyDate, fillRecord, maxError, false);
         }
 
         /**
@@ -76,7 +85,7 @@ public final class CopyStatementParser {
 
         /** Whether the options depend on the type of each column, which only the catalog can tell. */
         public boolean needsColumnTypes() {
-            return temporal() || fillRecord;
+            return temporal() || fillRecord || trimBlanks;
         }
 
         /** Whether date or timestamp fields are read with a format other than PostgreSQL's own. */
@@ -85,7 +94,8 @@ public final class CopyStatementParser {
         }
 
         public boolean fieldLevel() {
-            return blanksAsNull || emptyAsNull || removeQuotes || truncateColumns || temporal() || fillRecord;
+            return blanksAsNull || emptyAsNull || removeQuotes || truncateColumns || temporal() || fillRecord
+                    || trimBlanks;
         }
 
         public boolean any() {
@@ -380,6 +390,11 @@ public final class CopyStatementParser {
     private static final Pattern CSV_PATTERN = Pattern.compile("(?i)\\b(?:FORMAT\\s+(?:AS\\s+)?)?CSV\\b");
     private static final Pattern JSON_AUTO_PATTERN = Pattern.compile(
             "(?i)\\b(?:FORMAT\\s+(?:AS\\s+)?)?JSON(?:\\s+AS)?\\s+['\"]auto(?:\\s+(ignorecase))?['\"]");
+    private static final Pattern COMPUPDATE_PATTERN = Pattern.compile(
+            "(?i)\\bCOMPUPDATE(?:\\s+(?:PRESET|ON|OFF|TRUE|FALSE))?\\b");
+    private static final Pattern STATUPDATE_PATTERN = Pattern.compile(
+            "(?i)\\bSTATUPDATE(?:\\s+(?:ON|OFF|TRUE|FALSE))?\\b");
+    private static final Pattern TRIMBLANKS_PATTERN = Pattern.compile("(?i)\\bTRIMBLANKS\\b");
 
     /**
      * Options this simulator does not implement. A COPY carrying any of these is not intercepted:
@@ -390,9 +405,8 @@ public final class CopyStatementParser {
             "(?i)\\b(FIXEDWIDTH|PARQUET|AVRO|ORC|SHAPEFILE|BZIP2|LZOP|ZSTD"
                     + "|ENCRYPTED|ENCODING"
                     + "|MASTER_SYMMETRIC_KEY|KMS_KEY_ID"
-                    + "|TRIMBLANKS"
-                    + "|IGNOREBLANKLINES|ESCAPE|EXPLICIT_IDS|COMPUPDATE"
-                    + "|STATUPDATE|NOLOAD|ROUNDEC|QUOTE|SSH|READRATIO|COMPROWS|DIMENSION)\\b");
+                    + "|IGNOREBLANKLINES|ESCAPE|EXPLICIT_IDS"
+                    + "|NOLOAD|ROUNDEC|QUOTE|SSH|READRATIO|COMPROWS|DIMENSION)\\b");
 
     /** A {@code ;} followed by another statement: only a lone trailing {@code ;} is tolerated. */
     private static final Pattern TRAILING_STATEMENT = Pattern.compile(";\\s*\\S");
@@ -725,6 +739,10 @@ public final class CopyStatementParser {
         boolean fillRecord = false;
         int maxError = 0;
         boolean seenMaxError = false;
+        boolean trimBlanks = false;
+        boolean seenCompupdate = false;
+        boolean seenStatupdate = false;
+        boolean seenTrimBlanks = false;
 
         boolean seenDateFormat = false;
         boolean seenTimeFormat = false;
@@ -759,6 +777,9 @@ public final class CopyStatementParser {
         Matcher acceptAnyDateMatcher = ACCEPTANYDATE_PATTERN.matcher(options);
         Matcher fillRecordMatcher = FILLRECORD_PATTERN.matcher(options);
         Matcher maxErrorMatcher = MAXERROR_PATTERN.matcher(options);
+        Matcher compupdateMatcher = COMPUPDATE_PATTERN.matcher(options);
+        Matcher statupdateMatcher = STATUPDATE_PATTERN.matcher(options);
+        Matcher trimBlanksMatcher = TRIMBLANKS_PATTERN.matcher(options);
         AuthClauses auth = new AuthClauses(options, defaultIamRoleArn);
 
         int next;
@@ -900,6 +921,25 @@ public final class CopyStatementParser {
                 seenMaxError = true;
                 maxError = parsed;
                 offset = maxErrorMatcher.end();
+            } else if (matchClause(compupdateMatcher, offset, len)) {
+                if (seenCompupdate) {
+                    return null;
+                }
+                seenCompupdate = true;
+                offset = compupdateMatcher.end();
+            } else if (matchClause(statupdateMatcher, offset, len)) {
+                if (seenStatupdate) {
+                    return null;
+                }
+                seenStatupdate = true;
+                offset = statupdateMatcher.end();
+            } else if (matchClause(trimBlanksMatcher, offset, len)) {
+                if (seenTrimBlanks) {
+                    return null;
+                }
+                seenTrimBlanks = true;
+                trimBlanks = true;
+                offset = trimBlanksMatcher.end();
             } else if ((next = auth.consume(offset, len)) != AuthClauses.NO_MATCH) {
                 if (next == AuthClauses.REJECT) {
                     return null;
@@ -928,7 +968,7 @@ public final class CopyStatementParser {
         }
         CopyTransforms transforms = new CopyTransforms(
                 blanksAsNull, emptyAsNull, removeQuotes, truncateColumns, invalidChar,
-                dateFormat, timeFormat, acceptAnyDate, fillRecord, maxError);
+                dateFormat, timeFormat, acceptAnyDate, fillRecord, maxError, trimBlanks);
         if (transforms.any() && jsonAuto) {
             return null;
         }

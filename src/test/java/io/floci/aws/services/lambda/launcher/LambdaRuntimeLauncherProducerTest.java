@@ -39,6 +39,7 @@ class LambdaRuntimeLauncherProducerTest {
         lambda = mock(EmulatorConfig.LambdaServiceConfig.class);
         when(config.services()).thenReturn(services);
         when(services.lambda()).thenReturn(lambda);
+        when(lambda.reconcileContainersOnStartup()).thenReturn(true);
         when(dockerInstance.get()).thenReturn(containerLauncher);
         when(kubernetesInstance.get()).thenReturn(kubernetesPodLauncher);
     }
@@ -91,5 +92,37 @@ class LambdaRuntimeLauncherProducerTest {
         assertThatCode(() -> producer.validateExecutor(new StartupEvent(), config, kubernetesInstance))
                 .doesNotThrowAnyException();
         verify(kubernetesPodLauncher).initializeClient();
+    }
+
+    @Test
+    void startupReconcilesOnlyTheEnabledDockerExecutor() {
+        when(lambda.enabled()).thenReturn(true);
+        when(lambda.executor()).thenReturn("docker");
+        producer.reconcileDockerContainers(new StartupEvent(), config, dockerInstance);
+        verify(containerLauncher).removeLeftoverContainers();
+        verify(kubernetesInstance, never()).get();
+    }
+
+    @Test
+    void kubernetesStartupDoesNotInstantiateDocker() {
+        when(lambda.enabled()).thenReturn(true);
+        when(lambda.executor()).thenReturn("kubernetes");
+        producer.reconcileDockerContainers(new StartupEvent(), config, dockerInstance);
+        verify(dockerInstance, never()).get();
+    }
+
+    @Test
+    void disabledLambdaDoesNotInstantiateDockerForCleanup() {
+        producer.reconcileDockerContainers(new StartupEvent(), config, dockerInstance);
+        verify(dockerInstance, never()).get();
+    }
+
+    @Test
+    void disabledReconciliationDoesNotInstantiateDockerForCleanup() {
+        when(lambda.enabled()).thenReturn(true);
+        when(lambda.executor()).thenReturn("docker");
+        when(lambda.reconcileContainersOnStartup()).thenReturn(false);
+        producer.reconcileDockerContainers(new StartupEvent(), config, dockerInstance);
+        verify(dockerInstance, never()).get();
     }
 }

@@ -1276,6 +1276,32 @@
         "UntagResource": {"method": "DELETE", "requestUri": "/tags/{ResourceArn}"},
         "UpdateSchedule": {"method": "PUT", "requestUri": "/schedules/{Name}"}
       }
+    },
+    "signer": {
+      "credentialScope": "signer",
+      "apiVersion": "2017-08-25",
+      "accessDeniedStatus": 403,
+      "operations": {
+        "AddProfilePermission": {"method": "POST", "requestUri": "/_signer/signing-profiles/{profileName}/permissions"},
+        "CancelSigningProfile": {"method": "DELETE", "requestUri": "/_signer/signing-profiles/{profileName}"},
+        "DescribeSigningJob": {"method": "GET", "requestUri": "/_signer/signing-jobs/{jobId}"},
+        "GetRevocationStatus": {"method": "GET", "requestUri": "/_signer/revocations"},
+        "GetSigningPlatform": {"method": "GET", "requestUri": "/_signer/signing-platforms/{platformId}"},
+        "GetSigningProfile": {"method": "GET", "requestUri": "/_signer/signing-profiles/{profileName}"},
+        "ListProfilePermissions": {"method": "GET", "requestUri": "/_signer/signing-profiles/{profileName}/permissions"},
+        "ListSigningJobs": {"method": "GET", "requestUri": "/_signer/signing-jobs"},
+        "ListSigningPlatforms": {"method": "GET", "requestUri": "/_signer/signing-platforms"},
+        "ListSigningProfiles": {"method": "GET", "requestUri": "/_signer/signing-profiles"},
+        "ListTagsForResource": {"method": "GET", "requestUri": "/tags/{resourceArn+}"},
+        "PutSigningProfile": {"method": "PUT", "requestUri": "/_signer/signing-profiles/{profileName}"},
+        "RemoveProfilePermission": {"method": "DELETE", "requestUri": "/_signer/signing-profiles/{profileName}/permissions/{statementId}"},
+        "RevokeSignature": {"method": "PUT", "requestUri": "/_signer/signing-jobs/{jobId}/revoke"},
+        "RevokeSigningProfile": {"method": "PUT", "requestUri": "/_signer/signing-profiles/{profileName}/revoke"},
+        "SignPayload": {"method": "POST", "requestUri": "/_signer/signing-jobs/with-payload"},
+        "StartSigningJob": {"method": "POST", "requestUri": "/_signer/signing-jobs"},
+        "TagResource": {"method": "POST", "requestUri": "/tags/{resourceArn+}"},
+        "UntagResource": {"method": "DELETE", "requestUri": "/tags/{resourceArn+}"}
+      }
     }
   }
 }

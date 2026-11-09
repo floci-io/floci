@@ -5,15 +5,23 @@ import io.restassured.RestAssured;
 import io.restassured.config.EncoderConfig;
 import io.restassured.http.ContentType;
 import io.restassured.parsing.Parser;
+import io.restassured.response.Response;
 import io.restassured.specification.RequestSpecification;
+import jakarta.inject.Inject;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
+
+import java.util.ArrayList;
+import java.util.List;
 
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.containsString;
 import static org.hamcrest.Matchers.equalTo;
 import static org.hamcrest.Matchers.hasItem;
 import static org.hamcrest.Matchers.not;
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertNull;
 
 /**
  * The dashboard operations reach the emulator over the Query protocol - that is what the
@@ -22,6 +30,9 @@ import static org.hamcrest.Matchers.not;
  */
 @QuarkusTest
 class CloudWatchDashboardsIntegrationTest {
+
+    @Inject
+    CloudWatchDashboardsService dashboardsService;
 
     private static final String CW_SCOPE =
             "AWS4-HMAC-SHA256 Credential=test/20260205/us-east-1/monitoring/aws4_request";
@@ -41,6 +52,20 @@ class CloudWatchDashboardsIntegrationTest {
                 .contentType(JSON_1_0)
                 .header("X-Amz-Target", "GraniteServiceVersion20100801." + target)
                 .body(body);
+    }
+
+    private static RequestSpecification queryListDashboards(String prefix, String nextToken) {
+        RequestSpecification request = given()
+                .contentType("application/x-www-form-urlencoded")
+                .header("Authorization", CW_SCOPE)
+                .formParam("Action", "ListDashboards");
+        if (prefix != null) {
+            request.formParam("DashboardNamePrefix", prefix);
+        }
+        if (nextToken != null) {
+            request.formParam("NextToken", nextToken);
+        }
+        return request;
     }
 
     private static final String BODY =
@@ -98,11 +123,7 @@ class CloudWatchDashboardsIntegrationTest {
         putDashboard("prefixed-two", BODY);
         putDashboard("unprefixed", BODY);
 
-        given()
-            .contentType("application/x-www-form-urlencoded")
-            .header("Authorization", CW_SCOPE)
-            .formParam("Action", "ListDashboards")
-            .formParam("DashboardNamePrefix", "prefixed-")
+        queryListDashboards("prefixed-", null)
         .when()
             .post("/")
         .then()
@@ -111,6 +132,84 @@ class CloudWatchDashboardsIntegrationTest {
                     hasItem("prefixed-one"))
             .body("ListDashboardsResponse.ListDashboardsResult.DashboardEntries.member.DashboardName",
                     not(hasItem("unprefixed")));
+    }
+
+    @Test
+    void listDashboardsReturnsAtMostOneThousandEntriesAndAContinuationToken() {
+        List<String> names = new ArrayList<>();
+        try {
+            for (int i = 0; i < 1001; i++) {
+                String name = "pagination-issue-" + i;
+                dashboardsService.putDashboard(name, BODY, "us-east-1");
+                names.add(name);
+            }
+
+            Response response = json("ListDashboards", "{\"DashboardNamePrefix\":\"pagination-issue-\"}")
+                    .when().post("/");
+            response.then().statusCode(200);
+            assertEquals(1000, response.jsonPath().getList("DashboardEntries").size());
+            String nextToken = response.jsonPath().getString("NextToken");
+            assertNotNull(nextToken);
+
+            Response queryFirstPage = queryListDashboards("pagination-issue-", null)
+                    .when().post("/");
+            queryFirstPage.then().statusCode(200);
+            assertEquals(1000, queryFirstPage.xmlPath().getList(
+                    "ListDashboardsResponse.ListDashboardsResult.DashboardEntries.member").size());
+            assertNotNull(queryFirstPage.xmlPath().getString(
+                    "ListDashboardsResponse.ListDashboardsResult.NextToken"));
+
+            Response secondPage = json("ListDashboards",
+                    "{\"DashboardNamePrefix\":\"pagination-issue-\",\"NextToken\":\"" + nextToken + "\"}")
+                    .when().post("/");
+            secondPage.then().statusCode(200);
+            assertEquals(1, secondPage.jsonPath().getList("DashboardEntries").size());
+            assertNull(secondPage.jsonPath().getString("NextToken"));
+
+            queryListDashboards("pagination-issue-", nextToken)
+                    .when().post("/")
+                    .then().statusCode(200)
+                    .body("ListDashboardsResponse.ListDashboardsResult.DashboardEntries.member.DashboardName",
+                            equalTo(secondPage.jsonPath().getString("DashboardEntries[0].DashboardName")));
+
+            json("ListDashboards", "{\"DashboardNamePrefix\":\"other-\",\"NextToken\":\""
+                    + nextToken + "\"}")
+                    .when().post("/")
+                    .then().statusCode(400);
+            json("ListDashboards", "{\"NextToken\":\"not-a-token\"}")
+                    .when().post("/")
+                    .then().statusCode(400);
+            json("ListDashboards", "{\"DashboardNamePrefix\":\"pagination-issue-\",\"NextToken\":\""
+                    + nextToken + "\"}")
+                    .header("Authorization",
+                            "AWS4-HMAC-SHA256 Credential=210987654321/20260205/us-east-1/monitoring/aws4_request")
+                    .when().post("/")
+                    .then().statusCode(400);
+            json("ListDashboards", "{\"DashboardNamePrefix\":\"pagination-issue-\",\"NextToken\":\""
+                    + nextToken + "\"}")
+                    .header("Authorization",
+                            "AWS4-HMAC-SHA256 Credential=test/20260205/us-west-2/monitoring/aws4_request")
+                    .when().post("/")
+                    .then().statusCode(400);
+            queryListDashboards(null, "not-a-token")
+                    .when().post("/")
+                    .then().statusCode(400);
+        } finally {
+            dashboardsService.deleteDashboards(names, "us-east-1");
+        }
+    }
+
+    @Test
+    void listDashboardsRejectsExplicitlyEmptyContinuationTokens() {
+        json("ListDashboards", "{\"NextToken\":\"\"}")
+                .when().post("/")
+                .then().statusCode(400)
+                .body("__type", equalTo("InvalidParameterValue"));
+
+        queryListDashboards(null, "")
+                .when().post("/")
+                .then().statusCode(400)
+                .body("ErrorResponse.Error.Code", equalTo("InvalidParameterValue"));
     }
 
     @Test

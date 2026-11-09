@@ -9,7 +9,7 @@ import java.util.HexFormat;
  * <pre>
  *   1. IPEK derivation        BDK + initial KSN        -&gt; IPEK
  *   2. Transaction key        IPEK + KSN counter bits  -&gt; derived key (one-way)
- *   3. Working-key variant    derived key XOR mask     -&gt; MAC-request key
+ *   3. Working-key variants   derived key XOR mask     -&gt; PIN / MAC-request key
  * </pre>
  *
  * <p>Validated against the vectors ANSI X9.24-1 publishes, which the test holds: the
@@ -23,6 +23,7 @@ import java.util.HexFormat;
 public final class DukptCrypto {
 
     private static final byte[] KEY_VARIANT = HexFormat.of().parseHex("C0C0C0C000000000C0C0C0C000000000");
+    private static final byte[] PIN_MASK = HexFormat.of().parseHex("00000000000000FF00000000000000FF");
     private static final byte[] MAC_REQUEST_MASK = HexFormat.of().parseHex("000000000000FF00000000000000FF00");
 
     private DukptCrypto() {
@@ -108,6 +109,11 @@ public final class DukptCrypto {
             key = deriveStep(key, reg);
         }
         return key;
+    }
+
+    /** The PIN encryption working key. */
+    public static byte[] pinKey(String bdkHex, String ksnHex) {
+        return Ciphers.xor(deriveTransactionKey(bdkHex, ksnHex), PIN_MASK);
     }
 
     /** The MAC-request working key. */

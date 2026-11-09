@@ -4,17 +4,20 @@ import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.floci.aws.core.common.AwsException;
 import io.floci.aws.core.common.RequestScopes;
+import io.floci.aws.core.common.docker.ContainerReachableEndpoint;
 import io.floci.aws.services.eks.model.Cluster;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 import org.jboss.logging.Logger;
 
+import java.net.URI;
 import java.util.ArrayList;
 import java.util.Base64;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.function.Supplier;
 
 /**
  * Admission logic behind the EKS Pod Identity mutating webhook.
@@ -23,7 +26,9 @@ import java.util.Optional;
  * and the {@code eks-pod-identity-agent} addon is installed. The mutation projects a service
  * account token with the pod identity audience and sets the two container credentials environment
  * variables the AWS SDKs read, so the SDK credential chain reaches the container credentials
- * provider instead of falling through. Floci reproduces exactly that mutation.
+ * provider instead of falling through. Floci reproduces exactly that mutation, and also points the
+ * SDK at Floci with {@code AWS_ENDPOINT_URL} and {@code AWS_ENDPOINT_URL_STS}, as it does for every
+ * container it launches itself: otherwise the pod's calls, signed with Floci credentials, go to AWS.
  *
  * <p>Nothing answers {@link #CREDENTIALS_FULL_URI} yet: this class injects the plumbing only, so an
  * injected pod still cannot obtain credentials.
@@ -52,6 +57,12 @@ public class EksPodIdentityWebhook {
     static final String ENV_CREDENTIALS_FULL_URI = "AWS_CONTAINER_CREDENTIALS_FULL_URI";
     static final String ENV_AUTHORIZATION_TOKEN_FILE = "AWS_CONTAINER_AUTHORIZATION_TOKEN_FILE";
     static final String CREDENTIALS_FULL_URI = "http://169.254.170.23/v1/credentials";
+    static final String ENV_ENDPOINT_URL = "AWS_ENDPOINT_URL";
+    /**
+     * Set beside the global variable because the AWS SDK for Go v2 builds the STS client of its web
+     * identity provider before it reads {@code AWS_ENDPOINT_URL}.
+     */
+    static final String ENV_ENDPOINT_URL_STS = "AWS_ENDPOINT_URL_STS";
 
     private static final String DEFAULT_API_VERSION = "admission.k8s.io/v1";
     private static final String DEFAULT_SERVICE_ACCOUNT = "default";
@@ -59,13 +70,22 @@ public class EksPodIdentityWebhook {
     private final EksService eks;
     private final EksAddonService addons;
     private final EksPodIdentityAssociationService associations;
+    private final Supplier<String> flociEndpoint;
 
+    /** The endpoint is the Docker host address a launched container gets, when a pod can reach it. */
     @Inject
     public EksPodIdentityWebhook(EksService eks, EksAddonService addons,
-                                 EksPodIdentityAssociationService associations) {
+                                 EksPodIdentityAssociationService associations,
+                                 ContainerReachableEndpoint endpoint) {
+        this(eks, addons, associations, () -> podReachableEndpoint(endpoint.baseUrl(false)));
+    }
+
+    EksPodIdentityWebhook(EksService eks, EksAddonService addons,
+                          EksPodIdentityAssociationService associations, Supplier<String> flociEndpoint) {
         this.eks = eks;
         this.addons = addons;
         this.associations = associations;
+        this.flociEndpoint = flociEndpoint;
     }
 
     /**
@@ -109,8 +129,25 @@ public class EksPodIdentityWebhook {
                     || !hasAssociation(cluster.get(), namespace, serviceAccountOf(pod))) {
                 return List.of();
             }
-            return buildPatch(pod);
+            return buildPatch(pod, flociEndpoint.get());
         });
+    }
+
+    /**
+     * A pod resolves names through CoreDNS, which never sees the cluster container's
+     * {@code /etc/hosts}, where {@code host.docker.internal} lives on Linux. Floci's DNS server does
+     * not reach it either: on a custom Docker network the container's resolver is {@code 127.0.0.11},
+     * which k3s rejects as loopback and replaces with a public resolver, so Floci's hostname resolves
+     * to {@code 127.0.0.1} inside the pod. Only an IP address is reachable, and that is what
+     * {@code baseUrl(false)} returns whenever Floci runs in a container. No endpoint is injected
+     * otherwise, which leaves the SDK default.
+     */
+    static String podReachableEndpoint(String baseUrl) {
+        if (EksClusterManager.isIpv4Literal(URI.create(baseUrl).getHost())) {
+            return baseUrl;
+        }
+        LOG.debugv("EKS pod-identity-webhook: pods cannot resolve {0}, injecting no endpoint", baseUrl);
+        return null;
     }
 
     private boolean podIdentityAgentInstalled(Cluster cluster) {
@@ -135,12 +172,14 @@ public class EksPodIdentityWebhook {
     }
 
     /**
-     * The JSONPatch that turns a pod into an injected pod: one projected token volume, then a mount
-     * and the two credentials environment variables on every init container and container. An entry
-     * the pod already carries under the same name is left alone, matching the real webhook, which
-     * never overrides a value the workload set itself.
+     * The JSONPatch that turns a pod into an injected pod: one projected token volume, then a mount,
+     * the two credentials environment variables and the two endpoint variables on every init
+     * container and container. An entry the pod already carries under the same name is left alone,
+     * matching the real webhook, which never overrides a value the workload set itself. A container
+     * that sets {@code AWS_ENDPOINT_URL} gets no {@code AWS_ENDPOINT_URL_STS} either, since the
+     * service-specific variable would take its STS calls away from the endpoint it chose.
      */
-    static List<Map<String, Object>> buildPatch(Map<String, Object> pod) {
+    static List<Map<String, Object>> buildPatch(Map<String, Object> pod, String endpointUrl) {
         Map<String, Object> spec = asMap(pod.get("spec"));
         if (spec == null) {
             return List.of();
@@ -152,12 +191,14 @@ public class EksPodIdentityWebhook {
         } else if (!containsNamed(volumes, TOKEN_VOLUME_NAME)) {
             patch.add(operation("/spec/volumes/-", tokenVolume()));
         }
-        patchContainers(patch, spec, "initContainers");
-        patchContainers(patch, spec, "containers");
+        List<Map<String, Object>> injectedEnv = injectedEnv(endpointUrl);
+        patchContainers(patch, spec, "initContainers", injectedEnv);
+        patchContainers(patch, spec, "containers", injectedEnv);
         return patch;
     }
 
-    private static void patchContainers(List<Map<String, Object>> patch, Map<String, Object> spec, String field) {
+    private static void patchContainers(List<Map<String, Object>> patch, Map<String, Object> spec, String field,
+                                        List<Map<String, Object>> injectedEnv) {
         List<Object> containers = asList(spec.get(field));
         if (containers == null) {
             return;
@@ -175,9 +216,19 @@ public class EksPodIdentityWebhook {
                 patch.add(operation(path + "/volumeMounts/-", tokenMount()));
             }
             List<Object> env = asList(container.get("env"));
+            List<Object> envFrom = asList(container.get("envFrom"));
+            boolean mayDefineEndpoint = envFrom != null && !envFrom.isEmpty();
+            boolean setsGlobalEndpoint = env != null && containsNamed(env, ENV_ENDPOINT_URL);
             List<Map<String, Object>> missing = new ArrayList<>();
-            for (Map<String, Object> variable : credentialsEnv()) {
-                if (env == null || !containsNamed(env, String.valueOf(variable.get("name")))) {
+            for (Map<String, Object> variable : injectedEnv) {
+                String name = String.valueOf(variable.get("name"));
+                if (mayDefineEndpoint && isEndpointVariable(name)) {
+                    continue;
+                }
+                if (setsGlobalEndpoint && ENV_ENDPOINT_URL_STS.equals(name)) {
+                    continue;
+                }
+                if (env == null || !containsNamed(env, name)) {
                     missing.add(variable);
                 }
             }
@@ -213,6 +264,23 @@ public class EksPodIdentityWebhook {
         return List.of(
                 Map.of("name", ENV_CREDENTIALS_FULL_URI, "value", CREDENTIALS_FULL_URI),
                 Map.of("name", ENV_AUTHORIZATION_TOKEN_FILE, "value", TOKEN_FILE_PATH));
+    }
+
+    /**
+     * The values {@code envFrom} brings in are not known at admission, and an {@code env} entry would
+     * take precedence over them, so a container that has any gets no endpoint variable.
+     */
+    private static boolean isEndpointVariable(String name) {
+        return ENV_ENDPOINT_URL.equals(name) || ENV_ENDPOINT_URL_STS.equals(name);
+    }
+
+    static List<Map<String, Object>> injectedEnv(String endpointUrl) {
+        List<Map<String, Object>> env = new ArrayList<>(credentialsEnv());
+        if (endpointUrl != null && !endpointUrl.isBlank()) {
+            env.add(Map.of("name", ENV_ENDPOINT_URL, "value", endpointUrl));
+            env.add(Map.of("name", ENV_ENDPOINT_URL_STS, "value", endpointUrl));
+        }
+        return env;
     }
 
     private static Map<String, Object> operation(String path, Object value) {

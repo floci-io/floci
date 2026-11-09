@@ -39,8 +39,9 @@ class RedshiftUnloadParquetIntegrationTest {
     FlociDuckClient duck;
 
     @BeforeAll
-    static void requireDocker() {
+    static void requireDocker() throws ClassNotFoundException {
         SidecarContainersProfile.requireDocker();
+        Class.forName("org.postgresql.Driver");
     }
 
     @ParameterizedTest

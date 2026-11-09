@@ -241,6 +241,44 @@ public class RedshiftQueryHandler {
                     .build();
             return Response.ok(xml).type(MediaType.APPLICATION_XML).build();
         }
+        case "ModifyClusterSnapshot" -> {
+            String snapshotIdentifier = requireParam(params, "SnapshotIdentifier");
+            Integer manualRetention = parseOptionalInteger(params, "ManualSnapshotRetentionPeriod");
+            Boolean force = booleanParam(params, "Force");
+            Snapshot snapshot = service.modifyClusterSnapshot(snapshotIdentifier, manualRetention, force);
+            String xml = new XmlBuilder()
+                    .start("ModifyClusterSnapshotResponse")
+                      .start("ModifyClusterSnapshotResult")
+                        .raw(buildSnapshotXml(snapshot))
+                      .end("ModifyClusterSnapshotResult")
+                      .start("ResponseMetadata")
+                        .elem("RequestId", "test-req-id")
+                      .end("ResponseMetadata")
+                    .end("ModifyClusterSnapshotResponse")
+                    .build();
+            return Response.ok(xml).type(MediaType.APPLICATION_XML).build();
+        }
+        case "CopyClusterSnapshot" -> {
+            String sourceSnapshotId = requireParam(params, "SourceSnapshotIdentifier");
+            String targetSnapshotId = requireParam(params, "TargetSnapshotIdentifier");
+            String sourceClusterId = params.getFirst("SourceSnapshotClusterIdentifier");
+            Integer manualRetention = parseOptionalInteger(params, "ManualSnapshotRetentionPeriod");
+
+            Snapshot snapshot = service.copyClusterSnapshot(sourceSnapshotId, targetSnapshotId,
+                    sourceClusterId, manualRetention);
+
+            String xml = new XmlBuilder()
+                    .start("CopyClusterSnapshotResponse")
+                      .start("CopyClusterSnapshotResult")
+                        .raw(buildSnapshotXml(snapshot))
+                      .end("CopyClusterSnapshotResult")
+                      .start("ResponseMetadata")
+                        .elem("RequestId", "test-req-id")
+                      .end("ResponseMetadata")
+                    .end("CopyClusterSnapshotResponse")
+                    .build();
+            return Response.ok(xml).type(MediaType.APPLICATION_XML).build();
+        }
         case "RestoreFromClusterSnapshot" -> {
             String clusterIdentifier = params.getFirst("ClusterIdentifier");
             String snapshotIdentifier = params.getFirst("SnapshotIdentifier");

@@ -4,12 +4,14 @@ import io.floci.aws.config.EmulatorConfig;
 import io.floci.aws.core.common.RegionResolver;
 import io.floci.aws.core.common.docker.ContainerBuilder;
 import io.floci.aws.core.common.docker.ContainerDetector;
+import io.floci.aws.core.common.docker.ContainerExec;
 import io.floci.aws.core.common.docker.ContainerLifecycleManager;
 import io.floci.aws.core.common.docker.ContainerLifecycleManager.ContainerInfo;
 import io.floci.aws.core.common.docker.ContainerLifecycleManager.EndpointInfo;
 import io.floci.aws.core.common.docker.ContainerLogStreamer;
 import io.floci.aws.core.common.docker.ContainerSpec;
 import io.floci.aws.core.common.docker.ContainerStorageHelper;
+import io.floci.aws.core.common.docker.RetryingTarCopier;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 import org.jboss.logging.Logger;
@@ -21,6 +23,7 @@ import java.net.InetSocketAddress;
 import java.net.Socket;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
+import java.util.Base64;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
@@ -136,7 +139,9 @@ public class ElastiCacheContainerManager {
         // Remove any stale container with the same name
         lifecycleManager.removeIfExists(containerName);
 
-        StringBuilder serverFlags = new StringBuilder("--loglevel verbose");
+        // DEBUG is enabled for connections from inside the container only, so a snapshot restore
+        // can reload the dataset (DEBUG RELOAD NOSAVE); clients reach the server through the proxy.
+        StringBuilder serverFlags = new StringBuilder("--loglevel verbose --enable-debug-command local");
         for (String flag : extraServerFlags) {
             serverFlags.append(' ').append(flag);
         }
@@ -230,6 +235,40 @@ public class ElastiCacheContainerManager {
         throw new RuntimeException(
                 "ElastiCache backend for group " + groupId + " did not become ready on " + host + ":" + port
                         + " within " + BACKEND_READY_DEADLINE_MS + "ms");
+    }
+
+    /** The server's own CLI, valkey-cli or redis-cli, run inside its container against the local server. */
+    private static final String CLI = "C=$(command -v valkey-cli || command -v redis-cli); ";
+
+    /**
+     * A snapshot of the dataset: the server's RDB file, written by SAVE, base64 encoded so it
+     * travels through the exec's text output. The CLI exits 0 on an error reply too, so the reply
+     * itself must be OK: a SAVE refused while a BGSAVE runs would otherwise hand back the previous
+     * RDB file.
+     */
+    public String snapshot(String containerId) {
+        String[] cmd = {"sh", "-c", CLI + "R=$($C SAVE); if [ \"$R\" != OK ]; then echo \"SAVE: $R\" >&2; exit 1; fi;"
+                + " base64 -w0 \"$($C CONFIG GET dir | sed -n 2p)/$($C CONFIG GET dbfilename | sed -n 2p)\""};
+        ContainerExec.Result result = ContainerExec.run(lifecycleManager.getDockerClient(), containerId, cmd, 300);
+        if (result.exitCode() != 0) {
+            throw new IllegalStateException("SAVE failed with exit code " + result.exitCode() + ": " + result.stderr());
+        }
+        return result.stdout().trim();
+    }
+
+    /** Replaces the dataset with a {@link #snapshot} RDB file and reloads it without saving first. */
+    public void restore(String containerId, String rdbBase64) {
+        byte[] rdb = Base64.getDecoder().decode(rdbBase64);
+        RetryingTarCopier.copyBytes(lifecycleManager.getDockerClient(), containerId, "/tmp",
+                "floci-restore.rdb", rdb, 0644);
+        String[] cmd = {"sh", "-c", CLI + "D=$($C CONFIG GET dir | sed -n 2p); F=$($C CONFIG GET dbfilename | sed -n 2p);"
+                + " cp /tmp/floci-restore.rdb \"$D/$F\" && rm -f /tmp/floci-restore.rdb"
+                + " && $C DEBUG RELOAD NOSAVE | grep -q OK"};
+        ContainerExec.Result result = ContainerExec.run(lifecycleManager.getDockerClient(), containerId, cmd, 300);
+        if (result.exitCode() != 0) {
+            throw new IllegalStateException("restore failed with exit code " + result.exitCode() + ": "
+                    + result.stderr() + result.stdout());
+        }
     }
 
     public void stop(ElastiCacheContainerHandle handle) {

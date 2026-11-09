@@ -2,6 +2,7 @@ package io.floci.aws.services.elasticache;
 
 import io.quarkus.test.common.http.TestHTTPResource;
 import io.quarkus.test.junit.QuarkusTest;
+import io.restassured.specification.RequestSpecification;
 import org.jboss.logging.Logger;
 import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.Assumptions;
@@ -845,6 +846,72 @@ class ElastiCacheIntegrationTest {
             .when()
                 .post("/");
         }
+    }
+
+    @Test
+    @Order(21)
+    void snapshotCarriesTheDatasetIntoAGroupCreatedFromIt() throws Exception {
+        String sourceId = "it-ec-snap-src";
+        String restoredId = "it-ec-snap-dst";
+        String snapshotName = "it-ec-snap";
+        try {
+            int sourcePort = createNoAuthGroup(sourceId, null);
+            assertEquals("+OK\r\n", sendCommand(sourcePort, respArray("SET", "snapshot-key", "kept")));
+
+            given()
+                .formParam("Action", "CreateSnapshot")
+                .formParam("SnapshotName", snapshotName)
+                .formParam("ReplicationGroupId", sourceId)
+                .header("Authorization", AUTH_HEADER)
+            .when()
+                .post("/")
+            .then()
+                .statusCode(200)
+                .body("CreateSnapshotResponse.CreateSnapshotResult.Snapshot.SnapshotStatus", equalTo("available"));
+            // Written after the snapshot: the restored group must not see it.
+            sendCommand(sourcePort, respArray("SET", "later-key", "after"));
+
+            int restoredPort = createNoAuthGroup(restoredId, snapshotName);
+            try (Socket socket = openSocket(restoredPort)) {
+                write(socket, respArray("GET", "snapshot-key"));
+                assertEquals("$4\r\n", readLine(socket));
+                assertEquals("kept\r\n", readLine(socket));
+            }
+            assertEquals("$-1\r\n", sendCommand(restoredPort, respArray("GET", "later-key")));
+        } finally {
+            for (String groupId : List.of(restoredId, sourceId)) {
+                given()
+                    .formParam("Action", "DeleteReplicationGroup")
+                    .formParam("ReplicationGroupId", groupId)
+                    .header("Authorization", AUTH_HEADER)
+                    .post("/");
+            }
+            given()
+                .formParam("Action", "DeleteSnapshot")
+                .formParam("SnapshotName", snapshotName)
+                .header("Authorization", AUTH_HEADER)
+                .post("/");
+        }
+    }
+
+    /** Creates a group without auth, from {@code snapshotName} when given, and returns its proxy port. */
+    private static int createNoAuthGroup(String groupId, String snapshotName) {
+        RequestSpecification request = given()
+                .formParam("Action", "CreateReplicationGroup")
+                .formParam("ReplicationGroupId", groupId)
+                .formParam("ReplicationGroupDescription", "snapshot round trip")
+                .header("Authorization", AUTH_HEADER);
+        if (snapshotName != null) {
+            request = request.formParam("SnapshotName", snapshotName);
+        }
+        return request
+            .when()
+                .post("/")
+            .then()
+                .statusCode(200)
+                .extract()
+                .xmlPath()
+                .getInt("CreateReplicationGroupResponse.CreateReplicationGroupResult.ReplicationGroup.NodeGroups.NodeGroup.PrimaryEndpoint.Port");
     }
 
     static boolean isDockerAvailable() {

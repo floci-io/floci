@@ -452,6 +452,80 @@ public class RedshiftOperationsTest {
             .contentType("application/xml")
             .body(containsString("<SnapshotIdentifier>snap-test-1</SnapshotIdentifier>"));
 
+        // 3b. ModifyClusterSnapshot updates retention period
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .header("Authorization", AUTH_HEADER)
+            .formParam("Action", "ModifyClusterSnapshot")
+            .formParam("SnapshotIdentifier", "snap-test-1")
+            .formParam("ManualSnapshotRetentionPeriod", "45")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .contentType("application/xml")
+            .body(containsString("<ModifyClusterSnapshotResponse>"))
+            .body(containsString("<SnapshotIdentifier>snap-test-1</SnapshotIdentifier>"))
+            .body(containsString("<ManualSnapshotRetentionPeriod>45</ManualSnapshotRetentionPeriod>"));
+
+        // 3c. CopyClusterSnapshot rejects manual snapshot
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .header("Authorization", AUTH_HEADER)
+            .formParam("Action", "CopyClusterSnapshot")
+            .formParam("SourceSnapshotIdentifier", "snap-test-1")
+            .formParam("TargetSnapshotIdentifier", "snap-copy-1")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(400)
+            .contentType("application/xml")
+            .body(containsString("<Code>InvalidClusterSnapshotState</Code>"));
+
+        // 3d. CopyClusterSnapshot succeeds when source is automated
+        service.getSnapshot("snap-test-1").ifPresent(s -> s.setSnapshotType("automated"));
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .header("Authorization", AUTH_HEADER)
+            .formParam("Action", "CopyClusterSnapshot")
+            .formParam("SourceSnapshotIdentifier", "snap-test-1")
+            .formParam("TargetSnapshotIdentifier", "snap-copy-1")
+            .formParam("ManualSnapshotRetentionPeriod", "30")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .contentType("application/xml")
+            .body(containsString("<CopyClusterSnapshotResponse>"))
+            .body(containsString("<SnapshotIdentifier>snap-copy-1</SnapshotIdentifier>"))
+            .body(containsString("<SnapshotType>manual</SnapshotType>"))
+            .body(containsString("<ClusterIdentifier>cluster-src</ClusterIdentifier>"));
+
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .header("Authorization", AUTH_HEADER)
+            .formParam("Action", "DescribeClusterSnapshots")
+            .formParam("SnapshotIdentifier", "snap-copy-1")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .contentType("application/xml")
+            .body(containsString("<SnapshotIdentifier>snap-copy-1</SnapshotIdentifier>"));
+
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .header("Authorization", AUTH_HEADER)
+            .formParam("Action", "DeleteClusterSnapshot")
+            .formParam("SnapshotIdentifier", "snap-copy-1")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200);
+
+        // Restore snap-test-1 type to manual so later step 6 can delete it
+        service.getSnapshot("snap-test-1").ifPresent(s -> s.setSnapshotType("manual"));
+
         // 4. DeleteCluster
         given()
             .contentType("application/x-www-form-urlencoded")

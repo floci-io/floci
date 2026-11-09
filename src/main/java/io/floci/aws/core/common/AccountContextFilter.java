@@ -57,10 +57,8 @@ public class AccountContextFilter implements ContainerRequestFilter {
     // Lazily resolved: JAX-RS providers are instantiated before runtime config mappings exist
     // (the AwsProtocolClaimFilter pattern). jakarta.inject.Provider is qualified inline because
     // this class also carries the JAX-RS @Provider annotation.
-    private final jakarta.inject.Provider<EmulatorConfig> configProvider;
-    private final jakarta.inject.Provider<ResolvedServiceCatalog> catalogProvider;
-    private volatile EmulatorConfig config;
-    private volatile ResolvedServiceCatalog catalog;
+    private final MemoizedSupplier<EmulatorConfig> config;
+    private final MemoizedSupplier<ResolvedServiceCatalog> catalog;
 
     @Inject
     public AccountContextFilter(AccountResolver accountResolver,
@@ -73,26 +71,16 @@ public class AccountContextFilter implements ContainerRequestFilter {
         this.regionResolver = regionResolver;
         this.requestContext = requestContext;
         this.sessionAccountLookup = sessionAccountLookup;
-        this.configProvider = configProvider;
-        this.catalogProvider = catalogProvider;
+        this.config = new MemoizedSupplier<>(configProvider::get);
+        this.catalog = new MemoizedSupplier<>(catalogProvider::get);
     }
 
     private EmulatorConfig config() {
-        EmulatorConfig resolved = config;
-        if (resolved == null) {
-            resolved = configProvider.get();
-            config = resolved;
-        }
-        return resolved;
+        return config.get();
     }
 
     private ResolvedServiceCatalog catalog() {
-        ResolvedServiceCatalog resolved = catalog;
-        if (resolved == null) {
-            resolved = catalogProvider.get();
-            catalog = resolved;
-        }
-        return resolved;
+        return catalog.get();
     }
 
     @Override
@@ -125,10 +113,14 @@ public class AccountContextFilter implements ContainerRequestFilter {
                     ? regionResolver.resolveRegionFromRegionSet(ctx.getHeaderString("X-Amz-Region-Set"))
                     : regionResolver.resolveRegionFromAuth(auth);
             applyRegion(region);
-            if (rejectUnknownRegion(ctx, region, SigV4CredentialScope.serviceName(auth))) {
+            // Only a refusal or strict mode needs the signing name, so it is parsed only then.
+            if (!servesRegion(region)) {
+                rejectUnknownRegion(ctx, region, SigV4CredentialScope.serviceName(auth));
                 return;
             }
-            rejectPartitionAbsentService(ctx, SigV4CredentialScope.serviceName(auth).orElse(null));
+            if (config().partitions().strict()) {
+                rejectPartitionAbsentService(ctx, SigV4CredentialScope.serviceName(auth).orElse(null));
+            }
         } else {
             // A present Authorization header wins, as in IamEnforcementFilter: an unrecognised one
             // must not let the query string pick an account that IAM then never checks.
@@ -149,11 +141,14 @@ public class AccountContextFilter implements ContainerRequestFilter {
                                 query.getFirst("X-Amz-Region-Set"))
                         : regionResolver.resolveRegionFromPresignedCredential(credential);
                 applyRegion(region);
-                if (rejectUnknownRegion(ctx, region, SigV4CredentialScope.serviceNameFromCredential(credential))) {
+                if (!servesRegion(region)) {
+                    rejectUnknownRegion(ctx, region, SigV4CredentialScope.serviceNameFromCredential(credential));
                     return;
                 }
-                rejectPartitionAbsentService(ctx,
-                        SigV4CredentialScope.serviceNameFromCredential(credential).orElse(null));
+                if (config().partitions().strict()) {
+                    rejectPartitionAbsentService(ctx,
+                            SigV4CredentialScope.serviceNameFromCredential(credential).orElse(null));
+                }
             } else {
                 requestContext.setAccountId(accountResolver.resolve(null));
                 requestContext.setAccessKeyId(null);
@@ -194,7 +189,9 @@ public class AccountContextFilter implements ContainerRequestFilter {
                 : IamEnforcementFilter.requestAuthorization(null, query);
         // Some Query routes synthesize this header even without X-Amz-Algorithm. Inspect the
         // same region they use, in addition to the split credential used by request context.
-        String region = regionResolver.resolveRegionFromAuthOrNull(parsedAuthorization);
+        // The region is part of this text or a published one, so text without ':' cannot name an ambiguous one.
+        String region = parsedAuthorization == null || parsedAuthorization.indexOf(':') < 0
+                ? null : regionResolver.resolveRegionFromAuthOrNull(parsedAuthorization);
         if (!RegionResolver.containsArnDelimiter(region) && queryCredential != null) {
             region = regionResolver.resolveRegionFromPresignedCredential(queryCredential);
         }
@@ -202,7 +199,13 @@ public class AccountContextFilter implements ContainerRequestFilter {
             return false;
         }
         applyRegion(region);
-        return rejectUnknownRegion(ctx, region, SigV4CredentialScope.serviceName(parsedAuthorization));
+        rejectUnknownRegion(ctx, region, SigV4CredentialScope.serviceName(parsedAuthorization));
+        return true;
+    }
+
+    private boolean servesRegion(String region) {
+        return !RegionResolver.containsArnDelimiter(region)
+                && (RegionResolver.isKnownRegion(region) || config().partitions().allowUnknownRegions());
     }
 
     /**
@@ -215,12 +218,8 @@ public class AccountContextFilter implements ContainerRequestFilter {
      * {@code <ErrorResponse>} for a claimed Query or form-encoded request, CBOR for a claimed
      * CBOR request, and JSON otherwise. The pre-matching protocol claim is already available.
      */
-    private boolean rejectUnknownRegion(ContainerRequestContext ctx, String region, Optional<String> signingName) {
+    private void rejectUnknownRegion(ContainerRequestContext ctx, String region, Optional<String> signingName) {
         boolean ambiguous = RegionResolver.containsArnDelimiter(region);
-        if (!ambiguous && (RegionResolver.isKnownRegion(region)
-                || config().partitions().allowUnknownRegions())) {
-            return false;
-        }
         LOG.debugv("Refusing request signed for unknown region {0} (service {1}): {2} {3}",
                 region, signingName.orElse("?"), ctx.getMethod(), ctx.getUriInfo().getPath());
         if (signingName.isPresent() && S3_SIGNING_NAMES.contains(signingName.get())) {
@@ -229,7 +228,7 @@ public class AccountContextFilter implements ContainerRequestFilter {
                             + "' must not contain ':'."
                             : "The authorization header is malformed; the region '" + region
                             + "' is wrong; expecting a region AWS publishes."));
-            return true;
+            return;
         }
         String message = ambiguous ? "Region '" + region + "' must not contain ':' because it separates ARN fields."
                 : "Region '" + region + "' is not a region in any AWS partition. Sign the request "
@@ -243,14 +242,13 @@ public class AccountContextFilter implements ContainerRequestFilter {
             }
             ctx.abortWith(CborErrorResponses.of(new AwsException("InvalidSignatureException", message, 400),
                     CborErrorResponses.mediaTypeFor(contentType)));
-            return true;
+            return;
         }
         if (protocol == WireProtocol.AWS_QUERY || isFormEncoded(ctx.getMediaType())) {
             ctx.abortWith(AwsQueryResponse.error("InvalidSignatureException", message, null, 400));
-            return true;
+            return;
         }
         ctx.abortWith(AwsProtocolClaimFilter.errorResponse(400, "InvalidSignatureException", message));
-        return true;
     }
 
     private static boolean isFormEncoded(MediaType mediaType) {
@@ -270,7 +268,7 @@ public class AccountContextFilter implements ContainerRequestFilter {
      * service in every partition.
      */
     private void rejectPartitionAbsentService(ContainerRequestContext ctx, String signingName) {
-        if (signingName == null || !config().partitions().strict()) {
+        if (signingName == null) {
             return;
         }
         Optional<AwsPartition> partition = AwsPartitions.find(requestContext.getPartition());

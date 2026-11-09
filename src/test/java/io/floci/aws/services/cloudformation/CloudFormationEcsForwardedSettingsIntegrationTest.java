@@ -12,10 +12,14 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.RegisterExtension;
 
 import java.util.List;
+import java.util.Map;
+import java.util.stream.Collectors;
 
 import static io.floci.aws.testing.CfnRequests.cfn;
 import static org.hamcrest.Matchers.containsString;
 import static org.hamcrest.Matchers.equalTo;
+import static org.hamcrest.Matchers.hasKey;
+import static org.hamcrest.Matchers.not;
 import static org.hamcrest.Matchers.nullValue;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 
@@ -100,6 +104,62 @@ class CloudFormationEcsForwardedSettingsIntegrationTest {
             }
             """;
 
+    private static final String REGISTRIES_SETTING =
+            "\"ServiceRegistries\": [{\"RegistryArn\": {\"Fn::GetAtt\": [\"Registry\", \"Arn\"]}}]";
+    private static final String STRATEGY_SETTING =
+            "\"CapacityProviderStrategy\": [{\"CapacityProvider\": \"FARGATE\", \"Weight\": 2}]";
+    private static final String DEPLOYMENT_SETTING =
+            "\"DeploymentConfiguration\": {\"MaximumPercent\": 150, \"MinimumHealthyPercent\": 0}";
+    private static final String NO_VALUE_DEPLOYMENT_SETTING = "\"DeploymentConfiguration\": "
+            + "{\"Fn::If\": [\"Never\", {\"MaximumPercent\": 150}, {\"Ref\": \"AWS::NoValue\"}]}";
+    private static final String NO_VALUE_REGISTRIES_SETTING = "\"ServiceRegistries\": "
+            + "{\"Fn::If\": [\"Never\", [{\"RegistryArn\": {\"Fn::GetAtt\": [\"Registry\", \"Arn\"]}}], {\"Ref\": \"AWS::NoValue\"}]}";
+    private static final String NO_VALUE_STRATEGY_SETTING = "\"CapacityProviderStrategy\": "
+            + "{\"Fn::If\": [\"Never\", [{\"CapacityProvider\": \"FARGATE\", \"Weight\": 2}], {\"Ref\": \"AWS::NoValue\"}]}";
+    private static final String OUTSIDE_REGISTRY_ARN = "arn:aws:servicediscovery:us-east-1:000000000000:service/srv-9";
+
+    /** A service that declares only the settings spliced into %4$s, so a test controls which of the three it declares. */
+    private static final String SERVICE_TEMPLATE = """
+            {
+              "Conditions": {"Never": {"Fn::Equals": ["a", "b"]}},
+              "Resources": {
+                "Namespace": {
+                  "Type": "AWS::ServiceDiscovery::HttpNamespace",
+                  "Properties": {"Name": "%1$s"}
+                },
+                "Registry": {
+                  "Type": "AWS::ServiceDiscovery::Service",
+                  "Properties": {"Name": "app", "NamespaceId": {"Ref": "Namespace"}}
+                },
+                "Cluster": {
+                  "Type": "AWS::ECS::Cluster",
+                  "Properties": {"ClusterName": "%1$s"}
+                },
+                "TaskDef": {
+                  "Type": "AWS::ECS::TaskDefinition",
+                  "Properties": {
+                    "Family": "%1$s-td",
+                    "Cpu": "256",
+                    "Memory": "512",
+                    "NetworkMode": "awsvpc",
+                    "RequiresCompatibilities": ["FARGATE"],
+                    "ContainerDefinitions": [{"Name": "app", "Image": "app:v1"}]
+                  }
+                },
+                "Service": {
+                  "Type": "AWS::ECS::Service",
+                  "Properties": {
+                    "ServiceName": "%1$s-svc",
+                    "Cluster": {"Ref": "Cluster"},
+                    "TaskDefinition": {"Ref": "TaskDef"},
+                    "DesiredCount": %3$d,
+                    "NetworkConfiguration": {"AwsvpcConfiguration": {"Subnets": ["%2$s"]}}%4$s
+                  }
+                }
+              }
+            }
+            """;
+
     @RegisterExtension
     final PartitionCleanup cleanup = new PartitionCleanup();
 
@@ -152,6 +212,192 @@ class CloudFormationEcsForwardedSettingsIntegrationTest {
             .body("services[0].deploymentConfiguration.maximumPercent", equalTo(200))
             .body("services[0].capacityProviderStrategy[0].weight", equalTo(2))
             .body("services[0].serviceRegistries[0].registryArn", containsString(":servicediscovery:us-east-1:"));
+    }
+
+    @Test
+    void updateStack_droppedServiceRegistries_keepTheStoredRegistries() {
+        String name = stackName();
+        createServiceStack(name, REGISTRIES_SETTING, STRATEGY_SETTING, DEPLOYMENT_SETTING);
+        describeService(name).body("services[0].serviceRegistries[0].registryArn", containsString(":servicediscovery:"));
+
+        updateServiceStack(name, 1, STRATEGY_SETTING, DEPLOYMENT_SETTING);
+
+        describeService(name)
+            .body("services[0].serviceRegistries[0].registryArn", containsString(":servicediscovery:"))
+            .body("services[0].capacityProviderStrategy[0].weight", equalTo(2))
+            .body("services[0].deploymentConfiguration.maximumPercent", equalTo(150));
+    }
+
+    @Test
+    void updateStack_droppedCapacityProviderStrategy_keepTheStoredStrategy() {
+        String name = stackName();
+        createServiceStack(name, REGISTRIES_SETTING, STRATEGY_SETTING, DEPLOYMENT_SETTING);
+
+        updateServiceStack(name, 1, REGISTRIES_SETTING, DEPLOYMENT_SETTING);
+
+        describeService(name)
+            .body("services[0].capacityProviderStrategy[0].capacityProvider", equalTo("FARGATE"))
+            .body("services[0].capacityProviderStrategy[0].weight", equalTo(2))
+            .body("services[0].serviceRegistries[0].registryArn", containsString(":servicediscovery:"))
+            .body("services[0].deploymentConfiguration.maximumPercent", equalTo(150));
+    }
+
+    @Test
+    void updateStack_droppedDeploymentConfiguration_isReadBackAsNeverSet() {
+        String name = stackName();
+        createServiceStack(name, REGISTRIES_SETTING, STRATEGY_SETTING, DEPLOYMENT_SETTING);
+
+        updateServiceStack(name, 1, REGISTRIES_SETTING, STRATEGY_SETTING);
+
+        describeService(name)
+            .body("services[0]", not(hasKey("deploymentConfiguration")))
+            .body("services[0].capacityProviderStrategy[0].weight", equalTo(2))
+            .body("services[0].serviceRegistries[0].registryArn", containsString(":servicediscovery:"));
+    }
+
+    @Test
+    void updateStack_deploymentConfigurationChosenAsNoValue_isReadBackAsNeverSet() {
+        String name = stackName();
+        createServiceStack(name, DEPLOYMENT_SETTING);
+
+        updateServiceStack(name, 1, NO_VALUE_DEPLOYMENT_SETTING);
+
+        describeService(name).body("services[0]", not(hasKey("deploymentConfiguration")));
+    }
+
+    @Test
+    void updateStack_serviceRegistriesChosenAsNoValue_keepTheStoredRegistries() {
+        String name = stackName();
+        createServiceStack(name, REGISTRIES_SETTING);
+
+        updateServiceStack(name, 1, NO_VALUE_REGISTRIES_SETTING);
+
+        describeService(name).body("services[0].serviceRegistries[0].registryArn", containsString(":servicediscovery:"));
+    }
+
+    @Test
+    void updateStack_capacityProviderStrategyChosenAsNoValue_keepTheStoredStrategy() {
+        String name = stackName();
+        createServiceStack(name, STRATEGY_SETTING);
+
+        updateServiceStack(name, 1, NO_VALUE_STRATEGY_SETTING);
+
+        describeService(name)
+            .body("services[0].capacityProviderStrategy[0].capacityProvider", equalTo("FARGATE"))
+            .body("services[0].capacityProviderStrategy[0].weight", equalTo(2));
+    }
+
+    @Test
+    void updateStack_strategyDeclaredDirectlyAsNoValue_keepsTheStoredStrategy() {
+        String name = stackName();
+        createServiceStack(name, STRATEGY_SETTING);
+
+        updateServiceStack(name, 1, "\"CapacityProviderStrategy\": {\"Ref\": \"AWS::NoValue\"}");
+
+        describeService(name).body("services[0].capacityProviderStrategy[0].weight", equalTo(2));
+    }
+
+    @Test
+    void updateStack_emptyStrategyAndEmptyRegistries_clearBoth() {
+        String name = stackName();
+        createServiceStack(name, REGISTRIES_SETTING, STRATEGY_SETTING);
+
+        updateServiceStack(name, 1, "\"ServiceRegistries\": []", "\"CapacityProviderStrategy\": []");
+
+        describeService(name)
+            .body("services[0].serviceRegistries", nullValue())
+            .body("services[0].capacityProviderStrategy", nullValue())
+            .body("services[0].launchType", equalTo("FARGATE"));
+    }
+
+    @Test
+    void updateStack_emptyDeploymentConfiguration_isStoredAsGivenAndClearedWhenDroppedLater() {
+        String name = stackName();
+        createServiceStack(name, DEPLOYMENT_SETTING);
+
+        updateServiceStack(name, 1, "\"DeploymentConfiguration\": {}");
+        describeService(name).body("services[0].deploymentConfiguration", equalTo(Map.of()));
+
+        updateServiceStack(name, 1);
+        describeService(name).body("services[0]", not(hasKey("deploymentConfiguration")));
+    }
+
+    @Test
+    void updateStack_settingsSetThroughTheApi_surviveAnUpdateThatStillDoesNotDeclareThem() {
+        String name = stackName();
+        createServiceStack(name);
+        ecs("UpdateService", """
+                {"cluster": "%1$s", "service": "%1$s-svc",
+                 "deploymentConfiguration": {"maximumPercent": 111},
+                 "capacityProviderStrategy": [{"capacityProvider": "FARGATE_SPOT", "weight": 1}],
+                 "serviceRegistries": [{"registryArn": "%2$s"}]}
+                """.formatted(name, OUTSIDE_REGISTRY_ARN));
+
+        updateServiceStack(name, 2);
+
+        describeService(name)
+            .body("services[0].desiredCount", equalTo(2))
+            .body("services[0].deploymentConfiguration.maximumPercent", equalTo(111))
+            .body("services[0].capacityProviderStrategy[0].capacityProvider", equalTo("FARGATE_SPOT"))
+            .body("services[0].serviceRegistries[0].registryArn", equalTo(OUTSIDE_REGISTRY_ARN));
+    }
+
+    @Test
+    void updateStack_droppingOneSetting_leavesASettingSetThroughTheApiAlone() {
+        String name = stackName();
+        createServiceStack(name, DEPLOYMENT_SETTING);
+        ecs("UpdateService", """
+                {"cluster": "%1$s", "service": "%1$s-svc",
+                 "capacityProviderStrategy": [{"capacityProvider": "FARGATE_SPOT", "weight": 1}]}
+                """.formatted(name));
+
+        updateServiceStack(name, 1);
+
+        describeService(name)
+            .body("services[0]", not(hasKey("deploymentConfiguration")))
+            .body("services[0].capacityProviderStrategy[0].capacityProvider", equalTo("FARGATE_SPOT"));
+    }
+
+    @Test
+    void updateStack_droppedDesiredCount_setsTheDesiredCountToOne() {
+        String name = stackName();
+        submitService("CreateStack", name, 3);
+        assertEquals("CREATE_COMPLETE", CfnStackWaits.awaitTerminal(name).status());
+        describeService(name).body("services[0].desiredCount", equalTo(3));
+
+        submitTemplate("UpdateStack", name, serviceTemplate(name, 0).replace("\"DesiredCount\": 0,", ""));
+        assertEquals("UPDATE_COMPLETE", CfnStackWaits.awaitTerminal(name).status());
+
+        describeService(name).body("services[0].desiredCount", equalTo(1));
+    }
+
+    private void createServiceStack(String name, String... settings) {
+        submitService("CreateStack", name, 1, settings);
+        assertEquals("CREATE_COMPLETE", CfnStackWaits.awaitTerminal(name).status());
+    }
+
+    private void updateServiceStack(String name, int desiredCount, String... settings) {
+        submitService("UpdateStack", name, desiredCount, settings);
+        assertEquals("UPDATE_COMPLETE", CfnStackWaits.awaitTerminal(name).status());
+    }
+
+    /** Submits SERVICE_TEMPLATE whose service declares exactly {@code settings} besides its fixed properties. */
+    private static void submitService(String action, String stackName, int desiredCount, String... settings) {
+        submitTemplate(action, stackName, serviceTemplate(stackName, desiredCount, settings));
+    }
+
+    private static String serviceTemplate(String stackName, int desiredCount, String... settings) {
+        String declared = List.of(settings).stream().map(setting -> ", " + setting).collect(Collectors.joining());
+        return SERVICE_TEMPLATE.formatted(stackName, Ec2Service.defaultSubnetId("us-east-1", "a"), desiredCount, declared);
+    }
+
+    private static void submitTemplate(String action, String stackName, String template) {
+        cfn(action, stackName)
+            .formParam("TemplateBody", template)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200);
     }
 
     @Test

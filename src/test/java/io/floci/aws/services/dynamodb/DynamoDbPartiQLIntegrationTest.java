@@ -837,6 +837,67 @@ class DynamoDbPartiQLIntegrationTest {
             .statusCode(200);
     }
 
+    @Test
+    @Order(39)
+    void existsOutsideATransactionIsRefusedBeforeItsParametersAreCounted() {
+        String exists = "EXISTS(SELECT * FROM \\\"" + TABLE + "\\\" WHERE pk = ?)";
+        String outside = "EXISTS can only be used in ExecuteTransaction write requests.";
+
+        request("DynamoDB_20120810.ExecuteStatement", "{\"Statement\":\"" + exists + "\"}")
+            .statusCode(400)
+            .body("__type", equalTo("ValidationException"))
+            .body("message", equalTo(outside));
+        request("DynamoDB_20120810.BatchExecuteStatement", "{\"Statements\":[{\"Statement\":\"" + exists + "\"}]}")
+            .statusCode(200)
+            .body("Responses[0].Error.Code", equalTo("ValidationError"))
+            .body("Responses[0].Error.Message", equalTo(outside));
+        request("DynamoDB_20120810.ExecuteTransaction",
+                "{\"TransactStatements\":[{\"Statement\":\"" + exists + "\"}]}")
+            .statusCode(400)
+            .body("message", equalTo("Validation failed in TransactStatements[0]: "
+                    + "Number of parameters in request and statement don't match."));
+    }
+
+    @Test
+    @Order(40)
+    void aCallStatementIsRefusedBeforeItsParametersAreCounted() {
+        String outside = "EXISTS can only be used in ExecuteTransaction write requests.";
+
+        statement("foo(?)")
+            .statusCode(400)
+            .body("__type", equalTo("ValidationException"))
+            .body("message", equalTo(outside));
+        request("DynamoDB_20120810.BatchExecuteStatement", """
+                {"Statements":[{"Statement":"foo(1)"}]}
+                """)
+            .statusCode(200)
+            .body("Responses[0].Error.Code", equalTo("ValidationError"))
+            .body("Responses[0].Error.Message", equalTo(outside));
+        request("DynamoDB_20120810.ExecuteTransaction", """
+                {"TransactStatements":[{"Statement":"foo(?)"}]}
+                """)
+            .statusCode(400)
+            .body("message", equalTo("Validation failed in TransactStatements[0]: Unsupported operation in transaction."));
+    }
+
+    @Test
+    @Order(41)
+    void aNestedStatementIsReadAsATerm() {
+        statement("SELECT * FROM \"ttt\" WHERE pk = (SELECT * FROM \"ttt\")")
+            .statusCode(400)
+            .body("__type", equalTo("ValidationException"))
+            .body("message", equalTo("Unsupported token in expression: SELECT at 1:33:6"));
+        statement("foo(DELETE FROM \"ttt\" WHERE pk = 1)")
+            .statusCode(400)
+            .body("message", equalTo("Statement wasn't well formed, can't be processed: "
+                    + "Keyword delete only expected at the top level in the query"));
+        request("DynamoDB_20120810.ExecuteTransaction", """
+                {"TransactStatements":[{"Statement":"EXISTS(SELECT * FROM \\"ttt\\" WHERE pk = 1, 1)"}]}
+                """)
+            .statusCode(400)
+            .body("message", equalTo("Validation failed in TransactStatements[0]: Unsupported operation in transaction."));
+    }
+
     private static void putItem(String pk, String attributes) {
         request("DynamoDB_20120810.PutItem", """
                 {"TableName":"%s","Item":{"pk":{"S":"%s"},%s}}

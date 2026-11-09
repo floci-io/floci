@@ -459,4 +459,105 @@ class CopyRecordTransformerTest {
         byte[] out = new CopyRecordTransformer(spec, null).apply(new byte[]{'a', (byte) 0xFF, '\n'});
         assertEquals("a#\n", new String(out, StandardCharsets.UTF_8));
     }
+
+    @Test
+    void trimBlanksTrimsTrailingSpacesFromTextFields() {
+        CopyStatementParser.CopyTransforms transforms = new CopyStatementParser.CopyTransforms(
+                false, false, false, false, null, null, null, false, false, 0, true);
+        assertEquals("hello|world\n",
+                apply("|", false, null, transforms, "hello   |world  \n"));
+        assertEquals("  hello|world\n",
+                apply("|", false, null, transforms, "  hello|world\n"));
+    }
+
+    @Test
+    void trimBlanksTrimsTrailingTabsAndSpaces() {
+        CopyStatementParser.CopyTransforms transforms = new CopyStatementParser.CopyTransforms(
+                false, false, false, false, null, null, null, false, false, 0, true);
+        assertEquals("hello|world\n",
+                apply("|", false, null, transforms, "hello \t |world\t\n"));
+    }
+
+    @Test
+    void trimBlanksWithEmptyAsNullConvertsAllSpacesToNull() {
+        CopyStatementParser.CopyTransforms transforms = new CopyStatementParser.CopyTransforms(
+                false, true, false, false, null, null, null, false, false, 0, true);
+        assertEquals("\\N|hello\n",
+                apply("|", false, null, transforms, "   |hello   \n"));
+    }
+
+    @Test
+    void trimBlanksWithoutEmptyAsNullConvertsAllSpacesToEmptyString() {
+        CopyStatementParser.CopyTransforms transforms = new CopyStatementParser.CopyTransforms(
+                false, false, false, false, null, null, null, false, false, 0, true);
+        assertEquals("|hello\n",
+                apply("|", false, null, transforms, "   |hello   \n"));
+    }
+
+    @Test
+    void trimBlanksWithBlanksAsNullConvertsAllSpacesToNull() {
+        CopyStatementParser.CopyTransforms transforms = new CopyStatementParser.CopyTransforms(
+                true, false, false, false, null, null, null, false, false, 0, true);
+        assertEquals("\\N|hello\n",
+                apply("|", false, null, transforms, "   |hello   \n"));
+    }
+
+    @Test
+    void trimBlanksInCsvModeTrimsTrailingSpaces() {
+        CopyStatementParser.CopyTransforms transforms = new CopyStatementParser.CopyTransforms(
+                false, false, false, false, null, null, null, false, false, 0, true);
+        assertEquals("hello,world\n",
+                apply(",", true, null, transforms, "hello   ,world  \n"));
+        assertEquals("\"hello\",\"world\"\n",
+                apply(",", true, null, transforms, "\"hello   \",\"world  \"\n"));
+    }
+
+    @Test
+    void trimBlanksAppliesOnlyToVarcharWhenColumnKindsProvided() {
+        List<CopyRecordTransformer.ColumnKind> kinds = List.of(
+                CopyRecordTransformer.ColumnKind.TEXT,
+                CopyRecordTransformer.ColumnKind.CHAR,
+                CopyRecordTransformer.ColumnKind.OTHER);
+        CopyStatementParser.CopyTransforms transforms = new CopyStatementParser.CopyTransforms(
+                false, false, false, false, null, null, null, false, false, 0, true);
+        CopyStatementParser.S3CopyFrom spec = new CopyStatementParser.S3CopyFrom(
+                "t", List.of(), "b", "k", "|", 0, false, false, null, null, false, false, false, transforms);
+        byte[] out = new CopyRecordTransformer(spec, null, kinds)
+                .apply("hello   |world   |123   \n".getBytes(StandardCharsets.UTF_8));
+        assertEquals("hello|world   |123   \n", new String(out, StandardCharsets.UTF_8));
+    }
+
+    @Test
+    void trimBlanksKeepsANullMarkerThatEndsInSpaces() {
+        CopyStatementParser.CopyTransforms transforms = new CopyStatementParser.CopyTransforms(
+                false, false, false, false, null, null, null, false, false, 0, true);
+        assertEquals("N |hello\n", apply("|", false, "N ", transforms, "N |hello   \n"));
+        assertEquals("N ,hello\n", apply(",", true, "N ", transforms, "N ,hello   \n"));
+    }
+
+    @Test
+    void trimBlanksQuotesACsvFieldThatTrimsToAnEmptyStringSoItIsNotNull() {
+        CopyStatementParser.CopyTransforms transforms = new CopyStatementParser.CopyTransforms(
+                false, false, false, false, null, null, null, false, false, 0, true);
+        assertEquals("\"\",hello\n", apply(",", true, null, transforms, "   ,hello   \n"));
+        // a field that was empty to begin with stays NULL
+        assertEquals(",hello\n", apply(",", true, null, transforms, ",hello   \n"));
+    }
+
+    @Test
+    void trimBlanksWithEmptyAsNullStillNullsASpaceOnlyCsvField() {
+        CopyStatementParser.CopyTransforms transforms = new CopyStatementParser.CopyTransforms(
+                false, true, false, false, null, null, null, false, false, 0, true);
+        assertEquals(",hello\n", apply(",", true, null, transforms, "   ,hello   \n"));
+    }
+
+    @Test
+    void trimBlanksPreservesEscapedTrailingSpacesInTextMode() {
+        CopyStatementParser.CopyTransforms transforms = new CopyStatementParser.CopyTransforms(
+                false, false, false, false, null, null, null, false, false, 0, true);
+        assertEquals("hello\\ \n",
+                apply("|", false, null, transforms, "hello\\ \n"));
+        assertEquals("hello\\\\\n",
+                apply("|", false, null, transforms, "hello\\\\  \n"));
+    }
 }

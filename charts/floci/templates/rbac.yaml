@@ -1,0 +1,61 @@
+{{- if and .Values.rbac.create (include "floci.kubernetesExecutor" .) }}
+{{- $namespace := include "floci.lambdaNamespace" . }}
+# What the kubernetes Lambda executor calls (see KubernetesApiClient), and nothing more:
+# it polls pods with GET rather than watching them, and deletes them one by one.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: {{ include "floci.fullname" . }}-lambda
+  namespace: {{ $namespace }}
+  labels:
+    {{- include "floci.labels" . | nindent 4 }}
+rules:
+  # Create Lambda pods, poll them until Running, delete them when idle, and list the ones
+  # a previous Floci left behind (label selector app.kubernetes.io/managed-by=floci).
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["create", "get", "list", "delete"]
+  # Follow each Lambda pod's runtime log into CloudWatch Logs.
+  - apiGroups: [""]
+    resources: ["pods/log"]
+    verbs: ["get"]
+  {{- if .Values.floci.tls.enabled }}
+  # With TLS, Floci publishes its CA bundle to Lambda pods through one ConfigMap.
+  # Create cannot be limited by name; reading and replacing it can.
+  - apiGroups: [""]
+    resources: ["configmaps"]
+    verbs: ["create"]
+  - apiGroups: [""]
+    resources: ["configmaps"]
+    resourceNames: [{{ include "floci.caConfigMapName" . | quote }}]
+    {{- if include "floci.cleanupHook" . }}
+    # delete: only the uninstall cleanup hook removes it; Floci itself never does.
+    verbs: ["get", "update", "delete"]
+    {{- else }}
+    verbs: ["get", "update"]
+    {{- end }}
+  {{- else if include "floci.cleanupHook" . }}
+  # Without TLS only the uninstall cleanup hook's delete is left, for the CA ConfigMap an
+  # earlier revision with TLS on may have created.
+  - apiGroups: [""]
+    resources: ["configmaps"]
+    resourceNames: [{{ include "floci.caConfigMapName" . | quote }}]
+    verbs: ["delete"]
+  {{- end }}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ include "floci.fullname" . }}-lambda
+  namespace: {{ $namespace }}
+  labels:
+    {{- include "floci.labels" . | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: {{ include "floci.fullname" . }}-lambda
+subjects:
+  - kind: ServiceAccount
+    name: {{ include "floci.serviceAccountName" . }}
+    namespace: {{ .Release.Namespace }}
+{{- end }}

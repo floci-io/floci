@@ -26,7 +26,7 @@ public class AccountResolver {
         this.defaultAccountId = defaultAccountId;
     }
 
-    static boolean isAccountId(String value) {
+    public static boolean isAccountId(String value) {
         if (value == null || value.length() != 12) {
             return false;
         }

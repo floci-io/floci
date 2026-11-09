@@ -129,6 +129,8 @@ The attributes follow the [CloudFormation resource schema](https://docs.aws.amaz
 | `CreateClusterSnapshot` | Back up a cluster to a SQL dump via `pg_dump` |
 | `DescribeClusterSnapshots` | List snapshots, optionally filtered by snapshot or cluster identifier and SnapshotType (manual or automated) |
 | `DeleteClusterSnapshot` | Remove a snapshot and its stored dump |
+| `ModifyClusterSnapshot` | Update the retention period of a manual cluster snapshot |
+| `CopyClusterSnapshot` | Copy an automated cluster snapshot to a manual snapshot with a new identifier and retention period |
 | `RestoreFromClusterSnapshot` | Create a new cluster and load a snapshot's dump into it via `psql`; accepts `SnapshotIdentifier` or a same-account, same-region `SnapshotArn` |
 | `CreateClusterParameterGroup` | Register a parameter group (metadata only) |
 | `DescribeClusterParameterGroups` | List parameter groups, optionally filtered by name |
@@ -206,9 +208,13 @@ committed is removed on failure; if the commit succeeded and a later flush repor
 the dump is retained for the committed snapshot.
 
 `FinalClusterSnapshotRetentionPeriod` defaults to `-1` and accepts `-1` or 1 to 3,653 days.
-It is persisted and returned as the snapshot's `ManualSnapshotRetentionPeriod`; automatic
-expiration is not implemented. Manual snapshots created by `CreateClusterSnapshot`, and older
-snapshots without stored retention metadata, also return the default `-1`. Snapshot metadata
+It is persisted and returned as the snapshot's `ManualSnapshotRetentionPeriod`. The background
+retention sweep expires finite-retention manual snapshots, including final snapshots and
+`CopyClusterSnapshot` targets, and removes their stored dumps. `ModifyClusterSnapshot` can change
+this period; omitting `ManualSnapshotRetentionPeriod` preserves the current setting. An elapsed
+new retention period requires `Force=true` to delete the snapshot immediately.
+Manual snapshots created by `CreateClusterSnapshot`, and older snapshots without stored
+retention metadata, return the default `-1` and are retained indefinitely. Snapshot metadata
 uses the configured storage mode. Persistent and WAL metadata commit failures are reported
 before teardown; hybrid retains its existing
 write-behind durability and logged flush failures.
@@ -876,7 +882,9 @@ order) through its own S3 service and streams the rows into the backing PostgreS
 
 - Supported options: `DELIMITER`, `FORMAT CSV` (or a bare `CSV`), `GZIP`, `IGNOREHEADER <n>` and
   `HEADER`, `NULL AS`, `FORMAT AS JSON 'auto'`, `FORMAT AS JSON 'auto ignorecase'` (or bare `JSON 'auto'`),
-  `MANIFEST`, and an explicit column list.
+  `MANIFEST`, `COMPUPDATE`, `STATUPDATE`, `TRIMBLANKS`, and an explicit column list.
+- `COMPUPDATE [PRESET | ON | OFF | TRUE | FALSE]` and `STATUPDATE [ON | OFF | TRUE | FALSE]` (or bare `COMPUPDATE`
+  and `STATUPDATE`) are accepted and treated as no-ops for single-node PostgreSQL compatibility.
 - The default framing is pipe-delimited text, matching Redshift. `FORMAT CSV` switches to CSV with
   a comma default delimiter.
 - `FORMAT AS JSON 'auto'` loads JSON objects, mapping JSON keys to table columns with exact case
@@ -911,10 +919,12 @@ order) through its own S3 service and streams the rows into the backing PostgreS
   stored, and the statement text keeps them out of Floci's own messages. Combining key credentials with
   `IAM_ROLE`, or giving only one of the pair, is
   not intercepted, and neither is a blank key, secret, token or role.
-- `EMPTYASNULL`, `BLANKSASNULL`, `REMOVEQUOTES` (not with `CSV` or `JSON`), `ACCEPTINVCHARS [AS 'c']`
+- `EMPTYASNULL`, `BLANKSASNULL`, `TRIMBLANKS`, `REMOVEQUOTES` (not with `CSV` or `JSON`), `ACCEPTINVCHARS [AS 'c']`
   (default `?`, one ASCII character) and `TRUNCATECOLUMNS` rewrite field content before loading. Field
   level options need a single-byte `DELIMITER`, are not combined with `FORMAT AS JSON`, and normalise
-  `CRLF` line endings to `LF`. A nulled field is written as the `NULL AS` string, or `\N` in text
+  `CRLF` line endings to `LF`. `TRIMBLANKS` removes trailing white space (spaces and tabs) from `VARCHAR` columns;
+  combined with `EMPTYASNULL`, a field containing only spaces converts to `NULL`. A nulled field is written
+  as the `NULL AS` string, or `\N` in text
   mode and an empty unquoted field in CSV mode. `TRUNCATECOLUMNS` cuts a value to the declared
   `CHAR`/`VARCHAR` length in bytes (Redshift's meaning of the declared length, so `éééé` into
   `VARCHAR(3)` loads `é`), never inside a multi-byte character or a backslash escape. Its column

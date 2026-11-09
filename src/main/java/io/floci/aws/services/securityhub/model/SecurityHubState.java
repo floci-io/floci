@@ -28,6 +28,8 @@ public class SecurityHubState {
     private Map<String, SecurityHubAssociation> associations = new LinkedHashMap<>();
     /** Enabled standards: subscription ARN to standards ARN. */
     private Map<String, String> standardsSubscriptions = new LinkedHashMap<>();
+    /** This account's members when it is a Security Hub administrator, keyed by member account ID. */
+    private Map<String, SecurityHubMember> members = new LinkedHashMap<>();
 
     public String getAdminAccountId() { return adminAccountId; }
     public void setAdminAccountId(String adminAccountId) { this.adminAccountId = adminAccountId; }
@@ -65,4 +67,8 @@ public class SecurityHubState {
     public void setPolicies(Map<String, JsonNode> policies) { this.policies = policies; }
     public Map<String, SecurityHubAssociation> getAssociations() { return associations; }
     public void setAssociations(Map<String, SecurityHubAssociation> associations) { this.associations = associations; }
+    public Map<String, SecurityHubMember> getMembers() { return members; }
+    public void setMembers(Map<String, SecurityHubMember> value) {
+        members = value == null ? new LinkedHashMap<>() : value;
+    }
 }

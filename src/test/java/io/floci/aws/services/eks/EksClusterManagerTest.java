@@ -834,6 +834,36 @@ class EksClusterManagerTest {
         }
 
         @Test
+        void configuringTheSizingTypeReplacesASurvivorKeepingItsVolume() {
+            when(config.services().eks().nodeInstanceType()).thenReturn(Optional.of("t2.2xlarge"));
+            when(lifecycleManager.findByName("floci-eks-demo")).thenReturn(Optional.of(survivingContainer("cid-old")));
+            when(lifecycleManager.adopt(eq("cid-old"), eq(List.of(6443)), any()))
+                    .thenReturn(new ContainerInfo("cid-old", Map.of(), Map.of(6443, 6440)));
+            stubFreshStart("cid-new", 6440);
+
+            Cluster cluster = cluster();
+            manager.restoreCluster(cluster);
+
+            assertEquals("cid-new", cluster.getContainerId());
+            verify(lifecycleManager, never()).removeVolume(anyString());
+        }
+
+        @Test
+        void aSurvivorSizedFromTheConfiguredTypeIsKept() {
+            when(config.services().eks().nodeInstanceType()).thenReturn(Optional.of("t2.2xlarge"));
+            when(lifecycleManager.findByName("floci-eks-demo")).thenReturn(Optional.of(containerFromJson(
+                    "{\"Id\":\"cid-1\",\"Labels\":{\"io.floci.eks.node-capacity\":\"m5.large@t2.2xlarge:unbounded\"}}")));
+            when(lifecycleManager.adopt(eq("cid-1"), eq(List.of(6443)), any()))
+                    .thenReturn(new ContainerInfo("cid-1", Map.of(), Map.of(6443, 6440)));
+
+            Cluster cluster = cluster();
+            manager.restoreCluster(cluster);
+
+            assertEquals("cid-1", cluster.getContainerId());
+            verify(lifecycleManager, never()).create(any());
+        }
+
+        @Test
         void networkModeIgnoresTheEndpointHost() {
             when(containerDetector.isRunningInContainer()).thenReturn(true);
             when(config.services().eks().endpointMode()).thenReturn("network");
@@ -3273,6 +3303,66 @@ class EksClusterManagerTest {
             assertTrue(cmdCaptor.getValue().containsAll(expectedArgs));
             assertEquals("t3.medium", manager.synthesizeClusterNodeInstance(
                     cluster, "172.17.0.2", "us-east-1", "000000000000").getInstanceType());
+        }
+
+        @Test
+        void configuredSizingTypeSizesTheContainerButNotWhatTheApiReports() {
+            when(eks.nodeInstanceType()).thenReturn(Optional.of(" t2.2xlarge "));
+            Info host = stubDockerHost(64L * 1024 * 1024 * 1024, 16);
+
+            Cluster cluster = new Cluster();
+            cluster.setName("sized-cluster");
+            cluster.setNodeInstanceType(manager.selectNodeInstanceType("t3.small"));
+            manager.startCluster(cluster);
+
+            Ec2InstanceTypeCatalog catalog = new Ec2InstanceTypeCatalog();
+            EksNodeCapacity.Limits limits = EksNodeCapacity.calculate(
+                    catalog.find("t2.2xlarge").orElseThrow(), host.getMemTotal(), host.getNCPU(), 0, 0);
+            verify(builder).withMemoryBytes(limits.memoryBytes());
+            verify(builder).withCpuUnits(limits.vcpus() * 1024);
+            assertEquals("t3.small", cluster.getNodeInstanceType());
+            assertEquals("t3.small", manager.synthesizeClusterNodeInstance(
+                    cluster, "172.17.0.2", "us-east-1", "000000000000").getInstanceType());
+            assertEquals("t2.2xlarge", manager.sizingInstanceType(cluster));
+        }
+
+        @Test
+        void ceilingsStillApplyOnTopOfTheConfiguredSizingType() {
+            when(eks.nodeInstanceType()).thenReturn(Optional.of("t2.2xlarge"));
+            when(eks.maxMemoryMib()).thenReturn(4096);
+            when(eks.maxVcpus()).thenReturn(2);
+            Info host = stubDockerHost(64L * 1024 * 1024 * 1024, 16);
+
+            Cluster cluster = new Cluster();
+            cluster.setName("capped-sized-cluster");
+            manager.startCluster(cluster);
+
+            EksNodeCapacity.Limits limits = EksNodeCapacity.calculate(new Ec2InstanceTypeCatalog()
+                    .find("t2.2xlarge").orElseThrow(), host.getMemTotal(), host.getNCPU(), 4096, 2);
+            verify(builder).withMemoryBytes(limits.memoryBytes());
+            verify(builder).withCpuUnits(2 * 1024);
+        }
+
+        @Test
+        void sizingTypeAbsentFromTheCatalogIsIgnored() {
+            when(eks.nodeInstanceType()).thenReturn(Optional.of("x9.imaginary"));
+            Cluster cluster = new Cluster();
+            cluster.setNodeInstanceType("t3.small");
+
+            assertEquals("t3.small", manager.sizingInstanceType(cluster));
+
+            when(eks.nodeInstanceType()).thenReturn(Optional.of("  "));
+            assertEquals("t3.small", manager.sizingInstanceType(cluster));
+        }
+
+        private Info stubDockerHost(long memoryBytes, int cpus) {
+            DockerClient dockerClient = Mockito.mock(DockerClient.class, Mockito.RETURNS_DEEP_STUBS);
+            Info host = Mockito.mock(Info.class);
+            when(host.getMemTotal()).thenReturn(memoryBytes);
+            when(host.getNCPU()).thenReturn(cpus);
+            when(dockerClient.infoCmd().exec()).thenReturn(host);
+            when(lifecycleManager.getDockerClient()).thenReturn(dockerClient);
+            return host;
         }
 
         @Test

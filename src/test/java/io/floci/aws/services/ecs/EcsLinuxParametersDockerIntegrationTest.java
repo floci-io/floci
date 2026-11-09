@@ -20,11 +20,13 @@ import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
+import java.time.Duration;
 import java.util.Arrays;
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
 
+import static io.floci.aws.testing.EcsTaskWaits.awaitLastStatus;
 import static io.restassured.RestAssured.given;
 import static org.junit.jupiter.api.Assertions.assertArrayEquals;
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -119,7 +121,9 @@ class EcsLinuxParametersDockerIntegrationTest {
         EcsTask task = ecsService.runTask(clusterName, taskDefinitionArn, 1,
                 null, null, null, null, null, REGION).getFirst();
         taskArn = task.getTaskArn();
-        EcsTask described = ecsService.describeTasks(clusterName, List.of(taskArn), REGION).getFirst();
+        EcsTask described = awaitLastStatus(
+                () -> ecsService.describeTasks(clusterName, List.of(taskArn), REGION).getFirst(),
+                EcsTask::getLastStatus, Duration.ofMinutes(2), "RUNNING", "STOPPED");
         assertEquals("RUNNING", described.getLastStatus(), "the container must be up: " + described.getStoppedReason());
         String containerId = described.getContainers().getFirst().getRuntimeId();
 
@@ -166,7 +170,9 @@ class EcsLinuxParametersDockerIntegrationTest {
         EcsTask task = ecsService.runTask(clusterName, taskDefinitionArn, 1,
                 null, null, null, null, null, REGION).getFirst();
         taskArn = task.getTaskArn();
-        EcsTask described = ecsService.describeTasks(clusterName, List.of(taskArn), REGION).getFirst();
+        EcsTask described = awaitLastStatus(
+                () -> ecsService.describeTasks(clusterName, List.of(taskArn), REGION).getFirst(),
+                EcsTask::getLastStatus, Duration.ofMinutes(2), "RUNNING", "STOPPED");
         assertEquals("RUNNING", described.getLastStatus(), "the container must be up: " + described.getStoppedReason());
 
         String containerId = described.getContainers().getFirst().getRuntimeId();

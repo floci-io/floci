@@ -9,6 +9,7 @@ import jakarta.ws.rs.container.PreMatching;
 import jakarta.ws.rs.ext.Provider;
 
 import java.util.Set;
+import java.util.function.Predicate;
 
 /**
  * Rewrites the data plane's two-segment paths to an internal prefix before JAX-RS route
@@ -23,6 +24,24 @@ public class PaymentCryptographyDataPlaneRouteFilter implements ContainerRequest
 
     static final String INTERNAL_PREFIX = "/_paymentcryptography";
 
+    /**
+     * The path prefixes the data plane's routes sit under.
+     *
+     * <p>The routes are the ones the model names, and every one of them starts with one of
+     * these. A route whose prefix is not here is not rewritten, so it never reaches its
+     * controller, and the request is answered by whichever controller claims it instead.
+     * The test reads the generated routes and holds this list to them.
+     */
+    static final Set<String> CONTESTED_PATHS = Set.of(
+            "/keys",
+            "/mac",
+            "/macemvpinchange",
+            "/pindata",
+            "/cardvalidationdata",
+            "/cryptogram",
+            "/keymaterial",
+            "/as2805kekvalidation");
+
     private final SignedServiceRoute route;
 
     @Inject
@@ -33,15 +52,24 @@ public class PaymentCryptographyDataPlaneRouteFilter implements ContainerRequest
         // is served as well, so that either scope reaches the data plane.
         this.route = new SignedServiceRoute(catalog,
                 Set.of("paymentcryptography", "payment-cryptography-data"), INTERNAL_PREFIX,
-                SignedServiceRoute.under("/mac")
-                        .or(SignedServiceRoute.under("/pindata"))
-                        .or(SignedServiceRoute.under("/cardvalidationdata"))
-                        .or(SignedServiceRoute.under("/cryptogram"))
-                        .or(SignedServiceRoute.under("/keys")));
+                under(CONTESTED_PATHS));
     }
 
     @Override
     public void filter(ContainerRequestContext ctx) {
         route.apply(ctx);
+    }
+
+    /**
+     * The predicate that says a path is one of the service's contested routes.
+     *
+     * @param roots the path prefixes the routes sit under
+     * @return the predicate
+     */
+    private static Predicate<String> under(Set<String> roots) {
+        return roots.stream()
+                .map(SignedServiceRoute::under)
+                .reduce(Predicate::or)
+                .orElseThrow(() -> new IllegalStateException("the data plane has no routes"));
     }
 }
