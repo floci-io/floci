@@ -7,10 +7,12 @@ import io.floci.aws.services.paymentcryptography.model.PaymentCryptographyKey;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 
-import java.util.Iterator;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+
+import static io.floci.aws.services.paymentcryptography.PaymentCryptographyAttributes.soleVariant;
+import static io.floci.aws.services.paymentcryptography.PaymentCryptographyAttributes.text;
 
 /**
  * The card validation operations.
@@ -50,8 +52,6 @@ public class PaymentCryptographyCardValidationOperations {
         /** The dynamic variants. */
         String panSequenceNumber;
         String applicationTransactionCounter;
-        String trackData;
-        String unpredictableNumber;
         /** Which variant this is, for the key rules and the cipher. */
         String variant;
     }
@@ -131,15 +131,12 @@ public class PaymentCryptographyCardValidationOperations {
                                  int length) {
         if ("DynamicCardVerificationValue".equals(attrs.variant)) {
             return CvvCrypto.computeDynamicValue(pan, attrs.expiry, attrs.serviceCode,
-                    attrs.applicationTransactionCounter, key.getKeyMaterialHex(),
+                    attrs.applicationTransactionCounter,
+                    PaymentCryptographyKeyRules.materialHex(key),
                     attrs.panSequenceNumber, length);
         }
-        if ("DynamicCardVerificationCode".equals(attrs.variant)) {
-            throw validation("the dynamic card verification code is not implemented: it is a "
-                    + "Mastercard proprietary construction and it is not approximated");
-        }
         return CvvCrypto.computeCvv(pan, attrs.expiry, attrs.serviceCode,
-                key.getKeyMaterialHex(), length);
+                PaymentCryptographyKeyRules.materialHex(key), length);
     }
 
     /**
@@ -218,28 +215,13 @@ public class PaymentCryptographyCardValidationOperations {
                 // proprietary construction, and there is nothing published to check a
                 // derivation against.
                 throw validation("the dynamic card verification code is not implemented: it is a "
-                        + "Mastercard proprietary construction and it is not approximated)");}
+                        + "Mastercard proprietary construction and it is not approximated");
+            }
             default:
                 throw validation(variant + " not supported by this service "
                         + "(only CardVerificationValue1/CardVerificationValue2"
                         + "/DynamicCardVerificationValue/DynamicCardVerificationCode)");
         }
-    }
-
-    /** The one variant of an attributes structure, or null when there is not exactly one. */
-    private static String soleVariant(JsonNode attributes) {
-        if (attributes == null || !attributes.isObject()) {
-            return null;
-        }
-        String found = null;
-        Iterator<Map.Entry<String, JsonNode>> fields = attributes.fields();
-        while (fields.hasNext()) {
-            if (found != null) {
-                return null;
-            }
-            found = fields.next().getKey();
-        }
-        return found;
     }
 
     private PaymentCryptographyKey requiredKey(String identifier, String region) {
@@ -254,15 +236,6 @@ public class PaymentCryptographyCardValidationOperations {
     /**
      * Checks that the key has the mode of use the operation needs.
      */
-    /** The text of a request member. */
-    private static String text(JsonNode request, String member) {
-        if (request == null) {
-            return "";
-        }
-        JsonNode declared = request.get(member);
-        return declared == null || declared.isNull() ? "" : declared.asText("");
-    }
-
     private static AwsException validation(String message) {
         return new AwsException("ValidationException", message, 400);
     }

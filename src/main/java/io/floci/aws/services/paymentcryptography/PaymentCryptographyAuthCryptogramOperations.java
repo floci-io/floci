@@ -28,13 +28,15 @@ import static io.floci.aws.services.paymentcryptography.PaymentCryptographyAttri
  * transaction data, cut to eight bytes.
  *
  * <p>Three derivations are served. The EMV common session key is the one the EMV common
- * specification gives, and the EMV 2000 one is the same. The Mastercard derivation is the
- * proprietary one, which also diversifies with the unpredictable number. The Visa derivation
- * derives no session key at all: the transaction data is enciphered under the ICC master key,
- * which is the Visa Smart Debit and Credit method.
+ * specification gives. The Mastercard derivation is the proprietary one, which also
+ * diversifies with the unpredictable number. The Visa derivation derives no session key at
+ * all: the transaction data is enciphered under the ICC master key, which is the Visa Smart
+ * Debit and Credit method.
  *
- * <p>Amex is refused rather than approximated: the AEIPS derivation is proprietary and there
- * is nothing to verify it against, and a plausible wrong cryptogram is worse than an error.
+ * <p>Two derivations are refused rather than approximated. The American Express one is
+ * proprietary and there is nothing to verify it against, and a plausible wrong cryptogram is
+ * worse than an error. The EMV 2000 one is the EMV 4.1 tree derivation, which needs the
+ * card's public key certificate.
  */
 @ApplicationScoped
 public class PaymentCryptographyAuthCryptogramOperations {

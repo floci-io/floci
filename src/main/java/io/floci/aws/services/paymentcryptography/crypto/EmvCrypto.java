@@ -20,12 +20,10 @@ import java.util.HexFormat;
  * builds itself, which is the issuer authentication cryptogram.
  *
  * <p>All DES is done through three-key TDES rather than a single-DES provider:
- * single DES is expressed as TDES with K||K||K, which keeps the transform clear
- * of OpenSSL's legacy single-DES provider.
+ * single DES is expressed as TDES with K||K||K.
  *
- * <p>The full PAN flows into master key derivation. That is correct by
- * construction; truncating it to 12 digits was a bug that appeared across
- * several reviews of the original engine.
+ * <p>The full PAN flows into master key derivation, because the derivation is
+ * defined over the whole of it.
  */
 public final class EmvCrypto {
 
@@ -110,10 +108,6 @@ public final class EmvCrypto {
      * <p>Running a 3DES transform per block instead - the obvious reading -
      * produces a different MAC.
      */
-    public static byte[] retailMac(byte[] key16, byte[] data) {
-        return retailMac(key16, data, Padding.METHOD2);
-    }
-
     /** The retail MAC over data padded with the given ISO 9797-1 method. */
     public static byte[] retailMac(byte[] key16, byte[] data, Padding padding) {
         byte[] kl = slice(key16, 0, 8);
@@ -282,7 +276,7 @@ public final class EmvCrypto {
 
     /**
      * ARPC method 2, the CSU-based one: the leftmost 4 bytes of the retail MAC
-     * over {@code ARQC || ARC || CSU || proprietary} under the session key.
+     * over {@code ARQC || CSU || proprietary} under the session key.
      *
      * <p>The response code belongs in the input of the first method. The second
      * method has none: the card status update and the proprietary data are what
