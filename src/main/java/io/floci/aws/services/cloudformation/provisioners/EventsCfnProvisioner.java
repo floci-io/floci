@@ -307,6 +307,17 @@ public class EventsCfnProvisioner implements CfnResourceProvisioner {
     }
 
     /**
+     * An event bus update that failed after its tag snapshot may already have changed tags, so the
+     * engine keeps that attempt for {@link #rollbackUpdate} instead of putting the previous resource
+     * back over it. A failure before the snapshot changed nothing and is left to the engine.
+     */
+    @Override
+    public boolean retainsFailedUpdateState(StackResource resource) {
+        return "AWS::Events::EventBus".equals(resource.getResourceType())
+                && resource.getAttributes().containsKey(CfnRollback.EVENT_BUS_UPDATE_SNAPSHOT_ATTR);
+    }
+
+    /**
      * Puts the rule's targets back to what the snapshot holds and spends it. Exact rather than
      * additive: a target the failed update added is removed, and every snapshotted target is put
      * again, so one the update modified goes back to the configuration it was found with.
