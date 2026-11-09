@@ -85,9 +85,14 @@ class PaymentCryptographyAuthCryptogramOperationsTest {
 
     /** The session key derivation attributes of the EMV common variant. */
     private static JsonNode emvCommon() {
+        return emvCommon(PAN);
+    }
+
+    /** The session key derivation attributes of the EMV common variant, for an account number. */
+    private static JsonNode emvCommon(String pan) {
         ObjectMapper mapper = new ObjectMapper();
         ObjectNode value = mapper.createObjectNode();
-        value.put("PrimaryAccountNumber", PAN);
+        value.put("PrimaryAccountNumber", pan);
         value.put("PanSequenceNumber", PSN);
         value.put("ApplicationTransactionCounter", ATC);
         ObjectNode outer = mapper.createObjectNode();
@@ -96,9 +101,27 @@ class PaymentCryptographyAuthCryptogramOperationsTest {
     }
 
     @Test
+    void anAccountNumberShorterThanTheFieldIsRead() {
+        PaymentCryptographyKey key = createKey("DeriveKey");
+
+        // The model lets the account number be twelve digits, and the derivation reads the
+        // rightmost sixteen digits of it and the sequence number, so it is read rather than
+        // refused.
+        Map<String, Object> generated = cryptogram.generate(request(Map.of(
+                "KeyIdentifier", key.getArn(),
+                "TransactionData", TRANSACTION_DATA,
+                "MajorKeyDerivationMode", "EMV_OPTION_A",
+                "SessionKeyDerivationAttributes", emvCommon("411111111111"))), "us-east-1");
+
+        assertEquals(16, ((String) generated.get("AuthRequestCryptogram")).length());
+    }
+
+    @Test
     void theDerivationsAreTheOnesTheStandardGives() {
         // The values are the ones the EMV derivation gives for these inputs: the master key
-        // from the packed PAN || PSN, and the session key from the counter and that key.
+        // from the packed PAN || PSN, and the session key from the counter and that key. The
+        // derivation itself is pinned to the vectors the specifications publish in
+        // EmvCryptoTest.
         byte[] masterKey = EmvCrypto.deriveIccMasterKey(HEX.parseHex(IMK), PAN, PSN);
         assertEquals("A768CE9E1551FDE3A45B4C7C3DE9DC52", HEX.formatHex(masterKey));
         assertEquals("86CBD007BF1C4AE0B52643B64FB9371F",
