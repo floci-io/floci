@@ -28,6 +28,8 @@ import java.time.ZoneOffset;
 import java.time.format.DateTimeFormatter;
 import java.util.Base64;
 
+import static io.floci.aws.core.common.auth.SigV4RequestValidator.LEGACY_ACCESS_KEY_ID;
+import static io.floci.aws.core.common.auth.SigV4RequestValidator.LEGACY_SECRET_KEY;
 import static io.floci.aws.testing.EnforcementFixtures.createUser;
 import static io.floci.aws.testing.EnforcementFixtures.removeBucket;
 import static io.restassured.RestAssured.given;
@@ -48,8 +50,6 @@ import static org.hamcrest.Matchers.notNullValue;
 class S3PresignedPostAuthEnforcementIntegrationTest {
 
     private static final String BUCKET = "presigned-post-auth-bucket";
-    private static final String LEGACY_ACCESS_KEY_ID = "test";
-    private static final String LEGACY_SECRET_KEY = "test";
     // Matches the "20260101" date embedded in every credential scope built by this test class.
     private static final String AMZ_DATE = "20260101T000000Z";
 
