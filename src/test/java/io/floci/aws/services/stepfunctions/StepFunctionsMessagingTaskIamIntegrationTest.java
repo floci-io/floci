@@ -305,8 +305,7 @@ class StepFunctionsMessagingTaskIamIntegrationTest {
     void aForeignCredentialsRoleNeedsTheTopicPolicyToo() throws Exception {
         Target target = target("sns:publish");
         String executionRole = role(STATES_TRUST, ASSUME);
-        String foreignRole = EnforcementFixtures.createRole(cleanup, baseUri.getPort(), OTHER_ACCOUNT, "/",
-                "sfn-msg-" + UUID.randomUUID(), trusting(executionRole), PUBLISH_ANY);
+        String foreignRole = sfn().role(OTHER_ACCOUNT, "sfn-msg-", trusting(executionRole), PUBLISH_ANY);
         String machine = machine(jsonPathTask(target, foreignRole), executionRole);
 
         Response refused = terminal(start(machine, "{}"));
@@ -328,8 +327,7 @@ class StepFunctionsMessagingTaskIamIntegrationTest {
     void aForeignCredentialsRoleNeedsItsIdentityPolicyToo() throws Exception {
         Target target = target("sns:publish");
         String executionRole = role(STATES_TRUST, ASSUME);
-        String foreignRole = EnforcementFixtures.createRole(cleanup, baseUri.getPort(), OTHER_ACCOUNT, "/",
-                "sfn-msg-" + UUID.randomUUID(), trusting(executionRole), READ_ONLY);
+        String foreignRole = sfn().role(OTHER_ACCOUNT, "sfn-msg-", trusting(executionRole), READ_ONLY);
         setTopicPolicy(target.resourceArn(), topicStatement("Allow", foreignRole, target.resourceArn()));
 
         Response completed = terminal(start(machine(jsonPathTask(target, foreignRole), executionRole), "{}"));
@@ -426,8 +424,7 @@ class StepFunctionsMessagingTaskIamIntegrationTest {
     void aForeignCredentialsRoleNeedsTheBusPolicyToo() throws Exception {
         Target target = target("events:putEvents");
         String executionRole = role(STATES_TRUST, ASSUME);
-        String foreignRole = EnforcementFixtures.createRole(cleanup, baseUri.getPort(), OTHER_ACCOUNT, "/",
-                "sfn-msg-" + UUID.randomUUID(), trusting(executionRole), PUBLISH_ANY);
+        String foreignRole = sfn().role(OTHER_ACCOUNT, "sfn-msg-", trusting(executionRole), PUBLISH_ANY);
         String machine = machine(jsonPathTask(target, foreignRole), executionRole);
 
         Response refused = terminal(start(machine, "{}"));
@@ -449,8 +446,7 @@ class StepFunctionsMessagingTaskIamIntegrationTest {
     void aForeignCredentialsRoleNeedsItsIdentityPolicyOnABusToo() throws Exception {
         Target target = target("events:putEvents");
         String executionRole = role(STATES_TRUST, ASSUME);
-        String foreignRole = EnforcementFixtures.createRole(cleanup, baseUri.getPort(), OTHER_ACCOUNT, "/",
-                "sfn-msg-" + UUID.randomUUID(), trusting(executionRole), READ_ONLY);
+        String foreignRole = sfn().role(OTHER_ACCOUNT, "sfn-msg-", trusting(executionRole), READ_ONLY);
         events("PutPermission", Map.of("EventBusName", busName(target.resourceArn()), "StatementId", "s",
                 "Action", "events:PutEvents", "Principal", OTHER_ACCOUNT));
 

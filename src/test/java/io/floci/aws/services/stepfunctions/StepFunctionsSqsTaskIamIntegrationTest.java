@@ -181,8 +181,7 @@ class StepFunctionsSqsTaskIamIntegrationTest {
     void aForeignCredentialsRoleNeedsTheQueueToGrantIt() throws Exception {
         SqsTestQueue queue = queue();
         String executionRole = role(STATES_TRUST, ASSUME);
-        String foreignRole = EnforcementFixtures.createRole(cleanup, baseUri.getPort(), OTHER_ACCOUNT, "/",
-                "sfn-sqs-" + UUID.randomUUID(), trusting(executionRole), SEND);
+        String foreignRole = sfn().role(OTHER_ACCOUNT, "sfn-sqs-", trusting(executionRole), SEND);
         String machine = machine(jsonPathTask("sqs:sendMessage", queue, foreignRole), executionRole);
 
         Response refused = terminal(start(machine, "{}"));
@@ -201,8 +200,7 @@ class StepFunctionsSqsTaskIamIntegrationTest {
 
     @Test
     void aQueueInAnotherAccountNeedsItsOwnGrant() throws Exception {
-        SqsTestQueue queue = SqsTestQueue.create(sqsService, OTHER_ACCOUNT, REGION, "sfn-sqs-iam-");
-        cleanup.register(queue::delete);
+        SqsTestQueue queue = sfn().queue(sqsService, OTHER_ACCOUNT, REGION, "sfn-sqs-iam-");
         String role = role(STATES_TRUST, SEND);
         String machine = machine(jsonPathTask("sqs:sendMessage", queue, null), role);
 
@@ -220,8 +218,7 @@ class StepFunctionsSqsTaskIamIntegrationTest {
 
     @Test
     void aQueueInAnotherAccountCannotGrantWhatTheRoleLacks() throws Exception {
-        SqsTestQueue queue = SqsTestQueue.create(sqsService, OTHER_ACCOUNT, REGION, "sfn-sqs-iam-");
-        cleanup.register(queue::delete);
+        SqsTestQueue queue = sfn().queue(sqsService, OTHER_ACCOUNT, REGION, "sfn-sqs-iam-");
         String role = role(STATES_TRUST, READ_ONLY);
         queue.setPolicy(queuePolicy("Allow", role, queue.arn()));
 
