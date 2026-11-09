@@ -302,30 +302,15 @@ public final class EmvCrypto {
      * <p>The response code belongs in the MAC input. Omitting it produces an
      * ARPC that disagrees with the one an independent implementation computes
      * even when both sides hold the same session key - which happened.
+     *
+     * <p>The request carries no way to ask for the other form: the model gives
+     * the card status update and the proprietary data, and nothing else.
      */
     public static byte[] computeArpcMethod2(byte[] sk, byte[] arqc, String arcHex,
                                             String csuHex, String padHex) {
-        return computeArpcMethod2(sk, arqc, arcHex, csuHex, padHex, true);
-    }
-
-    /**
-     * The ARPC for the Visa online CVN (18, '22').
-     *
-     * <p>Visa requires the MAC input to be {@code ARQC || CSU}, with the
-     * proprietary authentication data appended when the CSU says it is present,
-     * and <strong>no response code</strong> - unlike the EMV and MasterCard form.
-     * The ARPC is the four left-most bytes of that MAC, taken under the
-     * application cryptogram session key.
-     *
-     * @param includeResponseCode true for the EMV/MasterCard form, which MACs the
-     *     response code in as well
-     */
-    public static byte[] computeArpcMethod2(byte[] sk, byte[] arqc, String arcHex,
-                                            String csuHex, String padHex,
-                                            boolean includeResponseCode) {
         byte[] data = concat(
                 arqc,
-                includeResponseCode && arcHex != null ? HEX.parseHex(arcHex) : new byte[0],
+                arcHex == null ? new byte[0] : HEX.parseHex(arcHex),
                 csuHex == null ? new byte[0] : HEX.parseHex(csuHex),
                 padHex == null ? new byte[0] : HEX.parseHex(padHex));
         return slice(retailMac(sk, data, Padding.METHOD2), 0, 4);

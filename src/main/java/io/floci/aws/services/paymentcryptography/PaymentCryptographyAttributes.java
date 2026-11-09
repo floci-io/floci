@@ -1,6 +1,7 @@
 package io.floci.aws.services.paymentcryptography;
 
 import com.fasterxml.jackson.databind.JsonNode;
+import io.floci.aws.core.common.AwsException;
 
 import java.util.Iterator;
 import java.util.Map;
@@ -31,6 +32,26 @@ final class PaymentCryptographyAttributes {
         }
         JsonNode declared = request.get(member);
         return declared == null || declared.isNull() ? "" : declared.asText("");
+    }
+
+    /**
+     * A hexadecimal member, checked to be one the cipher can read.
+     *
+     * <p>The model states the length of a hexadecimal member and does not always state an
+     * even one, so a member of an odd length is a request the model allows and the cipher
+     * cannot read. It is refused with the error the model names, rather than answered with
+     * a failure the caller cannot catch.
+     *
+     * @param member the member's path, for the refusal
+     * @param value the member's text
+     * @return the member's text, unchanged
+     */
+    static String hex(String member, String value) {
+        if (value.length() % 2 != 0) {
+            throw new AwsException("ValidationException",
+                    member + " must be an even number of hexadecimal characters", 400);
+        }
+        return value;
     }
 
     /**

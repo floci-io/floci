@@ -94,7 +94,8 @@ public class PaymentCryptographyAuthCryptogramOperations {
     Map<String, Object> generate(JsonNode request, String region) {
         PaymentCryptographyDataRequestShapes.check("GenerateAuthRequestCryptogram", request);
         String keyIdentifier = text(request, "KeyIdentifier");
-        String transactionData = text(request, "TransactionData");
+        String transactionData = PaymentCryptographyAttributes.hex("TransactionData",
+                text(request, "TransactionData"));
         SessionKey sk = resolveDerivation(request);
 
         PaymentCryptographyKey key = requiredKey(keyIdentifier, region);
@@ -121,7 +122,8 @@ public class PaymentCryptographyAuthCryptogramOperations {
         PaymentCryptographyDataRequestShapes.check("VerifyAuthRequestCryptogram", request);
         String keyIdentifier = text(request, "KeyIdentifier");
         String arqc = text(request, "AuthRequestCryptogram");
-        String transactionData = text(request, "TransactionData");
+        String transactionData = PaymentCryptographyAttributes.hex("TransactionData",
+                text(request, "TransactionData"));
         SessionKey sk = resolveDerivation(request);
 
         // The response attributes are optional, and the answer carries the response value only
@@ -130,7 +132,6 @@ public class PaymentCryptographyAuthCryptogramOperations {
         String arc = "0000";
         String csu = null;
         String pad = "";
-        String arpcInputFormat = null;
         JsonNode responseAttributes = request.get("AuthResponseAttributes");
         if (responseAttributes != null) {
             String variant = soleVariant(responseAttributes);
@@ -143,29 +144,16 @@ public class PaymentCryptographyAuthCryptogramOperations {
                 arc = text(method, "AuthResponseCode");
             } else if ("ArpcMethod2".equals(variant)) {
                 arpcMethod = "2";
-                // The variant's own members are read before the scheme constraints, because
-                // which constraint applies depends on the requested input format.
                 JsonNode method = responseAttributes.get(variant);
                 csu = text(method, "CardStatusUpdate");
-                pad = text(method, "ProprietaryAuthenticationData");
-                arpcInputFormat = text(method, "ArpcInputFormat");
-                if (!arpcInputFormat.isEmpty()
-                        && !"STANDARD".equals(arpcInputFormat) && !"VISA".equals(arpcInputFormat)) {
-                    throw validation("AuthResponseAttributes.ArpcMethod2.ArpcInputFormat must be "
-                            + "STANDARD or VISA");
-                }
+                pad = PaymentCryptographyAttributes.hex(
+                        "AuthResponseAttributes.ArpcMethod2.ProprietaryAuthenticationData",
+                        text(method, "ProprietaryAuthenticationData"));
                 if (sk.scheme == Scheme.MASTERCARD) {
                     throw validation("ARPC method 2 is not used in practice with the Mastercard "
                             + "session key derivation (method 1 only)");
                 }
                 if (sk.scheme == Scheme.VSDC) {
-                    if ("VISA".equals(arpcInputFormat)) {
-                        // Visa's online CVN MACs under a session key, and CVN 10 derives none,
-                        // so this combination cannot be right.
-                        throw validation("AuthResponseAttributes.ArpcMethod2.ArpcInputFormat VISA "
-                                + "needs a session-key derivation; the Visa variant derives none. "
-                                + "Request EmvCommon for the Visa online CVN.");
-                    }
                     throw validation("ARPC method 2 is not used in practice with the Visa session "
                             + "key derivation (method 1 only)");
                 }
@@ -202,8 +190,7 @@ public class PaymentCryptographyAuthCryptogramOperations {
         } else if ("2".equals(arpcMethod)) {
             // The response code is inside the MAC.
             out.put("AuthResponseValue", HEX.formatHex(EmvCrypto.computeArpcMethod2(
-                    arpcKey, HEX.parseHex(arqc), arc, csu, pad,
-                    !"VISA".equals(arpcInputFormat))));
+                    arpcKey, HEX.parseHex(arqc), arc, csu, pad)));
         }
         return out;
     }
@@ -327,9 +314,8 @@ public class PaymentCryptographyAuthCryptogramOperations {
                 || Boolean.TRUE.equals(modes.get("DeriveKey"))
                 || Boolean.TRUE.equals(modes.get("NoRestrictions"));
         if (!derives) {
-            throw new AwsException("InvalidKeyUsageException",
-                    "the key " + key.getArn() + " does not have the mode of use DeriveKey, which "
-                            + "it needs to derive a session key", 400);
+            throw validation("the key " + key.getArn() + " does not have the mode of use "
+                    + "DeriveKey, which it needs to derive a session key");
         }
     }
 

@@ -101,6 +101,11 @@ client that talks to the control plane does not reach it by accident.
   number and a longer sequence number are refused rather than read as the digits they
   carry, because the derivation reads the account number and the sequence number as they
   are given.
+- **A hexadecimal member of an odd length is refused.** The model states the length of a
+  hexadecimal member and does not always state an even one, so an odd number of
+  hexadecimal characters is a request the model allows and the cipher cannot read. The
+  track data, the transaction data and the proprietary authentication data are the members
+  it applies to, and the refusal names the member.
 
 The two-segment paths are moved to an internal prefix for the requests signed for this
 service, so a path-style request for a bucket of that name still reaches S3.

@@ -220,7 +220,9 @@ public class PaymentCryptographyCardValidationOperations {
                 String expiry = text(value, "CardExpiryDate");
                 String serviceCode = text(value, "ServiceCode");
                 String psn = text(value, "PanSequenceNumber");
-                String atc = text(value, "ApplicationTransactionCounter");
+                String atc = PaymentCryptographyAttributes.hex(
+                        variant + ".ApplicationTransactionCounter",
+                        text(value, "ApplicationTransactionCounter"));
                 CardAttrs out = new CardAttrs();
                 out.variant = variant;
                 out.expiry = expiry;
@@ -232,9 +234,13 @@ public class PaymentCryptographyCardValidationOperations {
             case "DynamicCardVerificationCode": {
                 JsonNode value = attributes.get(variant);
                 String psn = text(value, "PanSequenceNumber");
-                String atc = text(value, "ApplicationTransactionCounter");
-                String trackData = text(value, "TrackData");
-                String unpredictable = text(value, "UnpredictableNumber");
+                String atc = PaymentCryptographyAttributes.hex(
+                        variant + ".ApplicationTransactionCounter",
+                        text(value, "ApplicationTransactionCounter"));
+                String trackData = PaymentCryptographyAttributes.hex(
+                        variant + ".TrackData", text(value, "TrackData"));
+                String unpredictable = PaymentCryptographyAttributes.hex(
+                        variant + ".UnpredictableNumber", text(value, "UnpredictableNumber"));
                 CardAttrs out = new CardAttrs();
                 out.variant = variant;
                 out.panSequenceNumber = psn;
@@ -286,9 +292,8 @@ public class PaymentCryptographyCardValidationOperations {
             return;
         }
         if (!Boolean.TRUE.equals(modes.get(mode))) {
-            throw new AwsException("InvalidKeyUsageException",
-                    "the key " + key.getArn() + " does not have the mode of use " + mode
-                            + ", which it needs to " + what, 400);
+            throw validation("the key " + key.getArn() + " does not have the mode of use " + mode
+                    + ", which it needs to " + what);
         }
     }
 
