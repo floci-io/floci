@@ -1207,7 +1207,7 @@ public class DynamoDbPartiQLParser {
         }
     }
 
-    private static String incorrectOperandType(String op, String type) {
+    static String incorrectOperandType(String op, String type) {
         return "Incorrect operand type for operator or function; "
                 + "operator or function: " + op + ", operand type: " + type;
     }

@@ -772,6 +772,39 @@ class ExpressionEvaluatorTest {
                     "ConditionExpression", null, values));
         }
 
+        @ParameterizedTest
+        @CsvSource(delimiter = '|', quoteCharacter = '`', textBlock = """
+                n < :v                | {":v":{"BOOL":true}}                  | <, operand type: BOOL
+                :v >= n               | {":v":{"NULL":true}}                  | >=, operand type: NULL
+                size(n) > :v          | {":v":{"SS":["a"]}}                   | >, operand type: SS
+                NOT n <= :v           | {":v":{"L":[]}}                       | <=, operand type: L
+                n BETWEEN :lo AND :hi | {":lo":{"N":"1"},":hi":{"BOOL":true}} | BETWEEN, operand type: BOOL
+                n BETWEEN :lo AND :hi | {":lo":{"M":{}},":hi":{"BOOL":true}}  | BETWEEN, operand type: M
+                n BETWEEN :lo AND :hi | {":lo":{"N":"5"},":hi":{"NS":["1"]}}  | BETWEEN, operand type: NS
+                """)
+        void anOrderingOperatorRefusesAnOperandTypeWithNoOrdering(String expression, String values, String error)
+                throws Exception {
+            JsonNode parsed = mapper.readTree(values);
+
+            AwsException e = assertThrows(AwsException.class, () ->
+                    ExpressionEvaluator.validateExpression(expression, "FilterExpression", null, parsed));
+            assertEquals("Invalid FilterExpression: Incorrect operand type for operator or function; "
+                    + "operator or function: " + error, e.getMessage());
+        }
+
+        @ParameterizedTest
+        @CsvSource(delimiter = '|', quoteCharacter = '`', textBlock = """
+                n < :v  | {":v":{"B":"AQ=="}}
+                n = :v  | {":v":{"BOOL":true}}
+                n <> :v | {":v":{"NULL":true}}
+                """)
+        void orderedTypesAndOtherComparisonsAreAccepted(String expression, String values) throws Exception {
+            JsonNode parsed = mapper.readTree(values);
+
+            assertDoesNotThrow(() ->
+                    ExpressionEvaluator.validateExpression(expression, "FilterExpression", null, parsed));
+        }
+
         @Test
         void missingOperandThrowsSyntaxError() {
             AwsException e = assertThrows(AwsException.class, () ->
