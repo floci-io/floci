@@ -7710,11 +7710,22 @@ public class S3Service implements Resettable, ResourceProvider {
     private static final char ENCODED_SEGMENT_SEPARATOR = '~';
     private static final int SHA256_HEX_CHARS = 64;
 
-    // Windows refuses these characters in a file name, treats '\' as a separator and strips a
-    // trailing dot, all of which S3 accepts in a key, so there such a segment is encoded as well.
+    // Windows refuses these characters in a file name, treats '\' as a separator, strips a
+    // trailing dot and reserves device names such as NUL, all of which S3 accepts in a key, so
+    // there such a segment is encoded as well.
     private static final boolean WINDOWS_FILE_NAMES =
             System.getProperty("os.name", "").toLowerCase(Locale.ROOT).startsWith("windows");
     private static final String WINDOWS_RESERVED_CHARS = "<>:\"|?*\\";
+    // Microsoft's file naming rules reserve these names with any extension too (NUL.txt is NUL),
+    // and count the superscript digits ¹, ² and ³ as digits in COM and LPT names. Windows
+    // versions differ in which of these still open a device, so following the documented rules
+    // keeps a key on the same file whichever version runs Floci.
+    private static final Set<String> WINDOWS_DEVICE_NAMES = Set.of(
+            "CON", "PRN", "AUX", "NUL",
+            "COM1", "COM2", "COM3", "COM4", "COM5", "COM6", "COM7", "COM8", "COM9",
+            "COM¹", "COM²", "COM³",
+            "LPT1", "LPT2", "LPT3", "LPT4", "LPT5", "LPT6", "LPT7", "LPT8", "LPT9",
+            "LPT¹", "LPT²", "LPT³");
 
     // A 12-digit bucket name is valid on S3 and would otherwise collide with an account ID,
     // making dataRoot/<accountId>/... indistinguishable from the legacy dataRoot/<bucket>/...
@@ -7764,49 +7775,72 @@ public class S3Service implements Resettable, ResourceProvider {
      * becomes a readable prefix, '~', and the SHA-256 of the whole segment. The digest keeps the
      * mapping injective: the same key always resolves to one path and two keys never share a
      * file. Listing reads keys from the object store, never from these names, so the encoding
-     * never needs reversing.
+     * never needs reversing. The last segment is stored with {@code lastSegmentSuffix} appended,
+     * so the suffix counts toward its byte budget and is part of the name Windows has to hold.
      */
-    private static String encodePathSegments(String key, int lastSegmentBudget, int segmentBudget) {
+    private static String encodePathSegments(String key, String lastSegmentSuffix) {
         String[] segments = key.split("/", -1);
         for (int i = 0; i < segments.length; i++) {
-            segments[i] = encodePathSegment(segments[i], i == segments.length - 1 ? lastSegmentBudget : segmentBudget);
+            segments[i] = encodePathSegment(segments[i], i == segments.length - 1 ? lastSegmentSuffix : "");
         }
         return String.join("/", segments);
     }
 
-    private static String encodePathSegment(String segment, int budget) {
-        boolean representable = !WINDOWS_FILE_NAMES || isWindowsFileName(segment);
+    private static String encodePathSegment(String segment, String suffix) {
+        int budget = MAX_FILE_NAME_BYTES - suffix.length();
+        boolean representable = !WINDOWS_FILE_NAMES || isWindowsFileName(segment + suffix);
         if (representable && utf8Length(segment) <= budget && !hasEncodedShape(segment, budget)) {
             return segment;
         }
         String prefix = truncateUtf8(segment, budget - 1 - SHA256_HEX_CHARS);
         if (WINDOWS_FILE_NAMES) {
-            prefix = replaceWindowsReservedChars(prefix);
+            prefix = windowsSafePrefix(prefix);
         }
         return prefix + ENCODED_SEGMENT_SEPARATOR + Digests.sha256Hex(segment);
     }
 
-    /** Whether Windows stores {@code segment} as a file name exactly as written. */
-    static boolean isWindowsFileName(String segment) {
-        if (segment.equals(".") || segment.equals("..")) {
+    /** Whether Windows stores a file or directory named {@code name} exactly as written. */
+    static boolean isWindowsFileName(String name) {
+        if (name.equals(".") || name.equals("..")) {
             return true;
         }
-        for (int i = 0; i < segment.length(); i++) {
-            if (isWindowsReservedChar(segment.charAt(i))) {
+        for (int i = 0; i < name.length(); i++) {
+            if (isWindowsReservedChar(name.charAt(i))) {
                 return false;
             }
         }
-        return !segment.endsWith(".") && !segment.endsWith(" ");
+        return !name.endsWith(".") && !name.endsWith(" ") && !namesWindowsDevice(name);
     }
 
-    /** Swaps each character Windows refuses for '_'; every one is a single UTF-8 byte, as '_' is. */
-    private static String replaceWindowsReservedChars(String prefix) {
-        StringBuilder replaced = new StringBuilder(prefix.length());
+    /** Whether the part of {@code name} before its first dot, less trailing spaces, is a Windows device. */
+    private static boolean namesWindowsDevice(String name) {
+        int end = name.indexOf('.');
+        if (end < 0) {
+            end = name.length();
+        }
+        while (end > 0 && name.charAt(end - 1) == ' ') {
+            end--;
+        }
+        return WINDOWS_DEVICE_NAMES.contains(name.substring(0, end).toUpperCase(Locale.ROOT));
+    }
+
+    /**
+     * The readable prefix of an encoded name, made safe for Windows: each character Windows refuses
+     * becomes '_', and so does the first dot when the part before it names a device, because
+     * Microsoft's naming rules still read NUL.txt~digest as NUL. Each swapped character is one
+     * UTF-8 byte, as '_' is.
+     */
+    static String windowsSafePrefix(String prefix) {
+        StringBuilder safe = new StringBuilder(prefix.length());
         for (int i = 0; i < prefix.length(); i++) {
             char c = prefix.charAt(i);
-            replaced.append(isWindowsReservedChar(c) ? '_' : c);
+            safe.append(isWindowsReservedChar(c) ? '_' : c);
         }
-        return replaced.toString();
+        int dot = safe.indexOf(".");
+        if (dot >= 0 && namesWindowsDevice(safe.substring(0, dot))) {
+            safe.setCharAt(dot, '_');
+        }
+        return safe.toString();
     }
 
     private static boolean isWindowsReservedChar(char c) {
@@ -7881,8 +7915,7 @@ public class S3Service implements Resettable, ResourceProvider {
             safeKey = safeKey.substring(1);
         }
 
-        String encodedKey = encodePathSegments(safeKey,
-                MAX_FILE_NAME_BYTES - DATA_SUFFIX.length(), MAX_FILE_NAME_BYTES);
+        String encodedKey = encodePathSegments(safeKey, DATA_SUFFIX);
         Path resolved = bucketDir.resolve(encodedKey + DATA_SUFFIX).normalize();
         if (!resolved.startsWith(bucketDir)) {
             throw new AwsException("InvalidKey", "The specified key is invalid.", 400);
@@ -7891,16 +7924,19 @@ public class S3Service implements Resettable, ResourceProvider {
     }
 
     /**
-     * Whether the legacy layout, which used the raw key as the path, could have stored {@code key}.
-     * On Windows it could not hold a segment Windows refuses, and probing for one would either
-     * throw or find the file of a different key that Windows folds onto the same name.
+     * Whether the legacy layout, which used the raw key as the path with {@code lastSegmentSuffix}
+     * appended, could have stored {@code key}. On Windows it could not hold a name Windows refuses,
+     * and probing for one would throw, open a device, or find the file of a different key that
+     * Windows folds onto the same name.
      */
-    private static boolean hasLegacyPath(String key) {
+    private static boolean hasLegacyPath(String key, String lastSegmentSuffix) {
         if (!WINDOWS_FILE_NAMES) {
             return true;
         }
-        for (String segment : key.split("/", -1)) {
-            if (!isWindowsFileName(segment)) {
+        String[] segments = key.split("/", -1);
+        for (int i = 0; i < segments.length; i++) {
+            String name = i == segments.length - 1 ? segments[i] + lastSegmentSuffix : segments[i];
+            if (!isWindowsFileName(name)) {
                 return false;
             }
         }
@@ -7928,7 +7964,7 @@ public class S3Service implements Resettable, ResourceProvider {
 
     private Path resolveObjectPathForRead(String accountId, String bucketName, String key) {
         Path resolved = resolveObjectPath(accountId, bucketName, key);
-        if (hasLegacyPath(key)) {
+        if (hasLegacyPath(key, DATA_SUFFIX)) {
             copyLegacyFileIfPresent(legacyObjectPath(bucketName, key), resolved);
         }
         return resolved;
@@ -7947,7 +7983,7 @@ public class S3Service implements Resettable, ResourceProvider {
             safeKey = safeKey.substring(1);
         }
 
-        Path resolved = baseDir.resolve(encodePathSegments(safeKey, MAX_FILE_NAME_BYTES, MAX_FILE_NAME_BYTES))
+        Path resolved = baseDir.resolve(encodePathSegments(safeKey, ""))
                 .resolve(versionId + DATA_SUFFIX).normalize();
         if (!resolved.startsWith(baseDir)) {
             throw new AwsException("InvalidKey", "The specified key is invalid.", 400);
@@ -7971,7 +8007,7 @@ public class S3Service implements Resettable, ResourceProvider {
 
     private Path resolveVersionedPathForRead(String accountId, String bucketName, String key, String versionId) {
         Path resolved = resolveVersionedPath(accountId, bucketName, key, versionId);
-        if (hasLegacyPath(key)) {
+        if (hasLegacyPath(key, "")) {
             copyLegacyFileIfPresent(legacyVersionedPath(bucketName, key, versionId), resolved);
         }
         return resolved;
