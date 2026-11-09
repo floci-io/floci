@@ -1031,6 +1031,8 @@ class DynamoDbPartiQLParserTest {
             foo(DELETE FROM "u" WHERE pk = 1) x                                 | NWF Unexpected token after expression
             foo(DELETE FROM "u" WHERE pk = 1, 1 2)                              | NWF Expected RIGHT_PAREN
             foo(SELECT * FROM "t" WHERE pk = )                                  | NWF Unexpected term
+            EXISTS(SELECT * FROM "t" WHERE pk = 1                               | NWF Expected RIGHT_PAREN
+            EXISTS(SELECT * FROM "t" WHERE pk = 1 AND a = (DELETE FROM "u" WHERE pk = 1)) | KEYWORD delete
             """)
     void refusesANestedStatementOnceTheWholeStatementParses(String statement, String message) {
         String expected = message

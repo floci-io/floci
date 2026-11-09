@@ -565,13 +565,14 @@ public class DynamoDbPartiQLParser {
     private static final String EXISTS_OUTSIDE_TRANSACTION =
             "EXISTS can only be used in ExecuteTransaction write requests.";
 
+    private static final Set<TType> STATEMENT_ENDS = EnumSet.of(TType.SEMICOLON, TType.EOF);
+
     private Stmt parseStmt(boolean transaction) {
         if (peekFunction("exists") && tokens.get(pos + 2).type() == TType.SELECT) {
             advance();
             consume(TType.LPAREN);
             Stmt.Select select = parseSelect();
-            TType after = tokens.get(pos + 1).type();
-            if (peek().type() == TType.RPAREN && (after == TType.SEMICOLON || after == TType.EOF)) {
+            if (peek().type() == TType.RPAREN && STATEMENT_ENDS.contains(tokens.get(pos + 1).type())) {
                 advance();
                 return new Stmt.Exists(select);
             }
