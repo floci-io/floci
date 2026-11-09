@@ -146,6 +146,9 @@ public class CloudWatchDashboardsService {
 
     public PaginatedResult<Dashboard> listDashboardsPage(String dashboardNamePrefix,
                                                          String nextToken, String region) {
+        if (nextToken != null && nextToken.isEmpty()) {
+            throw new AwsException("InvalidParameterValue", "Invalid NextToken.", 400);
+        }
         String prefix = dashboardNamePrefix == null || dashboardNamePrefix.isBlank()
                 ? "" : dashboardNamePrefix;
         String scope = "cloudwatch-dashboards:" + regionResolver.getAccountId() + ":" + region + ":" + prefix;

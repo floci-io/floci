@@ -54,6 +54,20 @@ class CloudWatchDashboardsIntegrationTest {
                 .body(body);
     }
 
+    private static RequestSpecification queryListDashboards(String prefix, String nextToken) {
+        RequestSpecification request = given()
+                .contentType("application/x-www-form-urlencoded")
+                .header("Authorization", CW_SCOPE)
+                .formParam("Action", "ListDashboards");
+        if (prefix != null) {
+            request.formParam("DashboardNamePrefix", prefix);
+        }
+        if (nextToken != null) {
+            request.formParam("NextToken", nextToken);
+        }
+        return request;
+    }
+
     private static final String BODY =
             "{\"widgets\":[{\"type\":\"metric\",\"properties\":{\"title\":\"a > b\"}}]}";
 
@@ -109,11 +123,7 @@ class CloudWatchDashboardsIntegrationTest {
         putDashboard("prefixed-two", BODY);
         putDashboard("unprefixed", BODY);
 
-        given()
-            .contentType("application/x-www-form-urlencoded")
-            .header("Authorization", CW_SCOPE)
-            .formParam("Action", "ListDashboards")
-            .formParam("DashboardNamePrefix", "prefixed-")
+        queryListDashboards("prefixed-", null)
         .when()
             .post("/")
         .then()
@@ -141,11 +151,7 @@ class CloudWatchDashboardsIntegrationTest {
             String nextToken = response.jsonPath().getString("NextToken");
             assertNotNull(nextToken);
 
-            Response queryFirstPage = given()
-                    .contentType("application/x-www-form-urlencoded")
-                    .header("Authorization", CW_SCOPE)
-                    .formParam("Action", "ListDashboards")
-                    .formParam("DashboardNamePrefix", "pagination-issue-")
+            Response queryFirstPage = queryListDashboards("pagination-issue-", null)
                     .when().post("/");
             queryFirstPage.then().statusCode(200);
             assertEquals(1000, queryFirstPage.xmlPath().getList(
@@ -160,12 +166,7 @@ class CloudWatchDashboardsIntegrationTest {
             assertEquals(1, secondPage.jsonPath().getList("DashboardEntries").size());
             assertNull(secondPage.jsonPath().getString("NextToken"));
 
-            given()
-                    .contentType("application/x-www-form-urlencoded")
-                    .header("Authorization", CW_SCOPE)
-                    .formParam("Action", "ListDashboards")
-                    .formParam("DashboardNamePrefix", "pagination-issue-")
-                    .formParam("NextToken", nextToken)
+            queryListDashboards("pagination-issue-", nextToken)
                     .when().post("/")
                     .then().statusCode(200)
                     .body("ListDashboardsResponse.ListDashboardsResult.DashboardEntries.member.DashboardName",
@@ -190,16 +191,25 @@ class CloudWatchDashboardsIntegrationTest {
                             "AWS4-HMAC-SHA256 Credential=test/20260205/us-west-2/monitoring/aws4_request")
                     .when().post("/")
                     .then().statusCode(400);
-            given()
-                    .contentType("application/x-www-form-urlencoded")
-                    .header("Authorization", CW_SCOPE)
-                    .formParam("Action", "ListDashboards")
-                    .formParam("NextToken", "not-a-token")
+            queryListDashboards(null, "not-a-token")
                     .when().post("/")
                     .then().statusCode(400);
         } finally {
             dashboardsService.deleteDashboards(names, "us-east-1");
         }
+    }
+
+    @Test
+    void listDashboardsRejectsExplicitlyEmptyContinuationTokens() {
+        json("ListDashboards", "{\"NextToken\":\"\"}")
+                .when().post("/")
+                .then().statusCode(400)
+                .body("__type", equalTo("InvalidParameterValue"));
+
+        queryListDashboards(null, "")
+                .when().post("/")
+                .then().statusCode(400)
+                .body("ErrorResponse.Error.Code", equalTo("InvalidParameterValue"));
     }
 
     @Test
