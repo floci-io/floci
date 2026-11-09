@@ -877,7 +877,9 @@ order) through its own S3 service and streams the rows into the backing PostgreS
 
 - Supported options: `DELIMITER`, `FORMAT CSV` (or a bare `CSV`), `GZIP`, `IGNOREHEADER <n>` and
   `HEADER`, `NULL AS`, `FORMAT AS JSON 'auto'`, `FORMAT AS JSON 'auto ignorecase'` (or bare `JSON 'auto'`),
-  `MANIFEST`, and an explicit column list.
+  `MANIFEST`, `COMPUPDATE`, `STATUPDATE`, `TRIMBLANKS`, and an explicit column list.
+- `COMPUPDATE [PRESET | ON | OFF | TRUE | FALSE]` and `STATUPDATE [ON | OFF | TRUE | FALSE]` (or bare `COMPUPDATE`
+  and `STATUPDATE`) are accepted and treated as no-ops for single-node PostgreSQL compatibility.
 - The default framing is pipe-delimited text, matching Redshift. `FORMAT CSV` switches to CSV with
   a comma default delimiter.
 - `FORMAT AS JSON 'auto'` loads JSON objects, mapping JSON keys to table columns with exact case
@@ -912,10 +914,12 @@ order) through its own S3 service and streams the rows into the backing PostgreS
   stored, and the statement text keeps them out of Floci's own messages. Combining key credentials with
   `IAM_ROLE`, or giving only one of the pair, is
   not intercepted, and neither is a blank key, secret, token or role.
-- `EMPTYASNULL`, `BLANKSASNULL`, `REMOVEQUOTES` (not with `CSV` or `JSON`), `ACCEPTINVCHARS [AS 'c']`
+- `EMPTYASNULL`, `BLANKSASNULL`, `TRIMBLANKS`, `REMOVEQUOTES` (not with `CSV` or `JSON`), `ACCEPTINVCHARS [AS 'c']`
   (default `?`, one ASCII character) and `TRUNCATECOLUMNS` rewrite field content before loading. Field
   level options need a single-byte `DELIMITER`, are not combined with `FORMAT AS JSON`, and normalise
-  `CRLF` line endings to `LF`. A nulled field is written as the `NULL AS` string, or `\N` in text
+  `CRLF` line endings to `LF`. `TRIMBLANKS` removes trailing white space (spaces and tabs) from `VARCHAR` columns;
+  combined with `EMPTYASNULL`, a field containing only spaces converts to `NULL`. A nulled field is written
+  as the `NULL AS` string, or `\N` in text
   mode and an empty unquoted field in CSV mode. `TRUNCATECOLUMNS` cuts a value to the declared
   `CHAR`/`VARCHAR` length in bytes (Redshift's meaning of the declared length, so `éééé` into
   `VARCHAR(3)` loads `é`), never inside a multi-byte character or a backslash escape. Its column
