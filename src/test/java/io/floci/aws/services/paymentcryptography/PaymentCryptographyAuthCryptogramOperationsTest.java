@@ -16,6 +16,8 @@ import java.util.LinkedHashMap;
 import java.util.Map;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -72,6 +74,8 @@ class PaymentCryptographyAuthCryptogramOperationsTest {
         members.forEach((name, value) -> {
             if (value instanceof JsonNode json) {
                 node.set(name, json);
+            } else if (value instanceof Number number) {
+                node.put(name, number.intValue());
             } else {
                 node.put(name, String.valueOf(value));
             }
@@ -179,7 +183,7 @@ class PaymentCryptographyAuthCryptogramOperationsTest {
                         "MajorKeyDerivationMode", "EMV_OPTION_A",
                         "SessionKeyDerivationAttributes", emvCommon())), "us-east-1"));
 
-        assertEquals("InvalidKeyUsageException", refused.getErrorCode());
+        assertEquals("ValidationException", refused.getErrorCode());
     }
 
     @Test
@@ -220,5 +224,96 @@ class PaymentCryptographyAuthCryptogramOperationsTest {
 
         assertEquals("ValidationException", refused.getErrorCode());
         assertTrue(refused.getMessage().contains("TransactionData"), refused.getMessage());
+    }
+
+    @Test
+    void theResponseValueIsTheOneTheFirstMethodMakes() {
+        PaymentCryptographyKey key = createKey("DeriveKey");
+        String arqc = (String) cryptogram.generate(request(Map.of(
+                "KeyIdentifier", key.getArn(),
+                "TransactionData", TRANSACTION_DATA,
+                "MajorKeyDerivationMode", "EMV_OPTION_A",
+                "SessionKeyDerivationAttributes", emvCommon())), "us-east-1")
+                .get("AuthRequestCryptogram");
+
+        // The response attributes are what the response value is made from, and the first
+        // method takes the response code.
+        Map<String, Object> verified = cryptogram.verify(request(Map.of(
+                "KeyIdentifier", key.getArn(),
+                "TransactionData", TRANSACTION_DATA,
+                "AuthRequestCryptogram", arqc,
+                "MajorKeyDerivationMode", "EMV_OPTION_A",
+                "SessionKeyDerivationAttributes", emvCommon(),
+                "AuthResponseAttributes", responseCode("1234"))), "us-east-1");
+
+        String value = (String) verified.get("AuthResponseValue");
+        assertNotNull(value);
+        assertEquals(16, value.length());
+    }
+
+    @Test
+    void theResponseValueIsTheOneTheSecondMethodMakes() {
+        PaymentCryptographyKey key = createKey("DeriveKey");
+        String arqc = (String) cryptogram.generate(request(Map.of(
+                "KeyIdentifier", key.getArn(),
+                "TransactionData", TRANSACTION_DATA,
+                "MajorKeyDerivationMode", "EMV_OPTION_A",
+                "SessionKeyDerivationAttributes", emvCommon())), "us-east-1")
+                .get("AuthRequestCryptogram");
+
+        // The second method takes the card status update and the proprietary data.
+        Map<String, Object> verified = cryptogram.verify(request(Map.of(
+                "KeyIdentifier", key.getArn(),
+                "TransactionData", TRANSACTION_DATA,
+                "AuthRequestCryptogram", arqc,
+                "MajorKeyDerivationMode", "EMV_OPTION_A",
+                "SessionKeyDerivationAttributes", emvCommon(),
+                "AuthResponseAttributes", cardStatusUpdate("12345678", "ABCD"))), "us-east-1");
+
+        String value = (String) verified.get("AuthResponseValue");
+        assertNotNull(value);
+        assertEquals(8, value.length());
+    }
+
+    @Test
+    void aResponseValueThatIsNotAskedForIsNotAnswered() {
+        PaymentCryptographyKey key = createKey("DeriveKey");
+        String arqc = (String) cryptogram.generate(request(Map.of(
+                "KeyIdentifier", key.getArn(),
+                "TransactionData", TRANSACTION_DATA,
+                "MajorKeyDerivationMode", "EMV_OPTION_A",
+                "SessionKeyDerivationAttributes", emvCommon())), "us-east-1")
+                .get("AuthRequestCryptogram");
+
+        Map<String, Object> verified = cryptogram.verify(request(Map.of(
+                "KeyIdentifier", key.getArn(),
+                "TransactionData", TRANSACTION_DATA,
+                "AuthRequestCryptogram", arqc,
+                "MajorKeyDerivationMode", "EMV_OPTION_A",
+                "SessionKeyDerivationAttributes", emvCommon())), "us-east-1");
+
+        assertEquals(key.getArn(), verified.get("KeyArn"));
+        assertNull(verified.get("AuthResponseValue"));
+    }
+
+    /** The response attributes of the first ARPC method, which takes the response code. */
+    private static JsonNode responseCode(String code) {
+        ObjectMapper mapper = new ObjectMapper();
+        ObjectNode method = mapper.createObjectNode();
+        method.put("AuthResponseCode", code);
+        ObjectNode outer = mapper.createObjectNode();
+        outer.set("ArpcMethod1", method);
+        return outer;
+    }
+
+    /** The response attributes of the second ARPC method. */
+    private static JsonNode cardStatusUpdate(String status, String proprietary) {
+        ObjectMapper mapper = new ObjectMapper();
+        ObjectNode method = mapper.createObjectNode();
+        method.put("CardStatusUpdate", status);
+        method.put("ProprietaryAuthenticationData", proprietary);
+        ObjectNode outer = mapper.createObjectNode();
+        outer.set("ArpcMethod2", method);
+        return outer;
     }
 }

@@ -15,6 +15,7 @@ import java.util.LinkedHashMap;
 import java.util.Map;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -62,6 +63,8 @@ class PaymentCryptographyCardValidationOperationsTest {
         members.forEach((name, value) -> {
             if (value instanceof JsonNode json) {
                 node.set(name, json);
+            } else if (value instanceof Number number) {
+                node.put(name, number.intValue());
             } else {
                 node.put(name, String.valueOf(value));
             }
@@ -153,7 +156,7 @@ class PaymentCryptographyCardValidationOperationsTest {
                         "PrimaryAccountNumber", PAN,
                         "GenerationAttributes", cardVerificationValue1(EXPIRY, "201"))), "us-east-1"));
 
-        assertEquals("InvalidKeyUsageException", refused.getErrorCode());
+        assertEquals("ValidationException", refused.getErrorCode());
     }
 
     @Test
@@ -188,5 +191,84 @@ class PaymentCryptographyCardValidationOperationsTest {
 
         assertEquals("ValidationException", refused.getErrorCode());
         assertTrue(refused.getMessage().contains("PrimaryAccountNumber"), refused.getMessage());
+    }
+
+    @Test
+    void theDynamicCardVerificationCodeIsGeneratedAndVerifies() {
+        PaymentCryptographyKey key = createKey("TDES_2KEY", "TR31_E4_EMV_MKEY_DYNAMIC_NUMBERS",
+                "Generate", "Verify", "DeriveKey");
+
+        Map<String, Object> generated = cardValidation.generate(request(Map.of(
+                "KeyIdentifier", key.getArn(),
+                "PrimaryAccountNumber", PAN,
+                "GenerationAttributes", dynamicCardVerificationCode())), "us-east-1");
+
+        String value = (String) generated.get("ValidationData");
+        assertNotNull(value);
+        assertEquals(3, value.length());
+
+        cardValidation.verify(request(Map.of(
+                "KeyIdentifier", key.getArn(),
+                "PrimaryAccountNumber", PAN,
+                "ValidationData", value,
+                "VerificationAttributes", dynamicCardVerificationCode())), "us-east-1");
+    }
+
+    @Test
+    void theValidationDataLengthIsTheOneTheServiceMakes() {
+        PaymentCryptographyKey cvk = createKey("TDES_2KEY", "TR31_C0_CARD_VERIFICATION_KEY",
+                "Generate", "Verify");
+
+        // The model lets the length be three to five, and the service makes three.
+        cardValidation.generate(request(Map.of(
+                "KeyIdentifier", cvk.getArn(),
+                "PrimaryAccountNumber", PAN,
+                "ValidationDataLength", 3,
+                "GenerationAttributes", cardVerificationValue1(EXPIRY, "201"))), "us-east-1");
+
+        AwsException refused = assertThrows(AwsException.class,
+                () -> cardValidation.generate(request(Map.of(
+                        "KeyIdentifier", cvk.getArn(),
+                        "PrimaryAccountNumber", PAN,
+                        "ValidationDataLength", 4,
+                        "GenerationAttributes", cardVerificationValue1(EXPIRY, "201"))), "us-east-1"));
+
+        assertEquals("ValidationException", refused.getErrorCode());
+    }
+
+    @Test
+    void aTrackDataOfAnOddLengthIsRefused() {
+        PaymentCryptographyKey key = createKey("TDES_2KEY", "TR31_E4_EMV_MKEY_DYNAMIC_NUMBERS",
+                "Generate", "Verify", "DeriveKey");
+
+        // The model lets the track data be any number of hexadecimal characters, and an odd
+        // number of them is not a byte sequence, so it is refused with the error the model
+        // names rather than answered with a failure the caller cannot catch.
+        AwsException refused = assertThrows(AwsException.class,
+                () -> cardValidation.generate(request(Map.of(
+                        "KeyIdentifier", key.getArn(),
+                        "PrimaryAccountNumber", PAN,
+                        "GenerationAttributes", dynamicCardVerificationCode("123"))), "us-east-1"));
+
+        assertEquals("ValidationException", refused.getErrorCode());
+        assertTrue(refused.getMessage().contains("TrackData"), refused.getMessage());
+    }
+
+    /** The attributes of the dynamic card verification code, which is computed over the track. */
+    private static JsonNode dynamicCardVerificationCode() {
+        return dynamicCardVerificationCode("5081470082639564300303D25061010000000000");
+    }
+
+    /** The attributes of the dynamic card verification code, over the given track data. */
+    private static JsonNode dynamicCardVerificationCode(String trackData) {
+        ObjectMapper mapper = new ObjectMapper();
+        ObjectNode value = mapper.createObjectNode();
+        value.put("UnpredictableNumber", "12345678");
+        value.put("PanSequenceNumber", "01");
+        value.put("ApplicationTransactionCounter", "0001");
+        value.put("TrackData", trackData);
+        ObjectNode outer = mapper.createObjectNode();
+        outer.set("DynamicCardVerificationCode", value);
+        return outer;
     }
 }
