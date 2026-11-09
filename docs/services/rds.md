@@ -61,7 +61,7 @@ RDS endpoints return the us-east-1 hosted zone ID `Z2R2ITUGPM61AM` in all region
 | `StopDBCluster` | Stop a cluster and its member instances |
 | `StartDBCluster` | Start a stopped cluster and its members |
 | `RebootDBCluster` | Restart a cluster's database and its members' proxies |
-| `CreateDBInstanceReadReplica` | Create a read replica of a PostgreSQL instance, initialised from a copy of the source; see [Read replicas](#read-replicas) |
+| `CreateDBInstanceReadReplica` | Create a read replica of a PostgreSQL, MySQL or MariaDB instance, initialised from a copy of the source; see [Read replicas](#read-replicas) |
 | `PromoteReadReplica` | Detach a read replica into a standalone instance and turn automated backups on |
 | `SwitchoverReadReplica` | Refused with `InvalidDBInstanceState`: AWS supports switchover only for Oracle and SQL Server replicas, neither of which is emulated |
 | `PromoteReadReplicaDBCluster` | Refused with `InvalidDBClusterStateFault`: no cluster is created as a replica of an instance |
@@ -666,11 +666,11 @@ and a `StatusInfos` entry of type `read replication`, the source lists it under
 it is the ARN. A `DBSubnetGroupName` with a source given by plain identifier is refused with
 `DBSubnetGroupNotAllowedFault`, as on AWS.
 
-The replica's database is initialised from a `pg_dumpall` of the source taken when the replica is
-created, the same mechanism `RestoreDBInstanceFromDBSnapshot` uses, so it holds the source's data
-as of that moment. Writes made to the source afterwards are not streamed to the replica. Because
-the copy is dump based, only PostgreSQL sources are accepted; MySQL and MariaDB sources are refused
-with `InvalidDBInstanceState`, although `CreateDBSnapshot` accepts them. A source with automated backups
+The replica's database is initialised from a dump of the source taken when the replica is
+created, the same mechanism `CreateDBSnapshot` and `RestoreDBInstanceFromDBSnapshot` use, so it
+holds the source's data as of that moment. Writes made to the source afterwards are not streamed to
+the replica. PostgreSQL, MySQL and MariaDB sources are accepted; other engines are refused with
+`InvalidDBInstanceState`. A source with automated backups
 off (`BackupRetentionPeriod` 0) is refused with the same error AWS uses.
 
 `PromoteReadReplica` clears the link on both ends, sets the requested `BackupRetentionPeriod`

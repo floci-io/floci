@@ -169,6 +169,57 @@ class RdsReadReplicaIntegrationTest {
 
     @Test
     @Order(6)
+    void createReadReplicaAcceptsAMysqlSourceAndRefusesSqlServer() {
+        query("CreateDBInstance")
+                .formParam("DBInstanceIdentifier", "replica-test-mysql")
+                .formParam("Engine", "mysql")
+                .formParam("EngineVersion", "8.0.36")
+                .formParam("MasterUsername", "admin")
+                .formParam("MasterUserPassword", "password123")
+                .formParam("DBName", "appdb")
+                .formParam("DBInstanceClass", "db.t3.medium")
+                .formParam("AllocatedStorage", "20")
+        .when().post("/").then().statusCode(200);
+
+        query("CreateDBInstanceReadReplica")
+                .formParam("DBInstanceIdentifier", "replica-test-mysql-reader")
+                .formParam("SourceDBInstanceIdentifier", "replica-test-mysql")
+        .when().post("/")
+        .then()
+            .statusCode(200)
+            .body(containsString("<Engine>mysql</Engine>"))
+            .body(containsString("<ReadReplicaSourceDBInstanceIdentifier>replica-test-mysql"
+                    + "</ReadReplicaSourceDBInstanceIdentifier>"));
+
+        query("CreateDBInstance")
+                .formParam("DBInstanceIdentifier", "replica-test-sqlserver")
+                .formParam("Engine", "sqlserver-se")
+                .formParam("EngineVersion", "15.00")
+                .formParam("MasterUsername", "admin")
+                .formParam("MasterUserPassword", "Password123!")
+                .formParam("DBInstanceClass", "db.t3.medium")
+                .formParam("AllocatedStorage", "20")
+        .when().post("/").then().statusCode(200);
+
+        query("CreateDBInstanceReadReplica")
+                .formParam("DBInstanceIdentifier", "replica-test-sqlserver-reader")
+                .formParam("SourceDBInstanceIdentifier", "replica-test-sqlserver")
+        .when().post("/")
+        .then()
+            .statusCode(400)
+            .body(containsString("<Code>InvalidDBInstanceState</Code>"))
+            .body(containsString("not supported for engine SQLSERVER"));
+
+        for (String id : new String[]{"replica-test-mysql-reader", "replica-test-mysql",
+                "replica-test-sqlserver"}) {
+            query("DeleteDBInstance").formParam("DBInstanceIdentifier", id)
+                    .formParam("SkipFinalSnapshot", "true")
+                    .when().post("/").then().statusCode(200);
+        }
+    }
+
+    @Test
+    @Order(7)
     void cleanUp() {
         query("DeleteDBInstance").formParam("DBInstanceIdentifier", REPLICA)
                 .when().post("/").then().statusCode(200);

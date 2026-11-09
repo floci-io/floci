@@ -2180,8 +2180,11 @@ public class RdsService implements Resettable, ResourceProvider {
                     + "automated backups, use ModifyDBInstance to set the backup retention period "
                     + "to a non-zero value.", 400);
         }
-        if (source.getEngine() != DatabaseEngine.POSTGRES) {
-            // CreateDBSnapshot draws the same line: the point-in-time copy is pg_dumpall based.
+        boolean mysqlFamily = source.getEngine() == DatabaseEngine.MYSQL
+                || source.getEngine() == DatabaseEngine.MARIADB;
+        if (source.getEngine() != DatabaseEngine.POSTGRES && !mysqlFamily) {
+            // The copy is dump based: pg_dumpall for PostgreSQL, mysqldump or mariadb-dump for
+            // MySQL and MariaDB. No dump path exists for the other engines.
             throw new AwsException("InvalidDBInstanceState",
                     "Operation CreateDBInstanceReadReplica is not supported for engine "
                     + source.getEngine() + ".", 400);
@@ -2232,10 +2235,18 @@ public class RdsService implements Resettable, ResourceProvider {
         if (!config.services().rds().mock()
                 && source.getContainerId() != null && replica.getContainerId() != null) {
             try {
-                String sqlDump = containerManager.createPostgresSnapshot(
-                        source.getContainerId(), source.getMasterUsername());
-                containerManager.restorePostgresSnapshot(
-                        replica.getContainerId(), replica.getMasterUsername(), sqlDump);
+                if (mysqlFamily) {
+                    String sqlDump = containerManager.createMysqlSnapshot(source.getEngine(),
+                            source.getContainerId(), source.getMasterUsername(), source.getMasterPassword());
+                    containerManager.restoreMysqlSnapshot(replica.getEngine(),
+                            replica.getContainerId(), replica.getMasterUsername(),
+                            replica.getMasterPassword(), sqlDump);
+                } else {
+                    String sqlDump = containerManager.createPostgresSnapshot(
+                            source.getContainerId(), source.getMasterUsername());
+                    containerManager.restorePostgresSnapshot(
+                            replica.getContainerId(), replica.getMasterUsername(), sqlDump);
+                }
             } catch (Exception e) {
                 try {
                     deleteDbInstance(id, effectiveRegion);
