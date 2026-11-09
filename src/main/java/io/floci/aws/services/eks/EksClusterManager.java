@@ -1152,7 +1152,7 @@ public class EksClusterManager
     private EksNodeCapacity.Limits resolveNodeCapacity(Cluster cluster) {
         try {
             Info host = lifecycleManager.getDockerClient().infoCmd().exec();
-            CatalogInstanceType type = instanceTypeCatalog.find(nodeInstanceType(cluster)).orElseThrow();
+            CatalogInstanceType type = instanceTypeCatalog.find(sizingInstanceType(cluster)).orElseThrow();
             EksNodeCapacity.Limits limits = EksNodeCapacity.calculate(type, host.getMemTotal(), host.getNCPU(),
                     config.services().eks().maxMemoryMib(), config.services().eks().maxVcpus());
             if (limits == null) {
@@ -1181,7 +1181,7 @@ public class EksClusterManager
         if (maxMemoryMib <= 0 && maxVcpus <= 0) {
             return null;
         }
-        int vcpus = instanceTypeCatalog.find(nodeInstanceType(cluster))
+        int vcpus = instanceTypeCatalog.find(sizingInstanceType(cluster))
                 .map(type -> maxVcpus > 0 ? Math.min(type.vcpu, maxVcpus) : 0)
                 .orElse(maxVcpus);
         LOG.warnv("Applying explicit EKS cluster {0} ceiling without kubelet reservations"
@@ -1189,15 +1189,43 @@ public class EksClusterManager
         return EksNodeCapacity.explicitCeilingWithoutHostInfo(maxMemoryMib, vcpus);
     }
 
-    private static String capacityLabel(Cluster cluster, EksNodeCapacity.Limits limits) {
+    /**
+     * Carries the sizing type only when it is configured, so a survivor created without the
+     * setting keeps its label and is not recreated after an upgrade. Changing the setting changes
+     * the label, which recreates the node on the next start with its data volume.
+     */
+    private String capacityLabel(Cluster cluster, EksNodeCapacity.Limits limits) {
+        String types = nodeInstanceType(cluster) + configuredSizingInstanceType().map(type -> "@" + type).orElse("");
         if (limits == null) {
-            return nodeInstanceType(cluster) + ":unbounded";
+            return types + ":unbounded";
         }
-        return nodeInstanceType(cluster) + ":" + limits.memoryBytes() + ":" + limits.vcpus()
+        return types + ":" + limits.memoryBytes() + ":" + limits.vcpus()
                 + ":" + limits.systemMemoryMib() + ":" + limits.kubeMemoryMib()
                 + ":" + limits.evictionMemoryMib() + ":" + limits.systemCpuMilli()
                 + ":" + limits.kubeCpuMilli() + ":" + limits.reducedReservations()
                 + ":" + limits.kubeletArgsEnabled();
+    }
+
+    /**
+     * The catalog type the node container is sized from: {@code floci.services.eks.node-instance-type}
+     * when set, otherwise the node group's. Only the container's memory, CPU and kubelet reservations
+     * follow it; the node group, the node's instance-type label and the synthesized EC2 instance keep
+     * {@link #nodeInstanceType(Cluster)}.
+     */
+    String sizingInstanceType(Cluster cluster) {
+        return configuredSizingInstanceType().orElseGet(() -> nodeInstanceType(cluster));
+    }
+
+    private Optional<String> configuredSizingInstanceType() {
+        Optional<String> configured = config.services().eks().nodeInstanceType()
+                .map(String::trim)
+                .filter(type -> !type.isEmpty());
+        if (configured.isEmpty() || instanceTypeCatalog.find(configured.get()).isPresent()) {
+            return configured;
+        }
+        LOG.warnv("floci.services.eks.node-instance-type {0} is absent from the EC2 catalog; sizing EKS nodes "
+                + "from their node group's instance type", configured.get());
+        return Optional.empty();
     }
 
     static String nodeInstanceType(Cluster cluster) {
