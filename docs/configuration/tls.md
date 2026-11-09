@@ -48,6 +48,7 @@ Disabling verification (`--no-verify-ssl`, `verify=False`, `NODE_TLS_REJECT_UNAU
 | `FLOCI_TLS_ENABLED` | `false` | Enable TLS/HTTPS on the server |
 | `FLOCI_TLS_CERT_PATH` | *(unset)* | Path to PEM certificate file |
 | `FLOCI_TLS_KEY_PATH` | *(unset)* | Path to PEM private key file |
+| `FLOCI_TLS_EXTRA_CA_PATH` | *(unset)* | PEM file of extra CA certificates Floci's own outbound HTTPS clients trust, with TLS on or off. See [Trusting Your Own CAs for Outbound Calls](#trusting-your-own-cas-for-outbound-calls) |
 | `FLOCI_TLS_SELF_SIGNED` | `true` | Auto-generate a server certificate signed by Floci's local CA when no cert/key paths provided |
 
 The HTTPS listener accepts TLS 1.3 and TLS 1.2 by default, matching
@@ -124,6 +125,30 @@ docker run \
 ```
 
 When custom certificate paths are provided, `FLOCI_TLS_SELF_SIGNED` is ignored and the HTTPS server uses your certificate; no server certificate is generated. `GET /_floci/ca.pem` then returns a PEM bundle: the certificates in your certificate file first (a private key kept in that file is never served), then Floci's local CA, which is created on first use and signs the certificates Floci itself issues (IoT device certificates). Put the CA or the full chain in your certificate file if clients fetch their trust anchor from Floci; a bare leaf only lets them pin that one certificate.
+
+## Trusting Your Own CAs for Outbound Calls
+
+Some calls go out from Floci itself: an EventBridge API destination delivering an event, or Floci fetching a JWT issuer's keys. When the endpoint's certificate is issued by a private or corporate CA, Floci refuses it by default, because Floci trusts only the root CAs built into its Java runtime. Floci does not read the operating system's trust store, so adding the CA there (`update-ca-trust`, `update-ca-certificates`) has no effect.
+
+Point `FLOCI_TLS_EXTRA_CA_PATH` (config key `floci.tls.extra-ca-path`) at a PEM file holding those CA certificates:
+
+```yaml
+services:
+  floci:
+    image: floci/floci:latest
+    ports: ["4566:4566"]
+    environment:
+      FLOCI_TLS_EXTRA_CA_PATH: /certs/corp-root-ca.pem
+    volumes:
+      - ./certs/corp-root-ca.pem:/certs/corp-root-ca.pem:ro
+```
+
+- It works whether or not `FLOCI_TLS_ENABLED` is set. Floci does not need to serve HTTPS itself.
+- The CAs are added to what Floci already trusts: the JVM's root CAs, and Floci's own CA when TLS is enabled. Public endpoints keep working.
+- Floci's own clients that use them: EventBridge API destination delivery, and the JWT issuer fetch for HTTP API JWT authorizers and AppSync OIDC providers.
+- Containers Floci launches do not receive these CAs. They keep `/etc/floci-ca-bundle.pem` exactly as described in [Containers Floci Launches](#containers-floci-launches); a workload that calls such an endpoint itself configures its own CAs.
+- The file may hold several certificates. A private key kept in it is ignored.
+- A file that is missing, unreadable, or holds no certificate stops Floci at startup with a message naming the path, however the setting is given.
 
 ## WebSocket (wss://)
 

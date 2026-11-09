@@ -40,6 +40,7 @@ import java.security.interfaces.RSAPublicKey;
 import java.util.Arrays;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.function.Function;
 
@@ -301,6 +302,42 @@ class JwtSignatureVerifierTest {
 
         HttpsServer httpsServer = HttpsServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
         httpsServer.setHttpsConfigurator(new HttpsConfigurator(authority.serverSslContext(
+                Pem.parseCertificate(issued.certificatePem()), Pem.parsePrivateKey(issued.privateKeyPem()))));
+        String httpsIssuer = "https://localhost:" + httpsServer.getAddress().getPort();
+        httpsServer.createContext("/.well-known/openid-configuration", discovery(httpsIssuer));
+        httpsServer.createContext("/jwks", this::serveJwks);
+        httpsServer.start();
+        try (JwtSignatureVerifier trustingVerifier = new JwtSignatureVerifier(objectMapper, config)) {
+            String token = signToken("test-key-1", privateKey);
+
+            assertThrows(JwtSignatureVerifier.JwtVerificationException.class,
+                    () -> verifier.verify(token, httpsIssuer));
+            assertDoesNotThrow(() -> trustingVerifier.verify(token, httpsIssuer));
+        } finally {
+            httpsServer.stop(0);
+        }
+    }
+
+    /**
+     * The JWT issuer fetch shares Floci's outbound SSL context, so an issuer whose certificate chains to a CA in
+     * floci.tls.extra-ca-path verifies too, with TLS off.
+     */
+    @Test
+    void trustsAnIssuerCertificateFromAnExtraCaWithTlsOff(@TempDir Path dir) throws Exception {
+        if (Security.getProvider(BouncyCastleProvider.PROVIDER_NAME) == null) {
+            Security.addProvider(new BouncyCastleProvider());
+        }
+        FlociCertificateAuthority privateCa = FlociCertificateAuthority.loadOrCreate(dir.resolve("private-ca"));
+        CertificateGenerator.GeneratedCertificate issued = privateCa.issueServerCertificate(
+                "localhost", List.of("localhost"), KeyAlgorithm.RSA_2048, null);
+        EmulatorConfig config = mock(EmulatorConfig.class, RETURNS_DEEP_STUBS);
+        when(config.tls().enabled()).thenReturn(false);
+        when(config.tls().extraCaPath()).thenReturn(Optional.of(privateCa.certificatePath().toString()));
+        when(config.storage().persistentPath()).thenReturn(dir.toString());
+        when(config.security().allowPrivateJwtTargets()).thenReturn(true);
+
+        HttpsServer httpsServer = HttpsServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
+        httpsServer.setHttpsConfigurator(new HttpsConfigurator(privateCa.serverSslContext(
                 Pem.parseCertificate(issued.certificatePem()), Pem.parsePrivateKey(issued.privateKeyPem()))));
         String httpsIssuer = "https://localhost:" + httpsServer.getAddress().getPort();
         httpsServer.createContext("/.well-known/openid-configuration", discovery(httpsIssuer));

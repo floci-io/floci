@@ -1,5 +1,7 @@
 package io.floci.aws.config;
 
+import com.sun.net.httpserver.HttpsConfigurator;
+import com.sun.net.httpserver.HttpsServer;
 import io.floci.aws.core.common.Pem;
 import io.floci.aws.services.acm.CertificateGenerator;
 import io.floci.aws.services.acm.model.KeyAlgorithm;
@@ -9,12 +11,19 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
+import javax.net.ssl.SSLContext;
+import javax.net.ssl.SSLHandshakeException;
 import javax.net.ssl.TrustManager;
 import javax.net.ssl.TrustManagerFactory;
 import javax.net.ssl.X509TrustManager;
 import java.io.ByteArrayInputStream;
 import java.io.InputStream;
 import java.io.OutputStream;
+import java.net.InetSocketAddress;
+import java.net.URI;
+import java.net.http.HttpClient;
+import java.net.http.HttpRequest;
+import java.net.http.HttpResponse;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.security.GeneralSecurityException;
@@ -158,6 +167,70 @@ class ContainerCaBundleTest {
         assertEquals(Optional.empty(), ContainerCaBundle.sslContext(config));
         assertThrows(GeneralSecurityException.class,
                 () -> ContainerCaBundle.sslContext(tlsDir.resolve(ContainerCaBundle.FILE_NAME)));
+    }
+
+    /** The reported case: TLS off, and an endpoint whose certificate chains to a private CA in the extra file. */
+    @Test
+    void sslContextTrustsTheExtraCasWhenTlsIsOff() throws Exception {
+        FlociCertificateAuthority privateCa = FlociCertificateAuthority.loadOrCreate(tempDir.resolve("private-ca"));
+        EmulatorConfig config = config(false, Optional.of(privateCa.certificatePath().toString()));
+
+        Optional<SSLContext> context = ContainerCaBundle.sslContext(config);
+
+        assertTrue(context.isPresent(), "an extra CA file gives Floci's own clients a context with TLS off");
+        assertTrue(handshakes(context.get(), privateCa), "the extra CA is trusted");
+    }
+
+    /** The extra CAs are added to the JVM's roots, not swapped in for them, so public endpoints keep working. */
+    @Test
+    void theExtraCasComeOnTopOfEveryJvmRootWhenThereIsNoBundle() throws Exception {
+        FlociCertificateAuthority privateCa = FlociCertificateAuthority.loadOrCreate(tempDir.resolve("private-ca"));
+
+        List<X509Certificate> anchors = ContainerCaBundle.outboundTrustAnchors(null, privateCa.certificatePath());
+
+        TrustManagerFactory jvm = TrustManagerFactory.getInstance(TrustManagerFactory.getDefaultAlgorithm());
+        jvm.init((KeyStore) null);
+        for (TrustManager manager : jvm.getTrustManagers()) {
+            if (manager instanceof X509TrustManager x509) {
+                for (X509Certificate root : x509.getAcceptedIssuers()) {
+                    assertTrue(anchors.contains(root), root.getSubjectX500Principal().getName());
+                }
+            }
+        }
+        assertEquals(privateCa.certificate(), anchors.get(anchors.size() - 1), "the extra CA comes last");
+    }
+
+    @Test
+    void sslContextTrustsTheBundleAndTheExtraCasWhenTlsIsOn() throws Exception {
+        Path tlsDir = tempDir.resolve("tls");
+        FlociCertificateAuthority flociCa = FlociCertificateAuthority.loadOrCreate(tlsDir);
+        ContainerCaBundle.write(tlsDir, flociCa.certificatePath());
+        FlociCertificateAuthority privateCa = FlociCertificateAuthority.loadOrCreate(tempDir.resolve("private-ca"));
+        EmulatorConfig config = config(true, Optional.of(privateCa.certificatePath().toString()));
+
+        SSLContext context = ContainerCaBundle.sslContext(config).orElseThrow();
+
+        assertTrue(handshakes(context, flociCa), "Floci's CA, from the bundle");
+        assertTrue(handshakes(context, privateCa), "the extra CA");
+    }
+
+    /** With TLS off and no extra CA, nothing changes: Floci's own clients keep the JVM's default context. */
+    @Test
+    void sslContextIsEmptyWhenTlsIsOffAndNoExtraCaIsSet() {
+        assertEquals(Optional.empty(), ContainerCaBundle.sslContext(config(false, Optional.empty())));
+    }
+
+    /** A combined certificate-and-key file is accepted; only its certificates are trusted, the key is skipped. */
+    @Test
+    void anExtraCaFileHoldingAPrivateKeyIsTrustedForItsCertificates() throws Exception {
+        FlociCertificateAuthority privateCa = FlociCertificateAuthority.loadOrCreate(tempDir.resolve("private-ca"));
+        CertificateGenerator.GeneratedCertificate leaf = privateCa.issueServerCertificate("floci", List.of("floci"),
+                KeyAlgorithm.RSA_2048, null);
+        Path withKey = Files.writeString(tempDir.resolve("ca-and-key.pem"), privateCa.caPem() + leaf.privateKeyPem());
+
+        SSLContext context = ContainerCaBundle.sslContext(config(false, Optional.of(withKey.toString()))).orElseThrow();
+
+        assertTrue(handshakes(context, privateCa));
     }
 
     @Test
@@ -422,6 +495,38 @@ class ContainerCaBundleTest {
         BootstrapProcess.Result ended = BootstrapProcess.run(shell);
         assertEquals(0, ended.exit(), ended.output());
         return ended.output();
+    }
+
+    private EmulatorConfig config(boolean tlsEnabled, Optional<String> extraCaPath) {
+        EmulatorConfig config = mock(EmulatorConfig.class, RETURNS_DEEP_STUBS);
+        when(config.tls().enabled()).thenReturn(tlsEnabled);
+        when(config.tls().extraCaPath()).thenReturn(extraCaPath);
+        when(config.storage().persistentPath()).thenReturn(tempDir.toString());
+        return config;
+    }
+
+    // Whether a client over context completes a TLS handshake with a localhost server whose certificate ca issued.
+    private static boolean handshakes(SSLContext context, FlociCertificateAuthority ca) throws Exception {
+        CertificateGenerator.GeneratedCertificate issued = ca.issueServerCertificate(
+                "localhost", List.of("localhost"), KeyAlgorithm.RSA_2048, null);
+        HttpsServer server = HttpsServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
+        server.setHttpsConfigurator(new HttpsConfigurator(ca.serverSslContext(
+                Pem.parseCertificate(issued.certificatePem()), Pem.parsePrivateKey(issued.privateKeyPem()))));
+        server.createContext("/", exchange -> {
+            exchange.sendResponseHeaders(204, -1);
+            exchange.close();
+        });
+        server.start();
+        try {
+            HttpClient client = HttpClient.newBuilder().sslContext(context).build();
+            URI uri = URI.create("https://localhost:" + server.getAddress().getPort() + "/");
+            return client.send(HttpRequest.newBuilder(uri).build(), HttpResponse.BodyHandlers.discarding())
+                    .statusCode() == 204;
+        } catch (SSLHandshakeException e) {
+            return false;
+        } finally {
+            server.stop(0);
+        }
     }
 
     private static List<X509Certificate> parseAll(byte[] pem) throws Exception {

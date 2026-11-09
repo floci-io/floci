@@ -5,6 +5,7 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.MissingNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
+import io.floci.aws.config.ContainerCaBundle;
 import io.floci.aws.config.EmulatorConfig;
 import io.floci.aws.core.common.AwsArnUtils;
 import io.floci.aws.core.common.AwsException;
@@ -107,8 +108,15 @@ public class EventBridgeInvoker {
                               EmulatorConfig config, AppSyncTargetInvoker appSyncTargetInvoker) {
         this(lambdaService, sqsService, snsService, batchService, firehoseService, eventBridgeService,
                 ecsService, ecsJsonHandler, stepFunctionsService, redshiftDataService, redshiftTargetAuthorizer,
-                serviceRegistry, regionResolver, objectMapper, config,
-                HttpClient.newBuilder().connectTimeout(Duration.ofSeconds(5)).build(), appSyncTargetInvoker);
+                serviceRegistry, regionResolver, objectMapper, config, apiDestinationClient(config),
+                appSyncTargetInvoker);
+    }
+
+    // Trusts the extra CAs in floci.tls.extra-ca-path, and Floci's CA when TLS is on, besides the JVM's roots
+    private static HttpClient apiDestinationClient(EmulatorConfig config) {
+        HttpClient.Builder builder = HttpClient.newBuilder().connectTimeout(Duration.ofSeconds(5));
+        ContainerCaBundle.sslContext(config).ifPresent(builder::sslContext);
+        return builder.build();
     }
 
     public EventBridgeInvoker(LambdaService lambdaService,
@@ -128,7 +136,8 @@ public class EventBridgeInvoker {
                               EmulatorConfig config) {
         this(lambdaService, sqsService, snsService, batchService, firehoseService, eventBridgeService,
                 ecsService, ecsJsonHandler, stepFunctionsService, redshiftDataService, redshiftTargetAuthorizer,
-                serviceRegistry, regionResolver, objectMapper, config, (AppSyncTargetInvoker) null);
+                serviceRegistry, regionResolver, objectMapper, config,
+                HttpClient.newBuilder().connectTimeout(Duration.ofSeconds(5)).build(), null);
     }
 
     EventBridgeInvoker(LambdaService lambdaService,

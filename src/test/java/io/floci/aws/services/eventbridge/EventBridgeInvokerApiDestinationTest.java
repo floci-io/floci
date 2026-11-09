@@ -1,18 +1,30 @@
 package io.floci.aws.services.eventbridge;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.sun.net.httpserver.HttpsConfigurator;
+import com.sun.net.httpserver.HttpsServer;
 import io.floci.aws.config.EmulatorConfig;
+import io.floci.aws.config.FlociCertificateAuthority;
 import io.floci.aws.core.common.AwsException;
+import io.floci.aws.core.common.Pem;
+import io.floci.aws.services.acm.CertificateGenerator;
+import io.floci.aws.services.acm.model.KeyAlgorithm;
 import io.floci.aws.services.eventbridge.model.ApiDestination;
+import io.floci.aws.services.eventbridge.model.Connection;
+import io.floci.aws.services.eventbridge.model.Target;
 import io.floci.aws.services.lambda.LambdaService;
 import io.floci.aws.services.sns.SnsService;
 import io.floci.aws.services.sqs.SqsService;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.io.TempDir;
 
+import java.net.InetSocketAddress;
+import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
@@ -20,11 +32,19 @@ import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 
+import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.mockito.Mockito.RETURNS_DEEP_STUBS;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.when;
 
 class EventBridgeInvokerApiDestinationTest {
+
+    private static final String REGION = "us-east-1";
+    private static final String DESTINATION_ARN = "arn:aws:events:us-east-1:000000000000:api-destination/tls/1";
+    private static final String CONNECTION_ARN = "arn:aws:events:us-east-1:000000000000:connection/tls/1";
 
     @Test
     void substitutePathParameters_replacesWildcardsInOrder() {
@@ -123,6 +143,86 @@ class EventBridgeInvokerApiDestinationTest {
 
         // Two permits' worth of slack covers the one-second window rolling over mid-test
         assertTrue(granted.get() >= 5 && granted.get() <= 10, "granted " + granted.get());
+    }
+
+    /**
+     * An endpoint whose certificate chains to a private CA is refused while only the JVM's roots are trusted, and
+     * delivered to once that CA is in the floci.tls.extra-ca-path file, with TLS off as in the reported case.
+     */
+    @Test
+    void deliversToAnEndpointWhoseCertificateChainsToAnExtraCa(@TempDir Path dir) throws Exception {
+        FlociCertificateAuthority privateCa = FlociCertificateAuthority.loadOrCreate(dir.resolve("private-ca"));
+        AtomicInteger delivered = new AtomicInteger();
+        HttpsServer server = httpsEndpoint(privateCa, delivered);
+        try {
+            String endpoint = "https://localhost:" + server.getAddress().getPort() + "/hook";
+
+            AwsException refused = assertThrows(AwsException.class,
+                    () -> invoker(endpoint, Optional.empty()).invokeTarget(apiDestinationTarget(), "{}", REGION));
+            assertTrue(refused.getMessage().contains("SSLHandshakeException"), refused.getMessage());
+            assertEquals(0, delivered.get());
+
+            assertDoesNotThrow(() -> invoker(endpoint, Optional.of(privateCa.certificatePath().toString()))
+                    .invokeTarget(apiDestinationTarget(), "{}", REGION));
+            assertEquals(1, delivered.get());
+        } finally {
+            server.stop(0);
+        }
+    }
+
+    /** The extra CAs add trust; they do not loosen it: a CA the endpoint's certificate does not chain to is no help. */
+    @Test
+    void refusesAnEndpointWhoseCaIsNotInTheExtraCaFile(@TempDir Path dir) throws Exception {
+        FlociCertificateAuthority privateCa = FlociCertificateAuthority.loadOrCreate(dir.resolve("private-ca"));
+        FlociCertificateAuthority unrelatedCa = FlociCertificateAuthority.loadOrCreate(dir.resolve("unrelated-ca"));
+        AtomicInteger delivered = new AtomicInteger();
+        HttpsServer server = httpsEndpoint(privateCa, delivered);
+        try {
+            String endpoint = "https://localhost:" + server.getAddress().getPort() + "/hook";
+
+            AwsException refused = assertThrows(AwsException.class,
+                    () -> invoker(endpoint, Optional.of(unrelatedCa.certificatePath().toString()))
+                            .invokeTarget(apiDestinationTarget(), "{}", REGION));
+            assertTrue(refused.getMessage().contains("SSLHandshakeException"), refused.getMessage());
+            assertEquals(0, delivered.get());
+        } finally {
+            server.stop(0);
+        }
+    }
+
+    // An invoker built the way CDI builds it, its API destination pointing at endpoint, with TLS off.
+    private static EventBridgeInvoker invoker(String endpoint, Optional<String> extraCaPath) {
+        EmulatorConfig config = mock(EmulatorConfig.class, RETURNS_DEEP_STUBS);
+        when(config.tls().enabled()).thenReturn(false);
+        when(config.tls().extraCaPath()).thenReturn(extraCaPath);
+        EventBridgeService eventBridgeService = mock(EventBridgeService.class);
+        when(eventBridgeService.findApiDestinationByArn(DESTINATION_ARN, REGION)).thenReturn(
+                new ApiDestination("tls", DESTINATION_ARN, CONNECTION_ARN, endpoint, "POST", null, null));
+        when(eventBridgeService.findConnectionByArn(CONNECTION_ARN, REGION)).thenReturn(new Connection());
+        return new EventBridgeInvoker(mock(LambdaService.class), mock(SqsService.class), mock(SnsService.class),
+                null, null, eventBridgeService, null, null, null, null, null, null, null, new ObjectMapper(), config,
+                (AppSyncTargetInvoker) null);
+    }
+
+    private static Target apiDestinationTarget() {
+        return new Target("tls-target", DESTINATION_ARN, null, null);
+    }
+
+    // An HTTPS endpoint on localhost serving a certificate the CA issued, counting the requests to /hook.
+    private static HttpsServer httpsEndpoint(FlociCertificateAuthority ca, AtomicInteger requests) throws Exception {
+        CertificateGenerator.GeneratedCertificate issued = ca.issueServerCertificate(
+                "localhost", List.of("localhost"), KeyAlgorithm.RSA_2048, null);
+        HttpsServer server = HttpsServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
+        server.setHttpsConfigurator(new HttpsConfigurator(ca.serverSslContext(
+                Pem.parseCertificate(issued.certificatePem()), Pem.parsePrivateKey(issued.privateKeyPem()))));
+        server.createContext("/hook", exchange -> {
+            exchange.getRequestBody().readAllBytes();
+            requests.incrementAndGet();
+            exchange.sendResponseHeaders(200, -1);
+            exchange.close();
+        });
+        server.start();
+        return server;
     }
 
     private static ApiDestination rateLimited(String name, int limit) {

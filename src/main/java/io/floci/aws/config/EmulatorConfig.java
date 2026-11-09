@@ -3995,6 +3995,13 @@ public interface EmulatorConfig {
         Optional<String> keyPath();
 
         /**
+         * PEM file of extra CA certificates that Floci's own outbound HTTPS clients trust, on top of
+         * the JVM's default roots (and Floci's CA when TLS is on). Applies whether or not TLS is enabled.
+         * Containers Floci launches are not affected. Env: FLOCI_TLS_EXTRA_CA_PATH
+         */
+        Optional<String> extraCaPath();
+
+        /**
          * Auto-generate a server certificate when no cert-path/key-path is provided. The leaf is
          * issued by Floci's local root CA; both live under {@code {storage.persistent-path}/tls/}
          * and survive restarts. Clients trust the CA ({@code GET /_floci/ca.pem}), not the leaf.
