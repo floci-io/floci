@@ -36,7 +36,7 @@ class CodeBuildRunnerTest {
         int chunkCount = 320;
         String lastLine = "error: build step failed\n";
         DockerClient dockerClient = dockerClientStreaming(chunk, chunkCount, lastLine, 2L);
-        CodeBuildRunner runner = new CodeBuildRunner(dockerClient, null, null, null, null, null, null, null, null, null, null);
+        CodeBuildRunner runner = new CodeBuildRunner(dockerClient, null, null, null, null, null, null, null, null, null, null, null);
 
         CodeBuildRunner.PhaseResult result = runner.runPhase("container-1", "/src", List.of(),
                 List.of("./build.sh"), 60, new AtomicBoolean(false));
@@ -49,7 +49,7 @@ class CodeBuildRunnerTest {
     @Test
     void failureMessageIgnoresLongTrailingWhitespace() {
         DockerClient dockerClient = dockerClientStreaming(new byte[0], 0, "tests failed" + "\n".repeat(10_000), 1L);
-        CodeBuildRunner runner = new CodeBuildRunner(dockerClient, null, null, null, null, null, null, null, null, null, null);
+        CodeBuildRunner runner = new CodeBuildRunner(dockerClient, null, null, null, null, null, null, null, null, null, null, null);
 
         CodeBuildRunner.PhaseResult result = runner.runPhase("container-1", "/src", List.of(),
                 List.of("./test.sh"), 60, new AtomicBoolean(false));
@@ -66,7 +66,7 @@ class CodeBuildRunnerTest {
         ContainerDetector containerDetector = mock(ContainerDetector.class);
         ContainerReachableEndpoint endpoint = new ContainerReachableEndpoint(config, null, null, null, 4811);
         CodeBuildRunner runner = new CodeBuildRunner(null, null, null, null, null, null, null,
-                config, containerDetector, null, endpoint);
+                config, containerDetector, null, endpoint, null);
 
         assertEquals("http://host.docker.internal:4811", runner.resolveEndpointUrl());
     }

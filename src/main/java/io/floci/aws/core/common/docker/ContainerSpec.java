@@ -338,9 +338,18 @@ public record ContainerSpec(
         return deviceRequests != null && !deviceRequests.isEmpty();
     }
 
+    /**
+     * Whether a container on this network can be given a link-local address: only a user-defined
+     * network can, never Docker's default bridge, {@code host}, {@code none} or another container's
+     * namespace.
+     */
+    public static boolean acceptsLinkLocalIps(String networkMode) {
+        return networkMode != null && !networkMode.isBlank()
+                && !NETWORKS_WITHOUT_ENDPOINT_IPAM.contains(networkMode) && !networkMode.startsWith("container:");
+    }
+
     private static void requireUserDefinedNetwork(String networkMode) {
-        if (networkMode == null || networkMode.isBlank()
-                || NETWORKS_WITHOUT_ENDPOINT_IPAM.contains(networkMode) || networkMode.startsWith("container:")) {
+        if (!acceptsLinkLocalIps(networkMode)) {
             throw new IllegalArgumentException(
                     "Link-local addresses need a user-defined Docker network, but the network is '"
                             + networkMode + "'");

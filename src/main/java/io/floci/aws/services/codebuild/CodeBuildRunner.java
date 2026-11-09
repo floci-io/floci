@@ -79,6 +79,7 @@ public class CodeBuildRunner implements ContainerTeardown {
     private final ContainerDetector containerDetector;
     private final RegionResolver regionResolver;
     private final ContainerReachableEndpoint containerEndpoint;
+    private final CodeBuildRoleCredentials roleCredentials;
 
     private final ConcurrentHashMap<String, String> runningContainers = new ConcurrentHashMap<>();
     private final ConcurrentHashMap<String, AtomicBoolean> stopFlags = new ConcurrentHashMap<>();
@@ -94,7 +95,8 @@ public class CodeBuildRunner implements ContainerTeardown {
                            EmulatorConfig config,
                            ContainerDetector containerDetector,
                            RegionResolver regionResolver,
-                           ContainerReachableEndpoint containerEndpoint) {
+                           ContainerReachableEndpoint containerEndpoint,
+                           CodeBuildRoleCredentials roleCredentials) {
         this.dockerClient = dockerClient;
         this.containerBuilder = containerBuilder;
         this.lifecycleManager = lifecycleManager;
@@ -106,6 +108,7 @@ public class CodeBuildRunner implements ContainerTeardown {
         this.containerDetector = containerDetector;
         this.regionResolver = regionResolver;
         this.containerEndpoint = containerEndpoint;
+        this.roleCredentials = roleCredentials;
     }
 
     /**
@@ -169,10 +172,24 @@ public class CodeBuildRunner implements ContainerTeardown {
 
             if (stopFlag.get()) { finishStopped(build); return; }
 
-            // PROVISIONING
+            // PROVISIONING: the build's own session of its project's service role, before
+            // anything of its buildspec runs.
             beginPhase(build, "PROVISIONING");
             build.setCurrentPhase("PROVISIONING");
             workspace = Files.createTempDirectory("floci-codebuild-");
+            Optional<String> network = containerBuilder.resolveDockerNetwork(config.services().codebuild().dockerNetwork());
+            CodeBuildRoleCredentials.BuildCredentials credentials;
+            try {
+                credentials = roleCredentials.provision(executionId, buildId, project.getServiceRole(),
+                        accountOf(project), network);
+            } catch (CodeBuildRoleCredentials.RoleNotFoundException e) {
+                completePhaseWithError(build, "PROVISIONING", "FAILED", "CLIENT_ERROR", e.getMessage());
+                finishFailed(build);
+                return;
+            } catch (RuntimeException e) {
+                completePhaseWithError(build, "PROVISIONING", "FAILED", "FAULT_ERROR", e.getMessage());
+                throw e;
+            }
             completePhase(build, "PROVISIONING", "SUCCEEDED");
 
             if (stopFlag.get()) { finishStopped(build); return; }
@@ -221,11 +238,11 @@ public class CodeBuildRunner implements ContainerTeardown {
             logsMap.put("cloudWatchLogsArn", AwsArnUtils.Arn.of("logs", region, regionResolver.getAccountId(), "log-group:" + logGroup + ":log-stream:" + logStream).toString());
             build.setLogs(logsMap);
 
-            List<String> envList = buildEnvList(region, build, project, buildspec, logStream);
+            List<String> envList = buildEnvList(region, build, project, buildspec, logStream, credentials.env());
 
             // Keep the container alive so each phase can be run with docker exec.
             // No bind mount needed — source and artifacts are transferred with docker cp.
-            ContainerSpec spec = containerBuilder.newContainer(image)
+            ContainerBuilder.Builder specBuilder = containerBuilder.newContainer(image)
                     .withCmd(List.of("sh", "-c", "tail -f /dev/null"))
                     .withEnv(envList)
                     .withDockerNetwork(config.services().codebuild().dockerNetwork())
@@ -234,8 +251,13 @@ public class CodeBuildRunner implements ContainerTeardown {
                     .withPrivileged(privileged)
                     .withLogRotation()
                     .withLabels(ContainerStorageHelper.resourceIdentityLabels(
-                            "codebuild", buildId, regionResolver.getAccountId(), region))
-                    .build();
+                            "codebuild", buildId, regionResolver.getAccountId(), region));
+            // Its own address in 169.254.0.0/16, without which the container has no route to the
+            // credentials endpoint's 169.254.170.2.
+            if (credentials.linkLocalAddress() != null) {
+                specBuilder.withLinkLocalIp(credentials.linkLocalAddress());
+            }
+            ContainerSpec spec = specBuilder.build();
 
             ContainerLifecycleManager.ContainerInfo info = lifecycleManager.createAndStart(spec);
             containerId = info.containerId();
@@ -390,11 +412,14 @@ public class CodeBuildRunner implements ContainerTeardown {
             }
         } finally {
             stopFlags.remove(executionId);
+            // However the build ended, its session ends with it.
+            roleCredentials.revoke(executionId);
             if (containerId != null && runningContainers.remove(executionId, containerId)) {
                 lifecycleManager.stopAndRemove(containerId, logHandle);
             } else if (logHandle != null) {
                 try { logHandle.close(); } catch (Exception ignored) {}
             }
+            roleCredentials.releaseAddress(executionId);
             if (workspace != null) {
                 deleteDirectory(workspace);
             }
@@ -440,8 +465,18 @@ public class CodeBuildRunner implements ContainerTeardown {
         throw new AwsException("InvalidInputException", "No buildspec found in source or request", 400);
     }
 
+    /** The account the project is in, which its role is looked up and its session minted in. */
+    private String accountOf(Project project) {
+        try {
+            return AwsArnUtils.parse(project.getArn()).accountId();
+        } catch (RuntimeException e) {
+            return regionResolver.getAccountId();
+        }
+    }
+
     private List<String> buildEnvList(String region, Build build, Project project,
-                                      ParsedBuildspec buildspec, String logStream) {
+                                      ParsedBuildspec buildspec, String logStream,
+                                      Map<String, String> credentials) {
         Map<String, String> env = new LinkedHashMap<>();
 
         env.put("CODEBUILD_BUILD_ID", build.getId());
@@ -454,9 +489,10 @@ public class CodeBuildRunner implements ContainerTeardown {
         env.put("CODEBUILD_LOG_PATH", logStream);
         env.put("AWS_DEFAULT_REGION", region);
         env.put("AWS_REGION", region);
-        env.put("AWS_ACCESS_KEY_ID", "test");
-        env.put("AWS_SECRET_ACCESS_KEY", "test");
         env.put("AWS_ENDPOINT_URL", resolveEndpointUrl());
+        // The project's role, ahead of everything a project, its buildspec or the build's start
+        // sets, which still reaches the build as CodeBuild's own variables do.
+        env.putAll(credentials);
 
         env.putAll(buildspec.envVariables());
 
@@ -819,6 +855,11 @@ public class CodeBuildRunner implements ContainerTeardown {
     }
 
     private void completePhaseWithError(Build build, String phaseType, String status, String message) {
+        completePhaseWithError(build, phaseType, status, "COMMAND_EXECUTION_ERROR", message);
+    }
+
+    private void completePhaseWithError(Build build, String phaseType, String status, String statusCode,
+                                        String message) {
         findPhase(build, phaseType).ifPresent(p -> {
             double end = EpochSeconds.fromMillis(System.currentTimeMillis());
             p.setPhaseStatus(status);
@@ -826,7 +867,7 @@ public class CodeBuildRunner implements ContainerTeardown {
             p.setDurationInSeconds(Math.round(end - p.getStartTime()));
             if (message != null) {
                 String truncated = message.substring(0, Math.min(message.length(), 1024));
-                p.setContexts(List.of(Map.of("statusCode", "COMMAND_EXECUTION_ERROR", "message", truncated)));
+                p.setContexts(List.of(Map.of("statusCode", statusCode, "message", truncated)));
             }
         });
     }

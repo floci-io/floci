@@ -28,6 +28,9 @@ import java.util.concurrent.CompletableFuture;
  * Floci's own process can bind an address it does not otherwise own on a task's Docker network.
  * {@link EcsCredentialsProxy} is what actually holds 169.254.170.2, one small proxy container per
  * ECS network, forwarding here over {@code host.docker.internal}.
+ *
+ * <p>It serves a CodeBuild build its project's service role the same way, and a build's need starts
+ * it whether or not ECS task-role credentials are enabled.
  */
 @ApplicationScoped
 public class EcsTaskRoleCredentialsServer {
@@ -71,6 +74,14 @@ public class EcsTaskRoleCredentialsServer {
             }
         });
         return future;
+    }
+
+    /**
+     * Whether the server was started: by Floci's start with ECS task-role credentials on, or by the
+     * first CodeBuild build that needed it.
+     */
+    public synchronized boolean isRunning() {
+        return httpServer != null;
     }
 
     public synchronized void stop() {

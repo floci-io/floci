@@ -103,8 +103,11 @@ class CodeBuildRunnerSourceFailureTest {
         ContainerReachableEndpoint endpoint = mock(ContainerReachableEndpoint.class);
         when(endpoint.port()).thenReturn(4566);
 
+        CodeBuildRoleCredentials roleCredentials = mock(CodeBuildRoleCredentials.class);
+        when(roleCredentials.provision(anyString(), anyString(), nullable(String.class), anyString(), any()))
+                .thenReturn(new CodeBuildRoleCredentials.BuildCredentials(Map.of(), null));
         CodeBuildRunner runner = spy(new CodeBuildRunner(docker, containerBuilder, lifecycle, logStreamer,
-                s3, null, null, config, mock(ContainerDetector.class), regionResolver, endpoint));
+                s3, null, null, config, mock(ContainerDetector.class), regionResolver, endpoint, roleCredentials));
         doReturn(CodeBuildRunner.PhaseResult.ofSuccess()).when(runner)
                 .runPhase(anyString(), anyString(), anyList(), anyList(), anyInt(), any(AtomicBoolean.class));
 

@@ -989,6 +989,9 @@ for reasons that have nothing to do with the role's policy.
 
 Each of these logs a warning naming the task and the role it asked for.
 
+The same credentials server and per-network proxy also serve a CodeBuild build its project's
+service role, whether or not this setting is on (see [CodeBuild](codebuild.md#the-builds-credentials)).
+
 ### Ephemeral task volumes
 
 A volume declared with only a `name`, or with an empty `host` and no `sourcePath`, supplies
