@@ -762,7 +762,7 @@ resource or trust policy that referred to the old name still refers to it after 
 
 | Action | Description |
 |--------|-------------|
-| SimulatePrincipalPolicy | Evaluates requested actions and resources against the resolved principal's policies. |
+| SimulatePrincipalPolicy | Evaluates requested actions and resources against the resolved principal's policies, beside any documents the request supplies. |
 | SimulateCustomPolicy | Evaluates requested actions and resources against a standalone set of policy documents, with an optional permissions boundary. |
 | GetContextKeysForCustomPolicy | Lists the context keys referenced across a set of policy documents. |
 | GetContextKeysForPrincipalPolicy | Lists the context keys referenced across a resolved principal's policies, plus any additional documents supplied. |
@@ -802,18 +802,61 @@ provided in the request: <value>", captured from a real account on 2026-10-31 fo
 means the six colon-delimited segments every ARN carries, so a valid ARN naming something that is
 neither a user nor a role still answers the `InvalidInput` about the entity type rather than about
 the shape. The length wording follows the captures of real IAM length violations, naming only the
-bound the value broke and leaving the value itself out of the message. `SimulateCustomPolicy`
+bound the value broke and leaving the value itself out of the message. Either simulation action
 accepts only one `PermissionsBoundaryPolicyInputList` document, matching AWS's own documented
-limit; extra documents beyond the first are ignored. Neither simulation action evaluates a
-resource-based policy (`ResourcePolicy`) or `OrderedOrganizationPolicyInputList`, and neither
-returns `MatchedStatements`, `ResourceSpecificResults`, or a `PermissionsBoundaryDecisionDetail`:
-only the top-level `EvalDecision` is populated. `SimulatePrincipalPolicy` reads neither
-`PolicyInputList` nor `PermissionsBoundaryPolicyInputList`, so a document passed in either one does
-not enter that simulation, and `ResourceHandlingOption` is accepted and read by neither action, so
-none of the EC2 scenarios it names has its required resources enforced.
+limit; extra documents beyond the first are ignored. Neither evaluates a resource-based policy
+(`ResourcePolicy`) or `OrderedOrganizationPolicyInputList`, and neither returns
+`MatchedStatements`, `ResourceSpecificResults`, or a `PermissionsBoundaryDecisionDetail`: only the
+top-level `EvalDecision` is populated, so which policy allowed an action is not reported even where
+AWS names one, `PolicyInputList.1` in its own example for the principal simulator.
+`ResourceHandlingOption` is accepted and read by neither action, so none of the EC2 scenarios it
+names has its required resources enforced.
 `ContextEntries.member.N.ContextKeyType` is accepted but not read; the comparison is driven
 entirely by the policy's own condition operator (`Bool`, `NumericEquals`, `DateEquals`, and so on),
 not by the declared type.
+
+`PolicyInputList` and `PermissionsBoundaryPolicyInputList` on `SimulatePrincipalPolicy` are read,
+the documents a simulation is handed beside the ones the principal holds. A `PolicyInputList`
+document is "an optional list of additional policy documents to include in the simulation", so each
+is evaluated with the weight of a policy the principal holds: an allow in one allows an action the
+attached policies do not, which is what AWS's own example for this operation turns on, and a deny in
+one stops an action they allow. A `PermissionsBoundaryPolicyInputList` document is the boundary that
+simulation runs with in place of the stored one, "if a permissions boundary is attached to an entity
+and you pass in a different permissions boundary policy using this parameter, then the new
+permissions boundary policy is used for the simulation", and it is the boundary when the entity
+carries none, the member being "the IAM permissions boundary policy to simulate". Every index a
+request numbers is read, in the documented `PolicyInputList.member.N` spelling and the bare
+`PolicyInputList.N` one alike.
+
+Neither document is attached to anything, so no `PolicyExclusionList` identifier reaches either: a
+simulation that leaves out every part a `PolicyType` can name still carries what the request handed
+in, and a boundary handed in still holds the simulation down where the stored one was left out.
+
+Either document is held to the shape the model declares for a policy document, 1 to 131072
+characters of the printable set the member lists, so one past that length is a 400
+`ValidationError` naming `policyInputList.1.member` or
+`permissionsBoundaryPolicyInputList.1.member`, under the index the request numbered it with and
+answered ahead of the simulation. On `SimulateCustomPolicy` a `PolicyInputList` document is held to
+neither the length nor the pattern: the member is carried by hand in the generated constraints there because that
+operation requires it and answers an empty list in its own wording, "At least one PolicyInputList
+member is required.", which the walk would reword into a null violation. It is optional here, so
+there is nothing of this operation's own in front of the walk and the member is read from the model
+with the rest.
+
+A document a request supplies is held to being a policy document on every operation that takes one,
+the two simulators and the two context-key readers alike. The member takes "the complete, valid
+JSON text of an IAM policy", so a value that does not parse as a JSON object, and one that parses
+and carries no `Statement`, "the main element for a policy. This element is required.", is a 400
+`InvalidInput` naming the entry by the index it arrived under, "Policy input list item 1 has
+invalid content". A supplied permissions boundary that is no policy document is the same code with
+the fixed "Syntax errors in policy.", the member carrying one document and the refusal identifying
+none. Neither sentence is published and both are the ones AWS's own emulator answers.
+`PolicyEvaluation`, the 500 the two simulators model for a policy that "could not be successfully
+evaluated", is answered by neither action: it carries no sender fault where `InvalidInput` does,
+and the two context-key readers take the same member and model no `PolicyEvaluation` at all. A
+document already stored is read as it always was, contributing nothing to the decision rather than
+failing the call, so a policy the account accepted once does not make every later simulation
+fail.
 
 `PolicyExclusionList` on `SimulatePrincipalPolicy` is read. The member asks "what the simulation
 result would be if a policy were removed, without changing which policies are actually attached to
