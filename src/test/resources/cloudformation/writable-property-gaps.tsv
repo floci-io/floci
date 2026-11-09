@@ -532,14 +532,12 @@ AWS::RDS::DBInstance	SourceDBInstanceAutomatedBackupsArn	accepted and ignored
 AWS::RDS::DBInstance	SourceDBInstanceIdentifier	accepted and ignored
 AWS::RDS::DBInstance	SourceDbiResourceId	accepted and ignored
 AWS::RDS::DBInstance	SourceRegion	accepted and ignored
-AWS::RDS::DBInstance	StorageEncrypted	accepted and ignored
 AWS::RDS::DBInstance	StorageThroughput	accepted and ignored
 AWS::RDS::DBInstance	StorageType	accepted and ignored
 AWS::RDS::DBInstance	Tags	accepted and ignored
 AWS::RDS::DBInstance	Timezone	accepted and ignored
 AWS::RDS::DBInstance	UseDefaultProcessorFeatures	accepted and ignored
 AWS::RDS::DBInstance	UseLatestRestorableTime	accepted and ignored
-AWS::RDS::DBInstance	VPCSecurityGroups	accepted and ignored
 AWS::RDS::DBParameterGroup	Parameters	accepted and ignored
 AWS::RDS::DBParameterGroup	Tags	accepted and ignored
 AWS::RDS::DBProxyTargetGroup	Tags	accepted and ignored

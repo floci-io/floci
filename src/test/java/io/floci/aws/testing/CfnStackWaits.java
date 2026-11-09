@@ -139,6 +139,32 @@ public final class CfnStackWaits {
                                 stack.stackStatusReason() == null ? "" : stack.stackStatusReason())));
     }
 
+    /** Creates {@code stackName} from {@code template} through the SDK and waits for {@code expectedStatus}. */
+    public static Stack createStack(CloudFormationClient client, String stackName, String template,
+                                    String expectedStatus) {
+        client.createStack(request -> request.stackName(stackName).templateBody(template));
+        return awaitStatus(client, stackName, expectedStatus);
+    }
+
+    /** Updates {@code stackName} to {@code template} through the SDK and waits for {@code expectedStatus}. */
+    public static Stack updateStack(CloudFormationClient client, String stackName, String template,
+                                    String expectedStatus) {
+        client.updateStack(request -> request.stackName(stackName).templateBody(template));
+        return awaitStatus(client, stackName, expectedStatus);
+    }
+
+    /**
+     * A resource to append to a template's {@code Resources}, after the one named {@code logicalId}:
+     * an instance that names a launch template that does not exist, so it fails once that resource
+     * is done, and an update that changed it rolls back.
+     */
+    public static String failingResourceAfter(String logicalId) {
+        return """
+                ,
+                  "Later": {"Type": "AWS::EC2::Instance", "DependsOn": "%s", "Properties": {"LaunchTemplate": {
+                    "LaunchTemplateId": "lt-0123456789abcdef0", "Version": "1"}}}""".formatted(logicalId);
+    }
+
     /** The value of {@code stack}'s output {@code key}; fails when the stack has no such output. */
     public static String output(Stack stack, String key) {
         return stack.outputs().stream().filter(output -> key.equals(output.outputKey())).findFirst()

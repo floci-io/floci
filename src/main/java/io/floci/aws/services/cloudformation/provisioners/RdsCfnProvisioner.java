@@ -25,6 +25,7 @@ import org.jboss.logging.Logger;
 
 import java.util.ArrayList;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -39,8 +40,9 @@ import java.util.function.Function;
  * Extracted from the former CloudFormation monolith.
  *
  * <p>Every type here deletes by physical id alone, so the id-only
- * {@link #delete(String, String, String)} serves all seven. {@code DBCluster} is the one type that
- * replaces through {@link ReplacementCleanup}; see {@code provisionDbCluster}.
+ * {@link #delete(String, String, String)} serves all seven. {@code DBCluster} and {@code DBInstance}
+ * are the types that replace through {@link ReplacementCleanup}; see {@code provisionDbCluster} and
+ * {@code provisionDbInstance}.
  *
  * <p>Unlike most extractions this one does not take {@code RdsService} out of the monolith.
  * {@code AWS::SecretsManager::SecretTargetAttachment} is still served there and reads an
@@ -103,6 +105,23 @@ public class RdsCfnProvisioner implements CfnResourceProvisioner {
      */
     static final String ASSOCIATED_ROLES_PRIOR_ATTR = "__FlociAssociatedRolesPrior";
 
+    /**
+     * The {@code StorageEncrypted} a DB instance resource was last provisioned with, {@code true} or
+     * {@code false}. The property is createOnly, so an update that changes it replaces the instance.
+     * The change is read against this record, as CloudFormation reads the template's change, and not
+     * against the instance: one a stack created before Floci applied the property is unencrypted
+     * whatever its template said. Such a resource has no record, so its first update reads the
+     * previous template's value instead, and replaces the instance only when that changed.
+     */
+    private static final CreateOnlyInputs DB_INSTANCE_STORAGE_ENCRYPTED = new CreateOnlyInputs(
+            "__FlociDbInstanceStorageEncrypted", "__FlociDbInstanceStorageEncryptedPrior");
+    /**
+     * What an update that kept a DB instance needs for {@link #rollbackUpdate}: the region, the VPC
+     * security groups the instance had when the update changed them, and whether it changed anything
+     * else, which has no rollback here.
+     */
+    static final String DB_INSTANCE_PRIOR_IN_PLACE_ATTR = "__FlociDbInstancePriorInPlaceUpdate";
+
     private final RdsService rdsService;
     private final CfnDynamicReferences dynamicReferences;
 
@@ -145,7 +164,8 @@ public class RdsCfnProvisioner implements CfnResourceProvisioner {
     @Override
     public void delete(String resourceType, String physicalId, String region) {
         switch (resourceType) {
-            case "AWS::RDS::DBInstance" -> rdsService.deleteDbInstance(physicalId, region);
+            case "AWS::RDS::DBInstance" -> CfnDeletes.safeDelete("DB instance", physicalId,
+                    () -> rdsService.deleteDbInstance(physicalId, region), "DBInstanceNotFound");
             case "AWS::RDS::DBCluster" -> CfnDeletes.safeDelete("DB cluster", physicalId,
                     () -> rdsService.deleteDbCluster(physicalId, region), "DBClusterNotFoundFault");
             case "AWS::RDS::DBProxy" -> deleteDbProxySafe(physicalId, region);
@@ -159,8 +179,8 @@ public class RdsCfnProvisioner implements CfnResourceProvisioner {
         }
     }
 
-    // ── replacement lifecycle: only AWS::RDS::DBCluster records one, so the other types answer
-    // "no cleanup owed" through ReplacementCleanup's own empty-record handling ──
+    // ── replacement lifecycle: only AWS::RDS::DBCluster and AWS::RDS::DBInstance record one, so the
+    // other types answer "no cleanup owed" through ReplacementCleanup's own empty-record handling ──
 
     @Override
     public boolean hasReplacementUpdate(StackResource resource) {
@@ -174,7 +194,13 @@ public class RdsCfnProvisioner implements CfnResourceProvisioner {
 
     @Override
     public UpdateCleanupResult completeUpdate(StackResource resource) {
+        // An in-place update owes no cleanup, so the engine calls clearUpdate only after a
+        // replacement: the records a rollback would have spent go here, or the next update's
+        // rollback would put back the ones this update replaced.
         resource.getAttributes().remove(DB_CLUSTER_CREATE_ONLY_PRIOR_ATTR);
+        resource.getAttributes().remove(ASSOCIATED_ROLES_PRIOR_ATTR);
+        DB_INSTANCE_STORAGE_ENCRYPTED.clearPrior(resource);
+        resource.getAttributes().remove(DB_INSTANCE_PRIOR_IN_PLACE_ATTR);
         return ReplacementCleanup.complete(resource, this::delete);
     }
 
@@ -182,36 +208,80 @@ public class RdsCfnProvisioner implements CfnResourceProvisioner {
     public void clearUpdate(StackResource resource) {
         resource.getAttributes().remove(DB_CLUSTER_CREATE_ONLY_PRIOR_ATTR);
         resource.getAttributes().remove(ASSOCIATED_ROLES_PRIOR_ATTR);
+        DB_INSTANCE_STORAGE_ENCRYPTED.clearPrior(resource);
+        resource.getAttributes().remove(DB_INSTANCE_PRIOR_IN_PLACE_ATTR);
         ReplacementCleanup.clear(resource);
     }
 
     /**
      * A replacement is undone through the cleanup record: the resource names the displaced cluster
-     * again and the replacement is deleted. The createOnly record follows the cluster back, since
-     * {@link ReplacementCleanup} leaves {@code __Floci} attributes alone. Without a record the
-     * update was in place, and putting that back needs a snapshot this provisioner does not keep,
-     * so the engine keeps reporting it as not rolled back, as before.
+     * or instance again and the replacement is deleted. The createOnly and roles records follow it
+     * back, since {@link ReplacementCleanup} leaves {@code __Floci} attributes alone, even when the
+     * replacement's delete fails, as the resource names the displaced one from then on. Without a
+     * record the update was in place: an instance's VPC security groups are put back, and the
+     * rollback counts as done when the update changed nothing else. Any other in-place change needs
+     * a snapshot this provisioner does not keep, so the engine keeps reporting it as not rolled back.
      */
     @Override
     public boolean rollbackUpdate(StackResource resource) {
-        boolean replaced = ReplacementCleanup.rollback(resource, this::delete);
-        String priorRecord = resource.getAttributes().remove(DB_CLUSTER_CREATE_ONLY_PRIOR_ATTR);
-        if (priorRecord != null) {
-            if (priorRecord.isEmpty()) {
-                resource.getAttributes().remove(DB_CLUSTER_CREATE_ONLY_ATTR);
-            } else {
-                resource.getAttributes().put(DB_CLUSTER_CREATE_ONLY_ATTR, priorRecord);
-            }
+        boolean replaced;
+        try {
+            replaced = ReplacementCleanup.rollback(resource, this::delete);
+        } finally {
+            restorePriorRecords(resource);
         }
-        String priorRoles = resource.getAttributes().remove(ASSOCIATED_ROLES_PRIOR_ATTR);
-        if (priorRoles != null) {
-            if (priorRoles.isEmpty()) {
-                resource.getAttributes().remove(ASSOCIATED_ROLES_ATTR);
-            } else {
-                resource.getAttributes().put(ASSOCIATED_ROLES_ATTR, priorRoles);
-            }
+        if (replaced) {
+            resource.getAttributes().remove(DB_INSTANCE_PRIOR_IN_PLACE_ATTR);
+            return true;
         }
-        return replaced;
+        return restoreDbInstanceInPlaceUpdate(resource);
+    }
+
+    private static void restorePriorRecords(StackResource resource) {
+        restorePriorRecord(resource, DB_CLUSTER_CREATE_ONLY_ATTR, DB_CLUSTER_CREATE_ONLY_PRIOR_ATTR);
+        restorePriorRecord(resource, ASSOCIATED_ROLES_ATTR, ASSOCIATED_ROLES_PRIOR_ATTR);
+        DB_INSTANCE_STORAGE_ENCRYPTED.restorePrior(resource);
+    }
+
+    /** Puts back the record {@code priorAttribute} saved; an empty one means there was none. */
+    private static void restorePriorRecord(StackResource resource, String attribute, String priorAttribute) {
+        String prior = resource.getAttributes().remove(priorAttribute);
+        if (prior == null) {
+            return;
+        }
+        if (prior.isEmpty()) {
+            resource.getAttributes().remove(attribute);
+        } else {
+            resource.getAttributes().put(attribute, prior);
+        }
+    }
+
+    /**
+     * Puts back the VPC security groups an update that kept the instance changed, and answers whether
+     * that undid the whole update. The saved record is dropped only once the groups are back, so an
+     * instance gone since the update fails the rollback, and a retried one tries again.
+     */
+    private boolean restoreDbInstanceInPlaceUpdate(StackResource resource) {
+        String saved = resource.getAttributes().get(DB_INSTANCE_PRIOR_IN_PLACE_ATTR);
+        if (saved == null) {
+            return false;
+        }
+        JsonNode prior;
+        try {
+            prior = MAPPER.readTree(saved);
+        } catch (JsonProcessingException e) {
+            throw new IllegalStateException("Could not read the saved in-place update of "
+                    + resource.getLogicalId(), e);
+        }
+        JsonNode groups = prior.path("vpcSecurityGroups");
+        if (groups.isArray()) {
+            List<String> groupIds = new ArrayList<>();
+            groups.forEach(group -> groupIds.add(group.asText()));
+            rdsService.setDbInstanceVpcSecurityGroups(prior.path("region").asText(), resource.getPhysicalId(),
+                    groupIds);
+        }
+        resource.getAttributes().remove(DB_INSTANCE_PRIOR_IN_PLACE_ATTR);
+        return !prior.path("otherChanges").asBoolean(true);
     }
 
     private void provisionDbSubnetGroup(StackResource r, JsonNode props, CloudFormationTemplateEngine engine,
@@ -322,12 +392,22 @@ public class RdsCfnProvisioner implements CfnResourceProvisioner {
         r.getAttributes().put("DBClusterParameterGroupName", group.getDbClusterParameterGroupName());
     }
 
+    /**
+     * A DB instance on file under the same id is updated in place, unless {@code StorageEncrypted},
+     * a createOnlyProperty of the {@code AWS::RDS::DBInstance} schema, changed (see
+     * {@link #DB_INSTANCE_STORAGE_ENCRYPTED}): the replacement is created under a distinct physical
+     * id and the displaced instance is deleted once the update commits, or kept when a later resource
+     * fails the update, as {@code provisionDbCluster} does for a cluster. A custom-named instance is
+     * refused that update, as CloudFormation refuses it.
+     */
     private void provisionDbInstance(StackResource r, JsonNode props, CloudFormationTemplateEngine engine,
                                      ProvisionContext ctx, String region) {
+        Map<String, String> attributesBefore = Map.copyOf(r.getAttributes());
         String explicitId = resolveOptional(props, "DBInstanceIdentifier", engine);
         String priorPhysicalId = r.getPhysicalId();
+        boolean customNamed = explicitId != null && !explicitId.isBlank();
         String id;
-        if (explicitId != null && !explicitId.isBlank()) {
+        if (customNamed) {
             id = explicitId;
         } else if (priorPhysicalId != null) {
             id = priorPhysicalId;
@@ -337,11 +417,10 @@ public class RdsCfnProvisioner implements CfnResourceProvisioner {
 
         // provision() is re-invoked on every UpdateStack for every resource, so a same-id instance
         // already on file must be reconciled rather than re-created (createDbInstance throws
-        // DBInstanceAlreadyExists). Only password, IAM auth and subnet group are reconciled here.
-        // modifyDbInstance also takes DBInstanceClass, AllocatedStorage and EngineVersion now, but
-        // threading them through an UpdateStack is a separate change: DBInstanceClass and
-        // AllocatedStorage are update-in-place on the AWS::RDS::DBInstance schema while Engine is
-        // create-only, so passing them needs the replacement handling the DB cluster arm has.
+        // DBInstanceAlreadyExists). Password, IAM auth, subnet group, CA certificate, roles and VPC
+        // security groups are reconciled here. modifyDbInstance also takes DBInstanceClass,
+        // AllocatedStorage and EngineVersion now; threading them through an UpdateStack is a
+        // separate change.
         List<DbRoleAssociation> roles = parseAssociatedRoles(props, engine);
         String clusterMember = resolveOptional(props, "DBClusterIdentifier", engine);
         if (!roles.isEmpty() && clusterMember != null && !clusterMember.isBlank()) {
@@ -350,9 +429,32 @@ public class RdsCfnProvisioner implements CfnResourceProvisioner {
                     + ", a member of DB cluster " + clusterMember
                     + "; set AssociatedRoles on the AWS::RDS::DBCluster instead.", 400);
         }
+        Boolean storageEncrypted = parseOptionalStrictBoolProp(props, "StorageEncrypted", engine);
+        String encryptionRecord = String.valueOf(Boolean.TRUE.equals(storageEncrypted));
+        List<String> vpcSecurityGroups = resolveStringList(props, "VPCSecurityGroups", engine);
         DbInstance instance = sameNameExistingResource(priorPhysicalId, id, rdsService::getDbInstance);
+        String recordedEncryption = DB_INSTANCE_STORAGE_ENCRYPTED.read(attributesBefore);
+        if (recordedEncryption == null && instance != null && ctx.priorProperties() != null) {
+            recordedEncryption = String.valueOf(parseBoolProp(ctx.priorProperties(), "StorageEncrypted", engine));
+        }
+        boolean replacing = instance != null && recordedEncryption != null
+                && !recordedEncryption.equals(encryptionRecord);
+        if (replacing) {
+            if (customNamed) {
+                throw customNamedReplacementRefused(id);
+            }
+            id = ctx.generatePhysicalName(r.getLogicalId(), 60, true);
+            LOG.infov("Replacing DB instance {0} with {1}: StorageEncrypted {2} -> {3}",
+                    priorPhysicalId, id, recordedEncryption, encryptionRecord);
+            instance = null;
+        }
         boolean created = instance == null;
         String caCertificate = resolveOptional(props, "CACertificateIdentifier", engine);
+        DbInstanceInPlaceState stateBefore = created ? null : DbInstanceInPlaceState.of(instance);
+        // Worked out before anything changes, so that nothing can fail between the changes a
+        // rollback cannot undo and the groups, which it can.
+        List<String> desiredGroups = created ? null
+                : desiredVpcSecurityGroups(vpcSecurityGroups, clusterMember, id, ctx);
         if (instance != null) {
             // A null region keeps the default-region lookup sameNameExistingResource made.
             instance = rdsService.modifyDbInstance(
@@ -375,13 +477,15 @@ public class RdsCfnProvisioner implements CfnResourceProvisioner {
                     resolveOptional(props, "DBParameterGroupName", engine),
                     resolveOptional(props, "DBSubnetGroupName", engine),
                     resolveOptional(props, "DBClusterIdentifier", engine),
-                    null, false, false, null, Map.of(), List.of(), null, region, true,
-                    DbInstanceSettings.defaults().withCaCertificateIdentifier(caCertificate));
+                    null, false, false, null, Map.of(), vpcSecurityGroups, null, region, true,
+                    new DbInstanceSettings(storageEncrypted, null, null, null, null, null)
+                            .withCaCertificateIdentifier(caCertificate));
         }
         // The roles go on before a renamed instance's predecessor is deleted, so a refused list
-        // deletes only the new instance and the stack still has the old one to roll back to.
+        // deletes only the new instance and the stack still has the old one to roll back to. A
+        // replaced instance is kept until the update commits instead.
         instance = reconcileInstanceRoles(r, instance, roles, created, ctx.isUpdate(), region);
-        if (created) {
+        if (created && !replacing) {
             deleteRenamedResource(priorPhysicalId, id, rdsService::deleteDbInstance, "DB instance");
         }
         r.setPhysicalId(instance.getDbInstanceIdentifier());
@@ -401,6 +505,96 @@ public class RdsCfnProvisioner implements CfnResourceProvisioner {
         if (ca.validTill() != null) {
             r.getAttributes().put("CertificateDetails.ValidTill", ca.validTill().toString());
         }
+        if (created) {
+            r.getAttributes().remove(DB_INSTANCE_PRIOR_IN_PLACE_ATTR);
+        } else {
+            reconcileInstanceSecurityGroups(r, instance, desiredGroups, stateBefore, ctx);
+        }
+        DB_INSTANCE_STORAGE_ENCRYPTED.record(r, ctx, attributesBefore, encryptionRecord);
+        // A provision that left the resource with a new physical id for its StorageEncrypted replaced
+        // the instance: the displaced one is deleted once the update commits, or kept if it rolls back.
+        ReplacementCleanup.record(r, ctx, attributesBefore, replacing);
+    }
+
+    /**
+     * The VPC security groups a kept instance should have, or null to leave them as they are. A
+     * declared list is the groups. A list the previous template declared and this one drops puts a
+     * standalone instance on its VPC's default security group, as AWS's handler does, and leaves
+     * them when there is no such group, as there; a cluster member keeps its groups, as there too. A
+     * list the stack never declared leaves groups set outside it alone.
+     */
+    private List<String> desiredVpcSecurityGroups(List<String> declared, String clusterMember, String id,
+                                                  ProvisionContext ctx) {
+        if (!declared.isEmpty()) {
+            return declared;
+        }
+        if (!ctx.previouslyDeclared("VPCSecurityGroups") || (clusterMember != null && !clusterMember.isBlank())) {
+            return null;
+        }
+        List<String> defaultGroup = rdsService.defaultVpcSecurityGroupIds(ctx.region(), id);
+        return defaultGroup.isEmpty() ? null : defaultGroup;
+    }
+
+    /**
+     * Brings a kept instance's VPC security groups to {@code desired}, the last change of the update:
+     * when an earlier step fails, the engine restores the resource without calling
+     * {@link #rollbackUpdate}, so only a change made after every other one can be put back there.
+     * What the instance had is saved first, with whether the update changed anything else, for
+     * {@link #rollbackUpdate}.
+     */
+    private void reconcileInstanceSecurityGroups(StackResource r, DbInstance instance, List<String> desired,
+                                                 DbInstanceInPlaceState stateBefore, ProvisionContext ctx) {
+        String id = instance.getDbInstanceIdentifier();
+        List<String> groupsBefore = stateBefore.vpcSecurityGroups();
+        boolean groupsChange = desired != null && !Set.copyOf(desired).equals(Set.copyOf(groupsBefore));
+        ObjectNode saved = MAPPER.createObjectNode().put("region", ctx.region());
+        if (groupsChange) {
+            groupsBefore.forEach(saved.putArray("vpcSecurityGroups")::add);
+        }
+        saved.put("otherChanges", !stateBefore.sameSettingsAs(DbInstanceInPlaceState.of(instance)));
+        r.getAttributes().put(DB_INSTANCE_PRIOR_IN_PLACE_ATTR, saved.toString());
+        if (groupsChange) {
+            rdsService.setDbInstanceVpcSecurityGroups(ctx.region(), id, desired);
+        }
+    }
+
+    /**
+     * What an update that keeps a DB instance can change on it: the settings it hands
+     * {@code modifyDbInstance}, the roles, and the VPC security groups, copied so the instance's later
+     * changes do not reach them. Only the groups have a rollback here.
+     */
+    private record DbInstanceInPlaceState(String masterPassword, boolean iamAuthentication, String subnetGroup,
+                                          String caCertificate, Set<String> roles, List<String> vpcSecurityGroups) {
+
+        static DbInstanceInPlaceState of(DbInstance instance) {
+            Set<String> roles = new HashSet<>();
+            for (DbRoleAssociation role : instance.getAssociatedRoles()) {
+                roles.add(role.getRoleArn() + " " + blankToNull(role.getFeatureName()));
+            }
+            return new DbInstanceInPlaceState(instance.getMasterPassword(),
+                    instance.isIamDatabaseAuthenticationEnabled(), instance.getDbSubnetGroupName(),
+                    instance.getCaCertificateIdentifier(), roles, List.copyOf(instance.getVpcSecurityGroupIds()));
+        }
+
+        /** Whether {@code other} has the same settings and roles, whatever its groups. */
+        boolean sameSettingsAs(DbInstanceInPlaceState other) {
+            return Objects.equals(masterPassword, other.masterPassword)
+                    && iamAuthentication == other.iamAuthentication
+                    && Objects.equals(subnetGroup, other.subnetGroup)
+                    && Objects.equals(caCertificate, other.caCertificate)
+                    && roles.equals(other.roles);
+        }
+
+        @Override
+        public String toString() {
+            return "DbInstanceInPlaceState[groups=" + vpcSecurityGroups + "]";
+        }
+    }
+
+    private static AwsException customNamedReplacementRefused(String id) {
+        return new AwsException("ValidationError",
+                "CloudFormation cannot update a stack when a custom-named resource requires "
+                        + "replacing. Rename " + id + " and update the stack again.", 400);
     }
 
     /**
@@ -430,8 +624,8 @@ public class RdsCfnProvisioner implements CfnResourceProvisioner {
             id = ctx.generatePhysicalName(r.getLogicalId(), 60, true);
         }
 
-        // Same re-invocation rationale as provisionDbInstance above; modifyDbCluster only reconciles
-        // password and IAM auth, mirroring that method's existing scope.
+        // Same re-invocation rationale as provisionDbInstance above; modifyDbCluster reconciles the
+        // password, IAM auth and the Serverless v2 scaling.
         DbCluster cluster = sameNameExistingResource(priorPhysicalId, id, rdsService::getDbCluster);
         String engineMode = resolveOptional(props, "EngineMode", engine);
         boolean storageEncrypted = parseBoolProp(props, "StorageEncrypted", engine);
@@ -442,9 +636,7 @@ public class RdsCfnProvisioner implements CfnResourceProvisioner {
                 readDbClusterCreateOnly(attributesBefore.get(DB_CLUSTER_CREATE_ONLY_ATTR)), createOnly);
         if (replacementReason != null) {
             if (customNamed) {
-                throw new AwsException("ValidationError",
-                        "CloudFormation cannot update a stack when a custom-named resource requires "
-                                + "replacing. Rename " + id + " and update the stack again.", 400);
+                throw customNamedReplacementRefused(id);
             }
             id = ctx.generatePhysicalName(r.getLogicalId(), 60, true);
             LOG.infov("Replacing DB cluster {0} with {1}: {2}", priorPhysicalId, id, replacementReason);
@@ -1090,12 +1282,17 @@ public class RdsCfnProvisioner implements CfnResourceProvisioner {
      * {@code ValidationError} rather than a silent false.
      */
     private boolean parseStrictBoolProp(JsonNode props, String name, CloudFormationTemplateEngine engine) {
+        return Boolean.TRUE.equals(parseOptionalStrictBoolProp(props, name, engine));
+    }
+
+    /** As {@link #parseStrictBoolProp}, with null for a property the template leaves out. */
+    private Boolean parseOptionalStrictBoolProp(JsonNode props, String name, CloudFormationTemplateEngine engine) {
         if (props == null || !props.has(name)) {
-            return false;
+            return null;
         }
         JsonNode value = engine.resolveNodeOmittingNoValue(props.get(name));
         if (value == null || value.isMissingNode() || value.isNull()) {
-            return false;
+            return null;
         }
         if (value.isBoolean()) {
             return value.booleanValue();
