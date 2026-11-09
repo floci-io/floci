@@ -319,7 +319,11 @@ PUT, PATCH and DELETE).
   policies attached to a cache behavior cannot be deleted.
 - `ViewerCertificate.IAMCertificateId` must be the `ServerCertificateId` of an uploaded IAM server
   certificate: distribution create and update reject an unknown one with `InvalidViewerCertificate`,
-  and `DeleteServerCertificate` returns `DeleteConflict` while a distribution references it.
+  and `DeleteServerCertificate` returns `DeleteConflict` while a distribution references it. A blank
+  value names no certificate, which is what a distribution on the CloudFront domain name sends. The
+  `/cloudfront` upload path AWS documents for a certificate meant for CloudFront is not enforced, so
+  a certificate uploaded anywhere serves a distribution: a deliberate divergence, with both sources
+  and what would move it under Server Certificates in [IAM](iam.md).
 - `ViewerCertificate.ACMCertificateArn` must name an existing ACM certificate: distribution create and
   update reject an unknown one with `InvalidViewerCertificate`. ACM lists the distribution's ARN under
   `InUseBy`, and `DeleteCertificate` returns `ResourceInUseException` while a distribution references it.
