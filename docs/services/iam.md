@@ -2268,8 +2268,10 @@ As with passed roles, an operation Floci does not serve is in the table too.
   `Tag.N.Value` over the Query protocol. The tagging action is also checked for tags under any other
   spelling a handler might read, a member or a tag's key and value in any case, every element of a
   tag list and an object's structures, a form's list under any spelling and every number, so none a
-  handler applies goes unchecked. CodeDeploy's handler iterates its tags member whatever it holds,
-  so an object's structures are its tags too.
+  handler applies goes unchecked. An object's members, read as a map's tags, are a set of their own
+  beside its structures, so a member named as a structure's key does not hide the structure's tag
+  from a handler that iterates the object, as KMS's `CreateKey` does. CodeDeploy's handler iterates
+  its tags member whatever it holds, so an object's structures are its tags too.
 - CloudWatch Logs `CreateLogGroup`, which takes either of two tagging actions, is checked as described
   under CloudWatch Logs groups below.
 - Not read: an operation whose request carries no tags, which the Service Reference lists with a

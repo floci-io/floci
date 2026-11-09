@@ -181,7 +181,8 @@ final class TagOnCreate {
     /**
      * The tags a body carries at the member under any spelling a handler might read: its names, and a tag's
      * key and value, in any case, and a list or a map whichever the member is. One set for each top-level
-     * spelling, and for a tag specification each resource type.
+     * spelling, and for a tag specification each resource type; an object gives two, its elements read as tags
+     * and its members read as a map.
      */
     private static List<TagSet> anySpellingInBody(JsonNode body, TagOnCreateMembers.Member member) {
         List<TagSet> found = new ArrayList<>();
@@ -189,28 +190,31 @@ final class TagOnCreate {
             if (!top.getKey().equalsIgnoreCase(member.steps().getFirst().name())) {
                 return;
             }
-            Map<String, Map<String, String>> byType = new LinkedHashMap<>();
-            anySpelling(top.getValue(), member, 0, null, byType);
-            byType.forEach((type, tags) -> {
-                if (!tags.isEmpty()) {
-                    found.add(new TagSet(type, Collections.unmodifiableMap(tags)));
-                }
-            });
+            Map<String, Map<String, String>> asTags = new LinkedHashMap<>();
+            Map<String, Map<String, String>> asMap = new LinkedHashMap<>();
+            anySpelling(top.getValue(), member, 0, null, asTags, asMap);
+            for (Map<String, Map<String, String>> byType : List.of(asTags, asMap)) {
+                byType.forEach((type, tags) -> {
+                    if (!tags.isEmpty()) {
+                        found.add(new TagSet(type, Collections.unmodifiableMap(tags)));
+                    }
+                });
+            }
         });
         return found;
     }
 
     private static void anySpelling(JsonNode value, TagOnCreateMembers.Member member, int index, String type,
-                                    Map<String, Map<String, String>> byType) {
+                                    Map<String, Map<String, String>> asTags, Map<String, Map<String, String>> asMap) {
         List<PassedRoleMembers.Step> steps = member.steps();
         if (value == null) {
             return;
         }
         if (index == steps.size() - 1) {
-            Map<String, String> tags = byType.computeIfAbsent(type, ignored -> new LinkedHashMap<>());
+            Map<String, String> tags = asTags.computeIfAbsent(type, ignored -> new LinkedHashMap<>());
             // Every element is a tag, its key as text whatever it holds and a missing one empty, as a handler that
             // reads it with asText takes it; an object's values that are structures are elements too, as a handler
-            // iterating it reads them, and its members are a map's tags.
+            // iterating it reads them.
             for (JsonNode tag : value) {
                 if (value.isObject() && !tag.isObject()) {
                     continue;
@@ -219,8 +223,11 @@ final class TagOnCreate {
                 tags.put(key == null || key.isNull() ? "" : key.asText(),
                         text(field(tag, member.value() == null ? "value" : member.value())));
             }
+            // An object's members are a map's tags, a set of their own: in one with its elements, a member named as
+            // a structure's key would replace the tag a handler iterating the object applies.
             if (value.isObject()) {
-                value.properties().forEach(tag -> tags.put(tag.getKey(), tag.getValue().isNull() ? ""
+                Map<String, String> map = asMap.computeIfAbsent(type, ignored -> new LinkedHashMap<>());
+                value.properties().forEach(tag -> map.put(tag.getKey(), tag.getValue().isNull() ? ""
                         : tag.getValue().asText()));
             }
             return;
@@ -230,10 +237,10 @@ final class TagOnCreate {
             for (JsonNode element : value) {
                 JsonNode kind = member.resourceType() == null ? null : field(element, member.resourceType());
                 anySpelling(field(element, next), member, index + 1,
-                        kind != null && kind.isTextual() ? kind.asText() : type, byType);
+                        kind != null && kind.isTextual() ? kind.asText() : type, asTags, asMap);
             }
         } else if (value.isObject()) {
-            anySpelling(field(step(value, steps.get(index)), next), member, index + 1, type, byType);
+            anySpelling(field(step(value, steps.get(index)), next), member, index + 1, type, asTags, asMap);
         }
     }
 
