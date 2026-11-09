@@ -314,6 +314,7 @@ services:
       - { path: services/securityadmin/SecurityAdminController.java, mode: rest }
     rename_actions:
       ListAdmin: ListOrganizationAdminAccounts
+      CreateMembers: CreateMember
   - service: resource-groups
     doc: docs/services/resource-groups.md
     sources:
@@ -396,12 +397,14 @@ services:
     doc: docs/services/securityhub.md
     sources:
       - { path: services/securityhub/SecurityHubController.java, mode: rest }
+      - { path: services/securityadmin/SecurityAdminController.java, mode: rest }
       - { path: core/common/SharedTagsController.java, mode: rest }
     rename_actions:
       ListTags: ListTagsForResource
       TagResourcePost: TagResource
     exclude_actions:
       - ListTagsByQuery
+      - ListAdmin
       - TagResourceByBody
       - TagResourcePut
       - UntagResourceByQuery
