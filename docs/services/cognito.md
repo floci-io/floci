@@ -910,6 +910,11 @@ Floci follows real Cognito semantics for pools created with `UsernameAttributes`
   unverified, `AliasExistsException` when it is verified (`email_verified=true`); pass
   `ForceAliasCreation=true` to migrate a verified alias off the previous owner. On
   `AdminUpdateUserAttributes`, changing to an in-use alias throws `AliasExistsException`.
+- With `UsernameConfiguration.CaseSensitive=false`, an email, phone number or `preferred_username`
+  alias matches in any letter case, for sign-in and for the duplicate checks above, so
+  `Fixture@Example.com` signs in a user whose email is `fixture@example.com`. A pool that sets
+  `CaseSensitive=true`, or leaves it unset, matches aliases exactly. A classic pool's `Username` itself
+  is still matched exactly.
 
 Pools **without** `UsernameAttributes` (classic pools, and pools using `AliasAttributes`) keep the
 literal `Username` you supply, unchanged.

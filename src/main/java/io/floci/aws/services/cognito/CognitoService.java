@@ -2402,7 +2402,7 @@ public class CognitoService implements ResourceProvider {
     private CognitoUser resendTarget(UserPool pool, String username) {
         CognitoUser existing = userStore.get(userKey(pool.getId(), username)).orElse(null);
         if (usesAliasUsernames(pool) && existing == null) {
-            existing = findUserByAlias(pool.getId(), aliasAttributeForValue(pool, username), username);
+            existing = findUserByAlias(pool, aliasAttributeForValue(pool, username), username);
         }
         if (existing == null) {
             throw new AwsException("UserNotFoundException", "User not found", 400);
@@ -2427,7 +2427,7 @@ public class CognitoService implements ResourceProvider {
         String aliasAttribute = null;
         if (usesAliasUsernames(pool) && existing == null) {
             aliasAttribute = aliasAttributeForValue(pool, username);
-            existing = findUserByAlias(pool.getId(), aliasAttribute, username);
+            existing = findUserByAlias(pool, aliasAttribute, username);
         }
         if (existing == null) {
             return null;
@@ -2633,7 +2633,7 @@ public class CognitoService implements ResourceProvider {
         if (aliasPool) {
             String aliasAttribute = aliasAttributeForValue(pool, username);
             resolvedAttributes.put(aliasAttribute, username);
-            existing = findUserByAlias(userPoolId, aliasAttribute, username);
+            existing = findUserByAlias(pool, aliasAttribute, username);
             canonicalUsername = existing != null ? existing.getUsername() : UUID.randomUUID().toString();
             resolvedAttributes.put("sub", canonicalUsername);
         } else {
@@ -2828,7 +2828,7 @@ public class CognitoService implements ResourceProvider {
                 if (blankToNull(newValue) == null || newValue.equals(currentUser.getAttributes().get(aliasAttribute))) {
                     continue;
                 }
-                CognitoUser other = findUserByAlias(userPoolId, aliasAttribute, newValue);
+                CognitoUser other = findUserByAlias(pool, aliasAttribute, newValue);
                 if (other != null && !other.getUsername().equals(currentUser.getUsername())) {
                     throw new AwsException("AliasExistsException",
                             "An account with the given " + aliasAttribute + " already exists.", 400);
@@ -3631,7 +3631,7 @@ public class CognitoService implements ResourceProvider {
 
     private void requireAvailableSignUpUsername(UserPool pool, String username) {
         boolean exists = usesAliasUsernames(pool)
-                ? findUserByAlias(pool.getId(), aliasAttributeForValue(pool, username), username) != null
+                ? findUserByAlias(pool, aliasAttributeForValue(pool, username), username) != null
                 : userStore.get(userKey(pool.getId(), username)).isPresent();
         if (exists) {
             throw new AwsException("UsernameExistsException", "User already exists", 400);
@@ -6740,19 +6740,34 @@ public class CognitoService implements ResourceProvider {
         }
 
         for (String attribute : pool.getAliasAttributes()) {
-            if (username.equals(user.getAttributes().get(attribute))
+            if (aliasValueMatches(pool, user.getAttributes().get(attribute), username)
                     && isActiveAliasAttribute(user, attribute)) {
                 return true;
             }
         }
 
         for (String attribute : pool.getUsernameAttributes()) {
-            if (username.equals(user.getAttributes().get(attribute))) {
+            if (aliasValueMatches(pool, user.getAttributes().get(attribute), username)) {
                 return true;
             }
         }
 
         return false;
+    }
+
+    /**
+     * Whether a sign-in value names a stored alias. A pool whose {@code UsernameConfiguration}
+     * sets {@code CaseSensitive} to false matches the alias in any letter case, as AWS does.
+     */
+    private static boolean aliasValueMatches(UserPool pool, String stored, String supplied) {
+        if (stored == null) {
+            return false;
+        }
+        Map<String, Object> configuration = pool.getUsernameConfiguration();
+        Object caseSensitive = configuration == null ? null : configuration.get("CaseSensitive");
+        boolean caseInsensitive = Boolean.FALSE.equals(caseSensitive)
+                || (caseSensitive instanceof String text && "false".equalsIgnoreCase(text));
+        return caseInsensitive ? stored.equalsIgnoreCase(supplied) : stored.equals(supplied);
     }
 
     private boolean isActiveAliasAttribute(CognitoUser user, String attribute) {
@@ -6806,10 +6821,10 @@ public class CognitoService implements ResourceProvider {
     }
 
     /** Finds the single user in a pool whose {@code aliasAttr} equals {@code aliasValue}, or null. */
-    private CognitoUser findUserByAlias(String poolId, String aliasAttr, String aliasValue) {
-        String prefix = poolId + "::";
+    private CognitoUser findUserByAlias(UserPool pool, String aliasAttr, String aliasValue) {
+        String prefix = pool.getId() + "::";
         return userStore.scan(k -> k.startsWith(prefix)).stream()
-                .filter(u -> aliasValue.equals(u.getAttributes().get(aliasAttr)))
+                .filter(u -> aliasValueMatches(pool, u.getAttributes().get(aliasAttr), aliasValue))
                 .findFirst()
                 .orElse(null);
     }
