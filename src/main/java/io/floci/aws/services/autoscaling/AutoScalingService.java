@@ -1680,9 +1680,15 @@ public class AutoScalingService implements PassedRoleLookup {
     // ── Scaling activities ─────────────────────────────────────────────────────
 
     public List<ScalingActivity> describeScalingActivities(String region, String asgName) {
+        return describeScalingActivities(region, asgName, List.of());
+    }
+
+    public List<ScalingActivity> describeScalingActivities(String region, String asgName, List<String> activityIds) {
+        Set<String> requestedIds = activityIds == null ? Set.of() : new HashSet<>(activityIds);
         return activities.values().stream()
                 .filter(a -> a.getRegion() == null || a.getRegion().equals(region))
                 .filter(a -> asgName == null || asgName.equals(a.getAutoScalingGroupName()))
+                .filter(a -> requestedIds.isEmpty() || requestedIds.contains(a.getActivityId()))
                 .sorted(Comparator.comparing(ScalingActivity::getStartTime).reversed())
                 .collect(Collectors.toList());
     }

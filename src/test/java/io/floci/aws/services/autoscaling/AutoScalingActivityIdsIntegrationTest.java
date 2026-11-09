@@ -14,6 +14,7 @@ import org.junit.jupiter.api.extension.RegisterExtension;
 import software.amazon.awssdk.regions.Region;
 import software.amazon.awssdk.services.autoscaling.AutoScalingClient;
 import software.amazon.awssdk.services.autoscaling.model.Activity;
+import software.amazon.awssdk.services.autoscaling.model.DescribeScalingActivitiesResponse;
 
 import java.time.Instant;
 import java.util.List;
@@ -63,17 +64,15 @@ class AutoScalingActivityIdsIntegrationTest {
     void sdkFiltersSingleMultipleRepeatedAndUnknownIds() {
         try (AutoScalingClient client = AwsTestClients.create(
                 AutoScalingClient.builder(), ACCOUNT, Region.US_EAST_1)) {
-            assertEquals(List.of(groupIds.get(1)), client.describeScalingActivities(request -> request
-                    .autoScalingGroupName(groupName).activityIds(groupIds.get(1)))
-                    .activities().stream().map(Activity::activityId).toList());
-            assertEquals(List.of(groupIds.get(0), groupIds.get(2)), client.describeScalingActivities(request -> request
-                    .autoScalingGroupName(groupName).activityIds(groupIds.get(2), groupIds.get(0), groupIds.get(2)))
-                    .activities().stream().map(Activity::activityId).toList());
+            assertEquals(List.of(groupIds.get(1)), activityIds(client.describeScalingActivities(request -> request
+                    .autoScalingGroupName(groupName).activityIds(groupIds.get(1)))));
+            assertEquals(List.of(groupIds.get(0), groupIds.get(2)),
+                    activityIds(client.describeScalingActivities(request -> request.autoScalingGroupName(groupName)
+                            .activityIds(groupIds.get(2), groupIds.get(0), groupIds.get(2)))));
             assertTrue(client.describeScalingActivities(request -> request.autoScalingGroupName(groupName)
                     .activityIds(UUID.randomUUID().toString())).activities().isEmpty());
-            assertEquals(List.of(groupIds.get(1)), client.describeScalingActivities(request -> request
-                    .autoScalingGroupName(groupName).activityIds(UUID.randomUUID().toString(), groupIds.get(1)))
-                    .activities().stream().map(Activity::activityId).toList());
+            assertEquals(List.of(groupIds.get(1)), activityIds(client.describeScalingActivities(request -> request
+                    .autoScalingGroupName(groupName).activityIds(UUID.randomUUID().toString(), groupIds.get(1)))));
         }
     }
 
@@ -81,8 +80,8 @@ class AutoScalingActivityIdsIntegrationTest {
     void omittedIdsKeepTheCompleteGroupHistoryInNewestFirstOrder() {
         try (AutoScalingClient client = AwsTestClients.create(
                 AutoScalingClient.builder(), ACCOUNT, Region.US_EAST_1)) {
-            assertEquals(groupIds, client.describeScalingActivities(request -> request.autoScalingGroupName(groupName))
-                    .activities().stream().map(Activity::activityId).toList());
+            assertEquals(groupIds, activityIds(client.describeScalingActivities(
+                    request -> request.autoScalingGroupName(groupName))));
         }
     }
 
@@ -92,9 +91,8 @@ class AutoScalingActivityIdsIntegrationTest {
                 AutoScalingClient.builder(), ACCOUNT, Region.US_EAST_1)) {
             assertTrue(client.describeScalingActivities(request -> request.autoScalingGroupName(groupName)
                     .activityIds(otherGroupId, otherRegionId, otherAccountId)).activities().isEmpty());
-            assertEquals(List.of(otherGroupId), client.describeScalingActivities(request -> request
-                    .activityIds(otherGroupId, otherRegionId, otherAccountId))
-                    .activities().stream().map(Activity::activityId).toList());
+            assertEquals(List.of(otherGroupId), activityIds(client.describeScalingActivities(request -> request
+                    .activityIds(otherGroupId, otherRegionId, otherAccountId))));
         }
     }
 
@@ -113,6 +111,10 @@ class AutoScalingActivityIdsIntegrationTest {
                 .post("/").then().statusCode(200).extract().xmlPath()
                 .getList("DescribeScalingActivitiesResponse.DescribeScalingActivitiesResult.Activities.member.ActivityId");
         assertEquals(List.of(groupIds.get(0), groupIds.get(2)), returned);
+    }
+
+    private static List<String> activityIds(DescribeScalingActivitiesResponse response) {
+        return response.activities().stream().map(Activity::activityId).toList();
     }
 
     private String store(String account, Region region, String group, Instant start) {
