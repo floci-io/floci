@@ -28,6 +28,8 @@ class AppConfigListResourcesPaginationTest {
             "AWS4-HMAC-SHA256 Credential=210987654321/20261109/us-east-1/appconfig/aws4_request";
     private static final String OTHER_REGION =
             "AWS4-HMAC-SHA256 Credential=123456789012/20261109/us-west-2/appconfig/aws4_request";
+    private static final String DEFAULT_PAGE_ACCOUNT =
+            "AWS4-HMAC-SHA256 Credential=321098765432/20261109/us-east-1/appconfig/aws4_request";
 
     @Test
     void listEnvironmentsPaginatesAndScopesTokensToTheApplication() {
@@ -58,6 +60,30 @@ class AppConfigListResourcesPaginationTest {
     }
 
     @Test
+    void listEnvironmentsDefaultsToFiftyItems() {
+        String app = createApplication();
+        List<String> environments = new ArrayList<>();
+        try {
+            for (int i = 0; i < 51; i++) {
+                environments.add(given().header("Authorization", SCOPE)
+                        .contentType(ContentType.JSON)
+                        .body("{\"Name\":\"default-environment-" + i + "\"}")
+                        .when().post("/applications/" + app + "/environments")
+                        .then().statusCode(201).extract().path("Id"));
+            }
+            assertDefaultPageOfFifty("/applications/" + app + "/environments", SCOPE,
+                    Set.copyOf(environments));
+        } finally {
+            for (String environment : environments) {
+                given().header("Authorization", SCOPE)
+                        .when().delete("/applications/" + app + "/environments/" + environment)
+                        .then().statusCode(204);
+            }
+            deleteApplication(app);
+        }
+    }
+
+    @Test
     void listConfigurationProfilesPaginatesAndScopesTokensToTheApplicationAndOperation() {
         String app = createApplication();
         String otherApp = createApplication();
@@ -81,6 +107,24 @@ class AppConfigListResourcesPaginationTest {
     }
 
     @Test
+    void listConfigurationProfilesDefaultsToFiftyItems() {
+        String app = createApplication();
+        List<String> profiles = new ArrayList<>();
+        try {
+            for (int i = 0; i < 51; i++) {
+                profiles.add(createProfile(app, "default-profile-" + i));
+            }
+            assertDefaultPageOfFifty("/applications/" + app + "/configurationprofiles", SCOPE,
+                    Set.copyOf(profiles));
+        } finally {
+            for (String profile : profiles) {
+                deleteProfile(app, profile);
+            }
+            deleteApplication(app);
+        }
+    }
+
+    @Test
     void listHostedVersionsPaginatesInNumericOrderAndScopesTokensToTheProfile() {
         String app = createApplication();
         String profile = createProfile(app, "hosted");
@@ -95,32 +139,12 @@ class AppConfigListResourcesPaginationTest {
                         .when().post(path)
                         .then().statusCode(201);
             }
-            List<Integer> versions = new ArrayList<>();
-            String token = null;
-            String firstToken = null;
-            do {
-                RequestSpecification request = given().header("Authorization", SCOPE)
-                        .queryParam("max_results", 2);
-                if (token != null) {
-                    request.queryParam("next_token", token);
-                }
-                Response page = request
-                        .when().get(path)
-                        .then().statusCode(200).extract().response();
-                List<Integer> items = page.jsonPath().getList("Items.VersionNumber", Integer.class);
-                assertEquals(2, items.size());
-                versions.addAll(items);
-                token = page.jsonPath().getString("NextToken");
-                if (firstToken == null) {
-                    firstToken = token;
-                    assertNotNull(firstToken);
-                }
-            } while (token != null && versions.size() < 10);
-            assertEquals(IntStream.rangeClosed(1, 10).boxed().toList(), versions);
-            assertNull(token);
+            PageWalk<Integer> versions = walkPages(path, "VersionNumber", Integer.class, 2, 10);
+            assertEquals(IntStream.rangeClosed(1, 10).boxed().toList(), versions.items());
+            assertEquals(5, versions.pageCount());
             assertInvalidInputs(path);
             assertInvalidToken("/applications/" + app + "/configurationprofiles/" + otherProfile
-                    + "/hostedconfigurationversions", SCOPE, firstToken);
+                    + "/hostedconfigurationversions", SCOPE, versions.firstToken());
 
             for (int version = 11; version <= 51; version++) {
                 given().header("Authorization", SCOPE)
@@ -152,35 +176,97 @@ class AppConfigListResourcesPaginationTest {
     @Test
     void listDeploymentStrategiesPaginatesAndScopesTokensToAccountAndRegion() {
         String path = "/deploymentstrategies";
-        List<String> ids = new ArrayList<>();
+        PageWalk<String> strategies = walkPages(path, "Id", String.class, 2, 100);
+        assertTrue(strategies.items().containsAll(List.of("AppConfig.AllAtOnce", "AppConfig.Linear50PercentEvery30Seconds",
+                "AppConfig.Canary10Percent20Minutes")));
+        assertEquals(strategies.items().size(), new HashSet<>(strategies.items()).size());
+        assertInvalidInputs(path);
+        assertInvalidToken(path, OTHER_ACCOUNT, strategies.firstToken());
+        assertInvalidToken(path, OTHER_REGION, strategies.firstToken());
+    }
+
+    @Test
+    void listDeploymentStrategiesDefaultsToFiftyItemsIncludingBuiltins() {
+        List<String> strategies = new ArrayList<>();
+        try {
+            for (int i = 0; i < 48; i++) {
+                strategies.add(given().header("Authorization", DEFAULT_PAGE_ACCOUNT)
+                        .contentType(ContentType.JSON)
+                        .body("{\"Name\":\"default-strategy-" + i
+                                + "\",\"DeploymentDurationInMinutes\":0,\"GrowthFactor\":100,"
+                                + "\"FinalBakeTimeInMinutes\":0}")
+                        .when().post("/deploymentstrategies")
+                        .then().statusCode(201).extract().path("Id"));
+            }
+            Set<String> expected = new HashSet<>(strategies);
+            expected.addAll(List.of("AppConfig.AllAtOnce", "AppConfig.Linear50PercentEvery30Seconds",
+                    "AppConfig.Canary10Percent20Minutes"));
+            assertDefaultPageOfFifty("/deploymentstrategies", DEFAULT_PAGE_ACCOUNT, expected);
+        } finally {
+            for (String strategy : strategies) {
+                given().header("Authorization", DEFAULT_PAGE_ACCOUNT)
+                        .when().delete("/deployementstrategies/" + strategy)
+                        .then().statusCode(204);
+            }
+        }
+    }
+
+    private static void assertDefaultPageOfFifty(String path, String authorization, Set<String> expected) {
+        assertEquals(51, expected.size());
+        Response first = given().header("Authorization", authorization)
+                .when().get(path)
+                .then().statusCode(200).extract().response();
+        List<String> firstIds = first.jsonPath().getList("Items.Id", String.class);
+        assertEquals(50, firstIds.size());
+        String nextToken = first.jsonPath().getString("NextToken");
+        assertNotNull(nextToken);
+
+        Response second = given().header("Authorization", authorization)
+                .queryParam("next_token", nextToken)
+                .when().get(path)
+                .then().statusCode(200).extract().response();
+        List<String> secondIds = second.jsonPath().getList("Items.Id", String.class);
+        assertEquals(1, secondIds.size());
+        assertNull(second.jsonPath().getString("NextToken"));
+
+        List<String> allIds = new ArrayList<>(firstIds);
+        allIds.addAll(secondIds);
+        assertEquals(51, new HashSet<>(allIds).size());
+        assertEquals(expected, Set.copyOf(allIds));
+    }
+
+    private static <T> PageWalk<T> walkPages(String path, String field, Class<T> type,
+                                             int pageSize, int maxItems) {
+        List<T> items = new ArrayList<>();
+        Set<String> seenTokens = new HashSet<>();
         String token = null;
         String firstToken = null;
+        int pageCount = 0;
         do {
             RequestSpecification request = given().header("Authorization", SCOPE)
-                    .queryParam("max_results", 2);
+                    .queryParam("max_results", pageSize);
             if (token != null) {
                 request.queryParam("next_token", token);
             }
-            Response page = request
-                    .when().get(path)
+            Response page = request.when().get(path)
                     .then().statusCode(200).extract().response();
-            List<String> items = page.jsonPath().getList("Items.Id", String.class);
-            assertTrue(items.size() <= 2);
-            ids.addAll(items);
+            List<T> pageItems = page.jsonPath().getList("Items." + field, type);
+            assertTrue(pageItems.size() <= pageSize);
+            items.addAll(pageItems);
             token = page.jsonPath().getString("NextToken");
-            if (firstToken == null) {
+            if (pageCount++ == 0) {
                 firstToken = token;
                 assertNotNull(firstToken);
             }
-        } while (token != null && ids.size() < 100);
+            if (token != null) {
+                assertTrue(seenTokens.add(token));
+            }
+        } while (token != null && items.size() < maxItems);
         assertNull(token);
-        assertTrue(ids.containsAll(List.of("AppConfig.AllAtOnce", "AppConfig.Linear50PercentEvery30Seconds",
-                "AppConfig.Canary10Percent20Minutes")));
-        assertEquals(ids.size(), new HashSet<>(ids).size());
-        assertInvalidInputs(path);
-        assertInvalidToken(path, OTHER_ACCOUNT, firstToken);
-        assertInvalidToken(path, OTHER_REGION, firstToken);
+        return new PageWalk<>(items, firstToken, pageCount);
     }
+
+    private record PageWalk<T>(List<T> items, String firstToken, int pageCount) {}
 
     private static String assertTwoPages(String path, String idField, List<String> expected) {
         Response unpaged = given().header("Authorization", SCOPE)

@@ -111,8 +111,7 @@ public class AppConfigService {
 
     public PaginatedResult<Application> listApplicationsPage(Integer maxResults, String nextToken) {
         String scope = "appconfig-applications:" + regions.getAccountId() + ":" + regions.getRegion();
-        return Pagination.paginate(listApplications(), Application::getId, maxResults, nextToken,
-                50, 50, 2048, "BadRequestException", scope, true);
+        return pageAppConfigList(listApplications(), Application::getId, maxResults, nextToken, scope);
     }
 
     /** The application whose ID is exactly {@code applicationId}; GetApplication also takes a name. */
@@ -237,7 +236,7 @@ public class AppConfigService {
                                                               Integer maxResults, String nextToken) {
         String appId = resolveApplication(applicationIdentifier).getId();
         String scope = "appconfig-environments:" + regions.getAccountId() + ":" + regions.getRegion() + ":" + appId;
-        return pageAppConfigList(listEnvironments(appId), Environment::getId, maxResults, nextToken, scope, true);
+        return pageAppConfigList(listEnvironments(appId), Environment::getId, maxResults, nextToken, scope);
     }
 
     /** The environment whose ID is exactly {@code environmentId}, in whichever application holds it. */
@@ -341,7 +340,7 @@ public class AppConfigService {
         String appId = resolveApplication(applicationIdentifier).getId();
         String scope = "appconfig-profiles:" + regions.getAccountId() + ":" + regions.getRegion() + ":" + appId;
         return pageAppConfigList(listConfigurationProfiles(appId), ConfigurationProfile::getId,
-                maxResults, nextToken, scope, true);
+                maxResults, nextToken, scope);
     }
 
     /** The configuration profile whose ID is exactly {@code profileId}, in whichever application holds it. */
@@ -472,7 +471,7 @@ public class AppConfigService {
                 + ":" + appId + ":" + profileId;
         return pageAppConfigList(listHostedConfigurationVersions(appId, profileId),
                 version -> String.format(Locale.ROOT, "%010d", version.getVersionNumber()),
-                maxResults, nextToken, scope, false);
+                maxResults, nextToken, scope);
     }
 
     public synchronized void deleteHostedConfigurationVersion(String applicationIdentifier,
@@ -526,15 +525,12 @@ public class AppConfigService {
     public PaginatedResult<DeploymentStrategy> listDeploymentStrategiesPage(Integer maxResults, String nextToken) {
         String scope = "appconfig-strategies:" + regions.getAccountId() + ":" + regions.getRegion();
         return pageAppConfigList(listDeploymentStrategies(), DeploymentStrategy::getId,
-                maxResults, nextToken, scope, true);
+                maxResults, nextToken, scope);
     }
 
     private static <T> PaginatedResult<T> pageAppConfigList(List<T> items, Function<T, String> cursorOf,
                                                               Integer maxResults, String nextToken,
-                                                              String scope, boolean preserveUnpagedDefault) {
-        if (preserveUnpagedDefault && maxResults == null && nextToken == null) {
-            return new PaginatedResult<>(items, null);
-        }
+                                                              String scope) {
         return Pagination.paginate(items, cursorOf, maxResults, nextToken,
                 50, 50, 2048, "BadRequestException", scope, true);
     }
