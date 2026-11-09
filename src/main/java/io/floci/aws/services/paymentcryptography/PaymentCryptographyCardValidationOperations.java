@@ -119,7 +119,8 @@ public class PaymentCryptographyCardValidationOperations {
     private static String compute(String pan, CardAttrs attrs, PaymentCryptographyKey key) {
         if ("DynamicCardVerificationValue".equals(attrs.variant)) {
             return CvvCrypto.computeDynamicValue(pan, attrs.expiry, attrs.serviceCode,
-                    attrs.applicationTransactionCounter, key.getKeyMaterialHex());
+                    attrs.applicationTransactionCounter, key.getKeyMaterialHex(),
+                    attrs.panSequenceNumber);
         }
         if ("DynamicCardVerificationCode".equals(attrs.variant)) {
             return CvvCrypto.computeDynamicCode(attrs.trackData,

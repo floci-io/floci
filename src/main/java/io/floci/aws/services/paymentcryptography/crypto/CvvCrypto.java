@@ -38,31 +38,50 @@ public final class CvvCrypto {
     /**
      * The dynamic card verification value (dCVV).
      *
-     * <p>A session key is derived from the EMV master key and the terminal's
-     * application transaction counter, and the card verification cipher is
-     * applied to the card data under that session key rather than under the
-     * CVK. The value is therefore bound to one transaction, and a different
-     * counter gives a different value.
+     * <p>Visa's construction: the leftmost four digits of the account number are replaced by
+     * the transaction counter, and the result, the expiry and the service code are
+     * enciphered under the card's unique derived key. The three leftmost decimal digits of
+     * the result are the value.
      *
      * <pre>
-     *   SK  = the EMV common session key derived from the EMK and the ATC
-     *   r   = 3DES_EDE(SK, DES_e(B1, SK-A) XOR B2)   over PAN || expiry || serviceCode
+     *   altered PAN = the leftmost four digits of the PAN replaced by the counter
+     *   r   = 3DES_EDE(UDK, DES_e(B1, UDK-A) XOR B2)  over altered PAN || expiry || service code
      *   value = decimalize(r, 3)
      * </pre>
      *
-     * <p><b>This is the emulator's construction of the dCVV.</b> The service's
-     * cipher is in the scheme books and is not published, so the bytes this
-     * produces are not guaranteed to be the bytes the service produces for the
-     * same inputs. What does match the service is the shape: the inputs, the
-     * key type and the mode of use, and the fact that the value depends on the
-     * transaction counter.
+     * <p>The key is the unique derived key the card is personalised with, which the issuer
+     * derives from the master key with the account number and the PAN sequence number. The
+     * counter diversifies the value by the data it is inserted into, not by the key.
      */
     public static String computeDynamicValue(String pan, String expiryYYMM, String serviceCode,
-                                              String atcHex, String emkHex) {
-        byte[] emk = masterKey(emkHex);
-        byte[] sessionKey = EmvCrypto.deriveSessionKey(emk, HEX.parseHex(atcHex));
-        return decimalize(PinCrypto.digits(pan) + PinCrypto.digits(expiryYYMM)
-                + PinCrypto.digits(serviceCode), sessionKey);
+                                              String atcHex, String emkHex, String psn) {
+        byte[] udk = EmvCrypto.deriveIccMasterKey(HEX.parseHex(emkHex), pan, psn);
+        return decimalize(alteredPan(pan, atcHex) + PinCrypto.digits(expiryYYMM)
+                + PinCrypto.digits(serviceCode), udk);
+    }
+
+    /**
+     * The account number with its leftmost four digits replaced by the transaction counter.
+     *
+     * <p>The counter is a binary coded decimal counter, so its digits are the four decimal
+     * digits of its bytes, and only the rightmost four of them are inserted.
+     */
+    private static String alteredPan(String pan, String atcHex) {
+        String digits = PinCrypto.digits(pan);
+        String counter = atcHex;
+        if (counter.length() > 4) {
+            counter = counter.substring(counter.length() - 4);
+        }
+        StringBuilder altered = new StringBuilder(counter.length() + digits.length());
+        for (int i = 0; i < counter.length(); i++) {
+            char c = counter.charAt(i);
+            if (c < '0' || c > '9') {
+                throw new IllegalArgumentException(
+                        "the transaction counter must be a binary coded decimal counter");
+            }
+            altered.append(c);
+        }
+        return altered.append(digits.substring(4)).toString();
     }
 
     /**

@@ -86,10 +86,16 @@ client that talks to the control plane does not reach it by accident.
 - **The card verification value is the three digit value of the X9 algorithm.** It is computed
   from the account number, the expiry and the service code, enciphered under the card
   verification key, and the value is the decimalized left-most digits of the enciphered block.
-  The static values take a key of the `TR31_C0_CARD_VERIFICATION_KEY` usage. The dynamic ones
-  are computed from the transaction rather than from the card's own fields, and they take a
-  key of the `TR31_E6_EMV_MKEY_OTHER` or the `TR31_E4_EMV_MKEY_DYNAMIC_NUMBERS` usage that
-  may derive.
+  The static values take a key of the `TR31_C0_CARD_VERIFICATION_KEY` usage.
+- **The dynamic value is the one Visa describes for the magstripe data path.** The leftmost
+  four digits of the account number are replaced by the transaction counter, and the result,
+  the expiry and the service code are enciphered under the card's unique derived key, which
+  the issuer derives from the master key with the account number and the PAN sequence
+  number. The value is bound to the transaction, and the counter diversifies it through the
+  data it is inserted into rather than through the key. It takes a key of the
+  `TR31_E6_EMV_MKEY_OTHER` usage. The dynamic card verification code is the Mastercard
+  counterpart, over the track data, and takes a key of the
+  `TR31_E4_EMV_MKEY_DYNAMIC_NUMBERS` usage.
 - **The authorization cryptogram is the ARQC of the transaction.** It is the ISO 9797-1
   algorithm 3 retail MAC over the transaction data, cut to eight bytes, under a session key
   the request's derivation produces. Three derivations are served: the EMV common session key
