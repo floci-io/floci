@@ -94,6 +94,9 @@ jobs:
             | sed 's|^\./||; s|\.java$||' | LC_ALL=C sort \
             > "$GITHUB_WORKSPACE/all-classes.txt"
           cd "$GITHUB_WORKSPACE"
+          # Fetch only the pinned partitioner baseline, not a timing/golden dataset.
+          git cat-file -e 36ab50dceabecb64ca544c08e129a5289e40e222^{commit} 2>/dev/null \
+            || git fetch --no-tags --depth=1 origin 36ab50dceabecb64ca544c08e129a5289e40e222
           python3 -m unittest discover -s .github/ci -p test_partition.py
           .github/ci/partition.sh all-classes.txt "$SHARD_TOTAL" "${{ matrix.shard }}" > shard.txt
           # An empty includesFile makes surefire fall back to its default includes
