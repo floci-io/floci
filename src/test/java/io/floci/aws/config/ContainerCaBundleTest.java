@@ -214,6 +214,21 @@ class ContainerCaBundleTest {
         assertTrue(handshakes(context, privateCa), "the extra CA");
     }
 
+    /** A damaged bundle costs Floci's CA, not the extra CAs: the JVM's roots stand in for the bundle. */
+    @Test
+    void sslContextKeepsTheExtraCasWhenTheBundleIsDamaged() throws Exception {
+        Path tlsDir = Files.createDirectories(tempDir.resolve("tls"));
+        Files.writeString(tlsDir.resolve(ContainerCaBundle.FILE_NAME),
+                "-----BEGIN CERTIFICATE-----\nnot a certificate\n-----END CERTIFICATE-----\n");
+        FlociCertificateAuthority privateCa = FlociCertificateAuthority.loadOrCreate(tempDir.resolve("private-ca"));
+        EmulatorConfig config = config(true, Optional.of(privateCa.certificatePath().toString()));
+
+        Optional<SSLContext> context = ContainerCaBundle.sslContext(config);
+
+        assertTrue(context.isPresent(), "the extra CAs survive a bundle that cannot be parsed");
+        assertTrue(handshakes(context.get(), privateCa), "the extra CA is trusted");
+    }
+
     /** With TLS off and no extra CA, nothing changes: Floci's own clients keep the JVM's default context. */
     @Test
     void sslContextIsEmptyWhenTlsIsOffAndNoExtraCaIsSet() {

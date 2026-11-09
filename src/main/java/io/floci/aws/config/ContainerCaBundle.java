@@ -271,10 +271,12 @@ public final class ContainerCaBundle {
 
     /**
      * What {@link #sslContext(EmulatorConfig)} trusts when there is an extra CA file: the certificates
-     * of {@code bundle}, or the JVM's roots when {@code bundle} is null or holds no certificate,
-     * followed by every certificate in {@code extraCas}. A private key in that file is skipped.
+     * of {@code bundle}, or the JVM's roots when {@code bundle} is null, cannot be read or holds no
+     * certificate, followed by every certificate in {@code extraCas}. A private key in that file is
+     * skipped. A damaged bundle therefore costs Floci's own CA, never the extra CAs.
      *
      * @throws CertificateException when {@code extraCas} holds no certificate
+     * @throws IOException          when {@code extraCas} cannot be read
      */
     static List<X509Certificate> outboundTrustAnchors(Path bundle, Path extraCas)
             throws IOException, GeneralSecurityException {
@@ -284,7 +286,12 @@ public final class ContainerCaBundle {
         }
         List<X509Certificate> anchors = new ArrayList<>();
         if (bundle != null) {
-            anchors.addAll(parseCertificates(Files.readString(bundle)));
+            try {
+                anchors.addAll(parseCertificates(Files.readString(bundle)));
+            } catch (IOException | GeneralSecurityException e) {
+                LOG.warnv(e, "Cannot read {0}; outbound HTTPS from Floci trusts the JVM roots and the extra CAs"
+                        + " instead", bundle);
+            }
         }
         if (anchors.isEmpty()) {
             anchors.addAll(systemRoots());
