@@ -211,10 +211,10 @@ final class OtlpMetricsValidation {
     }
 
     private int dataPointCount(ScopeMetrics scope) {
-        return scope.getMetricsList().stream().mapToInt(this::dataPointCount).sum();
+        return scope.getMetricsList().stream().mapToInt(OtlpMetricsValidation::dataPointCount).sum();
     }
 
-    private int dataPointCount(Metric metric) {
+    static int dataPointCount(Metric metric) {
         return switch (metric.getDataCase()) {
             case GAUGE -> metric.getGauge().getDataPointsCount();
             case SUM -> metric.getSum().getDataPointsCount();
@@ -227,24 +227,37 @@ final class OtlpMetricsValidation {
 
     private boolean hasOversizedStringAttribute(List<KeyValue> attributes) {
         // CloudWatch counts UTF-16 code units here; the metadata limit counts UTF-8 bytes.
-        return attributes.stream().map(KeyValue::getValue).filter(AnyValue::hasStringValue)
-                .anyMatch(value -> value.getStringValue().length() > MAX_ATTRIBUTE_LENGTH);
+        return attributes.stream().map(KeyValue::getValue).anyMatch(this::hasOversizedString);
+    }
+
+    private boolean hasOversizedString(AnyValue value) {
+        return switch (value.getValueCase()) {
+            case STRING_VALUE -> value.getStringValue().length() > MAX_ATTRIBUTE_LENGTH;
+            case ARRAY_VALUE -> value.getArrayValue().getValuesList().stream().anyMatch(this::hasOversizedString);
+            case KVLIST_VALUE -> hasOversizedStringAttribute(value.getKvlistValue().getValuesList());
+            default -> false;
+        };
     }
 
     private long attributesSize(List<KeyValue> attributes) {
         long size = 0;
         for (KeyValue attribute : attributes) {
-            AnyValue value = attribute.getValue();
             size += utf8Size(attribute.getKey());
-            size += switch (value.getValueCase()) {
-                case STRING_VALUE -> utf8Size(value.getStringValue());
-                case BOOL_VALUE -> 1;
-                case INT_VALUE, DOUBLE_VALUE -> 8;
-                case BYTES_VALUE -> value.getBytesValue().size();
-                case ARRAY_VALUE, KVLIST_VALUE, VALUE_NOT_SET -> 0;
-            };
+            size += valueSize(attribute.getValue());
         }
         return size;
+    }
+
+    private long valueSize(AnyValue value) {
+        return switch (value.getValueCase()) {
+            case STRING_VALUE -> utf8Size(value.getStringValue());
+            case BOOL_VALUE -> 1;
+            case INT_VALUE, DOUBLE_VALUE -> 8;
+            case BYTES_VALUE -> value.getBytesValue().size();
+            case ARRAY_VALUE -> value.getArrayValue().getValuesList().stream().mapToLong(this::valueSize).sum();
+            case KVLIST_VALUE -> attributesSize(value.getKvlistValue().getValuesList());
+            case VALUE_NOT_SET -> 0;
+        };
     }
 
     private int utf8Size(String value) {

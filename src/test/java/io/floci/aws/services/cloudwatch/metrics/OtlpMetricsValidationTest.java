@@ -3,8 +3,10 @@ package io.floci.aws.services.cloudwatch.metrics;
 import com.google.protobuf.ByteString;
 import io.opentelemetry.proto.collector.metrics.v1.ExportMetricsServiceRequest;
 import io.opentelemetry.proto.common.v1.AnyValue;
+import io.opentelemetry.proto.common.v1.ArrayValue;
 import io.opentelemetry.proto.common.v1.InstrumentationScope;
 import io.opentelemetry.proto.common.v1.KeyValue;
+import io.opentelemetry.proto.common.v1.KeyValueList;
 import io.opentelemetry.proto.metrics.v1.Gauge;
 import io.opentelemetry.proto.metrics.v1.Metric;
 import io.opentelemetry.proto.metrics.v1.NumberDataPoint;
@@ -16,6 +18,7 @@ import org.junit.jupiter.api.Test;
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.function.UnaryOperator;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
@@ -87,15 +90,9 @@ class OtlpMetricsValidationTest {
     @Test
     void retainsValidPointWhenAnotherHasTooManyAttributes() {
         ExportMetricsServiceRequest original = request(List.of(), List.of(), List.of());
-        ResourceMetrics.Builder resource = original.getResourceMetrics(0).toBuilder();
-        ScopeMetrics.Builder scope = resource.getScopeMetrics(0).toBuilder();
-        Metric.Builder metric = scope.getMetrics(0).toBuilder();
-        Gauge.Builder gauge = metric.getGauge().toBuilder();
-        gauge.addDataPoints(gauge.getDataPoints(0).toBuilder().addAllAttributes(attributes("a", 151)));
-        metric.setGauge(gauge);
-        scope.setMetrics(0, metric);
-        resource.setScopeMetrics(0, scope);
-        OtlpMetricsValidation.Result result = validation.validate(original.toBuilder().setResourceMetrics(0, resource).build());
+        ExportMetricsServiceRequest updated = withFirstGauge(original, gauge -> gauge.addDataPoints(
+                gauge.getDataPoints(0).toBuilder().addAllAttributes(attributes("a", 151))));
+        OtlpMetricsValidation.Result result = validation.validate(updated);
         assertEquals(1, result.rejectedDataPoints());
         assertEquals(1, result.request().getResourceMetrics(0).getScopeMetrics(0).getMetrics(0)
                 .getGauge().getDataPointsCount());
@@ -105,15 +102,9 @@ class OtlpMetricsValidationTest {
     @Test
     void identifiesMissingServiceNameInTimestampError() {
         ExportMetricsServiceRequest original = request(List.of(), List.of(), List.of());
-        ResourceMetrics.Builder resource = original.getResourceMetrics(0).toBuilder();
-        ScopeMetrics.Builder scope = resource.getScopeMetrics(0).toBuilder();
-        Metric.Builder metric = scope.getMetrics(0).toBuilder();
-        Gauge.Builder gauge = metric.getGauge().toBuilder();
-        gauge.setDataPoints(0, gauge.getDataPoints(0).toBuilder().setTimeUnixNano(0));
-        metric.setGauge(gauge);
-        scope.setMetrics(0, metric);
-        resource.setScopeMetrics(0, scope);
-        OtlpMetricsValidation.Result result = validation.validate(original.toBuilder().setResourceMetrics(0, resource).build());
+        ExportMetricsServiceRequest updated = withFirstGauge(original,
+                gauge -> gauge.setDataPoints(0, gauge.getDataPoints(0).toBuilder().setTimeUnixNano(0)));
+        OtlpMetricsValidation.Result result = validation.validate(updated);
         assertEquals("TimeUnixNano 0 is too far in the past for metric 'metric' "
                 + "for resource where service.name is not present at "
                 + "[ResourceMetrics.1.ScopeMetrics.1.Metrics.1.Datapoint.1].", result.errorMessage());
@@ -123,15 +114,9 @@ class OtlpMetricsValidationTest {
     void reportsSharedAndDatapointErrorsButRejectsEachPointOnce() {
         ExportMetricsServiceRequest original = request(List.of(attribute("resource", "x".repeat(1025))),
                 List.of(), List.of());
-        ResourceMetrics.Builder resource = original.getResourceMetrics(0).toBuilder();
-        ScopeMetrics.Builder scope = resource.getScopeMetrics(0).toBuilder();
-        Metric.Builder metric = scope.getMetrics(0).toBuilder();
-        Gauge.Builder gauge = metric.getGauge().toBuilder();
-        gauge.setDataPoints(0, gauge.getDataPoints(0).toBuilder().setTimeUnixNano(0));
-        metric.setGauge(gauge);
-        scope.setMetrics(0, metric);
-        resource.setScopeMetrics(0, scope);
-        OtlpMetricsValidation.Result result = validation.validate(original.toBuilder().setResourceMetrics(0, resource).build());
+        ExportMetricsServiceRequest updated = withFirstGauge(original,
+                gauge -> gauge.setDataPoints(0, gauge.getDataPoints(0).toBuilder().setTimeUnixNano(0)));
+        OtlpMetricsValidation.Result result = validation.validate(updated);
         assertEquals(1, result.rejectedDataPoints());
         assertEquals("Attribute string value exceeds maximum length: 1024 "
                         + "[ResourceMetrics.1] (1 datapoint rejected).\n"
@@ -169,6 +154,44 @@ class OtlpMetricsValidationTest {
         OtlpMetricsValidation.Result result = validation.validate(request);
         assertFalse(result.hasErrors());
         assertEquals(0, result.rejectedDataPoints());
+    }
+
+    @Test
+    void checksNestedStringsInResourceScopeAndDatapointAttributes() {
+        AnyValue nested = AnyValue.newBuilder().setArrayValue(ArrayValue.newBuilder().addValues(
+                AnyValue.newBuilder().setKvlistValue(KeyValueList.newBuilder()
+                        .addValues(attribute("inner", "x".repeat(1025)))))).build();
+        KeyValue attribute = KeyValue.newBuilder().setKey("outer").setValue(nested).build();
+        assertTrue(validation.validate(request(List.of(attribute), List.of(), List.of())).errorMessage()
+                .contains("[ResourceMetrics.1]"));
+        assertTrue(validation.validate(request(List.of(), List.of(attribute), List.of())).errorMessage()
+                .contains("[ResourceMetrics.1.ScopeMetrics.1]"));
+        assertTrue(validation.validate(request(List.of(), List.of(), List.of(attribute))).errorMessage()
+                .contains("[ResourceMetrics.1.ScopeMetrics.1.Metrics.1.Datapoint.1]"));
+    }
+
+    @Test
+    void countsNestedKeysAndValuesTowardsMetadataLimit() {
+        List<KeyValue> attributes = metadataAttributes(39_985 - 11);
+        AnyValue nested = AnyValue.newBuilder().setArrayValue(ArrayValue.newBuilder().addValues(
+                AnyValue.newBuilder().setKvlistValue(KeyValueList.newBuilder()
+                        .addValues(attribute("inner", "value"))))).build();
+        attributes.add(KeyValue.newBuilder().setKey("o").setValue(nested).build());
+        assertFalse(validation.validate(request(List.of(), List.of(), attributes)).hasErrors());
+        attributes.add(attribute("x", ""));
+        assertTrue(validation.validate(request(List.of(), List.of(), attributes)).errorMessage()
+                .startsWith("Maximum size of datapoint metadata exceeded: 40 KB"));
+    }
+
+    private ExportMetricsServiceRequest withFirstGauge(ExportMetricsServiceRequest request,
+                                                       UnaryOperator<Gauge.Builder> edit) {
+        ResourceMetrics.Builder resource = request.getResourceMetrics(0).toBuilder();
+        ScopeMetrics.Builder scope = resource.getScopeMetrics(0).toBuilder();
+        Metric.Builder metric = scope.getMetrics(0).toBuilder();
+        metric.setGauge(edit.apply(metric.getGauge().toBuilder()));
+        scope.setMetrics(0, metric);
+        resource.setScopeMetrics(0, scope);
+        return request.toBuilder().setResourceMetrics(0, resource).build();
     }
 
     private ExportMetricsServiceRequest request(List<KeyValue> resource, List<KeyValue> scope, List<KeyValue> point) {

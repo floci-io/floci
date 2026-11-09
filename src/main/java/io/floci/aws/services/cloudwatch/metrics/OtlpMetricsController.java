@@ -1,7 +1,7 @@
 package io.floci.aws.services.cloudwatch.metrics;
 
 import com.google.protobuf.util.JsonFormat;
-import io.floci.aws.core.common.RegionResolver;
+import io.floci.aws.core.common.RequestContext;
 import io.floci.aws.core.common.ServiceRegistry;
 import io.opentelemetry.proto.collector.metrics.v1.ExportMetricsPartialSuccess;
 import io.opentelemetry.proto.collector.metrics.v1.ExportMetricsServiceRequest;
@@ -29,16 +29,16 @@ public class OtlpMetricsController {
     private static final int MAX_REQUEST_BYTES = 5 * 1024 * 1024;
     private static final String PROTOBUF = "application/x-protobuf";
     private final OtlpMetricsService service;
-    private final RegionResolver regionResolver;
+    private final RequestContext requestContext;
     private final ServiceRegistry serviceRegistry;
     private final OtlpMetricsDecoder decoder = new OtlpMetricsDecoder();
     private final OtlpMetricsValidation validation = new OtlpMetricsValidation();
 
     @Inject
-    public OtlpMetricsController(OtlpMetricsService service, RegionResolver regionResolver,
+    public OtlpMetricsController(OtlpMetricsService service, RequestContext requestContext,
                                  ServiceRegistry serviceRegistry) {
         this.service = service;
-        this.regionResolver = regionResolver;
+        this.requestContext = requestContext;
         this.serviceRegistry = serviceRegistry;
     }
 
@@ -70,7 +70,7 @@ public class OtlpMetricsController {
             if (result.rejectedDataPoints() > 0 && result.rejectedDataPoints() == dataPointCount(request)) {
                 return OtlpMetricsResponses.error(mediaType, 400, 3, result.errorMessage());
             }
-            service.ingest(regionResolver.resolveRegion(headers), result.request());
+            service.ingest(requestContext.getRegion(), result.request());
             ExportMetricsServiceResponse response = result.hasErrors()
                     ? ExportMetricsServiceResponse.newBuilder().setPartialSuccess(ExportMetricsPartialSuccess
                             .newBuilder().setRejectedDataPoints(result.rejectedDataPoints())
@@ -93,14 +93,7 @@ public class OtlpMetricsController {
         for (ResourceMetrics resource : request.getResourceMetricsList()) {
             for (ScopeMetrics scope : resource.getScopeMetricsList()) {
                 for (Metric metric : scope.getMetricsList()) {
-                    count += switch (metric.getDataCase()) {
-                        case GAUGE -> metric.getGauge().getDataPointsCount();
-                        case SUM -> metric.getSum().getDataPointsCount();
-                        case HISTOGRAM -> metric.getHistogram().getDataPointsCount();
-                        case EXPONENTIAL_HISTOGRAM -> metric.getExponentialHistogram().getDataPointsCount();
-                        case SUMMARY -> metric.getSummary().getDataPointsCount();
-                        case DATA_NOT_SET -> 0;
-                    };
+                    count += OtlpMetricsValidation.dataPointCount(metric);
                 }
             }
         }
