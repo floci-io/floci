@@ -157,7 +157,7 @@ public class InstanceConnectTunnelHandler {
                 return;
             }
             // An instance that speaks first (sshd's banner) can write before the upgrade completes;
-            // hold its bytes until the pipe and handlers below exist.
+            // hold its bytes until the pipe below exists; pipeTo resumes it.
             NetSocket socket = connected.result().pause();
             ctx.request().resume();
             ctx.request().toWebSocket().onSuccess(webSocket -> {
@@ -179,7 +179,6 @@ public class InstanceConnectTunnelHandler {
                         webSocket.close();
                     }
                 });
-                socket.resume();
             }).onFailure(cause -> {
                 socket.close();
                 LOG.warnv("EC2 Instance Connect Endpoint tunnel upgrade failed: {0}", cause.getMessage());
