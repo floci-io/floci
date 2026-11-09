@@ -27,6 +27,8 @@ import jakarta.enterprise.event.Observes;
 import jakarta.inject.Inject;
 import org.jboss.logging.Logger;
 
+import java.net.Inet4Address;
+import java.net.InetAddress;
 import java.time.Clock;
 import java.util.List;
 import java.util.Map;
@@ -234,6 +236,9 @@ public class InstanceConnectTunnelHandler {
         String region = scope.region();
         String endpointId = required(query, "instanceConnectEndpointId");
         String privateIp = required(query, "privateIpAddress");
+        if (!isIpv4Literal(privateIp)) {
+            throw new Refusal(400, "privateIpAddress must be an IPv4 address");
+        }
         int port = integer(query, "remotePort", null);
         if (!ALLOWED_PORTS.contains(port)) {
             throw new Refusal(400, "remotePort " + port + " is not supported; an EC2 Instance Connect Endpoint "
@@ -321,6 +326,16 @@ public class InstanceConnectTunnelHandler {
         }
         if (!matches) {
             throw new Refusal(403, "The request signature we calculated does not match the signature you provided.");
+        }
+    }
+
+    /** ofLiteral never resolves a name; a non-literal throws instead of reaching DNS. */
+    private static boolean isIpv4Literal(String value) {
+        try {
+            // The round trip refuses the shorthand ofLiteral accepts ("10.0.1", hex, octal).
+            return InetAddress.ofLiteral(value) instanceof Inet4Address a && a.getHostAddress().equals(value);
+        } catch (IllegalArgumentException e) {
+            return false;
         }
     }
 

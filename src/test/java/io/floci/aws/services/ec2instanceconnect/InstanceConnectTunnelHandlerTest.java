@@ -123,6 +123,9 @@ class InstanceConnectTunnelHandlerTest {
         assertEquals(404, refusal(CLI_QUERY.replace("instanceConnectEndpointId=" + EICE,
                 "instanceConnectEndpointId=eice-0000000000000000f")));
         assertEquals(404, refusal(CLI_QUERY.replace("10.0.1.10", "10.0.1.99")));
+        for (String bad : List.of("not-an-ip", "10.0.0.256", "::1", "10.0.1")) {
+            assertEquals(400, refusal(CLI_QUERY.replace("10.0.1.10", bad)), bad);
+        }
         when(ec2.instanceConnectEndpointMayReach(eq(endpoint), eq(instance), anyInt())).thenReturn(false);
         assertEquals(403, refusal(CLI_QUERY), "security groups deny");
     }
