@@ -2057,10 +2057,7 @@ public class RedshiftService implements ManagedSecretRotator {
     }
 
     public Snapshot modifyClusterSnapshot(String snapshotIdentifier, int manualSnapshotRetentionPeriod, Boolean force) {
-        if (manualSnapshotRetentionPeriod != -1 && (manualSnapshotRetentionPeriod < 1 || manualSnapshotRetentionPeriod > 3653)) {
-            throw new AwsException("InvalidRetentionPeriod",
-                    "ManualSnapshotRetentionPeriod must be -1 or between 1 and 3653.", 400);
-        }
+        validateManualRetention(manualSnapshotRetentionPeriod);
         String accountId = clusters.accountId();
         String region = regionResolver.getRegion();
 
@@ -2117,6 +2114,16 @@ public class RedshiftService implements ManagedSecretRotator {
                 throw new AwsException("InvalidClusterSnapshotState",
                         "Cannot modify an automated snapshot: " + snapshotIdentifier
                                 + ". Only manual snapshots can be modified.", 400);
+            }
+
+            if (isManualRetentionElapsed(snapshot, manualSnapshotRetentionPeriod, Instant.now())) {
+                if (!Boolean.TRUE.equals(force)) {
+                    throw new AwsException("InvalidRetentionPeriodFault",
+                            "The retention period of " + manualSnapshotRetentionPeriod + " days has already passed for snapshot "
+                                    + snapshotIdentifier + ". Use Force to delete it.", 400);
+                }
+                // Force overrides the fault: the snapshot is already past its new deadline, so it goes now.
+                return mutate(() -> removeSnapshot(snapshotName, snapshot.getClusterIdentifier()));
             }
 
             snapshot.setManualSnapshotRetentionPeriod(manualSnapshotRetentionPeriod);
@@ -3062,6 +3069,45 @@ public class RedshiftService implements ManagedSecretRotator {
                         entry.key(), entry.accountId());
             }
         }
+        expireManualSnapshots(now);
+    }
+
+    private static boolean isManualRetentionElapsed(Snapshot snapshot, int retentionDays, Instant now) {
+        return retentionDays > 0 && snapshot.getSnapshotCreateTime() != null
+                && !now.isBefore(snapshot.getSnapshotCreateTime().plus(retentionDays, ChronoUnit.DAYS));
+    }
+
+    /** Manual snapshots in the primary store keep their retention until ModifyClusterSnapshot gives them a deadline. */
+    private void expireManualSnapshots(Instant now) {
+        for (AccountAwareStorageBackend.AccountEntry<Snapshot> entry : snapshots.scanAllAccountEntries(key -> true)) {
+            if (Thread.currentThread().isInterrupted()) {
+                return;
+            }
+            if (!isManualSnapshotExpired(entry.value(), now)) {
+                continue;
+            }
+            try {
+                withResourceLock(entry.accountId(), "snapshot", entry.key(), () -> mutate(() -> {
+                    // Read again under the lock: the scanned snapshot may have been modified or deleted meanwhile.
+                    Snapshot current = snapshots.getForAccount(entry.accountId(), entry.key()).orElse(null);
+                    if (current == null || !isManualSnapshotExpired(current, now)) {
+                        return null;
+                    }
+                    snapshots.deleteAllAtomicallyForAccounts(Map.of(entry.accountId(), Set.of(entry.key())));
+                    snapshots.flush();
+                    deleteCopyDump(entry.accountId(), current.getSqlDump());
+                    return null;
+                }));
+            } catch (RuntimeException e) {
+                LOG.warnv(e, "Could not expire manual snapshot {0} of account {1}; will retry",
+                        entry.key(), entry.accountId());
+            }
+        }
+    }
+
+    private static boolean isManualSnapshotExpired(Snapshot snapshot, Instant now) {
+        return "manual".equals(snapshot.getSnapshotType())
+                && isManualRetentionElapsed(snapshot, snapshot.getManualSnapshotRetentionPeriod(), now);
     }
 
     private void runSnapshotSchedule(String accountId, Cluster cluster, Instant now) {

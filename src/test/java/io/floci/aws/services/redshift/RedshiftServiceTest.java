@@ -2608,12 +2608,12 @@ class RedshiftServiceTest {
     void modifyClusterSnapshotInvalidRetentionPeriod() {
         AwsException ex1 = assertThrows(AwsException.class, () ->
                 service.modifyClusterSnapshot("snap-1", 0));
-        assertEquals("InvalidRetentionPeriod", ex1.getErrorCode());
+        assertEquals("InvalidRetentionPeriodFault", ex1.getErrorCode());
         assertEquals(400, ex1.getHttpStatus());
 
         AwsException ex2 = assertThrows(AwsException.class, () ->
                 service.modifyClusterSnapshot("snap-1", 3654));
-        assertEquals("InvalidRetentionPeriod", ex2.getErrorCode());
+        assertEquals("InvalidRetentionPeriodFault", ex2.getErrorCode());
         assertEquals(400, ex2.getHttpStatus());
     }
 
