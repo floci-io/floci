@@ -75,13 +75,15 @@ floci:
       flociAddress: ""
 
   # -- Any other Floci setting, as FLOCI_* environment variables (see
-  # docs/configuration/environment-variables.md). An entry here wins over the variable
-  # the chart derives from the settings above. Values are rendered as strings.
+  # docs/configuration/environment-variables.md). Values are rendered as strings. The
+  # variables the chart sets from the settings above, and FLOCI_PORT (the container always
+  # listens on 4566), fail the render here; the error names the value to set instead.
   env: {}
     # FLOCI_SERVICES_SQS_ENDPOINT_STRATEGY: aws
     # FLOCI_SERVICES_LAMBDA_CONTAINER_IDLE_TIMEOUT_SECONDS: "300"
 
-# -- Extra container environment variables in Kubernetes EnvVar form (for valueFrom).
+# -- Extra container environment variables in Kubernetes EnvVar form (for valueFrom). The
+# variables the chart sets are refused here as in floci.env.
 extraEnv: []
   # - name: FLOCI_DOCKER_REGISTRY_CREDENTIALS_0__PASSWORD
   #   valueFrom:

@@ -169,11 +169,49 @@ Floci at runtime.
 {{- end }}
 
 {{/*
-Container environment. The chart's derived variables go in first and floci.env entries
-override them, so a variable is never listed twice. Sorted by name for a stable render.
+The variables the chart sets itself, each mapped to the value that controls it, as JSON. Other
+manifests follow these values: the container port and the probes are fixed at 4566, the Role
+and the token mount follow the executor and TLS settings, and the test pods expect the base URL
+and region. A variable set behind the chart's back would leave them out of step, so floci.env
+and extraEnv cannot set any of these.
+*/}}
+{{- define "floci.managedEnv" -}}
+{{- dict
+  "FLOCI_PORT" "service.port (the container always listens on 4566)"
+  "FLOCI_BASE_URL" "floci.baseUrl"
+  "FLOCI_HOSTNAME" "floci.hostname"
+  "FLOCI_DEFAULT_REGION" "floci.defaultRegion"
+  "FLOCI_DEFAULT_ACCOUNT_ID" "floci.defaultAccountId"
+  "FLOCI_STORAGE_MODE" "floci.storage.mode"
+  "FLOCI_STORAGE_PERSISTENT_PATH" "persistence.enabled or persistence.existingClaim (the data volume is always mounted at /app/data)"
+  "FLOCI_TLS_ENABLED" "floci.tls.enabled"
+  "FLOCI_SERVICES_LAMBDA_EXECUTOR" "floci.lambda.executor"
+  "FLOCI_SERVICES_LAMBDA_KUBERNETES_NAMESPACE" "floci.lambda.kubernetes.namespace"
+  "FLOCI_SERVICES_LAMBDA_KUBERNETES_INIT_IMAGE" "floci.lambda.kubernetes.initImage"
+  "FLOCI_SERVICES_LAMBDA_KUBERNETES_LABELS" "floci.lambda.kubernetes.labels"
+  "FLOCI_SERVICES_LAMBDA_KUBERNETES_FLOCI_ADDRESS" "floci.lambda.kubernetes.flociAddress"
+  | toJson }}
+{{- end }}
+
+{{/*
+Container environment: the variables the chart derives from its values, then floci.env.
+Sorted by name for a stable render. A floci.env or extraEnv entry for a variable the chart
+sets fails the render and names the value to use instead.
 */}}
 {{- define "floci.env" -}}
+{{- $managed := include "floci.managedEnv" . | fromJson }}
+{{- range $name, $value := .Values.floci.env }}
+{{- if hasKey $managed $name }}
+{{- fail (printf "floci.env.%s: the chart sets this variable; use %s instead" $name (get $managed $name)) }}
+{{- end }}
+{{- end }}
+{{- range .Values.extraEnv }}
+{{- if hasKey $managed .name }}
+{{- fail (printf "extraEnv %s: the chart sets this variable; use %s instead" .name (get $managed .name)) }}
+{{- end }}
+{{- end }}
 {{- $env := dict }}
+{{- $_ := set $env "FLOCI_PORT" "4566" }}
 {{- $_ := set $env "FLOCI_BASE_URL" (include "floci.baseUrl" .) }}
 {{- with .Values.floci.hostname }}
 {{- $_ := set $env "FLOCI_HOSTNAME" . }}

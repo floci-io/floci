@@ -33,6 +33,8 @@ matches the default manifests:
             - env:
                 - name: FLOCI_BASE_URL
                   value: http://floci.aws.svc.cluster.local:4566
+                - name: FLOCI_PORT
+                  value: "4566"
                 - name: FLOCI_SERVICES_LAMBDA_EXECUTOR
                   value: kubernetes
                 - name: FLOCI_SERVICES_LAMBDA_KUBERNETES_NAMESPACE

@@ -92,8 +92,7 @@ value. The ones most installs touch:
 | `ingress.enabled` | `false` | Ingress to the Service. |
 | `resources` | 100m CPU, 128Mi requested; 1Gi memory limit | Raise the limit for large in-memory data. |
 
-Any `FLOCI_*` setting can go in `floci.env`; an entry there wins over the variable the chart derives
-from the values above:
+Any other `FLOCI_*` setting can go in `floci.env`:
 
 ```yaml
 floci:
@@ -101,6 +100,15 @@ floci:
   env:
     FLOCI_SERVICES_SQS_ENDPOINT_STRATEGY: aws
     FLOCI_SERVICES_LAMBDA_CONTAINER_IDLE_TIMEOUT_SECONDS: 300
+```
+
+The variables the chart sets itself cannot go there or in `extraEnv`, because other manifests follow
+the values behind them: the Role and the ServiceAccount token follow `floci.lambda.executor` and
+`floci.tls.enabled`, and the container port and the probes are fixed at 4566, so `FLOCI_PORT` is
+refused too (`service.port` changes the Service port). The render fails and names the value to set:
+
+```
+Error: execution error at (floci/templates/deployment.yaml:68:16): floci.env.FLOCI_TLS_ENABLED: the chart sets this variable; use floci.tls.enabled instead
 ```
 
 The chart ships a JSON schema, so a misspelled key or a wrong type fails `helm install` instead of
