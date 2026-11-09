@@ -1014,6 +1014,266 @@ class CognitoIntegrationTest {
     }
 
     @Test
+    void confirmWithLinkSignUpAndResendSendALinkThatConfirmsTheUser() throws Exception {
+        given().delete("/_aws/ses").then().statusCode(200);
+
+        JsonNode poolResponse = cognitoJson("CreateUserPool", """
+                {
+                  "PoolName": "ConfirmWithLinkPool",
+                  "AutoVerifiedAttributes": ["email"],
+                  "VerificationMessageTemplate": {
+                    "DefaultEmailOption": "CONFIRM_WITH_LINK",
+                    "EmailSubject": "Code subject",
+                    "EmailMessage": "CODE {####}",
+                    "EmailSubjectByLink": "Confirm your account",
+                    "EmailMessageByLink": "Welcome. {##Click here##} to finish."
+                  }
+                }
+                """);
+        String linkPoolId = poolResponse.path("UserPool").path("Id").asText();
+        String linkClientId = cognitoJson("CreateUserPoolClient", """
+                {
+                  "UserPoolId": "%s",
+                  "ClientName": "confirm-with-link-client"
+                }
+                """.formatted(linkPoolId)).path("UserPoolClient").path("ClientId").asText();
+
+        String username = "link+" + UUID.randomUUID() + "@example.com";
+        cognitoAction("SignUp", """
+                {
+                  "ClientId": "%s",
+                  "Username": "%s",
+                  "Password": "Passw0rd!",
+                  "UserAttributes": [
+                    { "Name": "email", "Value": "%s" }
+                  ]
+                }
+                """.formatted(linkClientId, username, username))
+                .then()
+                .statusCode(200);
+
+        JsonNode signupEmail = latestEmailTo(username);
+        assertEquals("Confirm your account", signupEmail.path("Subject").asText());
+        String signupText = signupEmail.path("Body").path("text_part").asText();
+        assertThat(signupText, containsString("Welcome."));
+        assertThat(signupText, containsString("to finish."));
+        assertFalse(signupText.contains("CODE "));
+        String signupLink = confirmUserPath(signupText);
+        String originalCode = confirmationCode(signupLink);
+
+        given().delete("/_aws/ses").then().statusCode(200);
+        cognitoAction("ResendConfirmationCode", """
+                {
+                  "ClientId": "%s",
+                  "Username": "%s"
+                }
+                """.formatted(linkClientId, username))
+                .then()
+                .statusCode(200);
+
+        JsonNode resendEmail = latestEmailTo(username);
+        assertEquals("Confirm your account", resendEmail.path("Subject").asText());
+        String resendText = resendEmail.path("Body").path("text_part").asText();
+        String resendHtml = resendEmail.path("Body").path("html_part").asText();
+        String resendLink = confirmUserPath(resendText);
+        String replacementCode = confirmationCode(resendLink);
+        assertNotEquals(originalCode, replacementCode);
+        assertThat(resendHtml, containsString("<a href=\""));
+        assertThat(resendHtml, containsString(">Click here</a>"));
+        assertThat(resendHtml, containsString("&amp;"));
+
+        cognitoAction("ConfirmSignUp", """
+                {
+                  "ClientId": "%s",
+                  "Username": "%s",
+                  "ConfirmationCode": "%s"
+                }
+                """.formatted(linkClientId, username, originalCode))
+                .then()
+                .statusCode(400)
+                .body("__type", Matchers.equalTo("CodeMismatchException"));
+
+        given().urlEncodingEnabled(false)
+                .get(resendLink)
+                .then()
+                .statusCode(200)
+                .body(containsString("Your account has been confirmed."));
+
+        JsonNode confirmed = cognitoJson("AdminGetUser", """
+                {
+                  "UserPoolId": "%s",
+                  "Username": "%s"
+                }
+                """.formatted(linkPoolId, username));
+        assertEquals("CONFIRMED", confirmed.path("UserStatus").asText());
+        assertEquals("true", attributeValue(confirmed, "email_verified"));
+
+        given().delete("/_aws/ses").then().statusCode(200);
+        cognitoAction("ForgotPassword", """
+                {
+                  "ClientId": "%s",
+                  "Username": "%s"
+                }
+                """.formatted(linkClientId, username))
+                .then()
+                .statusCode(200);
+
+        JsonNode resetEmail = latestEmailTo(username);
+        assertEquals("Code subject", resetEmail.path("Subject").asText());
+        String resetText = resetEmail.path("Body").path("text_part").asText();
+        assertThat(resetText, containsString("CODE "));
+        assertFalse(resetText.contains("confirmUser"));
+        assertTrue(resetEmail.path("Body").path("html_part").isNull());
+    }
+
+    @Test
+    void confirmWithCodeKeepsTheCodeTemplateWhenALinkTemplateIsAlsoSet() throws Exception {
+        given().delete("/_aws/ses").then().statusCode(200);
+
+        JsonNode poolResponse = cognitoJson("CreateUserPool", """
+                {
+                  "PoolName": "ConfirmWithCodePool",
+                  "AutoVerifiedAttributes": ["email"],
+                  "VerificationMessageTemplate": {
+                    "DefaultEmailOption": "CONFIRM_WITH_CODE",
+                    "EmailSubject": "Code subject",
+                    "EmailMessage": "CODE {####}",
+                    "EmailSubjectByLink": "Confirm your account",
+                    "EmailMessageByLink": "Welcome. {##Click here##}"
+                  }
+                }
+                """);
+        String codePoolId = poolResponse.path("UserPool").path("Id").asText();
+        String codeClientId = cognitoJson("CreateUserPoolClient", """
+                {
+                  "UserPoolId": "%s",
+                  "ClientName": "confirm-with-code-client"
+                }
+                """.formatted(codePoolId)).path("UserPoolClient").path("ClientId").asText();
+
+        String username = "code+" + UUID.randomUUID() + "@example.com";
+        cognitoAction("SignUp", """
+                {
+                  "ClientId": "%s",
+                  "Username": "%s",
+                  "Password": "Passw0rd!",
+                  "UserAttributes": [
+                    { "Name": "email", "Value": "%s" }
+                  ]
+                }
+                """.formatted(codeClientId, username, username))
+                .then()
+                .statusCode(200);
+
+        JsonNode email = latestEmailTo(username);
+        assertEquals("Code subject", email.path("Subject").asText());
+        String text = email.path("Body").path("text_part").asText();
+        assertThat(text, containsString("CODE "));
+        assertFalse(text.contains("confirmUser"));
+        assertTrue(email.path("Body").path("html_part").isNull());
+        String signupCode = fetchLatestSesVerificationCode(username);
+
+        given().delete("/_aws/ses").then().statusCode(200);
+        cognitoAction("ResendConfirmationCode", """
+                {
+                  "ClientId": "%s",
+                  "Username": "%s"
+                }
+                """.formatted(codeClientId, username))
+                .then()
+                .statusCode(200);
+
+        JsonNode resend = latestEmailTo(username);
+        assertEquals("Code subject", resend.path("Subject").asText());
+        String resendText = resend.path("Body").path("text_part").asText();
+        assertThat(resendText, containsString("CODE "));
+        assertFalse(resendText.contains("confirmUser"));
+        assertTrue(resend.path("Body").path("html_part").isNull());
+        String resendCode = fetchLatestSesVerificationCode(username);
+        assertNotEquals(signupCode, resendCode);
+
+        cognitoAction("ConfirmSignUp", """
+                {
+                  "ClientId": "%s",
+                  "Username": "%s",
+                  "ConfirmationCode": "%s"
+                }
+                """.formatted(codeClientId, username, resendCode))
+                .then()
+                .statusCode(200);
+    }
+
+    @Test
+    void confirmWithLinkOnASharedHostConfirmsAUserOutsideTheDefaultAccount() throws Exception {
+        String accountId = "111122223333";
+        clearSes(accountId);
+
+        JsonNode poolResponse = CognitoCustomDomainFixtures.awsJsonAs(accountId,
+                CognitoCustomDomainFixtures.COGNITO, "CreateUserPool", """
+                {
+                  "PoolName": "OtherAccountLinkPool",
+                  "AutoVerifiedAttributes": ["email"],
+                  "VerificationMessageTemplate": {
+                    "DefaultEmailOption": "CONFIRM_WITH_LINK",
+                    "EmailSubjectByLink": "Confirm your account",
+                    "EmailMessageByLink": "Welcome. {##Click here##}"
+                  }
+                }
+                """);
+        String poolId = poolResponse.path("UserPool").path("Id").asText();
+        String clientId = CognitoCustomDomainFixtures.awsJsonAs(accountId, CognitoCustomDomainFixtures.COGNITO,
+                "CreateUserPoolClient", """
+                {
+                  "UserPoolId": "%s",
+                  "ClientName": "other-account-link-client"
+                }
+                """.formatted(poolId)).path("UserPoolClient").path("ClientId").asText();
+
+        String username = "other+" + UUID.randomUUID() + "@example.com";
+        CognitoCustomDomainFixtures.awsActionAs(accountId, CognitoCustomDomainFixtures.COGNITO, "SignUp", """
+                {
+                  "ClientId": "%s",
+                  "Username": "%s",
+                  "Password": "Passw0rd!",
+                  "UserAttributes": [
+                    { "Name": "email", "Value": "%s" }
+                  ]
+                }
+                """.formatted(clientId, username, username))
+                .then()
+                .statusCode(200);
+
+        JsonNode email = latestEmailTo(accountId, username);
+        String link = confirmUserPath(email.path("Body").path("text_part").asText());
+
+        given()
+                .urlEncodingEnabled(false)
+                .get(link)
+                .then()
+                .statusCode(200)
+                .body(containsString("Your account has been confirmed."));
+
+        cognitoAction("AdminGetUser", """
+                {
+                  "UserPoolId": "%s",
+                  "Username": "%s"
+                }
+                """.formatted(poolId, username))
+                .then()
+                .statusCode(400);
+
+        JsonNode confirmed = CognitoCustomDomainFixtures.awsJsonAs(accountId, CognitoCustomDomainFixtures.COGNITO,
+                "AdminGetUser", """
+                {
+                  "UserPoolId": "%s",
+                  "Username": "%s"
+                }
+                """.formatted(poolId, username));
+        assertEquals("CONFIRMED", confirmed.path("UserStatus").asText());
+        assertEquals("true", attributeValue(confirmed, "email_verified"));
+    }
+
+    @Test
     @Order(8)
     void forgotPasswordRequiresVerifiedRecoveryDestination() throws Exception {
         JsonNode poolResponse = cognitoJson("CreateUserPool", """
@@ -3638,6 +3898,71 @@ class CognitoIntegrationTest {
                   }
                 }
                 """).path("UserPool").path("Id").asText();
+    }
+
+    private static final Pattern CONFIRM_USER_LINK =
+            Pattern.compile("https?://[^\\s\"<>]+(/cognito-idp/confirmUser\\?[^\\s\"<>]+)");
+    private static final Pattern CONFIRMATION_CODE_PARAM = Pattern.compile("confirmation_code=(\\d+)");
+
+    private static JsonNode latestEmailTo(String recipient) {
+        JsonNode messages = SesMailbox.messagesTo(recipient);
+        assertTrue(messages.size() > 0, "expected an email to " + recipient);
+        return messages.get(messages.size() - 1);
+    }
+
+    /** SES stores the message in the account that sent it, which a credential-free read cannot see. */
+    private static JsonNode latestEmailTo(String accountId, String recipient) throws Exception {
+        String body = given()
+                .header("Authorization", "AWS4-HMAC-SHA256 Credential=" + accountId
+                        + "/20260905/us-east-1/email/aws4_request")
+                .when()
+                .get("/_aws/ses")
+                .then()
+                .statusCode(200)
+                .extract()
+                .asString();
+        JsonNode latest = null;
+        for (JsonNode message : OBJECT_MAPPER.readTree(body).path("messages")) {
+            for (JsonNode to : message.path("Destination").path("ToAddresses")) {
+                if (recipient.equals(to.asText())) {
+                    latest = message;
+                    break;
+                }
+            }
+        }
+        assertNotNull(latest, "expected an email to " + recipient + " in account " + accountId);
+        return latest;
+    }
+
+    private static void clearSes(String accountId) {
+        given()
+                .header("Authorization", "AWS4-HMAC-SHA256 Credential=" + accountId
+                        + "/20260905/us-east-1/email/aws4_request")
+                .when()
+                .delete("/_aws/ses")
+                .then()
+                .statusCode(200);
+    }
+
+    private static String confirmUserPath(String body) {
+        Matcher matcher = CONFIRM_USER_LINK.matcher(body);
+        assertTrue(matcher.find(), body);
+        return matcher.group(1);
+    }
+
+    private static String confirmationCode(String link) {
+        Matcher matcher = CONFIRMATION_CODE_PARAM.matcher(link);
+        assertTrue(matcher.find(), link);
+        return matcher.group(1);
+    }
+
+    private static String attributeValue(JsonNode user, String name) {
+        for (JsonNode attribute : user.path("UserAttributes")) {
+            if (name.equals(attribute.path("Name").asText())) {
+                return attribute.path("Value").asText();
+            }
+        }
+        return null;
     }
 
     private static String fetchLatestSesVerificationCode(String recipient) throws Exception {
