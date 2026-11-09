@@ -75,7 +75,8 @@ class Ec2InstanceTypeCatalogTest {
         assertTrue(i4iLarge.encryptionInTransitSupported);
         assertEquals(10, i4iLarge.ipv4AddressesPerInterface);
         assertEquals(3, i4iLarge.networkCards.get(0).maximumNetworkInterfaces);
-        assertEquals(true, i4iLarge.toResponseMap().get("instanceStorageSupported"));
+        assertTrue(Boolean.TRUE.equals(i4iLarge.toResponseMap().get("instanceStorageSupported")),
+                "i4i.large must report instance storage support");
     }
 
     @Test

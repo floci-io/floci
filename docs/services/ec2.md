@@ -42,9 +42,13 @@ Both describe APIs and the existing container resource limits use this entry.
 ### Processor manufacturer metadata
 
 `DescribeInstanceTypes` includes `ProcessorInfo.Manufacturer` for the bundled
-instance types. The original values were captured from AWS in `us-east-1` on 2026-11-04:
-`AWS` for Graviton, `Intel` for the catalog's T2, T3, M5 and R5 types, and `AMD`
-for `t3a.nano`. I4i uses `Intel` from the specifications above.
+instance types. For Graviton, T2, T3, M5, R5 and `t3a.nano`, the values were
+captured from AWS in `us-east-1` on 2026-11-04: `AWS` for Graviton, `Intel` for
+T2, T3, M5 and R5, and `AMD` for `t3a.nano`.
+
+The `i4i.large` value, `Intel`, comes from the AWS storage optimized specifications
+linked above. It was not part of that API capture.
+
 The catalog stores these values explicitly; architecture alone
 cannot distinguish Intel from AMD. See the AWS
 [ProcessorInfo API](https://docs.aws.amazon.com/AWSEC2/latest/APIReference/API_ProcessorInfo.html).
