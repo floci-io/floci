@@ -4,6 +4,8 @@ import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.floci.aws.core.common.AwsArnUtils;
 import io.floci.aws.core.common.AwsException;
+import io.floci.aws.core.common.PaginatedResult;
+import io.floci.aws.core.common.Pagination;
 import io.floci.aws.core.common.RegionResolver;
 import io.floci.aws.core.storage.StorageBackend;
 import io.floci.aws.core.storage.StorageFactory;
@@ -103,6 +105,12 @@ public class AppConfigService {
 
     public List<Application> listApplications() {
         return applicationStore.scan(k -> true);
+    }
+
+    public PaginatedResult<Application> listApplicationsPage(Integer maxResults, String nextToken) {
+        String scope = "appconfig-applications:" + regions.getAccountId() + ":" + regions.getRegion();
+        return Pagination.paginate(listApplications(), Application::getId, maxResults, nextToken,
+                50, 50, 2048, "BadRequestException", scope, true);
     }
 
     /** The application whose ID is exactly {@code applicationId}; GetApplication also takes a name. */

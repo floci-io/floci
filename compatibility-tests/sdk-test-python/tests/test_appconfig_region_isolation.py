@@ -1,11 +1,36 @@
 """AppConfig names, deployed content and session tokens belong to their request scope."""
 
-from contextlib import ExitStack
+from contextlib import ExitStack, closing
 import json
 
 import boto3
 import pytest
 from botocore.exceptions import ClientError
+from botocore.stub import Stubber
+
+
+def application_ids_with_name(client, name):
+    return [
+        app["Id"]
+        for page in client.get_paginator("list_applications").paginate()
+        for app in page["Items"]
+        if app["Name"] == name
+    ]
+
+
+def test_application_name_lookup_reads_later_pages():
+    client = boto3.client(
+        "appconfig", region_name="us-east-1", aws_access_key_id="test",
+        aws_secret_access_key="test")
+    with closing(client), Stubber(client) as stubber:
+        stubber.add_response("list_applications", {
+            "Items": [{"Id": "first", "Name": "other"}], "NextToken": "later",
+        })
+        stubber.add_response("list_applications", {
+            "Items": [{"Id": "second", "Name": "target"}],
+        }, {"NextToken": "later"})
+        assert application_ids_with_name(client, "target") == ["second"]
+        stubber.assert_no_pending_responses()
 
 
 @pytest.mark.parametrize("regions", [
@@ -63,10 +88,7 @@ def test_same_names_in_other_accounts_and_regions_do_not_alias(
             client = selection["client"]
             data = selection["data"]
             assert client.get_application(ApplicationId=unique_name)["Id"] == selection["app"]
-            assert [
-                app["Id"] for app in client.list_applications()["Items"]
-                if app["Name"] == unique_name
-            ] == [selection["app"]]
+            assert application_ids_with_name(client, unique_name) == [selection["app"]]
             response = client.get_configuration(
                 Application=unique_name, Environment="environment", Configuration="settings",
                 ClientId=unique_name)
