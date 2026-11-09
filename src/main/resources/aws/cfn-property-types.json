@@ -2,7 +2,7 @@
   "_source": {
     "generator": "tools/aws/regen_cfn_property_types.py",
     "schemas": "https://schema.cloudformation.us-east-1.amazonaws.com/CloudformationSchema.zip",
-    "retrieved": "2026-10-20",
+    "retrieved": "2026-11-09",
     "note": "make cfn-property-types-verify checks the file against AWS."
   },
   "operations": {
@@ -11,6 +11,7 @@
     "AWS::EC2::Instance": "AWS::EC2::Instance",
     "AWS::EC2::LaunchTemplate": "AWS::EC2::LaunchTemplate",
     "AWS::ECS::TaskDefinition": "AWS::ECS::TaskDefinition",
+    "AWS::Events::Connection": "AWS::Events::Connection",
     "AWS::Events::Rule": "AWS::Events::Rule",
     "AWS::Lambda::Function": "AWS::Lambda::Function",
     "AWS::Lambda::LayerVersion": "AWS::Lambda::LayerVersion"
@@ -1519,6 +1520,137 @@
         "ReadOnly": "Boolean",
         "SourceContainer": "String"
       }
+    },
+    "AWS::Events::Connection": {
+      "type": "structure",
+      "members": {
+        "Name": "String",
+        "Arn": "String",
+        "ArnForPolicy": "String",
+        "SecretArn": "String",
+        "Description": "String",
+        "AuthorizationType": "String",
+        "AuthParameters": "AWS::Events::Connection/AuthParameters",
+        "InvocationConnectivityParameters": "AWS::Events::Connection.InvocationConnectivityParameters",
+        "KmsKeyIdentifier": "String"
+      }
+    },
+    "AWS::Events::Connection.InvocationConnectivityParameters": {
+      "type": "structure",
+      "members": {
+        "ResourceParameters": "AWS::Events::Connection/ResourceParameters"
+      },
+      "required": [
+        "ResourceParameters"
+      ]
+    },
+    "AWS::Events::Connection/ApiKeyAuthParameters": {
+      "type": "structure",
+      "members": {
+        "ApiKeyName": "String",
+        "ApiKeyValue": "String"
+      },
+      "required": [
+        "ApiKeyName",
+        "ApiKeyValue"
+      ]
+    },
+    "AWS::Events::Connection/AuthParameters": {
+      "type": "structure",
+      "members": {
+        "ApiKeyAuthParameters": "AWS::Events::Connection/ApiKeyAuthParameters",
+        "BasicAuthParameters": "AWS::Events::Connection/BasicAuthParameters",
+        "OAuthParameters": "AWS::Events::Connection/OAuthParameters",
+        "InvocationHttpParameters": "AWS::Events::Connection/ConnectionHttpParameters",
+        "ConnectivityParameters": "AWS::Events::Connection/ConnectivityParameters"
+      }
+    },
+    "AWS::Events::Connection/BasicAuthParameters": {
+      "type": "structure",
+      "members": {
+        "Username": "String",
+        "Password": "String"
+      },
+      "required": [
+        "Username",
+        "Password"
+      ]
+    },
+    "AWS::Events::Connection/ClientParameters": {
+      "type": "structure",
+      "members": {
+        "ClientID": "String",
+        "ClientSecret": "String"
+      },
+      "required": [
+        "ClientID",
+        "ClientSecret"
+      ]
+    },
+    "AWS::Events::Connection/ConnectionHttpParameters": {
+      "type": "structure",
+      "members": {
+        "HeaderParameters": "AWS::Events::Connection/ConnectionHttpParameters.HeaderParameters",
+        "QueryStringParameters": "AWS::Events::Connection/ConnectionHttpParameters.QueryStringParameters",
+        "BodyParameters": "AWS::Events::Connection/ConnectionHttpParameters.BodyParameters"
+      }
+    },
+    "AWS::Events::Connection/ConnectionHttpParameters.BodyParameters": {
+      "type": "list",
+      "member": "AWS::Events::Connection/Parameter"
+    },
+    "AWS::Events::Connection/ConnectionHttpParameters.HeaderParameters": {
+      "type": "list",
+      "member": "AWS::Events::Connection/Parameter"
+    },
+    "AWS::Events::Connection/ConnectionHttpParameters.QueryStringParameters": {
+      "type": "list",
+      "member": "AWS::Events::Connection/Parameter"
+    },
+    "AWS::Events::Connection/ConnectivityParameters": {
+      "type": "structure",
+      "members": {
+        "ResourceParameters": "AWS::Events::Connection/ResourceParameters"
+      },
+      "required": [
+        "ResourceParameters"
+      ]
+    },
+    "AWS::Events::Connection/OAuthParameters": {
+      "type": "structure",
+      "members": {
+        "ClientParameters": "AWS::Events::Connection/ClientParameters",
+        "AuthorizationEndpoint": "String",
+        "HttpMethod": "String",
+        "OAuthHttpParameters": "AWS::Events::Connection/ConnectionHttpParameters"
+      },
+      "required": [
+        "ClientParameters",
+        "AuthorizationEndpoint",
+        "HttpMethod"
+      ]
+    },
+    "AWS::Events::Connection/Parameter": {
+      "type": "structure",
+      "members": {
+        "Key": "String",
+        "Value": "String",
+        "IsValueSecret": "Boolean"
+      },
+      "required": [
+        "Key",
+        "Value"
+      ]
+    },
+    "AWS::Events::Connection/ResourceParameters": {
+      "type": "structure",
+      "members": {
+        "ResourceConfigurationArn": "String",
+        "ResourceAssociationArn": "String"
+      },
+      "required": [
+        "ResourceConfigurationArn"
+      ]
     },
     "AWS::Events::Rule": {
       "type": "structure",

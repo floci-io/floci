@@ -1739,6 +1739,18 @@ public class EventBridgeService implements ResourceProvider, StoredResourceArns 
     public Connection updateConnection(String name, String description, String authorizationType,
                                        String authParameters, String invocationConnectivityParameters,
                                        String kmsKeyIdentifier, String region) {
+        return updateConnection(name, description, authorizationType, authParameters,
+                invocationConnectivityParameters, kmsKeyIdentifier, Set.of(), region);
+    }
+
+    /**
+     * As {@link #updateConnection(String, String, String, String, String, String, String)}, and the
+     * settings named in {@code cleared} ({@code Description}, {@code InvocationConnectivityParameters}
+     * or {@code KmsKeyIdentifier}) are removed, as a CloudFormation update that drops them does.
+     */
+    public Connection updateConnection(String name, String description, String authorizationType,
+                                       String authParameters, String invocationConnectivityParameters,
+                                       String kmsKeyIdentifier, Set<String> cleared, String region) {
         String key = connectionKey(region, name);
         Connection connection = connectionStore.get(key)
                 .orElseThrow(() -> new AwsException("ResourceNotFoundException",
@@ -1762,6 +1774,15 @@ public class EventBridgeService implements ResourceProvider, StoredResourceArns 
         }
         if (kmsKeyIdentifier != null) {
             connection.setKmsKeyIdentifier(kmsKeyIdentifier);
+        }
+        if (cleared.contains("Description")) {
+            connection.setDescription(null);
+        }
+        if (cleared.contains("InvocationConnectivityParameters")) {
+            connection.setInvocationConnectivityParameters(null);
+        }
+        if (cleared.contains("KmsKeyIdentifier")) {
+            connection.setKmsKeyIdentifier(null);
         }
         Instant now = Instant.now();
         connection.setConnectionState(ConnectionState.AUTHORIZED);

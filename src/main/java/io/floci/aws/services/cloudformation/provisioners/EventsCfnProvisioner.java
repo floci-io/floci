@@ -29,6 +29,7 @@ import org.jboss.logging.Logger;
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.Collections;
+import java.util.HashMap;
 import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -58,6 +59,7 @@ public class EventsCfnProvisioner implements CfnResourceProvisioner {
     /** The shape AWS::Events::Rule's resource schema declares for its targets. */
     private static final String TARGETS = CfnPropertyTypes.propertyShape("AWS::Events::Rule", "Targets");
 
+    private static final String CONNECTION = "AWS::Events::Connection";
     private static final String EVENT_BUS_CREATED_TIME_ATTR = "FlociEventBusCreatedTime";
     private static final String EVENT_BUS_MANAGED_TAG_KEYS_ATTR = "FlociEventBusManagedTagKeys";
     private static final String EVENT_BUS_MANAGED_POLICY_ATTR = "FlociEventBusManagedPolicy";
@@ -69,7 +71,10 @@ public class EventsCfnProvisioner implements CfnResourceProvisioner {
     private static final int STATEMENT_ID_MAX_LENGTH = 64;
     /** Connection properties an update cannot clear (EventBridge keeps an omitted field) or replace. */
     private static final Set<String> CONNECTION_REFUSED_DROPS = Set.of(
-            "Name", "Description", "AuthParameters", "InvocationConnectivityParameters", "KmsKeyIdentifier");
+            "Name", "AuthorizationType", "AuthParameters");
+    /** Connection properties a template that drops them clears, as CloudFormation does. */
+    private static final Set<String> CONNECTION_CLEARED_DROPS = Set.of(
+            "Description", "InvocationConnectivityParameters", "KmsKeyIdentifier");
 
     private final EventBridgeService eventBridgeService;
 
@@ -886,21 +891,34 @@ public class EventsCfnProvisioner implements CfnResourceProvisioner {
 
     /**
      * {@code AWS::Events::Connection}: {@code Ref} is the connection name, {@code Fn::GetAtt} gives
-     * {@code Arn} and {@code SecretArn}. An update changes the supplied properties in place.
-     * EventBridge's UpdateConnection leaves an omitted field as it is, so a property the new
-     * template drops cannot be cleared, and a different name is a replacement: both are refused
-     * rather than left silently stale.
+     * {@code Arn} and {@code SecretArn}. An update changes the supplied properties in place, and a
+     * template that drops {@code Description}, {@code InvocationConnectivityParameters} or
+     * {@code KmsKeyIdentifier} clears it. EventBridge's UpdateConnection leaves an omitted
+     * {@code AuthorizationType} or {@code AuthParameters} as it is, so dropping one is refused rather
+     * than left silently stale, and a different name is a replacement, refused too. The properties are
+     * read as the resource handler reads them, so an {@code ApiKeyAuthParameters} without its
+     * {@code ApiKeyValue} fails the resource. A connection an older Floci stubbed names nothing that
+     * exists, so an update creates it.
      */
-    private void provisionConnection(StackResource r, JsonNode props, ProvisionContext ctx) {
-        for (String dropped : ctx.droppedProperties(props)) {
-            if (CONNECTION_REFUSED_DROPS.contains(dropped)) {
-                throw new AwsException("ValidationError", "Removing " + dropped
-                        + " from a Connection is not supported: EventBridge keeps the value it has.", 400);
+    private void provisionConnection(StackResource r, JsonNode template, ProvisionContext ctx) {
+        Map<String, String> attributesBefore = new HashMap<>(r.getAttributes());
+        boolean updating = ctx.isUpdate() && !CfnResourceDispatcher.isStub(ctx.priorPhysicalId(), attributesBefore);
+        Set<String> cleared = new HashSet<>();
+        if (updating) {
+            for (String dropped : ctx.droppedProperties(template)) {
+                if (CONNECTION_REFUSED_DROPS.contains(dropped)) {
+                    throw new AwsException("ValidationError", "Removing " + dropped
+                            + " from a Connection is not supported: EventBridge keeps the value it has.", 400);
+                }
+                if (CONNECTION_CLEARED_DROPS.contains(dropped)) {
+                    cleared.add(dropped);
+                }
             }
         }
+        JsonNode props = new CfnPropertyTypes.HandlerReader(ctx.engine()).read(CONNECTION, template);
         String name = ctx.stablePhysicalName(
                 ctx.resolveOptional(props, "Name"), r.getLogicalId(), 64, false);
-        if (ctx.isUpdate() && ctx.priorPhysicalId() != null && !ctx.priorPhysicalId().equals(name)) {
+        if (updating && ctx.priorPhysicalId() != null && !ctx.priorPhysicalId().equals(name)) {
             throw new AwsException("ValidationError",
                     "Updating Connection Name requires resource replacement, which is not supported.", 400);
         }
@@ -914,11 +932,11 @@ public class EventsCfnProvisioner implements CfnResourceProvisioner {
         // A snapshot describes the update in flight; one an earlier update left behind is stale
         r.getAttributes().remove(CfnRollback.CONNECTION_UPDATE_SNAPSHOT_ATTR);
         Connection connection;
-        if (ctx.reusesPriorEntity(name)) {
+        if (updating && ctx.reusesPriorEntity(name)) {
             snapshotConnectionBeforeUpdate(r, eventBridgeService.describeConnection(name, ctx.region()),
                     ctx.region());
             connection = eventBridgeService.updateConnection(name, description, authorizationType,
-                    authParameters, connectivityParameters, kmsKeyIdentifier, ctx.region());
+                    authParameters, connectivityParameters, kmsKeyIdentifier, cleared, ctx.region());
         } else {
             connection = eventBridgeService.createConnection(name, description, authorizationType,
                     authParameters, connectivityParameters, kmsKeyIdentifier, ctx.region());
@@ -966,16 +984,9 @@ public class EventsCfnProvisioner implements CfnResourceProvisioner {
 
     // The snapshot is spent only once the restore succeeded: a restore that throws leaves it for the next attempt
     private boolean rollbackConnectionUpdate(StackResource resource) {
-        String raw = resource.getAttributes().get(CfnRollback.CONNECTION_UPDATE_SNAPSHOT_ATTR);
-        if (raw == null) {
+        JsonNode snapshot = CfnRollback.updateSnapshot(resource, CfnRollback.CONNECTION_UPDATE_SNAPSHOT_ATTR);
+        if (snapshot == null) {
             return false;
-        }
-        JsonNode snapshot;
-        try {
-            snapshot = MAPPER.readTree(raw);
-        } catch (JsonProcessingException e) {
-            throw new IllegalStateException("Could not read the connection update snapshot for "
-                    + resource.getLogicalId(), e);
         }
         Connection previous = new Connection();
         previous.setName(snapshot.path("name").asText());

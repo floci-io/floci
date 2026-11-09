@@ -14,6 +14,7 @@ import org.mockito.ArgumentCaptor;
 
 import java.time.Instant;
 import java.util.HashMap;
+import java.util.Set;
 
 import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -127,14 +128,14 @@ class EventsConnectionCfnProvisionerTest {
     void anUpdateChangesTheConnectionInPlace() {
         when(events.describeConnection(NAME, REGION)).thenReturn(stored());
         when(events.updateConnection(eq(NAME), eq("new description"), eq("API_KEY"), anyString(),
-                isNull(), isNull(), eq(REGION))).thenReturn(stored());
+                isNull(), isNull(), eq(Set.of()), eq(REGION))).thenReturn(stored());
 
         StackResource r = resource("ApiDestinationConnection");
         ObjectNode prior = props("old description", "tok");
         provisioner.provision(r, props("new description", "rotated"), ctx(NAME, prior));
 
         verify(events).updateConnection(eq(NAME), eq("new description"), eq("API_KEY"), anyString(),
-                isNull(), isNull(), eq(REGION));
+                isNull(), isNull(), eq(Set.of()), eq(REGION));
         verify(events, never()).createConnection(any(), any(), any(), any(), any(), any(), any());
         assertEquals(NAME, r.getPhysicalId());
         assertEquals(ARN, r.getAttributes().get("Arn"));
@@ -152,19 +153,75 @@ class EventsConnectionCfnProvisionerTest {
         assertEquals("ValidationError", e.getErrorCode());
         assertTrue(e.getMessage().contains("requires resource replacement"), e.getMessage());
         verify(events, never()).createConnection(any(), any(), any(), any(), any(), any(), any());
-        verify(events, never()).updateConnection(any(), any(), any(), any(), any(), any(), any());
+        verify(events, never()).updateConnection(any(), any(), any(), any(), any(), any(), any(), any());
     }
 
     @Test
-    void aDroppedPropertyIsRefusedBecauseEventBridgeWouldKeepIt() {
+    void aDroppedDescriptionIsCleared() {
+        when(events.describeConnection(NAME, REGION)).thenReturn(stored());
+        when(events.updateConnection(any(), any(), any(), any(), any(), any(), any(), any())).thenReturn(stored());
+
+        provisioner.provision(resource("ApiDestinationConnection"), props(null, "tok"),
+                ctx(NAME, props("a description", "tok")));
+
+        verify(events).updateConnection(eq(NAME), isNull(), eq("API_KEY"), anyString(),
+                isNull(), isNull(), eq(Set.of("Description")), eq(REGION));
+    }
+
+    @Test
+    void aDroppedKmsKeyAndConnectivityParametersAreCleared() {
+        when(events.describeConnection(NAME, REGION)).thenReturn(stored());
+        when(events.updateConnection(any(), any(), any(), any(), any(), any(), any(), any())).thenReturn(stored());
+        ObjectNode prior = props(null, "tok");
+        prior.put("KmsKeyIdentifier", "alias/orders");
+        prior.set("InvocationConnectivityParameters", mapper.createObjectNode().set("ResourceParameters",
+                mapper.createObjectNode().put("ResourceConfigurationArn", "arn:aws:vpc-lattice:us-east-1:000000000000:resourceconfiguration/rcfg-1")));
+
+        provisioner.provision(resource("ApiDestinationConnection"), props(null, "tok"), ctx(NAME, prior));
+
+        verify(events).updateConnection(eq(NAME), isNull(), eq("API_KEY"), anyString(), isNull(), isNull(),
+                eq(Set.of("KmsKeyIdentifier", "InvocationConnectivityParameters")), eq(REGION));
+    }
+
+    @Test
+    void aDroppedAuthorizationTypeIsRefusedBecauseEventBridgeWouldKeepIt() {
         StackResource r = resource("ApiDestinationConnection");
+        ObjectNode dropped = props(null, "tok");
+        dropped.remove("AuthorizationType");
 
         AwsException e = assertThrows(AwsException.class,
-                () -> provisioner.provision(r, props(null, "tok"), ctx(NAME, props("a description", "tok"))));
+                () -> provisioner.provision(r, dropped, ctx(NAME, props(null, "tok"))));
 
         assertEquals("ValidationError", e.getErrorCode());
-        assertTrue(e.getMessage().contains("Removing Description"), e.getMessage());
-        verify(events, never()).updateConnection(any(), any(), any(), any(), any(), any(), any());
+        assertTrue(e.getMessage().contains("Removing AuthorizationType"), e.getMessage());
+        verify(events, never()).updateConnection(any(), any(), any(), any(), any(), any(), any(), any());
+    }
+
+    @Test
+    void anApiKeyWithoutItsValueFailsTheResource() {
+        StackResource r = resource("ApiDestinationConnection");
+        ObjectNode props = props(null, "tok");
+        ((ObjectNode) props.get("AuthParameters").get("ApiKeyAuthParameters")).remove("ApiKeyValue");
+
+        AwsException e = assertThrows(AwsException.class, () -> provisioner.provision(r, props, ctx(null, null)));
+
+        assertTrue(e.getMessage().contains("ApiKeyValue"), e.getMessage());
+        verify(events, never()).createConnection(any(), any(), any(), any(), any(), any(), any());
+    }
+
+    @Test
+    void aConnectionAnOlderFlociStubbedIsCreatedByTheNextUpdate() {
+        when(events.createConnection(any(), any(), any(), any(), any(), any(), any())).thenReturn(stored());
+        StackResource r = resource("ApiDestinationConnection");
+        r.getAttributes().put("Arn", "arn:aws:stub:::ApiDestinationConnection");
+        String stubId = "ApiDestinationConnection-1a2b3c4d";
+
+        provisioner.provision(r, props("Events to orders", "tok"), ctx(stubId, props("older", "tok")));
+
+        verify(events).createConnection(eq(NAME), eq("Events to orders"), eq("API_KEY"), anyString(),
+                isNull(), isNull(), eq(REGION));
+        verify(events, never()).updateConnection(any(), any(), any(), any(), any(), any(), any(), any());
+        assertEquals(NAME, r.getPhysicalId());
     }
 
     private Connection priorConnection() {
@@ -181,7 +238,7 @@ class EventsConnectionCfnProvisionerTest {
 
     private StackResource updatedConnection() {
         when(events.describeConnection(NAME, REGION)).thenReturn(priorConnection());
-        when(events.updateConnection(any(), any(), any(), any(), any(), any(), any())).thenReturn(stored());
+        when(events.updateConnection(any(), any(), any(), any(), any(), any(), any(), any())).thenReturn(stored());
         StackResource r = resource("ApiDestinationConnection");
         provisioner.provision(r, props("new description", "rotated"), ctx(NAME, props("old description", "old-key")));
         return r;
