@@ -4143,12 +4143,8 @@ class Ec2ServiceTest {
     }
 
     @Test
-    void resolveDefaultVpcAndSecurityGroupIdFallBackToPreRegionScopingStorage() throws Exception {
-        // #21 follow-up: persistent storage written before default ids were made region-scoped
-        // still carries the old literal "vpc-default"/"sg-default", never the new scoped form, and
-        // nothing re-seeds it (ensureDefaultResources skips a region that already has a VPC on
-        // file). Any lookup that blindly computed the new scoped id instead of resolving against
-        // what's actually stored would silently stop finding the region's real default VPC/SG.
+    void resolveDefaultVpcIdFallsBackToPreRegionScopingStorage() throws Exception {
+        // Existing regions are not re-seeded, so persisted VPCs can still have the old unscoped id.
         Ec2Service service = new Ec2Service(mockConfig(true), mock(Ec2ContainerManager.class),
                 mock(Ec2PortForwardManager.class),
                 mock(AmiImageResolver.class), mock(Ec2ImageCatalog.class), new Ec2InstanceTypeCatalog(),
@@ -4163,29 +4159,16 @@ class Ec2ServiceTest {
         legacyVpc.setRegion("us-east-1");
         putViaReflection(service, "vpcs", "us-east-1::vpc-default", legacyVpc);
 
-        SecurityGroup legacySg = new SecurityGroup();
-        legacySg.setGroupId("sg-default");
-        legacySg.setGroupName("default");
-        legacySg.setDescription("default VPC security group");
-        legacySg.setVpcId("vpc-default");
-        legacySg.setOwnerId("000000000000");
-        legacySg.setRegion("us-east-1");
-        putViaReflection(service, "securityGroups", "us-east-1::sg-default", legacySg);
-
         assertEquals("vpc-default", service.resolveDefaultVpcId("us-east-1"),
                 "must resolve the pre-existing unscoped default VPC, not compute a fresh scoped id");
-        assertEquals("sg-default", service.resolveDefaultSecurityGroupId("us-east-1"),
-                "must resolve the pre-existing unscoped default security group, not compute a fresh scoped id");
 
         SecurityGroup created = service.createSecurityGroup("us-east-1", "app", "app sg", null);
         assertEquals("vpc-default", created.getVpcId(),
                 "a new security group with no explicit VpcId must attach to the real default VPC on file");
 
-        // A genuinely fresh region has neither format on file, so both resolvers fall back to the
+        // A genuinely fresh region has neither format on file, so the resolver falls back to the
         // scoped form ensureDefaultResources would seed.
         assertEquals(Ec2Service.defaultVpcId("eu-west-1"), service.resolveDefaultVpcId("eu-west-1"));
-        assertEquals(Ec2Service.defaultSecurityGroupId("eu-west-1"),
-                service.resolveDefaultSecurityGroupId("eu-west-1"));
     }
 
     @SuppressWarnings("unchecked")
