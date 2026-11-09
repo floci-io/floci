@@ -10,6 +10,8 @@ import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import com.fasterxml.jackson.dataformat.yaml.YAMLMapper;
 import io.floci.aws.core.common.AwsException;
+import io.floci.aws.core.common.PaginatedResult;
+import io.floci.aws.core.common.Pagination;
 import io.floci.aws.core.common.RegionResolver;
 import io.floci.aws.core.common.SmithyValidationErrors;
 import io.floci.aws.services.apigateway.ApiGatewayService.StoredMapping;
@@ -1418,12 +1420,18 @@ public class ApiGatewayController {
 
     @GET
     @Path("/v2/apis")
-    public Response getApis(@Context HttpHeaders headers) {
+    public Response getApis(@Context HttpHeaders headers,
+                            @QueryParam("maxResults") String maxResults,
+                            @QueryParam("nextToken") String nextToken) {
         String region = regionResolver.resolveRegion(headers);
-        List<Api> apis = v2Service.getApis(region);
+        PaginatedResult<Api> page = v2Service.getApis(region,
+                Pagination.parseMaxResults(maxResults, "BadRequestException"), nextToken);
         ObjectNode root = objectMapper.createObjectNode();
         ArrayNode items = root.putArray("items");
-        apis.forEach(a -> items.add(toV2ApiNode(a)));
+        page.items().forEach(a -> items.add(toV2ApiNode(a)));
+        if (page.nextToken() != null) {
+            root.put("nextToken", page.nextToken());
+        }
         return Response.ok(root.toString()).type(MediaType.APPLICATION_JSON).build();
     }
 

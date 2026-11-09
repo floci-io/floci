@@ -951,6 +951,10 @@ listener relays the request unchanged and does not add a hop.
 (`arn:<partition>:apigateway:<region>::/vpclinks/<vpcLinkId>`). `UpdateVpcLink` changes only the
 name, as in the API model.
 
+`GetApis` pages with `MaxResults` and `NextToken`: a page holds at most `MaxResults` APIs and
+carries a `NextToken` unless it is the last. Without `MaxResults` every API comes back on one page.
+A `MaxResults` below 1 or an unreadable `NextToken` is refused with `BadRequestException`.
+
 ### Custom Domain Names and API Mappings
 
 A custom domain created through either API is one record, routed by its `Host` header as
