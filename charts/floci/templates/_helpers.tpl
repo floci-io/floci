@@ -94,6 +94,14 @@ follows the published scheme (2.4.0-compat, latest-compat, nightly-compat).
 {{- default .Release.Namespace .Values.floci.lambda.kubernetes.namespace }}
 {{- end }}
 
+{{/*
+The ConfigMap Floci publishes its TLS CA bundle in, in the Lambda namespace. The name is fixed
+in Floci (KubernetesPodLauncher.CA_CONFIG_MAP_NAME).
+*/}}
+{{- define "floci.caConfigMapName" -}}
+floci-lambda-ca
+{{- end }}
+
 {{- define "floci.storageMode" -}}
 {{- $mode := .Values.floci.storage.mode | toString }}
 {{- if not $mode }}

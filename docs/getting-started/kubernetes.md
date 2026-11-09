@@ -143,9 +143,9 @@ What the chart sets up for it:
 
 - **RBAC, least privilege.** A Role in the Lambda namespace allows exactly what the executor calls:
   `pods` `create`, `get`, `list`, `delete` and `pods/log` `get`. With TLS it adds `configmaps`
-  `create` and, for the one ConfigMap named `floci-lambda-ca`, `get`, `update` and `delete`. The
-  ServiceAccount token is mounted only when the Kubernetes executor is on. With `rbac.create=false`,
-  grant these yourself.
+  `create` and, for the one ConfigMap named `floci-lambda-ca`, `get` and `update`. The cleanup hook
+  below adds `delete` on that one ConfigMap, with or without TLS. The ServiceAccount token is mounted
+  only when the Kubernetes executor is on. With `rbac.create=false`, grant these yourself.
 - **A separate Lambda namespace** (`floci.lambda.kubernetes.namespace`). The Role and RoleBinding are
   created there. Lambda pods carry no security context of their own, so a namespace that enforces the
   `restricted` Pod Security Standard rejects them; keep Floci in a `restricted` namespace and run

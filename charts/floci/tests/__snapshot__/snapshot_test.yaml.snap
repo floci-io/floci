@@ -134,6 +134,14 @@ matches the default manifests:
           - pods/log
         verbs:
           - get
+      - apiGroups:
+          - ""
+        resourceNames:
+          - floci-lambda-ca
+        resources:
+          - configmaps
+        verbs:
+          - delete
   3: |
     apiVersion: rbac.authorization.k8s.io/v1
     kind: RoleBinding

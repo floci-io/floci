@@ -27,13 +27,20 @@ rules:
     verbs: ["create"]
   - apiGroups: [""]
     resources: ["configmaps"]
-    resourceNames: ["floci-lambda-ca"]
+    resourceNames: [{{ include "floci.caConfigMapName" . | quote }}]
     {{- if include "floci.cleanupHook" . }}
     # delete: only the uninstall cleanup hook removes it; Floci itself never does.
     verbs: ["get", "update", "delete"]
     {{- else }}
     verbs: ["get", "update"]
     {{- end }}
+  {{- else if include "floci.cleanupHook" . }}
+  # Without TLS only the uninstall cleanup hook's delete is left, for the CA ConfigMap an
+  # earlier revision with TLS on may have created.
+  - apiGroups: [""]
+    resources: ["configmaps"]
+    resourceNames: [{{ include "floci.caConfigMapName" . | quote }}]
+    verbs: ["delete"]
   {{- end }}
 ---
 apiVersion: rbac.authorization.k8s.io/v1

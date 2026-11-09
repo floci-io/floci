@@ -131,13 +131,14 @@ tests:
           content:
             name: LAMBDA_NAMESPACE
             value: aws
+      # Also with TLS off: an earlier revision with TLS on may have created it.
       - contains:
           path: spec.containers[0].env
           content:
             name: CA_CONFIG_MAP
-            value: ""
+            value: floci-lambda-ca
 
-  - it: also deletes the CA ConfigMap with TLS
+  - it: cleans up the Lambda namespace with TLS
     template: templates/cleanup-hook.yaml
     set:
       floci.tls.enabled: true

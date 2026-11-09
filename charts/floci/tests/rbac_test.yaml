@@ -11,6 +11,8 @@ tests:
     documentSelector:
       path: kind
       value: Role
+    set:
+      cleanup.enabled: false
     asserts:
       - equal:
           path: metadata.namespace
@@ -24,6 +26,26 @@ tests:
             - apiGroups: [""]
               resources: ["pods/log"]
               verbs: ["get"]
+
+  - it: lets the cleanup hook delete a CA ConfigMap left from TLS, by name, with TLS off
+    template: templates/rbac.yaml
+    documentSelector:
+      path: kind
+      value: Role
+    asserts:
+      - equal:
+          path: rules
+          value:
+            - apiGroups: [""]
+              resources: ["pods"]
+              verbs: ["create", "get", "list", "delete"]
+            - apiGroups: [""]
+              resources: ["pods/log"]
+              verbs: ["get"]
+            - apiGroups: [""]
+              resources: ["configmaps"]
+              resourceNames: ["floci-lambda-ca"]
+              verbs: ["delete"]
 
   - it: binds the Role to the chart's ServiceAccount
     template: templates/rbac.yaml

@@ -118,7 +118,8 @@ serviceAccount:
 rbac:
   # -- Create the Role and RoleBinding the kubernetes Lambda executor needs, in the Lambda
   # namespace: pods create/get/list/delete, pods/log get and, with TLS, the floci-lambda-ca
-  # ConfigMap. Nothing is created for the docker executor.
+  # ConfigMap (plus its delete for the cleanup hook, with or without TLS). Nothing is
+  # created for the docker executor.
   create: true
 
 persistence:

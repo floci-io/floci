@@ -17,10 +17,9 @@ for pod in $pods; do
   echo "delete pod $pod: HTTP $code"
 done
 
-if [ -n "$CA_CONFIG_MAP" ]; then
-  code="$(k -o /dev/null -w '%{http_code}' -X DELETE "$api/api/v1/namespaces/$LAMBDA_NAMESPACE/configmaps/$CA_CONFIG_MAP")"
-  echo "delete configmap $CA_CONFIG_MAP: HTTP $code (404 means it was never created)"
-fi
+# Also with TLS off now: a revision that ran with TLS on may have left the CA ConfigMap.
+code="$(k -o /dev/null -w '%{http_code}' -X DELETE "$api/api/v1/namespaces/$LAMBDA_NAMESPACE/configmaps/$CA_CONFIG_MAP")"
+echo "delete configmap $CA_CONFIG_MAP: HTTP $code (404 means Floci never ran with TLS here)"
 exit 0
 ` }}
 apiVersion: v1
@@ -61,7 +60,7 @@ spec:
         - name: LAMBDA_NAMESPACE
           value: {{ include "floci.lambdaNamespace" . | quote }}
         - name: CA_CONFIG_MAP
-          value: {{ ternary "floci-lambda-ca" "" .Values.floci.tls.enabled | quote }}
+          value: {{ include "floci.caConfigMapName" . | quote }}
         - name: HOME
           value: /tmp
       securityContext:
