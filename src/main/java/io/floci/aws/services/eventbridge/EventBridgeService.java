@@ -1198,7 +1198,8 @@ public class EventBridgeService implements ResourceProvider, StoredResourceArns 
                 for (JsonNode filter : expected) {
                     if (filter.isObject() && filter.has("numeric") && !isValidNumericFilter(filter.get("numeric"))) {
                         throw new AwsException("InvalidEventPatternException",
-                                "numeric must contain operator/number pairs using =, >, >=, <, or <=.", 400);
+                                "numeric must contain one comparison or a lower bound followed by an upper bound"
+                                        + " with a strictly greater endpoint.", 400);
                     }
                 }
             }
@@ -1401,7 +1402,7 @@ public class EventBridgeService implements ResourceProvider, StoredResourceArns 
     }
 
     private boolean isValidNumericFilter(JsonNode comparisons) {
-        if (!comparisons.isArray() || comparisons.isEmpty() || comparisons.size() % 2 != 0) {
+        if (!comparisons.isArray() || (comparisons.size() != 2 && comparisons.size() != 4)) {
             return false;
         }
         for (int i = 0; i < comparisons.size(); i += 2) {
@@ -1411,7 +1412,14 @@ public class EventBridgeService implements ResourceProvider, StoredResourceArns 
                 return false;
             }
         }
-        return true;
+        if (comparisons.size() == 2) {
+            return true;
+        }
+        String lowerOperator = comparisons.get(0).textValue();
+        String upperOperator = comparisons.get(2).textValue();
+        return (">".equals(lowerOperator) || ">=".equals(lowerOperator))
+                && ("<".equals(upperOperator) || "<=".equals(upperOperator))
+                && comparisons.get(1).decimalValue().compareTo(comparisons.get(3).decimalValue()) < 0;
     }
 
     private boolean matchesNumeric(JsonNode comparisons, JsonNode actual) {

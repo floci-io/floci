@@ -59,6 +59,18 @@ class EventBridgeTestEventPatternIntegrationTest {
             [3,8] | ">=",7,"<",9   | true
             ["7"] | ">=",7         | false
             []    | ">=",7         | false
+            6 | ">",6,"<",8 | false
+            7 | ">",6,"<",8 | true
+            8 | ">",6,"<",8 | false
+            6 | ">",6,"<=",8 | false
+            7 | ">",6,"<=",8 | true
+            8 | ">",6,"<=",8 | true
+            6 | ">=",6,"<",8 | true
+            7 | ">=",6,"<",8 | true
+            8 | ">=",6,"<",8 | false
+            6 | ">=",6,"<=",8 | true
+            7 | ">=",6,"<=",8 | true
+            8 | ">=",6,"<=",8 | true
             """)
     void numericComparisonThroughSdk(String value, String comparisons, boolean expected) {
         try (EventBridgeClient client = sdkClient()) {
@@ -71,6 +83,13 @@ class EventBridgeTestEventPatternIntegrationTest {
 
             assertEquals(expected, client.testEventPattern(request -> request
                     .eventPattern(pattern).event(event)).result());
+            String name = "valid-numeric-pattern";
+            client.putRule(request -> request.name(name).eventPattern(pattern));
+            try {
+                assertEquals(pattern, client.describeRule(request -> request.name(name)).eventPattern());
+            } finally {
+                client.deleteRule(request -> request.name(name));
+            }
         }
     }
 
@@ -98,13 +117,42 @@ class EventBridgeTestEventPatternIntegrationTest {
 
     private static Stream<String> invalidNumericPatterns() {
         Stream<String> invalidFilters = Stream.of("null", "7", "{}", "[]", "[\">=\"]", "[\">=\",7,\"<\"]",
-                "[\"!=\",7]", "[7,7]", "[\">=\",\"7\"]", "[\">=\",null]", "[\">=\",true]")
+                "[\"!=\",7]", "[7,7]", "[\">=\",\"7\"]", "[\">=\",null]", "[\">=\",true]",
+                "[\">\",0,\">\",1]", "[\">=\",0,\">\",1]",
+                "[\">\",0,\">=\",1]", "[\">=\",0,\">=\",1]",
+                "[\"<\",9,\"<\",7]", "[\"<=\",9,\"<=\",7]",
+                "[\"=\",7,\">\",6]", "[\">\",6,\"=\",7]",
+                "[\"=\",7,\"=\",7]", "[\"<\",9,\">\",7]",
+                "[\"<=\",9,\">=\",7]", "[\">\",9,\"<\",7]",
+                "[\">=\",9,\"<=\",7]", "[\">\",7,\"<\",7]",
+                "[\">\",7,\"<=\",7]", "[\">=\",7,\"<\",7]",
+                "[\">=\",7,\"<=\",7]", "[\">\",0,\"<\",9,\"<\",8]")
                 .map(filter -> "{\"detail\":{\"severity\":[{\"numeric\":" + filter + "}]}}");
         return Stream.concat(invalidFilters, Stream.of(
                 "{\"detail\":{\"nested\":{\"severity\":[{\"numeric\":[]}]}}}",
                 "{\"$or\":[{\"source\":[\"example.test\"]},{\"detail\":{\"severity\":[{\"numeric\":[]}]}}]}",
                 "{\"detail\":{\"$or\":[{\"severity\":[7]},{\"severity\":[{\"numeric\":[]}] }]}}",
                 "{\"detail\":{\"severity\":[7,{\"numeric\":[]}]}}"));
+    }
+
+    @ParameterizedTest
+    @MethodSource("invalidNumericPatterns")
+    void invalidNumericUpdatePreservesExistingRuleThroughSdk(String pattern) {
+        try (EventBridgeClient client = sdkClient()) {
+            String name = "numeric-update-preservation";
+            String original = "{\"detail\":{\"severity\":[7]}}";
+            client.putRule(request -> request.name(name).eventPattern(original).description("original"));
+            try {
+                InvalidEventPatternException error = assertThrows(InvalidEventPatternException.class,
+                        () -> client.putRule(request -> request.name(name).eventPattern(pattern).description("changed")));
+                assertEquals(400, error.statusCode());
+                assertEquals("InvalidEventPatternException", error.awsErrorDetails().errorCode());
+                assertEquals(original, client.describeRule(request -> request.name(name)).eventPattern());
+                assertEquals("original", client.describeRule(request -> request.name(name)).description());
+            } finally {
+                client.deleteRule(request -> request.name(name));
+            }
+        }
     }
 
     private EventBridgeClient sdkClient() {

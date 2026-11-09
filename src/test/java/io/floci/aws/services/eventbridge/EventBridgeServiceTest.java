@@ -1027,17 +1027,41 @@ class EventBridgeServiceTest {
             [3,8]   | ">=",7,"<",9    | true
             ["7"]   | ">=",7          | false
             []      | ">=",7          | false
+            6 | ">",6,"<",8 | false
+            7 | ">",6,"<",8 | true
+            8 | ">",6,"<",8 | false
+            6 | ">",6,"<=",8 | false
+            7 | ">",6,"<=",8 | true
+            8 | ">",6,"<=",8 | true
+            6 | ">=",6,"<",8 | true
+            7 | ">=",6,"<",8 | true
+            8 | ">=",6,"<",8 | false
+            6 | ">=",6,"<=",8 | true
+            7 | ">=",6,"<=",8 | true
+            8 | ">=",6,"<=",8 | true
             """)
     void matchesPatternByNumericComparison(String value, String comparisons, boolean expected) {
         Map<String, Object> event = Map.of("Detail", "{\"value\":" + value + "}");
         String pattern = "{\"detail\":{\"value\":[{\"numeric\":[" + comparisons + "]}]}}";
 
         assertEquals(expected, service.matchesPattern(event, pattern));
+        assertEquals(expected, service.testEventPattern(pattern, "{\"detail\":{\"value\":" + value + "}}"));
+        service.putRule("valid-numeric", null, pattern, null, RuleState.ENABLED, null, null, null, REGION);
+        assertEquals(pattern, service.describeRule("valid-numeric", null, REGION).getEventPattern());
     }
 
     @ParameterizedTest
     @ValueSource(strings = {"null", "7", "{}", "[]", "[\">=\"]", "[\">=\",7,\"<\"]",
-            "[\"!=\",7]", "[7,7]", "[\">=\",\"7\"]", "[\">=\",null]", "[\">=\",true]"})
+            "[\"!=\",7]", "[7,7]", "[\">=\",\"7\"]", "[\">=\",null]", "[\">=\",true]",
+            "[\">\",0,\">\",1]", "[\">=\",0,\">\",1]",
+            "[\">\",0,\">=\",1]", "[\">=\",0,\">=\",1]",
+            "[\"<\",9,\"<\",7]", "[\"<=\",9,\"<=\",7]",
+            "[\"=\",7,\">\",6]", "[\">\",6,\"=\",7]",
+            "[\"=\",7,\"=\",7]", "[\"<\",9,\">\",7]",
+            "[\"<=\",9,\">=\",7]", "[\">\",9,\"<\",7]",
+            "[\">=\",9,\"<=\",7]", "[\">\",7,\"<\",7]",
+            "[\">\",7,\"<=\",7]", "[\">=\",7,\"<\",7]",
+            "[\">=\",7,\"<=\",7]", "[\">\",0,\"<\",9,\"<\",8]"})
     void malformedNumericComparisonIsRejectedByPublicApis(String comparisons) {
         String pattern = "{\"detail\":{\"value\":[{\"numeric\":" + comparisons + "}]}}";
 
