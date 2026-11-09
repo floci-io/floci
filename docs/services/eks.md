@@ -11,7 +11,7 @@ EKS uses a standard REST API with JSON bodies: not the JSON 1.1 (`X-Amz-Target`)
 |---|---|
 | `CreateCluster` | Create a new EKS cluster |
 | `DescribeCluster` | Describe a cluster by name |
-| `ListClusters` | List all cluster names |
+| `ListClusters` | List cluster names with pagination (`maxResults` 1-100 and `nextToken`) |
 | `DeleteCluster` | Delete a cluster |
 | `CreateAccessEntry` | Create STANDARD or EC2_LINUX access-entry metadata |
 | `DescribeAccessEntry` | Describe an access entry by IAM principal ARN |

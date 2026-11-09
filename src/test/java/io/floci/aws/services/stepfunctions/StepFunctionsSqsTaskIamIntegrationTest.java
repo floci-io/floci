@@ -31,6 +31,7 @@ import java.util.UUID;
 import static io.floci.aws.testing.EnforcementFixtures.auth;
 import static io.floci.aws.testing.StepFunctionsTestClient.LAMBDA_TRUST;
 import static io.floci.aws.testing.StepFunctionsTestClient.STATES_TRUST;
+import static io.floci.aws.testing.StepFunctionsTestClient.allow;
 import static io.floci.aws.testing.StepFunctionsTestClient.trusting;
 import static io.restassured.RestAssured.given;
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -43,9 +44,9 @@ class StepFunctionsSqsTaskIamIntegrationTest {
     private static final String OTHER_ACCOUNT = "000000000442";
     private static final String REGION = "us-east-1";
     private static final ObjectMapper MAPPER = new ObjectMapper();
-    private static final String SEND = allow("sqs:SendMessage");
-    private static final String READ_ONLY = allow("sqs:GetQueueUrl");
-    private static final String ASSUME = allow("sts:AssumeRole");
+    private static final String SEND = allow("*", "sqs:SendMessage");
+    private static final String READ_ONLY = allow("*", "sqs:GetQueueUrl");
+    private static final String ASSUME = allow("*", "sts:AssumeRole");
 
     @TestHTTPResource
     URI baseUri;
@@ -164,7 +165,7 @@ class StepFunctionsSqsTaskIamIntegrationTest {
     void aCredentialsRoleNotAllowedTheActionIsRefusedEvenIfTheExecutionRoleIs(String integration, String error)
             throws Exception {
         SqsTestQueue queue = queue();
-        String executionRole = role(STATES_TRUST, allow("sts:AssumeRole", "sqs:SendMessage"));
+        String executionRole = role(STATES_TRUST, allow("*", "sts:AssumeRole", "sqs:SendMessage"));
         String taskRole = role(trusting(executionRole), READ_ONLY);
         String machine = machine(jsonPathTask(integration, queue, taskRole), executionRole);
 
@@ -344,15 +345,6 @@ class StepFunctionsSqsTaskIamIntegrationTest {
         assertEquals("hello", queue.receive().getFirst().getBody());
     }
 
-    private static String allow(String... actions) {
-        try {
-            return MAPPER.writeValueAsString(Map.of("Version", "2012-10-17", "Statement", List.of(
-                    Map.of("Effect", "Allow", "Action", List.of(actions), "Resource", "*"))));
-        } catch (Exception e) {
-            throw new IllegalStateException(e);
-        }
-    }
-
     private static String queuePolicy(String effect, String principal, String queueArn) {
         return """
                 {"Version":"2012-10-17","Statement":[{"Effect":"%s","Principal":{"AWS":"%s"},
@@ -391,23 +383,19 @@ class StepFunctionsSqsTaskIamIntegrationTest {
     }
 
     private SqsTestQueue queue() {
-        SqsTestQueue queue = SqsTestQueue.create(sqsService, ACCOUNT, REGION, "sfn-sqs-iam-");
-        cleanup.register(queue::delete);
-        return queue;
+        return sfn().queue(sqsService, ACCOUNT, REGION, "sfn-sqs-iam-");
     }
 
     private String role(String trust, String policy) {
-        return EnforcementFixtures.createRole(cleanup, baseUri.getPort(), ACCOUNT, "/",
-                "sfn-sqs-" + UUID.randomUUID(), trust, policy);
+        return sfn().role(ACCOUNT, "sfn-sqs-", trust, policy);
     }
 
     private String machine(Map<String, Object> task, String role) throws Exception {
-        return machineWithDefinition(MAPPER.writeValueAsString(
-                Map.of("StartAt", "Send", "States", Map.of("Send", task))), role);
+        return sfn().machine(ACCOUNT, "sfn-sqs-iam-", task, role);
     }
 
     private String machineWithDefinition(String definition, String role) {
-        return sfn().createMachine(ACCOUNT, "sfn-sqs-iam-", definition, "STANDARD", role);
+        return sfn().machineWithDefinition(ACCOUNT, "sfn-sqs-iam-", definition, role);
     }
 
     private String start(String machine, String input) {
