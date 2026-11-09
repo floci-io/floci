@@ -2,27 +2,28 @@ package io.floci.aws.services.cloudformation;
 
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.node.ObjectNode;
+import io.floci.aws.testing.CfnStackWaits;
+import io.floci.aws.testing.OrganizationsFixture;
 import io.floci.aws.testing.RestAssuredJsonUtils;
 import io.quarkus.test.junit.QuarkusTest;
-import io.restassured.path.json.JsonPath;
 import io.restassured.response.Response;
 import io.restassured.specification.RequestSpecification;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
 
-import java.time.Duration;
-import java.util.List;
 import java.util.UUID;
-import java.util.concurrent.TimeUnit;
 
+import static io.floci.aws.testing.EnforcementFixtures.auth;
 import static io.restassured.RestAssured.given;
-import static org.awaitility.Awaitility.await;
 import static org.hamcrest.MatcherAssert.assertThat;
 import static org.hamcrest.Matchers.containsString;
 import static org.hamcrest.Matchers.equalTo;
 import static org.hamcrest.Matchers.not;
 import static org.hamcrest.Matchers.startsWith;
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /** {@code AWS::CloudFormation::StackSet} deploys its instances through StackSets, end to end. */
 @QuarkusTest
@@ -30,7 +31,7 @@ class StackSetCfnIntegrationTest {
 
     private static final String MANAGEMENT = "676767676767";
     private static final String REGION = "us-east-1";
-    private static final String ORG_TARGET = "AWSOrganizationsV20161128.";
+    private final OrganizationsFixture organizationsFixture = new OrganizationsFixture();
 
     @BeforeAll
     static void configureRestAssured() {
@@ -39,15 +40,12 @@ class StackSetCfnIntegrationTest {
 
     @Test
     void serviceManagedStackSetResourceDeploysToItsTargetsAndFollowsUpdatesAndDeletion() throws Exception {
-        organizations("CreateOrganization", "{\"FeatureSet\":\"ALL\"}").then().statusCode(200);
-        String rootId = organizations("ListRoots", "{}").then().statusCode(200)
-                .extract().jsonPath().getString("Roots[0].Id");
+        String rootId = organizationsFixture.createWithTrustedAccess(MANAGEMENT);
         String targetOu = createOu(rootId, "CfnStackSetTarget");
         String otherOu = createOu(rootId, "CfnStackSetOther");
         String suffix = UUID.randomUUID().toString().substring(0, 8);
         String targetAccount = createAccount("cfn-stackset-target-" + suffix + "@example.com", targetOu, rootId);
         String otherAccount = createAccount("cfn-stackset-other-" + suffix + "@example.com", otherOu, rootId);
-        cloudFormation("ActivateOrganizationsAccess").then().statusCode(200);
 
         String stack = "stackset-resource-" + suffix;
         String stackSet = "cfn-stackset-" + suffix;
@@ -55,7 +53,7 @@ class StackSetCfnIntegrationTest {
         cloudFormation("CreateStack", "StackName", stack, "TemplateBody", template(stackSet, queue),
                 "Parameters.member.1.ParameterKey", "Targets", "Parameters.member.1.ParameterValue", targetOu)
                 .then().statusCode(200);
-        awaitStackStatus(stack, "CREATE_COMPLETE");
+        CfnStackWaits.awaitStatus(stack, "CREATE_COMPLETE", auth(MANAGEMENT, "cloudformation"));
 
         String ref = output(stack, "StackSetRef");
         assertThat(ref, startsWith(stackSet + ":"));
@@ -71,25 +69,21 @@ class StackSetCfnIntegrationTest {
         cloudFormation("UpdateStack", "StackName", stack, "TemplateBody", template(stackSet, queue),
                 "Parameters.member.1.ParameterKey", "Targets", "Parameters.member.1.ParameterValue", otherOu)
                 .then().statusCode(200);
-        awaitStackStatus(stack, "UPDATE_COMPLETE");
+        CfnStackWaits.awaitStatus(stack, "UPDATE_COMPLETE", auth(MANAGEMENT, "cloudformation"));
         assertQueue(targetAccount, queue, false);
         assertQueue(otherAccount, queue, true);
 
-        cloudFormation("DeleteStack", "StackName", stack).then().statusCode(200);
-        await().atMost(Duration.ofSeconds(30)).pollInterval(200, TimeUnit.MILLISECONDS).until(() ->
-                cloudFormation("DescribeStackSet", "StackSetName", stackSet).statusCode() == 404);
+        CfnStackWaits.deleteStack(stack, auth(MANAGEMENT, "cloudformation"));
+        cloudFormation("DescribeStackSet", "StackSetName", stackSet).then().statusCode(404);
         assertQueue(otherAccount, queue, false);
     }
 
     @Test
     void anUpdateRemovesTheInstancesOfARegionDroppedFromAKeptTarget() throws Exception {
-        organizations("CreateOrganization", "{\"FeatureSet\":\"ALL\"}").then().statusCode(200);
-        String rootId = organizations("ListRoots", "{}").then().statusCode(200)
-                .extract().jsonPath().getString("Roots[0].Id");
+        String rootId = organizationsFixture.createWithTrustedAccess(MANAGEMENT);
         String targetOu = createOu(rootId, "CfnStackSetRegions");
         String suffix = UUID.randomUUID().toString().substring(0, 8);
         String account = createAccount("cfn-stackset-regions-" + suffix + "@example.com", targetOu, rootId);
-        cloudFormation("ActivateOrganizationsAccess").then().statusCode(200);
 
         String stack = "stackset-regions-" + suffix;
         String stackSet = "cfn-stackset-regions-" + suffix;
@@ -98,7 +92,7 @@ class StackSetCfnIntegrationTest {
                 "Parameters.member.1.ParameterKey", "Targets", "Parameters.member.1.ParameterValue", targetOu,
                 "Parameters.member.2.ParameterKey", "Regions", "Parameters.member.2.ParameterValue", REGION + ",us-west-2")
                 .then().statusCode(200);
-        awaitStackStatus(stack, "CREATE_COMPLETE");
+        CfnStackWaits.awaitStatus(stack, "CREATE_COMPLETE", auth(MANAGEMENT, "cloudformation"));
         assertQueue(account, queue, REGION, true);
         assertQueue(account, queue, "us-west-2", true);
 
@@ -106,7 +100,7 @@ class StackSetCfnIntegrationTest {
                 "Parameters.member.1.ParameterKey", "Targets", "Parameters.member.1.ParameterValue", targetOu,
                 "Parameters.member.2.ParameterKey", "Regions", "Parameters.member.2.ParameterValue", REGION)
                 .then().statusCode(200);
-        awaitStackStatus(stack, "UPDATE_COMPLETE");
+        CfnStackWaits.awaitStatus(stack, "UPDATE_COMPLETE", auth(MANAGEMENT, "cloudformation"));
         assertQueue(account, queue, REGION, true);
         assertQueue(account, queue, "us-west-2", false);
         cloudFormation("ListStackInstances", "StackSetName", stackSet).then().statusCode(200)
@@ -116,12 +110,9 @@ class StackSetCfnIntegrationTest {
 
     @Test
     void anUpdateDroppingATargetWithNoInstancesStopsDeployingToIt() throws Exception {
-        organizations("CreateOrganization", "{\"FeatureSet\":\"ALL\"}").then().statusCode(200);
-        String rootId = organizations("ListRoots", "{}").then().statusCode(200)
-                .extract().jsonPath().getString("Roots[0].Id");
+        String rootId = organizationsFixture.createWithTrustedAccess(MANAGEMENT);
         String emptyOu = createOu(rootId, "CfnStackSetEmpty");
         String otherOu = createOu(rootId, "CfnStackSetOtherEmpty");
-        cloudFormation("ActivateOrganizationsAccess").then().statusCode(200);
 
         String suffix = UUID.randomUUID().toString().substring(0, 8);
         String stack = "stackset-empty-" + suffix;
@@ -130,11 +121,11 @@ class StackSetCfnIntegrationTest {
         cloudFormation("CreateStack", "StackName", stack, "TemplateBody", template(stackSet, queue),
                 "Parameters.member.1.ParameterKey", "Targets", "Parameters.member.1.ParameterValue", emptyOu)
                 .then().statusCode(200);
-        awaitStackStatus(stack, "CREATE_COMPLETE");
+        CfnStackWaits.awaitStatus(stack, "CREATE_COMPLETE", auth(MANAGEMENT, "cloudformation"));
         cloudFormation("UpdateStack", "StackName", stack, "TemplateBody", template(stackSet, queue),
                 "Parameters.member.1.ParameterKey", "Targets", "Parameters.member.1.ParameterValue", otherOu)
                 .then().statusCode(200);
-        awaitStackStatus(stack, "UPDATE_COMPLETE");
+        CfnStackWaits.awaitStatus(stack, "UPDATE_COMPLETE", auth(MANAGEMENT, "cloudformation"));
 
         String account = createAccount("cfn-stackset-empty-" + suffix + "@example.com", emptyOu, rootId);
         assertQueue(account, queue, false);
@@ -143,26 +134,54 @@ class StackSetCfnIntegrationTest {
                 .body(containsString("<member>" + otherOu + "</member>"));
     }
 
+    @Test
+    void missingPermissionModelFailsStackCreation() {
+        String stack = "missing-permission-model-" + UUID.randomUUID().toString().substring(0, 8);
+        ObjectMapper mapper = new ObjectMapper();
+        String body = mapper.createObjectNode().set("Resources", mapper.createObjectNode().set("StackSet",
+                mapper.createObjectNode().put("Type", "AWS::CloudFormation::StackSet")
+                        .set("Properties", mapper.createObjectNode().put("StackSetName", stack).put("TemplateBody",
+                                "{\"Resources\":{\"Queue\":{\"Type\":\"AWS::SQS::Queue\"}}}"))))
+                .toString();
+        cloudFormation("CreateStack", "StackName", stack, "TemplateBody", body).then().statusCode(200);
+
+        CfnStackWaits.StackState state = CfnStackWaits.awaitTerminal(stack, auth(MANAGEMENT, "cloudformation"));
+        assertEquals("ROLLBACK_COMPLETE", state.status());
+        assertTrue(CfnStackWaits.failedResourceReason(stack, auth(MANAGEMENT, "cloudformation"))
+                .contains("PermissionModel"));
+    }
+
+    @Test
+    void unnamedStackSetKeepsItsGeneratedIdentityOnUpdate() {
+        String stack = "unnamed-stackset-" + UUID.randomUUID().toString().substring(0, 8);
+        ObjectMapper mapper = new ObjectMapper();
+        ObjectNode properties = mapper.createObjectNode().put("PermissionModel", "SELF_MANAGED")
+                .put("TemplateBody", "{\"Resources\":{\"Queue\":{\"Type\":\"AWS::SQS::Queue\"}}}");
+        ObjectNode resource = mapper.createObjectNode().put("Type", "AWS::CloudFormation::StackSet");
+        resource.set("Properties", properties);
+        ObjectNode body = mapper.createObjectNode();
+        body.set("Resources", mapper.createObjectNode().set("Set", resource));
+        body.set("Outputs", mapper.createObjectNode().set("Id",
+                mapper.createObjectNode().set("Value", mapper.createObjectNode().put("Ref", "Set"))));
+        cloudFormation("CreateStack", "StackName", stack, "TemplateBody", body.toString()).then().statusCode(200);
+        CfnStackWaits.awaitStatus(stack, "CREATE_COMPLETE", auth(MANAGEMENT, "cloudformation"));
+        String identity = output(stack, "Id");
+        assertThat(identity, startsWith(stack + "-Set-"));
+
+        properties.put("Description", "updated");
+        cloudFormation("UpdateStack", "StackName", stack, "TemplateBody", body.toString()).then().statusCode(200);
+        CfnStackWaits.awaitStatus(stack, "UPDATE_COMPLETE", auth(MANAGEMENT, "cloudformation"));
+        assertEquals(identity, output(stack, "Id"));
+        String name = identity.substring(0, identity.indexOf(':'));
+        cloudFormation("DescribeStackSet", "StackSetName", name).then().statusCode(200)
+                .body(containsString("<Description>updated</Description>"));
+        CfnStackWaits.deleteStack(stack, auth(MANAGEMENT, "cloudformation"));
+        cloudFormation("DescribeStackSet", "StackSetName", name).then().statusCode(404);
+    }
+
     @AfterEach
     void deleteOrganization() {
-        if (organizations("DescribeOrganization", "{}").statusCode() != 200) {
-            return;
-        }
-        JsonPath accounts = organizations("ListAccounts", "{}").jsonPath();
-        for (String accountId : accounts.getList("Accounts.Id", String.class)) {
-            if (!MANAGEMENT.equals(accountId)) {
-                organizations("RemoveAccountFromOrganization", "{\"AccountId\":\"" + accountId + "\"}")
-                        .then().statusCode(200);
-            }
-        }
-        String rootId = organizations("ListRoots", "{}").jsonPath().getString("Roots[0].Id");
-        List<String> units = organizations("ListOrganizationalUnitsForParent", "{\"ParentId\":\"" + rootId + "\"}")
-                .jsonPath().getList("OrganizationalUnits.Id", String.class);
-        for (String unit : units) {
-            organizations("DeleteOrganizationalUnit", "{\"OrganizationalUnitId\":\"" + unit + "\"}")
-                    .then().statusCode(200);
-        }
-        organizations("DeleteOrganization", "{}").then().statusCode(200);
+        organizationsFixture.cleanup();
     }
 
     private static String template(String stackSet, String queue) throws JsonProcessingException {
@@ -199,23 +218,17 @@ class StackSetCfnIntegrationTest {
             """.formatted(stackSet, queue, new ObjectMapper().writeValueAsString(instanceTemplate));
     }
 
-    private static String createOu(String parentId, String name) {
+    private String createOu(String parentId, String name) {
         return organizations("CreateOrganizationalUnit", "{\"ParentId\":\"" + parentId + "\",\"Name\":\"" + name + "\"}")
                 .then().statusCode(200).extract().jsonPath().getString("OrganizationalUnit.Id");
     }
 
-    private static String createAccount(String email, String parentId, String rootId) {
+    private String createAccount(String email, String parentId, String rootId) {
         String accountId = organizations("CreateAccount", "{\"Email\":\"" + email + "\",\"AccountName\":\"CfnStackSet\"}")
                 .then().statusCode(200).extract().jsonPath().getString("CreateAccountStatus.AccountId");
         organizations("MoveAccount", "{\"AccountId\":\"" + accountId + "\",\"SourceParentId\":\"" + rootId
                 + "\",\"DestinationParentId\":\"" + parentId + "\"}").then().statusCode(200);
         return accountId;
-    }
-
-    private static void awaitStackStatus(String stack, String expected) {
-        await().atMost(Duration.ofSeconds(30)).pollInterval(200, TimeUnit.MILLISECONDS).until(() ->
-                expected.equals(cloudFormation("DescribeStacks", "StackName", stack).xmlPath().getString(
-                        "DescribeStacksResponse.DescribeStacksResult.Stacks.member.StackStatus")));
     }
 
     private static String output(String stack, String key) {
@@ -230,8 +243,7 @@ class StackSetCfnIntegrationTest {
 
     private static void assertQueue(String account, String queue, String region, boolean present) {
         given()
-                .header("Authorization", "AWS4-HMAC-SHA256 Credential=" + account + "/20261101/" + region
-                        + "/sqs/aws4_request, SignedHeaders=host, Signature=abc")
+                .header("Authorization", auth(account, region, "sqs"))
                 .contentType("application/x-www-form-urlencoded")
                 .formParam("Action", "GetQueueUrl")
                 .formParam("QueueName", queue)
@@ -249,17 +261,7 @@ class StackSetCfnIntegrationTest {
         return request.when().post("/");
     }
 
-    private static Response organizations(String action, String body) {
-        return given()
-                .header("Authorization", auth(MANAGEMENT, "organizations"))
-                .header("X-Amz-Target", ORG_TARGET + action)
-                .contentType("application/x-amz-json-1.1")
-                .body(body)
-                .when().post("/");
-    }
-
-    private static String auth(String account, String service) {
-        return "AWS4-HMAC-SHA256 Credential=" + account + "/20261101/" + REGION + "/" + service
-                + "/aws4_request, SignedHeaders=host, Signature=abc";
+    private Response organizations(String action, String body) {
+        return organizationsFixture.request(MANAGEMENT, action, body).post("/");
     }
 }

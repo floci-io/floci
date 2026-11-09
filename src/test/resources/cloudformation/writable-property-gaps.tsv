@@ -420,6 +420,7 @@ AWS::Lambda::MicrovmImage	CpuConfigurations	accepted and ignored
 AWS::Lambda::MicrovmImage	EgressNetworkConnectors	accepted and ignored
 AWS::Lambda::MicrovmImage	EnvironmentVariables	accepted and ignored
 AWS::Lambda::MicrovmImage	Hooks	accepted and ignored
+AWS::Lambda::MicrovmImage	KmsKeyIdentifier	accepted and ignored; local MicroVM image builds do not model KMS encryption
 AWS::Lambda::MicrovmImage	Logging	accepted and ignored
 AWS::Lambda::MicrovmImage	Resources	accepted and ignored
 AWS::Lambda::MicrovmImage	Tags	accepted and ignored

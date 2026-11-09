@@ -51,6 +51,10 @@ public class StackSetCfnProvisioner implements CfnResourceProvisioner {
 
     @Override
     public void provision(StackResource r, JsonNode props, ProvisionContext ctx) {
+        String permissionModel = ctx.resolveOptional(props, "PermissionModel");
+        if (permissionModel == null || permissionModel.isBlank()) {
+            throw new AwsException("ValidationError", "PermissionModel is required for AWS::CloudFormation::StackSet", 400);
+        }
         StackSetService stackSets = stackSetService.get();
         String templateBody = cfnService.get().resolveTemplateBody(
                 ctx.resolveOptional(props, "TemplateBody"), ctx.resolveOptional(props, "TemplateURL"));
@@ -76,9 +80,10 @@ public class StackSetCfnProvisioner implements CfnResourceProvisioner {
             return;
         }
 
-        String name = ctx.resolveOptional(props, "StackSetName");
+        String explicitName = ctx.resolveOptional(props, "StackSetName");
+        String name = explicitName == null ? ctx.generatePhysicalName(r.getLogicalId(), 128, false) : explicitName;
         StackSet stackSet = stackSets.createStackSet(name, templateBody, parameters, capabilities, tags, description,
-                ctx.resolveOptional(props, "PermissionModel"),
+                permissionModel,
                 Boolean.TRUE.equals(optionalBoolean(autoDeployment, "Enabled", ctx)),
                 Boolean.TRUE.equals(optionalBoolean(autoDeployment, "RetainStacksOnAccountRemoval", ctx)),
                 Boolean.TRUE.equals(optionalBoolean(props.path("ManagedExecution"), "Active", ctx)));

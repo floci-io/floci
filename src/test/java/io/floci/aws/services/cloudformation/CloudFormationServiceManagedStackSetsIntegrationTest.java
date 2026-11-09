@@ -1,19 +1,18 @@
 package io.floci.aws.services.cloudformation;
 
+import io.floci.aws.testing.OrganizationsFixture;
 import io.floci.aws.testing.RestAssuredJsonUtils;
 import io.quarkus.test.junit.QuarkusTest;
-import io.restassured.path.json.JsonPath;
 import io.restassured.specification.RequestSpecification;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
 
 import java.time.Duration;
-import java.util.LinkedHashSet;
 import java.util.List;
-import java.util.Set;
 import java.util.UUID;
 
+import static io.floci.aws.testing.EnforcementFixtures.auth;
 import static io.restassured.RestAssured.given;
 import static org.awaitility.Awaitility.await;
 import static org.hamcrest.Matchers.containsString;
@@ -28,9 +27,8 @@ import static org.junit.jupiter.api.Assertions.assertNotEquals;
 class CloudFormationServiceManagedStackSetsIntegrationTest {
     private static final String MANAGEMENT = "555555555555";
     private static final String REGION = "us-east-1";
-    private static final String ORG_TARGET = "AWSOrganizationsV20161128.";
 
-    private final Set<String> organizationOwners = new LinkedHashSet<>();
+    private final OrganizationsFixture organizationsFixture = new OrganizationsFixture();
 
     @BeforeAll
     static void configureRestAssured() {
@@ -696,13 +694,7 @@ class CloudFormationServiceManagedStackSetsIntegrationTest {
     }
 
     private String createOrganizationWithTrustedAccess(String management) {
-        organizations(management, "CreateOrganization", "{\"FeatureSet\":\"ALL\"}")
-                .post("/").then().statusCode(200);
-        cloudFormation(management, "ActivateOrganizationsAccess")
-                .post("/").then().statusCode(200);
-        return organizations(management, "ListRoots", "{}")
-                .post("/").then().statusCode(200)
-                .extract().jsonPath().getString("Roots[0].Id");
+        return organizationsFixture.createWithTrustedAccess(management);
     }
 
     private List<String> operationIds(String management, String stackSet) {
@@ -802,53 +794,12 @@ class CloudFormationServiceManagedStackSetsIntegrationTest {
     }
 
     private RequestSpecification organizations(String account, String action, String body) {
-        if ("CreateOrganization".equals(action)) {
-            organizationOwners.add(account);
-        }
-        return given()
-                .header("Authorization", auth(account, "organizations"))
-                .header("X-Amz-Target", ORG_TARGET + action)
-                .contentType("application/x-amz-json-1.1")
-                .body(body);
+        return organizationsFixture.request(account, action, body);
     }
 
-    /**
-     * Organizations state is shared by every test in the JVM and keyed by the management account,
-     * so an organization left behind here makes the next class that creates one under the same
-     * account fail with AlreadyInOrganizationException. Dismantle each one this test created:
-     * member accounts out, organizational units bottom-up, then the organization.
-     */
     @AfterEach
     void deleteTheOrganizationsThisTestCreated() {
-        for (String owner : organizationOwners) {
-            if (organizations(owner, "DescribeOrganization", "{}").post("/").statusCode() != 200) {
-                continue;
-            }
-            JsonPath accounts = organizations(owner, "ListAccounts", "{}").post("/").jsonPath();
-            for (String accountId : accounts.getList("Accounts.Id", String.class)) {
-                if (!owner.equals(accountId)) {
-                    organizations(owner, "RemoveAccountFromOrganization", "{\"AccountId\":\"" + accountId + "\"}")
-                            .post("/").then().statusCode(200);
-                }
-            }
-            JsonPath roots = organizations(owner, "ListRoots", "{}").post("/").jsonPath();
-            for (String rootId : roots.getList("Roots.Id", String.class)) {
-                deleteOrganizationalUnitsUnder(owner, rootId);
-            }
-            organizations(owner, "DeleteOrganization", "{}").post("/").then().statusCode(200);
-        }
-        organizationOwners.clear();
-    }
-
-    private void deleteOrganizationalUnitsUnder(String owner, String parentId) {
-        JsonPath units = organizations(owner, "ListOrganizationalUnitsForParent", "{\"ParentId\":\"" + parentId + "\"}")
-                .post("/").jsonPath();
-        List<String> ouIds = units.getList("OrganizationalUnits.Id", String.class);
-        for (String ouId : ouIds) {
-            deleteOrganizationalUnitsUnder(owner, ouId);
-            organizations(owner, "DeleteOrganizationalUnit", "{\"OrganizationalUnitId\":\"" + ouId + "\"}")
-                    .post("/").then().statusCode(200);
-        }
+        organizationsFixture.cleanup();
     }
 
     private RequestSpecification cloudFormation(String action) {
@@ -887,8 +838,4 @@ class CloudFormationServiceManagedStackSetsIntegrationTest {
                 + queueName + "\"}}}}";
     }
 
-    private static String auth(String account, String service) {
-        return "AWS4-HMAC-SHA256 Credential=" + account + "/20260904/" + REGION + "/" + service
-                + "/aws4_request, SignedHeaders=host, Signature=abc";
-    }
 }
