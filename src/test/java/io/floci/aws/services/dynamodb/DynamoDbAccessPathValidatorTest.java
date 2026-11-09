@@ -12,6 +12,8 @@ import io.floci.aws.services.dynamodb.model.LocalSecondaryIndex;
 import io.floci.aws.services.dynamodb.model.TableDefinition;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.CsvSource;
 
 import java.util.List;
 import java.util.regex.MatchResult;
@@ -184,14 +186,6 @@ class DynamoDbAccessPathValidatorTest {
                 () -> validateExpression(tablePath, "pk > :pk"));
         assertThrows(AwsException.class,
                 () -> validateExpression(tablePath, "pk = :pk AND sk <> :sk"));
-    }
-
-    @Test
-    void rejectsDuplicateAndNestedKeyConditions() {
-        assertThrows(AwsException.class, () -> validateExpression(
-                tablePath, "pk = :pk AND sk > :start AND sk < :end"));
-        assertThrows(AwsException.class, () -> validateExpression(
-                tablePath, "pk.value = :pk"));
     }
 
     @Test
@@ -375,19 +369,37 @@ class DynamoDbAccessPathValidatorTest {
         assertDoesNotThrow(() -> validateExpression(tablePath, "pk = :pk AND :hi > sk"));
     }
 
-    @Test
-    void rejectsANestedPathOnAKeyAttribute() {
+    @ParameterizedTest
+    @CsvSource(delimiter = '|', textBlock = """
+            pk.value = :pk                                 | cannot have conditions on nested attributes
+            pk = :pk AND #sk.foo = :v                      | cannot have conditions on nested attributes
+            pk = :pk AND x[0] = :v                         | cannot have conditions on nested attributes
+            pk = :pk AND x.y BETWEEN :a AND :b             | cannot have conditions on nested attributes
+            pk = :pk AND begins_with(x.y, :v)              | cannot have conditions on nested attributes
+            pk = :pk AND x.y = :v AND sk > :a AND sk < :b  | cannot have conditions on nested attributes
+            pk = :pk AND sk > :a AND sk < :b AND x.y = :v  | must only contain one condition per key
+            pk = :pk AND #sk > :a AND sk < :b              | must only contain one condition per key
+            pk = :pk AND :a < sk AND sk < :b               | must only contain one condition per key
+            x = :a AND x = :b AND pk = :pk                 | must only contain one condition per key
+            pk = :pk AND pk = :pk                          | must only contain one condition per key
+            """)
+    void refusesANestedOrRepeatedAttributeInAKeyCondition(String expression, String error) {
         ObjectNode names = mapper.createObjectNode();
         names.put("#sk", "sk");
-        ObjectNode values = expressionValues(":pk", ":v");
 
-        AwsException error = assertThrows(AwsException.class,
-                () -> DynamoDbAccessPathValidator.validateQuery(
-                        table, tablePath, null, "pk = :pk AND #sk.foo = :v",
-                        null, null, names, values));
+        AwsException thrown = assertThrows(AwsException.class,
+                () -> DynamoDbAccessPathValidator.validateKeyConditionAttributes(expression, names));
 
-        assertEquals("KeyConditionExpressions cannot have conditions on nested attributes",
-                error.getMessage());
+        assertEquals("Invalid KeyConditionExpression: KeyConditionExpressions " + error, thrown.getMessage());
+    }
+
+    @Test
+    void acceptsANameThatHoldsADotInAKeyCondition() {
+        ObjectNode names = mapper.createObjectNode();
+        names.put("#a", "x.y");
+
+        assertDoesNotThrow(() -> DynamoDbAccessPathValidator.validateKeyConditionAttributes(
+                "pk = :pk AND #a = :v", names));
     }
 
     @Test

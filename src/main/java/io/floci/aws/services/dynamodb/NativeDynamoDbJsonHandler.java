@@ -1335,6 +1335,7 @@ public class NativeDynamoDbJsonHandler {
         // through to "Query condition missed key schema element" instead of the real cause.
         requireDefinedTokens(keyConditionExpr, "KeyConditionExpression", exprAttrNames, exprAttrValues);
         ExpressionEvaluator.validateSemantics(keyConditionExpr, "KeyConditionExpression", exprAttrNames, exprAttrValues);
+        DynamoDbAccessPathValidator.validateKeyConditionAttributes(keyConditionExpr, exprAttrNames);
 
         if (select != null && !VALID_SELECT.contains(select)) {
             throw SmithyValidationErrors.validationException(
