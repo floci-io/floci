@@ -162,7 +162,7 @@ NAMESPACES = ("access-analyzer", "acm", "application-autoscaling", "athena", "bc
               "cognito-idp", "cur", "datasync", "ecr", "elasticloadbalancing", "elasticmapreduce", "es", "events",
               "firehose", "globalaccelerator", "kinesisanalytics", "payment-cryptography", "quicksight", "redshift",
               "redshift-data", "rekognition", "servicediscovery", "servicequotas", "sso", "states", "textract",
-              "timestream-influxdb", "translate")
+              "timestream-influxdb", "translate", "signer")
 
 # SDK clients the reference lists for a namespace's operations whose requests Floci does not serve, and why: their
 # members are not read.
@@ -235,6 +235,7 @@ NOT_COVERED: dict[str, str] = {
     "dlm": _REST,
     "dms": _LATER,
     "ec2": _LATER,
+    "ec2-instance-connect": _LATER,
     "ecs": _LATER,
     "elasticache": _LATER,
     "elasticbeanstalk": "not read yet: an environment's ARN carries its application's name, "

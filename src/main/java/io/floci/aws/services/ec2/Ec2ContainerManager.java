@@ -583,6 +583,8 @@ public class Ec2ContainerManager {
                 configureLinkLocalMetadataEndpoint(started.namespace() == null
                         ? containerId : started.namespace().helperId(), instanceId, flociHost, imdsPort);
 
+                installInstanceConnectTrustAnchor(containerId, instanceId);
+
                 // Publish security-group TCP ingress ports on the host via socat sidecars.
                 if (appPorts != null && !appPorts.isEmpty()) {
                     portForwardManager.reconcile(instance, appPorts);
@@ -761,8 +763,32 @@ public class Ec2ContainerManager {
                     .withMount(new Mount().withType(MountType.TMPFS).withTarget("/run"))
                     .withMount(new Mount().withType(MountType.TMPFS).withTarget("/run/lock"))
                     .withBind("/sys/fs/cgroup", "/sys/fs/cgroup");
+            // The guest shares the Docker host's kernel but ships none of its modules, so
+            // `modprobe br_netfilter` (Kubernetes node setup) fails with "not found" even
+            // when the module is built in. Only the running kernel's directory is bound: the
+            // guest's dpkg owns the rest of /lib/modules, and a read-only bind of the whole
+            // tree breaks apt-get upgrade, DKMS and linux-modules-extra.
+            String kernelVersion = hostKernelVersion();
+            if (kernelVersion != null) {
+                String modules = "/lib/modules/" + kernelVersion;
+                specBuilder.withReadOnlyBind(modules, modules);
+            }
         }
         return specBuilder.build();
+    }
+
+    /** The Docker daemon's kernel version, or null when it cannot be read (the modules bind is then skipped). */
+    private String hostKernelVersion() {
+        try {
+            String version = dockerClient.infoCmd().exec().getKernelVersion();
+            if (version != null && !version.isBlank()) {
+                return version;
+            }
+        } catch (Exception e) {
+            LOG.debugv("Could not read the Docker host's kernel version: {0}", e.getMessage());
+        }
+        LOG.warn("Docker host kernel version unknown; systemd guest launches without /lib/modules");
+        return null;
     }
 
     private void failLaunch(Instance instance) {
@@ -1712,6 +1738,40 @@ public class Ec2ContainerManager {
             LOG.warnv("Could not remove captured Docker image {0}: {1}", tag, e.getMessage());
             return false;
         }
+    }
+
+    /**
+     * Adds Floci's local CA to the guest's system trust store, so the unmodified EC2 Instance
+     * Connect agent can verify the signer chain Floci serves through IMDS. On EC2 that chain ends
+     * at a public root the AMI already trusts. The agent finds the root by its common name, as
+     * {@code /etc/ssl/certs/<CN with underscores>.pem}, which is the name
+     * {@code update-ca-certificates} gives a {@code <stem>.crt} it installs. Best effort: images
+     * without a Debian-family trust store are left alone.
+     */
+    private void installInstanceConnectTrustAnchor(String containerId, String instanceId) {
+        metadataServer.instanceConnect().ifPresent(keys -> {
+            try {
+                String dir = "/usr/local/share/ca-certificates";
+                ContainerExec.Result probe = execInContainerForResult(containerId, new String[]{"sh", "-c",
+                        "[ -d " + dir + " ] && command -v update-ca-certificates >/dev/null"}, 5);
+                if (probe.exitCode() != 0) {
+                    LOG.debugv("EC2 instance {0} has no update-ca-certificates trust store; EC2 Instance Connect "
+                            + "keys cannot be verified there", instanceId);
+                    return;
+                }
+                RetryingTarCopier.copyBytes(dockerClient, containerId, dir, keys.trustAnchorFileStem() + ".crt",
+                        keys.trustAnchorPem().getBytes(StandardCharsets.UTF_8), 0644);
+                ContainerExec.Result update = execInContainerForResult(containerId,
+                        new String[]{"update-ca-certificates"}, 60);
+                if (update.exitCode() != 0) {
+                    LOG.warnv("Could not refresh the trust store of EC2 instance {0}: {1}", instanceId,
+                            update.summary());
+                }
+            } catch (Exception e) {
+                LOG.warnv("Could not install the EC2 Instance Connect trust anchor in EC2 instance {0}: {1}",
+                        instanceId, e.getMessage());
+            }
+        });
     }
 
     private void injectSshKey(String containerId, String publicKey) {

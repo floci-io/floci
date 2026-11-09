@@ -410,6 +410,28 @@ jobs:
           sparse-checkout: |
             compatibility-tests
             .github/ci
+            src/main/resources
+
+      # Keep the first Neptune request inside its existing test deadline on a cold runner.
+      - name: Pre-pull Neptune image for Node SDK
+        if: matrix.test == 'sdk-test-node'
+        run: |
+          image="$(awk '/^    neptune:/ { in_service=1; next } in_service && /^    [a-z]/ { exit } in_service && $1 == "default-image:" { gsub(/"/, "", $2); print $2; exit }' src/main/resources/application.yml)"
+          if [ -z "$image" ]; then
+            echo "::error::Cannot read Neptune default-image from application.yml"
+            exit 1
+          fi
+          for attempt in 1 2 3; do
+            if docker pull "$image"; then
+              exit 0
+            fi
+            if [ "$attempt" -lt 3 ]; then
+              echo "::warning::Neptune image pre-pull failed (attempt $attempt/3): $image"
+              sleep 5
+            fi
+          done
+          echo "::error::Neptune image pre-pull failed after 3 attempts: $image"
+          exit 1
 
       - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
 

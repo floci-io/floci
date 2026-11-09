@@ -168,9 +168,6 @@ public class DynamoDbStreamService {
             return;
         }
 
-        long seq = sequenceCounters.computeIfAbsent(sd.getStreamArn(), k -> new AtomicLong()).incrementAndGet();
-        String sequenceNumber = String.format("%021d", seq);
-
         JsonNode sourceItem = newItem != null ? newItem : oldItem;
         ObjectNode keys = buildKeys(sourceItem, table);
 
@@ -184,7 +181,6 @@ public class DynamoDbStreamService {
         record.setEventName(eventName);
         record.setEventSource("aws:dynamodb");
         record.setAwsRegion(region);
-        record.setSequenceNumber(sequenceNumber);
         record.setApproximateCreationDateTime(Instant.now().getEpochSecond());
         record.setKeys(keys);
         record.setNewImage(newImage);
@@ -195,6 +191,9 @@ public class DynamoDbStreamService {
         ConcurrentLinkedDeque<DynamoDbStreamRecord> deque = records.get(sd.getStreamArn());
         if (deque != null) {
             synchronized (deque) {
+                long seq = sequenceCounters.computeIfAbsent(sd.getStreamArn(), k -> new AtomicLong())
+                        .incrementAndGet();
+                record.setSequenceNumber(String.format("%021d", seq));
                 streamRecordCounts.computeIfAbsent(sd.getStreamArn(), ignored -> new AtomicLong())
                         .incrementAndGet();
                 deque.addLast(record);

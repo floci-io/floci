@@ -3,10 +3,16 @@ package io.floci.aws.services.cloudformation;
 import io.floci.aws.services.ec2.Ec2Service;
 import io.floci.aws.services.ec2.model.Instance;
 import io.floci.aws.services.ec2.model.Tag;
+import io.floci.aws.testing.AwsTestClients;
 import io.floci.aws.testing.CfnStackWaits;
 import io.quarkus.test.junit.QuarkusTest;
 import jakarta.inject.Inject;
 import org.junit.jupiter.api.Test;
+import software.amazon.awssdk.regions.Region;
+import software.amazon.awssdk.services.cloudformation.CloudFormationClient;
+import software.amazon.awssdk.services.cloudformation.model.Stack;
+import software.amazon.awssdk.services.ec2.Ec2Client;
+import software.amazon.awssdk.services.ec2.model.IamInstanceProfile;
 
 import java.util.ArrayList;
 import java.util.HashMap;
@@ -372,6 +378,74 @@ class CloudFormationEc2InstanceIntegrationTest {
         assertEquals("running", instance.getState().getName());
     }
 
+    @Test
+    void anInstanceTakesItsLaunchTemplatesInstanceProfileOnCreateUpdateAndRollback() {
+        String stackName = "cfn-ec2-lt-profile-" + Long.toString(System.nanoTime(), 36);
+        try (CloudFormationClient cloudFormation = AwsTestClients.create(CloudFormationClient.builder(), "test",
+                Region.of(REGION))) {
+            cloudFormation.createStack(request -> request.stackName(stackName)
+                    .templateBody(launchTemplateProfileStack("First", false)));
+            try {
+                Stack created = CfnStackWaits.awaitStatus(cloudFormation, stackName, "CREATE_COMPLETE");
+                String instanceId = CfnStackWaits.output(created, "InstanceId");
+                assertInstanceProfile(instanceId, CfnStackWaits.output(created, "FirstArn"));
+
+                // A template version naming another profile gives the same instance that profile, a
+                // failed update puts it back, and a version naming none leaves the instance without one.
+                Stack changed = updateStack(cloudFormation, stackName, launchTemplateProfileStack("Second", false),
+                        "UPDATE_COMPLETE");
+                assertEquals(instanceId, CfnStackWaits.output(changed, "InstanceId"));
+                assertInstanceProfile(instanceId, CfnStackWaits.output(changed, "SecondArn"));
+                Stack rolledBack = updateStack(cloudFormation, stackName, launchTemplateProfileStack("First", true),
+                        "UPDATE_ROLLBACK_COMPLETE");
+                assertInstanceProfile(instanceId, CfnStackWaits.output(rolledBack, "SecondArn"));
+                Stack cleared = updateStack(cloudFormation, stackName, launchTemplateProfileStack(null, false),
+                        "UPDATE_COMPLETE");
+                assertEquals(instanceId, CfnStackWaits.output(cleared, "InstanceId"));
+                assertInstanceProfile(instanceId, null);
+            } finally {
+                CfnStackWaits.deleteStack(stackName, CFN_AUTH);
+            }
+        }
+    }
+
+    private static Stack updateStack(CloudFormationClient cloudFormation, String stackName, String template,
+                                     String expectedStatus) {
+        cloudFormation.updateStack(request -> request.stackName(stackName).templateBody(template));
+        return CfnStackWaits.awaitStatus(cloudFormation, stackName, expectedStatus);
+    }
+
+    /**
+     * An instance launched from a launch template whose IamInstanceProfile names the stack's profile
+     * {@code profile}, First or Second, or no profile when it is null. With {@code laterFails}, a
+     * second instance that names a missing launch template fails after the first is updated.
+     */
+    private static String launchTemplateProfileStack(String profile, boolean laterFails) {
+        String member = profile == null ? "" : """
+                , "IamInstanceProfile": {"Name": {"Ref": "%s"}}""".formatted(profile);
+        String later = !laterFails ? "" : """
+                ,
+                  "Later": {"Type": "AWS::EC2::Instance", "DependsOn": "Server", "Properties": {"LaunchTemplate": {
+                    "LaunchTemplateId": "lt-0123456789abcdef0", "Version": "1"}}}""";
+        return """
+                {"Resources": {
+                  "Role": {"Type": "AWS::IAM::Role", "Properties": {"AssumeRolePolicyDocument": {
+                    "Version": "2012-10-17", "Statement": [{"Effect": "Allow",
+                      "Principal": {"Service": "ec2.amazonaws.com"}, "Action": "sts:AssumeRole"}]}}},
+                  "First": {"Type": "AWS::IAM::InstanceProfile", "Properties": {"Roles": [{"Ref": "Role"}]}},
+                  "Second": {"Type": "AWS::IAM::InstanceProfile", "Properties": {"Roles": [{"Ref": "Role"}]}},
+                  "Lt": {"Type": "AWS::EC2::LaunchTemplate", "Properties": {"LaunchTemplateData": {
+                    "ImageId": "ami-12345678", "InstanceType": "t3.micro"%s}}},
+                  "Server": {"Type": "AWS::EC2::Instance", "Properties": {"LaunchTemplate": {
+                    "LaunchTemplateId": {"Ref": "Lt"}, "Version": {"Fn::GetAtt": ["Lt", "LatestVersionNumber"]}}}}%s
+                }, "Outputs": {
+                  "InstanceId": {"Value": {"Ref": "Server"}},
+                  "FirstArn": {"Value": {"Fn::GetAtt": ["First", "Arn"]}},
+                  "SecondArn": {"Value": {"Fn::GetAtt": ["Second", "Arn"]}}
+                }}
+                """.formatted(member, later);
+    }
+
     private static void assertUserData(String instanceId, String encoded) {
         given()
             .contentType("application/x-www-form-urlencoded")
@@ -383,15 +457,13 @@ class CloudFormationEc2InstanceIntegrationTest {
             .body(containsString("<value>" + encoded + "</value>"));
     }
 
+    /** DescribeInstances, through the SDK, reports the profile {@code arn} on the instance, or none when it is null. */
     private static void assertInstanceProfile(String instanceId, String arn) {
-        given()
-            .contentType("application/x-www-form-urlencoded")
-            .header("Authorization", EC2_AUTH)
-            .formParam("Action", "DescribeIamInstanceProfileAssociations")
-            .formParam("Filter.1.Name", "instance-id")
-            .formParam("Filter.1.Value.1", instanceId)
-        .when().post("/").then().statusCode(200)
-            .body(containsString("<arn>" + arn + "</arn>"));
+        try (Ec2Client ec2Client = AwsTestClients.create(Ec2Client.builder(), "test", Region.of(REGION))) {
+            IamInstanceProfile profile = ec2Client.describeInstances(request -> request.instanceIds(instanceId))
+                    .reservations().get(0).instances().get(0).iamInstanceProfile();
+            assertEquals(arn, profile == null ? null : profile.arn());
+        }
     }
 
     private static String createInstanceProfile(String name) {

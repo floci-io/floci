@@ -1195,4 +1195,77 @@ class SchedulerIntegrationTest {
                 .body("__type", containsString("SerializationException"));
         }
     }
+
+    @Test
+    @Order(45)
+    void listScheduleGroupsPagesWithMaxResultsAndNextToken() {
+        for (String name : List.of("paging-group-a", "paging-group-b")) {
+            given().contentType("application/json").body("{}")
+                    .when().post("/schedule-groups/" + name)
+                    .then().statusCode(200);
+        }
+
+        String token = given().queryParam("NamePrefix", "paging-group-").queryParam("MaxResults", 1)
+                .when().get("/schedule-groups")
+                .then().statusCode(200)
+                .body("ScheduleGroups.Name", contains("paging-group-a"))
+                .body("NextToken", notNullValue())
+                .extract().path("NextToken");
+
+        given().queryParam("NamePrefix", "paging-group-").queryParam("MaxResults", 1)
+                .queryParam("NextToken", token)
+                .when().get("/schedule-groups")
+                .then().statusCode(200)
+                .body("ScheduleGroups.Name", contains("paging-group-b"))
+                .body("$", not(hasKey("NextToken")));
+    }
+
+    @Test
+    @Order(46)
+    void listSchedulesPagesWithMaxResultsAndNextToken() {
+        String body = """
+                {"ScheduleExpression":"rate(1 hour)","FlexibleTimeWindow":{"Mode":"OFF"},
+                 "GroupName":"paging-group-a",
+                 "Target":{"Arn":"arn:aws:sqs:us-east-1:000000000000:queue",
+                           "RoleArn":"arn:aws:iam::000000000000:role/scheduler-role"}}
+                """;
+        for (String name : List.of("paging-1", "paging-2")) {
+            given().contentType("application/json").body(body)
+                    .when().post("/schedules/" + name)
+                    .then().statusCode(200);
+        }
+
+        String token = given().queryParam("ScheduleGroup", "paging-group-a").queryParam("MaxResults", 1)
+                .when().get("/schedules")
+                .then().statusCode(200)
+                .body("Schedules.Name", contains("paging-1"))
+                .body("NextToken", notNullValue())
+                .extract().path("NextToken");
+
+        given().queryParam("ScheduleGroup", "paging-group-a").queryParam("MaxResults", 1)
+                .queryParam("NextToken", token)
+                .when().get("/schedules")
+                .then().statusCode(200)
+                .body("Schedules.Name", contains("paging-2"))
+                .body("$", not(hasKey("NextToken")));
+    }
+
+    @Test
+    @Order(47)
+    void listOperationsRejectInvalidMaxResultsAndNextToken() {
+        for (String path : List.of("/schedule-groups", "/schedules")) {
+            for (String maxResults : List.of("0", "101", "abc")) {
+                given().queryParam("MaxResults", maxResults)
+                        .when().get(path)
+                        .then().statusCode(400)
+                        .body("__type", containsString("ValidationException"));
+            }
+            for (String nextToken : List.of("bogus-token", "")) {
+                given().queryParam("NextToken", nextToken)
+                        .when().get(path)
+                        .then().statusCode(400)
+                        .body("__type", containsString("ValidationException"));
+            }
+        }
+    }
 }

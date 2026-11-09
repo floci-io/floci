@@ -1251,11 +1251,424 @@ class EcsCfnProvisionerTest {
         verify(ecs, times(2)).updateService(requests.capture(), eq(REGION));
         UpdateServiceRequest restore = requests.getAllValues().get(1);
         assertEquals(1, restore.getDesiredCount());
-        assertEquals(Map.of(), restore.getDeploymentConfiguration(), "a deployment configuration the update added is removed");
+        assertNull(restore.getDeploymentConfiguration(), "the restore request leaves the deployment configuration to the sibling");
+        // A deployment configuration the update added is removed: the sibling puts back the prior value, here none.
+        verify(ecs).replaceServiceDeploymentConfiguration(eq("web"), eq("front"), isNull(), eq(REGION));
         assertEquals(priorStrategy, restore.getCapacityProviderStrategy());
         assertEquals(List.of(), restore.getServiceRegistries(), "a registry the update added is deregistered");
         verify(ecs).awaitServiceStable(restored);
         assertNull(r.getAttributes().get(CfnRollback.UPDATE_ROLLBACK_FAILURE_ATTR));
+    }
+
+    private static final String SERVICE_REGISTRIES = "ServiceRegistries";
+    private static final String CAPACITY_PROVIDER_STRATEGY = "CapacityProviderStrategy";
+    private static final String DEPLOYMENT_CONFIGURATION_PROPERTY = "DeploymentConfiguration";
+    private static final List<String> SETTINGS =
+            List.of(SERVICE_REGISTRIES, CAPACITY_PROVIDER_STRATEGY, DEPLOYMENT_CONFIGURATION_PROPERTY);
+
+    private ProvisionContext ctx(String priorPhysicalId, JsonNode priorProperties) {
+        ProvisionContext base = ctx(priorPhysicalId);
+        return new ProvisionContext(base.engine(), REGION, "000000000000", "my-stack", priorPhysicalId,
+                event -> {}, priorProperties);
+    }
+
+    private ObjectNode serviceProps() {
+        return mapper.createObjectNode().put("Cluster", "web").put("ServiceName", "front")
+                .put("TaskDefinition", TASK_DEF_ARN);
+    }
+
+    /** The service properties plus the named ones of the three settings, with the values of {@link #withServiceSettings}. */
+    private ObjectNode declaring(String... settings) {
+        ObjectNode all = withServiceSettings(serviceProps());
+        List<String> kept = new ArrayList<>(List.of("Cluster", "ServiceName", "TaskDefinition"));
+        kept.addAll(List.of(settings));
+        all.retain(kept);
+        return all;
+    }
+
+    private ObjectNode declaringExcept(String dropped) {
+        return declaring(SETTINGS.stream().filter(name -> !name.equals(dropped)).toArray(String[]::new));
+    }
+
+    private StackResource existingService() {
+        StackResource r = resource("AWS::ECS::Service", "Service");
+        r.getAttributes().put("Name", "front");
+        return r;
+    }
+
+    /** Runs an in-place update of the service from {@code prior} to {@code props} and returns the one UpdateService request sent. */
+    private UpdateServiceRequest updateFrom(ObjectNode prior, ObjectNode props) {
+        when(ecs.updateService(any(UpdateServiceRequest.class), eq(REGION))).thenReturn(service("front"));
+
+        provisioner.provision(existingService(), props, ctx(SERVICE_ARN, prior));
+
+        ArgumentCaptor<UpdateServiceRequest> request = ArgumentCaptor.forClass(UpdateServiceRequest.class);
+        verify(ecs).updateService(request.capture(), eq(REGION));
+        return request.getValue();
+    }
+
+    private void verifyNoDeploymentConfigurationReplacement() {
+        verify(ecs, never()).replaceServiceDeploymentConfiguration(any(), any(), any(), any());
+    }
+
+    @Test
+    void aDroppedServiceRegistriesIsLeftOutOfTheRequestSoTheStoredOnesStay() {
+        UpdateServiceRequest request = updateFrom(declaring(SERVICE_REGISTRIES), serviceProps());
+
+        assertNull(request.getServiceRegistries(), "dropped registries are not deregistered");
+        assertNull(request.getCapacityProviderStrategy());
+        assertNull(request.getDeploymentConfiguration());
+        verifyNoDeploymentConfigurationReplacement();
+    }
+
+    @Test
+    void aDroppedCapacityProviderStrategyIsLeftOutOfTheRequestSoTheStoredOneStays() {
+        UpdateServiceRequest request = updateFrom(declaring(CAPACITY_PROVIDER_STRATEGY), serviceProps());
+
+        assertNull(request.getCapacityProviderStrategy(), "a dropped strategy is not removed");
+        assertNull(request.getServiceRegistries());
+        assertNull(request.getDeploymentConfiguration());
+        verifyNoDeploymentConfigurationReplacement();
+    }
+
+    @Test
+    void aDroppedDeploymentConfigurationIsReplacedWithNull() {
+        updateFrom(declaring(DEPLOYMENT_CONFIGURATION_PROPERTY), serviceProps());
+
+        verify(ecs).replaceServiceDeploymentConfiguration(eq("web"), eq("front"), isNull(), eq(REGION));
+    }
+
+    @Test
+    void anEmptyStrategyInTheTemplateClearsTheStrategyOnUpdate() {
+        ObjectNode props = serviceProps();
+        props.putArray(CAPACITY_PROVIDER_STRATEGY);
+
+        UpdateServiceRequest request = updateFrom(declaring(CAPACITY_PROVIDER_STRATEGY), props);
+
+        assertEquals(List.of(), request.getCapacityProviderStrategy());
+    }
+
+    @Test
+    void anEmptyStrategyClearsTheStrategyEvenWhenThePriorTemplateDidNotDeclareIt() {
+        ObjectNode props = serviceProps();
+        props.putArray(CAPACITY_PROVIDER_STRATEGY);
+
+        UpdateServiceRequest request = updateFrom(serviceProps(), props);
+
+        assertEquals(List.of(), request.getCapacityProviderStrategy());
+    }
+
+    @Test
+    void anEmptyServiceRegistriesListInTheTemplateClearsTheRegistries() {
+        ObjectNode props = serviceProps();
+        props.putArray(SERVICE_REGISTRIES);
+
+        UpdateServiceRequest request = updateFrom(declaring(SERVICE_REGISTRIES), props);
+
+        assertEquals(List.of(), request.getServiceRegistries());
+    }
+
+    @Test
+    void aStrategyAndRegistriesDroppedTogetherBothStay() {
+        UpdateServiceRequest request = updateFrom(declaring(SERVICE_REGISTRIES, CAPACITY_PROVIDER_STRATEGY), serviceProps());
+
+        assertNull(request.getServiceRegistries());
+        assertNull(request.getCapacityProviderStrategy());
+        verifyNoDeploymentConfigurationReplacement();
+    }
+
+    @Test
+    void anEmptyStrategyAndAnEmptyRegistriesListDeclaredTogetherClearBoth() {
+        ObjectNode props = serviceProps();
+        props.putArray(CAPACITY_PROVIDER_STRATEGY);
+        props.putArray(SERVICE_REGISTRIES);
+
+        UpdateServiceRequest request = updateFrom(declaring(SERVICE_REGISTRIES, CAPACITY_PROVIDER_STRATEGY), props);
+
+        assertEquals(List.of(), request.getCapacityProviderStrategy());
+        assertEquals(List.of(), request.getServiceRegistries());
+    }
+
+    @Test
+    void anEmptyServiceRegistriesListClearsTheRegistriesEvenWhenThePriorTemplateDidNotDeclareThem() {
+        ObjectNode props = serviceProps();
+        props.putArray(SERVICE_REGISTRIES);
+
+        UpdateServiceRequest request = updateFrom(serviceProps(), props);
+
+        assertEquals(List.of(), request.getServiceRegistries());
+    }
+
+    @Test
+    void anEmptyDeploymentConfigurationObjectIsAppliedAsGiven() {
+        ObjectNode props = serviceProps();
+        props.putObject(DEPLOYMENT_CONFIGURATION_PROPERTY);
+
+        UpdateServiceRequest request = updateFrom(declaring(DEPLOYMENT_CONFIGURATION_PROPERTY), props);
+
+        assertEquals(Map.of(), request.getDeploymentConfiguration());
+        verifyNoDeploymentConfigurationReplacement();
+    }
+
+    @Test
+    void aDeploymentConfigurationDeclaredEmptyIsReplacedWithNullWhenItIsDropped() {
+        ObjectNode prior = serviceProps();
+        prior.putObject(DEPLOYMENT_CONFIGURATION_PROPERTY);
+
+        updateFrom(prior, serviceProps());
+
+        verify(ecs).replaceServiceDeploymentConfiguration(eq("web"), eq("front"), isNull(), eq(REGION));
+    }
+
+    @Test
+    void aChangedValueOfEachSettingIsAppliedAndNothingIsCleared() {
+        ObjectNode prior = serviceProps();
+        prior.putArray(SERVICE_REGISTRIES).addObject().put("RegistryArn", REGISTRY_ARN + "-old");
+        prior.putObject(DEPLOYMENT_CONFIGURATION_PROPERTY).put("MaximumPercent", "100");
+        prior.putArray(CAPACITY_PROVIDER_STRATEGY).addObject()
+                .put("CapacityProvider", "FARGATE_SPOT").put("Weight", "1");
+
+        UpdateServiceRequest request = updateFrom(prior, declaring(SETTINGS.toArray(String[]::new)));
+
+        assertEquals(REGISTRIES, request.getServiceRegistries());
+        assertEquals(DEPLOYMENT_CONFIGURATION, request.getDeploymentConfiguration());
+        assertEquals(STRATEGY, request.getCapacityProviderStrategy());
+        verifyNoDeploymentConfigurationReplacement();
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {SERVICE_REGISTRIES, CAPACITY_PROVIDER_STRATEGY, DEPLOYMENT_CONFIGURATION_PROPERTY})
+    void droppingOneSettingLeavesTheOtherTwoAsDeclared(String dropped) {
+        UpdateServiceRequest request = updateFrom(declaring(SETTINGS.toArray(String[]::new)), declaringExcept(dropped));
+
+        if (!SERVICE_REGISTRIES.equals(dropped)) {
+            assertEquals(REGISTRIES, request.getServiceRegistries(), "registries stay as declared");
+        }
+        if (!CAPACITY_PROVIDER_STRATEGY.equals(dropped)) {
+            assertEquals(STRATEGY, request.getCapacityProviderStrategy(), "strategy stays as declared");
+        }
+        if (!DEPLOYMENT_CONFIGURATION_PROPERTY.equals(dropped)) {
+            assertEquals(DEPLOYMENT_CONFIGURATION, request.getDeploymentConfiguration(),
+                    "deployment configuration stays as declared");
+            verifyNoDeploymentConfigurationReplacement();
+        } else {
+            verify(ecs).replaceServiceDeploymentConfiguration(eq("web"), eq("front"), isNull(), eq(REGION));
+        }
+    }
+
+    @Test
+    void settingsNoTemplateEverDeclaredAreNotSentByAnUpdate() {
+        UpdateServiceRequest request = updateFrom(serviceProps(), serviceProps());
+
+        assertNull(request.getServiceRegistries(), "registries set outside the stack survive");
+        assertNull(request.getCapacityProviderStrategy(), "strategy set outside the stack survives");
+        assertNull(request.getDeploymentConfiguration(), "deployment configuration set outside the stack survives");
+        verifyNoDeploymentConfigurationReplacement();
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {SERVICE_REGISTRIES, CAPACITY_PROVIDER_STRATEGY, DEPLOYMENT_CONFIGURATION_PROPERTY})
+    void aSettingTheStackNeverDeclaredSurvivesTheDropOfAnotherOne(String dropped) {
+        UpdateServiceRequest request = updateFrom(declaring(dropped), serviceProps());
+
+        if (!SERVICE_REGISTRIES.equals(dropped)) {
+            assertNull(request.getServiceRegistries(), "registries set outside the stack survive");
+        }
+        if (!CAPACITY_PROVIDER_STRATEGY.equals(dropped)) {
+            assertNull(request.getCapacityProviderStrategy(), "strategy set outside the stack survives");
+        }
+        if (!DEPLOYMENT_CONFIGURATION_PROPERTY.equals(dropped)) {
+            assertNull(request.getDeploymentConfiguration(), "deployment configuration set outside the stack survives");
+            verifyNoDeploymentConfigurationReplacement();
+        }
+    }
+
+    @Test
+    void aDroppedTaskDefinitionAndNetworkConfigurationLeaveTheStoredValues() {
+        ObjectNode prior = serviceProps();
+        prior.putObject("NetworkConfiguration").putObject("AwsvpcConfiguration").putArray("Subnets").add("subnet-1");
+        ObjectNode props = mapper.createObjectNode().put("Cluster", "web").put("ServiceName", "front");
+
+        UpdateServiceRequest request = updateFrom(prior, props);
+
+        assertNull(request.getTaskDefinition());
+        assertNull(request.getNetworkConfiguration());
+        assertNull(request.getServiceRegistries());
+        assertNull(request.getCapacityProviderStrategy());
+        assertNull(request.getDeploymentConfiguration());
+        verifyNoDeploymentConfigurationReplacement();
+    }
+
+    @Test
+    void aCreateClearsNothingEvenWhenThePriorTemplateDeclaredTheSettings() {
+        when(ecs.createService(any(CreateServiceRequest.class), eq(REGION))).thenReturn(service("front"));
+
+        // A resource the previous template had under another physical id counts as a create here.
+        provisioner.provision(resource("AWS::ECS::Service", "Service"), serviceProps(),
+                ctx(null, declaring(SETTINGS.toArray(String[]::new))));
+
+        ArgumentCaptor<CreateServiceRequest> request = ArgumentCaptor.forClass(CreateServiceRequest.class);
+        verify(ecs).createService(request.capture(), eq(REGION));
+        assertNull(request.getValue().getServiceRegistries());
+        assertNull(request.getValue().getCapacityProviderStrategy());
+        assertNull(request.getValue().getDeploymentConfiguration());
+        verify(ecs, never()).updateService(any(UpdateServiceRequest.class), anyString());
+        verifyNoDeploymentConfigurationReplacement();
+    }
+
+    /** What the three settings held after each write to the service, in order; null where the value is null. */
+    private record SettingHistory(EcsServiceModel service, List<Map<String, Object>> deploymentConfigurations,
+                                  List<List<CapacityProviderStrategyItem>> strategies,
+                                  List<List<Map<String, Object>>> registries) {
+    }
+
+    /**
+     * Updates a service that held all three settings from a template declaring them to one declaring
+     * {@code props}, with the update failing to stabilize. The stored service behaves as the real one
+     * does: UpdateService assigns each non-null member, the replace method assigns exactly what it is
+     * given, and both change the very model the prior settings were read from.
+     */
+    private SettingHistory updateThatDoesNotStabilize(ObjectNode props) {
+        return updateThatDoesNotStabilize(declaring(SETTINGS.toArray(String[]::new)), props, DEPLOYMENT_CONFIGURATION);
+    }
+
+    /** As above, for a stored service holding {@code storedDeploymentConfiguration} (null: none) and a prior template declaring {@code prior}. */
+    private SettingHistory updateThatDoesNotStabilize(ObjectNode prior, ObjectNode props,
+                                                      Map<String, Object> storedDeploymentConfiguration) {
+        EcsServiceModel stored = service("front");
+        stored.setTaskDefinition(TASK_DEF_ARN);
+        stored.setDesiredCount(1);
+        stored.setDeploymentConfiguration(storedDeploymentConfiguration);
+        stored.setCapacityProviderStrategy(STRATEGY);
+        stored.setServiceRegistries(REGISTRIES);
+        SettingHistory history = new SettingHistory(stored, new ArrayList<>(), new ArrayList<>(), new ArrayList<>());
+        when(ecs.serviceByArn(SERVICE_ARN)).thenReturn(stored);
+        EcsServiceModel updated = service("front");
+        EcsServiceModel restored = service("front");
+        when(ecs.updateService(any(UpdateServiceRequest.class), eq(REGION))).thenAnswer(inv -> {
+            UpdateServiceRequest request = inv.getArgument(0);
+            if (request.getDeploymentConfiguration() != null) {
+                stored.setDeploymentConfiguration(request.getDeploymentConfiguration());
+            }
+            if (request.getCapacityProviderStrategy() != null) {
+                stored.setCapacityProviderStrategy(request.getCapacityProviderStrategy());
+            }
+            if (request.getServiceRegistries() != null) {
+                stored.setServiceRegistries(request.getServiceRegistries());
+            }
+            record(history);
+            return Integer.valueOf(3).equals(request.getDesiredCount()) ? updated : restored;
+        });
+        when(ecs.replaceServiceDeploymentConfiguration(any(), any(), any(), any())).thenAnswer(inv -> {
+            stored.setDeploymentConfiguration(inv.getArgument(2));
+            record(history);
+            return stored;
+        });
+        doThrow(new AwsException("NotStabilized", "did not stabilize", 500)).when(ecs).awaitServiceStable(updated);
+
+        assertThrows(AwsException.class, () -> provisioner.provision(existingService(), props.put("DesiredCount", "3"),
+                ctx(SERVICE_ARN, prior)));
+        return history;
+    }
+
+    private static void record(SettingHistory history) {
+        history.deploymentConfigurations().add(history.service().getDeploymentConfiguration());
+        history.strategies().add(history.service().getCapacityProviderStrategy());
+        history.registries().add(history.service().getServiceRegistries());
+    }
+
+    @Test
+    void aDroppedDesiredCountSetsTheDesiredCountToOne() {
+        ObjectNode prior = serviceProps().put("DesiredCount", "3");
+
+        UpdateServiceRequest request = updateFrom(prior, serviceProps());
+
+        assertEquals(1, request.getDesiredCount());
+        verifyNoDeploymentConfigurationReplacement();
+    }
+
+    @Test
+    void aDeploymentConfigurationTheServiceNeverHadIsReadBackAsNoneAfterTheRestore() {
+        ObjectNode prior = serviceProps();
+        prior.putArray(SERVICE_REGISTRIES);
+        ObjectNode props = declaring(DEPLOYMENT_CONFIGURATION_PROPERTY);
+
+        SettingHistory history = updateThatDoesNotStabilize(prior, props, null);
+
+        assertTrue(history.deploymentConfigurations().contains(DEPLOYMENT_CONFIGURATION),
+                "the update applied the declared deployment configuration before the wait");
+        assertNull(history.service().getDeploymentConfiguration(), "the restore leaves none, not an empty map");
+        assertNull(history.deploymentConfigurations().getLast(), "none is the last write to the deployment configuration");
+        assertEquals(STRATEGY, history.service().getCapacityProviderStrategy());
+        assertEquals(REGISTRIES, history.service().getServiceRegistries());
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"dropped", "changed"})
+    void anUnknownPriorServiceLeavesTheDeploymentConfigurationAloneOnRestore(String change) {
+        when(ecs.serviceByArn(SERVICE_ARN)).thenReturn(null);
+        EcsServiceModel updated = service("front");
+        EcsServiceModel restored = service("front");
+        List<String> writes = new ArrayList<>();
+        when(ecs.updateService(any(UpdateServiceRequest.class), eq(REGION))).thenAnswer(inv -> {
+            UpdateServiceRequest request = inv.getArgument(0);
+            writes.add("update");
+            return Integer.valueOf(3).equals(request.getDesiredCount()) ? updated : restored;
+        });
+        when(ecs.replaceServiceDeploymentConfiguration(any(), any(), any(), any())).thenAnswer(inv -> {
+            writes.add("replace");
+            return service("front");
+        });
+        doThrow(new AwsException("NotStabilized", "did not stabilize", 500)).when(ecs).awaitServiceStable(updated);
+        ObjectNode prior = declaring(SETTINGS.toArray(String[]::new));
+        ObjectNode props = "dropped".equals(change) ? declaringExcept(DEPLOYMENT_CONFIGURATION_PROPERTY)
+                : declaring(SETTINGS.toArray(String[]::new));
+        if ("changed".equals(change)) {
+            ((ObjectNode) prior.get(DEPLOYMENT_CONFIGURATION_PROPERTY)).put("MaximumPercent", "100");
+        }
+
+        assertThrows(AwsException.class, () -> provisioner.provision(existingService(), props.put("DesiredCount", "3"),
+                ctx(SERVICE_ARN, prior)));
+
+        ArgumentCaptor<UpdateServiceRequest> requests = ArgumentCaptor.forClass(UpdateServiceRequest.class);
+        verify(ecs, times(2)).updateService(requests.capture(), eq(REGION));
+        UpdateServiceRequest restore = requests.getAllValues().get(1);
+        assertNull(restore.getDeploymentConfiguration(), "the restore request carries no deployment configuration");
+        assertNull(restore.getTaskDefinition(), "an unknown prior service is restored by cluster and service only");
+        assertNull(restore.getDesiredCount());
+        int restoreAt = writes.lastIndexOf("update");
+        assertEquals(List.of(), writes.subList(restoreAt + 1, writes.size()),
+                "no deployment configuration is written after the restore request");
+    }
+
+    @Test
+    void aDroppedDeploymentConfigurationIsPutBackWhenTheUpdateDoesNotStabilize() {
+        SettingHistory history = updateThatDoesNotStabilize(declaringExcept(DEPLOYMENT_CONFIGURATION_PROPERTY));
+
+        assertTrue(history.deploymentConfigurations().contains(null), "the drop was applied before the wait");
+        assertEquals(DEPLOYMENT_CONFIGURATION, history.service().getDeploymentConfiguration());
+        assertEquals(STRATEGY, history.service().getCapacityProviderStrategy());
+        assertEquals(REGISTRIES, history.service().getServiceRegistries());
+    }
+
+    @Test
+    void aDroppedCapacityProviderStrategyIsNeverClearedWhenTheUpdateDoesNotStabilize() {
+        SettingHistory history = updateThatDoesNotStabilize(declaringExcept(CAPACITY_PROVIDER_STRATEGY));
+
+        assertFalse(history.strategies().contains(List.of()), "the strategy was never cleared");
+        assertEquals(STRATEGY, history.service().getCapacityProviderStrategy());
+        assertEquals(DEPLOYMENT_CONFIGURATION, history.service().getDeploymentConfiguration());
+        assertEquals(REGISTRIES, history.service().getServiceRegistries());
+    }
+
+    @Test
+    void droppedServiceRegistriesAreNeverClearedWhenTheUpdateDoesNotStabilize() {
+        SettingHistory history = updateThatDoesNotStabilize(declaringExcept(SERVICE_REGISTRIES));
+
+        assertFalse(history.registries().contains(List.of()), "the registries were never cleared");
+        assertEquals(REGISTRIES, history.service().getServiceRegistries());
+        assertEquals(DEPLOYMENT_CONFIGURATION, history.service().getDeploymentConfiguration());
+        assertEquals(STRATEGY, history.service().getCapacityProviderStrategy());
     }
 
     /**

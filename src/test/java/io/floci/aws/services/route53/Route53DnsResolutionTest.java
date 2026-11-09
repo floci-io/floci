@@ -3,6 +3,7 @@ package io.floci.aws.services.route53;
 import io.floci.aws.core.common.dns.DnsAnswer;
 import io.floci.aws.core.common.dns.DnsLookupHelper;
 import io.floci.aws.core.common.dns.DnsRecord;
+import io.floci.aws.core.common.dns.EmbeddedDnsServer;
 import io.floci.aws.services.route53.model.AliasTarget;
 import io.floci.aws.services.route53.model.ResourceRecord;
 import io.floci.aws.services.route53.model.ResourceRecordSet;
@@ -37,6 +38,9 @@ class Route53DnsResolutionTest {
 
     @InjectMock
     DnsLookupHelper dnsLookupHelper;
+
+    @InjectMock
+    EmbeddedDnsServer embeddedDnsServer;
 
     @Inject
     Route53DnsRecordSource dnsRecordSource;
@@ -384,6 +388,21 @@ class Route53DnsResolutionTest {
         assertTrue(result.isPresent());
         String expectedIp = InetAddress.getLocalHost().getHostAddress();
         assertEquals(List.of(expectedIp), result.get().addresses());
+    }
+
+    @Test
+    void aTargetOnAFlociSuffixResolvesToTheAddressTheEmbeddedDnsServerAnswersItsNamesWith() {
+        // After a crash Floci can still be on a network it made, whose address the host's own lookup may take.
+        Mockito.when(embeddedDnsServer.getServerIp()).thenReturn(Optional.of("172.19.0.2"));
+        String zone = uniqueZone();
+        String zoneId = createPrivateZone(zone);
+        addRecord(zoneId, "floci-cname." + zone, "CNAME", "sqs.localhost.floci.io");
+        addAlias(zoneId, "floci-alias." + zone, "A", "s3.localhost.localstack.cloud");
+
+        assertEquals(List.of("172.19.0.2"),
+                dnsRecordSource.resolveIpv4("floci-cname." + zone).orElseThrow().addresses());
+        assertEquals(List.of("172.19.0.2"),
+                dnsRecordSource.resolveIpv4("floci-alias." + zone).orElseThrow().addresses());
     }
 
     @Test

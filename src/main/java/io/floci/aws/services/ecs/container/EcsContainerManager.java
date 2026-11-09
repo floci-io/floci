@@ -24,6 +24,7 @@ import io.floci.aws.core.common.docker.ContainerDetector;
 import io.floci.aws.core.common.docker.ContainerLifecycleManager;
 import io.floci.aws.core.common.docker.ContainerLifecycleManager.ContainerInfo;
 import io.floci.aws.core.common.docker.ContainerLogStreamer;
+import io.floci.aws.core.common.docker.ContainerReconciler;
 import io.floci.aws.core.common.docker.ContainerSpec;
 import io.floci.aws.core.common.docker.ContainerStorageHelper;
 import io.floci.aws.core.common.docker.LaunchedContainerAwsEnv;
@@ -150,9 +151,7 @@ public class EcsContainerManager {
     private final EfsService efsService;
     // Stamped as RUN_LABEL on every container this process creates, so a sweep can tell its own apart.
     private final String runId = UUID.randomUUID().toString();
-    // A sweep failure is retried before each task launch; each distinct failure is a WARN once.
-    private volatile boolean leftoverListFailureReported;
-    private final Set<String> leftoverRemovalFailuresReported = ConcurrentHashMap.newKeySet();
+    private final ContainerReconciler containerReconciler;
     private volatile boolean leftoverTaskVolumeListFailureReported;
     private final Set<String> leftoverTaskVolumeRemovalFailuresReported = ConcurrentHashMap.newKeySet();
 
@@ -193,6 +192,7 @@ public class EcsContainerManager {
         this.credentialsProxy = credentialsProxy;
         this.linkLocalAddresses = linkLocalAddresses;
         this.efsService = efsService;
+        this.containerReconciler = new ContainerReconciler(lifecycleManager, LOG);
     }
 
     public EcsContainerManager(ContainerBuilder containerBuilder,
@@ -651,9 +651,6 @@ public class EcsContainerManager {
             containersInDefinitionOrder.forEach(container -> container.setManagedAgents(agents));
         }
         task.setContainers(containersInDefinitionOrder);
-        task.setLastStatus(TaskStatus.RUNNING.name());
-        task.setDesiredStatus(TaskStatus.RUNNING.name());
-        task.setStartedAt(Instant.now());
 
         return new EcsTaskHandle(task.getTaskArn(), containerIds, logStreamsByContainerId,
                 firelensVolumeName,
@@ -739,8 +736,8 @@ public class EcsContainerManager {
      *
      * <p>The wait is bounded by the dependent container's {@code startTimeout}, defaulting to
      * {@value #DEPENDENCY_WAIT_SECONDS} seconds rather than AWS's longer agent default, because
-     * RunTask here is synchronous and a caller is holding the request open. A dependency that does
-     * not get there in time fails the task.
+     * the service scheduler starts a service's tasks on its own thread, which a long wait holds up.
+     * A dependency that does not get there in time fails the task.
      */
     private void awaitDependencies(ContainerDefinition definition, Map<String, String> startedContainerIds) {
         if (definition.getDependsOn() == null || definition.getDependsOn().isEmpty()) {
@@ -1246,51 +1243,11 @@ public class EcsContainerManager {
 
     /** {@link #removeLeftoverContainers()} keeping only the containers of run {@code currentRunId}. */
     public boolean removeLeftoverContainers(String currentRunId) {
-        String owner = ContainerStorageHelper.ownerIdentity(config);
-        ContainerStorageHelper.LabelAliases aliases = ContainerStorageHelper.CONTAINER_LABEL_ALIASES;
-        List<com.github.dockerjava.api.model.Container> containers;
-        try {
-            // Docker's container summary, not the ECS model Container this class imports.
-            containers = aliases.listByLabels(
-                    Map.of(ContainerStorageHelper.SERVICE_LABEL, "ecs", ContainerStorageHelper.OWNER_LABEL, owner),
-                    filter -> lifecycleManager.getDockerClient()
-                            .listContainersCmd()
-                            .withShowAll(true)
-                            .withLabelFilter(filter)
-                            .exec(),
-                    com.github.dockerjava.api.model.Container::getId);
-        } catch (Exception e) {
-            LOG.logv(leftoverListFailureReported ? Logger.Level.DEBUG : Logger.Level.WARN,
-                    "Could not list the ECS containers a previous run left behind: {0}", e.getMessage());
-            leftoverListFailureReported = true;
-            return false;
-        }
-        leftoverListFailureReported = false;
-        boolean allRemoved = true;
-        for (com.github.dockerjava.api.model.Container container : containers) {
-            Map<String, String> labels = container.getLabels();
-            if (!aliases.consistent(container.getId(), labels)
-                    || !aliases.matches(labels, ContainerStorageHelper.OWNER_LABEL, owner)
-                    || currentRunId.equals(aliases.labelValue(labels, RUN_LABEL))) {
-                continue;
-            }
-            try {
-                lifecycleManager.removeIfExistsStrict(container.getId(), true);
-                leftoverRemovalFailuresReported.remove(container.getId());
-                LOG.infov("Removed ECS container {0} ({1}) left by a previous run", container.getId(),
-                        container.getNames() == null ? "" : String.join(",", container.getNames()));
-            } catch (Exception e) {
-                allRemoved = false;
-                Logger.Level level = leftoverRemovalFailuresReported.add(container.getId())
-                        ? Logger.Level.WARN : Logger.Level.DEBUG;
-                LOG.logv(level, "Could not remove ECS container {0} left by a previous run: {1}",
-                        container.getId(), e.getMessage());
-            }
-        }
-        if (allRemoved) {
-            leftoverRemovalFailuresReported.clear();
-        }
-        return allRemoved;
+        return containerReconciler.reconcile(
+                Map.of(ContainerStorageHelper.SERVICE_LABEL, "ecs",
+                        ContainerStorageHelper.OWNER_LABEL, ContainerStorageHelper.ownerIdentity(config)),
+                container -> !currentRunId.equals(ContainerStorageHelper.CONTAINER_LABEL_ALIASES
+                        .labelValue(container.getLabels(), RUN_LABEL)));
     }
 
     /** Removes previous-run task volumes independently of the container launch gate. */
@@ -2526,7 +2483,4 @@ public class EcsContainerManager {
             hostVolumePolicy.validate(hostPath, HostVolumePolicy.DEVICE_HOST_PATH);
         }
     }
-
-    // Inner enum to avoid import cycle — mirrors model.TaskStatus for readability
-    private enum TaskStatus {RUNNING}
 }

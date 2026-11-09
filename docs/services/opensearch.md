@@ -16,6 +16,8 @@ Domain metadata is stored in-process. No Docker containers are started. Domains 
 
 Floci starts an **OpenSearch** Docker container per domain, choosing the image based on the requested `EngineVersion` (e.g. `OpenSearch_3.6` → `opensearchproject/opensearch:3.6.0`, `Elasticsearch_7.10` → `docker.elastic.co/elasticsearch/elasticsearch-oss:7.10.2`). The container is exposed on a host port from the configured range (`9400–9499`). Once `/_cluster/health` returns `green` or `yellow`, the domain transitions to `Created: true` and the `Endpoint` field is populated with the container's address.
 
+The returned `Endpoint` contains the host and port without a scheme. Use `http://` when connecting to the local data plane.
+
 OpenSearch 2.12+ requires an initial admin password even when the security plugin is disabled; Floci sets `OPENSEARCH_INITIAL_ADMIN_PASSWORD=FlociAdmin1!` automatically for those versions. The security plugin itself stays disabled.
 
 !!! note "Docker socket required"

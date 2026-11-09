@@ -221,15 +221,28 @@ final class CopyRecordTransformer {
 
     private void writeField(Field field, int column, ByteArrayOutputStream out) {
         byte[] value = field.value();
+        boolean isVarchar = columnKinds == null
+                || (column < columnKinds.size() && columnKinds.get(column) == ColumnKind.TEXT);
+        // A NULL marker that ends in spaces is matched on the raw field, so trimming must leave it alone.
+        boolean rawNullMarker = !field.quoted() && Arrays.equals(value, nullMarker);
+        if (transforms.trimBlanks() && isVarchar && !rawNullMarker) {
+            value = trimTrailingSpaces(value, csv);
+        }
+        // Trimming a CSV field down to nothing yields an empty string, which an unquoted empty field would turn into NULL.
+        boolean trimmedToEmpty = csv && !field.quoted() && value.length == 0 && field.value().length > 0;
         boolean emptyField = !field.quoted() && value.length == 0;
         boolean nonCharacter = columnKinds != null && column < columnKinds.size()
                 && columnKinds.get(column) != ColumnKind.TEXT
                 && columnKinds.get(column) != ColumnKind.CHAR;
-        boolean nulled = (transforms.blanksAsNull() && isBlank(value))
+        boolean nulled = (transforms.blanksAsNull() && isBlank(field.value()))
                 || (transforms.emptyAsNull() && value.length == 0)
                 || (emptyField && nonCharacter);
         if (nulled) {
             out.writeBytes(nullMarker);
+            return;
+        }
+        if (trimmedToEmpty && nullMarker.length == 0) {
+            out.writeBytes(new byte[]{DOUBLE_QUOTE, DOUBLE_QUOTE});
             return;
         }
         // A field that already is the NULL marker must not be cut or reformatted: that would turn NULL into data.
@@ -255,6 +268,26 @@ final class CopyRecordTransformer {
         } else {
             out.writeBytes(escapeTextField(limited));
         }
+    }
+
+    private static byte[] trimTrailingSpaces(byte[] value, boolean csv) {
+        int end = value.length;
+        while (end > 0) {
+            if (value[end - 1] != ' ' && value[end - 1] != '\t') {
+                break;
+            }
+            if (!csv) {
+                int backslashes = 0;
+                for (int k = end - 2; k >= 0 && value[k] == BACKSLASH; k--) {
+                    backslashes++;
+                }
+                if ((backslashes % 2) != 0) {
+                    break;
+                }
+            }
+            end--;
+        }
+        return end == value.length ? value : Arrays.copyOf(value, end);
     }
 
     private boolean containsDelimiter(byte[] value) {

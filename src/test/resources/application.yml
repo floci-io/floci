@@ -155,6 +155,7 @@ floci:
       enabled: true
     lambda:
       enabled: true
+      reconcile-containers-on-startup: true
       container-drain-timeout-seconds: 15
       docker-flags: ""
       honour-architectures: false
@@ -507,6 +508,8 @@ floci:
       enabled: true
     efs:
       enabled: true
+    ec2instanceconnect:
+      enabled: true
     organizations:
       enabled: true
     rum:
@@ -555,6 +558,8 @@ floci:
     appintegrations:
       enabled: true
     dlm:
+      enabled: true
+    signer:
       enabled: true
     cognitoidentity:
       enabled: true

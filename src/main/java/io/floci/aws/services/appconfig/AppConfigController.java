@@ -3,6 +3,7 @@ package io.floci.aws.services.appconfig;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
+import io.floci.aws.core.common.PaginatedResult;
 import io.floci.aws.core.common.Pagination;
 import io.floci.aws.services.appconfig.AppConfigDataService.LegacyConfiguration;
 import io.floci.aws.services.appconfig.model.Application;
@@ -75,11 +76,19 @@ public class AppConfigController {
 
     @GET
     @Path("/applications")
-    public Response listApplications() {
-        List<Application> apps = service.listApplications();
+    public Response listApplications(@QueryParam("max_results") String maxResults,
+                                     @QueryParam("next_token") String nextToken,
+                                     @Context UriInfo uriInfo) {
+        String token = nextToken == null && uriInfo.getQueryParameters().containsKey("next_token")
+                ? "" : nextToken;
+        PaginatedResult<Application> page = service.listApplicationsPage(
+                Pagination.parseMaxResults(maxResults, "BadRequestException"), token);
         ObjectNode root = objectMapper.createObjectNode();
         ArrayNode items = root.putArray("Items");
-        apps.forEach(items::addPOJO);
+        page.items().forEach(items::addPOJO);
+        if (page.nextToken() != null) {
+            root.put("NextToken", page.nextToken());
+        }
         return Response.ok(root).build();
     }
 

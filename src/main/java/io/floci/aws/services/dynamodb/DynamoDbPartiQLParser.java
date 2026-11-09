@@ -156,7 +156,7 @@ public class DynamoDbPartiQLParser {
             return null;
         }
         try {
-            return parse(statement, List.of()).table();
+            return parse(statement, List.of(), true).table();
         } catch (Exception e) {
             try {
                 List<Token> tokens = tokenize(statement.trim());
@@ -483,6 +483,12 @@ public class DynamoDbPartiQLParser {
     private String deferredError;
     // DynamoDB checks operands once it has read every term, and the first one in the statement wins.
     private String expressionError;
+    // How many calls, collections and nested statements enclose the term being read.
+    private int termDepth;
+    private final List<NestedStatement> nestedStatements = new ArrayList<>();
+
+    // shallow: inside one call or collection only.
+    private record NestedStatement(Token keyword, boolean shallow) {}
 
     private DynamoDbPartiQLParser(String statement, List<JsonNode> parameters) {
         this.statement = statement;
@@ -491,23 +497,35 @@ public class DynamoDbPartiQLParser {
     }
 
     static Stmt parse(String statement, List<JsonNode> parameters) {
+        return parse(statement, parameters, false);
+    }
+
+    static Stmt parse(String statement, List<JsonNode> parameters, boolean transaction) {
         try {
-            return parseStatement(statement, parameters);
+            return parseStatement(statement, parameters, transaction);
         } catch (StackOverflowError expected) {
             // DynamoDB answers a statement nested too deep for its parser the same way, with no message.
             throw new AwsException("InternalFailure", null, 500);
         }
     }
 
-    private static Stmt parseStatement(String statement, List<JsonNode> parameters) {
+    private static Stmt parseStatement(String statement, List<JsonNode> parameters, boolean transaction) {
         parameters.forEach(DynamoDbAttributeValueValidator::validate);
         DynamoDbPartiQLParser parser = new DynamoDbPartiQLParser(statement, parameters);
-        Stmt stmt = parser.parseStmt();
+        Stmt stmt = parser.parseStmt(transaction);
         if (parser.peek().type() == TType.SEMICOLON) {
             parser.advance();
         }
         if (parser.peek().type() != TType.EOF) {
             throw validationEx(UNEXPECTED_TOKEN);
+        }
+        String nestedStatementError = parser.nestedStatementError(false);
+        if (nestedStatementError != null) {
+            throw validationEx(nestedStatementError);
+        }
+        // Outside a transaction DynamoDB refuses EXISTS before it checks anything inside it.
+        if (stmt instanceof Stmt.Exists && !transaction) {
+            throw validationEx(EXISTS_OUTSIDE_TRANSACTION);
         }
         if (parser.fromClauseError != null) {
             throw validationEx(parser.fromClauseError);
@@ -544,14 +562,27 @@ public class DynamoDbPartiQLParser {
         return !tokens.isEmpty() && OPERAND_ENDS.contains(tokens.getLast().type());
     }
 
-    private Stmt parseStmt() {
-        if (peekFunction("exists")) {
+    private static final String EXISTS_OUTSIDE_TRANSACTION =
+            "EXISTS can only be used in ExecuteTransaction write requests.";
+
+    private static final Set<TType> STATEMENT_ENDS = EnumSet.of(TType.SEMICOLON, TType.EOF);
+
+    private Stmt parseStmt(boolean transaction) {
+        if (peekFunction("exists") && tokens.get(pos + 2).type() == TType.SELECT) {
             advance();
             consume(TType.LPAREN);
-            requireTermStart();
             Stmt.Select select = parseSelect();
-            consume(TType.RPAREN);
-            return new Stmt.Exists(select);
+            if (peek().type() == TType.RPAREN && STATEMENT_ENDS.contains(tokens.get(pos + 1).type())) {
+                advance();
+                return new Stmt.Exists(select);
+            }
+            // DynamoDB reads anything else as a call with the SELECT as an argument. The statement starts over.
+            pos = 0;
+            paramIdx = 0;
+            fromClauseError = null;
+            deferredError = null;
+            expressionError = null;
+            nestedStatements.clear();
         }
         return switch (peek().type()) {
             case SELECT -> parseSelect();
@@ -561,13 +592,13 @@ public class DynamoDbPartiQLParser {
             case DELETE -> parseDelete();
             default -> {
                 requireTermStart();
-                throw validationEx(expressionStatementRefusal());
+                throw validationEx(expressionStatementRefusal(transaction));
             }
         };
     }
 
     // DynamoDB reads any other statement as one expression and refuses it by the kind of that expression.
-    private String expressionStatementRefusal() {
+    private String expressionStatementRefusal(boolean transaction) {
         String kind = parseTermKind();
         if (kind == null || continuesExpression(peek())) {
             return NOT_WELL_FORMED + "Expected data manipulation";
@@ -578,11 +609,41 @@ public class DynamoDbPartiQLParser {
         if (peek().type() != TType.EOF) {
             return UNEXPECTED_TOKEN;
         }
+        String nestedStatementError = nestedStatementError(SHALLOW_TERM_KINDS.contains(kind));
+        if (nestedStatementError != null) {
+            return nestedStatementError;
+        }
+        // Outside a transaction DynamoDB answers any call as it answers EXISTS.
+        if (CALL.equals(kind)) {
+            return transaction ? "Unsupported operation in transaction." : EXISTS_OUTSIDE_TRANSACTION;
+        }
         return OPERATOR.equals(kind) ? NOT_WELL_FORMED + "Expected data manipulation" : "Unsupported operation: " + kind;
     }
 
     // A sign on anything but a number, or IS NOT. DynamoDB refuses it with a message of its own.
     private static final String OPERATOR = "Operator";
+
+    private static final String CALL = "Call";
+
+    // DynamoDB keeps the arguments of these terms right below the statement.
+    private static final Set<String> SHALLOW_TERM_KINDS = Set.of(CALL, "CallAgg", "List", "Bag");
+
+    // DynamoDB refuses a nested INSERT, UPDATE or DELETE once the whole statement parses. An INSERT right below
+    // the statement gets past that and fails later with a message of its own.
+    private String nestedStatementError(boolean shallowAllowed) {
+        for (NestedStatement nested : nestedStatements) {
+            if (nested.keyword().type() != TType.INSERT || !shallowAllowed || !nested.shallow()) {
+                // DynamoDB names no keyword for UPDATE.
+                String keyword = switch (nested.keyword().type()) {
+                    case INSERT -> "insert_into";
+                    case DELETE -> "delete";
+                    default -> "null";
+                };
+                return NOT_WELL_FORMED + "Keyword " + keyword + " only expected at the top level in the query";
+            }
+        }
+        return nestedStatements.isEmpty() ? null : NOT_WELL_FORMED + "Unable to parse statement";
+    }
 
     // A sign folds into the number it applies to. It binds tighter than IS and looser than a path step.
     private String parseTermKind() {
@@ -667,6 +728,11 @@ public class DynamoDbPartiQLParser {
                 };
             }
             case IDENT -> {
+                if (peekCall()) {
+                    advance();
+                    parseCallArguments(t, false);
+                    yield AGGREGATE_FUNCTIONS.contains(t.value().toLowerCase(Locale.ROOT)) ? "CallAgg" : CALL;
+                }
                 if (isBareWord(t) && KEYWORDS.contains(t.value().toLowerCase(Locale.ROOT))
                         || tokens.get(pos + 1).type() == TType.LPAREN) {
                     yield null;
@@ -721,6 +787,12 @@ public class DynamoDbPartiQLParser {
             Token name = advance();
             defer("Unexpected path component at " + position(name));
             parseCall(name, false);
+            return PATH_STAND_IN;
+        }
+        // DynamoDB reads a nested statement here only in parentheses.
+        if (peek().type() == TType.LPAREN && peekNestedStatement()) {
+            Token keyword = parseNestedStatement();
+            defer("Unexpected path component at " + position(keyword));
             return PATH_STAND_IN;
         }
         return parsePath();
@@ -791,6 +863,11 @@ public class DynamoDbPartiQLParser {
     }
 
     private PVal parseFieldValue() {
+        if (peekNestedStatement()) {
+            Token keyword = parseNestedStatement();
+            defer("Unsupported data type: SELECT under key root at " + position(keyword));
+            return new PVal.Null();
+        }
         if (!peekCall()) {
             return parseValue();
         }
@@ -1128,6 +1205,12 @@ public class DynamoDbPartiQLParser {
     }
 
     private Cond parseCond() {
+        if (STATEMENT_STARTS.contains(peek().type())) {
+            Token start = peek();
+            parseNestedTerm();
+            return peek().type() == TType.IS
+                    ? parsePredicate(PATH_STAND_IN, start) : new Cond.Missing(PATH_STAND_IN, false);
+        }
         if (peek().type() == TType.LPAREN) {
             advance();
             Cond grouped = parseOr();
@@ -1390,6 +1473,7 @@ public class DynamoDbPartiQLParser {
         boolean aggregate = AGGREGATE_FUNCTIONS.contains(function);
         List<Argument> arguments = new ArrayList<>();
         consume(TType.LPAREN);
+        termDepth++;
         if (isStar(peek())) {
             if (!"count".equals(function)) {
                 throw validationEx(NOT_WELL_FORMED + (aggregate ? function : name.value()) + "(*) is not allowed");
@@ -1411,6 +1495,7 @@ public class DynamoDbPartiQLParser {
             throw validationEx(NOT_WELL_FORMED + "Expected RIGHT_PAREN");
         }
         advance();
+        termDepth--;
         return arguments;
     }
 
@@ -1739,23 +1824,24 @@ public class DynamoDbPartiQLParser {
                 defer(DynamoDbAttributeValueValidator.NESTING_EXCEEDED + " under " + path);
             }
             requireTermStart();
-            Token t = advance();
+            boolean nestedStatement = peekNestedStatement();
+            Token t = nestedStatement ? peek() : advance();
             String nested = path == null ? "root" : path;
             OpenCollection parent = open.peek();
-            PVal value = switch (t.type()) {
+            PVal value = nestedStatement ? parseNestedValue(parent, path) : switch (t.type()) {
                 case STRING   -> new PVal.Str(t.value());
                 case NUMBER   -> checkedNumber(new PVal.Num(t.value()), nested);
                 case BOOL     -> new PVal.Bool(Boolean.parseBoolean(t.value()));
                 case NULL     -> new PVal.Null();
                 case QUESTION -> {
                     if (path != null) {
-                        defer("Unsupported data type: Parameter under key " + path + " at "
-                                + position(t.start(), 1));
+                        defer(refusedMember("Parameter", parent, path) + " at " + position(t));
                     }
                     yield resolveParam();
                 }
                 case LBRACKET, LBRACE, LBAG -> {
                     open.push(new OpenCollection(t.type(), nested));
+                    termDepth++;
                     yield null;
                 }
                 case PLUS, MINUS -> checkedNumber(parseSignedNumber(t), nested);
@@ -1778,6 +1864,7 @@ public class DynamoDbPartiQLParser {
                 if (peek().type() == top.close) {
                     advance();
                     open.pop();
+                    termDepth--;
                     value = closed(top);
                     continue;
                 }
@@ -1798,13 +1885,78 @@ public class DynamoDbPartiQLParser {
             return new PVal.Null();
         }
         if (parent != null) {
-            boolean firstInBag = parent.close == TType.RBAG && parent.items.isEmpty();
-            defer((firstInBag ? BAG_MEMBER_TYPES : "Unsupported data type: Call under key " + path) + " at "
-                    + position(name));
+            defer(refusedMember("Call", parent, path) + " at " + position(name));
         }
         parseCall(name, false);
         deferExpression(expectedValue);
         return new PVal.Null();
+    }
+
+    private static final Set<TType> STATEMENT_STARTS = EnumSet.of(TType.SELECT, TType.INSERT, TType.UPDATE,
+            TType.DELETE);
+
+    private boolean peekNestedStatement() {
+        int next = pos;
+        while (tokens.get(next).type() == TType.LPAREN) {
+            next++;
+        }
+        return STATEMENT_STARTS.contains(tokens.get(next).type());
+    }
+
+    // Reads a statement in a term, with the parentheses around it, and returns its keyword. DynamoDB checks
+    // only the syntax inside it, and refuses a nested INSERT, UPDATE or DELETE before any term check.
+    private Token parseNestedStatement() {
+        int parentheses = 0;
+        while (peek().type() == TType.LPAREN) {
+            advance();
+            parentheses++;
+        }
+        Token keyword = peek();
+        if (keyword.type() != TType.SELECT) {
+            nestedStatements.add(new NestedStatement(keyword, termDepth == 1));
+        }
+        String fromClause = fromClauseError;
+        String deferred = deferredError;
+        String expression = expressionError;
+        termDepth++;
+        switch (keyword.type()) {
+            case SELECT -> parseSelect();
+            case INSERT -> parseInsert();
+            case UPDATE -> parseUpdate();
+            default -> parseDelete();
+        }
+        termDepth--;
+        fromClauseError = fromClause;
+        deferredError = deferred;
+        expressionError = expression;
+        for (int i = 0; i < parentheses; i++) {
+            if (peek().type() != TType.RPAREN) {
+                throw validationEx(NOT_WELL_FORMED + "Expected RIGHT_PAREN");
+            }
+            advance();
+        }
+        return keyword;
+    }
+
+    private void parseNestedTerm() {
+        Token keyword = parseNestedStatement();
+        String shapeError = callShapeError(keyword, addPathSteps(new ArrayList<>()));
+        defer(shapeError != null ? shapeError : "Unsupported token in expression: SELECT at " + position(keyword));
+    }
+
+    private PVal parseNestedValue(OpenCollection parent, String path) {
+        if (parent == null) {
+            parseNestedTerm();
+        } else {
+            Token keyword = parseNestedStatement();
+            defer(refusedMember("Select", parent, path) + " at " + position(keyword));
+        }
+        return new PVal.Null();
+    }
+
+    private static String refusedMember(String type, OpenCollection parent, String path) {
+        boolean firstInBag = parent.close == TType.RBAG && parent.items.isEmpty();
+        return firstInBag ? BAG_MEMBER_TYPES : "Unsupported data type: " + type + " under key " + path;
     }
 
     private static final class OpenCollection {
@@ -1968,7 +2120,8 @@ public class DynamoDbPartiQLParser {
 
     private PVal resolveParam() {
         if (paramIdx >= parameters.size()) {
-            throw validationEx("Not enough parameters supplied for ? placeholders");
+            defer("Number of parameters in request and statement don't match.");
+            return new PVal.Null();
         }
         JsonNode p = parameters.get(paramIdx++);
         String type = DynamoDbAttributeValueValidator.typeOf(p);

@@ -64,7 +64,8 @@ quarkus:
       # The Pricing service reads its bundled snapshot, EC2 reads its image
       # catalog (ec2/image-catalog.yaml), SageMaker reads its instance type
       # catalog (sagemaker/instance-type-catalog.yaml), KMS reads its AWS managed
-      # key catalog (kms/aws-managed-keys.yaml), AppSync's GraphQL
+      # key catalog (kms/aws-managed-keys.yaml), Bedrock reads its model catalog
+      # (bedrock/model-catalog.yaml), AppSync's GraphQL
       # parser reads its message bundles, Lambda Web Functions copy their
       # runtime (lambdaweb/index.mjs) into each environment, EMR writes its S3DistCp program
       # (emr/s3-dist-cp.py) into a step's container, EC2 security group enforcement builds
@@ -88,6 +89,7 @@ quarkus:
         - docker/*.Dockerfile
         - sagemaker/*.yaml
         - kms/*.yaml
+        - bedrock/*.yaml
         - eks/*.json
         - aws/*.json
         - iam/service-linked-roles.tsv
@@ -440,6 +442,7 @@ floci:
       enabled: true
     lambda:
       enabled: true
+      reconcile-containers-on-startup: true  # FLOCI_SERVICES_LAMBDA_RECONCILE_CONTAINERS_ON_STARTUP
       ephemeral: false
       # Extra Docker create flags for Lambda containers, for example: --env KEY=VALUE --volume /host:/container:ro
       docker-flags: ""
@@ -851,6 +854,7 @@ floci:
       mock: false
       max-memory-mib: 0        # optional k3s container memory ceiling; 0 follows the node type
       max-vcpus: 0             # optional k3s container CPU ceiling; 0 follows the node type
+      # node-instance-type: t2.2xlarge # optional catalog type to size the k3s node from; the API keeps the node group's type
       provider: k3s
       default-image: "rancher/k3s:latest"
       # image-template: "myregistry.io/k3s:v%s" # optional custom image format template taking cluster version
@@ -1015,6 +1019,8 @@ floci:
       enabled: true
     efs:
       enabled: true
+    ec2instanceconnect:
+      enabled: true
     organizations:
       enabled: true
       # management-account-email: ""  # When set, overrides the management-account email reported by DescribeOrganization and account listings.
@@ -1070,6 +1076,8 @@ floci:
     appintegrations:
       enabled: true
     dlm:
+      enabled: true
+    signer:
       enabled: true
     cognitoidentity:
       enabled: true

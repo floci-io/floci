@@ -66,6 +66,8 @@ changing credentials already issued.
 
 StackSets support both `SELF_MANAGED` and the Cloud Launchpad `SERVICE_MANAGED` workflow. `ActivateOrganizationsAccess` requires an Organizations management account with all features enabled and enables trusted access for `stacksets.cloudformation.amazonaws.com`. Service-managed organizational-unit deployment targets are resolved from the caller's actual Organizations state rather than converted into synthetic account IDs. Targeting an OU includes eligible accounts directly in that OU and in all descendant OUs, while excluding the organization management account, matching AWS StackSets targeting semantics. `DescribeStackSet` returns the stack set's `Tags` and, for a service-managed stack set, the root and OU ids its instances were created for as `OrganizationalUnitIds`.
 
+With `AutoDeployment` enabled, a service-managed stack set follows its organization. An account created in, invited into or moved under a targeted root or OU gets an instance in every Region of the targets that now cover it, and an account moved out of every target or removed from the organization loses its instances; their stacks stay when `RetainStacksOnAccountRemoval` is set. Account placement changes are reconciled asynchronously, so Organizations calls do not wait for deployments and deployment failures do not undo completed account changes. A second `CreateStackInstances` for a target already recorded adds its Regions to the earlier ones. Automatic creates and deletes are recorded in `ListStackSetOperations` and `DescribeStackSetOperation`, with their timestamps and success or failure status. An account move that needs no instance changes records no operation. A returning account uses a distinct backing-stack name when its previous name remains occupied; the retained stack is not reassociated.
+
 `CreateStackInstances` and `UpdateStackSet` execute the backing CloudFormation stacks in each target account. A failed resource can therefore drive the backing stack through rollback and leave the stack instance `INOPERABLE` with detailed status `FAILED`; the StackSet operation is reported as `FAILED` instead of being forced to success.
 
 Operation IDs are recorded and validated. Duplicate IDs return `OperationIdAlreadyExistsException`, missing stack sets return `StackSetNotFoundException`, and missing operation IDs return `OperationNotFoundException`. Invalid targets and request shapes use the CloudFormation query-protocol validation errors. Operations complete locally, so `OperationInProgressException` is only reachable when local operation state actually overlaps; Floci does not inject concurrency failures solely to exercise an error code.
@@ -732,13 +734,18 @@ regenerates it from AWS's published schemas, and `cfn-schema-drift.yml` compares
 A property the previous template declared and the new template drops is cleared on `UpdateStack`,
 goes back to its create default, or is kept, on the AppSync resources, the EC2 networking types
 (`Subnet`, `InternetGateway`, `RouteTable`, `NatGateway`, `EIP`, `PrefixList`), an
-`AWS::ApiGatewayV2::Stage` and an `AWS::EC2::Instance`. Kept: required members
+`AWS::ApiGatewayV2::Stage`, an `AWS::EC2::Instance` and an `AWS::ECS::Service`. Kept: required members
 (`AuthenticationType`, `Type`, a function's `DataSourceName`), a data source's and a function's `Name`,
 an API key's `Expires`, a GraphQL API's `ApiType` and `Visibility`, a UNIT resolver's `DataSourceName`,
 a `NatGateway`'s `PrivateIpAddress`, a `PrefixList`'s `MaxEntries`, a `Stage`'s `StageName` and an
 `Instance`'s `SecurityGroupIds`, `NetworkInterfaces` and `LaunchTemplate`. A dropped `LaunchTemplate` keeps
 the instance, but the instance type and the `MetadataOptions` members the template supplied go back to
-their defaults. A `Stage`'s dropped `StageVariables` become empty. An `Instance`'s dropped `UserData` is
+their defaults, and the instance profile it supplied is disassociated. A service's `TaskDefinition`,
+`NetworkConfiguration`, `ServiceName`, `LaunchType`, `LoadBalancers`, `CapacityProviderStrategy` and
+`ServiceRegistries` are kept, and its `DesiredCount` goes back to 1. A service's dropped
+`DeploymentConfiguration` is cleared. An empty `CapacityProviderStrategy` or `ServiceRegistries` in the
+template clears it; a failed stabilisation puts the prior values back, and a deployment configuration
+the service did not have goes back to none. A `Stage`'s dropped `StageVariables` become empty. An `Instance`'s dropped `UserData` is
 cleared: a running instance is stopped for the rewrite and started again, and a stopped one stays stopped.
 An update that drops a `PrefixList`'s `AddressFamily` or `PrefixListName` fails. Create-only members are
 not cleared either.

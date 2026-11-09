@@ -621,16 +621,20 @@ public class CloudWatchMetricsJsonHandler {
     private Response handleListDashboards(JsonNode request, String region) {
         String prefix = request.has("DashboardNamePrefix")
                 ? request.path("DashboardNamePrefix").asText() : null;
-        List<Dashboard> dashboards = dashboardsService.listDashboards(prefix, region);
+        PaginatedResult<Dashboard> page = dashboardsService.listDashboardsPage(prefix,
+                Pagination.parseNextToken(request, "NextToken", "InvalidParameterValue"), region);
 
         ObjectNode response = objectMapper.createObjectNode();
         ArrayNode entries = response.putArray("DashboardEntries");
-        for (Dashboard d : dashboards) {
+        for (Dashboard d : page.items()) {
             ObjectNode node = entries.addObject();
             node.put("DashboardName", d.getDashboardName());
             node.put("DashboardArn", d.getDashboardArn());
             node.put("LastModified", d.getLastModified());
             node.put("Size", d.getSize());
+        }
+        if (page.nextToken() != null) {
+            response.put("NextToken", page.nextToken());
         }
         return Response.ok(response).build();
     }
