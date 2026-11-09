@@ -179,6 +179,42 @@ class StackSetCfnIntegrationTest {
         cloudFormation("DescribeStackSet", "StackSetName", name).then().statusCode(404);
     }
 
+    @Test
+    void conditionalDeploymentSettingsResolveTheirSelectedObjects() throws Exception {
+        String root = organizationsFixture.createWithTrustedAccess(MANAGEMENT);
+        String suffix = UUID.randomUUID().toString().substring(0, 8);
+        String stack = "conditional-stackset-" + suffix;
+        String stackSet = "conditional-set-" + suffix;
+        ObjectMapper mapper = new ObjectMapper();
+        ObjectNode body = (ObjectNode) mapper.readTree(template(stackSet, "conditional-q-" + suffix));
+        body.set("Conditions", mapper.createObjectNode().set("Enabled", mapper.createObjectNode()
+                .set("Fn::Equals", mapper.createArrayNode().add("yes").add("yes"))));
+        ObjectNode properties = (ObjectNode) body.path("Resources").path("StackSet").path("Properties");
+        for (String key : new String[]{"AutoDeployment", "ManagedExecution"}) {
+            properties.set(key, mapper.createObjectNode().set("Fn::If", mapper.createArrayNode()
+                    .add("Enabled").add(properties.get(key))
+                    .add(mapper.createObjectNode().put("AutoDeployment".equals(key) ? "Enabled" : "Active", false))));
+        }
+        cloudFormation("CreateStack", "StackName", stack, "TemplateBody", body.toString(),
+                "Parameters.member.1.ParameterKey", "Targets", "Parameters.member.1.ParameterValue", root)
+                .then().statusCode(200);
+        CfnStackWaits.awaitStatus(stack, "CREATE_COMPLETE", auth(MANAGEMENT, "cloudformation"));
+
+        cloudFormation("DescribeStackSet", "StackSetName", stackSet).then().statusCode(200)
+                .body(containsString("<Enabled>true</Enabled>"))
+                .body(containsString("<Active>true</Active>"));
+        body.set("Conditions", mapper.createObjectNode().set("Enabled", mapper.createObjectNode()
+                .set("Fn::Equals", mapper.createArrayNode().add("no").add("yes"))));
+        cloudFormation("UpdateStack", "StackName", stack, "TemplateBody", body.toString(),
+                "Parameters.member.1.ParameterKey", "Targets", "Parameters.member.1.ParameterValue", root)
+                .then().statusCode(200);
+        CfnStackWaits.awaitStatus(stack, "UPDATE_COMPLETE", auth(MANAGEMENT, "cloudformation"));
+        cloudFormation("DescribeStackSet", "StackSetName", stackSet).then().statusCode(200)
+                .body(containsString("<Enabled>false</Enabled>"))
+                .body(containsString("<Active>false</Active>"));
+        CfnStackWaits.deleteStack(stack, auth(MANAGEMENT, "cloudformation"));
+    }
+
     @AfterEach
     void deleteOrganization() {
         organizationsFixture.cleanup();
