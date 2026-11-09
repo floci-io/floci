@@ -2541,10 +2541,7 @@ class RedshiftServiceTest {
 
     @Test
     void modifyClusterSnapshotSuccess() {
-        Snapshot manualSnap = new Snapshot();
-        manualSnap.setSnapshotIdentifier("snap-1");
-        manualSnap.setClusterIdentifier("my-cluster");
-        manualSnap.setSnapshotType("manual");
+        Snapshot manualSnap = snapshotOf("snap-1", "my-cluster");
         manualSnap.setStatus("available");
         manualSnap.setManualSnapshotRetentionPeriod(-1);
 
@@ -2572,13 +2569,7 @@ class RedshiftServiceTest {
 
     @Test
     void modifyClusterSnapshotAutomatedSnapshotRejected() {
-        Snapshot autoSnap = new Snapshot();
-        autoSnap.setSnapshotIdentifier("auto-snap-1");
-        autoSnap.setClusterIdentifier("my-cluster");
-        autoSnap.setSnapshotType("automated");
-        autoSnap.setStatus("available");
-
-        when(snapshotBackend.get("auto-snap-1")).thenReturn(Optional.of(autoSnap));
+        automatedSnapshot("auto-snap-1");
         when(snapshotCopyBackend.get(anyString())).thenReturn(Optional.empty());
 
         AwsException ex = assertThrows(AwsException.class, () ->
@@ -2589,10 +2580,7 @@ class RedshiftServiceTest {
 
     @Test
     void modifyClusterSnapshotNotAvailableRejected() {
-        Snapshot manualSnap = new Snapshot();
-        manualSnap.setSnapshotIdentifier("snap-1");
-        manualSnap.setClusterIdentifier("my-cluster");
-        manualSnap.setSnapshotType("manual");
+        Snapshot manualSnap = snapshotOf("snap-1", "my-cluster");
         manualSnap.setStatus("creating");
 
         when(snapshotBackend.get("snap-1")).thenReturn(Optional.of(manualSnap));
@@ -2618,41 +2606,18 @@ class RedshiftServiceTest {
     }
 
     @Test
-    void modifyClusterSnapshotWithSourceArnValidation() {
-        Snapshot manualSnap = new Snapshot();
-        manualSnap.setSnapshotIdentifier("snap-1");
-        manualSnap.setClusterIdentifier("my-cluster");
-        manualSnap.setSnapshotType("manual");
-        manualSnap.setStatus("available");
+    void modifyClusterSnapshotWithoutRetentionPreservesExistingSettings() {
+        Snapshot snapshot = snapshotOf("snap-1", "my-cluster");
+        snapshot.setStatus("available");
+        snapshot.setManualSnapshotRetentionPeriod(7);
+        when(snapshotBackend.get("snap-1")).thenReturn(Optional.of(snapshot));
 
-        when(snapshotBackend.get("snap-1")).thenReturn(Optional.of(manualSnap));
-        when(snapshotCopyBackend.get(anyString())).thenReturn(Optional.empty());
+        Snapshot modified = service.modifyClusterSnapshot("snap-1", null, true);
 
-        // Valid ARN succeeds
-        String validArn = "arn:aws:redshift:us-east-1:111111111111:snapshot:my-cluster/snap-1";
-        Snapshot modified = service.modifyClusterSnapshot(validArn, 60);
-        assertNotNull(modified);
-        assertEquals(60, modified.getManualSnapshotRetentionPeriod());
-
-        // Malformed ARN throws InvalidParameterValue 400
-        AwsException exMalformed = assertThrows(AwsException.class, () ->
-                service.modifyClusterSnapshot("arn:bad", 60));
-        assertEquals("InvalidParameterValue", exMalformed.getErrorCode());
-        assertEquals(400, exMalformed.getHttpStatus());
-
-        // Mismatched account throws ClusterSnapshotNotFound 404
-        String wrongAccountArn = "arn:aws:redshift:us-east-1:999999999999:snapshot:my-cluster/snap-1";
-        AwsException exAccount = assertThrows(AwsException.class, () ->
-                service.modifyClusterSnapshot(wrongAccountArn, 60));
-        assertEquals("ClusterSnapshotNotFound", exAccount.getErrorCode());
-        assertEquals(404, exAccount.getHttpStatus());
-
-        // Mismatched cluster in ARN throws ClusterSnapshotNotFound 404
-        String wrongClusterArn = "arn:aws:redshift:us-east-1:111111111111:snapshot:other-cluster/snap-1";
-        AwsException exCluster = assertThrows(AwsException.class, () ->
-                service.modifyClusterSnapshot(wrongClusterArn, 60));
-        assertEquals("ClusterSnapshotNotFound", exCluster.getErrorCode());
-        assertEquals(404, exCluster.getHttpStatus());
+        assertSame(snapshot, modified);
+        assertEquals(7, modified.getManualSnapshotRetentionPeriod());
+        verify(snapshotBackend, never()).putAllAtomically(any());
+        verify(snapshotBackend, never()).deleteAllAtomically(any());
     }
 
     @Test

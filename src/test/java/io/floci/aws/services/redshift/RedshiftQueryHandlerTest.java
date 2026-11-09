@@ -1481,16 +1481,27 @@ class RedshiftQueryHandlerTest {
     // ── ModifyClusterSnapshot ─────────────────────────────────────────────────
 
     @Test
-    void modifyClusterSnapshotRequiresParameters() {
+    void modifyClusterSnapshotRequiresIdentifier() {
         MultivaluedMap<String, String> params = new MultivaluedHashMap<>();
         AwsException ex1 = assertThrows(AwsException.class, () -> handler.handle("ModifyClusterSnapshot", params));
         assertEquals("InvalidParameterValue", ex1.getErrorCode());
         assertTrue(ex1.getMessage().contains("SnapshotIdentifier is required"));
+    }
 
+    @Test
+    void modifyClusterSnapshotAllowsOmittedRetention() {
+        Snapshot snapshot = new Snapshot();
+        snapshot.setSnapshotIdentifier("my-snap");
+        snapshot.setManualSnapshotRetentionPeriod(7);
+        when(service.modifyClusterSnapshot("my-snap", null, null)).thenReturn(snapshot);
+        MultivaluedMap<String, String> params = new MultivaluedHashMap<>();
         params.putSingle("SnapshotIdentifier", "my-snap");
-        AwsException ex2 = assertThrows(AwsException.class, () -> handler.handle("ModifyClusterSnapshot", params));
-        assertEquals("InvalidParameterValue", ex2.getErrorCode());
-        assertTrue(ex2.getMessage().contains("ManualSnapshotRetentionPeriod is required"));
+
+        Response response = handler.handle("ModifyClusterSnapshot", params);
+
+        assertEquals(200, response.getStatus());
+        assertTrue(response.getEntity().toString().contains("<ManualSnapshotRetentionPeriod>7</ManualSnapshotRetentionPeriod>"));
+        verify(service).modifyClusterSnapshot("my-snap", null, null);
     }
 
     @Test

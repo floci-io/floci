@@ -208,9 +208,13 @@ committed is removed on failure; if the commit succeeded and a later flush repor
 the dump is retained for the committed snapshot.
 
 `FinalClusterSnapshotRetentionPeriod` defaults to `-1` and accepts `-1` or 1 to 3,653 days.
-It is persisted and returned as the snapshot's `ManualSnapshotRetentionPeriod`; automatic
-expiration is not implemented. Manual snapshots created by `CreateClusterSnapshot`, and older
-snapshots without stored retention metadata, also return the default `-1`. Snapshot metadata
+It is persisted and returned as the snapshot's `ManualSnapshotRetentionPeriod`. The background
+retention sweep expires finite-retention manual snapshots, including final snapshots and
+`CopyClusterSnapshot` targets, and removes their stored dumps. `ModifyClusterSnapshot` can change
+this period; omitting `ManualSnapshotRetentionPeriod` preserves the current setting. An elapsed
+new retention period requires `Force=true` to delete the snapshot immediately.
+Manual snapshots created by `CreateClusterSnapshot`, and older snapshots without stored
+retention metadata, return the default `-1` and are retained indefinitely. Snapshot metadata
 uses the configured storage mode. Persistent and WAL metadata commit failures are reported
 before teardown; hybrid retains its existing
 write-behind durability and logged flush failures.

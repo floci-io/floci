@@ -244,9 +244,6 @@ public class RedshiftQueryHandler {
         case "ModifyClusterSnapshot" -> {
             String snapshotIdentifier = requireParam(params, "SnapshotIdentifier");
             Integer manualRetention = parseOptionalInteger(params, "ManualSnapshotRetentionPeriod");
-            if (manualRetention == null) {
-                throw new AwsException("InvalidParameterValue", "ManualSnapshotRetentionPeriod is required", 400);
-            }
             Boolean force = booleanParam(params, "Force");
             Snapshot snapshot = service.modifyClusterSnapshot(snapshotIdentifier, manualRetention, force);
             String xml = new XmlBuilder()
