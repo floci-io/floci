@@ -273,7 +273,7 @@ final class CopyRecordTransformer {
     private static byte[] trimTrailingSpaces(byte[] value, boolean csv) {
         int end = value.length;
         while (end > 0) {
-            if (value[end - 1] != ' ') {
+            if (value[end - 1] != ' ' && value[end - 1] != '\t') {
                 break;
             }
             if (!csv) {

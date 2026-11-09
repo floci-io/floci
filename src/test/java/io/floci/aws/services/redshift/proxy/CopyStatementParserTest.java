@@ -785,7 +785,7 @@ class CopyStatementParserTest {
 
     @Test
     void parsesCompupdateAndStatupdateOptions() {
-        for (String comp : List.of("COMPUPDATE", "COMPUPDATE ON", "COMPUPDATE OFF", "COMPUPDATE TRUE", "COMPUPDATE FALSE")) {
+        for (String comp : List.of("COMPUPDATE", "COMPUPDATE PRESET", "COMPUPDATE ON", "COMPUPDATE OFF", "COMPUPDATE TRUE", "COMPUPDATE FALSE")) {
             CopyStatementParser.S3CopyFrom c = copyFrom("COPY t FROM 's3://b/k' " + comp);
             assertNotNull(c);
             assertEquals("t", c.targetTable());

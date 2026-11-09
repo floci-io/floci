@@ -391,7 +391,7 @@ public final class CopyStatementParser {
     private static final Pattern JSON_AUTO_PATTERN = Pattern.compile(
             "(?i)\\b(?:FORMAT\\s+(?:AS\\s+)?)?JSON(?:\\s+AS)?\\s+['\"]auto(?:\\s+(ignorecase))?['\"]");
     private static final Pattern COMPUPDATE_PATTERN = Pattern.compile(
-            "(?i)\\bCOMPUPDATE(?:\\s+(?:ON|OFF|TRUE|FALSE))?\\b");
+            "(?i)\\bCOMPUPDATE(?:\\s+(?:PRESET|ON|OFF|TRUE|FALSE))?\\b");
     private static final Pattern STATUPDATE_PATTERN = Pattern.compile(
             "(?i)\\bSTATUPDATE(?:\\s+(?:ON|OFF|TRUE|FALSE))?\\b");
     private static final Pattern TRIMBLANKS_PATTERN = Pattern.compile("(?i)\\bTRIMBLANKS\\b");

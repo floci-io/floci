@@ -471,6 +471,14 @@ class CopyRecordTransformerTest {
     }
 
     @Test
+    void trimBlanksTrimsTrailingTabsAndSpaces() {
+        CopyStatementParser.CopyTransforms transforms = new CopyStatementParser.CopyTransforms(
+                false, false, false, false, null, null, null, false, false, 0, true);
+        assertEquals("hello|world\n",
+                apply("|", false, null, transforms, "hello \t |world\t\n"));
+    }
+
+    @Test
     void trimBlanksWithEmptyAsNullConvertsAllSpacesToNull() {
         CopyStatementParser.CopyTransforms transforms = new CopyStatementParser.CopyTransforms(
                 false, true, false, false, null, null, null, false, false, 0, true);
