@@ -203,7 +203,7 @@ public class BedrockService implements ResourceProvider {
                         "Guardrail " + guardrailId + " version " + effectiveVersion + " does not exist.", 404));
     }
 
-    public Guardrail updateGuardrail(String identifier, JsonNode request, String region) {
+    public synchronized Guardrail updateGuardrail(String identifier, JsonNode request, String region) {
         String name = requiredName(request);
         String description = boundedDescription(request);
         String blockedInputMessaging = requiredBlockedMessaging(request, "blockedInputMessaging");
@@ -230,7 +230,7 @@ public class BedrockService implements ResourceProvider {
      * {@code guardrailVersion} is a {@code GuardrailNumericalVersion} in the AWS model,
      * so DRAFT cannot be deleted on its own.
      */
-    public void deleteGuardrail(String identifier, String version, String region) {
+    public synchronized void deleteGuardrail(String identifier, String version, String region) {
         String guardrailId = resolveGuardrailId(identifier);
         if (version != null && !version.isBlank()) {
             if (!NUMERICAL_VERSION_PATTERN.matcher(version).matches()) {
