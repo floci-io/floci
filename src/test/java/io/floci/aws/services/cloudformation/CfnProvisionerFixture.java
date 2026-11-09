@@ -172,6 +172,7 @@ import io.floci.aws.services.secretsmanager.SecretsManagerService;
 import io.floci.aws.services.ses.SesIdentityService;
 import io.floci.aws.services.ses.SesReceiptRuleService;
 import io.floci.aws.services.ses.SesService;
+import io.floci.aws.services.signer.SignerService;
 import io.floci.aws.services.sns.SnsService;
 import io.floci.aws.services.sqs.SqsService;
 import io.floci.aws.services.ssm.SsmService;
@@ -208,6 +209,7 @@ final class CfnProvisionerFixture {
 
     static final class Builder {
 
+        private SignerService signerService;
         private S3Service s3Service;
         private S3VectorsService s3VectorsService;
         private SnsService snsService;
@@ -319,7 +321,9 @@ final class CfnProvisionerFixture {
             ensureDynamicReferences();
             List<CfnResourceProvisioner> discovered = new ArrayList<>();
             discovered.add(new CdkMetadataCfnProvisioner());
-            discovered.add(new SignerCfnProvisioner());
+            if (signerService != null) {
+                discovered.add(new SignerCfnProvisioner(signerService));
+            }
             if (stepFunctionsService != null) {
                 discovered.add(new StepFunctionsCfnProvisioner(stepFunctionsService, s3Service, objectMapper));
             }
@@ -559,6 +563,11 @@ final class CfnProvisionerFixture {
 
         public Builder s3Vectors(S3VectorsService v) {
             this.s3VectorsService = v;
+            return this;
+        }
+
+        public Builder signer(SignerService v) {
+            this.signerService = v;
             return this;
         }
 

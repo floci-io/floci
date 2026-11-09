@@ -655,6 +655,11 @@
             <groupId>software.amazon.awssdk</groupId>
             <artifactId>dlm</artifactId>
         </dependency>
+        <!-- Signer client -->
+        <dependency>
+            <groupId>software.amazon.awssdk</groupId>
+            <artifactId>signer</artifactId>
+        </dependency>
         <!-- DataSync client -->
         <dependency>
             <groupId>software.amazon.awssdk</groupId>
