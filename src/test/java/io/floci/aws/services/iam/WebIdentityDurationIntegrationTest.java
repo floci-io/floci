@@ -11,7 +11,6 @@ import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.CsvSource;
 import software.amazon.awssdk.auth.credentials.AnonymousCredentialsProvider;
 import software.amazon.awssdk.auth.credentials.AwsBasicCredentials;
-import software.amazon.awssdk.auth.credentials.AwsSessionCredentials;
 import software.amazon.awssdk.auth.credentials.StaticCredentialsProvider;
 import software.amazon.awssdk.regions.Region;
 import software.amazon.awssdk.services.iam.IamClient;
@@ -20,14 +19,12 @@ import software.amazon.awssdk.services.sts.StsClient;
 import software.amazon.awssdk.services.sts.model.AssumeRoleWithWebIdentityRequest;
 import software.amazon.awssdk.services.sts.model.AssumeRoleWithWebIdentityResponse;
 import software.amazon.awssdk.services.sts.model.Credentials;
-import software.amazon.awssdk.services.sts.model.GetCallerIdentityResponse;
 import software.amazon.awssdk.services.sts.model.StsException;
 
 import java.net.URI;
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.List;
-import java.util.Map;
 import java.util.UUID;
 
 import static org.junit.jupiter.api.Assertions.*;
@@ -83,19 +80,7 @@ class WebIdentityDurationIntegrationTest {
                     int seconds = requested == 0 ? 3600 : requested;
                     assertFalse(credentials.expiration().isBefore(before.plusSeconds(seconds - 1)));
                     assertFalse(credentials.expiration().isAfter(Instant.now().plusSeconds(seconds)));
-                    GetCallerIdentityResponse identity;
-                    try (StsClient caller = StsClient.builder().endpointOverride(endpoint).region(Region.US_EAST_1)
-                            .credentialsProvider(StaticCredentialsProvider.create(AwsSessionCredentials.create(
-                                    credentials.accessKeyId(), credentials.secretAccessKey(), credentials.sessionToken())))
-                            .build()) {
-                        identity = caller.getCallerIdentity();
-                    }
-                    assertAll(
-                            () -> assertEquals(role.roleId() + ":duration", response.assumedRoleUser().assumedRoleId()),
-                            () -> assertEquals(response.assumedRoleUser().arn(), identity.arn()),
-                            () -> assertEquals(role.roleId() + ":duration", identity.userId()),
-                            () -> assertEquals(Map.of("team", "federated"),
-                                    iam.resolveCallerArns(credentials.accessKeyId()).orElseThrow().principalTags()));
+                    FederatedSessionAssertions.assertIdentity(endpoint, iam, role, "duration", response);
                 } else {
                     StsException error = assertThrows(StsException.class, () ->
                             sessions.add(sts.assumeRoleWithWebIdentity(request.build()).credentials()));

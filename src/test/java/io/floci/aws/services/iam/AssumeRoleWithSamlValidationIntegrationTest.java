@@ -19,16 +19,12 @@ import org.junit.jupiter.api.Test;
 import org.w3c.dom.Document;
 import org.w3c.dom.Element;
 import software.amazon.awssdk.auth.credentials.AnonymousCredentialsProvider;
-import software.amazon.awssdk.auth.credentials.AwsSessionCredentials;
-import software.amazon.awssdk.auth.credentials.StaticCredentialsProvider;
 import software.amazon.awssdk.regions.Region;
 import software.amazon.awssdk.services.iam.IamClient;
 import software.amazon.awssdk.services.iam.model.IamException;
 import software.amazon.awssdk.services.iam.model.Role;
 import software.amazon.awssdk.services.sts.StsClient;
 import software.amazon.awssdk.services.sts.model.AssumeRoleWithSamlResponse;
-import software.amazon.awssdk.services.sts.model.Credentials;
-import software.amazon.awssdk.services.sts.model.GetCallerIdentityResponse;
 import software.amazon.awssdk.services.sts.model.StsException;
 
 import javax.xml.crypto.dsig.CanonicalizationMethod;
@@ -63,7 +59,6 @@ import java.util.ArrayList;
 import java.util.Base64;
 import java.util.Date;
 import java.util.List;
-import java.util.Map;
 import java.util.UUID;
 import java.util.function.Consumer;
 import java.util.function.Function;
@@ -72,7 +67,6 @@ import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.containsString;
 import static org.hamcrest.Matchers.equalTo;
 import static org.hamcrest.Matchers.startsWith;
-import static org.junit.jupiter.api.Assertions.assertAll;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertInstanceOf;
 import static org.junit.jupiter.api.Assertions.assertSame;
@@ -410,20 +404,7 @@ class AssumeRoleWithSamlValidationIntegrationTest {
                     .samlAssertion(assertion(roleArn, providerArn, expiry, AUDIENCE, ISSUER, sign)));
             sessions.add(response.credentials().accessKeyId());
             Role role = client.getRole(b -> b.roleName(name)).role();
-            Credentials credentials = response.credentials();
-            GetCallerIdentityResponse identity;
-            try (StsClient caller = StsClient.builder().endpointOverride(endpoint).region(Region.US_EAST_1)
-                    .credentialsProvider(StaticCredentialsProvider.create(AwsSessionCredentials.create(
-                            credentials.accessKeyId(), credentials.secretAccessKey(), credentials.sessionToken())))
-                    .build()) {
-                identity = caller.getCallerIdentity();
-            }
-            assertAll(
-                    () -> assertEquals(role.roleId() + ":saml-subject", response.assumedRoleUser().assumedRoleId()),
-                    () -> assertEquals(response.assumedRoleUser().arn(), identity.arn()),
-                    () -> assertEquals(role.roleId() + ":saml-subject", identity.userId()),
-                    () -> assertEquals(Map.of("team", "federated"),
-                            iamService.resolveCallerArns(credentials.accessKeyId()).orElseThrow().principalTags()));
+            FederatedSessionAssertions.assertIdentity(endpoint, iamService, role, "saml-subject", response);
             return response;
         }
 
