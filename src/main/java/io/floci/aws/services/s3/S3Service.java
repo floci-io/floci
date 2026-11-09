@@ -7710,6 +7710,12 @@ public class S3Service implements Resettable, ResourceProvider {
     private static final char ENCODED_SEGMENT_SEPARATOR = '~';
     private static final int SHA256_HEX_CHARS = 64;
 
+    // Windows refuses these characters in a file name, treats '\' as a separator and strips a
+    // trailing dot, all of which S3 accepts in a key, so there such a segment is encoded as well.
+    private static final boolean WINDOWS_FILE_NAMES =
+            System.getProperty("os.name", "").toLowerCase(Locale.ROOT).startsWith("windows");
+    private static final String WINDOWS_RESERVED_CHARS = "<>:\"|?*\\";
+
     // A 12-digit bucket name is valid on S3 and would otherwise collide with an account ID,
     // making dataRoot/<accountId>/... indistinguishable from the legacy dataRoot/<bucket>/...
     // layout. A leading "." keeps this namespace unreachable by any real bucket name.
@@ -7753,11 +7759,12 @@ public class S3Service implements Resettable, ResourceProvider {
     /**
      * Encodes the '/'-separated segments of an object key into names the filesystem can hold.
      * A segment within its byte budget is kept as written, so every path an earlier Floci could
-     * create is still found; a longer one, and any segment shaped like an encoded one so a
-     * crafted short key cannot land on an encoded name, becomes a readable prefix, '~', and the
-     * SHA-256 of the whole segment. The digest keeps the mapping injective: the same key always
-     * resolves to one path and two keys never share a file. Listing reads keys from the object
-     * store, never from these names, so the encoding never needs reversing.
+     * create is still found; a longer one, one Windows cannot hold when running there, and any
+     * segment shaped like an encoded one so a crafted short key cannot land on an encoded name,
+     * becomes a readable prefix, '~', and the SHA-256 of the whole segment. The digest keeps the
+     * mapping injective: the same key always resolves to one path and two keys never share a
+     * file. Listing reads keys from the object store, never from these names, so the encoding
+     * never needs reversing.
      */
     private static String encodePathSegments(String key, int lastSegmentBudget, int segmentBudget) {
         String[] segments = key.split("/", -1);
@@ -7768,11 +7775,42 @@ public class S3Service implements Resettable, ResourceProvider {
     }
 
     private static String encodePathSegment(String segment, int budget) {
-        if (utf8Length(segment) <= budget && !hasEncodedShape(segment, budget)) {
+        boolean representable = !WINDOWS_FILE_NAMES || isWindowsFileName(segment);
+        if (representable && utf8Length(segment) <= budget && !hasEncodedShape(segment, budget)) {
             return segment;
         }
-        return truncateUtf8(segment, budget - 1 - SHA256_HEX_CHARS)
-                + ENCODED_SEGMENT_SEPARATOR + Digests.sha256Hex(segment);
+        String prefix = truncateUtf8(segment, budget - 1 - SHA256_HEX_CHARS);
+        if (WINDOWS_FILE_NAMES) {
+            prefix = replaceWindowsReservedChars(prefix);
+        }
+        return prefix + ENCODED_SEGMENT_SEPARATOR + Digests.sha256Hex(segment);
+    }
+
+    /** Whether Windows stores {@code segment} as a file name exactly as written. */
+    static boolean isWindowsFileName(String segment) {
+        if (segment.equals(".") || segment.equals("..")) {
+            return true;
+        }
+        for (int i = 0; i < segment.length(); i++) {
+            if (isWindowsReservedChar(segment.charAt(i))) {
+                return false;
+            }
+        }
+        return !segment.endsWith(".") && !segment.endsWith(" ");
+    }
+
+    /** Swaps each character Windows refuses for '_'; every one is a single UTF-8 byte, as '_' is. */
+    private static String replaceWindowsReservedChars(String prefix) {
+        StringBuilder replaced = new StringBuilder(prefix.length());
+        for (int i = 0; i < prefix.length(); i++) {
+            char c = prefix.charAt(i);
+            replaced.append(isWindowsReservedChar(c) ? '_' : c);
+        }
+        return replaced.toString();
+    }
+
+    private static boolean isWindowsReservedChar(char c) {
+        return c < 0x20 || WINDOWS_RESERVED_CHARS.indexOf(c) >= 0;
     }
 
     /** Whether {@code segment} could itself be the output of {@link #encodePathSegment}. */
@@ -7852,6 +7890,23 @@ public class S3Service implements Resettable, ResourceProvider {
         return resolved;
     }
 
+    /**
+     * Whether the legacy layout, which used the raw key as the path, could have stored {@code key}.
+     * On Windows it could not hold a segment Windows refuses, and probing for one would either
+     * throw or find the file of a different key that Windows folds onto the same name.
+     */
+    private static boolean hasLegacyPath(String key) {
+        if (!WINDOWS_FILE_NAMES) {
+            return true;
+        }
+        for (String segment : key.split("/", -1)) {
+            if (!isWindowsFileName(segment)) {
+                return false;
+            }
+        }
+        return true;
+    }
+
     private Path legacyObjectPath(String bucketName, String key) {
         String safeKey = key;
         while (safeKey.startsWith("/")) {
@@ -7873,7 +7928,9 @@ public class S3Service implements Resettable, ResourceProvider {
 
     private Path resolveObjectPathForRead(String accountId, String bucketName, String key) {
         Path resolved = resolveObjectPath(accountId, bucketName, key);
-        copyLegacyFileIfPresent(legacyObjectPath(bucketName, key), resolved);
+        if (hasLegacyPath(key)) {
+            copyLegacyFileIfPresent(legacyObjectPath(bucketName, key), resolved);
+        }
         return resolved;
     }
 
@@ -7914,7 +7971,9 @@ public class S3Service implements Resettable, ResourceProvider {
 
     private Path resolveVersionedPathForRead(String accountId, String bucketName, String key, String versionId) {
         Path resolved = resolveVersionedPath(accountId, bucketName, key, versionId);
-        copyLegacyFileIfPresent(legacyVersionedPath(bucketName, key, versionId), resolved);
+        if (hasLegacyPath(key)) {
+            copyLegacyFileIfPresent(legacyVersionedPath(bucketName, key, versionId), resolved);
+        }
         return resolved;
     }
 
