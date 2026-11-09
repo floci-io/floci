@@ -66,8 +66,9 @@ class RedshiftSpectrumS3AuthEnforcedIntegrationTest {
     private String glueDatabase;
 
     @BeforeAll
-    static void requireDocker() {
+    static void requireDocker() throws ClassNotFoundException {
         SidecarContainersProfile.requireDocker();
+        Class.forName("org.postgresql.Driver");
     }
 
     @AfterEach
