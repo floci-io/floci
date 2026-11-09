@@ -410,10 +410,15 @@ public class LambdaMicrovmsController {
         node.put("status", version.status);
         node.put("createdAt", EpochSeconds.fromInstant(version.createdAt));
         node.put("updatedAt", EpochSeconds.fromInstant(image.updatedAt));
-        node.put("baseImageArn", image.baseImageArn);
-        node.put("baseImageVersion", image.baseImageVersion);
-        node.put("buildRoleArn", image.buildRoleArn);
-        node.putObject("codeArtifact").put("uri", image.codeArtifactUri);
+        // The version's own build spec, snapshotted when it was minted. A
+        // record stored before the snapshot existed falls back to the image's
+        // current values, which cannot reconstruct its original build spec.
+        node.put("baseImageArn", version.baseImageArn != null ? version.baseImageArn : image.baseImageArn);
+        node.put("baseImageVersion",
+                version.baseImageVersion != null ? version.baseImageVersion : image.baseImageVersion);
+        node.put("buildRoleArn", version.buildRoleArn != null ? version.buildRoleArn : image.buildRoleArn);
+        node.putObject("codeArtifact")
+                .put("uri", version.codeArtifactUri != null ? version.codeArtifactUri : image.codeArtifactUri);
         // A version's description is its own and nothing sets it. It stays null
         // even once the parent image has one, which is why it cannot simply be
         // read off the image.

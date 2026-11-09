@@ -570,4 +570,53 @@ class LambdaMicrovmsIntegrationTest {
                 .then().statusCode(404)
                 .body("message", equalTo("Network connector not found: " + arn));
     }
+
+    @Test
+    @Order(17)
+    void eachVersionReportsItsOwnBuildSpecAfterAnUpdate() {
+        String image = "microvm-it-version-spec";
+        given()
+                .contentType("application/json")
+                .body("""
+                        {
+                          "name": "%s",
+                          "baseImageArn": "arn:aws:lambda:us-east-1:aws:microvm-image:al2023-1",
+                          "buildRoleArn": "arn:aws:iam::000000000000:role/microvm-build",
+                          "codeArtifact": { "uri": "s3://artifacts/app.zip" }
+                        }
+                        """.formatted(image))
+                .when()
+                .post(MICROVMS + "/microvm-images")
+                .then()
+                .statusCode(201);
+        given()
+                .contentType("application/json")
+                .body("""
+                        {
+                          "baseImageArn": "arn:aws:lambda:us-east-1:aws:microvm-image:al2023-1",
+                          "buildRoleArn": "arn:aws:iam::000000000000:role/microvm-build",
+                          "codeArtifact": { "uri": "s3://artifacts/app-v2.zip" }
+                        }
+                        """)
+                .when()
+                .put(MICROVMS + "/microvm-images/" + image)
+                .then()
+                .statusCode(200);
+
+        given()
+                .when()
+                .get(MICROVMS + "/microvm-images/" + image + "/versions")
+                .then()
+                .statusCode(200)
+                .body("items[0].imageVersion", equalTo("1.0"))
+                .body("items[0].codeArtifact.uri", equalTo("s3://artifacts/app.zip"))
+                .body("items[1].imageVersion", equalTo("2.0"))
+                .body("items[1].codeArtifact.uri", equalTo("s3://artifacts/app-v2.zip"));
+        given()
+                .when()
+                .get(MICROVMS + "/microvm-images/" + image + "/versions/1.0")
+                .then()
+                .statusCode(200)
+                .body("codeArtifact.uri", equalTo("s3://artifacts/app.zip"));
+    }
 }
