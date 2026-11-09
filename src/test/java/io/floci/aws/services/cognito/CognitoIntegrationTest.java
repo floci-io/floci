@@ -3905,33 +3905,18 @@ class CognitoIntegrationTest {
     private static final Pattern CONFIRMATION_CODE_PARAM = Pattern.compile("confirmation_code=(\\d+)");
 
     private static JsonNode latestEmailTo(String recipient) {
-        JsonNode messages = SesMailbox.messagesTo(recipient);
-        assertTrue(messages.size() > 0, "expected an email to " + recipient);
-        return messages.get(messages.size() - 1);
+        return latestEmail(SesMailbox.messagesTo(recipient), "expected an email to " + recipient);
     }
 
     /** SES stores the message in the account that sent it, which a credential-free read cannot see. */
-    private static JsonNode latestEmailTo(String accountId, String recipient) throws Exception {
-        String body = given()
-                .header("Authorization", "AWS4-HMAC-SHA256 Credential=" + accountId
-                        + "/20260905/us-east-1/email/aws4_request")
-                .when()
-                .get("/_aws/ses")
-                .then()
-                .statusCode(200)
-                .extract()
-                .asString();
-        JsonNode latest = null;
-        for (JsonNode message : OBJECT_MAPPER.readTree(body).path("messages")) {
-            for (JsonNode to : message.path("Destination").path("ToAddresses")) {
-                if (recipient.equals(to.asText())) {
-                    latest = message;
-                    break;
-                }
-            }
-        }
-        assertNotNull(latest, "expected an email to " + recipient + " in account " + accountId);
-        return latest;
+    private static JsonNode latestEmailTo(String accountId, String recipient) {
+        return latestEmail(SesMailbox.messagesTo(accountId, recipient),
+                "expected an email to " + recipient + " in account " + accountId);
+    }
+
+    private static JsonNode latestEmail(JsonNode messages, String failure) {
+        assertTrue(messages.size() > 0, failure);
+        return messages.get(messages.size() - 1);
     }
 
     private static void clearSes(String accountId) {
