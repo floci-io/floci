@@ -22,6 +22,7 @@ Tests are plain bash scripts that call `aws` CLI commands with `--endpoint-url` 
 | `s3-notifications` | S3 → SQS event notifications                         |
 | `payment-cryptography-data` | The Payment Cryptography data plane: encrypt, decrypt, MAC |
 | `payment-cryptography-pin` | The Payment Cryptography PIN operations: generate, verify, translate |
+| `payment-cryptography-card` | The Payment Cryptography card operations: the card verification value and the authorization cryptogram |
 
 ## Requirements
 

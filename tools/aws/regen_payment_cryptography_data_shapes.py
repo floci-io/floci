@@ -27,6 +27,8 @@ OPERATIONS = (
     "EncryptData", "DecryptData", "ReEncryptData",
     "GenerateMac", "VerifyMac",
     "GeneratePinData", "VerifyPinData", "TranslatePinData", "GenerateMacEmvPinChange",
+    "GenerateCardValidationData", "VerifyCardValidationData",
+    "GenerateAuthRequestCryptogram", "VerifyAuthRequestCryptogram",
 )
 
 

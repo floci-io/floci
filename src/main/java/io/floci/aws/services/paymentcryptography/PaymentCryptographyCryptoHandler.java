@@ -86,6 +86,7 @@ public class PaymentCryptographyCryptoHandler {
     public Map<String, Object> encryptData(JsonNode request, String region) {
         // The request is checked against the constraints the model states for it.
         PaymentCryptographyDataRequestShapes.check("EncryptData", request);
+        PaymentCryptographyAttributes.refuseWrappedKey(request, "WrappedKey");
         PaymentCryptographyKey key = requiredKey(request, region, "KeyIdentifier");
         requireMode(key, "Encrypt", "encrypt");
         Encryption encryption = encryptionAttributes(request.get("EncryptionAttributes"));
@@ -104,6 +105,7 @@ public class PaymentCryptographyCryptoHandler {
     public Map<String, Object> decryptData(JsonNode request, String region) {
         // The request is checked against the constraints the model states for it.
         PaymentCryptographyDataRequestShapes.check("DecryptData", request);
+        PaymentCryptographyAttributes.refuseWrappedKey(request, "WrappedKey");
         PaymentCryptographyKey key = requiredKey(request, region, "KeyIdentifier");
         requireMode(key, "Decrypt", "decrypt");
         Encryption encryption = encryptionAttributes(request.get("DecryptionAttributes"));
@@ -122,6 +124,8 @@ public class PaymentCryptographyCryptoHandler {
     public Map<String, Object> reEncryptData(JsonNode request, String region) {
         // The request is checked against the constraints the model states for it.
         PaymentCryptographyDataRequestShapes.check("ReEncryptData", request);
+        PaymentCryptographyAttributes.refuseWrappedKey(request, "IncomingWrappedKey");
+        PaymentCryptographyAttributes.refuseWrappedKey(request, "OutgoingWrappedKey");
         PaymentCryptographyKey incoming = requiredKey(request, region, "IncomingKeyIdentifier");
         requireMode(incoming, "Decrypt", "decrypt");
         PaymentCryptographyKey outgoing = requiredKey(request, region, "OutgoingKeyIdentifier");

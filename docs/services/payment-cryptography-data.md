@@ -20,6 +20,10 @@ client that talks to the control plane does not reach it by accident.
 | `GeneratePinData` | Generate a PIN block and the verification value that goes with it, on `POST /pindata/generate` |
 | `VerifyPinData` | Verify a PIN block against the verification value the issuer holds, on `POST /pindata/verify` |
 | `TranslatePinData` | Re-encipher a PIN block from one key to another, on `POST /pindata/translate` |
+| `GenerateCardValidationData` | Generate the card verification value of a card account, on `POST /cardvalidationdata/generate` |
+| `VerifyCardValidationData` | Verify a card verification value against the one the issuer holds, on `POST /cardvalidationdata/verify` |
+| `GenerateAuthRequestCryptogram` | Generate the cryptogram an authorization request carries, on `POST /cryptogram/generate` |
+| `VerifyAuthRequestCryptogram` | Verify the cryptogram an authorization request carries, on `POST /cryptogram/verify` |
 <!-- floci:actions:end -->
 
 ## Emulation Behavior
@@ -75,6 +79,75 @@ client that talks to the control plane does not reach it by accident.
   the session key the EMV secure messaging rules define, which this service does not make. It
   is not one of the actions the service lists as supported. The wrapped-key form of a PIN
   encryption key is refused too, because the unwrapping is part of the key exchange.
+- **The wrapped key is refused on every operation that carries one.** The encrypt, decrypt
+  and re-encrypt requests hold a wrapped key for the key exchange, and the unwrapping is
+  part of that exchange rather than part of the cipher, so a request that carries one is
+  refused rather than answered as if the key were a fixed one.
+- **The card verification value is the three digit value of the X9 algorithm.** It is computed
+  from the account number, the expiry and the service code, enciphered under the card
+  verification key, and the value is the decimalized left-most digits of the enciphered block.
+  The static values take a key of the `TR31_C0_CARD_VERIFICATION_KEY` usage. The value
+  carries the number of digits the request asks for, which the model states as three to
+  five.
+- **The dynamic value is the one Visa describes for the magstripe data path.** The leftmost
+  four digits of the account number are replaced by the transaction counter, and the result,
+  the expiry and the service code are enciphered under the card's unique derived key, which
+  the issuer derives from the master key with the account number and the PAN sequence
+  number. The value is bound to the transaction, and the counter diversifies it through the
+  data it is inserted into rather than through the key. It takes a key of the
+  `TR31_E6_EMV_MKEY_OTHER` usage. The dynamic card verification code, which is the
+  Mastercard counterpart over the track data, is refused rather than approximated: it is a
+  proprietary construction and there is nothing published to check a derivation against.
+- **The authorization cryptogram is the ARQC of the transaction.** It is the ISO 9797-1
+  algorithm 3 retail MAC over the transaction data, cut to eight bytes, under a session key
+  the request's derivation produces. Three derivations are served: the EMV common session key,
+  the Mastercard one, which also diversifies with the terminal's unpredictable number, and
+  the Visa one, which derives no session key at all and enciphers the transaction data under
+  the ICC master key.
+- **The transaction data is enciphered exactly as it is given.** It reaches the service
+  already padded, as the user guide tells the caller to pad it, because the card padded
+  it the same way before it enciphered it. The service therefore pads nothing: padding
+  it again would encipher a block the card never enciphered.
+- **The transaction data has to be a whole number of eight-byte blocks.** The ISO 9797-1
+  MAC runs over eight-byte blocks, and the guide tells the caller to pad the data to a
+  multiple of the block size before sending it, so a length that is not a whole number
+  of blocks is a request the cipher cannot read and is refused.
+- **The authorization cryptogram is made under a key of the application cryptogram
+  usage.** The key table names `TR31_E0_EMV_MKEY_APP_CRYPTOGRAMS` with a `TDES_2KEY`
+  algorithm and the `DeriveKey` mode of use for it, so a key of another usage, another
+  algorithm, or without the mode of use is refused.
+- **A key that is disabled does no work, and a key that is not there is a 404.** The
+  service reads a disabled key and tells the caller about it, but it does not compute a card
+  value or a cryptogram under it, and a request that names a key the service does not hold
+  is answered with the not-found error and the status the data plane answers it with.
+- **The card operations and the cryptogram operations read the key through one helper.**
+  The usage, the algorithm, the mode of use, whether the key is enabled and whether it
+  still holds its material are asked in one place, so the two cannot drift apart on
+  what they accept.
+- **The response value of the second method is made of the card status update.** The first
+  method takes the response code, and the second takes the card status update and the
+  proprietary data, as EMV Book 2 section 8.2.2 has it.
+- **The American Express cryptogram is refused rather than approximated.** The AEIPS session
+  key derivation is proprietary and there is nothing to verify it against, and a plausible
+  wrong cryptogram is the one outcome worse than an error. The EMV 4.1 tree derivation, the
+  one the `Emv2000` attributes ask for, is refused for the same reason: it needs the card's
+  public key certificate.
+- **The card requests are checked against the model.** The account number is twelve to
+  nineteen digits, the expiry is four of them, the service code is three, and the PAN
+  sequence number is two: the EMV ones, as the model states them. A formatted account
+  number and a longer sequence number are refused rather than read as the digits they
+  carry, because the derivation reads the account number and the sequence number as they
+  are given.
+- **The master key is derived over the rightmost sixteen digits.** The account number and
+  the PAN sequence number are padded on the left with zeros when they are shorter, which
+  is the rule EMV 4.4 Book 2 gives and the Visa Integrated Circuit Card Specification
+  states the same way. So an account number of twelve digits is read and derived from,
+  rather than refused.
+- **A hexadecimal member of an odd length is refused.** The model states the length of a
+  hexadecimal member and does not always state an even one, so an odd number of
+  hexadecimal characters is a request the model allows and the cipher cannot read. The
+  track data, the transaction data and the proprietary authentication data are the members
+  it applies to, and the refusal names the member.
 
 The two-segment paths are moved to an internal prefix for the requests signed for this
 service, so a path-style request for a bucket of that name still reaches S3.

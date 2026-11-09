@@ -138,6 +138,17 @@ public final class Ciphers {
     }
 
     /**
+     * The Single DES decryption of a block under a key, in ECB mode.
+     *
+     * @param block8 the eight-byte block to decrypt
+     * @param key8 the eight-byte key
+     * @return the decrypted block
+     */
+    public static byte[] tdesSingleDesDecrypt(byte[] block8, byte[] key8) {
+        return block(new DESEngine(), false, block8, key8);
+    }
+
+    /**
      * The Triple DES encryption of data under a two-key key, in CBC mode.
      *
      * <p>The two-key form is K1||K2, and the cipher takes three keys, so it is widened to

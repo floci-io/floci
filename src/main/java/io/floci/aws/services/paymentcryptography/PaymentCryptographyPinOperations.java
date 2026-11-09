@@ -504,9 +504,7 @@ public class PaymentCryptographyPinOperations {
      * carries one is refused rather than answered as if the key were a fixed one.
      */
     private static void refuseWrappedKey(JsonNode request, String member) {
-        if (request.get(member) != null) {
-            throw validation(member + " is not supported by this service");
-        }
+        PaymentCryptographyAttributes.refuseWrappedKey(request, member);
     }
 
     private static PinBlockFormat format(String wireName) {
