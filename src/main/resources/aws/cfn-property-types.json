@@ -2,7 +2,7 @@
   "_source": {
     "generator": "tools/aws/regen_cfn_property_types.py",
     "schemas": "https://schema.cloudformation.us-east-1.amazonaws.com/CloudformationSchema.zip",
-    "retrieved": "2026-11-18",
+    "retrieved": "2026-11-19",
     "note": "make cfn-property-types-verify checks the file against AWS."
   },
   "operations": {
@@ -12,6 +12,7 @@
     "AWS::EC2::LaunchTemplate": "AWS::EC2::LaunchTemplate",
     "AWS::ECS::TaskDefinition": "AWS::ECS::TaskDefinition",
     "AWS::EKS::Cluster": "AWS::EKS::Cluster",
+    "AWS::Events::Connection": "AWS::Events::Connection",
     "AWS::Events::Rule": "AWS::Events::Rule",
     "AWS::Lambda::Function": "AWS::Lambda::Function",
     "AWS::Lambda::LayerVersion": "AWS::Lambda::LayerVersion",
@@ -102,28 +103,28 @@
     "AWS::DSQL::Cluster": {
       "type": "structure",
       "members": {
-        "DeletionProtectionEnabled": "Boolean",
-        "Tags": "AWS::DSQL::Cluster.Tags",
+        "Status": "String",
+        "PolicyVersion": "String",
+        "EncryptionDetails": "AWS::DSQL::Cluster.EncryptionDetails",
+        "KmsEncryptionKey": "String",
+        "MultiRegionProperties": "AWS::DSQL::Cluster.MultiRegionProperties",
         "ResourceArn": "String",
         "Identifier": "String",
-        "CreationTime": "String",
-        "Status": "String",
         "VpcEndpointServiceName": "String",
-        "MultiRegionProperties": "AWS::DSQL::Cluster.MultiRegionProperties",
-        "KmsEncryptionKey": "String",
-        "EncryptionDetails": "AWS::DSQL::Cluster.EncryptionDetails",
-        "Endpoint": "String",
         "VpcEndpoint": "String",
-        "PolicyVersion": "String",
+        "Endpoint": "String",
+        "MetricGroups": "AWS::DSQL::Cluster.MetricGroups",
+        "CreationTime": "String",
         "PolicyDocument": "String",
-        "MetricGroups": "AWS::DSQL::Cluster.MetricGroups"
+        "DeletionProtectionEnabled": "Boolean",
+        "Tags": "AWS::DSQL::Cluster.Tags"
       }
     },
     "AWS::DSQL::Cluster.EncryptionDetails": {
       "type": "structure",
       "members": {
-        "EncryptionStatus": "String",
         "EncryptionType": "String",
+        "EncryptionStatus": "String",
         "KmsKeyArn": "String"
       }
     },
@@ -134,8 +135,8 @@
     "AWS::DSQL::Cluster.MultiRegionProperties": {
       "type": "structure",
       "members": {
-        "WitnessRegion": "String",
-        "Clusters": "AWS::DSQL::Cluster.MultiRegionProperties.Clusters"
+        "Clusters": "AWS::DSQL::Cluster.MultiRegionProperties.Clusters",
+        "WitnessRegion": "String"
       }
     },
     "AWS::DSQL::Cluster.MultiRegionProperties.Clusters": {
@@ -158,8 +159,8 @@
     "AWS::DSQL::Cluster/Tag": {
       "type": "structure",
       "members": {
-        "Key": "AWS::DSQL::Cluster/Tag.Key",
-        "Value": "AWS::DSQL::Cluster/Tag.Value"
+        "Value": "AWS::DSQL::Cluster/Tag.Value",
+        "Key": "AWS::DSQL::Cluster/Tag.Key"
       },
       "required": [
         "Key",
@@ -1948,6 +1949,205 @@
       "members": {
         "Enabled": "Boolean"
       }
+    },
+    "AWS::Events::Connection": {
+      "type": "structure",
+      "members": {
+        "Name": "AWS::Events::Connection.Name",
+        "Arn": "AWS::Events::Connection.Arn",
+        "ArnForPolicy": "AWS::Events::Connection.ArnForPolicy",
+        "SecretArn": "AWS::Events::Connection.SecretArn",
+        "Description": "AWS::Events::Connection.Description",
+        "AuthorizationType": "String",
+        "AuthParameters": "AWS::Events::Connection/AuthParameters",
+        "InvocationConnectivityParameters": "AWS::Events::Connection.InvocationConnectivityParameters",
+        "KmsKeyIdentifier": "AWS::Events::Connection.KmsKeyIdentifier"
+      }
+    },
+    "AWS::Events::Connection.Arn": {
+      "type": "string",
+      "pattern": "^arn:aws([a-z]|\\-)*:events:([a-z]|\\d|\\-)*:([0-9]{12})?:connection\\/[\\.\\-_A-Za-z0-9]+\\/[\\-A-Za-z0-9]+$"
+    },
+    "AWS::Events::Connection.ArnForPolicy": {
+      "type": "string",
+      "pattern": "^arn:aws([a-z]|\\-)*:events:([a-z]|\\d|\\-)*:([0-9]{12})?:connection\\/[\\.\\-_A-Za-z0-9]+$"
+    },
+    "AWS::Events::Connection.Description": {
+      "type": "string",
+      "maxLength": 512
+    },
+    "AWS::Events::Connection.InvocationConnectivityParameters": {
+      "type": "structure",
+      "members": {
+        "ResourceParameters": "AWS::Events::Connection/ResourceParameters"
+      },
+      "required": [
+        "ResourceParameters"
+      ]
+    },
+    "AWS::Events::Connection.KmsKeyIdentifier": {
+      "type": "string",
+      "maxLength": 2048,
+      "pattern": "^[a-zA-Z0-9_\\-/:]*$"
+    },
+    "AWS::Events::Connection.Name": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 64,
+      "pattern": "[\\.\\-_A-Za-z0-9]+"
+    },
+    "AWS::Events::Connection.SecretArn": {
+      "type": "string",
+      "pattern": "^arn:aws([a-z]|\\-)*:secretsmanager:([a-z]|\\d|\\-)*:([0-9]{12})?:secret:([a-z]|\\d|\\-)*(!)*[\\/_+=\\.@\\-A-Za-z0-9]+$"
+    },
+    "AWS::Events::Connection/ApiKeyAuthParameters": {
+      "type": "structure",
+      "members": {
+        "ApiKeyName": "AWS::Events::Connection/ApiKeyAuthParameters.ApiKeyName",
+        "ApiKeyValue": "AWS::Events::Connection/ApiKeyAuthParameters.ApiKeyValue"
+      },
+      "required": [
+        "ApiKeyName",
+        "ApiKeyValue"
+      ]
+    },
+    "AWS::Events::Connection/ApiKeyAuthParameters.ApiKeyName": {
+      "type": "string",
+      "pattern": "^[ \\t]*[^\\x00-\\x1F\\x7F]+([ \\t]+[^\\x00-\\x1F\\x7F]+)*[ \\t]*$"
+    },
+    "AWS::Events::Connection/ApiKeyAuthParameters.ApiKeyValue": {
+      "type": "string",
+      "pattern": "^[ \\t]*[^\\x00-\\x1F\\x7F]+([ \\t]+[^\\x00-\\x1F\\x7F]+)*[ \\t]*$"
+    },
+    "AWS::Events::Connection/AuthParameters": {
+      "type": "structure",
+      "members": {
+        "ApiKeyAuthParameters": "AWS::Events::Connection/ApiKeyAuthParameters",
+        "BasicAuthParameters": "AWS::Events::Connection/BasicAuthParameters",
+        "OAuthParameters": "AWS::Events::Connection/OAuthParameters",
+        "InvocationHttpParameters": "AWS::Events::Connection/ConnectionHttpParameters",
+        "ConnectivityParameters": "AWS::Events::Connection/ConnectivityParameters"
+      }
+    },
+    "AWS::Events::Connection/BasicAuthParameters": {
+      "type": "structure",
+      "members": {
+        "Username": "AWS::Events::Connection/BasicAuthParameters.Username",
+        "Password": "AWS::Events::Connection/BasicAuthParameters.Password"
+      },
+      "required": [
+        "Username",
+        "Password"
+      ]
+    },
+    "AWS::Events::Connection/BasicAuthParameters.Password": {
+      "type": "string",
+      "pattern": "^[ \\t]*[^\\x00-\\x1F\\x7F]+([ \\t]+[^\\x00-\\x1F\\x7F]+)*[ \\t]*$"
+    },
+    "AWS::Events::Connection/BasicAuthParameters.Username": {
+      "type": "string",
+      "pattern": "^[ \\t]*[^\\x00-\\x1F\\x7F]+([ \\t]+[^\\x00-\\x1F\\x7F]+)*[ \\t]*$"
+    },
+    "AWS::Events::Connection/ClientParameters": {
+      "type": "structure",
+      "members": {
+        "ClientID": "AWS::Events::Connection/ClientParameters.ClientID",
+        "ClientSecret": "AWS::Events::Connection/ClientParameters.ClientSecret"
+      },
+      "required": [
+        "ClientID",
+        "ClientSecret"
+      ]
+    },
+    "AWS::Events::Connection/ClientParameters.ClientID": {
+      "type": "string",
+      "pattern": "^[ \\t]*[^\\x00-\\x1F\\x7F]+([ \\t]+[^\\x00-\\x1F\\x7F]+)*[ \\t]*$"
+    },
+    "AWS::Events::Connection/ClientParameters.ClientSecret": {
+      "type": "string",
+      "pattern": "^[ \\t]*[^\\x00-\\x1F\\x7F]+([ \\t]+[^\\x00-\\x1F\\x7F]+)*[ \\t]*$"
+    },
+    "AWS::Events::Connection/ConnectionHttpParameters": {
+      "type": "structure",
+      "members": {
+        "HeaderParameters": "AWS::Events::Connection/ConnectionHttpParameters.HeaderParameters",
+        "QueryStringParameters": "AWS::Events::Connection/ConnectionHttpParameters.QueryStringParameters",
+        "BodyParameters": "AWS::Events::Connection/ConnectionHttpParameters.BodyParameters"
+      }
+    },
+    "AWS::Events::Connection/ConnectionHttpParameters.BodyParameters": {
+      "type": "list",
+      "member": "AWS::Events::Connection/Parameter"
+    },
+    "AWS::Events::Connection/ConnectionHttpParameters.HeaderParameters": {
+      "type": "list",
+      "member": "AWS::Events::Connection/Parameter"
+    },
+    "AWS::Events::Connection/ConnectionHttpParameters.QueryStringParameters": {
+      "type": "list",
+      "member": "AWS::Events::Connection/Parameter"
+    },
+    "AWS::Events::Connection/ConnectivityParameters": {
+      "type": "structure",
+      "members": {
+        "ResourceParameters": "AWS::Events::Connection/ResourceParameters"
+      },
+      "required": [
+        "ResourceParameters"
+      ]
+    },
+    "AWS::Events::Connection/OAuthParameters": {
+      "type": "structure",
+      "members": {
+        "ClientParameters": "AWS::Events::Connection/ClientParameters",
+        "AuthorizationEndpoint": "AWS::Events::Connection/OAuthParameters.AuthorizationEndpoint",
+        "HttpMethod": "String",
+        "OAuthHttpParameters": "AWS::Events::Connection/ConnectionHttpParameters"
+      },
+      "required": [
+        "ClientParameters",
+        "AuthorizationEndpoint",
+        "HttpMethod"
+      ]
+    },
+    "AWS::Events::Connection/OAuthParameters.AuthorizationEndpoint": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 2048,
+      "pattern": "^((%[0-9A-Fa-f]{2}|[-()_.!~*';/?:@\\x26=+$,A-Za-z0-9])+)([).!';/?:,])?$"
+    },
+    "AWS::Events::Connection/Parameter": {
+      "type": "structure",
+      "members": {
+        "Key": "String",
+        "Value": "String",
+        "IsValueSecret": "Boolean"
+      },
+      "required": [
+        "Key",
+        "Value"
+      ]
+    },
+    "AWS::Events::Connection/ResourceParameters": {
+      "type": "structure",
+      "members": {
+        "ResourceConfigurationArn": "AWS::Events::Connection/ResourceParameters.ResourceConfigurationArn",
+        "ResourceAssociationArn": "AWS::Events::Connection/ResourceParameters.ResourceAssociationArn"
+      },
+      "required": [
+        "ResourceConfigurationArn"
+      ]
+    },
+    "AWS::Events::Connection/ResourceParameters.ResourceAssociationArn": {
+      "type": "string",
+      "minLength": 20,
+      "maxLength": 2048,
+      "pattern": "^arn:[a-z0-9\\-]+:vpc-lattice:[a-zA-Z0-9\\-]+:\\d{12}:servicenetworkresourceassociation/snra-[0-9a-z]{17}$"
+    },
+    "AWS::Events::Connection/ResourceParameters.ResourceConfigurationArn": {
+      "type": "string",
+      "maxLength": 2048,
+      "pattern": "^arn:[a-z0-9f\\-]+:vpc-lattice:[a-zA-Z0-9\\-]+:\\d{12}:resourceconfiguration/rcfg-[0-9a-z]{17}$"
     },
     "AWS::Events::Rule": {
       "type": "structure",
