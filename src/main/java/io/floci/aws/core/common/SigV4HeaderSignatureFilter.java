@@ -119,8 +119,6 @@ public class SigV4HeaderSignatureFilter implements ContainerRequestFilter {
     /** REST-XML resources the catalog does not list: S3 Control answers in S3's XML. */
     private static final Set<Class<?>> UNCATALOGUED_REST_XML = Set.of(S3ControlController.class);
 
-    /** The well-known local-dev pair, honoured as every other SigV4 check in Floci honours it. */
-
     private static final String MISMATCH_MESSAGE = "The request signature we calculated does not match "
             + "the signature you provided. Check your AWS Secret Access Key and signing method. "
             + "Consult the service documentation for details.";

@@ -44,6 +44,8 @@ import java.util.Locale;
 import java.util.Map;
 import java.util.Optional;
 
+import static io.floci.aws.core.common.auth.SigV4RequestValidator.LEGACY_ACCESS_KEY_ID;
+
 /**
  * The checks an {@code IamAuth} endpoint makes before a request reaches the function: a SigV4
  * signature for the service {@code lambda} in the endpoint's region, or a SigV4a one whose region
@@ -63,7 +65,6 @@ public class LambdaWebIamAuth {
     private static final String SERVICE = "lambda";
     private static final String SECURITY_TOKEN = "X-Amz-Security-Token";
     private static final String REGION_SET = "X-Amz-Region-Set";
-    private static final String TEST_ACCESS_KEY = "test";
     private static final String CLOUDFRONT_SOURCE_ARN = "lambda-web-cloudfront-source-arn";
     private static final String CLOUDFRONT_KEY = "lambda-web-cloudfront-key";
 
@@ -274,8 +275,8 @@ public class LambdaWebIamAuth {
      * signs with {@code test}.
      */
     private String secretKey(String accessKeyId, String sessionToken) {
-        if (TEST_ACCESS_KEY.equals(accessKeyId)) {
-            return TEST_ACCESS_KEY;
+        if (LEGACY_ACCESS_KEY_ID.equals(accessKeyId)) {
+            return LEGACY_ACCESS_KEY_ID;
         }
         if (SessionTokenCheck.of(iamService, accessKeyId, sessionToken) != SessionTokenCheck.VALID) {
             return null;
@@ -286,7 +287,7 @@ public class LambdaWebIamAuth {
     }
 
     private boolean authorize(String accessKeyId, WebFunctionTarget target) {
-        if (!config.services().iam().enforcementEnabled() || TEST_ACCESS_KEY.equals(accessKeyId)) {
+        if (!config.services().iam().enforcementEnabled() || LEGACY_ACCESS_KEY_ID.equals(accessKeyId)) {
             return true;
         }
         Optional<String> callerAccount = iamService.resolveAccountId(accessKeyId);

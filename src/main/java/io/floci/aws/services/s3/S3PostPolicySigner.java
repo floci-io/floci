@@ -22,7 +22,6 @@ import static io.floci.aws.core.common.auth.SigV4RequestValidator.LEGACY_SECRET_
  */
 final class S3PostPolicySigner {
 
-
     /** S3's error list: {@code ExpiredToken}, 400 Bad Request. */
     static final String EXPIRED_TOKEN_MESSAGE = "The provided token has expired.";
 

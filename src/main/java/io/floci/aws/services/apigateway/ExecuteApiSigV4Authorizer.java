@@ -60,7 +60,6 @@ public class ExecuteApiSigV4Authorizer {
     /** Where a temporary credential's session token rides: a header, or a presigned query parameter. */
     private static final String SECURITY_TOKEN = "X-Amz-Security-Token";
 
-
     private final IamService iamService;
     private final RegionResolver regionResolver;
 
