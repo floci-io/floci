@@ -43,6 +43,29 @@ class RequestResourceMembersTest {
     private static final ObjectMapper MAPPER = new ObjectMapper();
 
     @Test
+    void generatedIdTargetsValidateTheirMemberWireNameAndDiscriminators() throws Exception {
+        ObjectMapper mapper = new ObjectMapper();
+        ObjectNode document = (ObjectNode) mapper.readTree("""
+                {"namespaces":{"ec2":["ec2"]},"arnFormats":{"ec2":{
+                "instance":"arn:${Partition}:ec2:${Region}:${Account}:instance/${InstanceId}",
+                "volume":"arn:${Partition}:ec2:${Region}:${Account}:volume/${VolumeId}"}},
+                "operations":{"ec2:Tag":{"types":["instance","volume"],"resources":[],
+                "targets":{"member":"Resources[]","query":"ResourceId","prefixes":{"instance":"i-"}}}}}
+                """);
+        assertEquals("ResourceId", parse(document.toString()).targets().get("ec2:Tag").query());
+        for (String invalid : List.of(
+                "{\"member\":\"Resources\",\"query\":\"ResourceId\",\"prefixes\":{\"instance\":\"i-\"}}",
+                "{\"member\":\"Resources[]\",\"query\":\"ResourceId.member\",\"prefixes\":{\"instance\":\"i-\"}}",
+                "{\"member\":\"Resources[]\",\"query\":\"ResourceId\",\"prefixes\":{\"unknown\":\"i-\"}}",
+                "{\"member\":\"Resources[]\",\"query\":\"ResourceId\",\"prefixes\":{\"instance\":\"\"}}",
+                "{\"member\":\"Resources[]\",\"query\":\"ResourceId\",\"prefixes\":{\"instance\":\"i-\",\"volume\":\"i-\"}}")) {
+            ObjectNode changed = document.deepCopy();
+            ((ObjectNode) changed.path("operations").path("ec2:Tag")).set("targets", mapper.readTree(invalid));
+            assertThrows(IllegalStateException.class, () -> parse(changed.toString()), invalid);
+        }
+    }
+
+    @Test
     void theTableReadsItsNamespacesAndGivesEachTypeItNamesAnArnFormat() {
         RequestResourceMembers.Table table = RequestResourceMembers.table();
         assertTrue(table.namespaces().containsAll(List.of("cognito-idp", "ecr", "elasticloadbalancing", "states")));

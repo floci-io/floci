@@ -1,10 +1,13 @@
 package io.floci.aws.services.iam;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
+import io.floci.aws.core.common.AwsProtocolClaimFilter;
 import io.floci.aws.core.common.AwsRegions;
+import io.floci.aws.core.common.ProtocolClaim;
 import io.floci.aws.core.common.RegionResolver;
 import io.floci.aws.core.common.RequestContext;
 import io.floci.aws.core.common.StoredResourceArns;
+import io.floci.aws.core.common.WireProtocol;
 import io.floci.aws.core.storage.AccountAwareStorageBackend;
 import io.floci.aws.core.storage.InMemoryStorage;
 import io.floci.aws.services.eks.EksService;
@@ -33,6 +36,7 @@ import java.io.IOException;
 import java.io.InputStream;
 import java.net.URI;
 import java.nio.charset.StandardCharsets;
+import java.util.ArrayList;
 import java.util.Base64;
 import java.util.HashMap;
 import java.util.List;
@@ -44,8 +48,11 @@ import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.Mockito.clearInvocations;
 import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 class ResourceArnBuilderTest {
@@ -633,6 +640,100 @@ class ResourceArnBuilderTest {
         assertEquals(
                 List.of(stored, "arn:aws-cn:iam::000000000000:server-certificate/new"),
                 backedBy("old", stored).buildResources("iam", ctx, "us-east-1", "000000000000"));
+    }
+
+    @Test
+    void missingGetRoleUsesItsNameButCannotAcceptAnInjectedPath() {
+        setFormBody("Action=GetRole&RoleName=local-storage&Path=/injected/");
+        assertEquals("arn:aws:iam::000000000000:role/local-storage",
+                builder.build("iam", ctx, "us-east-1", ACCOUNT));
+        assertEquals("arn:aws-us-gov:iam::000000000000:role/local-storage",
+                builder.build("iam", ctx, "us-gov-west-1", ACCOUNT));
+    }
+
+    @Test
+    void ec2TagsAuthorizeEachInstanceAndKeepUnmodelledResourcesVisible() {
+        setFormBody("Action=CreateTags&ResourceId.1=i-first&ResourceId.2=i-second&Tag.1.Key=Owner&Tag.1.Value=a");
+        assertEquals(List.of("arn:aws:ec2:us-east-1:000000000000:instance/i-first",
+                        "arn:aws:ec2:us-east-1:000000000000:instance/i-second"),
+                builder.buildResources("ec2", "ec2:CreateTags", ctx, "us-east-1", ACCOUNT, "aws"));
+        setFormBody("Action=DeleteTags&ResourceId.1=i-first&ResourceId.2=vol-second");
+        assertEquals(List.of("arn:aws-us-gov:ec2:us-gov-west-1:000000000000:instance/i-first", "*"),
+                builder.buildResources("ec2", "ec2:DeleteTags", ctx, "us-gov-west-1", ACCOUNT, "aws-us-gov"));
+        assertEquals(List.of("*"), builder.buildResources("ec2", "ec2:DescribeInstances", ctx,
+                "us-east-1", ACCOUNT, "aws"));
+    }
+
+    @Test
+    void instanceTagTargetsUseHandlerOrderFirstDuplicatesAndStopAtTheFirstGap() {
+        queryParams.add("ResourceId.1", "i-query-decoy");
+        setFormBody("Action=CreateTags&ResourceId.1=i-first&ResourceId.1=i-duplicate"
+                + "&ResourceId.2=i-second&ResourceId.4=i-gap");
+        assertEquals(List.of("arn:aws-cn:ec2:cn-north-1:111122223333:instance/i-first",
+                        "arn:aws-cn:ec2:cn-north-1:111122223333:instance/i-second"),
+                builder.buildResources("ec2", "ec2:CreateTags", ctx, "cn-north-1", "111122223333", "aws-cn"));
+        setFormBody("Action=CreateTags&ResourceId.2=i-not-dispatched");
+        assertEquals(List.of("*"),
+                builder.buildResources("ec2", "ec2:CreateTags", ctx, "us-east-1", ACCOUNT, "aws"));
+        setFormBody("Action=CreateTags&ResourceId.1=i-first&ResourceId.2=i-first");
+        assertEquals(List.of("arn:aws:ec2:us-east-1:000000000000:instance/i-first",
+                        "arn:aws:ec2:us-east-1:000000000000:instance/i-first"),
+                builder.buildResources("ec2", "ec2:CreateTags", ctx, "us-east-1", ACCOUNT, "aws"));
+    }
+
+    @Test
+    void largeTagBatchReusesTheDecodedFormAndLeavesTheBodyForTheHandler() throws IOException {
+        StringBuilder form = new StringBuilder("Action=CreateTags");
+        List<String> expected = new ArrayList<>();
+        for (int i = 1; i <= 1000; i++) {
+            form.append("&ResourceId.").append(i).append("=i-").append(i);
+            expected.add("arn:aws:ec2:us-east-1:000000000000:instance/i-" + i);
+        }
+        form.append("&ResourceId.1000=i-decoy&ResourceId.1002=i-gap&Tag.1.Key=Owner&Tag.1.Value=team%2Ba");
+        setFormBody(form.toString());
+        queryParams.add("ResourceId.1", "i-query-decoy");
+        assertEquals(expected, builder.buildResources("ec2", "ec2:CreateTags", ctx, "us-east-1", ACCOUNT, "aws"));
+        clearInvocations(ctx);
+
+        assertEquals(expected, builder.buildResources("ec2", "ec2:CreateTags", ctx, "us-east-1", ACCOUNT, "aws"));
+        assertEquals(expected, builder.buildResources("ec2", "ec2:DeleteTags", ctx, "us-east-1", ACCOUNT, "aws"));
+        verify(ctx, never()).getEntityStream();
+        assertEquals(form.toString(), new String(ctx.getEntityStream().readAllBytes(), StandardCharsets.UTF_8));
+    }
+
+    @Test
+    void missingRoleOperationsUseTheModelRatherThanAnInjectedPath() {
+        queryParams.add("RoleName", "query-decoy");
+        setFormBody("Operation=GetRole&RoleName=first&RoleName=duplicate&Path=/injected/");
+        assertEquals("arn:aws:iam::111122223333:role/first",
+                builder.build("iam", ctx, "us-east-1", "111122223333"));
+        for (String action : List.of("DeleteRole", "ListRolePolicies", "TagRole", "UpdateRole")) {
+            setFormBody("Action=" + action + "&RoleName=first&Path=/injected/");
+            assertEquals("arn:aws:iam::" + ACCOUNT + ":role/first",
+                    builder.build("iam", ctx, "us-east-1", ACCOUNT), action);
+        }
+        setFormBody("Action=GetRole");
+        assertEquals("*", builder.build("iam", ctx, "us-east-1", ACCOUNT));
+    }
+
+    @Test
+    void queryGetUsesTheSameMissingRoleAndInstanceResources() {
+        when(ctx.getMethod()).thenReturn("GET");
+        contextProperties.put(AwsProtocolClaimFilter.CLAIM_PROPERTY,
+                new ProtocolClaim(WireProtocol.AWS_QUERY, null, null, null));
+        queryParams.add("Action", "GetRole");
+        queryParams.add("RoleName", "first");
+        queryParams.add("RoleName", "duplicate");
+        queryParams.add("Path", "/injected/");
+        assertEquals("arn:aws:iam::000000000000:role/first", builder.build("iam", ctx, "us-east-1", ACCOUNT));
+        queryParams.clear();
+        queryParams.add("Action", "CreateTags");
+        queryParams.add("ResourceId.1", "i-first");
+        queryParams.add("ResourceId.1", "i-duplicate");
+        queryParams.add("ResourceId.2", "i-second");
+        assertEquals(List.of("arn:aws:ec2:us-east-1:000000000000:instance/i-first",
+                        "arn:aws:ec2:us-east-1:000000000000:instance/i-second"),
+                builder.buildResources("ec2", "ec2:CreateTags", ctx, "us-east-1", ACCOUNT, "aws"));
     }
 
     /**

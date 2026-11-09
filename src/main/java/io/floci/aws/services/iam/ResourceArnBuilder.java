@@ -555,6 +555,12 @@ public class ResourceArnBuilder {
         // resource has and leave a deny on the real one unmatched.
         Optional<StoredEntity> stored = storedIamEntity(resourceType, name, accountId);
         if (stored.isEmpty()) {
+            // Without a stored role or a modelled Path member, the request names only the root path.
+            if ("role".equals(resourceType) && IamRequestShapes.hasMember(action, "RoleName")
+                    && !IamRequestShapes.hasMember(action, "Path")) {
+                return List.of(AwsArnUtils.Arn.global(AwsRegions.partitionFor(region), "iam", accountId,
+                        "role/" + name).toString());
+            }
             return List.of("*");
         }
         String storedArn = stored.get().arn();

@@ -31,6 +31,25 @@ class RequestResourcesTest {
     private static final String MACHINE = "arn:aws:states:us-east-1:000000000000:stateMachine:orders";
 
     @Test
+    void generatedIdTargetsReadModelListsAndSerializedQueryNamesInOrder() throws Exception {
+        String instance = "arn:aws:ec2:us-east-1:000000000000:instance/i-one";
+        for (String operation : List.of("ec2:CreateTags", "ec2:DeleteTags")) {
+            assertTrue(RequestResources.hasIndividualTargets(operation));
+            assertFalse(RequestResources.actsOnNoResource(operation));
+            assertEquals(List.of(instance, "*", instance), of(operation,
+                    json("{\"Resources\":[\"i-one\",\"vpc-one\",\"i-one\"]}")));
+            assertEquals(List.of(instance, "*", instance), RequestResources.ofBody(operation,
+                    new ObjectMapper().readTree("{\"Resources\":[\"i-one\",\"vpc-one\",\"i-one\"]}"),
+                    "aws", "us-east-1", "000000000000", null));
+            assertEquals(List.of(), of(operation, json("{\"Resources\":\"i-one\"}")));
+        }
+        assertFalse(RequestResources.hasIndividualTargets("ec2:DescribeInstances"));
+        assertEquals(List.of(), RequestResources.ofBody("ec2:TerminateInstances",
+                new ObjectMapper().readTree("{\"InstanceIds\":[\"i-one\"]}"), "aws", "us-east-1",
+                "000000000000", null));
+    }
+
+    @Test
     void listTablesCorrectionReadsTheCollectionAndLeavesOtherDynamoOperationsHandBuilt() {
         assertTrue(RequestResources.reads("dynamodb:ListTables"));
         assertFalse(RequestResources.reads("dynamodb:BatchWriteItem"));
