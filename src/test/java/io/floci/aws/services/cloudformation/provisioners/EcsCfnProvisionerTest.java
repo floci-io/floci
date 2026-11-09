@@ -1312,20 +1312,20 @@ class EcsCfnProvisionerTest {
     }
 
     @Test
-    void aDroppedServiceRegistriesIsSentAsAnEmptyList() {
+    void aDroppedServiceRegistriesIsLeftOutOfTheRequestSoTheStoredOnesStay() {
         UpdateServiceRequest request = updateFrom(declaring(SERVICE_REGISTRIES), serviceProps());
 
-        assertEquals(List.of(), request.getServiceRegistries());
+        assertNull(request.getServiceRegistries(), "dropped registries are not deregistered");
         assertNull(request.getCapacityProviderStrategy());
         assertNull(request.getDeploymentConfiguration());
         verifyNoDeploymentConfigurationReplacement();
     }
 
     @Test
-    void aDroppedCapacityProviderStrategyIsSentAsAnEmptyList() {
+    void aDroppedCapacityProviderStrategyIsLeftOutOfTheRequestSoTheStoredOneStays() {
         UpdateServiceRequest request = updateFrom(declaring(CAPACITY_PROVIDER_STRATEGY), serviceProps());
 
-        assertEquals(List.of(), request.getCapacityProviderStrategy());
+        assertNull(request.getCapacityProviderStrategy(), "a dropped strategy is not removed");
         assertNull(request.getServiceRegistries());
         assertNull(request.getDeploymentConfiguration());
         verifyNoDeploymentConfigurationReplacement();
@@ -1364,6 +1364,37 @@ class EcsCfnProvisionerTest {
         props.putArray(SERVICE_REGISTRIES);
 
         UpdateServiceRequest request = updateFrom(declaring(SERVICE_REGISTRIES), props);
+
+        assertEquals(List.of(), request.getServiceRegistries());
+    }
+
+    @Test
+    void aStrategyAndRegistriesDroppedTogetherBothStay() {
+        UpdateServiceRequest request = updateFrom(declaring(SERVICE_REGISTRIES, CAPACITY_PROVIDER_STRATEGY), serviceProps());
+
+        assertNull(request.getServiceRegistries());
+        assertNull(request.getCapacityProviderStrategy());
+        verifyNoDeploymentConfigurationReplacement();
+    }
+
+    @Test
+    void anEmptyStrategyAndAnEmptyRegistriesListDeclaredTogetherClearBoth() {
+        ObjectNode props = serviceProps();
+        props.putArray(CAPACITY_PROVIDER_STRATEGY);
+        props.putArray(SERVICE_REGISTRIES);
+
+        UpdateServiceRequest request = updateFrom(declaring(SERVICE_REGISTRIES, CAPACITY_PROVIDER_STRATEGY), props);
+
+        assertEquals(List.of(), request.getCapacityProviderStrategy());
+        assertEquals(List.of(), request.getServiceRegistries());
+    }
+
+    @Test
+    void anEmptyServiceRegistriesListClearsTheRegistriesEvenWhenThePriorTemplateDidNotDeclareThem() {
+        ObjectNode props = serviceProps();
+        props.putArray(SERVICE_REGISTRIES);
+
+        UpdateServiceRequest request = updateFrom(serviceProps(), props);
 
         assertEquals(List.of(), request.getServiceRegistries());
     }
@@ -1621,20 +1652,20 @@ class EcsCfnProvisionerTest {
     }
 
     @Test
-    void aDroppedCapacityProviderStrategyIsPutBackWhenTheUpdateDoesNotStabilize() {
+    void aDroppedCapacityProviderStrategyIsNeverClearedWhenTheUpdateDoesNotStabilize() {
         SettingHistory history = updateThatDoesNotStabilize(declaringExcept(CAPACITY_PROVIDER_STRATEGY));
 
-        assertTrue(history.strategies().contains(List.of()), "the drop was applied before the wait");
+        assertFalse(history.strategies().contains(List.of()), "the strategy was never cleared");
         assertEquals(STRATEGY, history.service().getCapacityProviderStrategy());
         assertEquals(DEPLOYMENT_CONFIGURATION, history.service().getDeploymentConfiguration());
         assertEquals(REGISTRIES, history.service().getServiceRegistries());
     }
 
     @Test
-    void droppedServiceRegistriesArePutBackWhenTheUpdateDoesNotStabilize() {
+    void droppedServiceRegistriesAreNeverClearedWhenTheUpdateDoesNotStabilize() {
         SettingHistory history = updateThatDoesNotStabilize(declaringExcept(SERVICE_REGISTRIES));
 
-        assertTrue(history.registries().contains(List.of()), "the drop was applied before the wait");
+        assertFalse(history.registries().contains(List.of()), "the registries were never cleared");
         assertEquals(REGISTRIES, history.service().getServiceRegistries());
         assertEquals(DEPLOYMENT_CONFIGURATION, history.service().getDeploymentConfiguration());
         assertEquals(STRATEGY, history.service().getCapacityProviderStrategy());

@@ -329,15 +329,9 @@ public class EcsCfnProvisioner implements CfnResourceProvisioner {
             update.setDesiredCount(desiredCount);
             update.setNetworkConfiguration(networkConfiguration);
             update.setDeploymentConfiguration(deploymentConfiguration);
+            // A dropped strategy or registries stay null, so the stored value stays; only a declared empty list clears it.
             update.setCapacityProviderStrategy(capacityProviderStrategy);
             update.setServiceRegistries(serviceRegistries);
-            // A dropped setting is cleared; an empty list is how updateService clears a strategy or the registries.
-            if (capacityProviderStrategy == null && dropped.contains("CapacityProviderStrategy")) {
-                update.setCapacityProviderStrategy(List.of());
-            }
-            if (serviceRegistries == null && dropped.contains("ServiceRegistries")) {
-                update.setServiceRegistries(List.of());
-            }
             clearDeploymentConfiguration = deploymentConfiguration == null
                     && dropped.contains("DeploymentConfiguration");
             // Built before updateService, which changes this same model in place.

@@ -739,11 +739,11 @@ a `NatGateway`'s `PrivateIpAddress`, a `PrefixList`'s `MaxEntries`, a `Stage`'s 
 `Instance`'s `SecurityGroupIds`, `NetworkInterfaces` and `LaunchTemplate`. A dropped `LaunchTemplate` keeps
 the instance, but the instance type and the `MetadataOptions` members the template supplied go back to
 their defaults, and the instance profile it supplied is disassociated. A service's `TaskDefinition`,
-`NetworkConfiguration`, `ServiceName`, `LaunchType` and `LoadBalancers` are kept, and its `DesiredCount`
-goes back to 1. A service's dropped `DeploymentConfiguration`, `CapacityProviderStrategy` and
-`ServiceRegistries` are cleared, and an empty `CapacityProviderStrategy` in the template clears it too; a
-failed stabilisation puts the prior values back, and a deployment configuration the service did not have
-goes back to none. A `Stage`'s dropped `StageVariables` become empty. An `Instance`'s dropped `UserData` is
+`NetworkConfiguration`, `ServiceName`, `LaunchType`, `LoadBalancers`, `CapacityProviderStrategy` and
+`ServiceRegistries` are kept, and its `DesiredCount` goes back to 1. A service's dropped
+`DeploymentConfiguration` is cleared. An empty `CapacityProviderStrategy` or `ServiceRegistries` in the
+template clears it; a failed stabilisation puts the prior values back, and a deployment configuration
+the service did not have goes back to none. A `Stage`'s dropped `StageVariables` become empty. An `Instance`'s dropped `UserData` is
 cleared: a running instance is stopped for the rewrite and started again, and a stopped one stays stopped.
 An update that drops a `PrefixList`'s `AddressFamily` or `PrefixListName` fails. Create-only members are
 not cleared either.

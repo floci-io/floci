@@ -102,7 +102,7 @@ AWS::EC2::Subnet	CidrBlock	create-only	a drop never matches the stored block, so
 AWS::EC2::Subnet	MapPublicIpOnLaunch	default:false
 AWS::EC2::Subnet	Tags	clear
 AWS::EC2::Subnet	VpcId	create-only	a drop is refused
-AWS::ECS::Service	CapacityProviderStrategy	clear	an empty list replaces it, which also clears a strategy the template declares empty
+AWS::ECS::Service	CapacityProviderStrategy	keep:AWS documents a removed strategy as no update; a declared empty list clears it
 AWS::ECS::Service	Cluster	create-only
 AWS::ECS::Service	DeploymentConfiguration	clear	it is stored as none, so it reads back as never set; a declared {} is stored as given
 AWS::ECS::Service	DesiredCount	default:1
@@ -110,5 +110,5 @@ AWS::ECS::Service	LaunchType	keep:the provisioner leaves it out of the update, s
 AWS::ECS::Service	LoadBalancers	keep:the provisioner leaves it out of the update, so the stored value stays
 AWS::ECS::Service	NetworkConfiguration	keep:the update leaves a missing network configuration unchanged
 AWS::ECS::Service	ServiceName	keep:the prior name is reused
-AWS::ECS::Service	ServiceRegistries	clear	an empty list replaces them
+AWS::ECS::Service	ServiceRegistries	keep:AWS removes registries only through a declared empty list
 AWS::ECS::Service	TaskDefinition	keep:required for the ECS controller

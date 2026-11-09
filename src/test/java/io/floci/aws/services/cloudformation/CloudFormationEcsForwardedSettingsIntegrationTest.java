@@ -112,6 +112,10 @@ class CloudFormationEcsForwardedSettingsIntegrationTest {
             "\"DeploymentConfiguration\": {\"MaximumPercent\": 150, \"MinimumHealthyPercent\": 0}";
     private static final String NO_VALUE_DEPLOYMENT_SETTING = "\"DeploymentConfiguration\": "
             + "{\"Fn::If\": [\"Never\", {\"MaximumPercent\": 150}, {\"Ref\": \"AWS::NoValue\"}]}";
+    private static final String NO_VALUE_REGISTRIES_SETTING = "\"ServiceRegistries\": "
+            + "{\"Fn::If\": [\"Never\", [{\"RegistryArn\": {\"Fn::GetAtt\": [\"Registry\", \"Arn\"]}}], {\"Ref\": \"AWS::NoValue\"}]}";
+    private static final String NO_VALUE_STRATEGY_SETTING = "\"CapacityProviderStrategy\": "
+            + "{\"Fn::If\": [\"Never\", [{\"CapacityProvider\": \"FARGATE\", \"Weight\": 2}], {\"Ref\": \"AWS::NoValue\"}]}";
     private static final String OUTSIDE_REGISTRY_ARN = "arn:aws:servicediscovery:us-east-1:000000000000:service/srv-9";
 
     /** A service that declares only the settings spliced into %4$s, so a test controls which of the three it declares. */
@@ -211,7 +215,7 @@ class CloudFormationEcsForwardedSettingsIntegrationTest {
     }
 
     @Test
-    void updateStack_droppedServiceRegistries_leaveTheServiceWithoutRegistries() {
+    void updateStack_droppedServiceRegistries_keepTheStoredRegistries() {
         String name = stackName();
         createServiceStack(name, REGISTRIES_SETTING, STRATEGY_SETTING, DEPLOYMENT_SETTING);
         describeService(name).body("services[0].serviceRegistries[0].registryArn", containsString(":servicediscovery:"));
@@ -219,21 +223,21 @@ class CloudFormationEcsForwardedSettingsIntegrationTest {
         updateServiceStack(name, 1, STRATEGY_SETTING, DEPLOYMENT_SETTING);
 
         describeService(name)
-            .body("services[0].serviceRegistries", nullValue())
+            .body("services[0].serviceRegistries[0].registryArn", containsString(":servicediscovery:"))
             .body("services[0].capacityProviderStrategy[0].weight", equalTo(2))
             .body("services[0].deploymentConfiguration.maximumPercent", equalTo(150));
     }
 
     @Test
-    void updateStack_droppedCapacityProviderStrategy_leaveTheServiceOnItsLaunchType() {
+    void updateStack_droppedCapacityProviderStrategy_keepTheStoredStrategy() {
         String name = stackName();
         createServiceStack(name, REGISTRIES_SETTING, STRATEGY_SETTING, DEPLOYMENT_SETTING);
 
         updateServiceStack(name, 1, REGISTRIES_SETTING, DEPLOYMENT_SETTING);
 
         describeService(name)
-            .body("services[0].capacityProviderStrategy", nullValue())
-            .body("services[0].launchType", equalTo("FARGATE"))
+            .body("services[0].capacityProviderStrategy[0].capacityProvider", equalTo("FARGATE"))
+            .body("services[0].capacityProviderStrategy[0].weight", equalTo(2))
             .body("services[0].serviceRegistries[0].registryArn", containsString(":servicediscovery:"))
             .body("services[0].deploymentConfiguration.maximumPercent", equalTo(150));
     }
@@ -259,6 +263,38 @@ class CloudFormationEcsForwardedSettingsIntegrationTest {
         updateServiceStack(name, 1, NO_VALUE_DEPLOYMENT_SETTING);
 
         describeService(name).body("services[0]", not(hasKey("deploymentConfiguration")));
+    }
+
+    @Test
+    void updateStack_serviceRegistriesChosenAsNoValue_keepTheStoredRegistries() {
+        String name = stackName();
+        createServiceStack(name, REGISTRIES_SETTING);
+
+        updateServiceStack(name, 1, NO_VALUE_REGISTRIES_SETTING);
+
+        describeService(name).body("services[0].serviceRegistries[0].registryArn", containsString(":servicediscovery:"));
+    }
+
+    @Test
+    void updateStack_capacityProviderStrategyChosenAsNoValue_keepTheStoredStrategy() {
+        String name = stackName();
+        createServiceStack(name, STRATEGY_SETTING);
+
+        updateServiceStack(name, 1, NO_VALUE_STRATEGY_SETTING);
+
+        describeService(name)
+            .body("services[0].capacityProviderStrategy[0].capacityProvider", equalTo("FARGATE"))
+            .body("services[0].capacityProviderStrategy[0].weight", equalTo(2));
+    }
+
+    @Test
+    void updateStack_strategyDeclaredDirectlyAsNoValue_keepsTheStoredStrategy() {
+        String name = stackName();
+        createServiceStack(name, STRATEGY_SETTING);
+
+        updateServiceStack(name, 1, "\"CapacityProviderStrategy\": {\"Ref\": \"AWS::NoValue\"}");
+
+        describeService(name).body("services[0].capacityProviderStrategy[0].weight", equalTo(2));
     }
 
     @Test
@@ -309,16 +345,17 @@ class CloudFormationEcsForwardedSettingsIntegrationTest {
     @Test
     void updateStack_droppingOneSetting_leavesASettingSetThroughTheApiAlone() {
         String name = stackName();
-        createServiceStack(name, STRATEGY_SETTING);
+        createServiceStack(name, DEPLOYMENT_SETTING);
         ecs("UpdateService", """
-                {"cluster": "%1$s", "service": "%1$s-svc", "deploymentConfiguration": {"maximumPercent": 111}}
+                {"cluster": "%1$s", "service": "%1$s-svc",
+                 "capacityProviderStrategy": [{"capacityProvider": "FARGATE_SPOT", "weight": 1}]}
                 """.formatted(name));
 
         updateServiceStack(name, 1);
 
         describeService(name)
-            .body("services[0].capacityProviderStrategy", nullValue())
-            .body("services[0].deploymentConfiguration.maximumPercent", equalTo(111));
+            .body("services[0]", not(hasKey("deploymentConfiguration")))
+            .body("services[0].capacityProviderStrategy[0].capacityProvider", equalTo("FARGATE_SPOT"));
     }
 
     @Test
