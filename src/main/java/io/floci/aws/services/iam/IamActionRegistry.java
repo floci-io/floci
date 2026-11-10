@@ -837,7 +837,7 @@ public class IamActionRegistry {
      * so a rule ending at the route's last segment has to match it too, or the request would pass as an
      * unknown action.
      */
-    public static String routedPath(ContainerRequestContext ctx) {
+    static String routedPath(ContainerRequestContext ctx) {
         return withoutTrailingSlash(rawPath(ctx));
     }
 

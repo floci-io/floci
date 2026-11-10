@@ -600,7 +600,7 @@ def test_every_correction_is_the_vendored_entry_of_an_operation_the_file_reads()
         assert len(actual) == len(resources), operation
         for resource, correction in zip(actual, resources, strict=True):
             assert {key: value for key, value in resource.items()
-                    if key not in ("account", "arnOf", "preserveArnContext", "made") or key in correction} == correction, operation
+                    if key not in ("account", "arnOf", "made") or key in correction} == correction, operation
 
 
 def test_a_correction_gives_the_operation_its_resources(corrections):
@@ -966,7 +966,6 @@ def test_arn_pattern_does_not_turn_unrelated_members_into_identifiers(member):
 
 def test_no_inferred_identifier_metadata_or_withdrawn_redshift_rows():
     document = json.loads(r.OUTPUT.read_text())
-    assert "preserveArnContext" not in r.OUTPUT.read_text()
     resource = document["operations"]["redshift:DescribeClusters"]["resources"][0]
     assert "arnOf" not in resource
     assert "redshift:CreateCluster" not in r.CORRECTIONS

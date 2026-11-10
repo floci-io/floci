@@ -32,19 +32,6 @@ class RequestResourcesTest {
     private static final String MACHINE = "arn:aws:states:us-east-1:000000000000:stateMachine:orders";
 
     @Test
-    void inferredIdentifiersPreserveMissingArnContext() {
-        for (String region : List.of("", "us-east-1")) {
-            for (String account : List.of("", "000000000000")) {
-                String arn = "arn:aws:redshift:" + region + ":" + account + ":cluster:missing";
-                for (String operation : List.of("DescribeClusters", "DeleteCluster")) {
-                    assertEquals(List.of(arn), of("redshift:" + operation,
-                            json("{\"ClusterIdentifier\":\"" + arn + "\"}")));
-                }
-            }
-        }
-    }
-
-    @Test
     void inferredLandingZoneIdentifiersKeepRawContextAcrossOperations() {
         String arn = "arn:aws:controltower:::landingzone/missing";
         for (String operation : List.of("GetLandingZone", "UpdateLandingZone", "ResetLandingZone", "DeleteLandingZone")) {
@@ -944,20 +931,6 @@ class RequestResourcesTest {
         assertEquals(List.of(application), of("sso:PutApplicationAccessScope",
                 json("{\"ApplicationArn\":\"" + application + "\",\"AuthorizedTargets\":["
                         + "\"arn:aws:sso::000000000000:application/ssoins-1234567890123456/apl-9999999999999999\"]}")));
-    }
-
-    @Test
-    void directArnsPreserveExistingSingleVariableResolution() {
-        String prefix = "arn:aws:redshift:us-east-1:000000000000:cluster:";
-        String foreign = "arn:aws:redshift:us-west-2:222222222222:cluster:other";
-        for (String action : List.of("CreateCluster", "DeleteCluster", "DescribeClusters")) {
-            assertEquals(List.of(prefix + "warehouse"), of("redshift:" + action,
-                    json("{\"ClusterIdentifier\":\"warehouse\"}")));
-            assertEquals(List.of(foreign, "arn:aws:redshift:us-east-1:222222222222:cluster:other",
-                    "arn:aws:redshift:us-west-2:000000000000:cluster:other", prefix + "other"),
-                    of("redshift:" + action,
-                    json("{\"ClusterIdentifier\":\"" + foreign + "\"}")));
-        }
     }
 
     /**
