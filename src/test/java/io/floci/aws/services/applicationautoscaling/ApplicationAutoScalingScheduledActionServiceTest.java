@@ -235,6 +235,31 @@ class ApplicationAutoScalingScheduledActionServiceTest {
         assertBounds(7, 10, 5);
         assertEquals(State.FAILED, action("failure").getState());
         verify(adjuster).setCapacity(RESOURCE, 7, REGION);
+        ScalingActivity activity = service.describeScalingActivities(NAMESPACE, RESOURCE, DIMENSION, REGION).getFirst();
+        assertEquals("Failed", activity.getStatusCode());
+        assertEquals("ECS failed", activity.getStatusMessage());
+    }
+
+    @Test
+    void rescheduleBeforeExecutionReordersDueActionsUnderTargetLock() throws Exception {
+        put("first", NOW.plusSeconds(1), 0, 3);
+        put("second", NOW.plusSeconds(2), 0, 4);
+        AtomicReference<Thread> sweepThread = new AtomicReference<>();
+        try (ExecutorService executor = Executors.newSingleThreadExecutor()) {
+            Future<?> sweep;
+            synchronized (service.targetLock(REGION, NAMESPACE, RESOURCE, DIMENSION)) {
+                sweep = executor.submit(() -> {
+                    sweepThread.set(Thread.currentThread());
+                    service.runScheduledActions(NOW.plusSeconds(4));
+                });
+                ThreadStates.awaitBlockedOrDone(sweepThread, sweep);
+                assertFalse(sweep.isDone());
+                put("first", NOW.plusSeconds(3), 0, 8);
+            }
+            sweep.get(10, TimeUnit.SECONDS);
+        }
+        assertBounds(0, 8, 4);
+        assertTrue(describe().stream().allMatch(a -> a.getState() == State.SUCCEEDED));
     }
 
     @Test
@@ -285,16 +310,12 @@ class ApplicationAutoScalingScheduledActionServiceTest {
     }
 
     @Test
-    @SuppressWarnings("unchecked")
     void dynamicExecutionWaitsAndRecomputesUsingScheduledBounds() throws Exception {
         TargetTrackingConfiguration config = new TargetTrackingConfiguration();
         config.setTargetValue(50.0);
         ScalingPolicy policy = service.putScalingPolicy("dynamic", "TargetTrackingScaling", NAMESPACE, RESOURCE,
                 DIMENSION, config, null, REGION);
-        Instance<CapacityAdjuster> adjusters = mock(Instance.class);
-        when(adjusters.iterator()).thenAnswer(call -> List.<CapacityAdjuster>of(adjuster).iterator());
-        when(adjuster.supports(DIMENSION)).thenReturn(true);
-        ScalingPolicyAlarmActionHandler handler = new ScalingPolicyAlarmActionHandler(service, adjusters);
+        ScalingPolicyAlarmActionHandler handler = dynamicHandler();
         MetricAlarm alarm = new MetricAlarm();
         alarm.setComparisonOperator("GreaterThanThreshold");
         alarm.setThreshold(50.0);
@@ -327,6 +348,64 @@ class ApplicationAutoScalingScheduledActionServiceTest {
         verify(adjuster, times(1)).setCapacity(RESOURCE, 3, REGION);
     }
 
+    @SuppressWarnings("unchecked")
+    private ScalingPolicyAlarmActionHandler dynamicHandler() {
+        Instance<CapacityAdjuster> adjusters = mock(Instance.class);
+        when(adjusters.iterator()).thenAnswer(call -> List.<CapacityAdjuster>of(adjuster).iterator());
+        when(adjuster.supports(DIMENSION)).thenReturn(true);
+        return new ScalingPolicyAlarmActionHandler(service, adjusters);
+    }
+
+    @Test
+    void scheduledMinimumReductionPermitsLaterDynamicScaleInWithoutForcingIt() {
+        capacity.set(1);
+        TargetTrackingConfiguration config = new TargetTrackingConfiguration();
+        config.setTargetValue(50.0);
+        config.setScaleInCooldown(0);
+        ScalingPolicy policy = service.putScalingPolicy("idle", "TargetTrackingScaling", NAMESPACE, RESOURCE,
+                DIMENSION, config, null, REGION);
+        ScalingPolicyAlarmActionHandler handler = dynamicHandler();
+        MetricAlarm alarm = new MetricAlarm();
+        alarm.setComparisonOperator("LessThanThreshold");
+        alarm.setThreshold(50.0);
+        handler.handle(policy.getPolicyArn(), alarm, 0.0, REGION);
+        assertBounds(1, 10, 1);
+        put("lower-minimum", NOW, 0, null);
+        service.runScheduledActions(NOW);
+        assertBounds(0, 10, 1);
+        verify(adjuster, never()).setCapacity(anyString(), anyInt(), anyString());
+        handler.handle(policy.getPolicyArn(), alarm, 0.0, REGION);
+        assertBounds(0, 10, 0);
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"delete", "reschedule", "deregister"})
+    void mutationBeforeClaimPreventsStaleSweepExecution(String mutation) throws Exception {
+        put("pending", NOW.plusSeconds(1), 0, 0);
+        AtomicReference<Thread> sweepThread = new AtomicReference<>();
+        try (ExecutorService executor = Executors.newSingleThreadExecutor()) {
+            Future<?> sweep;
+            synchronized (service.targetLock(REGION, NAMESPACE, RESOURCE, DIMENSION)) {
+                sweep = executor.submit(() -> {
+                    sweepThread.set(Thread.currentThread());
+                    service.runScheduledActions(NOW.plusSeconds(2));
+                });
+                ThreadStates.awaitBlockedOrDone(sweepThread, sweep);
+                assertFalse(sweep.isDone());
+                switch (mutation) {
+                    case "delete" -> service.deleteScheduledAction(NAMESPACE, RESOURCE, DIMENSION, "pending", REGION);
+                    case "reschedule" -> put("pending", NOW.plusSeconds(10), 0, 0);
+                    case "deregister" -> service.deregisterScalableTarget(NAMESPACE, RESOURCE, DIMENSION, REGION);
+                    default -> throw new IllegalArgumentException(mutation);
+                }
+            }
+            sweep.get(10, TimeUnit.SECONDS);
+        }
+        assertEquals(5, capacity.get());
+        verifyNoInteractions(adjuster);
+        assertTrue(service.describeScalingActivities(NAMESPACE, RESOURCE, DIMENSION, REGION).isEmpty());
+    }
+
     @Test
     void activityWriteFailureAndTerminalWriteFailureCannotRepeatEffects() {
         InMemoryStorage<String, ScalingActivity> activityStore = spy(new InMemoryStorage<>());
@@ -337,7 +416,7 @@ class ApplicationAutoScalingScheduledActionServiceTest {
         put("activity", NOW, 7, 9);
         doThrow(new IllegalStateException("activity write failed")).when(activityStore).putAllAtomically(anyMap());
         service.runScheduledActions(NOW);
-        assertEquals(State.FAILED, action("activity").getState());
+        assertEquals(State.SUCCEEDED, action("activity").getState());
         doAnswer(call -> {
             Map<String, ScheduledAction> entries = call.getArgument(0);
             if (entries.values().stream().anyMatch(a -> a.getState() == State.SUCCEEDED || a.getState() == State.FAILED)) {

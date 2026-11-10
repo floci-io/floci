@@ -161,7 +161,8 @@ bounds, so a minimum-only update removes any previously configured maximum.
 When due, an action changes its configured bounds and preserves the target's other bound.
 Desired count is clamped into the resulting range. An in-range count stays unchanged.
 Every successful occurrence records a `Successful` scaling activity, including unchanged
-bounds. A conflicting effective range fails without changing the target.
+bounds. Failed attempts record a `Failed` activity with the error message.
+A conflicting effective range fails without changing the target.
 
 Completed actions remain visible. An explicit future schedule rearms an action while
 preserving its ARN and creation time. A capacity-only update does not rearm it.

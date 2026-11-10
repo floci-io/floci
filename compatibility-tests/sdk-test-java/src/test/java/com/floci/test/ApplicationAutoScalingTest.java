@@ -11,9 +11,9 @@ import software.amazon.awssdk.services.applicationautoscaling.model.ObjectNotFou
 import software.amazon.awssdk.services.applicationautoscaling.model.PutScheduledActionRequest;
 import software.amazon.awssdk.services.applicationautoscaling.model.ScalableDimension;
 import software.amazon.awssdk.services.applicationautoscaling.model.ScalableTarget;
-import software.amazon.awssdk.services.applicationautoscaling.model.ScheduledAction;
 import software.amazon.awssdk.services.applicationautoscaling.model.ScalingActivity;
 import software.amazon.awssdk.services.applicationautoscaling.model.ScalingActivityStatusCode;
+import software.amazon.awssdk.services.applicationautoscaling.model.ScheduledAction;
 import software.amazon.awssdk.services.applicationautoscaling.model.ServiceNamespace;
 import software.amazon.awssdk.services.ecs.EcsClient;
 import software.amazon.awssdk.services.ecs.model.ContainerDefinition;
@@ -40,6 +40,7 @@ class ApplicationAutoScalingTest {
     private ApplicationAutoScalingClient scaling;
     private String name;
     private String resourceId;
+    private boolean targetRegistered;
 
     @BeforeEach
     void registerTarget() {
@@ -48,15 +49,20 @@ class ApplicationAutoScalingTest {
         scaling = TestFixtures.applicationAutoScalingClient();
         scaling.registerScalableTarget(r -> r.serviceNamespace(NAMESPACE).resourceId(resourceId)
                 .scalableDimension(DIMENSION).minCapacity(0).maxCapacity(4));
+        targetRegistered = true;
     }
 
     @AfterEach
     void cleanup() {
-        try {
-            scaling.deregisterScalableTarget(r -> r.serviceNamespace(NAMESPACE).resourceId(resourceId)
-                    .scalableDimension(DIMENSION));
-        } finally {
-            scaling.close();
+        if (scaling != null) {
+            try {
+                if (targetRegistered) {
+                    scaling.deregisterScalableTarget(r -> r.serviceNamespace(NAMESPACE).resourceId(resourceId)
+                            .scalableDimension(DIMENSION));
+                }
+            } finally {
+                scaling.close();
+            }
         }
     }
 
@@ -160,7 +166,7 @@ class ApplicationAutoScalingTest {
                         scaling.putScheduledAction(action(name).schedule(at(Instant.now().plusSeconds(5)))
                                 .scalableTargetAction(b -> b.minCapacity(0)).build());
                         ScheduledAction created = actionNamed(name);
-                        awaitSuccessfulActivities(1);
+                        awaitExecution(ecs, 1, 0, 4, 2);
                         assertBounds(0, 4);
                         assertThat(ecs.describeServices(r -> r.cluster(name).services(name))
                                 .services().get(0).desiredCount()).isEqualTo(2);
@@ -168,7 +174,7 @@ class ApplicationAutoScalingTest {
 
                         scaling.putScheduledAction(action(name).schedule(at(Instant.now().plusSeconds(5)))
                                 .scalableTargetAction(b -> b.maxCapacity(1)).build());
-                        awaitSuccessfulActivities(2);
+                        awaitExecution(ecs, 2, 0, 1, 1);
                         assertBounds(0, 1);
                         assertThat(ecs.describeServices(r -> r.cluster(name).services(name))
                                 .services().get(0).desiredCount()).isEqualTo(1);
@@ -206,12 +212,19 @@ class ApplicationAutoScalingTest {
         return found.get(0);
     }
 
-    private void awaitSuccessfulActivities(int count) throws InterruptedException {
-        TestFixtures.await(() -> scaling.describeScalingActivities(r -> r.serviceNamespace(NAMESPACE)
-                        .resourceId(resourceId).scalableDimension(DIMENSION)).scalingActivities().stream()
-                        .filter(a -> a.statusCode() == ScalingActivityStatusCode.SUCCESSFUL)
-                        .map(ScalingActivity::activityId).distinct().count() >= count,
-                resourceId, count + " successful scheduled activities", Duration.ofSeconds(30).toNanos(), 200);
+    private void awaitExecution(EcsClient ecs, int activities, int minimum, int maximum, int desired)
+            throws InterruptedException {
+        TestFixtures.await(() -> {
+            List<ScalableTarget> targets = scaling.describeScalableTargets(r -> r.serviceNamespace(NAMESPACE)
+                    .resourceIds(resourceId).scalableDimension(DIMENSION)).scalableTargets();
+            long successful = scaling.describeScalingActivities(r -> r.serviceNamespace(NAMESPACE)
+                    .resourceId(resourceId).scalableDimension(DIMENSION)).scalingActivities().stream()
+                    .filter(a -> a.statusCode() == ScalingActivityStatusCode.SUCCESSFUL)
+                    .map(ScalingActivity::activityId).distinct().count();
+            return successful >= activities && targets.size() == 1
+                    && targets.get(0).minCapacity() == minimum && targets.get(0).maxCapacity() == maximum
+                    && ecs.describeServices(r -> r.cluster(name).services(name)).services().get(0).desiredCount() == desired;
+        }, resourceId, "scheduled bounds and desired count", Duration.ofSeconds(30).toNanos(), 200);
     }
 
     private void assertBounds(int minimum, int maximum) {

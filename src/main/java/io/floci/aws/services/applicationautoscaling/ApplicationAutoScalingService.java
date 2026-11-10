@@ -40,6 +40,7 @@ import java.time.format.ResolverStyle;
 import java.time.temporal.ChronoUnit;
 import java.util.ArrayList;
 import java.util.Comparator;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
@@ -413,14 +414,22 @@ public class ApplicationAutoScalingService implements StoredResourceArns {
                 .filter(e -> e.value().getState() == State.PENDING && !e.value().getDeadline().isAfter(now))
                 .sorted(Comparator.comparing((AccountEntry<ScheduledAction> e) -> e.value().getDeadline())
                         .thenComparing(e -> e.value().getScheduledActionName())).toList();
+        Set<String> processedTargets = new HashSet<>();
         for (AccountEntry<ScheduledAction> entry : entries) {
             String region = entry.key().substring(0, entry.key().indexOf("::"));
+            ScheduledAction candidate = entry.value();
+            String targetKey = targetKey(region, candidate.getServiceNamespace(), candidate.getResourceId(),
+                    candidate.getScalableDimension());
+            if (!processedTargets.add(entry.accountId() + "::" + targetKey)) {
+                continue;
+            }
             try {
                 RequestScopes.runAs(entry.accountId(), region, () -> {
                     ScheduledAction action = entry.value();
                     synchronized (targetLock(region, action.getServiceNamespace(), action.getResourceId(),
                             action.getScalableDimension())) {
-                        executeScheduledAction(entry.key(), now, region);
+                        runTargetScheduledActions(action.getServiceNamespace(), action.getResourceId(),
+                                action.getScalableDimension(), region, now);
                     }
                 });
             } catch (RuntimeException e) {
@@ -437,7 +446,11 @@ public class ApplicationAutoScalingService implements StoredResourceArns {
                 .sorted(Comparator.comparing(ScheduledAction::getDeadline)
                         .thenComparing(ScheduledAction::getScheduledActionName)).toList();
         for (ScheduledAction action : due) {
-            executeScheduledAction(prefix + action.getScheduledActionName(), now, region);
+            try {
+                executeScheduledAction(prefix + action.getScheduledActionName(), now, region);
+            } catch (RuntimeException e) {
+                LOG.warnv(e, "Scheduled action {0} failed", action.getScheduledActionName());
+            }
         }
     }
 
@@ -456,6 +469,8 @@ public class ApplicationAutoScalingService implements StoredResourceArns {
         }
         action.setState(State.CLAIMED);
         scheduledActions.putAllAtomically(Map.of(key, new ScheduledAction(action)));
+        String description = "Applying scheduled action " + action.getScheduledActionName();
+        String failure = null;
         try {
             ScalableTarget target = new ScalableTarget(existing);
             int min = action.getMinCapacity() == null ? target.getMinCapacity() : action.getMinCapacity();
@@ -472,13 +487,19 @@ public class ApplicationAutoScalingService implements StoredResourceArns {
             if (desired != current) {
                 ecsCapacityAdjuster.setCapacity(target.getResourceId(), desired, region);
             }
-            recordScalingActivity(target.getServiceNamespace(), target.getResourceId(), target.getScalableDimension(),
-                    "Setting capacity bounds to " + min + " and " + max,
-                    "scheduled action " + action.getScheduledActionName(), region);
+            description = "Setting capacity bounds to " + min + " and " + max;
             action.setState(State.SUCCEEDED);
         } catch (RuntimeException e) {
             action.setState(State.FAILED);
+            failure = e.getMessage();
             LOG.warnv(e, "Scheduled action {0} could not complete", action.getScheduledActionName());
+        }
+        try {
+            recordScalingActivity(action.getServiceNamespace(), action.getResourceId(), action.getScalableDimension(),
+                    description, "scheduled action " + action.getScheduledActionName(), region,
+                    action.getState() == State.SUCCEEDED ? "Successful" : "Failed", failure);
+        } catch (RuntimeException e) {
+            LOG.warnv(e, "Could not record activity for scheduled action {0}", action.getScheduledActionName());
         }
         scheduledActions.putAllAtomically(Map.of(key, action));
     }
@@ -1004,11 +1025,12 @@ public class ApplicationAutoScalingService implements StoredResourceArns {
      * DescribeScalingActivities. */
     void recordScalingActivity(ScalingPolicy policy, String description, String cause, String region) {
         recordScalingActivity(policy.getServiceNamespace(), policy.getResourceId(), policy.getScalableDimension(),
-                description, cause, region);
+                description, cause, region, "Successful", null);
     }
 
     private void recordScalingActivity(String serviceNamespace, String resourceId, String dimension,
-                                       String description, String cause, String region) {
+                                       String description, String cause, String region,
+                                       String status, String statusMessage) {
         ScalingActivity activity = new ScalingActivity();
         activity.setActivityId(UUID.randomUUID().toString());
         activity.setServiceNamespace(serviceNamespace);
@@ -1019,7 +1041,8 @@ public class ApplicationAutoScalingService implements StoredResourceArns {
         double now = nowEpochSeconds();
         activity.setStartTime(now);
         activity.setEndTime(now);
-        activity.setStatusCode("Successful");
+        activity.setStatusCode(status);
+        activity.setStatusMessage(statusMessage);
         String key = region + "::" + serviceNamespace + "::" + dimension
                 + "::" + resourceId + "::" + activity.getActivityId();
         activities.putAllAtomically(Map.of(key, activity));
