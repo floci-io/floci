@@ -49,6 +49,7 @@ import java.util.Optional;
 import java.util.Properties;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicLong;
+import java.util.stream.Stream;
 import java.util.zip.GZIPInputStream;
 import java.util.zip.GZIPOutputStream;
 import java.util.zip.ZipEntry;
@@ -214,6 +215,8 @@ class EmrServerlessSparkRunnerTest {
         verify(spec).withEntrypoint(argThat((List<String> entrypoint) -> entrypoint.size() == 5
                 && List.of("/bin/bash", "-c").equals(entrypoint.subList(0, 2))
                 && entrypoint.get(2).contains("setpriv --reuid=hadoop --regid=hadoop --clear-groups \"$@\"")
+                // While it is still root, which owns Hive's lib folder.
+                && entrypoint.get(2).contains(EmrServerlessSparkRunner.HIVE_ONE_SDK + "\nexport HOME=~hadoop\n")
                 && List.of("floci", "/usr/bin/hive").equals(entrypoint.subList(3, 5))));
         verify(spec).withCmd(argThat((List<String> cmd) -> "--hiveconf".equals(cmd.getFirst())
                 && List.of("-f", "s3://bucket/queries/report.sql").equals(cmd.subList(cmd.size() - 2, cmd.size()))));
@@ -979,6 +982,56 @@ class EmrServerlessSparkRunnerTest {
         assertEquals(List.of("true", "/path/to/my.jar:/usr/lib/hadoop-lzo/lib/*", "-Dnote='it''s' $HOME `id`"),
                 Files.readAllLines(printed));
         assertFalse(Files.exists(folder.resolve("ran")));
+    }
+
+    @Test
+    void anEmr6HiveImageKeepsOneSdkWithCloudWatchsModulesAndWhatIsNotTheSdk(@TempDir Path folder) throws Exception {
+        List<String> kept = List.of("auth-2.19.0.jar", "cloudwatch-2.20.160.jar",
+                "cloudwatch-metric-publisher-2.20.160.jar", "guava-31.1-jre.jar", "hive-exec-3.1.3-amzn-8.jar",
+                "my-library-2.20.160.jar");
+        List<String> jars = new ArrayList<>(kept);
+        for (String module : List.of("annotations", "apache-client", "auth", "aws-core", "aws-json-protocol",
+                "aws-query-protocol", "endpoints-spi", "http-client-spi", "json-utils", "metrics-spi",
+                "netty-nio-client", "profiles", "protocol-core", "regions", "sdk-core", "third-party-jackson-core",
+                "utils")) {
+            jars.add(module + "-2.20.160.jar");
+        }
+
+        assertEquals(kept, hiveLibAfterOneSdk(folder, true, jars.toArray(String[]::new)));
+    }
+
+    @Test
+    void anImageWithoutStockSdkModulesKeepsEveryJar(@TempDir Path folder) throws Exception {
+        List<String> jars = List.of("commons-math-2.2.jar", "guava-31.1-jre.jar", "hive-exec-3.1.3-amzn-14.jar");
+
+        assertEquals(jars, hiveLibAfterOneSdk(folder, true, jars.toArray(String[]::new)));
+    }
+
+    @Test
+    void anImageWithoutTezsPluginKeepsItsOnlySdk(@TempDir Path folder) throws Exception {
+        List<String> jars = List.of("aws-core-2.20.160.jar", "sdk-core-2.20.160.jar");
+
+        assertEquals(jars, hiveLibAfterOneSdk(folder, false, jars.toArray(String[]::new)));
+    }
+
+    /** What is left of a Hive lib folder holding {@code jars} once the shell has run, by name. */
+    private static List<String> hiveLibAfterOneSdk(Path folder, boolean plugin, String... jars) throws Exception {
+        Path lib = Files.createDirectories(folder.resolve("hive/lib"));
+        Path tez = Files.createDirectories(folder.resolve("tez"));
+        for (String jar : jars) {
+            Files.createFile(lib.resolve(jar));
+        }
+        if (plugin) {
+            Files.createFile(tez.resolve("tez-emr-serverless.jar"));
+        }
+        String script = EmrServerlessSparkRunner.HIVE_ONE_SDK.replace("/usr/lib/hive/lib", lib.toString())
+                .replace("/usr/lib/tez", tez.toString());
+
+        BootstrapProcess.run(new ProcessBuilder("bash", "-c", script).directory(folder.toFile()));
+
+        try (Stream<Path> left = Files.list(lib)) {
+            return left.map(path -> path.getFileName().toString()).sorted().toList();
+        }
     }
 
     @Test
