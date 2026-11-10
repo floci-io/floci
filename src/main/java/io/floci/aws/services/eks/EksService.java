@@ -856,7 +856,10 @@ public class EksService implements TagHandler, ResourceProvider, Ec2InstanceLaun
     }
 
     public List<String> listClusters() {
+        // Clusters are stored per account; like AWS, a request only sees its own Region's clusters.
+        String region = regionResolver.getRegion();
         return storage.scan(k -> true).stream()
+                .filter(cluster -> region.equals(resolveClusterRegion(cluster)))
                 .map(Cluster::getName)
                 .collect(Collectors.toList());
     }
@@ -864,8 +867,20 @@ public class EksService implements TagHandler, ResourceProvider, Ec2InstanceLaun
     public PaginatedResult<String> listClusters(Integer maxResults, String nextToken) {
         int limit = EksAccessEntryService.pageSize(maxResults);
         List<String> names = listClusters().stream().sorted().toList();
-        return Pagination.paginate(names, name -> name, limit, nextToken, "clusters:" + regionResolver.getAccountId(),
+        return Pagination.paginate(names, name -> name, limit, nextToken, "clusters:" + regionResolver.getAccountId() + ":" + regionResolver.getRegion(),
                 token -> new AwsException("InvalidParameterException", "Invalid nextToken", 400));
+    }
+
+    /**
+     * Answers ResourceNotFoundException for a cluster in another Region, as AWS does: cluster names
+     * are Regional, so a request must not reach a cluster created in a different Region of the account.
+     * Applied by the API handlers only; Floci's own restore and node-join paths act on any Region.
+     */
+    public void requireClusterInRequestRegion(String name) {
+        Cluster cluster = describeCluster(name);
+        if (!regionResolver.getRegion().equals(resolveClusterRegion(cluster))) {
+            throw new AwsException("ResourceNotFoundException", "No cluster found for name: " + name, 404);
+        }
     }
 
     public Cluster deleteCluster(String name) {
