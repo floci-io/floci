@@ -148,7 +148,7 @@ class StepFunctionsAwsSdkTaskIntegrationTest {
 
     @Test
     @Order(4)
-    void startExecutionReusingAnExecutionNameFailsWithTheSdkExceptionName() {
+    void startExecutionReusingAnExecutionNameFailsWithTheSdkExceptionName() throws Exception {
         String smArn = createStateMachine("aws-sdk-start-execution-named", """
                 {
                   "QueryLanguage": "JSONata",
@@ -164,8 +164,15 @@ class StepFunctionsAwsSdkTaskIntegrationTest {
                 }
                 """.replace("CHILD_ARN", quickChildArn));
 
-        assertEquals("SUCCEEDED", waitForTerminalState(startExecution(smArn, "{}"))
-                .jsonPath().getString("status"));
+        // The first execution started the child's execution under the name, and the helper
+        // fails the test when the parent did not succeed.
+        JsonNode first = mapper.readTree(succeedingOutputOf(smArn, "{}"));
+
+        // The name is taken while the child's execution runs, and a start with that name and
+        // the same input then returns that execution again, so the second start would
+        // succeed. The name is a conflict once the child's execution is closed, so the test
+        // waits for that.
+        waitForTerminalState(first.path("ExecutionArn").asText());
 
         Response describe = waitForTerminalState(startExecution(smArn, "{}"));
         assertEquals("FAILED", describe.jsonPath().getString("status"));
