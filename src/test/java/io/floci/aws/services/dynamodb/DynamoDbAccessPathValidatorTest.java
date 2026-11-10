@@ -422,6 +422,47 @@ class DynamoDbAccessPathValidatorTest {
         assertEquals("Query condition missed key schema element: pk", error.getMessage());
     }
 
+    @ParameterizedTest
+    @CsvSource(delimiter = '|', textBlock = """
+                                 | pk = :pk AND sk > :a AND x = :b                             | 3 | 2
+                                 | x = :a AND y = :b AND z = :c                                | 3 | 2
+                                 | pk > :pk AND sk > :a AND x = :b                             | 3 | 2
+                                 | pk = :pk AND (sk > :a AND x = :b)                           | 3 | 2
+            alternate-index      | pk = :pk AND alternate = :a AND sk = :b                     | 3 | 2
+            tenant-region-index  | tenantId = :t AND region = :r AND createdAt = :c AND x = :x | 4 | 3
+            """)
+    void refusesMoreKeyConditionsThanTheKeySchemaHas(String indexName, String expression,
+                                                     int conditions, int keyAttributes) {
+        AwsException error = assertThrows(AwsException.class,
+                () -> validateExpression(DynamoDbAccessPath.resolve(table, indexName), expression));
+
+        assertEquals("The number of query conditions (" + conditions + ") exceeds the number of key attributes "
+                + "defined in the schema (" + keyAttributes + ")", error.getMessage());
+    }
+
+    @Test
+    void countsKeyConditionsBeforeCheckingTheirValueTypes() {
+        ObjectNode values = expressionValues(":pk", ":sk", ":v");
+        values.set(":pk", numberValue("1"));
+        AwsException expressionError = assertThrows(AwsException.class,
+                () -> DynamoDbAccessPathValidator.validateQuery(
+                        table, tablePath, null, "pk = :pk AND sk > :sk AND status = :v",
+                        null, null, null, values));
+
+        ObjectNode legacy = mapper.createObjectNode();
+        legacy.set("pk", legacyCondition("EQ", attributeValues("p1")));
+        legacy.set("sk", legacyCondition("EQ", mapper.createArrayNode().add(numberValue("1"))));
+        legacy.set("status", legacyCondition("EQ", attributeValues("open")));
+        AwsException legacyError = assertThrows(AwsException.class,
+                () -> DynamoDbAccessPathValidator.validateQuery(
+                        table, tablePath, legacy, null, null, null, null, null));
+
+        String message = "The number of query conditions (3) exceeds the number of key attributes "
+                + "defined in the schema (2)";
+        assertEquals(message, expressionError.getMessage());
+        assertEquals(message, legacyError.getMessage());
+    }
+
     @Test
     void stillRejectsANonKeyAttributeAlongsideTheFullKey() {
         AwsException error = assertThrows(AwsException.class,
