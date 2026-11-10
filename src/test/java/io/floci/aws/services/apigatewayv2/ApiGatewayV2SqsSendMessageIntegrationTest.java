@@ -12,6 +12,7 @@ import software.amazon.awssdk.services.apigatewayv2.ApiGatewayV2Client;
 import software.amazon.awssdk.services.apigatewayv2.model.BadRequestException;
 import software.amazon.awssdk.services.apigatewayv2.model.CreateIntegrationResponse;
 import software.amazon.awssdk.services.apigatewayv2.model.GetIntegrationResponse;
+import software.amazon.awssdk.services.apigatewayv2.model.Route;
 import software.amazon.awssdk.services.apigatewayv2.model.UpdateIntegrationResponse;
 import software.amazon.awssdk.services.sqs.SqsClient;
 import software.amazon.awssdk.services.sqs.model.Message;
@@ -19,6 +20,7 @@ import software.amazon.awssdk.services.sqs.model.Message;
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
+import java.util.function.Function;
 
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.MatcherAssert.assertThat;
@@ -27,6 +29,7 @@ import static org.hamcrest.Matchers.equalTo;
 import static org.hamcrest.Matchers.hasSize;
 import static org.hamcrest.Matchers.notNullValue;
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 
 @QuarkusTest
@@ -92,6 +95,18 @@ class ApiGatewayV2SqsSendMessageIntegrationTest {
                 assertEquals(SUBTYPE, integration.path("IntegrationSubtype").asText());
                 assertEquals("$request.body", integration.path("RequestParameters").path("MessageBody").asText());
                 assertEquals("0", integration.path("RequestParameters").path("DelaySeconds").asText());
+
+                JsonNode numeric = json("CreateIntegration", Map.of("ApiId", api,
+                        "IntegrationType", "AWS_PROXY", "IntegrationSubtype", SUBTYPE,
+                        "RequestParameters", Map.of("QueueUrl", "http://localhost/000000000000/json",
+                                "MessageBody", "$request.body", "DelaySeconds", 5)), 201);
+                assertEquals("5", numeric.path("RequestParameters").path("DelaySeconds").asText());
+
+                JsonNode nested = json("CreateIntegration", Map.of("ApiId", api,
+                        "IntegrationType", "AWS_PROXY", "IntegrationSubtype", SUBTYPE,
+                        "RequestParameters", Map.of("QueueUrl", "http://localhost/000000000000/json",
+                                "MessageBody", Map.of("nested", "value"))), 400);
+                assertEquals("BadRequestException", nested.path("__type").asText());
             } finally {
                 client.deleteApi(b -> b.apiId(api));
             }
@@ -125,59 +140,167 @@ class ApiGatewayV2SqsSendMessageIntegrationTest {
     }
 
     @Test
-    void invokeSendsRequestBodyAndMappedHeaderAttributeToQueue() {
-        String queueName = "apigw-sqs-" + UUID.randomUUID();
-        try (ApiGatewayV2Client client = apigw(); SqsClient sqs = sqs()) {
-            String queueUrl = sqs.createQueue(b -> b.queueName(queueName)).queueUrl();
-            String api = client.createApi(b -> b.name("sqs-invoke").protocolType("HTTP")).apiId();
+    void subtypeWithoutInvokerIsStoredAndAnswersServerError() {
+        try (ApiGatewayV2Client client = apigw()) {
+            String api = client.createApi(b -> b.name("sqs-purge").protocolType("HTTP")).apiId();
             try {
-                String integration = client.createIntegration(b -> b.apiId(api).integrationType("AWS_PROXY")
-                        .integrationSubtype(SUBTYPE).credentialsArn(ROLE)
-                        .requestParameters(parameters(queueUrl))).integrationId();
-                client.createRoute(b -> b.apiId(api).routeKey("POST /send").target("integrations/" + integration));
+                CreateIntegrationResponse created = client.createIntegration(b -> b.apiId(api)
+                        .integrationType("AWS_PROXY").integrationSubtype("SQS-PurgeQueue")
+                        .requestParameters(Map.of("QueueUrl", "http://localhost/000000000000/purge")));
+                assertEquals("SQS-PurgeQueue", created.integrationSubtype());
+                assertThrows(BadRequestException.class, () ->
+                        client.createIntegration(b -> b.apiId(api).integrationType("AWS_PROXY")
+                                .integrationSubtype("SQS-PurgeQueue")
+                                .requestParameters(Map.of("QueueUrl", "http://localhost/000000000000/purge",
+                                        "MessageBody", "$request.body"))));
+                client.createRoute(b -> b.apiId(api).routeKey("POST /purge")
+                        .target("integrations/" + created.integrationId()));
                 client.createStage(b -> b.apiId(api).stageName("test").autoDeploy(true));
 
-                given().contentType("application/json").header("Authorization", "Bearer token-123")
-                        .body("{\"event\":\"created\"}")
-                        .post("/execute-api/" + api + "/test/send")
-                        .then().statusCode(200)
-                        .body("SendMessageResponse.SendMessageResult.MessageId", notNullValue())
-                        .body("SendMessageResponse.ResponseMetadata.RequestId", notNullValue());
-
-                List<Message> messages = sqs.receiveMessage(b -> b.queueUrl(queueUrl)
-                        .messageAttributeNames("All").maxNumberOfMessages(10)).messages();
-                assertThat(messages, hasSize(1));
-                assertThat(messages.getFirst().body(), equalTo("{\"event\":\"created\"}"));
-                assertThat(messages.getFirst().messageAttributes().get("Authorization").stringValue(),
-                        equalTo("Bearer token-123"));
+                given().post("/execute-api/" + api + "/test/purge")
+                        .then().statusCode(500);
             } finally {
                 client.deleteApi(b -> b.apiId(api));
-                sqs.deleteQueue(b -> b.queueUrl(queueUrl));
             }
         }
     }
 
     @Test
-    void invokeWithEmptyBodyReturnsMissingParameter() {
-        String queueName = "apigw-sqs-empty-" + UUID.randomUUID();
-        try (ApiGatewayV2Client client = apigw(); SqsClient sqs = sqs()) {
-            String queueUrl = sqs.createQueue(b -> b.queueName(queueName)).queueUrl();
-            String api = client.createApi(b -> b.name("sqs-invoke-empty").protocolType("HTTP")).apiId();
+    void reimportWithInvalidSubtypeLeavesApiUnchanged() {
+        String valid = """
+                {"openapi": "3.0.1", "info": {"title": "subtype-reimport", "version": "1.0"},
+                 "paths": {"/items": {"get": {"x-amazon-apigateway-integration": {
+                   "type": "http_proxy", "httpMethod": "GET", "uri": "https://backend.example/items",
+                   "payloadFormatVersion": "1.0"}}}}}
+                """;
+        String invalid = """
+                {"openapi": "3.0.1", "info": {"title": "subtype-reimport", "version": "1.0"},
+                 "paths": {"/send": {"post": {"x-amazon-apigateway-integration": {
+                   "type": "aws_proxy", "integrationSubtype": "SQS-PurgeEverything",
+                   "payloadFormatVersion": "1.0",
+                   "requestParameters": {"QueueUrl": "http://localhost/000000000000/q"}}}}}}
+                """;
+        try (ApiGatewayV2Client client = apigw()) {
+            String api = client.importApi(b -> b.body(valid)).apiId();
             try {
-                String integration = client.createIntegration(b -> b.apiId(api).integrationType("AWS_PROXY")
-                        .integrationSubtype(SUBTYPE).requestParameters(parameters(queueUrl))).integrationId();
-                client.createRoute(b -> b.apiId(api).routeKey("POST /send").target("integrations/" + integration));
-                client.createStage(b -> b.apiId(api).stageName("test").autoDeploy(true));
-
-                given().post("/execute-api/" + api + "/test/send")
-                        .then().statusCode(400)
-                        .body("Error.Code", equalTo("MissingParameter"));
-                assertThat(sqs.receiveMessage(b -> b.queueUrl(queueUrl)).messages(), hasSize(0));
+                assertThrows(BadRequestException.class, () -> client.reimportApi(b -> b.apiId(api).body(invalid)));
+                List<String> routeKeys = client.getRoutes(b -> b.apiId(api)).items().stream()
+                        .map(Route::routeKey).toList();
+                assertEquals(List.of("GET /items"), routeKeys);
             } finally {
                 client.deleteApi(b -> b.apiId(api));
-                sqs.deleteQueue(b -> b.queueUrl(queueUrl));
             }
         }
+    }
+
+    @Test
+    void invokeSendsRequestBodyAndMappedHeaderAttributeToQueue() {
+        withSendMessageRoute("sqs-invoke", ApiGatewayV2SqsSendMessageIntegrationTest::parameters,
+                (sqs, queueUrl, api) -> {
+                    given().contentType("application/json").header("Authorization", "Bearer token-123")
+                            .body("{\"event\":\"created\"}")
+                            .post("/execute-api/" + api + "/test/send")
+                            .then().statusCode(200)
+                            .body("SendMessageResponse.SendMessageResult.MessageId", notNullValue())
+                            .body("SendMessageResponse.ResponseMetadata.RequestId", notNullValue());
+
+                    Message message = onlyMessage(sqs, queueUrl);
+                    assertThat(message.body(), equalTo("{\"event\":\"created\"}"));
+                    assertThat(message.messageAttributes().get("Authorization").stringValue(),
+                            equalTo("Bearer token-123"));
+                });
+    }
+
+    @Test
+    void invokeWithEmptyBodyReturnsMissingParameter() {
+        withSendMessageRoute("sqs-invoke-empty", ApiGatewayV2SqsSendMessageIntegrationTest::parameters,
+                (sqs, queueUrl, api) -> {
+                    given().post("/execute-api/" + api + "/test/send")
+                            .then().statusCode(400)
+                            .body("Error.Code", equalTo("MissingParameter"));
+                    assertThat(sqs.receiveMessage(b -> b.queueUrl(queueUrl)).messages(), hasSize(0));
+                });
+    }
+
+    @Test
+    void invokeSendsBodyFieldSelectedByPath() {
+        withSendMessageRoute("sqs-invoke-path",
+                queueUrl -> Map.of("QueueUrl", queueUrl, "MessageBody", "$request.body.message"),
+                (sqs, queueUrl, api) -> {
+                    given().contentType("application/json").body("{\"message\":\"hi\"}")
+                            .post("/execute-api/" + api + "/test/send")
+                            .then().statusCode(200);
+                    assertThat(onlyMessage(sqs, queueUrl).body(), equalTo("hi"));
+                });
+    }
+
+    @Test
+    void invokeKeepsHeaderValueInsideItsAttribute() {
+        String header = "x\"},\"TenantId\":{\"DataType\":\"String\",\"StringValue\":\"evil";
+        withSendMessageRoute("sqs-invoke-quoted", ApiGatewayV2SqsSendMessageIntegrationTest::parameters,
+                (sqs, queueUrl, api) -> {
+                    given().contentType("application/json").header("Authorization", header).body("{}")
+                            .post("/execute-api/" + api + "/test/send")
+                            .then().statusCode(200);
+                    Message message = onlyMessage(sqs, queueUrl);
+                    assertThat(message.messageAttributes().get("Authorization").stringValue(), equalTo(header));
+                    assertFalse(message.messageAttributes().containsKey("TenantId"));
+                });
+    }
+
+    @Test
+    void invokeResolvesContextVariables() {
+        String attributes = "{\"Stage\":{\"DataType\":\"String\",\"StringValue\":\"${context.stage}\"},"
+                + "\"Route\":{\"DataType\":\"String\",\"StringValue\":\"${context.routeKey}\"}}";
+        withSendMessageRoute("sqs-invoke-context",
+                queueUrl -> Map.of("QueueUrl", queueUrl, "MessageBody", "$context.httpMethod",
+                        "MessageAttributes", attributes),
+                (sqs, queueUrl, api) -> {
+                    given().post("/execute-api/" + api + "/test/send").then().statusCode(200);
+                    Message message = onlyMessage(sqs, queueUrl);
+                    assertThat(message.body(), equalTo("POST"));
+                    assertThat(message.messageAttributes().get("Stage").stringValue(), equalTo("test"));
+                    assertThat(message.messageAttributes().get("Route").stringValue(), equalTo("POST /send"));
+                });
+    }
+
+    private interface RouteCheck {
+        void run(SqsClient sqs, String queueUrl, String apiId);
+    }
+
+    /**
+     * Creates a queue and an HTTP API whose {@code POST /send} route on stage {@code test} sends to it
+     * through an SQS-SendMessage integration, runs the check, then deletes both.
+     */
+    private void withSendMessageRoute(String name, Function<String, Map<String, String>> parameters,
+                                      RouteCheck check) {
+        try (ApiGatewayV2Client client = apigw(); SqsClient sqs = sqs()) {
+            String api = client.createApi(b -> b.name(name).protocolType("HTTP")).apiId();
+            String queueUrl = null;
+            try {
+                String createdQueue = sqs.createQueue(b -> b.queueName(name + "-" + UUID.randomUUID())).queueUrl();
+                queueUrl = createdQueue;
+                String integration = client.createIntegration(b -> b.apiId(api).integrationType("AWS_PROXY")
+                        .integrationSubtype(SUBTYPE).credentialsArn(ROLE)
+                        .requestParameters(parameters.apply(createdQueue))).integrationId();
+                client.createRoute(b -> b.apiId(api).routeKey("POST /send").target("integrations/" + integration));
+                client.createStage(b -> b.apiId(api).stageName("test").autoDeploy(true));
+                check.run(sqs, createdQueue, api);
+            } finally {
+                client.deleteApi(b -> b.apiId(api));
+                if (queueUrl != null) {
+                    String createdQueue = queueUrl;
+                    sqs.deleteQueue(b -> b.queueUrl(createdQueue));
+                }
+            }
+        }
+    }
+
+    private static Message onlyMessage(SqsClient sqs, String queueUrl) {
+        List<Message> messages = sqs.receiveMessage(b -> b.queueUrl(queueUrl)
+                .messageAttributeNames("All").maxNumberOfMessages(10)).messages();
+        assertThat(messages, hasSize(1));
+        return messages.getFirst();
     }
 
     private JsonNode json(String action, Map<String, Object> body, int status) throws Exception {
