@@ -7,6 +7,7 @@ import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.CopyOnWriteArrayList;
 
 @RegisterForReflection
 @JsonInclude(JsonInclude.Include.NON_NULL)
@@ -31,7 +32,7 @@ public class CodePipelineExecution {
     private List<Map<String, Object>> sourceRevisionOverrides = new ArrayList<>();
     private List<Map<String, String>> variables = new ArrayList<>();
     private Map<String, String> trigger = new LinkedHashMap<>();
-    private List<ActionExecution> actionExecutions = new ArrayList<>();
+    private List<ActionExecution> actionExecutions = new CopyOnWriteArrayList<>();
     private Map<String, String> stageExecutionStatuses = new LinkedHashMap<>();
     private volatile String currentStage;
     private volatile String waitingStage;
@@ -185,7 +186,7 @@ public class CodePipelineExecution {
     }
 
     public void setActionExecutions(List<ActionExecution> actionExecutions) {
-        this.actionExecutions = actionExecutions;
+        this.actionExecutions = actionExecutions == null ? null : new CopyOnWriteArrayList<>(actionExecutions);
     }
 
     public Map<String, String> getStageExecutionStatuses() {
