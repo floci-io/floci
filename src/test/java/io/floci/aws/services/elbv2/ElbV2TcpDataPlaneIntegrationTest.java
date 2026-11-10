@@ -257,13 +257,9 @@ class ElbV2TcpDataPlaneIntegrationTest {
     @Test
     void tcpListenerRelaysServerGreetingBeforeClientSendsBytes() throws Exception {
         byte[] greeting = {0, 5, 42, (byte) 0xff};
-        replaceBackend(new NetServerOptions(), socket -> {
-            socket.write(Buffer.buffer(greeting));
-            socket.handler(socket::write);
-        });
+        replaceBackendWithGreeting(greeting);
         try (Socket socket = connect(listenerPort)) {
-            assertArrayEquals(greeting, socket.getInputStream().readNBytes(greeting.length));
-            assertEcho(socket, new byte[]{1, 2, 3});
+            assertGreetingAndEcho(socket, greeting, new byte[]{1, 2, 3});
         }
     }
 
@@ -277,10 +273,7 @@ class ElbV2TcpDataPlaneIntegrationTest {
             backend = retainedBackend;
             when(backend.actualPort()).thenReturn(oldPort);
             when(backend.close()).thenReturn(Future.succeededFuture());
-            replaceBackend(new NetServerOptions(), socket -> {
-                socket.write(Buffer.buffer(greeting));
-                socket.handler(socket::write);
-            });
+            replaceBackendWithGreeting(greeting);
             assertEquals(oldPort, original.actualPort());
             assertNotEquals(oldPort, backend.actualPort());
             assertEquals(List.of(backend.actualPort()),
@@ -290,8 +283,7 @@ class ElbV2TcpDataPlaneIntegrationTest {
                 assertEcho(socket, new byte[]{1, 2, 3});
             }
             try (Socket socket = connect(listenerPort)) {
-                assertArrayEquals(greeting, socket.getInputStream().readNBytes(greeting.length));
-                assertEcho(socket, new byte[]{0, 42, (byte) 0xff});
+                assertGreetingAndEcho(socket, greeting, new byte[]{0, 42, (byte) 0xff});
             }
         } finally {
             if (backend == retainedBackend) {
@@ -578,6 +570,18 @@ class ElbV2TcpDataPlaneIntegrationTest {
                 assertEquals(port, reservation.getLocalPort());
             }
         });
+    }
+
+    private void replaceBackendWithGreeting(byte[] greeting) throws Exception {
+        replaceBackend(new NetServerOptions(), socket -> {
+            socket.write(Buffer.buffer(greeting));
+            socket.handler(socket::write);
+        });
+    }
+
+    private static void assertGreetingAndEcho(Socket socket, byte[] greeting, byte[] payload) throws IOException {
+        assertArrayEquals(greeting, socket.getInputStream().readNBytes(greeting.length));
+        assertEcho(socket, payload);
     }
 
     private static void assertEcho(Socket socket, byte[] payload) throws IOException {
