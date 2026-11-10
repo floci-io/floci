@@ -50,6 +50,31 @@
         "ValidatePolicy": {"method": "POST", "requestUri": "/policy/validation"}
       }
     },
+    "account": {
+      "credentialScope": "account",
+      "apiVersion": "2021-02-01",
+      "accessDeniedStatus": 403,
+      "operations": {
+        "AcceptPrimaryEmailUpdate": {"method": "POST", "requestUri": "/acceptPrimaryEmailUpdate"},
+        "DeleteAlternateContact": {"method": "POST", "requestUri": "/deleteAlternateContact"},
+        "DisableRegion": {"method": "POST", "requestUri": "/disableRegion"},
+        "EnableRegion": {"method": "POST", "requestUri": "/enableRegion"},
+        "GetAccountInformation": {"method": "POST", "requestUri": "/getAccountInformation"},
+        "GetAlternateContact": {"method": "POST", "requestUri": "/getAlternateContact"},
+        "GetContactInformation": {"method": "POST", "requestUri": "/getContactInformation"},
+        "GetGovCloudAccountInformation": {"method": "POST", "requestUri": "/getGovCloudAccountInformation"},
+        "GetPrimaryEmail": {"method": "POST", "requestUri": "/getPrimaryEmail"},
+        "GetPrimaryEmailUpdateStatus": {"method": "POST", "requestUri": "/getPrimaryEmailUpdateStatus"},
+        "GetRegionOptStatus": {"method": "POST", "requestUri": "/getRegionOptStatus"},
+        "ListRegions": {"method": "POST", "requestUri": "/listRegions"},
+        "PutAccountName": {"method": "POST", "requestUri": "/putAccountName"},
+        "PutAlternateContact": {"method": "POST", "requestUri": "/putAlternateContact"},
+        "PutContactInformation": {"method": "POST", "requestUri": "/putContactInformation"},
+        "SendPhoneNumberVerification": {"method": "POST", "requestUri": "/sendPhoneNumberVerification"},
+        "StartPrimaryEmailUpdate": {"method": "POST", "requestUri": "/startPrimaryEmailUpdate"},
+        "VerifyPhoneNumber": {"method": "POST", "requestUri": "/verifyPhoneNumber"}
+      }
+    },
     "apigateway": {
       "credentialScope": "apigateway",
       "apiVersion": "2015-07-09",
@@ -477,6 +502,19 @@
         "UpdateKeys": {"method": "POST", "requestUri": "/key-value-stores/{KvsARN}/keys"}
       }
     },
+    "controlcatalog": {
+      "credentialScope": "controlcatalog",
+      "apiVersion": "2018-05-10",
+      "accessDeniedStatus": 403,
+      "operations": {
+        "GetControl": {"method": "POST", "requestUri": "/get-control"},
+        "ListCommonControls": {"method": "POST", "requestUri": "/common-controls"},
+        "ListControlMappings": {"method": "POST", "requestUri": "/list-control-mappings"},
+        "ListControls": {"method": "POST", "requestUri": "/list-controls"},
+        "ListDomains": {"method": "POST", "requestUri": "/domains"},
+        "ListObjectives": {"method": "POST", "requestUri": "/objectives"}
+      }
+    },
     "controltower": {
       "credentialScope": "controltower",
       "apiVersion": "2018-05-10",
@@ -696,6 +734,38 @@
         "UpdatePackage": {"method": "POST", "requestUri": "/2015-01-01/packages/update"},
         "UpdateVpcEndpoint": {"method": "POST", "requestUri": "/2015-01-01/es/vpcEndpoints/update"},
         "UpgradeElasticsearchDomain": {"method": "POST", "requestUri": "/2015-01-01/es/upgradeDomain"}
+      }
+    },
+    "fis": {
+      "credentialScope": "fis",
+      "apiVersion": "2020-12-01",
+      "operations": {
+        "CreateExperimentTemplate": {"method": "POST", "requestUri": "/experimentTemplates"},
+        "CreateTargetAccountConfiguration": {"method": "POST", "requestUri": "/experimentTemplates/{id}/targetAccountConfigurations/{accountId}"},
+        "DeleteExperimentTemplate": {"method": "DELETE", "requestUri": "/experimentTemplates/{id}"},
+        "DeleteTargetAccountConfiguration": {"method": "DELETE", "requestUri": "/experimentTemplates/{id}/targetAccountConfigurations/{accountId}"},
+        "GetAction": {"method": "GET", "requestUri": "/actions/{id}"},
+        "GetExperiment": {"method": "GET", "requestUri": "/experiments/{id}"},
+        "GetExperimentTargetAccountConfiguration": {"method": "GET", "requestUri": "/experiments/{id}/targetAccountConfigurations/{accountId}"},
+        "GetExperimentTemplate": {"method": "GET", "requestUri": "/experimentTemplates/{id}"},
+        "GetSafetyLever": {"method": "GET", "requestUri": "/safetyLevers/{id}"},
+        "GetTargetAccountConfiguration": {"method": "GET", "requestUri": "/experimentTemplates/{id}/targetAccountConfigurations/{accountId}"},
+        "GetTargetResourceType": {"method": "GET", "requestUri": "/targetResourceTypes/{resourceType}"},
+        "ListActions": {"method": "GET", "requestUri": "/actions"},
+        "ListExperimentResolvedTargets": {"method": "GET", "requestUri": "/experiments/{id}/resolvedTargets"},
+        "ListExperimentTargetAccountConfigurations": {"method": "GET", "requestUri": "/experiments/{id}/targetAccountConfigurations"},
+        "ListExperimentTemplates": {"method": "GET", "requestUri": "/experimentTemplates"},
+        "ListExperiments": {"method": "GET", "requestUri": "/experiments"},
+        "ListTagsForResource": {"method": "GET", "requestUri": "/tags/{resourceArn+}", "alternatives": [{"requestUri": "/tags", "located": {"resourceArn": "?resourceArn"}}]},
+        "ListTargetAccountConfigurations": {"method": "GET", "requestUri": "/experimentTemplates/{id}/targetAccountConfigurations"},
+        "ListTargetResourceTypes": {"method": "GET", "requestUri": "/targetResourceTypes"},
+        "StartExperiment": {"method": "POST", "requestUri": "/experiments"},
+        "StopExperiment": {"method": "DELETE", "requestUri": "/experiments/{id}"},
+        "TagResource": {"method": "POST", "requestUri": "/tags/{resourceArn+}", "alternatives": [{"requestUri": "/tags", "located": {"resourceArn": "body"}}]},
+        "UntagResource": {"method": "DELETE", "requestUri": "/tags/{resourceArn+}", "alternatives": [{"requestUri": "/tags", "located": {"resourceArn": "?resourceArn"}}]},
+        "UpdateExperimentTemplate": {"method": "PATCH", "requestUri": "/experimentTemplates/{id}"},
+        "UpdateSafetyLeverState": {"method": "PATCH", "requestUri": "/safetyLevers/{id}/state"},
+        "UpdateTargetAccountConfiguration": {"method": "PATCH", "requestUri": "/experimentTemplates/{id}/targetAccountConfigurations/{accountId}"}
       }
     },
     "guardduty": {
@@ -1196,6 +1266,27 @@
         "UpdateSensitivityInspectionTemplate": {"method": "PUT", "requestUri": "/templates/sensitivity-inspections/{id}"}
       }
     },
+    "oam": {
+      "credentialScope": "oam",
+      "apiVersion": "2022-06-10",
+      "operations": {
+        "CreateLink": {"method": "POST", "requestUri": "/CreateLink"},
+        "CreateSink": {"method": "POST", "requestUri": "/CreateSink"},
+        "DeleteLink": {"method": "POST", "requestUri": "/DeleteLink"},
+        "DeleteSink": {"method": "POST", "requestUri": "/DeleteSink"},
+        "GetLink": {"method": "POST", "requestUri": "/GetLink"},
+        "GetSink": {"method": "POST", "requestUri": "/GetSink"},
+        "GetSinkPolicy": {"method": "POST", "requestUri": "/GetSinkPolicy"},
+        "ListAttachedLinks": {"method": "POST", "requestUri": "/ListAttachedLinks"},
+        "ListLinks": {"method": "POST", "requestUri": "/ListLinks"},
+        "ListSinks": {"method": "POST", "requestUri": "/ListSinks"},
+        "ListTagsForResource": {"method": "GET", "requestUri": "/tags/{ResourceArn+}"},
+        "PutSinkPolicy": {"method": "POST", "requestUri": "/PutSinkPolicy"},
+        "TagResource": {"method": "PUT", "requestUri": "/tags/{ResourceArn+}"},
+        "UntagResource": {"method": "DELETE", "requestUri": "/tags/{ResourceArn+}"},
+        "UpdateLink": {"method": "POST", "requestUri": "/UpdateLink"}
+      }
+    },
     "opensearch": {
       "credentialScope": "es",
       "apiVersion": "2021-01-01",
@@ -1641,6 +1732,86 @@
         "UpdateUser": {"method": "PUT", "requestUri": "/accounts/{AwsAccountId}/namespaces/{Namespace}/users/{UserName}"},
         "UpdateUserCustomPermission": {"method": "PUT", "requestUri": "/accounts/{AwsAccountId}/namespaces/{Namespace}/users/{UserName}/custom-permission"},
         "UpdateVPCConnection": {"method": "PUT", "requestUri": "/accounts/{AwsAccountId}/vpc-connections/{VPCConnectionId}"}
+      }
+    },
+    "ram": {
+      "credentialScope": "ram",
+      "apiVersion": "2018-01-04",
+      "operations": {
+        "AcceptResourceShareInvitation": {"method": "POST", "requestUri": "/acceptresourceshareinvitation"},
+        "AssociateResourceShare": {"method": "POST", "requestUri": "/associateresourceshare"},
+        "AssociateResourceSharePermission": {"method": "POST", "requestUri": "/associateresourcesharepermission"},
+        "CreatePermission": {"method": "POST", "requestUri": "/createpermission"},
+        "CreatePermissionVersion": {"method": "POST", "requestUri": "/createpermissionversion"},
+        "CreateResourceShare": {"method": "POST", "requestUri": "/createresourceshare"},
+        "DeletePermission": {"method": "DELETE", "requestUri": "/deletepermission"},
+        "DeletePermissionVersion": {"method": "DELETE", "requestUri": "/deletepermissionversion"},
+        "DeleteResourceShare": {"method": "DELETE", "requestUri": "/deleteresourceshare"},
+        "DisassociateResourceShare": {"method": "POST", "requestUri": "/disassociateresourceshare"},
+        "DisassociateResourceSharePermission": {"method": "POST", "requestUri": "/disassociateresourcesharepermission"},
+        "EnableSharingWithAwsOrganization": {"method": "POST", "requestUri": "/enablesharingwithawsorganization"},
+        "GetPermission": {"method": "POST", "requestUri": "/getpermission"},
+        "GetResourcePolicies": {"method": "POST", "requestUri": "/getresourcepolicies"},
+        "GetResourceShareAssociations": {"method": "POST", "requestUri": "/getresourceshareassociations"},
+        "GetResourceShareInvitations": {"method": "POST", "requestUri": "/getresourceshareinvitations"},
+        "GetResourceShares": {"method": "POST", "requestUri": "/getresourceshares"},
+        "ListPendingInvitationResources": {"method": "POST", "requestUri": "/listpendinginvitationresources"},
+        "ListPermissionAssociations": {"method": "POST", "requestUri": "/listpermissionassociations"},
+        "ListPermissionVersions": {"method": "POST", "requestUri": "/listpermissionversions"},
+        "ListPermissions": {"method": "POST", "requestUri": "/listpermissions"},
+        "ListPrincipals": {"method": "POST", "requestUri": "/listprincipals"},
+        "ListReplacePermissionAssociationsWork": {"method": "POST", "requestUri": "/listreplacepermissionassociationswork"},
+        "ListResourceSharePermissions": {"method": "POST", "requestUri": "/listresourcesharepermissions"},
+        "ListResourceTypes": {"method": "POST", "requestUri": "/listresourcetypes"},
+        "ListResources": {"method": "POST", "requestUri": "/listresources"},
+        "ListSourceAssociations": {"method": "POST", "requestUri": "/listsourceassociations"},
+        "PromotePermissionCreatedFromPolicy": {"method": "POST", "requestUri": "/promotepermissioncreatedfrompolicy"},
+        "PromoteResourceShareCreatedFromPolicy": {"method": "POST", "requestUri": "/promoteresourcesharecreatedfrompolicy"},
+        "RejectResourceShareInvitation": {"method": "POST", "requestUri": "/rejectresourceshareinvitation"},
+        "ReplacePermissionAssociations": {"method": "POST", "requestUri": "/replacepermissionassociations"},
+        "SetDefaultPermissionVersion": {"method": "POST", "requestUri": "/setdefaultpermissionversion"},
+        "TagResource": {"method": "POST", "requestUri": "/tagresource"},
+        "UntagResource": {"method": "POST", "requestUri": "/untagresource"},
+        "UpdateResourceShare": {"method": "POST", "requestUri": "/updateresourceshare"}
+      }
+    },
+    "resource-explorer-2": {
+      "credentialScope": "resource-explorer-2",
+      "apiVersion": "2022-07-28",
+      "accessDeniedStatus": 403,
+      "operations": {
+        "AssociateDefaultView": {"method": "POST", "requestUri": "/AssociateDefaultView"},
+        "BatchGetView": {"method": "POST", "requestUri": "/BatchGetView"},
+        "CreateIndex": {"method": "POST", "requestUri": "/CreateIndex"},
+        "CreateResourceExplorerSetup": {"method": "POST", "requestUri": "/CreateResourceExplorerSetup"},
+        "CreateView": {"method": "POST", "requestUri": "/CreateView"},
+        "DeleteIndex": {"method": "POST", "requestUri": "/DeleteIndex"},
+        "DeleteResourceExplorerSetup": {"method": "POST", "requestUri": "/DeleteResourceExplorerSetup"},
+        "DeleteView": {"method": "POST", "requestUri": "/DeleteView"},
+        "DisassociateDefaultView": {"method": "POST", "requestUri": "/DisassociateDefaultView"},
+        "GetAccountLevelServiceConfiguration": {"method": "POST", "requestUri": "/GetAccountLevelServiceConfiguration"},
+        "GetDefaultView": {"method": "POST", "requestUri": "/GetDefaultView"},
+        "GetIndex": {"method": "POST", "requestUri": "/GetIndex"},
+        "GetManagedView": {"method": "POST", "requestUri": "/GetManagedView"},
+        "GetResourceExplorerSetup": {"method": "POST", "requestUri": "/GetResourceExplorerSetup"},
+        "GetServiceIndex": {"method": "POST", "requestUri": "/GetServiceIndex"},
+        "GetServiceView": {"method": "POST", "requestUri": "/GetServiceView"},
+        "GetView": {"method": "POST", "requestUri": "/GetView"},
+        "ListIndexes": {"method": "POST", "requestUri": "/ListIndexes"},
+        "ListIndexesForMembers": {"method": "POST", "requestUri": "/ListIndexesForMembers"},
+        "ListManagedViews": {"method": "POST", "requestUri": "/ListManagedViews"},
+        "ListResources": {"method": "POST", "requestUri": "/ListResources"},
+        "ListServiceIndexes": {"method": "POST", "requestUri": "/ListServiceIndexes"},
+        "ListServiceViews": {"method": "POST", "requestUri": "/ListServiceViews"},
+        "ListStreamingAccessForServices": {"method": "POST", "requestUri": "/ListStreamingAccessForServices"},
+        "ListSupportedResourceTypes": {"method": "POST", "requestUri": "/ListSupportedResourceTypes"},
+        "ListTagsForResource": {"method": "GET", "requestUri": "/tags/{resourceArn+}", "alternatives": [{"requestUri": "/tags", "located": {"resourceArn": "?resourceArn"}}]},
+        "ListViews": {"method": "POST", "requestUri": "/ListViews"},
+        "Search": {"method": "POST", "requestUri": "/Search"},
+        "TagResource": {"method": "POST", "requestUri": "/tags/{resourceArn+}", "alternatives": [{"requestUri": "/tags", "located": {"resourceArn": "body"}}]},
+        "UntagResource": {"method": "DELETE", "requestUri": "/tags/{resourceArn+}", "alternatives": [{"requestUri": "/tags", "located": {"resourceArn": "?resourceArn"}}]},
+        "UpdateIndexType": {"method": "POST", "requestUri": "/UpdateIndexType"},
+        "UpdateView": {"method": "POST", "requestUri": "/UpdateView"}
       }
     },
     "s3": {

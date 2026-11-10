@@ -354,6 +354,7 @@
       "StartPolicyGeneration",
       "ValidatePolicy"
     ],
+    "account": [],
     "apigateway": [],
     "cloudfront": [
       "CreateAnycastIpList",
@@ -430,6 +431,12 @@
       "UpdateSavingsPlan"
     ],
     "cloudfront-keyvaluestore": [],
+    "controlcatalog": [
+      "ListCommonControls",
+      "ListControlMappings",
+      "ListDomains",
+      "ListObjectives"
+    ],
     "controltower": [
       "CreateLandingZone",
       "CreateManagedAccount",
@@ -546,6 +553,13 @@
       "UpdatePackage",
       "UpdatePackageScope",
       "UpdateVpcEndpoint"
+    ],
+    "fis": [
+      "GetTargetResourceType",
+      "ListActions",
+      "ListExperimentTemplates",
+      "ListExperiments",
+      "ListTargetResourceTypes"
     ],
     "guardduty": [
       "AcceptAdministratorInvitation",
@@ -841,6 +855,11 @@
       "UpdateRevealConfiguration",
       "UpdateSensitivityInspectionTemplate"
     ],
+    "oam": [
+      "CreateSink",
+      "ListLinks",
+      "ListSinks"
+    ],
     "payment-cryptography": [
       "CreateKey",
       "DisableDefaultKeyReplicationRegions",
@@ -951,6 +970,46 @@
       "UpdateRoleCustomPermission",
       "UpdateSPICECapacityConfiguration",
       "UpdateSelfUpgradeConfiguration"
+    ],
+    "ram": [
+      "EnableSharingWithAwsOrganization",
+      "GetResourcePolicies",
+      "GetResourceShareAssociations",
+      "GetResourceShareInvitations",
+      "GetResourceShares",
+      "ListPermissionAssociations",
+      "ListPermissions",
+      "ListPrincipals",
+      "ListReplacePermissionAssociationsWork",
+      "ListResourceTypes",
+      "ListResources",
+      "ListSourceAssociations"
+    ],
+    "resource-explorer-2": [
+      "AssociateDefaultView",
+      "BatchGetView",
+      "CreateIndex",
+      "CreateManagedView",
+      "CreateResourceExplorerSetup",
+      "CreateStreamingAccessForService",
+      "CreateView",
+      "DeleteResourceExplorerSetup",
+      "DeleteStreamingAccessForService",
+      "DisassociateDefaultView",
+      "GetAccountLevelServiceConfiguration",
+      "GetDefaultView",
+      "GetIndex",
+      "GetResourceExplorerSetup",
+      "GetServiceIndex",
+      "GetServiceView",
+      "ListIndexes",
+      "ListIndexesForMembers",
+      "ListManagedViews",
+      "ListServiceIndexes",
+      "ListServiceViews",
+      "ListStreamingAccessForServices",
+      "ListSupportedResourceTypes",
+      "ListViews"
     ],
     "scheduler": [
       "ListScheduleGroups",
