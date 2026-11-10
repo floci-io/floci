@@ -278,7 +278,7 @@ query language. Supported commands:
 | Command | Notes |
 |---|---|
 | `fields a, b, ...` | Projection. Defaults to `@timestamp, @message`. `display` is an alias |
-| `filter <field> = 'v'` | Equality. `!=` and `==` are also accepted; `where` is an alias |
+| `filter <field> = 'v'` | Equality. `!=` and `==` are also accepted; `where` is an alias. Comparisons can be joined with `or` (any case) and grouped with parentheses, for example `filter (type = 'A' or type = 'B')` |
 | `sort <field> [asc\|desc]` | `order` is an alias |
 | `dedup <field, ...>` | Keeps the first row per unique tuple, applied after sorting |
 | `limit N` | The effective cap is the smallest of this value, the `StartQuery` `limit` parameter, and `FLOCI_SERVICES_CLOUDWATCHLOGS_MAX_EVENTS_PER_QUERY` |
@@ -296,14 +296,12 @@ degrade silently, so it is worth knowing how each case behaves:
 | Input | Result |
 |---|---|
 | An unsupported command (`stats`, `parse`, ...) | The query fails. Logged as `Unsupported command: stats` |
-| A `filter` whose operator is not `=`, `!=` or `==` — for example `<`, `<=`, `>`, `>=`, `like /ERROR/` or `=~ /ERROR/` | The query fails. Logged as `Unsupported filter expression: ...`. Exception: an unquoted `=` anywhere in the expression, as in `like /a=b/`, is taken as the equality operator, so that query completes with **no** rows and no warning |
-| A `filter` combining conditions with `and` / `or` — for example `filter level = 'ERROR' and status = 200` | Only the leftmost operator is parsed; the rest of the line becomes the compared value. With `=` nothing matches and you get **no** rows; with `!=` everything matches and you get **every** row (up to the limit). `status` is `Complete` and no warning is logged |
+| A `filter` whose operator is not `=`, `!=` or `==`, for example `<`, `<=`, `>`, `>=`, `like /ERROR/` or `=~ /ERROR/` | The query fails. Logged as `Unsupported filter expression: ...` |
+| A `filter` using `and`, `not` or `\|\|`, or with text after the value, as in `filter level = 'ERROR' x` | The query fails. AWS evaluates `and` and `not`, ignores the trailing text, and rejects an unparenthesized `\|\|` at `StartQuery` with `MalformedQueryException` (use `or`) |
+| A blank query, or an empty stage as in a trailing `\|` | The query fails. AWS rejects it at `StartQuery` |
+| A `filter` with a backslash escape, a backtick-quoted field name or an expression such as `1+1` in place of the field | The query fails. AWS interprets them |
 | A projected field that does not exist | Rendered as an empty string. No warning |
 | A `sort` direction other than `asc` / `desc` | Treated as ascending. No warning |
-
-When a `Complete` result set looks narrower or wider than intended, check the query for a
-compound `filter` or a stray `=` first: those cases produce neither a failure nor a warning. The
-only log line is the usual INFO summary, `Logs Insights query <id>: scanned ... -> <n> row(s)`.
 
 For matching events by a pattern, `FilterLogEvents` is the more predictable option today: it
 applies the filter pattern syntax (`?ERROR ?WARN`, `{ $.level = "ERROR" }`, and so on) as AWS does.
