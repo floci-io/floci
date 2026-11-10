@@ -48,6 +48,7 @@ import java.util.Set;
 import java.util.UUID;
 import java.util.function.Consumer;
 import java.util.function.Supplier;
+import java.util.function.UnaryOperator;
 import java.util.regex.Pattern;
 import java.util.stream.Collectors;
 import java.util.stream.Stream;
@@ -886,7 +887,29 @@ public class RedshiftServerlessService implements Resettable, StoredResourceArns
                                                                      String ownerAccount, Instant startTime,
                                                                      Instant endTime, String region,
                                                                      Integer maxResults, String nextToken) {
-        List<RedshiftServerlessSnapshot> all = snapshots.scan(key -> key.startsWith(region + "::")).stream()
+        return pageOfSnapshots(snapshots.scan(key -> key.startsWith(region + "::")), namespaceName, namespaceArn,
+                ownerAccount, startTime, endTime, maxResults, nextToken);
+    }
+
+    /**
+     * Lists the snapshots {@code accountId} owns in {@code region}, narrowed as {@link #listSnapshots} does, to the
+     * ones {@code visible} keeps. Whether the caller may see a snapshot of another account is for the caller of
+     * this method to decide.
+     */
+    public PaginatedResult<RedshiftServerlessSnapshot> listSnapshotsOfAccount(
+            String accountId, UnaryOperator<List<RedshiftServerlessSnapshot>> visible, String namespaceName,
+            String namespaceArn, Instant startTime, Instant endTime, String region, Integer maxResults,
+            String nextToken) {
+        List<RedshiftServerlessSnapshot> owned = snapshots.scanForAccount(accountId,
+                key -> key.startsWith(region + "::"));
+        return pageOfSnapshots(visible.apply(owned), namespaceName, namespaceArn, accountId, startTime, endTime,
+                maxResults, nextToken);
+    }
+
+    private PaginatedResult<RedshiftServerlessSnapshot> pageOfSnapshots(
+            List<RedshiftServerlessSnapshot> candidates, String namespaceName, String namespaceArn,
+            String ownerAccount, Instant startTime, Instant endTime, Integer maxResults, String nextToken) {
+        List<RedshiftServerlessSnapshot> all = candidates.stream()
                 .filter(snapshot -> namespaceName == null || namespaceName.isBlank()
                         || namespaceName.equals(snapshot.getNamespaceName()))
                 .filter(snapshot -> namespaceArn == null || namespaceArn.isBlank()

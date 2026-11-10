@@ -659,6 +659,44 @@ class RedshiftServerlessIntegrationTest {
     }
 
     @Test
+    void aSnapshotOfAnotherAccountIsReadAndOnlyTheSharedOnesAreListed() {
+        String owner = "111122223333";
+        String caller = "444455556666";
+        String allowCaller = "{\\\"Version\\\":\\\"2012-10-17\\\",\\\"Statement\\\":[{\\\"Effect\\\":\\\"Allow\\\","
+                + "\\\"Principal\\\":{\\\"AWS\\\":\\\"arn:aws:iam::" + caller + ":root\\\"},"
+                + "\\\"Action\\\":\\\"redshift-serverless:GetSnapshot\\\",\\\"Resource\\\":\\\"*\\\"}]}";
+
+        callAs(owner, "CreateNamespace", "{\"namespaceName\":\"read-src\",\"adminUsername\":\"admin\"}").statusCode(200);
+        String sharedArn = callAs(owner, "CreateSnapshot",
+                "{\"snapshotName\":\"read-shared\",\"namespaceName\":\"read-src\"}")
+                .statusCode(200).extract().path("snapshot.snapshotArn");
+        callAs(owner, "CreateSnapshot", "{\"snapshotName\":\"read-private\",\"namespaceName\":\"read-src\"}")
+                .statusCode(200);
+        String get = "{\"snapshotName\":\"read-shared\",\"ownerAccount\":\"" + owner + "\"}";
+        String list = "{\"ownerAccount\":\"" + owner + "\"}";
+
+        // GetSnapshot reads the owner's snapshot, and IAM enforcement checks its policy. The list leaves out what
+        // is not shared rather than refusing.
+        callAs(caller, "ListSnapshots", list).statusCode(200).body("snapshots", hasSize(0));
+
+        callAs(owner, "PutResourcePolicy", "{\"resourceArn\":\"" + sharedArn + "\",\"policy\":\"" + allowCaller + "\"}")
+                .statusCode(200);
+        callAs(caller, "GetSnapshot", get).statusCode(200)
+                .body("snapshot.snapshotName", equalTo("read-shared"))
+                .body("snapshot.ownerAccount", equalTo(owner));
+        callAs(caller, "GetSnapshot", "{\"snapshotArn\":\"" + sharedArn + "\",\"ownerAccount\":\"" + owner + "\"}")
+                .statusCode(200).body("snapshot.snapshotName", equalTo("read-shared"));
+        callAs(caller, "ListSnapshots", list).statusCode(200)
+                .body("snapshots", hasSize(1))
+                .body("snapshots[0].snapshotName", equalTo("read-shared"));
+        callAs(caller, "GetSnapshot", get.replace("read-shared", "no-such-snap")).statusCode(400)
+                .body("__type", equalTo("ResourceNotFoundException"));
+
+        callAs(owner, "DeleteResourcePolicy", "{\"resourceArn\":\"" + sharedArn + "\"}").statusCode(200);
+        callAs(caller, "ListSnapshots", list).statusCode(200).body("snapshots", hasSize(0));
+    }
+
+    @Test
     void resourcePolicyIsIsolatedPerAccount() {
         String accountA = "111122223333";
         String accountB = "444455556666";
