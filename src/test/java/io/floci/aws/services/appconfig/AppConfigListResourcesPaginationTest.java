@@ -38,11 +38,7 @@ class AppConfigListResourcesPaginationTest {
         List<String> environments = new ArrayList<>();
         try {
             for (int i = 0; i < 2; i++) {
-                environments.add(given().header("Authorization", SCOPE)
-                        .contentType(ContentType.JSON)
-                        .body("{\"Name\":\"environment-" + i + "\"}")
-                        .when().post("/applications/" + app + "/environments")
-                        .then().statusCode(201).extract().path("Id"));
+                environments.add(createEnvironment(app, "environment-" + i));
             }
             String path = "/applications/" + app + "/environments";
             String token = assertTwoPages(path, "Id", environments);
@@ -50,9 +46,7 @@ class AppConfigListResourcesPaginationTest {
             assertInvalidToken("/applications/" + otherApp + "/environments", SCOPE, token);
         } finally {
             for (String environment : environments) {
-                given().header("Authorization", SCOPE)
-                        .when().delete("/applications/" + app + "/environments/" + environment)
-                        .then().statusCode(204);
+                deleteEnvironment(app, environment);
             }
             deleteApplication(otherApp);
             deleteApplication(app);
@@ -65,19 +59,13 @@ class AppConfigListResourcesPaginationTest {
         List<String> environments = new ArrayList<>();
         try {
             for (int i = 0; i < 51; i++) {
-                environments.add(given().header("Authorization", SCOPE)
-                        .contentType(ContentType.JSON)
-                        .body("{\"Name\":\"default-environment-" + i + "\"}")
-                        .when().post("/applications/" + app + "/environments")
-                        .then().statusCode(201).extract().path("Id"));
+                environments.add(createEnvironment(app, "default-environment-" + i));
             }
             assertDefaultPageOfFifty("/applications/" + app + "/environments", SCOPE,
                     Set.copyOf(environments));
         } finally {
             for (String environment : environments) {
-                given().header("Authorization", SCOPE)
-                        .when().delete("/applications/" + app + "/environments/" + environment)
-                        .then().statusCode(204);
+                deleteEnvironment(app, environment);
             }
             deleteApplication(app);
         }
@@ -132,13 +120,7 @@ class AppConfigListResourcesPaginationTest {
         try {
             String path = "/applications/" + app + "/configurationprofiles/" + profile
                     + "/hostedconfigurationversions";
-            for (int version = 1; version <= 10; version++) {
-                given().header("Authorization", SCOPE)
-                        .contentType("application/json")
-                        .body("{}")
-                        .when().post(path)
-                        .then().statusCode(201);
-            }
+            createHostedVersions(path, 10);
             PageWalk<Integer> versions = walkPages(path, "VersionNumber", Integer.class, 2, 10);
             assertEquals(IntStream.rangeClosed(1, 10).boxed().toList(), versions.items());
             assertEquals(5, versions.pageCount());
@@ -146,13 +128,7 @@ class AppConfigListResourcesPaginationTest {
             assertInvalidToken("/applications/" + app + "/configurationprofiles/" + otherProfile
                     + "/hostedconfigurationversions", SCOPE, versions.firstToken());
 
-            for (int version = 11; version <= 51; version++) {
-                given().header("Authorization", SCOPE)
-                        .contentType("application/json")
-                        .body("{}")
-                        .when().post(path)
-                        .then().statusCode(201);
-            }
+            createHostedVersions(path, 41);
             Response defaultPage = given().header("Authorization", SCOPE)
                     .when().get(path)
                     .then().statusCode(200).extract().response();
@@ -331,6 +307,30 @@ class AppConfigListResourcesPaginationTest {
                 .body("{\"Name\":\"pagination-" + UUID.randomUUID() + "\"}")
                 .when().post("/applications")
                 .then().statusCode(201).extract().path("Id");
+    }
+
+    private static String createEnvironment(String app, String name) {
+        return given().header("Authorization", SCOPE)
+                .contentType(ContentType.JSON)
+                .body("{\"Name\":\"" + name + "\"}")
+                .when().post("/applications/" + app + "/environments")
+                .then().statusCode(201).extract().path("Id");
+    }
+
+    private static void deleteEnvironment(String app, String environment) {
+        given().header("Authorization", SCOPE)
+                .when().delete("/applications/" + app + "/environments/" + environment)
+                .then().statusCode(204);
+    }
+
+    private static void createHostedVersions(String path, int count) {
+        for (int i = 0; i < count; i++) {
+            given().header("Authorization", SCOPE)
+                    .contentType(ContentType.JSON)
+                    .body("{}")
+                    .when().post(path)
+                    .then().statusCode(201);
+        }
     }
 
     private static String createProfile(String app, String name) {
