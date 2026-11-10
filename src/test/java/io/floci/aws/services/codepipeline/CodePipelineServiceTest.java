@@ -22,6 +22,8 @@ import io.floci.aws.services.s3.model.S3Object;
 import io.floci.aws.testing.ThreadStates;
 import io.smallrye.config.SmallRyeConfigBuilder;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
 
 import java.lang.reflect.InvocationHandler;
 import java.lang.reflect.Method;
@@ -48,6 +50,7 @@ import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyBoolean;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.mock;
@@ -1128,6 +1131,64 @@ class CodePipelineServiceTest {
             waitForExecutionStatus(service, pipeline, first, "Stopped");
             waitForExecutionStatus(service, pipeline, second, "Stopped");
         } finally {
+            service.shutdown();
+        }
+    }
+
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    void workerCompletionCannotBeOverwrittenByStopPublication(boolean abandon) throws Exception {
+        String pipeline = "stop-publication";
+        String executionId = "stopping-execution";
+        CountDownLatch stopPublished = new CountDownLatch(1);
+        CountDownLatch releaseStop = new CountDownLatch(1);
+        AtomicReference<Thread> requester = new AtomicReference<>();
+        AtomicReference<Thread> worker = new AtomicReference<>();
+        try (ExecutorService requests = Executors.newSingleThreadExecutor()) {
+            createExternalActionPipeline(service, pipeline, """
+                    {"name":"Approve","actionTypeId":{
+                    "category":"Approval","owner":"AWS","provider":"Manual","version":"1"}}
+                    """);
+            CodePipelineExecution execution = spy(waitingExecution(storage, pipeline, executionId, 1, null));
+            doAnswer(invocation -> {
+                boolean requested = (boolean) invocation.callRealMethod();
+                if (requested && Thread.currentThread() != requester.get()) {
+                    worker.compareAndSet(null, Thread.currentThread());
+                }
+                return requested;
+            }).when(execution).isStopRequested();
+            doAnswer(invocation -> {
+                invocation.callRealMethod();
+                if ((boolean) invocation.getArgument(0)) {
+                    stopPublished.countDown();
+                    assertTrue(releaseStop.await(5, TimeUnit.SECONDS));
+                }
+                return null;
+            }).when(execution).setStopRequested(anyBoolean());
+            storage.executionStore.putForAccount(ACCOUNT, REGION + ":" + pipeline + ":" + executionId, execution);
+            service.resumePersistedExecutions();
+            await().atMost(Duration.ofSeconds(3)).untilAsserted(() ->
+                    assertFalse(handle("ListActionExecutions", """
+                            {"pipelineName":"%s","filter":{"pipelineExecutionId":"%s"}}
+                            """.formatted(pipeline, executionId)).path("actionExecutionDetails").isEmpty()));
+            Future<?> stopped = requests.submit(() -> {
+                requester.set(Thread.currentThread());
+                stopExecution(service, pipeline, executionId, abandon);
+                return null;
+            });
+            try {
+                assertTrue(stopPublished.await(5, TimeUnit.SECONDS));
+                await().atMost(Duration.ofSeconds(3)).until(() -> worker.get() != null);
+                ThreadStates.awaitBlockedOrDone(worker.get());
+            } finally {
+                releaseStop.countDown();
+            }
+            stopped.get(5, TimeUnit.SECONDS);
+            await().atMost(Duration.ofSeconds(3))
+                    .until(() -> !service.activeRuns.contains(ACCOUNT + ":" + executionId));
+            assertEquals("Stopped", execution.getStatus());
+        } finally {
+            releaseStop.countDown();
             service.shutdown();
         }
     }
