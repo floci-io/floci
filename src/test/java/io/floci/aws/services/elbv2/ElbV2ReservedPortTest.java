@@ -186,7 +186,7 @@ class ElbV2ReservedPortTest {
         listener.setLoadBalancerArn("arn:aws:elasticloadbalancing:us-west-2:000000000000:loadbalancer/app/lb/1");
         listener.setPort(8443);
         listener.setProtocol("HTTPS");
-        listener.setCertificates(List.of(certificateArn));
+        listener.setDefaultCertificate(certificateArn);
         LoadBalancer loadBalancer = new LoadBalancer();
         loadBalancer.setDnsName("tls.example.test");
         when(dataPlane.elbV2Service.getLoadBalancer(region, listener.getLoadBalancerArn())).thenReturn(loadBalancer);
@@ -252,7 +252,7 @@ class ElbV2ReservedPortTest {
             listener.setLoadBalancerArn("arn:aws:elasticloadbalancing:us-west-2:000000000000:loadbalancer/app/" + name + "/1");
             listener.setPort(8443);
             listener.setProtocol("HTTPS");
-            listener.setCertificates(List.of(certificateArn));
+            listener.setDefaultCertificate(certificateArn);
             LoadBalancer loadBalancer = new LoadBalancer();
             loadBalancer.setDnsName(name + ".example.test");
             when(dataPlane.elbV2Service.getLoadBalancer("us-west-2", listener.getLoadBalancerArn()))
