@@ -17,6 +17,7 @@ import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.stream.Stream;
 
@@ -60,22 +61,25 @@ class S3WindowsFileNameKeyTest {
         assertKeysRoundTrip(List.of(
                 "CON",
                 "NUL.txt",
+                "PRN.log",
                 "COM1",
                 "com¹",
                 "NUL/report.json",
                 "LPT²/x",
+                "lpt³.log",
                 "Aux .tar.gz"));
     }
 
-    @Test
-    void aVersionedKeyNamingAWindowsDeviceKeepsEachVersion() {
+    @ParameterizedTest
+    @ValueSource(strings = {"nul", "NUL.txt", "COM¹.log", "LPT²/x", "Aux .tar.gz"})
+    void aVersionedKeyNamingAWindowsDeviceKeepsEachVersion(String key) {
         s3Service.putBucketVersioning("bucket", "Enabled");
-        String firstVersion = s3Service.putObject("bucket", "nul", bytes("first"), "text/plain", Map.of())
+        String firstVersion = s3Service.putObject("bucket", key, bytes("first"), "text/plain", Map.of())
                 .getVersionId();
-        s3Service.putObject("bucket", "nul", bytes("second"), "text/plain", Map.of());
+        s3Service.putObject("bucket", key, bytes("second"), "text/plain", Map.of());
 
-        assertArrayEquals(bytes("second"), s3Service.getObject("bucket", "nul").getData());
-        assertArrayEquals(bytes("first"), s3Service.getObject("bucket", "nul", firstVersion).getData());
+        assertArrayEquals(bytes("second"), s3Service.getObject("bucket", key).getData());
+        assertArrayEquals(bytes("first"), s3Service.getObject("bucket", key, firstVersion).getData());
     }
 
     @Test
@@ -106,6 +110,22 @@ class S3WindowsFileNameKeyTest {
         assertArrayEquals(bytes("trailing dot"), s3Service.getObject("bucket", "dir./file").getData());
     }
 
+    @ParameterizedTest
+    @ValueSource(booleans = {true, false})
+    @EnabledOnOs(OS.WINDOWS)
+    void aRawUppercaseDigestNameCannotOverwriteAnEncodedKey(boolean invalidFirst) {
+        String invalidKey = "x:";
+        String craftedKey = "x_~" + Digests.sha256Hex(invalidKey).toUpperCase(Locale.ROOT);
+        List<String> keys = invalidFirst ? List.of(invalidKey, craftedKey) : List.of(craftedKey, invalidKey);
+        for (String key : keys) {
+            s3Service.putObject("bucket", key, bytes("body of " + key), "text/plain", Map.of());
+        }
+
+        for (String key : keys) {
+            assertArrayEquals(bytes("body of " + key), s3Service.getObject("bucket", key).getData(), key);
+        }
+    }
+
     @Test
     void aLastSegmentEndingInADotOrSpaceKeepsItsUnencodedPath() {
         for (String key : List.of("logs/report.", "logs/report ")) {
@@ -127,19 +147,24 @@ class S3WindowsFileNameKeyTest {
             Files.move(objectFile(key), legacy);
 
             assertArrayEquals(body, s3Service.getObject("bucket", key).getData(), key);
+            assertArrayEquals(body, Files.readAllBytes(objectFile(key)), "copied account-scoped body: " + key);
+            assertArrayEquals(body, Files.readAllBytes(legacy), "preserved legacy body: " + key);
         }
     }
 
-    @Test
-    void aVersionedKeyEndingInADotKeepsItsOwnNullVersion() {
+    @ParameterizedTest
+    @ValueSource(strings = {"logs/report.", "logs/report "})
+    void aVersionedKeyEndingInADotOrSpaceKeepsItsOwnNullVersion(String key) {
         s3Service.putObject("bucket", "logs/report", bytes("plain"), "text/plain", Map.of());
-        s3Service.putObject("bucket", "logs/report.", bytes("trailing dot"), "text/plain", Map.of());
+        s3Service.putObject("bucket", key, bytes("trailing character"), "text/plain", Map.of());
         s3Service.putBucketVersioning("bucket", "Enabled");
         s3Service.putObject("bucket", "logs/report", bytes("plain, versioned"), "text/plain", Map.of());
-        s3Service.putObject("bucket", "logs/report.", bytes("trailing dot, versioned"), "text/plain", Map.of());
+        s3Service.putObject("bucket", key, bytes("trailing character, versioned"), "text/plain", Map.of());
 
         assertArrayEquals(bytes("plain"), s3Service.getObject("bucket", "logs/report", "null").getData());
-        assertArrayEquals(bytes("trailing dot"), s3Service.getObject("bucket", "logs/report.", "null").getData());
+        assertArrayEquals(bytes("trailing character"), s3Service.getObject("bucket", key, "null").getData());
+        assertArrayEquals(bytes("plain, versioned"), s3Service.getObject("bucket", "logs/report").getData());
+        assertArrayEquals(bytes("trailing character, versioned"), s3Service.getObject("bucket", key).getData());
     }
 
     @Test

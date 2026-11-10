@@ -7769,12 +7769,12 @@ public class S3Service implements Resettable, ResourceProvider {
 
     /**
      * Encodes the '/'-separated segments of an object key into names the filesystem can hold.
-     * A segment within its byte budget is kept as written, so every path an earlier Floci could
-     * create is still found; a longer one, one Windows cannot hold when running there, and any
+     * A segment within its byte budget that the filesystem can hold as written is kept, unless
+     * it has the encoded-name shape. A longer one, one Windows cannot hold when running there, and any
      * segment shaped like an encoded one so a crafted short key cannot land on an encoded name,
      * becomes a readable prefix, '~', and the SHA-256 of the whole segment. The digest keeps the
-     * mapping injective: the same key always resolves to one path and two keys never share a
-     * file. Listing reads keys from the object store, never from these names, so the encoding
+     * encoded segments distinct; recognizing the encoded-name shape prevents raw segments from
+     * aliasing them. Listing reads keys from the object store, never from these names, so the encoding
      * never needs reversing. The last segment is stored with {@code lastSegmentSuffix} appended,
      * so the suffix counts toward its byte budget and is part of the name Windows has to hold.
      */
@@ -7857,7 +7857,8 @@ public class S3Service implements Resettable, ResourceProvider {
         }
         for (int i = segment.length() - SHA256_HEX_CHARS; i < segment.length(); i++) {
             char c = segment.charAt(i);
-            if ((c < '0' || c > '9') && (c < 'a' || c > 'f')) {
+            if ((c < '0' || c > '9') && (c < 'a' || c > 'f')
+                    && (!WINDOWS_FILE_NAMES || c < 'A' || c > 'F')) {
                 return false;
             }
         }
@@ -7925,7 +7926,8 @@ public class S3Service implements Resettable, ResourceProvider {
 
     /**
      * Whether the legacy layout, which used the raw key as the path with {@code lastSegmentSuffix}
-     * appended, could have stored {@code key}. On Windows it could not hold a name Windows refuses,
+     * appended, can represent {@code key} without Windows folding or rejecting a component.
+     * On Windows it cannot hold a name Windows refuses,
      * and probing for one would throw, open a device, or find the file of a different key that
      * Windows folds onto the same name.
      */
