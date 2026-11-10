@@ -31,6 +31,12 @@
 `DescribeParameters` includes the stored parameter's `ARN` in each metadata entry, matching
 `GetParameter`. This applies to filtered and paginated results as well.
 
+Retained flat-name parameters from older Floci versions expose canonical
+`parameter/<name>` ARNs on reads without a `PutParameter` overwrite. Normalization
+preserves the ARN's partition, region and account, along with the parameter's value,
+version, tags and history. Refresh cached Terraform outputs or policies that consumed
+the old malformed ARN; malformed policy resources do not grant access to the canonical ARN.
+
 `GetParametersByPath` supports `Type` and `KeyId` entries in `ParameterFilters`, with `Equals`
 (the default) or `BeginsWith`. Values within one filter combine with OR; multiple
 filters combine with AND. Filtering also applies to public AMI parameters and
