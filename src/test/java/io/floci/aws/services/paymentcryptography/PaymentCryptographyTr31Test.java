@@ -3,6 +3,7 @@ package io.floci.aws.services.paymentcryptography;
 import org.junit.jupiter.api.Test;
 
 import java.util.HexFormat;
+import java.util.List;
 
 import static org.junit.jupiter.api.Assertions.assertArrayEquals;
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -165,15 +166,61 @@ class PaymentCryptographyTr31Test {
         // An optional block sits between the header and the cipher text in the clear, and it
         // is authenticated with it, so the cipher text starts after it.
         // The identifier, the length over two characters and the value. The length covers
-        // the whole block, the identifier and the length included.
-        // The identifier, the length over two characters, and the value. The length covers
-        // the whole block, the identifier and the length included.
-        String block = blockWithOptionalBlock("00" + "06" + "61626364");
+        // the whole block, the identifier and the length included, and it is in hexadecimal.
+        String block = blockWithOptionalBlock("00" + "0C" + "61626364");
 
         byte[] key = PaymentCryptographyTr31.unwrap(block,
                 PaymentCryptographyCrypto.fromHex(AES_128_KEK));
 
         assertArrayEquals(PaymentCryptographyCrypto.fromHex(CLEAR_KEY), key);
+    }
+
+    @Test
+    void anOptionalBlockWithALengthInHexadecimalIsRead() {
+        // The length of an optional block is in hexadecimal, so a length of "0E" is fourteen
+        // characters and not a number at all.
+        String block = blockWithOptionalBlock("TT" + "0E" + "0123456789");
+
+        byte[] key = PaymentCryptographyTr31.unwrap(block,
+                PaymentCryptographyCrypto.fromHex(AES_128_KEK));
+
+        assertArrayEquals(PaymentCryptographyCrypto.fromHex(CLEAR_KEY), key);
+    }
+
+    @Test
+    void aBlockIsPaddedSoThatItsOptionalBlocksStayAligned() {
+        // The optional blocks take up a whole number of cipher blocks, so a block whose
+        // optional blocks are not aligned gets a padding block that makes them so. The
+        // optional block here is twenty-four characters and a cipher block is sixteen, so
+        // the padding block carries four characters of filler.
+        String block = PaymentCryptographyTr31.wrap(
+                PaymentCryptographyCrypto.fromHex(CLEAR_KEY),
+                PaymentCryptographyCrypto.fromHex(AES_128_KEK), true,
+                "A", "D0", "B", "E", "00",
+                List.<String[]>of(new String[] {"KS", "00604B120F9292800000"}));
+
+        // The optional block and the padding block between the header and the cipher text.
+        String optional = block.substring(16, 16 + 32);
+        assertEquals("KS1800604B120F9292800000", optional.substring(0, 24),
+                "the optional block was not written as the standard says");
+        assertEquals("PB080000", optional.substring(24), "the padding block was not added");
+        assertEquals(2, Integer.parseInt(block.substring(12, 14)),
+                "the padding block was not counted");
+    }
+
+    @Test
+    void aBlockWhoseOptionalBlocksAreAlignedGetsNoPaddingBlock() {
+        // Optional blocks that already fill whole cipher blocks are left alone, because a
+        // padding block would break the alignment. Twelve characters of data make the
+        // optional block sixteen characters long, which is one cipher block.
+        String block = PaymentCryptographyTr31.wrap(
+                PaymentCryptographyCrypto.fromHex(CLEAR_KEY),
+                PaymentCryptographyCrypto.fromHex(AES_128_KEK), true,
+                "A", "D0", "B", "E", "00",
+                List.<String[]>of(new String[] {"KS", "00604B120F92"}));
+
+        assertEquals(1, Integer.parseInt(block.substring(12, 14)),
+                "a padding block was added to aligned optional blocks");
     }
 
     @Test

@@ -78,6 +78,17 @@
 - **The TR-34 and the AS2805 forms are not made.** A request that asks for one of them is
   refused with the error that says so, rather than answered with something of another kind,
   and the refusal names the forms the service serves.
+- **The block headers a request names:** an export may name the modes of use, the
+  exportability, the version and the optional blocks of the TR-31 block it produces, and
+  the block carries them. An optional block is written with its length in hexadecimal, and
+  the length covers the whole block, the identifier and the length included. The optional
+  blocks take up a whole number of cipher blocks, so a block whose optional blocks are not
+  aligned carries a padding block that fills the rest.
+- **The exportability of a key that comes in:** the exportability of the block says whether
+  the key may leave the service again. An exportable or a sensitive key may, and only a
+  non-exportable one may not.
+- **The certificate of a key:** `GetPublicKeyCertificate` answers with the certificate and
+  its chain, and a certificate the service mints is valid for ninety days.
 - **The import and export parameters:** `GetParametersForImport` answers with the token an
   import quotes back, the wrapping key's certificate and the chain, and the moment the
   parameters expire; `GetParametersForExport` answers with the same for an export, over a

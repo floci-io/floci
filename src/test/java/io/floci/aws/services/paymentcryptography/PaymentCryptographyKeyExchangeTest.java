@@ -4,16 +4,19 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import io.floci.aws.core.common.AwsException;
 import io.floci.aws.core.common.RegionResolver;
 import io.floci.aws.core.storage.InMemoryStorage;
+import io.floci.aws.services.acm.CertificateGenerator;
 import io.floci.aws.services.paymentcryptography.crypto.Certificates;
 import io.floci.aws.services.paymentcryptography.crypto.CertificatesTest;
 import io.floci.aws.services.paymentcryptography.crypto.RsaOaep;
 import io.floci.aws.services.paymentcryptography.model.PaymentCryptographyKey;
+import io.floci.aws.testing.ManualClock;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
 import java.security.KeyPair;
 import java.security.SecureRandom;
 import java.security.cert.X509Certificate;
+import java.time.Duration;
 import java.time.Instant;
 import java.util.HexFormat;
 import java.util.LinkedHashMap;
@@ -138,9 +141,14 @@ class PaymentCryptographyKeyExchangeTest {
         // The header carries the version and the exportability the request asked for.
         assertEquals("01", block.substring(9, 11), "the version of the key");
         assertEquals("S", block.substring(11, 12), "the exportability of the key");
-        // The optional block sits between the header and the cipher text.
-        assertEquals("01", block.substring(12, 14), "the number of optional blocks");
+        // The optional block sits between the header and the cipher text, and its length is
+        // in hexadecimal and covers the whole block, the identifier and the length included.
         assertEquals("AB", block.substring(16, 18), "the optional block's identifier");
+        assertEquals("08", block.substring(18, 20), "the optional block's length");
+        // The optional blocks take up a whole number of cipher blocks, so the block carries a
+        // padding block that fills the rest.
+        assertEquals("02", block.substring(12, 14), "the number of optional blocks");
+        assertEquals("PB080000", block.substring(24, 32), "the padding block");
 
         // And the block still opens, so the optional blocks are authenticated with it.
         PaymentCryptographyKey imported = service.importKey("us-east-1", "Tr31KeyBlock",
@@ -157,8 +165,7 @@ class PaymentCryptographyKeyExchangeTest {
      * nothing and the key would not come back.
      */
     @Test
-    void aKeyThatLeavesUnderACryptogramComesBack() {
-        Map<String, Object> importParameters = service.parametersForImport("KEY_CRYPTOGRAM",
+    void aKeyThatLeavesUnderACryptogramComesBack() {        Map<String, Object> importParameters = service.parametersForImport("KEY_CRYPTOGRAM",
                 "RSA_2048", false);
 
         PaymentCryptographyKey key = createKey("TDES_2KEY", "TR31_D0_SYMMETRIC_DATA_ENCRYPTION_KEY");
@@ -241,6 +248,56 @@ class PaymentCryptographyKeyExchangeTest {
 
         assertEquals(key.getKeyMaterialHex(), imported.getKeyMaterialHex());
         assertEquals(key.getKeyUsage(), imported.getKeyUsage());
+    }
+
+    @Test
+    void aKeyLeavesUnderAKeyTheTwoPartiesAgreedCarriesTheHeadersTheRequestNames() {
+        // The block headers the request names travel with the block under the agreed key,
+        // the same as they do under a key the service holds.
+        SecureRandom random = new SecureRandom();
+        KeyPair authority = PaymentCryptographyKeyPairs.rsa(2048, random);
+        KeyPair counterparty = PaymentCryptographyKeyPairs.ec(
+                PaymentCryptographyKeyAlgorithm.ECC_NIST_P256, random);
+        Certificates.Minted authorityCertificate = CertificatesTest.mint(authority.getPublic(),
+                "floci key-exchange CA", authority.getPrivate(), "floci key-exchange CA");
+        Certificates.Minted counterpartyCertificate = CertificatesTest.mint(counterparty.getPublic(),
+                "floci counterparty", authority.getPrivate(), "floci key-exchange CA");
+
+        PaymentCryptographyKey ca = service.importKey("us-east-1", "TrustedCertificatePublicKey",
+                Map.of("PublicKeyCertificate", authorityCertificate.pem(),
+                        "KeyAttributes", Map.of(
+                                "KeyAlgorithm", "RSA_2048",
+                                "KeyClass", "PUBLIC_KEY",
+                                "KeyUsage", "TR31_S0_ASYMMETRIC_KEY_FOR_DIGITAL_SIGNATURE",
+                                "KeyModesOfUse", Map.of("Verify", Boolean.TRUE))), "", true, Map.of());
+        PaymentCryptographyKey agreement = createKeyPair("ECC_NIST_P256",
+                "TR31_K3_ASYMMETRIC_KEY_FOR_KEY_AGREEMENT");
+        PaymentCryptographyKey key = createKey("AES_128", "TR31_D0_SYMMETRIC_DATA_ENCRYPTION_KEY");
+
+        Map<String, Object> material = new LinkedHashMap<>();
+        material.put("PrivateKeyIdentifier", agreement.getKeyId());
+        material.put("CertificateAuthorityPublicKeyIdentifier", ca.getKeyId());
+        material.put("PublicKeyCertificate", counterpartyCertificate.pem());
+        material.put("DeriveKeyAlgorithm", "AES_128");
+        material.put("KeyDerivationFunction", "ANSI_X963");
+        material.put("KeyDerivationHashAlgorithm", "SHA_256");
+        material.put("DerivationData", Map.of(
+                "SharedInformation", "00112233445566778899AABBCCDDEEFF"));
+        material.put("KeyBlockHeaders", Map.of(
+                "KeyExportability", "SENSITIVE",
+                "KeyVersion", "01",
+                "OptionalBlocks", Map.of("AB", "0011")));
+
+        Map<?, ?> wrapped = (Map<?, ?>) service.exportKey("us-east-1", key.getKeyId(),
+                "DiffieHellmanTr31KeyBlock", material, "", "").get("WrappedKey");
+        String block = (String) wrapped.get("KeyMaterial");
+
+        // The header carries the version and the exportability the request asked for, and
+        // the optional block sits between the header and the cipher text.
+        assertEquals("01", block.substring(9, 11), "the version of the key");
+        assertEquals("S", block.substring(11, 12), "the exportability of the key");
+        assertEquals("AB", block.substring(16, 18), "the optional block's identifier");
+        assertEquals("08", block.substring(18, 20), "the optional block's length");
     }
 
     @Test
@@ -359,17 +416,22 @@ class PaymentCryptographyKeyExchangeTest {
     @Test
     void theExpiredTokensAreSwept() {
         // A token that was issued and never quoted again would otherwise stay for the life
-        // of the process, and it holds a private key.
-        long lifetime = PaymentCryptographyKeyExchange.importTokenTtlMs;
-        try {
-            PaymentCryptographyKeyExchange.importTokenTtlMs = 0;
-            service.parametersForImport("KEY_CRYPTOGRAM", "RSA_2048", false);
-            service.parametersForImport("KEY_CRYPTOGRAM", "RSA_2048", false);
-        } finally {
-            PaymentCryptographyKeyExchange.importTokenTtlMs = lifetime;
-        }
+        // of the process, and it holds a private key. The clock moves past the token's life,
+        // so the token is expired and the next issue sweeps it.
+        ManualClock clock = new ManualClock(Instant.parse("2026-01-01T00:00:00Z"));
+        PaymentCryptographyService timed = new PaymentCryptographyService(
+                new InMemoryStorage<>(),
+                new InMemoryStorage<>(),
+                new RegionResolver("us-east-1", "000000000000"),
+                new SecureRandom(),
+                new PaymentCryptographyRequestContext(),
+                new CertificateGenerator(),
+                clock);
+        timed.parametersForImport("KEY_CRYPTOGRAM", "RSA_2048", false);
+        clock.advance(Duration.ofDays(31));
+        timed.parametersForImport("KEY_CRYPTOGRAM", "RSA_2048", false);
 
-        assertEquals(1, service.issuedTokenCount(),
+        assertEquals(1, timed.issuedTokenCount(),
                 "the token that expired was not swept");
     }
 
@@ -695,6 +757,83 @@ class PaymentCryptographyKeyExchangeTest {
 
         assertTrue(parsed.getNotAfter().toInstant().getEpochSecond() >= validUntil,
                 "the certificate expires before the parameters do");
+    }
+
+    @Test
+    void aSensitiveKeyMayLeaveTheServiceAgain() {
+        // The exportability of a block says whether the key that comes in may leave again.
+        // A sensitive one may: it is only under a trusted key that it may not be worked with.
+        Map<String, Object> material = new LinkedHashMap<>();
+        material.put("WrappingKeyIdentifier", protection.getKeyId());
+        material.put("KeyBlockHeaders", Map.of("KeyExportability", "SENSITIVE"));
+
+        PaymentCryptographyKey key = createKey("AES_128", "TR31_D0_SYMMETRIC_DATA_ENCRYPTION_KEY");
+        Map<?, ?> wrapped = (Map<?, ?>) service.exportKey("us-east-1", key.getKeyId(),
+                "Tr31KeyBlock", material, "", "").get("WrappedKey");
+        String block = (String) wrapped.get("KeyMaterial");
+        assertEquals("S", block.substring(11, 12), "the exportability of the key");
+
+        PaymentCryptographyKey imported = service.importKey("us-east-1", "Tr31KeyBlock",
+                Map.of("WrappingKeyIdentifier", protection.getKeyId(), "WrappedKeyBlock", block),
+                "", true, Map.of());
+
+        assertTrue(imported.isExportable(), "the sensitive key may not leave the service again");
+    }
+
+    @Test
+    void aKeyThatIsNotExportableDoesNotComeBackExportable() {
+        // The exportability of a block says whether the key that comes in may leave again.
+        Map<String, Object> material = new LinkedHashMap<>();
+        material.put("WrappingKeyIdentifier", protection.getKeyId());
+        material.put("KeyBlockHeaders", Map.of("KeyExportability", "NON_EXPORTABLE"));
+
+        PaymentCryptographyKey key = createKey("AES_128", "TR31_D0_SYMMETRIC_DATA_ENCRYPTION_KEY");
+        Map<?, ?> wrapped = (Map<?, ?>) service.exportKey("us-east-1", key.getKeyId(),
+                "Tr31KeyBlock", material, "", "").get("WrappedKey");
+        String block = (String) wrapped.get("KeyMaterial");
+
+        PaymentCryptographyKey imported = service.importKey("us-east-1", "Tr31KeyBlock",
+                Map.of("WrappingKeyIdentifier", protection.getKeyId(), "WrappedKeyBlock", block),
+                "", true, Map.of());
+
+        assertFalse(imported.isExportable(), "the key that may not leave came back exportable");
+    }
+
+    @Test
+    void theModesOfUseTheRequestNamesAreReadTheWayTheKeyHasThem() {
+        // A key encryption key wraps and unwraps rather than encrypting and decrypting, so
+        // the modes the request names for one are read that way too.
+        Map<String, Object> material = new LinkedHashMap<>();
+        material.put("WrappingKeyIdentifier", protection.getKeyId());
+        material.put("KeyBlockHeaders", Map.of(
+                "KeyModesOfUse", Map.of("Wrap", true, "Unwrap", true)));
+
+        PaymentCryptographyKey key = createKey("AES_128", "TR31_K0_KEY_ENCRYPTION_KEY");
+        Map<?, ?> wrapped = (Map<?, ?>) service.exportKey("us-east-1", key.getKeyId(),
+                "Tr31KeyBlock", material, "", "").get("WrappedKey");
+        String block = (String) wrapped.get("KeyMaterial");
+
+        assertEquals("B", block.substring(8, 9), "the mode of use of the key");
+    }
+
+    @Test
+    void theCertificateOfAKeyCarriesItsChain() {
+        // The certificate the service mints is signed by the service, so the chain is the
+        // certificate itself.
+        PaymentCryptographyKey key = createKeyPair("RSA_2048");
+
+        Map<String, Object> answer = service.publicKeyCertificate(key);
+
+        assertNotNull(answer.get("KeyCertificate"), "the certificate is missing");
+        assertNotNull(answer.get("KeyCertificateChain"), "the chain of the certificate is missing");
+        X509Certificate parsed = Certificates.parseCertificate(
+                (String) answer.get("KeyCertificate"));
+        long validity = parsed.getNotAfter().toInstant().getEpochSecond()
+                - parsed.getNotBefore().toInstant().getEpochSecond();
+        // The certificate is good for ninety days, and it starts an hour early so that a
+        // clock a little behind the service's still accepts it.
+        assertEquals(90L * 24 * 3600 + 3600, validity,
+                "the certificate is not valid for ninety days");
     }
 
 }

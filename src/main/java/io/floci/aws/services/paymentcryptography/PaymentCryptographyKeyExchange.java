@@ -87,11 +87,24 @@ final class PaymentCryptographyKeyExchange {
     /** The prefix an export token's name carries, as the model states it. */
     private static final String EXPORT_TOKEN_PREFIX = "export-token-";
 
-    /** How long an export token is good for, in milliseconds. */
-    static long exportTokenTtlMs = 30L * 24 * 3600 * 1000;
+    /**
+     * How long a certificate the service mints is valid, in seconds.
+     *
+     * <p>The reference keeps a certificate for ninety days, so that is how long one the
+     * service mints is good for.
+     */
+    private static final long CERTIFICATE_VALIDITY_SECONDS = 90L * 24 * 3600;
+
+    /**
+     * How long an export token is good for, in milliseconds.
+     *
+     * <p>The model says an import token expires after thirty days, and an export token is
+     * given the same life.
+     */
+    static final long EXPORT_TOKEN_TTL_MS = 30L * 24 * 3600 * 1000;
 
     /** How long an import token is good for, in milliseconds. */
-    static long importTokenTtlMs = 30L * 24 * 3600 * 1000;
+    static final long IMPORT_TOKEN_TTL_MS = 30L * 24 * 3600 * 1000;
 
     /** The RSA moduli the service makes a wrapping key of. */
     private static final Map<String, Integer> RSA_BITS =
@@ -307,12 +320,15 @@ final class PaymentCryptographyKeyExchange {
             throw validation(tooWeak);
         }
 
+        Map<String, Object> headers = object(material, "KeyBlockHeaders");
         String block = PaymentCryptographyTr31.wrap(clear, agreed.derived(),
                 agreed.deriveAlgorithm().aes,
                 PaymentCryptographyService.algorithmByte(key),
                 PaymentCryptographyService.usageCode(key),
-                PaymentCryptographyService.modeCode(key),
-                key.isExportable() ? "E" : "N");
+                modeCode(key, headers),
+                exportabilityCode(key, headers),
+                versionCode(headers),
+                optionalBlocks(headers));
         return new Exported(block, "TR31_KEY_BLOCK", null);
     }
 
@@ -371,7 +387,7 @@ final class PaymentCryptographyKeyExchange {
         }
         String usage = PaymentCryptographyTr31.usageOf(block);
         String mode = PaymentCryptographyTr31.modeOf(block);
-        boolean exportable = "E".equals(PaymentCryptographyTr31.exportabilityOf(block));
+        boolean exportable = exportableOnImport(PaymentCryptographyTr31.exportabilityOf(block));
         String algorithm = PaymentCryptographyService.algorithmOf(block, material2.length);
         // The wrapping key has to be at least as strong as the key it protects, the
         // same rule the export enforces.
@@ -383,6 +399,20 @@ final class PaymentCryptographyKeyExchange {
         return new Imported(algorithm, PaymentCryptographyService.usageName(usage),
                 PaymentCryptographyService.modesFor(mode, PaymentCryptographyService.isKeyEncryptionKey(PaymentCryptographyService.usageName(usage))),
                 exportable, material2, null, null, null, "SYMMETRIC_KEY");
+    }
+
+    /**
+     * Whether a key that comes in under a block may leave the service again.
+     *
+     * <p>The exportability of the block says it: an exportable key may leave, and a
+     * sensitive one may leave under a key that is trusted, so it may leave too. Only the
+     * non-exportable one stays.
+     *
+     * @param exportability the exportability character of the block
+     * @return whether the key may leave the service again
+     */
+    private static boolean exportableOnImport(String exportability) {
+        return !"N".equals(exportability);
     }
 
     /** A key out of an RSA-OAEP cryptogram. */
@@ -546,7 +576,7 @@ final class PaymentCryptographyKeyExchange {
         }
         String usage = PaymentCryptographyTr31.usageOf(block);
         String mode = PaymentCryptographyTr31.modeOf(block);
-        boolean exportable = "E".equals(PaymentCryptographyTr31.exportabilityOf(block));
+        boolean exportable = exportableOnImport(PaymentCryptographyTr31.exportabilityOf(block));
         String algorithm = PaymentCryptographyService.algorithmOf(block, clear.length);
         // The derived key protects the imported one, so it has to be as strong as it.
         int derivedBits = Math.min(
@@ -577,6 +607,10 @@ final class PaymentCryptographyKeyExchange {
      *
      * <p>A key that arrived with a certificate keeps it. A key the service made has none, so
      * it gets a self-signed one over its own public half.
+     *
+     * <p>The certificate the service mints is valid for ninety days, which is how long the
+     * reference keeps one, and it is valid from an hour ago so that a clock a little behind
+     * the service's still accepts it.
      */
     Map<String, Object> publicKeyCertificate(PaymentCryptographyKey key) {
         String pem = key.getKeyCertificatePem();
@@ -588,11 +622,14 @@ final class PaymentCryptographyKeyExchange {
             }
             pem = mintSelfSigned(new KeyPair(publicKey, privateKey), "floci",
                     clock.instant().minusSeconds(3600),
-                    clock.instant().plusSeconds(31536000L)).pem();
+                    clock.instant().plusSeconds(CERTIFICATE_VALIDITY_SECONDS)).pem();
         }
         Map<String, Object> out = new LinkedHashMap<>();
         // The reference names the member KeyCertificate.
         out.put("KeyCertificate", Certificates.pemBase64(pem));
+        // The certificate is its own chain: the service signs with a certificate of its own,
+        // so there is no authority above it to name.
+        out.put("KeyCertificateChain", Certificates.pemBase64(pem));
         return out;
     }
 
@@ -777,7 +814,7 @@ final class PaymentCryptographyKeyExchange {
      * @param materialType the kind of material the token must have been issued for
      * @return the parameter, or null when the token is not one
      */
-    private static Issued take(Map<String, Issued> tokens, String token, String materialType) {
+    private Issued take(Map<String, Issued> tokens, String token, String materialType) {
         if (token == null || token.isEmpty()) {
             return null;
         }
@@ -785,7 +822,7 @@ final class PaymentCryptographyKeyExchange {
         if (issued == null || !issued.materialType.equals(materialType)) {
             return null;
         }
-        if (issued.validUntilMs < System.currentTimeMillis()) {
+        if (issued.validUntilMs < clock.millis()) {
             tokens.remove(token);
             return null;
         }
@@ -895,7 +932,10 @@ final class PaymentCryptographyKeyExchange {
         }
         Map<String, Boolean> modes = new LinkedHashMap<>();
         declared.forEach((name, value) -> modes.put(name, Boolean.TRUE.equals(value)));
-        return PaymentCryptographyService.modeCode(modes);
+        // The modes the request names are read the way the key's own are: a key encryption
+        // key wraps and unwraps rather than encrypting and decrypting.
+        return PaymentCryptographyService.modeCode(modes,
+                PaymentCryptographyService.isKeyEncryptionKey(key.getKeyUsage()));
     }
 
     /** The version of the key the block carries. */
@@ -955,9 +995,9 @@ final class PaymentCryptographyKeyExchange {
         // certificate that has expired.
         Certificates.Minted certificate = mintSelfSigned(pair, "floci key-import KRD",
                 Instant.ofEpochMilli(now).minus(1, ChronoUnit.HOURS),
-                Instant.ofEpochMilli(now).plus(importTokenTtlMs, ChronoUnit.MILLIS));
+                Instant.ofEpochMilli(now).plus(IMPORT_TOKEN_TTL_MS, ChronoUnit.MILLIS));
         Issued issued = new Issued(token(IMPORT_TOKEN_PREFIX), pair.getPrivate(), certificate.der(),
-                wrappingAlgorithm, materialType, now + importTokenTtlMs);
+                wrappingAlgorithm, materialType, now + IMPORT_TOKEN_TTL_MS);
         sweep(importTokens, now);
         importTokens.put(issued.token, issued);
         lastImportParameters.put(last, issued);
@@ -1012,9 +1052,9 @@ final class PaymentCryptographyKeyExchange {
         // certificate that has expired.
         Certificates.Minted certificate = mintSelfSigned(pair, "floci key-export KRD",
                 Instant.ofEpochMilli(now).minus(1, ChronoUnit.HOURS),
-                Instant.ofEpochMilli(now).plus(exportTokenTtlMs, ChronoUnit.MILLIS));
+                Instant.ofEpochMilli(now).plus(EXPORT_TOKEN_TTL_MS, ChronoUnit.MILLIS));
         Issued issued = new Issued(token(EXPORT_TOKEN_PREFIX), pair.getPrivate(), certificate.der(),
-                algorithm, materialType, now + exportTokenTtlMs);
+                algorithm, materialType, now + EXPORT_TOKEN_TTL_MS);
         sweep(exportTokens, now);
         exportTokens.put(issued.token, issued);
         lastExportParameters.put(last, issued);

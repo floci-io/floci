@@ -732,7 +732,6 @@ public class PaymentCryptographyService implements Resettable, StoredResourceArn
      */
     private static final Map<String, String> USAGE_NAMES = Map.ofEntries(
             Map.entry("B0", "TR31_B0_BASE_DERIVATION_KEY"),
-            Map.entry("B1", "TR31_B1_INITIAL_DERIVATION_KEY"),
             Map.entry("C0", "TR31_C0_CARD_VERIFICATION_KEY"),
             Map.entry("D0", "TR31_D0_SYMMETRIC_DATA_ENCRYPTION_KEY"),
             Map.entry("E0", "TR31_E0_EMV_MKEY_APP_CRYPTOGRAMS"),
@@ -755,18 +754,31 @@ public class PaymentCryptographyService implements Resettable, StoredResourceArn
             Map.entry("S0", "TR31_S0_ASYMMETRIC_KEY_FOR_DIGITAL_SIGNATURE"));
 
     /**
+     * The usage name of the key an initial derivation key has.
+     *
+     * <p>The standard gives an initial derivation key the usage code B1, and the key the
+     * service derives carries that code in the block it is exported in. The name is the
+     * service's own marker for such a key: the API has no usage name for it, because a key
+     * with that usage never lives in the service.
+     */
+    static final String INITIAL_DERIVATION_KEY_USAGE = "TR31_B1_INITIAL_DERIVATION_KEY";
+
+    /** The TR-31 usage code of an initial derivation key. */
+    static final String INITIAL_DERIVATION_KEY_CODE = "B1";
+
+    /**
      * Whether a key is the one derived from a base derivation key.
      *
      * <p>It is an initial derivation key, and the standard gives it the usage code B1.
      */
     static boolean isInitialDerivationKey(PaymentCryptographyKey key) {
-        return "TR31_B1_INITIAL_DERIVATION_KEY".equals(key.getKeyUsage());
+        return INITIAL_DERIVATION_KEY_USAGE.equals(key.getKeyUsage());
     }
 
     /** The TR-31 usage code of a key, which the initial derivation key has of its own. */
     static String usageCode(PaymentCryptographyKey key) {
         if (isInitialDerivationKey(key)) {
-            return "B1";
+            return INITIAL_DERIVATION_KEY_CODE;
         }
         return usageCode(key.getKeyUsage());
     }
@@ -862,50 +874,18 @@ public class PaymentCryptographyService implements Resettable, StoredResourceArn
     }
 
     /**
-     * The mode of use character a key block carries.
+     * The mode of use character a set of modes gives.
      *
-     * <p>The character is read off the key's own modes, because that is what it says: a key
-     * that encrypts and decrypts is a {@code B}, one that only encrypts is an {@code E}. A key
-     * encryption key wraps and unwraps rather than encrypts and decrypts, so its modes are read
-     * that way.
+     * <p>The character is read off the modes, because that is what it says: a key that
+     * encrypts and decrypts is a {@code B}, one that only encrypts is an {@code E}. A key
+     * encryption key wraps and unwraps rather than encrypts and decrypts, so its modes are
+     * read that way.
      *
-     * @param key the key the block carries
+     * @param modes the modes of the key
+     * @param isKek whether the key is a key encryption key, whose modes are wrap and unwrap
      * @return the character
      */
-    /** The mode of use a set of modes gives, for the block headers a request names. */
-    static String modeCode(Map<String, Boolean> modes) {
-        boolean encrypt = enabled(modes, "Encrypt");
-        boolean decrypt = enabled(modes, "Decrypt");
-        boolean generate = enabled(modes, "Generate");
-        boolean verify = enabled(modes, "Verify");
-        boolean derive = enabled(modes, "DeriveKey");
-        if (encrypt && decrypt) {
-            return "B";
-        }
-        if (encrypt) {
-            return "E";
-        }
-        if (decrypt) {
-            return "D";
-        }
-        if (generate && verify) {
-            return "C";
-        }
-        if (generate) {
-            return "G";
-        }
-        if (verify) {
-            return "V";
-        }
-        if (derive) {
-            return "X";
-        }
-        return "N";
-    }
-
-    static String modeCode(PaymentCryptographyKey key) {
-        Map<String, Boolean> modes = key.getKeyModesOfUse();
-        boolean isKek = isKeyEncryptionKey(key.getKeyUsage());
+    static String modeCode(Map<String, Boolean> modes, boolean isKek) {
         boolean encrypt = isKek
                 ? enabled(modes, "Wrap") || enabled(modes, "Encrypt")
                 : enabled(modes, "Encrypt");
@@ -937,6 +917,18 @@ public class PaymentCryptographyService implements Resettable, StoredResourceArn
             return "X";
         }
         return "N";
+    }
+
+    /**
+     * The mode of use character a key block carries.
+     *
+     * <p>The character is read off the key's own modes, because that is what it says.
+     *
+     * @param key the key the block carries
+     * @return the character
+     */
+    static String modeCode(PaymentCryptographyKey key) {
+        return modeCode(key.getKeyModesOfUse(), isKeyEncryptionKey(key.getKeyUsage()));
     }
 
     /** Whether a mode of use is on. A key with no modes at all has every one of them. */

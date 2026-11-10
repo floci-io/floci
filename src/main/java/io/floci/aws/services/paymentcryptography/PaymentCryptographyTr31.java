@@ -74,11 +74,14 @@ final class PaymentCryptographyTr31 {
                        String version, List<String[]> optionalBlocks) {
         String type = protectionAes ? "D" : "B";
         byte[] lengthEncoded = lengthEncode(clearKey, protectionAes ? 16 : 8);
-        String optional = optionalBlocks(optionalBlocks);
+        // The optional blocks are padded so that the header keeps the block alignment the
+        // standard asks for, and the padding block is one of them.
+        List<String[]> padded = withPadding(optionalBlocks, protectionAes ? 16 : 8);
+        String optional = optionalBlocks(padded);
         int blockLength = HEADER_LENGTH + optional.length() + lengthEncoded.length * 2
                 + macLength(protectionAes);
         String header = header16(type, usage, mode, exportability, blockLength, algorithm, version,
-                optionalBlocks.size());
+                padded.size());
 
         byte[][] derived = deriveKeys(protectionKey, protectionAes);
         byte[] encryptionKey = derived[0];
@@ -91,6 +94,37 @@ final class PaymentCryptographyTr31 {
                 ? PaymentCryptographyCrypto.aesCbcEncrypt(encryptionKey, mac, lengthEncoded)
                 : Ciphers.tdesCbcEncrypt(lengthEncoded, Ciphers.widenTdesKey(encryptionKey), mac);
         return header + optional + hexUpper(cipherText) + hexUpper(mac);
+    }
+
+    /**
+     * The optional blocks of a header, with the padding block that keeps them aligned.
+     *
+     * <p>The standard requires the optional blocks to take up a whole number of cipher
+     * blocks, so a header that carries them and is not aligned gets a padding block whose
+     * length is the smallest that aligns it. A header whose optional blocks are already
+     * aligned gets no padding block at all, because one would break the alignment.
+     *
+     * @param blocks the optional blocks the caller asked for
+     * @param blockSize the cipher block size in characters
+     * @return the blocks, with the padding block appended when one is needed
+     */
+    private static List<String[]> withPadding(List<String[]> blocks, int blockSize) {
+        int total = 0;
+        for (String[] block : blocks) {
+            total += block[0].length() + 2 + block[1].length();
+        }
+        if (total % blockSize == 0) {
+            return blocks;
+        }
+        // The padding block spends four characters on its identifier and its length, and
+        // the rest of the space is what it carries.
+        int padding = blockSize - ((total + 4) % blockSize);
+        if (padding == blockSize) {
+            padding = 0;
+        }
+        List<String[]> padded = new ArrayList<>(blocks);
+        padded.add(new String[] {"PB", "0".repeat(padding)});
+        return padded;
     }
 
     /**
@@ -156,9 +190,8 @@ final class PaymentCryptographyTr31 {
      * The optional blocks a key block carries, as the characters of the key block.
      *
      * <p>An optional block is its identifier over two characters, its length over two, and
-     * then its value. The length covers the whole block, the identifier and the length
-     * included, and it counts the bytes the block takes, which are twice the characters it
-     * holds.
+     * then its value. The length covers the whole block in characters, the identifier and the
+     * length included, and it is written in hexadecimal.
      *
      * @param blocks the optional blocks, each its identifier and its value
      * @return the optional blocks, as the characters of the key block
@@ -168,10 +201,8 @@ final class PaymentCryptographyTr31 {
         for (String[] block : blocks) {
             String id = block[0];
             String value = block[1];
-            // The length covers the identifier and the length as well as the value, and it
-            // counts the bytes the block takes.
-            int bytes = 2 + (value.length() + 1) / 2;
-            out.append(id).append(pad2(bytes)).append(value);
+            // The length covers the whole block, the identifier and the length included.
+            out.append(id).append(hex2(4 + value.length())).append(value);
         }
         return out.toString();
     }
@@ -180,9 +211,9 @@ final class PaymentCryptographyTr31 {
      * How many characters the block's optional blocks take.
      *
      * <p>An optional block is its identifier over two characters, its length over two, and
-     * then its value. The length covers the whole block, the identifier and the length
-     * included, and it counts the bytes the block takes, which are twice the characters it
-     * holds. The header says how many of them there are.
+     * then its value. The length covers the whole block in characters, the identifier and the
+     * length included, and it is written in hexadecimal. The header says how many of them
+     * there are.
      *
      * @param header the block's header
      * @param block the whole block
@@ -192,50 +223,47 @@ final class PaymentCryptographyTr31 {
         int count = parseInt(header.substring(12, 14), "the number of optional blocks");
         int length = 0;
         for (int i = 0; i < count; i++) {
-            int at = HEADER_LENGTH + length;
-            if (block.length() < at + 4) {
-                throw new IllegalArgumentException("the key block says it has " + count
-                        + " optional blocks, and it is too short to hold them");
-            }
-            length += 2 * parseInt(block.substring(at + 2, at + 4),
-                    "the length of an optional block");
+            length += optionalBlockLength(block, HEADER_LENGTH + length);
         }
         return length;
     }
 
     /**
-     * The optional blocks a key block carries, as the header and the value of each.
+     * How many characters the optional block at a place takes.
      *
-     * <p>An optional block is its identifier over two characters, its length over two, and
-     * then its value. The length covers the whole block, the identifier and the length
-     * included, and it counts the bytes the block takes, which are twice the characters it
-     * holds. The header says how many of them there are.
+     * <p>The length field says how long the whole block is, the identifier and the length
+     * included. A block longer than a length field can hold says so with a zero length, and
+     * then the number of characters the length itself takes follows, and the length after
+     * that.
      *
-     * @param header the block's header
      * @param block the whole block
-     * @return the optional blocks, in the order they appear
+     * @param at where the optional block starts
+     * @return the length of the optional block, in characters
      */
-    static List<String[]> optionalBlocks(String header, String block) {
-        int count = parseInt(header.substring(12, 14), "the number of optional blocks");
-        List<String[]> blocks = new ArrayList<>();
-        int length = 0;
-        for (int i = 0; i < count; i++) {
-            int at = HEADER_LENGTH + length;
-            if (block.length() < at + 4) {
-                throw new IllegalArgumentException("the key block says it has " + count
-                        + " optional blocks, and it is too short to hold them");
-            }
-            String id = block.substring(at, at + 2);
-            int bytes = parseInt(block.substring(at + 2, at + 4), "the length of an optional block");
-            int value = Math.max(0, bytes - 2) * 2;
-            if (block.length() < at + 4 + value) {
-                throw new IllegalArgumentException("the key block says it has " + count
-                        + " optional blocks, and it is too short to hold them");
-            }
-            blocks.add(new String[] {id, block.substring(at + 4, at + 4 + value)});
-            length += 2 * bytes;
+    private static int optionalBlockLength(String block, int at) {
+        if (block.length() < at + 4) {
+            throw new IllegalArgumentException("the key block says it has optional blocks, and it "
+                    + "is too short to hold them");
         }
-        return blocks;
+        int length = parseInt(block.substring(at + 2, at + 4),
+                "the length of an optional block", 16);
+        if (length != 0) {
+            return length;
+        }
+        // The length did not fit in its field, so the field says so and the length follows
+        // the number of characters it takes.
+        if (block.length() < at + 8) {
+            throw new IllegalArgumentException("the key block says it has optional blocks, and it "
+                    + "is too short to hold them");
+        }
+        int digits = parseInt(block.substring(at + 4, at + 6),
+                "the length of the length of an optional block", 16);
+        if (digits == 0 || block.length() < at + 6 + digits) {
+            throw new IllegalArgumentException("the key block says it has optional blocks, and it "
+                    + "is too short to hold them");
+        }
+        return parseInt(block.substring(at + 6, at + 6 + digits),
+                "the length of an optional block", 16);
     }
 
     /** The usage code of a block's header, such as {@code D0}. */
@@ -289,39 +317,6 @@ final class PaymentCryptographyTr31 {
             throw new IllegalArgumentException("the key block header must be 16 characters");
         }
         return header;
-    }
-
-    /**
-     * The 16-character header of a block, for a block the service writes itself.
-     *
-     * <p>A TR-34 block carries a TR-31 header in the clear, and the header has to be written
-     * the same way a TR-31 block's is.
-     *
-     * @param type the block type, {@code B} for TDEA and {@code D} for AES
-     * @param usage the two characters of the usage code
-     * @param mode the mode of use character
-     * @param exportability the exportability character
-     * @param blockLength the length of the whole block, in characters
-     * @param algorithm the algorithm of the key the block carries, {@code A} or {@code T}
-     * @return the header, sixteen characters
-     */
-    /**
-     * The length of a whole block, in characters.
-     *
-     * <p>The header's length field counts the header, the length encoded key and the MAC,
-     * so the key's own length is not what it says.
-     *
-     * @param type the block type, {@code B} for TDEA and {@code D} for AES
-     * @param clearKey the key the block carries
-     * @return the length of the block, in characters
-     */
-    static int blockLength(String type, byte[] clearKey) {
-        boolean aes = "D".equals(type);
-        int blockSize = aes ? 16 : 8;
-        int macHexChars = aes ? 32 : 16;
-        int lengthEncoded = 2 + clearKey.length;
-        int padding = (blockSize - (lengthEncoded % blockSize)) % blockSize;
-        return 16 + (lengthEncoded + padding) * 2 + macHexChars;
     }
 
     /** The algorithm the header of a block names for the key it carries. */
@@ -553,6 +548,20 @@ final class PaymentCryptographyTr31 {
         String text = Integer.toString(value);
         if (text.length() > 2) {
             throw new IllegalArgumentException("the count does not fit in two characters: " + value);
+        }
+        return "00".substring(0, 2 - text.length()) + text;
+    }
+
+    /**
+     * A number of two characters, in the hexadecimal the optional blocks write their length in.
+     *
+     * @param value the number
+     * @return the number, in upper-case hexadecimal
+     */
+    private static String hex2(int value) {
+        String text = Integer.toString(value, 16).toUpperCase(Locale.ROOT);
+        if (text.length() > 2) {
+            throw new IllegalArgumentException("the length does not fit in two characters: " + value);
         }
         return "00".substring(0, 2 - text.length()) + text;
     }
