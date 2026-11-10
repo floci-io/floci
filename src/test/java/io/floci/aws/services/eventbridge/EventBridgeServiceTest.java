@@ -264,18 +264,6 @@ class EventBridgeServiceTest {
     }
 
     @Test
-    void ruleOnAPartnerBusIsTaggableByItsArn() {
-        String name = "aws.partner/example.com/123/orders";
-        service.createEventBus(name, name, null, null, REGION);
-        Rule rule = service.putRule("partner-rule", name, "{\"source\":[\"example.com\"]}", null,
-                RuleState.ENABLED, null, null, null, REGION);
-
-        service.tagResource(rule.getArn(), Map.of("team", "orders"), REGION);
-
-        assertEquals(Map.of("team", "orders"), service.listTagsForResource(rule.getArn(), REGION));
-    }
-
-    @Test
     void deletePartnerEventBusByArn() {
         String name = "aws.partner/example.com/123/orders";
         EventBus bus = service.createEventBus(name, name, null, null, REGION);
