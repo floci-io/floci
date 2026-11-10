@@ -2,6 +2,8 @@ package io.floci.aws.services.ec2;
 
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.node.ArrayNode;
+import com.fasterxml.jackson.databind.node.JsonNodeFactory;
 import io.floci.aws.config.EmulatorConfig;
 import io.floci.aws.core.common.AvailabilityZoneIds;
 import io.floci.aws.core.common.AwsArnUtils;
@@ -11,6 +13,7 @@ import io.floci.aws.core.common.AwsPartitions;
 import io.floci.aws.core.common.AwsRegions;
 import io.floci.aws.core.common.CidrCanonicalizer;
 import io.floci.aws.core.common.ContainerTeardown;
+import io.floci.aws.core.common.Digests;
 import io.floci.aws.core.common.PaginatedResult;
 import io.floci.aws.core.common.Pagination;
 import io.floci.aws.core.common.RequestContext;
@@ -13852,15 +13855,21 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
                 .collect(Collectors.toList());
     }
 
-    public List<Map<String, String>> describeInstanceTypeOfferings(String region, List<String> instanceTypeNames,
+    public PaginatedResult<Map<String, String>> describeInstanceTypeOfferings(String region, List<String> instanceTypeNames,
                                                                    String locationType,
-                                                                   Map<String, List<String>> filters) {
-        return describeInstanceTypeOfferings(region, instanceTypeNames, locationType, filterList(filters));
+                                                                   Map<String, List<String>> filters,
+                                                                   Integer maxResults, String nextToken) {
+        return describeInstanceTypeOfferings(region, instanceTypeNames, locationType, filterList(filters),
+                maxResults, nextToken);
     }
 
-    List<Map<String, String>> describeInstanceTypeOfferings(String region, List<String> instanceTypeNames,
+    PaginatedResult<Map<String, String>> describeInstanceTypeOfferings(String region, List<String> instanceTypeNames,
                                                             String locationType,
-                                                            List<Map.Entry<String, List<String>>> filters) {
+                                                            List<Map.Entry<String, List<String>>> filters,
+                                                            Integer maxResults, String nextToken) {
+        if (maxResults != null && (maxResults < 5 || maxResults > 1000)) {
+            throw new AwsException("InvalidMaxResults", "MaxResults must be between 5 and 1000", 400);
+        }
         // The first instance-type filter names the types to look up beside InstanceType.N, as a
         // lone one always has, or the whole catalog when one of its values holds a * or ?
         // wildcard. Every filter must then match a looked-up type, so the answer is InstanceType.N
@@ -13905,7 +13914,31 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
                 offerings.add(offering);
             }
         }
-        return offerings;
+        ArrayNode scope = JsonNodeFactory.instance.arrayNode().add(region).add(effectiveLocationType);
+        ArrayNode names = scope.addArray();
+        for (String name : instanceTypeNames) {
+            names.add(name);
+        }
+        ArrayNode filterScope = scope.addArray();
+        if (filters != null) {
+            for (Map.Entry<String, List<String>> filter : filters) {
+                ArrayNode entry = filterScope.addArray().add(filter.getKey());
+                ArrayNode values = entry.addArray();
+                for (String value : filter.getValue()) {
+                    values.add(value);
+                }
+            }
+        }
+        String namespace = "ec2-instance-type-offerings:" + Digests.sha256Hex(scope.toString());
+        return Pagination.paginate(offerings,
+                offering -> offering.get("instanceType") + ":" + offering.get("locationType")
+                        + ":" + offering.get("location"),
+                maxResults == null ? Integer.MAX_VALUE : maxResults, nextToken, namespace,
+                token -> Pagination.tokenStartsWith(token, "ec2-instance-type-offerings:")
+                        ? new AwsException("InvalidPaginationToken.DataMismatch",
+                                "The supplied request parameters do not match the the original request parameters "
+                                        + "that are being paginated over.", 400)
+                        : new AwsException("InvalidParameterValue", "Invalid NextToken", 400));
     }
 
     // ─── Filter matching ───────────────────────────────────────────────────────
