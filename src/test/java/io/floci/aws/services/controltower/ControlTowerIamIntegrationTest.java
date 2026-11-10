@@ -14,11 +14,13 @@ import software.amazon.awssdk.services.controltower.model.ControlTowerException;
 import software.amazon.awssdk.services.controltower.model.ListLandingZonesRequest;
 
 import java.net.URI;
+import java.net.URLEncoder;
 import java.nio.charset.StandardCharsets;
 import java.util.Map;
 import java.util.UUID;
 
 import static io.restassured.RestAssured.given;
+import static org.hamcrest.Matchers.containsString;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertThrows;
@@ -171,14 +173,48 @@ class ControlTowerIamIntegrationTest {
             String arn = admin.listLandingZones(ListLandingZonesRequest.builder().build()).landingZones().getFirst().arn();
             try (SignedIamUsers.User user = user("Allow", "controltower:TagResource", arn)) {
                 String body = "{\"resourceArn\":\"" + arn + "\",\"tags\":{\"bare\":\"yes\"}}";
-                URI target = endpoint.resolve("/tags");
+                URI target = endpoint.resolve("/tags?resourceArn="
+                        + URLEncoder.encode(arn + "-foreign", StandardCharsets.UTF_8));
                 try {
-                    given().headers(user.signer("controltower").headersFor("POST", target, Map.of(),
+                    given().urlEncodingEnabled(false).headers(user.signer("controltower").headersFor("POST", target, Map.of(),
                                     body.getBytes(StandardCharsets.UTF_8)))
                             .contentType("application/json").body(body).post(target).then().statusCode(200);
                     assertEquals("yes", admin.listTagsForResource(r -> r.resourceArn(arn)).tags().get("bare"));
                 } finally {
                     admin.untagResource(r -> r.resourceArn(arn).tagKeys("bare"));
+                }
+            }
+        }
+    }
+
+    @Test
+    void bareTagQueryRoutesIgnoreBodyAndRequireScopedQueryResource() throws Exception {
+        try (ControlTowerClient admin = client("test", "test")) {
+            String arn = admin.listLandingZones(ListLandingZonesRequest.builder().build()).landingZones().getFirst().arn();
+            try (SignedIamUsers.User user = user("Allow", "controltower:*", arn)) {
+                String body = "{\"resourceArn\":\"" + arn + "\"}";
+                URI permitted = endpoint.resolve("/tags/?resourceArn=" + URLEncoder.encode(arn, StandardCharsets.UTF_8)
+                        + "&tagKeys=bare-query");
+                URI foreign = endpoint.resolve("/tags?resourceArn="
+                        + URLEncoder.encode(arn + "-foreign", StandardCharsets.UTF_8) + "&tagKeys=bare-query");
+                admin.tagResource(r -> r.resourceArn(arn).tags(Map.of("bare-query", "retained")));
+                try {
+                    for (String method : new String[]{"GET", "DELETE"}) {
+                        for (URI denied : new URI[]{foreign, endpoint.resolve("/tags")}) {
+                            given().urlEncodingEnabled(false).headers(user.signer("controltower").headersFor(method, denied, Map.of(),
+                                            body.getBytes(StandardCharsets.UTF_8)))
+                                    .contentType("application/json").body(body).request(method, denied)
+                                    .then().statusCode(403).body(containsString("not authorized to perform: controltower:"));
+                        }
+                    }
+                    assertEquals("retained", admin.listTagsForResource(r -> r.resourceArn(arn)).tags().get("bare-query"));
+                    for (String method : new String[]{"GET", "DELETE"}) {
+                        given().urlEncodingEnabled(false).headers(user.signer("controltower").headersFor(method, permitted, Map.of(), new byte[0]))
+                                .request(method, permitted).then().statusCode(200);
+                    }
+                    assertFalse(admin.listTagsForResource(r -> r.resourceArn(arn)).tags().containsKey("bare-query"));
+                } finally {
+                    admin.untagResource(r -> r.resourceArn(arn).tagKeys("bare-query"));
                 }
             }
         }

@@ -12,7 +12,9 @@ request on each route and compares the action the registry gives with that one.
 The credential scopes in `HAND_ROUTED` are authorized by the registry's rules alone, each for its
 reason, and their routes are vendored for the coverage test only. Within any other scope, two
 operations on one route would leave a request matching it no single operation, so the generation
-fails on them.
+fails on them. Supported shared-controller alternatives are generated beside the modeled URI, with
+member-location overrides for the bare route. These alternatives describe existing Floci compatibility
+paths, not additional botocore operations.
 
 The models are botocore's `<model>/<apiVersion>/service-2.json` (Apache-2.0,
 https://github.com/boto/botocore), the latest API version of each, located as
@@ -136,7 +138,13 @@ def build(models: dict[str, dict], provenance: str) -> dict:
                 # A label holding an ARN spans the slashes the ARN holds, which the rewritten path
                 # holds as they are.
                 request_uri = re.sub(r"\{([^}]+)\}", r"{\1+}", request_uri)
-            operations[operation] = {"method": http["method"], "requestUri": request_uri}
+            route = {"method": http["method"], "requestUri": request_uri}
+            if operation in shared:
+                # SharedTagsController also serves the bare path, reading POST's body and
+                # GET/DELETE's query. Keep that compatibility route and its member source together.
+                route["alternatives"] = [{"requestUri": "/tags", "located": {
+                    "resourceArn": "body" if http["method"] == "POST" else "?resourceArn"}}]
+            operations[operation] = route
         routes[name] = {
             "credentialScope": MODELS[name],
             "apiVersion": model["metadata"]["apiVersion"],
@@ -178,8 +186,9 @@ def shared_routes(routes: dict[str, dict]) -> list[str]:
         if model["credentialScope"] in HAND_ROUTED:
             continue
         for operation, route in model["operations"].items():
-            key = (model["credentialScope"],) + route_key(route["method"], route["requestUri"])
-            named.setdefault(key, set()).add(operation)
+            for variant in [route, *route.get("alternatives", [])]:
+                key = (model["credentialScope"],) + route_key(route["method"], variant["requestUri"])
+                named.setdefault(key, set()).add(operation)
     return [f"{key[0]} {key[1]} {'/'.join(key[2])}: {', '.join(sorted(operations))}"
             for key, operations in sorted(named.items()) if len(operations) > 1]
 

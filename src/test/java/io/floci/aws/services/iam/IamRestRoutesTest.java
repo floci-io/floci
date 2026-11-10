@@ -44,6 +44,32 @@ class IamRestRoutesTest {
                }}
              }}""";
 
+    @ParameterizedTest
+    @ValueSource(strings = {"controltower", "signer"})
+    void sharedTagAlternativesCarryMemberLocations(String scope) {
+        IamRestRoutes vendored = IamRestRoutes.vendored();
+        Map<String, String> operations = Map.of("POST", "TagResource", "GET", "ListTagsForResource",
+                "DELETE", "UntagResource");
+        operations.forEach((method, operation) -> {
+            IamRestRoutes.Match bare = vendored.match(scope, method, "/tags/", null).orElseThrow();
+            assertEquals(operation, bare.operation());
+            assertEquals(Map.of(), bare.labels());
+            assertEquals(Map.of("resourceArn", "POST".equals(method) ? "body" : "?resourceArn"), bare.located());
+            IamRestRoutes.Match path = vendored.match(scope, method, "/tags/arn%3Aresource%2Fitem", null).orElseThrow();
+            assertEquals(operation, path.operation());
+            assertEquals(Map.of("resourceArn", "arn:resource/item"), path.labels());
+            assertEquals(Map.of(), path.located());
+        });
+    }
+
+    @Test
+    void malformedAlternativeMemberSourceIsRejected() {
+        String alternative = ROUTES.replace("\"requestUri\": \"/things/\"",
+                "\"requestUri\": \"/things/\", \"alternatives\": [{\"requestUri\": \"/other\", "
+                        + "\"located\": {\"member\": \"header\"}}]");
+        assertThrows(IllegalStateException.class, () -> routes(alternative));
+    }
+
     private final IamRestRoutes routes = routes(ROUTES);
 
     @Test

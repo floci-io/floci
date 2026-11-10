@@ -315,12 +315,12 @@
         "ListEnabledControls": {"method": "POST", "requestUri": "/list-enabled-controls"},
         "ListLandingZoneOperations": {"method": "POST", "requestUri": "/list-landingzone-operations"},
         "ListLandingZones": {"method": "POST", "requestUri": "/list-landingzones"},
-        "ListTagsForResource": {"method": "GET", "requestUri": "/tags/{resourceArn+}"},
+        "ListTagsForResource": {"method": "GET", "requestUri": "/tags/{resourceArn+}", "alternatives": [{"requestUri": "/tags", "located": {"resourceArn": "?resourceArn"}}]},
         "ResetEnabledBaseline": {"method": "POST", "requestUri": "/reset-enabled-baseline"},
         "ResetEnabledControl": {"method": "POST", "requestUri": "/reset-enabled-control"},
         "ResetLandingZone": {"method": "POST", "requestUri": "/reset-landingzone"},
-        "TagResource": {"method": "POST", "requestUri": "/tags/{resourceArn+}"},
-        "UntagResource": {"method": "DELETE", "requestUri": "/tags/{resourceArn+}"},
+        "TagResource": {"method": "POST", "requestUri": "/tags/{resourceArn+}", "alternatives": [{"requestUri": "/tags", "located": {"resourceArn": "body"}}]},
+        "UntagResource": {"method": "DELETE", "requestUri": "/tags/{resourceArn+}", "alternatives": [{"requestUri": "/tags", "located": {"resourceArn": "?resourceArn"}}]},
         "UpdateEnabledBaseline": {"method": "POST", "requestUri": "/update-enabled-baseline"},
         "UpdateEnabledControl": {"method": "POST", "requestUri": "/update-enabled-control"},
         "UpdateLandingZone": {"method": "POST", "requestUri": "/update-landingzone"}
@@ -1327,15 +1327,15 @@
         "ListSigningJobs": {"method": "GET", "requestUri": "/_signer/signing-jobs"},
         "ListSigningPlatforms": {"method": "GET", "requestUri": "/_signer/signing-platforms"},
         "ListSigningProfiles": {"method": "GET", "requestUri": "/_signer/signing-profiles"},
-        "ListTagsForResource": {"method": "GET", "requestUri": "/tags/{resourceArn+}"},
+        "ListTagsForResource": {"method": "GET", "requestUri": "/tags/{resourceArn+}", "alternatives": [{"requestUri": "/tags", "located": {"resourceArn": "?resourceArn"}}]},
         "PutSigningProfile": {"method": "PUT", "requestUri": "/_signer/signing-profiles/{profileName}"},
         "RemoveProfilePermission": {"method": "DELETE", "requestUri": "/_signer/signing-profiles/{profileName}/permissions/{statementId}"},
         "RevokeSignature": {"method": "PUT", "requestUri": "/_signer/signing-jobs/{jobId}/revoke"},
         "RevokeSigningProfile": {"method": "PUT", "requestUri": "/_signer/signing-profiles/{profileName}/revoke"},
         "SignPayload": {"method": "POST", "requestUri": "/_signer/signing-jobs/with-payload"},
         "StartSigningJob": {"method": "POST", "requestUri": "/_signer/signing-jobs"},
-        "TagResource": {"method": "POST", "requestUri": "/tags/{resourceArn+}"},
-        "UntagResource": {"method": "DELETE", "requestUri": "/tags/{resourceArn+}"}
+        "TagResource": {"method": "POST", "requestUri": "/tags/{resourceArn+}", "alternatives": [{"requestUri": "/tags", "located": {"resourceArn": "body"}}]},
+        "UntagResource": {"method": "DELETE", "requestUri": "/tags/{resourceArn+}", "alternatives": [{"requestUri": "/tags", "located": {"resourceArn": "?resourceArn"}}]}
       }
     }
   }

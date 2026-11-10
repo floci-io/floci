@@ -295,20 +295,19 @@ public final class RequestResources {
     private static Map<String, String> locatedMembers(RequestResourceMembers.Table table, String operation,
                                                        ContainerRequestContext ctx) {
         Map<String, String> located = table.located().getOrDefault(operation, Map.of());
-        if (!"{resourceArn}".equals(located.get("resourceArn")) || ctx.getUriInfo() == null) {
+        Map<String, String> alternatives = IamActionRegistry.routeMemberLocations(operation, ctx);
+        if (alternatives.isEmpty()) {
             return located;
         }
-        if (ctx.getUriInfo().getRequestUri() == null || !"/tags".equals(IamActionRegistry.routedPath(ctx))) {
-            return located;
-        }
-        // SharedTagsController's bare route reads POST's JSON member, and GET/DELETE's query parameter.
-        Map<String, String> shared = new HashMap<>(located);
-        if ("POST".equals(ctx.getMethod())) {
-            shared.remove("resourceArn");
-        } else if ("GET".equals(ctx.getMethod()) || "DELETE".equals(ctx.getMethod())) {
-            shared.put("resourceArn", "?resourceArn");
-        }
-        return shared;
+        Map<String, String> merged = new HashMap<>(located);
+        alternatives.forEach((member, source) -> {
+            if ("body".equals(source)) {
+                merged.remove(member);
+            } else {
+                merged.put(member, source);
+            }
+        });
+        return merged;
     }
 
     /**

@@ -434,11 +434,6 @@ public class IamActionRegistry {
         rule("eks", "POST",   "^/tags(/.+)?$",                                           "eks:TagResource"),
         rule("eks", "DELETE", "^/tags(/.+)?$",                                           "eks:UntagResource"),
 
-        // ── Control Tower ──────────────────────────────────────────────────────
-        rule("controltower", "GET",    "^/tags(/.+)?$", "controltower:ListTagsForResource"),
-        rule("controltower", "POST",   "^/tags(/.+)?$", "controltower:TagResource"),
-        rule("controltower", "DELETE", "^/tags(/.+)?$", "controltower:UntagResource"),
-
         // ── Bedrock ────────────────────────────────────────────────────────────
         rule("bedrock", "POST",   "^/resource-policy$",   "bedrock:PutResourcePolicy"),
         rule("bedrock", "GET",    "^/resource-policy/.+", "bedrock:GetResourcePolicy"),
@@ -761,6 +756,19 @@ public class IamActionRegistry {
         return routes.match(credentialScope, ctx.getMethod().toUpperCase(), routedPath(ctx),
                         ctx.getUriInfo() == null ? null : ctx.getUriInfo().getQueryParameters())
                 .map(IamRestRoutes.Match::labels).orElse(Map.of());
+    }
+
+    /** Member locations of a generated alternative route; absent entries keep the operation's model locations. */
+    public static Map<String, String> routeMemberLocations(String operation, ContainerRequestContext ctx) {
+        int separator = operation.indexOf(':');
+        if (separator < 0 || ctx.getMethod() == null || ctx.getUriInfo() == null
+                || ctx.getUriInfo().getRequestUri() == null) {
+            return Map.of();
+        }
+        return IamRestRoutes.vendored().match(operation.substring(0, separator), ctx.getMethod().toUpperCase(),
+                        routedPath(ctx), ctx.getUriInfo().getQueryParameters())
+                .filter(match -> match.operation().equals(operation.substring(separator + 1)))
+                .map(IamRestRoutes.Match::located).orElse(Map.of());
     }
 
     /**
