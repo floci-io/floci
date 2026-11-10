@@ -280,10 +280,7 @@ public final class ContainerCaBundle {
      */
     static List<X509Certificate> outboundTrustAnchors(Path bundle, Path extraCas)
             throws IOException, GeneralSecurityException {
-        List<X509Certificate> extras = parseCertificates(Files.readString(extraCas));
-        if (extras.isEmpty()) {
-            throw new CertificateException(extraCas + " holds no certificate");
-        }
+        List<X509Certificate> extras = certificates(extraCas);
         List<X509Certificate> anchors = new ArrayList<>();
         if (bundle != null) {
             try {
@@ -333,11 +330,20 @@ public final class ContainerCaBundle {
 
     /** A PKCS12 key store of exactly the certificates in {@code bundle}, each a trusted entry. */
     private static KeyStore trustStore(Path bundle) throws IOException, GeneralSecurityException {
-        List<X509Certificate> certificates = parseCertificates(Files.readString(bundle));
+        return trustStore(certificates(bundle));
+    }
+
+    /**
+     * The certificates in {@code file}, in order; a private key or any other PEM object in it is skipped.
+     *
+     * @throws CertificateException when {@code file} holds no certificate
+     */
+    private static List<X509Certificate> certificates(Path file) throws IOException, GeneralSecurityException {
+        List<X509Certificate> certificates = parseCertificates(Files.readString(file));
         if (certificates.isEmpty()) {
-            throw new CertificateException(bundle + " holds no certificate");
+            throw new CertificateException(file + " holds no certificate");
         }
-        return trustStore(certificates);
+        return certificates;
     }
 
     /** A PKCS12 key store of exactly {@code certificates}, each a trusted entry. */

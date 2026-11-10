@@ -151,15 +151,9 @@ class EventBridgeInvokerApiDestinationTest {
         AtomicInteger delivered = new AtomicInteger();
         HttpsServer server = httpsEndpoint(privateCa, delivered);
         try {
-            String endpoint = "https://localhost:" + server.getAddress().getPort() + "/hook";
+            assertRefused(hookUrl(server), Optional.empty(), delivered);
 
-            AwsException refused = assertThrows(AwsException.class,
-                    () -> invoker(endpoint, Optional.empty()).invokeTarget(apiDestinationTarget(), "{}", REGION));
-            assertTrue(refused.getMessage().contains("SSLHandshakeException"), refused.getMessage());
-            assertEquals(0, delivered.get());
-
-            assertDoesNotThrow(() -> invoker(endpoint, Optional.of(privateCa.certificatePath().toString()))
-                    .invokeTarget(apiDestinationTarget(), "{}", REGION));
+            assertDoesNotThrow(() -> deliver(hookUrl(server), Optional.of(privateCa.certificatePath().toString())));
             assertEquals(1, delivered.get());
         } finally {
             server.stop(0);
@@ -174,16 +168,26 @@ class EventBridgeInvokerApiDestinationTest {
         AtomicInteger delivered = new AtomicInteger();
         HttpsServer server = httpsEndpoint(privateCa, delivered);
         try {
-            String endpoint = "https://localhost:" + server.getAddress().getPort() + "/hook";
-
-            AwsException refused = assertThrows(AwsException.class,
-                    () -> invoker(endpoint, Optional.of(unrelatedCa.certificatePath().toString()))
-                            .invokeTarget(apiDestinationTarget(), "{}", REGION));
-            assertTrue(refused.getMessage().contains("SSLHandshakeException"), refused.getMessage());
-            assertEquals(0, delivered.get());
+            assertRefused(hookUrl(server), Optional.of(unrelatedCa.certificatePath().toString()), delivered);
         } finally {
             server.stop(0);
         }
+    }
+
+    // Asserts that delivering to endpoint fails the TLS handshake, so the endpoint never sees a request.
+    private static void assertRefused(String endpoint, Optional<String> extraCaPath, AtomicInteger delivered) {
+        AwsException refused = assertThrows(AwsException.class, () -> deliver(endpoint, extraCaPath));
+        assertTrue(refused.getMessage().contains("SSLHandshakeException"), refused.getMessage());
+        assertEquals(0, delivered.get());
+    }
+
+    // Sends one event to the API destination at endpoint, with extraCaPath as the extra CA setting.
+    private static void deliver(String endpoint, Optional<String> extraCaPath) {
+        invoker(endpoint, extraCaPath).invokeTarget(apiDestinationTarget(), "{}", REGION);
+    }
+
+    private static String hookUrl(HttpsServer server) {
+        return "https://localhost:" + server.getAddress().getPort() + "/hook";
     }
 
     // An invoker built the way CDI builds it, its API destination pointing at endpoint, with TLS off.

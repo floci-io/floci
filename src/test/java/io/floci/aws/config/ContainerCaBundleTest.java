@@ -159,7 +159,7 @@ class ContainerCaBundleTest {
     /** The reported case: TLS off, and an endpoint whose certificate chains to a private CA in the extra file. */
     @Test
     void sslContextTrustsTheExtraCasWhenTlsIsOff() throws Exception {
-        FlociCertificateAuthority privateCa = FlociCertificateAuthority.loadOrCreate(tempDir.resolve("private-ca"));
+        FlociCertificateAuthority privateCa = privateCa();
         EmulatorConfig config = config(false, Optional.of(privateCa.certificatePath().toString()));
 
         Optional<SSLContext> context = ContainerCaBundle.sslContext(config);
@@ -171,7 +171,7 @@ class ContainerCaBundleTest {
     /** The extra CAs are added to the JVM's roots, not swapped in for them, so public endpoints keep working. */
     @Test
     void theExtraCasComeOnTopOfEveryJvmRootWhenThereIsNoBundle() throws Exception {
-        FlociCertificateAuthority privateCa = FlociCertificateAuthority.loadOrCreate(tempDir.resolve("private-ca"));
+        FlociCertificateAuthority privateCa = privateCa();
 
         List<X509Certificate> anchors = ContainerCaBundle.outboundTrustAnchors(null, privateCa.certificatePath());
 
@@ -184,7 +184,7 @@ class ContainerCaBundleTest {
         Path tlsDir = tempDir.resolve("tls");
         FlociCertificateAuthority flociCa = FlociCertificateAuthority.loadOrCreate(tlsDir);
         ContainerCaBundle.write(tlsDir, flociCa.certificatePath());
-        FlociCertificateAuthority privateCa = FlociCertificateAuthority.loadOrCreate(tempDir.resolve("private-ca"));
+        FlociCertificateAuthority privateCa = privateCa();
         EmulatorConfig config = config(true, Optional.of(privateCa.certificatePath().toString()));
 
         SSLContext context = ContainerCaBundle.sslContext(config).orElseThrow();
@@ -199,7 +199,7 @@ class ContainerCaBundleTest {
         Path tlsDir = Files.createDirectories(tempDir.resolve("tls"));
         Files.writeString(tlsDir.resolve(ContainerCaBundle.FILE_NAME),
                 "-----BEGIN CERTIFICATE-----\nnot a certificate\n-----END CERTIFICATE-----\n");
-        FlociCertificateAuthority privateCa = FlociCertificateAuthority.loadOrCreate(tempDir.resolve("private-ca"));
+        FlociCertificateAuthority privateCa = privateCa();
         EmulatorConfig config = config(true, Optional.of(privateCa.certificatePath().toString()));
 
         Optional<SSLContext> context = ContainerCaBundle.sslContext(config);
@@ -217,10 +217,8 @@ class ContainerCaBundleTest {
     /** A combined certificate-and-key file is accepted; only its certificates are trusted, the key is skipped. */
     @Test
     void anExtraCaFileHoldingAPrivateKeyIsTrustedForItsCertificates() throws Exception {
-        FlociCertificateAuthority privateCa = FlociCertificateAuthority.loadOrCreate(tempDir.resolve("private-ca"));
-        CertificateGenerator.GeneratedCertificate leaf = privateCa.issueServerCertificate("floci", List.of("floci"),
-                KeyAlgorithm.RSA_2048, null);
-        Path withKey = Files.writeString(tempDir.resolve("ca-and-key.pem"), privateCa.caPem() + leaf.privateKeyPem());
+        FlociCertificateAuthority privateCa = privateCa();
+        Path withKey = TlsTestSupport.caWithPrivateKey(privateCa, tempDir.resolve("ca-and-key.pem"));
 
         SSLContext context = ContainerCaBundle.sslContext(config(false, Optional.of(withKey.toString()))).orElseThrow();
 
@@ -489,6 +487,10 @@ class ContainerCaBundleTest {
         BootstrapProcess.Result ended = BootstrapProcess.run(shell);
         assertEquals(0, ended.exit(), ended.output());
         return ended.output();
+    }
+
+    private FlociCertificateAuthority privateCa() {
+        return FlociCertificateAuthority.loadOrCreate(tempDir.resolve("private-ca"));
     }
 
     private EmulatorConfig config(boolean tlsEnabled, Optional<String> extraCaPath) {
