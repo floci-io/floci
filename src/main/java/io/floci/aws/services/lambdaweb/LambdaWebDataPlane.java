@@ -510,7 +510,8 @@ public class LambdaWebDataPlane {
 
     /** The shapes Floci mints, in any case and with any port, so a near miss gets the AWS 404 and not another service. */
     static boolean isLambdaWebHost(String host) {
-        return ENDPOINT_DOMAIN.matcher(host).matches();
+        // Every request of every service asks, so the dot after the id is checked before the pattern.
+        return host.length() > 16 && host.charAt(16) == '.' && ENDPOINT_DOMAIN.matcher(host).matches();
     }
 
     /** The app gets the path without dot segments, as on AWS. Repeated slashes and the query stay as sent. */
