@@ -40,6 +40,7 @@ import io.floci.aws.services.eventbridge.model.ReplayState;
 import io.floci.aws.services.eventbridge.model.Rule;
 import io.floci.aws.services.eventbridge.model.RuleState;
 import io.floci.aws.services.eventbridge.model.Target;
+import io.floci.aws.services.pipes.PipesFilterMatcher;
 import io.floci.aws.services.resourcegroupstagging.ResourceGroupsTaggingService;
 import jakarta.annotation.PostConstruct;
 import jakarta.enterprise.context.ApplicationScoped;
@@ -69,6 +70,7 @@ public class EventBridgeService implements ResourceProvider, StoredResourceArns 
     private static final Logger LOG = Logger.getLogger(EventBridgeService.class);
     private static final int MAX_LIST_LIMIT = 100;
     private static final List<String> REQUIRED_ENTRY_FIELDS = List.of("Source", "DetailType", "Detail");
+    private static final Set<String> NUMERIC_OPERATORS = Set.of("=", ">", ">=", "<", "<=");
 
     private final StorageBackend<String, EventBus> busStore;
     private final StorageBackend<String, Rule> ruleStore;
@@ -356,6 +358,9 @@ public class EventBridgeService implements ResourceProvider, StoredResourceArns 
                 && (scheduleExpression == null || scheduleExpression.isBlank())) {
             throw new AwsException("ValidationException",
                     "Parameter(s) EventPattern or ScheduleExpression must be specified.", 400);
+        }
+        if (eventPattern != null && !eventPattern.isBlank()) {
+            validateEventPattern(eventPattern);
         }
         String effectiveBus = resolvedBusName(busName);
         ensureBusExists(effectiveBus, region);
@@ -1130,12 +1135,7 @@ public class EventBridgeService implements ResourceProvider, StoredResourceArns 
         if (eventJson == null || eventJson.isBlank()) {
             throw new AwsException("InvalidEventPatternException", "Event is required.", 400);
         }
-        try {
-            objectMapper.readTree(eventPattern);
-        } catch (Exception e) {
-            throw new AwsException("InvalidEventPatternException",
-                    "Event pattern is not valid JSON: " + e.getMessage(), 400);
-        }
+        validateEventPattern(eventPattern);
         JsonNode event;
         try {
             event = objectMapper.readTree(eventJson);
@@ -1168,6 +1168,43 @@ public class EventBridgeService implements ResourceProvider, StoredResourceArns 
             entry.put("Region", event.get("region").asText());
         }
         return matchesPattern(entry, eventPattern);
+    }
+
+    private void validateEventPattern(String eventPattern) {
+        JsonNode pattern;
+        try {
+            pattern = objectMapper.readTree(eventPattern);
+        } catch (JsonProcessingException e) {
+            throw new AwsException("InvalidEventPatternException",
+                    "Event pattern is not valid JSON: " + e.getMessage(), 400);
+        }
+        if (pattern == null || !pattern.isObject()) {
+            throw new AwsException("InvalidEventPatternException", "Event pattern must be a JSON object.", 400);
+        }
+        validateNumericPatterns(pattern);
+    }
+
+    private void validateNumericPatterns(JsonNode pattern) {
+        Iterator<Map.Entry<String, JsonNode>> fields = pattern.fields();
+        while (fields.hasNext()) {
+            Map.Entry<String, JsonNode> field = fields.next();
+            JsonNode expected = field.getValue();
+            if ("$or".equals(field.getKey()) && expected.isArray()) {
+                for (JsonNode branch : expected) {
+                    validateNumericPatterns(branch);
+                }
+            } else if (expected.isObject()) {
+                validateNumericPatterns(expected);
+            } else if (expected.isArray()) {
+                for (JsonNode filter : expected) {
+                    if (filter.isObject() && filter.has("numeric") && !isValidNumericFilter(filter.get("numeric"))) {
+                        throw new AwsException("InvalidEventPatternException",
+                                "numeric must contain one comparison or a lower bound followed by an upper bound"
+                                        + " with a strictly greater endpoint.", 400);
+                    }
+                }
+            }
+        }
     }
 
     boolean matchesPattern(Map<String, Object> event, String eventPattern) {
@@ -1253,6 +1290,18 @@ public class EventBridgeService implements ResourceProvider, StoredResourceArns 
         }
     }
 
+    private boolean matchesNestedDetail(JsonNode actual, JsonNode pattern) {
+        if (actual.isArray()) {
+            for (JsonNode element : actual) {
+                if (matchesDetailNode(element, pattern)) {
+                    return true;
+                }
+            }
+            return false;
+        }
+        return matchesDetailNode(actual, pattern);
+    }
+
     private boolean matchesDetailNode(JsonNode actual, JsonNode pattern) {
         JsonNode orClauses = pattern.get("$or");
         if (orClauses != null && orClauses.isArray()) {
@@ -1276,7 +1325,9 @@ public class EventBridgeService implements ResourceProvider, StoredResourceArns 
             JsonNode expected = field.getValue();
             JsonNode actualField = actual.get(field.getKey());
             if (expected.isArray()) {
-                if (!matchesArrayField(expected, actualField)) {
+                JsonNode leaf = actualField != null && actualField.isArray() && actualField.isEmpty()
+                        ? null : actualField;
+                if (!matchesArrayField(expected, leaf)) {
                     return false;
                 }
             } else if (expected.isObject()) {
@@ -1291,7 +1342,7 @@ public class EventBridgeService implements ResourceProvider, StoredResourceArns 
                         return false;
                     }
                 }
-                if (!matchesDetailNode(nestedActual, expected)) {
+                if (!matchesNestedDetail(nestedActual, expected)) {
                     return false;
                 }
             }
@@ -1305,6 +1356,14 @@ public class EventBridgeService implements ResourceProvider, StoredResourceArns 
     }
 
     private boolean matchesArrayField(JsonNode arrayNode, JsonNode actual) {
+        if (actual != null && actual.isArray()) {
+            for (JsonNode value : actual) {
+                if (matchesArrayField(arrayNode, value)) {
+                    return true;
+                }
+            }
+            return false;
+        }
         for (JsonNode element : arrayNode) {
             if (matchesSingleElement(element, actual)) {
                 return true;
@@ -1325,6 +1384,11 @@ public class EventBridgeService implements ResourceProvider, StoredResourceArns 
             }
             if (element.has("equals-ignore-case")) {
                 return value != null && value.equalsIgnoreCase(element.get("equals-ignore-case").asText());
+            }
+            if (element.has("numeric")) {
+                JsonNode comparisons = element.get("numeric");
+                return actual != null && isValidNumericFilter(comparisons)
+                        && PipesFilterMatcher.matchesNumeric(comparisons, actual);
             }
             if (element.has("anything-but")) {
                 JsonNode anythingBut = element.get("anything-but");
@@ -1352,6 +1416,27 @@ public class EventBridgeService implements ResourceProvider, StoredResourceArns 
         }
         // Exact literal match (string, null, boolean, number)
         return matchesExactValue(element, actual);
+    }
+
+    private boolean isValidNumericFilter(JsonNode comparisons) {
+        if (!comparisons.isArray() || (comparisons.size() != 2 && comparisons.size() != 4)) {
+            return false;
+        }
+        for (int i = 0; i < comparisons.size(); i += 2) {
+            JsonNode operator = comparisons.get(i);
+            if (!operator.isTextual() || !NUMERIC_OPERATORS.contains(operator.textValue())
+                    || !comparisons.get(i + 1).isNumber()) {
+                return false;
+            }
+        }
+        if (comparisons.size() == 2) {
+            return true;
+        }
+        String lowerOperator = comparisons.get(0).textValue();
+        String upperOperator = comparisons.get(2).textValue();
+        return (">".equals(lowerOperator) || ">=".equals(lowerOperator))
+                && ("<".equals(upperOperator) || "<=".equals(upperOperator))
+                && comparisons.get(1).decimalValue().compareTo(comparisons.get(3).decimalValue()) < 0;
     }
 
     private boolean matchesExactValue(JsonNode expected, JsonNode actual) {

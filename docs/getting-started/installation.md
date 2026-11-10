@@ -1,6 +1,7 @@
 # Installation
 
 Floci can be run three ways: as a Docker image, as a pre-built native binary, or built from source.
+To run it in a Kubernetes cluster, use the Helm chart: see [Kubernetes (Helm)](kubernetes.md).
 
 ## Docker (Recommended)
 

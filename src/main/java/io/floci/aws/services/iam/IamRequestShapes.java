@@ -41,6 +41,11 @@ public final class IamRequestShapes {
     private IamRequestShapes() {
     }
 
+    /** Whether the operation's generated input shape declares the member. */
+    static boolean hasMember(String operation, String member) {
+        return CHECK.hasMember(operation, member);
+    }
+
     /** Throws {@code ValidationError} when the request breaks a constraint the model declares. */
     public static void check(String action, MultivaluedMap<String, String> params) {
         CHECK.check(action, params);

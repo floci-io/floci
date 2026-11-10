@@ -164,10 +164,11 @@ class EmrClusterStorageTest {
         // The NameNode answering on its port is its own, the one its format gave the ClusterId, not another
         // cluster's sharing its namespace.
         verify(spec).withEntrypoint(argThat(entrypoint -> entrypoint.get(2).contains(String.join(" ",
-                "cid=$(sed -n \"s/^clusterID=//p\" /mnt/namenode/current/VERSION); hdfs namenode & hdfs datanode &",
+                "cid=$(sed -n \"s/^clusterID=//p\" /mnt/namenode/current/VERSION);"
+                        + " hdfs namenode & hdfs datanode & n=2;",
                 "until curl -sf -m 5 \"http://127.0.0.1:9870/jmx?qry=Hadoop:service=NameNode,name=NameNodeInfo\"",
                 "| grep -q \"\\\"ClusterId\\\" : \\\"$cid\\\"\"; do",
-                "[ \"$(jobs -rp | wc -l)\" = 2 ] || exit 1; sleep 0.2; done;"))));
+                "[ \"$(jobs -rp | wc -l)\" = $n ] || exit 1; sleep 0.2; done;"))));
         // The image is there before the start's deadline.
         verify(lifecycle).resolveImageForLaunch(IMAGE, ImagePullBehavior.PREFER_CACHED, null);
         // Ready once the DataNode has joined and the NameNode has left safe mode, as its JMX says; a daemon that
@@ -175,13 +176,15 @@ class EmrClusterStorageTest {
         verify(spec).withEntrypoint(argThat(entrypoint -> entrypoint.get(2).contains(String.join(" ",
                 "until curl -sf -m 5 \"http://127.0.0.1:9870/jmx?qry=Hadoop:service=NameNode,name=FSNamesystemState\"",
                 "| grep -q \"\\\"NumLiveDataNodes\\\" : 1,\"; do",
-                "[ \"$(jobs -rp | wc -l)\" = 2 ] || exit 1; sleep 0.2; done;",
+                "[ \"$(jobs -rp | wc -l)\" = $n ] || exit 1; sleep 0.2; done;",
                 "until curl -sf -m 5 \"http://127.0.0.1:9870/jmx?qry=Hadoop:service=NameNode,name=NameNodeInfo\"",
                 "| grep -q \"\\\"Safemode\\\" : \\\"\\\"\"; do",
-                "[ \"$(jobs -rp | wc -l)\" = 2 ] || exit 1; sleep 0.2; done;",
+                "[ \"$(jobs -rp | wc -l)\" = $n ] || exit 1; sleep 0.2; done;",
                 "hdfs dfs -mkdir -p /tmp /user/hadoop || exit 1;"))
                 && entrypoint.get(2).contains(String.join(" ", "fi;", "touch /tmp/floci-hdfs-ready;",
-                "wait -n; rm -f /tmp/floci-hdfs-ready; kill $(jobs -rp) 2>/dev/null; exit 1'"))));
+                // Not wait -n, which an emr-6.x image's bash, 4.2, does not have.
+                "while [ \"$(jobs -rp | wc -l)\" = $n ]; do sleep 1; done;",
+                "rm -f /tmp/floci-hdfs-ready; kill $(jobs -rp) 2>/dev/null; exit 1'"))));
         // A cluster without Hive runs no metastore service, and its primary node does not talk to Floci.
         verify(spec, never()).withEnv(eq("FLOCI_HIVE_METASTORE"), anyString());
         verify(spec, never()).withJavaTrustStore();
@@ -295,9 +298,9 @@ class EmrClusterStorageTest {
                         + "databaseName=/mnt/var/lib/hive/metastore_db;create=true\"")
                 && entrypoint.get(2).contains(
                         "hive.metastore.warehouse.dir=hdfs://$FLOCI_HDFS_HOST:8020/user/hive/warehouse"
-                                + " \"${site[@]}\" &")
+                                + " \"${site[@]}\" & n=$((n + 1));")
                 && entrypoint.get(2).contains("until (exec 3<>/dev/tcp/127.0.0.1/9083) 2>/dev/null; do "
-                        + "[ \"$(jobs -rp | wc -l)\" = 3 ] || exit 1; sleep 0.2; done; "
+                        + "[ \"$(jobs -rp | wc -l)\" = $n ] || exit 1; sleep 0.2; done; "
                         + "fi; touch /tmp/floci-hdfs-ready")));
 
         // The session goes with the container.
@@ -593,7 +596,7 @@ class EmrClusterStorageTest {
                 "[ -z \"$FLOCI_HIVE_METASTORE_SITE\" ] || mapfile -t site <<< \"$FLOCI_HIVE_METASTORE_SITE\"; cd /tmp;")
                 && entrypoint.get(2).contains(
                         "hive.metastore.warehouse.dir=hdfs://$FLOCI_HDFS_HOST:8020/user/hive/warehouse"
-                                + " \"${site[@]}\" &")));
+                                + " \"${site[@]}\" & n=$((n + 1));")));
     }
 
     @Test

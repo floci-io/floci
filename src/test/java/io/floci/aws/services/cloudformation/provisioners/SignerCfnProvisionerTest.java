@@ -9,11 +9,16 @@ import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.floci.aws.core.common.AwsException;
 import io.floci.aws.services.cloudformation.CloudFormationTemplateEngine;
 import io.floci.aws.services.cloudformation.model.StackResource;
+import io.floci.aws.services.signer.SignerService;
+import io.floci.aws.services.signer.model.SigningProfile;
+import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
 import java.util.HashMap;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
@@ -21,15 +26,48 @@ import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyMap;
+import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.ArgumentMatchers.nullable;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.times;
+import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 class SignerCfnProvisionerTest {
 
     private static final String PROFILE_ARN_PREFIX = "arn:aws:signer:eu-west-1:000000000000:/signing-profiles/";
+    private static final String STUB_VERSION = "AbCdEfGhIj";
 
-    private final SignerCfnProvisioner provisioner = new SignerCfnProvisioner();
+    private final SignerService signerService = mock(SignerService.class);
+    private final SignerCfnProvisioner provisioner = new SignerCfnProvisioner(signerService);
     private final ObjectMapper mapper = new ObjectMapper();
+
+    /**
+     * A stand-in for the service's own upsert: it answers the identifiers the Signer API would, so the
+     * assertions here stay about what the provisioner puts on the resource. That a stack-created
+     * profile is readable through the API is asserted by
+     * {@code CloudFormationLambdaCodeSigningIntegrationTest}.
+     */
+    @BeforeEach
+    void stubService() {
+        when(signerService.putSigningProfile(anyString(), anyString(), nullable(String.class),
+                nullable(Integer.class), anyMap(), anyString()))
+                .thenAnswer(inv -> {
+                    String name = inv.getArgument(0);
+                    String platformId = inv.getArgument(1);
+                    String arn = PROFILE_ARN_PREFIX + name;
+                    SigningProfile profile = new SigningProfile();
+                    profile.setProfileName(name);
+                    profile.setPlatformId(platformId);
+                    profile.setProfileVersion(STUB_VERSION);
+                    profile.setArn(arn);
+                    profile.setProfileVersionArn(arn + "/" + STUB_VERSION);
+                    return profile;
+                });
+    }
 
     private ProvisionContext ctx(String priorPhysicalId) {
         CloudFormationTemplateEngine engine = mock(CloudFormationTemplateEngine.class);
@@ -286,5 +324,154 @@ class SignerCfnProvisionerTest {
 
             assertEquals("ValidationError", e.getErrorCode(), "'" + name + "'");
         }
+    }
+
+    @Test
+    void provisionCreatesTheProfileThroughTheSignerService() {
+        ObjectNode props = props("my_profile");
+        props.putObject("SignatureValidityPeriod").put("Type", "DAYS").put("Value", 30);
+        props.putArray("Tags").addObject().put("Key", "team").put("Value", "a");
+
+        provisioner.provision(profile(), props, ctx(null));
+
+        verify(signerService).putSigningProfile("my_profile", "AWSLambda-SHA384-ECDSA",
+                "DAYS", Integer.valueOf(30), Map.of("team", "a"), "eu-west-1");
+    }
+
+    @Test
+    void tagsOnlyUpdateReplacesTheTagsInsteadOfMintingAVersion() {
+        StackResource r = profile();
+        provisioner.provision(r, props("my_profile"), ctx(null));
+
+        ObjectNode tagged = props("my_profile");
+        tagged.putArray("Tags").addObject().put("Key", "team").put("Value", "a");
+        provisioner.provision(r, tagged, ctx(r.getPhysicalId()));
+
+        verify(signerService).replaceTags("my_profile", Map.of("team", "a"), "eu-west-1");
+        verify(signerService, times(1)).putSigningProfile(anyString(), anyString(),
+                any(), any(), anyMap(), anyString());
+    }
+
+    @Test
+    void deleteCancelsTheProfileThePhysicalIdNames() {
+        String arn = PROFILE_ARN_PREFIX + "my_profile";
+
+        provisioner.delete("AWS::Signer::SigningProfile", arn, "eu-west-1");
+
+        verify(signerService).cancelSigningProfile("my_profile", "eu-west-1");
+    }
+
+    @Test
+    void aStringValidityPeriodReachesTheServiceAsANumber() {
+        ObjectNode props = props("my_profile");
+        props.putObject("SignatureValidityPeriod").put("Type", "DAYS").put("Value", "135");
+
+        provisioner.provision(profile(), props, ctx(null));
+
+        verify(signerService).putSigningProfile(eq("my_profile"), eq("AWSLambda-SHA384-ECDSA"),
+                eq("DAYS"), eq(Integer.valueOf(135)), anyMap(), eq("eu-west-1"));
+    }
+
+    @Test
+    void aStackCannotTakeOverASigningProfileItDidNotCreate() {
+        when(signerService.findSigningProfile("my_profile", "eu-west-1"))
+                .thenReturn(Optional.of(new SigningProfile()));
+
+        AwsException e = assertThrows(AwsException.class,
+                () -> provisioner.provision(profile(), props("my_profile"), ctx(null)));
+
+        assertEquals("ValidationError", e.getErrorCode());
+        verify(signerService, never()).putSigningProfile(anyString(), anyString(),
+                any(), any(), anyMap(), anyString());
+    }
+
+    @Test
+    void aTagsOnlyUpdateAdoptsAProfileThatPredatesTheService() throws Exception {
+        StackResource r = profile();
+        r.setPhysicalId(PROFILE_ARN_PREFIX + "legacy");
+        r.getAttributes().put("Arn", PROFILE_ARN_PREFIX + "legacy");
+        r.getAttributes().put("ProfileName", "legacy");
+        r.getAttributes().put("ProfileVersion", "abcdefghij");
+        r.getAttributes().put("FlociSigningProfileCreateOnly",
+                "AWSLambda-SHA384-ECDSA|legacy|DAYS|30");
+        when(signerService.findSigningProfile("legacy", "eu-west-1")).thenReturn(Optional.empty());
+
+        ObjectNode props = props("legacy");
+        props.putObject("SignatureValidityPeriod").put("Type", "DAYS").put("Value", 30);
+        props.putArray("Tags").addObject().put("Key", "team").put("Value", "a");
+        provisioner.provision(r, props, ctx(r.getPhysicalId()));
+
+        verify(signerService).adoptSigningProfile("legacy", "AWSLambda-SHA384-ECDSA", "abcdefghij",
+                "DAYS", Integer.valueOf(30), "eu-west-1");
+        verify(signerService).replaceTags(eq("legacy"), eq(Map.of("team", "a")), eq("eu-west-1"));
+    }
+
+    @Test
+    void rollbackOfATagsOnlyUpdateRestoresThePreviousTags() {
+        StackResource r = profile();
+        provisioner.provision(r, props("my_profile"), ctx(null));
+
+        when(signerService.findSigningProfile("my_profile", "eu-west-1"))
+                .thenReturn(Optional.of(profileWithTags(Map.of("env", "old"))));
+        ObjectNode tagged = props("my_profile");
+        tagged.putArray("Tags").addObject().put("Key", "team").put("Value", "a");
+        provisioner.provision(r, tagged, ctx(r.getPhysicalId()));
+
+        assertTrue(provisioner.rollbackUpdate(r));
+
+        verify(signerService).replaceTags("my_profile", Map.of("env", "old"), "eu-west-1");
+        assertFalse(r.getAttributes().containsKey("FlociSigningProfilePriorTags"));
+    }
+
+    @Test
+    void aTagsUpdateThatChangesNothingLeavesNoSnapshot() {
+        StackResource r = profile();
+        provisioner.provision(r, props("my_profile"), ctx(null));
+
+        when(signerService.findSigningProfile("my_profile", "eu-west-1"))
+                .thenReturn(Optional.of(profileWithTags(Map.of("env", "same"))));
+        ObjectNode tagged = props("my_profile");
+        tagged.putArray("Tags").addObject().put("Key", "env").put("Value", "same");
+        provisioner.provision(r, tagged, ctx(r.getPhysicalId()));
+
+        assertFalse(r.getAttributes().containsKey("FlociSigningProfilePriorTags"));
+        verify(signerService, never())
+                .replaceTags(anyString(), anyMap(), anyString());
+    }
+
+    @Test
+    void intrinsicTagValuesAreResolvedBeforeTheyReachTheService() throws Exception {
+        CloudFormationTemplateEngine engine = mock(CloudFormationTemplateEngine.class);
+        when(engine.resolve(any())).thenAnswer(inv -> {
+            JsonNode node = inv.getArgument(0);
+            return node == null || node.isMissingNode() ? null : node.asText();
+        });
+        when(engine.resolveNodeOmittingNoValue(any())).thenAnswer(inv -> {
+            JsonNode node = inv.getArgument(0);
+            if (node != null && node.isObject() && node.has("Fn::Sub")) {
+                return mapper.getNodeFactory().textNode("resolved-" + node.path("Fn::Sub").asText());
+            }
+            return node;
+        });
+        ProvisionContext context =
+                new ProvisionContext(engine, "eu-west-1", "000000000000", "my-stack", null);
+        ObjectNode props = props("my_profile");
+        props.putArray("Tags").addObject()
+                .put("Key", "team")
+                .set("Value", mapper.readTree("{\"Fn::Sub\":\"platform\"}"));
+
+        provisioner.provision(profile(), props, context);
+
+        verify(signerService).putSigningProfile(eq("my_profile"), eq("AWSLambda-SHA384-ECDSA"),
+                any(), any(), eq(Map.of("team", "resolved-platform")), eq("eu-west-1"));
+    }
+
+    private static SigningProfile profileWithTags(Map<String, String> tags) {
+        SigningProfile profile = new SigningProfile();
+        profile.setProfileName("my_profile");
+        profile.setPlatformId("AWSLambda-SHA384-ECDSA");
+        profile.setProfileVersion("AbCdEfGhIj");
+        profile.setTags(new LinkedHashMap<>(tags));
+        return profile;
     }
 }

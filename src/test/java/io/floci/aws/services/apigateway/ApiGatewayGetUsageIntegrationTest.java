@@ -21,8 +21,9 @@ import static org.hamcrest.Matchers.nullValue;
  * no {@code position} when there is no further page.
  *
  * <p>Each pair is {@code [used, remaining]}, not {@code [used, quota]}: on real API Gateway the
- * second element is the quota limit minus cumulative use. Both are zero here because nothing meters
- * requests per key, so there is no use to report or to subtract from a plan's quota.
+ * second element is the quota limit minus cumulative use. The plans here have no quota and see no
+ * calls, so every pair is zero; metered counts are covered by
+ * {@link ApiGatewayUsageMeteringIntegrationTest}.
  */
 @QuarkusTest
 class ApiGatewayGetUsageIntegrationTest {

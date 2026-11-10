@@ -16,11 +16,27 @@ import java.util.Optional;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
 
 /** How {@link TagOnCreate} reads the tags a request carries and the condition keys it checks them with. */
 class TagOnCreateTest {
+
+    @Test
+    void controlTowerUsesModeledTagMapsAndChecksTheCreateActionWithTheirTags() {
+        for (String operation : List.of("CreateLandingZone", "EnableControl", "EnableBaseline")) {
+            Tagging tagging = TagOnCreate.of("controltower:" + operation, json(
+                    "{\"tags\":{\"team\":\"blue\"}}")).orElseThrow();
+            assertEquals("controltower:TagResource", tagging.action());
+            assertEquals(List.of(set(Map.of("team", "blue"))), tagging.sets());
+            assertTrue(tagging.requestTags());
+            assertFalse(tagging.createAction());
+            assertEquals(List.of(Map.of("aws:RequestTag/team", List.of("blue"), "aws:TagKeys", List.of("team"))),
+                    TagOnCreate.requestTagContexts(tagging));
+            assertFalse(TagOnCreate.of("controltower:" + operation, json("{\"tags\":{}}")).isPresent());
+        }
+    }
 
     @Test
     void aFormsTagsAreReadFromOneToTheFirstNumberWithNoKey() {
@@ -98,6 +114,23 @@ class TagOnCreateTest {
         // A map's string values are its own, not elements.
         assertEquals(List.of(), TagOnCreate.of("sqs:CreateQueue", json("{\"QueueName\":\"q\",\"tags\":{\"team\":\"blue\"}}"))
                 .orElseThrow().otherSpellings());
+    }
+
+    /**
+     * An object read as a list of tags and as a map gives two sets, so a member named as its structure's key does not
+     * replace the tag a handler iterating the object applies.
+     */
+    @Test
+    void anObjectReadAsTagsAndAsAMapGivesASetForEach() {
+        Tagging collision = TagOnCreate.of("kms:CreateKey", json(
+                "{\"Tags\":{\"team\":{\"TagKey\":\"team\",\"TagValue\":\"red\"}}}")).orElseThrow();
+        assertEquals(List.of(), collision.sets());
+        assertEquals(List.of(set(Map.of("team", "red")), set(Map.of("team", ""))), collision.otherSpellings());
+        assertEquals(List.of(List.of(), List.of("red"), List.of("")), TagOnCreate.requestTagContexts(collision).stream()
+                .map(context -> context.getOrDefault("aws:RequestTag/team", List.of())).toList());
+        // A map holding only strings is read as a map alone.
+        assertEquals(List.of(set(Map.of("team", "red"))), TagOnCreate.of("kms:CreateKey", json(
+                "{\"Tags\":{\"team\":\"red\"}}")).orElseThrow().otherSpellings());
     }
 
     /**

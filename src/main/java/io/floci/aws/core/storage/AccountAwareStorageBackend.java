@@ -1,5 +1,6 @@
 package io.floci.aws.core.storage;
 
+import io.floci.aws.core.common.MemoizedSupplier;
 import io.floci.aws.core.common.RequestContext;
 import jakarta.enterprise.context.ContextNotActiveException;
 import jakarta.enterprise.inject.Instance;
@@ -42,7 +43,7 @@ public class AccountAwareStorageBackend<V> implements StorageBackend<String, V> 
 
     private final StorageBackend<String, V> delegate;
     private final Instance<RequestContext> requestContextInstance;
-    private volatile RequestContext requestContextProxy;
+    private final MemoizedSupplier<RequestContext> requestContextProxy;
     private final String defaultAccountId;
 
     // Accounts that own keys here, so a cross-account lookup does one get per account instead of a scan.
@@ -57,6 +58,7 @@ public class AccountAwareStorageBackend<V> implements StorageBackend<String, V> 
                                       String defaultAccountId) {
         this.delegate = delegate;
         this.requestContextInstance = requestContextInstance;
+        this.requestContextProxy = new MemoizedSupplier<>(() -> requestContextInstance.get());
         this.defaultAccountId = defaultAccountId;
     }
 
@@ -640,12 +642,7 @@ public class AccountAwareStorageBackend<V> implements StorageBackend<String, V> 
     }
 
     private RequestContext requestContext() {
-        RequestContext proxy = requestContextProxy;
-        if (proxy == null) {
-            proxy = requestContextInstance.get();
-            requestContextProxy = proxy;
-        }
-        return proxy;
+        return requestContextProxy.get();
     }
 
     private String prefix() {

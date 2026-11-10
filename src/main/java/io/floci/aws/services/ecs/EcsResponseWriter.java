@@ -98,7 +98,7 @@ public class EcsResponseWriter {
         n.put("status", c.getStatus());
         n.put("registeredContainerInstancesCount", c.getRegisteredContainerInstancesCount());
         n.put("runningTasksCount", c.getRunningTasksCount());
-        n.put("pendingTasksCount", c.getPendingTasksCount());
+        n.put("pendingTasksCount", service.pendingTasksCount(c));
         n.put("activeServicesCount", c.getActiveServicesCount());
         if (include.contains("SETTINGS") && c.getSettings() != null && !c.getSettings().isEmpty()) {
             ArrayNode settings = objectMapper.createArrayNode();

@@ -17,8 +17,10 @@ import java.net.InetSocketAddress;
 import java.net.http.HttpClient;
 import java.nio.charset.StandardCharsets;
 import java.time.Duration;
+import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.Set;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
@@ -30,6 +32,7 @@ import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
@@ -63,6 +66,7 @@ class CodeArtifactPypiControllerTest {
     private String backendUrl;
     private CodeArtifactService service;
     private PypiserverSidecarClient pypiserver;
+    private CodeArtifactPypiExternalConnectionImporter externalConnectionImporter;
     private CodeArtifactPypiController controller;
 
     @BeforeEach
@@ -84,9 +88,13 @@ class CodeArtifactPypiControllerTest {
         when(service.containerBackedOverriddenVersionStatusesByRepository(eq(REGION), eq(DOMAIN), eq(OWNER),
                 eq(REPOSITORY), eq("pypi"))).thenReturn(Map.of());
         when(pypiserver.ensureReady(eq("pypi-repo-id"), any())).thenReturn(backendUrl);
+        // Mockito's own default answer already returns an empty List/false for every unstubbed
+        // method here, matching a repository with no pypi external connection configured at all;
+        // individual tests below override specific calls to exercise the merge/retention paths.
+        externalConnectionImporter = mock(CodeArtifactPypiExternalConnectionImporter.class);
 
         HttpClient httpClient = HttpClient.newBuilder().connectTimeout(Duration.ofSeconds(5)).build();
-        controller = new CodeArtifactPypiController(service, pypiserver, httpClient);
+        controller = new CodeArtifactPypiController(service, pypiserver, externalConnectionImporter, httpClient);
     }
 
     @AfterEach
@@ -157,6 +165,171 @@ class CodeArtifactPypiControllerTest {
         backend.createContext("/packages/missing.tar.gz", exchange -> respond(exchange, 404, "text/plain", ""));
 
         Response response = controller.downloadFile(headers("Bearer good"), DOMAIN, REPOSITORY, "missing.tar.gz");
+
+        assertEquals(404, response.getStatus());
+    }
+
+    /**
+     * AWS's own documented trigger for a pypi external connection: a real local miss. The fake
+     * backend answers 404 first (nothing retained yet) and 200 once the importer reports a
+     * successful retention, standing in for pypiserver actually having the file by the time this
+     * controller retries.
+     */
+    @Test
+    void downloadFileRetainsFromTheExternalConnectionOnALocalMissThenServesTheRealBytes() {
+        AtomicInteger requestCount = new AtomicInteger();
+        backend.createContext("/packages/ext-pkg-1.0.0.tar.gz", exchange -> {
+            if (requestCount.getAndIncrement() == 0) {
+                respond(exchange, 404, "text/plain", "");
+            } else {
+                respond(exchange, 200, "application/octet-stream", "real-upstream-bytes");
+            }
+        });
+        when(externalConnectionImporter.tryImportAsset(REGION, DOMAIN, OWNER, REPOSITORY, "pypi-repo-id",
+                "ext-pkg-1.0.0.tar.gz")).thenReturn(true);
+
+        Response response = controller.downloadFile(headers("Bearer good"), DOMAIN, REPOSITORY,
+                "ext-pkg-1.0.0.tar.gz");
+
+        assertEquals(200, response.getStatus());
+        assertEquals("real-upstream-bytes", new String((byte[]) response.getEntity(), StandardCharsets.UTF_8));
+        assertEquals(2, requestCount.get());
+    }
+
+    @Test
+    void downloadFileStaysA404WhenTheExternalConnectionDoesNotHaveItEither() {
+        backend.createContext("/packages/unknown-everywhere.tar.gz",
+                exchange -> respond(exchange, 404, "text/plain", ""));
+
+        Response response = controller.downloadFile(headers("Bearer good"), DOMAIN, REPOSITORY,
+                "unknown-everywhere.tar.gz");
+
+        assertEquals(404, response.getStatus());
+        verify(externalConnectionImporter).tryImportAsset(REGION, DOMAIN, OWNER, REPOSITORY, "pypi-repo-id",
+                "unknown-everywhere.tar.gz");
+    }
+
+    /**
+     * {@link #packageIndexRewritesRootRelativePackageLinksToThisRepositorysPathPrefix} already
+     * covers the plain local-listing path; this one proves the external-connection merge actually
+     * runs alongside it, adding an entry pypiserver's own local index never listed.
+     */
+    @Test
+    void packageIndexMergesInAFileTheExternalConnectionNamesThatIsNotKnownLocally() {
+        backend.createContext("/simple/my-pkg/", exchange -> respond(exchange, 200, "text/html",
+                "<a href=\"/packages/my-pkg-1.0.tar.gz\">my-pkg-1.0.tar.gz</a>"));
+        when(externalConnectionImporter.additionalExternalFilenames(eq(REGION), eq(DOMAIN), eq(OWNER),
+                eq(REPOSITORY), eq("pypi-repo-id"), eq("my-pkg"), eq(Set.of("my-pkg-1.0.tar.gz"))))
+                .thenReturn(List.of(new CodeArtifactPypiExternalConnectionImporter.ExternalIndexFile(
+                        "my-pkg-2.0.tar.gz", false, null)));
+
+        Response response = controller.packageIndex(headers("Bearer good"), DOMAIN, REPOSITORY, "my-pkg");
+
+        assertEquals(200, response.getStatus());
+        String body = new String((byte[]) response.getEntity(), StandardCharsets.UTF_8);
+        assertTrue(body.contains("href=\"/codeartifact/pypi/" + DOMAIN + "/" + REPOSITORY
+                + "/packages/my-pkg-1.0.tar.gz\""), body);
+        assertTrue(body.contains("href=\"/codeartifact/pypi/" + DOMAIN + "/" + REPOSITORY
+                + "/packages/my-pkg-2.0.tar.gz\""), body);
+    }
+
+    /**
+     * {@code additionalExternalFilenames} ultimately returns whatever a real external connection's
+     * own response named: nothing here enforces that it is free of characters HTML would read as
+     * markup. The real pypi.org registry's own filenames are strictly validated and could never
+     * actually contain any of these, but {@code withAdditionalFilenames}/{@code escapeHtml} are
+     * written as though the input is untrusted, and had no test actually proving that, unlike the
+     * hash/slash/question-mark literal tests the rest of this proxy already has for other inputs.
+     */
+    @Test
+    void packageIndexEscapesAnExternalFilenameBeforePlacingItInTheMergedHtml() {
+        backend.createContext("/simple/my-pkg/", exchange -> respond(exchange, 404, "text/plain", ""));
+        String wicked = "wicked\"><script>alert(1)</script>.tar.gz";
+        when(externalConnectionImporter.additionalExternalFilenames(eq(REGION), eq(DOMAIN), eq(OWNER),
+                eq(REPOSITORY), eq("pypi-repo-id"), eq("my-pkg"), eq(Set.of())))
+                .thenReturn(List.of(new CodeArtifactPypiExternalConnectionImporter.ExternalIndexFile(wicked, false,
+                        null)));
+
+        Response response = controller.packageIndex(headers("Bearer good"), DOMAIN, REPOSITORY, "my-pkg");
+
+        assertEquals(200, response.getStatus());
+        String body = new String((byte[]) response.getEntity(), StandardCharsets.UTF_8);
+        assertTrue(body.contains("wicked&quot;&gt;&lt;script&gt;alert(1)&lt;/script&gt;.tar.gz"), body);
+        assertFalse(body.contains("<script>"), body);
+        assertFalse(body.contains("wicked\">"), body);
+    }
+
+    /**
+     * Mirrors {@link #downloadFileTreatsAHashInTheFilenameAsLiteralNotAUriFragment} for the merge
+     * side: HTML-escaping alone would leave a literal {@code #} free to be read as a URI fragment
+     * by whatever real client resolves this href, silently truncating the path it actually
+     * requests to everything before the {@code #}.
+     */
+    @Test
+    void packageIndexPercentEncodesAHashInAnExternalFilenameInsteadOfLeavingItAsAUriFragment() {
+        backend.createContext("/simple/my-pkg/", exchange -> respond(exchange, 404, "text/plain", ""));
+        when(externalConnectionImporter.additionalExternalFilenames(eq(REGION), eq(DOMAIN), eq(OWNER),
+                eq(REPOSITORY), eq("pypi-repo-id"), eq("my-pkg"), eq(Set.of())))
+                .thenReturn(List.of(new CodeArtifactPypiExternalConnectionImporter.ExternalIndexFile(
+                        "my-pkg-1.0#evil.tar.gz", false, null)));
+
+        Response response = controller.packageIndex(headers("Bearer good"), DOMAIN, REPOSITORY, "my-pkg");
+
+        assertEquals(200, response.getStatus());
+        String body = new String((byte[]) response.getEntity(), StandardCharsets.UTF_8);
+        assertTrue(body.contains("href=\"/codeartifact/pypi/" + DOMAIN + "/" + REPOSITORY
+                + "/packages/my-pkg-1.0%23evil.tar.gz\""), body);
+    }
+
+    /**
+     * A package pypiserver has never heard of (no local upload, ever) but that the real public
+     * registry has must still be listable, the same as real CodeArtifact: without this, a package
+     * could only ever be discovered through an external connection after some other request
+     * happened to retain one of its files first.
+     */
+    @Test
+    void packageIndexListsAPackageThatOnlyExistsOnTheExternalConnectionSoFar() {
+        backend.createContext("/simple/only-external/", exchange -> respond(exchange, 404, "text/plain", ""));
+        when(externalConnectionImporter.additionalExternalFilenames(eq(REGION), eq(DOMAIN), eq(OWNER),
+                eq(REPOSITORY), eq("pypi-repo-id"), eq("only-external"), eq(Set.of())))
+                .thenReturn(List.of(new CodeArtifactPypiExternalConnectionImporter.ExternalIndexFile(
+                        "only-external-1.0.tar.gz", false, null)));
+
+        Response response = controller.packageIndex(headers("Bearer good"), DOMAIN, REPOSITORY, "only-external");
+
+        assertEquals(200, response.getStatus());
+        String body = new String((byte[]) response.getEntity(), StandardCharsets.UTF_8);
+        assertTrue(body.contains("href=\"/codeartifact/pypi/" + DOMAIN + "/" + REPOSITORY
+                + "/packages/only-external-1.0.tar.gz\""), body);
+    }
+
+    /**
+     * The fix for a real finding: a real pip client filters candidates using exactly these two
+     * attributes (PEP 592/PEP 700). Without them, a file this repository has not retained yet
+     * would look unconditionally eligible on the very first install even though the registry's
+     * own response already named it yanked or Python-incompatible.
+     */
+    @Test
+    void packageIndexEmitsDataYankedAndDataRequiresPythonForAnExternalFile() {
+        backend.createContext("/simple/my-pkg/", exchange -> respond(exchange, 404, "text/plain", ""));
+        when(externalConnectionImporter.additionalExternalFilenames(eq(REGION), eq(DOMAIN), eq(OWNER),
+                eq(REPOSITORY), eq("pypi-repo-id"), eq("my-pkg"), eq(Set.of())))
+                .thenReturn(List.of(new CodeArtifactPypiExternalConnectionImporter.ExternalIndexFile(
+                        "my-pkg-1.0.tar.gz", true, ">=3.9")));
+
+        Response response = controller.packageIndex(headers("Bearer good"), DOMAIN, REPOSITORY, "my-pkg");
+
+        assertEquals(200, response.getStatus());
+        String body = new String((byte[]) response.getEntity(), StandardCharsets.UTF_8);
+        assertTrue(body.contains("data-requires-python=\"&gt;=3.9\""), body);
+        assertTrue(body.contains("data-yanked=\"\""), body);
+    }
+
+    @Test
+    void packageIndexStaysA404WhenNeitherLocalNorTheExternalConnectionHasThePackage() {
+        backend.createContext("/simple/nowhere/", exchange -> respond(exchange, 404, "text/plain", ""));
+
+        Response response = controller.packageIndex(headers("Bearer good"), DOMAIN, REPOSITORY, "nowhere");
 
         assertEquals(404, response.getStatus());
     }
@@ -237,6 +410,8 @@ class CodeArtifactPypiControllerTest {
         assertEquals(404, response.getStatus());
         assertEquals(false, downloadReceived.get());
         verify(pypiserver).endUse("pypi-repo-id");
+        // Retention must never resurrect a version this repository already marked Archived.
+        verify(externalConnectionImporter, never()).tryImportAsset(any(), any(), any(), any(), any(), any());
     }
 
     /**

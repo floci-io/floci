@@ -12,14 +12,12 @@ import org.junit.jupiter.api.Order;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.TestMethodOrder;
 
-import javax.crypto.Mac;
-import javax.crypto.spec.SecretKeySpec;
-import java.nio.charset.StandardCharsets;
 import java.util.Base64;
 import java.util.UUID;
 
 import static io.floci.aws.services.cognito.CognitoRestAssuredUtils.cognitoAction;
 import static io.floci.aws.services.cognito.CognitoRestAssuredUtils.cognitoJson;
+import static io.floci.aws.services.cognito.CognitoSecretHashTestHelper.secretHash;
 import static org.hamcrest.Matchers.containsString;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotEquals;
@@ -184,7 +182,7 @@ class CognitoAliasUsernameIntegrationTest {
                     "SECRET_HASH": "%s"
                   }
                 }
-                """.formatted(clientId, EMAIL, PASSWORD, secretHash(uuidUsername)))
+                """.formatted(clientId, EMAIL, PASSWORD, secretHash(clientId, clientSecret, uuidUsername)))
                 .then()
                 .statusCode(400)
                 .body("__type", containsString("NotAuthorizedException"));
@@ -218,7 +216,7 @@ class CognitoAliasUsernameIntegrationTest {
                     "SECRET_HASH": "%s"
                   }
                 }
-                """.formatted(clientId, EMAIL, PASSWORD, secretHash(EMAIL)))
+                """.formatted(clientId, EMAIL, PASSWORD, secretHash(clientId, clientSecret, EMAIL)))
                 .then()
                 .statusCode(400)
                 .body("__type", containsString("UserNotFoundException"));
@@ -245,18 +243,7 @@ class CognitoAliasUsernameIntegrationTest {
                     "SECRET_HASH": "%s"
                   }
                 }
-                """.formatted(clientId, username, PASSWORD, secretHash(username)));
-    }
-
-    private static String secretHash(String username) {
-        try {
-            Mac mac = Mac.getInstance("HmacSHA256");
-            mac.init(new SecretKeySpec(clientSecret.getBytes(StandardCharsets.UTF_8), "HmacSHA256"));
-            byte[] sig = mac.doFinal((username + clientId).getBytes(StandardCharsets.UTF_8));
-            return Base64.getEncoder().encodeToString(sig);
-        } catch (Exception e) {
-            throw new RuntimeException(e);
-        }
+                """.formatted(clientId, username, PASSWORD, secretHash(clientId, clientSecret, username)));
     }
 
     private static boolean isUuid(String value) {

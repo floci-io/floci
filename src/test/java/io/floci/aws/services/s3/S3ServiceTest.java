@@ -4,6 +4,7 @@ import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.floci.aws.core.common.AwsException;
+import io.floci.aws.core.common.PaginatedResult;
 import io.floci.aws.core.common.RegionResolver;
 import io.floci.aws.core.storage.HybridStorage;
 import io.floci.aws.core.storage.InMemoryStorage;
@@ -317,6 +318,21 @@ class S3ServiceTest {
         AwsException ex = assertThrows(AwsException.class,
                 () -> s3Service.createBucket(bucketName, "us-east-1"), bucketName);
         assertEquals("InvalidBucketName", ex.getErrorCode());
+    }
+
+    @Test
+    void listBucketsWithoutPaginationParametersReturnsMoreThanTenThousandBucketsOnOnePage() {
+        InMemoryStorage<String, Bucket> bucketStore = new InMemoryStorage<>();
+        S3Service service = new S3Service(bucketStore, new InMemoryStorage<>(), tempDir.resolve("many-s3"), false);
+        for (int i = 0; i <= 10000; i++) {
+            String name = "bucket-" + i;
+            bucketStore.put(name, new Bucket(name));
+        }
+
+        PaginatedResult<Bucket> page = service.listBuckets(null, null);
+
+        assertEquals(10001, page.items().size());
+        assertNull(page.nextToken());
     }
 
     @Test

@@ -1,5 +1,6 @@
 package io.floci.aws.services.eks;
 
+import io.floci.aws.core.common.PaginatedResult;
 import io.floci.aws.core.common.Pagination;
 import io.floci.aws.services.eks.model.Addon;
 import io.floci.aws.services.eks.model.AssociateAccessPolicyRequest;
@@ -78,9 +79,12 @@ public class EksController {
 
     @GET
     @Path("/clusters")
-    public Response listClusters() {
-        List<String> clusterNames = eksService.listClusters();
-        return Response.ok(Map.of("clusters", clusterNames)).build();
+    public Response listClusters(@QueryParam("maxResults") String maxResults,
+                                 @QueryParam("nextToken") String nextToken) {
+        PaginatedResult<String> page = eksService.listClusters(
+                Pagination.parseMaxResults(maxResults, "InvalidParameterException"), nextToken);
+        return Response.ok(page.nextToken() == null ? Map.of("clusters", page.items())
+                : Map.of("clusters", page.items(), "nextToken", page.nextToken())).build();
     }
 
     @GET

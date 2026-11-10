@@ -28,6 +28,7 @@ import java.util.Map;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyString;
@@ -196,6 +197,24 @@ class EcsContainerManagerAwsBaselineTest {
         // The id in the URI is the one the container is then found by.
         String id = metadataUri.substring(metadataUri.lastIndexOf('/') + 1);
         assertEquals(id, task.getContainers().getFirst().getMetadataId());
+    }
+
+    @Test
+    void startTaskLeavesTheTasksStatusToTheService() {
+        TaskDefinition taskDef = new TaskDefinition();
+        taskDef.setFamily("test-family");
+        taskDef.setContainerDefinitions(List.of(containerDef("app", "app:latest", List.of())));
+        EcsTask task = new EcsTask();
+        task.setTaskArn("arn:aws:ecs:us-east-1:000000000000:task/test-cluster/abc123");
+        task.setLastStatus("PENDING");
+        // A StopTask that arrived while the images were pulled.
+        task.setDesiredStatus("STOPPED");
+
+        manager.startTask(task, taskDef, null, "us-east-1");
+
+        assertEquals("PENDING", task.getLastStatus());
+        assertEquals("STOPPED", task.getDesiredStatus());
+        assertNull(task.getStartedAt());
     }
 
     private static ContainerDefinition containerDef(String name, String image, List<KeyValuePair> env) {

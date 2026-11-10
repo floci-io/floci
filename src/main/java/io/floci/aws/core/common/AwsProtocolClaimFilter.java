@@ -46,24 +46,18 @@ public class AwsProtocolClaimFilter implements ContainerRequestFilter {
     private final ResolvedServiceCatalog catalog;
     // Lazily resolved: JAX-RS providers are instantiated before runtime config
     // mappings exist (same pattern as GlobalCorsFilter).
-    private final jakarta.inject.Provider<EmulatorConfig> configProvider;
-    private volatile EmulatorConfig config;
+    private final MemoizedSupplier<EmulatorConfig> config;
 
     @Inject
     public AwsProtocolClaimFilter(ProtocolClaimer claimer, ResolvedServiceCatalog catalog,
                                   jakarta.inject.Provider<EmulatorConfig> configProvider) {
         this.claimer = claimer;
         this.catalog = catalog;
-        this.configProvider = configProvider;
+        this.config = new MemoizedSupplier<>(configProvider::get);
     }
 
     private EmulatorConfig config() {
-        EmulatorConfig resolved = config;
-        if (resolved == null) {
-            resolved = configProvider.get();
-            config = resolved;
-        }
-        return resolved;
+        return config.get();
     }
 
     @Override

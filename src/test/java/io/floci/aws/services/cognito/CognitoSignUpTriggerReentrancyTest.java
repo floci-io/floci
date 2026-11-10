@@ -24,6 +24,7 @@ import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.CsvSource;
 import org.junit.jupiter.params.provider.ValueSource;
 
 import java.time.Clock;
@@ -398,9 +399,12 @@ class CognitoSignUpTriggerReentrancyTest {
                 deliveredCode.get());
     }
 
-    @Test
-    void preSignUpRejectsSameUsernameAdminCreationWithoutBlockingTheTrigger() throws Exception {
+    @ParameterizedTest
+    @CsvSource({"true, alice", "false, alice", "false, ALICE"})
+    void preSignUpRejectsSameUsernameAdminCreationWithoutBlockingTheTrigger(
+            boolean caseSensitive, String overlappingUsername) throws Exception {
         UserPool pool = pool(Map.of("PreSignUp", FUNCTION));
+        pool.setUsernameConfiguration(Map.of("CaseSensitive", caseSensitive));
         UserPoolClient client = client(pool);
         AtomicReference<Throwable> callbackFailure = new AtomicReference<>();
         AtomicReference<AwsException> duplicateFailure = new AtomicReference<>();
@@ -410,7 +414,7 @@ class CognitoSignUpTriggerReentrancyTest {
                     if ("PreSignUp_SignUp".equals(event.path("triggerSource").asText())) {
                         callback(() -> {
                             AwsException duplicate = assertThrows(AwsException.class,
-                                    () -> service.adminCreateUser(pool.getId(), "alice",
+                                    () -> service.adminCreateUser(pool.getId(), overlappingUsername,
                                             Map.of("name", "created by trigger"), null, "SUPPRESS"));
                             assertEquals("UsernameExistsException", duplicate.getErrorCode());
                             duplicateFailure.set(duplicate);

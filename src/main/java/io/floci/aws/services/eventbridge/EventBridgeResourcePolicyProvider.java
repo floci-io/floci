@@ -6,7 +6,7 @@ import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 
 import java.util.List;
-import java.util.regex.Pattern;
+import java.util.Optional;
 
 /**
  * Supplies event bus policies to IAM policy evaluation, together with the account that owns the bus:
@@ -16,7 +16,6 @@ import java.util.regex.Pattern;
 @ApplicationScoped
 public class EventBridgeResourcePolicyProvider implements ResourcePolicyProvider {
 
-    private static final Pattern ACCOUNT_ID = Pattern.compile("\\d{12}");
     private static final String BUS_PREFIX = "event-bus/";
 
     private final EventBridgeService eventBridgeService;
@@ -28,13 +27,13 @@ public class EventBridgeResourcePolicyProvider implements ResourcePolicyProvider
 
     @Override
     public List<ResourcePolicy> getResourcePolicies(String credentialScope, String resourceArn) {
-        if (!AwsArnUtils.isArnFor(resourceArn, "events")) {
+        Optional<AwsArnUtils.Arn> parsed = ResourcePolicyProvider.regionalArn(resourceArn, "events");
+        if (parsed.isEmpty()) {
             return List.of();
         }
-        AwsArnUtils.Arn arn = AwsArnUtils.parse(resourceArn);
+        AwsArnUtils.Arn arn = parsed.get();
         String name = arn.resource().startsWith(BUS_PREFIX) ? arn.resource().substring(BUS_PREFIX.length()) : "";
-        if (!ACCOUNT_ID.matcher(arn.accountId()).matches() || arn.region().isBlank()
-                || name.isBlank() || name.contains("*") || name.contains("/")) {
+        if (name.isBlank() || name.contains("*") || name.contains("/")) {
             return List.of();
         }
         return List.of(new ResourcePolicy(eventBridgeService.findBusPolicy(resourceArn).orElse(null),

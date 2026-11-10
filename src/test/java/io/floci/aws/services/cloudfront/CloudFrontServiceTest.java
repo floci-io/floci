@@ -29,6 +29,7 @@ import java.security.KeyPairGenerator;
 import java.security.spec.ECGenParameterSpec;
 import java.time.Instant;
 import java.util.Base64;
+import java.util.HashMap;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
@@ -125,6 +126,8 @@ class CloudFrontServiceTest {
                     + "<Items><Location>US</Location><Location>CA</Location></Items>"
                     + "</GeoRestriction></Restrictions>";
 
+    private final Map<String, AccountAwareStorageBackend<?>> stores = new HashMap<>();
+
     private CloudFrontService serviceWithDomainSuffix(String domainSuffix) {
         return serviceWithDomainSuffix(domainSuffix, "us-east-1");
     }
@@ -135,9 +138,11 @@ class CloudFrontServiceTest {
     }
 
     private CloudFrontService serviceWithDomainSuffix(String domainSuffix, String region, String baseUrl) {
+        stores.clear();
         StorageFactory storageFactory = Mockito.mock(StorageFactory.class);
         when(storageFactory.create(Mockito.anyString(), Mockito.anyString(), Mockito.any()))
-                .thenAnswer(invocation -> AccountAwareStorageBackend.inMemory("000000000000"));
+                .thenAnswer(invocation -> stores.computeIfAbsent(invocation.getArgument(1, String.class),
+                        ignored -> AccountAwareStorageBackend.inMemory("000000000000")));
 
         EmulatorConfig config = Mockito.mock(EmulatorConfig.class);
         EmulatorConfig.DnsConfig dnsConfig = Mockito.mock(EmulatorConfig.DnsConfig.class);
@@ -473,6 +478,24 @@ class CloudFrontServiceTest {
         assertNull(service.findByHost("a." + id + ".cloudfront.localhost.floci.io"));
         assertNull(service.findByHost("EABCDEFGHIJKLM.cloudfront.localhost.floci.io"));
         assertNull(service.findByHost(".cloudfront.localhost"));
+
+        // The id and the suffix are compared apart, ignoring case.
+        assertEquals(id, service.findByHost(id + ".CLOUDFRONT.LOCALHOST").getId());
+        assertNull(service.findByHost(id + ".cloudfront.localhosx"));
+        assertNull(service.findByHost("X" + id.substring(1) + ".cloudfront.localhost"));
+    }
+
+    @Test
+    @SuppressWarnings("unchecked")
+    void findByHostIgnoresADistributionOfAnotherAccount() {
+        CloudFrontService service = serviceWithDomainSuffix("cloudfront.net");
+        Distribution dist = service.createDistribution(distribution(true, List.of()), Map.of());
+        AccountAwareStorageBackend<Distribution> distributions =
+                (AccountAwareStorageBackend<Distribution>) stores.get("cloudfront-distributions.json");
+        distributions.deleteForAccount("000000000000", dist.getId());
+        distributions.putForAccount("111122223333", dist.getId(), dist);
+
+        assertNull(service.findByHost(dist.getDomainName()));
     }
 
     @Test

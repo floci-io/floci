@@ -9,6 +9,8 @@ import java.io.IOException;
 import java.io.InputStream;
 import java.io.OutputStream;
 import java.nio.charset.StandardCharsets;
+import java.util.Arrays;
+import java.util.Collections;
 import java.util.List;
 
 import static org.junit.jupiter.api.Assertions.assertArrayEquals;
@@ -46,6 +48,68 @@ class PostgresWireDecoderTest {
 
         assertEquals("portal-1", bind.portalName());
         assertEquals("stmt-1", bind.statementName());
+    }
+
+    @Test
+    void decodesTextBindParametersAndMarksNullAndBinaryAsUnknown() throws IOException {
+        byte[] body = concat(cString("p"), cString("s"),
+                int16(3), int16(0), int16(1), int16(0),
+                int16(3),
+                int32(3), "abc".getBytes(StandardCharsets.UTF_8),
+                int32(2), new byte[]{0, 7},
+                int32(-1),
+                int16(0));
+
+        assertEquals(Arrays.asList("abc", null, null), parameters(body));
+    }
+
+    @Test
+    void appliesASingleBindFormatCodeToEveryParameter() throws IOException {
+        byte[] binary = concat(cString("p"), cString("s"), int16(1), int16(1), int16(1),
+                int32(1), new byte[]{5}, int16(0));
+        byte[] text = concat(cString("p"), cString("s"), int16(1), int16(0), int16(2),
+                int32(1), "a".getBytes(StandardCharsets.UTF_8),
+                int32(1), "b".getBytes(StandardCharsets.UTF_8), int16(0));
+
+        assertEquals(Collections.singletonList((String) null), parameters(binary));
+        assertEquals(List.of("a", "b"), parameters(text));
+    }
+
+    @Test
+    void aMalformedBindParameterSectionLeavesTheValuesUnknownWithoutFailing() throws IOException {
+        byte[] body = concat(cString("p"), cString("s"), int16(0), int16(1), int32(9), new byte[]{1});
+
+        assertEquals(List.of(), parameters(body));
+        assertEquals("s", decodeBind(body).statementName());
+    }
+
+    @Test
+    void aBindWithFewerFormatCodesThanParametersLeavesTheValuesUnknownWithoutFailing() throws IOException {
+        byte[] body = concat(cString("p"), cString("s"), int16(2), int16(0), int16(0), int16(3),
+                int32(1), "a".getBytes(StandardCharsets.UTF_8),
+                int32(1), "b".getBytes(StandardCharsets.UTF_8),
+                int32(1), "c".getBytes(StandardCharsets.UTF_8), int16(0));
+
+        assertEquals(List.of(), parameters(body));
+    }
+
+    @Test
+    void readsMixedPerParameterFormatCodes() throws IOException {
+        byte[] body = concat(cString("p"), cString("s"), int16(2), int16(0), int16(1), int16(2),
+                int32(1), "a".getBytes(StandardCharsets.UTF_8),
+                int32(1), new byte[]{9}, int16(0));
+
+        assertEquals(Arrays.asList("a", null), parameters(body));
+    }
+
+    private static List<String> parameters(byte[] body) throws IOException {
+        PostgresWireDecoder decoder = new PostgresWireDecoder(new ByteArrayInputStream(frame('B', body)));
+        return decoder.decodeBindParameters(decoder.nextMessage());
+    }
+
+    private static PostgresWireDecoder.BindMessage decodeBind(byte[] body) throws IOException {
+        PostgresWireDecoder decoder = new PostgresWireDecoder(new ByteArrayInputStream(frame('B', body)));
+        return decoder.decodeBind(decoder.nextMessage());
     }
 
     @Test

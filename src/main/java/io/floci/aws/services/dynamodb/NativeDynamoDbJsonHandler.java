@@ -817,18 +817,21 @@ public class NativeDynamoDbJsonHandler {
             DynamoDbAttributeValueValidator.requireNestingWithinLimit(legacyValues(request.get("Expected")), false);
             DynamoDbExpressionSize.checkWrite(conditionExpression, "ConditionExpression");
             ExpressionEvaluator.validateSyntax(conditionExpression, "ConditionExpression");
-            requireDefinedTokens(conditionExpression, "ConditionExpression", exprAttrNames, exprAttrValues);
             ExpressionEvaluator.validateSemantics(conditionExpression, "ConditionExpression",
                     exprAttrNames, exprAttrValues);
             checkUnusedEan(exprAttrNames, extractHashTokens(conditionExpression));
             checkUnusedEav(exprAttrValues, extractColonTokens(conditionExpression));
         } catch (AwsException e) {
-            // The size check and a BETWEEN error add the envelope themselves.
-            if (!"ValidationException".equals(e.getErrorCode()) || e.getMessage().startsWith(VALIDATION_ENVELOPE)) {
-                throw e;
-            }
-            throw SmithyValidationErrors.validationException(e.getMessage());
+            throw inValidationEnvelope(e);
         }
+    }
+
+    // A size check and a BETWEEN error add the envelope themselves.
+    private static AwsException inValidationEnvelope(AwsException e) {
+        if (!"ValidationException".equals(e.getErrorCode()) || e.getMessage().startsWith(VALIDATION_ENVELOPE)) {
+            return e;
+        }
+        return SmithyValidationErrors.validationException(e.getMessage());
     }
 
     private static void requireNonEmptyMap(JsonNode map, String member) {
@@ -973,9 +976,9 @@ public class NativeDynamoDbJsonHandler {
                 ? request.get("ConditionalOperator").asText() : "AND";
 
         if (updateData != null && updateExpression != null) {
-            throw new AwsException("ValidationException",
+            throw SmithyValidationErrors.validationException(
                     "Can not use both expression and non-expression parameters in the same request: "
-                    + "Non-expression parameters: {AttributeUpdates} Expression parameters: {UpdateExpression}", 400);
+                    + "Non-expression parameters: {AttributeUpdates} Expression parameters: {UpdateExpression}");
         }
         requireReadableValues(exprAttrValues, VALIDATION_ENVELOPE);
 
@@ -985,46 +988,50 @@ public class NativeDynamoDbJsonHandler {
                 "UpdateExpression is null, ConditionExpression is null");
         requireReadableValues(attributeUpdateValues, VALIDATION_ENVELOPE);
 
-        ExpressionEvaluator.validateSyntax(conditionExpression, "ConditionExpression");
+        try {
+            ExpressionEvaluator.validateSyntax(conditionExpression, "ConditionExpression");
 
-        if (conditionExpression != null && expectedUpd != null) {
-            throw new AwsException("ValidationException",
-                    "Can not use both expression and non-expression parameters in the same request: "
-                    + "Non-expression parameters: {Expected} Expression parameters: {ConditionExpression}", 400);
-        }
-
-        // Validate EAN/EAV usage across UpdateExpression + ConditionExpression
-        if (updateExpression != null) {
-            // Pre-validate syntax: expression must start with a valid clause keyword.
-            // AWS tokenizes UpdateExpression whitespace-insensitively, so collapse runs
-            // of whitespace (newlines, tabs, multiple spaces) before matching keywords.
-            String ue = updateExpression.trim().replaceAll("\\s+", " ");
-            if (!ue.isEmpty()) {
-                String upper = ue.toUpperCase();
-                if (!upper.startsWith("SET ") && !upper.startsWith("REMOVE ") && !upper.startsWith("ADD ") && !upper.startsWith("DELETE ")) {
-                    String[] parts = ue.split("\\s+", 3);
-                    String token = parts[0];
-                    String near = parts.length >= 2
-                            ? (token + " " + parts[1]).substring(0, Math.min(token.length() + 1 + parts[1].length(), 20))
-                            : token;
-                    throw new AwsException("ValidationException",
-                            "Invalid UpdateExpression: Syntax error; token: \"" + token + "\", near: \"" + near + "\"", 400);
-                }
-                DynamoDbService.requireClosedParentheses(updateExpression, "1 validation error detected: ");
+            if (conditionExpression != null && expectedUpd != null) {
+                throw new AwsException("ValidationException",
+                        "Can not use both expression and non-expression parameters in the same request: "
+                        + "Non-expression parameters: {Expected} Expression parameters: {ConditionExpression}", 400);
             }
-            // Undefined tokens, then ConditionExpression's semantic errors, must both be caught
-            // before the unused-EAN/EAV checks below.
-            requireDefinedTokens(updateExpression, "UpdateExpression", exprAttrNames, exprAttrValues);
-            requireDefinedTokens(conditionExpression, "ConditionExpression", exprAttrNames, exprAttrValues);
-            ExpressionEvaluator.validateSemantics(conditionExpression, "ConditionExpression", exprAttrNames, exprAttrValues);
-            Set<String> hashTokens = extractHashTokens(updateExpression, conditionExpression);
-            checkUnusedEan(exprAttrNames, hashTokens);
-            Set<String> colonTokensAll = extractColonTokens(updateExpression, conditionExpression);
-            checkUnusedEav(exprAttrValues, colonTokensAll);
-            dynamoDbService.requireAddOrDeleteOperandTypes(updateExpression, exprAttrValues, true);
-        } else {
-            requireDefinedTokens(conditionExpression, "ConditionExpression", exprAttrNames, exprAttrValues);
-            ExpressionEvaluator.validateSemantics(conditionExpression, "ConditionExpression", exprAttrNames, exprAttrValues);
+
+            // Validate EAN/EAV usage across UpdateExpression + ConditionExpression
+            if (updateExpression != null) {
+                // Pre-validate syntax: expression must start with a valid clause keyword.
+                // AWS tokenizes UpdateExpression whitespace-insensitively, so collapse runs
+                // of whitespace (newlines, tabs, multiple spaces) before matching keywords.
+                String ue = updateExpression.trim().replaceAll("\\s+", " ");
+                if (!ue.isEmpty()) {
+                    String upper = ue.toUpperCase();
+                    if (!upper.startsWith("SET ") && !upper.startsWith("REMOVE ") && !upper.startsWith("ADD ") && !upper.startsWith("DELETE ")) {
+                        String[] parts = ue.split("\\s+", 3);
+                        String token = parts[0];
+                        String near = parts.length >= 2
+                                ? (token + " " + parts[1]).substring(0, Math.min(token.length() + 1 + parts[1].length(), 20))
+                                : token;
+                        throw new AwsException("ValidationException",
+                                "Invalid UpdateExpression: Syntax error; token: \"" + token + "\", near: \"" + near + "\"", 400);
+                    }
+                    DynamoDbService.requireClosedParentheses(updateExpression, "1 validation error detected: ");
+                }
+                // Undefined tokens, then ConditionExpression's semantic errors, must both be caught
+                // before the unused-EAN/EAV checks below.
+                requireDefinedTokens(updateExpression, "UpdateExpression", exprAttrNames, exprAttrValues);
+                ExpressionEvaluator.validateSemantics(conditionExpression, "ConditionExpression", exprAttrNames, exprAttrValues);
+                requireNonEmptyExpression(updateExpression, "UpdateExpression");
+                DynamoDbReservedWords.check(ue, "UpdateExpression");
+                Set<String> hashTokens = extractHashTokens(updateExpression, conditionExpression);
+                checkUnusedEan(exprAttrNames, hashTokens);
+                Set<String> colonTokensAll = extractColonTokens(updateExpression, conditionExpression);
+                checkUnusedEav(exprAttrValues, colonTokensAll);
+                dynamoDbService.requireAddOrDeleteOperandTypes(updateExpression, exprAttrValues, true);
+            } else {
+                ExpressionEvaluator.validateSemantics(conditionExpression, "ConditionExpression", exprAttrNames, exprAttrValues);
+            }
+        } catch (AwsException e) {
+            throw inValidationEnvelope(e);
         }
 
         Consumer<JsonNode> expectedCheck = legacyExpectedCheck(tableName, region, key, true, expectedUpd,
@@ -1328,13 +1335,12 @@ public class NativeDynamoDbJsonHandler {
         ExpressionEvaluator.validateSyntax(keyConditionExpr, "KeyConditionExpression");
         ExpressionEvaluator.validateSyntax(filterExpr, "FilterExpression");
         // DynamoDB reports filter errors before projection errors, and projection before key-condition.
-        requireDefinedTokens(filterExpr, "FilterExpression", exprAttrNames, exprAttrValues);
         ExpressionEvaluator.validateSemantics(filterExpr, "FilterExpression", exprAttrNames, exprAttrValues);
         ProjectionEvaluator.validateExpression(projectionExpression, exprAttrNames);
         // Must run before DynamoDbAccessPathValidator below: an unresolved #name there falls
         // through to "Query condition missed key schema element" instead of the real cause.
-        requireDefinedTokens(keyConditionExpr, "KeyConditionExpression", exprAttrNames, exprAttrValues);
         ExpressionEvaluator.validateSemantics(keyConditionExpr, "KeyConditionExpression", exprAttrNames, exprAttrValues);
+        DynamoDbAccessPathValidator.validateKeyConditionAttributes(keyConditionExpr, exprAttrNames);
 
         if (select != null && !VALID_SELECT.contains(select)) {
             throw SmithyValidationErrors.validationException(
@@ -1480,7 +1486,6 @@ public class NativeDynamoDbJsonHandler {
         DynamoDbAttributeValueValidator.requireNestingWithinLimit(exprAttrValues);
         ExpressionEvaluator.validateSyntax(filterExpr, "FilterExpression");
         // DynamoDB reports filter errors before projection errors.
-        requireDefinedTokens(filterExpr, "FilterExpression", exprAttrNames, exprAttrValues);
         ExpressionEvaluator.validateSemantics(filterExpr, "FilterExpression", exprAttrNames, exprAttrValues);
         ProjectionEvaluator.validateExpression(projectionExpressionScan, exprAttrNames);
 
@@ -2956,7 +2961,6 @@ public class NativeDynamoDbJsonHandler {
         ExpressionEvaluator.validateSyntax(conditionExpression, "ConditionExpression");
         // Undefined tokens must fail here as a ValidationException, never a
         // TransactionCanceledException with a false ConditionalCheckFailed reason.
-        requireDefinedTokens(conditionExpression, "ConditionExpression", exprAttrNames, exprAttrValues);
         ExpressionEvaluator.validateSemantics(conditionExpression, "ConditionExpression",
                 exprAttrNames, exprAttrValues);
 
@@ -3453,9 +3457,8 @@ public class NativeDynamoDbJsonHandler {
 
     /**
      * Rejects the first #name or :value token, in textual order, that neither
-     * ExpressionAttributeNames nor ExpressionAttributeValues defines. This matches DynamoDB for
-     * condition, key-condition and filter expressions, and for a single-action update expression;
-     * with several undefined tokens spread across an UpdateExpression's actions/clauses, DynamoDB
+     * ExpressionAttributeNames nor ExpressionAttributeValues defines. This matches DynamoDB for a
+     * single-action update expression; with several undefined tokens spread across an UpdateExpression's actions/clauses, DynamoDB
      * may name a different one, though always with this same error type and message form.
      */
     private static void requireDefinedTokens(String expression, String exprType,
@@ -3463,14 +3466,10 @@ public class NativeDynamoDbJsonHandler {
         for (ExprToken token : scanExprTokens(expression)) {
             if (token.prefix() == '#') {
                 if (exprAttrNames == null || !exprAttrNames.has(token.text())) {
-                    throw new AwsException("ValidationException",
-                            "Invalid " + exprType + ": An expression attribute name used in the document path "
-                            + "is not defined; attribute name: " + token.text(), 400);
+                    throw ExpressionEvaluator.undefinedName(exprType, token.text());
                 }
             } else if (exprAttrValues == null || !exprAttrValues.has(token.text())) {
-                throw new AwsException("ValidationException",
-                        "Invalid " + exprType + ": An expression attribute value used in expression is not "
-                        + "defined; attribute value: " + token.text(), 400);
+                throw ExpressionEvaluator.undefinedValue(exprType, token.text());
             }
         }
     }
@@ -4168,7 +4167,7 @@ public class NativeDynamoDbJsonHandler {
         throwValidationErrors(validationErrors);
         String statement = request.path("Statement").asText();
         List<JsonNode> parameters = toPartiQLParams(request.path("Parameters"));
-        DynamoDbPartiQLParser.Stmt stmt = DynamoDbPartiQLParser.parse(statement, parameters);
+        DynamoDbPartiQLParser.Stmt stmt = parsePartiQLStatement(statement, parameters, region);
         PartiQLExecuteContext ctx = PartiQLExecuteContext.builder()
                 .limit(request.has("Limit") ? request.get("Limit").asInt() : null)
                 .nextToken(request.has("NextToken") ? request.get("NextToken").asText() : null)
@@ -4200,7 +4199,7 @@ public class NativeDynamoDbJsonHandler {
                 JsonNode s = stmts.get(i);
                 List<JsonNode> parameters = toPartiQLParams(s.path("Parameters"));
                 statements.add(inTransactStatement(i,
-                        () -> DynamoDbPartiQLParser.parse(s.path("Statement").asText(), parameters)));
+                        () -> DynamoDbPartiQLParser.parse(s.path("Statement").asText(), parameters, true)));
             }
             long reads = statements.stream().filter(DynamoDbPartiQLParser.Stmt.Select.class::isInstance).count();
             if (reads > 0 && reads < statements.size()) {
@@ -4338,7 +4337,7 @@ public class NativeDynamoDbJsonHandler {
         ObjectNode slot = objectMapper.createObjectNode();
         String tableName = null;
         try {
-            DynamoDbPartiQLParser.Stmt stmt = parsePartiQLStatement(statement);
+            DynamoDbPartiQLParser.Stmt stmt = parsePartiQLStatement(statement, region);
             tableName = stmt.table();
             if (stmt instanceof DynamoDbPartiQLParser.Stmt.Select select) {
                 requireBatchSelectReadsByKey(select, region);
@@ -4403,9 +4402,15 @@ public class NativeDynamoDbJsonHandler {
                 "Select statements within BatchExecuteStatement must specify the primary key in the where clause.", 400);
     }
 
-    private DynamoDbPartiQLParser.Stmt parsePartiQLStatement(JsonNode statement) {
-        return DynamoDbPartiQLParser.parse(statement.path("Statement").asText(),
-                toPartiQLParams(statement.path("Parameters")));
+    private DynamoDbPartiQLParser.Stmt parsePartiQLStatement(JsonNode statement, String region) {
+        return parsePartiQLStatement(statement.path("Statement").asText(),
+                toPartiQLParams(statement.path("Parameters")), region);
+    }
+
+    private DynamoDbPartiQLParser.Stmt parsePartiQLStatement(String statement, List<JsonNode> parameters,
+                                                             String region) {
+        return DynamoDbPartiQLParser.parse(statement, parameters, false,
+                parsed -> partiQLHandler.requireReadableIndex(parsed, region));
     }
 
     private List<JsonNode> toPartiQLParams(JsonNode node) {

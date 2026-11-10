@@ -2,6 +2,7 @@ package io.floci.aws.services.ec2;
 
 import io.floci.aws.config.EmulatorConfig;
 import io.floci.aws.services.ec2.model.Instance;
+import io.floci.aws.services.ec2instanceconnect.InstanceConnectKeys;
 import io.floci.aws.services.iam.IamService;
 import io.floci.aws.testing.MutableClock;
 import io.floci.aws.testutil.FreePorts;
@@ -34,6 +35,7 @@ final class Ec2MetadataTestFixture implements AutoCloseable {
     private final Instance instance = instance("i-0123456789abcdef0");
     private Vertx vertx;
     private Ec2MetadataServer server;
+    private InstanceConnectKeys instanceConnect;
     private String endpoint;
 
     void start() throws Exception {
@@ -53,7 +55,7 @@ final class Ec2MetadataTestFixture implements AutoCloseable {
         int port = FreePorts.anyInterfacePort();
         when(config.services().ec2().imdsPort()).thenReturn(port);
         vertx = Vertx.vertx();
-        server = new Ec2MetadataServer(vertx, config, iam, serverClock);
+        server = new Ec2MetadataServer(vertx, config, iam, serverClock, instanceConnect);
         server.start().get(10, TimeUnit.SECONDS);
         endpoint = "http://127.0.0.1:" + port;
         if (registeredInstance != null) {
@@ -74,6 +76,18 @@ final class Ec2MetadataTestFixture implements AutoCloseable {
                 }
             }
         }
+    }
+
+    /** Serves EC2 Instance Connect from {@code keys}; call before {@link #start()}. */
+    Ec2MetadataTestFixture withInstanceConnect(InstanceConnectKeys keys) {
+        this.instanceConnect = keys;
+        return this;
+    }
+
+    HttpResponse<String> head(String path, String token) throws Exception {
+        return client.send(HttpRequest.newBuilder(URI.create(endpoint + path)).timeout(Duration.ofSeconds(5))
+                        .header(TOKEN_HEADER, token).method("HEAD", HttpRequest.BodyPublishers.noBody()).build(),
+                HttpResponse.BodyHandlers.ofString());
     }
 
     MutableClock clock() {

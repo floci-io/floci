@@ -1418,7 +1418,7 @@ public class AutoScalingQueryHandler {
 
     private Response handleDescribeScalingActivities(MultivaluedMap<String, String> p, String region) {
         List<ScalingActivity> activities = service.describeScalingActivities(
-                region, p.getFirst("AutoScalingGroupName"));
+                region, p.getFirst("AutoScalingGroupName"), indexedMembers(p, "ActivityIds"));
         XmlBuilder xml = new XmlBuilder()
                 .start("DescribeScalingActivitiesResponse", NS)
                   .start("DescribeScalingActivitiesResult")

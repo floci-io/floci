@@ -513,6 +513,18 @@ class DynamoDbVectorSearchIntegrationTest {
     }
 
     @Test
+    @Order(19)
+    void searchVectorsChecksAnOrderingOperandTypeBeforeTheComparator() {
+        expectValidation("SearchVectors", search(SCHEMA, "schema", 4, """
+            ,
+            "SearchConditionExpression": "tenant < :t",
+            "ExpressionAttributeValues": {":t": {"BOOL": true}}
+            """),
+                "Invalid SearchConditionExpression: Incorrect operand type for operator or function; "
+                + "operator or function: <, operand type: BOOL");
+    }
+
+    @Test
     @Order(20)
     void searchVectorsRejectsADimensionMismatch() {
         expectValidation("SearchVectors", """

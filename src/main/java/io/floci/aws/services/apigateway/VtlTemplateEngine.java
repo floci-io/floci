@@ -15,9 +15,11 @@ import org.apache.velocity.runtime.directive.Break;
 import org.apache.velocity.runtime.directive.Define;
 import org.apache.velocity.runtime.directive.Evaluate;
 import org.apache.velocity.runtime.directive.Foreach;
+import org.apache.velocity.runtime.directive.ForeachScope;
 import org.apache.velocity.runtime.directive.Include;
 import org.apache.velocity.runtime.directive.Macro;
 import org.apache.velocity.runtime.directive.Parse;
+import org.apache.velocity.runtime.directive.Scope;
 import org.apache.velocity.runtime.directive.Stop;
 import org.apache.velocity.runtime.parser.StandardParser;
 import org.apache.velocity.runtime.resource.ResourceCacheImpl;
@@ -59,6 +61,8 @@ import java.util.Set;
         StringResourceRepositoryImpl.class,
         Foreach.class,
         SandboxedForeach.class,
+        ForeachScope.class,
+        Scope.class,
         Include.class,
         Parse.class,
         Macro.class,

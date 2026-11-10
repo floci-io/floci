@@ -8,6 +8,7 @@ import io.floci.aws.core.common.AwsNamespaces;
 import io.floci.aws.core.common.AwsQueryLists;
 import io.floci.aws.core.common.AwsQueryResponse;
 import io.floci.aws.core.common.AwsRegionFacts;
+import io.floci.aws.core.common.PaginatedResult;
 import io.floci.aws.core.common.XmlBuilder;
 import io.floci.aws.services.docdb.DocDbQueryHandler;
 import io.floci.aws.services.neptune.NeptuneQueryHandler;
@@ -348,7 +349,7 @@ public class RdsQueryHandler {
                     xml.start("DBInstance").raw(row).end("DBInstance");
                 }
             }
-            xml.end("DBInstances").start("Marker").end("Marker");
+            xml.end("DBInstances");
             return Response.ok(AwsQueryResponse.envelope("DescribeDBInstances", AwsNamespaces.RDS, xml.build())).build();
         } catch (AwsException e) {
             return AwsQueryResponse.error(e.getErrorCode(), e.getMessage(), AwsNamespaces.RDS, e.getHttpStatus());
@@ -698,10 +699,7 @@ public class RdsQueryHandler {
         if (duration != null && (duration < 1 || duration > 20_160)) {
             throw new AwsException("InvalidParameterValue", "Duration must be between 1 and 20160.", 400);
         }
-        Integer maxRecords = parseOptionalInt(params.getFirst("MaxRecords"));
-        if (maxRecords != null && (maxRecords < 20 || maxRecords > 100)) {
-            throw new AwsException("InvalidParameterValue", "MaxRecords must be between 20 and 100.", 400);
-        }
+        int limit = recordPageLimit(params);
         Instant start = parseOptionalInstant(params.getFirst("StartTime"));
         Instant end = parseOptionalInstant(params.getFirst("EndTime"));
         if (start != null && end != null && start.isAfter(end)) {
@@ -717,11 +715,9 @@ public class RdsQueryHandler {
         }
         List<RdsEvent> all = service.describeEvents(region, sourceIdentifier, sourceType, start, end, duration);
         int offset = parseMarker(params.getFirst("Marker"));
-        int limit = maxRecords != null ? maxRecords : 100;
-        int from = Math.min(offset, all.size());
-        int to = Math.min(from + limit, all.size());
+        PaginatedResult<RdsEvent> page = recordPage(all, offset, limit);
         XmlBuilder xml = new XmlBuilder().start("Events");
-        for (RdsEvent event : all.subList(from, to)) {
+        for (RdsEvent event : page.items()) {
             xml.start("Event")
                     .elem("SourceIdentifier", event.sourceIdentifier())
                     .elem("SourceType", event.sourceType())
@@ -736,10 +732,24 @@ public class RdsQueryHandler {
                     .end("Event");
         }
         xml.end("Events");
-        if (to < all.size()) {
-            xml.elem("Marker", String.valueOf(to));
+        if (page.nextToken() != null) {
+            xml.elem("Marker", page.nextToken());
         }
         return Response.ok(AwsQueryResponse.envelope("DescribeEvents", AwsNamespaces.RDS, xml.build())).build();
+    }
+
+    private static int recordPageLimit(MultivaluedMap<String, String> params) {
+        Integer limit = parseOptionalInt(params.getFirst("MaxRecords"));
+        if (limit != null && (limit < 20 || limit > 100)) {
+            throw new AwsException("InvalidParameterValue", "MaxRecords must be between 20 and 100.", 400);
+        }
+        return limit != null ? limit : 100;
+    }
+
+    private static <T> PaginatedResult<T> recordPage(List<T> records, int offset, int limit) {
+        int from = Math.min(offset, records.size());
+        int to = Math.min(from + limit, records.size());
+        return new PaginatedResult<>(records.subList(from, to), to < records.size() ? String.valueOf(to) : null);
     }
 
     private static Integer parseOptionalInt(String value) {
@@ -1041,7 +1051,7 @@ public class RdsQueryHandler {
                .end("AvailabilityZones")
                .end("OrderableDBInstanceOption");
         }
-        xml.end("OrderableDBInstanceOptions").start("Marker").end("Marker");
+        xml.end("OrderableDBInstanceOptions");
         return Response.ok(AwsQueryResponse.envelope("DescribeOrderableDBInstanceOptions",
                 AwsNamespaces.RDS, xml.build())).build();
     }
@@ -1114,7 +1124,7 @@ public class RdsQueryHandler {
             for (DbSubnetGroup group : result) {
                 xml.start("DBSubnetGroup").raw(dbSubnetGroupInnerXml(group)).end("DBSubnetGroup");
             }
-            xml.end("DBSubnetGroups").start("Marker").end("Marker");
+            xml.end("DBSubnetGroups");
             return Response.ok(AwsQueryResponse.envelope("DescribeDBSubnetGroups", AwsNamespaces.RDS, xml.build())).build();
         } catch (AwsException e) {
             return AwsQueryResponse.error(e.getErrorCode(), e.getMessage(), AwsNamespaces.RDS, e.getHttpStatus());
@@ -1454,7 +1464,7 @@ public class RdsQueryHandler {
                     }
                 }
             }
-            xml.end("DBClusters").start("Marker").end("Marker");
+            xml.end("DBClusters");
             return Response.ok(AwsQueryResponse.envelope("DescribeDBClusters", AwsNamespaces.RDS, xml.build())).build();
         } catch (AwsException e) {
             return AwsQueryResponse.error(e.getErrorCode(), e.getMessage(), AwsNamespaces.RDS, e.getHttpStatus());
@@ -1555,7 +1565,7 @@ public class RdsQueryHandler {
             for (DbParameterGroup g : result) {
                 xml.start("DBParameterGroup").raw(paramGroupInnerXml(g)).end("DBParameterGroup");
             }
-            xml.end("DBParameterGroups").start("Marker").end("Marker");
+            xml.end("DBParameterGroups");
             return Response.ok(AwsQueryResponse.envelope("DescribeDBParameterGroups", AwsNamespaces.RDS, xml.build())).build();
         } catch (AwsException e) {
             return AwsQueryResponse.error(e.getErrorCode(), e.getMessage(), AwsNamespaces.RDS, e.getHttpStatus());
@@ -1728,7 +1738,7 @@ public class RdsQueryHandler {
             DbParameterGroup group = service.getDbParameterGroup(name, region);
             XmlBuilder xml = new XmlBuilder().start("Parameters");
             writeParameterRows(xml, group.getParameters(), group.getApplyMethods(), params.getFirst("Source"));
-            xml.end("Parameters").start("Marker").end("Marker");
+            xml.end("Parameters");
             return Response.ok(AwsQueryResponse.envelope("DescribeDBParameters", AwsNamespaces.RDS, xml.build())).build();
         } catch (AwsException e) {
             return AwsQueryResponse.error(e.getErrorCode(), e.getMessage(), AwsNamespaces.RDS, e.getHttpStatus());
@@ -1763,22 +1773,18 @@ public class RdsQueryHandler {
             MultivaluedMap<String, String> params, String region) {
         String filterName = params.getFirst("DBClusterParameterGroupName");
         try {
-            Integer maxRecords = parseOptionalInt(params.getFirst("MaxRecords"));
-            if (maxRecords != null && (maxRecords < 20 || maxRecords > 100)) {
-                throw new AwsException("InvalidParameterValue", "MaxRecords must be between 20 and 100.", 400);
-            }
+            int limit = recordPageLimit(params);
             int offset = parseMarker(params.getFirst("Marker"));
             List<DbClusterParameterGroup> all = new ArrayList<>(
                     service.listDbClusterParameterGroups(filterName, region));
-            int from = Math.min(offset, all.size());
-            int to = Math.min(from + (maxRecords != null ? maxRecords : 100), all.size());
+            PaginatedResult<DbClusterParameterGroup> page = recordPage(all, offset, limit);
             XmlBuilder xml = new XmlBuilder().start("DBClusterParameterGroups");
-            for (DbClusterParameterGroup g : all.subList(from, to)) {
+            for (DbClusterParameterGroup g : page.items()) {
                 xml.start("DBClusterParameterGroup").raw(clusterParamGroupInnerXml(g)).end("DBClusterParameterGroup");
             }
             xml.end("DBClusterParameterGroups");
-            if (to < all.size()) {
-                xml.elem("Marker", String.valueOf(to));
+            if (page.nextToken() != null) {
+                xml.elem("Marker", page.nextToken());
             }
             return Response.ok(AwsQueryResponse.envelope("DescribeDBClusterParameterGroups", AwsNamespaces.RDS, xml.build())).build();
         } catch (AwsException e) {
@@ -1872,7 +1878,7 @@ public class RdsQueryHandler {
             DbClusterParameterGroup group = service.getDbClusterParameterGroup(name, region);
             XmlBuilder xml = new XmlBuilder().start("Parameters");
             writeParameterRows(xml, group.getParameters(), group.getApplyMethods(), params.getFirst("Source"));
-            xml.end("Parameters").start("Marker").end("Marker");
+            xml.end("Parameters");
             return Response.ok(AwsQueryResponse.envelope("DescribeDBClusterParameters", AwsNamespaces.RDS, xml.build())).build();
         } catch (AwsException e) {
             return AwsQueryResponse.error(e.getErrorCode(), e.getMessage(), AwsNamespaces.RDS, e.getHttpStatus());
@@ -1929,7 +1935,7 @@ public class RdsQueryHandler {
         for (OptionGroup group : result) {
             xml.start("OptionGroup").raw(optionGroupInnerXml(group)).end("OptionGroup");
         }
-        xml.end("OptionGroupsList").start("Marker").end("Marker");
+        xml.end("OptionGroupsList");
         return Response.ok(AwsQueryResponse.envelope(
                 "DescribeOptionGroups", AwsNamespaces.RDS, xml.build())).build();
     }
@@ -2152,10 +2158,7 @@ public class RdsQueryHandler {
         if (sourceType != null && !List.of("SNAPSHOT", "CLUSTER").contains(sourceType)) {
             throw new AwsException("InvalidParameterValue", "SourceType must be SNAPSHOT or CLUSTER.", 400);
         }
-        Integer maxRecords = parseOptionalInt(params.getFirst("MaxRecords"));
-        if (maxRecords != null && (maxRecords < 20 || maxRecords > 100)) {
-            throw new AwsException("InvalidParameterValue", "MaxRecords must be between 20 and 100.", 400);
-        }
+        int limit = recordPageLimit(params);
         Map<String, List<String>> filters = new LinkedHashMap<>();
         for (int i = 1; params.getFirst("Filters.Filter." + i + ".Name") != null; i++) {
             String name = params.getFirst("Filters.Filter." + i + ".Name");
@@ -2163,15 +2166,14 @@ public class RdsQueryHandler {
         }
         List<ExportTask> all = exportTaskService.describeExportTasks(params.getFirst("ExportTaskIdentifier"),
                 params.getFirst("SourceArn"), sourceType, filters, region);
-        int from = Math.min(parseMarker(params.getFirst("Marker")), all.size());
-        int to = Math.min(from + (maxRecords != null ? maxRecords : 100), all.size());
+        PaginatedResult<ExportTask> page = recordPage(all, parseMarker(params.getFirst("Marker")), limit);
         XmlBuilder xml = new XmlBuilder().start("ExportTasks");
-        for (ExportTask task : all.subList(from, to)) {
+        for (ExportTask task : page.items()) {
             xml.start("ExportTask").raw(exportTaskXml(task)).end("ExportTask");
         }
         xml.end("ExportTasks");
-        if (to < all.size()) {
-            xml.elem("Marker", String.valueOf(to));
+        if (page.nextToken() != null) {
+            xml.elem("Marker", page.nextToken());
         }
         return Response.ok(AwsQueryResponse.envelope("DescribeExportTasks", AwsNamespaces.RDS, xml.build())).build();
     }

@@ -22,11 +22,13 @@ import jakarta.inject.Inject;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
+import java.time.Duration;
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
 import java.util.concurrent.TimeUnit;
 
+import static io.floci.aws.testing.EcsTaskWaits.awaitLastStatus;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
@@ -87,7 +89,10 @@ class EcsAwsvpcTaskAddressDockerIntegrationTest {
         String network = null;
         String probe = null;
         try {
-            EcsTask described = ecsService.describeTasks(clusterName, List.of(task.getTaskArn()), REGION).getFirst();
+            String taskArn = task.getTaskArn();
+            EcsTask described = awaitLastStatus(
+                    () -> ecsService.describeTasks(clusterName, List.of(taskArn), REGION).getFirst(),
+                    EcsTask::getLastStatus, Duration.ofMinutes(2), "RUNNING", "STOPPED");
             assertEquals("RUNNING", described.getLastStatus(), "the task must start: " + described.getStoppedReason());
             String address = described.getPrivateIpAddress();
             assertNotNull(address, "an awsvpc task must report its ENI address");

@@ -66,6 +66,10 @@ changing credentials already issued.
 
 StackSets support both `SELF_MANAGED` and the Cloud Launchpad `SERVICE_MANAGED` workflow. `ActivateOrganizationsAccess` requires an Organizations management account with all features enabled and enables trusted access for `stacksets.cloudformation.amazonaws.com`. Service-managed organizational-unit deployment targets are resolved from the caller's actual Organizations state rather than converted into synthetic account IDs. Targeting an OU includes eligible accounts directly in that OU and in all descendant OUs, while excluding the organization management account, matching AWS StackSets targeting semantics. `DescribeStackSet` returns the stack set's `Tags` and, for a service-managed stack set, the root and OU ids its instances were created for as `OrganizationalUnitIds`.
 
+With `AutoDeployment` enabled, a service-managed stack set follows its organization. An account created in, invited into or moved under a targeted root or OU gets an instance in every Region of the targets that now cover it, and an account moved out of every target or removed from the organization loses its instances; their stacks stay when `RetainStacksOnAccountRemoval` is set. Account placement changes are reconciled asynchronously, so Organizations calls do not wait for deployments and deployment failures do not undo completed account changes. A second `CreateStackInstances` for a target already recorded adds its Regions to the earlier ones. Automatic creates and deletes are recorded in `ListStackSetOperations` and `DescribeStackSetOperation`, with their timestamps and success or failure status. An account move that needs no instance changes records no operation. A returning account uses a distinct backing-stack name when its previous name remains occupied; the retained stack is not reassociated.
+
+A template can declare `AWS::CloudFormation::StackSet` with required `StackSetName` and `PermissionModel` properties. Missing or blank values fail resource creation. Floci creates the stack set and an instance in every account, or account under every root and OU, and Region of its `StackInstancesGroup`. An update applies the template, parameters and settings to every instance, deploys to the targets and Regions the template adds, and removes the instances of a target it drops or of a Region it drops from a target it keeps; deleting the resource deletes every instance and then the stack set. `Ref` and `Fn::GetAtt StackSetId` return the stack set id. Resource updates require that original id; deleting a resource whose original id is gone succeeds. Changing `StackSetName` or `PermissionModel` replaces the resource. `UpdateReplacePolicy: Retain` preserves the displaced set; replacement rollback restores the previous identity and removes the replacement. In-place rollback restores the saved configuration, deployment targets and instances. A failed restore keeps its snapshot for `ContinueUpdateRollback`. `AdministrationRoleARN`, `ExecutionRoleName`, `OperationPreferences`, `CallAs` and `ParameterOverrides` are not applied.
+
 `CreateStackInstances` and `UpdateStackSet` execute the backing CloudFormation stacks in each target account. A failed resource can therefore drive the backing stack through rollback and leave the stack instance `INOPERABLE` with detailed status `FAILED`; the StackSet operation is reported as `FAILED` instead of being forced to success.
 
 Operation IDs are recorded and validated. Duplicate IDs return `OperationIdAlreadyExistsException`, missing stack sets return `StackSetNotFoundException`, and missing operation IDs return `OperationNotFoundException`. Invalid targets and request shapes use the CloudFormation query-protocol validation errors. Operations complete locally, so `OperationInProgressException` is only reachable when local operation state actually overlaps; Floci does not inject concurrency failures solely to exercise an error code.
@@ -238,7 +242,7 @@ cross-resource references.
 | WAFv2 | `IPSet`, `LoggingConfiguration`, `WebACL`, `WebACLAssociation` |
 | Config | `ConfigRule` |
 | Bedrock AgentCore | `Runtime` (Ref returns the AgentRuntimeId; CapacityProviderConfiguration, FilesystemConfigurations, LifecycleConfiguration, PlatformVersion and RequestHeaderConfiguration are accepted and not stored), `RuntimeEndpoint` (Ref returns the endpoint ARN; Tags are accepted and not stored), `Memory` (Ref returns the memory ARN; MemoryStrategies, IndexedKeys, NamespaceKeys and StreamDeliveryResources are accepted and not stored) |
-| CloudFormation | `CustomResource`, `Custom::DynamoDBReplica` (applied natively against DynamoDB, not via a provider Lambda), `Stack` (nested stacks), `Custom::*` (Lambda-backed) |
+| CloudFormation | `CustomResource`, `Custom::DynamoDBReplica` (applied natively against DynamoDB, not via a provider Lambda), `StackSet`, `Stack` (nested stacks), `Custom::*` (Lambda-backed) |
 | CloudTrail | `Trail` |
 | CDK | `CDK::Metadata` (accepted; no-op) |
 <!-- floci:cfn-types:end -->
@@ -310,9 +314,13 @@ The current implementation is limited to custom buses with the `Name`, `Descript
 `Policy` properties. `EventSourceName`, `KmsKeyIdentifier`, `DeadLetterConfig`, and `LogConfig` are
 rejected with `ValidationError` instead of being silently ignored. AWS models a `Name` change as
 resource replacement; Floci currently rejects that update until generic replacement handling is
-available. `Policy` is applied when the bus is created. Changing `Description`, `Tags`, or `Policy`
-during `UpdateStack` is rejected until transactional resource rollback is available; this prevents a
-failed stack update from leaving the live bus in the rejected configuration.
+available. `Policy` is applied when the bus is created. On `UpdateStack` the template's `Tags` are
+applied to the same bus in place: a key the stack recorded setting and the new template drops is
+removed, and a tag added outside the stack is kept, as on AWS. A bus created before Floci recorded
+its tag keys keeps a key an older template dropped. When a later resource fails the update, the
+tags the bus had before it are put back. Changing `Description` or `Policy` during `UpdateStack` is
+rejected until transactional resource rollback is available; this prevents a failed stack update
+from leaving the live bus in the rejected configuration.
 
 ## EventBridge archives
 
@@ -732,13 +740,18 @@ regenerates it from AWS's published schemas, and `cfn-schema-drift.yml` compares
 A property the previous template declared and the new template drops is cleared on `UpdateStack`,
 goes back to its create default, or is kept, on the AppSync resources, the EC2 networking types
 (`Subnet`, `InternetGateway`, `RouteTable`, `NatGateway`, `EIP`, `PrefixList`), an
-`AWS::ApiGatewayV2::Stage` and an `AWS::EC2::Instance`. Kept: required members
+`AWS::ApiGatewayV2::Stage`, an `AWS::EC2::Instance` and an `AWS::ECS::Service`. Kept: required members
 (`AuthenticationType`, `Type`, a function's `DataSourceName`), a data source's and a function's `Name`,
 an API key's `Expires`, a GraphQL API's `ApiType` and `Visibility`, a UNIT resolver's `DataSourceName`,
 a `NatGateway`'s `PrivateIpAddress`, a `PrefixList`'s `MaxEntries`, a `Stage`'s `StageName` and an
 `Instance`'s `SecurityGroupIds`, `NetworkInterfaces` and `LaunchTemplate`. A dropped `LaunchTemplate` keeps
 the instance, but the instance type and the `MetadataOptions` members the template supplied go back to
-their defaults. A `Stage`'s dropped `StageVariables` become empty. An `Instance`'s dropped `UserData` is
+their defaults, and the instance profile it supplied is disassociated. A service's `TaskDefinition`,
+`NetworkConfiguration`, `ServiceName`, `LaunchType`, `LoadBalancers`, `CapacityProviderStrategy` and
+`ServiceRegistries` are kept, and its `DesiredCount` goes back to 1. A service's dropped
+`DeploymentConfiguration` is cleared. An empty `CapacityProviderStrategy` or `ServiceRegistries` in the
+template clears it; a failed stabilisation puts the prior values back, and a deployment configuration
+the service did not have goes back to none. A `Stage`'s dropped `StageVariables` become empty. An `Instance`'s dropped `UserData` is
 cleared: a running instance is stopped for the rewrite and started again, and a stopped one stays stopped.
 An update that drops a `PrefixList`'s `AddressFamily` or `PrefixListName` fails. Create-only members are
 not cleared either.
@@ -1052,6 +1065,41 @@ resource.
 A stack that reached `UPDATE_ROLLBACK_FAILED` under an earlier Floci version kept no record of its
 state before the update. `ContinueUpdateRollback` then retries every `UPDATE_FAILED` resource and
 keeps the template the stack holds.
+
+## Stack status events
+
+Every status a stack records, root or nested, goes to the default EventBridge bus of the stack's
+account and Region, with source `aws.cloudformation` and detail type
+`CloudFormation Stack Status Change`, as
+[CloudFormation sends it](https://docs.aws.amazon.com/AWSCloudFormation/latest/UserGuide/eventbridge-integration.html).
+`resources` holds the stack's ID, and the
+[detail](https://docs.aws.amazon.com/AWSCloudFormation/latest/UserGuide/event-detail-stack-status-change.html)
+holds `stack-id`, `client-request-token` where there is one, and `status-details` with `status`,
+`detailed-status` and `status-reason`, each of the last two empty where there is nothing to say. A
+resource's progress sends nothing, a parent's record of a nested stack included. Each status is sent
+once.
+
+A failed create or update ends as it does on AWS. A root whose nested stack fails goes from
+`CREATE_IN_PROGRESS` to `ROLLBACK_IN_PROGRESS` and `ROLLBACK_COMPLETE`, or from `UPDATE_IN_PROGRESS`
+through `UPDATE_ROLLBACK_IN_PROGRESS` and `UPDATE_ROLLBACK_COMPLETE_CLEANUP_IN_PROGRESS` to
+`UPDATE_ROLLBACK_COMPLETE`, with no `CREATE_FAILED` or `UPDATE_FAILED`. A nested stack whose create
+fails sends `CREATE_FAILED`, and its rollback shows as `DELETE_IN_PROGRESS` and `DELETE_COMPLETE`.
+A failure in a root's own resource with its nested stack healthy, and a delete that fails, send the
+statuses CloudFormation documents from the same code; neither was read against AWS.
+
+The `client-request-token` is the `ClientRequestToken` of the operation that caused the status:
+`ExecuteChangeSet`, `CreateStack`, `UpdateStack`, `DeleteStack` or `ContinueUpdateRollback`, called
+directly or from a state machine's `aws-sdk:cloudformation` task. A rollback's statuses carry the token
+of the create or update that failed. The key is absent, never empty, on
+a nested stack's events, on the `REVIEW_IN_PROGRESS` of a new stack, and on the events of an operation
+given no token.
+
+Events are delivered in order by one background worker, apart from the stack operation and outside any
+lock on the stack. The status an operation starts with is sent as the operation begins to run, so one
+the operation limit refuses sends nothing. A delivery that fails is logged and changes nothing about
+the operation, and a slow target delays later events, never a stack. The worker's queue is in memory: an event still in it when
+Floci stops is dropped and counted in the log, and is not sent on the next start, even where the stack
+is persisted.
 
 ## Deleted Stacks
 

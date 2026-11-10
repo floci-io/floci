@@ -13,6 +13,7 @@ public class PendingInvocation {
     private final CompletableFuture<InvokeResult> resultFuture;
     private final CompletableFuture<Void> dispatchedFuture = new CompletableFuture<>();
     private volatile String clientContext;
+    private volatile ResponseStreamListener responseStreamListener;
 
     public PendingInvocation(String requestId, byte[] payload, long deadlineMs,
                               String functionArn, CompletableFuture<InvokeResult> resultFuture) {
@@ -39,6 +40,8 @@ public class PendingInvocation {
     public String getFunctionArn() { return functionArn; }
     public String getClientContext() { return clientContext; }
     public void setClientContext(String clientContext) { this.clientContext = clientContext; }
+    public ResponseStreamListener getResponseStreamListener() { return responseStreamListener; }
+    public void setResponseStreamListener(ResponseStreamListener listener) { this.responseStreamListener = listener; }
     public CompletableFuture<InvokeResult> getResultFuture() { return resultFuture; }
     public CompletableFuture<Void> getDispatchedFuture() { return dispatchedFuture; }
 }

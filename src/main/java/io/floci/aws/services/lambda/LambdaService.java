@@ -38,6 +38,7 @@ import io.floci.aws.services.lambda.model.LambdaAlias;
 import io.floci.aws.services.lambda.model.LambdaFileSystemConfig;
 import io.floci.aws.services.lambda.model.LambdaFunction;
 import io.floci.aws.services.lambda.model.LambdaUrlConfig;
+import io.floci.aws.services.lambda.model.ResponseStreamListener;
 import io.floci.aws.services.lambda.model.ScalingConfig;
 import io.floci.aws.services.lambda.zip.CodeStore;
 import io.floci.aws.services.lambda.zip.DeploymentPackage;
@@ -1560,7 +1561,21 @@ public class LambdaService implements ResourceProvider {
         return invokeArn(functionArn, payload, InvocationType.Event, chainDepth);
     }
 
+    /**
+     * Invokes a Lambda target ARN synchronously, handing a response the runtime streams to
+     * {@code listener} as it arrives.
+     */
+    public InvokeResult invokeArnStreaming(String functionArn, byte[] payload, ResponseStreamListener listener) {
+        return invokeArn(functionArn, payload, InvocationType.RequestResponse,
+                LambdaInvocationChain.currentDepth(), listener);
+    }
+
     private InvokeResult invokeArn(String functionArn, byte[] payload, InvocationType type, int chainDepth) {
+        return invokeArn(functionArn, payload, type, chainDepth, null);
+    }
+
+    private InvokeResult invokeArn(String functionArn, byte[] payload, InvocationType type, int chainDepth,
+                                   ResponseStreamListener listener) {
         AwsArnUtils.Arn arn = AwsArnUtils.parse(functionArn);
         LambdaArnUtils.ResolvedFunctionRef ref = LambdaArnUtils.resolve(functionArn);
         LambdaFunction fn = targetResolver.resolveInvokeTargetForAccount(
@@ -1569,7 +1584,9 @@ public class LambdaService implements ResourceProvider {
         if (durable != null) {
             return durable;
         }
-        InvokeResult result = executorService.invoke(fn, payload, type, chainDepth, ref.qualifier());
+        InvokeResult result = listener == null
+                ? executorService.invoke(fn, payload, type, chainDepth, ref.qualifier())
+                : executorService.invokeStreaming(fn, payload, chainDepth, ref.qualifier(), listener);
         result.setExecutedVersion(fn.getVersion());
         return result;
     }

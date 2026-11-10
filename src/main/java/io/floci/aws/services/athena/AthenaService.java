@@ -62,6 +62,8 @@ import java.util.regex.Pattern;
 public class AthenaService {
 
     private static final Logger LOG = Logger.getLogger(AthenaService.class);
+    private static final Pattern DECIMAL_TYPE = Pattern.compile("DECIMAL\\((\\d+),\\s*(\\d+)\\)",
+            Pattern.CASE_INSENSITIVE);
     public static final String DEFAULT_CATALOG = "AwsDataCatalog";
     private static final String DEFAULT_OUTPUT_BUCKET = "floci-athena-results";
     private static final String DEFAULT_WORKGROUP = "primary";
@@ -97,6 +99,7 @@ public class AthenaService {
     private final StorageBackend<String, QueryExecution> queryStore;
     private final StorageBackend<String, WorkGroup> workGroupStore;
     private final StorageBackend<String, DataCatalog> dataCatalogStore;
+    private final StorageBackend<String, List<String>> resultColumnTypeStore;
     private final FlociDuckClient duckClient;
     private final GlueService glueService;
     private final S3Service s3Service;
@@ -119,6 +122,8 @@ public class AthenaService {
         this.workGroupStore = storageFactory.create("athena", "workgroups.json",
                 new TypeReference<>() {});
         this.dataCatalogStore = storageFactory.create("athena", "data-catalogs.json",
+                new TypeReference<>() {});
+        this.resultColumnTypeStore = storageFactory.create("athena", "query-result-column-types.json",
                 new TypeReference<>() {});
         this.duckClient = duckClient;
         this.glueService = glueService;
@@ -189,6 +194,9 @@ public class AthenaService {
                 ensureOutputBucket(outputLocation);
             }
             duckClient.execute(query, setupDdl, outputLocation);
+            if (outputLocation != null) {
+                resultColumnTypeStore.put(id, describeColumnTypes(query, setupDdl));
+            }
             return null;
         }).onSuccess(v -> {
             markSucceeded(id, execution);
@@ -542,7 +550,8 @@ public class AthenaService {
             return new ResultSet(List.of(), new ResultSet.ResultSetMetadata(List.of()));
         }
 
-        return readResultsFromS3(execution.getResultConfiguration().getOutputLocation(), id);
+        List<String> columnTypes = resultColumnTypeStore.get(id).orElse(List.of());
+        return readResultsFromS3(execution.getResultConfiguration().getOutputLocation(), id, columnTypes);
     }
 
     // ── private helpers ───────────────────────────────────────────────────────
@@ -1091,7 +1100,60 @@ public class AthenaService {
         }
     }
 
-    private ResultSet readResultsFromS3(String outputLocation, String queryId) {
+    /**
+     * The DuckDB type of each result column, in order. The result CSV carries only the column names,
+     * so the types come from DuckDB describing the same query. The query has already succeeded, so a
+     * failure here only costs the types: its columns are reported as varchar.
+     */
+    private List<String> describeColumnTypes(String query, String setupDdl) {
+        try {
+            return duckClient.query("DESCRIBE " + query, setupDdl).stream()
+                    .map(column -> String.valueOf(column.get("column_type")))
+                    .toList();
+        } catch (RuntimeException e) {
+            LOG.warnv(e, "Could not describe the result columns of {0}; reporting them as varchar", query);
+            return List.of();
+        }
+    }
+
+    private static ResultSet.ColumnInfo columnInfo(String name, String duckType) {
+        ResultSet.ColumnInfo column = new ResultSet.ColumnInfo(DEFAULT_CATALOG, "", "", name, athenaType(duckType));
+        Matcher decimal = DECIMAL_TYPE.matcher(duckType.trim());
+        if (decimal.matches()) {
+            column.setPrecision(Integer.parseInt(decimal.group(1)));
+            column.setScale(Integer.parseInt(decimal.group(2)));
+        }
+        return column;
+    }
+
+    static String athenaType(String duckType) {
+        String type = duckType.toUpperCase(Locale.ROOT).trim();
+        if (type.endsWith("[]")) {
+            return "array";
+        }
+        int parameters = type.indexOf('(');
+        return switch (parameters < 0 ? type : type.substring(0, parameters)) {
+            case "BIGINT" -> "bigint";
+            case "INTEGER" -> "integer";
+            case "SMALLINT" -> "smallint";
+            case "TINYINT" -> "tinyint";
+            case "DOUBLE" -> "double";
+            case "FLOAT" -> "float";
+            case "DECIMAL" -> "decimal";
+            case "BOOLEAN" -> "boolean";
+            case "DATE" -> "date";
+            case "TIMESTAMP", "TIMESTAMP_S", "TIMESTAMP_MS", "TIMESTAMP_NS" -> "timestamp";
+            case "TIMESTAMP WITH TIME ZONE" -> "timestamp with time zone";
+            case "TIME" -> "time";
+            case "TIME WITH TIME ZONE" -> "time with time zone";
+            case "BLOB" -> "varbinary";
+            case "STRUCT" -> "row";
+            case "MAP" -> "map";
+            default -> "varchar";
+        };
+    }
+
+    private ResultSet readResultsFromS3(String outputLocation, String queryId, List<String> columnTypes) {
         try {
             String bucket = extractBucket(outputLocation);
             String prefix = extractKey(outputLocation);
@@ -1109,14 +1171,14 @@ public class AthenaService {
                 return emptyResultSet();
             }
 
-            return parseCsv(csv.get().getData());
+            return parseCsv(csv.get().getData(), columnTypes);
         } catch (Exception e) {
             LOG.warnv("Could not read query results for {0}: {1}", queryId, e.getMessage());
             return emptyResultSet();
         }
     }
 
-    private ResultSet parseCsv(byte[] data) {
+    private ResultSet parseCsv(byte[] data, List<String> columnTypes) {
         List<ResultSet.Row> rows = new ArrayList<>();
         List<ResultSet.ColumnInfo> columns = new ArrayList<>();
 
@@ -1129,8 +1191,8 @@ public class AthenaService {
             }
 
             String[] headers = CsvParser.parseLine(headerLine).toArray(String[]::new);
-            for (String h : headers) {
-                columns.add(new ResultSet.ColumnInfo(DEFAULT_CATALOG, "", "", h, "varchar"));
+            for (int i = 0; i < headers.length; i++) {
+                columns.add(columnInfo(headers[i], i < columnTypes.size() ? columnTypes.get(i) : "VARCHAR"));
             }
 
             // Header row is included in GetQueryResults per AWS spec

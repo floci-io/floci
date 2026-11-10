@@ -10,6 +10,8 @@ import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import com.fasterxml.jackson.dataformat.yaml.YAMLMapper;
 import io.floci.aws.core.common.AwsException;
+import io.floci.aws.core.common.PaginatedResult;
+import io.floci.aws.core.common.Pagination;
 import io.floci.aws.core.common.RegionResolver;
 import io.floci.aws.core.common.SmithyValidationErrors;
 import io.floci.aws.services.apigateway.ApiGatewayService.StoredMapping;
@@ -977,11 +979,8 @@ public class ApiGatewayController {
      *
      * <p>Each pair is {@code [used, remaining]}, not {@code [used, quota]}: measured against real
      * API Gateway, the second element is the quota limit minus the cumulative use so far in the
-     * period. Both elements are {@code 0} here because the emulator does not meter requests per API
-     * key, so there is no use to report or to subtract from a plan's quota. Once the execute path
-     * counts per key, this method is where the count feeds in; until then a caller that sums the
-     * used counts gets the same zero it already gets from an unsupported action, without having to
-     * special-case a missing endpoint.
+     * period. The execute path counts each admitted call per key and UTC day, and a plan without a
+     * quota reports {@code [0, 0]}, as AWS does.
      */
     @GET
     @Path("/usageplans/{usagePlanId}/usage")
@@ -1421,12 +1420,18 @@ public class ApiGatewayController {
 
     @GET
     @Path("/v2/apis")
-    public Response getApis(@Context HttpHeaders headers) {
+    public Response getApis(@Context HttpHeaders headers,
+                            @QueryParam("maxResults") String maxResults,
+                            @QueryParam("nextToken") String nextToken) {
         String region = regionResolver.resolveRegion(headers);
-        List<Api> apis = v2Service.getApis(region);
+        PaginatedResult<Api> page = v2Service.getApis(region,
+                Pagination.parseMaxResults(maxResults, "BadRequestException"), nextToken);
         ObjectNode root = objectMapper.createObjectNode();
         ArrayNode items = root.putArray("items");
-        apis.forEach(a -> items.add(toV2ApiNode(a)));
+        page.items().forEach(a -> items.add(toV2ApiNode(a)));
+        if (page.nextToken() != null) {
+            root.put("nextToken", page.nextToken());
+        }
         return Response.ok(root.toString()).type(MediaType.APPLICATION_JSON).build();
     }
 

@@ -50,8 +50,16 @@ public class SpectrumQueryPreparation {
     }
 
     public boolean prepare(String sql, SpectrumSession session, BackendSql backend) {
+        return prepare(sql, session, backend, List.of());
+    }
+
+    /**
+     * Prepares a statement that has bind parameters. {@code parameters} is the text of each bound value, a null
+     * where it is unusable; null {@code parameters} means the statement is only being parsed, with no values yet.
+     */
+    public boolean prepare(String sql, SpectrumSession session, BackendSql backend, List<String> parameters) {
         try {
-            return RequestScopes.callAs(session.accountId(), () -> prepareInScope(sql, session, backend));
+            return RequestScopes.callAs(session.accountId(), () -> prepareInScope(sql, session, backend, parameters));
         } catch (AwsException exception) {
             String state = switch (exception.getErrorCode()) {
                 case "AlreadyExistsException" -> "42P07";
@@ -91,7 +99,7 @@ public class SpectrumQueryPreparation {
         };
     }
 
-    private boolean prepareInScope(String sql, SpectrumSession session, BackendSql backend) {
+    private boolean prepareInScope(String sql, SpectrumSession session, BackendSql backend, List<String> parameters) {
         Optional<ExternalStatement> statement = parser.parse(sql);
         if (statement.orElse(null) instanceof ExternalStatement.CreateSchema schema) {
             return createSchema(schema, session, backend);
@@ -139,7 +147,7 @@ public class SpectrumQueryPreparation {
             try (ExternalCatalogLocks.Guard ignored = catalogLocks.read(binding,
                     session.inTransaction() || !backend.permitsCachePublication())) {
                 requireCurrentBinding(session, binding);
-                ExternalTableMaterializer.Outcome outcome = materializer.ensureCurrent(backend, session, binding, reference.table(), sql);
+                ExternalTableMaterializer.Outcome outcome = materializer.ensureCurrent(backend, session, binding, reference.table(), sql, parameters);
                 if (outcome == ExternalTableMaterializer.Outcome.NOT_EXTERNAL) {
                     throw new SpectrumSqlException("42P01", "external relation \"" + reference.schema()
                             + "." + reference.table() + "\" does not exist");

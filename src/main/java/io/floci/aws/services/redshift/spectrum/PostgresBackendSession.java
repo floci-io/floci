@@ -17,6 +17,11 @@ public final class PostgresBackendSession implements BackendSql {
     }
 
     @Override
+    public Object connectionKey() {
+        return backend;
+    }
+
+    @Override
     public void execute(String sql) {
         try {
             OutputStream output = backend.getOutputStream();

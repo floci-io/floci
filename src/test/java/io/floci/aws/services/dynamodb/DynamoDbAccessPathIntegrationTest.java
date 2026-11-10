@@ -12,6 +12,7 @@ import org.junit.jupiter.api.TestMethodOrder;
 
 import java.util.HashSet;
 import java.util.List;
+import java.util.Map;
 import java.util.Set;
 
 import static io.restassured.RestAssured.given;
@@ -116,6 +117,27 @@ class DynamoDbAccessPathIntegrationTest {
             .statusCode(400)
             .body("__type", equalTo("ValidationException"))
             .body("message", equalTo("Query key condition not supported"));
+    }
+
+    @Test
+    @Order(12)
+    void queryRefusesANestedOrRepeatedKeyConditionAttributeBeforeTheTableLookup() {
+        Map<String, String> errors = Map.of(
+                "pk = :pk AND sk > :a AND sk < :b", "must only contain one condition per key",
+                "pk = :pk AND (sk > :a AND sk < :b)", "must only contain one condition per key",
+                "pk = :pk AND x.y = :a", "cannot have conditions on nested attributes",
+                "(pk = :pk AND sk > :a) AND x.y = :b", "cannot have conditions on nested attributes");
+        for (String table : List.of(TABLE, "access-path-validation-missing")) {
+            errors.forEach((expression, error) -> request("DynamoDB_20120810.Query", """
+                    {
+                      "TableName":"%s",
+                      "KeyConditionExpression":"%s",
+                      "ExpressionAttributeValues":{":pk":{"S":"p1"},":a":{"S":"a"},":b":{"S":"b"}}
+                    }
+                    """.formatted(table, expression))
+                .statusCode(400)
+                .body("message", equalTo("Invalid KeyConditionExpression: KeyConditionExpressions " + error)));
+        }
     }
 
     @Test
@@ -894,6 +916,24 @@ class DynamoDbAccessPathIntegrationTest {
                 .post("/")
             .then()
                 .statusCode(200);
+        }
+    }
+
+    @Test
+    @Order(30)
+    void queryRefusesAnOrderingOperandWithNoOrderingBeforeTheTableLookup() {
+        String operandError = "Invalid KeyConditionExpression: Incorrect operand type for operator or function; "
+                + "operator or function: <, operand type: BOOL";
+        for (String table : List.of(TABLE, "access-path-validation-missing")) {
+            request("DynamoDB_20120810.Query", """
+                    {
+                      "TableName":"%s",
+                      "KeyConditionExpression":"pk = :pk AND sk < :sk",
+                      "ExpressionAttributeValues":{":pk":{"S":"p1"},":sk":{"BOOL":true}}
+                    }
+                    """.formatted(table))
+                .statusCode(400)
+                .body("message", equalTo(operandError));
         }
     }
 

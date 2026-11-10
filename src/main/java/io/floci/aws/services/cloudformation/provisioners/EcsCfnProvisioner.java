@@ -304,6 +304,7 @@ public class EcsCfnProvisioner implements CfnResourceProvisioner {
         List<Map<String, Object>> serviceRegistries =
                 parseServiceRegistries(props != null ? props.get("ServiceRegistries") : null, ctx);
 
+        Set<String> dropped = ctx.droppedProperties(props);
         String priorName = r.getAttributes().get("Name");
         String serviceName = ctx.resolveOptional(props, "ServiceName");
         if (serviceName == null || serviceName.isBlank()) {
@@ -317,6 +318,9 @@ public class EcsCfnProvisioner implements CfnResourceProvisioner {
         boolean inPlace = ctx.isUpdate() && serviceName.equals(priorName)
                 && clusterName(clusterRef).equals(clusterOfServiceArn(ctx.priorPhysicalId()));
         UpdateServiceRequest restore;
+        boolean clearDeploymentConfiguration = false;
+        boolean restoreDeploymentConfiguration = false;
+        Map<String, Object> priorDeploymentConfiguration = null;
         if (inPlace) {
             UpdateServiceRequest update = new UpdateServiceRequest();
             update.setCluster(clusterRef);
@@ -325,10 +329,17 @@ public class EcsCfnProvisioner implements CfnResourceProvisioner {
             update.setDesiredCount(desiredCount);
             update.setNetworkConfiguration(networkConfiguration);
             update.setDeploymentConfiguration(deploymentConfiguration);
+            // A dropped strategy or registries stay null, so the stored value stays; only a declared empty list clears it.
             update.setCapacityProviderStrategy(capacityProviderStrategy);
             update.setServiceRegistries(serviceRegistries);
+            clearDeploymentConfiguration = deploymentConfiguration == null
+                    && dropped.contains("DeploymentConfiguration");
             // Built before updateService, which changes this same model in place.
-            restore = restoreRequest(update, ecsService.serviceByArn(ctx.priorPhysicalId()));
+            EcsServiceModel prior = ecsService.serviceByArn(ctx.priorPhysicalId());
+            restore = restoreRequest(update, prior);
+            priorDeploymentConfiguration = prior == null ? null : prior.getDeploymentConfiguration();
+            restoreDeploymentConfiguration = prior != null
+                    && (deploymentConfiguration != null || clearDeploymentConfiguration);
             svc = ecsService.updateService(update, ctx.region());
         } else {
             CreateServiceRequest create = new CreateServiceRequest();
@@ -340,7 +351,8 @@ public class EcsCfnProvisioner implements CfnResourceProvisioner {
             create.setLoadBalancers(loadBalancers);
             create.setNetworkConfiguration(networkConfiguration);
             create.setDeploymentConfiguration(deploymentConfiguration);
-            create.setCapacityProviderStrategy(capacityProviderStrategy);
+            create.setCapacityProviderStrategy(
+                    capacityProviderStrategy != null && capacityProviderStrategy.isEmpty() ? null : capacityProviderStrategy);
             create.setServiceRegistries(serviceRegistries);
             restore = null;
             svc = ecsService.createService(create, ctx.region());
@@ -350,11 +362,25 @@ public class EcsCfnProvisioner implements CfnResourceProvisioner {
         r.getAttributes().put("Name", svc.getServiceName());
         r.getAttributes().put("ServiceArn", svc.getServiceArn());
         if (inPlace) {
+            String service = serviceName;
+            boolean clearedDeploymentConfiguration = clearDeploymentConfiguration;
+            boolean restoredDeploymentConfiguration = restoreDeploymentConfiguration;
+            Map<String, Object> priorConfiguration = priorDeploymentConfiguration;
             try {
+                if (clearedDeploymentConfiguration) {
+                    ecsService.replaceServiceDeploymentConfiguration(clusterRef, service, null, ctx.region());
+                }
                 ecsService.awaitServiceStable(svc);
             } catch (RuntimeException failure) {
-                restoreInPlace(r, failure, () -> ecsService.awaitServiceStable(
-                        ecsService.updateService(restore, ctx.region())));
+                restoreInPlace(r, failure, () -> {
+                    EcsServiceModel restored = ecsService.updateService(restore, ctx.region());
+                    // After updateService, so the exact prior value, none included, is what stays.
+                    if (restoredDeploymentConfiguration) {
+                        ecsService.replaceServiceDeploymentConfiguration(
+                                clusterRef, service, priorConfiguration, ctx.region());
+                    }
+                    ecsService.awaitServiceStable(restored);
+                });
                 throw failure;
             }
         } else {
@@ -364,11 +390,12 @@ public class EcsCfnProvisioner implements CfnResourceProvisioner {
 
     /**
      * The update that puts {@code prior} back on what {@code update} changed: its task definition,
-     * desired count and network configuration, and each setting the update declared. A deployment
-     * configuration, capacity provider strategy or service registries the service did not have are
-     * put back empty, so a registry the update added is deregistered; a setting the update left
-     * unchanged is left unchanged again, so the restore rolls no deployment for registries nobody
-     * touched.
+     * desired count and network configuration, and each setting the update declared. A capacity
+     * provider strategy or service registries the service did not have are put back empty, so a
+     * registry the update added is deregistered; a setting the update left unchanged is left
+     * unchanged again, so the restore rolls no deployment for registries nobody touched. The
+     * deployment configuration is not here: updateService cannot put back none, so the caller
+     * restores it exactly through replaceServiceDeploymentConfiguration.
      */
     private static UpdateServiceRequest restoreRequest(UpdateServiceRequest update, EcsServiceModel prior) {
         UpdateServiceRequest restore = new UpdateServiceRequest();
@@ -380,9 +407,6 @@ public class EcsCfnProvisioner implements CfnResourceProvisioner {
         restore.setTaskDefinition(prior.getTaskDefinition());
         restore.setDesiredCount(prior.getDesiredCount());
         restore.setNetworkConfiguration(prior.getNetworkConfiguration());
-        if (update.getDeploymentConfiguration() != null) {
-            restore.setDeploymentConfiguration(Objects.requireNonNullElse(prior.getDeploymentConfiguration(), Map.of()));
-        }
         if (update.getCapacityProviderStrategy() != null) {
             restore.setCapacityProviderStrategy(Objects.requireNonNullElse(prior.getCapacityProviderStrategy(), List.of()));
         }
@@ -749,7 +773,7 @@ public class EcsCfnProvisioner implements CfnResourceProvisioner {
         return result;
     }
 
-    /** As the ECS handler reads it: an empty strategy is none. */
+    /** An empty list stays empty: an update clears the strategy with it, a create treats it as none. */
     private static List<CapacityProviderStrategyItem> parseCapacityProviderStrategy(JsonNode node,
                                                                                     ProvisionContext ctx) {
         JsonNode resolved = ctx.engine().resolveNode(node);
@@ -764,7 +788,7 @@ public class EcsCfnProvisioner implements CfnResourceProvisioner {
                         item.path("Weight").asInt(0), item.path("Base").asInt(0)));
             }
         }
-        return result.isEmpty() ? null : result;
+        return result;
     }
 
     /**

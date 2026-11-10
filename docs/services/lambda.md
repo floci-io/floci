@@ -429,6 +429,8 @@ disabled fails with Lambda's error as the resource status reason.
 
 Function URLs are also reachable directly on `/{proxy:.*}` under the Lambda URL controller, which routes the request into the normal `Invoke` path.
 
+A function URL with `InvokeMode: RESPONSE_STREAM` streams the response: each chunk the handler writes reaches the caller as it is written. When the handler uses `awslambda.HttpResponseStream.from`, the status code, headers and cookies come from its prelude. Otherwise the response is a `200` with the content type the handler set, `application/octet-stream` by default. A function that fails before its stream starts, in its init or by timing out, answers `502`. An error the handler throws ends the body where it stopped, an empty `200` if it wrote nothing: the runtime reports it in HTTP trailers, which Floci's runtime API does not read. A handler that does not stream is answered as with `BUFFERED`.
+
 Function URLs are not available in AWS GovCloud (US) or in the China Regions
 ([GovCloud guide](https://docs.aws.amazon.com/govcloud-us/latest/UserGuide/govcloud-lambda.html),
 [China guide](https://docs.amazonaws.cn/en_us/aws/latest/userguide/lambda.html)), so
@@ -614,6 +616,7 @@ Configuration resource reads and `ListFunctionsByCodeSigningConfig` return
 |---|---|---|
 | `FLOCI_SERVICES_LAMBDA_ENABLED` | `true` | Enable or disable the service |
 | `FLOCI_SERVICES_LAMBDA_EPHEMERAL` | `false` | Remove containers after each invocation |
+| `FLOCI_SERVICES_LAMBDA_RECONCILE_CONTAINERS_ON_STARTUP` | `true` | Reclaim owned Docker containers from previous runs at startup and retry incomplete cleanup on cold starts; disable when deployments share the same owner identity |
 | `FLOCI_SERVICES_LAMBDA_HONOUR_ARCHITECTURES` | `false` | Select each function's declared architecture for Docker image pulls and containers |
 | `FLOCI_SERVICES_LAMBDA_DEFAULT_MEMORY_MB` | `128` | Default function memory (MB) |
 | `FLOCI_SERVICES_LAMBDA_DEFAULT_TIMEOUT_SECONDS` | `3` | Default function timeout (seconds) |
@@ -681,6 +684,21 @@ Configuration resource reads and `ListFunctionsByCodeSigningConfig` return
     The temporary copy helper is removed without a stop grace period once copying
     finishes or fails. It runs no Lambda code; actual execution environments retain
     their normal shutdown and extension-drain behavior.
+
+!!! note "Cleanup after an unclean Docker shutdown"
+    At startup, Floci removes running and exited Lambda containers left by a previous run,
+    including temporary code-copy helpers. Cleanup is scoped to the Docker resource namespace
+    and Floci API port, and preserves containers from the current run and named code volumes.
+    If Docker is unavailable or removal fails, the next cold start retries cleanup.
+
+    This applies to containers created with ownership and run labels. Containers from older
+    versions without those labels are left alone because their deployment cannot be identified
+    safely. Use distinct `FLOCI_DOCKER_RESOURCE_NAMESPACE` values for deployments sharing a daemon.
+
+    If two deployments must share the same namespace and API port, set
+    `FLOCI_SERVICES_LAMBDA_RECONCILE_CONTAINERS_ON_STARTUP=false` to disable both startup cleanup
+    and cold-start retries. Cleanup is enabled by default. Each distinct Docker listing or removal
+    failure warns once; repeated failures log at DEBUG until cleanup recovers.
 
 !!! note "Bounding warm containers"
     After an invocation the container stays warm so the next call skips the cold start, and is
@@ -853,7 +871,9 @@ subjects:
 
 #### Running Floci in-cluster
 
-A minimal Deployment (namespace `floci` assumed, RBAC from above bound to the
+The Helm chart in `charts/floci` sets all of this up, with the RBAC above, a Lambda
+namespace of your choice and `helm test` checks: see
+[Kubernetes (Helm)](../getting-started/kubernetes.md). Without Helm, a minimal Deployment (namespace `floci` assumed, RBAC from above bound to the
 `floci` ServiceAccount):
 
 ```yaml

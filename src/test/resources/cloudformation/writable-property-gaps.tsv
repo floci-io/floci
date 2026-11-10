@@ -130,6 +130,10 @@ AWS::BedrockAgentCore::RuntimeEndpoint	Tags	accepted and not stored, a warning i
 AWS::CertificateManager::Certificate	CertificateAuthorityArn	accepted and ignored
 AWS::CertificateManager::Certificate	DomainValidationOptions	accepted and ignored, as the AcmCfnProvisioner javadoc records
 AWS::CloudFormation::CustomResource	ServiceTimeout	accepted and ignored
+AWS::CloudFormation::StackSet	AdministrationRoleARN	accepted and ignored; local StackSets deploy without assuming an administration role
+AWS::CloudFormation::StackSet	CallAs	accepted and ignored; local StackSets do not model delegated administrator authorization
+AWS::CloudFormation::StackSet	ExecutionRoleName	accepted and ignored; local StackSets deploy without assuming an execution role
+AWS::CloudFormation::StackSet	OperationPreferences	accepted and ignored; explicit StackSet deployments execute locally without scheduling preferences
 AWS::CloudFront::Distribution	Tags	accepted and ignored
 AWS::CloudFront::Function	FunctionMetadata	accepted and ignored
 AWS::CloudTrail::Trail	AggregationConfigurations	accepted and ignored
@@ -416,6 +420,7 @@ AWS::Lambda::MicrovmImage	CpuConfigurations	accepted and ignored
 AWS::Lambda::MicrovmImage	EgressNetworkConnectors	accepted and ignored
 AWS::Lambda::MicrovmImage	EnvironmentVariables	accepted and ignored
 AWS::Lambda::MicrovmImage	Hooks	accepted and ignored
+AWS::Lambda::MicrovmImage	KmsKeyIdentifier	accepted and ignored; local MicroVM image builds do not model KMS encryption
 AWS::Lambda::MicrovmImage	Logging	accepted and ignored
 AWS::Lambda::MicrovmImage	Resources	accepted and ignored
 AWS::Lambda::MicrovmImage	Tags	accepted and ignored
@@ -641,7 +646,6 @@ AWS::SecretsManager::Secret	Type	accepted and ignored
 AWS::ServiceDiscovery::PrivateDnsNamespace	Properties	accepted and ignored
 AWS::ServiceDiscovery::PublicDnsNamespace	Properties	accepted and ignored
 AWS::ServiceDiscovery::Service	ServiceAttributes	accepted and ignored
-AWS::Signer::SigningProfile	Tags	accepted and ignored: Floci has no Signer API to tag
 AWS::Transfer::Server	Certificate	rejected with a ValidationError, not supported by Floci
 AWS::Transfer::Server	CreateWithHostKey	rejected with a ValidationError, not supported by Floci
 AWS::Transfer::Server	IpAddressType	rejected with a ValidationError, not supported by Floci

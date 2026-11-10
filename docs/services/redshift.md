@@ -129,6 +129,8 @@ The attributes follow the [CloudFormation resource schema](https://docs.aws.amaz
 | `CreateClusterSnapshot` | Back up a cluster to a SQL dump via `pg_dump` |
 | `DescribeClusterSnapshots` | List snapshots, optionally filtered by snapshot or cluster identifier and SnapshotType (manual or automated) |
 | `DeleteClusterSnapshot` | Remove a snapshot and its stored dump |
+| `ModifyClusterSnapshot` | Update the retention period of a manual cluster snapshot |
+| `CopyClusterSnapshot` | Copy an automated cluster snapshot to a manual snapshot with a new identifier and retention period |
 | `RestoreFromClusterSnapshot` | Create a new cluster and load a snapshot's dump into it via `psql`; accepts `SnapshotIdentifier` or a same-account, same-region `SnapshotArn` |
 | `CreateClusterParameterGroup` | Register a parameter group (metadata only) |
 | `DescribeClusterParameterGroups` | List parameter groups, optionally filtered by name |
@@ -206,9 +208,13 @@ committed is removed on failure; if the commit succeeded and a later flush repor
 the dump is retained for the committed snapshot.
 
 `FinalClusterSnapshotRetentionPeriod` defaults to `-1` and accepts `-1` or 1 to 3,653 days.
-It is persisted and returned as the snapshot's `ManualSnapshotRetentionPeriod`; automatic
-expiration is not implemented. Manual snapshots created by `CreateClusterSnapshot`, and older
-snapshots without stored retention metadata, also return the default `-1`. Snapshot metadata
+It is persisted and returned as the snapshot's `ManualSnapshotRetentionPeriod`. The background
+retention sweep expires finite-retention manual snapshots, including final snapshots and
+`CopyClusterSnapshot` targets, and removes their stored dumps. `ModifyClusterSnapshot` can change
+this period; omitting `ManualSnapshotRetentionPeriod` preserves the current setting. An elapsed
+new retention period requires `Force=true` to delete the snapshot immediately.
+Manual snapshots created by `CreateClusterSnapshot`, and older snapshots without stored
+retention metadata, return the default `-1` and are retained indefinitely. Snapshot metadata
 uses the configured storage mode. Persistent and WAL metadata commit failures are reported
 before teardown; hybrid retains its existing
 write-behind durability and logged flush failures.
@@ -789,9 +795,22 @@ needs, reloads the ones whose objects or Glue entry changed and drops the ones G
 When two partitions hold key values that PostgreSQL casts to the same value, such as integer `1` and `01`,
 rows can no longer be told apart by partition, so a query on that table loads every partition and replaces
 the whole table when any of them changes.
-Pruning applies to the simple query protocol and the Data API. A session in a transaction block, and a client
-on the extended query protocol (the default of the PostgreSQL JDBC driver, unless `preferQueryMode=simple`),
-load every partition.
+Pruning applies to the simple query protocol, the extended query protocol (the default of the PostgreSQL JDBC
+driver, unless `preferQueryMode=simple`), statements inside a transaction block, and the Data API outside a
+transaction block. A Data API statement inside a transaction block, which includes a batch, loads every
+partition, because that backend cannot report where its transaction ends.
+A bind parameter (`$1`, `$2`) in a predicate is read as the value the client binds, so a prepared statement
+prunes like the same query written with literals. When the statement is parsed its values are not yet known, so
+it loads no partition at that point, only enough for PostgreSQL to plan it, and each Bind loads the partitions
+its values select. A parameter that is NULL, sent in binary format, or compared in a form Floci does not read
+(for example `$1::int`) leaves its predicate out, and the query loads every partition.
+The partitions loaded inside a transaction block, or by an extended query cycle, are staged for their connection
+and recorded as loaded only when the transaction (or the cycle) commits. A rollback, an error or a
+`ROLLBACK TO SAVEPOINT` discards them, so nothing is left behind that a later query would trust. Staged
+partitions also stop being trusted when another load changes the table in the meantime, and the next query then
+reloads it. While a connection holds staged partitions, other connections reload the table on their next query.
+A session inside a transaction block waits at most 30 seconds for another connection that is loading the same
+table, then fails with SQLSTATE `58030`; a session outside a transaction block waits for the load to finish.
 
 Materialized relations are cached in the cluster database. Each new query checks the associated
 role, trust policy and S3 access before using cached data, following the existing S3 enforcement
@@ -876,7 +895,9 @@ order) through its own S3 service and streams the rows into the backing PostgreS
 
 - Supported options: `DELIMITER`, `FORMAT CSV` (or a bare `CSV`), `GZIP`, `IGNOREHEADER <n>` and
   `HEADER`, `NULL AS`, `FORMAT AS JSON 'auto'`, `FORMAT AS JSON 'auto ignorecase'` (or bare `JSON 'auto'`),
-  `MANIFEST`, and an explicit column list.
+  `MANIFEST`, `COMPUPDATE`, `STATUPDATE`, `TRIMBLANKS`, and an explicit column list.
+- `COMPUPDATE [PRESET | ON | OFF | TRUE | FALSE]` and `STATUPDATE [ON | OFF | TRUE | FALSE]` (or bare `COMPUPDATE`
+  and `STATUPDATE`) are accepted and treated as no-ops for single-node PostgreSQL compatibility.
 - The default framing is pipe-delimited text, matching Redshift. `FORMAT CSV` switches to CSV with
   a comma default delimiter.
 - `FORMAT AS JSON 'auto'` loads JSON objects, mapping JSON keys to table columns with exact case
@@ -911,10 +932,12 @@ order) through its own S3 service and streams the rows into the backing PostgreS
   stored, and the statement text keeps them out of Floci's own messages. Combining key credentials with
   `IAM_ROLE`, or giving only one of the pair, is
   not intercepted, and neither is a blank key, secret, token or role.
-- `EMPTYASNULL`, `BLANKSASNULL`, `REMOVEQUOTES` (not with `CSV` or `JSON`), `ACCEPTINVCHARS [AS 'c']`
+- `EMPTYASNULL`, `BLANKSASNULL`, `TRIMBLANKS`, `REMOVEQUOTES` (not with `CSV` or `JSON`), `ACCEPTINVCHARS [AS 'c']`
   (default `?`, one ASCII character) and `TRUNCATECOLUMNS` rewrite field content before loading. Field
   level options need a single-byte `DELIMITER`, are not combined with `FORMAT AS JSON`, and normalise
-  `CRLF` line endings to `LF`. A nulled field is written as the `NULL AS` string, or `\N` in text
+  `CRLF` line endings to `LF`. `TRIMBLANKS` removes trailing white space (spaces and tabs) from `VARCHAR` columns;
+  combined with `EMPTYASNULL`, a field containing only spaces converts to `NULL`. A nulled field is written
+  as the `NULL AS` string, or `\N` in text
   mode and an empty unquoted field in CSV mode. `TRUNCATECOLUMNS` cuts a value to the declared
   `CHAR`/`VARCHAR` length in bytes (Redshift's meaning of the declared length, so `éééé` into
   `VARCHAR(3)` loads `é`), never inside a multi-byte character or a backslash escape. Its column

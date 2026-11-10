@@ -6639,16 +6639,75 @@ class RdsServiceTest {
     }
 
     @Test
-    void createDbSnapshotThrowsForNonPostgres() {
-        rdsService.createDbInstance("mydb", "mysql", "8.0",
-                "admin", "password", "dbname", "db.t3.micro",
+    void createDbSnapshotThrowsForSqlServer() {
+        rdsService.createDbInstance("mydb", "sqlserver-se", "15.00",
+                "sa", "Password123!", null, "db.t3.micro",
                 20, false, null, null, null, null, false);
 
         AwsException exception = assertThrows(AwsException.class, () ->
                 rdsService.createDbSnapshot("mysnap", "mydb"));
 
         assertEquals("InvalidDBInstanceState", exception.getErrorCode());
-        assertTrue(exception.getMessage().contains("CreateDBSnapshot is not supported for engine MYSQL"));
+        assertTrue(exception.getMessage().contains("CreateDBSnapshot is not supported for engine SQLSERVER"));
+    }
+
+    @ParameterizedTest
+    @CsvSource({"mysql, 8.0, MYSQL", "mariadb, 10.11, MARIADB"})
+    void mysqlFamilySnapshotIsTheMasterUsersDumpAndSeedsTheRestoredInstance(String engine, String version,
+                                                                             DatabaseEngine expected) {
+        rdsService.createDbInstance("mydb", engine, version,
+                "admin", "password", "dbname", "db.t3.micro",
+                20, false, null, null, null, null, false);
+        when(containerManager.createMysqlSnapshot(eq(expected), any(), eq("admin"), eq("password")))
+                .thenReturn("MYSQL_DUMP");
+
+        DbSnapshot snapshot = rdsService.createDbSnapshot("mysnap", "mydb");
+        DbInstance restored = rdsService.restoreDbInstanceFromDbSnapshot("restored", "mysnap",
+                null, null, false, null, List.of(), Map.of(), "us-east-1");
+
+        assertEquals(expected, snapshot.getEngine());
+        assertEquals("available", snapshot.getStatus());
+        assertEquals(expected, restored.getEngine());
+        verify(containerManager).restoreMysqlSnapshot(eq(expected), any(), eq("admin"), eq("password"),
+                eq("MYSQL_DUMP"));
+        verify(containerManager, never()).createPostgresSnapshot(any(), any());
+        verify(containerManager, never()).restorePostgresSnapshot(any(), any(), any());
+    }
+
+    @Test
+    void mysqlSnapshotThatCannotBeReadIsNotRecorded() {
+        rdsService.createDbInstance("mydb", "mysql", "8.0",
+                "admin", "password", "dbname", "db.t3.micro",
+                20, false, null, null, null, null, false);
+        when(containerManager.createMysqlSnapshot(any(), any(), any(), any()))
+                .thenThrow(new RuntimeException("mysqldump failed with exit code 2"));
+
+        AwsException exception = assertThrows(AwsException.class, () ->
+                rdsService.createDbSnapshot("mysnap", "mydb"));
+
+        assertEquals("InvalidDBInstanceState", exception.getErrorCode());
+        assertEquals("DBSnapshotNotFound", assertThrows(AwsException.class, () ->
+                rdsService.restoreDbInstanceFromDbSnapshot("restored", "mysnap",
+                        null, null, false, null, List.of(), Map.of(), "us-east-1")).getErrorCode());
+    }
+
+    @Test
+    void mysqlInstanceTheSnapshotCannotBeLoadedIntoIsRemoved() {
+        rdsService.createDbInstance("mydb", "mysql", "8.0",
+                "admin", "password", "dbname", "db.t3.micro",
+                20, false, null, null, null, null, false);
+        when(containerManager.createMysqlSnapshot(any(), any(), any(), any())).thenReturn("MYSQL_DUMP");
+        rdsService.createDbSnapshot("mysnap", "mydb");
+        doThrow(new RuntimeException("mysql restore failed with exit code 1"))
+                .when(containerManager).restoreMysqlSnapshot(any(), any(), any(), any(), any());
+
+        AwsException exception = assertThrows(AwsException.class, () ->
+                rdsService.restoreDbInstanceFromDbSnapshot("restored", "mysnap",
+                        null, null, false, null, List.of(), Map.of(), "us-east-1"));
+
+        assertEquals("InvalidDBSnapshotState", exception.getErrorCode());
+        assertEquals("DBInstanceNotFound", assertThrows(AwsException.class, () ->
+                rdsService.getDbInstance("restored")).getErrorCode());
     }
 
     @Test

@@ -789,6 +789,67 @@ class DynamoDbPartiQLEdgeCaseIntegrationTest {
             .body("message", equalTo(overlapping));
     }
 
+    @Test
+    @Order(33)
+    void refusesAReadOfAMultiAttributeIndexBeforeItsTerms() {
+        request("DynamoDB_20120810.CreateTable", """
+                {
+                  "TableName": "partiql-edge-cases-multi",
+                  "AttributeDefinitions": [
+                    {"AttributeName":"pk","AttributeType":"S"},
+                    {"AttributeName":"h1","AttributeType":"S"},
+                    {"AttributeName":"h2","AttributeType":"S"},
+                    {"AttributeName":"r1","AttributeType":"S"}
+                  ],
+                  "KeySchema": [{"AttributeName":"pk","KeyType":"HASH"}],
+                  "GlobalSecondaryIndexes": [{
+                    "IndexName": "multi",
+                    "KeySchema": [{"AttributeName":"h1","KeyType":"HASH"},{"AttributeName":"h2","KeyType":"HASH"},
+                                  {"AttributeName":"r1","KeyType":"RANGE"}],
+                    "Projection": {"ProjectionType":"ALL"}
+                  }, {
+                    "IndexName": "single",
+                    "KeySchema": [{"AttributeName":"h1","KeyType":"HASH"},{"AttributeName":"r1","KeyType":"RANGE"}],
+                    "Projection": {"ProjectionType":"ALL"}
+                  }],
+                  "BillingMode": "PAY_PER_REQUEST"
+                }
+                """)
+            .statusCode(200);
+        request("DynamoDB_20120810.PutItem", """
+                {"TableName":"partiql-edge-cases-multi",
+                 "Item":{"pk":{"S":"p"},"h1":{"S":"a"},"h2":{"S":"x"},"r1":{"S":"m"}}}
+                """)
+            .statusCode(200);
+        String table = "\"partiql-edge-cases-multi\"";
+        String refused = "PartiQL statements cannot be executed on tables with multi-attribute HASH keys"
+                + " or multi-attribute RANGE keys.";
+
+        statement("SELECT * FROM " + table + ".\"multi\" WHERE foo(1) AND h1 = <<>>")
+            .statusCode(400)
+            .body("message", equalTo(refused));
+        statement("SELECT * FROM " + table + ".\"multi\" WHERE h1 = 1e200")
+            .statusCode(400)
+            .body("message", equalTo(refused));
+        statement("SELECT * FROM " + table + ".\"multi\" AS x WHERE h1 = 'a'")
+            .statusCode(400)
+            .body("message", equalTo("Aliasing is not supported"));
+        statement("SELECT pk FROM " + table + ".\"single\" WHERE h1 = 'a'")
+            .statusCode(200)
+            .body("Items[0].pk.S", equalTo("p"));
+        request("DynamoDB_20120810.BatchExecuteStatement", "{\"Statements\":[{\"Statement\":"
+                + json("SELECT * FROM " + table + ".\"multi\" WHERE h1 = 'a' AND h2 = 'x' AND r1 = 'm'")
+                + "},{\"Statement\":" + json("SELECT * FROM " + table + " WHERE pk = 'p'") + "}]}")
+            .statusCode(200)
+            .body("Responses[0].Error.Code", equalTo("ValidationError"))
+            .body("Responses[0].Error.Message", equalTo(refused))
+            .body("Responses[1].Item.pk.S", equalTo("p"));
+        transaction("SELECT * FROM " + table + ".\"multi\" WHERE pk = 'p'")
+            .statusCode(400)
+            .body("message", equalTo("Validation failed in TransactStatements[0]: "
+                    + "Reads on indices are not supported within transactions."));
+    }
+
     private static ValidatableResponse getItem(String pk) {
         return request("DynamoDB_20120810.GetItem", """
                 {"TableName":"%s","Key":{"pk":{"S":"%s"},"sk":{"S":"1"}},"ConsistentRead":true}

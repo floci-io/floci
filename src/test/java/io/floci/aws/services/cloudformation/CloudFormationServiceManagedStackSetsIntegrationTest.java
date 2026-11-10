@@ -1,32 +1,35 @@
 package io.floci.aws.services.cloudformation;
 
+import io.floci.aws.testing.CfnRequests;
+import io.floci.aws.testing.OrganizationsFixture;
 import io.floci.aws.testing.RestAssuredJsonUtils;
 import io.quarkus.test.junit.QuarkusTest;
-import io.restassured.path.json.JsonPath;
 import io.restassured.specification.RequestSpecification;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
 
-import java.util.LinkedHashSet;
+import java.time.Duration;
 import java.util.List;
-import java.util.Set;
 import java.util.UUID;
 
+import static io.floci.aws.testing.EnforcementFixtures.auth;
 import static io.restassured.RestAssured.given;
+import static org.awaitility.Awaitility.await;
 import static org.hamcrest.Matchers.containsString;
 import static org.hamcrest.Matchers.equalTo;
 import static org.hamcrest.Matchers.hasItem;
 import static org.hamcrest.Matchers.not;
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertNotEquals;
 
 /** AWS Organizations semantics required by service-managed CloudFormation StackSets. */
 @QuarkusTest
 class CloudFormationServiceManagedStackSetsIntegrationTest {
     private static final String MANAGEMENT = "555555555555";
     private static final String REGION = "us-east-1";
-    private static final String ORG_TARGET = "AWSOrganizationsV20161128.";
 
-    private final Set<String> organizationOwners = new LinkedHashSet<>();
+    private final OrganizationsFixture organizationsFixture = new OrganizationsFixture();
 
     @BeforeAll
     static void configureRestAssured() {
@@ -51,10 +54,10 @@ class CloudFormationServiceManagedStackSetsIntegrationTest {
                 .extract().jsonPath().getString("OrganizationalUnit.Id");
 
         String suffix = UUID.randomUUID().toString().substring(0, 8);
-        String directAccount = createAccount("stacksets-direct-" + suffix + "@example.com", "StackSetsDirect");
-        String nestedAccount = createAccount("stacksets-nested-" + suffix + "@example.com", "StackSetsNested");
-        moveAccount(directAccount, rootId, parentOu);
-        moveAccount(nestedAccount, rootId, childOu);
+        String directAccount = organizationsFixture.createAccount(MANAGEMENT, "stacksets-direct-" + suffix + "@example.com", "StackSetsDirect");
+        String nestedAccount = organizationsFixture.createAccount(MANAGEMENT, "stacksets-nested-" + suffix + "@example.com", "StackSetsNested");
+        organizationsFixture.moveAccount(MANAGEMENT, directAccount, rootId, parentOu);
+        organizationsFixture.moveAccount(MANAGEMENT, nestedAccount, rootId, childOu);
 
         cloudFormation("ActivateOrganizationsAccess")
                 .post("/").then().statusCode(200);
@@ -479,74 +482,300 @@ class CloudFormationServiceManagedStackSetsIntegrationTest {
                 .body(containsString("<member>" + targetOu + "</member>"));
     }
 
-    private String createAccount(String email, String name) {
-        JsonPath response = organizations("CreateAccount",
-                "{\"Email\":\"" + email + "\",\"AccountName\":\"" + name + "\"}")
+    @Test
+    void autoDeploymentFollowsAnAccountIntoAndOutOfATargetedOrganizationalUnit() {
+        String management = "626262626262";
+        String rootId = createOrganizationWithTrustedAccess(management);
+        String targetOu = organizationsFixture.createOu(management, rootId, "AutoTarget");
+        String childOu = organizationsFixture.createOu(management, targetOu, "AutoTargetChild");
+        String otherOu = organizationsFixture.createOu(management, rootId, "AutoOther");
+        String suffix = UUID.randomUUID().toString().substring(0, 8);
+        String stackSet = "auto-ou-" + suffix;
+        String queue = "auto-ou-q-" + suffix;
+        createAutoDeployingStackSet(management, stackSet, queue, "false");
+        createStackInstances(management, stackSet, targetOu, REGION);
+        createStackInstances(management, stackSet, targetOu, "us-west-2");
+
+        cloudFormation(management, "ListStackSetAutoDeploymentTargets")
+                .formParam("StackSetName", stackSet)
                 .post("/").then().statusCode(200)
-                .body("CreateAccountStatus.State", equalTo("SUCCEEDED"))
-                .extract().jsonPath();
-        return response.getString("CreateAccountStatus.AccountId");
+                .body(containsString("<member>" + REGION + "</member>"))
+                .body(containsString("<member>us-west-2</member>"));
+
+        String account = organizationsFixture.createAccount(management, "auto-ou-" + suffix + "@example.com", "AutoOu");
+        assertQueueAbsent(account, queue);
+        assertNoInstance(management, stackSet, account);
+
+        organizationsFixture.moveAccount(management, account, rootId, childOu);
+        assertQueueVisible(account, queue);
+        assertEquals(3, operationIds(management, stackSet).size());
+        cloudFormation(management, "ListStackInstances")
+                .formParam("StackSetName", stackSet)
+                .formParam("StackInstanceAccount", account)
+                .post("/").then().statusCode(200)
+                .body(containsString("<Region>" + REGION + "</Region>"))
+                .body(containsString("<Region>us-west-2</Region>"))
+                .body(containsString("<OrganizationalUnitId>" + targetOu + "</OrganizationalUnitId>"))
+                .body(containsString("<DetailedStatus>SUCCEEDED</DetailedStatus>"));
+
+        organizationsFixture.moveAccount(management, account, childOu, targetOu);
+        assertQueueVisible(account, queue);
+        assertEquals(3, operationIds(management, stackSet).size());
+
+        organizationsFixture.moveAccount(management, account, targetOu, otherOu);
+        assertQueueAbsent(account, queue);
+        assertNoInstance(management, stackSet, account);
+        assertEquals(4, operationIds(management, stackSet).size());
     }
 
-    private void moveAccount(String accountId, String sourceParent, String destinationParent) {
-        organizations("MoveAccount",
-                "{\"AccountId\":\"" + accountId + "\",\"SourceParentId\":\"" + sourceParent
-                        + "\",\"DestinationParentId\":\"" + destinationParent + "\"}")
+    @Test
+    void automaticDeploymentOperationsCanBeListedAndDescribed() {
+        String management = "666666666666";
+        String rootId = createOrganizationWithTrustedAccess(management);
+        String suffix = UUID.randomUUID().toString().substring(0, 8);
+        String stackSet = "auto-operations-" + suffix;
+        createAutoDeployingStackSet(management, stackSet, "auto-operations-q-" + suffix, "false");
+        createStackInstances(management, stackSet, rootId, REGION);
+        List<String> initialOperations = operationIds(management, stackSet);
+        assertEquals(1, initialOperations.size());
+
+        String account = organizationsFixture.createAccount(management, "auto-operations-" + suffix + "@example.com", "AutoOperations");
+        await().atMost(Duration.ofSeconds(10)).untilAsserted(() ->
+                assertEquals(2, operationIds(management, stackSet).size()));
+        List<String> afterCreate = operationIds(management, stackSet);
+        assertEquals(2, afterCreate.size());
+        String createOperation = afterCreate.stream()
+                .filter(id -> !initialOperations.contains(id)).findFirst().orElseThrow();
+        assertOperation(management, stackSet, createOperation, "CREATE", "SUCCEEDED");
+
+        organizations(management, "RemoveAccountFromOrganization", "{\"AccountId\":\"" + account + "\"}")
+                .post("/").then().statusCode(200);
+        await().atMost(Duration.ofSeconds(10)).untilAsserted(() ->
+                assertEquals(3, operationIds(management, stackSet).size()));
+        List<String> afterDelete = operationIds(management, stackSet);
+        assertEquals(3, afterDelete.size());
+        String deleteOperation = afterDelete.stream()
+                .filter(id -> !afterCreate.contains(id)).findFirst().orElseThrow();
+        assertOperation(management, stackSet, deleteOperation, "DELETE", "SUCCEEDED");
+    }
+
+    @Test
+    void deletingOneTargetRegionPreservesAutomaticDeploymentToTheOtherRegion() {
+        String management = "676767676767";
+        String rootId = createOrganizationWithTrustedAccess(management);
+        String targetOu = organizationsFixture.createOu(management, rootId, "RemainingRegion");
+        String suffix = UUID.randomUUID().toString().substring(0, 8);
+        String stackSet = "auto-region-" + suffix;
+        String queue = "auto-region-q-" + suffix;
+        String existingAccount = organizationsFixture.createAccount(management,
+                "auto-region-existing-" + suffix + "@example.com", "ExistingRegion");
+        organizationsFixture.moveAccount(management, existingAccount, rootId, targetOu);
+        createAutoDeployingStackSet(management, stackSet, queue, "false");
+        createStackInstances(management, stackSet, targetOu, REGION);
+        createStackInstances(management, stackSet, targetOu, "us-west-2");
+        cloudFormation(management, "DeleteStackInstances")
+                .formParam("StackSetName", stackSet)
+                .formParam("DeploymentTargets.OrganizationalUnitIds.member.1", targetOu)
+                .formParam("Regions.member.1", "us-west-2")
+                .post("/").then().statusCode(200);
+        assertQueueVisible(existingAccount, queue);
+        cloudFormation(management, "ListStackSetAutoDeploymentTargets")
+                .formParam("StackSetName", stackSet)
+                .post("/").then().statusCode(200)
+                .body(containsString("<OrganizationalUnitId>" + targetOu + "</OrganizationalUnitId>"))
+                .body(containsString("<member>" + REGION + "</member>"))
+                .body(not(containsString("<member>us-west-2</member>")));
+
+        String account = organizationsFixture.createAccount(management, "auto-region-" + suffix + "@example.com", "RemainingRegion");
+        organizationsFixture.moveAccount(management, account, rootId, targetOu);
+        assertQueueVisible(account, queue);
+        cloudFormation(management, "ListStackInstances")
+                .formParam("StackSetName", stackSet)
+                .formParam("StackInstanceAccount", account)
+                .post("/").then().statusCode(200)
+                .body(containsString("<Region>" + REGION + "</Region>"))
+                .body(not(containsString("<Region>us-west-2</Region>")));
+    }
+
+    @Test
+    void autoDeploymentToTheRootCoversNewAccountsAndRemovesThoseThatLeave() {
+        String management = "636363636363";
+        String rootId = createOrganizationWithTrustedAccess(management);
+        String suffix = UUID.randomUUID().toString().substring(0, 8);
+        String stackSet = "auto-root-" + suffix;
+        String queue = "auto-root-q-" + suffix;
+        createAutoDeployingStackSet(management, stackSet, queue, "false");
+        createStackInstances(management, stackSet, rootId, REGION);
+
+        String account = organizationsFixture.createAccount(management, "auto-root-" + suffix + "@example.com", "AutoRoot");
+        assertQueueVisible(account, queue);
+        assertQueueAbsent(management, queue);
+
+        organizations(management, "RemoveAccountFromOrganization", "{\"AccountId\":\"" + account + "\"}")
+                .post("/").then().statusCode(200);
+        assertQueueAbsent(account, queue);
+        assertNoInstance(management, stackSet, account);
+    }
+
+    @Test
+    void autoDeploymentRetainsTheStackOfAnAccountThatLeavesItsTargets() {
+        String management = "646464646464";
+        String rootId = createOrganizationWithTrustedAccess(management);
+        String targetOu = organizationsFixture.createOu(management, rootId, "RetainTarget");
+        String suffix = UUID.randomUUID().toString().substring(0, 8);
+        String stackSet = "auto-retain-" + suffix;
+        String queue = "auto-retain-q-" + suffix;
+        createAutoDeployingStackSet(management, stackSet, queue, "true");
+        createStackInstances(management, stackSet, targetOu, REGION);
+
+        String account = organizationsFixture.createAccount(management, "auto-retain-" + suffix + "@example.com", "AutoRetain");
+        organizationsFixture.moveAccount(management, account, rootId, targetOu);
+        assertQueueVisible(account, queue);
+
+        organizationsFixture.moveAccount(management, account, targetOu, rootId);
+        assertNoInstance(management, stackSet, account);
+        assertQueueVisible(account, queue);
+    }
+
+    @Test
+    void returningAccountGetsANewStackWithoutAdoptingItsRetainedStack() {
+        String management = "707070707070";
+        String rootId = createOrganizationWithTrustedAccess(management);
+        String targetOu = organizationsFixture.createOu(management, rootId, "RetainedReturn");
+        String suffix = UUID.randomUUID().toString().substring(0, 8);
+        String stackSet = "retained-return-" + suffix;
+        cloudFormation(management, "CreateStackSet")
+                .formParam("StackSetName", stackSet)
+                .formParam("TemplateBody", "{\"Resources\":{\"Q\":{\"Type\":\"AWS::SQS::Queue\"}}}")
+                .formParam("PermissionModel", "SERVICE_MANAGED")
+                .formParam("AutoDeployment.Enabled", "true")
+                .formParam("AutoDeployment.RetainStacksOnAccountRemoval", "true")
+                .post("/").then().statusCode(200);
+        createStackInstances(management, stackSet, targetOu, REGION);
+        String account = organizationsFixture.createAccount(management, "retained-return-" + suffix + "@example.com", "RetainedReturn");
+        organizationsFixture.moveAccount(management, account, rootId, targetOu);
+        String retained = stackIdForInstance(management, stackSet, account);
+
+        organizationsFixture.moveAccount(management, account, targetOu, rootId);
+        assertNoInstance(management, stackSet, account);
+        cloudFormation(account, "DescribeStacks")
+                .formParam("StackName", retained)
+                .post("/").then().statusCode(200)
+                .body(containsString("CREATE_COMPLETE"));
+        organizationsFixture.moveAccount(management, account, rootId, targetOu);
+        String replacement = stackIdForInstance(management, stackSet, account);
+
+        assertNotEquals(retained, replacement);
+        cloudFormation(account, "DescribeStacks")
+                .formParam("StackName", retained)
+                .post("/").then().statusCode(200)
+                .body(containsString("CREATE_COMPLETE"));
+    }
+
+    @Test
+    void stackSetWithoutAutoDeploymentIgnoresAccountsMovedIntoItsTargets() {
+        String management = "656565656565";
+        String rootId = createOrganizationWithTrustedAccess(management);
+        String targetOu = organizationsFixture.createOu(management, rootId, "ManualTarget");
+        String suffix = UUID.randomUUID().toString().substring(0, 8);
+        String stackSet = "manual-" + suffix;
+        String queue = "manual-q-" + suffix;
+        cloudFormation(management, "CreateStackSet")
+                .formParam("StackSetName", stackSet)
+                .formParam("TemplateBody", queueTemplate(queue))
+                .formParam("PermissionModel", "SERVICE_MANAGED")
+                .formParam("AutoDeployment.Enabled", "false")
+                .post("/").then().statusCode(200);
+        createStackInstances(management, stackSet, targetOu, REGION);
+
+        String account = organizationsFixture.createAccount(management, "manual-" + suffix + "@example.com", "Manual");
+        organizationsFixture.moveAccount(management, account, rootId, targetOu);
+        assertQueueAbsent(account, queue);
+        assertNoInstance(management, stackSet, account);
+    }
+
+    private String createOrganizationWithTrustedAccess(String management) {
+        return organizationsFixture.createWithTrustedAccess(management);
+    }
+
+    private List<String> operationIds(String management, String stackSet) {
+        return cloudFormation(management, "ListStackSetOperations")
+                .formParam("StackSetName", stackSet)
+                .post("/").then().statusCode(200)
+                .extract().xmlPath().getList(
+                        "ListStackSetOperationsResponse.ListStackSetOperationsResult.Summaries.member.OperationId",
+                        String.class);
+    }
+
+    private void assertOperation(String management, String stackSet, String operationId, String action, String status) {
+        await().atMost(Duration.ofSeconds(10)).untilAsserted(() -> cloudFormation(management, "DescribeStackSetOperation")
+                .formParam("StackSetName", stackSet)
+                .formParam("OperationId", operationId)
+                .post("/").then().statusCode(200)
+                .body(containsString("<Action>" + action + "</Action>"))
+                .body(containsString("<Status>" + status + "</Status>"))
+                .body(containsString("<CreationTimestamp>"))
+                .body(containsString("<EndTimestamp>")));
+    }
+
+
+    private void createAutoDeployingStackSet(String management, String stackSet, String queue, String retainStacks) {
+        cloudFormation(management, "CreateStackSet")
+                .formParam("StackSetName", stackSet)
+                .formParam("TemplateBody", queueTemplate(queue))
+                .formParam("PermissionModel", "SERVICE_MANAGED")
+                .formParam("AutoDeployment.Enabled", "true")
+                .formParam("AutoDeployment.RetainStacksOnAccountRemoval", retainStacks)
                 .post("/").then().statusCode(200);
     }
+
+    private void createStackInstances(String management, String stackSet, String target, String region) {
+        cloudFormation(management, "CreateStackInstances")
+                .formParam("StackSetName", stackSet)
+                .formParam("DeploymentTargets.OrganizationalUnitIds.member.1", target)
+                .formParam("Regions.member.1", region)
+                .post("/").then().statusCode(200);
+    }
+
+
+
+    private void assertNoInstance(String management, String stackSet, String account) {
+        await().atMost(Duration.ofSeconds(10)).untilAsserted(() -> cloudFormation(management, "ListStackInstances")
+                .formParam("StackSetName", stackSet)
+                .formParam("StackInstanceAccount", account)
+                .post("/").then().statusCode(200)
+                .body(not(containsString("<Account>" + account + "</Account>"))));
+    }
+
+    private String stackIdForInstance(String management, String stackSet, String account) {
+        await().atMost(Duration.ofSeconds(10)).untilAsserted(() ->
+                cloudFormation(management, "DescribeStackInstance")
+                        .formParam("StackSetName", stackSet)
+                        .formParam("StackInstanceAccount", account)
+                        .formParam("StackInstanceRegion", REGION)
+                        .post("/").then().statusCode(200));
+        return cloudFormation(management, "DescribeStackInstance")
+                .formParam("StackSetName", stackSet)
+                .formParam("StackInstanceAccount", account)
+                .formParam("StackInstanceRegion", REGION)
+                .post("/").then().statusCode(200)
+                .extract().xmlPath().getString(
+                        "DescribeStackInstanceResponse.DescribeStackInstanceResult.StackInstance.StackId");
+    }
+
+
 
     private RequestSpecification organizations(String action, String body) {
         return organizations(MANAGEMENT, action, body);
     }
 
     private RequestSpecification organizations(String account, String action, String body) {
-        if ("CreateOrganization".equals(action)) {
-            organizationOwners.add(account);
-        }
-        return given()
-                .header("Authorization", auth(account, "organizations"))
-                .header("X-Amz-Target", ORG_TARGET + action)
-                .contentType("application/x-amz-json-1.1")
-                .body(body);
+        return organizationsFixture.request(account, action, body);
     }
 
-    /**
-     * Organizations state is shared by every test in the JVM and keyed by the management account,
-     * so an organization left behind here makes the next class that creates one under the same
-     * account fail with AlreadyInOrganizationException. Dismantle each one this test created:
-     * member accounts out, organizational units bottom-up, then the organization.
-     */
     @AfterEach
     void deleteTheOrganizationsThisTestCreated() {
-        for (String owner : organizationOwners) {
-            if (organizations(owner, "DescribeOrganization", "{}").post("/").statusCode() != 200) {
-                continue;
-            }
-            JsonPath accounts = organizations(owner, "ListAccounts", "{}").post("/").jsonPath();
-            for (String accountId : accounts.getList("Accounts.Id", String.class)) {
-                if (!owner.equals(accountId)) {
-                    organizations(owner, "RemoveAccountFromOrganization", "{\"AccountId\":\"" + accountId + "\"}")
-                            .post("/").then().statusCode(200);
-                }
-            }
-            JsonPath roots = organizations(owner, "ListRoots", "{}").post("/").jsonPath();
-            for (String rootId : roots.getList("Roots.Id", String.class)) {
-                deleteOrganizationalUnitsUnder(owner, rootId);
-            }
-            organizations(owner, "DeleteOrganization", "{}").post("/").then().statusCode(200);
-        }
-        organizationOwners.clear();
-    }
-
-    private void deleteOrganizationalUnitsUnder(String owner, String parentId) {
-        JsonPath units = organizations(owner, "ListOrganizationalUnitsForParent", "{\"ParentId\":\"" + parentId + "\"}")
-                .post("/").jsonPath();
-        List<String> ouIds = units.getList("OrganizationalUnits.Id", String.class);
-        for (String ouId : ouIds) {
-            deleteOrganizationalUnitsUnder(owner, ouId);
-            organizations(owner, "DeleteOrganizationalUnit", "{\"OrganizationalUnitId\":\"" + ouId + "\"}")
-                    .post("/").then().statusCode(200);
-        }
+        organizationsFixture.cleanup();
     }
 
     private RequestSpecification cloudFormation(String action) {
@@ -554,30 +783,28 @@ class CloudFormationServiceManagedStackSetsIntegrationTest {
     }
 
     private RequestSpecification cloudFormation(String account, String action) {
-        return given()
-                .header("Authorization", auth(account, "cloudformation"))
-                .contentType("application/x-www-form-urlencoded")
-                .formParam("Action", action);
+        return CfnRequests.cfn(action, null)
+                .header("Authorization", auth(account, "cloudformation"));
     }
 
     private void assertQueueVisible(String account, String queueName) {
-        given()
+        await().atMost(Duration.ofSeconds(10)).untilAsserted(() -> given()
                 .header("Authorization", auth(account, "sqs"))
                 .contentType("application/x-www-form-urlencoded")
                 .formParam("Action", "GetQueueUrl")
                 .formParam("QueueName", queueName)
                 .post("/").then().statusCode(200)
-                .body(containsString("/" + account + "/" + queueName));
+                .body(containsString("/" + account + "/" + queueName)));
     }
 
     private void assertQueueAbsent(String account, String queueName) {
-        given()
+        await().atMost(Duration.ofSeconds(10)).untilAsserted(() -> given()
                 .header("Authorization", auth(account, "sqs"))
                 .contentType("application/x-www-form-urlencoded")
                 .formParam("Action", "GetQueueUrl")
                 .formParam("QueueName", queueName)
                 .post("/").then().statusCode(400)
-                .body(containsString("AWS.SimpleQueueService.NonExistentQueue"));
+                .body(containsString("AWS.SimpleQueueService.NonExistentQueue")));
     }
 
     private static String queueTemplate(String queueName) {
@@ -585,8 +812,4 @@ class CloudFormationServiceManagedStackSetsIntegrationTest {
                 + queueName + "\"}}}}";
     }
 
-    private static String auth(String account, String service) {
-        return "AWS4-HMAC-SHA256 Credential=" + account + "/20260904/" + REGION + "/" + service
-                + "/aws4_request, SignedHeaders=host, Signature=abc";
-    }
 }
