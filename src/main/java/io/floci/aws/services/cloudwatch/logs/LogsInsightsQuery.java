@@ -5,6 +5,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import io.floci.aws.services.cloudwatch.logs.model.LogEvent;
 import org.jboss.logging.Logger;
 
+import java.math.BigDecimal;
 import java.time.Instant;
 import java.time.ZoneOffset;
 import java.time.format.DateTimeFormatter;
@@ -44,7 +45,7 @@ final class LogsInsightsQuery {
     private static final ObjectMapper MAPPER = new ObjectMapper();
     private static final DateTimeFormatter TS_FORMAT =
             DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss.SSS").withZone(ZoneOffset.UTC);
-    private static final Pattern BARE_TOKEN = Pattern.compile("[^\\s'\"`()=!<>]+");
+    private static final Pattern NUMBER = Pattern.compile("-?\\d+(\\.\\d+)?");
     private static final Pattern FIELD = Pattern.compile("[@A-Za-z_]\\w*(\\.\\w+)*");
 
     private final List<String> fields = new ArrayList<>();
@@ -55,7 +56,7 @@ final class LogsInsightsQuery {
     private Integer limit;
     private String unsupportedReason;
 
-    private record Filter(String field, boolean negate, String value) {}
+    private record Filter(String field, boolean negate, String value, boolean numeric) {}
 
     private LogsInsightsQuery() {}
 
@@ -293,24 +294,28 @@ final class LogsInsightsQuery {
                         : null;
                 if (op != null) {
                     String field = expr.substring(0, i).trim();
-                    String value = literal(expr.substring(i + op.length()).trim());
+                    String raw = expr.substring(i + op.length()).trim();
+                    String value = literal(raw);
                     if (value == null || !FIELD.matcher(field).matches()) {
                         return null;
                     }
-                    return new Filter(field, op.equals("!="), value);
+                    return new Filter(field, op.equals("!="), value, NUMBER.matcher(raw).matches());
                 }
             }
         }
         return null;
     }
 
-    /** The text of a quoted literal, or a bare token; {@code null} when anything follows the value. */
+    /**
+     * The text of a quoted literal, or a bare number; {@code null} for anything else. AWS evaluates
+     * other unquoted values (a word, {@code 1+1}) as expressions, which this engine does not support.
+     */
     private static String literal(String s) {
         if (!s.isEmpty() && (s.charAt(0) == '\'' || s.charAt(0) == '"')) {
             int close = s.indexOf(s.charAt(0), 1);
             return close == s.length() - 1 ? s.substring(1, close) : null;
         }
-        return BARE_TOKEN.matcher(s).matches() ? s : null;
+        return NUMBER.matcher(s).matches() ? s : null;
     }
 
     /**
@@ -392,7 +397,18 @@ final class LogsInsightsQuery {
 
     private boolean matches(Row row, Filter f) {
         String actual = resolve(row, f.field());
-        return f.negate() != (actual != null && actual.equals(f.value()));
+        boolean equal = actual != null && (f.numeric() ? sameNumber(actual, f.value()) : actual.equals(f.value()));
+        return f.negate() != equal;
+    }
+
+    /** A bare number compares by value on AWS, so {@code n = 2} matches 2, 2.0 and 02. */
+    private static boolean sameNumber(String actual, String expected) {
+        try {
+            return new BigDecimal(actual).compareTo(new BigDecimal(expected)) == 0;
+        } catch (NumberFormatException ignored) {
+            // A non-numeric field value is simply not equal to a number.
+            return false;
+        }
     }
 
     private Comparator<Row> comparatorFor(String field) {

@@ -208,6 +208,27 @@ class CloudWatchLogsInsightsQueryTest {
     }
 
     @Test
+    void queryStringLongerThanTheAwsLimitIsRejected() {
+        String group = "search/query-length";
+        String stream = "s-1";
+        createGroupStream(service, group, stream);
+        putRaw(service, group, stream, BASE_MS + 1000, "{\"type\":\"B\",\"id\":\"b1\"}");
+        putRaw(service, group, stream, BASE_MS + 2000, "{\"type\":\"C\",\"id\":\"c1\"}");
+
+        // The deepest nesting that fits in AWS's 10000-character limit still parses.
+        String nested = "fields id | filter " + "type = 'A' or (".repeat(600) + "type = 'B'" + ")".repeat(600);
+        assertEquals(List.of("b1"), rowsFor(group, nested).stream().map(row -> row.get("id")).toList());
+
+        long startSec = BASE_MS / 1000 - 10;
+        String tooLong = "fields id" + " ".repeat(10_000 - 8);
+        AwsException ex = assertThrows(AwsException.class, () ->
+                service.startQuery(List.of(group), startSec, startSec + 86400, tooLong, null, REGION));
+        assertEquals("InvalidParameterException", ex.getErrorCode());
+        assertEquals("1 validation error detected: Value at 'queryString' failed to satisfy constraint: "
+                + "Member must have length less than or equal to 10000", ex.getMessage());
+    }
+
+    @Test
     void filterValueContainingEqualsIsNotMisparsed() {
         String group = "connectors/equals";
         String stream = "s-1";
@@ -519,7 +540,11 @@ class CloudWatchLogsInsightsQueryTest {
                 "1+1 = 2 or level = 'ERROR'",
                 "level. = 'INFO'",
                 "level = 'INFO' x",
-                "(level = 'INFO'")) {
+                "(level = 'INFO'",
+                "level = INFO",
+                "level = web-db",
+                "level = 1+1",
+                "level != 1+1 or level = 'ERROR'")) {
             CloudWatchLogsService.QueryState state = startQueryFor(group, "fields @message | filter " + expr);
             assertEquals("Failed", state.status(), "unsupported operator must fail the query: " + expr);
             assertTrue(state.rows().isEmpty(), "a failed query exposes no rows: " + expr);
@@ -600,6 +625,23 @@ class CloudWatchLogsInsightsQueryTest {
         // A '>=' inside the quoted value is not an operator — the real '=' still wins.
         assertEquals("REQ>=42",
                 rowsFor(group, "fields params.id | filter params.id = 'REQ>=42'").get(0).get("params.id"));
+    }
+
+    @Test
+    void bareNumberComparesAsANumber() {
+        String group = "search/query-number";
+        String stream = "s-1";
+        createGroupStream(service, group, stream);
+        // These events and the expected ids below were observed on AWS with the same queries.
+        putRaw(service, group, stream, BASE_MS + 1000, "{\"n\":2,\"id\":\"a1\"}");
+        putRaw(service, group, stream, BASE_MS + 2000, "{\"n\":3,\"id\":\"b1\"}");
+        putRaw(service, group, stream, BASE_MS + 3000, "{\"n\":2.0,\"id\":\"d1\"}");
+
+        for (String filter : List.of("n = 2", "n = 2.0", "n = 02", "n == 2")) {
+            assertEquals(List.of("a1", "d1"), idsFor(group, filter), filter);
+        }
+        assertEquals(List.of(), idsFor(group, "n = -2"), "n = -2");
+        assertEquals(List.of("b1"), idsFor(group, "n != 2"), "n != 2");
     }
 
     @Test

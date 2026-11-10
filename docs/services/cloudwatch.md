@@ -273,12 +273,13 @@ The bare-colon spelling is a client-compatibility tolerance: the
 documents the canonical ARN, not that spelling. This tolerance does not change other APIs' ARN handling.
 
 `StartQuery` / `GetQueryResults` / `StopQuery` run a **subset** of the Logs Insights
-query language. Supported commands:
+query language. As on AWS, `StartQuery` rejects a `queryString` longer than 10,000 characters
+with `InvalidParameterException`. Supported commands:
 
 | Command | Notes |
 |---|---|
 | `fields a, b, ...` | Projection. Defaults to `@timestamp, @message`. `display` is an alias |
-| `filter <field> = 'v'` | Equality. `!=` and `==` are also accepted; `where` is an alias. Comparisons can be joined with `or` (any case) and grouped with parentheses, for example `filter (type = 'A' or type = 'B')` |
+| `filter <field> = 'v'` | Equality. `!=` and `==` are also accepted; `where` is an alias. An unquoted value must be a number and compares by value, so `n = 2` matches `2` and `2.0`. Comparisons can be joined with `or` (any case) and grouped with parentheses, for example `filter (type = 'A' or type = 'B')` |
 | `sort <field> [asc\|desc]` | `order` is an alias |
 | `dedup <field, ...>` | Keeps the first row per unique tuple, applied after sorting |
 | `limit N` | The effective cap is the smallest of this value, the `StartQuery` `limit` parameter, and `FLOCI_SERVICES_CLOUDWATCHLOGS_MAX_EVENTS_PER_QUERY` |
@@ -299,7 +300,7 @@ degrade silently, so it is worth knowing how each case behaves:
 | A `filter` whose operator is not `=`, `!=` or `==`, for example `<`, `<=`, `>`, `>=`, `like /ERROR/` or `=~ /ERROR/` | The query fails. Logged as `Unsupported filter expression: ...` |
 | A `filter` using `and`, `not` or `\|\|`, or with text after the value, as in `filter level = 'ERROR' x` | The query fails. AWS evaluates `and` and `not`, ignores the trailing text, and rejects an unparenthesized `\|\|` at `StartQuery` with `MalformedQueryException` (use `or`) |
 | A blank query, or an empty stage as in a trailing `\|` | The query fails. AWS rejects it at `StartQuery` |
-| A `filter` with a backslash escape, a backtick-quoted field name or an expression such as `1+1` in place of the field | The query fails. AWS interprets them |
+| A `filter` with a backslash escape, a backtick-quoted field name, an expression such as `1+1` in place of the field, or an unquoted value that is not a number, such as `level = ERROR` or `n = 1+1` | The query fails. AWS interprets them |
 | A projected field that does not exist | Rendered as an empty string. No warning |
 | A `sort` direction other than `asc` / `desc` | Treated as ascending. No warning |
 

@@ -1151,6 +1151,10 @@ public class CloudWatchLogsService implements ResourceProvider, Resettable {
      */
     public String startQuery(List<String> logGroupNames, long startTimeSeconds, long endTimeSeconds,
                              String queryString, Integer limit, String region) {
+        if (queryString.length() > 10_000) {
+            throw SmithyValidationErrors.exception("InvalidParameterException",
+                    "Value at 'queryString' failed to satisfy constraint: Member must have length less than or equal to 10000");
+        }
         long startMs = startTimeSeconds * 1000L;
         long endMs = endTimeSeconds * 1000L;
 
