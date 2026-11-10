@@ -46,7 +46,8 @@ final class LogsInsightsQuery {
     private static final DateTimeFormatter TS_FORMAT =
             DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss.SSS").withZone(ZoneOffset.UTC);
     private static final Pattern NUMBER = Pattern.compile("-?\\d+(\\.\\d+)?");
-    private static final Pattern FIELD = Pattern.compile("[@A-Za-z_]\\w*(\\.\\w+)*");
+    // Possessive, so a long dotted path is matched in a loop rather than one stack frame per segment.
+    private static final Pattern FIELD = Pattern.compile("[@A-Za-z_]\\w*(?:\\.\\w+)*+");
 
     private final List<String> fields = new ArrayList<>();
     private final List<List<Filter>> filters = new ArrayList<>();

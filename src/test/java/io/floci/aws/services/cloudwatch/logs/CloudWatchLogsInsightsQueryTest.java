@@ -215,9 +215,12 @@ class CloudWatchLogsInsightsQueryTest {
         putRaw(service, group, stream, BASE_MS + 1000, "{\"type\":\"B\",\"id\":\"b1\"}");
         putRaw(service, group, stream, BASE_MS + 2000, "{\"type\":\"C\",\"id\":\"c1\"}");
 
-        // The deepest nesting that fits in AWS's 10000-character limit still parses.
-        String nested = "fields id | filter " + "type = 'A' or (".repeat(600) + "type = 'B'" + ")".repeat(600);
+        // The deepest nesting and the longest dotted field that fit in AWS's 10000-character limit still parse.
+        String nested = "fields id | filter " + "a=1 or (".repeat(1100) + "type = 'B'" + ")".repeat(1100);
         assertEquals(List.of("b1"), rowsFor(group, nested).stream().map(row -> row.get("id")).toList());
+        assertEquals(List.of(), idsFor(group, "a" + ".a".repeat(4900) + " = 1"));
+        // AWS counts code points: 4990 emoji are 9980 UTF-16 units but leave the query under the limit.
+        assertEquals(List.of(), idsFor(group, "id = '" + "\uD83D\uDE00".repeat(4990) + "'"));
 
         long startSec = BASE_MS / 1000 - 10;
         String tooLong = "fields id" + " ".repeat(10_000 - 8);
