@@ -81,6 +81,14 @@ class DynamoDbAccessPathValidatorTest {
     }
 
     @Test
+    void acceptsKeyConditionsGroupedInParentheses() {
+        assertDoesNotThrow(() -> validateExpression(compositePkGsiPath,
+                "tenantId = :t AND (region = :r AND createdAt > :c)"));
+        assertDoesNotThrow(() -> validateExpression(compositePkGsiPath,
+                "(tenantId = :t AND region = :r) AND (createdAt > :c)"));
+    }
+
+    @Test
     void rejectsCompositePartitionKeyQueryMissingOneHashAttribute() {
         AwsException error = assertThrows(AwsException.class,
                 () -> validateExpression(compositePkGsiPath, "tenantId = :t"));
@@ -382,6 +390,10 @@ class DynamoDbAccessPathValidatorTest {
             pk = :pk AND :a < sk AND sk < :b               | must only contain one condition per key
             x = :a AND x = :b AND pk = :pk                 | must only contain one condition per key
             pk = :pk AND pk = :pk                          | must only contain one condition per key
+            pk = :pk AND (sk > :a AND x.y = :v)            | cannot have conditions on nested attributes
+            pk = :pk AND (sk > :a AND sk < :b)             | must only contain one condition per key
+            (pk = :pk AND sk > :a) AND sk < :b             | must only contain one condition per key
+            pk = :pk AND (sk > :a AND (sk < :b))           | must only contain one condition per key
             """)
     void refusesANestedOrRepeatedAttributeInAKeyCondition(String expression, String error) {
         ObjectNode names = mapper.createObjectNode();

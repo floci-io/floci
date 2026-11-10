@@ -120,11 +120,13 @@ class DynamoDbAccessPathIntegrationTest {
     }
 
     @Test
-    @Order(3)
+    @Order(12)
     void queryRefusesANestedOrRepeatedKeyConditionAttributeBeforeTheTableLookup() {
         Map<String, String> errors = Map.of(
                 "pk = :pk AND sk > :a AND sk < :b", "must only contain one condition per key",
-                "pk = :pk AND x.y = :a", "cannot have conditions on nested attributes");
+                "pk = :pk AND (sk > :a AND sk < :b)", "must only contain one condition per key",
+                "pk = :pk AND x.y = :a", "cannot have conditions on nested attributes",
+                "(pk = :pk AND sk > :a) AND x.y = :b", "cannot have conditions on nested attributes");
         for (String table : List.of(TABLE, "access-path-validation-missing")) {
             errors.forEach((expression, error) -> request("DynamoDB_20120810.Query", """
                     {
