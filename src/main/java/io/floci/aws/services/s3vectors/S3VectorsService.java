@@ -7,7 +7,6 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.ObjectReader;
 import io.floci.aws.core.common.AwsArnUtils;
 import io.floci.aws.core.common.AwsException;
-import io.floci.aws.core.common.AwsRegions;
 import io.floci.aws.core.common.RegionResolver;
 import io.floci.aws.core.storage.AccountAwareStorageBackend;
 import io.floci.aws.core.storage.StorageFactory;
@@ -30,6 +29,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.function.Function;
 import java.util.stream.Collectors;
 
 @ApplicationScoped
@@ -69,7 +69,7 @@ public class S3VectorsService {
     }
 
     private String buildBucketArn(String region, String bucketName) {
-        return AwsArnUtils.Arn.of("s3vectors", region, regionResolver.getAccountId(), "bucket/" + bucketName).toString();
+        return regionResolver.buildArn("s3vectors", region, "bucket/" + bucketName);
     }
 
     private String buildIndexArn(String region, String bucketName, String indexName) {
@@ -198,55 +198,58 @@ public class S3VectorsService {
     }
 
     private ResolvedBucket resolveBucket(String bucketName, String bucketArn, String region) {
-        boolean hasName = bucketName != null && !bucketName.isBlank();
-        boolean hasArn = bucketArn != null && !bucketArn.isBlank();
-        if (!hasName && !hasArn) {
-            throw new AwsException("ValidationException",
-                    "Either vectorBucketName or vectorBucketArn is required.", 400);
-        }
-        if (hasName && hasArn) {
-            throw new AwsException("ValidationException",
-                    "Specify either vectorBucketName or vectorBucketArn, not both.", 400);
-        }
-        if (hasName) {
-            validateBucketName(bucketName);
-            return new ResolvedBucket(bucketName, region);
-        }
-        AwsArnUtils.Arn parsed = parseS3VectorsArn(bucketArn, "vectorBucketArn");
-        String[] parts = parsed.resource().split("/", -1);
-        if (parts.length != 2 || !"bucket".equals(parts[0]) || parts[1].isBlank() || parsed.accountId().isEmpty()) {
-            throw new AwsException("ValidationException", "Malformed vectorBucketArn: " + bucketArn, 400);
-        }
-        validateBucketName(parts[1]);
-        String arnRegion = parsed.region().isEmpty() ? region : parsed.region();
-        if (!parsed.partition().equals(AwsRegions.partitionFor(arnRegion))) {
-            throw new AwsException("ValidationException", "Malformed vectorBucketArn: " + bucketArn, 400);
-        }
-        if (!parsed.accountId().equals(store.accountId())) {
+        ResolvedBucket resolved = resolveBucket(bucketName, bucketArn, region,
+                regionResolver::partitionForRegion, "ValidationException");
+        if (resolved.accountId() != null && !store.accountId().equals(resolved.accountId())) {
             throw new AwsException("NotFoundException",
-                    "The vector bucket " + parts[1] + " does not exist.", 404);
+                    "The vector bucket " + resolved.bucketName() + " does not exist.", 404);
         }
-        return new ResolvedBucket(parts[1], arnRegion);
+        return resolved;
     }
 
-    private static void validateBucketName(String bucketName) {
-        if (bucketName.length() < 3 || bucketName.length() > 63) {
-            throw new AwsException("ValidationException",
-                    "vectorBucketName must be between 3 and 63 characters.", 400);
+    public static ResolvedBucket resolveBucket(String bucketName, String bucketArn,
+                                               String defaultRegion, Function<String, String> partitionForRegion,
+                                               String errorCode) {
+        if ((bucketName == null) == (bucketArn == null)) {
+            throw new AwsException(errorCode,
+                    "Specify exactly one of VectorBucketName or VectorBucketArn.", 400);
         }
+        if (bucketArn == null) {
+            return new ResolvedBucket(validateName(bucketName, "VectorBucketName", false, errorCode),
+                    defaultRegion, null);
+        }
+        String[] parts = arnParts(bucketArn, false, errorCode);
+        AwsArnUtils.Arn parsed = AwsArnUtils.parse(bucketArn);
+        String name = validateName(parts[1], "VectorBucketArn bucket name", false, errorCode);
+        if (parsed.region().isEmpty() || parsed.accountId().isEmpty()
+                || !partitionForRegion.apply(parsed.region()).equals(parsed.partition())) {
+            throw new AwsException(errorCode, "Invalid S3 Vectors ARN: " + bucketArn, 400);
+        }
+        return new ResolvedBucket(name, parsed.region(), parsed.accountId());
     }
 
-    private static AwsArnUtils.Arn parseS3VectorsArn(String arn, String fieldName) {
-        AwsArnUtils.Arn parsed;
+    public static String validateName(String name, String property, boolean index, String errorCode) {
+        String pattern = index ? "[a-z0-9][a-z0-9.-]{1,61}[a-z0-9]" : "[a-z0-9][a-z0-9-]{1,61}[a-z0-9]";
+        if (name == null || !name.matches(pattern)) {
+            throw new AwsException(errorCode,
+                    property + " must be a valid lowercase name of 3 to 63 characters.", 400);
+        }
+        return name;
+    }
+
+    public static String[] arnParts(String arn, boolean index, String errorCode) {
         try {
-            parsed = AwsArnUtils.parse(arn);
+            AwsArnUtils.Arn parsed = AwsArnUtils.parse(arn);
+            String[] parts = parsed.resource().split("/", -1);
+            if (!"s3vectors".equals(parsed.service()) || parts.length != (index ? 4 : 2)
+                    || !"bucket".equals(parts[0]) || parts[1].isBlank()
+                    || (index && (!"index".equals(parts[2]) || parts[3].isBlank()))) {
+                throw new AwsException(errorCode, "Invalid S3 Vectors ARN: " + arn, 400);
+            }
+            return parts;
         } catch (IllegalArgumentException e) {
-            throw new AwsException("ValidationException", "Malformed " + fieldName + ": " + arn, 400);
+            throw new AwsException(errorCode, "Invalid S3 Vectors ARN: " + arn, 400);
         }
-        if (!"s3vectors".equals(parsed.service())) {
-            throw new AwsException("ValidationException", "Not an S3 Vectors " + fieldName + ": " + arn, 400);
-        }
-        return parsed;
     }
 
     private static void validatePolicyDocument(String policy) {
@@ -263,7 +266,7 @@ public class S3VectorsService {
         }
     }
 
-    private record ResolvedBucket(String bucketName, String region) {}
+    public record ResolvedBucket(String bucketName, String region, String accountId) {}
 
     public VectorIndex createIndex(String bucketName, String indexName, int dimension, String dataType,
                                    String distanceMetric, List<String> nonFilterableMetadataKeys, String region) {
@@ -440,18 +443,12 @@ public class S3VectorsService {
         if (indexArn == null || indexArn.isBlank()) {
             throw new AwsException("ValidationException", "Either indexName or indexArn is required.", 400);
         }
-        AwsArnUtils.Arn parsed = parseS3VectorsArn(indexArn, "indexArn");
-        String resource = parsed.resource();
-        int marker = resource.lastIndexOf("/index/");
-        if (marker < 0 || !resource.startsWith("bucket/")) {
-            throw new AwsException("ValidationException", "Malformed indexArn: " + indexArn, 400);
-        }
-        String bucketNameFromArn = resource.substring("bucket/".length(), marker);
-        String indexNameFromArn = resource.substring(marker + "/index/".length());
+        String[] parts = arnParts(indexArn, true, "ValidationException");
+        AwsArnUtils.Arn parsed = AwsArnUtils.parse(indexArn);
         // The ARN carries its own region — an index in one region must resolve there regardless
         // of which region the ListVectors request itself was signed for.
         String arnRegion = parsed.region().isEmpty() ? region : parsed.region();
-        return getIndex(bucketNameFromArn, indexNameFromArn, arnRegion);
+        return getIndex(parts[1], parts[3], arnRegion);
     }
 
     /**

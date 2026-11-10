@@ -75,7 +75,8 @@ bucket deletion so concurrent changes do not overwrite each other or restore del
 Bucket policies can be attached, retrieved, and deleted by either `vectorBucketName` or
 `vectorBucketArn`. `PutVectorBucketPolicy` validates that the policy is a JSON object and
 stores it with the bucket; `GetVectorBucketPolicy` returns `NotFoundException` when no
-policy is attached.
+policy is attached. Bucket policies are stored and returned, but Floci does not evaluate
+or enforce them on requests.
 
 Encryption settings are stored and returned; Floci does not perform KMS encryption.
 Standalone S3 Vectors tagging APIs are not implemented.
