@@ -18,6 +18,7 @@ import java.util.ArrayList;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.function.Function;
 import java.util.UUID;
 
 import static io.restassured.RestAssured.given;
@@ -166,7 +167,7 @@ class BackupPaginationIntegrationTest {
 
     private record PageResult<T>(List<T> items, String nextToken) {}
 
-    private int pageThrough(List<String> collected, java.util.function.Function<String, PageResult<String>> fetcher) {
+    private int pageThrough(List<String> collected, Function<String, PageResult<String>> fetcher) {
         int pages = 0;
         String token = null;
         do {
