@@ -164,7 +164,7 @@ class ApplicationAutoScalingTest {
                                 .scalableDimension(DIMENSION).minCapacity(2).maxCapacity(4)
                                 .suspendedState(s -> s.dynamicScalingInSuspended(true)
                                         .dynamicScalingOutSuspended(true).scheduledScalingSuspended(false)));
-                        scaling.putScheduledAction(action(name).schedule(at(Instant.now().plusSeconds(2)))
+                        scaling.putScheduledAction(action(name).schedule(at(Instant.now().plusSeconds(3)))
                                 .scalableTargetAction(b -> b.minCapacity(0).maxCapacity(1)).build());
                         ScheduledAction created = actionNamed(name);
                         awaitExecution(ecs, 1, 0, 1, 1);
