@@ -418,6 +418,10 @@ public class SsoOidcController {
 
     /** OAuth error code to the SSO OIDC exception name, e.g. authorization_pending to AuthorizationPendingException. */
     static String exceptionName(String error) {
+        // The one modeled exception not named after its OAuth code.
+        if ("server_error".equals(error)) {
+            return "InternalServerException";
+        }
         StringBuilder name = new StringBuilder();
         for (String part : error.split("_")) {
             if (!part.isEmpty()) {
