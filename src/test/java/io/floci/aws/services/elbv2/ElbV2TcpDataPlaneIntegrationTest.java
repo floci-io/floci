@@ -271,12 +271,16 @@ class ElbV2TcpDataPlaneIntegrationTest {
     void replacingBackendDoesNotRequireItsOccupiedPort() throws Exception {
         NetServer original = backend;
         int oldPort = original.actualPort();
-        NetServer closingBackend = mock(NetServer.class);
+        byte[] greeting = {7, 19, 31, (byte) 0xff};
+        NetServer retainedBackend = mock(NetServer.class);
         try {
-            backend = closingBackend;
+            backend = retainedBackend;
             when(backend.actualPort()).thenReturn(oldPort);
             when(backend.close()).thenReturn(Future.succeededFuture());
-            replaceBackend(new NetServerOptions(), socket -> socket.handler(socket::write));
+            replaceBackend(new NetServerOptions(), socket -> {
+                socket.write(Buffer.buffer(greeting));
+                socket.handler(socket::write);
+            });
             assertEquals(oldPort, original.actualPort());
             assertNotEquals(oldPort, backend.actualPort());
             assertEquals(List.of(backend.actualPort()),
@@ -286,10 +290,11 @@ class ElbV2TcpDataPlaneIntegrationTest {
                 assertEcho(socket, new byte[]{1, 2, 3});
             }
             try (Socket socket = connect(listenerPort)) {
+                assertArrayEquals(greeting, socket.getInputStream().readNBytes(greeting.length));
                 assertEcho(socket, new byte[]{0, 42, (byte) 0xff});
             }
         } finally {
-            if (backend == closingBackend) {
+            if (backend == retainedBackend) {
                 backend = original;
             }
             original.close().toCompletionStage().toCompletableFuture().get(5, TimeUnit.SECONDS);
