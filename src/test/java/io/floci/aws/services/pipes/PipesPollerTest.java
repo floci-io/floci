@@ -10,6 +10,7 @@ import io.floci.aws.core.storage.AccountAwareStorageBackend;
 import io.floci.aws.core.storage.StorageFactory;
 import io.floci.aws.services.dynamodb.backend.DynamoDbStreamReader;
 import io.floci.aws.services.kinesis.KinesisService;
+import io.floci.aws.services.kinesis.model.KinesisRecord;
 import io.floci.aws.services.pipes.model.DesiredState;
 import io.floci.aws.services.pipes.model.Pipe;
 import io.floci.aws.services.sqs.SqsService;
@@ -26,6 +27,7 @@ import org.mockito.junit.jupiter.MockitoExtension;
 import java.nio.charset.StandardCharsets;
 import java.time.Instant;
 import java.util.ArrayList;
+import java.util.Base64;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.CompletableFuture;
@@ -776,4 +778,37 @@ class PipesPollerTest {
                 "arn:aws-cn:kinesis:cn-north-1:111111111111:stream/orders/consumer/reader:1700000000"));
         assertEquals("orders", PipesPoller.kinesisStreamName("orders"));
     }
+
+    @Test
+    void buildKinesisRecordNodes_carriesGuideFields() {
+        Pipe pipe = new Pipe();
+        pipe.setName("kinesis-pipe");
+        pipe.setSource("arn:aws:kinesis:us-east-1:000000000000:stream/orders");
+        pipe.setRoleArn("arn:aws:iam::000000000000:role/pipe-role");
+
+        KinesisRecord kr = new KinesisRecord(
+                "hello".getBytes(StandardCharsets.UTF_8),
+                "partition-1",
+                "49545115243490985018280067714973144582180062593244413954",
+                Instant.ofEpochMilli(1545084650987L));
+
+        List<ObjectNode> nodes = poller.buildKinesisRecordNodes(List.of(kr), pipe, "us-east-1");
+        assertEquals(1, nodes.size());
+        ObjectNode node = nodes.get(0);
+        assertEquals("aws:kinesis", node.get("eventSource").asText());
+        assertEquals("1.0", node.get("eventVersion").asText());
+        assertEquals("shardId-000000000000:49545115243490985018280067714973144582180062593244413954",
+                node.get("eventID").asText());
+        assertEquals("aws:kinesis:record", node.get("eventName").asText());
+        assertEquals("arn:aws:iam::000000000000:role/pipe-role", node.get("invokeIdentityArn").asText());
+        assertEquals("us-east-1", node.get("awsRegion").asText());
+        assertEquals("arn:aws:kinesis:us-east-1:000000000000:stream/orders", node.get("eventSourceARN").asText());
+        assertEquals("1.0", node.get("kinesisSchemaVersion").asText());
+        assertEquals("partition-1", node.get("partitionKey").asText());
+        assertEquals("49545115243490985018280067714973144582180062593244413954",
+                node.get("sequenceNumber").asText());
+        assertEquals(Base64.getEncoder().encodeToString("hello".getBytes(StandardCharsets.UTF_8)),
+                node.get("data").asText());
+    }
+
 }

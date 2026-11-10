@@ -8,6 +8,8 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.CsvSource;
 
+import java.nio.charset.StandardCharsets;
+import java.util.Base64;
 import java.util.List;
 
 import static org.junit.jupiter.api.Assertions.*;
@@ -358,4 +360,23 @@ class PipesFilterMatcherTest {
     private static JsonNode json(String value) throws Exception {
         return MAPPER.readTree(value);
     }
+
+    @Test
+    void kinesisDataFilter_matchesDecodedJsonField() throws Exception {
+        String data = Base64.getEncoder().encodeToString(
+                "{\"id\": 7, \"status\": \"NEW\"}".getBytes(StandardCharsets.UTF_8));
+        JsonNode record = MAPPER.readTree(
+                "{\"eventSource\": \"aws:kinesis\", \"data\": \"" + data + "\"}");
+        assertTrue(matcher.matchesRecord(record, "{\"data\": {\"id\": [7]}}"));
+        assertFalse(matcher.matchesRecord(record, "{\"data\": {\"id\": [99]}}"));
+    }
+
+    @Test
+    void kinesisDataFilter_matchesDecodedStringField() throws Exception {
+        String data = Base64.getEncoder().encodeToString("hello".getBytes(StandardCharsets.UTF_8));
+        JsonNode record = MAPPER.readTree(
+                "{\"eventSource\": \"aws:kinesis\", \"data\": \"" + data + "\"}");
+        assertTrue(matcher.matchesRecord(record, "{\"data\": [\"hello\"]}"));
+    }
+
 }

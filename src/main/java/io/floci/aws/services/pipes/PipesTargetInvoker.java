@@ -379,14 +379,13 @@ public class PipesTargetInvoker {
             JsonNode current = objectMapper.readTree(json);
             String previousSegment = null;
             JsonNode container = null;
-            JsonNode outer = null;
             boolean sourceFieldDecoded = false;
             for (String segment : segments) {
                 // AWS Pipes parses an encoded source body when traversing into it.
                 if (!sourceFieldDecoded && isEncodedSourceField(previousSegment) && current.isTextual()) {
                     try {
                         JsonNode decoded = objectMapper.readTree(
-                                decodedSourceText(previousSegment, current.asText(), container, outer));
+                                decodedSourceText(previousSegment, current.asText(), container));
                         if (decoded != null && (decoded.isObject() || decoded.isArray())) {
                             current = decoded;
                         }
@@ -401,7 +400,6 @@ public class PipesTargetInvoker {
                 if (next.isMissingNode() || next.isNull()) {
                     return null;
                 }
-                outer = container;
                 container = current;
                 current = next;
                 previousSegment = segment;
@@ -409,7 +407,7 @@ public class PipesTargetInvoker {
             if (!sourceFieldDecoded && isEncodedSourceField(previousSegment) && current.isTextual()) {
                 // SQS bodies commonly contain a JSON document as a string. Pipes input
                 // transformation resolves that document when the body itself is selected.
-                String text = decodedSourceText(previousSegment, current.asText(), container, outer);
+                String text = decodedSourceText(previousSegment, current.asText(), container);
                 try {
                     JsonNode decoded = objectMapper.readTree(text);
                     if (decoded != null && (decoded.isObject() || decoded.isArray())) {
@@ -439,10 +437,9 @@ public class PipesTargetInvoker {
      * is not base64.
      *
      * @param container the object that holds {@code field}
-     * @param outer the object that holds {@code container}
      */
-    private static String decodedSourceText(String field, String text, JsonNode container, JsonNode outer) {
-        if (!isBase64SourceField(field, container, outer)) {
+    public static String decodedSourceText(String field, String text, JsonNode container) {
+        if (!isBase64SourceField(field, container)) {
             return text;
         }
         try {
@@ -453,10 +450,9 @@ public class PipesTargetInvoker {
         }
     }
 
-    private static boolean isBase64SourceField(String field, JsonNode container, JsonNode outer) {
+    private static boolean isBase64SourceField(String field, JsonNode container) {
         if ("data".equals(field)) {
-            return outer != null && "aws:kinesis".equals(outer.path("eventSource").asText())
-                    && outer.path("kinesis") == container;
+            return container != null && "aws:kinesis".equals(container.path("eventSource").asText());
         }
         if ("key".equals(field) || "value".equals(field)) {
             return container != null && isKafkaEventSource(container.path("eventSource").asText());

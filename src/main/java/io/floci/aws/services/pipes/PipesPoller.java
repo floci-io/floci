@@ -749,22 +749,27 @@ public class PipesPoller implements Resettable {
         return nodes;
     }
 
-    private List<ObjectNode> buildKinesisRecordNodes(List<?> records, Pipe pipe, String region) {
+    List<ObjectNode> buildKinesisRecordNodes(List<?> records, Pipe pipe, String region) {
         List<ObjectNode> nodes = new ArrayList<>();
         for (Object record : records) {
-            ObjectNode node = objectMapper.valueToTree(record);
+            KinesisRecord kr = (KinesisRecord) record;
             ObjectNode eventRecord = objectMapper.createObjectNode();
             eventRecord.put("eventSource", "aws:kinesis");
-            eventRecord.put("eventSourceARN", pipe.getSource());
+            eventRecord.put("eventVersion", "1.0");
+            eventRecord.put("eventID", "shardId-000000000000:" + kr.getSequenceNumber());
+            eventRecord.put("eventName", "aws:kinesis:record");
+            eventRecord.put("invokeIdentityArn", pipe.getRoleArn());
             eventRecord.put("awsRegion", region);
-            eventRecord.put("eventID", pipe.getSource() + ":" +
-                    node.path("SequenceNumber").asText());
-            ObjectNode kinesis = eventRecord.putObject("kinesis");
-            kinesis.put("partitionKey", node.path("PartitionKey").asText());
-            kinesis.put("sequenceNumber", node.path("SequenceNumber").asText());
-            kinesis.put("approximateArrivalTimestamp",
-                    node.path("ApproximateArrivalTimestamp").asDouble());
-            kinesis.put("data", node.path("Data").asText());
+            eventRecord.put("eventSourceARN", pipe.getSource());
+            eventRecord.put("kinesisSchemaVersion", "1.0");
+            eventRecord.put("partitionKey", kr.getPartitionKey());
+            eventRecord.put("sequenceNumber", kr.getSequenceNumber());
+            eventRecord.put("approximateArrivalTimestamp",
+                    kr.getApproximateArrivalTimestamp() != null
+                            ? kr.getApproximateArrivalTimestamp().toEpochMilli() / 1000.0 : 0.0);
+            String data = kr.getData() != null
+                    ? Base64.getEncoder().encodeToString(kr.getData()) : "";
+            eventRecord.put("data", data);
             nodes.add(eventRecord);
         }
         return nodes;

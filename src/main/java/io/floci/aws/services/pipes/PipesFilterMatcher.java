@@ -106,15 +106,25 @@ public class PipesFilterMatcher {
             }
             JsonNode value = actual == null || !actual.isObject() ? null : actual.get(field.getKey());
             JsonNode expected = field.getValue();
+            // Kinesis data arrives base64-encoded; decode it for both object and array patterns.
+            JsonNode decodedValue = value;
+            if (value != null && value.isTextual() && "data".equals(field.getKey())
+                    && actual != null && "aws:kinesis".equals(actual.path("eventSource").asText())) {
+                String decoded = PipesTargetInvoker.decodedSourceText(field.getKey(), value.asText(),
+                        actual);
+                if (!decoded.equals(value.asText()) && decoder != null) {
+                    decodedValue = decoder.getNodeFactory().textNode(decoded);
+                }
+            }
             if (expected.isObject()) {
                 boolean nestedMatches = value == null
                         ? matches(expected, null, decoder)
-                        : matchesNested(expected, decoded(value, decoder), decoder);
+                        : matchesNested(expected, decoded(decodedValue, decoder), decoder);
                 if (!nestedMatches) {
                     return false;
                 }
             } else if (expected.isArray()) {
-                if (!matchesAlternatives(field.getKey(), expected, value)) {
+                if (!matchesAlternatives(field.getKey(), expected, decodedValue)) {
                     return false;
                 }
             } else {
