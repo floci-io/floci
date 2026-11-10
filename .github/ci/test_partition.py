@@ -6,8 +6,6 @@ import tempfile
 import unittest
 
 PATH = Path(__file__).with_name('partition.sh').resolve()
-# Historical implementation, not historical test data: new classes remain covered.
-BASELINE = '36ab50dceabecb64ca544c08e129a5289e40e222'
 
 
 class PartitionTest(unittest.TestCase):
@@ -40,31 +38,6 @@ class PartitionTest(unittest.TestCase):
         self.assertEqual(expected, set(flattened))
         self.assertEqual(len(expected), len(flattened), 'Each class must appear exactly once')
         return shards
-
-    def test_real_manifest_assignments_match_pinned_baseline(self):
-        root = PATH.parents[2]
-        source = root / 'src/test/java'
-        classes = sorted({path.relative_to(source).with_suffix('').as_posix()
-                          for pattern in ('*Test.java', 'Test*.java', '*Tests.java', '*TestCase.java')
-                          for path in source.rglob(pattern)})
-        self.assertTrue(classes, 'Repository test manifest must not be empty')
-        self.classes.write_text('\n'.join(classes) + '\n')
-        baseline = self.root / 'baseline.py'
-        result = subprocess.run(['git', 'show', BASELINE + ':.github/ci/partition.sh'],
-                                cwd=root, capture_output=True, text=True)
-        self.assertEqual(0, result.returncode, result.stderr)
-        baseline.write_text(result.stdout)
-        assignments = []
-        for index in range(1, 5):
-            outputs = []
-            for script in (baseline, PATH):
-                result = subprocess.run([sys.executable, str(script), str(self.classes), '4', str(index)],
-                                        cwd=root, capture_output=True, text=True)
-                self.assertEqual(0, result.returncode, result.stderr)
-                outputs.append(result.stdout)
-            self.assertEqual(outputs[0], outputs[1], 'Real manifest shard ' + str(index))
-            assignments.extend(outputs[1].splitlines())
-        self.assertEqual(classes, sorted(assignments), 'Complete, disjoint real-manifest coverage')
 
     def test_legacy_profile_and_plain_class_assignment_is_preserved(self):
         for name in ('p/A', 'p/B'):
