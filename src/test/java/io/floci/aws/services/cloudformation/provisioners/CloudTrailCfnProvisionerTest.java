@@ -1,13 +1,11 @@
 package io.floci.aws.services.cloudformation.provisioners;
 
-import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.floci.aws.core.common.AwsException;
 import io.floci.aws.core.common.RegionResolver;
 import io.floci.aws.core.storage.AccountAwareStorageBackend;
 import io.floci.aws.core.storage.StorageFactory;
-import io.floci.aws.services.cloudformation.CloudFormationTemplateEngine;
 import io.floci.aws.services.cloudformation.model.StackResource;
 import io.floci.aws.services.cloudtrail.CloudTrailService;
 import io.floci.aws.services.cloudtrail.model.EventSelector;
@@ -162,19 +160,7 @@ class CloudTrailCfnProvisionerTest {
     }
 
     private ProvisionContext context() {
-        return new ProvisionContext(passthroughEngine(), "us-east-1", "111122223333", "stack");
-    }
-
-    /** An update: the prior physical id and the previous template's properties, as the stack hands them over. */
-    private ProvisionContext updateContext(String priorPhysicalId, String priorProperties) throws Exception {
-        return new ProvisionContext(passthroughEngine(), "us-east-1", "111122223333", "stack", priorPhysicalId,
-                event -> {}, mapper.readTree(priorProperties));
-    }
-
-    private static CloudFormationTemplateEngine passthroughEngine() {
-        CloudFormationTemplateEngine engine = mock(CloudFormationTemplateEngine.class);
-        when(engine.resolveNode(any(JsonNode.class))).thenAnswer(inv -> inv.getArgument(0));
-        return engine;
+        return new ProvisionContext(ProvisionContexts.passthroughEngine(), "us-east-1", "111122223333", "stack");
     }
 
     private StackResource resource() {
@@ -211,7 +197,8 @@ class CloudTrailCfnProvisionerTest {
     private void updateTrail(CloudTrailService real, StackResource r, String previous, String current)
             throws Exception {
         new CloudTrailCfnProvisioner(real).provision(r, mapper.readTree(current),
-                updateContext(r.getPhysicalId(), previous));
+                ProvisionContexts.update("us-east-1", "111122223333", "stack",
+                        r.getPhysicalId(), previous));
     }
 
     @Test

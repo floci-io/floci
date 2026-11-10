@@ -1,13 +1,11 @@
 package io.floci.aws.services.cloudformation.provisioners;
 
-import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.floci.aws.core.common.AwsException;
 import io.floci.aws.core.common.RegionResolver;
 import io.floci.aws.core.storage.AccountAwareStorageBackend;
 import io.floci.aws.core.storage.StorageFactory;
-import io.floci.aws.services.cloudformation.CloudFormationTemplateEngine;
 import io.floci.aws.services.cloudformation.model.StackResource;
 import io.floci.aws.services.lambda.LambdaAliasStore;
 import io.floci.aws.services.lambda.LambdaConcurrencyLimiter;
@@ -52,24 +50,7 @@ class LambdaVersionAliasCfnProvisionerTest {
     private final ObjectMapper mapper = new ObjectMapper();
 
     private ProvisionContext ctx() {
-        return new ProvisionContext(passthroughEngine(), "us-east-1", "000000000000", "my-stack");
-    }
-
-    /** An update: the prior physical id and the previous template's properties, as the stack hands them over. */
-    private ProvisionContext updateCtx(String priorPhysicalId, String priorProperties) throws Exception {
-        return new ProvisionContext(passthroughEngine(), "us-east-1", "000000000000", "my-stack",
-                priorPhysicalId, event -> {}, mapper.readTree(priorProperties));
-    }
-
-    // Scalar properties only: intrinsic resolution (Ref/GetAtt) is the engine's job and is
-    // covered by its own tests, so a passthrough keeps this a true isolated unit test.
-    private static CloudFormationTemplateEngine passthroughEngine() {
-        CloudFormationTemplateEngine engine = mock(CloudFormationTemplateEngine.class);
-        when(engine.resolve(any())).thenAnswer(inv -> {
-            JsonNode node = inv.getArgument(0);
-            return node == null ? null : node.asText();
-        });
-        return engine;
+        return new ProvisionContext(ProvisionContexts.passthroughEngine(), "us-east-1", "000000000000", "my-stack");
     }
 
     private StackResource resource(String type, String logicalId) {
@@ -248,7 +229,8 @@ class LambdaVersionAliasCfnProvisionerTest {
 
     private void updateAlias(LambdaService real, StackResource r, String previous, String current) throws Exception {
         new LambdaVersionAliasCfnProvisioner(real).provision(r, mapper.readTree(current),
-                updateCtx(r.getPhysicalId(), previous));
+                ProvisionContexts.update("us-east-1", "000000000000", "my-stack",
+                        r.getPhysicalId(), previous));
     }
 
     @Test

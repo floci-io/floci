@@ -1,6 +1,5 @@
 package io.floci.aws.services.cloudformation.provisioners;
 
-import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
@@ -9,7 +8,6 @@ import io.floci.aws.core.common.AwsException;
 import io.floci.aws.core.common.RegionResolver;
 import io.floci.aws.core.storage.AccountAwareStorageBackend;
 import io.floci.aws.core.storage.StorageFactory;
-import io.floci.aws.services.cloudformation.CloudFormationTemplateEngine;
 import io.floci.aws.services.cloudformation.model.StackResource;
 import io.floci.aws.services.secretsmanager.SecretsManagerService;
 import io.floci.aws.services.secretsmanager.model.Secret;
@@ -49,23 +47,8 @@ class SecretsManagerCfnProvisionerTest {
     private final ObjectMapper mapper = new ObjectMapper();
 
     private ProvisionContext ctx(String priorPhysicalId) {
-        return new ProvisionContext(passthroughEngine(), REGION, "000000000000", "my-stack", priorPhysicalId);
-    }
-
-    /** An update: the prior physical id and the previous template's properties, as the stack hands them over. */
-    private ProvisionContext updateCtx(String priorPhysicalId, String priorProperties) throws Exception {
-        return new ProvisionContext(passthroughEngine(), REGION, "000000000000", "my-stack", priorPhysicalId,
-                event -> {}, mapper.readTree(priorProperties));
-    }
-
-    private static CloudFormationTemplateEngine passthroughEngine() {
-        CloudFormationTemplateEngine engine = mock(CloudFormationTemplateEngine.class);
-        when(engine.resolve(any())).thenAnswer(inv -> {
-            JsonNode node = inv.getArgument(0);
-            return node == null || node.isMissingNode() || node.isNull() ? null : node.asText();
-        });
-        when(engine.resolveNode(any())).thenAnswer(inv -> inv.getArgument(0));
-        return engine;
+        return new ProvisionContext(ProvisionContexts.passthroughEngine(),
+                REGION, "000000000000", "my-stack", priorPhysicalId);
     }
 
     private static StackResource resource() {
@@ -339,7 +322,8 @@ class SecretsManagerCfnProvisionerTest {
     private void updateSecret(SecretsManagerService real, StackResource r, String previous, String current)
             throws Exception {
         new SecretsManagerCfnProvisioner(real).provision(r, mapper.readTree(current),
-                updateCtx(r.getPhysicalId(), previous));
+                ProvisionContexts.update(REGION, "000000000000", "my-stack",
+                        r.getPhysicalId(), previous));
     }
 
     @Test

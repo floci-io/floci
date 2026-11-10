@@ -1,6 +1,5 @@
 package io.floci.aws.services.cloudformation.provisioners;
 
-import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.floci.aws.config.EmulatorConfig;
@@ -9,7 +8,6 @@ import io.floci.aws.core.common.RegionResolver;
 import io.floci.aws.core.storage.AccountAwareStorageBackend;
 import io.floci.aws.core.storage.StorageFactory;
 import io.floci.aws.services.acm.AcmService;
-import io.floci.aws.services.cloudformation.CloudFormationTemplateEngine;
 import io.floci.aws.services.cloudformation.model.StackResource;
 import io.floci.aws.services.cognito.CognitoService;
 import io.floci.aws.services.cognito.model.CognitoGroup;
@@ -56,22 +54,8 @@ class CognitoUserPoolGroupCfnProvisionerTest {
      * has to be modelled there and not only on the resource.
      */
     private ProvisionContext ctx(String priorPhysicalId) {
-        return new ProvisionContext(passthroughEngine(), "us-east-1", "000000000000", "my-stack", priorPhysicalId);
-    }
-
-    /** An update: the prior physical id and the previous template's properties, as the stack hands them over. */
-    private ProvisionContext updateCtx(String priorPhysicalId, String priorProperties) throws Exception {
-        return new ProvisionContext(passthroughEngine(), "us-east-1", "000000000000", "my-stack", priorPhysicalId,
-                event -> {}, mapper.readTree(priorProperties));
-    }
-
-    private static CloudFormationTemplateEngine passthroughEngine() {
-        CloudFormationTemplateEngine engine = mock(CloudFormationTemplateEngine.class);
-        when(engine.resolve(any())).thenAnswer(inv -> {
-            JsonNode node = inv.getArgument(0);
-            return node == null ? null : node.asText();
-        });
-        return engine;
+        return new ProvisionContext(ProvisionContexts.passthroughEngine(),
+                "us-east-1", "000000000000", "my-stack", priorPhysicalId);
     }
 
     private ObjectNode props(String userPoolId, String groupName) {
@@ -474,7 +458,8 @@ class CognitoUserPoolGroupCfnProvisionerTest {
     private void updateGroup(CognitoService real, StackResource r, String previous, String current)
             throws Exception {
         new CognitoUserPoolGroupCfnProvisioner(real).provision(r, mapper.readTree(current),
-                updateCtx(r.getPhysicalId(), previous));
+                ProvisionContexts.update("us-east-1", "000000000000", "my-stack",
+                        r.getPhysicalId(), previous));
     }
 
     @Test
