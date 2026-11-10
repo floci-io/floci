@@ -2474,7 +2474,8 @@ public class CloudFormationService implements ResourceProvider {
                                 ? previousDefinition.path("Properties") : null;
                         JsonNode provisionProps = props.isMissingNode() ? null : props;
                         JsonNode[] comparedForms = comparedProperties.get(logicalId);
-                        PropertyChanges changes = PropertyChanges.between(type, !creating, priorProps,
+                        PropertyChanges changes = PropertyChanges.between(type,
+                                ProvisionContext.isUpdate(resource.getPhysicalId()), priorProps,
                                 provisionProps,
                                 comparedForms != null ? comparedForms[0] : null,
                                 comparedForms != null ? comparedForms[1] : null);

@@ -21,6 +21,10 @@ import java.util.Set;
  * <p>Names keep the previous template's field order for the ones it declared, then the rest in
  * the order of the current properties, so {@link #dropped()} keeps the order callers saw before
  * this type existed.
+ *
+ * <p>UNCHANGED means unchanged in the template. A property whose {@code Ref} or
+ * {@code Fn::GetAtt} reads a resource this update replaces still reads UNCHANGED, so UNCHANGED
+ * alone is no reason to skip a write.
  */
 public record PropertyChanges(Map<String, PropertyChange> byName) {
 

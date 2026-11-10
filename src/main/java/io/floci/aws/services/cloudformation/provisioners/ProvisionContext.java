@@ -64,6 +64,15 @@ public record ProvisionContext(CloudFormationTemplateEngine engine, String regio
      * this as "reuse the existing entity" must still reject or replace on createOnly properties.
      */
     public boolean isUpdate() {
+        return isUpdate(priorPhysicalId);
+    }
+
+    /**
+     * The one definition of "this call is an update": a non-blank prior physical id. The engine
+     * uses it to build the property changes it hands a provisioner, so the statement and
+     * {@link #isUpdate()} cannot disagree.
+     */
+    public static boolean isUpdate(String priorPhysicalId) {
         return priorPhysicalId != null && !priorPhysicalId.isBlank();
     }
 
