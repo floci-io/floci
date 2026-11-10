@@ -7,7 +7,6 @@ import io.floci.aws.services.cloudformation.model.StackEvent;
 
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
-import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
@@ -22,11 +21,18 @@ import java.util.function.Consumer;
  */
 public record ProvisionContext(CloudFormationTemplateEngine engine, String region,
                                String accountId, String stackName, String priorPhysicalId,
-                               Consumer<StackEvent> progress, JsonNode priorProperties) {
+                               Consumer<StackEvent> progress, JsonNode priorProperties,
+                               PropertyChanges changes) {
+
+    public ProvisionContext(CloudFormationTemplateEngine engine, String region,
+                            String accountId, String stackName, String priorPhysicalId,
+                            Consumer<StackEvent> progress, JsonNode priorProperties) {
+        this(engine, region, accountId, stackName, priorPhysicalId, progress, priorProperties, null);
+    }
 
     public ProvisionContext(CloudFormationTemplateEngine engine, String region,
                             String accountId, String stackName, String priorPhysicalId) {
-        this(engine, region, accountId, stackName, priorPhysicalId, event -> {}, null);
+        this(engine, region, accountId, stackName, priorPhysicalId, event -> {}, null, null);
     }
 
     /** Intermediate resource events retain the stack pipeline's event IDs and metadata. */
@@ -88,16 +94,20 @@ public record ProvisionContext(CloudFormationTemplateEngine engine, String regio
      * (a create-only property is a replacement question, not a clear).
      */
     public Set<String> droppedProperties(JsonNode props) {
-        Set<String> dropped = new LinkedHashSet<>();
-        if (!isUpdate() || priorProperties == null) {
-            return dropped;
+        return PropertyChanges.between(null, isUpdate(), priorProperties, props).dropped();
+    }
+
+    /**
+     * What this update did to each top-level property of the resource: the engine's own statement
+     * when it made one, which decides changed against unchanged by the forms CloudFormation
+     * compares, otherwise one derived from this context's previous properties and {@code props}.
+     * {@code resourceType} only tells which properties are create-only on the derived form.
+     */
+    public PropertyChanges changes(String resourceType, JsonNode props) {
+        if (changes != null) {
+            return changes;
         }
-        priorProperties.fieldNames().forEachRemaining(name -> {
-            if (previouslyDeclared(name) && (props == null || !props.has(name))) {
-                dropped.add(name);
-            }
-        });
-        return dropped;
+        return PropertyChanges.between(resourceType, isUpdate(), priorProperties, props);
     }
 
     /**
