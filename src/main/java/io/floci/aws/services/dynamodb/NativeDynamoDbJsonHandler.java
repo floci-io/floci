@@ -976,9 +976,9 @@ public class NativeDynamoDbJsonHandler {
                 ? request.get("ConditionalOperator").asText() : "AND";
 
         if (updateData != null && updateExpression != null) {
-            throw new AwsException("ValidationException",
+            throw SmithyValidationErrors.validationException(
                     "Can not use both expression and non-expression parameters in the same request: "
-                    + "Non-expression parameters: {AttributeUpdates} Expression parameters: {UpdateExpression}", 400);
+                    + "Non-expression parameters: {AttributeUpdates} Expression parameters: {UpdateExpression}");
         }
         requireReadableValues(exprAttrValues, VALIDATION_ENVELOPE);
 
@@ -1020,6 +1020,8 @@ public class NativeDynamoDbJsonHandler {
                 // before the unused-EAN/EAV checks below.
                 requireDefinedTokens(updateExpression, "UpdateExpression", exprAttrNames, exprAttrValues);
                 ExpressionEvaluator.validateSemantics(conditionExpression, "ConditionExpression", exprAttrNames, exprAttrValues);
+                requireNonEmptyExpression(updateExpression, "UpdateExpression");
+                DynamoDbReservedWords.check(ue, "UpdateExpression");
                 Set<String> hashTokens = extractHashTokens(updateExpression, conditionExpression);
                 checkUnusedEan(exprAttrNames, hashTokens);
                 Set<String> colonTokensAll = extractColonTokens(updateExpression, conditionExpression);

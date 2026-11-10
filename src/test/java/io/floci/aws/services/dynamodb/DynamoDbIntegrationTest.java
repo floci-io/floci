@@ -5868,12 +5868,16 @@ given()
 
     @ParameterizedTest
     @CsvSource(delimiter = '|', quoteCharacter = '`', textBlock = """
-            "UpdateExpression": "SET q = :w", "ConditionExpression": "a = = b", "ExpressionAttributeValues": {":w": {"S": "w"}}                         | Invalid ConditionExpression: Syntax error; token: "=", near: "= = b"
-            "UpdateExpression": "SET q = :w", "ConditionExpression": "((a = :w))", "ExpressionAttributeValues": {":w": {"S": "w"}}                      | Invalid ConditionExpression: The expression has redundant parentheses;
+            "UpdateExpression": "SET q = :w", "ConditionExpression": "a = = b", "ExpressionAttributeValues": {":w": {"S": "w"}}                      | Invalid ConditionExpression: Syntax error; token: "=", near: "= = b"
+            "UpdateExpression": "SET q = :w", "ConditionExpression": "((a = :w))", "ExpressionAttributeValues": {":w": {"S": "w"}}                   | Invalid ConditionExpression: The expression has redundant parentheses;
             "UpdateExpression": "SET q = :w", "ConditionExpression": "x < :v", "ExpressionAttributeValues": {":w": {"S": "w"}, ":v": {"BOOL": true}} | Invalid ConditionExpression: Incorrect operand type for operator or function; operator or function: <, operand type: BOOL
-            "ConditionExpression": "contains(x, x)"                                                                                                   | Invalid ConditionExpression: The first operand must be distinct from the remaining operands for this operator or function; operator: contains, first operand: [x]
-            "UpdateExpression": "FOO q = :w", "ExpressionAttributeValues": {":w": {"S": "w"}}                                                          | Invalid UpdateExpression: Syntax error; token: "FOO", near: "FOO q"
-            "UpdateExpression": "SET q = :w", "ExpressionAttributeValues": {":w": {"S": "w"}, ":z": {"S": "z"}}                                        | Value provided in ExpressionAttributeValues unused in expressions: keys: {:z}
+            "ConditionExpression": "contains(x, x)"                                                                                                  | Invalid ConditionExpression: The first operand must be distinct from the remaining operands for this operator or function; operator: contains, first operand: [x]
+            "UpdateExpression": "FOO q = :w", "ExpressionAttributeValues": {":w": {"S": "w"}}                                                        | Invalid UpdateExpression: Syntax error; token: "FOO", near: "FOO q"
+            "UpdateExpression": "SET q = :w", "ExpressionAttributeValues": {":w": {"S": "w"}, ":z": {"S": "z"}}                                      | Value provided in ExpressionAttributeValues unused in expressions: keys: {:z}
+            "UpdateExpression": ""                                                                                                                   | Invalid UpdateExpression: The expression can not be empty;
+            "UpdateExpression": "", "ConditionExpression": "a = :missing"                                                                            | Invalid ConditionExpression: An expression attribute value used in expression is not defined; attribute value: :missing
+            "UpdateExpression": "SET name = :w", "ExpressionAttributeValues": {":w": {"S": "w"}}                                                     | Invalid UpdateExpression: Attribute name is a reserved keyword; reserved word: name
+            "UpdateExpression": "SET q = :w", "AttributeUpdates": {"q": {"Action": "PUT", "Value": {"S": "w"}}}                                      | Can not use both expression and non-expression parameters in the same request: Non-expression parameters: {AttributeUpdates} Expression parameters: {UpdateExpression}
             """)
     void updateItemPutsExpressionErrorsInTheValidationEnvelope(String members, String message) {
         createOnDemandTableForGsiUpdates("UpdateEnvelopeTable");
