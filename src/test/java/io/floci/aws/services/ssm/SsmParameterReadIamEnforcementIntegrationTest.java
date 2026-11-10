@@ -21,12 +21,14 @@ import software.amazon.awssdk.services.ssm.model.SsmException;
 import java.util.UUID;
 
 import static io.floci.aws.testing.EnforcementFixtures.auth;
+import static io.restassured.RestAssured.given;
+import static org.hamcrest.Matchers.containsString;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 
 /**
  * {@code GetParametersByPath} is checked against the parameter its {@code Path} names, and {@code GetParameters}
- * against each parameter its {@code Names} give.
+ * against each parameter its {@code Names} give, without the version or label selector a name may carry.
  */
 @QuarkusTest
 @TestProfile(IamEnforcementProfile.class)
@@ -95,6 +97,59 @@ class SsmParameterReadIamEnforcementIntegrationTest {
             } finally {
                 root.deleteParameter(r -> r.name(allowed));
                 root.deleteParameter(r -> r.name(other));
+            }
+        }
+    }
+
+    @Test
+    void getParametersByPathIsCheckedAgainstItsPathWhateverNamesTheBodyCarries() {
+        String prefix = "/iam-path-names-" + UUID.randomUUID();
+        String allowed = prefix + "/allowed";
+        String other = prefix + "/secrets";
+        try (SsmClient root = AwsTestClients.create(SsmClient.builder(), ACCOUNT, Region.US_EAST_1)) {
+            try {
+                root.putParameter(r -> r.name(allowed).type(ParameterType.STRING).value("v"));
+                root.putParameter(r -> r.name(other + "/key").type(ParameterType.STRING).value("v"));
+                EnforcementFixtures.UserCredentials credentials = user("""
+                        {"Version":"2012-10-17","Statement":[{"Effect":"Allow","Action":"ssm:GetParametersByPath",
+                          "Resource":"arn:aws:ssm:us-east-1:000000000000:parameter%s"}]}""".formatted(allowed));
+
+                given()
+                        .header("Authorization", auth(credentials.accessKeyId(), "ssm"))
+                        .header("X-Amz-Target", "AmazonSSM.GetParametersByPath")
+                        .contentType("application/x-amz-json-1.1")
+                        .body("{\"Path\":\"" + other + "\",\"Names\":[\"" + allowed + "\"]}")
+                .when().post("/")
+                .then().statusCode(400).body(containsString("AccessDeniedException"));
+            } finally {
+                root.deleteParameter(r -> r.name(allowed));
+                root.deleteParameter(r -> r.name(other + "/key"));
+            }
+        }
+    }
+
+    @Test
+    void aGrantOnAParameterAllowsReadingItsVersionsAndLabels() {
+        String name = "/iam-selector-read-" + UUID.randomUUID() + "/db";
+        try (SsmClient root = AwsTestClients.create(SsmClient.builder(), ACCOUNT, Region.US_EAST_1)) {
+            try {
+                root.putParameter(r -> r.name(name).type(ParameterType.STRING).value("v1"));
+                root.putParameter(r -> r.name(name).type(ParameterType.STRING).value("v2").overwrite(true));
+                root.labelParameterVersion(r -> r.name(name).parameterVersion(1L).labels("stable"));
+                String arn = root.getParameter(r -> r.name(name)).parameter().arn();
+                EnforcementFixtures.UserCredentials credentials = user("""
+                        {"Version":"2012-10-17","Statement":[{"Effect":"Allow",
+                          "Action":["ssm:GetParameter","ssm:GetParameters"],
+                          "Resource":"arn:aws:ssm:us-east-1:000000000000:parameter%s"}]}""".formatted(name));
+                try (SsmClient user = AwsTestClients.create(SsmClient.builder(), credentials.accessKeyId(),
+                        Region.US_EAST_1)) {
+                    assertEquals("v1", user.getParameter(r -> r.name(name + ":1")).parameter().value());
+                    assertEquals("v1", user.getParameter(r -> r.name(arn + ":stable")).parameter().value());
+                    GetParametersResponse read = user.getParameters(r -> r.names(name + ":2", name + ":stable"));
+                    assertEquals(2, read.parameters().size());
+                }
+            } finally {
+                root.deleteParameter(r -> r.name(name));
             }
         }
     }
