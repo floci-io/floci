@@ -20,8 +20,8 @@ import java.util.List;
 import java.util.Map;
 import java.util.UUID;
 
+import static io.floci.aws.testing.EcsTaskWaits.awaitLastStatus;
 import static io.restassured.RestAssured.given;
-import static org.awaitility.Awaitility.await;
 import static org.hamcrest.Matchers.*;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
@@ -94,13 +94,6 @@ class BackupPaginationIntegrationTest {
         }
     }
 
-    private void awaitJobState(String auth, String jobId, String expected) {
-        await().atMost(Duration.ofSeconds(10)).pollInterval(Duration.ofMillis(25))
-                .until(() -> expected.equals(given().header("Authorization", auth)
-                        .get("/backup-jobs/" + jobId).then().statusCode(200)
-                        .extract().path("State")));
-    }
-
     private List<String> startThreeJobs(String vault) {
         String iamRole = "arn:aws:iam::000000000000:role/backup-role";
         String resourceArn = "arn:aws:dynamodb:" + REGION + ":000000000000:table/my-table";
@@ -112,7 +105,11 @@ class BackupPaginationIntegrationTest {
                     .put("/backup-jobs").then().statusCode(200)
                     .extract().path("BackupJobId");
             jobIds.add(jobId);
-            awaitJobState(AUTH, jobId, "COMPLETED");
+            awaitLastStatus(
+                    () -> given().header("Authorization", AUTH).get("/backup-jobs/" + jobId)
+                            .then().statusCode(200).extract().jsonPath(),
+                    jp -> jp.getString("State"),
+                    Duration.ofSeconds(10), "COMPLETED");
         }
         return jobIds;
     }
