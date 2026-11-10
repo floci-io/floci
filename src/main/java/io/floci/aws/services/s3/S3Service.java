@@ -630,7 +630,7 @@ public class S3Service implements Resettable, ResourceProvider {
                     "max-buckets must be between 1 and " + MAX_LIST_BUCKETS + ".", 400);
         }
         return Pagination.paginate(listBuckets(), Bucket::getName,
-                maxBuckets == null ? MAX_LIST_BUCKETS : maxBuckets, continuationToken,
+                maxBuckets == null ? Integer.MAX_VALUE : maxBuckets, continuationToken,
                 "buckets:" + ownerId(),
                 token -> new AwsException("InvalidArgument", "The continuation token provided is incorrect.", 400));
     }
