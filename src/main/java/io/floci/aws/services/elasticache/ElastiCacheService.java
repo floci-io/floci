@@ -419,7 +419,10 @@ public class ElastiCacheService implements ResourceProvider {
             // derived from configuration and need no Docker, so the group is created and reaches
             // 'available' even when no daemon is reachable. Only connecting to the cache needs
             // the container.
-            handle = containerManager.tryStart(groupId, image, request.region());
+            handle = seed != null
+                    ? containerManager.tryStart(groupId, image,
+                            List.of(ElastiCacheContainerManager.RESTORE_SERVER_FLAG), request.region())
+                    : containerManager.tryStart(groupId, image, request.region());
             if (seed != null) {
                 loadSnapshot(groupId, handle, seed);
             }

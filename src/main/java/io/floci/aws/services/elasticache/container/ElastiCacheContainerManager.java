@@ -83,8 +83,14 @@ public class ElastiCacheContainerManager {
      *         container was created
      */
     public ElastiCacheContainerHandle tryStart(String groupId, String image, String region) {
+        return tryStart(groupId, image, List.of(), region);
+    }
+
+    /** {@link #tryStart(String, String, String)} with {@code extraServerFlags} on the server command line. */
+    public ElastiCacheContainerHandle tryStart(String groupId, String image, List<String> extraServerFlags,
+                                               String region) {
         try {
-            ElastiCacheContainerHandle handle = start(groupId, image, region);
+            ElastiCacheContainerHandle handle = start(groupId, image, extraServerFlags, region);
             dockerUnavailableLogged = false;
             return handle;
         } catch (RuntimeException e) {
@@ -139,9 +145,7 @@ public class ElastiCacheContainerManager {
         // Remove any stale container with the same name
         lifecycleManager.removeIfExists(containerName);
 
-        // DEBUG is enabled for connections from inside the container only, so a snapshot restore
-        // can reload the dataset (DEBUG RELOAD NOSAVE); clients reach the server through the proxy.
-        StringBuilder serverFlags = new StringBuilder("--loglevel verbose --enable-debug-command local");
+        StringBuilder serverFlags = new StringBuilder("--loglevel verbose");
         for (String flag : extraServerFlags) {
             serverFlags.append(' ').append(flag);
         }
@@ -236,6 +240,14 @@ public class ElastiCacheContainerManager {
                 "ElastiCache backend for group " + groupId + " did not become ready on " + host + ":" + port
                         + " within " + BACKEND_READY_DEADLINE_MS + "ms");
     }
+
+    /**
+     * The server flag a backend loading a snapshot starts with: DEBUG for connections from inside the
+     * container only, so {@link #restore} can reload the dataset (DEBUG RELOAD NOSAVE) while clients
+     * reach the server through the proxy. Redis has the flag from 7.0 on and an older server refuses
+     * to start with it, so it is passed only to a group created from a snapshot.
+     */
+    public static final String RESTORE_SERVER_FLAG = "--enable-debug-command local";
 
     /** The server's own CLI, valkey-cli or redis-cli, run inside its container against the local server. */
     private static final String CLI = "C=$(command -v valkey-cli || command -v redis-cli); ";

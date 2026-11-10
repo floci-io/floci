@@ -31,6 +31,7 @@ import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyInt;
+import static org.mockito.ArgumentMatchers.anyList;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.doAnswer;
@@ -78,6 +79,10 @@ class ElastiCacheSnapshotServiceTest {
                 "headless".equals(inv.getArgument(0)) ? null
                         : new ElastiCacheContainerHandle("container-" + inv.getArgument(0),
                                 inv.getArgument(0), "localhost", 6379));
+        // A group created from a snapshot starts through the overload that takes server flags.
+        when(containerManager.tryStart(anyString(), anyString(), anyList(), any())).thenAnswer(inv ->
+                new ElastiCacheContainerHandle("container-" + inv.getArgument(0),
+                        inv.getArgument(0), "localhost", 6379));
         when(containerManager.snapshot("container-source")).thenReturn(RDB);
         doNothing().when(proxyManager).startProxy(anyString(), any(), anyInt(), anyString(), anyInt(), any());
         KmsService kmsService = mock(KmsService.class);
@@ -100,6 +105,19 @@ class ElastiCacheSnapshotServiceTest {
         assertEquals("arn:aws:elasticache:us-east-1:000000000000:snapshot:snap", snapshot.getArn());
         verify(containerManager).restore("container-restored", RDB);
         assertEquals("restored", service.getReplicationGroup("restored").getReplicationGroupId());
+    }
+
+    @Test
+    void onlyAGroupCreatedFromASnapshotStartsWithTheDebugCommand() {
+        group("source");
+        service.createSnapshot("snap", "source", null);
+
+        service.createReplicationGroupFromSnapshot(request("restored", null), "snap");
+
+        verify(containerManager).tryStart(eq("source"), anyString(), any());
+        verify(containerManager, never()).tryStart(eq("source"), anyString(), anyList(), any());
+        verify(containerManager).tryStart(eq("restored"), anyString(),
+                eq(List.of(ElastiCacheContainerManager.RESTORE_SERVER_FLAG)), any());
     }
 
     @Test
@@ -205,6 +223,7 @@ class ElastiCacheSnapshotServiceTest {
                 fault(() -> service.createReplicationGroupFromSnapshot(request("restored", null), "snap")));
         assertEquals("ReplicationGroupNotFoundFault", fault(() -> service.getReplicationGroup("restored")));
         verify(containerManager, never()).tryStart(eq("restored"), anyString(), any());
+        verify(containerManager, never()).tryStart(eq("restored"), anyString(), anyList(), any());
     }
 
     @Test
@@ -229,6 +248,7 @@ class ElastiCacheSnapshotServiceTest {
         assertEquals("InvalidParameterCombination",
                 fault(() -> service.createReplicationGroupFromSnapshot(request("sharded", "enabled"), "snap")));
         verify(containerManager, never()).tryStart(eq("sharded"), anyString(), any());
+        verify(containerManager, never()).tryStart(eq("sharded"), anyString(), anyList(), any());
     }
 
     @Test
