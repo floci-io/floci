@@ -144,6 +144,61 @@ class BackupDeletedPlanServiceTest {
         }
     }
 
+    @ParameterizedTest
+    @ValueSource(strings = {"list", "tag", "untag"})
+    void planTagsUseKeyedLookupWithoutScanningRetainedHistory(String operation) {
+        AccountAwareStorageBackend<BackupPlan> plans = spy(AccountAwareStorageBackend.inMemory(ACCOUNT));
+        BackupService service = service(storage(plans, AccountAwareStorageBackend.inMemory(ACCOUNT)), config());
+        try {
+            BackupPlan retained = service.createBackupPlan("deleted", List.of(), null, REGION);
+            service.deleteBackupPlan(retained.getBackupPlanId());
+            BackupPlan active = service.createBackupPlan("active", List.of(), null, Map.of("env", "test"), REGION);
+            clearInvocations(plans);
+            switch (operation) {
+                case "list" -> assertEquals(Map.of("env", "test"), service.listTags(active.getBackupPlanArn()));
+                case "tag" -> {
+                    service.tagResource(active.getBackupPlanArn(), Map.of("new", "value"));
+                    assertEquals(Map.of("env", "test", "new", "value"), service.listTags(active.getBackupPlanArn()));
+                }
+                case "untag" -> {
+                    service.untagResource(active.getBackupPlanArn(), List.of("env"));
+                    assertTrue(service.listTags(active.getBackupPlanArn()).isEmpty());
+                }
+                default -> throw new IllegalArgumentException(operation);
+            }
+            verify(plans, never()).scan(any());
+            verify(plans, atLeastOnce()).get(active.getBackupPlanId());
+        } finally {
+            service.shutdown();
+        }
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"account", "region", "partition", "service", "type", "malformed", "deleted"})
+    void keyedPlanTagsStillRequireExactActiveArn(String mismatch) {
+        AccountAwareStorageBackend<BackupPlan> plans = spy(AccountAwareStorageBackend.inMemory(ACCOUNT));
+        BackupService service = service(storage(plans, AccountAwareStorageBackend.inMemory(ACCOUNT)), config());
+        try {
+            BackupPlan plan = service.createBackupPlan("exact", List.of(), null, Map.of("env", "test"), REGION);
+            String arn = switch (mismatch) {
+                case "account" -> plan.getBackupPlanArn().replace(ACCOUNT, "999999999999");
+                case "region" -> plan.getBackupPlanArn().replace(REGION, "us-east-1");
+                case "partition" -> plan.getBackupPlanArn().replace("arn:aws:", "arn:aws-cn:");
+                case "service" -> plan.getBackupPlanArn().replace(":backup:", ":other:");
+                case "type" -> plan.getBackupPlanArn().replace("backup-plan:", "backup-vault:");
+                case "malformed" -> "not-an-arn";
+                case "deleted" -> service.deleteBackupPlan(plan.getBackupPlanId()).getBackupPlanArn();
+                default -> throw new IllegalArgumentException(mismatch);
+            };
+            assertNotFound(() -> service.listTags(arn));
+            assertNotFound(() -> service.tagResource(arn, Map.of("late", "tag")));
+            assertNotFound(() -> service.untagResource(arn, List.of("env")));
+            assertEquals(Map.of("env", "test"), plans.get(plan.getBackupPlanId()).orElseThrow().getTags());
+        } finally {
+            service.shutdown();
+        }
+    }
+
     private static void assertNotFound(Runnable operation) {
         assertEquals("ResourceNotFoundException", assertThrows(AwsException.class, operation::run).getErrorCode());
     }

@@ -1040,9 +1040,11 @@ public class BackupService {
     }
 
     private BackupPlan findPlanByArn(String arn) {
-        return listBackupPlans().stream()
-                .filter(plan -> arn.equals(plan.getBackupPlanArn()))
-                .findFirst()
+        return AwsArnUtils.resourceIfArnFor(arn, "backup")
+                .filter(resource -> resource.startsWith("backup-plan:"))
+                .map(resource -> resource.substring("backup-plan:".length()))
+                .flatMap(planStore::get)
+                .filter(plan -> arn.equals(plan.getBackupPlanArn()) && plan.getDeletionDate() == null)
                 .orElseThrow(() -> new AwsException("ResourceNotFoundException", "Resource not found: " + arn, 400));
     }
 
