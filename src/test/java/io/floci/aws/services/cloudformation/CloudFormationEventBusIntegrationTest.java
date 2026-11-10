@@ -548,6 +548,56 @@ class CloudFormationEventBusIntegrationTest {
         }
     }
 
+    @Test
+    void partnerEventBusIsProvisionedFromItsEventSourceName() {
+        String suffix = Long.toString(System.nanoTime(), 36);
+        String busName = "aws.partner/example.com/cfn-" + suffix;
+        String stackName = "eventbus-partner-" + suffix;
+
+        createStack(stackName, partnerEventBusTemplate(busName, busName));
+        assertStackStatus(stackName, "CREATE_COMPLETE");
+
+        JsonPath bus = callEventBridge("AWSEvents.DescribeEventBus", "{\"Name\":\"" + busName + "\"}", 200);
+        assertEquals(busName, bus.getString("Name"));
+        if (!bus.getString("Arn").endsWith(":event-bus/" + busName)) {
+            throw new AssertionError("unexpected partner bus ARN: " + bus.getString("Arn"));
+        }
+
+        deleteStack(stackName);
+        CfnStackWaits.awaitStackDeleted(stackName);
+        callEventBridge("AWSEvents.DescribeEventBus", "{\"Name\":\"" + busName + "\"}", 400);
+    }
+
+    @Test
+    void partnerEventBusNameMustMatchItsEventSourceName() {
+        String suffix = Long.toString(System.nanoTime(), 36);
+        String stackName = "eventbus-partner-mismatch-" + suffix;
+
+        createStack(stackName, partnerEventBusTemplate("aws.partner/example.com/a-" + suffix,
+                "aws.partner/example.com/b-" + suffix));
+        assertStackStatus(stackName, "ROLLBACK_COMPLETE");
+        String events = describeStackEvents(stackName);
+        if (!events.contains("Name must match EventSourceName")) {
+            throw new AssertionError("partner-name mismatch was not preserved: " + events);
+        }
+    }
+
+    private static String partnerEventBusTemplate(String busName, String eventSourceName) {
+        return """
+                {
+                  "Resources": {
+                    "Bus": {
+                      "Type": "AWS::Events::EventBus",
+                      "Properties": {
+                        "Name": "%s",
+                        "EventSourceName": "%s"
+                      }
+                    }
+                  }
+                }
+                """.formatted(busName, eventSourceName);
+    }
+
     // "Policy" is deliberately absent: an inline resource policy is supported (see
     // provisionEventBridgeEventBus), so rejecting it would regress templates main supports today.
     @ParameterizedTest

@@ -205,6 +205,87 @@ class EventBridgeServiceTest {
     }
 
     @Test
+    void createPartnerEventBusTakesItsEventSourceName() {
+        String name = "aws.partner/example.com/123/orders";
+        EventBus bus = service.createEventBus(name, name, "Partner bus", null, REGION);
+
+        assertEquals(name, bus.getName());
+        assertTrue(bus.getArn().endsWith(":event-bus/" + name));
+        assertEquals(bus.getArn(), service.describeEventBus(name, REGION).getArn());
+        assertEquals(name, service.describeEventBus(bus.getArn(), REGION).getName());
+    }
+
+    @Test
+    void createPartnerEventBusRejectsANameOtherThanItsEventSourceName() {
+        AwsException error = assertThrows(AwsException.class, () ->
+                service.createEventBus("aws.partner/example.com/a", "aws.partner/example.com/b",
+                        null, null, REGION));
+        assertEquals("ValidationException", error.getErrorCode());
+        assertEquals(400, error.getHttpStatus());
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"aws.partner/example.com", "partner/example.com/x", "aws.partner/example.com/x y"})
+    void createPartnerEventBusRejectsAnInvalidEventSourceName(String name) {
+        AwsException error = assertThrows(AwsException.class, () ->
+                service.createEventBus(name, name, null, null, REGION));
+        assertEquals("ValidationException", error.getErrorCode());
+        assertTrue(error.getMessage().contains("Invalid partner event source name"));
+    }
+
+    @Test
+    void putEventsOnAPartnerBusByArnReachesTheRuleOnIt() {
+        String name = "aws.partner/example.com/123/orders";
+        EventBus bus = service.createEventBus(name, name, null, null, REGION);
+        Rule rule = service.putRule("partner-rule", name, "{\"source\":[\"example.com\"]}", null,
+                RuleState.ENABLED, null, null, null, REGION);
+        Target target = new Target("t1", "arn:aws:sqs:us-east-1:000000000000:queue-1", null, null);
+        service.putTargets("partner-rule", bus.getArn(), List.of(target), REGION);
+
+        service.putEvents(List.of(Map.of("EventBusName", bus.getArn(), "Source", "example.com",
+                "DetailType", "Order", "Detail", "{}")), REGION);
+
+        assertTrue(rule.getArn().endsWith(":rule/" + name + "/partner-rule"));
+        verify(dispatcherMock).dispatch(eq(rule.getArn()), eq(target), anyString(), eq(REGION), any());
+    }
+
+    @Test
+    void nestedPartnerBusesKeepTheirRulesApart() {
+        String parent = "aws.partner/example.com/orders";
+        String child = parent + "/eu";
+        service.createEventBus(parent, parent, null, null, REGION);
+        service.createEventBus(child, child, null, null, REGION);
+        service.putRule("child-rule", child, "{\"source\":[\"example.com\"]}", null,
+                RuleState.ENABLED, null, null, null, REGION);
+
+        assertTrue(service.listRules(parent, null, REGION).isEmpty());
+        assertEquals(1, service.listRules(child, null, REGION).size());
+        assertDoesNotThrow(() -> service.deleteEventBus(parent, REGION));
+    }
+
+    @Test
+    void ruleOnAPartnerBusIsTaggableByItsArn() {
+        String name = "aws.partner/example.com/123/orders";
+        service.createEventBus(name, name, null, null, REGION);
+        Rule rule = service.putRule("partner-rule", name, "{\"source\":[\"example.com\"]}", null,
+                RuleState.ENABLED, null, null, null, REGION);
+
+        service.tagResource(rule.getArn(), Map.of("team", "orders"), REGION);
+
+        assertEquals(Map.of("team", "orders"), service.listTagsForResource(rule.getArn(), REGION));
+    }
+
+    @Test
+    void deletePartnerEventBusByArn() {
+        String name = "aws.partner/example.com/123/orders";
+        EventBus bus = service.createEventBus(name, name, null, null, REGION);
+
+        service.deleteEventBus(bus.getArn(), REGION);
+
+        assertThrows(AwsException.class, () -> service.describeEventBus(name, REGION));
+    }
+
+    @Test
     void updateEventBusRejectsLongDescription() {
         service.createEventBus("my-bus", null, null, REGION);
         assertThrows(AwsException.class, () ->
