@@ -150,6 +150,68 @@ class Ec2InstanceTypeOfferingsPaginationIntegrationTest {
         }
     }
 
+    @ParameterizedTest
+    @ValueSource(strings = {"add-filter", "remove-filter", "change-filter", "add-location-filter",
+            "change-location-type", "change-region"})
+    void changedSelectionRejectsContinuation(String change) {
+        DescribeInstanceTypeOfferingsRequest.Builder original = DescribeInstanceTypeOfferingsRequest.builder()
+                .locationType(LocationType.REGION).maxResults(5);
+        if (change.equals("remove-filter") || change.equals("change-filter")) {
+            original.filters(f -> f.name("instance-type").values("*"));
+        }
+        try (Ec2Client source = AwsTestClients.create(Ec2Client.builder(), "test", Region.US_EAST_1);
+                Ec2Client destination = AwsTestClients.create(Ec2Client.builder(), "test",
+                        change.equals("change-region") ? Region.EU_WEST_1 : Region.US_EAST_1)) {
+            DescribeInstanceTypeOfferingsResponse first = source.describeInstanceTypeOfferings(original.build());
+            assertTrue(first.nextToken() != null && !first.nextToken().isBlank());
+            DescribeInstanceTypeOfferingsRequest.Builder continuation = original.nextToken(first.nextToken());
+            DescribeInstanceTypeOfferingsRequest changed = switch (change) {
+                case "add-filter" -> continuation.filters(f -> f.name("instance-type").values("t3.*")).build();
+                case "remove-filter" -> continuation.filters(List.of()).build();
+                case "change-filter" -> continuation.filters(f -> f.name("instance-type").values("t4g.*")).build();
+                case "add-location-filter" -> continuation.filters(f -> f.name("location").values("us-east-1")).build();
+                case "change-location-type" -> continuation.locationType(LocationType.AVAILABILITY_ZONE).build();
+                case "change-region" -> continuation.build();
+                default -> throw new IllegalArgumentException(change);
+            };
+            Ec2Exception error = assertThrows(Ec2Exception.class,
+                    () -> destination.describeInstanceTypeOfferings(changed));
+            assertEquals(400, error.statusCode());
+            assertEquals("InvalidPaginationToken.DataMismatch", error.awsErrorDetails().errorCode());
+        }
+    }
+
+    @Test
+    void continuationAllowsChangingPageSize() {
+        try (Ec2Client ec2 = AwsTestClients.create(Ec2Client.builder(), "test", Region.US_EAST_1)) {
+            DescribeInstanceTypeOfferingsRequest request = DescribeInstanceTypeOfferingsRequest.builder()
+                    .locationType(LocationType.REGION).maxResults(5).build();
+            DescribeInstanceTypeOfferingsResponse first = ec2.describeInstanceTypeOfferings(request);
+            assertTrue(first.nextToken() != null && !first.nextToken().isBlank());
+            DescribeInstanceTypeOfferingsRequest continuation = request.toBuilder().nextToken(first.nextToken()).build();
+            List<InstanceTypeOffering> expected = ec2.describeInstanceTypeOfferings(continuation).instanceTypeOfferings();
+            List<InstanceTypeOffering> largerPage = ec2.describeInstanceTypeOfferings(continuation.toBuilder()
+                    .maxResults(10).build()).instanceTypeOfferings();
+            assertEquals(10, largerPage.size());
+            assertEquals(expected, largerPage.subList(0, 5));
+            assertTrue(first.instanceTypeOfferings().stream().noneMatch(largerPage::contains));
+        }
+    }
+
+    @Test
+    void changedExplicitInstanceTypesRejectContinuation() {
+        String token = ec2("DescribeInstanceTypeOfferings", "test", "us-east-1")
+                .formParam("LocationType", "region").formParam("MaxResults", 5)
+                .post("/").then().statusCode(200)
+                .extract().xmlPath().getString("DescribeInstanceTypeOfferingsResponse.nextToken");
+        assertTrue(token != null && !token.isBlank());
+        ec2("DescribeInstanceTypeOfferings", "test", "us-east-1")
+                .formParam("LocationType", "region").formParam("MaxResults", 5)
+                .formParam("NextToken", token).formParam("InstanceType.1", "t3.micro")
+                .post("/").then().statusCode(400)
+                .body("Response.Errors.Error.Code", equalTo("InvalidPaginationToken.DataMismatch"));
+    }
+
     @Test
     void nonIntegerPageSizeReturnsXmlError() {
         ec2("DescribeInstanceTypeOfferings", "test", "us-east-1")
