@@ -9,10 +9,12 @@ import org.bouncycastle.crypto.encodings.OAEPEncoding;
 import org.bouncycastle.crypto.engines.RSABlindedEngine;
 import org.bouncycastle.crypto.engines.RSAEngine;
 import org.bouncycastle.crypto.params.RSAKeyParameters;
+import org.bouncycastle.crypto.params.RSAPrivateCrtKeyParameters;
 
 import java.security.Key;
 import java.security.PrivateKey;
 import java.security.PublicKey;
+import java.security.interfaces.RSAPrivateCrtKey;
 import java.security.interfaces.RSAPrivateKey;
 import java.security.interfaces.RSAPublicKey;
 
@@ -61,9 +63,10 @@ public final class RsaOaep {
      * {@code PSource.PSpecified.DEFAULT} means.
      */
     private static OAEPEncoding encoding(String digest, boolean encrypt) {
-        // The public operation is blinded: the exponentiation is made unpredictable, so a
-        // caller cannot tell how far it has come from the timing.
-        AsymmetricBlockCipher engine = encrypt ? new RSABlindedEngine() : new RSAEngine();
+        // The private operation is the blinded one: it decrypts what a caller brought, so its
+        // timing must not say how far the exponentiation has come. The public operation
+        // exponentiates with a public exponent, and blinding that protects nothing.
+        AsymmetricBlockCipher engine = encrypt ? new RSAEngine() : new RSABlindedEngine();
         Digest hash = "SHA-512".equals(digest) ? new SHA512Digest() : new SHA256Digest();
         return new OAEPEncoding(engine, hash, hash, null);
     }
@@ -76,8 +79,7 @@ public final class RsaOaep {
                 RSAPublicKey rsa = (RSAPublicKey) pub;
                 oaep.init(true, new RSAKeyParameters(false, rsa.getModulus(), rsa.getPublicExponent()));
             } else {
-                RSAPrivateKey rsa = (RSAPrivateKey) priv;
-                oaep.init(false, new RSAKeyParameters(true, rsa.getModulus(), rsa.getPrivateExponent()));
+                oaep.init(false, privateParameters((RSAPrivateKey) priv));
             }
             return oaep.processBlock(input, 0, input.length);
         } catch (InvalidCipherTextException e) {
@@ -85,6 +87,24 @@ public final class RsaOaep {
         } catch (RuntimeException e) {
             throw new IllegalArgumentException("RSA-OAEP failed: " + e.getMessage(), e);
         }
+    }
+
+    /**
+     * The private key's parameters, with the CRT values when the key carries them.
+     *
+     * <p>The blinded engine blinds the exponentiation it is given, and it does so with the
+     * CRT values, so a key that has them is passed as they are.
+     *
+     * @param key the private key
+     * @return the parameters the engine works with
+     */
+    private static RSAKeyParameters privateParameters(RSAPrivateKey key) {
+        if (key instanceof RSAPrivateCrtKey crt) {
+            return new RSAPrivateCrtKeyParameters(crt.getModulus(), crt.getPublicExponent(),
+                    crt.getPrivateExponent(), crt.getPrimeP(), crt.getPrimeQ(),
+                    crt.getPrimeExponentP(), crt.getPrimeExponentQ(), crt.getCrtCoefficient());
+        }
+        return new RSAKeyParameters(true, key.getModulus(), key.getPrivateExponent());
     }
 
     /** Decrypt with a key given as the generic {@link Key} type. */

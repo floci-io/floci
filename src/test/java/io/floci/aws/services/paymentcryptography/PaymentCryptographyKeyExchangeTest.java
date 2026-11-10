@@ -149,6 +149,13 @@ class PaymentCryptographyKeyExchangeTest {
         assertEquals("TR31_D0_SYMMETRIC_DATA_ENCRYPTION_KEY", imported.getKeyUsage());
     }
 
+    /**
+     * A key that leaves under a cryptogram comes back.
+     *
+     * <p>The import decrypts what the caller brought under the private key the parameters
+     * issued, and that operation is blinded, so a wrong set of CRT values would decrypt to
+     * nothing and the key would not come back.
+     */
     @Test
     void aKeyThatLeavesUnderACryptogramComesBack() {
         Map<String, Object> importParameters = service.parametersForImport("KEY_CRYPTOGRAM",
