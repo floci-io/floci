@@ -36,11 +36,12 @@ import java.nio.charset.StandardCharsets;
 import java.time.Instant;
 import java.time.ZoneOffset;
 import java.time.format.DateTimeFormatter;
-import java.util.Arrays;
 import java.util.Base64;
 import java.util.List;
 import java.util.Locale;
 import java.util.UUID;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.CompletionException;
 
 /**
  * Handles Lambda Function URL invocations.
@@ -59,7 +60,6 @@ public class LambdaUrlInvocationController {
 
     private static final Logger LOG = Logger.getLogger(LambdaUrlInvocationController.class);
     private static final int FUNCTION_ERROR_STATUS = 502;
-    private static final byte[] STREAM_PRELUDE_DELIMITER = new byte[8];
 
     private final LambdaService lambdaService;
     private final RegionResolver regionResolver;
@@ -145,13 +145,69 @@ public class LambdaUrlInvocationController {
 
         LOG.infov("Lambda URL invocation: {0} {1} -> {2} (region: {3})", method, urlId, functionName, region);
 
+        boolean streamed = urlConfig != null && "RESPONSE_STREAM".equals(urlConfig.getInvokeMode());
         try {
-            InvokeResult result = lambdaService.invokeArn(
-                    functionArn, event.getBytes(), InvocationType.RequestResponse);
-            boolean streamed = urlConfig != null && "RESPONSE_STREAM".equals(urlConfig.getInvokeMode());
-            return buildResponse(result, streamed);
+            if (streamed) {
+                return invokeStreamed(functionArn, event.getBytes());
+            }
+            return buildResponse(lambdaService.invokeArn(
+                    functionArn, event.getBytes(), InvocationType.RequestResponse));
         } catch (AwsException e) {
             return Response.status(e.getHttpStatus()).entity(e.getMessage()).build();
+        }
+    }
+
+    /**
+     * Runs the invocation on its own thread and answers as soon as the head of the streamed response
+     * is known, so the body reaches the caller as the function writes it. A function that fails or
+     * returns before it streams anything is answered as a buffered response.
+     */
+    private Response invokeStreamed(String functionArn, byte[] event) {
+        LambdaUrlResponseStream stream = new LambdaUrlResponseStream(objectMapper);
+        CompletableFuture<InvokeResult> invocation = new CompletableFuture<>();
+        Thread.ofVirtual().name("lambda-url-stream").start(() -> {
+            try {
+                invocation.complete(lambdaService.invokeArnStreaming(functionArn, event, stream));
+            } catch (RuntimeException e) {
+                invocation.completeExceptionally(e);
+            } finally {
+                stream.end();
+            }
+        });
+        CompletableFuture.anyOf(stream.head(), invocation).handle((ignored, e) -> null).join();
+
+        if (!stream.head().isDone()) {
+            try {
+                return buildResponse(invocation.join());
+            } catch (CompletionException e) {
+                if (e.getCause() instanceof AwsException aws) {
+                    throw aws;
+                }
+                throw e;
+            }
+        }
+        LambdaUrlResponseStream.Head head;
+        try {
+            head = stream.head().join();
+        } catch (CompletionException e) {
+            LOG.warnv("Streamed response of {0} has an unreadable prelude: {1}", functionArn, e.getMessage());
+            return Response.status(FUNCTION_ERROR_STATUS).build();
+        }
+        Response.ResponseBuilder builder;
+        if (head.prelude() == null) {
+            builder = Response.ok().type(head.contentType() != null ? head.contentType() : MediaType.APPLICATION_OCTET_STREAM);
+        } else {
+            builder = Response.status(head.prelude().path("statusCode").asInt(200));
+            applyHeadersAndCookies(builder, head.prelude());
+        }
+        return builder.entity(stream.body()).build();
+    }
+
+    private static void applyHeadersAndCookies(Response.ResponseBuilder builder, JsonNode response) {
+        response.path("headers").fields().forEachRemaining(e -> builder.header(e.getKey(), e.getValue().asText()));
+        JsonNode cookies = response.path("cookies");
+        if (cookies.isArray()) {
+            cookies.forEach(cookie -> builder.header("Set-Cookie", cookie.asText()));
         }
     }
 
@@ -223,27 +279,19 @@ public class LambdaUrlInvocationController {
                 || normalized.contains("xml") || normalized.contains("form");
     }
 
-    private Response buildResponse(InvokeResult result, boolean streamed) {
+    private Response buildResponse(InvokeResult result) {
         if (result.getFunctionError() != null) {
             return buildFunctionErrorResponse(result);
         }
         if (result.getPayload() == null || result.getPayload().length == 0) {
             return Response.status(result.getStatusCode()).build();
         }
-        if (streamed) {
-            return buildStreamedResponse(result.getPayload());
-        }
         try {
             JsonNode node = objectMapper.readTree(result.getPayload());
             if (node.isObject() && node.has("statusCode")) {
                 int status = node.get("statusCode").asInt();
                 Response.ResponseBuilder builder = Response.status(status);
-                if (node.has("headers")) {
-                    node.get("headers").fields().forEachRemaining(e -> builder.header(e.getKey(), e.getValue().asText()));
-                }
-                if (node.has("cookies") && node.get("cookies").isArray()) {
-                    node.get("cookies").forEach(cookie -> builder.header("Set-Cookie", cookie.asText()));
-                }
+                applyHeadersAndCookies(builder, node);
                 if (node.has("body")) {
                     String body = node.get("body").asText();
                     boolean isBase64 = node.path("isBase64Encoded").asBoolean(false);
@@ -257,43 +305,6 @@ public class LambdaUrlInvocationController {
         } catch (Exception e) {
             return Response.ok(result.getPayload()).build();
         }
-    }
-
-    /**
-     * A streamed response that went through {@code awslambda.HttpResponseStream.from} starts with a
-     * JSON prelude (statusCode, headers, cookies) and eight NUL bytes; everything after them is the
-     * body. Without a prelude, the whole stream is the body of a 200 application/octet-stream.
-     */
-    private Response buildStreamedResponse(byte[] payload) {
-        int delimiter = indexOf(payload, STREAM_PRELUDE_DELIMITER);
-        JsonNode prelude = delimiter < 0 ? null : readPrelude(Arrays.copyOfRange(payload, 0, delimiter));
-        if (prelude == null) {
-            return Response.ok(payload).type(MediaType.APPLICATION_OCTET_STREAM).build();
-        }
-        Response.ResponseBuilder builder = Response.status(prelude.path("statusCode").asInt(200));
-        prelude.path("headers").fields().forEachRemaining(e -> builder.header(e.getKey(), e.getValue().asText()));
-        prelude.path("cookies").forEach(cookie -> builder.header("Set-Cookie", cookie.asText()));
-        return builder.entity(Arrays.copyOfRange(payload, delimiter + STREAM_PRELUDE_DELIMITER.length, payload.length))
-                .build();
-    }
-
-    private JsonNode readPrelude(byte[] json) {
-        try {
-            JsonNode node = objectMapper.readTree(json);
-            return node != null && node.isObject() ? node : null;
-        } catch (Exception e) {
-            LOG.debugv("Streamed Function URL response has no JSON prelude: {0}", e.getMessage());
-            return null;
-        }
-    }
-
-    private static int indexOf(byte[] data, byte[] target) {
-        for (int i = 0; i <= data.length - target.length; i++) {
-            if (Arrays.equals(data, i, i + target.length, target, 0, target.length)) {
-                return i;
-            }
-        }
-        return -1;
     }
 
     /**
