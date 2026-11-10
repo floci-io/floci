@@ -2,11 +2,13 @@ package io.floci.aws.services.ssoadmin;
 
 import io.floci.aws.testing.RestAssuredJsonUtils;
 import io.quarkus.test.junit.QuarkusTest;
+import io.restassured.path.json.config.JsonPathConfig;
 import org.hamcrest.Matchers;
 import org.junit.jupiter.api.Assertions;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
 
+import java.math.BigDecimal;
 import java.util.List;
 
 import static io.restassured.RestAssured.given;
@@ -21,6 +23,9 @@ import static org.hamcrest.Matchers.matchesPattern;
  */
 @QuarkusTest
 class SsoAdminIntegrationTest {
+
+    /** Reads JSON numbers as exact decimals rather than floats. */
+    private static final JsonPathConfig EXACT_NUMBERS = new JsonPathConfig(JsonPathConfig.NumberReturnType.BIG_DECIMAL);
 
     private static final String AUTH_HEADER =
             "AWS4-HMAC-SHA256 Credential=AKID/20260101/us-east-1/sso/aws4_request";
@@ -198,7 +203,7 @@ class SsoAdminIntegrationTest {
         // AWS always returns CreatedDate on a PermissionSet; the Terraform AWS provider reads it
         // unconditionally and crashes when it is missing.
         String instanceArn = "arn:aws:sso:::instance/ssoins-7223b02a5d9f7c8e";
-        float created = given()
+        BigDecimal created = given()
                 .contentType("application/x-amz-json-1.1")
                 .header("Authorization", AUTH_HEADER)
                 .header("X-Amz-Target", "SWBExternalService.CreatePermissionSet")
@@ -206,7 +211,7 @@ class SsoAdminIntegrationTest {
             .when().post("/")
             .then().statusCode(200)
                 .body("PermissionSet.CreatedDate", Matchers.notNullValue())
-                .extract().path("PermissionSet.CreatedDate");
+                .extract().jsonPath(EXACT_NUMBERS).get("PermissionSet.CreatedDate");
         String permissionSetArn = given()
                 .contentType("application/x-amz-json-1.1")
                 .header("Authorization", AUTH_HEADER)
@@ -215,15 +220,16 @@ class SsoAdminIntegrationTest {
             .when().post("/")
             .then().statusCode(200)
                 .extract().path("PermissionSet.PermissionSetArn");
-        float created2 = given()
+        BigDecimal created2 = given()
                 .contentType("application/x-amz-json-1.1")
                 .header("Authorization", AUTH_HEADER)
                 .header("X-Amz-Target", "SWBExternalService.DescribePermissionSet")
                 .body("{\"InstanceArn\":\"" + instanceArn + "\",\"PermissionSetArn\":\"" + permissionSetArn + "\"}")
             .when().post("/")
             .then().statusCode(200)
-                .extract().path("PermissionSet.CreatedDate");
-        Assertions.assertTrue(created > 0 && created2 >= created, "CreatedDate must be a positive epoch-seconds value");
+                .extract().jsonPath(EXACT_NUMBERS).get("PermissionSet.CreatedDate");
+        Assertions.assertTrue(created.signum() > 0 && created2.compareTo(created) >= 0,
+                "CreatedDate must be a positive epoch-seconds value");
 
         given()
                 .contentType("application/x-amz-json-1.1")
@@ -234,7 +240,7 @@ class SsoAdminIntegrationTest {
             .when().post("/")
             .then().statusCode(200);
 
-        float afterUpdate = given()
+        BigDecimal afterUpdate = given()
                 .contentType("application/x-amz-json-1.1")
                 .header("Authorization", AUTH_HEADER)
                 .header("X-Amz-Target", "SWBExternalService.DescribePermissionSet")
@@ -242,8 +248,10 @@ class SsoAdminIntegrationTest {
             .when().post("/")
             .then().statusCode(200)
                 .body("PermissionSet.Description", equalTo("updated"))
-                .extract().path("PermissionSet.CreatedDate");
-        Assertions.assertEquals(created2, afterUpdate, "UpdatePermissionSet must keep CreatedDate");
+                .extract().jsonPath(EXACT_NUMBERS).get("PermissionSet.CreatedDate");
+        // Compared exactly (a float would only resolve about 128 s at epoch-second scale); the
+        // controlled-clock case is SsoAdminServiceTest.permissionSetKeepsItsExactCreationTimeAcrossUpdates.
+        Assertions.assertEquals(0, created2.compareTo(afterUpdate), "UpdatePermissionSet must keep CreatedDate exactly");
     }
 
     @Test

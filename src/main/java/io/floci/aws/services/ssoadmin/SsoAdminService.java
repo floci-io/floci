@@ -42,6 +42,7 @@ import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 
 import java.nio.charset.StandardCharsets;
+import java.time.Clock;
 import java.time.Duration;
 import java.time.Instant;
 import java.time.format.DateTimeParseException;
@@ -144,6 +145,8 @@ public class SsoAdminService implements Resettable, StoredResourceArns {
     private final String defaultRegion;
     /** The seeded instance lives in the deployment's home region, so its ARN takes that partition. */
     private final String bootstrapInstanceArn;
+    /** Source of permission-set creation times; tests advance it to detect a reset date. */
+    private Clock clock = Clock.systemUTC();
 
     @Inject
     public SsoAdminService(StorageFactory storageFactory, IdentityStoreService identityStoreService,
@@ -247,6 +250,23 @@ public class SsoAdminService implements Resettable, StoredResourceArns {
     }
 
     public String getInstanceArn() { return bootstrapInstanceArn; }
+
+    void setClock(Clock clock) {
+        this.clock = clock;
+    }
+
+    /**
+     * The permission set's CreatedDate. One persisted before the creation time was recorded reports
+     * its instance's creation time instead: it cannot predate the instance, and unlike a time
+     * assigned at load it stays the same across restarts without a write.
+     */
+    public long createdDateEpochMillis(PermissionSet permissionSet) {
+        if (permissionSet.createdDateEpochMillis() != null) {
+            return permissionSet.createdDateEpochMillis();
+        }
+        SsoInstance instance = findInstanceByArn(instanceArnForPermissionSet(permissionSet.arn()));
+        return instance != null ? instance.createdDateEpochMillis() : 0L;
+    }
     public String getIdentityStoreId() { return IDENTITY_STORE_ID; }
 
     public boolean hasIdentityStore(String identityStoreId) {
@@ -1551,7 +1571,7 @@ public class SsoAdminService implements Resettable, StoredResourceArns {
         String arn = globalArn("sso", instance.primaryRegion(), "",
                 "permissionSet/" + instanceId + "/ps-" + shortId());
         PermissionSet permissionSet = new PermissionSet(arn, name, description, sessionDuration,
-                new LinkedHashMap<>(), new LinkedHashMap<>(), null, null, tags, Instant.now().toEpochMilli());
+                new LinkedHashMap<>(), new LinkedHashMap<>(), null, null, tags, clock.millis());
         permissionSets.put(arn, permissionSet);
         return permissionSet;
     }

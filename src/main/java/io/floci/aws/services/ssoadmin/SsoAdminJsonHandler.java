@@ -918,7 +918,7 @@ public class SsoAdminJsonHandler {
             node.put("Description", p.description());
         }
         node.put("SessionDuration", p.sessionDuration());
-        node.put("CreatedDate", EpochSeconds.fromMillis(p.createdDateEpochMillis()));
+        node.put("CreatedDate", EpochSeconds.fromMillis(service.createdDateEpochMillis(p)));
         return node;
     }
 

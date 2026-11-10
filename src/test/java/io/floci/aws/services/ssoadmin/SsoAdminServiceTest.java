@@ -29,6 +29,10 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.mockito.Mockito;
 
+import java.time.Clock;
+import java.time.Duration;
+import java.time.Instant;
+import java.time.ZoneOffset;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -1986,6 +1990,41 @@ class SsoAdminServiceTest {
         request.put("Name", name);
         request.put("ClientToken", clientToken);
         return service.createApplication(request, ACCOUNT_ID, "us-east-1");
+    }
+
+    @Test
+    void permissionSetKeepsItsExactCreationTimeAcrossUpdates() {
+        Instant created = Instant.parse("2026-01-02T03:04:05.678Z");
+        service.setClock(Clock.fixed(created, ZoneOffset.UTC));
+        PermissionSet permissionSet = createPermissionSet("ClockedAdmins");
+        assertEquals(created.toEpochMilli(), service.createdDateEpochMillis(permissionSet));
+
+        // Advance well past float precision at epoch-second scale (128 s) so a reset would show.
+        service.setClock(Clock.fixed(created.plus(Duration.ofMinutes(5)), ZoneOffset.UTC));
+        ObjectNode update = mapper.createObjectNode();
+        update.put("InstanceArn", service.getInstanceArn());
+        update.put("PermissionSetArn", permissionSet.arn());
+        update.put("Description", "updated");
+        update.put("SessionDuration", "PT2H");
+        service.updatePermissionSet(update);
+
+        PermissionSet updated = service.getPermissionSet(service.getInstanceArn(), permissionSet.arn());
+        assertEquals(created.toEpochMilli(), service.createdDateEpochMillis(updated));
+    }
+
+    @Test
+    void permissionSetPersistedWithoutCreationTimeReportsItsInstanceCreationTime() {
+        PermissionSet stored = createPermissionSet("LegacyAdmins");
+        PermissionSet legacy = new PermissionSet(stored.arn(), stored.name(), stored.description(),
+                stored.sessionDuration(), stored.managedPolicies(), stored.customerManagedPolicies(),
+                stored.inlinePolicy(), stored.permissionsBoundary(), stored.tags(), null);
+        long instanceCreated = instances.scan(key -> true).stream()
+                .filter(instance -> instance.instanceArn().equals(service.getInstanceArn()))
+                .findFirst().orElseThrow().createdDateEpochMillis();
+
+        assertEquals(instanceCreated, service.createdDateEpochMillis(legacy));
+        // Stable: the same value on every read, unlike a time assigned when the record is loaded.
+        assertEquals(service.createdDateEpochMillis(legacy), service.createdDateEpochMillis(legacy));
     }
 
     private PermissionSet createPermissionSet(String name) {
