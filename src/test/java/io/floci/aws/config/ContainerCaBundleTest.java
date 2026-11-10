@@ -1,11 +1,11 @@
 package io.floci.aws.config;
 
-import com.sun.net.httpserver.HttpsConfigurator;
 import com.sun.net.httpserver.HttpsServer;
 import io.floci.aws.core.common.Pem;
 import io.floci.aws.services.acm.CertificateGenerator;
 import io.floci.aws.services.acm.model.KeyAlgorithm;
 import io.floci.aws.services.lambda.launcher.BootstrapProcess;
+import io.floci.aws.testing.LocalHttpsServer;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -19,7 +19,6 @@ import javax.net.ssl.X509TrustManager;
 import java.io.ByteArrayInputStream;
 import java.io.InputStream;
 import java.io.OutputStream;
-import java.net.InetSocketAddress;
 import java.net.URI;
 import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
@@ -92,21 +91,9 @@ class ContainerCaBundleTest {
         FlociCertificateAuthority ca = FlociCertificateAuthority.loadOrCreate(tlsDir);
         Path bundle = ContainerCaBundle.write(tlsDir, ca.certificatePath());
 
-        List<X509Certificate> accepted = new ArrayList<>();
-        for (TrustManager manager : ContainerCaBundle.trustManagers(bundle)) {
-            if (manager instanceof X509TrustManager x509) {
-                accepted.addAll(List.of(x509.getAcceptedIssuers()));
-            }
-        }
-        TrustManagerFactory jvm = TrustManagerFactory.getInstance(TrustManagerFactory.getDefaultAlgorithm());
-        jvm.init((KeyStore) null);
-        for (TrustManager manager : jvm.getTrustManagers()) {
-            if (manager instanceof X509TrustManager x509) {
-                for (X509Certificate root : x509.getAcceptedIssuers()) {
-                    assertTrue(accepted.contains(root), root.getSubjectX500Principal().getName());
-                }
-            }
-        }
+        List<X509Certificate> accepted = acceptedIssuers(ContainerCaBundle.trustManagers(bundle));
+
+        assertHoldsEveryJvmRoot(accepted);
         assertTrue(accepted.contains(ca.certificate()), "Floci's anchor");
     }
 
@@ -188,15 +175,7 @@ class ContainerCaBundleTest {
 
         List<X509Certificate> anchors = ContainerCaBundle.outboundTrustAnchors(null, privateCa.certificatePath());
 
-        TrustManagerFactory jvm = TrustManagerFactory.getInstance(TrustManagerFactory.getDefaultAlgorithm());
-        jvm.init((KeyStore) null);
-        for (TrustManager manager : jvm.getTrustManagers()) {
-            if (manager instanceof X509TrustManager x509) {
-                for (X509Certificate root : x509.getAcceptedIssuers()) {
-                    assertTrue(anchors.contains(root), root.getSubjectX500Principal().getName());
-                }
-            }
-        }
+        assertHoldsEveryJvmRoot(anchors);
         assertEquals(privateCa.certificate(), anchors.get(anchors.size() - 1), "the extra CA comes last");
     }
 
@@ -522,11 +501,7 @@ class ContainerCaBundleTest {
 
     // Whether a client over context completes a TLS handshake with a localhost server whose certificate ca issued.
     private static boolean handshakes(SSLContext context, FlociCertificateAuthority ca) throws Exception {
-        CertificateGenerator.GeneratedCertificate issued = ca.issueServerCertificate(
-                "localhost", List.of("localhost"), KeyAlgorithm.RSA_2048, null);
-        HttpsServer server = HttpsServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
-        server.setHttpsConfigurator(new HttpsConfigurator(ca.serverSslContext(
-                Pem.parseCertificate(issued.certificatePem()), Pem.parsePrivateKey(issued.privateKeyPem()))));
+        HttpsServer server = LocalHttpsServer.issuedBy(ca);
         server.createContext("/", exchange -> {
             exchange.sendResponseHeaders(204, -1);
             exchange.close();
@@ -541,6 +516,26 @@ class ContainerCaBundleTest {
             return false;
         } finally {
             server.stop(0);
+        }
+    }
+
+    // The issuers that managers accept, in order.
+    private static List<X509Certificate> acceptedIssuers(TrustManager[] managers) {
+        List<X509Certificate> issuers = new ArrayList<>();
+        for (TrustManager manager : managers) {
+            if (manager instanceof X509TrustManager x509) {
+                issuers.addAll(List.of(x509.getAcceptedIssuers()));
+            }
+        }
+        return issuers;
+    }
+
+    // Asserts that anchors holds every root the running JVM trusts by default.
+    private static void assertHoldsEveryJvmRoot(List<X509Certificate> anchors) throws GeneralSecurityException {
+        TrustManagerFactory jvm = TrustManagerFactory.getInstance(TrustManagerFactory.getDefaultAlgorithm());
+        jvm.init((KeyStore) null);
+        for (X509Certificate root : acceptedIssuers(jvm.getTrustManagers())) {
+            assertTrue(anchors.contains(root), root.getSubjectX500Principal().getName());
         }
     }
 

@@ -252,7 +252,7 @@ public final class ContainerCaBundle {
         Optional<Path> extraCas = config.tls().extraCaPath().filter(path -> !path.isBlank()).map(Path::of);
         if (extraCas.isPresent()) {
             try {
-                return Optional.of(sslContext(outboundTrustAnchors(bundle.orElse(null), extraCas.get())));
+                return Optional.of(sslContext(trustStore(outboundTrustAnchors(bundle.orElse(null), extraCas.get()))));
             } catch (IOException | GeneralSecurityException e) {
                 LOG.warnv(e, "Cannot read the extra CAs in {0}; outbound HTTPS from Floci does not trust them",
                         extraCas.get());
@@ -309,25 +309,26 @@ public final class ContainerCaBundle {
      *                              trust nothing, public endpoints included
      */
     public static SSLContext sslContext(Path bundle) throws IOException, GeneralSecurityException {
-        SSLContext context = SSLContext.getInstance("TLS");
-        context.init(null, trustManagers(bundle), null);
-        return context;
+        return sslContext(trustStore(bundle));
     }
 
     /** The trust managers of {@link #sslContext(Path)}, over exactly the certificates in {@code bundle}. */
     static TrustManager[] trustManagers(Path bundle) throws IOException, GeneralSecurityException {
-        TrustManagerFactory factory = TrustManagerFactory.getInstance(TrustManagerFactory.getDefaultAlgorithm());
-        factory.init(trustStore(bundle));
-        return factory.getTrustManagers();
+        return trustManagers(trustStore(bundle));
     }
 
-    /** An SSL context that trusts exactly {@code anchors}. */
-    private static SSLContext sslContext(List<X509Certificate> anchors) throws IOException, GeneralSecurityException {
-        TrustManagerFactory factory = TrustManagerFactory.getInstance(TrustManagerFactory.getDefaultAlgorithm());
-        factory.init(trustStore(anchors));
+    /** An SSL context that trusts exactly the entries of {@code trustStore}. */
+    private static SSLContext sslContext(KeyStore trustStore) throws GeneralSecurityException {
         SSLContext context = SSLContext.getInstance("TLS");
-        context.init(null, factory.getTrustManagers(), null);
+        context.init(null, trustManagers(trustStore), null);
         return context;
+    }
+
+    /** The trust managers over exactly the entries of {@code trustStore}. */
+    private static TrustManager[] trustManagers(KeyStore trustStore) throws GeneralSecurityException {
+        TrustManagerFactory factory = TrustManagerFactory.getInstance(TrustManagerFactory.getDefaultAlgorithm());
+        factory.init(trustStore);
+        return factory.getTrustManagers();
     }
 
     /** A PKCS12 key store of exactly the certificates in {@code bundle}, each a trusted entry. */

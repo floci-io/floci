@@ -1,24 +1,20 @@
 package io.floci.aws.services.eventbridge;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
-import com.sun.net.httpserver.HttpsConfigurator;
 import com.sun.net.httpserver.HttpsServer;
 import io.floci.aws.config.EmulatorConfig;
 import io.floci.aws.config.FlociCertificateAuthority;
 import io.floci.aws.core.common.AwsException;
-import io.floci.aws.core.common.Pem;
-import io.floci.aws.services.acm.CertificateGenerator;
-import io.floci.aws.services.acm.model.KeyAlgorithm;
 import io.floci.aws.services.eventbridge.model.ApiDestination;
 import io.floci.aws.services.eventbridge.model.Connection;
 import io.floci.aws.services.eventbridge.model.Target;
 import io.floci.aws.services.lambda.LambdaService;
 import io.floci.aws.services.sns.SnsService;
 import io.floci.aws.services.sqs.SqsService;
+import io.floci.aws.testing.LocalHttpsServer;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
-import java.net.InetSocketAddress;
 import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
@@ -210,11 +206,7 @@ class EventBridgeInvokerApiDestinationTest {
 
     // An HTTPS endpoint on localhost serving a certificate the CA issued, counting the requests to /hook.
     private static HttpsServer httpsEndpoint(FlociCertificateAuthority ca, AtomicInteger requests) throws Exception {
-        CertificateGenerator.GeneratedCertificate issued = ca.issueServerCertificate(
-                "localhost", List.of("localhost"), KeyAlgorithm.RSA_2048, null);
-        HttpsServer server = HttpsServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
-        server.setHttpsConfigurator(new HttpsConfigurator(ca.serverSslContext(
-                Pem.parseCertificate(issued.certificatePem()), Pem.parsePrivateKey(issued.privateKeyPem()))));
+        HttpsServer server = LocalHttpsServer.issuedBy(ca);
         server.createContext("/hook", exchange -> {
             exchange.getRequestBody().readAllBytes();
             requests.incrementAndGet();
