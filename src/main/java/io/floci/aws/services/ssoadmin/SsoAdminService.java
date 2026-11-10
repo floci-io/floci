@@ -1551,7 +1551,7 @@ public class SsoAdminService implements Resettable, StoredResourceArns {
         String arn = globalArn("sso", instance.primaryRegion(), "",
                 "permissionSet/" + instanceId + "/ps-" + shortId());
         PermissionSet permissionSet = new PermissionSet(arn, name, description, sessionDuration,
-                new LinkedHashMap<>(), new LinkedHashMap<>(), null, null, tags);
+                new LinkedHashMap<>(), new LinkedHashMap<>(), null, null, tags, Instant.now().toEpochMilli());
         permissionSets.put(arn, permissionSet);
         return permissionSet;
     }
@@ -1592,7 +1592,7 @@ public class SsoAdminService implements Resettable, StoredResourceArns {
         PermissionSet updated = new PermissionSet(current.arn(), current.name(), description, session,
                 new LinkedHashMap<>(current.managedPolicies()),
                 new LinkedHashMap<>(current.customerManagedPolicies()), current.inlinePolicy(), current.permissionsBoundary(),
-                new LinkedHashMap<>(current.tags()));
+                new LinkedHashMap<>(current.tags()), current.createdDateEpochMillis());
         permissionSets.put(updated.arn(), updated);
         markPermissionSetProvisioningStale(updated.arn());
         return updated;
@@ -1691,7 +1691,7 @@ public class SsoAdminService implements Resettable, StoredResourceArns {
         permissionSets.put(arn, new PermissionSet(current.arn(), current.name(), current.description(),
                 current.sessionDuration(), new LinkedHashMap<>(current.managedPolicies()),
                 new LinkedHashMap<>(current.customerManagedPolicies()), policy, current.permissionsBoundary(),
-                new LinkedHashMap<>(current.tags())));
+                new LinkedHashMap<>(current.tags()), current.createdDateEpochMillis()));
         markPermissionSetProvisioningStale(arn);
     }
 
@@ -1700,7 +1700,7 @@ public class SsoAdminService implements Resettable, StoredResourceArns {
         permissionSets.put(arn, new PermissionSet(current.arn(), current.name(), current.description(),
                 current.sessionDuration(), new LinkedHashMap<>(current.managedPolicies()),
                 new LinkedHashMap<>(current.customerManagedPolicies()), null, current.permissionsBoundary(),
-                new LinkedHashMap<>(current.tags())));
+                new LinkedHashMap<>(current.tags()), current.createdDateEpochMillis()));
         markPermissionSetProvisioningStale(arn);
     }
 
@@ -1720,7 +1720,7 @@ public class SsoAdminService implements Resettable, StoredResourceArns {
         permissionSets.put(permissionSetArn, new PermissionSet(current.arn(), current.name(), current.description(),
                 current.sessionDuration(), new LinkedHashMap<>(current.managedPolicies()),
                 new LinkedHashMap<>(current.customerManagedPolicies()), current.inlinePolicy(), null,
-                new LinkedHashMap<>(current.tags())));
+                new LinkedHashMap<>(current.tags()), current.createdDateEpochMillis()));
         markPermissionSetProvisioningStale(permissionSetArn);
     }
 
@@ -1764,7 +1764,7 @@ public class SsoAdminService implements Resettable, StoredResourceArns {
         permissionSets.put(permissionSetArn, new PermissionSet(current.arn(), current.name(), current.description(),
                 current.sessionDuration(), new LinkedHashMap<>(current.managedPolicies()),
                 new LinkedHashMap<>(current.customerManagedPolicies()), current.inlinePolicy(), boundary,
-                new LinkedHashMap<>(current.tags())));
+                new LinkedHashMap<>(current.tags()), current.createdDateEpochMillis()));
         markPermissionSetProvisioningStale(permissionSetArn);
     }
 
