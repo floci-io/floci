@@ -822,12 +822,16 @@ public class NativeDynamoDbJsonHandler {
             checkUnusedEan(exprAttrNames, extractHashTokens(conditionExpression));
             checkUnusedEav(exprAttrValues, extractColonTokens(conditionExpression));
         } catch (AwsException e) {
-            // The size check and a BETWEEN error add the envelope themselves.
-            if (!"ValidationException".equals(e.getErrorCode()) || e.getMessage().startsWith(VALIDATION_ENVELOPE)) {
-                throw e;
-            }
-            throw SmithyValidationErrors.validationException(e.getMessage());
+            throw inValidationEnvelope(e);
         }
+    }
+
+    // A size check and a BETWEEN error add the envelope themselves.
+    private static AwsException inValidationEnvelope(AwsException e) {
+        if (!"ValidationException".equals(e.getErrorCode()) || e.getMessage().startsWith(VALIDATION_ENVELOPE)) {
+            return e;
+        }
+        return SmithyValidationErrors.validationException(e.getMessage());
     }
 
     private static void requireNonEmptyMap(JsonNode map, String member) {
@@ -984,44 +988,48 @@ public class NativeDynamoDbJsonHandler {
                 "UpdateExpression is null, ConditionExpression is null");
         requireReadableValues(attributeUpdateValues, VALIDATION_ENVELOPE);
 
-        ExpressionEvaluator.validateSyntax(conditionExpression, "ConditionExpression");
+        try {
+            ExpressionEvaluator.validateSyntax(conditionExpression, "ConditionExpression");
 
-        if (conditionExpression != null && expectedUpd != null) {
-            throw new AwsException("ValidationException",
-                    "Can not use both expression and non-expression parameters in the same request: "
-                    + "Non-expression parameters: {Expected} Expression parameters: {ConditionExpression}", 400);
-        }
-
-        // Validate EAN/EAV usage across UpdateExpression + ConditionExpression
-        if (updateExpression != null) {
-            // Pre-validate syntax: expression must start with a valid clause keyword.
-            // AWS tokenizes UpdateExpression whitespace-insensitively, so collapse runs
-            // of whitespace (newlines, tabs, multiple spaces) before matching keywords.
-            String ue = updateExpression.trim().replaceAll("\\s+", " ");
-            if (!ue.isEmpty()) {
-                String upper = ue.toUpperCase();
-                if (!upper.startsWith("SET ") && !upper.startsWith("REMOVE ") && !upper.startsWith("ADD ") && !upper.startsWith("DELETE ")) {
-                    String[] parts = ue.split("\\s+", 3);
-                    String token = parts[0];
-                    String near = parts.length >= 2
-                            ? (token + " " + parts[1]).substring(0, Math.min(token.length() + 1 + parts[1].length(), 20))
-                            : token;
-                    throw new AwsException("ValidationException",
-                            "Invalid UpdateExpression: Syntax error; token: \"" + token + "\", near: \"" + near + "\"", 400);
-                }
-                DynamoDbService.requireClosedParentheses(updateExpression, "1 validation error detected: ");
+            if (conditionExpression != null && expectedUpd != null) {
+                throw new AwsException("ValidationException",
+                        "Can not use both expression and non-expression parameters in the same request: "
+                        + "Non-expression parameters: {Expected} Expression parameters: {ConditionExpression}", 400);
             }
-            // Undefined tokens, then ConditionExpression's semantic errors, must both be caught
-            // before the unused-EAN/EAV checks below.
-            requireDefinedTokens(updateExpression, "UpdateExpression", exprAttrNames, exprAttrValues);
-            ExpressionEvaluator.validateSemantics(conditionExpression, "ConditionExpression", exprAttrNames, exprAttrValues);
-            Set<String> hashTokens = extractHashTokens(updateExpression, conditionExpression);
-            checkUnusedEan(exprAttrNames, hashTokens);
-            Set<String> colonTokensAll = extractColonTokens(updateExpression, conditionExpression);
-            checkUnusedEav(exprAttrValues, colonTokensAll);
-            dynamoDbService.requireAddOrDeleteOperandTypes(updateExpression, exprAttrValues, true);
-        } else {
-            ExpressionEvaluator.validateSemantics(conditionExpression, "ConditionExpression", exprAttrNames, exprAttrValues);
+
+            // Validate EAN/EAV usage across UpdateExpression + ConditionExpression
+            if (updateExpression != null) {
+                // Pre-validate syntax: expression must start with a valid clause keyword.
+                // AWS tokenizes UpdateExpression whitespace-insensitively, so collapse runs
+                // of whitespace (newlines, tabs, multiple spaces) before matching keywords.
+                String ue = updateExpression.trim().replaceAll("\\s+", " ");
+                if (!ue.isEmpty()) {
+                    String upper = ue.toUpperCase();
+                    if (!upper.startsWith("SET ") && !upper.startsWith("REMOVE ") && !upper.startsWith("ADD ") && !upper.startsWith("DELETE ")) {
+                        String[] parts = ue.split("\\s+", 3);
+                        String token = parts[0];
+                        String near = parts.length >= 2
+                                ? (token + " " + parts[1]).substring(0, Math.min(token.length() + 1 + parts[1].length(), 20))
+                                : token;
+                        throw new AwsException("ValidationException",
+                                "Invalid UpdateExpression: Syntax error; token: \"" + token + "\", near: \"" + near + "\"", 400);
+                    }
+                    DynamoDbService.requireClosedParentheses(updateExpression, "1 validation error detected: ");
+                }
+                // Undefined tokens, then ConditionExpression's semantic errors, must both be caught
+                // before the unused-EAN/EAV checks below.
+                requireDefinedTokens(updateExpression, "UpdateExpression", exprAttrNames, exprAttrValues);
+                ExpressionEvaluator.validateSemantics(conditionExpression, "ConditionExpression", exprAttrNames, exprAttrValues);
+                Set<String> hashTokens = extractHashTokens(updateExpression, conditionExpression);
+                checkUnusedEan(exprAttrNames, hashTokens);
+                Set<String> colonTokensAll = extractColonTokens(updateExpression, conditionExpression);
+                checkUnusedEav(exprAttrValues, colonTokensAll);
+                dynamoDbService.requireAddOrDeleteOperandTypes(updateExpression, exprAttrValues, true);
+            } else {
+                ExpressionEvaluator.validateSemantics(conditionExpression, "ConditionExpression", exprAttrNames, exprAttrValues);
+            }
+        } catch (AwsException e) {
+            throw inValidationEnvelope(e);
         }
 
         Consumer<JsonNode> expectedCheck = legacyExpectedCheck(tableName, region, key, true, expectedUpd,

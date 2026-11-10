@@ -5179,7 +5179,7 @@ given()
         .then()
             .statusCode(400)
             .body("__type", containsString("ValidationException"))
-            .body("message", equalTo("Invalid ConditionExpression: An expression attribute value "
+            .body("message", equalTo("1 validation error detected: Invalid ConditionExpression: An expression attribute value "
                     + "used in expression is not defined; attribute value: :v"));
 
         // UpdateItem: ConditionExpression references an undefined #name.
@@ -5199,7 +5199,7 @@ given()
         .then()
             .statusCode(400)
             .body("__type", containsString("ValidationException"))
-            .body("message", equalTo("Invalid ConditionExpression: An expression attribute name "
+            .body("message", equalTo("1 validation error detected: Invalid ConditionExpression: An expression attribute name "
                     + "used in the document path is not defined; attribute name: #n"));
 
         // Undefined :v must win over the unused-EAV check for the stray :z.
@@ -5219,7 +5219,7 @@ given()
         .then()
             .statusCode(400)
             .body("__type", containsString("ValidationException"))
-            .body("message", equalTo("Invalid ConditionExpression: An expression attribute value "
+            .body("message", equalTo("1 validation error detected: Invalid ConditionExpression: An expression attribute value "
                     + "used in expression is not defined; attribute value: :v"));
 
         // contains()'s distinct-operand error must win over the unused-EAN check for the stray #z.
@@ -5240,7 +5240,7 @@ given()
         .then()
             .statusCode(400)
             .body("__type", containsString("ValidationException"))
-            .body("message", equalTo("Invalid ConditionExpression: The first operand must be distinct "
+            .body("message", equalTo("1 validation error detected: Invalid ConditionExpression: The first operand must be distinct "
                     + "from the remaining operands for this operator or function; operator: contains, "
                     + "first operand: [sk]"));
 
@@ -5490,7 +5490,7 @@ given()
         .then()
             .statusCode(400)
             .body("__type", containsString("ValidationException"))
-            .body("message", equalTo("Invalid UpdateExpression: An expression attribute value "
+            .body("message", equalTo("1 validation error detected: Invalid UpdateExpression: An expression attribute value "
                     + "used in expression is not defined; attribute value: :d"));
 
         // Previously this silently stored an attribute literally named "#n".
@@ -5509,7 +5509,7 @@ given()
         .then()
             .statusCode(400)
             .body("__type", containsString("ValidationException"))
-            .body("message", equalTo("Invalid UpdateExpression: An expression attribute name "
+            .body("message", equalTo("1 validation error detected: Invalid UpdateExpression: An expression attribute name "
                     + "used in the document path is not defined; attribute name: #n"));
 
         // Both undefined; #n comes first in the text and is reported.
@@ -5527,7 +5527,7 @@ given()
         .then()
             .statusCode(400)
             .body("__type", containsString("ValidationException"))
-            .body("message", equalTo("Invalid UpdateExpression: An expression attribute name "
+            .body("message", equalTo("1 validation error detected: Invalid UpdateExpression: An expression attribute name "
                     + "used in the document path is not defined; attribute name: #n"));
 
         // :d is inside list_append's args but still comes before #n in the text.
@@ -5545,7 +5545,7 @@ given()
         .then()
             .statusCode(400)
             .body("__type", containsString("ValidationException"))
-            .body("message", equalTo("Invalid UpdateExpression: An expression attribute value "
+            .body("message", equalTo("1 validation error detected: Invalid UpdateExpression: An expression attribute value "
                     + "used in expression is not defined; attribute value: :d"));
 
         // Control: a fully-defined UpdateExpression #name is still accepted (no regression).
@@ -5864,6 +5864,31 @@ given()
             .body("message", equalTo(message));
 
         deleteTable("ConditionOrderTable");
+    }
+
+    @ParameterizedTest
+    @CsvSource(delimiter = '|', quoteCharacter = '`', textBlock = """
+            "UpdateExpression": "SET q = :w", "ConditionExpression": "a = = b", "ExpressionAttributeValues": {":w": {"S": "w"}}                         | Invalid ConditionExpression: Syntax error; token: "=", near: "= = b"
+            "UpdateExpression": "SET q = :w", "ConditionExpression": "((a = :w))", "ExpressionAttributeValues": {":w": {"S": "w"}}                      | Invalid ConditionExpression: The expression has redundant parentheses;
+            "UpdateExpression": "SET q = :w", "ConditionExpression": "x < :v", "ExpressionAttributeValues": {":w": {"S": "w"}, ":v": {"BOOL": true}} | Invalid ConditionExpression: Incorrect operand type for operator or function; operator or function: <, operand type: BOOL
+            "ConditionExpression": "contains(x, x)"                                                                                                   | Invalid ConditionExpression: The first operand must be distinct from the remaining operands for this operator or function; operator: contains, first operand: [x]
+            "UpdateExpression": "FOO q = :w", "ExpressionAttributeValues": {":w": {"S": "w"}}                                                          | Invalid UpdateExpression: Syntax error; token: "FOO", near: "FOO q"
+            "UpdateExpression": "SET q = :w", "ExpressionAttributeValues": {":w": {"S": "w"}, ":z": {"S": "z"}}                                        | Value provided in ExpressionAttributeValues unused in expressions: keys: {:z}
+            """)
+    void updateItemPutsExpressionErrorsInTheValidationEnvelope(String members, String message) {
+        createOnDemandTableForGsiUpdates("UpdateEnvelopeTable");
+
+        given()
+            .header("X-Amz-Target", "DynamoDB_20120810.UpdateItem")
+            .contentType(DYNAMODB_CONTENT_TYPE)
+            .body("{\"TableName\": \"UpdateEnvelopeTable\", \"Key\": {\"pk\": {\"S\": \"a\"}}, " + members + "}")
+        .when().post("/")
+        .then()
+            .statusCode(400)
+            .body("__type", containsString("ValidationException"))
+            .body("message", equalTo("1 validation error detected: " + message));
+
+        deleteTable("UpdateEnvelopeTable");
     }
 
     @ParameterizedTest
