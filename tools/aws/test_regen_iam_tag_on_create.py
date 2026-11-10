@@ -255,6 +255,16 @@ def test_an_operation_carrying_no_tags_must_say_why(corrections):
         "tagging": ["svc:TagResource"], "notRead": "no member of the request carries tags"}
 
 
+def test_an_operation_botocore_does_not_have_yet_is_not_read_until_a_bump_brings_it(corrections):
+    corrections.setattr(r, "NOT_READ", {"svc:CreateThing": r.NOT_IN_BOTOCORE})
+    before = {"svc": model({"CreateOther": "In"}, {"In": structure(Name="String")})}
+    assert r.entry_for("svc:CreateThing", upstream("svc:TagResource"), before) == {
+        "tagging": ["svc:TagResource"], "notRead": r.NOT_IN_BOTOCORE}
+    bumped = {"svc": model({"CreateThing": "In"}, {"In": structure(Tags="TagList"), **TAG_SHAPES})}
+    with pytest.raises(ValueError, match="take it out of NOT_READ"):
+        r.entry_for("svc:CreateThing", upstream("svc:TagResource"), bumped)
+
+
 def test_an_exclusion_drops_a_member_and_a_query_name_is_added(corrections):
     models = {"svc": model({"CreateThing": "In"}, {"In": structure(Tags="TagList", tags="TagMap"), **TAG_SHAPES})}
     corrections.setattr(r, "EXCLUDED_MEMBERS", {"svc:CreateThing": {"Tags[]": "the tags of something else"}})

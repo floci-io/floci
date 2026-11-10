@@ -2281,7 +2281,7 @@ its namespace's `CreateAction` key, as `ec2:CreateTags`, `ecs:TagResource`, Clou
 `TagResource` and Elastic Load Balancing's `AddTags` do, the key is the operation's name:
 `ec2:CreateAction` is `RunInstances` for an instance launched with tags. The operation's own action
 is checked with the same `aws:RequestTag/<key>` and `aws:TagKeys`, once for each resource's tags,
-wherever the Service Reference lists those keys for it or for a resource it acts on, which it does for 548 of the operations read, so
+wherever the Service Reference lists those keys for it or for a resource it acts on, which it does for 549 of the operations read, so
 "allow `sqs:CreateQueue` only with `aws:RequestTag/team`" and "deny it when `aws:RequestTag/team` is
 null" hold as on AWS; keys a service's own condition keys already give, as EC2's `RunInstances`
 does, are kept. It is checked once for each reading of the tags and refused if any is denied: the
@@ -2309,8 +2309,10 @@ As with passed roles, an operation Floci does not serve is in the table too.
 - CloudWatch Logs `CreateLogGroup`, which takes either of two tagging actions, is checked as described
   under CloudWatch Logs groups below.
 - Not read: an operation whose request carries no tags, which the Service Reference lists with a
-  tagging action all the same (RDS `DeleteDBInstance` and DynamoDB `UpdateTable`, among others), and
-  EC2's `RequestSpotFleet`, whose tags are deeper in its configuration. A session's tags also need
+  tagging action all the same (RDS `DeleteDBInstance` and DynamoDB `UpdateTable`, among others),
+  EC2's `RequestSpotFleet`, whose tags are deeper in its configuration, and Athena's
+  `CreateSystemTableConfiguration` and SageMaker's `CreateClusterExtension`, which Floci does not
+  serve and the botocore it is pinned to does not have yet. A session's tags also need
   `sts:TagSession` in the role's trust policy, which is not checked, and service-specific request tag
   keys such as `rds:req-tag/<key>` are not set. S3 checks `s3:PutObjectTagging` for an object it
   creates with tags itself, and the REST services whose routes no rule maps yet are not read.
