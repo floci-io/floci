@@ -249,7 +249,7 @@ public final class ContainerCaBundle {
      */
     public static Optional<SSLContext> sslContext(EmulatorConfig config) {
         Optional<Path> bundle = hostPath(config);
-        Optional<Path> extraCas = config.tls().extraCaPath().filter(path -> !path.isBlank()).map(Path::of);
+        Optional<Path> extraCas = extraCaFile(config);
         if (extraCas.isPresent()) {
             try {
                 return Optional.of(sslContext(trustStore(outboundTrustAnchors(bundle.orElse(null), extraCas.get()))));
@@ -269,6 +269,11 @@ public final class ContainerCaBundle {
         }
     }
 
+    /** The {@code floci.tls.extra-ca-path} file, when one is set; a blank value counts as unset. */
+    static Optional<Path> extraCaFile(EmulatorConfig config) {
+        return config.tls().extraCaPath().filter(path -> !path.isBlank()).map(Path::of);
+    }
+
     /**
      * What {@link #sslContext(EmulatorConfig)} trusts when there is an extra CA file: the certificates
      * of {@code bundle}, or the JVM's roots when {@code bundle} is null, cannot be read or holds no
@@ -284,9 +289,9 @@ public final class ContainerCaBundle {
         List<X509Certificate> anchors = new ArrayList<>();
         if (bundle != null) {
             try {
-                anchors.addAll(parseCertificates(Files.readString(bundle)));
+                anchors.addAll(certificates(bundle));
             } catch (IOException | GeneralSecurityException e) {
-                LOG.warnv(e, "Cannot read {0}; outbound HTTPS from Floci trusts the JVM roots and the extra CAs"
+                LOG.warnv(e, "Cannot use {0}; outbound HTTPS from Floci trusts the JVM roots and the extra CAs"
                         + " instead", bundle);
             }
         }
@@ -338,7 +343,7 @@ public final class ContainerCaBundle {
      *
      * @throws CertificateException when {@code file} holds no certificate
      */
-    private static List<X509Certificate> certificates(Path file) throws IOException, GeneralSecurityException {
+    static List<X509Certificate> certificates(Path file) throws IOException, GeneralSecurityException {
         List<X509Certificate> certificates = parseCertificates(Files.readString(file));
         if (certificates.isEmpty()) {
             throw new CertificateException(file + " holds no certificate");

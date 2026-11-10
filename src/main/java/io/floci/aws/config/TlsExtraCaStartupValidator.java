@@ -32,34 +32,26 @@ public class TlsExtraCaStartupValidator {
     }
 
     void onStart(@Observes StartupEvent ignored) {
-        Optional<String> extraCaPath = config.tls().extraCaPath();
-        if (validate(extraCaPath)) {
-            LOG.infov("TLS: outbound HTTPS from Floci also trusts the CAs in {0}", extraCaPath.get());
+        Optional<Path> extraCaFile = ContainerCaBundle.extraCaFile(config);
+        if (extraCaFile.isPresent()) {
+            validate(extraCaFile.get());
+            LOG.infov("TLS: outbound HTTPS from Floci also trusts the CAs in {0}", extraCaFile.get());
         }
     }
 
     /**
-     * Whether an extra CA file is set, checking it when it is.
+     * Checks that {@code file} can be read and holds at least one certificate.
      *
-     * @throws IllegalStateException when the file is missing or unreadable, or holds no certificate
+     * @throws IllegalStateException when it cannot, naming the file and the reason
      */
-    static boolean validate(Optional<String> extraCaPath) {
-        if (extraCaPath.isEmpty() || extraCaPath.get().isBlank()) {
-            return false;
+    private static void validate(Path file) {
+        if (!Files.isReadable(file)) {
+            throw new IllegalStateException("TLS extra CA file not found or not readable: " + file);
         }
-        String path = extraCaPath.get();
-        if (!Files.isReadable(Path.of(path))) {
-            throw new IllegalStateException("TLS extra CA file not found or not readable: " + path);
-        }
-        String certificates;
         try {
-            certificates = ContainerCaBundle.certificatePem(Files.readString(Path.of(path)));
+            ContainerCaBundle.certificates(file);
         } catch (IOException | GeneralSecurityException e) {
-            throw new IllegalStateException("TLS extra CA file cannot be read: " + path + ": " + e.getMessage(), e);
+            throw new IllegalStateException("TLS extra CA file cannot be used: " + file + ": " + e.getMessage(), e);
         }
-        if (certificates.isEmpty()) {
-            throw new IllegalStateException("TLS extra CA file holds no certificate: " + path);
-        }
-        return true;
     }
 }

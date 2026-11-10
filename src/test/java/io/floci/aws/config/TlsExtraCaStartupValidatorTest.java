@@ -41,7 +41,7 @@ class TlsExtraCaStartupValidatorTest {
 
         String refusal = refusal(false, empty.toString());
 
-        assertTrue(refusal.contains("holds no certificate: " + empty), refusal);
+        assertTrue(refusal.contains(empty + " holds no certificate"), refusal);
     }
 
     @Test
