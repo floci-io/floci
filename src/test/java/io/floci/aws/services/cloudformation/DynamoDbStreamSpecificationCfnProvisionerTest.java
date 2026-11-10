@@ -58,6 +58,8 @@ class DynamoDbStreamSpecificationCfnProvisionerTest {
         created.setTableArn(TABLE_ARN);
         when(dynamoDbService.createTable(anyString(), anyList(), anyList(), any(), any(),
                 anyList(), anyList(), anyString())).thenReturn(created);
+        when(dynamoDbService.createTable(anyString(), anyList(), anyList(), any(), any(),
+                anyList(), anyList(), anyList(), anyString(), anyString())).thenReturn(created);
     }
 
     /** Make provisioning take the update path: the table already exists, with a live stream. */

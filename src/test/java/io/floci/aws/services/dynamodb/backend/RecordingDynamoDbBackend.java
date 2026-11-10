@@ -92,6 +92,14 @@ public final class RecordingDynamoDbBackend implements DynamoDbItemAccess, Dynam
     }
 
     @Override
+    public TableDefinition createOnDemandTable(Scope scope, String tableName, List<KeySchemaElement> keySchema,
+                                               List<AttributeDefinition> attributeDefinitions,
+                                               List<GlobalSecondaryIndex> globalSecondaryIndexes,
+                                               List<LocalSecondaryIndex> localSecondaryIndexes) {
+        return record("createOnDemandTable", scope);
+    }
+
+    @Override
     public TableDefinition describeTable(Scope scope, String tableName) {
         return record("describeTable", scope);
     }
