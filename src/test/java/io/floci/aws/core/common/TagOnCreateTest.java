@@ -16,11 +16,27 @@ import java.util.Optional;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
 
 /** How {@link TagOnCreate} reads the tags a request carries and the condition keys it checks them with. */
 class TagOnCreateTest {
+
+    @Test
+    void controlTowerUsesModeledTagMapsAndChecksTheCreateActionWithTheirTags() {
+        for (String operation : List.of("CreateLandingZone", "EnableControl", "EnableBaseline")) {
+            Tagging tagging = TagOnCreate.of("controltower:" + operation, json(
+                    "{\"tags\":{\"team\":\"blue\"}}")).orElseThrow();
+            assertEquals("controltower:TagResource", tagging.action());
+            assertEquals(List.of(set(Map.of("team", "blue"))), tagging.sets());
+            assertTrue(tagging.requestTags());
+            assertFalse(tagging.createAction());
+            assertEquals(List.of(Map.of("aws:RequestTag/team", List.of("blue"), "aws:TagKeys", List.of("team"))),
+                    TagOnCreate.requestTagContexts(tagging));
+            assertFalse(TagOnCreate.of("controltower:" + operation, json("{\"tags\":{}}")).isPresent());
+        }
+    }
 
     @Test
     void aFormsTagsAreReadFromOneToTheFirstNumberWithNoKey() {
