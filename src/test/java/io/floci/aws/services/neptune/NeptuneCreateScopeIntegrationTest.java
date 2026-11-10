@@ -27,6 +27,7 @@ import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
@@ -67,6 +68,8 @@ class NeptuneCreateScopeIntegrationTest {
                     AwsException duplicate = assertThrows(AwsException.class,
                             () -> service.createDbCluster("shared", "1.3.2.1", false));
                     assertEquals("DBClusterAlreadyExistsFault", duplicate.getErrorCode());
+                    verify(containers, times(1)).tryStart(
+                            anyString(), anyString(), any(NeptuneDbType.class), anyString(), anyString());
                 });
                 RequestScopes.runAs("111111111111", "us-east-1", () -> {
                     NeptuneCluster cluster = service.createDbCluster("shared", "1.3.2.1", false);

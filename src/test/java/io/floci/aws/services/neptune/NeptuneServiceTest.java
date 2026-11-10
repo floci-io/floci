@@ -1,6 +1,5 @@
 package io.floci.aws.services.neptune;
 
-import com.github.dockerjava.api.exception.ConflictException;
 import io.floci.aws.config.EmulatorConfig;
 import io.floci.aws.core.common.AwsException;
 import io.floci.aws.core.common.RegionResolver;
@@ -20,12 +19,6 @@ import org.junit.jupiter.api.Test;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
-import java.util.concurrent.CountDownLatch;
-import java.util.concurrent.ExecutorService;
-import java.util.concurrent.Executors;
-import java.util.concurrent.Future;
-import java.util.concurrent.TimeUnit;
-import java.util.concurrent.atomic.AtomicInteger;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
@@ -98,41 +91,6 @@ class NeptuneServiceTest {
         doNothing().when(proxyManager).startProxy(anyString(), anyInt(), anyString(), anyInt());
 
         service = new NeptuneService(config, regionResolver, containerManager, proxyManager, storageFactory);
-    }
-
-    @Test
-    void duplicateCreateDuringProvisioningCannotStartOrCleanUpTheOwner() throws Exception {
-        CountDownLatch started = new CountDownLatch(1);
-        CountDownLatch finish = new CountDownLatch(1);
-        AtomicInteger launches = new AtomicInteger();
-        when(containerManager.tryStart(anyString(), anyString(), any(NeptuneDbType.class), anyString(), anyString()))
-                .thenAnswer(call -> {
-                    if (launches.incrementAndGet() != 1) {
-                        throw new ConflictException("The first create owns this container name");
-                    }
-                    started.countDown();
-                    assertTrue(finish.await(5, TimeUnit.SECONDS), "The test must release backend startup");
-                    return new NeptuneContainerHandle("owner-container", "shared", "localhost", 8182);
-                });
-
-        try (ExecutorService executor = Executors.newSingleThreadExecutor()) {
-            Future<NeptuneCluster> owner = executor.submit(
-                    () -> service.createDbCluster("shared", "1.3.2.1", false));
-            try {
-                assertTrue(started.await(5, TimeUnit.SECONDS), "The first create must enter backend startup");
-                AwsException duplicate = assertThrows(AwsException.class,
-                        () -> service.createDbCluster("shared", "1.3.2.1", false));
-                assertEquals("DBClusterAlreadyExistsFault", duplicate.getErrorCode());
-                verify(containerManager, times(1)).tryStart(
-                        anyString(), anyString(), any(NeptuneDbType.class), anyString(), anyString());
-                verify(containerManager, never()).stopByClusterId(anyString());
-                verify(proxyManager, never()).stopProxy(anyString());
-            } finally {
-                finish.countDown();
-            }
-            assertEquals("owner-container", owner.get(5, TimeUnit.SECONDS).getContainerId());
-            assertEquals("owner-container", service.getDbCluster("shared").getContainerId());
-        }
     }
 
     @Test

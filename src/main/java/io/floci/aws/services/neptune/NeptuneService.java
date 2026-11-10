@@ -75,8 +75,7 @@ public class NeptuneService {
         settings.validate();
         String identity = resourceIdentity(currentAccount(), currentRegion(), id);
         if (!provisioningClusterNames.add(identity)) {
-            throw new AwsException("DBClusterAlreadyExistsFault",
-                    "Neptune cluster " + id + " already exists.", 400);
+            throw clusterAlreadyExists(id);
         }
         try {
             return provisionDbCluster(id, engineVersion, iamEnabled, settings, tags);
@@ -85,11 +84,15 @@ public class NeptuneService {
         }
     }
 
+    private static AwsException clusterAlreadyExists(String id) {
+        return new AwsException("DBClusterAlreadyExistsFault",
+                "Neptune cluster " + id + " already exists.", 400);
+    }
+
     private NeptuneCluster provisionDbCluster(String id, String engineVersion, boolean iamEnabled,
                                              NeptuneClusterSettings settings, Map<String, String> tags) {
         if (getStoredCluster(id).isPresent()) {
-            throw new AwsException("DBClusterAlreadyExistsFault",
-                    "Neptune cluster " + id + " already exists.", 400);
+            throw clusterAlreadyExists(id);
         }
 
         // Open the try immediately after reserving the port so config reads below can't leak it.
