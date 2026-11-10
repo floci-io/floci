@@ -33,6 +33,10 @@ public class DbCluster {
     private String dbSubnetGroupName;
     private String vpcId;
     private List<String> vpcSecurityGroupIds = new ArrayList<>();
+    // Null until a request names them; the emitted XML then falls back to the defaults.
+    private String preferredBackupWindow;
+    private String preferredMaintenanceWindow;
+    private boolean deletionProtection;
     private String availabilityZone;
     private boolean multiAz;
     private Map<String, String> subnetAvailabilityZones = new LinkedHashMap<>();
@@ -164,6 +168,17 @@ public class DbCluster {
     public void setVpcSecurityGroupIds(List<String> vpcSecurityGroupIds) {
         this.vpcSecurityGroupIds = vpcSecurityGroupIds != null ? new ArrayList<>(vpcSecurityGroupIds) : new ArrayList<>();
     }
+
+    public String getPreferredBackupWindow() { return preferredBackupWindow; }
+    public void setPreferredBackupWindow(String preferredBackupWindow) { this.preferredBackupWindow = preferredBackupWindow; }
+
+    public String getPreferredMaintenanceWindow() { return preferredMaintenanceWindow; }
+    public void setPreferredMaintenanceWindow(String preferredMaintenanceWindow) {
+        this.preferredMaintenanceWindow = preferredMaintenanceWindow;
+    }
+
+    public boolean isDeletionProtection() { return deletionProtection; }
+    public void setDeletionProtection(boolean deletionProtection) { this.deletionProtection = deletionProtection; }
 
     public Map<String, String> getSubnetAvailabilityZones() { return subnetAvailabilityZones; }
     public void setSubnetAvailabilityZones(Map<String, String> subnetAvailabilityZones) {

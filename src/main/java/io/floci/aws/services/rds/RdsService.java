@@ -11463,12 +11463,24 @@ public class RdsService implements Resettable, ResourceProvider {
         return RESPONSE_COPIER.convertValue(cluster, DbCluster.class);
     }
 
-    /** Stores the VpcSecurityGroupIds a Create/ModifyDBCluster request carries. */
-    public synchronized DbCluster setDbClusterVpcSecurityGroupIds(String id, List<String> vpcSecurityGroupIds,
-                                                                   String region) {
+    /** Stores what a Create/ModifyDBCluster request carries; a null argument leaves that field as it is. */
+    public synchronized DbCluster setDbClusterRequestSettings(String id, String region,
+            List<String> vpcSecurityGroupIds, String backupWindow, String maintenanceWindow,
+            Boolean deletionProtection) {
         String effectiveRegion = effectiveRegion(region);
         DbCluster cluster = getDbCluster(id, effectiveRegion);
-        cluster.setVpcSecurityGroupIds(vpcSecurityGroupIds);
+        if (vpcSecurityGroupIds != null) {
+            cluster.setVpcSecurityGroupIds(vpcSecurityGroupIds);
+        }
+        if (backupWindow != null) {
+            cluster.setPreferredBackupWindow(backupWindow);
+        }
+        if (maintenanceWindow != null) {
+            cluster.setPreferredMaintenanceWindow(maintenanceWindow);
+        }
+        if (deletionProtection != null) {
+            cluster.setDeletionProtection(deletionProtection);
+        }
         putClusterForScope(currentAccountId(), effectiveRegion, id, cluster);
         return RESPONSE_COPIER.convertValue(cluster, DbCluster.class);
     }

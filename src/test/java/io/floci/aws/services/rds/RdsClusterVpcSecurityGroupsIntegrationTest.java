@@ -19,8 +19,9 @@ import static io.restassured.http.ContentType.URLENC;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 
 /**
- * VpcSecurityGroupIds given to CreateDBCluster and ModifyDBCluster are stored on the cluster and
- * read back through DescribeDBClusters, instead of a fixed sg-00000000 membership.
+ * VpcSecurityGroupIds, PreferredBackupWindow, PreferredMaintenanceWindow and DeletionProtection given
+ * to CreateDBCluster and ModifyDBCluster are stored on the cluster and read back through
+ * DescribeDBClusters, instead of a fixed sg-00000000 membership, fixed windows and no protection flag.
  */
 @QuarkusTest
 @TestProfile(RdsMockProfile.class)
@@ -98,5 +99,45 @@ class RdsClusterVpcSecurityGroupsIntegrationTest {
     void omittedGroupsFallBackToTheInstanceDefault() {
         create().when().post("/").then().statusCode(200);
         assertEquals(List.of("sg-00000000"), describedGroupIds());
+    }
+
+    private static String described(String tag) {
+        String xml = rds("DescribeDBClusters").formParam("DBClusterIdentifier", ID)
+                .when().post("/").then().statusCode(200).extract().asString();
+        try {
+            return DocumentBuilderFactory.newInstance().newDocumentBuilder()
+                    .parse(new ByteArrayInputStream(xml.getBytes(StandardCharsets.UTF_8)))
+                    .getElementsByTagName(tag).item(0).getTextContent();
+        } catch (Exception e) {
+            throw new IllegalStateException("no " + tag + " in RDS response: " + xml, e);
+        }
+    }
+
+    @Test
+    void windowsAndDeletionProtectionAreStoredAndDefaulted() {
+        create().when().post("/").then().statusCode(200);
+        assertEquals("mon:00:00-mon:03:00", described("PreferredMaintenanceWindow"));
+        assertEquals("04:00-06:00", described("PreferredBackupWindow"));
+        assertEquals("false", described("DeletionProtection"));
+        rds("DeleteDBCluster").formParam("DBClusterIdentifier", ID)
+                .formParam("SkipFinalSnapshot", "true").when().post("/");
+
+        String created = create()
+                .formParam("PreferredBackupWindow", "05:00-06:00")
+                .formParam("PreferredMaintenanceWindow", "tue:07:00-tue:08:00")
+                .formParam("DeletionProtection", "true")
+                .when().post("/").then().statusCode(200).extract().asString();
+        assertEquals(true, created.contains("<PreferredBackupWindow>05:00-06:00</PreferredBackupWindow>"));
+        assertEquals("05:00-06:00", described("PreferredBackupWindow"));
+        assertEquals("tue:07:00-tue:08:00", described("PreferredMaintenanceWindow"));
+        assertEquals("true", described("DeletionProtection"));
+
+        rds("ModifyDBCluster").formParam("DBClusterIdentifier", ID)
+                .formParam("PreferredBackupWindow", "03:00-04:00")
+                .formParam("DeletionProtection", "false")
+                .when().post("/").then().statusCode(200);
+        assertEquals("03:00-04:00", described("PreferredBackupWindow"));
+        assertEquals("tue:07:00-tue:08:00", described("PreferredMaintenanceWindow"));
+        assertEquals("false", described("DeletionProtection"));
     }
 }

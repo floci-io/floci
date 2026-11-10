@@ -8,6 +8,7 @@ import io.floci.aws.core.common.AwsNamespaces;
 import io.floci.aws.core.common.AwsQueryLists;
 import io.floci.aws.core.common.AwsQueryResponse;
 import io.floci.aws.core.common.AwsRegionFacts;
+import io.floci.aws.core.common.BackupWindows;
 import io.floci.aws.core.common.PaginatedResult;
 import io.floci.aws.core.common.XmlBuilder;
 import io.floci.aws.services.docdb.DocDbQueryHandler;
@@ -1395,8 +1396,13 @@ public class RdsQueryHandler {
             if (backupRetentionPeriodParam != null) {
                 cluster = service.setBackupRetentionPeriod(region, id, backupRetentionPeriod);
             }
-            if (hasMemberKeys(params, "VpcSecurityGroupIds")) {
-                cluster = service.setDbClusterVpcSecurityGroupIds(id, vpcSecurityGroupIds(params), region);
+            if (hasMemberKeys(params, "VpcSecurityGroupIds") || params.getFirst("PreferredBackupWindow") != null
+                    || params.getFirst("PreferredMaintenanceWindow") != null
+                    || parseOptionalBoolean(params, "DeletionProtection") != null) {
+                cluster = service.setDbClusterRequestSettings(id, region,
+                        hasMemberKeys(params, "VpcSecurityGroupIds") ? vpcSecurityGroupIds(params) : null,
+                        params.getFirst("PreferredBackupWindow"), params.getFirst("PreferredMaintenanceWindow"),
+                        parseOptionalBoolean(params, "DeletionProtection"));
             }
             String result = dbClusterXml(cluster);
             return Response.ok(AwsQueryResponse.envelope("CreateDBCluster", AwsNamespaces.RDS, result)).build();
@@ -1527,8 +1533,13 @@ public class RdsQueryHandler {
             if (modifyBackupRetentionPeriod != null) {
                 cluster = service.setBackupRetentionPeriod(region, id, modifyBackupRetentionPeriod);
             }
-            if (hasMemberKeys(params, "VpcSecurityGroupIds")) {
-                cluster = service.setDbClusterVpcSecurityGroupIds(id, vpcSecurityGroupIds(params), region);
+            if (hasMemberKeys(params, "VpcSecurityGroupIds") || params.getFirst("PreferredBackupWindow") != null
+                    || params.getFirst("PreferredMaintenanceWindow") != null
+                    || parseOptionalBoolean(params, "DeletionProtection") != null) {
+                cluster = service.setDbClusterRequestSettings(id, region,
+                        hasMemberKeys(params, "VpcSecurityGroupIds") ? vpcSecurityGroupIds(params) : null,
+                        params.getFirst("PreferredBackupWindow"), params.getFirst("PreferredMaintenanceWindow"),
+                        parseOptionalBoolean(params, "DeletionProtection"));
             }
             String result = dbClusterXml(cluster);
             return Response.ok(AwsQueryResponse.envelope("ModifyDBCluster", AwsNamespaces.RDS, result)).build();
@@ -3533,8 +3544,11 @@ public class RdsQueryHandler {
            .elem("BackupRetentionPeriod", c.getBackupRetentionPeriod())
            .elem("KmsKeyId", c.getKmsKeyId())
            .elem("AvailabilityZone", c.getAvailabilityZone() != null ? c.getAvailabilityZone() : config.defaultAvailabilityZone())
-           .elem("PreferredMaintenanceWindow", "mon:00:00-mon:03:00")
-           .elem("PreferredBackupWindow", "04:00-06:00")
+           .elem("PreferredMaintenanceWindow", c.getPreferredMaintenanceWindow() != null
+                   ? c.getPreferredMaintenanceWindow() : BackupWindows.DEFAULT_MAINTENANCE_WINDOW)
+           .elem("PreferredBackupWindow", c.getPreferredBackupWindow() != null
+                   ? c.getPreferredBackupWindow() : BackupWindows.DEFAULT_BACKUP_WINDOW)
+           .elem("DeletionProtection", c.isDeletionProtection())
            .raw(vpcSecurityGroupsXml(c.getVpcSecurityGroupIds()))
            .elem("DBSubnetGroup", c.getDbSubnetGroupName() != null ? c.getDbSubnetGroupName() : "default");
         String clusterParameterGroup = dbClusterParameterGroupName(c, engineStr);
