@@ -164,15 +164,16 @@ class StepFunctionsAwsSdkTaskIntegrationTest {
                 }
                 """.replace("CHILD_ARN", quickChildArn));
 
-        // The first execution started the child's execution under the name, and the helper
-        // fails the test when the parent did not succeed.
-        JsonNode first = mapper.readTree(succeedingOutputOf(smArn, "{}"));
+        Response first = waitForTerminalState(startExecution(smArn, "{}"));
+        assertEquals("SUCCEEDED", first.jsonPath().getString("status"));
 
         // The name is taken while the child's execution runs, and a start with that name and
         // the same input then returns that execution again, so the second start would
         // succeed. The name is a conflict once the child's execution is closed, so the test
         // waits for that.
-        waitForTerminalState(first.path("ExecutionArn").asText());
+        String childArn = mapper.readTree(first.jsonPath().getString("output"))
+                .path("ExecutionArn").asText();
+        waitForTerminalState(childArn);
 
         Response describe = waitForTerminalState(startExecution(smArn, "{}"));
         assertEquals("FAILED", describe.jsonPath().getString("status"));
