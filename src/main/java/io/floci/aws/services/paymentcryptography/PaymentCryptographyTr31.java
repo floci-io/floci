@@ -202,7 +202,7 @@ final class PaymentCryptographyTr31 {
             String id = block[0];
             String value = block[1];
             // The length covers the whole block, the identifier and the length included.
-            out.append(id).append(hex2(4 + value.length())).append(value);
+            out.append(id).append(two(4 + value.length(), 16)).append(value);
         }
         return out.toString();
     }
@@ -311,7 +311,7 @@ final class PaymentCryptographyTr31 {
                 + mode
                 + version       // the version of the key
                 + exportability
-                + pad2(optionalBlocks)  // the number of optional blocks
+                + two(optionalBlocks, 10)  // the number of optional blocks
                 + "00";   // the reserved characters
         if (header.length() != HEADER_LENGTH) {
             throw new IllegalArgumentException("the key block header must be 16 characters");
@@ -543,25 +543,20 @@ final class PaymentCryptographyTr31 {
         return "0000".substring(0, 4 - text.length()) + text;
     }
 
-    /** A count of two characters, as the header writes it. */
-    private static String pad2(int value) {
-        String text = Integer.toString(value);
-        if (text.length() > 2) {
-            throw new IllegalArgumentException("the count does not fit in two characters: " + value);
-        }
-        return "00".substring(0, 2 - text.length()) + text;
-    }
-
     /**
-     * A number of two characters, in the hexadecimal the optional blocks write their length in.
+     * A number of two characters, in the radix the field it goes into is written in.
+     *
+     * <p>The header's count of the optional blocks is written in ten, and the length of an
+     * optional block in sixteen, as the standard has it.
      *
      * @param value the number
-     * @return the number, in upper-case hexadecimal
+     * @param radix the radix the field is written in
+     * @return the number, in two characters
      */
-    private static String hex2(int value) {
-        String text = Integer.toString(value, 16).toUpperCase(Locale.ROOT);
+    private static String two(int value, int radix) {
+        String text = Integer.toString(value, radix).toUpperCase(Locale.ROOT);
         if (text.length() > 2) {
-            throw new IllegalArgumentException("the length does not fit in two characters: " + value);
+            throw new IllegalArgumentException("the number does not fit in two characters: " + value);
         }
         return "00".substring(0, 2 - text.length()) + text;
     }

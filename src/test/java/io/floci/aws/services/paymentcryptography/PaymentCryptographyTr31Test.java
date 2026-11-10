@@ -188,6 +188,21 @@ class PaymentCryptographyTr31Test {
     }
 
     @Test
+    void theOptionalBlockTheReferenceGivesIsWrittenAsItGivesIt() {
+        // The reference gives the base derivation key identifier of a DUKPT key as "BI" with
+        // the value "00ABCDEFABCD", and its length is written as "10": the whole block is
+        // sixteen characters, the identifier and the length included.
+        String block = PaymentCryptographyTr31.wrap(
+                PaymentCryptographyCrypto.fromHex(CLEAR_KEY),
+                PaymentCryptographyCrypto.fromHex(AES_128_KEK), true,
+                "A", "D0", "B", "E", "00",
+                List.<String[]>of(new String[] {"BI", "00ABCDEFABCD"}));
+
+        assertEquals("BI1000ABCDEFABCD", block.substring(16, 32),
+                "the optional block was not written as the standard says");
+    }
+
+    @Test
     void aBlockIsPaddedSoThatItsOptionalBlocksStayAligned() {
         // The optional blocks take up a whole number of cipher blocks, so a block whose
         // optional blocks are not aligned gets a padding block that makes them so. The

@@ -207,47 +207,27 @@ class PaymentCryptographyKeyExchangeTest {
         KeyPair authority = PaymentCryptographyKeyPairs.rsa(2048, random);
         KeyPair counterparty = PaymentCryptographyKeyPairs.ec(
                 PaymentCryptographyKeyAlgorithm.ECC_NIST_P256, random);
-        Instant now = Instant.now();
-        Certificates.Minted authorityCertificate = CertificatesTest.mint(authority.getPublic(), "floci key-exchange CA", authority.getPrivate(), "floci key-exchange CA");
+        Certificates.Minted authorityCertificate = CertificatesTest.mint(authority.getPublic(),
+                "floci key-exchange CA", authority.getPrivate(), "floci key-exchange CA");
         // The counterparty's certificate is signed by the authority, which is what lets the
         // service trust it.
-        Certificates.Minted counterpartyCertificate = CertificatesTest.mint(counterparty.getPublic(), "floci counterparty", authority.getPrivate(), "floci key-exchange CA");
+        Certificates.Minted counterpartyCertificate = CertificatesTest.mint(counterparty.getPublic(),
+                "floci counterparty", authority.getPrivate(), "floci key-exchange CA");
+        Exchange exchange = agreedExchange(authorityCertificate, counterpartyCertificate);
 
-        PaymentCryptographyKey ca = service.importKey("us-east-1", "TrustedCertificatePublicKey",
-                Map.of("PublicKeyCertificate", authorityCertificate.pem(),
-                        "KeyAttributes", Map.of(
-                                "KeyAlgorithm", "RSA_2048",
-                                "KeyClass", "PUBLIC_KEY",
-                                "KeyUsage", "TR31_S0_ASYMMETRIC_KEY_FOR_DIGITAL_SIGNATURE",
-                                "KeyModesOfUse", Map.of("Verify", Boolean.TRUE))), "", true, Map.of());
-        PaymentCryptographyKey agreement = createKeyPair("ECC_NIST_P256",
-                "TR31_K3_ASYMMETRIC_KEY_FOR_KEY_AGREEMENT");
-        PaymentCryptographyKey key = createKey("AES_128", "TR31_D0_SYMMETRIC_DATA_ENCRYPTION_KEY");
-
-        Map<String, Object> material = new LinkedHashMap<>();
-        material.put("PrivateKeyIdentifier", agreement.getKeyId());
-        material.put("CertificateAuthorityPublicKeyIdentifier", ca.getKeyId());
-        material.put("PublicKeyCertificate", counterpartyCertificate.pem());
-        material.put("DeriveKeyAlgorithm", "AES_128");
-        material.put("KeyDerivationFunction", "ANSI_X963");
-        material.put("KeyDerivationHashAlgorithm", "SHA_256");
-        material.put("DerivationData", Map.of(
-                "SharedInformation", "00112233445566778899AABBCCDDEEFF"));
-
-        Map<String, Object> answer = service.exportKey("us-east-1", key.getKeyId(),
-                "DiffieHellmanTr31KeyBlock", material, "", "");
-        Map<?, ?> wrapped = (Map<?, ?>) answer.get("WrappedKey");
+        Map<?, ?> wrapped = (Map<?, ?>) service.exportKey("us-east-1", exchange.key().getKeyId(),
+                "DiffieHellmanTr31KeyBlock", exchange.material(), "", "").get("WrappedKey");
 
         assertEquals("TR31_KEY_BLOCK", wrapped.get("WrappedKeyMaterialFormat"));
 
         // The two parties agree the key again, so the block opens under it.
-        Map<String, Object> incoming = new LinkedHashMap<>(material);
+        Map<String, Object> incoming = new LinkedHashMap<>(exchange.material());
         incoming.put("WrappedKeyBlock", wrapped.get("KeyMaterial"));
         PaymentCryptographyKey imported = service.importKey("us-east-1",
                 "DiffieHellmanTr31KeyBlock", incoming, "", true, Map.of());
 
-        assertEquals(key.getKeyMaterialHex(), imported.getKeyMaterialHex());
-        assertEquals(key.getKeyUsage(), imported.getKeyUsage());
+        assertEquals(exchange.key().getKeyMaterialHex(), imported.getKeyMaterialHex());
+        assertEquals(exchange.key().getKeyUsage(), imported.getKeyUsage());
     }
 
     @Test
@@ -262,33 +242,14 @@ class PaymentCryptographyKeyExchangeTest {
                 "floci key-exchange CA", authority.getPrivate(), "floci key-exchange CA");
         Certificates.Minted counterpartyCertificate = CertificatesTest.mint(counterparty.getPublic(),
                 "floci counterparty", authority.getPrivate(), "floci key-exchange CA");
-
-        PaymentCryptographyKey ca = service.importKey("us-east-1", "TrustedCertificatePublicKey",
-                Map.of("PublicKeyCertificate", authorityCertificate.pem(),
-                        "KeyAttributes", Map.of(
-                                "KeyAlgorithm", "RSA_2048",
-                                "KeyClass", "PUBLIC_KEY",
-                                "KeyUsage", "TR31_S0_ASYMMETRIC_KEY_FOR_DIGITAL_SIGNATURE",
-                                "KeyModesOfUse", Map.of("Verify", Boolean.TRUE))), "", true, Map.of());
-        PaymentCryptographyKey agreement = createKeyPair("ECC_NIST_P256",
-                "TR31_K3_ASYMMETRIC_KEY_FOR_KEY_AGREEMENT");
-        PaymentCryptographyKey key = createKey("AES_128", "TR31_D0_SYMMETRIC_DATA_ENCRYPTION_KEY");
-
-        Map<String, Object> material = new LinkedHashMap<>();
-        material.put("PrivateKeyIdentifier", agreement.getKeyId());
-        material.put("CertificateAuthorityPublicKeyIdentifier", ca.getKeyId());
-        material.put("PublicKeyCertificate", counterpartyCertificate.pem());
-        material.put("DeriveKeyAlgorithm", "AES_128");
-        material.put("KeyDerivationFunction", "ANSI_X963");
-        material.put("KeyDerivationHashAlgorithm", "SHA_256");
-        material.put("DerivationData", Map.of(
-                "SharedInformation", "00112233445566778899AABBCCDDEEFF"));
+        Exchange exchange = agreedExchange(authorityCertificate, counterpartyCertificate);
+        Map<String, Object> material = new LinkedHashMap<>(exchange.material());
         material.put("KeyBlockHeaders", Map.of(
                 "KeyExportability", "SENSITIVE",
                 "KeyVersion", "01",
                 "OptionalBlocks", Map.of("AB", "0011")));
 
-        Map<?, ?> wrapped = (Map<?, ?>) service.exportKey("us-east-1", key.getKeyId(),
+        Map<?, ?> wrapped = (Map<?, ?>) service.exportKey("us-east-1", exchange.key().getKeyId(),
                 "DiffieHellmanTr31KeyBlock", material, "", "").get("WrappedKey");
         String block = (String) wrapped.get("KeyMaterial");
 
@@ -307,36 +268,16 @@ class PaymentCryptographyKeyExchangeTest {
         KeyPair other = PaymentCryptographyKeyPairs.rsa(2048, random);
         KeyPair counterparty = PaymentCryptographyKeyPairs.ec(
                 PaymentCryptographyKeyAlgorithm.ECC_NIST_P256, random);
-        Instant now = Instant.now();
-        Certificates.Minted authorityCertificate = CertificatesTest.mint(authority.getPublic(), "floci key-exchange CA", authority.getPrivate(), "floci key-exchange CA");
+        Certificates.Minted authorityCertificate = CertificatesTest.mint(authority.getPublic(),
+                "floci key-exchange CA", authority.getPrivate(), "floci key-exchange CA");
         // Signed by somebody else, so the authority cannot vouch for it.
         Certificates.Minted counterpartyCertificate = CertificatesTest.mint(counterparty.getPublic(),
                 "floci counterparty", other.getPrivate(), "floci somebody else");
-
-        PaymentCryptographyKey ca = service.importKey("us-east-1", "TrustedCertificatePublicKey",
-                Map.of("PublicKeyCertificate", authorityCertificate.pem(),
-                        "KeyAttributes", Map.of(
-                                "KeyAlgorithm", "RSA_2048",
-                                "KeyClass", "PUBLIC_KEY",
-                                "KeyUsage", "TR31_S0_ASYMMETRIC_KEY_FOR_DIGITAL_SIGNATURE",
-                                "KeyModesOfUse", Map.of("Verify", Boolean.TRUE))), "", true, Map.of());
-        PaymentCryptographyKey agreement = createKeyPair("ECC_NIST_P256",
-                "TR31_K3_ASYMMETRIC_KEY_FOR_KEY_AGREEMENT");
-        PaymentCryptographyKey key = createKey("AES_128", "TR31_D0_SYMMETRIC_DATA_ENCRYPTION_KEY");
-
-        Map<String, Object> material = new LinkedHashMap<>();
-        material.put("PrivateKeyIdentifier", agreement.getKeyId());
-        material.put("CertificateAuthorityPublicKeyIdentifier", ca.getKeyId());
-        material.put("PublicKeyCertificate", counterpartyCertificate.pem());
-        material.put("DeriveKeyAlgorithm", "AES_128");
-        material.put("KeyDerivationFunction", "ANSI_X963");
-        material.put("KeyDerivationHashAlgorithm", "SHA_256");
-        material.put("DerivationData", Map.of(
-                "SharedInformation", "00112233445566778899AABBCCDDEEFF"));
+        Exchange exchange = agreedExchange(authorityCertificate, counterpartyCertificate);
 
         AwsException refused = assertThrows(AwsException.class,
-                () -> service.exportKey("us-east-1", key.getKeyId(), "DiffieHellmanTr31KeyBlock",
-                        material, "", ""));
+                () -> service.exportKey("us-east-1", exchange.key().getKeyId(),
+                        "DiffieHellmanTr31KeyBlock", exchange.material(), "", ""));
 
         assertEquals("ValidationException", refused.getErrorCode());
         assertTrue(refused.getMessage().contains("not signed by the certificate authority"),
@@ -501,6 +442,40 @@ class PaymentCryptographyKeyExchangeTest {
                         "KeyClass", "PUBLIC_KEY",
                         "KeyUsage", "TR31_S0_ASYMMETRIC_KEY_FOR_DIGITAL_SIGNATURE",
                         "KeyModesOfUse", Map.of("Verify", Boolean.TRUE))), "", true, Map.of());
+    }
+
+    /**
+     * A key exchange under a key the two parties agreed with ECDH.
+     *
+     * <p>The service trusts the certificate the counterparty brings because the authority
+     * signed it, so the helper imports the authority, makes the agreement key and builds the
+     * material of the export.
+     *
+     * @param authorityCertificate the certificate of the authority that vouches for the
+     *                              counterparty
+     * @param counterpartyCertificate the certificate the counterparty brings
+     * @return the material of the export, and the key that leaves under it
+     */
+    private Exchange agreedExchange(Certificates.Minted authorityCertificate,
+                                    Certificates.Minted counterpartyCertificate) {
+        PaymentCryptographyKey authority = createAuthority(authorityCertificate.pem());
+        PaymentCryptographyKey agreement = createKeyPair("ECC_NIST_P256",
+                "TR31_K3_ASYMMETRIC_KEY_FOR_KEY_AGREEMENT");
+        Map<String, Object> material = new LinkedHashMap<>();
+        material.put("PrivateKeyIdentifier", agreement.getKeyId());
+        material.put("CertificateAuthorityPublicKeyIdentifier", authority.getKeyId());
+        material.put("PublicKeyCertificate", counterpartyCertificate.pem());
+        material.put("DeriveKeyAlgorithm", "AES_128");
+        material.put("KeyDerivationFunction", "ANSI_X963");
+        material.put("KeyDerivationHashAlgorithm", "SHA_256");
+        material.put("DerivationData", Map.of(
+                "SharedInformation", "00112233445566778899AABBCCDDEEFF"));
+        return new Exchange(material,
+                createKey("AES_128", "TR31_D0_SYMMETRIC_DATA_ENCRYPTION_KEY"));
+    }
+
+    /** The material of a key exchange, and the key that leaves under it. */
+    private record Exchange(Map<String, Object> material, PaymentCryptographyKey key) {
     }
 
 
