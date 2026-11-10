@@ -7,6 +7,7 @@ import java.util.LinkedHashSet;
 import java.util.Set;
 
 import static io.restassured.RestAssured.given;
+import static org.hamcrest.Matchers.equalTo;
 
 public final class OrganizationsFixture {
     private final Set<String> owners = new LinkedHashSet<>();
@@ -27,6 +28,32 @@ public final class OrganizationsFixture {
                 .post("/").then().statusCode(200);
         return request(owner, "ListRoots", "{}").post("/").then().statusCode(200)
                 .extract().jsonPath().getString("Roots[0].Id");
+    }
+
+    public String createOu(String owner, String parentId, String name) {
+        return request(owner, "CreateOrganizationalUnit",
+                "{\"ParentId\":\"" + parentId + "\",\"Name\":\"" + name + "\"}")
+                .post("/").then().statusCode(200)
+                .extract().jsonPath().getString("OrganizationalUnit.Id");
+    }
+
+    public String createAccount(String owner, String email, String name) {
+        return request(owner, "CreateAccount", "{\"Email\":\"" + email + "\",\"AccountName\":\"" + name + "\"}")
+                .post("/").then().statusCode(200)
+                .body("CreateAccountStatus.State", equalTo("SUCCEEDED"))
+                .extract().jsonPath().getString("CreateAccountStatus.AccountId");
+    }
+
+    public String createAccount(String owner, String email, String name, String parentId, String rootId) {
+        String account = createAccount(owner, email, name);
+        moveAccount(owner, account, rootId, parentId);
+        return account;
+    }
+
+    public void moveAccount(String owner, String account, String source, String destination) {
+        request(owner, "MoveAccount", "{\"AccountId\":\"" + account + "\",\"SourceParentId\":\"" + source
+                + "\",\"DestinationParentId\":\"" + destination + "\"}")
+                .post("/").then().statusCode(200);
     }
 
     public void cleanup() {

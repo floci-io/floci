@@ -63,6 +63,10 @@ public class StackSetCfnProvisioner implements CfnResourceProvisioner {
         if (permissionModel == null || permissionModel.isBlank()) {
             throw new AwsException("ValidationError", "PermissionModel is required for AWS::CloudFormation::StackSet", 400);
         }
+        String explicitName = ctx.resolveOptional(props, "StackSetName");
+        if (explicitName == null || explicitName.isBlank()) {
+            throw new AwsException("ValidationError", "StackSetName is required for AWS::CloudFormation::StackSet", 400);
+        }
         StackSetService stackSets = stackSetService.get();
         String templateBody = cfnService.get().resolveTemplateBody(
                 ctx.resolveOptional(props, "TemplateBody"), ctx.resolveOptional(props, "TemplateURL"));
@@ -80,10 +84,9 @@ public class StackSetCfnProvisioner implements CfnResourceProvisioner {
             ReplacementCleanup.endRollbackRetry(r);
         }
         Map<String, String> attributesBefore = new HashMap<>(r.getAttributes());
-        String explicitName = ctx.resolveOptional(props, "StackSetName");
         String inputs = createOnlyInputs(explicitName, permissionModel);
         Runnable create = () -> {
-            String name = explicitName == null ? ctx.generatePhysicalName(r.getLogicalId(), 128, false) : explicitName;
+            String name = explicitName;
             StackSet stackSet = stackSets.createStackSet(name, templateBody, parameters, capabilities, tags, description,
                     permissionModel,
                     Boolean.TRUE.equals(optionalBoolean(autoDeployment, "Enabled", ctx)),

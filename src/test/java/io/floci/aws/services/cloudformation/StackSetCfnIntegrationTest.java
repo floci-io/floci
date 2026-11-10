@@ -3,6 +3,7 @@ package io.floci.aws.services.cloudformation;
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
+import io.floci.aws.testing.CfnRequests;
 import io.floci.aws.testing.CfnStackWaits;
 import io.floci.aws.testing.OrganizationsFixture;
 import io.floci.aws.testing.RestAssuredJsonUtils;
@@ -47,11 +48,13 @@ class StackSetCfnIntegrationTest {
     @Test
     void serviceManagedStackSetResourceDeploysToItsTargetsAndFollowsUpdatesAndDeletion() throws Exception {
         String rootId = organizationsFixture.createWithTrustedAccess(MANAGEMENT);
-        String targetOu = createOu(rootId, "CfnStackSetTarget");
-        String otherOu = createOu(rootId, "CfnStackSetOther");
+        String targetOu = organizationsFixture.createOu(MANAGEMENT, rootId, "CfnStackSetTarget");
+        String otherOu = organizationsFixture.createOu(MANAGEMENT, rootId, "CfnStackSetOther");
         String suffix = UUID.randomUUID().toString().substring(0, 8);
-        String targetAccount = createAccount("cfn-stackset-target-" + suffix + "@example.com", targetOu, rootId);
-        String otherAccount = createAccount("cfn-stackset-other-" + suffix + "@example.com", otherOu, rootId);
+        String targetAccount = organizationsFixture.createAccount(MANAGEMENT,
+                "cfn-stackset-target-" + suffix + "@example.com", "CfnStackSet", targetOu, rootId);
+        String otherAccount = organizationsFixture.createAccount(MANAGEMENT,
+                "cfn-stackset-other-" + suffix + "@example.com", "CfnStackSet", otherOu, rootId);
 
         String stack = "stackset-resource-" + suffix;
         String stackSet = "cfn-stackset-" + suffix;
@@ -87,9 +90,10 @@ class StackSetCfnIntegrationTest {
     @Test
     void anUpdateRemovesTheInstancesOfARegionDroppedFromAKeptTarget() throws Exception {
         String rootId = organizationsFixture.createWithTrustedAccess(MANAGEMENT);
-        String targetOu = createOu(rootId, "CfnStackSetRegions");
+        String targetOu = organizationsFixture.createOu(MANAGEMENT, rootId, "CfnStackSetRegions");
         String suffix = UUID.randomUUID().toString().substring(0, 8);
-        String account = createAccount("cfn-stackset-regions-" + suffix + "@example.com", targetOu, rootId);
+        String account = organizationsFixture.createAccount(MANAGEMENT,
+                "cfn-stackset-regions-" + suffix + "@example.com", "CfnStackSet", targetOu, rootId);
 
         String stack = "stackset-regions-" + suffix;
         String stackSet = "cfn-stackset-regions-" + suffix;
@@ -117,8 +121,8 @@ class StackSetCfnIntegrationTest {
     @Test
     void anUpdateDroppingATargetWithNoInstancesStopsDeployingToIt() throws Exception {
         String rootId = organizationsFixture.createWithTrustedAccess(MANAGEMENT);
-        String emptyOu = createOu(rootId, "CfnStackSetEmpty");
-        String otherOu = createOu(rootId, "CfnStackSetOtherEmpty");
+        String emptyOu = organizationsFixture.createOu(MANAGEMENT, rootId, "CfnStackSetEmpty");
+        String otherOu = organizationsFixture.createOu(MANAGEMENT, rootId, "CfnStackSetOtherEmpty");
 
         String suffix = UUID.randomUUID().toString().substring(0, 8);
         String stack = "stackset-empty-" + suffix;
@@ -133,7 +137,8 @@ class StackSetCfnIntegrationTest {
                 .then().statusCode(200);
         CfnStackWaits.awaitStatus(stack, "UPDATE_COMPLETE", auth(MANAGEMENT, "cloudformation"));
 
-        String account = createAccount("cfn-stackset-empty-" + suffix + "@example.com", emptyOu, rootId);
+        String account = organizationsFixture.createAccount(MANAGEMENT,
+                "cfn-stackset-empty-" + suffix + "@example.com", "CfnStackSet", emptyOu, rootId);
         assertQueue(account, queue, false);
         cloudFormation("DescribeStackSet", "StackSetName", stackSet).then().statusCode(200)
                 .body(not(containsString("<member>" + emptyOu + "</member>")))
@@ -158,31 +163,16 @@ class StackSetCfnIntegrationTest {
     }
 
     @Test
-    void unnamedStackSetKeepsItsGeneratedIdentityOnUpdate() {
-        String stack = "unnamed-stackset-" + UUID.randomUUID().toString().substring(0, 8);
-        ObjectMapper mapper = new ObjectMapper();
-        ObjectNode properties = mapper.createObjectNode().put("PermissionModel", "SELF_MANAGED")
-                .put("TemplateBody", "{\"Resources\":{\"Queue\":{\"Type\":\"AWS::SQS::Queue\"}}}");
-        ObjectNode resource = mapper.createObjectNode().put("Type", "AWS::CloudFormation::StackSet");
-        resource.set("Properties", properties);
-        ObjectNode body = mapper.createObjectNode();
-        body.set("Resources", mapper.createObjectNode().set("Set", resource));
-        body.set("Outputs", mapper.createObjectNode().set("Id",
-                mapper.createObjectNode().set("Value", mapper.createObjectNode().put("Ref", "Set"))));
+    void missingStackSetNameFailsStackCreation() {
+        String stack = "missing-stackset-name-" + UUID.randomUUID().toString().substring(0, 8);
+        ObjectNode body = simpleStackSetTemplate("temporary");
+        ((ObjectNode) body.path("Resources").path("Set").path("Properties")).remove("StackSetName");
         cloudFormation("CreateStack", "StackName", stack, "TemplateBody", body.toString()).then().statusCode(200);
-        CfnStackWaits.awaitStatus(stack, "CREATE_COMPLETE", auth(MANAGEMENT, "cloudformation"));
-        String identity = output(stack, "Id");
-        assertThat(identity, startsWith(stack + "-Set-"));
 
-        properties.put("Description", "updated");
-        cloudFormation("UpdateStack", "StackName", stack, "TemplateBody", body.toString()).then().statusCode(200);
-        CfnStackWaits.awaitStatus(stack, "UPDATE_COMPLETE", auth(MANAGEMENT, "cloudformation"));
-        assertEquals(identity, output(stack, "Id"));
-        String name = identity.substring(0, identity.indexOf(':'));
-        cloudFormation("DescribeStackSet", "StackSetName", name).then().statusCode(200)
-                .body(containsString("<Description>updated</Description>"));
-        CfnStackWaits.deleteStack(stack, auth(MANAGEMENT, "cloudformation"));
-        cloudFormation("DescribeStackSet", "StackSetName", name).then().statusCode(404);
+        CfnStackWaits.StackState state = CfnStackWaits.awaitTerminal(stack, auth(MANAGEMENT, "cloudformation"));
+        assertEquals("ROLLBACK_COMPLETE", state.status());
+        assertTrue(CfnStackWaits.failedResourceReason(stack, auth(MANAGEMENT, "cloudformation"))
+                .contains("StackSetName"));
     }
 
     @Test
@@ -429,16 +419,16 @@ class StackSetCfnIntegrationTest {
     }
 
     @Test
-    void replacementChangesPermissionModelForGeneratedName() {
+    void replacementChangesPermissionModelWithANewName() {
         organizationsFixture.createWithTrustedAccess(MANAGEMENT);
         String stack = "replace-model-" + UUID.randomUUID().toString().substring(0, 8);
-        ObjectNode body = simpleStackSetTemplate("temporary");
+        ObjectNode body = simpleStackSetTemplate("before-" + stack);
         ObjectNode properties = (ObjectNode) body.path("Resources").path("Set").path("Properties");
-        properties.remove("StackSetName");
         cloudFormation("CreateStack", "StackName", stack, "TemplateBody", body.toString()).then().statusCode(200);
         CfnStackWaits.awaitStatus(stack, "CREATE_COMPLETE", auth(MANAGEMENT, "cloudformation"));
         String original = output(stack, "Id");
         properties.put("PermissionModel", "SERVICE_MANAGED");
+        properties.put("StackSetName", "after-" + stack);
         properties.set("AutoDeployment", new ObjectMapper().createObjectNode().put("Enabled", false));
         cloudFormation("UpdateStack", "StackName", stack, "TemplateBody", body.toString()).then().statusCode(200);
         CfnStackWaits.awaitStatus(stack, "UPDATE_COMPLETE", auth(MANAGEMENT, "cloudformation"));
@@ -682,18 +672,7 @@ class StackSetCfnIntegrationTest {
             """.formatted(stackSet, queue, new ObjectMapper().writeValueAsString(instanceTemplate));
     }
 
-    private String createOu(String parentId, String name) {
-        return organizations("CreateOrganizationalUnit", "{\"ParentId\":\"" + parentId + "\",\"Name\":\"" + name + "\"}")
-                .then().statusCode(200).extract().jsonPath().getString("OrganizationalUnit.Id");
-    }
 
-    private String createAccount(String email, String parentId, String rootId) {
-        String accountId = organizations("CreateAccount", "{\"Email\":\"" + email + "\",\"AccountName\":\"CfnStackSet\"}")
-                .then().statusCode(200).extract().jsonPath().getString("CreateAccountStatus.AccountId");
-        organizations("MoveAccount", "{\"AccountId\":\"" + accountId + "\",\"SourceParentId\":\"" + rootId
-                + "\",\"DestinationParentId\":\"" + parentId + "\"}").then().statusCode(200);
-        return accountId;
-    }
 
     private static String output(String stack, String key) {
         return cloudFormation("DescribeStacks", "StackName", stack).xmlPath().getString(
@@ -715,10 +694,8 @@ class StackSetCfnIntegrationTest {
     }
 
     private static Response cloudFormation(String action, String... formParams) {
-        RequestSpecification request = given()
-                .header("Authorization", auth(MANAGEMENT, "cloudformation"))
-                .contentType("application/x-www-form-urlencoded")
-                .formParam("Action", action);
+        RequestSpecification request = CfnRequests.cfn(action, null)
+                .header("Authorization", auth(MANAGEMENT, "cloudformation"));
         for (int i = 0; i < formParams.length; i += 2) {
             request = request.formParam(formParams[i], formParams[i + 1]);
         }
