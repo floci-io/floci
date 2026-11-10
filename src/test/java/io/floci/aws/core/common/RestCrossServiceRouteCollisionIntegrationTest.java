@@ -70,8 +70,6 @@ class RestCrossServiceRouteCollisionIntegrationTest {
             "mq, GET, /v1/configurations/c-123",
             "mq, PUT, /v1/configurations/c-123",
             "mq, DELETE, /v1/configurations/c-123",
-            "securityhub, POST, /members",
-            "securityhub, GET, /members",
             "securityhub, GET, /associations",
             "securityhub, POST, /associations",
             "macie2, GET, /jobs/job-123",

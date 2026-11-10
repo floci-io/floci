@@ -8,7 +8,6 @@ import io.floci.aws.services.bedrockagentcorecontrol.BedrockAgentCoreResourcePol
 import io.floci.aws.services.codegurureviewer.CodeGuruReviewerController;
 import io.floci.aws.services.dsql.DsqlController;
 import io.floci.aws.services.iot.IotController;
-import io.floci.aws.services.macie2.MacieController;
 import io.floci.aws.services.msk.MskController;
 import io.floci.aws.services.rdsdata.RdsDataController;
 import io.floci.aws.services.s3.S3Controller;
@@ -25,6 +24,7 @@ import org.jboss.logging.Logger;
 import java.util.List;
 import java.util.Optional;
 import java.util.Set;
+import java.util.function.Predicate;
 
 /**
  * Stops a known REST JSON service request from being handled by S3's path-style wildcard routes
@@ -41,7 +41,11 @@ public class AwsRestRouteScopeFilter implements ContainerRequestFilter {
     @Context
     ResourceInfo resourceInfo;
 
-    record RouteCollision(Class<?> controllerClass, String pathPrefix, Set<String> conflictingScopes) {}
+    record RouteCollision(Class<?> controllerClass, Predicate<String> paths, Set<String> conflictingScopes) {
+        RouteCollision(Class<?> controllerClass, String pathPrefix, Set<String> conflictingScopes) {
+            this(controllerClass, SignedServiceRoute.under(pathPrefix), conflictingScopes);
+        }
+    }
 
     // Issue #6426: Map of controllers, path prefixes, and foreign signing service scopes that collide
     // on shared JAX-RS path templates when operations are unimplemented for the signed service.
@@ -50,7 +54,6 @@ public class AwsRestRouteScopeFilter implements ContainerRequestFilter {
             new RouteCollision(AppConfigController.class, "/applications",
                     Set.of("app-integrations", "servicecatalog")),
             new RouteCollision(MskController.class, "/v1/configurations", Set.of("mq")),
-            new RouteCollision(MacieController.class, "/members", Set.of("securityhub")),
             new RouteCollision(CodeGuruReviewerController.class, "/associations", Set.of("securityhub")),
             new RouteCollision(IotController.class, "/jobs", Set.of("macie2")),
             new RouteCollision(IotController.class, "/rules", Set.of("connect")),
@@ -89,7 +92,7 @@ public class AwsRestRouteScopeFilter implements ContainerRequestFilter {
                     .flatMap(catalog::byCredentialScope)
                     .filter(descriptor -> descriptor.supportsProtocol(ServiceProtocol.REST_JSON))
                     .filter(descriptor -> !"s3".equals(descriptor.externalKey()))
-                    .ifPresent(descriptor -> rejectS3Fallthrough(ctx, descriptor));
+                    .ifPresent(descriptor -> reject(ctx, descriptor.externalKey(), "an S3 wildcard route"));
             return;
         }
 
@@ -103,38 +106,24 @@ public class AwsRestRouteScopeFilter implements ContainerRequestFilter {
 
         for (RouteCollision collision : ROUTE_COLLISIONS) {
             if (collision.controllerClass() == resourceClass
-                    && (normalizedPath.equals(collision.pathPrefix())
-                            || normalizedPath.startsWith(collision.pathPrefix() + "/"))
+                    && collision.paths().test(normalizedPath)
                     && collision.conflictingScopes().contains(scope.get())) {
-                rejectRouteCollision(ctx, scope.get());
+                reject(ctx, scope.get(), "a colliding route on another service");
                 return;
             }
         }
     }
 
-    private void rejectRouteCollision(ContainerRequestContext ctx, String signingService) {
+    private void reject(ContainerRequestContext ctx, String service, String matchedRoute) {
         if (!configProvider.get().protocols().rejectUnknownServiceScope()) {
-            LOG.debugv("REST service {0} matched a colliding route; rejection disabled by config", signingService);
+            LOG.debugv("Known REST JSON service {0} matched {1}; rejection disabled by config",
+                    service, matchedRoute);
             return;
         }
         String method = ctx.getMethod();
         String path = ctx.getUriInfo().getPath();
-        LOG.infov("Rejecting {0} request that matched colliding route on another service: {1} {2}",
-                signingService, method, path);
-        ctx.abortWith(AwsProtocolClaimFilter.unknownOperationResponse(404,
-                "Unknown operation: " + method + " " + path));
-    }
-
-    private void rejectS3Fallthrough(ContainerRequestContext ctx, ServiceDescriptor descriptor) {
-        if (!configProvider.get().protocols().rejectUnknownServiceScope()) {
-            LOG.debugv("Known REST JSON service {0} matched an S3 wildcard route; rejection disabled by config",
-                    descriptor.externalKey());
-            return;
-        }
-        String method = ctx.getMethod();
-        String path = ctx.getUriInfo().getPath();
-        LOG.infov("Rejecting {0} request that matched an S3 wildcard route: {1} {2}",
-                descriptor.externalKey(), method, path);
+        LOG.infov("Rejecting {0} request that matched {1}: {2} {3}",
+                service, matchedRoute, method, path);
         ctx.abortWith(AwsProtocolClaimFilter.unknownOperationResponse(404,
                 "Unknown operation: " + method + " " + path));
     }
