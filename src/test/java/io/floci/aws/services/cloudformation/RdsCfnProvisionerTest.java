@@ -2160,9 +2160,12 @@ class RdsCfnProvisionerTest {
         assertTrue(r.getStatusReason().contains("StorageEncrypted must be true or false"), r.getStatusReason());
     }
 
-    @Test
-    void anUpdateMovesTheInstanceToTheNewGroupsLastAndARollbackPutsTheOldOnesBack() {
-        StackResource r = updateFromFirstGroup(SG_SECOND);
+    /** Every group the instance had comes back, however many, and an instance that had none gets none. */
+    @ParameterizedTest
+    @ValueSource(strings = {"sg-first", "sg-first,sg-other", ""})
+    void anUpdateMovesTheInstanceToTheNewGroupsLastAndARollbackPutsTheOldOnesBack(String groupsOnFile) {
+        String[] before = groupsOnFile.isEmpty() ? new String[0] : groupsOnFile.split(",");
+        StackResource r = updateInstance(createInstance(PLAIN, before), SG_SECOND);
 
         assertEquals("CREATE_COMPLETE", r.getStatus(), r.getStatusReason());
         InOrder order = inOrder(rdsService);
@@ -2172,7 +2175,7 @@ class RdsCfnProvisionerTest {
 
         assertTrue(provisioner.rollbackUpdate(r), "the groups were all the update changed");
 
-        verify(rdsService).setDbInstanceVpcSecurityGroups("us-east-1", r.getPhysicalId(), List.of("sg-first"));
+        verify(rdsService).setDbInstanceVpcSecurityGroups("us-east-1", r.getPhysicalId(), List.of(before));
         assertFalse(r.getAttributes().containsKey(IN_PLACE_ATTR));
     }
 

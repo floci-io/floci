@@ -111,7 +111,9 @@ public class RdsCfnProvisioner implements CfnResourceProvisioner {
      * The change is read against this record, as CloudFormation reads the template's change, and not
      * against the instance: one a stack created before Floci applied the property is unencrypted
      * whatever its template said. Such a resource has no record, so its first update reads the
-     * previous template's value instead, and replaces the instance only when that changed.
+     * previous template's value instead, resolved as well as it still can be, and replaces the
+     * instance only when that changed. As in {@link Ec2Tags#ownedKeys}, a value taken from a
+     * parameter resolves to the new value there, so a change made only through a parameter is not seen.
      */
     private static final CreateOnlyInputs DB_INSTANCE_STORAGE_ENCRYPTED = new CreateOnlyInputs(
             "__FlociDbInstanceStorageEncrypted", "__FlociDbInstanceStorageEncryptedPrior");
@@ -549,7 +551,8 @@ public class RdsCfnProvisioner implements CfnResourceProvisioner {
         boolean groupsChange = desired != null && !Set.copyOf(desired).equals(Set.copyOf(groupsBefore));
         ObjectNode saved = MAPPER.createObjectNode().put("region", ctx.region());
         if (groupsChange) {
-            groupsBefore.forEach(saved.putArray("vpcSecurityGroups")::add);
+            ArrayNode priorGroups = saved.putArray("vpcSecurityGroups");
+            groupsBefore.forEach(priorGroups::add);
         }
         saved.put("otherChanges", !stateBefore.sameSettingsAs(DbInstanceInPlaceState.of(instance)));
         r.getAttributes().put(DB_INSTANCE_PRIOR_IN_PLACE_ATTR, saved.toString());
