@@ -184,7 +184,7 @@ class ElbV2BackendTlsIntegrationTest {
     void httpsHealthRejectsAReachablePlaintextServer() throws Exception {
         HttpServer plain = backend(false);
         createTarget("HTTP", plain.actualPort(), "HTTPS", plain.actualPort(), "200");
-        awaitHealth("unhealthy", "Target.FailedHealthChecks");
+        awaitHealth("unhealthy", "Target.FailedHealthChecks", true);
     }
 
     @ParameterizedTest
@@ -274,7 +274,7 @@ class ElbV2BackendTlsIntegrationTest {
         HttpServer application = backend(false);
         createTarget("HTTP", application.actualPort(), "HTTPS", stalled.actualPort(), "200");
 
-        awaitHealth("unhealthy", "Target.Timeout");
+        awaitHealth("unhealthy", "Target.Timeout", true);
         assertTrue(clientHelloReceived.get(), "The probe must start a real TLS handshake");
         Duration elapsed = handshakeWait.get(5, TimeUnit.SECONDS);
         assertTrue(elapsed.compareTo(Duration.ofMillis(1500)) >= 0
@@ -310,7 +310,7 @@ class ElbV2BackendTlsIntegrationTest {
         NetServer slow = slowPeer("HTTPS".equals(protocol), false);
         elb.modifyTargetGroup(r -> r.targetGroupArn(groupArn).healthCheckPort(String.valueOf(slow.actualPort())));
 
-        awaitHealth("unhealthy", "Target.Timeout");
+        awaitHealth("unhealthy", "Target.Timeout", true);
     }
 
     @Test
@@ -322,7 +322,7 @@ class ElbV2BackendTlsIntegrationTest {
         elb.modifyTargetGroup(r -> r.targetGroupArn(groupArn).healthCheckProtocol("HTTPS")
                 .healthCheckPort(String.valueOf(slow.actualPort())));
 
-        awaitHealth("unhealthy", "Target.Timeout");
+        awaitHealth("unhealthy", "Target.Timeout", true);
     }
 
     private NetServer slowPeer(boolean tls, boolean handshake) throws Exception {
