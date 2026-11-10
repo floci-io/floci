@@ -5,16 +5,13 @@ import com.fasterxml.jackson.databind.node.ObjectNode;
 import com.sun.net.httpserver.HttpExchange;
 import com.sun.net.httpserver.HttpHandler;
 import com.sun.net.httpserver.HttpServer;
-import com.sun.net.httpserver.HttpsConfigurator;
 import com.sun.net.httpserver.HttpsServer;
 import io.floci.aws.config.ContainerCaBundle;
 import io.floci.aws.config.EmulatorConfig;
 import io.floci.aws.config.FlociCertificateAuthority;
 import io.floci.aws.config.TlsConfigSource;
 import io.floci.aws.core.common.Base64Url;
-import io.floci.aws.core.common.Pem;
-import io.floci.aws.services.acm.CertificateGenerator;
-import io.floci.aws.services.acm.model.KeyAlgorithm;
+import io.floci.aws.testing.LocalHttpsServer;
 import org.apache.hc.client5.http.DnsResolver;
 import org.apache.hc.client5.http.SystemDefaultDnsResolver;
 import org.bouncycastle.jce.provider.BouncyCastleProvider;
@@ -38,8 +35,8 @@ import java.security.Signature;
 import java.security.interfaces.RSAPrivateKey;
 import java.security.interfaces.RSAPublicKey;
 import java.util.Arrays;
-import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.function.Function;
 
@@ -286,22 +283,43 @@ class JwtSignatureVerifierTest {
      */
     @Test
     void trustsAnIssuerCertificateFromTheCaBundleFlociWrites(@TempDir Path dir) throws Exception {
-        if (Security.getProvider(BouncyCastleProvider.PROVIDER_NAME) == null) {
-            Security.addProvider(new BouncyCastleProvider());
-        }
         Path tlsDir = dir.resolve("tls");
         FlociCertificateAuthority authority = FlociCertificateAuthority.loadOrCreate(tlsDir);
         ContainerCaBundle.write(tlsDir, authority.certificatePath());
-        CertificateGenerator.GeneratedCertificate issued = authority.issueServerCertificate(
-                "localhost", List.of("localhost"), KeyAlgorithm.RSA_2048, null);
+
+        assertOnlyTheInjectedVerifierTrusts(authority, httpsIssuerConfig(dir, true));
+    }
+
+    /**
+     * The JWT issuer fetch shares Floci's outbound SSL context, so an issuer whose certificate chains to a CA in
+     * floci.tls.extra-ca-path verifies too, with TLS off.
+     */
+    @Test
+    void trustsAnIssuerCertificateFromAnExtraCaWithTlsOff(@TempDir Path dir) throws Exception {
+        FlociCertificateAuthority privateCa = FlociCertificateAuthority.loadOrCreate(dir.resolve("private-ca"));
+        EmulatorConfig config = httpsIssuerConfig(dir, false);
+        when(config.tls().extraCaPath()).thenReturn(Optional.of(privateCa.certificatePath().toString()));
+
+        assertOnlyTheInjectedVerifierTrusts(privateCa, config);
+    }
+
+    // A configuration with TLS as tlsEnabled says, persisting under dir, that lets the verifier reach localhost.
+    private static EmulatorConfig httpsIssuerConfig(Path dir, boolean tlsEnabled) {
         EmulatorConfig config = mock(EmulatorConfig.class, RETURNS_DEEP_STUBS);
-        when(config.tls().enabled()).thenReturn(true);
+        when(config.tls().enabled()).thenReturn(tlsEnabled);
         when(config.storage().persistentPath()).thenReturn(dir.toString());
         when(config.security().allowPrivateJwtTargets()).thenReturn(true);
+        return config;
+    }
 
-        HttpsServer httpsServer = HttpsServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
-        httpsServer.setHttpsConfigurator(new HttpsConfigurator(authority.serverSslContext(
-                Pem.parseCertificate(issued.certificatePem()), Pem.parsePrivateKey(issued.privateKeyPem()))));
+    // Asserts that an issuer serving a certificate ca issued is refused with the JVM's roots alone and verified by
+    // the verifier Floci injects with config.
+    private void assertOnlyTheInjectedVerifierTrusts(FlociCertificateAuthority ca, EmulatorConfig config)
+            throws Exception {
+        if (Security.getProvider(BouncyCastleProvider.PROVIDER_NAME) == null) {
+            Security.addProvider(new BouncyCastleProvider());
+        }
+        HttpsServer httpsServer = LocalHttpsServer.issuedBy(ca);
         String httpsIssuer = "https://localhost:" + httpsServer.getAddress().getPort();
         httpsServer.createContext("/.well-known/openid-configuration", discovery(httpsIssuer));
         httpsServer.createContext("/jwks", this::serveJwks);
