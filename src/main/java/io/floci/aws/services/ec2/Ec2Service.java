@@ -9648,8 +9648,9 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
         validateLaunchTemplateData(region, data);
         LaunchTemplate launchTemplate = findLaunchTemplate(region, id, name);
         synchronized (launchTemplate) {
+            ensureLaunchTemplatePresent(region, launchTemplate, id);
             ensureLaunchTemplateVersions(launchTemplate);
-            int latestVersion = parseLaunchTemplateVersion(launchTemplate.getLatestVersionNumber()) + 1;
+            int latestVersion = lastIssuedLaunchTemplateVersion(launchTemplate) + 1;
             LaunchTemplateData source;
             if (sourceVersion == null || sourceVersion.isBlank()) {
                 source = new LaunchTemplateData();
@@ -9660,6 +9661,7 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
             LaunchTemplateData merged = source.mergedWith(data != null ? data : new LaunchTemplateData());
             validateLaunchTemplateData(region, merged);
             launchTemplate.setLatestVersionNumber(String.valueOf(latestVersion));
+            launchTemplate.setLastIssuedVersionNumber(latestVersion);
             launchTemplate.getVersions().put(String.valueOf(latestVersion), merged);
             launchTemplate.setData(new LaunchTemplateData(merged));
             if (versionDescription != null && !versionDescription.isBlank()) {
@@ -9730,15 +9732,11 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
     }
 
     public LaunchTemplate modifyLaunchTemplate(String region, String id, String name, String defaultVersion, boolean dryRun) {
-        boolean hasId = id != null && !id.isBlank();
-        boolean hasName = name != null && !name.isBlank();
-        if (hasId == hasName) {
-            throw new AwsException(hasId ? "InvalidParameterCombination" : "MissingParameter",
-                    "Specify either LaunchTemplateId or LaunchTemplateName, but not both.", 400);
-        }
+        validateLaunchTemplateSelector(id, name);
         ensureDefaultResources(region);
         LaunchTemplate launchTemplate = findLaunchTemplate(region, id, name);
         synchronized (launchTemplate) {
+            ensureLaunchTemplatePresent(region, launchTemplate, id);
             ensureLaunchTemplateVersions(launchTemplate);
             String nextDefault = launchTemplate.getDefaultVersionNumber();
             if (defaultVersion != null && !defaultVersion.isBlank()) {
@@ -9868,44 +9866,131 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
                                                         boolean decodeUserData) {
         ensureDefaultResources(region);
         LaunchTemplate launchTemplate = findLaunchTemplate(region, id, name);
-        String resolvedVersion = resolveLaunchTemplateVersion(
-                launchTemplate,
-                version,
-                launchTemplate.getDefaultVersionNumber());
-        LaunchTemplateData data = new LaunchTemplateData(versionData(launchTemplate, resolvedVersion));
-        if (decodeUserData) {
-            data.setUserData(Ec2UserDataDecoder.decodeIfMissing(data.getUserData(), data.getEncodedUserData()));
+        synchronized (launchTemplate) {
+            String resolvedVersion = resolveLaunchTemplateVersion(
+                    launchTemplate,
+                    version,
+                    launchTemplate.getDefaultVersionNumber());
+            LaunchTemplateData data = new LaunchTemplateData(versionData(launchTemplate, resolvedVersion));
+            if (decodeUserData) {
+                data.setUserData(Ec2UserDataDecoder.decodeIfMissing(data.getUserData(), data.getEncodedUserData()));
+            }
+            return data;
         }
-        return data;
     }
 
     public LaunchTemplate deleteLaunchTemplate(String region, String id, String name) {
         ensureDefaultResources(region);
         LaunchTemplate launchTemplate = findLaunchTemplate(region, id, name);
-        launchTemplates.delete(key(region, launchTemplate.getLaunchTemplateId()));
-        removeTags(region, launchTemplate.getLaunchTemplateId());
-        return launchTemplate;
+        synchronized (launchTemplate) {
+            launchTemplates.delete(key(region, launchTemplate.getLaunchTemplateId()));
+            removeTags(region, launchTemplate.getLaunchTemplateId());
+            return launchTemplate;
+        }
     }
 
+    /** CloudFormation rollback uses the same validation and mutation as the public API. */
     public void deleteLaunchTemplateVersion(String region, String id, String version) {
+        LaunchTemplateVersionDeletion result =
+                deleteLaunchTemplateVersions(region, id, null, List.of(version), false).getFirst();
+        if (result.errorCode() != null) {
+            throw new AwsException(result.errorCode(), result.errorMessage(), 400);
+        }
+    }
+
+    public record LaunchTemplateVersionDeletion(String launchTemplateId, String launchTemplateName,
+                                                int versionNumber, String errorCode, String errorMessage) {}
+
+    public List<LaunchTemplateVersionDeletion> deleteLaunchTemplateVersions(
+            String region, String id, String name, List<String> requestedVersions, boolean dryRun) {
+        validateLaunchTemplateSelector(id, name);
+        if (requestedVersions == null || requestedVersions.isEmpty()) {
+            throw new AwsException("MissingParameter", "The request must contain LaunchTemplateVersion.", 400);
+        }
+        if (requestedVersions.size() > 200) {
+            throw new AwsException("InvalidParameterValue", "Specify at most 200 launch template versions.", 400);
+        }
+        List<Integer> versions = requestedVersions.stream().map(this::parseLaunchTemplateVersion).toList();
+        if (versions.stream().anyMatch(version -> version < 1)) {
+            throw new AwsException("InvalidLaunchTemplateVersion.Malformed",
+                    "Launch template version numbers must be positive.", 400);
+        }
         ensureDefaultResources(region);
-        LaunchTemplate launchTemplate = findLaunchTemplate(region, id, null);
-        synchronized (launchTemplate) {
-            ensureLaunchTemplateVersions(launchTemplate);
-            launchTemplate.getVersions().remove(version);
-            launchTemplate.getVersionDescriptions().remove(version);
-            int max = launchTemplate.getVersions().keySet().stream()
-                    .mapToInt(this::parseLaunchTemplateVersion)
-                    .max()
-                    .orElse(1);
-            String maxStr = String.valueOf(max);
-            launchTemplate.setLatestVersionNumber(maxStr);
-            LaunchTemplateData latestData = launchTemplate.getVersions().get(maxStr);
-            if (latestData != null) {
-                launchTemplate.setData(new LaunchTemplateData(latestData));
+        try {
+            LaunchTemplate template = findLaunchTemplate(region, id, name);
+            synchronized (template) {
+                ensureLaunchTemplatePresent(region, template, id);
+                if (dryRun) {
+                    throw new AwsException("DryRunOperation",
+                            "Request would have succeeded, but DryRun flag is set.", 412);
+                }
+                ensureLaunchTemplateVersions(template);
+                int lastIssued = lastIssuedLaunchTemplateVersion(template);
+                List<LaunchTemplateVersionDeletion> results = new ArrayList<>();
+                boolean changed = false;
+                for (int version : versions) {
+                    String number = Integer.toString(version);
+                    String errorCode = null;
+                    String errorMessage = null;
+                    if (number.equals(template.getDefaultVersionNumber())) {
+                        errorCode = "unexpectedError";
+                        errorMessage = "The default version of a launch template cannot be deleted.";
+                    } else if (!template.getVersions().containsKey(number)) {
+                        errorCode = "launchTemplateVersionDoesNotExist";
+                        errorMessage = "The specified launch template version does not exist.";
+                    } else if (template.getVersions().size() == 1) {
+                        errorCode = "unexpectedError";
+                        errorMessage = "The last remaining launch template version cannot be deleted.";
+                    } else {
+                        template.getVersions().remove(number);
+                        template.getVersionDescriptions().remove(number);
+                        changed = true;
+                    }
+                    results.add(new LaunchTemplateVersionDeletion(template.getLaunchTemplateId(),
+                            template.getLaunchTemplateName(), version, errorCode, errorMessage));
+                }
+                if (changed) {
+                    String latest = Integer.toString(template.getVersions().keySet().stream()
+                            .mapToInt(this::parseLaunchTemplateVersion).max().orElseThrow());
+                    template.setLastIssuedVersionNumber(lastIssued);
+                    template.setLatestVersionNumber(latest);
+                    template.setData(new LaunchTemplateData(template.getVersions().get(latest)));
+                    template.setVersionDescription(template.getVersionDescriptions().get(latest));
+                    launchTemplates.put(key(region, template.getLaunchTemplateId()), template);
+                }
+                return results;
             }
-            launchTemplate.setVersionDescription(launchTemplate.getVersionDescriptions().get(maxStr));
-            launchTemplates.put(key(region, launchTemplate.getLaunchTemplateId()), launchTemplate);
+        } catch (AwsException error) {
+            String code = switch (error.getErrorCode()) {
+                case "InvalidLaunchTemplateId.NotFound" -> "launchTemplateIdDoesNotExist";
+                case "InvalidLaunchTemplateName.NotFoundException" -> "launchTemplateNameDoesNotExist";
+                default -> throw error;
+            };
+            return versions.stream().map(version ->
+                    new LaunchTemplateVersionDeletion(id, name, version, code, error.getMessage())).toList();
+        }
+    }
+
+    private int lastIssuedLaunchTemplateVersion(LaunchTemplate template) {
+        // Older records have no counter; preserve their latest version before deleting it.
+        return Math.max(template.getLastIssuedVersionNumber(),
+                parseLaunchTemplateVersion(template.getLatestVersionNumber()));
+    }
+
+    private void validateLaunchTemplateSelector(String id, String name) {
+        boolean hasId = id != null && !id.isBlank();
+        boolean hasName = name != null && !name.isBlank();
+        if (hasId == hasName) {
+            throw new AwsException(hasId ? "InvalidParameterCombination" : "MissingParameter",
+                    "Specify either LaunchTemplateId or LaunchTemplateName, but not both.", 400);
+        }
+    }
+
+    private void ensureLaunchTemplatePresent(String region, LaunchTemplate template, String requestedId) {
+        if (launchTemplates.get(key(region, template.getLaunchTemplateId())).isEmpty()) {
+            String errorCode = isSet(requestedId)
+                    ? "InvalidLaunchTemplateId.NotFound" : "InvalidLaunchTemplateName.NotFoundException";
+            throw new AwsException(errorCode, "The specified launch template does not exist.", 400);
         }
     }
 

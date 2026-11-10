@@ -340,6 +340,7 @@ public class Ec2QueryHandler {
                 case "DescribeLaunchTemplateVersions" -> handleDescribeLaunchTemplateVersions(params, region);
                 case "ModifyLaunchTemplate" -> handleModifyLaunchTemplate(params, region);
                 case "DeleteLaunchTemplate" -> handleDeleteLaunchTemplate(params, region);
+                case "DeleteLaunchTemplateVersions" -> handleDeleteLaunchTemplateVersions(params, region);
                 // Network Interfaces
                 case "DescribeNetworkInterfaces" -> handleDescribeNetworkInterfaces(params, region);
                 case "CreateNetworkInterface" -> handleCreateNetworkInterface(params, region);
@@ -5283,6 +5284,38 @@ public class Ec2QueryHandler {
                 .start("launchTemplate").raw(launchTemplateXml(launchTemplate)).end("launchTemplate")
                 .end("DeleteLaunchTemplateResponse");
         return xmlResponse(xml.build());
+    }
+
+    private Response handleDeleteLaunchTemplateVersions(MultivaluedMap<String, String> p, String region) {
+        String dryRun = p.getFirst("DryRun");
+        if (dryRun != null && dryRun.isBlank()) {
+            throw new AwsException("InvalidParameterValue", "DryRun is not a valid boolean.", 400);
+        }
+        List<Ec2Service.LaunchTemplateVersionDeletion> results = service.deleteLaunchTemplateVersions(
+                region, p.getFirst("LaunchTemplateId"), p.getFirst("LaunchTemplateName"),
+                getList(p, "LaunchTemplateVersion"), Boolean.TRUE.equals(parseOptionalBoolean(dryRun, "DryRun")));
+        XmlBuilder xml = new XmlBuilder().start("DeleteLaunchTemplateVersionsResponse", AwsNamespaces.EC2)
+                .elem("requestId", UUID.randomUUID().toString());
+        for (boolean success : List.of(true, false)) {
+            String set = success ? "successfullyDeletedLaunchTemplateVersionSet"
+                    : "unsuccessfullyDeletedLaunchTemplateVersionSet";
+            xml.start(set);
+            for (Ec2Service.LaunchTemplateVersionDeletion result : results) {
+                if ((result.errorCode() == null) != success) {
+                    continue;
+                }
+                xml.start("item").elem("launchTemplateId", result.launchTemplateId())
+                        .elem("launchTemplateName", result.launchTemplateName())
+                        .elem("versionNumber", Integer.toString(result.versionNumber()));
+                if (!success) {
+                    xml.start("responseError").elem("code", result.errorCode())
+                            .elem("message", result.errorMessage()).end("responseError");
+                }
+                xml.end("item");
+            }
+            xml.end(set);
+        }
+        return xmlResponse(xml.end("DeleteLaunchTemplateVersionsResponse").build());
     }
 
     // ─── Network Interface handlers ───────────────────────────────────────────
