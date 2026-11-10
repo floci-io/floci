@@ -1917,7 +1917,7 @@ final class CognitoAuthFlowHandler {
     private Map<String, Object> triggerEvent(UserPool pool, String clientId, CognitoUser user, String triggerKey,
                                              String triggerSource, Map<String, Object> request) {
         Map<String, Object> event = new HashMap<>();
-        event.put("version", "1");
+        event.put("version", CLIENT_CREDENTIALS_TRIGGER_SOURCE.equals(triggerSource) ? "3" : "1");
         event.put("region", regionForPool(pool));
         event.put("userPoolId", pool.getId());
         String userName = user == null ? null : user.getUsername();

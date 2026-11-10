@@ -1,7 +1,7 @@
 package io.floci.aws.services.cognito;
 
 import com.fasterxml.jackson.core.JsonProcessingException;
-import com.fasterxml.jackson.core.type.TypeReference;
+import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.floci.aws.core.common.AwsException;
@@ -593,18 +593,25 @@ public class CognitoOAuthController {
         if (raw == null) {
             return Optional.of(Map.of());
         }
-        Map<String, String> metadata;
+        JsonNode root;
         try {
-            metadata = objectMapper.readValue(raw, new TypeReference<>() {});
+            root = objectMapper.readTree(raw);
         } catch (JsonProcessingException e) {
             LOG.debugv(e, "Rejecting malformed aws_client_metadata");
             return Optional.empty();
         }
-        if (metadata == null) {
+        if (root == null || root.isNull()) {
             return Optional.of(Map.of());
         }
-        if (metadata.containsValue(null)) {
+        if (!root.isObject()) {
             return Optional.empty();
+        }
+        Map<String, String> metadata = new LinkedHashMap<>();
+        for (Map.Entry<String, JsonNode> member : root.properties()) {
+            if (!member.getValue().isTextual()) {
+                return Optional.empty();
+            }
+            metadata.put(member.getKey(), member.getValue().textValue());
         }
         return Optional.of(metadata);
     }

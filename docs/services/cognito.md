@@ -884,11 +884,12 @@ curl -s -b jar -o /dev/null -w '%{http_code} %{redirect_url}\n' \
 - Client-credentials invokes the pre token generation trigger with triggerSource
   `TokenGeneration_ClientCredentials` when, as on AWS, the pool's
   `PreTokenGenerationConfig.LambdaVersion` is `V3_0`; a `V1_0` or `V2_0` trigger is not invoked.
-  The event carries `userName` `ClientCredentials`, the granted `scopes`, empty `userAttributes`, a
+  The event carries `version` `3`, `userName` `ClientCredentials`, the granted `scopes`, empty `userAttributes`, a
   null `groupConfiguration`, the request's `aws_client_metadata` (a URL-encoded JSON object of
   strings) as `clientMetadata`, and `response.claimsAndScopeOverrideDetails` set to null, so a
-  function must build the response object rather than write into it. A metadata value that is
-  not a string, null included, refuses the request with `invalid_request`.
+  function must build the response object rather than write into it. Metadata that is not a JSON
+  object, or a value that is not a JSON string (a number, boolean, null, object or array), refuses
+  the request with `invalid_request`.
   Only `accessTokenGeneration` applies: its claims and scope changes reach the access token, while
   `idTokenGeneration` and `groupOverrideDetails` are ignored. The trigger cannot add, change or
   suppress `sub`, `client_id`, `token_use`, `version`, `username`, `iss`, `exp`, `iat`, `jti` or any

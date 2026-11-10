@@ -12,6 +12,8 @@ import org.junit.jupiter.api.MethodOrderer;
 import org.junit.jupiter.api.Order;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.TestMethodOrder;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
 
 import javax.crypto.Mac;
 import javax.crypto.spec.SecretKeySpec;
@@ -877,13 +879,21 @@ class CognitoOAuthTokenIntegrationTest {
                 .body("error", equalTo("invalid_request"));
     }
 
-    @Test
+    @ParameterizedTest
     @Order(43)
-    void clientCredentialsRejectsAwsClientMetadataWithANullValue() {
+    @ValueSource(strings = {
+            "{\"environment\": null}",
+            "{\"retries\": 3}",
+            "{\"enabled\": true}",
+            "{\"nested\": {\"a\": \"b\"}}",
+            "{\"list\": [\"a\"]}",
+            "[\"environment\"]",
+            "\"environment\""})
+    void clientCredentialsRejectsAwsClientMetadataThatIsNotAnObjectOfStrings(String metadata) {
         given()
                 .header("Authorization", basic(confidentialClientId, confidentialClientSecret))
                 .formParam("grant_type", "client_credentials")
-                .formParam("aws_client_metadata", "{\"environment\": null}")
+                .formParam("aws_client_metadata", metadata)
         .when()
                 .post("/cognito-idp/oauth2/token")
         .then()

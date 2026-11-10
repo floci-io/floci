@@ -1399,6 +1399,7 @@ class CognitoLambdaTriggersTest {
         Map<String, Object> response = (Map<String, Object>) event.get("response");
         assertAll(
                 () -> assertEquals("TokenGeneration_ClientCredentials", event.get("triggerSource")),
+                () -> assertEquals("3", event.get("version")),
                 () -> assertEquals("ClientCredentials", event.get("userName")),
                 () -> assertTrue(response.containsKey("claimsAndScopeOverrideDetails")),
                 () -> assertNull(response.get("claimsAndScopeOverrideDetails")),
