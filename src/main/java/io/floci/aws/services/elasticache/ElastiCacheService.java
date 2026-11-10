@@ -2138,6 +2138,7 @@ public class ElastiCacheService implements ResourceProvider {
      * the first member becomes primary.
      */
     public ReplicationGroup changeReplicaCount(String groupId, Integer newReplicaCount, boolean increase) {
+        requireGroupId(groupId);
         if (newReplicaCount == null) {
             throw new AwsException("InvalidParameterValue", "The parameter NewReplicaCount must be provided.", 400);
         }
@@ -2172,6 +2173,7 @@ public class ElastiCacheService implements ResourceProvider {
      * the endpoints stay as they are; the roles every API reports change.
      */
     public ReplicationGroup testFailover(String groupId, String nodeGroupId) {
+        requireGroupId(groupId);
         if (nodeGroupId == null || nodeGroupId.isBlank()) {
             throw new AwsException("InvalidParameterValue", "The parameter NodeGroupId must be provided.", 400);
         }
@@ -2190,6 +2192,12 @@ public class ElastiCacheService implements ResourceProvider {
             LOG.infov("Replication group {0} failed over to member {1}", groupId,
                     String.valueOf(group.getPrimaryMemberIndex()));
             return group;
+        }
+    }
+
+    private static void requireGroupId(String groupId) {
+        if (groupId == null || groupId.isBlank()) {
+            throw new AwsException("InvalidParameterValue", "The parameter ReplicationGroupId must be provided.", 400);
         }
     }
 

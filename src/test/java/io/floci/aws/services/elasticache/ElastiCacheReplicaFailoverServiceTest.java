@@ -84,6 +84,8 @@ class ElastiCacheReplicaFailoverServiceTest {
         assertEquals("InvalidParameterValue", fault(() -> service.changeReplicaCount("cache", 6, true)));
         assertEquals("InvalidParameterValue", fault(() -> service.changeReplicaCount("cache", null, true)));
         assertEquals("ReplicationGroupNotFoundFault", fault(() -> service.changeReplicaCount("nope", 2, true)));
+        assertEquals("InvalidParameterValue", fault(() -> service.changeReplicaCount(null, 3, true)));
+        assertEquals("InvalidParameterValue", fault(() -> service.changeReplicaCount(" ", 1, false)));
         assertEquals(2, service.getReplicationGroup("cache").getNumCacheClusters());
     }
 
@@ -128,6 +130,7 @@ class ElastiCacheReplicaFailoverServiceTest {
         assertEquals("InvalidReplicationGroupState", fault(() -> service.testFailover("lonely", "0001")));
         assertEquals("NodeGroupNotFoundFault", fault(() -> service.testFailover("cache", "0002")));
         assertEquals("InvalidParameterValue", fault(() -> service.testFailover("cache", null)));
+        assertEquals("InvalidParameterValue", fault(() -> service.testFailover(null, "0001")));
         assertEquals("cache-001", primaryId("cache"));
     }
 
