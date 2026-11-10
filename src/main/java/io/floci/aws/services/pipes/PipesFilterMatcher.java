@@ -8,9 +8,7 @@ import org.jboss.logging.Logger;
 
 import java.io.IOException;
 import java.math.BigDecimal;
-import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
-import java.util.Base64;
 import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
@@ -112,13 +110,10 @@ public class PipesFilterMatcher {
             JsonNode decodedValue = value;
             if (value != null && value.isTextual() && "data".equals(field.getKey())
                     && actual != null && "aws:kinesis".equals(actual.path("eventSource").asText())) {
-                try {
-                    String text = new String(Base64.getDecoder().decode(value.asText()), StandardCharsets.UTF_8);
-                    if (decoder != null) {
-                        decodedValue = decoder.getNodeFactory().textNode(text);
-                    }
-                } catch (Exception ignored) {
-                    // Not base64; fall through to normal handling.
+                String decoded = PipesTargetInvoker.decodedSourceText(field.getKey(), value.asText(),
+                        actual);
+                if (!decoded.equals(value.asText()) && decoder != null) {
+                    decodedValue = decoder.getNodeFactory().textNode(decoded);
                 }
             }
             if (expected.isObject()) {

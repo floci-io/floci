@@ -386,7 +386,7 @@ public class PipesTargetInvoker {
                 if (!sourceFieldDecoded && isEncodedSourceField(previousSegment) && current.isTextual()) {
                     try {
                         JsonNode decoded = objectMapper.readTree(
-                                decodedSourceText(previousSegment, current.asText(), container, outer));
+                                decodedSourceText(previousSegment, current.asText(), container));
                         if (decoded != null && (decoded.isObject() || decoded.isArray())) {
                             current = decoded;
                         }
@@ -409,7 +409,7 @@ public class PipesTargetInvoker {
             if (!sourceFieldDecoded && isEncodedSourceField(previousSegment) && current.isTextual()) {
                 // SQS bodies commonly contain a JSON document as a string. Pipes input
                 // transformation resolves that document when the body itself is selected.
-                String text = decodedSourceText(previousSegment, current.asText(), container, outer);
+                String text = decodedSourceText(previousSegment, current.asText(), container);
                 try {
                     JsonNode decoded = objectMapper.readTree(text);
                     if (decoded != null && (decoded.isObject() || decoded.isArray())) {
@@ -441,8 +441,8 @@ public class PipesTargetInvoker {
      * @param container the object that holds {@code field}
      * @param outer the object that holds {@code container}
      */
-    private static String decodedSourceText(String field, String text, JsonNode container, JsonNode outer) {
-        if (!isBase64SourceField(field, container, outer)) {
+    public static String decodedSourceText(String field, String text, JsonNode container) {
+        if (!isBase64SourceField(field, container)) {
             return text;
         }
         try {
@@ -453,7 +453,7 @@ public class PipesTargetInvoker {
         }
     }
 
-    private static boolean isBase64SourceField(String field, JsonNode container, JsonNode outer) {
+    public static boolean isBase64SourceField(String field, JsonNode container) {
         if ("data".equals(field)) {
             return container != null && "aws:kinesis".equals(container.path("eventSource").asText());
         }

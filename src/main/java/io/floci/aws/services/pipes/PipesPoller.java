@@ -749,7 +749,7 @@ public class PipesPoller implements Resettable {
         return nodes;
     }
 
-    private List<ObjectNode> buildKinesisRecordNodes(List<?> records, Pipe pipe, String region) {
+    List<ObjectNode> buildKinesisRecordNodes(List<?> records, Pipe pipe, String region) {
         List<ObjectNode> nodes = new ArrayList<>();
         for (Object record : records) {
             KinesisRecord kr = (KinesisRecord) record;
