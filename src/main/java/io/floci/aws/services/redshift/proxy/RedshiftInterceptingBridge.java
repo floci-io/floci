@@ -374,7 +374,8 @@ public class RedshiftInterceptingBridge {
             try {
                 write(backendOut, new byte[]{'H', 0, 0, 0, 4});
                 boolean prepared = runWithBackendOwned(() -> {
-                    spectrumInterceptor.preparation().prepare(parse.sql(), spectrumSession(), relationalBackend);
+                    // no values yet: a parameterized statement is only planned here, the Bind loads its partitions
+                    spectrumInterceptor.preparation().prepare(parse.sql(), spectrumSession(), relationalBackend, null);
                     return true;
                 });
                 if (!prepared) {
@@ -415,10 +416,12 @@ public class RedshiftInterceptingBridge {
         PostgresWireDecoder.ParseMessage relational = relationalStatements.get(bind.statementName());
         if (relational != null && !coordinator.isDiscardingUntilSync()) {
             try {
+                List<String> parameterValues = decoder.decodeBindParameters(message);
                 // Parse/Describe responses may be buffered until Flush or Sync; drain them before taking ownership.
                 write(backendOut, new byte[]{'H', 0, 0, 0, 4});
                 boolean prepared = runWithBackendOwned(() -> {
-                    spectrumInterceptor.preparation().prepare(relational.sql(), spectrumSession(), relationalBackend);
+                    spectrumInterceptor.preparation().prepare(relational.sql(), spectrumSession(), relationalBackend,
+                            parameterValues);
                     return true;
                 });
                 if (!prepared) {

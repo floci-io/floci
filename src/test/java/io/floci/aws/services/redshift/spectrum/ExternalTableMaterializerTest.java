@@ -23,6 +23,7 @@ import java.nio.charset.StandardCharsets;
 import java.time.Duration;
 import java.time.Instant;
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
@@ -52,6 +53,7 @@ import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.ArgumentMatchers.isNull;
 import static org.mockito.ArgumentMatchers.notNull;
 import static org.mockito.ArgumentMatchers.startsWith;
+import static org.mockito.Mockito.clearInvocations;
 import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.mock;
@@ -1286,6 +1288,111 @@ class ExternalTableMaterializerTest {
 
         verify(duck).execute(argThat(sql -> sql.contains("s3://bucket/one/part-1.csv")
                 && !sql.contains("s3://bucket/two/part-1.csv")), any(), anyString(), eq(ACCOUNT));
+    }
+
+    private static final String DAY_PARAMETER_SQL = "SELECT * FROM analytics.events WHERE day = $1";
+
+    @Test
+    void loadsNoPartitionWhileAParameterizedStatementIsOnlyBeingParsed() {
+        twoDayPartitions();
+        RecordingBackend extended = extendedBackend("connection-1");
+
+        materializer.ensureCurrent(extended, session(false), BINDING, "events", DAY_PARAMETER_SQL, null);
+
+        verify(duck, never()).execute(anyString(), any(), anyString(), anyString());
+        assertThat(extended.statements.stream().anyMatch(sql -> sql.contains("CREATE TABLE \"analytics\".\"events\"")),
+                equalTo(true));
+    }
+
+    @Test
+    void loadsOnlyThePartitionTheBoundValueSelectsAfterTheStatementWasParsed() {
+        twoDayPartitions();
+        RecordingBackend extended = extendedBackend("connection-1");
+        materializer.ensureCurrent(extended, session(false), BINDING, "events", DAY_PARAMETER_SQL, null);
+
+        materializer.ensureCurrent(extended, session(false), BINDING, "events", DAY_PARAMETER_SQL,
+                List.of("2026-01-02"));
+
+        verify(duck).execute(argThat(sql -> sql.contains("s3://bucket/two/part-1.csv")
+                && !sql.contains("s3://bucket/one/")), any(), anyString(), eq(ACCOUNT));
+    }
+
+    @Test
+    void loadsEveryPartitionWhenTheBoundValueIsUnusable() {
+        twoDayPartitions();
+        RecordingBackend extended = extendedBackend("connection-1");
+
+        materializer.ensureCurrent(extended, session(false), BINDING, "events", DAY_PARAMETER_SQL,
+                Collections.singletonList(null));
+
+        verify(duck).execute(argThat(sql -> sql.contains("s3://bucket/one/part-1.csv")
+                && sql.contains("s3://bucket/two/part-1.csv")), any(), anyString(), eq(ACCOUNT));
+    }
+
+    @Test
+    void parsingAParameterizedStatementDoesNotEmptyATableOfOverlappingPartitions() {
+        Table table = dayPartitionedTable();
+        table.setPartitionKeys(List.of(new Column("n", "int")));
+        Partition one = dayPartition(table, "1", "one/", "e1");
+        Partition paddedOne = dayPartition(table, "01", "padded/", "e2");
+        Partition two = dayPartition(table, "2", "two/", "e3");
+        when(glue.getPartitions("lake", "events")).thenReturn(List.of(one, paddedOne, two));
+        RecordingBackend extended = extendedBackend("connection-1");
+        materializer.ensureCurrent(extended, session(false), BINDING, "events",
+                "SELECT * FROM analytics.events WHERE n = 1");
+        when(glue.getPartitions("lake", "events")).thenReturn(List.of(one, paddedOne));
+        int loaded = extended.statements.size();
+
+        materializer.ensureCurrent(extended, session(false), BINDING, "events",
+                "SELECT * FROM analytics.events WHERE n = $1", null);
+
+        assertThat(extended.statements.size(), equalTo(loaded));
+    }
+
+    @Test
+    void aBindAfterAParseThatSawAGluePartitionRemovedStillReadsTheRetainedOverlappingPartitions() {
+        Table table = dayPartitionedTable();
+        table.setPartitionKeys(List.of(new Column("n", "int")));
+        Partition one = dayPartition(table, "1", "one/", "e1");
+        Partition paddedOne = dayPartition(table, "01", "padded/", "e2");
+        Partition zeroPaddedOne = dayPartition(table, "001", "zero-padded/", "e3");
+        when(glue.getPartitions("lake", "events")).thenReturn(List.of(one, paddedOne, zeroPaddedOne));
+        RecordingBackend extended = extendedBackend("connection-1");
+        materializer.ensureCurrent(extended, session(false), BINDING, "events",
+                "SELECT * FROM analytics.events WHERE n = 1");
+        when(glue.getPartitions("lake", "events")).thenReturn(List.of(one, paddedOne));
+        String sql = "SELECT * FROM analytics.events WHERE n = $1";
+        materializer.ensureCurrent(extended, session(false), BINDING, "events", sql, null);
+        clearInvocations(duck);
+
+        materializer.ensureCurrent(extended, session(false), BINDING, "events", sql, List.of("1"));
+
+        verify(duck).execute(argThat(load -> load.contains("s3://bucket/one/part-1.csv")
+                && load.contains("s3://bucket/padded/part-1.csv")
+                && !load.contains("s3://bucket/zero-padded/")), any(), anyString(), eq(ACCOUNT));
+    }
+
+    @Test
+    void aStatementWithoutParametersLoadsItsPartitionsEvenWhileBeingParsed() {
+        twoDayPartitions();
+        RecordingBackend extended = extendedBackend("connection-1");
+
+        materializer.ensureCurrent(extended, session(false), BINDING, "events", DAY_ONE_SQL, null);
+
+        verify(duck).execute(argThat(sql -> sql.contains("s3://bucket/one/part-1.csv")
+                && !sql.contains("s3://bucket/two/")), any(), anyString(), eq(ACCOUNT));
+    }
+
+    @Test
+    void loadsEveryPartitionOnABackendThatDoesNotReportTheEndOfTheTransactionEvenWhileBeingParsed() {
+        twoDayPartitions();
+        RecordingBackend unreported = new RecordingBackend();
+        unreported.publicationAllowed = false;
+
+        materializer.ensureCurrent(unreported, session(false), BINDING, "events", DAY_PARAMETER_SQL, null);
+
+        verify(duck).execute(argThat(sql -> sql.contains("s3://bucket/one/part-1.csv")
+                && sql.contains("s3://bucket/two/part-1.csv")), any(), anyString(), eq(ACCOUNT));
     }
 
     @Test

@@ -679,9 +679,10 @@ class RedshiftSpectrumIntegrationTest {
         }
     }
 
-    @Test
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
     @Timeout(120)
-    void readsOnlyThePartitionsTheWhereSelectsOnTheExtendedProtocolAndInATransaction() throws Exception {
+    void readsOnlyThePartitionsTheWhereSelectsOnTheExtendedProtocolAndInATransaction(boolean bindParameters) throws Exception {
         bucket = "spectrum-pruning-ext-" + System.nanoTime();
         s3Service.createBucket(bucket, "us-east-1");
         s3Service.putObject(bucket, "events/day=1/part-1.csv", "1,10\n2,20\n".getBytes(StandardCharsets.UTF_8),
@@ -713,29 +714,51 @@ class RedshiftSpectrumIntegrationTest {
                     + "PARTITION (day='1') LOCATION 's3://" + bucket + "/events/day=1/' "
                     + "PARTITION (day='2') LOCATION 's3://" + bucket + "/events/day=2/'");
 
-            // the cache is cold here, so the simple protocol transaction itself loads and stages the partition
-            try (Connection simple = DriverManager.getConnection(baseUrl + "&preferQueryMode=simple",
-                    "admin", "Secret123");
-                 Statement query = simple.createStatement()) {
-                simple.setAutoCommit(false);
-                assertDayOneSum(query, selectDayOne);
-                simple.commit();
-                simple.setAutoCommit(true);
-                assertDayOneSum(query, selectDayOne);
-                SQLException unreadable = assertThrows(SQLException.class,
-                        () -> query.executeQuery("SELECT SUM(amount) FROM " + schemaName + ".events"));
-                assertEquals("22P02", unreadable.getSQLState());
+            if (!bindParameters) {
+                // The literal case also covers loading the cold cache in a Simple Query transaction.
+                try (Connection simple = DriverManager.getConnection(baseUrl + "&preferQueryMode=simple",
+                        "admin", "Secret123");
+                     Statement query = simple.createStatement()) {
+                    simple.setAutoCommit(false);
+                    assertDayOneSum(query, selectDayOne);
+                    simple.commit();
+                    simple.setAutoCommit(true);
+                    assertDayOneSum(query, selectDayOne);
+                    SQLException unreadable = assertThrows(SQLException.class,
+                            () -> query.executeQuery("SELECT SUM(amount) FROM " + schemaName + ".events"));
+                    assertEquals("22P02", unreadable.getSQLState());
+                }
             }
-            try (Connection extended = DriverManager.getConnection(baseUrl + "&preferQueryMode=extended",
+            String select = bindParameters ? "SELECT SUM(amount) FROM " + schemaName + ".events WHERE day = ?" : selectDayOne;
+            try (Connection extended = DriverManager.getConnection(baseUrl + "&preferQueryMode=extended&binaryTransfer=false",
                     "admin", "Secret123");
-                 Statement query = extended.createStatement()) {
-                assertDayOneSum(query, selectDayOne);
+                 PreparedStatement query = extended.prepareStatement(select)) {
+                query.unwrap(PGStatement.class).setPrepareThreshold(1);
+                // Describe forces Parse before any Bind, while the parameterized case still has a cold cache.
+                assertEquals(bindParameters ? 1 : 0, query.getParameterMetaData().getParameterCount());
+                if (bindParameters) {
+                    query.setInt(1, 1);
+                }
+                assertPreparedSum(query, 30);
                 extended.setAutoCommit(false);
-                assertDayOneSum(query, selectDayOne);
+                assertPreparedSum(query, 30);
                 extended.rollback();
-                assertDayOneSum(query, selectDayOne);
+                assertPreparedSum(query, 30);
                 extended.commit();
                 extended.setAutoCommit(true);
+                if (bindParameters) {
+                    query.setInt(1, 2);
+                    SQLException unreadable = assertThrows(SQLException.class, query::executeQuery);
+                    assertEquals("22P02", unreadable.getSQLState());
+                    query.setInt(1, 1);
+                    assertPreparedSum(query, 30);
+                    s3Service.putObject(bucket, "events/day=2/part-1.csv", "3,40\n".getBytes(StandardCharsets.UTF_8),
+                            "text/csv", null);
+                    query.setInt(1, 2);
+                    assertPreparedSum(query, 40);
+                    query.setInt(1, 1);
+                    assertPreparedSum(query, 30);
+                }
             }
             statement.execute("DROP SCHEMA IF EXISTS " + schemaName + " CASCADE");
         } finally {
@@ -748,6 +771,14 @@ class RedshiftSpectrumIntegrationTest {
         try (ResultSet rows = statement.executeQuery(sql)) {
             assertTrue(rows.next());
             assertEquals(30, rows.getLong(1));
+        }
+    }
+
+    private static void assertPreparedSum(PreparedStatement statement, long expected) throws SQLException {
+        try (ResultSet rows = statement.executeQuery()) {
+            assertTrue(rows.next());
+            assertEquals(expected, rows.getLong(1));
+            assertFalse(rows.next());
         }
     }
 

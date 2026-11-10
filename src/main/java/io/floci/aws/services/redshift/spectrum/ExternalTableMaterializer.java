@@ -213,14 +213,26 @@ public class ExternalTableMaterializer {
      */
     public Outcome ensureCurrent(BackendSql backend, SpectrumSession session, ExternalSchemaBinding binding,
                                  String tableName, String sql) {
+        return ensureCurrent(backend, session, binding, tableName, sql, List.of());
+    }
+
+    /**
+     * As {@link #ensureCurrent(BackendSql, SpectrumSession, ExternalSchemaBinding, String, String)} for a query
+     * with bind parameters: {@code parameters} holds the text of each bound value, a null where it is unusable.
+     * Null {@code parameters} means the statement is only being parsed and its values are not known yet; a
+     * partitioned table then loads no partition, enough for PostgreSQL to plan it, and the Bind loads the ones
+     * its values select.
+     */
+    public Outcome ensureCurrent(BackendSql backend, SpectrumSession session, ExternalSchemaBinding binding,
+                                 String tableName, String sql, List<String> parameters) {
         try (ExternalCatalogLocks.Guard ignored = catalogLocks.read(binding,
                 session.inTransaction() || !backend.permitsCachePublication())) {
-            return ensureCurrentLocked(backend, session, binding, tableName, sql);
+            return ensureCurrentLocked(backend, session, binding, tableName, sql, parameters);
         }
     }
 
     private Outcome ensureCurrentLocked(BackendSql backend, SpectrumSession session, ExternalSchemaBinding binding,
-                                        String tableName, String sql) {
+                                        String tableName, String sql, List<String> parameters) {
         Table table;
         try {
             table = RequestScopes.callAs(session.accountId(), () -> glueService.getTable(binding.glueDatabase(), tableName));
@@ -240,7 +252,8 @@ public class ExternalTableMaterializer {
             authorizeIcebergManifests(session.accountId(), binding, roleSession, table, location);
             List<Partition> partitions = partitions(session.accountId(), binding, table);
             if (holdsPartitions(table, session, backend, partitions)) {
-                return ensurePartitions(backend, session, binding, roleSession, table, location, partitions, sql);
+                return ensurePartitions(backend, session, binding, roleSession, table, location, partitions, sql,
+                        parameters);
             }
             List<ReadSource> sources = readSources(session.accountId(), binding, roleSession, table, location, partitions);
             List<S3Object> objects = sources.stream().flatMap(source -> source.objects().stream()).toList();
@@ -339,13 +352,16 @@ public class ExternalTableMaterializer {
      */
     private Outcome ensurePartitions(BackendSql backend, SpectrumSession session, ExternalSchemaBinding binding,
                                      RedshiftRoleAccess.RoleSession roleSession, Table table, Location location,
-                                     List<Partition> partitions, String sql) {
+                                     List<Partition> partitions, String sql, List<String> parameters) {
         String accountId = session.accountId();
         Optional<PartitionPruner.Filter> filter = PartitionPruner.filterFor(sql, binding.schemaName(),
-                table.getName(), table.getPartitionKeys());
+                table.getName(), table.getPartitionKeys(), parameters);
         // partitions that PostgreSQL's casts make equal cannot be told apart by key value, so they are all read
         boolean overlapping = hasOverlappingPartitions(table, partitions);
-        List<Partition> qualified = filter.isEmpty() || overlapping ? partitions
+        // a statement still being parsed has no values to select with, and its Bind loads what it needs
+        boolean awaitingValues = parameters == null && PartitionPruner.hasParameters(sql);
+        List<Partition> qualified = awaitingValues ? List.of()
+                : filter.isEmpty() || overlapping ? partitions
                 : partitions.stream().filter(partition -> filter.get().matches(partition.getValues())).toList();
         List<ReadSource> sources = readSources(accountId, binding, roleSession, table, location, qualified);
         authorizeObjects(accountId, binding, roleSession, sources);
@@ -372,6 +388,11 @@ public class ExternalTableMaterializer {
                 previousSignature = schemaSignatures.get(cacheKey);
             }
             boolean reset = state == null || !state.identity().equals(identity) || !definitions.equals(previousSignature);
+            if (awaitingValues && !reset) {
+                // a statement still being parsed loads nothing; its Bind reconciles the table, because a delete by
+                // key value here could remove rows of partitions that stay recorded as loaded
+                return Outcome.CURRENT;
+            }
             Map<List<String>, String> held = reset ? Map.of() : state.partitions();
             Set<List<String>> existing = partitions.stream().map(Partition::getValues).collect(Collectors.toSet());
             List<List<String>> deletions = new ArrayList<>(held.keySet().stream()
@@ -390,7 +411,7 @@ public class ExternalTableMaterializer {
                     loaded.put(values, fingerprint);
                 }
             }
-            if (overlapping && !reset && (!deletions.isEmpty() || !toLoad.isEmpty())) {
+            if (overlapping && !reset &&(!deletions.isEmpty() || !toLoad.isEmpty())) {
                 // a delete by key value cannot tell overlapping partitions apart, so the whole table is replaced
                 reset = true;
                 toLoad.clear();
