@@ -22,7 +22,8 @@ on, the request names a resource when one of its top-level members holds a strin
 strings, or, for an ARN, a member of a structure or of each element of a list of structures does
 (`SetRulePriorities`' `RulePriorities[].RuleArn`), and:
 
-- holds the resource's ARN: its name ends in `Arn` or `Arns`. Any of the action's types may be the
+- holds the resource's ARN: its name ends in `Arn` or `Arns`, or its modeled pattern only accepts an ARN,
+  regardless of the member's name. Any of the action's types may be the
   one it holds (`ResourceArn` holds whatever the action acts on, `RuleArn` a `listener-rule/app`),
   and a value names a resource of a type when it matches the type's ARN format, so an ARN of
   something the action does not act on is not checked.
@@ -44,7 +45,10 @@ acts in, so `repository/<name>` is that account's. A member whose shape's patter
 the name (`(arn:...:event-bus/)?<name>`) may give the ARN of the type of that name instead, whose one
 variable it is then read as, in the ARN's account and Region: EventBridge's `EventBusName`. So may a
 field of each element of a list of structures, each element's resource in the account and Region of
-the ARN it gives: `PutEvents`' `Entries[].EventBusName`. A format whose account the reference names
+the ARN it gives: `PutEvents`' `Entries[].EventBusName`. An unpatterned Identifier may also fill a type's
+sole variable from an ARN. Its inferred `preserveArnContext` retains the reader's direct-ARN fallback,
+including empty account and Region. Explicit `arnOf` corrections retain their existing defaults.
+A format whose account the reference names
 `${AccountId}` rather than `${Account}` (DataSync's) is read as every other format's account.
 
 An operation that creates a type its action does not act on names the new resource from the ARN of the
@@ -302,27 +306,6 @@ NOT_COVERED: dict[str, str] = {
 # them apart (EventBridge's `events` and EventBridge V2's `eventsv2`): Floci applies it only to a request the service
 # of that endpoint serves, never by a member a caller could add to a request of the other.
 CORRECTIONS: dict[str, tuple[list[dict], str]] = {
-    **{f"controltower:{operation}": ([{"type": "LandingZone",
-                                       "fill": {"LandingZoneId": "landingZoneIdentifier"},
-                                       "arnOf": {"landingZoneIdentifier": "LandingZone"}}],
-                                     "landingZoneIdentifier accepts either the landing zone ARN or its final id; "
-                                     "the unpatterned SDK string does not describe that alternative")
-       for operation in ("GetLandingZone", "UpdateLandingZone", "DeleteLandingZone", "ResetLandingZone")},
-    **{f"controltower:{operation}": ([{"types": [kind], "arn": member}],
-                                     "the Identifier holds the complete ARN, not the id in the resource ARN")
-       for operation, kind, member in (
-           ("GetBaseline", "Baseline", "baselineIdentifier"),
-           ("GetEnabledBaseline", "EnabledBaseline", "enabledBaselineIdentifier"),
-           ("UpdateEnabledBaseline", "EnabledBaseline", "enabledBaselineIdentifier"),
-           ("ResetEnabledBaseline", "EnabledBaseline", "enabledBaselineIdentifier"),
-           ("DisableBaseline", "EnabledBaseline", "enabledBaselineIdentifier"),
-           ("GetEnabledControl", "EnabledControl", "enabledControlIdentifier"),
-           ("UpdateEnabledControl", "EnabledControl", "enabledControlIdentifier"),
-           ("ResetEnabledControl", "EnabledControl", "enabledControlIdentifier"),
-           ("DisableControl", "EnabledControl", "enabledControlIdentifier"))},
-    "controltower:EnableControl": ([{"type": "EnabledControl", "fill": {}}],
-                                   "controlIdentifier names the catalog control, not the enabled control; "
-                                   "the enabled control id is minted by the service"),
     "quicksight:CreateDataSet": ([{"types": ["datasource"], "arn": f"PhysicalTableMap{{}}.{kind}.DataSourceArn"}
                                  for kind in ("S3Source", "RelationalTable", "CustomSql", "SaaSTable", "FileSource")],
                                 "CreateDataSet acts on each data source named by its physical tables; "
@@ -706,7 +689,7 @@ BARE = {"name", "names", "id", "ids", "identifier", "identifiers"}
 # The patterns botocore gives a string shape that holds an account id.
 ACCOUNT_ID_PATTERNS = {"[0-9]{12}", "^[0-9]{12}$", r"\d{12}", r"^\d{12}$"}
 # The verbs an operation that creates the resource it is named after starts with.
-CREATING_RE = re.compile(r"^(Create|Run|Allocate|Register|Put|Import|Copy|Request|Start|Add)")
+CREATING_RE = re.compile(r"^(Create|Run|Allocate|Register|Put|Import|Copy|Request|Start|Add|Enable)")
 # An operation's verb: what follows is what it acts on.
 SUBJECT_RE = re.compile(r"^[A-Z][a-z]+")
 # The protocols whose requests RequestResources reads: form parameters or a JSON or CBOR body.
@@ -794,6 +777,64 @@ def request_members(models: dict[str, dict], operation: str) -> dict[str, str]:
                 found.setdefault(name, name + _strings(model, shape))
             for path in _nested_arns(model, name, shape):
                 found.setdefault(path.removesuffix("[]"), path)
+    return found
+
+
+def string_patterns(models: dict[str, dict], operation: str) -> dict[str, set[str | None]]:
+    """Patterns of each top-level string member, including list elements, across the request's clients."""
+    found: dict[str, set[str | None]] = {}
+    for model in models.values():
+        spec = model["operations"].get(operation)
+        if spec is None or "input" not in spec or not READ_PROTOCOLS & _protocols(model):
+            continue
+        for name, member in model["shapes"][spec["input"]["shape"]].get("members", {}).items():
+            if member.get("location") not in BODY_LOCATIONS and _located(member) is None:
+                continue
+            shape = model["shapes"][member["shape"]]
+            if _strings(model, shape) is None:
+                continue
+            element = model["shapes"][shape["member"]["shape"]] if shape["type"] == "list" else shape
+            found.setdefault(name, set()).add(element.get("pattern"))
+    return found
+
+
+def only_arn(pattern: str | None) -> bool:
+    """A required ARN prefix, with no top-level alternative that could instead name another value."""
+    if not pattern or not re.match(r"^\^?arn:", pattern):
+        return False
+    depth = 0
+    in_class = False
+    escaped = False
+    for char in pattern:
+        if escaped:
+            escaped = False
+        elif char == "\\":
+            escaped = True
+        elif in_class:
+            in_class = char != "]"
+        elif char == "[":
+            in_class = True
+        elif char == "(":
+            depth += 1
+        elif char == ")":
+            depth -= 1
+        elif char == "|" and depth == 0:
+            return False
+    return True
+
+
+def with_identifier_arns(resources: list[dict], formats: dict[str, str], patterns: dict[str, set[str | None]]) -> list[dict]:
+    """An unpatterned Identifier filling a type's sole variable can also give that type's ARN."""
+    found = []
+    for resource in resources:
+        kind = resource.get("type")
+        variables = set(VARIABLE_RE.findall(formats.get(kind, ""))) - KNOWN_VARIABLES
+        arn_of = {member: kind for variable, path in resource.get("fill", {}).items()
+                  if variables == {variable} and kind_of(member := path.removesuffix("[]")) == "identifier"
+                  and patterns.get(member) == {None}}
+        inferred = arn_of.keys() - resource.get("arnOf", {}).keys()
+        found.append(dict(resource, arnOf={**arn_of, **resource.get("arnOf", {})},
+                          preserveArnContext=sorted(inferred)) if inferred else resource)
     return found
 
 
@@ -978,12 +1019,14 @@ def compatible(member: str, variable: str) -> bool:
     return not member_kind or not variable_kind or member_kind == variable_kind or member_kind == "identifier"
 
 
-def resources_for(operation: str, types: list[str], formats: dict[str, str], members: dict[str, str]) -> list[dict]:
+def resources_for(operation: str, types: list[str], formats: dict[str, str], members: dict[str, str],
+                  arn_members: set[str] | None = None) -> list[dict]:
     """The resources the rule finds the operation's request naming, as vendored entries."""
     name = operation.split(":", 1)[1]
     created = stem(CREATING_RE.sub("", name)) if CREATING_RE.match(name) else None
     subject = stem(SUBJECT_RE.sub("", name))
-    arns = {member: path for member, path in members.items() if re.search(r"arns?$", member, re.IGNORECASE)}
+    arns = {member: path for member, path in members.items() if re.search(r"arns?$", member, re.IGNORECASE)
+            or member in (arn_members or set())}
     names = {member: path for member, path in members.items() if member not in arns}
     by_arn: dict[str, list[str]] = {}
     filled: dict[str, dict[str, str]] = {}
@@ -998,7 +1041,8 @@ def resources_for(operation: str, types: list[str], formats: dict[str, str], mem
         # A top-level ARN member named for the type, or for whatever the action acts on, holds it, and a bare
         # name then names something else.
         held = [member for member in arns if "." not in member and (stem(member) in ("", "resource")
-                or related(stem(member), kind_stem) or kind_stem.startswith(stem(member)))]
+                or (stem(member) == kind_stem if member in (arn_members or set())
+                    else related(stem(member), kind_stem) or kind_stem.startswith(stem(member))))]
         variables = [v for v in VARIABLE_RE.findall(formats[kind]) if v not in KNOWN_VARIABLES]
         fill: dict[str, str] = {}
         for variable in sorted(variables, key=lambda v: (kind_of(v) == "", v)):
@@ -1186,6 +1230,8 @@ def entry_for(operation: str, upstream: dict, formats: dict[str, str], models: d
     """What the file says for one operation."""
     types = upstream["types"] or []
     members = request_members(models, operation.split(":", 1)[1])
+    patterns = string_patterns(models, operation.split(":", 1)[1])
+    arn_members = {member for member, values in patterns.items() if all(only_arn(value) for value in values)}
     if namespace_of(operation) in ID_TARGETS:
         entry = {"action": upstream["action"], "types": types, "resources": []}
         targets = id_targets(operation, types, formats, models)
@@ -1200,12 +1246,13 @@ def entry_for(operation: str, upstream: dict, formats: dict[str, str], models: d
             raise ValueError(f"CORRECTIONS serves {operation} on {sorted(unknown)}, no endpoint prefix of the clients "
                              f"it reads ({sorted(endpoints)})")
     else:
-        resources = with_through(with_found(with_parent_ids(resources_for(operation, types, formats, members),
+        resources = with_through(with_found(with_parent_ids(resources_for(operation, types, formats, members, arn_members),
                                                             formats, types, members),
                                             namespace_of(operation), types, members),
                                  namespace_of(operation), types, members)
     resources = with_account(resources, formats, account_members(models, operation.split(":", 1)[1]))
     resources = with_arn_of(resources, formats, name_or_arn_members(models, operation.split(":", 1)[1]))
+    resources = with_identifier_arns(resources, formats, patterns)
     resources = with_made(resources, operation, formats)
     entry = {"action": upstream["action"], "types": types, "resources": resources}
     creates = creates_for(operation, types, formats, members)
@@ -1425,7 +1472,7 @@ ARN_PATH_RE = re.compile(r"^(?:[A-Za-z][A-Za-z0-9_]*(\[])?(\.[A-Za-z][A-Za-z0-9_
 # A format's resource that is a literal and one variable, at its end.
 ONE_VARIABLE_RE = re.compile(r"^[^$]*\$\{\w+}$")
 # The keys a resource found by members does not take: it is read no other way, in the caller's account.
-FOUND_ONLY = {"absent", "arnOf", "account", "fixed", "before"}
+FOUND_ONLY = {"absent", "arnOf", "preserveArnContext", "account", "fixed", "before"}
 
 
 def validate(document: dict) -> list[str]:
@@ -1515,7 +1562,7 @@ def _resource_problems(operation: str, resource: object, types: set[str], format
                                                                                      "endpoint"}
                                               or {"types", "through"} <= set(resource) <= {"types", "through", "when",
                                                                                             "endpoint"}
-                                              or {"type", "fill"} <= set(resource) <= {"type", "fill", "when", "unless", "absent", "arnOf", "account",
+                                              or {"type", "fill"} <= set(resource) <= {"type", "fill", "when", "unless", "absent", "arnOf", "preserveArnContext", "account",
                                                                                        "fixed", "made", "before", "find", "endpoint"}):
         return [f"{operation} names {resource!r}, which is neither an ARN member nor a type's variables"]
     if "endpoint" in resource and not (isinstance(resource["endpoint"], str) and resource["endpoint"]):
@@ -1568,6 +1615,11 @@ def _resource_problems(operation: str, resource: object, types: set[str], format
             and len(set(VARIABLE_RE.findall(formats.get(kind, ""))) - KNOWN_VARIABLES) == 1
             and formats[kind].endswith("}") for path, kind in arn_of.items()):
         return [f"{operation} reads {arn_of!r} as ARNs of types, which are no members or types of one variable"]
+    preserved = resource.get("preserveArnContext", [])
+    if not isinstance(preserved, list) or not all(
+            isinstance(path, str) and arn_of.get(path) == kinds[0] and path in fill.values()
+            and len(fill) == 1 for path in preserved):
+        return [f"{operation} preserves {preserved!r}, not a sole member naming this resource's ARN"]
     account = resource.get("account")
     if account is not None and (not isinstance(account, str) or not PATH_RE.match(account) or account.endswith("[]")
                                 or "${Account}" not in formats[kinds[0]]):

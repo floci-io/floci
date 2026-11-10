@@ -1,13 +1,12 @@
 package io.floci.aws.services.controltower;
 
+import io.floci.aws.testing.AwsTestClients;
 import io.floci.aws.testing.SignedIamEnforcementProfile;
 import io.floci.aws.testing.SignedIamUsers;
 import io.quarkus.test.common.http.TestHTTPResource;
 import io.quarkus.test.junit.QuarkusTest;
 import io.quarkus.test.junit.TestProfile;
 import org.junit.jupiter.api.Test;
-import software.amazon.awssdk.auth.credentials.AwsBasicCredentials;
-import software.amazon.awssdk.auth.credentials.StaticCredentialsProvider;
 import software.amazon.awssdk.regions.Region;
 import software.amazon.awssdk.services.controltower.ControlTowerClient;
 import software.amazon.awssdk.services.controltower.model.ControlTowerException;
@@ -29,6 +28,27 @@ class ControlTowerIamIntegrationTest {
 
     @TestHTTPResource("/")
     URI endpoint;
+
+    @Test
+    void inferredLandingZoneArnKeepsMissingContextWithoutNamingTheSeededZone() throws Exception {
+        try (ControlTowerClient admin = client("test", "test")) {
+            String arn = admin.listLandingZones(ListLandingZonesRequest.builder().build()).landingZones().getFirst().arn();
+            String raw = "arn:aws:controltower:::landingzone/" + arn.substring(arn.lastIndexOf('/') + 1);
+            try (SignedIamUsers.User user = user("Allow", "controltower:*", raw);
+                 ControlTowerClient caller = client(user.accessKeyId(), user.secretAccessKey())) {
+                assertEquals(404, assertThrows(ControlTowerException.class,
+                        () -> caller.getLandingZone(r -> r.landingZoneIdentifier(raw))).statusCode());
+                assertEquals(404, assertThrows(ControlTowerException.class,
+                        () -> caller.deleteLandingZone(r -> r.landingZoneIdentifier(raw))).statusCode());
+            }
+            try (SignedIamUsers.User user = user("Allow", "controltower:*", arn);
+                 ControlTowerClient caller = client(user.accessKeyId(), user.secretAccessKey())) {
+                denied(() -> caller.getLandingZone(r -> r.landingZoneIdentifier(raw)));
+                denied(() -> caller.deleteLandingZone(r -> r.landingZoneIdentifier(raw)));
+            }
+            assertEquals(arn, admin.getLandingZone(r -> r.landingZoneIdentifier(arn)).landingZone().arn());
+        }
+    }
 
     @Test
     void landingZoneScopedAllowAcceptsIdAndArnButRefusesAnotherResource() throws Exception {
@@ -169,8 +189,7 @@ class ControlTowerIamIntegrationTest {
     }
 
     private ControlTowerClient client(String key, String secret) {
-        return ControlTowerClient.builder().endpointOverride(endpoint).region(Region.US_EAST_1)
-                .credentialsProvider(StaticCredentialsProvider.create(AwsBasicCredentials.create(key, secret))).build();
+        return AwsTestClients.create(ControlTowerClient.builder(), key, secret, Region.US_EAST_1, endpoint);
     }
 
     private static void denied(Runnable request) {

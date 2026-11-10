@@ -43,6 +43,25 @@ class RequestResourceMembersTest {
     private static final ObjectMapper MAPPER = new ObjectMapper();
 
     @Test
+    void inferredArnContextMetadataRequiresTheSoleMatchingMember() throws Exception {
+        String document = """
+                {"namespaces":{"example":["example"]},"arnFormats":{"example":{
+                "pool":"arn:${Partition}:example:${Region}:${Account}:pool/${PoolId}"}},
+                "operations":{"example:Read":{"resources":[{"type":"pool",
+                "fill":{"PoolId":"PoolIdentifier"},"arnOf":{"PoolIdentifier":"pool"},
+                "preserveArnContext":["PoolIdentifier"]}]}}}
+                """;
+        assertEquals(List.of("PoolIdentifier"), parse(document).operations().get("example:Read")
+                .getFirst().preserveArnContext());
+        for (String invalid : List.of("null", "17", "\"PoolIdentifier\"", "[17]", "[\"Other\"]")) {
+            assertThrows(IllegalStateException.class,
+                    () -> parse(document.replace("[\"PoolIdentifier\"]", invalid)));
+        }
+        assertThrows(IllegalStateException.class, () -> parse(document.replace(
+                "\"arnOf\":{\"PoolIdentifier\":\"pool\"},", "")));
+    }
+
+    @Test
     void generatedIdTargetsValidateTheirMemberWireNameAndDiscriminators() throws Exception {
         ObjectMapper mapper = new ObjectMapper();
         ObjectNode document = (ObjectNode) mapper.readTree("""
@@ -449,7 +468,8 @@ class RequestResourceMembersTest {
      */
     private static boolean sharesAMember(Resource resource, Map<Member, String> given) {
         if (resource.arn() != null || resource.fill().values().stream()
-                .noneMatch(member -> given.containsKey(member) && !resource.arnOf().containsKey(member.path()))) {
+                .noneMatch(member -> given.containsKey(member) && (!resource.arnOf().containsKey(member.path())
+                        || !AwsArnUtils.isArn(given.get(member))))) {
             return false;
         }
         Map<String, String> values = given.entrySet().stream()

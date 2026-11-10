@@ -1,5 +1,6 @@
 package io.floci.aws.services.controltower;
 
+import io.floci.aws.testing.AwsTestClients;
 import io.floci.aws.testing.SignedIamEnforcementProfile;
 import io.floci.aws.testing.SignedIamUsers;
 import io.quarkus.test.common.http.TestHTTPResource;
@@ -8,8 +9,6 @@ import io.quarkus.test.junit.TestProfile;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.ValueSource;
-import software.amazon.awssdk.auth.credentials.AwsBasicCredentials;
-import software.amazon.awssdk.auth.credentials.StaticCredentialsProvider;
 import software.amazon.awssdk.core.document.Document;
 import software.amazon.awssdk.regions.Region;
 import software.amazon.awssdk.services.controltower.ControlTowerClient;
@@ -113,7 +112,6 @@ class ControlTowerTagOnCreateIntegrationTest {
     }
 
     private ControlTowerClient client(String key, String secret) {
-        return ControlTowerClient.builder().endpointOverride(endpoint).region(Region.AP_SOUTHEAST_2)
-                .credentialsProvider(StaticCredentialsProvider.create(AwsBasicCredentials.create(key, secret))).build();
+        return AwsTestClients.create(ControlTowerClient.builder(), key, secret, Region.AP_SOUTHEAST_2, endpoint);
     }
 }

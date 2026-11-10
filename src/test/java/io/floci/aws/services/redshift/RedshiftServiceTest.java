@@ -4203,6 +4203,15 @@ class RedshiftServiceTest {
     }
 
     @Test
+    void snapshotScheduleRejectsArnIdentifiersBeforeStorage() {
+        String arn = "arn:aws:redshift:us-west-2:222222222222:snapshotschedule:other";
+        AwsException failure = assertThrows(AwsException.class, () -> service.createSnapshotSchedule(
+                arn, "description", List.of("rate(2 hours)"), Map.of()));
+        assertEquals("InvalidParameterValue", failure.getErrorCode());
+        verifyNoInteractions(snapshotScheduleBackend);
+    }
+
+    @Test
     void snapshotScheduleRejectsOutOfRangeCronFields() {
         when(snapshotScheduleBackend.get("invalid-cron")).thenReturn(Optional.empty());
 

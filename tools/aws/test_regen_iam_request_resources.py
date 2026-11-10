@@ -600,7 +600,7 @@ def test_every_correction_is_the_vendored_entry_of_an_operation_the_file_reads()
         assert len(actual) == len(resources), operation
         for resource, correction in zip(actual, resources, strict=True):
             assert {key: value for key, value in resource.items()
-                    if key not in ("account", "arnOf", "made") or key in correction} == correction, operation
+                    if key not in ("account", "arnOf", "preserveArnContext", "made") or key in correction} == correction, operation
 
 
 def test_a_correction_gives_the_operation_its_resources(corrections):
@@ -904,3 +904,78 @@ def test_id_targets_reject_unknown_types_ambiguous_prefixes_and_malformed_member
         invalid = copy.deepcopy(document)
         invalid["operations"]["ec2:CreateTags"]["targets"][field] = value
         assert r.validate(invalid), (field, value)
+
+
+@pytest.mark.parametrize("operation", [
+    "GetLandingZone", "UpdateLandingZone", "DeleteLandingZone", "ResetLandingZone",
+    "GetBaseline", "GetEnabledBaseline", "UpdateEnabledBaseline", "ResetEnabledBaseline", "DisableBaseline",
+    "GetEnabledControl", "UpdateEnabledControl", "ResetEnabledControl", "DisableControl", "EnableControl",
+])
+def test_controltower_entries_are_derived_without_operation_corrections(operation):
+    from regen_partitions import resolve_botocore_data
+
+    key = "controltower:" + operation
+    assert key not in r.CORRECTIONS
+    document = json.loads(r.OUTPUT.read_text())
+    data, _ = resolve_botocore_data(None)
+    model = r.load_models(data, {"controltower"})
+    expected = document["operations"][key]
+    assert r.entry_for(key, {"action": expected["action"], "types": expected["types"]},
+                       document["arnFormats"]["controltower"], model) == expected
+
+
+@pytest.mark.parametrize("pattern, expected", [
+    (None, False), ("", False), ("arn:aws:service:.*", True),
+    (r"^arn:(aws|aws-cn):service:[a-z0-9-]+:.*$", True),
+    (r"arn:aws:service:[a|b]+", True), (r"arn:aws:service:foo\|bar", True),
+    (r"^arn:aws:service:.*$|plain-name", False),
+    (r"(arn:aws:service:.*)?plain-name", False),
+])
+def test_arn_only_patterns_distinguish_nested_and_top_level_alternatives(pattern, expected):
+    assert r.only_arn(pattern) is expected
+
+
+def test_arn_only_identifier_never_fills_a_different_resource_id():
+    formats = {"EnabledControl": "arn:${Partition}:svc:${Region}:${Account}:enabledcontrol/${EnabledControlId}"}
+    result = r.resources_for("svc:EnableControl", ["EnabledControl"], formats,
+                             {"controlIdentifier": "controlIdentifier"}, {"controlIdentifier"})
+    assert result == [{"types": ["EnabledControl"], "arn": "controlIdentifier"},
+                      {"type": "EnabledControl", "fill": {}}]
+
+
+def test_arn_only_pattern_recognition_does_not_depend_on_member_spelling():
+    formats = {"pool": "arn:${Partition}:svc:${Region}:${Account}:pool/${PoolId}"}
+    assert r.resources_for("svc:ReadPool", ["pool"], formats,
+                           {"opaqueReference": "opaqueReference"}, {"opaqueReference"}) == [
+        {"types": ["pool"], "arn": "opaqueReference"}]
+
+
+def test_explicit_name_key_arn_conversion_is_preserved():
+    formats = {"pool": "arn:${Partition}:svc:${Region}:${Account}:pool/${PoolName}"}
+    resource = {"type": "pool", "fill": {"PoolName": "PoolIdentifier"},
+                "arnOf": {"PoolIdentifier": "pool"}}
+    assert r.with_identifier_arns([resource], formats, {"PoolIdentifier": {None}}) == [resource]
+
+
+def test_inferred_identifier_arn_does_not_replace_explicit_metadata():
+    formats = {"pool": "arn:${Partition}:svc:${Region}:${Account}:pool/${PoolId}"}
+    resource = {"type": "pool", "fill": {"PoolId": "PoolIdentifier"},
+                "arnOf": {"PoolIdentifier": "parent"}}
+    assert r.with_identifier_arns([resource], formats, {"PoolIdentifier": {None}}) == [resource]
+
+
+def test_inferred_identifier_preserves_direct_arn_context_without_marking_explicit_metadata():
+    formats = {"pool": "arn:${Partition}:svc:${Region}:${Account}:pool/${PoolId}"}
+    resource = {"type": "pool", "fill": {"PoolId": "PoolIdentifier"}}
+    assert r.with_identifier_arns([resource], formats, {"PoolIdentifier": {None}}) == [
+        dict(resource, arnOf={"PoolIdentifier": "pool"}, preserveArnContext=["PoolIdentifier"])]
+    explicit = dict(resource, arnOf={"PoolIdentifier": "pool"})
+    assert r.with_identifier_arns([explicit], formats, {"PoolIdentifier": {None}}) == [explicit]
+
+
+@pytest.mark.parametrize("preserved", [None, "Bus", ["Unknown"], [17]])
+def test_preserved_arn_context_requires_a_sole_matching_arn_member(preserved):
+    document = json.loads(r.OUTPUT.read_text())
+    resource = document["operations"]["redshift:DescribeClusters"]["resources"][0]
+    resource["preserveArnContext"] = preserved
+    assert r.validate(document)

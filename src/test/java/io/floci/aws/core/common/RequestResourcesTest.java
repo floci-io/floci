@@ -32,6 +32,28 @@ class RequestResourcesTest {
     private static final String MACHINE = "arn:aws:states:us-east-1:000000000000:stateMachine:orders";
 
     @Test
+    void inferredIdentifiersPreserveMissingArnContext() {
+        for (String region : List.of("", "us-east-1")) {
+            for (String account : List.of("", "000000000000")) {
+                String arn = "arn:aws:redshift:" + region + ":" + account + ":cluster:missing";
+                for (String operation : List.of("DescribeClusters", "DeleteCluster")) {
+                    assertEquals(List.of(arn), of("redshift:" + operation,
+                            json("{\"ClusterIdentifier\":\"" + arn + "\"}")));
+                }
+            }
+        }
+    }
+
+    @Test
+    void inferredLandingZoneIdentifiersKeepRawContextAcrossOperations() {
+        String arn = "arn:aws:controltower:::landingzone/missing";
+        for (String operation : List.of("GetLandingZone", "UpdateLandingZone", "ResetLandingZone", "DeleteLandingZone")) {
+            assertEquals(List.of(arn), of("controltower:" + operation,
+                    json("{\"landingZoneIdentifier\":\"" + arn + "\"}")));
+        }
+    }
+
+    @Test
     void controlTowerIdentifiersKeepFullArnsAndLandingZoneIds() {
         String prefix = "arn:aws:controltower:us-east-1:000000000000:";
         for (String operation : List.of("GetLandingZone", "UpdateLandingZone", "ResetLandingZone", "DeleteLandingZone")) {
@@ -55,6 +77,17 @@ class RequestResourcesTest {
         assertEquals(List.of("arn:aws-us-gov:controltower:us-gov-west-1:111122223333:landingzone/zone-one"),
                 RequestResources.of("controltower:GetLandingZone", json("{\"landingZoneIdentifier\":\"zone-one\"}"),
                         "aws-us-gov", "us-gov-west-1", "111122223333"));
+    }
+
+    @Test
+    void inferredControlArnsIgnoreOtherResourceTypesAndKeepTheCreatedWildcard() {
+        String enabled = "arn:aws:controltower:us-east-1:000000000000:enabledcontrol/one";
+        String references = "\"controlIdentifier\":\"arn:aws:controlcatalog:::control/catalog-one\","
+                + "\"targetIdentifier\":\"arn:aws:organizations::111122223333:ou/o-one/ou-one\"";
+        assertEquals(List.of(enabled), of("controltower:DisableControl",
+                json("{" + references + ",\"enabledControlIdentifier\":\"" + enabled + "\"}")));
+        assertEquals(List.of("arn:aws:controltower:us-east-1:000000000000:enabledcontrol/*"),
+                of("controltower:EnableControl", json("{" + references + "}")));
     }
 
     @Test
@@ -889,6 +922,42 @@ class RequestResourcesTest {
                 json("{\"names\":[\"a\",\"" + project + "b\"]}")));
         assertEquals(List.of(project + "a", project + "b"), of("codebuild:BatchGetProjects",
                 json("{\"names\":[\"" + project + "a\",\"" + project + "b\"]}")));
+    }
+
+    @Test
+    void modelOnlyArnMembersAreFilteredByTheActionsResourceTypes() {
+        String prefix = "arn:aws:";
+        assertEquals(List.of(prefix + "athena:us-east-1:000000000000:workgroup/team"), of("athena:StartSession",
+                json("{\"WorkGroup\":\"team\",\"ExecutionRole\":\"arn:aws:iam::000000000000:role/runner\"}")));
+        assertEquals(List.of(prefix + "kinesisanalytics:us-east-1:000000000000:application/job"),
+                of("kinesisanalytics:UpdateApplication", json("{\"ApplicationName\":\"job\","
+                        + "\"ServiceExecutionRoleUpdate\":\"arn:aws:iam::000000000000:role/runner\"}")));
+        String subscription = prefix + "ce::000000000000:anomalysubscription/subscription";
+        assertEquals(List.of(subscription), of("ce:UpdateAnomalySubscription",
+                json("{\"SubscriptionArn\":\"" + subscription + "\",\"MonitorArnList\":["
+                        + "\"arn:aws:ce::000000000000:anomalymonitor/monitor\"]}")));
+        assertEquals(List.of(prefix + "quicksight:us-east-1:000000000000:dashboard/dashboard"),
+                RequestResources.of("quicksight:UpdateDashboardLinks", json("{\"LinkEntities\":["
+                        + "\"arn:aws:quicksight:us-east-1:000000000000:analysis/analysis\"]}"),
+                        "aws", "us-east-1", "000000000000", null, Map.of("DashboardId", "dashboard")));
+        String application = prefix + "sso::000000000000:application/ssoins-1234567890123456/apl-1234567890123456";
+        assertEquals(List.of(application), of("sso:PutApplicationAccessScope",
+                json("{\"ApplicationArn\":\"" + application + "\",\"AuthorizedTargets\":["
+                        + "\"arn:aws:sso:::instance/ssoins-1234567890123456\"]}")));
+    }
+
+    @Test
+    void inferredIdentifierArnsPreserveExistingSingleVariableResolution() {
+        String prefix = "arn:aws:redshift:us-east-1:000000000000:cluster:";
+        String foreign = "arn:aws:redshift:us-west-2:222222222222:cluster:other";
+        for (String action : List.of("CreateCluster", "DeleteCluster", "DescribeClusters")) {
+            assertEquals(List.of(prefix + "warehouse"), of("redshift:" + action,
+                    json("{\"ClusterIdentifier\":\"warehouse\"}")));
+            assertEquals(List.of(foreign, "arn:aws:redshift:us-east-1:222222222222:cluster:other",
+                    "arn:aws:redshift:us-west-2:000000000000:cluster:other", prefix + "other"),
+                    of("redshift:" + action,
+                    json("{\"ClusterIdentifier\":\"" + foreign + "\"}")));
+        }
     }
 
     /**
