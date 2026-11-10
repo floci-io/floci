@@ -19,7 +19,6 @@ import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
-import java.util.function.Function;
 
 import static io.restassured.RestAssured.given;
 import static org.awaitility.Awaitility.await;
@@ -125,16 +124,8 @@ class BackupPaginationIntegrationTest {
         startThreeJobs(vault);
 
         List<String> collected = new ArrayList<>();
-        int pages = pageThrough(collected, token -> {
-            RequestSpecification req = given().header("Authorization", AUTH)
-                    .queryParam("byBackupVaultName", vault).queryParam("maxResults", 1);
-            if (token != null) req = req.queryParam("nextToken", token);
-            JsonPath page = req.get("/backup-jobs/").then().statusCode(200).extract().jsonPath();
-            List<String> ids = page.getList("BackupJobs.BackupJobId");
-            assertNotNull(ids);
-            assertEquals(1, ids.size(), "each page must hold exactly one job");
-            return new PageResult<>(ids, page.getString("NextToken"));
-        });
+        int pages = pageThrough(collected, "/backup-jobs/", Map.of("byBackupVaultName", vault, "maxResults", 1),
+                "BackupJobs.BackupJobId", "each page must hold exactly one job");
 
         assertEquals(3, collected.size());
         assertEquals(3, new HashSet<>(collected).size());
@@ -148,16 +139,9 @@ class BackupPaginationIntegrationTest {
         startThreeJobs(vault);
 
         List<String> collected = new ArrayList<>();
-        int pages = pageThrough(collected, token -> {
-            RequestSpecification req = given().header("Authorization", AUTH).queryParam("maxResults", 1);
-            if (token != null) req = req.queryParam("nextToken", token);
-            JsonPath page = req.get("/backup-vaults/" + vault + "/recovery-points/")
-                    .then().statusCode(200).extract().jsonPath();
-            List<String> arns = page.getList("RecoveryPoints.RecoveryPointArn");
-            assertNotNull(arns);
-            assertEquals(1, arns.size(), "each page must hold exactly one recovery point");
-            return new PageResult<>(arns, page.getString("NextToken"));
-        });
+        int pages = pageThrough(collected, "/backup-vaults/" + vault + "/recovery-points/",
+                Map.of("maxResults", 1), "RecoveryPoints.RecoveryPointArn",
+                "each page must hold exactly one recovery point");
 
         assertEquals(3, collected.size());
         assertEquals(3, new HashSet<>(collected).size());
@@ -165,15 +149,22 @@ class BackupPaginationIntegrationTest {
     }
 
 
-    private record PageResult<T>(List<T> items, String nextToken) {}
-
-    private int pageThrough(List<String> collected, Function<String, PageResult<String>> fetcher) {
+    private int pageThrough(List<String> collected, String path, Map<String, ?> query, String listField,
+            String sizeMessage) {
         int pages = 0;
         String token = null;
         do {
-            PageResult<String> result = fetcher.apply(token);
-            collected.addAll(result.items());
-            token = result.nextToken();
+            RequestSpecification req = given().header("Authorization", AUTH);
+            for (Map.Entry<String, ?> e : query.entrySet()) {
+                req = req.queryParam(e.getKey(), e.getValue());
+            }
+            if (token != null) req = req.queryParam("nextToken", token);
+            JsonPath page = req.get(path).then().statusCode(200).extract().jsonPath();
+            List<String> items = page.getList(listField);
+            assertNotNull(items);
+            assertEquals(1, items.size(), sizeMessage);
+            collected.addAll(items);
+            token = page.getString("NextToken");
             pages++;
         } while (token != null);
         return pages;
