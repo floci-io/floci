@@ -1825,7 +1825,8 @@ Map, ACM, CodePipeline, CodeBuild, Amazon Managed Service for Apache Flink (Kine
 Application Auto Scaling, AWS Budgets, Cost and Usage Reports, Service Quotas, Amazon Textract, Amazon Translate, Amazon Athena,
 AWS Data Exports, AWS Pricing Calculator, Cost Explorer, CloudTrail, Global Accelerator, Amazon
 Timestream for InfluxDB, Amazon Redshift, the Amazon Redshift Data API, AWS Payment Cryptography, AWS DataSync, Amazon EMR,
-Amazon Rekognition, IAM Identity Center, Amazon Inspector, Amazon Macie, Amazon OpenSearch Service and IAM Access Analyzer they come from a table generated from AWS's Service Reference and botocore, `src/main/resources/aws/iam-request-resources.json`, which gives each
+Amazon Rekognition, IAM Identity Center, Amazon Inspector, Amazon Macie, Amazon OpenSearch Service, IAM Access Analyzer,
+AWS Security Hub and Amazon GuardDuty they come from a table generated from AWS's Service Reference and botocore, `src/main/resources/aws/iam-request-resources.json`, which gives each
 operation's action, the resource types that action acts on with their ARN formats, and the request
 members that name them: a member holding a resource's ARN, which counts when it matches the format
 of a type the action acts on, or members filling the variables of a type's format. A member holding
@@ -2014,7 +2015,7 @@ the one after `/tags/` or `/v1/tags/`, the body's `resourceArn` on `POST /tags`,
 `resourceArn` query parameter on the other bare routes.
 
 A REST request names its resources in its path and its query as well as its body. For the REST
-services the table reads, OpenSearch Service and IAM Access Analyzer among them, a member its path carries, the
+services the table reads, OpenSearch Service, IAM Access Analyzer, Security Hub and GuardDuty among them, a member its path carries, the
 `DomainName` of `/2021-01-01/opensearch/domain/{DomainName}` or the `analyzerName` of
 `/analyzer/{analyzerName}`, is read from the route the request matches in the vendored routes below,
 and one its query carries, the `arn` of `ListTags`, from the query, as members of the body are:
@@ -2030,6 +2031,16 @@ Floci serves neither. Of Access Analyzer's, Floci serves the analyzer operations
 is checked on the analyzer its body names, and so are its tags, which also need
 `access-analyzer:TagResource` (below), and `GetAnalyzer` and `DeleteAnalyzer` on the one their path
 names.
+Security Hub checks most of its actions on the caller's hub in the Region, `hub/default`, which no
+member names: `EnableSecurityHub`, `DescribeStandards` and the organization and standards operations
+are checked on that hub, and `DescribeHub` on the hub its `HubArn` query names, or on that one when it
+names none: an optional member holding the ARN of a type whose format has no variable of its own names
+that type when it is left out. GuardDuty's detector operations are checked on `detector/<DetectorId>`
+from their path, and a publishing destination on
+`detector/<DetectorId>/publishingdestination/<DestinationId>`; its list, member and organization
+operations act on no resource type and are checked on `*`. An `EnableSecurityHub` or a GuardDuty
+create carrying tags also needs `securityhub:TagResource` on the hub or `guardduty:TagResource` on `*`,
+a detector's id being one GuardDuty mints (below).
 
 A route no rule maps is the operation whose route it matches in botocore's model of its service,
 vendored in `src/main/resources/aws/rest-routes.json` (`make aws-data-sync` regenerates it): of the
@@ -2041,9 +2052,10 @@ when the Service Reference gives the action no resource type, as AWS authorizes 
 The actions of no resource type are vendored in `src/main/resources/aws/iam-authorized-actions.json`
 for each scope whose routes are read (`make iam-authorized-actions-sync` regenerates them). So
 OpenSearch Service's `ListDomainNames`, `ListVersions` and VPC endpoint operations, in both API
-versions, and Access Analyzer's `ListAnalyzers` and `ValidatePolicy` are checked by their routes, and
-so are OpenSearch Service's domain operations and Access Analyzer's analyzer operations, the table of
-request resources reading the domain or the analyzer they name. Every route Floci serves of AWS Lake
+versions, Access Analyzer's `ListAnalyzers` and `ValidatePolicy`, and GuardDuty's operations of no
+resource type are checked by their routes, and so are OpenSearch Service's domain operations, Access
+Analyzer's analyzer operations, Security Hub's hub operations and GuardDuty's detector operations, the
+table of request resources reading the resource they name. Every route Floci serves of AWS Lake
 Formation and Amazon Inspector is one AWS authorizes on no resource type, as is every one of Amazon Macie's but
 `CreateMember`, so those are checked by their routes alone. `CreateMember`, on `POST /members`, is checked on the
 member its `account.accountId` names, and needs `macie2:TagResource` when it carries tags. A route whose action AWS checks on a
@@ -2326,7 +2338,7 @@ Region, as the Service Reference gives it the `function` resource, so a function
 there too, and a create of a service the table of request resources reads is checked on the resource
 it creates (a target group on `targetgroup/<Name>/*`, an application load balancer on
 `loadbalancer/app/<Name>/*`, an Access Analyzer analyzer on `analyzer/<analyzerName>`, an OpenSearch
-domain on `domain/<DomainName>`). A create of a resource under a parent its action acts on tags the new
+domain on `domain/<DomainName>`, a Security Hub hub on `hub/default`). A create of a resource under a parent its action acts on tags the new
 resource, so its tags are checked on that one, built from the parent's ARN with its own id open:
 `CreateListener` acts on a load balancer and its tags are checked on
 `listener/app/<load balancer name>/<load balancer id>/*`, and `CreateRule`'s on the new

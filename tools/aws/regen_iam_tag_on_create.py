@@ -106,14 +106,14 @@ OUTPUT = REPO_ROOT / "src/main/resources/aws/iam-tag-on-create.json"
 NAMESPACES = (
     "access-analyzer", "acm", "application-autoscaling", "athena", "autoscaling", "bcm-data-exports",
     "bcm-pricing-calculator", "budgets", "ce", "cloudformation", "cloudhsm", "cloudtrail", "cloudwatch",
-    "codedeploy", "codepipeline", "cognito-identity", "cognito-idp", "comprehend", "config", "controltower", "cur", "datasync",
-    "dms", "dsql", "dynamodb", "ec2", "ecr", "ecs", "eks", "elasticache", "elasticloadbalancing",
-    "elasticmapreduce", "es", "events", "firehose", "globalaccelerator", "glue", "iam", "kinesis", "kinesisanalytics",
-    "kms", "lambda", "lightsail", "logs", "macie2", "memorydb", "network-firewall", "organizations",
-    "payment-cryptography", "pipes", "rds", "redshift", "redshift-serverless", "rekognition", "resource-groups",
-    "route53resolver", "sagemaker", "scheduler", "secretsmanager", "servicediscovery", "ses", "signer", "sns", "sqs",
-    "ssm", "sso", "states", "sts", "swf", "textract", "timestream-influxdb", "transcribe", "transfer", "translate",
-    "wafv2", "xray",
+    "codedeploy", "codepipeline", "cognito-identity", "cognito-idp", "comprehend", "config", "controltower", "cur",
+    "datasync", "dms", "dsql", "dynamodb", "ec2", "ecr", "ecs", "eks", "elasticache", "elasticloadbalancing",
+    "elasticmapreduce", "es", "events", "firehose", "globalaccelerator", "glue", "guardduty", "iam", "kinesis",
+    "kinesisanalytics", "kms", "lambda", "lightsail", "logs", "macie2", "memorydb", "network-firewall",
+    "organizations", "payment-cryptography", "pipes", "rds", "redshift", "redshift-serverless", "rekognition",
+    "resource-groups", "route53resolver", "sagemaker", "scheduler", "secretsmanager", "securityhub",
+    "servicediscovery", "ses", "signer", "sns", "sqs", "ssm", "sso", "states", "sts", "swf", "textract",
+    "timestream-influxdb", "transcribe", "transfer", "translate", "wafv2", "xray",
 )
 
 _NO_ROUTES = "REST routes no rule maps yet"
@@ -126,11 +126,11 @@ NOT_COVERED = {
     "cloudfront": _NO_ROUTES, "codeguru-reviewer": _NO_ROUTES, "connect": _NO_ROUTES,
     "detective": _NO_ROUTES, "dlm": _NO_ROUTES,
     "elasticfilesystem": _NO_ROUTES, "emr-serverless": _NO_ROUTES, "fis": _NO_ROUTES,
-    "guardduty": _NO_ROUTES, "inspector2": _NO_ROUTES, "iot": _NO_ROUTES, "kafka": _NO_ROUTES,
+    "inspector2": _NO_ROUTES, "iot": _NO_ROUTES, "kafka": _NO_ROUTES,
     "mq": _NO_ROUTES, "oam": _NO_ROUTES,
     "quicksight": "metadata-only REST subset; creation-tag IAM authorization is not implemented",
     "ram": _NO_ROUTES,
-    "resource-explorer-2": _NO_ROUTES, "rum": _NO_ROUTES, "s3tables": _NO_ROUTES, "securityhub": _NO_ROUTES,
+    "resource-explorer-2": _NO_ROUTES, "rum": _NO_ROUTES, "s3tables": _NO_ROUTES,
     "s3": "authorized by route; S3 checks s3:PutObjectTagging for an object it creates with tags itself",
     "servicecatalog": "its operations that tag are AppRegistry's, whose REST routes no rule maps yet",
 }

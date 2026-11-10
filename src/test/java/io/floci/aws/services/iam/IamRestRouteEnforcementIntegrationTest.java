@@ -648,6 +648,67 @@ class IamRestRouteEnforcementIntegrationTest {
     }
 
     /**
+     * A Security Hub request is checked on the caller's hub in the Region it is signed for, {@code hub/default}, the
+     * ARN Security Hub gives it, or on the hub its {@code HubArn} names: a caller with no grant is refused, a grant
+     * scoped to the hub lets {@code DescribeStandards} through and {@code DescribeHub} reach Security Hub, which is
+     * not enabled there, with or without the hub's ARN, a request naming or signed for another Region's hub is
+     * refused, and a deny on the hub holds under an allow on everything.
+     */
+    @Test
+    void aSecurityHubRequestIsCheckedOnTheHub() {
+        String user = user("route-hub");
+        String region = "eu-west-3";
+        String hub = "arn:aws:securityhub:" + region + ":" + ACCOUNT + ":hub/default";
+        String otherHub = "arn:aws:securityhub:us-west-2:" + ACCOUNT + ":hub/default";
+        refused(as(user, region, "securityhub").get("/standards").then(), "securityhub:DescribeStandards");
+        refused(as(user, region, "securityhub").body("{}").post("/accounts").then(), "securityhub:EnableSecurityHub");
+
+        policy(user, allow("securityhub:DescribeStandards", hub) + "," + allow("securityhub:DescribeHub", hub));
+        as(user, region, "securityhub").get("/standards").then().statusCode(200);
+        as(user, region, "securityhub").get("/accounts").then().statusCode(404)
+                .body(containsString("ResourceNotFoundException"));
+        as(user, region, "securityhub").queryParam("HubArn", hub).get("/accounts").then().statusCode(404)
+                .body(containsString("ResourceNotFoundException"));
+        refused(as(user, region, "securityhub").queryParam("HubArn", otherHub).get("/accounts").then(),
+                "securityhub:DescribeHub");
+        refused(as(user, "us-west-2", "securityhub").get("/standards").then(), "securityhub:DescribeStandards");
+
+        policy(user, allow("securityhub:*", "*") + "," + deny("securityhub:DescribeStandards", hub));
+        refused(as(user, region, "securityhub").get("/standards").then(), "securityhub:DescribeStandards");
+        as(user, "us-west-2", "securityhub").get("/standards").then().statusCode(200);
+    }
+
+    /**
+     * A GuardDuty request naming its detector in its path is checked on that detector, the ARN GuardDuty gives it,
+     * and one naming none as its action on {@code *}: a caller with no grant is refused, a grant scoped to the
+     * detector lets {@code GetDetector} read it, a request naming another detector is refused, and a deny on the
+     * detector holds under an allow on everything.
+     */
+    @Test
+    void aGuardDutyRequestIsCheckedOnTheDetectorItsPathNames() {
+        String user = user("route-detector");
+        String region = "eu-west-3";
+        refused(as(user, region, "guardduty").get("/detector").then(), "guardduty:ListDetectors");
+        String detector = given().header("Authorization", auth(ADMIN, region, "guardduty"))
+                .contentType("application/json").body("{\"enable\":true}").post("/detector")
+                .then().statusCode(200).extract().path("detectorId");
+        cleanup.register(() -> given().header("Authorization", auth(ADMIN, region, "guardduty"))
+                .delete("/detector/" + detector));
+        String arn = "arn:aws:guardduty:" + region + ":" + ACCOUNT + ":detector/" + detector;
+        refused(as(user, region, "guardduty").get("/detector/" + detector).then(), "guardduty:GetDetector");
+
+        policy(user, allow("guardduty:GetDetector", arn));
+        as(user, region, "guardduty").get("/detector/" + detector).then().statusCode(200)
+                .body("status", equalTo("ENABLED"));
+        refused(as(user, region, "guardduty").get("/detector/other" + detector).then(), "guardduty:GetDetector");
+        refused(as(user, region, "guardduty").get("/detector").then(), "guardduty:ListDetectors");
+
+        policy(user, allow("guardduty:*", "*") + "," + deny("guardduty:GetDetector", arn));
+        refused(as(user, region, "guardduty").get("/detector/" + detector).then(), "guardduty:GetDetector");
+        as(user, region, "guardduty").get("/detector").then().statusCode(200);
+    }
+
+    /**
      * A segment ending in a matrix parameter, which the router ignores, is checked as the route it reaches, on the
      * resource its path names: the routed path carries no matrix parameter, so the rule matches and the ARN is the
      * named resource's, and a grant scoped to it lets the request through while a caller with none is refused.

@@ -57,6 +57,7 @@ MODELS: dict[str, str] = {
     "controltower": "controltower",
     "dsql": "dsql",
     "eks": "eks",
+    "guardduty": "guardduty",
     "es": "es",
     "inspector2": "inspector2",
     "lakeformation": "lakeformation",
@@ -72,6 +73,7 @@ MODELS: dict[str, str] = {
     "s3": "s3",
     "s3control": "s3",
     "scheduler": "scheduler",
+    "securityhub": "securityhub",
     "signer": "signer",
     "xray": "xray",
 }
