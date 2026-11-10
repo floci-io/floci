@@ -625,16 +625,9 @@ public class EventsCfnProvisioner implements CfnResourceProvisioner {
      * keeps the stack reporting that rollback is not implemented.
      */
     private boolean rollbackEventBusUpdate(StackResource resource) {
-        String raw = resource.getAttributes().get(CfnRollback.EVENT_BUS_UPDATE_SNAPSHOT_ATTR);
-        if (raw == null) {
+        JsonNode snapshot = CfnRollback.updateSnapshot(resource, CfnRollback.EVENT_BUS_UPDATE_SNAPSHOT_ATTR);
+        if (snapshot == null) {
             return false;
-        }
-        JsonNode snapshot;
-        try {
-            snapshot = MAPPER.readTree(raw);
-        } catch (JsonProcessingException e) {
-            throw new IllegalStateException("Could not read the event bus update snapshot for "
-                    + resource.getLogicalId(), e);
         }
         reconcileEventBusTags(snapshot.path("arn").asText(), CfnRollback.snapshotTagKeys(snapshot),
                 CfnRollback.snapshotTags(snapshot), snapshot.path("region").asText());

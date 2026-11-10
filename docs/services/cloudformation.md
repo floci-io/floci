@@ -312,9 +312,13 @@ The current implementation is limited to custom buses with the `Name`, `Descript
 `Policy` properties. `EventSourceName`, `KmsKeyIdentifier`, `DeadLetterConfig`, and `LogConfig` are
 rejected with `ValidationError` instead of being silently ignored. AWS models a `Name` change as
 resource replacement; Floci currently rejects that update until generic replacement handling is
-available. `Policy` is applied when the bus is created. Changing `Description`, `Tags`, or `Policy`
-during `UpdateStack` is rejected until transactional resource rollback is available; this prevents a
-failed stack update from leaving the live bus in the rejected configuration.
+available. `Policy` is applied when the bus is created. On `UpdateStack` the template's `Tags` are
+applied to the same bus in place: a key the stack recorded setting and the new template drops is
+removed, and a tag added outside the stack is kept, as on AWS. A bus created before Floci recorded
+its tag keys keeps a key an older template dropped. When a later resource fails the update, the
+tags the bus had before it are put back. Changing `Description` or `Policy` during `UpdateStack` is
+rejected until transactional resource rollback is available; this prevents a failed stack update
+from leaving the live bus in the rejected configuration.
 
 ## EventBridge archives
 

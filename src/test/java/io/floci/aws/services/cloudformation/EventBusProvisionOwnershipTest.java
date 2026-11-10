@@ -191,6 +191,24 @@ class EventBusProvisionOwnershipTest {
         assertFalse(provisioner.retainsFailedUpdateState(policy));
     }
 
+    /**
+     * A bus the failed update never reached carries no snapshot, so its rollback reports false
+     * and the stack keeps saying rollback is not implemented, rather than touching its tags.
+     */
+    @Test
+    void aBusWithoutAnUpdateSnapshotIsNotRolledBack() {
+        StackResource bus = new StackResource();
+        bus.setLogicalId("OrdersBus");
+        bus.setResourceType("AWS::Events::EventBus");
+        bus.setPhysicalId(BUS);
+        bus.setAttributes(new HashMap<>(Map.of(MANAGED_TAG_KEYS_ATTR, "[\"version\"]")));
+
+        assertFalse(provisioner.rollbackUpdate(bus));
+        verify(eventBridgeService, never()).tagResource(anyString(), any(), anyString());
+        verify(eventBridgeService, never()).untagResource(anyString(), any(), anyString());
+        assertEquals("[\"version\"]", bus.getAttributes().get(MANAGED_TAG_KEYS_ATTR));
+    }
+
     @Test
     void updateOfBusRecreatedOutOfBandStillFails() {
         when(eventBridgeService.createEventBus(eq(BUS), any(), any(), eq(REGION)))
