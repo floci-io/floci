@@ -146,12 +146,15 @@ public class PipesTargetInvoker {
             if (resp.isEmpty() || "null".equals(resp)) {
                 return null;
             }
-            // AWS also skips the target when the enrichment returns an empty object {} or empty
-            // array []; only a non-empty array such as [{}] invokes the target (with an
-            // empty-payload element). Parse so whitespace variants ({ }, [ ]) are handled too.
+            // AWS also skips the target when the enrichment returns an empty string "", an empty
+            // object {} or an empty array []; only a non-empty array such as [{}] invokes the target
+            // (with an empty-payload element). Parse so whitespace variants ({ }, [ ]) are handled too.
             try {
                 JsonNode node = objectMapper.readTree(resp);
-                if ((node.isObject() || node.isArray()) && node.isEmpty()) {
+                boolean empty = node.isTextual()
+                        ? node.asText().isEmpty()
+                        : node.isContainerNode() && node.isEmpty();
+                if (empty) {
                     return null;
                 }
             } catch (JsonProcessingException e) {

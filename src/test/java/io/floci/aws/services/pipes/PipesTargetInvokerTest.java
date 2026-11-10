@@ -655,10 +655,10 @@ class PipesTargetInvokerTest {
 
     @Test
     void applyEnrichment_emptyObjectOrArrayResponseSkipsTarget() {
-        // AWS skips the target when the enrichment returns {} or [] (whitespace variants included).
+        // AWS skips the target when the enrichment returns "", {} or [] (whitespace variants included).
         String region = "us-east-1";
         Pipe pipe = enrichmentPipe(region, "arn:aws:lambda:" + region + ":000000000000:function:enrich-fn");
-        for (String body : new String[]{"{}", "[]", "  { }  ", "[ ]"}) {
+        for (String body : new String[]{"{}", "[]", "  { }  ", "[ ]", "\"\""}) {
             when(lambdaService.invoke(eq(region), eq("enrich-fn"), any(byte[].class), eq(InvocationType.RequestResponse)))
                     .thenReturn(new InvokeResult(
                             200, null, body.getBytes(StandardCharsets.UTF_8), null, "req"));

@@ -179,15 +179,16 @@ A pipe's optional enrichment step (`source → filter → enrichment → target`
 synchronously (`RequestResponse`), once per batch, as a bare JSON array, and the response becomes the
 target input.
 
-- **Empty responses skip the target**, matching AWS: an empty body, `null`, `{}`, or `[]` consumes
-  the source records without invoking the target. A non-empty array such as `[{}]` still invokes the
+- **Empty responses skip the target**, matching AWS: an empty body, `null`, `""`, `{}`, or `[]`
+  consumes the source records without invoking the target. A non-empty array such as `[{}]` still invokes the
   target (with an empty-payload element).
 - **An array response is delivered by target.** An event bus, SQS queue or SNS topic takes one event
-  per element, with the target's `InputTemplate` rendered on each element apart. A Lambda function or
-  a Step Functions state machine takes the whole response in one request. An array of more than 10
-  elements for an event bus, queue or topic fails the batch without invoking the target, as on AWS,
-  where 10 is what those targets take in one request. A failure on any element fails the batch, and a
-  retried batch runs through the enrichment again, so elements already delivered are delivered again.
+  per element, with the target's `InputTemplate` rendered on each element apart. A Lambda function, a
+  Step Functions state machine or a Redshift target takes the whole response in one request. An array
+  of more than 10 elements for an event bus, queue or topic fails the batch without invoking the
+  target, as on AWS, where 10 is what those targets take in one request. A failure on any element
+  fails the batch, and a retried batch runs through the enrichment again, so elements already
+  delivered are delivered again.
 - **A Lambda enrichment `FunctionError` fails the batch** — the source records are routed to the
   pipe's dead-letter queue rather than silently consumed. Where the pipe has no dead-letter queue or
   the queue refuses them, an SQS message becomes visible again and a DynamoDB stream batch is read

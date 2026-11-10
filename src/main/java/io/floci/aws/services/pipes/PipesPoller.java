@@ -636,17 +636,17 @@ public class PipesPoller implements Resettable {
     }
 
     /**
-     * What each target invocation takes of an enrichment's response. A target with no batch API, Lambda
-     * or Step Functions, gets the entire JSON array in one request; any other target gets one event per
-     * element, each rendered through the target's template apart, and an array past the target's batch
-     * limit fails the batch, as AWS invokes no target with it. A response that is no array is one
-     * event, raw, and only a Lambda target expects it in the batch (JSON array) shape.
+     * What each target invocation takes of an enrichment's response. A target with no batch API, Lambda,
+     * Step Functions or Redshift, gets the entire JSON array in one request; an event bus, queue or topic
+     * gets one event per element, each rendered through the target's template apart, and an array past
+     * the target's batch limit fails the batch, as AWS invokes no target with it. A response that is no
+     * array is one event, raw, and only a Lambda target expects it in the batch (JSON array) shape.
      */
     private List<String> enrichedTargetPayloads(Pipe pipe, String enriched) {
         if (isLambdaTarget(pipe)) {
             return List.of(asEventArray(objectMapper, enriched));
         }
-        if (isStateMachineTarget(pipe)) {
+        if (isStateMachineTarget(pipe) || PipesTargetInvoker.isRedshiftTarget(pipe.getTarget())) {
             return List.of(enriched);
         }
         JsonNode response;

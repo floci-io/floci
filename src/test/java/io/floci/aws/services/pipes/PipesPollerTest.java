@@ -277,6 +277,20 @@ class PipesPollerTest {
     }
 
     @Test
+    void pollSqs_enrichmentArrayReachesRedshiftWholeHoweverLongItIs() throws Exception {
+        for (String target : List.of("arn:aws:redshift:us-east-1:000000000000:cluster:warehouse",
+                "arn:aws:redshift-serverless:us-east-1:000000000000:workgroup/warehouse")) {
+            Pipe pipe = enrichedSqsPipe(target);
+            String eleven = elements(11);
+            when(targetInvoker.applyEnrichment(eq(pipe), anyString(), eq("us-east-1"))).thenReturn(eleven);
+
+            poller.pollSqs(pipe, "us-east-1");
+
+            assertEquals(List.of(eleven), targetPayloads(pipe), target);
+        }
+    }
+
+    @Test
     void pollKafka_filtersUsingDecodedPayloadButDeliversOriginalRecord() throws Exception {
         Pipe pipe = selfManagedKafkaPipe();
         byte[] key = "customer-123".getBytes(StandardCharsets.UTF_8);
@@ -797,12 +811,7 @@ class PipesPollerTest {
         pipe.setSourceParameters(MAPPER.readTree(
                 "{\"DynamoDBStreamParameters\":{\"DeadLetterConfig\":{\"Arn\":\"" + DLQ_ARN + "\"}}}"));
         streams.shard.add(ddbRecord("001", "active"));
-        StringBuilder eleven = new StringBuilder("[");
-        for (int n = 1; n <= 11; n++) {
-            eleven.append(n > 1 ? "," : "").append("{\"n\":").append(n).append("}");
-        }
-        when(targetInvoker.applyEnrichment(eq(pipe), anyString(), eq("us-east-1")))
-                .thenReturn(eleven.append("]").toString());
+        when(targetInvoker.applyEnrichment(eq(pipe), anyString(), eq("us-east-1"))).thenReturn(elements(11));
 
         poller.startPolling(pipe);
         poller.pollDynamoDbStreams(pipe, "us-east-1");
@@ -877,6 +886,15 @@ class PipesPollerTest {
         when(sqsService.receiveMessage(anyString(), anyInt(), anyInt(), anyInt(), eq("us-east-1")))
                 .thenReturn(List.of(msg));
         return pipe;
+    }
+
+    /** An enrichment response of {@code count} events, {@code [{"n":1},...]}. */
+    private static String elements(int count) {
+        StringBuilder array = new StringBuilder("[");
+        for (int n = 1; n <= count; n++) {
+            array.append(n > 1 ? "," : "").append("{\"n\":").append(n).append("}");
+        }
+        return array.append("]").toString();
     }
 
     /** What the enrichment was invoked with, in invocation order. */
