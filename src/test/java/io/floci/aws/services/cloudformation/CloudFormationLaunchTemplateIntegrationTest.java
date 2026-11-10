@@ -14,6 +14,7 @@ import java.util.List;
 import java.util.Map;
 
 import static io.restassured.RestAssured.given;
+import static org.hamcrest.Matchers.contains;
 import static org.hamcrest.Matchers.containsString;
 import static org.hamcrest.Matchers.equalTo;
 import static org.hamcrest.Matchers.not;
@@ -35,6 +36,88 @@ class CloudFormationLaunchTemplateIntegrationTest {
             "AWS4-HMAC-SHA256 Credential=test/20260205/us-east-1/cloudformation/aws4_request";
     private static final String EC2_AUTH =
             "AWS4-HMAC-SHA256 Credential=test/20260205/us-east-1/ec2/aws4_request";
+
+    @Test
+    void rollbackDeletesTheFailedVersionWithoutReusingItsNumber() {
+        String suffix = Long.toString(System.nanoTime(), 36);
+        String stackName = "cfn-lt-version-gap-" + suffix;
+        String templateName = "cfn-lt-version-gap-template-" + suffix;
+        try {
+            applyVersionTemplate(stackName, templateName, "t3.micro", false, false);
+            CfnStackWaits.awaitStatus(stackName, "CREATE_COMPLETE", CFN_AUTH);
+            applyVersionTemplate(stackName, templateName, "t3.small", true, false);
+            CfnStackWaits.awaitStatus(stackName, "UPDATE_COMPLETE", CFN_AUTH);
+            applyVersionTemplate(stackName, templateName, "t3.medium", true, true);
+            CfnStackWaits.awaitStatus(stackName, "UPDATE_ROLLBACK_COMPLETE", CFN_AUTH);
+
+            given()
+                .header("Authorization", EC2_AUTH)
+                .formParam("Action", "DescribeLaunchTemplates")
+                .formParam("LaunchTemplateName.1", templateName)
+            .when()
+                .post("/")
+            .then()
+                .statusCode(200)
+                .body("DescribeLaunchTemplatesResponse.launchTemplates.item.defaultVersionNumber", equalTo("1"))
+                .body("DescribeLaunchTemplatesResponse.launchTemplates.item.latestVersionNumber", equalTo("2"));
+            given()
+                .header("Authorization", EC2_AUTH)
+                .formParam("Action", "DescribeLaunchTemplateVersions")
+                .formParam("LaunchTemplateName", templateName)
+                .formParam("LaunchTemplateVersion.1", "3")
+            .when()
+                .post("/")
+            .then()
+                .statusCode(400)
+                .body(containsString("<Code>InvalidLaunchTemplateVersion.NotFound</Code>"));
+
+            applyVersionTemplate(stackName, templateName, "t3.large", true, false);
+            CfnStackWaits.awaitStatus(stackName, "UPDATE_COMPLETE", CFN_AUTH);
+            given()
+                .header("Authorization", EC2_AUTH)
+                .formParam("Action", "DescribeLaunchTemplateVersions")
+                .formParam("LaunchTemplateName", templateName)
+            .when()
+                .post("/")
+            .then()
+                .statusCode(200)
+                .body("DescribeLaunchTemplateVersionsResponse.launchTemplateVersionSet.item.versionNumber",
+                        contains("1", "2", "4"))
+                .body("DescribeLaunchTemplateVersionsResponse.launchTemplateVersionSet.item.launchTemplateData.instanceType",
+                        contains("t3.micro", "t3.small", "t3.large"));
+        } finally {
+            given()
+                .header("Authorization", CFN_AUTH)
+                .formParam("Action", "DeleteStack")
+                .formParam("StackName", stackName)
+            .when()
+                .post("/")
+            .then()
+                .statusCode(200);
+            CfnStackWaits.awaitStackDeleted(stackName);
+        }
+    }
+
+    private void applyVersionTemplate(String stack, String name, String type, boolean update, boolean fail) {
+        String failure = fail ? """
+                ,"BrokenSubnet": {"Type": "AWS::EC2::Subnet", "DependsOn": "Lt",
+                    "Properties": {"VpcId": "vpc-ffffffff", "CidrBlock": "10.84.1.0/24"}}
+                """ : "";
+        String template = """
+                {"Resources": {"Lt": {"Type": "AWS::EC2::LaunchTemplate", "Properties": {
+                    "LaunchTemplateName": "%s",
+                    "LaunchTemplateData": {"ImageId": "ami-12345678", "InstanceType": "%s"}}}%s}}
+                """.formatted(name, type, failure);
+        given()
+            .header("Authorization", CFN_AUTH)
+            .formParam("Action", update ? "UpdateStack" : "CreateStack")
+            .formParam("StackName", stack)
+            .formParam("TemplateBody", template)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200);
+    }
 
     @Test
     void ec2InstanceResolvesImageAndTypeFromLaunchTemplate() {

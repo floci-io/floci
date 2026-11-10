@@ -16,6 +16,7 @@ import software.amazon.awssdk.http.urlconnection.UrlConnectionHttpClient;
 import software.amazon.awssdk.regions.Region;
 import software.amazon.awssdk.services.ec2.Ec2Client;
 import software.amazon.awssdk.services.ec2.model.DescribeLaunchTemplateVersionsRequest;
+import software.amazon.awssdk.services.ec2.model.Ec2Exception;
 import software.amazon.awssdk.services.ec2.model.LaunchTemplateVersion;
 
 import java.lang.management.ManagementFactory;
@@ -25,6 +26,7 @@ import java.net.URI;
 import java.time.Duration;
 import java.util.AbstractSet;
 import java.util.Arrays;
+import java.util.Collections;
 import java.util.Iterator;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -44,6 +46,7 @@ import static org.awaitility.Awaitility.await;
 import static org.hamcrest.Matchers.equalTo;
 import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 
 @QuarkusTest
 class Ec2LaunchTemplateVersionsIntegrationTest {
@@ -107,9 +110,36 @@ class Ec2LaunchTemplateVersionsIntegrationTest {
         try (Ec2Client client = client()) {
             String id = createVersions(client, name);
             try {
-                // The deletion API is not implemented; seed a gap through the existing service path.
-                RequestScopes.runAs(ACCOUNT, () -> service.deleteLaunchTemplateVersion("us-east-1", id, "2"));
+                client.deleteLaunchTemplateVersions(request -> request.launchTemplateId(id).versions("2"));
                 assertEquals(List.of(1L, 3L), client.describeLaunchTemplateVersions(request -> request.launchTemplateId(id))
+                        .launchTemplateVersions().stream().map(LaunchTemplateVersion::versionNumber).toList());
+            } finally {
+                client.deleteLaunchTemplate(request -> request.launchTemplateId(id));
+            }
+        }
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"empty", "malformed", "zero", "too-many", "both-selectors"})
+    void invalidDeletionBatchPreservesAllVersions(String invalid) {
+        String name = "versions-invalid-" + UUID.randomUUID();
+        try (Ec2Client client = client()) {
+            String id = createVersions(client, name);
+            try {
+                List<String> versions = switch (invalid) {
+                    case "empty" -> List.of();
+                    case "malformed" -> List.of("2", "invalid");
+                    case "zero" -> List.of("2", "0");
+                    case "too-many" -> Collections.nCopies(201, "2");
+                    default -> List.of("2");
+                };
+                Ec2Exception error = assertThrows(Ec2Exception.class, () ->
+                        client.deleteLaunchTemplateVersions(request -> request.launchTemplateId(id)
+                                .launchTemplateName("both-selectors".equals(invalid) ? name : null)
+                                .versions(versions)));
+                assertEquals(400, error.statusCode());
+                assertEquals(List.of(1L, 2L, 3L), client.describeLaunchTemplateVersions(
+                                request -> request.launchTemplateId(id))
                         .launchTemplateVersions().stream().map(LaunchTemplateVersion::versionNumber).toList());
             } finally {
                 client.deleteLaunchTemplate(request -> request.launchTemplateId(id));
@@ -142,6 +172,9 @@ class Ec2LaunchTemplateVersionsIntegrationTest {
         LaunchTemplate template = RequestScopes.callAs(ACCOUNT, () -> {
             LaunchTemplate created = service.createLaunchTemplate("us-east-1", name, new LaunchTemplateData(), List.of());
             service.createLaunchTemplateVersion("us-east-1", created.getLaunchTemplateId(), null, "1", new LaunchTemplateData());
+            if (delete) {
+                service.modifyLaunchTemplate("us-east-1", created.getLaunchTemplateId(), null, "2");
+            }
             return created;
         });
         CountDownLatch startWriter = new CountDownLatch(1);
