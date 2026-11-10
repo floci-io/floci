@@ -1257,6 +1257,21 @@ class EventBridgeServiceTest {
                 "{\"detail\":{\"a\":{\"b\":{\"c\":[\"wrong\"]}}}}"));
     }
 
+    @ParameterizedTest
+    @CsvSource(delimiter = '|', value = {
+            "{\"detail\":{\"items\":{\"id\":[\"a\"]}}}|{\"items\":[{\"id\":\"a\"}]}|true",
+            "{\"detail\":{\"items\":{\"id\":[\"a\"]}}}|{\"items\":[{\"id\":\"b\"},{\"id\":\"a\"}]}|true",
+            "{\"detail\":{\"items\":{\"id\":[\"a\"]}}}|{\"items\":[{\"id\":\"b\"},{\"id\":\"c\"}]}|false",
+            "{\"detail\":{\"tags\":[{\"exists\":false}]}}|{\"tags\":[]}|true",
+            "{\"detail\":{\"tags\":[{\"exists\":true}]}}|{\"tags\":[]}|false",
+            "{\"detail\":{\"tags\":[{\"exists\":false}]}}|{\"tags\":[\"a\"]}|false",
+            "{\"detail\":{\"tags\":[{\"exists\":true}]}}|{\"tags\":[\"a\"]}|true"
+    })
+    void matchesPatternAgainstArrayDetail(String pattern, String detail, boolean expected) {
+        Map<String, Object> event = Map.of("Source", "my.app", "Detail", detail);
+        assertEquals(expected, service.matchesPattern(event, pattern));
+    }
+
     @Test
     void matchesPatternTopLevelOr_firstBranchMatches() {
         Map<String, Object> event = Map.of("Source", "aws.ec2", "DetailType", "Other");
