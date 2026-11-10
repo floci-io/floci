@@ -204,7 +204,7 @@ arn:aws:iam::<account>:role/aws-service-role/<namespace>.application-autoscaling
   evaluates its policies or adjusts its capacity. This matches the existing behavior of
   EC2 Auto Scaling's `PutScalingPolicy` in Floci for those dimensions. The control plane
   is faithful for all dimensions; the control loop is only emulated for ECS.
-- Scheduled scaling supports only one-off UTC schedules for ECS desired count. Recurring schedules, `Timezone`, `StartTime`, and `EndTime` return `ValidationException`.
+- Scheduled scaling supports only one-off UTC schedules for ECS desired count. `Timezone` accepts `UTC` or omission. Recurring schedules, other timezones, `StartTime`, and `EndTime` return `ValidationException`.
 - `PredictiveScalingPolicyConfiguration` is accepted only insofar as `PolicyType` is
   validated; the configuration block is not stored.
 - **The evaluation range's exact width is an approximation.** Alarm evaluation follows

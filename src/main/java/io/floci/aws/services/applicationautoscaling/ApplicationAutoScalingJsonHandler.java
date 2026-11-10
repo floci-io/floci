@@ -119,7 +119,7 @@ public class ApplicationAutoScalingJsonHandler {
     }
 
     private Response handlePutScheduledAction(JsonNode request, String region) {
-        for (String unsupported : List.of("Timezone", "StartTime", "EndTime")) {
+        for (String unsupported : List.of("StartTime", "EndTime")) {
             if (request.has(unsupported)) {
                 throw new AwsException("ValidationException", unsupported + " is not supported for one-off UTC schedules.", 400);
             }
@@ -131,7 +131,8 @@ public class ApplicationAutoScalingJsonHandler {
         service.putScheduledAction(text(request, "ServiceNamespace"), text(request, "ResourceId"),
                 text(request, "ScalableDimension"), text(request, "ScheduledActionName"),
                 strictText(request, "Schedule"), action != null,
-                strictInteger(action, "MinCapacity"), strictInteger(action, "MaxCapacity"), region);
+                strictInteger(action, "MinCapacity"), strictInteger(action, "MaxCapacity"),
+                strictText(request, "Timezone"), region);
         return Response.ok(objectMapper.createObjectNode()).build();
     }
 
@@ -144,7 +145,7 @@ public class ApplicationAutoScalingJsonHandler {
     private Response handleDescribeScheduledActions(JsonNode request, String region) {
         PaginatedResult<ScheduledAction> result = service.describeScheduledActions(text(request, "ServiceNamespace"),
                 text(request, "ResourceId"), text(request, "ScalableDimension"),
-                stringList(request.path("ScheduledActionNames")), optionalMaxResults(request), text(request, "NextToken"), region);
+                scheduledActionNames(request.get("ScheduledActionNames")), optionalMaxResults(request), text(request, "NextToken"), region);
         ObjectNode response = objectMapper.createObjectNode();
         ArrayNode actions = response.putArray("ScheduledActions");
         for (ScheduledAction action : result.items()) {
@@ -156,6 +157,9 @@ public class ApplicationAutoScalingJsonHandler {
             node.put("ScheduledActionARN", action.getScheduledActionArn());
             node.put("Schedule", action.getSchedule());
             node.put("CreationTime", action.getCreationTime());
+            if (action.getTimezone() != null) {
+                node.put("Timezone", action.getTimezone());
+            }
             ObjectNode bounds = node.putObject("ScalableTargetAction");
             if (action.getMinCapacity() != null) {
                 bounds.put("MinCapacity", action.getMinCapacity());
@@ -168,6 +172,23 @@ public class ApplicationAutoScalingJsonHandler {
             response.put("NextToken", result.nextToken());
         }
         return Response.ok(response).build();
+    }
+
+    private static List<String> scheduledActionNames(JsonNode value) {
+        if (value == null || value.isNull()) {
+            return List.of();
+        }
+        if (!value.isArray()) {
+            throw new AwsException("ValidationException", "ScheduledActionNames must be an array of strings.", 400);
+        }
+        List<String> names = new ArrayList<>();
+        for (JsonNode name : value) {
+            if (!name.isTextual()) {
+                throw new AwsException("ValidationException", "ScheduledActionNames must contain only strings.", 400);
+            }
+            names.add(name.textValue());
+        }
+        return names;
     }
 
     private static String strictText(JsonNode request, String field) {

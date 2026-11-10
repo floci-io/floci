@@ -600,10 +600,11 @@ class ApplicationAutoScalingIntegrationTest {
             ScheduledActionFixtures.register(client, resource, 1, 10);
             try {
                 client.putScheduledAction(ScheduledActionFixtures.put(resource, "once")
-                        .schedule(ScheduledActionFixtures.schedule(deadline))
+                        .timezone("UTC").schedule(ScheduledActionFixtures.schedule(deadline))
                         .scalableTargetAction(ScheduledActionFixtures.bounds(2, 8)).build());
                 ScheduledAction original = ScheduledActionFixtures.describe(client, resource).scheduledActions().getFirst();
                 assertNotNull(original.creationTime());
+                assertEquals("UTC", original.timezone());
                 assertTrue(original.scheduledActionARN().contains(":autoscaling:us-east-1:000000000000:scheduledAction:"));
                 client.putScheduledAction(ScheduledActionFixtures.put(resource, "once")
                         .scalableTargetAction(ScheduledActionFixtures.bounds(3, null)).build());
@@ -611,15 +612,23 @@ class ApplicationAutoScalingIntegrationTest {
                 assertEquals(3, replaced.scalableTargetAction().minCapacity());
                 assertNull(replaced.scalableTargetAction().maxCapacity());
                 assertEquals(original.schedule(), replaced.schedule());
+                assertEquals("UTC", replaced.timezone());
                 client.putScheduledAction(ScheduledActionFixtures.put(resource, "once").build());
                 client.putScheduledAction(ScheduledActionFixtures.put(resource, "once")
                         .schedule(ScheduledActionFixtures.schedule(deadline.plusSeconds(60))).build());
                 ScheduledAction rescheduled = ScheduledActionFixtures.describe(client, resource).scheduledActions().getFirst();
                 assertEquals(original.scheduledActionARN(), rescheduled.scheduledActionARN());
                 assertEquals(original.creationTime(), rescheduled.creationTime());
+                assertEquals("UTC", rescheduled.timezone());
                 client.putScheduledAction(ScheduledActionFixtures.put(resource, "two")
                         .schedule(ScheduledActionFixtures.schedule(deadline))
                         .scalableTargetAction(ScheduledActionFixtures.bounds(null, 4)).build());
+                ScheduledAction omittedTimezone = client.describeScheduledActions(b -> b.serviceNamespace("ecs")
+                        .resourceId(resource).scheduledActionNames("two")).scheduledActions().getFirst();
+                assertNull(omittedTimezone.timezone());
+                client.putScheduledAction(ScheduledActionFixtures.put(resource, "two").timezone("UTC").build());
+                assertEquals("UTC", client.describeScheduledActions(b -> b.serviceNamespace("ecs")
+                        .resourceId(resource).scheduledActionNames("two")).scheduledActions().getFirst().timezone());
                 DescribeScheduledActionsResponse page = client.describeScheduledActions(b -> b.serviceNamespace("ecs")
                         .resourceId(resource).maxResults(1));
                 assertEquals(1, page.scheduledActions().size());
@@ -637,7 +646,7 @@ class ApplicationAutoScalingIntegrationTest {
                 assertThrows(ValidationException.class, () -> client.putScheduledAction(ScheduledActionFixtures.put(resource, "two")
                         .schedule("rate(1 minute)").build()));
                 assertThrows(ValidationException.class, () -> client.putScheduledAction(ScheduledActionFixtures.put(resource, "two")
-                        .timezone("UTC").build()));
+                        .timezone("Europe/London").build()));
                 assertThrows(ValidationException.class, () -> client.putScheduledAction(ScheduledActionFixtures.put(resource, "two")
                         .startTime(deadline).build()));
                 assertThrows(ValidationException.class, () -> client.putScheduledAction(ScheduledActionFixtures.put(resource, "two")
@@ -686,6 +695,49 @@ class ApplicationAutoScalingIntegrationTest {
                     ScheduledActionFixtures.deregister(client, resource);
                 }
             }
+        }
+    }
+
+    @Test
+    void scheduledActionNamesRejectMalformedFiltersWithoutReturningUnfilteredActions() {
+        String resource = "service/scheduled-name-filter/service";
+        try (ApplicationAutoScalingClient client = AwsTestClients.create(ApplicationAutoScalingClient.builder(),
+                "000000000000", Region.US_EAST_1)) {
+            ScheduledActionFixtures.register(client, resource, 0, 10);
+            try {
+                for (String name : List.of("wanted", "other")) {
+                    client.putScheduledAction(ScheduledActionFixtures.put(resource, name)
+                            .schedule("at(2099-01-01T00:00:00)")
+                            .scalableTargetAction(ScheduledActionFixtures.bounds(0, 1)).build());
+                }
+                assertEquals(List.of("wanted"), client.describeScheduledActions(b -> b.serviceNamespace("ecs")
+                        .resourceId(resource).scheduledActionNames("wanted")).scheduledActions().stream()
+                        .map(ScheduledAction::scheduledActionName).toList());
+                assertEquals(2, ScheduledActionFixtures.describe(client, resource).scheduledActions().size());
+                String base = "\"ServiceNamespace\":\"ecs\",\"ResourceId\":\"" + resource + "\",\"ScheduledActionNames\":";
+                for (String names : List.of("\"wanted\"", "1", "true", "{}", "[1]", "[true]", "[{}]", "[[]]", "[null]",
+                        "[\"wanted\",1]")) {
+                    call("DescribeScheduledActions").body("{" + base + names + "}").post("/").then()
+                            .statusCode(400).body("__type", equalTo("ValidationException"));
+                }
+                for (String names : List.of("[]", "null")) {
+                    call("DescribeScheduledActions").body("{" + base + names + "}").post("/").then()
+                            .statusCode(200).body("ScheduledActions", hasSize(2));
+                }
+            } finally {
+                ScheduledActionFixtures.deregister(client, resource);
+            }
+        }
+    }
+
+    @Test
+    void unsupportedScheduledTimezonesAreRejectedWithoutCoercion() {
+        String base = "\"ServiceNamespace\":\"ecs\",\"ResourceId\":\"service/malformed-timezone/service\","
+                + "\"ScalableDimension\":\"ecs:service:DesiredCount\",\"ScheduledActionName\":\"bad\","
+                + "\"Schedule\":\"at(2099-01-01T00:00:00)\",\"ScalableTargetAction\":{\"MinCapacity\":0},\"Timezone\":";
+        for (String timezone : List.of("\"Europe/London\"", "\"Etc/UTC\"", "\"utc\"", "\"\"", "1", "true", "{}", "[]", "null")) {
+            call("PutScheduledAction").body("{" + base + timezone + "}").post("/").then()
+                    .statusCode(400).body("__type", equalTo("ValidationException"));
         }
     }
 

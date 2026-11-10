@@ -263,18 +263,21 @@ public class ApplicationAutoScalingService implements StoredResourceArns {
 
     public ScheduledAction putScheduledAction(String namespace, String resourceId, String dimension, String name,
                                                String schedule, boolean actionSupplied, Integer min, Integer max,
-                                               String region) {
+                                               String timezone, String region) {
         return putScheduledAction(namespace, resourceId, dimension, name, schedule, actionSupplied, min, max,
-                region, Instant.now());
+                timezone, region, Instant.now());
     }
 
     ScheduledAction putScheduledAction(String namespace, String resourceId, String dimension, String name,
                                        String schedule, boolean actionSupplied, Integer min, Integer max,
-                                       String region, Instant now) {
+                                       String timezone, String region, Instant now) {
         validateTriple(namespace, resourceId, dimension);
         validateActionName(name);
         if (!"ecs".equals(namespace) || !"ecs:service:DesiredCount".equals(dimension)) {
             throw new AwsException("ValidationException", "Scheduled actions support ECS desired count only.", 400);
+        }
+        if (timezone != null && !"UTC".equals(timezone)) {
+            throw new AwsException("ValidationException", "Only UTC is supported for Timezone.", 400);
         }
         Instant deadline = schedule == null ? null : parseSchedule(schedule);
         if (actionSupplied && (min == null && max == null || min != null && min < 0 || max != null && max < 0
@@ -303,6 +306,9 @@ public class ApplicationAutoScalingService implements StoredResourceArns {
                 action.setSchedule(schedule);
                 action.setDeadline(deadline);
                 action.setState(deadline.isBefore(now.truncatedTo(ChronoUnit.SECONDS)) ? State.SKIPPED : State.PENDING);
+            }
+            if (timezone != null) {
+                action.setTimezone(timezone);
             }
             if (actionSupplied) {
                 action.setMinCapacity(min);

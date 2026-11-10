@@ -7,6 +7,7 @@ import java.time.Instant;
 /** A retained one-off scheduled action and its execution state. */
 @RegisterForReflection
 public class ScheduledAction {
+    @RegisterForReflection
     public enum State { PENDING, CLAIMED, SUCCEEDED, FAILED, SKIPPED }
 
     private String serviceNamespace;
@@ -15,6 +16,7 @@ public class ScheduledAction {
     private String scheduledActionName;
     private String scheduledActionArn;
     private String schedule;
+    private String timezone;
     private Instant deadline;
     private Integer minCapacity;
     private Integer maxCapacity;
@@ -30,6 +32,7 @@ public class ScheduledAction {
         this.scheduledActionName = source.scheduledActionName;
         this.scheduledActionArn = source.scheduledActionArn;
         this.schedule = source.schedule;
+        this.timezone = source.timezone;
         this.deadline = source.deadline;
         this.minCapacity = source.minCapacity;
         this.maxCapacity = source.maxCapacity;
@@ -54,6 +57,9 @@ public class ScheduledAction {
 
     public String getSchedule() { return schedule; }
     public void setSchedule(String value) { this.schedule = value; }
+
+    public String getTimezone() { return timezone; }
+    public void setTimezone(String value) { this.timezone = value; }
 
     public Instant getDeadline() { return deadline; }
     public void setDeadline(Instant value) { this.deadline = value; }

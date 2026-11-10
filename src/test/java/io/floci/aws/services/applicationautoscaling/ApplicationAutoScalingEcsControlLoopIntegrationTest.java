@@ -184,9 +184,10 @@ class ApplicationAutoScalingEcsControlLoopIntegrationTest {
                         .suspendedState(state -> state.scheduledScalingSuspended(true)));
                 Instant suspendedDeadline = Instant.now().plusSeconds(60);
                 scaling.putScheduledAction(ScheduledActionFixtures.put(resource, "clamp")
-                        .schedule(ScheduledActionFixtures.schedule(suspendedDeadline))
+                        .timezone("UTC").schedule(ScheduledActionFixtures.schedule(suspendedDeadline))
                         .scalableTargetAction(ScheduledActionFixtures.bounds(0, 1)).build());
                 ScheduledAction identity = ScheduledActionFixtures.describe(scaling, resource).scheduledActions().getFirst();
+                assertEquals("UTC", identity.timezone());
                 ScheduledActionFixtures.register(scaling, resource, 1, 10);
                 ScalableTarget suspended = scaling.describeScalableTargets(b -> b.serviceNamespace("ecs")
                         .resourceIds(resource)).scalableTargets().getFirst();
@@ -205,6 +206,7 @@ class ApplicationAutoScalingEcsControlLoopIntegrationTest {
                     assertEquals("Successful", scaling.describeScalingActivities(b -> b.serviceNamespace("ecs").resourceId(resource))
                             .scalingActivities().getFirst().statusCodeAsString());
                 });
+                assertEquals("UTC", ScheduledActionFixtures.describe(scaling, resource).scheduledActions().getFirst().timezone());
                 scaling.putScheduledAction(ScheduledActionFixtures.put(resource, "clamp")
                         .scalableTargetAction(ScheduledActionFixtures.bounds(0, 0)).build());
                 scheduledActionScheduler.tick(Instant.now().plusSeconds(60));

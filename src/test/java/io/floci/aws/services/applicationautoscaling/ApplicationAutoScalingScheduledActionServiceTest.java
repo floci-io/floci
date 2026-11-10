@@ -77,7 +77,7 @@ class ApplicationAutoScalingScheduledActionServiceTest {
 
     private ScheduledAction put(String name, Instant deadline, Integer min, Integer max) {
         return service.putScheduledAction(NAMESPACE, RESOURCE, DIMENSION, name,
-                deadline == null ? null : schedule(deadline), true, min, max, REGION, NOW);
+                deadline == null ? null : schedule(deadline), true, min, max, null, REGION, NOW);
     }
 
     private List<ScheduledAction> describe() {
@@ -105,7 +105,7 @@ class ApplicationAutoScalingScheduledActionServiceTest {
         service.runScheduledActions(NOW.plusSeconds(2));
         assertBounds(7, 9, 7);
         ScheduledAction updated = service.putScheduledAction(NAMESPACE, RESOURCE, DIMENSION, "once",
-                schedule(NOW.plusSeconds(3)), false, null, null, REGION, NOW.plusSeconds(2));
+                schedule(NOW.plusSeconds(3)), false, null, null, null, REGION, NOW.plusSeconds(2));
         assertEquals(original.getScheduledActionArn(), updated.getScheduledActionArn());
         assertEquals(original.getCreationTime(), updated.getCreationTime());
         service.runScheduledActions(NOW.plusSeconds(3));
@@ -118,7 +118,7 @@ class ApplicationAutoScalingScheduledActionServiceTest {
         put("replace", NOW.plusSeconds(1), 2, 8);
         put("replace", null, 3, null);
         assertNull(action("replace").getMaxCapacity());
-        service.putScheduledAction(NAMESPACE, RESOURCE, DIMENSION, "replace", null, false, null, null, REGION, NOW);
+        service.putScheduledAction(NAMESPACE, RESOURCE, DIMENSION, "replace", null, false, null, null, null, REGION, NOW);
         assertEquals(schedule(NOW.plusSeconds(1)), action("replace").getSchedule());
         service.runScheduledActions(NOW.plusSeconds(1));
         assertBounds(3, 10, 5);
@@ -162,9 +162,9 @@ class ApplicationAutoScalingScheduledActionServiceTest {
     @Test
     void pastAcceptedInactiveAndCurrentSecondEligible() {
         service.putScheduledAction(NAMESPACE, RESOURCE, DIMENSION, "past", schedule(NOW.minusSeconds(1)),
-                true, 0, 0, REGION, NOW.plusMillis(900));
+                true, 0, 0, null, REGION, NOW.plusMillis(900));
         service.putScheduledAction(NAMESPACE, RESOURCE, DIMENSION, "current", schedule(NOW),
-                true, 0, 4, REGION, NOW.plusMillis(900));
+                true, 0, 4, null, REGION, NOW.plusMillis(900));
         service.runScheduledActions(NOW.plusSeconds(1));
         assertEquals(State.SKIPPED, action("past").getState());
         assertEquals(State.SUCCEEDED, action("current").getState());
@@ -200,13 +200,13 @@ class ApplicationAutoScalingScheduledActionServiceTest {
     void suspensionBetweenTicksSettlesPriorStateAndConsumesMissedOccurrences() {
         Instant realNow = Instant.now();
         service.putScheduledAction(NAMESPACE, RESOURCE, DIMENSION, "before-suspend", schedule(realNow.minusSeconds(10)),
-                true, 2, null, REGION, realNow.minusSeconds(20));
+                true, 2, null, null, REGION, realNow.minusSeconds(20));
         SuspendedState state = new SuspendedState();
         state.setScheduledScalingSuspended(true);
         register(state);
         assertEquals(State.SUCCEEDED, action("before-suspend").getState());
         service.putScheduledAction(NAMESPACE, RESOURCE, DIMENSION, "during-suspend", schedule(realNow.minusSeconds(5)),
-                true, 0, 0, REGION, realNow.minusSeconds(20));
+                true, 0, 0, null, REGION, realNow.minusSeconds(20));
         service.registerScalableTarget(NAMESPACE, RESOURCE, DIMENSION, null, null, null, null, null, REGION);
         assertTrue(service.findTarget(REGION, NAMESPACE, RESOURCE, DIMENSION).orElseThrow()
                 .getSuspendedState().isScheduledScalingSuspended());
@@ -452,7 +452,7 @@ class ApplicationAutoScalingScheduledActionServiceTest {
                 Collections.nCopies(51, "a"), null, null, REGION));
         assertTrue(service.describeScheduledActions(NAMESPACE, "missing", null, List.of(), null, null, REGION).items().isEmpty());
         assertThrows(AwsException.class, () -> service.putScheduledAction(NAMESPACE, RESOURCE, DIMENSION, "a",
-                "at(2030-02-30T00:00:00)", false, null, null, REGION, NOW));
+                "at(2030-02-30T00:00:00)", false, null, null, null, REGION, NOW));
         assertThrows(AwsException.class, () -> put("empty", NOW, null, null));
     }
 
@@ -468,7 +468,10 @@ class ApplicationAutoScalingScheduledActionServiceTest {
             put("completed", NOW, 2, 8);
             service.runScheduledActions(NOW);
             put("overdue", NOW.plusSeconds(1), 0, 0);
-            put("future", NOW.plusSeconds(10), 0, 4);
+            service.putScheduledAction(NAMESPACE, RESOURCE, DIMENSION, "future", schedule(NOW.plusSeconds(10)),
+                    true, 0, 4, "UTC", REGION, NOW);
+            put("future", null, 0, 4);
+            assertEquals("UTC", action("future").getTimezone());
             put("claimed", NOW.plusSeconds(5), 0, 0);
             first.create("applicationautoscaling", "application-autoscaling-scheduled-actions.json",
                     new TypeReference<Map<String, ScheduledAction>>() {})
@@ -486,7 +489,10 @@ class ApplicationAutoScalingScheduledActionServiceTest {
             assertEquals(State.SKIPPED, action("overdue").getState());
             assertEquals(State.SKIPPED, action("claimed").getState());
             assertEquals(State.SUCCEEDED, action("completed").getState());
+            assertEquals("UTC", action("future").getTimezone());
+            assertNull(action("completed").getTimezone());
             service.runScheduledActions(NOW.plusSeconds(10));
+            assertEquals("UTC", action("future").getTimezone());
             assertBounds(0, 4, 4);
             assertEquals(2, service.describeScalingActivities(NAMESPACE, RESOURCE, DIMENSION, REGION).size());
         } finally {
