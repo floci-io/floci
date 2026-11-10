@@ -145,8 +145,8 @@ public class SsoAdminService implements Resettable, StoredResourceArns {
     private final String defaultRegion;
     /** The seeded instance lives in the deployment's home region, so its ARN takes that partition. */
     private final String bootstrapInstanceArn;
-    /** Source of permission-set creation times; tests advance it to detect a reset date. */
-    private Clock clock = Clock.systemUTC();
+    /** Source of permission-set creation times; the @Inject constructor passes the system clock. */
+    private final Clock clock;
 
     @Inject
     public SsoAdminService(StorageFactory storageFactory, IdentityStoreService identityStoreService,
@@ -182,7 +182,8 @@ public class SsoAdminService implements Resettable, StoredResourceArns {
                 organizationsService,
                 requestContext,
                 config.defaultAccountId(),
-                config.defaultRegion());
+                config.defaultRegion(),
+                Clock.systemUTC());
     }
 
     SsoAdminService(StorageBackend<String, PermissionSet> permissionSets,
@@ -214,7 +215,9 @@ public class SsoAdminService implements Resettable, StoredResourceArns {
                     OrganizationsService organizationsService,
                     SsoAdminRequestContext requestContext,
                     String defaultAccountId,
-                    String defaultRegion) {
+                    String defaultRegion,
+                    Clock clock) {
+        this.clock = clock;
         this.permissionSets = permissionSets;
         this.assignments = assignments;
         this.assignmentOperations = assignmentOperations;
@@ -250,10 +253,6 @@ public class SsoAdminService implements Resettable, StoredResourceArns {
     }
 
     public String getInstanceArn() { return bootstrapInstanceArn; }
-
-    void setClock(Clock clock) {
-        this.clock = clock;
-    }
 
     /**
      * The permission set's CreatedDate. One persisted before the creation time was recorded reports

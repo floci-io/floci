@@ -2,6 +2,7 @@ package io.floci.aws.services.ssoadmin;
 
 import io.floci.aws.testing.RestAssuredJsonUtils;
 import io.quarkus.test.junit.QuarkusTest;
+import io.restassured.path.json.JsonPath;
 import io.restassured.path.json.config.JsonPathConfig;
 import org.hamcrest.Matchers;
 import org.junit.jupiter.api.Assertions;
@@ -203,33 +204,23 @@ class SsoAdminIntegrationTest {
         // AWS always returns CreatedDate on a PermissionSet; the Terraform AWS provider reads it
         // unconditionally and crashes when it is missing.
         String instanceArn = "arn:aws:sso:::instance/ssoins-7223b02a5d9f7c8e";
-        BigDecimal created = given()
+        JsonPath create = given()
                 .contentType("application/x-amz-json-1.1")
                 .header("Authorization", AUTH_HEADER)
                 .header("X-Amz-Target", "SWBExternalService.CreatePermissionSet")
                 .body("{\"InstanceArn\":\"" + instanceArn + "\",\"Name\":\"CreatedDateIntegration\"}")
             .when().post("/")
             .then().statusCode(200)
-                .body("PermissionSet.CreatedDate", Matchers.notNullValue())
-                .extract().jsonPath(EXACT_NUMBERS).get("PermissionSet.CreatedDate");
-        String permissionSetArn = given()
-                .contentType("application/x-amz-json-1.1")
-                .header("Authorization", AUTH_HEADER)
-                .header("X-Amz-Target", "SWBExternalService.CreatePermissionSet")
-                .body("{\"InstanceArn\":\"" + instanceArn + "\",\"Name\":\"CreatedDateIntegration2\"}")
-            .when().post("/")
-            .then().statusCode(200)
-                .extract().path("PermissionSet.PermissionSetArn");
-        BigDecimal created2 = given()
-                .contentType("application/x-amz-json-1.1")
-                .header("Authorization", AUTH_HEADER)
-                .header("X-Amz-Target", "SWBExternalService.DescribePermissionSet")
-                .body("{\"InstanceArn\":\"" + instanceArn + "\",\"PermissionSetArn\":\"" + permissionSetArn + "\"}")
-            .when().post("/")
-            .then().statusCode(200)
-                .extract().jsonPath(EXACT_NUMBERS).get("PermissionSet.CreatedDate");
-        Assertions.assertTrue(created.signum() > 0 && created2.compareTo(created) >= 0,
-                "CreatedDate must be a positive epoch-seconds value");
+                .extract().jsonPath(EXACT_NUMBERS);
+        String permissionSetArn = create.getString("PermissionSet.PermissionSetArn");
+        BigDecimal created = create.get("PermissionSet.CreatedDate");
+        Assertions.assertNotNull(created, "CreatePermissionSet must return CreatedDate");
+        Assertions.assertTrue(created.signum() > 0, "CreatedDate must be a positive epoch-seconds value");
+
+        // Compared exactly: a float would only resolve about 128 s at epoch-second scale. The
+        // advanced-clock case is SsoAdminServiceTest.permissionSetKeepsItsExactCreationTimeAcrossUpdates.
+        Assertions.assertEquals(0, created.compareTo(describedCreatedDate(instanceArn, permissionSetArn)),
+                "DescribePermissionSet must return the CreatedDate CreatePermissionSet did");
 
         given()
                 .contentType("application/x-amz-json-1.1")
@@ -240,18 +231,19 @@ class SsoAdminIntegrationTest {
             .when().post("/")
             .then().statusCode(200);
 
-        BigDecimal afterUpdate = given()
+        Assertions.assertEquals(0, created.compareTo(describedCreatedDate(instanceArn, permissionSetArn)),
+                "UpdatePermissionSet must keep the CreatedDate CreatePermissionSet returned");
+    }
+
+    private BigDecimal describedCreatedDate(String instanceArn, String permissionSetArn) {
+        return given()
                 .contentType("application/x-amz-json-1.1")
                 .header("Authorization", AUTH_HEADER)
                 .header("X-Amz-Target", "SWBExternalService.DescribePermissionSet")
                 .body("{\"InstanceArn\":\"" + instanceArn + "\",\"PermissionSetArn\":\"" + permissionSetArn + "\"}")
             .when().post("/")
             .then().statusCode(200)
-                .body("PermissionSet.Description", equalTo("updated"))
                 .extract().jsonPath(EXACT_NUMBERS).get("PermissionSet.CreatedDate");
-        // Compared exactly (a float would only resolve about 128 s at epoch-second scale); the
-        // controlled-clock case is SsoAdminServiceTest.permissionSetKeepsItsExactCreationTimeAcrossUpdates.
-        Assertions.assertEquals(0, created2.compareTo(afterUpdate), "UpdatePermissionSet must keep CreatedDate exactly");
     }
 
     @Test

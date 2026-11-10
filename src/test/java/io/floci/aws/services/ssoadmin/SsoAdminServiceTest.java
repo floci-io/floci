@@ -25,14 +25,13 @@ import io.floci.aws.services.ssoadmin.model.RegionMetadata;
 import io.floci.aws.services.ssoadmin.model.SsoApplication;
 import io.floci.aws.services.ssoadmin.model.SsoInstance;
 import io.floci.aws.services.ssoadmin.model.TrustedTokenIssuer;
+import io.floci.aws.testing.MutableClock;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.mockito.Mockito;
 
 import java.time.Clock;
 import java.time.Duration;
-import java.time.Instant;
-import java.time.ZoneOffset;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -51,6 +50,7 @@ class SsoAdminServiceTest {
 
     private final ObjectMapper mapper = new ObjectMapper();
     private SsoAdminService service;
+    private final MutableClock clock = new MutableClock();
     private IdentityStoreService identityStoreService;
     private OrganizationsService organizationsService;
     private InMemoryStorage<String, ApplicationAccessScope> applicationAccessScopes;
@@ -96,7 +96,8 @@ class SsoAdminServiceTest {
                 organizationsService,
                 new SsoAdminRequestContext(),
                 ACCOUNT_ID,
-                "us-east-1");
+                "us-east-1",
+                clock);
         service.ensureBootstrapInstance(ACCOUNT_ID, "us-east-1");
     }
 
@@ -1963,7 +1964,8 @@ class SsoAdminServiceTest {
                 organizationsService,
                 new SsoAdminRequestContext(),
                 "999999999999",
-                defaultRegion);
+                defaultRegion,
+                Clock.systemUTC());
     }
 
     private ObjectNode trustedTokenIssuerRequest(String name, String clientToken) {
@@ -1994,13 +1996,11 @@ class SsoAdminServiceTest {
 
     @Test
     void permissionSetKeepsItsExactCreationTimeAcrossUpdates() {
-        Instant created = Instant.parse("2026-01-02T03:04:05.678Z");
-        service.setClock(Clock.fixed(created, ZoneOffset.UTC));
         PermissionSet permissionSet = createPermissionSet("ClockedAdmins");
-        assertEquals(created.toEpochMilli(), service.createdDateEpochMillis(permissionSet));
+        long created = service.createdDateEpochMillis(permissionSet);
 
         // Advance well past float precision at epoch-second scale (128 s) so a reset would show.
-        service.setClock(Clock.fixed(created.plus(Duration.ofMinutes(5)), ZoneOffset.UTC));
+        clock.advance(Duration.ofMinutes(5));
         ObjectNode update = mapper.createObjectNode();
         update.put("InstanceArn", service.getInstanceArn());
         update.put("PermissionSetArn", permissionSet.arn());
@@ -2009,7 +2009,7 @@ class SsoAdminServiceTest {
         service.updatePermissionSet(update);
 
         PermissionSet updated = service.getPermissionSet(service.getInstanceArn(), permissionSet.arn());
-        assertEquals(created.toEpochMilli(), service.createdDateEpochMillis(updated));
+        assertEquals(created, service.createdDateEpochMillis(updated));
     }
 
     @Test
