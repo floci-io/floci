@@ -619,13 +619,10 @@ class RedshiftServerlessIntegrationTest {
     }
 
     @Test
-    void aSnapshotItsPolicyAllowsIsRestorableByAnotherAccount() {
+    void aSnapshotAnotherAccountOwnsIsRestoredFromItsOwnersAccount() {
         String owner = "111122223333";
         String caller = "444455556666";
         String stranger = "777788889999";
-        String allowCaller = "{\\\"Version\\\":\\\"2012-10-17\\\",\\\"Statement\\\":[{\\\"Effect\\\":\\\"Allow\\\","
-                + "\\\"Principal\\\":{\\\"AWS\\\":\\\"arn:aws:iam::" + caller + ":root\\\"},"
-                + "\\\"Action\\\":\\\"redshift-serverless:RestoreFromSnapshot\\\",\\\"Resource\\\":\\\"*\\\"}]}";
 
         callAs(owner, "CreateNamespace", "{\"namespaceName\":\"share-src\",\"adminUsername\":\"admin\"}").statusCode(200);
         String snapshotArn = callAs(owner, "CreateSnapshot",
@@ -637,25 +634,17 @@ class RedshiftServerlessIntegrationTest {
         String restore = "{\"namespaceName\":\"share-dst\",\"workgroupName\":\"share-wg\","
                 + "\"snapshotName\":\"share-snap\",\"ownerAccount\":\"" + owner + "\"}";
 
-        // Not shared until the snapshot's policy says so.
-        callAs(caller, "RestoreFromSnapshot", restore).statusCode(400).body("__type", equalTo("AccessDeniedException"));
-
-        callAs(owner, "PutResourcePolicy", "{\"resourceArn\":\"" + snapshotArn + "\",\"policy\":\"" + allowCaller + "\"}")
-                .statusCode(200);
+        // Whether the snapshot's policy shares it is IAM enforcement's to decide, which this class leaves off.
         callAs(caller, "RestoreFromSnapshot", restore)
                 .statusCode(200)
                 .body("ownerAccount", equalTo(owner))
                 .body("snapshotName", equalTo("share-snap"))
                 .body("namespace.namespaceName", equalTo("share-dst"));
 
-        // Another account the policy does not name is refused, and a snapshot that is not there is not found.
-        callAs(stranger, "CreateNamespace", "{\"namespaceName\":\"share-dst\",\"adminUsername\":\"admin\"}")
-                .statusCode(200);
-        callAs(stranger, "CreateWorkgroup", "{\"workgroupName\":\"share-wg\",\"namespaceName\":\"share-dst\"}")
-                .statusCode(200);
-        callAs(stranger, "RestoreFromSnapshot", restore).statusCode(400)
-                .body("__type", equalTo("AccessDeniedException"));
+        // A snapshot that is not the owner's is not found, however it is named.
         callAs(caller, "RestoreFromSnapshot", restore.replace("share-snap", "no-such-snap")).statusCode(400)
+                .body("__type", equalTo("ResourceNotFoundException"));
+        callAs(caller, "RestoreFromSnapshot", restore.replace(owner, stranger)).statusCode(400)
                 .body("__type", equalTo("ResourceNotFoundException"));
 
         // The owner's snapshot ARN names the snapshot as well as its name does; one of another account does not.
@@ -667,10 +656,6 @@ class RedshiftServerlessIntegrationTest {
         callAs(caller, "RestoreFromSnapshot", byArn.replace("\"ownerAccount\":\"" + owner, "\"ownerAccount\":\"" + stranger))
                 .statusCode(400)
                 .body("__type", equalTo("ValidationException"));
-
-        // Withdrawing the policy takes the access away at the next restore.
-        callAs(owner, "DeleteResourcePolicy", "{\"resourceArn\":\"" + snapshotArn + "\"}").statusCode(200);
-        callAs(caller, "RestoreFromSnapshot", restore).statusCode(400).body("__type", equalTo("AccessDeniedException"));
     }
 
     @Test

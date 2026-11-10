@@ -1083,7 +1083,7 @@ class RedshiftServerlessServiceTest {
         assertTrue(service.findSnapshotOfAccount(owner, "own-snap", REGION).isEmpty());
 
         RedshiftServerlessService.RestoreResult restored = service.restoreFromSharedSnapshot(
-                "shared-ns", "shared-wg", theirs, owner, null, null, REGION);
+                "shared-ns", "shared-wg", "their-snap", owner, null, null, REGION);
 
         assertEquals("AVAILABLE", restored.namespace().getStatus());
         assertEquals("their-snap", restored.snapshot().getSnapshotName());
@@ -1093,19 +1093,33 @@ class RedshiftServerlessServiceTest {
     }
 
     @Test
-    void restoreFromSharedSnapshotChecksTheSnapshotUnderTheServiceLock() {
-        create("shared-ns");
-        createWorkgroup("shared-wg", "shared-ns");
-        boolean[] heldLock = new boolean[1];
+    void findNamesTheArnOfTheSnapshotOfTheAccountThatOwnsIt() {
+        String owner = "999999999999";
+        create("find-ns");
+        RedshiftServerlessSnapshot own = service.createSnapshot("own-snap", "find-ns", null, null, REGION);
+        RedshiftServerlessSnapshot theirs = new RedshiftServerlessSnapshot(own);
+        theirs.setSnapshotName("their-snap");
+        theirs.setSnapshotArn("arn:aws:redshift-serverless:" + REGION + ":" + owner + ":snapshot/their-snap");
+        snapshotStore.putForAccount(owner, REGION + "::their-snap", theirs);
 
-        AwsException refused = assertThrows(AwsException.class, () -> service.restoreFromSharedSnapshot(
-                "shared-ns", "shared-wg", () -> {
-                    heldLock[0] = Thread.holdsLock(service);
-                    throw new AwsException("AccessDeniedException", "revoked", 400);
-                }, "999999999999", null, null, REGION));
+        assertEquals(Optional.of(own.getSnapshotArn()), service.find("snapshot", List.of("own-snap"), REGION));
+        assertEquals(Optional.of(theirs.getSnapshotArn()),
+                service.find("snapshot", List.of("their-snap", owner), REGION));
+        assertEquals(Optional.empty(), service.find("snapshot", List.of("their-snap"), REGION));
+        assertEquals(Optional.empty(), service.find("snapshot", List.of("own-snap", owner), REGION));
+        assertEquals(Optional.of(service.getNamespace("find-ns", REGION).getNamespaceArn()),
+                service.find("namespace", List.of("find-ns"), REGION));
+        assertEquals(Optional.empty(), service.find("workgroup", List.of("missing"), REGION));
+        assertEquals(Optional.empty(), service.find("endpointAccess", List.of("any"), REGION));
+        assertEquals(Optional.empty(), service.find("snapshot", List.of(), REGION));
+    }
 
-        assertTrue(heldLock[0]);
-        assertEquals("AccessDeniedException", refused.getErrorCode());
+    @Test
+    void anOwnerAccountIsOtherOnlyWhenItDiffersFromTheCallers() {
+        assertTrue(service.isOtherAccount("999999999999"));
+        assertFalse(service.isOtherAccount(ACCOUNT_ID));
+        assertFalse(service.isOtherAccount(null));
+        assertFalse(service.isOtherAccount(" "));
     }
 
     @Test
@@ -1132,9 +1146,10 @@ class RedshiftServerlessServiceTest {
         theirs.setSnapshotName("their-snap");
         theirs.setOwnerAccount(owner);
         theirs.setSqlDump(callerDump.toString());
+        snapshotStore.putForAccount(owner, REGION + "::their-snap", theirs);
 
         AwsException untrusted = assertThrows(AwsException.class, () -> service.restoreFromSharedSnapshot(
-                "shared-ns", "shared-wg", theirs, owner, null, null, REGION));
+                "shared-ns", "shared-wg", "their-snap", owner, null, null, REGION));
 
         assertEquals("InternalServerException", untrusted.getErrorCode());
     }
@@ -1147,14 +1162,20 @@ class RedshiftServerlessServiceTest {
                 service.createSnapshot("own-snap", "shared-ns", null, null, REGION));
         theirs.setSnapshotName("their-snap");
         theirs.setOwnerAccount(owner);
+        snapshotStore.putForAccount(owner, REGION + "::their-snap", theirs);
 
         AwsException noWorkgroup = assertThrows(AwsException.class, () -> service.restoreFromSharedSnapshot(
-                "shared-ns", "missing-wg", theirs, owner, null, null, REGION));
+                "shared-ns", "missing-wg", "their-snap", owner, null, null, REGION));
         assertEquals("ResourceNotFoundException", noWorkgroup.getErrorCode());
 
+        AwsException noSnapshot = assertThrows(AwsException.class, () -> service.restoreFromSharedSnapshot(
+                "shared-ns", "missing-wg", "no-such-snap", owner, null, null, REGION));
+        assertEquals("ResourceNotFoundException", noSnapshot.getErrorCode());
+
         theirs.setStatus("FAILED");
+        snapshotStore.putForAccount(owner, REGION + "::their-snap", theirs);
         AwsException unavailable = assertThrows(AwsException.class, () -> service.restoreFromSharedSnapshot(
-                "shared-ns", "missing-wg", theirs, owner, null, null, REGION));
+                "shared-ns", "missing-wg", "their-snap", owner, null, null, REGION));
         assertEquals("ConflictException", unavailable.getErrorCode());
     }
 

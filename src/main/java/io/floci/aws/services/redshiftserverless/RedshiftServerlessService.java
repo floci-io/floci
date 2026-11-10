@@ -8,6 +8,7 @@ import io.floci.aws.core.common.PaginatedResult;
 import io.floci.aws.core.common.Pagination;
 import io.floci.aws.core.common.RegionResolver;
 import io.floci.aws.core.common.Resettable;
+import io.floci.aws.core.common.StoredResourceArns;
 import io.floci.aws.core.storage.AccountAwareStorageBackend;
 import io.floci.aws.core.storage.StorageFactory;
 import io.floci.aws.services.redshift.SnapshotDumpCopier;
@@ -51,7 +52,7 @@ import java.util.stream.Collectors;
 import java.util.stream.Stream;
 
 @ApplicationScoped
-public class RedshiftServerlessService implements Resettable {
+public class RedshiftServerlessService implements Resettable, StoredResourceArns {
     private static final Logger LOG = Logger.getLogger(RedshiftServerlessService.class);
 
     public static final String DEFAULT_DB_NAME = "dev";
@@ -923,34 +924,50 @@ public class RedshiftServerlessService implements Resettable {
     }
 
     /**
-     * Restores a snapshot another account shared. The caller has already been checked against the
-     * snapshot's resource policy; the dump is read from the snapshot owner's directory.
+     * Restores a snapshot another account owns. Whether the caller may is decided before this runs, by the
+     * snapshot's resource policy under IAM enforcement; the dump is read from the owner's directory.
      */
     public synchronized RestoreResult restoreFromSharedSnapshot(String namespaceName, String workgroupName,
-                                                                RedshiftServerlessSnapshot snapshot,
-                                                                String snapshotAccountId,
-                                                                Boolean manageAdminPassword,
-                                                                String adminPasswordSecretKmsKeyId, String region) {
-        return restoreFromSharedSnapshot(namespaceName, workgroupName, () -> snapshot, snapshotAccountId,
-                manageAdminPassword, adminPasswordSecretKmsKeyId, region);
-    }
-
-    /**
-     * Same as above, but {@code authorizedSnapshot} is called under this service's lock, so the owner's
-     * snapshot and policy are checked at the moment of the restore. A deletion, expiry or policy revocation
-     * cannot land between the check and the restore.
-     */
-    public synchronized RestoreResult restoreFromSharedSnapshot(String namespaceName, String workgroupName,
-                                                                Supplier<RedshiftServerlessSnapshot> authorizedSnapshot,
-                                                                String snapshotAccountId,
+                                                                String snapshotName, String snapshotAccountId,
                                                                 Boolean manageAdminPassword,
                                                                 String adminPasswordSecretKmsKeyId, String region) {
         validateManagedPassword(manageAdminPassword, null, adminPasswordSecretKmsKeyId);
         validateNamespaceName(namespaceName);
-        RedshiftServerlessSnapshot snapshot = authorizedSnapshot.get();
+        RedshiftServerlessSnapshot snapshot = findSnapshotOfAccount(snapshotAccountId, snapshotName, region)
+                .orElseThrow(() -> snapshotNotFound(snapshotName));
         requireAvailableSnapshot(snapshot);
         return restoreFrom(namespaceName, workgroupName, snapshot, snapshotAccountId, manageAdminPassword,
                 adminPasswordSecretKmsKeyId, region);
+    }
+
+    /** Whether {@code ownerAccount} names an account other than the caller's. */
+    public boolean isOtherAccount(String ownerAccount) {
+        return ownerAccount != null && !ownerAccount.isBlank() && !ownerAccount.equals(workgroups.accountId());
+    }
+
+    @Override
+    public String namespace() {
+        return "redshift-serverless";
+    }
+
+    /**
+     * The ARN of the resource the request names by its name: the caller's, or for a snapshot named with the
+     * account that owns it, that account's. These ARNs end in an id Redshift Serverless gives them, which IAM
+     * policies are matched against.
+     */
+    @Override
+    public Optional<String> find(String type, List<String> names, String region) {
+        if (names.isEmpty()) {
+            return Optional.empty();
+        }
+        String name = names.getFirst();
+        return switch (type) {
+            case "namespace" -> findNamespace(name, region).map(Namespace::getNamespaceArn);
+            case "workgroup" -> findWorkgroup(name, region).map(Workgroup::getWorkgroupArn);
+            case "snapshot" -> (names.size() > 1 ? findSnapshotOfAccount(names.get(1), name, region)
+                    : findSnapshot(name, region)).map(RedshiftServerlessSnapshot::getSnapshotArn);
+            default -> Optional.empty();
+        };
     }
 
     /** The snapshot {@code snapshotName} of {@code accountId} in {@code region}, whoever is calling. */

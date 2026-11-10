@@ -167,7 +167,7 @@ NAMESPACES = ("access-analyzer", "acm", "application-autoscaling", "athena", "bc
               "bcm-pricing-calculator", "budgets", "ce", "cloudtrail", "codebuild", "codepipeline", "cognito-identity",
               "cognito-idp", "controltower", "cur", "datasync", "ec2", "ecr", "elasticloadbalancing", "elasticmapreduce", "es", "events",
               "firehose", "globalaccelerator", "kinesisanalytics", "payment-cryptography", "quicksight", "redshift",
-              "redshift-data", "rekognition", "servicediscovery", "servicequotas", "sso", "states", "textract",
+              "redshift-data", "redshift-serverless", "rekognition", "servicediscovery", "servicequotas", "sso", "states", "textract",
               "timestream-influxdb", "translate", "signer")
 
 # SDK clients the reference lists for a namespace's operations whose requests Floci does not serve, and why: their
@@ -265,10 +265,6 @@ NOT_COVERED: dict[str, str] = {
     "ram": _REST,
     "rds": _LATER,
     "rds-data": _REST,
-    "redshift-serverless": "not read yet: its namespace, workgroup, snapshot and managed VPC endpoint ARNs end in an "
-                           "id the service mints, `namespace/<id>`, while its requests name them by namespaceName, "
-                           "workgroupName, snapshotName and endpointName, so reading it needs the stored ARNs those "
-                           "find, as Redshift Data's workgroups are found",
     "resource-explorer-2": _REST,
     "route53": _REST,
     "route53resolver": _LATER,
@@ -318,6 +314,14 @@ CORRECTIONS: dict[str, tuple[list[dict], str]] = {
                                    "the user ARN ends in namespace/user-name, which the reference combines as "
                                    "ResourceId; QuickSight resolves it from the account, namespace and user name")
        for operation in ("RegisterUser", "DescribeUser")},
+    **{f"redshift-serverless:{operation}": (
+        [{"types": ["snapshot"], "arn": "snapshotArn"},
+         {"type": "snapshot", "fill": {}, "find": ["snapshotName"], "when": {"ownerAccount": [None]}},
+         {"type": "snapshot", "fill": {}, "find": ["snapshotName", "ownerAccount"]}],
+        "a snapshot another account shares is named by snapshotName and the ownerAccount of that account, and it is "
+        "that account's snapshot the request acts on, so its ARN, with the owner's account, is what the snapshot's "
+        "resource policy is checked against; without ownerAccount the snapshot is the caller's own")
+       for operation in ("GetSnapshot", "RestoreFromSnapshot")},
     "logs:PutDeliverySource": ([{"type": "delivery-source", "fill": {"DeliverySourceName": "name"}}],
                                "resourceArn is the ARN of the resource that sends the logs (an event bus, a load "
                                "balancer), never the delivery source's, which the request names by name"),
@@ -613,6 +617,13 @@ FOUND_BY: dict[str, tuple[list[str], str]] = {
         "target', Application Auto Scaling User Guide), which the reference names ${ResourceId}, while its requests "
         "name the target by ServiceNamespace, ResourceId and ScalableDimension; ResourceId is the target's "
         "resource (service/<cluster>/<service>), not that id"),
+    **{f"redshift-serverless:{kind}": ([member], f"a Redshift Serverless {kind}'s ARN ends in the id the service gives "
+                                                  f"it, {path}/<id> ('The unique identifier' of its {kind}), while its "
+                                                  f"requests name it by {member}")
+       for kind, member, path in (("namespace", "namespaceName", "namespace"),
+                                  ("workgroup", "workgroupName", "workgroup"),
+                                  ("snapshot", "snapshotName", "snapshot"),
+                                  ("endpointAccess", "endpointName", "managedvpcendpoint"))},
     "redshift-data:workgroup": (
         ["WorkgroupName"],
         "a serverless workgroup's ARN ends in the id Redshift Serverless gives it, workgroup/<id> (its Workgroup's "
