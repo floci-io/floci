@@ -72,18 +72,6 @@ MODELS: dict[str, str] = {
     "signer": "signer",
 }
 
-# Non-botocore REST routes that IamRestRoutes authorizes. These are manually maintained;
-# update rest-routes.json with regen_rest_routes.py after editing.
-STATIC_MODELS: dict[str, dict] = {
-    "cloudwatch-otlp": {
-        "credentialScope": "cloudwatch",
-        "apiVersion": "2024-01-01",
-        "operations": {
-            "PutMetricData": {"method": "POST", "requestUri": "/v1/metrics"},
-        },
-    },
-}
-
 # The models whose routes are rewritten onto an internal prefix, and the prefix they are rewritten
 # onto, with whether the labels in their paths hold an ARN. A service whose routes sit under such a
 # prefix has them there, and the prefix names them.
@@ -169,12 +157,6 @@ def build(models: dict[str, dict], provenance: str) -> dict:
                 raise SystemExit(f"error: REST models of {scope} have conflicting access-denied HTTP statuses")
             denial_statuses[scope] = status
             routes[name]["accessDeniedStatus"] = status
-    for name, model in sorted(STATIC_MODELS.items()):
-        routes[name] = {
-            "credentialScope": model["credentialScope"],
-            "apiVersion": model["apiVersion"],
-            "operations": model["operations"],
-        }
     routes = dict(sorted(routes.items()))
     shared = shared_routes(routes)
     if shared:

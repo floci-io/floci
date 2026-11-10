@@ -147,7 +147,7 @@ class IamRestRouteCoverageTest {
                 String action = RUN_AS_ANOTHER_OPERATION.getOrDefault(operation.getKey(),
                         authorized.path(scope).path(operation.getKey()).asText(scope + ":" + operation.getKey()));
                 boolean read = requestResources.path("operations").has(scope + ":" + operation.getKey());
-                String expected = "cloudwatch-otlp".equals(model) || handBuilt.contains(scope) || read
+                String expected = handBuilt.contains(scope) || read
                         || IamAuthorizedActions.actsOnNoResourceType(action)
                         ? action : null;
                 tests.add(DynamicTest.dynamicTest(model + " " + operation.getKey(),

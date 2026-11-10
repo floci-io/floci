@@ -3,6 +3,7 @@ package io.floci.aws.services.cloudwatch.metrics;
 import com.google.protobuf.Descriptors.FieldDescriptor;
 import com.google.protobuf.DynamicMessage;
 import com.google.protobuf.util.JsonFormat;
+import io.floci.aws.core.common.IamOperation;
 import io.floci.aws.core.common.RequestContext;
 import io.floci.aws.core.common.ServiceRegistry;
 import jakarta.inject.Inject;
@@ -21,6 +22,7 @@ import java.util.List;
 import java.util.zip.GZIPInputStream;
 
 @Path("/v1/metrics")
+@IamOperation(namespace = "cloudwatch", operation = "PutMetricData")
 public class OtlpMetricsController {
 
     private static final int MAX_REQUEST_BYTES = 5 * 1024 * 1024;

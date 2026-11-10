@@ -291,13 +291,6 @@
         "UpdateVpcLink": {"method": "PATCH", "requestUri": "/v2/vpclinks/{vpcLinkId}"}
       }
     },
-    "cloudwatch-otlp": {
-      "credentialScope": "cloudwatch",
-      "apiVersion": "2024-01-01",
-      "operations": {
-        "PutMetricData": {"method": "POST", "requestUri": "/v1/metrics"}
-      }
-    },
     "controltower": {
       "credentialScope": "controltower",
       "apiVersion": "2018-05-10",
