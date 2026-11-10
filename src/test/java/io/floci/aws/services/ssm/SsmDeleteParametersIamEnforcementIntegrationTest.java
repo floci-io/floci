@@ -70,7 +70,7 @@ class SsmDeleteParametersIamEnforcementIntegrationTest {
     }
 
     @Test
-    void aBatchNamingADeniedParameterDeletesNeither() {
+    void aDenyOnOneNamedParameterRefusesTheBatchAndDeletesNeither() {
         String prefix = "/iam-names-delete-" + UUID.randomUUID();
         String allowed = prefix + "/allowed";
         String denied = prefix + "/denied";
@@ -79,8 +79,11 @@ class SsmDeleteParametersIamEnforcementIntegrationTest {
                 root.putParameter(r -> r.name(allowed).type(ParameterType.STRING).value("v"));
                 root.putParameter(r -> r.name(denied).type(ParameterType.STRING).value("v"));
                 EnforcementFixtures.UserCredentials credentials = user("""
-                        {"Version":"2012-10-17","Statement":[{"Effect":"Allow","Action":"ssm:DeleteParameters",
-                          "Resource":"arn:aws:ssm:us-east-1:000000000000:parameter%s"}]}""".formatted(allowed));
+                        {"Version":"2012-10-17","Statement":[
+                          {"Effect":"Allow","Action":"ssm:DeleteParameters",
+                           "Resource":"arn:aws:ssm:us-east-1:000000000000:parameter/*"},
+                          {"Effect":"Deny","Action":"ssm:DeleteParameters",
+                           "Resource":"arn:aws:ssm:us-east-1:000000000000:parameter%s"}]}""".formatted(denied));
                 try (SsmClient user = AwsTestClients.create(SsmClient.builder(), credentials.accessKeyId(),
                         Region.US_EAST_1)) {
                     SsmException refused = assertThrows(SsmException.class,

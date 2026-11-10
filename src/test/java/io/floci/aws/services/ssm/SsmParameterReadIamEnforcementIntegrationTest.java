@@ -102,7 +102,7 @@ class SsmParameterReadIamEnforcementIntegrationTest {
     }
 
     @Test
-    void getParametersByPathIsCheckedAgainstItsPathWhateverNamesTheBodyCarries() {
+    void aDenyOnAPathRefusesGetParametersByPathOnItWhateverNamesTheBodyCarries() {
         String prefix = "/iam-path-names-" + UUID.randomUUID();
         String allowed = prefix + "/allowed";
         String other = prefix + "/secrets";
@@ -111,8 +111,11 @@ class SsmParameterReadIamEnforcementIntegrationTest {
                 root.putParameter(r -> r.name(allowed).type(ParameterType.STRING).value("v"));
                 root.putParameter(r -> r.name(other + "/key").type(ParameterType.STRING).value("v"));
                 EnforcementFixtures.UserCredentials credentials = user("""
-                        {"Version":"2012-10-17","Statement":[{"Effect":"Allow","Action":"ssm:GetParametersByPath",
-                          "Resource":"arn:aws:ssm:us-east-1:000000000000:parameter%s"}]}""".formatted(allowed));
+                        {"Version":"2012-10-17","Statement":[
+                          {"Effect":"Allow","Action":"ssm:GetParametersByPath",
+                           "Resource":"arn:aws:ssm:us-east-1:000000000000:parameter/*"},
+                          {"Effect":"Deny","Action":"ssm:GetParametersByPath",
+                           "Resource":"arn:aws:ssm:us-east-1:000000000000:parameter%s"}]}""".formatted(other));
 
                 given()
                         .header("Authorization", auth(credentials.accessKeyId(), "ssm"))
