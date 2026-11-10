@@ -1741,6 +1741,55 @@ class ResourceArnBuilderTest {
                 builder.buildResources("ssm", ctx, "us-east-1", "000000000000"));
     }
 
+    @Test
+    void ssmActsOnTheFieldItsOperationReadsWhateverElseTheBodyCarries() {
+        when(ctx.getHeaderString("X-Amz-Target")).thenReturn("AmazonSSM.GetParametersByPath");
+        setJsonBody("{\"Path\":\"/secrets\",\"Names\":[\"/allowed\"],\"Name\":\"/allowed\"}");
+        assertEquals(List.of("arn:aws:ssm:us-east-1:000000000000:parameter/secrets"),
+                builder.buildResources("ssm", ctx, "us-east-1", "000000000000"));
+
+        when(ctx.getHeaderString("X-Amz-Target")).thenReturn("AmazonSSM.GetParameters");
+        setJsonBody("{\"Names\":[\"/secrets/a\"],\"Name\":\"/allowed\",\"Path\":\"/allowed\"}");
+        assertEquals(List.of("arn:aws:ssm:us-east-1:000000000000:parameter/secrets/a"),
+                builder.buildResources("ssm", ctx, "us-east-1", "000000000000"));
+
+        when(ctx.getHeaderString("X-Amz-Target")).thenReturn("AmazonSSM.DeleteParameters");
+        setJsonBody("{\"Names\":[\"/secrets/a\",\"/secrets/b\"],\"Name\":\"/allowed\"}");
+        assertEquals(List.of("arn:aws:ssm:us-east-1:000000000000:parameter/secrets/a",
+                        "arn:aws:ssm:us-east-1:000000000000:parameter/secrets/b"),
+                builder.buildResources("ssm", ctx, "us-east-1", "000000000000"));
+
+        when(ctx.getHeaderString("X-Amz-Target")).thenReturn("AmazonSSM.GetParameter");
+        setJsonBody("{\"Name\":\"/secrets/a\",\"Names\":[\"/allowed\"],\"Path\":\"/allowed\"}");
+        assertEquals(List.of("arn:aws:ssm:us-east-1:000000000000:parameter/secrets/a"),
+                builder.buildResources("ssm", ctx, "us-east-1", "000000000000"));
+    }
+
+    @Test
+    void ssmReadsActOnTheParameterAVersionOrLabelSelectorPicksFrom() {
+        when(ctx.getHeaderString("X-Amz-Target")).thenReturn("AmazonSSM.GetParameter");
+        setJsonBody("{\"Name\":\"/app/db:3\"}");
+        assertEquals(List.of("arn:aws:ssm:us-east-1:000000000000:parameter/app/db"),
+                builder.buildResources("ssm", ctx, "us-east-1", "000000000000"));
+        setJsonBody("{\"Name\":\"arn:aws:ssm:us-east-1:000000000000:parameter/app/db:prod\"}");
+        assertEquals(List.of("arn:aws:ssm:us-east-1:000000000000:parameter/app/db"),
+                builder.buildResources("ssm", ctx, "us-east-1", "000000000000"));
+
+        when(ctx.getHeaderString("X-Amz-Target")).thenReturn("AmazonSSM.GetParameters");
+        setJsonBody("{\"Names\":[\"/app/db:prod\",\"plain-key:2\","
+                + "\"arn:aws:ssm:us-east-1:111122223333:parameter/shared/b:7\",\"/app/other\"]}");
+        assertEquals(List.of("arn:aws:ssm:us-east-1:000000000000:parameter/app/db",
+                        "arn:aws:ssm:us-east-1:000000000000:parameter/plain-key",
+                        "arn:aws:ssm:us-east-1:111122223333:parameter/shared/b",
+                        "arn:aws:ssm:us-east-1:000000000000:parameter/app/other"),
+                builder.buildResources("ssm", ctx, "us-east-1", "000000000000"));
+
+        when(ctx.getHeaderString("X-Amz-Target")).thenReturn("AmazonSSM.DeleteParameter");
+        setJsonBody("{\"Name\":\"/app/db:3\"}");
+        assertEquals(List.of("arn:aws:ssm:us-east-1:000000000000:parameter/app/db:3"),
+                builder.buildResources("ssm", ctx, "us-east-1", "000000000000"));
+    }
+
     // ── SQS ─────────────────────────────────────────────────────────────────────
 
     @Test
