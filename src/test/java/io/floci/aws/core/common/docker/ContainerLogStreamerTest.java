@@ -71,6 +71,27 @@ class ContainerLogStreamerTest {
     }
 
     @Test
+    void startupObservationReassemblesLinesAndClosesWithoutAContainerShutdown() throws Exception {
+        DockerClient docker = mock(DockerClient.class);
+        LogContainerCmd command = mock(LogContainerCmd.class, RETURNS_SELF);
+        when(docker.logContainerCmd("starting-db")).thenReturn(command);
+        ContainerLogStreamer streamer = new ContainerLogStreamer(docker, null);
+        List<String> observed = new ArrayList<>();
+        Closeable handle = streamer.observe("starting-db", observed::add);
+        ArgumentCaptor<ResultCallback> captor = ArgumentCaptor.forClass(ResultCallback.class);
+        verify(command).exec(captor.capture());
+        ResultCallback<Frame> callback = captor.getValue();
+        CountDownLatch closed = new CountDownLatch(1);
+        callback.onStart(closed::countDown);
+        callback.onNext(new Frame(StreamType.STDOUT, utf8("ready to ")));
+        assertTrue(observed.isEmpty());
+        callback.onNext(new Frame(StreamType.STDOUT, utf8("serve\n")));
+        assertEquals(List.of("ready to serve"), observed);
+        handle.close();
+        assertTrue(closed.await(1, TimeUnit.SECONDS));
+    }
+
+    @Test
     void ensureLogGroupAndStreamUsesOwningAccount() {
         CloudWatchLogsService cloudWatchLogsService = mock(CloudWatchLogsService.class);
         ContainerLogStreamer streamer = new ContainerLogStreamer(null, cloudWatchLogsService);

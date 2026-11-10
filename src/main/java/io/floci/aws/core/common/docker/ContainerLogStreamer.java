@@ -154,6 +154,11 @@ public class ContainerLogStreamer {
         return follow(containerId, null, line -> logToConsole(logPrefix, line));
     }
 
+    /** Observes reassembled lines from a newly created container without forwarding or logging them. */
+    public Closeable observe(String containerId, Consumer<String> observer) {
+        return follow(containerId, null, new LogReassemblyCallback(observer, 0));
+    }
+
     /**
      * A stream that logs each line written to it to the console logger as it arrives, as the attach methods
      * log a container's: for the output of a command run in a container. A line is held only until its
