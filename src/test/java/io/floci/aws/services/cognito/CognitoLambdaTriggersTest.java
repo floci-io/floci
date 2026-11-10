@@ -32,8 +32,6 @@ import org.junit.jupiter.params.provider.ValueSource;
 import org.mockito.ArgumentCaptor;
 import org.mockito.invocation.InvocationOnMock;
 
-import javax.crypto.Mac;
-import javax.crypto.spec.SecretKeySpec;
 import java.io.IOException;
 import java.nio.charset.StandardCharsets;
 import java.time.Duration;
@@ -54,6 +52,7 @@ import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicReference;
 
+import static io.floci.aws.services.cognito.CognitoSecretHashTestHelper.secretHash;
 import static io.floci.aws.testing.InlineMocks.inlineMock;
 import static org.junit.jupiter.api.Assertions.assertAll;
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -2246,14 +2245,14 @@ class CognitoLambdaTriggersTest {
         AwsException ex = assertThrows(AwsException.class, () ->
                 service.respondToAuthChallenge(client.getClientId(), "CUSTOM_CHALLENGE", session,
                         Map.of("USERNAME", uuid, "ANSWER", "blue",
-                                "SECRET_HASH", secretHash(secret, "custom@example.com", client.getClientId()))));
+                                "SECRET_HASH", secretHash(client.getClientId(), secret, "custom@example.com"))));
         assertEquals("NotAuthorizedException", ex.getErrorCode());
 
         // Round 2 with USERNAME=UUID and a matching SECRET_HASH over the UUID -> tokens issued.
         Map<String, Object> tokens = service.respondToAuthChallenge(client.getClientId(),
                 "CUSTOM_CHALLENGE", session,
                 Map.of("USERNAME", uuid, "ANSWER", "blue",
-                        "SECRET_HASH", secretHash(secret, uuid, client.getClientId())));
+                        "SECRET_HASH", secretHash(client.getClientId(), secret, uuid)));
         assertNotNull(((Map<String, Object>) tokens.get("AuthenticationResult")).get("AccessToken"));
     }
 
@@ -2296,7 +2295,7 @@ class CognitoLambdaTriggersTest {
         AwsException ex = assertThrows(AwsException.class, () ->
                 service.respondToAuthChallenge(client.getClientId(), "CUSTOM_CHALLENGE", session,
                         Map.of("USERNAME", other.getUsername(), "ANSWER", "blue",
-                                "SECRET_HASH", secretHash(secret, other.getUsername(), client.getClientId()))));
+                                "SECRET_HASH", secretHash(client.getClientId(), secret, other.getUsername()))));
         assertEquals("NotAuthorizedException", ex.getErrorCode());
 
         // The session user's own email alias still resolves to the session user, so it is accepted
@@ -2304,19 +2303,8 @@ class CognitoLambdaTriggersTest {
         Map<String, Object> tokens = service.respondToAuthChallenge(client.getClientId(),
                 "CUSTOM_CHALLENGE", session,
                 Map.of("USERNAME", "victim@example.com", "ANSWER", "blue",
-                        "SECRET_HASH", secretHash(secret, "victim@example.com", client.getClientId())));
+                        "SECRET_HASH", secretHash(client.getClientId(), secret, "victim@example.com")));
         assertNotNull(((Map<String, Object>) tokens.get("AuthenticationResult")).get("AccessToken"));
-    }
-
-    private static String secretHash(String secret, String username, String clientId) {
-        try {
-            Mac mac = Mac.getInstance("HmacSHA256");
-            mac.init(new SecretKeySpec(secret.getBytes(StandardCharsets.UTF_8), "HmacSHA256"));
-            byte[] sig = mac.doFinal((username + clientId).getBytes(StandardCharsets.UTF_8));
-            return Base64.getEncoder().encodeToString(sig);
-        } catch (Exception e) {
-            throw new RuntimeException(e);
-        }
     }
 
     // =========================================================================

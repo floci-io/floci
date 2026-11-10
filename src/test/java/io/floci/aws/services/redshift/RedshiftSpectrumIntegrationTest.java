@@ -679,6 +679,78 @@ class RedshiftSpectrumIntegrationTest {
         }
     }
 
+    @Test
+    @Timeout(120)
+    void readsOnlyThePartitionsTheWhereSelectsOnTheExtendedProtocolAndInATransaction() throws Exception {
+        bucket = "spectrum-pruning-ext-" + System.nanoTime();
+        s3Service.createBucket(bucket, "us-east-1");
+        s3Service.putObject(bucket, "events/day=1/part-1.csv", "1,10\n2,20\n".getBytes(StandardCharsets.UTF_8),
+                "text/csv", null);
+        // this partition cannot be read, so a query that reads it fails and shows which partitions were read
+        s3Service.putObject(bucket, "events/day=2/part-1.csv", "not-a-number,30\n".getBytes(StandardCharsets.UTF_8),
+                "text/csv", null);
+        glueDatabase = "spectrum_pruning_ext_" + System.nanoTime();
+        Database database = new Database();
+        database.setName(glueDatabase);
+        glueService.createDatabase(database);
+        clusterId = "it-pruning-ext-" + System.nanoTime();
+        Cluster cluster = createClusterWithRole(clusterId);
+        String baseUrl = "jdbc:postgresql://127.0.0.1:" + cluster.getEndpoint().getPort() + "/dev?socketTimeout=30";
+        String schemaName = "pruning_ext_lake";
+        String selectDayOne = "SELECT SUM(amount) FROM " + schemaName + ".events WHERE day = 1";
+
+        try (Connection setup = Awaitility.await().atMost(Duration.ofSeconds(30)).pollDelay(Duration.ZERO)
+                .pollInterval(Duration.ofMillis(500)).ignoreExceptions()
+                .until(() -> DriverManager.getConnection(baseUrl + "&preferQueryMode=simple", "admin", "Secret123"),
+                        Objects::nonNull);
+             Statement statement = setup.createStatement()) {
+            statement.execute("CREATE EXTERNAL SCHEMA " + schemaName + " FROM DATA CATALOG DATABASE '" + glueDatabase
+                    + "' IAM_ROLE '" + ROLE_ARN + "'");
+            statement.execute("CREATE EXTERNAL TABLE " + schemaName + ".events (id INTEGER, amount INTEGER) "
+                    + "PARTITIONED BY (day INTEGER) ROW FORMAT DELIMITED FIELDS TERMINATED BY ',' "
+                    + "STORED AS TEXTFILE LOCATION 's3://" + bucket + "/events/'");
+            statement.execute("ALTER TABLE " + schemaName + ".events ADD "
+                    + "PARTITION (day='1') LOCATION 's3://" + bucket + "/events/day=1/' "
+                    + "PARTITION (day='2') LOCATION 's3://" + bucket + "/events/day=2/'");
+
+            // the cache is cold here, so the simple protocol transaction itself loads and stages the partition
+            try (Connection simple = DriverManager.getConnection(baseUrl + "&preferQueryMode=simple",
+                    "admin", "Secret123");
+                 Statement query = simple.createStatement()) {
+                simple.setAutoCommit(false);
+                assertDayOneSum(query, selectDayOne);
+                simple.commit();
+                simple.setAutoCommit(true);
+                assertDayOneSum(query, selectDayOne);
+                SQLException unreadable = assertThrows(SQLException.class,
+                        () -> query.executeQuery("SELECT SUM(amount) FROM " + schemaName + ".events"));
+                assertEquals("22P02", unreadable.getSQLState());
+            }
+            try (Connection extended = DriverManager.getConnection(baseUrl + "&preferQueryMode=extended",
+                    "admin", "Secret123");
+                 Statement query = extended.createStatement()) {
+                assertDayOneSum(query, selectDayOne);
+                extended.setAutoCommit(false);
+                assertDayOneSum(query, selectDayOne);
+                extended.rollback();
+                assertDayOneSum(query, selectDayOne);
+                extended.commit();
+                extended.setAutoCommit(true);
+            }
+            statement.execute("DROP SCHEMA IF EXISTS " + schemaName + " CASCADE");
+        } finally {
+            s3Service.deleteObject(bucket, "events/day=1/part-1.csv");
+            s3Service.deleteObject(bucket, "events/day=2/part-1.csv");
+        }
+    }
+
+    private static void assertDayOneSum(Statement statement, String sql) throws SQLException {
+        try (ResultSet rows = statement.executeQuery(sql)) {
+            assertTrue(rows.next());
+            assertEquals(30, rows.getLong(1));
+        }
+    }
+
     private static void assertTotal(Statement statement, long total) throws SQLException {
         try (ResultSet rows = statement.executeQuery("SELECT COALESCE(SUM(amount),0) FROM lake.events")) {
             assertTrue(rows.next());

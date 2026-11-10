@@ -914,6 +914,13 @@ Floci follows real Cognito semantics for pools created with `UsernameAttributes`
 Pools **without** `UsernameAttributes` (classic pools, and pools using `AliasAttributes`) keep the
 literal `Username` you supply, unchanged.
 
+With `UsernameConfiguration.CaseSensitive=false`, username, email and `preferred_username`
+lookups and duplicate checks ignore case. An omitted setting or `CaseSensitive=true` keeps
+exact matching. Email sign-in still resolves to the same canonical UUID, and `SECRET_HASH`
+uses the exact `USERNAME` sent in each request. Challenge responses follow the pool's case-sensitivity
+setting too. Floci preserves stored casing in returned usernames, email addresses and
+`preferred_username` values. AWS lowercases these values in case-insensitive pools.
+
 ### Token claims
 
 Floci mirrors AWS's access-token / ID-token split:

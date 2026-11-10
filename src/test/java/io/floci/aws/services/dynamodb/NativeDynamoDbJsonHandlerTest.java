@@ -2407,6 +2407,7 @@ class NativeDynamoDbJsonHandlerTest {
             PutItem    | {"TableName":"Missing","Item":{"pk":{"S":"a"}},"ConditionExpression":"","ExpressionAttributeValues":{":v":{"S":"x"}}} | 1 validation error detected: Invalid ConditionExpression: The expression can not be empty;
             DeleteItem | {"TableName":"Missing","Key":{"pk":{"S":"a"}},"ConditionExpression":"a = :v"} | 1 validation error detected: Invalid ConditionExpression: An expression attribute value used in expression is not defined; attribute value: :v
             PutItem    | {"TableName":"Missing","Item":{"pk":{"S":"a"}},"ConditionExpression":"a BETWEEN :b AND :a","ExpressionAttributeValues":{":a":{"N":"1"},":b":{"N":"5"}}} | 1 validation error detected: Invalid ConditionExpression: The BETWEEN operator requires upper bound to be greater than or equal to lower bound; lower bound operand: AttributeValue: {N:5}, upper bound operand: AttributeValue: {N:1}
+            DeleteItem | {"TableName":"Missing","Key":{"pk":{"S":"a"}},"ConditionExpression":"a < :v","ExpressionAttributeValues":{":v":{"BOOL":true}}} | 1 validation error detected: Invalid ConditionExpression: Incorrect operand type for operator or function; operator or function: <, operand type: BOOL
             """)
     void aPutOrDeleteChecksItsConditionMembersInOrderInsideTheEnvelope(String operation, String request,
             String message) throws Exception {

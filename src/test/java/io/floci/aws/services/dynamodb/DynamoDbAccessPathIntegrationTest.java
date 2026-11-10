@@ -898,6 +898,24 @@ class DynamoDbAccessPathIntegrationTest {
     }
 
     @Test
+    @Order(30)
+    void queryRefusesAnOrderingOperandWithNoOrderingBeforeTheTableLookup() {
+        String operandError = "Invalid KeyConditionExpression: Incorrect operand type for operator or function; "
+                + "operator or function: <, operand type: BOOL";
+        for (String table : List.of(TABLE, "access-path-validation-missing")) {
+            request("DynamoDB_20120810.Query", """
+                    {
+                      "TableName":"%s",
+                      "KeyConditionExpression":"pk = :pk AND sk < :sk",
+                      "ExpressionAttributeValues":{":pk":{"S":"p1"},":sk":{"BOOL":true}}
+                    }
+                    """.formatted(table))
+                .statusCode(400)
+                .body("message", equalTo(operandError));
+        }
+    }
+
+    @Test
     @Order(99)
     void deleteTable() {
         given()
