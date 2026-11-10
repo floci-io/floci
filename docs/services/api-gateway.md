@@ -838,18 +838,34 @@ authorizer's context into request headers, query strings, and paths. For a retur
 `requestParameters`. String, numeric, and boolean context values are rendered as
 text. This works with format `1.0` policy responses and format `2.0` simple responses.
 
-HTTP API `AWS_PROXY` integrations with `integrationSubtype` `SQS-SendMessage` send each request to
-an SQS queue instead of invoking a Lambda function. `requestParameters` name the `SendMessage`
-inputs: `QueueUrl` and `MessageBody` are required, and `DelaySeconds`, `MessageAttributes`,
-`MessageDeduplicationId`, `MessageGroupId`, `MessageSystemAttributes` and `Region` are optional.
-Create and update reject a missing required parameter, any other parameter name, an unknown
-subtype, a subtype on a non-`AWS_PROXY` integration or a WebSocket API, and a
-`payloadFormatVersion` other than `1.0`, which is the default when a subtype is set. A value is a
-static string, a whole expression such as `$request.body`, `$request.body.<JSONPath>`,
-`$request.header.<name>`, `$request.querystring.<name>`, the `$context` values `HTTP_PROXY` mapping reads, or
-`$stageVariables.<name>`, or text with expressions embedded as `${request.header.Authorization}`.
-`MessageAttributes` and `MessageSystemAttributes` must resolve to a JSON object. `Region` selects
-the queue's region and defaults to the API's. A sent message answers `200` with
+HTTP API `AWS_PROXY` integrations accept every `integrationSubtype` AWS defines:
+`EventBridge-PutEvents`, `SQS-SendMessage`, `SQS-ReceiveMessage`, `SQS-DeleteMessage`,
+`SQS-PurgeQueue`, `AppConfig-GetConfiguration`, `Kinesis-PutRecord`,
+`StepFunctions-StartExecution`, `StepFunctions-StartSyncExecution` and
+`StepFunctions-StopExecution`. `requestParameters` name the action's inputs, and create, update
+and OpenAPI import and reimport check them against that subtype's required and optional
+parameters from the AWS reference. They reject a missing required parameter, any other parameter
+name, a name that is not a subtype, a subtype on a non-`AWS_PROXY` integration or a WebSocket API,
+and a `payloadFormatVersion` other than `1.0`, which is the default when a subtype is set. Import
+and reimport check every integration in the document before changing anything, so a rejected
+reimport leaves the API as it was. A CloudFormation update that drops `IntegrationSubtype` removes
+it from the integration.
+
+Only `SQS-SendMessage` is invoked: each request is sent to an SQS queue instead of a Lambda
+function. A request that reaches any other subtype answers `500` with
+`{"message":"Internal Server Error"}`. For `SQS-SendMessage`, `QueueUrl` and `MessageBody` are
+required, and `DelaySeconds`, `MessageAttributes`, `MessageDeduplicationId`, `MessageGroupId`,
+`MessageSystemAttributes` and `Region` are optional. A value is a static string, a whole
+expression, or text with expressions embedded as `${request.header.Authorization}`. The
+expressions are `$request.body`, `$request.body.<JSONPath>`, `$request.header.<name>`,
+`$request.querystring.<name>`, `$request.path.<name>`, `$stageVariables.<name>`, and these
+`$context` variables: `accountId`, `apiId`, `domainName`, `httpMethod`, `path`, `requestTime`,
+`requestTimeEpoch`, `routeKey`, `stage`, `requestId`, `identity.sourceIp`, `authorizer.<key>` and
+`authorizer.claims.<claim>`. Any other expression resolves to nothing, or to an empty string where it is embedded. `MessageAttributes`
+and `MessageSystemAttributes` are JSON object templates: expressions are resolved only inside
+their string values, so a header holding quotes or braces stays one string value and cannot add
+attributes. `Region` selects the queue's region and defaults to the API's. A sent message answers
+`200` with
 `{"SendMessageResponse":{"ResponseMetadata":{"RequestId":...},"SendMessageResult":{...}}}`; a
 required parameter that resolves to nothing, such as an empty body for `$request.body`, answers
 `400` with `{"Error":{"Code":"MissingParameter",...}}`, and an SQS error is relayed in the same
