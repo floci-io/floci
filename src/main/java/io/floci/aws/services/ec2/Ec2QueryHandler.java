@@ -5165,20 +5165,25 @@ public class Ec2QueryHandler {
     private Response handleDescribeInstanceTypeOfferings(MultivaluedMap<String, String> p, String region) {
         List<String> typeNames = getList(p, "InstanceType");
         List<Map.Entry<String, List<String>>> filters = getFiltersList(p);
-        List<Map<String, String>> offerings = service.describeInstanceTypeOfferings(
-                region, typeNames, p.getFirst("LocationType"), filters);
+        Integer maxResults = p.getFirst("MaxResults") == null ? null : parseIntParam(p, "MaxResults", 0);
+        PaginatedResult<Map<String, String>> result = service.describeInstanceTypeOfferings(
+                region, typeNames, p.getFirst("LocationType"), filters, maxResults, p.getFirst("NextToken"));
         XmlBuilder xml = new XmlBuilder()
                 .start("DescribeInstanceTypeOfferingsResponse", AwsNamespaces.EC2)
                 .elem("requestId", UUID.randomUUID().toString())
                 .start("instanceTypeOfferingSet");
-        for (Map<String, String> offering : offerings) {
+        for (Map<String, String> offering : result.items()) {
             xml.start("item")
                     .elem("instanceType", offering.get("instanceType"))
                     .elem("locationType", offering.get("locationType"))
                     .elem("location", offering.get("location"))
                     .end("item");
         }
-        xml.end("instanceTypeOfferingSet").end("DescribeInstanceTypeOfferingsResponse");
+        xml.end("instanceTypeOfferingSet");
+        if (result.nextToken() != null) {
+            xml.elem("nextToken", result.nextToken());
+        }
+        xml.end("DescribeInstanceTypeOfferingsResponse");
         return xmlResponse(xml.build());
     }
 
