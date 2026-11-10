@@ -629,7 +629,12 @@ public class RedshiftServerlessService implements Resettable {
     }
 
     public String snapshotNameFromArn(String snapshotArn, String region, String memberName) {
-        String prefix = regionResolver.buildArn("redshift-serverless", region, "snapshot/");
+        return snapshotNameFromArn(snapshotArn, region, workgroups.accountId(), memberName);
+    }
+
+    /** Same as above for a snapshot {@code ownerAccount} owns, as a cross-account restore names it. */
+    public String snapshotNameFromArn(String snapshotArn, String region, String ownerAccount, String memberName) {
+        String prefix = regionResolver.buildArn("redshift-serverless", region, ownerAccount, "snapshot/");
         if (snapshotArn == null || !snapshotArn.startsWith(prefix) || snapshotArn.length() == prefix.length()) {
             throw ServerlessSupport.validation(memberName + " does not identify a snapshot in this account and Region.");
         }
@@ -926,8 +931,23 @@ public class RedshiftServerlessService implements Resettable {
                                                                 String snapshotAccountId,
                                                                 Boolean manageAdminPassword,
                                                                 String adminPasswordSecretKmsKeyId, String region) {
+        return restoreFromSharedSnapshot(namespaceName, workgroupName, () -> snapshot, snapshotAccountId,
+                manageAdminPassword, adminPasswordSecretKmsKeyId, region);
+    }
+
+    /**
+     * Same as above, but {@code authorizedSnapshot} is called under this service's lock, so the owner's
+     * snapshot and policy are checked at the moment of the restore. A deletion, expiry or policy revocation
+     * cannot land between the check and the restore.
+     */
+    public synchronized RestoreResult restoreFromSharedSnapshot(String namespaceName, String workgroupName,
+                                                                Supplier<RedshiftServerlessSnapshot> authorizedSnapshot,
+                                                                String snapshotAccountId,
+                                                                Boolean manageAdminPassword,
+                                                                String adminPasswordSecretKmsKeyId, String region) {
         validateManagedPassword(manageAdminPassword, null, adminPasswordSecretKmsKeyId);
         validateNamespaceName(namespaceName);
+        RedshiftServerlessSnapshot snapshot = authorizedSnapshot.get();
         requireAvailableSnapshot(snapshot);
         return restoreFrom(namespaceName, workgroupName, snapshot, snapshotAccountId, manageAdminPassword,
                 adminPasswordSecretKmsKeyId, region);

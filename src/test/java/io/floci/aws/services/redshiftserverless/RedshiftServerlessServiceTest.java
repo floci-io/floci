@@ -96,6 +96,11 @@ class RedshiftServerlessServiceTest {
                 .thenAnswer(invocation -> "arn:aws:redshift-serverless:"
                         + invocation.getArgument(1, String.class) + ":" + ACCOUNT_ID + ":"
                         + invocation.getArgument(2, String.class));
+        when(regionResolver.buildArn(eq("redshift-serverless"), any(String.class), any(String.class),
+                any(String.class)))
+                .thenAnswer(invocation -> "arn:aws:redshift-serverless:"
+                        + invocation.getArgument(1, String.class) + ":" + invocation.getArgument(2, String.class)
+                        + ":" + invocation.getArgument(3, String.class));
         nextPort = 7100;
         endpoints = mock(RedshiftServerlessEndpoints.class);
         when(endpoints.allocate()).thenAnswer(invocation -> new Endpoint("localhost", nextPort++));
@@ -1085,6 +1090,32 @@ class RedshiftServerlessServiceTest {
         assertEquals(owner, restored.snapshot().getOwnerAccount());
         verify(runtime).restoreSnapshot(eq(ACCOUNT_ID), eq(REGION), eq("shared-wg"), any(), any(), eq(ownerDump),
                 any());
+    }
+
+    @Test
+    void restoreFromSharedSnapshotChecksTheSnapshotUnderTheServiceLock() {
+        create("shared-ns");
+        createWorkgroup("shared-wg", "shared-ns");
+        boolean[] heldLock = new boolean[1];
+
+        AwsException refused = assertThrows(AwsException.class, () -> service.restoreFromSharedSnapshot(
+                "shared-ns", "shared-wg", () -> {
+                    heldLock[0] = Thread.holdsLock(service);
+                    throw new AwsException("AccessDeniedException", "revoked", 400);
+                }, "999999999999", null, null, REGION));
+
+        assertTrue(heldLock[0]);
+        assertEquals("AccessDeniedException", refused.getErrorCode());
+    }
+
+    @Test
+    void snapshotNameFromArnOfAnotherOwnerNeedsThatOwnersAccount() {
+        String owner = "999999999999";
+        String ownerArn = "arn:aws:redshift-serverless:" + REGION + ":" + owner + ":snapshot/their-snap";
+
+        assertEquals("their-snap", service.snapshotNameFromArn(ownerArn, REGION, owner, "snapshotArn"));
+        assertEquals("ValidationException", assertThrows(AwsException.class,
+                () -> service.snapshotNameFromArn(ownerArn, REGION, ACCOUNT_ID, "snapshotArn")).getErrorCode());
     }
 
     @Test

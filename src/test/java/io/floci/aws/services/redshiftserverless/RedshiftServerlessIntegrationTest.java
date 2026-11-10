@@ -658,6 +658,16 @@ class RedshiftServerlessIntegrationTest {
         callAs(caller, "RestoreFromSnapshot", restore.replace("share-snap", "no-such-snap")).statusCode(400)
                 .body("__type", equalTo("ResourceNotFoundException"));
 
+        // The owner's snapshot ARN names the snapshot as well as its name does; one of another account does not.
+        String byArn = "{\"namespaceName\":\"share-dst\",\"workgroupName\":\"share-wg\","
+                + "\"snapshotArn\":\"" + snapshotArn + "\",\"ownerAccount\":\"" + owner + "\"}";
+        callAs(caller, "RestoreFromSnapshot", byArn).statusCode(200)
+                .body("ownerAccount", equalTo(owner))
+                .body("snapshotName", equalTo("share-snap"));
+        callAs(caller, "RestoreFromSnapshot", byArn.replace("\"ownerAccount\":\"" + owner, "\"ownerAccount\":\"" + stranger))
+                .statusCode(400)
+                .body("__type", equalTo("ValidationException"));
+
         // Withdrawing the policy takes the access away at the next restore.
         callAs(owner, "DeleteResourcePolicy", "{\"resourceArn\":\"" + snapshotArn + "\"}").statusCode(200);
         callAs(caller, "RestoreFromSnapshot", restore).statusCode(400).body("__type", equalTo("AccessDeniedException"));

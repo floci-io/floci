@@ -256,7 +256,7 @@ public class RedshiftServerlessJsonHandler {
      * and Region.
      */
     private Response handleGetSnapshot(JsonNode request, String region) {
-        return snapshotResponse(service.getSnapshot(snapshotNameOf(request, region), region));
+        return snapshotResponse(service.getSnapshot(snapshotNameOf(request, region, null), region));
     }
 
     private Response handleListSnapshots(JsonNode request, String region) {
@@ -285,13 +285,14 @@ public class RedshiftServerlessJsonHandler {
 
     private Response handleRestoreFromSnapshot(JsonNode request, String region) {
         String ownerAccount = ServerlessSupport.text(request, "ownerAccount");
-        String snapshotName = snapshotNameOf(request, region);
+        boolean shared = sharedSnapshots.isOtherAccount(ownerAccount);
+        String snapshotName = snapshotNameOf(request, region, shared ? ownerAccount : null);
         RedshiftServerlessService.RestoreResult result;
-        if (sharedSnapshots.isOtherAccount(ownerAccount)) {
-            RedshiftServerlessSnapshot shared = sharedSnapshots.requireRestorable(ownerAccount, snapshotName, region);
+        if (shared) {
             result = service.restoreFromSharedSnapshot(
                     ServerlessSupport.text(request, "namespaceName"), ServerlessSupport.text(request, "workgroupName"),
-                    shared, ownerAccount, ServerlessSupport.bool(request, "manageAdminPassword"),
+                    () -> sharedSnapshots.requireRestorable(ownerAccount, snapshotName, region),
+                    ownerAccount, ServerlessSupport.bool(request, "manageAdminPassword"),
                     ServerlessSupport.text(request, "adminPasswordSecretKmsKeyId"), region);
         } else {
             result = service.restoreFromSnapshot(
@@ -307,14 +308,21 @@ public class RedshiftServerlessJsonHandler {
         return Response.ok(response).build();
     }
 
-    /** The snapshot name from {@code snapshotName}, or recovered from {@code snapshotArn} when absent. */
-    private String snapshotNameOf(JsonNode request, String region) {
+    /**
+     * The snapshot name from {@code snapshotName}, or recovered from {@code snapshotArn} when absent.
+     * {@code ownerAccount} is the account the ARN must name, or null for the caller's own.
+     */
+    private String snapshotNameOf(JsonNode request, String region, String ownerAccount) {
         String snapshotName = ServerlessSupport.text(request, "snapshotName");
         String snapshotArn = ServerlessSupport.text(request, "snapshotArn");
         if (snapshotName != null && snapshotArn != null) {
             throw ServerlessSupport.validation("snapshotName and snapshotArn cannot both be specified.");
         }
-        return snapshotArn == null ? snapshotName : service.snapshotNameFromArn(snapshotArn, region);
+        if (snapshotArn == null) {
+            return snapshotName;
+        }
+        return ownerAccount == null ? service.snapshotNameFromArn(snapshotArn, region)
+                : service.snapshotNameFromArn(snapshotArn, region, ownerAccount, "snapshotArn");
     }
 
     private Response handleCreateUsageLimit(JsonNode request, String region) {
