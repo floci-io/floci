@@ -157,6 +157,7 @@ def build(models: dict[str, dict], provenance: str) -> dict:
                 raise SystemExit(f"error: REST models of {scope} have conflicting access-denied HTTP statuses")
             denial_statuses[scope] = status
             routes[name]["accessDeniedStatus"] = status
+    routes = dict(sorted(routes.items()))
     shared = shared_routes(routes)
     if shared:
         raise SystemExit("error: one route names more than one operation in a scope the rules do not route alone: "

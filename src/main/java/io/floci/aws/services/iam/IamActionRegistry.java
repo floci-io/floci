@@ -3,6 +3,7 @@ package io.floci.aws.services.iam;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.floci.aws.core.common.AwsProtocolClaimFilter;
 import io.floci.aws.core.common.AwsQueryServiceResolver;
+import io.floci.aws.core.common.IamOperation;
 import io.floci.aws.core.common.ProtocolClaim;
 import io.floci.aws.core.common.RequestResources;
 import io.floci.aws.core.common.WireProtocol;
@@ -674,7 +675,14 @@ public class IamActionRegistry {
                 && resourceInfo.getResourceMethod() != null) {
             return ROUTE53_DELEGATION_ACTIONS.get(resourceInfo.getResourceMethod().getName());
         }
-        return null;
+        if (resourceInfo == null || resourceInfo.getResourceClass() == null) {
+            return null;
+        }
+        IamOperation iamOperation = resourceInfo.getResourceClass().getAnnotation(IamOperation.class);
+        if (iamOperation == null || !credentialScope.equals(iamOperation.namespace())) {
+            return null;
+        }
+        return IamAuthorizedActions.actionFor(iamOperation.namespace(), iamOperation.operation());
     }
 
     /**

@@ -27,6 +27,7 @@ import io.floci.aws.services.bedrockagentcorecontrol.BedrockAgentCoreToolsContro
 import io.floci.aws.services.bedrockruntime.BedrockRuntimeController;
 import io.floci.aws.services.cloudfront.CloudFrontController;
 import io.floci.aws.services.cloudfront.CloudFrontServingController;
+import io.floci.aws.services.cloudwatch.metrics.OtlpMetricsController;
 import io.floci.aws.services.codeartifact.CodeArtifactController;
 import io.floci.aws.services.codeartifact.CodeArtifactMavenController;
 import io.floci.aws.services.codeartifact.CodeArtifactPypiController;
@@ -302,7 +303,7 @@ public class ResolvedServiceCatalog {
                         config.storage().services().cloudwatchmetrics().flushIntervalMs(), AwsNamespaces.CW, ServiceProtocol.QUERY,
                         protocols(ServiceProtocol.QUERY, ServiceProtocol.JSON, ServiceProtocol.CBOR),
                         Set.of("GraniteServiceVersion20100801."), Set.of("monitoring"),
-                        Set.of("GraniteServiceVersion20100801"), Set.of(), "CloudWatchVersion20130116."),
+                        Set.of("GraniteServiceVersion20100801"), Set.of(OtlpMetricsController.class), "CloudWatchVersion20130116."),
                 descriptor("paymentcryptography", "paymentcryptography",
                         config.services().paymentcryptography().enabled(), true,
                         "paymentcryptography",
