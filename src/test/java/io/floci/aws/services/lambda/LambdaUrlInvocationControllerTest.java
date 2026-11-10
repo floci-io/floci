@@ -8,6 +8,7 @@ import io.floci.aws.services.lambda.model.InvocationType;
 import io.floci.aws.services.lambda.model.InvokeResult;
 import io.floci.aws.services.lambda.model.LambdaAlias;
 import io.floci.aws.services.lambda.model.LambdaFunction;
+import io.floci.aws.services.lambda.model.LambdaUrlConfig;
 import jakarta.ws.rs.core.HttpHeaders;
 import jakarta.ws.rs.core.MultivaluedHashMap;
 import jakarta.ws.rs.core.Response;
@@ -366,6 +367,54 @@ class LambdaUrlInvocationControllerTest {
                 uriInfoFor("http://localhost/lambda-url/url-id/")));
 
         assertFalse(eventNode.has("cookies"));
+    }
+
+    @Test
+    void responseStreamUrlReturnsTheBodyThatFollowsTheHttpResponseStreamPrelude() {
+        byte[] payload = ("{\"statusCode\":201,\"headers\":{\"content-type\":\"text/event-stream\"},"
+                + "\"cookies\":[\"a=1\"]}\0\0\0\0\0\0\0\0data: 1\n\ndata: [DONE]\n\n")
+                .getBytes(StandardCharsets.UTF_8);
+
+        Response response = invokeResponseStreamUrl(payload);
+
+        assertEquals(201, response.getStatus());
+        assertEquals("text/event-stream", response.getHeaderString("content-type"));
+        assertEquals("a=1", response.getHeaderString("Set-Cookie"));
+        assertEquals("data: 1\n\ndata: [DONE]\n\n",
+                new String((byte[]) response.getEntity(), StandardCharsets.UTF_8));
+    }
+
+    @Test
+    void responseStreamUrlWithoutAPreludeReturnsTheStreamAsAnOctetStream() {
+        byte[] payload = "{\"statusCode\":418,\"body\":\"written as data\"}".getBytes(StandardCharsets.UTF_8);
+
+        Response response = invokeResponseStreamUrl(payload);
+
+        assertEquals(200, response.getStatus());
+        assertEquals("application/octet-stream", response.getHeaderString("content-type"));
+        assertEquals("{\"statusCode\":418,\"body\":\"written as data\"}",
+                new String((byte[]) response.getEntity(), StandardCharsets.UTF_8));
+    }
+
+    private Response invokeResponseStreamUrl(byte[] payload) {
+        LambdaUrlConfig urlConfig = new LambdaUrlConfig();
+        urlConfig.setInvokeMode("RESPONSE_STREAM");
+        LambdaFunction fn = new LambdaFunction();
+        fn.setFunctionName("my-function");
+        fn.setFunctionArn(FUNCTION_ARN);
+        fn.setAccountId("100000000012");
+        fn.setUrlConfig(urlConfig);
+
+        LambdaService lambdaService = mock(LambdaService.class);
+        when(lambdaService.getTargetByUrlId("url-id")).thenReturn(fn);
+        InvokeResult invokeResult = new InvokeResult();
+        invokeResult.setStatusCode(200);
+        invokeResult.setPayload(payload);
+        when(lambdaService.invokeArn(eq(FUNCTION_ARN), any(byte[].class), eq(InvocationType.RequestResponse)))
+                .thenReturn(invokeResult);
+
+        return newController(lambdaService).handleGet("url-id", "", headersWith(null),
+                uriInfoFor("http://localhost/lambda-url/url-id/"));
     }
 
     private JsonNode readTree(byte[] json) {

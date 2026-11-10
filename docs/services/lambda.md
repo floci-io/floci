@@ -429,6 +429,8 @@ disabled fails with Lambda's error as the resource status reason.
 
 Function URLs are also reachable directly on `/{proxy:.*}` under the Lambda URL controller, which routes the request into the normal `Invoke` path.
 
+A function URL with `InvokeMode: RESPONSE_STREAM` answers with the status code, headers and cookies from the `awslambda.HttpResponseStream.from` prelude and the body the handler wrote after it. A handler that writes no prelude gets a `200` with `application/octet-stream`. Floci buffers the stream, so the body arrives in one piece when the function finishes rather than chunk by chunk.
+
 Function URLs are not available in AWS GovCloud (US) or in the China Regions
 ([GovCloud guide](https://docs.aws.amazon.com/govcloud-us/latest/UserGuide/govcloud-lambda.html),
 [China guide](https://docs.amazonaws.cn/en_us/aws/latest/userguide/lambda.html)), so
