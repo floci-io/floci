@@ -16,8 +16,8 @@ import software.amazon.awssdk.services.applicationautoscaling.model.ScalingActiv
 import software.amazon.awssdk.services.applicationautoscaling.model.ScheduledAction;
 import software.amazon.awssdk.services.applicationautoscaling.model.ServiceNamespace;
 import software.amazon.awssdk.services.ecs.EcsClient;
+import software.amazon.awssdk.services.ecs.model.ClusterContainsTasksException;
 import software.amazon.awssdk.services.ecs.model.ContainerDefinition;
-import software.amazon.awssdk.services.ecs.model.DescribeTasksRequest;
 import software.amazon.awssdk.services.ecs.model.DesiredStatus;
 import software.amazon.awssdk.services.ecs.model.LaunchType;
 import software.amazon.awssdk.services.ecs.model.TaskDefinition;
@@ -164,7 +164,7 @@ class ApplicationAutoScalingTest {
                                 .scalableDimension(DIMENSION).minCapacity(2).maxCapacity(4)
                                 .suspendedState(s -> s.dynamicScalingInSuspended(true)
                                         .dynamicScalingOutSuspended(true).scheduledScalingSuspended(false)));
-                        scaling.putScheduledAction(action(name).schedule(at(Instant.now().plusSeconds(3)))
+                        scaling.putScheduledAction(action(name).schedule(at(Instant.now().plusSeconds(2)))
                                 .scalableTargetAction(b -> b.minCapacity(0).maxCapacity(1)).build());
                         ScheduledAction created = actionNamed(name);
                         awaitExecution(ecs, 1, 0, 1, 1);
@@ -182,19 +182,22 @@ class ApplicationAutoScalingTest {
                     ecs.deregisterTaskDefinition(r -> r.taskDefinition(definition.taskDefinitionArn()));
                 }
             } finally {
-                // DeleteService can request a stop while a task is still launching.
-                List<String> tasks = Stream.of(DesiredStatus.RUNNING, DesiredStatus.STOPPED)
-                        .flatMap(status -> ecs.listTasks(r -> r.cluster(name).desiredStatus(status)).taskArns().stream())
-                        .distinct().toList();
-                for (String task : tasks) {
-                    ecs.stopTask(r -> r.cluster(name).task(task));
-                }
-                if (!tasks.isEmpty()) {
-                    assertThat(ecs.waiter().waitUntilTasksStopped(DescribeTasksRequest.builder()
-                                    .cluster(name).tasks(tasks).build(),
-                            TestFixtures.waiterOverride(Duration.ofSeconds(60))).matched().response()).isPresent();
-                }
-                ecs.deleteCluster(r -> r.cluster(name));
+                // An in-flight service reconciliation can add tasks after DeleteService returns.
+                TestFixtures.await(() -> {
+                    List<String> tasks = Stream.of(DesiredStatus.RUNNING, DesiredStatus.STOPPED)
+                            .flatMap(status -> ecs.listTasks(r -> r.cluster(name).desiredStatus(status)).taskArns().stream())
+                            .distinct().toList();
+                    for (String task : tasks) {
+                        ecs.stopTask(r -> r.cluster(name).task(task));
+                    }
+                    try {
+                        ecs.deleteCluster(r -> r.cluster(name));
+                        return true;
+                    } catch (ClusterContainsTasksException expected) {
+                        // Re-list on the next pass to include tasks created after this snapshot.
+                        return false;
+                    }
+                }, name, "cluster deleted", Duration.ofSeconds(60).toNanos(), 200);
             }
         }
     }
