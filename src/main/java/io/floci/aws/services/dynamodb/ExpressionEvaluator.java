@@ -472,6 +472,9 @@ final class ExpressionEvaluator {
         return -1;
     }
 
+    private static final Map<TokenType, String> ORDERING_OPERATORS = Map.of(
+            TokenType.LT, "<", TokenType.LE, "<=", TokenType.GT, ">", TokenType.GE, ">=");
+
     private static void validateSemantics(Expr expr, String exprType,
                                           JsonNode names, JsonNode values) {
         if (expr == null) return;
@@ -480,9 +483,29 @@ final class ExpressionEvaluator {
             case OrExpr o -> o.operands().forEach(x -> validateSemantics(x, exprType, names, values));
             case NotExpr n -> validateSemantics(n.operand(), exprType, names, values);
             case FunctionCallExpr f -> validateFunction(f, exprType, names, values);
-            case BetweenExpr b -> validateBetween(b, exprType, values);
+            case CompareExpr c when ORDERING_OPERATORS.containsKey(c.op()) ->
+                    requireOrderedOperands(ORDERING_OPERATORS.get(c.op()), exprType, values, c.left(), c.right());
+            case BetweenExpr b -> {
+                requireOrderedOperands("BETWEEN", exprType, values, b.value(), b.low(), b.high());
+                validateBetween(b, exprType, values);
+            }
             default -> {}
         }
+    }
+
+    private static void requireOrderedOperands(String operator, String exprType, JsonNode values,
+                                               Operand... operands) {
+        for (Operand operand : operands) {
+            String type = operandValueType(operand, values);
+            if (type != null && !DynamoDbPartiQLParser.ORDERED_TYPES.contains(type)) {
+                throw incorrectOperandType(exprType, operator, type);
+            }
+        }
+    }
+
+    private static AwsException incorrectOperandType(String exprType, String operator, String type) {
+        return new AwsException("ValidationException", "Invalid " + exprType + ": "
+                + DynamoDbPartiQLParser.incorrectOperandType(operator, type), 400);
     }
 
     // AWS rejects a BETWEEN whose bounds are the wrong way round when it parses the
@@ -559,9 +582,7 @@ final class ExpressionEvaluator {
         if (name.equals("begins_with") && f.args().size() >= 2) {
             String type = operandValueType(f.args().get(1), values);
             if (type != null && !type.equals("S") && !type.equals("B")) {
-                throw new AwsException("ValidationException",
-                        "Invalid " + exprType + ": Incorrect operand type for operator or function; "
-                        + "operator or function: begins_with, operand type: " + type, 400);
+                throw incorrectOperandType(exprType, "begins_with", type);
             }
         }
     }
