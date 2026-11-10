@@ -1,7 +1,11 @@
 package io.floci.aws.services.cloudformation;
 
+import io.floci.aws.services.cloudformation.model.StackResource;
+import io.floci.aws.services.cloudformation.provisioners.CfnRollback;
+import io.floci.aws.services.cloudformation.provisioners.Ec2LaunchTemplateCfnProvisioner;
 import io.floci.aws.services.ec2.Ec2Service;
 import io.floci.aws.services.ec2.model.Instance;
+import io.floci.aws.services.ec2.model.LaunchTemplate;
 import io.floci.aws.services.ec2.model.LaunchTemplateData;
 import io.floci.aws.testing.CfnStackWaits;
 import io.quarkus.test.junit.QuarkusTest;
@@ -19,6 +23,7 @@ import static org.hamcrest.Matchers.containsString;
 import static org.hamcrest.Matchers.equalTo;
 import static org.hamcrest.Matchers.not;
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
  * End-to-end check that CloudFormation provisions AWS::EC2::LaunchTemplate for real
@@ -32,10 +37,40 @@ class CloudFormationLaunchTemplateIntegrationTest {
     @Inject
     Ec2Service ec2Service;
 
+    @Inject
+    Ec2LaunchTemplateCfnProvisioner launchTemplateProvisioner;
+
     private static final String CFN_AUTH =
             "AWS4-HMAC-SHA256 Credential=test/20260205/us-east-1/cloudformation/aws4_request";
     private static final String EC2_AUTH =
             "AWS4-HMAC-SHA256 Credential=test/20260205/us-east-1/ec2/aws4_request";
+
+    @Test
+    void rollbackAcceptsAVersionAlreadyDeletedThroughThePublicApi() {
+        LaunchTemplate template = ec2Service.createLaunchTemplate("us-east-1",
+                "already-deleted-version-" + System.nanoTime(), new LaunchTemplateData(), List.of());
+        String id = template.getLaunchTemplateId();
+        try {
+            ec2Service.createLaunchTemplateVersion("us-east-1", id, null, null, new LaunchTemplateData());
+            StackResource resource = new StackResource();
+            resource.setLogicalId("Lt");
+            resource.getAttributes().put("LatestVersionNumber", "2");
+            resource.getAttributes().put(CfnRollback.LAUNCH_TEMPLATE_UPDATE_SNAPSHOT_ATTR,
+                    "{\"region\":\"us-east-1\",\"launchTemplateId\":\"" + id + "\","
+                            + "\"createdVersion\":\"2\",\"priorLatestVersion\":\"1\",\"priorDefaultVersion\":\"1\"}");
+            given().header("Authorization", EC2_AUTH)
+                    .formParam("Action", "DeleteLaunchTemplateVersions")
+                    .formParam("LaunchTemplateId", id).formParam("LaunchTemplateVersion.1", "2")
+                    .post("/").then().statusCode(200);
+            assertTrue(launchTemplateProvisioner.rollbackUpdate(resource));
+            assertEquals("1", resource.getAttributes().get("LatestVersionNumber"));
+            assertEquals("1", resource.getAttributes().get("DefaultVersionNumber"));
+            assertEquals(List.of("1"), ec2Service.describeLaunchTemplateVersions("us-east-1", id, null, List.of())
+                    .stream().map(LaunchTemplate::getLatestVersionNumber).toList());
+        } finally {
+            ec2Service.deleteLaunchTemplate("us-east-1", id, null);
+        }
+    }
 
     @Test
     void rollbackDeletesTheFailedVersionWithoutReusingItsNumber() {

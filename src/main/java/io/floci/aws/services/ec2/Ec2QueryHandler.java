@@ -5287,9 +5287,13 @@ public class Ec2QueryHandler {
     }
 
     private Response handleDeleteLaunchTemplateVersions(MultivaluedMap<String, String> p, String region) {
+        String dryRun = p.getFirst("DryRun");
+        if (dryRun != null && dryRun.isBlank()) {
+            throw new AwsException("InvalidParameterValue", "DryRun is not a valid boolean.", 400);
+        }
         List<Ec2Service.LaunchTemplateVersionDeletion> results = service.deleteLaunchTemplateVersions(
                 region, p.getFirst("LaunchTemplateId"), p.getFirst("LaunchTemplateName"),
-                getList(p, "LaunchTemplateVersion"), Boolean.parseBoolean(p.getFirst("DryRun")));
+                getList(p, "LaunchTemplateVersion"), Boolean.TRUE.equals(parseOptionalBoolean(dryRun, "DryRun")));
         XmlBuilder xml = new XmlBuilder().start("DeleteLaunchTemplateVersionsResponse", AwsNamespaces.EC2)
                 .elem("requestId", UUID.randomUUID().toString());
         for (boolean success : List.of(true, false)) {

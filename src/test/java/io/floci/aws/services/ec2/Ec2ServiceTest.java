@@ -9612,19 +9612,20 @@ class Ec2ServiceTest {
 
     @Test
     void templateResolutionCopiesVersionBeforeConcurrentDeletion() throws Exception {
+        AccountAwareStorageBackend<LaunchTemplate> templates = AccountAwareStorageBackend.inMemory("000000000000");
         Ec2Service service = new Ec2Service(mockConfig(true), mock(Ec2ContainerManager.class),
                 mock(Ec2PortForwardManager.class), mock(AmiImageResolver.class), mock(Ec2ImageCatalog.class),
-                new Ec2InstanceTypeCatalog(), new InMemoryStorageFactory());
+                new Ec2InstanceTypeCatalog(), new InMemoryStorageFactory(Map.of("ec2-launch-templates.json", templates)));
         LaunchTemplateData first = new LaunchTemplateData();
         first.setImageId("ami-first");
-        LaunchTemplate template = service.createLaunchTemplate("us-east-1", "resolution-race", first, List.of());
+        LaunchTemplate created = service.createLaunchTemplate("us-east-1", "resolution-race", first, List.of());
         LaunchTemplateData second = new LaunchTemplateData();
         second.setImageId("ami-second");
-        service.createLaunchTemplateVersion("us-east-1", template.getLaunchTemplateId(), null, null, second);
+        service.createLaunchTemplateVersion("us-east-1", created.getLaunchTemplateId(), null, null, second);
+        LaunchTemplate template = spy(created);
         Map<String, LaunchTemplateData> versions = spy(new LinkedHashMap<>(template.getVersions()));
-        Field versionsField = LaunchTemplate.class.getDeclaredField("versions");
-        versionsField.setAccessible(true);
-        versionsField.set(template, versions);
+        doReturn(versions).when(template).getVersions();
+        templates.put("us-east-1::" + template.getLaunchTemplateId(), template);
         CountDownLatch checked = new CountDownLatch(1);
         CountDownLatch release = new CountDownLatch(1);
         AtomicReference<Thread> reader = new AtomicReference<>();

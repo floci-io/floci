@@ -259,6 +259,28 @@ class Ec2LaunchTemplateVersionsIntegrationTest {
         };
     }
 
+    @ParameterizedTest
+    @ValueSource(strings = {"yes", "1", "invalid", "", " "})
+    void invalidDeleteDryRunDoesNotRemoveVersions(String dryRun) {
+        try (Ec2Client client = client()) {
+            String id = createVersions(client, "invalid-delete-dry-run-" + UUID.randomUUID());
+            try {
+                given().header("Authorization", "AWS4-HMAC-SHA256 Credential=" + ACCOUNT
+                                + "/20261110/us-east-1/ec2/aws4_request")
+                        .formParam("Action", "DeleteLaunchTemplateVersions")
+                        .formParam("LaunchTemplateId", id).formParam("LaunchTemplateVersion.1", "2")
+                        .formParam("DryRun", dryRun)
+                        .post("/").then().statusCode(400)
+                        .body("Response.Errors.Error.Code", equalTo("InvalidParameterValue"));
+                assertEquals(List.of(1L, 2L, 3L), client.describeLaunchTemplateVersions(request ->
+                        request.launchTemplateId(id)).launchTemplateVersions().stream()
+                        .map(LaunchTemplateVersion::versionNumber).toList());
+            } finally {
+                client.deleteLaunchTemplate(request -> request.launchTemplateId(id));
+            }
+        }
+    }
+
     @Test
     void legacyVersionAliasStillSelectsAnOlderVersion() {
         String name = "versions-alias-6234-" + UUID.randomUUID();
