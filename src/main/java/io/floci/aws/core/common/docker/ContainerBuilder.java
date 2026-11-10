@@ -201,6 +201,7 @@ public class ContainerBuilder {
         private Long memorySwapBytes;
         private Long memorySwappiness;
         private boolean javaTrustStore;
+        private String dnsName;
 
         Builder(String image, EmulatorConfig config, DockerHostResolver dockerHostResolver,
                 EmbeddedDnsServer embeddedDnsServer,
@@ -403,6 +404,15 @@ public class ContainerBuilder {
             if (ip != null && !ip.isBlank() && !linkLocalIps.contains(ip.trim())) {
                 linkLocalIps.add(ip.trim());
             }
+            return this;
+        }
+
+        /**
+         * Gives the container {@code name} as its host name and as its alias on the user-defined network it joins at
+         * creation, so the other containers there reach it by that name.
+         */
+        public Builder withDnsName(String name) {
+            this.dnsName = name;
             return this;
         }
 
@@ -822,7 +832,8 @@ public class ContainerBuilder {
                     init,
                     new LinuxOptions(List.copyOf(capAdd), List.copyOf(capDrop), List.copyOf(devices),
                             shmSizeBytes, Map.copyOf(tmpfs), memorySwapBytes, memorySwappiness),
-                    javaTrustStore
+                    javaTrustStore,
+                    dnsName
             );
         }
     }

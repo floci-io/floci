@@ -632,6 +632,7 @@ floci:
       # hive-image-template: "registry.internal/emr-serverless/hive/%s:20250425"   # every cluster's HDFS, and Hive
       yarn-node-memory-mb: 4096             # memory a cluster's NodeManager offers its YARN containers
       yarn-node-vcores: 4                   # virtual cores it offers them
+      yarn-max-worker-nodes: 4              # the most core and task nodes a cluster runs as containers of their own
       # Remove the step drivers a previous run of this deployment left on the daemon, and the images
       # bootstrap actions left for clusters that are gone or have ended, when the EMR service starts.
       # Scoped to this deployment's own containers and images.

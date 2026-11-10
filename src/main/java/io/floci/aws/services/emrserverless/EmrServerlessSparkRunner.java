@@ -84,6 +84,9 @@ public class EmrServerlessSparkRunner implements SparkJobRunner, ContainerTeardo
     private static final String HADOOP_SITE_VARIABLE = "FLOCI_HADOOP_SITE";
     private static final String SPARK_LOG4J2_VARIABLE = "FLOCI_SPARK_LOG4J2";
     private static final String MAPRED_SITE_VARIABLE = "FLOCI_MAPRED_SITE";
+    // The copies of a block a cluster's core nodes keep, as an hdfs-site.xml property: there, as the image's own says two
+    // and a Hadoop client reads hdfs-site.xml after core-site.xml.
+    private static final String HDFS_SITE_VARIABLE = "FLOCI_HDFS_SITE";
     private static final String HADOOP_LOG4J_VARIABLE = "FLOCI_HADOOP_LOG4J";
     private static final String HADOOP_ENV_VARIABLE = "FLOCI_HADOOP_ENV";
     private static final Pattern SHELL_NAME = Pattern.compile("[A-Za-z_][A-Za-z0-9_]*");
@@ -167,6 +170,9 @@ public class EmrServerlessSparkRunner implements SparkJobRunner, ContainerTeardo
             "  }",
             "  site core-site.xml \"$" + HADOOP_SITE_VARIABLE + "\"",
             "  site mapred-site.xml \"$" + MAPRED_SITE_VARIABLE + "\"",
+            "  if [ -n \"${" + HDFS_SITE_VARIABLE + ":-}\" ]; then",
+            "    site hdfs-site.xml \"$" + HDFS_SITE_VARIABLE + "\"",
+            "  fi",
             "  if [ ! -s \"$hadoop_conf/log4j.properties\" ]; then",
             "    printf '%s\\n' '" + String.join("' '", HADOOP_CONSOLE_LOG) + "' > \"$hadoop_conf/log4j.properties\"",
             "  fi",
@@ -415,6 +421,10 @@ public class EmrServerlessSparkRunner implements SparkJobRunner, ContainerTeardo
             if (job.storage() != null && job.engine() == Engine.SPARK) {
                 container.withEnv(HADOOP_SITE_VARIABLE, hadoopSite(job, endpoint))
                         .withEnv(MAPRED_SITE_VARIABLE, mapredSite(job));
+                if (job.storage() != null && job.storage().replication() > 0) {
+                    container.withEnv(HDFS_SITE_VARIABLE, siteProperty("dfs.replication",
+                            String.valueOf(job.storage().replication())));
+                }
                 if (!job.hadoopLog4j().isEmpty()) {
                     container.withEnv(HADOOP_LOG4J_VARIABLE, hadoopLog4jFile(job));
                 }
@@ -516,7 +526,8 @@ public class EmrServerlessSparkRunner implements SparkJobRunner, ContainerTeardo
             for (Container container : containers) {
                 Map<String, String> labels = container.getLabels() != null ? container.getLabels() : Map.of();
                 // A live EMR cluster's HDFS, which its storage keeps, carries the service's labels too.
-                if (Storage.HDFS_COMPONENT.equals(labels.get(ContainerStorageHelper.COMPONENT_LABEL))) {
+                String component = labels.get(ContainerStorageHelper.COMPONENT_LABEL);
+                if (Storage.HDFS_COMPONENT.equals(component) || Storage.NODE_COMPONENT.equals(component)) {
                     continue;
                 }
                 if (aliases.consistent(container.getId(), labels)
@@ -984,10 +995,18 @@ public class EmrServerlessSparkRunner implements SparkJobRunner, ContainerTeardo
     }
 
     // A cluster's HDFS, as Hadoop settings: its NameNode, on the cluster's primary node, which hdfs:// paths without a
-    // host, and paths without a scheme, lead to; none before it runs.
+    // host, and paths without a scheme, lead to, and, as it is a client that says how many copies of a block it writes
+    // and the image's hdfs-site.xml says two, the copies its core nodes keep; none before it runs.
     private static List<SparkSetting> hdfsSettings(Storage storage) {
-        return storage == null || storage.hdfsHost() == null ? List.of()
-                : List.of(new SparkSetting("fs.defaultFS", "hdfs://" + storage.hdfsHost() + ":" + HDFS_PORT));
+        if (storage == null || storage.hdfsHost() == null) {
+            return List.of();
+        }
+        List<SparkSetting> settings = new ArrayList<>();
+        settings.add(new SparkSetting("fs.defaultFS", "hdfs://" + storage.hdfsHost() + ":" + HDFS_PORT));
+        if (storage.replication() > 0) {
+            settings.add(new SparkSetting("dfs.replication", String.valueOf(storage.replication())));
+        }
+        return settings;
     }
 
     // The cluster's HDFS for a MapReduce job in local mode, which reads the core-site.xml of the hadoop command's

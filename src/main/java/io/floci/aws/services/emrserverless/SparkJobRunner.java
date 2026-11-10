@@ -112,10 +112,11 @@ public interface SparkJobRunner {
      * node, named {@code hdfsHost}, which a step's container reaches at {@code hdfsAddress} on the Docker network
      * {@code hdfsNetwork}, the cluster's own, which the container joins (all three null until it runs, the network
      * also on the host's own network, which steps share with it); and, on a cluster with Hive or HCatalog, the URI of
-     * the Hive metastore service on that node, or null.
+     * the Hive metastore service on that node, or null; and how many copies of a block its HDFS keeps, when its core
+     * nodes hold it, else 0.
      */
     record Storage(String home, String mnt, String hdfsHost, String hdfsAddress, String hdfsNetwork,
-                   String hiveMetastore, String resourceManager, String flociEndpoint) {
+                   String hiveMetastore, String resourceManager, String flociEndpoint, int replication) {
 
         /**
          * The component label of an EMR cluster's HDFS container, which carries its service's labels as a driver
@@ -123,19 +124,24 @@ public interface SparkJobRunner {
          */
         public static final String HDFS_COMPONENT = "emr-hdfs";
 
+        /** The component label of an EMR cluster's core or task node's container, its storage's as the HDFS is. */
+        public static final String NODE_COMPONENT = "emr-node";
+
         /** A cluster's volumes, before its HDFS runs. */
         public Storage(String home, String mnt) {
-            this(home, mnt, null, null, null, null, null, null);
+            this(home, mnt, null, null, null, null, null, null, 0);
         }
 
         /** This storage, its HDFS's NameNode on {@code host}, at {@code address} on {@code network}. */
         public Storage withHdfs(String host, String address, String network) {
-            return new Storage(home, mnt, host, address, network, hiveMetastore, resourceManager, flociEndpoint);
+            return new Storage(home, mnt, host, address, network, hiveMetastore, resourceManager, flociEndpoint,
+                    replication);
         }
 
         /** This storage, its Hive metastore service at {@code uri}. */
         public Storage withHiveMetastore(String uri) {
-            return new Storage(home, mnt, hdfsHost, hdfsAddress, hdfsNetwork, uri, resourceManager, flociEndpoint);
+            return new Storage(home, mnt, hdfsHost, hdfsAddress, hdfsNetwork, uri, resourceManager, flociEndpoint,
+                    replication);
         }
 
         /**
@@ -143,7 +149,14 @@ public interface SparkJobRunner {
          * Floci's address on the HDFS's network.
          */
         public Storage withYarn(String host, String flociEndpoint) {
-            return new Storage(home, mnt, hdfsHost, hdfsAddress, hdfsNetwork, hiveMetastore, host, flociEndpoint);
+            return new Storage(home, mnt, hdfsHost, hdfsAddress, hdfsNetwork, hiveMetastore, host, flociEndpoint,
+                    replication);
+        }
+
+        /** This storage, its HDFS keeping {@code copies} copies of a block on its core nodes. */
+        public Storage withReplication(int copies) {
+            return new Storage(home, mnt, hdfsHost, hdfsAddress, hdfsNetwork, hiveMetastore, resourceManager,
+                    flociEndpoint, copies);
         }
     }
 
