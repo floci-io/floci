@@ -22,7 +22,8 @@ on, the request names a resource when one of its top-level members holds a strin
 strings, or, for an ARN, a member of a structure or of each element of a list of structures does
 (`SetRulePriorities`' `RulePriorities[].RuleArn`), and:
 
-- holds the resource's ARN: its name ends in `Arn` or `Arns`. Any of the action's types may be the
+- holds the resource's ARN: its name ends in `Arn` or `Arns`, or it is an Identifier whose modeled
+  pattern only accepts an ARN. Any of the action's types may be the
   one it holds (`ResourceArn` holds whatever the action acts on, `RuleArn` a `listener-rule/app`),
   and a value names a resource of a type when it matches the type's ARN format, so an ARN of
   something the action does not act on is not checked.
@@ -164,7 +165,7 @@ OUTPUT = REPO_ROOT / "src/main/resources/aws/iam-request-resources.json"
 # are the ones its handlers mint.
 NAMESPACES = ("access-analyzer", "acm", "application-autoscaling", "athena", "bcm-data-exports",
               "bcm-pricing-calculator", "budgets", "ce", "cloudtrail", "codebuild", "codepipeline", "cognito-identity",
-              "cognito-idp", "cur", "datasync", "ec2", "ecr", "elasticloadbalancing", "elasticmapreduce", "es", "events",
+              "cognito-idp", "controltower", "cur", "datasync", "ec2", "ecr", "elasticloadbalancing", "elasticmapreduce", "es", "events",
               "firehose", "globalaccelerator", "kinesisanalytics", "payment-cryptography", "quicksight", "redshift",
               "redshift-data", "rekognition", "servicediscovery", "servicequotas", "sso", "states", "textract",
               "timestream-influxdb", "translate", "signer")
@@ -235,7 +236,6 @@ NOT_COVERED: dict[str, str] = {
     "config": _LATER,
     "connect": _REST,
     "controlcatalog": _REST,
-    "controltower": _REST,
     "detective": _REST,
     "dlm": _REST,
     "dms": _LATER,
@@ -581,40 +581,6 @@ CORRECTIONS: dict[str, tuple[list[dict], str]] = {
                                  "Name (ARN) to which you want to add the tag or tags'), whose name does not end in "
                                  "Arn")
        for operation in ("CreateTags", "DeleteTags", "DescribeTags")},
-    **{f"redshift:{operation}": ([{"type": kind, "fill": fill}], f"{why}, never a {kind}'s")
-       for operation, kind, fill, why in (
-           ("CreateCluster", "cluster", {"ClusterName": "ClusterIdentifier"},
-            "its DefaultIamRoleArn is an IAM role's ARN and its RedshiftIdcApplicationArn an IAM Identity Center "
-            "application's"),
-           ("CreateCustomDomainAssociation", "cluster", {"ClusterName": "ClusterIdentifier"},
-            "its CustomDomainCertificateArn is an ACM certificate's ARN"),
-           ("CreateEventSubscription", "eventsubscription", {"EventSubscriptionName": "SubscriptionName"},
-            "its SnsTopicArn is an SNS topic's ARN"),
-           ("CreateIntegration", "integration", {},
-            "its SourceArn is the source database's ARN and its TargetArn the target data warehouse's"),
-           ("DescribeClusterSnapshots", "cluster", {"ClusterName": "ClusterIdentifier"},
-            "its SnapshotArn is a snapshot's ARN"),
-           ("DescribeNodeConfigurationOptions", "cluster", {"ClusterName": "ClusterIdentifier"},
-            "its SnapshotArn is a snapshot's ARN"),
-           ("ListRecommendations", "cluster", {"ClusterName": "ClusterIdentifier"},
-            "its NamespaceArn is a namespace's ARN"),
-           ("ModifyClusterIamRoles", "cluster", {"ClusterName": "ClusterIdentifier"},
-            "its DefaultIamRoleArn is an IAM role's ARN"),
-           ("ModifyCustomDomainAssociation", "cluster", {"ClusterName": "ClusterIdentifier"},
-            "its CustomDomainCertificateArn is an ACM certificate's ARN"),
-           ("ModifyEventSubscription", "eventsubscription", {"EventSubscriptionName": "SubscriptionName"},
-            "its SnsTopicArn is an SNS topic's ARN"),
-           ("ModifyLakehouseConfiguration", "cluster", {"ClusterName": "ClusterIdentifier"},
-            "its LakehouseIdcApplicationArn is an IAM Identity Center application's ARN"))},
-    **{f"redshift:{operation}": ([{"types": [kind], "arn": arn}], f"{why}, never a {kind}'s")
-       for operation, kind, arn, why in (
-           ("AssociateDataShareConsumer", "datashare", "DataShareArn",
-            "its ConsumerArn is the consumer namespace's ARN"),
-           ("DisassociateDataShareConsumer", "datashare", "DataShareArn",
-            "its ConsumerArn is the consumer namespace's ARN"),
-           ("ModifyRedshiftIdcApplication", "redshiftidcapplication", "RedshiftIdcApplicationArn",
-            "its IamRoleArn is an IAM role's ARN and its AuthorizedTokenIssuerList's TrustedTokenIssuerArn a trusted "
-            "token issuer's"))},
 }
 
 # Resource types whose ARN a request may give with a qualifier, one more `:<name>` past its format, which their
@@ -686,7 +652,7 @@ BARE = {"name", "names", "id", "ids", "identifier", "identifiers"}
 # The patterns botocore gives a string shape that holds an account id.
 ACCOUNT_ID_PATTERNS = {"[0-9]{12}", "^[0-9]{12}$", r"\d{12}", r"^\d{12}$"}
 # The verbs an operation that creates the resource it is named after starts with.
-CREATING_RE = re.compile(r"^(Create|Run|Allocate|Register|Put|Import|Copy|Request|Start|Add)")
+CREATING_RE = re.compile(r"^(Create|Run|Allocate|Register|Put|Import|Copy|Request|Start|Add|Enable)")
 # An operation's verb: what follows is what it acts on.
 SUBJECT_RE = re.compile(r"^[A-Z][a-z]+")
 # The protocols whose requests RequestResources reads: form parameters or a JSON or CBOR body.
@@ -775,6 +741,49 @@ def request_members(models: dict[str, dict], operation: str) -> dict[str, str]:
             for path in _nested_arns(model, name, shape):
                 found.setdefault(path.removesuffix("[]"), path)
     return found
+
+
+def string_patterns(models: dict[str, dict], operation: str) -> dict[str, set[str | None]]:
+    """Patterns of each top-level string member, including list elements, across the request's clients."""
+    found: dict[str, set[str | None]] = {}
+    for model in models.values():
+        spec = model["operations"].get(operation)
+        if spec is None or "input" not in spec or not READ_PROTOCOLS & _protocols(model):
+            continue
+        for name, member in model["shapes"][spec["input"]["shape"]].get("members", {}).items():
+            if member.get("location") not in BODY_LOCATIONS and _located(member) is None:
+                continue
+            shape = model["shapes"][member["shape"]]
+            if _strings(model, shape) is None:
+                continue
+            element = model["shapes"][shape["member"]["shape"]] if shape["type"] == "list" else shape
+            found.setdefault(name, set()).add(element.get("pattern"))
+    return found
+
+
+def only_arn(pattern: str | None) -> bool:
+    """A required ARN prefix, with no top-level alternative that could instead name another value."""
+    if not pattern or not re.match(r"^\^?arn:", pattern):
+        return False
+    depth = 0
+    in_class = False
+    escaped = False
+    for char in pattern:
+        if escaped:
+            escaped = False
+        elif char == "\\":
+            escaped = True
+        elif in_class:
+            in_class = char != "]"
+        elif char == "[":
+            in_class = True
+        elif char == "(":
+            depth += 1
+        elif char == ")":
+            depth -= 1
+        elif char == "|" and depth == 0:
+            return False
+    return True
 
 
 def located_members(models: dict[str, dict], operation: str) -> dict[str, str]:
@@ -958,12 +967,14 @@ def compatible(member: str, variable: str) -> bool:
     return not member_kind or not variable_kind or member_kind == variable_kind or member_kind == "identifier"
 
 
-def resources_for(operation: str, types: list[str], formats: dict[str, str], members: dict[str, str]) -> list[dict]:
+def resources_for(operation: str, types: list[str], formats: dict[str, str], members: dict[str, str],
+                  arn_members: set[str] | None = None) -> list[dict]:
     """The resources the rule finds the operation's request naming, as vendored entries."""
     name = operation.split(":", 1)[1]
     created = stem(CREATING_RE.sub("", name)) if CREATING_RE.match(name) else None
     subject = stem(SUBJECT_RE.sub("", name))
-    arns = {member: path for member, path in members.items() if re.search(r"arns?$", member, re.IGNORECASE)}
+    arns = {member: path for member, path in members.items() if re.search(r"arns?$", member, re.IGNORECASE)
+            or member in (arn_members or set())}
     names = {member: path for member, path in members.items() if member not in arns}
     by_arn: dict[str, list[str]] = {}
     filled: dict[str, dict[str, str]] = {}
@@ -978,7 +989,8 @@ def resources_for(operation: str, types: list[str], formats: dict[str, str], mem
         # A top-level ARN member named for the type, or for whatever the action acts on, holds it, and a bare
         # name then names something else.
         held = [member for member in arns if "." not in member and (stem(member) in ("", "resource")
-                or related(stem(member), kind_stem) or kind_stem.startswith(stem(member)))]
+                or (stem(member) == kind_stem if member in (arn_members or set())
+                    else related(stem(member), kind_stem) or kind_stem.startswith(stem(member))))]
         variables = [v for v in VARIABLE_RE.findall(formats[kind]) if v not in KNOWN_VARIABLES]
         fill: dict[str, str] = {}
         for variable in sorted(variables, key=lambda v: (kind_of(v) == "", v)):
@@ -1166,6 +1178,9 @@ def entry_for(operation: str, upstream: dict, formats: dict[str, str], models: d
     """What the file says for one operation."""
     types = upstream["types"] or []
     members = request_members(models, operation.split(":", 1)[1])
+    patterns = string_patterns(models, operation.split(":", 1)[1])
+    arn_members = {member for member, values in patterns.items() if kind_of(member) == "identifier"
+                   and all(only_arn(value) for value in values)}
     if namespace_of(operation) in ID_TARGETS:
         entry = {"action": upstream["action"], "types": types, "resources": []}
         targets = id_targets(operation, types, formats, models)
@@ -1180,7 +1195,7 @@ def entry_for(operation: str, upstream: dict, formats: dict[str, str], models: d
             raise ValueError(f"CORRECTIONS serves {operation} on {sorted(unknown)}, no endpoint prefix of the clients "
                              f"it reads ({sorted(endpoints)})")
     else:
-        resources = with_through(with_found(with_parent_ids(resources_for(operation, types, formats, members),
+        resources = with_through(with_found(with_parent_ids(resources_for(operation, types, formats, members, arn_members),
                                                             formats, types, members),
                                             namespace_of(operation), types, members),
                                  namespace_of(operation), types, members)

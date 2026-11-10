@@ -449,7 +449,8 @@ class RequestResourceMembersTest {
      */
     private static boolean sharesAMember(Resource resource, Map<Member, String> given) {
         if (resource.arn() != null || resource.fill().values().stream()
-                .noneMatch(member -> given.containsKey(member) && !resource.arnOf().containsKey(member.path()))) {
+                .noneMatch(member -> given.containsKey(member) && (!resource.arnOf().containsKey(member.path())
+                        || !AwsArnUtils.isArn(given.get(member))))) {
             return false;
         }
         Map<String, String> values = given.entrySet().stream()
