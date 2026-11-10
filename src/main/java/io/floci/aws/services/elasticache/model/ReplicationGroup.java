@@ -43,6 +43,8 @@ public class ReplicationGroup {
     private int numNodeGroups = 1;
     private int replicasPerNodeGroup;
     private int numCacheClusters = 1;
+    /** The member a cluster-mode-disabled group reports as primary, 1-based; TestFailover moves it. */
+    private int primaryMemberIndex = 1;
     private String engine;
     private String engineVersion;
     private String cacheNodeType;
@@ -169,6 +171,9 @@ public class ReplicationGroup {
 
     public int getNumCacheClusters() { return numCacheClusters; }
     public void setNumCacheClusters(int numCacheClusters) { this.numCacheClusters = numCacheClusters; }
+
+    public int getPrimaryMemberIndex() { return primaryMemberIndex; }
+    public void setPrimaryMemberIndex(int primaryMemberIndex) { this.primaryMemberIndex = primaryMemberIndex; }
 
     public String getEngine() { return engine; }
     public void setEngine(String engine) { this.engine = engine; }
