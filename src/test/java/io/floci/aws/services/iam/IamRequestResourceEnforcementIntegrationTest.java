@@ -5,6 +5,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.dataformat.cbor.CBORFactory;
 import io.floci.aws.services.redshift.model.Endpoint;
 import io.floci.aws.services.redshiftserverless.RedshiftServerlessRuntime;
+import io.floci.aws.testing.AwsTestClients;
 import io.floci.aws.testing.EnforcementFixtures;
 import io.floci.aws.testing.IamEnforcementProfile;
 import io.floci.aws.testing.PartitionCleanup;
@@ -19,6 +20,11 @@ import io.restassured.specification.RequestSpecification;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.RegisterExtension;
+import software.amazon.awssdk.regions.Region;
+import software.amazon.awssdk.services.applicationautoscaling.ApplicationAutoScalingClient;
+import software.amazon.awssdk.services.applicationautoscaling.model.ApplicationAutoScalingException;
+import software.amazon.awssdk.services.applicationautoscaling.model.PutScheduledActionRequest;
+import software.amazon.awssdk.services.applicationautoscaling.model.ScalableTargetAction;
 
 import java.io.IOException;
 import java.io.UncheckedIOException;
@@ -36,6 +42,7 @@ import static org.hamcrest.Matchers.equalTo;
 import static org.hamcrest.Matchers.hasSize;
 import static org.hamcrest.Matchers.not;
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyBoolean;
@@ -1303,6 +1310,40 @@ class IamRequestResourceEnforcementIntegrationTest {
         refusedJson(scaling(user, "ListTagsForResource", "{\"ResourceARN\":\"" + arn + "\"}"),
                 "application-autoscaling:ListTagsForResource");
         scaling(user, "DeregisterScalableTarget", other + "}").statusCode(200);
+    }
+
+    @Test
+    void scheduledActionWritesUseTargetArnAndDescribeRequiresWildcard() {
+        User user = user("res-scheduled-actions");
+        String resource = "service/res-" + suffix() + "/scheduled";
+        try (ApplicationAutoScalingClient adminClient = AwsTestClients.create(ApplicationAutoScalingClient.builder(), ADMIN, Region.US_EAST_1);
+                ApplicationAutoScalingClient client = AwsTestClients.create(ApplicationAutoScalingClient.builder(), user.accessKeyId(), Region.US_EAST_1)) {
+            String arn = adminClient.registerScalableTarget(b -> b.serviceNamespace("ecs").resourceId(resource)
+                    .scalableDimension("ecs:service:DesiredCount").minCapacity(0).maxCapacity(2)).scalableTargetARN();
+            try {
+                PutScheduledActionRequest put = PutScheduledActionRequest.builder().serviceNamespace("ecs").resourceId(resource)
+                        .scalableDimension("ecs:service:DesiredCount").scheduledActionName("scheduled")
+                        .schedule("at(2099-01-01T00:00:00)")
+                        .scalableTargetAction(ScalableTargetAction.builder().minCapacity(0).build()).build();
+                user.policy(allowOn("application-autoscaling:PutScheduledAction", TARGETS + "other"));
+                assertEquals("AccessDeniedException", assertThrows(ApplicationAutoScalingException.class,
+                        () -> client.putScheduledAction(put)).awsErrorDetails().errorCode());
+                user.policy(allowOn("application-autoscaling:PutScheduledAction", arn));
+                client.putScheduledAction(put);
+                user.policy(allowOn("application-autoscaling:DescribeScheduledActions", arn));
+                assertThrows(ApplicationAutoScalingException.class, () -> client.describeScheduledActions(b -> b.serviceNamespace("ecs").resourceId(resource)));
+                user.policy(allowOn("application-autoscaling:DescribeScheduledActions", "*"));
+                assertEquals(1, client.describeScheduledActions(b -> b.serviceNamespace("ecs").resourceId(resource)).scheduledActions().size());
+                user.policy(allowOn("application-autoscaling:DeleteScheduledAction", TARGETS + "other"));
+                assertThrows(ApplicationAutoScalingException.class, () -> client.deleteScheduledAction(b -> b.serviceNamespace("ecs")
+                        .resourceId(resource).scalableDimension("ecs:service:DesiredCount").scheduledActionName("scheduled")));
+                user.policy(allowOn("application-autoscaling:DeleteScheduledAction", arn));
+                client.deleteScheduledAction(b -> b.serviceNamespace("ecs").resourceId(resource)
+                        .scalableDimension("ecs:service:DesiredCount").scheduledActionName("scheduled"));
+            } finally {
+                adminClient.deregisterScalableTarget(b -> b.serviceNamespace("ecs").resourceId(resource).scalableDimension("ecs:service:DesiredCount"));
+            }
+        }
     }
 
     /** The members naming an ECS service's desired count as a scalable target, an open JSON object. */

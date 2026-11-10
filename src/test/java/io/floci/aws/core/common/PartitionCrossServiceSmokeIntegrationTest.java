@@ -3,6 +3,7 @@ package io.floci.aws.core.common;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.dataformat.cbor.CBORFactory;
 import io.floci.aws.services.ec2instanceconnect.InstanceConnectKeys;
+import io.floci.aws.testing.AwsTestClients;
 import io.floci.aws.testing.PartitionCleanup;
 import io.floci.aws.testing.PartitionMatrix;
 import io.floci.aws.testing.PartitionMatrix.PartitionCase;
@@ -16,6 +17,9 @@ import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.extension.RegisterExtension;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.MethodSource;
+import software.amazon.awssdk.regions.Region;
+import software.amazon.awssdk.services.applicationautoscaling.ApplicationAutoScalingClient;
+import software.amazon.awssdk.services.applicationautoscaling.model.ScalableTargetAction;
 
 import java.net.URI;
 import java.nio.charset.StandardCharsets;
@@ -969,18 +973,26 @@ class PartitionCrossServiceSmokeIntegrationTest {
     @MethodSource(PartitionMatrix.NON_COMMERCIAL_CASES)
     void applicationAutoScalingScalableTargetArn(PartitionCase partitionCase) {
         String region = offered(partitionCase, "application-autoscaling");
-        String resourceId = "table/" + unique("smoke-table", partitionCase);
-        String target = """
-                "ServiceNamespace": "dynamodb", "ResourceId": "%s",
-                "ScalableDimension": "dynamodb:table:ReadCapacityUnits"
-                """.formatted(resourceId);
-        String arn = json11(region, "application-autoscaling", "AnyScaleFrontendService.RegisterScalableTarget",
-                "{" + target + ", \"MinCapacity\": 1, \"MaxCapacity\": 5}")
-        .when().post("/").then().statusCode(200)
-            .extract().jsonPath().getString("ScalableTargetARN");
-        cleanup.register(() -> json11(region, "application-autoscaling",
-                "AnyScaleFrontendService.DeregisterScalableTarget", "{" + target + "}").when().post("/"));
-        PartitionMatrix.assertArnIn(partitionCase, arn);
+        String resourceId = "service/" + unique("smoke-cluster", partitionCase) + "/service";
+        try (ApplicationAutoScalingClient client = AwsTestClients.create(ApplicationAutoScalingClient.builder(),
+                "000000000000", Region.of(region))) {
+            String arn = client.registerScalableTarget(b -> b.serviceNamespace("ecs").resourceId(resourceId)
+                    .scalableDimension("ecs:service:DesiredCount").minCapacity(1).maxCapacity(5)).scalableTargetARN();
+            try {
+                PartitionMatrix.assertArnIn(partitionCase, arn);
+                client.putScheduledAction(b -> b.serviceNamespace("ecs").resourceId(resourceId)
+                        .scalableDimension("ecs:service:DesiredCount").scheduledActionName("partition-action")
+                        .schedule("at(2099-01-01T00:00:00)")
+                        .scalableTargetAction(ScalableTargetAction.builder().minCapacity(0).build()));
+                String actionArn = client.describeScheduledActions(b -> b.serviceNamespace("ecs").resourceId(resourceId))
+                        .scheduledActions().getFirst().scheduledActionARN();
+                PartitionMatrix.assertArnIn(partitionCase, actionArn);
+                assertTrue(actionArn.contains(":autoscaling:" + region + ":000000000000:scheduledAction:"));
+            } finally {
+                client.deregisterScalableTarget(b -> b.serviceNamespace("ecs").resourceId(resourceId)
+                        .scalableDimension("ecs:service:DesiredCount"));
+            }
+        }
     }
 
     @ParameterizedTest
