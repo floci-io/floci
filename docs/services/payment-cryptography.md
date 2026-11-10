@@ -86,7 +86,9 @@
 - **The data plane is a service of its own:** the operations that use a key are on
   [the data plane's page](payment-cryptography-data.md), which is reached at its own
   routes.
-- **Not yet emulated:** the multi-region replication operations.
+- **Not yet emulated:** the multi-region replication operations, the resource policy
+  operations, the key usage operations, the key restore operation, the multi-party
+  approval operations and the certificate signing request.
 
 ## Configuration
 
