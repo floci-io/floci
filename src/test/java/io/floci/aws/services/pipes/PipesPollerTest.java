@@ -26,6 +26,7 @@ import org.mockito.junit.jupiter.MockitoExtension;
 
 import java.nio.charset.StandardCharsets;
 import java.time.Instant;
+import java.util.Base64;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
@@ -789,7 +790,7 @@ class PipesPollerTest {
                 "hello".getBytes(StandardCharsets.UTF_8),
                 "partition-1",
                 "49545115243490985018280067714973144582180062593244413954",
-                java.time.Instant.ofEpochMilli(1545084650987L));
+                Instant.ofEpochMilli(1545084650987L));
 
         List<ObjectNode> nodes = poller.buildKinesisRecordNodes(List.of(kr), pipe, "us-east-1");
         assertEquals(1, nodes.size());
@@ -806,7 +807,7 @@ class PipesPollerTest {
         assertEquals("partition-1", node.get("partitionKey").asText());
         assertEquals("49545115243490985018280067714973144582180062593244413954",
                 node.get("sequenceNumber").asText());
-        assertEquals(java.util.Base64.getEncoder().encodeToString("hello".getBytes(StandardCharsets.UTF_8)),
+        assertEquals(Base64.getEncoder().encodeToString("hello".getBytes(StandardCharsets.UTF_8)),
                 node.get("data").asText());
     }
 
