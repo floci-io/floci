@@ -779,7 +779,9 @@ public class IamActionRegistry {
      * none of the resources in the request's path is needed.
      */
     private static boolean checkedAsAws(String credentialScope, String operation, String action) {
-        return RequestResources.reads(credentialScope + ":" + operation)
+        // The OTLP route has no dataset identifier, so its PutMetricData authorization uses *.
+        return "cloudwatch".equals(credentialScope) && "PutMetricData".equals(operation)
+                || RequestResources.reads(credentialScope + ":" + operation)
                 || RequestResources.builtByHand(credentialScope)
                 || IamAuthorizedActions.actsOnNoResourceType(action);
     }
