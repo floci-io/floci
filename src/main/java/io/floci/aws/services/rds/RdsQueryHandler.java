@@ -1395,6 +1395,9 @@ public class RdsQueryHandler {
             if (backupRetentionPeriodParam != null) {
                 cluster = service.setBackupRetentionPeriod(region, id, backupRetentionPeriod);
             }
+            if (hasMemberKeys(params, "VpcSecurityGroupIds")) {
+                cluster = service.setDbClusterVpcSecurityGroupIds(id, vpcSecurityGroupIds(params), region);
+            }
             String result = dbClusterXml(cluster);
             return Response.ok(AwsQueryResponse.envelope("CreateDBCluster", AwsNamespaces.RDS, result)).build();
         } catch (AwsException e) {
@@ -1523,6 +1526,9 @@ public class RdsQueryHandler {
             }
             if (modifyBackupRetentionPeriod != null) {
                 cluster = service.setBackupRetentionPeriod(region, id, modifyBackupRetentionPeriod);
+            }
+            if (hasMemberKeys(params, "VpcSecurityGroupIds")) {
+                cluster = service.setDbClusterVpcSecurityGroupIds(id, vpcSecurityGroupIds(params), region);
             }
             String result = dbClusterXml(cluster);
             return Response.ok(AwsQueryResponse.envelope("ModifyDBCluster", AwsNamespaces.RDS, result)).build();
@@ -3295,7 +3301,7 @@ public class RdsQueryHandler {
            .elem("StorageEncrypted", i.isStorageEncrypted())
            .elem("CopyTagsToSnapshot", i.isCopyTagsToSnapshot())
            .elem("DeletionProtection", i.isDeletionProtection())
-           .raw(vpcSecurityGroupsXml(i))
+           .raw(vpcSecurityGroupsXml(i.getVpcSecurityGroupIds()))
            .raw(dbParameterGroupsXml(i))
            .raw(optionGroupMembershipsXml(i))
            .raw(dbSubnetGroupXml(dbSubnetGroupForInstance(i)))
@@ -3377,10 +3383,10 @@ public class RdsQueryHandler {
         return xml.build();
     }
 
-    private String vpcSecurityGroupsXml(DbInstance i) {
-        List<String> groupIds = i.getVpcSecurityGroupIds().isEmpty()
+    private String vpcSecurityGroupsXml(List<String> vpcSecurityGroupIds) {
+        List<String> groupIds = vpcSecurityGroupIds.isEmpty()
                 ? List.of("sg-00000000")
-                : i.getVpcSecurityGroupIds();
+                : vpcSecurityGroupIds;
         XmlBuilder xml = new XmlBuilder().start("VpcSecurityGroups");
         for (String groupId : groupIds) {
             xml.start("VpcSecurityGroupMembership")
@@ -3529,12 +3535,7 @@ public class RdsQueryHandler {
            .elem("AvailabilityZone", c.getAvailabilityZone() != null ? c.getAvailabilityZone() : config.defaultAvailabilityZone())
            .elem("PreferredMaintenanceWindow", "mon:00:00-mon:03:00")
            .elem("PreferredBackupWindow", "04:00-06:00")
-           .start("VpcSecurityGroups")
-             .start("VpcSecurityGroupMembership")
-               .elem("VpcSecurityGroupId", "sg-00000000")
-               .elem("Status", "active")
-             .end("VpcSecurityGroupMembership")
-           .end("VpcSecurityGroups")
+           .raw(vpcSecurityGroupsXml(c.getVpcSecurityGroupIds()))
            .elem("DBSubnetGroup", c.getDbSubnetGroupName() != null ? c.getDbSubnetGroupName() : "default");
         String clusterParameterGroup = dbClusterParameterGroupName(c, engineStr);
         if (clusterParameterGroup != null) {

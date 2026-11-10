@@ -32,6 +32,7 @@ public class DbCluster {
     private String parameterGroupName;
     private String dbSubnetGroupName;
     private String vpcId;
+    private List<String> vpcSecurityGroupIds = new ArrayList<>();
     private String availabilityZone;
     private boolean multiAz;
     private Map<String, String> subnetAvailabilityZones = new LinkedHashMap<>();
@@ -158,6 +159,11 @@ public class DbCluster {
 
     public boolean isMultiAz() { return multiAz; }
     public void setMultiAz(boolean multiAz) { this.multiAz = multiAz; }
+
+    public List<String> getVpcSecurityGroupIds() { return vpcSecurityGroupIds; }
+    public void setVpcSecurityGroupIds(List<String> vpcSecurityGroupIds) {
+        this.vpcSecurityGroupIds = vpcSecurityGroupIds != null ? new ArrayList<>(vpcSecurityGroupIds) : new ArrayList<>();
+    }
 
     public Map<String, String> getSubnetAvailabilityZones() { return subnetAvailabilityZones; }
     public void setSubnetAvailabilityZones(Map<String, String> subnetAvailabilityZones) {

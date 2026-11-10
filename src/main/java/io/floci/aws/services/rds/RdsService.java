@@ -11462,6 +11462,17 @@ public class RdsService implements Resettable, ResourceProvider {
                 cluster.getDbClusterIdentifier());
         return RESPONSE_COPIER.convertValue(cluster, DbCluster.class);
     }
+
+    /** Stores the VpcSecurityGroupIds a Create/ModifyDBCluster request carries. */
+    public synchronized DbCluster setDbClusterVpcSecurityGroupIds(String id, List<String> vpcSecurityGroupIds,
+                                                                   String region) {
+        String effectiveRegion = effectiveRegion(region);
+        DbCluster cluster = getDbCluster(id, effectiveRegion);
+        cluster.setVpcSecurityGroupIds(vpcSecurityGroupIds);
+        putClusterForScope(currentAccountId(), effectiveRegion, id, cluster);
+        return RESPONSE_COPIER.convertValue(cluster, DbCluster.class);
+    }
+
     private static final Set<String> DATA_API_ENGINES = Set.of("aurora-postgresql", "aurora-mysql");
 
     /**
