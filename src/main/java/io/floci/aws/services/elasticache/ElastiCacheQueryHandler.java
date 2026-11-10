@@ -485,17 +485,29 @@ public class ElastiCacheQueryHandler {
         return AuthMode.NO_AUTH;
     }
 
+    /** Whether a cache cluster's ARN names the request's Region; one recorded without an ARN counts as the default's. */
+    private boolean inRequestRegion(String arn) {
+        return regionResolver.getRegion().equals(AwsArnUtils.regionOrDefault(arn, regionResolver.getDefaultRegion()));
+    }
+
     private Response handleDescribeCacheClusters(MultivaluedMap<String, String> params) {
         String filterId = params.getFirst("CacheClusterId");
         boolean showNodeInfo = "true".equalsIgnoreCase(params.getFirst("ShowCacheNodeInfo"));
         boolean filtered = filterId != null && !filterId.isBlank();
         try {
+            // Cache clusters are stored per account; like AWS, only the request's Region's are listed.
             List<ElastiCacheService.MemberCacheCluster> members = service.listMemberCacheClusters(filterId);
-            List<CacheCluster> clusterList = new ArrayList<>(service.findCacheClusters(filterId));
+            List<CacheCluster> clusterList = new ArrayList<>(service.findCacheClusters(filterId).stream()
+                    .filter(c -> inRequestRegion(c.getArn())).toList());
             // The Memcached lookup is the one that raises CacheClusterNotFound for an unknown id,
             // which is the right answer only once no other source has answered.
             if (!filtered || (members.isEmpty() && clusterList.isEmpty())) {
-                clusterList.addAll(memcachedService.listCacheClusters(filterId));
+                memcachedService.listCacheClusters(filterId).stream()
+                        .filter(c -> inRequestRegion(c.getArn()))
+                        .forEach(clusterList::add);
+                if (filtered && clusterList.isEmpty()) {
+                    throw new AwsException("CacheClusterNotFound", "Cache cluster " + filterId + " not found.", 404);
+                }
             }
             XmlBuilder xml = new XmlBuilder().start("CacheClusters");
             for (CacheCluster c : clusterList) {

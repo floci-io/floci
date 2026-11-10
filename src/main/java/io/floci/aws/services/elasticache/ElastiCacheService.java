@@ -900,8 +900,9 @@ public class ElastiCacheService implements ResourceProvider {
     }
 
     /**
-     * Whether a resource belongs to the request's Region. Replication groups, cache clusters, users and user
-     * groups are stored per account; like AWS, the Describe* listings only show the requesting Region's.
+     * Whether a resource belongs to the request's Region. Replication groups, cache clusters (including
+     * Memcached ones, which DescribeCacheClusters lists too), users and user groups are stored per account;
+     * like AWS, the Describe* listings only show the requesting Region's.
      * The getters stay unscoped: credential lookups, restore and validation run outside a request.
      */
     private boolean inRequestRegion(String arn) {
