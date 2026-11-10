@@ -1910,9 +1910,10 @@ public class ResourceArnBuilder {
     /**
      * The parameters an SSM request is evaluated against, read from the field its handler acts on: the
      * {@code ResourceArn} of a resource-policy action, the path {@code GetParametersByPath} gives in {@code Path},
-     * which AWS authorizes it against rather than the parameters it returns, each parameter {@code GetParameters}
-     * and {@code DeleteParameters} give in {@code Names}, and the parameter any other action gives in
-     * {@code Name}. A version or label selector on a {@code GetParameter} or {@code GetParameters} name is not
+     * which AWS authorizes it against rather than the parameters it returns, the root path {@code /} being the
+     * empty parameter name {@code parameter/}, each parameter {@code GetParameters} and {@code DeleteParameters}
+     * give in {@code Names}, read as their handlers read it, element by element or value by value, and the
+     * parameter any other action gives in {@code Name}. A version or label selector on a {@code GetParameter} or {@code GetParameters} name is not
      * part of the parameter's ARN, so it is left out.
      */
     private List<String> buildSsmArns(ContainerRequestContext ctx, String region, String accountId) {
@@ -1930,23 +1931,21 @@ public class ResourceArnBuilder {
             if ("GetParametersByPath".equals(operation)) {
                 if (json.hasNonNull("Path")) {
                     String path = json.get("Path").asText().trim();
-                    if (!path.isEmpty() && !"/".equals(path)) {
+                    if (!path.isEmpty()) {
                         return List.of(ssmParameterArn(path, region, accountId));
                     }
                 }
             } else if (SSM_NAMES_OPERATIONS.contains(operation)) {
-                if (json.path("Names").isArray()) {
-                    List<String> arns = new ArrayList<>();
-                    for (JsonNode entry : json.get("Names")) {
-                        String name = entry.asText().trim();
-                        if (!name.isEmpty()) {
-                            arns.add(ssmParameterArn(selectorRead ? withoutSsmSelector(name) : name,
-                                    region, accountId));
-                        }
+                List<String> arns = new ArrayList<>();
+                for (JsonNode entry : json.path("Names")) {
+                    String name = entry.asText().trim();
+                    if (!name.isEmpty()) {
+                        arns.add(ssmParameterArn(selectorRead ? withoutSsmSelector(name) : name,
+                                region, accountId));
                     }
-                    if (!arns.isEmpty()) {
-                        return arns;
-                    }
+                }
+                if (!arns.isEmpty()) {
+                    return arns;
                 }
             } else if (json.hasNonNull("Name")) {
                 String name = json.get("Name").asText().trim();
@@ -1969,7 +1968,8 @@ public class ResourceArnBuilder {
 
     /**
      * The parameter a read names without its {@code :version} or {@code :label} selector. A parameter name
-     * cannot contain a colon, so the last colon of the name, or of an ARN's resource, starts the selector.
+     * cannot contain a colon, so the last colon of the name, or of an ARN's resource, starts the selector. A
+     * name that only looks like an ARN is a plain name, as {@code SsmService} reads it.
      */
     private static String withoutSsmSelector(String nameOrArn) {
         if (AwsArnUtils.looksLikeArn(nameOrArn)) {
@@ -1977,7 +1977,7 @@ public class ResourceArnBuilder {
             try {
                 arn = AwsArnUtils.parse(nameOrArn);
             } catch (IllegalArgumentException e) {
-                return nameOrArn;
+                return withoutSelector(nameOrArn);
             }
             String resource = withoutSelector(arn.resource());
             return new AwsArnUtils.Arn(arn.partition(), arn.service(), arn.region(), arn.accountId(), resource)
