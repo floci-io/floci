@@ -28,7 +28,7 @@ class SpectrumQueryPreparationTest {
         materializer = mock(ExternalTableMaterializer.class);
         backend = mock(BackendSql.class);
         when(registry.list(SESSION.accountId(), SESSION.clusterKey(), "dev")).thenReturn(List.of(BINDING));
-        when(materializer.ensureCurrent(any(), any(), any(), anyString(), anyString()))
+        when(materializer.ensureCurrent(any(), any(), any(), anyString(), anyString(), any()))
                 .thenReturn(ExternalTableMaterializer.Outcome.CURRENT);
         glue = mock(GlueService.class);
         preparation = new SpectrumQueryPreparation(registry, materializer, new ExternalStatementParser(),
@@ -62,7 +62,7 @@ class SpectrumQueryPreparationTest {
         String sql = "SELECT a.id, SUM(b.amount) FROM lake.sales a JOIN lake.sales b "
                 + "ON a.id=b.id JOIN public.customers c ON c.id=a.id GROUP BY a.id ORDER BY a.id";
         assertFalse(preparation.prepare(sql, SESSION, backend));
-        verify(materializer).ensureCurrent(backend, SESSION, BINDING, "sales", sql);
+        verify(materializer).ensureCurrent(backend, SESSION, BINDING, "sales", sql, List.of());
     }
 
     @Test
@@ -81,7 +81,7 @@ class SpectrumQueryPreparationTest {
 
     @Test
     void missingGlueTableDoesNotUseCachedRelation() {
-        when(materializer.ensureCurrent(backend, SESSION, BINDING, "sales", "SELECT * FROM lake.sales"))
+        when(materializer.ensureCurrent(backend, SESSION, BINDING, "sales", "SELECT * FROM lake.sales", List.of()))
                 .thenReturn(ExternalTableMaterializer.Outcome.NOT_EXTERNAL);
         SpectrumSqlException error = assertThrows(SpectrumSqlException.class, () ->
                 preparation.prepare("SELECT * FROM lake.sales", SESSION, backend));

@@ -799,9 +799,11 @@ Pruning applies to the simple query protocol, the extended query protocol (the d
 driver, unless `preferQueryMode=simple`), statements inside a transaction block, and the Data API outside a
 transaction block. A Data API statement inside a transaction block, which includes a batch, loads every
 partition, because that backend cannot report where its transaction ends.
-Only predicates written as literals are used. A predicate on a bind parameter (`$1`, `$2`) is left out, so a
-statement whose partition predicates all use bind parameters loads every partition, while a literal predicate
-in the same statement still prunes.
+A bind parameter (`$1`, `$2`) in a predicate is read as the value the client binds, so a prepared statement
+prunes like the same query written with literals. When the statement is parsed its values are not yet known, so
+it loads no partition at that point, only enough for PostgreSQL to plan it, and each Bind loads the partitions
+its values select. A parameter that is NULL, sent in binary format, or compared in a form Floci does not read
+(for example `$1::int`) leaves its predicate out, and the query loads every partition.
 The partitions loaded inside a transaction block, or by an extended query cycle, are staged for their connection
 and recorded as loaded only when the transaction (or the cycle) commits. A rollback, an error or a
 `ROLLBACK TO SAVEPOINT` discards them, so nothing is left behind that a later query would trust. Staged

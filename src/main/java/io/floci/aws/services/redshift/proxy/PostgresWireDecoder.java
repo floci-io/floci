@@ -9,6 +9,7 @@ import java.io.InputStream;
 import java.io.OutputStream;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.List;
 import java.util.Objects;
 import java.util.function.IntPredicate;
@@ -148,7 +149,45 @@ public class PostgresWireDecoder {
         BodyCursor cursor = cursorFor(message, 'B');
         String portalName = cursor.readCString();
         String statementName = cursor.readCString();
-        return new BindMessage(portalName, statementName);
+        List<String> parameterValues;
+        try {
+            parameterValues = readBindParameters(cursor);
+        } catch (IOException expected) {
+            // Only pruning reads the values and treats an absent one as unknown; the backend still gets the
+            // original frame and reports a malformed Bind itself, so it must not fail here.
+            parameterValues = List.of();
+        }
+        return new BindMessage(portalName, statementName, parameterValues);
+    }
+
+    /**
+     * Text-format values of a Bind's parameters, by position. A NULL or a binary-format value is null: the
+     * caller cannot read it as a literal.
+     */
+    private static List<String> readBindParameters(BodyCursor cursor) throws IOException {
+        int formatCount = cursor.readInt16();
+        int[] formats = new int[formatCount];
+        for (int i = 0; i < formatCount; i++) {
+            formats[i] = cursor.readInt16();
+        }
+        int parameterCount = cursor.readInt16();
+        if (formatCount > 1 && formatCount != parameterCount) {
+            throw new IOException("Bind has " + formatCount + " parameter format codes for " + parameterCount
+                    + " parameters");
+        }
+        List<String> values = new ArrayList<>(parameterCount);
+        for (int i = 0; i < parameterCount; i++) {
+            int length = cursor.readInt32();
+            if (length < 0) {
+                values.add(null);
+                continue;
+            }
+            byte[] raw = cursor.readBytes(length);
+            // zero format codes mean every parameter is text, one applies to all, otherwise one per parameter
+            int format = formatCount == 0 ? 0 : formatCount == 1 ? formats[0] : formats[i];
+            values.add(format == 0 ? new String(raw, StandardCharsets.UTF_8) : null);
+        }
+        return values;
     }
 
     /** Decode an Execute ({@code 'E'}) message body. */
@@ -262,6 +301,13 @@ public class PostgresWireDecoder {
             return value;
         }
 
+        private byte[] readBytes(int count) throws IOException {
+            requireRemaining(count);
+            byte[] value = Arrays.copyOfRange(body, offset, offset + count);
+            offset += count;
+            return value;
+        }
+
         private int readInt32() throws IOException {
             requireRemaining(4);
             int value = ((body[offset] & 0xFF) << 24)
@@ -321,7 +367,8 @@ public class PostgresWireDecoder {
     public record ParseMessage(String statementName, String sql, List<Integer> parameterTypeOids) {
     }
 
-    public record BindMessage(String portalName, String statementName) {
+    /** {@code parameterValues} holds the text of each parameter, or null where it is NULL or not text format. */
+    public record BindMessage(String portalName, String statementName, List<String> parameterValues) {
     }
 
     public record ExecuteMessage(String portalName, int maxRows) {
