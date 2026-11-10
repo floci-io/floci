@@ -1,0 +1,79 @@
+services:
+  floci:
+    environment:
+      FLOCI_SERVICES_UI_ENABLED: "false"
+    ports:
+      - "6400-6419:6400-6419"
+      - "7100-7199:7100-7199"
+      - "8182-8282:8182-8282"
+      - "8700-8799:8700-8799"
+
+  floci-az:
+    image: floci/floci-az:0.16.0
+    ports:
+      - "4577:4577"
+      - "4578:4578"
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+    environment:
+      FLOCI_AZ_HOSTNAME: floci-az
+      FLOCI_AZ_BASE_URL: http://floci-az:4577
+      FLOCI_AZ_SERVICES_DOCKER_NETWORK: floci_default
+      FLOCI_AZ_SERVICES_REDIS_BASE_PORT: "16779"
+      FLOCI_AZ_SERVICES_REDIS_MAX_PORT: "16799"
+      FLOCI_AZ_UI_ENABLED: "false"
+    networks:
+      - floci_default
+
+  floci-gcp:
+    image: floci/floci-gcp:0.12.0
+    ports:
+      - "4588:4588"
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+    environment:
+      FLOCI_GCP_HOSTNAME: floci-gcp
+      FLOCI_GCP_BASE_URL: http://floci-gcp:4588
+      FLOCI_GCP_SERVICES_DOCKER_NETWORK: floci_default
+    networks:
+      - floci_default
+
+  floci-oci:
+    image: floci/floci-oci:0.6.0
+    ports:
+      - "4599:4599"
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+    environment:
+      FLOCI_OCI_HOSTNAME: floci-oci
+      FLOCI_OCI_BASE_URL: http://floci-oci:4599
+      FLOCI_OCI_SERVICES_DOCKER_NETWORK: floci_default
+    networks:
+      - floci_default
+
+  floci-ui:
+    image: floci/floci-ui:0.7.0
+    ports:
+      - "4500:4500"
+    environment:
+      FLOCI_ENDPOINT: http://floci:4566
+      AWS_ENDPOINT_URL: http://floci:4566
+      FLOCI_AZURE_ENDPOINT: http://floci-az:4577
+      FLOCI_GCP_ENDPOINT: http://floci-gcp:4588
+      FLOCI_GCP_PROJECT: floci-local
+      FLOCI_OCI_ENDPOINT: http://floci-oci:4599
+      AWS_REGION: us-east-1
+      AWS_ACCESS_KEY_ID: test
+      AWS_SECRET_ACCESS_KEY: test
+      PORT: "4500"
+    depends_on:
+      floci:
+        condition: service_healthy
+      floci-az:
+        condition: service_started
+      floci-gcp:
+        condition: service_started
+      floci-oci:
+        condition: service_started
+    networks:
+      - floci_default
