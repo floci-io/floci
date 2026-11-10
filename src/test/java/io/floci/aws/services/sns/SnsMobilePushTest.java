@@ -1,0 +1,566 @@
+package io.floci.aws.services.sns;
+
+import io.floci.aws.core.common.AwsException;
+import io.floci.aws.core.common.RegionResolver;
+import io.floci.aws.core.storage.InMemoryStorage;
+import io.floci.aws.services.sns.model.PlatformApplication;
+import io.floci.aws.services.sns.model.PlatformEndpoint;
+import io.floci.aws.services.sns.model.PushNotification;
+import io.floci.aws.testutil.LogCapture;
+import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Test;
+
+import java.util.List;
+import java.util.Map;
+import java.util.UUID;
+import java.util.logging.Level;
+import java.util.logging.LogRecord;
+
+import static org.junit.jupiter.api.Assertions.*;
+
+/**
+ * Covers Floci's mock SNS mobile push surface: iOS (APNS / APNS_SANDBOX), Android
+ * (GCM / FCM), and the error codes the real AWS SNS API returns for push.
+ */
+class SnsMobilePushTest {
+
+    private static final String REGION = "us-east-1";
+    private static final String ACCOUNT = "000000000000";
+
+    private SnsService snsService;
+
+    @BeforeEach
+    void setUp() {
+        RegionResolver regionResolver = new RegionResolver(REGION, ACCOUNT);
+        snsService = new SnsService(
+                new InMemoryStorage<>(),
+                new InMemoryStorage<>(),
+                new InMemoryStorage<>(),
+                new InMemoryStorage<>(),
+                regionResolver,
+                null,
+                null);
+    }
+
+    // --- CreatePlatformApplication ---
+
+    @Test
+    void createPlatformApplication_apnsReturnsArn() {
+        PlatformApplication app = snsService.createPlatformApplication(
+                "ios-app", "APNS", Map.of("PlatformCredential", "fake-cert"), REGION);
+        assertEquals("arn:aws:sns:us-east-1:000000000000:app/APNS/ios-app", app.getArn());
+        assertEquals("APNS", app.getPlatform());
+        assertEquals("true", app.getAttributes().get("Enabled"));
+    }
+
+    @Test
+    void createPlatformApplication_gcmReturnsArn() {
+        PlatformApplication app = snsService.createPlatformApplication(
+                "android-app", "GCM", Map.of("PlatformCredential", "fake-key"), REGION);
+        assertEquals("arn:aws:sns:us-east-1:000000000000:app/GCM/android-app", app.getArn());
+    }
+
+    @Test
+    void createPlatformApplication_rejectsUnsupportedPlatform() {
+        AwsException e = assertThrows(AwsException.class,
+                () -> snsService.createPlatformApplication("desktop", "WNS", Map.of(), REGION));
+        assertEquals("InvalidParameter", e.getErrorCode());
+        assertEquals(400, e.getHttpStatus());
+    }
+
+    @Test
+    void createPlatformApplication_requiresName() {
+        AwsException e = assertThrows(AwsException.class,
+                () -> snsService.createPlatformApplication("", "APNS", Map.of(), REGION));
+        assertEquals("InvalidParameter", e.getErrorCode());
+    }
+
+    @Test
+    void createPlatformApplication_rejectsNameWithDisallowedCharacters() {
+        // AWS allows only ASCII letters, digits, underscores, hyphens, and periods.
+        AwsException e = assertThrows(AwsException.class,
+                () -> snsService.createPlatformApplication("bad name!", "APNS", Map.of(), REGION));
+        assertEquals("InvalidParameter", e.getErrorCode());
+        assertTrue(e.getMessage().contains("Name"));
+    }
+
+    @Test
+    void createPlatformApplication_rejectsNameLongerThan256Characters() {
+        String tooLong = "a".repeat(257);
+        AwsException e = assertThrows(AwsException.class,
+                () -> snsService.createPlatformApplication(tooLong, "APNS", Map.of(), REGION));
+        assertEquals("InvalidParameter", e.getErrorCode());
+    }
+
+    @Test
+    void createPlatformApplication_acceptsAllAllowedNameCharacters() {
+        PlatformApplication app = snsService.createPlatformApplication(
+                "My-App_1.0", "APNS", Map.of(), REGION);
+        assertEquals("arn:aws:sns:us-east-1:000000000000:app/APNS/My-App_1.0", app.getArn());
+    }
+
+    @Test
+    void createPlatformApplication_idempotentByName() {
+        PlatformApplication first = snsService.createPlatformApplication("ios-app", "APNS", Map.of(), REGION);
+        PlatformApplication second = snsService.createPlatformApplication("ios-app", "APNS", Map.of(), REGION);
+        assertEquals(first.getArn(), second.getArn());
+    }
+
+    // --- CreatePlatformEndpoint ---
+
+    @Test
+    void createPlatformEndpoint_iosReturnsEndpointArn() {
+        PlatformApplication app = snsService.createPlatformApplication("ios-app", "APNS", Map.of(), REGION);
+        PlatformEndpoint endpoint = snsService.createPlatformEndpoint(
+                app.getArn(), "ios-device-token-abc", "ios-user-42", Map.of(), REGION);
+        assertTrue(endpoint.getArn().startsWith("arn:aws:sns:us-east-1:000000000000:endpoint/APNS/ios-app/"));
+        assertEquals("ios-device-token-abc", endpoint.getToken());
+        assertEquals("true", endpoint.getAttributes().get("Enabled"));
+    }
+
+    @Test
+    void createPlatformEndpoint_androidReturnsEndpointArn() {
+        PlatformApplication app = snsService.createPlatformApplication("android-app", "GCM", Map.of(), REGION);
+        PlatformEndpoint endpoint = snsService.createPlatformEndpoint(
+                app.getArn(), "fcm-registration-token-xyz", null, Map.of(), REGION);
+        assertTrue(endpoint.getArn().contains(":endpoint/GCM/android-app/"));
+    }
+
+    @Test
+    void createPlatformEndpoint_rejectsMissingToken() {
+        PlatformApplication app = snsService.createPlatformApplication("ios-app", "APNS", Map.of(), REGION);
+        AwsException e = assertThrows(AwsException.class,
+                () -> snsService.createPlatformEndpoint(app.getArn(), null, null, Map.of(), REGION));
+        assertEquals("InvalidParameter", e.getErrorCode());
+    }
+
+    @Test
+    void createPlatformEndpoint_unknownApplicationArnReturnsNotFound() {
+        AwsException e = assertThrows(AwsException.class,
+                () -> snsService.createPlatformEndpoint(
+                        "arn:aws:sns:us-east-1:000000000000:app/APNS/missing",
+                        "token", null, Map.of(), REGION));
+        assertEquals("NotFound", e.getErrorCode());
+        assertEquals(404, e.getHttpStatus());
+    }
+
+    @Test
+    void createPlatformEndpoint_sameTokenSameDataReturnsExisting() {
+        PlatformApplication app = snsService.createPlatformApplication("ios-app", "APNS", Map.of(), REGION);
+        PlatformEndpoint first = snsService.createPlatformEndpoint(app.getArn(), "tok-1", "user-7", Map.of(), REGION);
+        PlatformEndpoint second = snsService.createPlatformEndpoint(app.getArn(), "tok-1", "user-7", Map.of(), REGION);
+        assertEquals(first.getArn(), second.getArn());
+    }
+
+    @Test
+    void createPlatformEndpoint_sameTokenDifferentDataRejected() {
+        PlatformApplication app = snsService.createPlatformApplication("ios-app", "APNS", Map.of(), REGION);
+        snsService.createPlatformEndpoint(app.getArn(), "tok-1", "user-7", Map.of(), REGION);
+        AwsException e = assertThrows(AwsException.class,
+                () -> snsService.createPlatformEndpoint(app.getArn(), "tok-1", "user-99", Map.of(), REGION));
+        assertEquals("InvalidParameter", e.getErrorCode());
+        assertTrue(e.getMessage().contains("already exists with the same Token"));
+    }
+
+    @Test
+    void createPlatformEndpoint_rejectsWhenPlatformAppDisabled() {
+        PlatformApplication app = snsService.createPlatformApplication("ios-app", "APNS", Map.of(), REGION);
+        snsService.setPlatformApplicationAttributes(app.getArn(), Map.of("Enabled", "false"), REGION);
+        AwsException e = assertThrows(AwsException.class,
+                () -> snsService.createPlatformEndpoint(app.getArn(), "tok-1", null, Map.of(), REGION));
+        assertEquals("PlatformApplicationDisabled", e.getErrorCode());
+    }
+
+    // --- Publish: happy paths ---
+
+    @Test
+    void publish_iosDirectToEndpointCapturesPayload() {
+        PlatformApplication app = snsService.createPlatformApplication("ios-app", "APNS", Map.of(), REGION);
+        PlatformEndpoint endpoint = snsService.createPlatformEndpoint(
+                app.getArn(), "ios-token", null, Map.of(), REGION);
+
+        String messageId = snsService.publish(null, endpoint.getArn(), null,
+                "{\"aps\":{\"alert\":\"hi iOS\"}}", null, null, null, null, null, REGION);
+        assertNotNull(messageId);
+
+        List<PushNotification> captured = snsService.peekPushNotifications(endpoint.getArn());
+        assertEquals(1, captured.size());
+        assertEquals("APNS", captured.get(0).platform());
+        assertEquals("ios-token", captured.get(0).token());
+        assertTrue(captured.get(0).payload().contains("hi iOS"));
+    }
+
+    @Test
+    void publish_androidDirectToEndpointCapturesPayload() {
+        PlatformApplication app = snsService.createPlatformApplication("android-app", "GCM", Map.of(), REGION);
+        PlatformEndpoint endpoint = snsService.createPlatformEndpoint(
+                app.getArn(), "fcm-token", null, Map.of(), REGION);
+
+        String messageId = snsService.publish(null, endpoint.getArn(), null,
+                "{\"notification\":{\"body\":\"hi Android\"}}", null, null, null, null, null, REGION);
+        assertNotNull(messageId);
+
+        List<PushNotification> captured = snsService.peekPushNotifications(endpoint.getArn());
+        assertEquals(1, captured.size());
+        assertEquals("GCM", captured.get(0).platform());
+        assertTrue(captured.get(0).payload().contains("hi Android"));
+    }
+
+    @Test
+    void publish_jsonStructureResolvesPlatformSpecificPayload() {
+        PlatformApplication iosApp = snsService.createPlatformApplication("ios-app", "APNS", Map.of(), REGION);
+        PlatformApplication andApp = snsService.createPlatformApplication("android-app", "GCM", Map.of(), REGION);
+        PlatformEndpoint iosEndpoint = snsService.createPlatformEndpoint(iosApp.getArn(), "ios-token", null, Map.of(), REGION);
+        PlatformEndpoint andEndpoint = snsService.createPlatformEndpoint(andApp.getArn(), "fcm-token", null, Map.of(), REGION);
+
+        String envelope = "{"
+                + "\"default\":\"plain fallback\","
+                + "\"APNS\":\"{\\\"aps\\\":{\\\"alert\\\":\\\"ios body\\\"}}\","
+                + "\"GCM\":\"{\\\"notification\\\":{\\\"body\\\":\\\"android body\\\"}}\""
+                + "}";
+
+        snsService.publish(null, iosEndpoint.getArn(), null, envelope, null, "json", null, null, null, REGION);
+        snsService.publish(null, andEndpoint.getArn(), null, envelope, null, "json", null, null, null, REGION);
+
+        assertTrue(snsService.peekPushNotifications(iosEndpoint.getArn()).get(0).payload().contains("ios body"));
+        assertTrue(snsService.peekPushNotifications(andEndpoint.getArn()).get(0).payload().contains("android body"));
+    }
+
+    @Test
+    void publish_jsonStructureFallsBackToDefaultWhenPlatformKeyMissing() {
+        PlatformApplication app = snsService.createPlatformApplication("ios-app", "APNS", Map.of(), REGION);
+        PlatformEndpoint endpoint = snsService.createPlatformEndpoint(app.getArn(), "ios-token", null, Map.of(), REGION);
+
+        snsService.publish(null, endpoint.getArn(), null,
+                "{\"default\":\"fallback\"}", null, "json", null, null, null, REGION);
+        assertEquals("fallback", snsService.peekPushNotifications(endpoint.getArn()).get(0).payload());
+    }
+
+    // --- Publish: error codes ---
+
+    @Test
+    void publish_jsonStructureAcceptsPlatformKeyWithoutDefault() {
+        PlatformApplication app = snsService.createPlatformApplication("ios-app", "APNS", Map.of(), REGION);
+        PlatformEndpoint endpoint = snsService.createPlatformEndpoint(app.getArn(), "ios-token", null, Map.of(), REGION);
+
+        snsService.publish(null, endpoint.getArn(), null,
+                "{\"APNS\":\"x\"}", null, "json", null, null, null, REGION);
+        assertEquals("x", snsService.peekPushNotifications(endpoint.getArn()).get(0).payload());
+    }
+
+    @Test
+    void publish_jsonStructureRejectsWhenNeitherPlatformKeyNorDefaultPresent() {
+        PlatformApplication app = snsService.createPlatformApplication("ios-app", "APNS", Map.of(), REGION);
+        PlatformEndpoint endpoint = snsService.createPlatformEndpoint(app.getArn(), "ios-token", null, Map.of(), REGION);
+
+        AwsException e = assertThrows(AwsException.class, () -> snsService.publish(
+                null, endpoint.getArn(), null, "{\"GCM\":\"x\"}", null, "json",
+                null, null, null, REGION));
+        assertEquals("InvalidParameter", e.getErrorCode());
+        assertTrue(e.getMessage().contains("APNS"));
+        assertTrue(e.getMessage().contains("default"));
+    }
+
+    @Test
+    void publish_jsonStructureRejectsInvalidJson() {
+        PlatformApplication app = snsService.createPlatformApplication("ios-app", "APNS", Map.of(), REGION);
+        PlatformEndpoint endpoint = snsService.createPlatformEndpoint(app.getArn(), "ios-token", null, Map.of(), REGION);
+
+        AwsException e = assertThrows(AwsException.class, () -> snsService.publish(
+                null, endpoint.getArn(), null, "not json at all", null, "json",
+                null, null, null, REGION));
+        assertEquals("InvalidParameter", e.getErrorCode());
+    }
+
+    @Test
+    void publish_disabledEndpointThrowsEndpointDisabled() {
+        PlatformApplication app = snsService.createPlatformApplication("ios-app", "APNS", Map.of(), REGION);
+        PlatformEndpoint endpoint = snsService.createPlatformEndpoint(app.getArn(), "ios-token", null, Map.of(), REGION);
+        snsService.setEndpointAttributes(endpoint.getArn(), Map.of("Enabled", "false"), REGION);
+
+        AwsException e = assertThrows(AwsException.class, () -> snsService.publish(
+                null, endpoint.getArn(), null, "hello", null, null, null, null, null, REGION));
+        assertEquals("EndpointDisabled", e.getErrorCode());
+        assertEquals(400, e.getHttpStatus());
+        assertTrue(snsService.peekPushNotifications(endpoint.getArn()).isEmpty());
+    }
+
+    @Test
+    void publish_expiredSentinelTokenCreatesDisabledEndpointAndPublishFails() {
+        PlatformApplication app = snsService.createPlatformApplication("ios-app", "APNS", Map.of(), REGION);
+        PlatformEndpoint endpoint = snsService.createPlatformEndpoint(
+                app.getArn(), "EXPIRED-ios-device", null, Map.of(), REGION);
+        assertEquals("false", endpoint.getAttributes().get("Enabled"));
+
+        AwsException e = assertThrows(AwsException.class, () -> snsService.publish(
+                null, endpoint.getArn(), null, "hello", null, null, null, null, null, REGION));
+        assertEquals("EndpointDisabled", e.getErrorCode());
+    }
+
+    @Test
+    void publish_unknownEndpointArnReturnsNotFound() {
+        AwsException e = assertThrows(AwsException.class, () -> snsService.publish(
+                null,
+                "arn:aws:sns:us-east-1:000000000000:endpoint/APNS/missing/" + UUID.randomUUID(),
+                null, "hello", null, null, null, null, null, REGION));
+        assertEquals("NotFound", e.getErrorCode());
+        assertEquals(404, e.getHttpStatus());
+    }
+
+    @Test
+    void publish_platformApplicationArnAsTargetIsRejected() {
+        PlatformApplication app = snsService.createPlatformApplication("ios-app", "APNS", Map.of(), REGION);
+        AwsException e = assertThrows(AwsException.class, () -> snsService.publish(
+                null, app.getArn(), null, "hello", null, null, null, null, null, REGION));
+        assertEquals("InvalidParameter", e.getErrorCode());
+    }
+
+    @Test
+    void publish_disabledPlatformApplicationThrowsForEnabledEndpoint() {
+        PlatformApplication app = snsService.createPlatformApplication("ios-app", "APNS", Map.of(), REGION);
+        PlatformEndpoint endpoint = snsService.createPlatformEndpoint(app.getArn(), "ios-token", null, Map.of(), REGION);
+        snsService.setPlatformApplicationAttributes(app.getArn(), Map.of("Enabled", "false"), REGION);
+
+        AwsException e = assertThrows(AwsException.class, () -> snsService.publish(
+                null, endpoint.getArn(), null, "hello", null, null, null, null, null, REGION));
+        assertEquals("PlatformApplicationDisabled", e.getErrorCode());
+    }
+
+    // --- Publish: topic broadcast to platform endpoints (Protocol="application") ---
+
+    @Test
+    void publish_topicBroadcastToApplicationEndpointsCapturesForEachDevice() {
+        PlatformApplication app = snsService.createPlatformApplication("android-app", "GCM", Map.of(), REGION);
+        PlatformEndpoint deviceA = snsService.createPlatformEndpoint(app.getArn(), "fcm-token-a", null, Map.of(), REGION);
+        PlatformEndpoint deviceB = snsService.createPlatformEndpoint(app.getArn(), "fcm-token-b", null, Map.of(), REGION);
+
+        String topicArn = snsService.createTopic("market-alerts", null, null, REGION).getTopicArn();
+        snsService.subscribe(topicArn, "application", deviceA.getArn(), REGION, Map.of());
+        snsService.subscribe(topicArn, "application", deviceB.getArn(), REGION, Map.of());
+
+        String envelope = "{"
+                + "\"default\":\"market open\","
+                + "\"GCM\":\"{\\\"notification\\\":{\\\"body\\\":\\\"market alert\\\"}}\""
+                + "}";
+        String messageId = snsService.publish(topicArn, null, null, envelope, null, "json",
+                null, null, null, REGION);
+        assertNotNull(messageId);
+
+        List<PushNotification> capturedA = snsService.peekPushNotifications(deviceA.getArn());
+        List<PushNotification> capturedB = snsService.peekPushNotifications(deviceB.getArn());
+        assertEquals(1, capturedA.size());
+        assertEquals(1, capturedB.size());
+        assertEquals("GCM", capturedA.get(0).platform());
+        assertEquals("fcm-token-a", capturedA.get(0).token());
+        assertEquals("fcm-token-b", capturedB.get(0).token());
+        assertTrue(capturedA.get(0).payload().contains("market alert"));
+        assertTrue(capturedB.get(0).payload().contains("market alert"));
+    }
+
+    @Test
+    void publish_logsEachPushAndSmsBelowInfo() {
+        PlatformApplication app = snsService.createPlatformApplication("android-app", "GCM", Map.of(), REGION);
+        PlatformEndpoint endpoint = snsService.createPlatformEndpoint(app.getArn(), "fcm-token", null, Map.of(), REGION);
+        String topicArn = snsService.createTopic("market-alerts", null, null, REGION).getTopicArn();
+        snsService.subscribe(topicArn, "application", endpoint.getArn(), REGION, Map.of());
+
+        List<LogRecord> records = LogCapture.capture(SnsService.class, () -> {
+            snsService.publish(topicArn, null, null, "to topic", null, null, null, null, null, REGION);
+            snsService.publish(null, endpoint.getArn(), null, "to endpoint", null, null, null, null, null, REGION);
+            snsService.publish(null, null, "+15555550100", "to phone", null, null, REGION);
+        });
+
+        assertEquals(2, records.stream().filter(r -> r.getMessage().startsWith("Captured push notification")).count());
+        assertEquals(1, records.stream().filter(r -> r.getMessage().startsWith("SNS SMS published")).count());
+        assertEquals(List.of(), records.stream()
+                .filter(r -> r.getLevel().intValue() >= Level.INFO.intValue())
+                .map(LogRecord::getMessage)
+                .toList());
+    }
+
+    @Test
+    void publish_topicBroadcastSkipsDisabledEndpointButDeliversToEnabled() {
+        PlatformApplication app = snsService.createPlatformApplication("android-app", "GCM", Map.of(), REGION);
+        PlatformEndpoint enabled = snsService.createPlatformEndpoint(app.getArn(), "fcm-token-live", null, Map.of(), REGION);
+        PlatformEndpoint disabled = snsService.createPlatformEndpoint(app.getArn(), "fcm-token-dead", null, Map.of(), REGION);
+        snsService.setEndpointAttributes(disabled.getArn(), Map.of("Enabled", "false"), REGION);
+
+        String topicArn = snsService.createTopic("market-alerts", null, null, REGION).getTopicArn();
+        snsService.subscribe(topicArn, "application", enabled.getArn(), REGION, Map.of());
+        snsService.subscribe(topicArn, "application", disabled.getArn(), REGION, Map.of());
+
+        assertDoesNotThrow(() -> snsService.publish(topicArn, null, null,
+                "{\"GCM\":\"hi\",\"default\":\"hi\"}", null, "json", null, null, null, REGION));
+
+        assertEquals(1, snsService.peekPushNotifications(enabled.getArn()).size());
+        assertTrue(snsService.peekPushNotifications(disabled.getArn()).isEmpty());
+    }
+
+    @Test
+    void publish_topicBroadcastFallsBackToDefaultWhenPlatformKeyMissing() {
+        PlatformApplication app = snsService.createPlatformApplication("android-app", "GCM", Map.of(), REGION);
+        PlatformEndpoint device = snsService.createPlatformEndpoint(app.getArn(), "fcm-token", null, Map.of(), REGION);
+
+        String topicArn = snsService.createTopic("market-alerts", null, null, REGION).getTopicArn();
+        snsService.subscribe(topicArn, "application", device.getArn(), REGION, Map.of());
+
+        snsService.publish(topicArn, null, null, "{\"default\":\"fallback body\"}", null, "json",
+                null, null, null, REGION);
+
+        List<PushNotification> captured = snsService.peekPushNotifications(device.getArn());
+        assertEquals(1, captured.size());
+        assertEquals("fallback body", captured.get(0).payload());
+    }
+
+    @Test
+    void publish_topicBroadcastRejectsJsonStructureMissingDefaultBeforeFanOut() {
+        PlatformApplication app = snsService.createPlatformApplication("android-app", "GCM", Map.of(), REGION);
+        PlatformEndpoint device = snsService.createPlatformEndpoint(app.getArn(), "fcm-token", null, Map.of(), REGION);
+
+        String topicArn = snsService.createTopic("market-alerts", null, null, REGION).getTopicArn();
+        snsService.subscribe(topicArn, "application", device.getArn(), REGION, Map.of());
+
+        AwsException e = assertThrows(AwsException.class, () -> snsService.publish(
+                topicArn, null, null, "{\"GCM\":\"only gcm\"}", null, "json",
+                null, null, null, REGION));
+        assertEquals("InvalidParameter", e.getErrorCode());
+        assertEquals(400, e.getHttpStatus());
+        assertTrue(e.getMessage().contains("default"));
+        assertTrue(snsService.peekPushNotifications(device.getArn()).isEmpty());
+    }
+
+    @Test
+    void publish_topicBroadcastRejectsInvalidJsonStructureBeforeFanOut() {
+        PlatformApplication app = snsService.createPlatformApplication("android-app", "GCM", Map.of(), REGION);
+        PlatformEndpoint device = snsService.createPlatformEndpoint(app.getArn(), "fcm-token", null, Map.of(), REGION);
+
+        String topicArn = snsService.createTopic("market-alerts", null, null, REGION).getTopicArn();
+        snsService.subscribe(topicArn, "application", device.getArn(), REGION, Map.of());
+
+        AwsException e = assertThrows(AwsException.class, () -> snsService.publish(
+                topicArn, null, null, "not json at all", null, "json",
+                null, null, null, REGION));
+        assertEquals("InvalidParameter", e.getErrorCode());
+        assertTrue(snsService.peekPushNotifications(device.getArn()).isEmpty());
+    }
+
+    @Test
+    void publishBatch_rejectsEntryWithJsonStructureMissingDefaultWithoutFailingBatch() {
+        PlatformApplication app = snsService.createPlatformApplication("android-app", "GCM", Map.of(), REGION);
+        PlatformEndpoint device = snsService.createPlatformEndpoint(app.getArn(), "fcm-token", null, Map.of(), REGION);
+
+        String topicArn = snsService.createTopic("market-alerts", null, null, REGION).getTopicArn();
+        snsService.subscribe(topicArn, "application", device.getArn(), REGION, Map.of());
+
+        SnsService.BatchPublishResult result = snsService.publishBatch(topicArn, List.of(
+                Map.of("Id", "bad", "Message", "{\"GCM\":\"only gcm\"}", "MessageStructure", "json"),
+                Map.of("Id", "good", "Message", "{\"default\":\"ok body\"}", "MessageStructure", "json")),
+                REGION);
+
+        assertEquals(1, result.failed().size());
+        assertEquals("bad", result.failed().get(0)[0]);
+        assertEquals("InvalidParameter", result.failed().get(0)[1]);
+        assertTrue(result.failed().get(0)[2].contains("default"));
+        assertEquals("true", result.failed().get(0)[3]);
+
+        assertEquals(1, result.successful().size());
+        assertEquals("good", result.successful().get(0)[0]);
+
+        List<PushNotification> captured = snsService.peekPushNotifications(device.getArn());
+        assertEquals(1, captured.size());
+        assertEquals("ok body", captured.get(0).payload());
+    }
+
+    @Test
+    void publishBatch_rejectsEntryWithInvalidJsonStructureWithoutFailingBatch() {
+        PlatformApplication app = snsService.createPlatformApplication("android-app", "GCM", Map.of(), REGION);
+        PlatformEndpoint device = snsService.createPlatformEndpoint(app.getArn(), "fcm-token", null, Map.of(), REGION);
+
+        String topicArn = snsService.createTopic("market-alerts", null, null, REGION).getTopicArn();
+        snsService.subscribe(topicArn, "application", device.getArn(), REGION, Map.of());
+
+        SnsService.BatchPublishResult result = snsService.publishBatch(topicArn, List.of(
+                Map.of("Id", "bad", "Message", "not json at all", "MessageStructure", "json"),
+                Map.of("Id", "good", "Message", "plain text")),
+                REGION);
+
+        assertEquals(1, result.failed().size());
+        assertEquals("bad", result.failed().get(0)[0]);
+        assertEquals("InvalidParameter", result.failed().get(0)[1]);
+        assertEquals(1, result.successful().size());
+        assertEquals("good", result.successful().get(0)[0]);
+
+        List<PushNotification> captured = snsService.peekPushNotifications(device.getArn());
+        assertEquals(1, captured.size());
+        assertEquals("plain text", captured.get(0).payload());
+    }
+
+    // --- Inspection helpers ---
+
+    @Test
+    void peekPushNotifications_filtersByEndpointArn() {
+        PlatformApplication app = snsService.createPlatformApplication("ios-app", "APNS", Map.of(), REGION);
+        PlatformEndpoint a = snsService.createPlatformEndpoint(app.getArn(), "tok-a", null, Map.of(), REGION);
+        PlatformEndpoint b = snsService.createPlatformEndpoint(app.getArn(), "tok-b", null, Map.of(), REGION);
+        snsService.publish(null, a.getArn(), null, "to-a", null, null, null, null, null, REGION);
+        snsService.publish(null, b.getArn(), null, "to-b", null, null, null, null, null, REGION);
+        snsService.publish(null, a.getArn(), null, "to-a-again", null, null, null, null, null, REGION);
+
+        assertEquals(2, snsService.peekPushNotifications(a.getArn()).size());
+        assertEquals(1, snsService.peekPushNotifications(b.getArn()).size());
+        assertEquals(3, snsService.peekPushNotifications(null).size());
+
+        snsService.clearPushNotifications();
+        assertTrue(snsService.peekPushNotifications(null).isEmpty());
+    }
+
+    // --- Endpoint lifecycle ---
+
+    @Test
+    void deleteEndpoint_isIdempotent() {
+        assertDoesNotThrow(() -> snsService.deleteEndpoint(
+                "arn:aws:sns:us-east-1:000000000000:endpoint/APNS/x/" + UUID.randomUUID(), REGION));
+    }
+
+    @Test
+    void getEndpointAttributes_returnsTokenEnabledAndCustomData() {
+        PlatformApplication app = snsService.createPlatformApplication("ios-app", "APNS", Map.of(), REGION);
+        PlatformEndpoint endpoint = snsService.createPlatformEndpoint(app.getArn(), "ios-token", "user-42", Map.of(), REGION);
+
+        Map<String, String> attrs = snsService.getEndpointAttributes(endpoint.getArn(), REGION);
+        assertEquals("ios-token", attrs.get("Token"));
+        assertEquals("user-42", attrs.get("CustomUserData"));
+        assertEquals("true", attrs.get("Enabled"));
+    }
+
+    @Test
+    void setEndpointAttributes_tokenRotationPropagatesToPublishedNotifications() {
+        PlatformApplication app = snsService.createPlatformApplication("ios-app", "APNS", Map.of(), REGION);
+        PlatformEndpoint endpoint = snsService.createPlatformEndpoint(app.getArn(), "old-token", null, Map.of(), REGION);
+
+        snsService.setEndpointAttributes(endpoint.getArn(), Map.of("Token", "new-token"), REGION);
+
+        assertEquals("new-token", snsService.getEndpointAttributes(endpoint.getArn(), REGION).get("Token"));
+
+        snsService.publish(null, endpoint.getArn(), null, "hello", null, null, null, null, null, REGION);
+        assertEquals("new-token",
+                snsService.peekPushNotifications(endpoint.getArn()).get(0).token());
+    }
+
+    @Test
+    void listEndpointsByPlatformApplication_returnsAllEndpointsForApp() {
+        PlatformApplication app = snsService.createPlatformApplication("ios-app", "APNS", Map.of(), REGION);
+        snsService.createPlatformEndpoint(app.getArn(), "tok-1", null, Map.of(), REGION);
+        snsService.createPlatformEndpoint(app.getArn(), "tok-2", null, Map.of(), REGION);
+        assertEquals(2, snsService.listEndpointsByPlatformApplication(app.getArn(), REGION).size());
+    }
+
+    @Test
+    void deletePlatformApplication_cascadesEndpoints() {
+        PlatformApplication app = snsService.createPlatformApplication("ios-app", "APNS", Map.of(), REGION);
+        snsService.createPlatformEndpoint(app.getArn(), "tok-1", null, Map.of(), REGION);
+        snsService.deletePlatformApplication(app.getArn(), REGION);
+        assertTrue(snsService.listEndpointsByPlatformApplication(app.getArn(), REGION).isEmpty());
+        assertTrue(snsService.listPlatformApplications(REGION).isEmpty());
+    }
+}

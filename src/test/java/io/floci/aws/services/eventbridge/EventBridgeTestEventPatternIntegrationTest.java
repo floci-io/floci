@@ -1,0 +1,720 @@
+package io.floci.aws.services.eventbridge;
+
+import io.floci.aws.testing.RestAssuredJsonUtils;
+import io.quarkus.test.junit.QuarkusTest;
+import org.junit.jupiter.api.BeforeAll;
+import org.junit.jupiter.api.Test;
+
+import static io.restassured.RestAssured.given;
+import static org.hamcrest.Matchers.equalTo;
+
+@QuarkusTest
+class EventBridgeTestEventPatternIntegrationTest {
+
+    private static final String EVENT_BRIDGE_CONTENT_TYPE = "application/x-amz-json-1.1";
+    private static final String TARGET = "AWSEvents.TestEventPattern";
+
+    @BeforeAll
+    static void configureRestAssured() {
+        RestAssuredJsonUtils.configureAwsContentTypes();
+    }
+
+    @Test
+    void sourceMatch() {
+        given()
+            .contentType(EVENT_BRIDGE_CONTENT_TYPE)
+            .header("X-Amz-Target", TARGET)
+            .body("""
+                {
+                    "EventPattern": "{\\"source\\":[\\"com.myapp\\"]}",
+                    "Event": "{\\"source\\":\\"com.myapp\\",\\"detail-type\\":\\"OrderPlaced\\",\\"detail\\":{}}"
+                }
+                """)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("Result", equalTo(true));
+    }
+
+    @Test
+    void sourceNoMatch() {
+        given()
+            .contentType(EVENT_BRIDGE_CONTENT_TYPE)
+            .header("X-Amz-Target", TARGET)
+            .body("""
+                {
+                    "EventPattern": "{\\"source\\":[\\"com.myapp\\"]}",
+                    "Event": "{\\"source\\":\\"com.otherapp\\",\\"detail-type\\":\\"OrderPlaced\\",\\"detail\\":{}}"
+                }
+                """)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("Result", equalTo(false));
+    }
+
+    @Test
+    void detailTypeMatch() {
+        given()
+            .contentType(EVENT_BRIDGE_CONTENT_TYPE)
+            .header("X-Amz-Target", TARGET)
+            .body("""
+                {
+                    "EventPattern": "{\\"source\\":[\\"com.myapp\\"],\\"detail-type\\":[\\"OrderPlaced\\"]}",
+                    "Event": "{\\"source\\":\\"com.myapp\\",\\"detail-type\\":\\"OrderPlaced\\",\\"detail\\":{}}"
+                }
+                """)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("Result", equalTo(true));
+    }
+
+    @Test
+    void detailNestedMatch() {
+        given()
+            .contentType(EVENT_BRIDGE_CONTENT_TYPE)
+            .header("X-Amz-Target", TARGET)
+            .body("""
+                {
+                    "EventPattern": "{\\"detail\\":{\\"status\\":[\\"PAID\\"]}}",
+                    "Event": "{\\"source\\":\\"com.myapp\\",\\"detail-type\\":\\"OrderPlaced\\",\\"detail\\":{\\"status\\":\\"PAID\\"}}"
+                }
+                """)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("Result", equalTo(true));
+    }
+
+    @Test
+    void detailBooleanLiteralMatch() {
+        given()
+            .contentType(EVENT_BRIDGE_CONTENT_TYPE)
+            .header("X-Amz-Target", TARGET)
+            .body("""
+                {
+                    "EventPattern": "{\\"detail\\":{\\"enabled\\":[true]}}",
+                    "Event": "{\\"source\\":\\"com.myapp\\",\\"detail-type\\":\\"OrderPlaced\\",\\"detail\\":{\\"enabled\\":true}}"
+                }
+                """)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("Result", equalTo(true));
+    }
+
+    @Test
+    void detailBooleanLiteralNoMatchOnDifferentValue() {
+        given()
+            .contentType(EVENT_BRIDGE_CONTENT_TYPE)
+            .header("X-Amz-Target", TARGET)
+            .body("""
+                {
+                    "EventPattern": "{\\"detail\\":{\\"enabled\\":[true]}}",
+                    "Event": "{\\"source\\":\\"com.myapp\\",\\"detail-type\\":\\"OrderPlaced\\",\\"detail\\":{\\"enabled\\":false}}"
+                }
+                """)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("Result", equalTo(false));
+    }
+
+    @Test
+    void detailStringPatternDoesNotMatchBooleanValue() {
+        // Pattern ["true"] must not match the JSON boolean true (type-strict, as in AWS)
+        given()
+            .contentType(EVENT_BRIDGE_CONTENT_TYPE)
+            .header("X-Amz-Target", TARGET)
+            .body("""
+                {
+                    "EventPattern": "{\\"detail\\":{\\"enabled\\":[\\"true\\"]}}",
+                    "Event": "{\\"source\\":\\"com.myapp\\",\\"detail-type\\":\\"OrderPlaced\\",\\"detail\\":{\\"enabled\\":true}}"
+                }
+                """)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("Result", equalTo(false));
+    }
+
+    @Test
+    void detailBooleanPatternDoesNotMatchStringValue() {
+        given()
+            .contentType(EVENT_BRIDGE_CONTENT_TYPE)
+            .header("X-Amz-Target", TARGET)
+            .body("""
+                {
+                    "EventPattern": "{\\"detail\\":{\\"enabled\\":[true]}}",
+                    "Event": "{\\"source\\":\\"com.myapp\\",\\"detail-type\\":\\"OrderPlaced\\",\\"detail\\":{\\"enabled\\":\\"true\\"}}"
+                }
+                """)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("Result", equalTo(false));
+    }
+
+    @Test
+    void detailNumberLiteralMatch() {
+        given()
+            .contentType(EVENT_BRIDGE_CONTENT_TYPE)
+            .header("X-Amz-Target", TARGET)
+            .body("""
+                {
+                    "EventPattern": "{\\"detail\\":{\\"count\\":[5]}}",
+                    "Event": "{\\"source\\":\\"com.myapp\\",\\"detail-type\\":\\"OrderPlaced\\",\\"detail\\":{\\"count\\":5}}"
+                }
+                """)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("Result", equalTo(true));
+    }
+
+    @Test
+    void detailStringPatternDoesNotMatchNumberValue() {
+        // Pattern ["5"] must not match the JSON number 5 (type-strict, as in AWS)
+        given()
+            .contentType(EVENT_BRIDGE_CONTENT_TYPE)
+            .header("X-Amz-Target", TARGET)
+            .body("""
+                {
+                    "EventPattern": "{\\"detail\\":{\\"count\\":[\\"5\\"]}}",
+                    "Event": "{\\"source\\":\\"com.myapp\\",\\"detail-type\\":\\"OrderPlaced\\",\\"detail\\":{\\"count\\":5}}"
+                }
+                """)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("Result", equalTo(false));
+    }
+
+    @Test
+    void detailNumberPatternDoesNotMatchStringValue() {
+        given()
+            .contentType(EVENT_BRIDGE_CONTENT_TYPE)
+            .header("X-Amz-Target", TARGET)
+            .body("""
+                {
+                    "EventPattern": "{\\"detail\\":{\\"count\\":[5]}}",
+                    "Event": "{\\"source\\":\\"com.myapp\\",\\"detail-type\\":\\"OrderPlaced\\",\\"detail\\":{\\"count\\":\\"5\\"}}"
+                }
+                """)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("Result", equalTo(false));
+    }
+
+    @Test
+    void detailNumberMatchIsByNumericValue() {
+        // AWS normalizes numbers before comparing: 300 and 300.0 are equal.
+        given()
+            .contentType(EVENT_BRIDGE_CONTENT_TYPE)
+            .header("X-Amz-Target", TARGET)
+            .body("""
+                {
+                    "EventPattern": "{\\"detail\\":{\\"count\\":[300]}}",
+                    "Event": "{\\"source\\":\\"com.myapp\\",\\"detail-type\\":\\"OrderPlaced\\",\\"detail\\":{\\"count\\":300.0}}"
+                }
+                """)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("Result", equalTo(true));
+    }
+
+    @Test
+    void detailNumberScientificNotationMatchesDecimal() {
+        given()
+            .contentType(EVENT_BRIDGE_CONTENT_TYPE)
+            .header("X-Amz-Target", TARGET)
+            .body("""
+                {
+                    "EventPattern": "{\\"detail\\":{\\"count\\":[3.0e2]}}",
+                    "Event": "{\\"source\\":\\"com.myapp\\",\\"detail-type\\":\\"OrderPlaced\\",\\"detail\\":{\\"count\\":300.0}}"
+                }
+                """)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("Result", equalTo(true));
+    }
+
+    @Test
+    void detailExistsMatchesBooleanValue() {
+        given()
+            .contentType(EVENT_BRIDGE_CONTENT_TYPE)
+            .header("X-Amz-Target", TARGET)
+            .body("""
+                {
+                    "EventPattern": "{\\"detail\\":{\\"enabled\\":[{\\"exists\\":true}]}}",
+                    "Event": "{\\"source\\":\\"com.myapp\\",\\"detail-type\\":\\"OrderPlaced\\",\\"detail\\":{\\"enabled\\":false}}"
+                }
+                """)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("Result", equalTo(true));
+    }
+
+    @Test
+    void detailNullLiteralMatchesNullValue() {
+        given()
+            .contentType(EVENT_BRIDGE_CONTENT_TYPE)
+            .header("X-Amz-Target", TARGET)
+            .body("""
+                {
+                    "EventPattern": "{\\"detail\\":{\\"field\\":[null]}}",
+                    "Event": "{\\"source\\":\\"com.myapp\\",\\"detail-type\\":\\"OrderPlaced\\",\\"detail\\":{\\"field\\":null}}"
+                }
+                """)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("Result", equalTo(true));
+    }
+
+    @Test
+    void detailNullLiteralDoesNotMatchMissingField() {
+        given()
+            .contentType(EVENT_BRIDGE_CONTENT_TYPE)
+            .header("X-Amz-Target", TARGET)
+            .body("""
+                {
+                    "EventPattern": "{\\"detail\\":{\\"field\\":[null]}}",
+                    "Event": "{\\"source\\":\\"com.myapp\\",\\"detail-type\\":\\"OrderPlaced\\",\\"detail\\":{\\"other\\":1}}"
+                }
+                """)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("Result", equalTo(false));
+    }
+
+    @Test
+    void detailExistsTrueMatchesNullValue() {
+        // A key carrying the JSON literal null still exists in AWS.
+        given()
+            .contentType(EVENT_BRIDGE_CONTENT_TYPE)
+            .header("X-Amz-Target", TARGET)
+            .body("""
+                {
+                    "EventPattern": "{\\"detail\\":{\\"field\\":[{\\"exists\\":true}]}}",
+                    "Event": "{\\"source\\":\\"com.myapp\\",\\"detail-type\\":\\"OrderPlaced\\",\\"detail\\":{\\"field\\":null}}"
+                }
+                """)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("Result", equalTo(true));
+    }
+
+    @Test
+    void detailExistsFalseDoesNotMatchNullValue() {
+        given()
+            .contentType(EVENT_BRIDGE_CONTENT_TYPE)
+            .header("X-Amz-Target", TARGET)
+            .body("""
+                {
+                    "EventPattern": "{\\"detail\\":{\\"field\\":[{\\"exists\\":false}]}}",
+                    "Event": "{\\"source\\":\\"com.myapp\\",\\"detail-type\\":\\"OrderPlaced\\",\\"detail\\":{\\"field\\":null}}"
+                }
+                """)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("Result", equalTo(false));
+    }
+
+    @Test
+    void detailExistsFalseMatchesMissingField() {
+        given()
+            .contentType(EVENT_BRIDGE_CONTENT_TYPE)
+            .header("X-Amz-Target", TARGET)
+            .body("""
+                {
+                    "EventPattern": "{\\"detail\\":{\\"field\\":[{\\"exists\\":false}]}}",
+                    "Event": "{\\"source\\":\\"com.myapp\\",\\"detail-type\\":\\"OrderPlaced\\",\\"detail\\":{\\"other\\":1}}"
+                }
+                """)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("Result", equalTo(true));
+    }
+
+    @Test
+    void detailExistsTrueDoesNotMatchMissingField() {
+        given()
+            .contentType(EVENT_BRIDGE_CONTENT_TYPE)
+            .header("X-Amz-Target", TARGET)
+            .body("""
+                {
+                    "EventPattern": "{\\"detail\\":{\\"field\\":[{\\"exists\\":true}]}}",
+                    "Event": "{\\"source\\":\\"com.myapp\\",\\"detail-type\\":\\"OrderPlaced\\",\\"detail\\":{\\"other\\":1}}"
+                }
+                """)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("Result", equalTo(false));
+    }
+
+    @Test
+    void detailAnythingButNumberValue() {
+        given()
+            .contentType(EVENT_BRIDGE_CONTENT_TYPE)
+            .header("X-Amz-Target", TARGET)
+            .body("""
+                {
+                    "EventPattern": "{\\"detail\\":{\\"count\\":[{\\"anything-but\\":[3]}]}}",
+                    "Event": "{\\"source\\":\\"com.myapp\\",\\"detail-type\\":\\"OrderPlaced\\",\\"detail\\":{\\"count\\":5}}"
+                }
+                """)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("Result", equalTo(true));
+    }
+
+    @Test
+    void detailAnythingButNumberValueExcluded() {
+        given()
+            .contentType(EVENT_BRIDGE_CONTENT_TYPE)
+            .header("X-Amz-Target", TARGET)
+            .body("""
+                {
+                    "EventPattern": "{\\"detail\\":{\\"count\\":[{\\"anything-but\\":[5]}]}}",
+                    "Event": "{\\"source\\":\\"com.myapp\\",\\"detail-type\\":\\"OrderPlaced\\",\\"detail\\":{\\"count\\":5}}"
+                }
+                """)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("Result", equalTo(false));
+    }
+
+    @Test
+    void detailAnythingButScalarStringValue() {
+        given()
+            .contentType(EVENT_BRIDGE_CONTENT_TYPE)
+            .header("X-Amz-Target", TARGET)
+            .body("""
+                {
+                    "EventPattern": "{\\"detail\\":{\\"state\\":[{\\"anything-but\\":\\"initializing\\"}]}}",
+                    "Event": "{\\"source\\":\\"com.myapp\\",\\"detail-type\\":\\"OrderPlaced\\",\\"detail\\":{\\"state\\":\\"running\\"}}"
+                }
+                """)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("Result", equalTo(true));
+    }
+
+    @Test
+    void detailAnythingButScalarStringValueExcluded() {
+        given()
+            .contentType(EVENT_BRIDGE_CONTENT_TYPE)
+            .header("X-Amz-Target", TARGET)
+            .body("""
+                {
+                    "EventPattern": "{\\"detail\\":{\\"state\\":[{\\"anything-but\\":\\"initializing\\"}]}}",
+                    "Event": "{\\"source\\":\\"com.myapp\\",\\"detail-type\\":\\"OrderPlaced\\",\\"detail\\":{\\"state\\":\\"initializing\\"}}"
+                }
+                """)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("Result", equalTo(false));
+    }
+
+    @Test
+    void detailAnythingButScalarNumberValue() {
+        given()
+            .contentType(EVENT_BRIDGE_CONTENT_TYPE)
+            .header("X-Amz-Target", TARGET)
+            .body("""
+                {
+                    "EventPattern": "{\\"detail\\":{\\"count\\":[{\\"anything-but\\":5}]}}",
+                    "Event": "{\\"source\\":\\"com.myapp\\",\\"detail-type\\":\\"OrderPlaced\\",\\"detail\\":{\\"count\\":3}}"
+                }
+                """)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("Result", equalTo(true));
+    }
+
+    @Test
+    void detailAnythingButScalarNumberValueExcluded() {
+        given()
+            .contentType(EVENT_BRIDGE_CONTENT_TYPE)
+            .header("X-Amz-Target", TARGET)
+            .body("""
+                {
+                    "EventPattern": "{\\"detail\\":{\\"count\\":[{\\"anything-but\\":5}]}}",
+                    "Event": "{\\"source\\":\\"com.myapp\\",\\"detail-type\\":\\"OrderPlaced\\",\\"detail\\":{\\"count\\":5}}"
+                }
+                """)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("Result", equalTo(false));
+    }
+
+    @Test
+    void detailAnythingButScalarMissingFieldDoesNotMatch() {
+        given()
+            .contentType(EVENT_BRIDGE_CONTENT_TYPE)
+            .header("X-Amz-Target", TARGET)
+            .body("""
+                {
+                    "EventPattern": "{\\"detail\\":{\\"state\\":[{\\"anything-but\\":\\"initializing\\"}]}}",
+                    "Event": "{\\"source\\":\\"com.myapp\\",\\"detail-type\\":\\"OrderPlaced\\",\\"detail\\":{\\"other\\":1}}"
+                }
+                """)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("Result", equalTo(false));
+    }
+
+    @Test
+    void prefixFilterMatch() {
+        given()
+            .contentType(EVENT_BRIDGE_CONTENT_TYPE)
+            .header("X-Amz-Target", TARGET)
+            .body("""
+                {
+                    "EventPattern": "{\\"source\\":[{\\"prefix\\":\\"com.\\"}]}",
+                    "Event": "{\\"source\\":\\"com.myapp\\",\\"detail-type\\":\\"OrderPlaced\\",\\"detail\\":{}}"
+                }
+                """)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("Result", equalTo(true));
+    }
+
+    @Test
+    void emptyPatternRejected() {
+        // AWS spec: EventPattern is required; an empty string must be rejected
+        // rather than treated as a match-all wildcard.
+        given()
+            .contentType(EVENT_BRIDGE_CONTENT_TYPE)
+            .header("X-Amz-Target", TARGET)
+            .body("""
+                {
+                    "EventPattern": "",
+                    "Event": "{\\"source\\":\\"com.myapp\\",\\"detail-type\\":\\"OrderPlaced\\",\\"detail\\":{}}"
+                }
+                """)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(400);
+    }
+
+    @Test
+    void accountMatchFromEventEnvelope() {
+        given()
+            .contentType(EVENT_BRIDGE_CONTENT_TYPE)
+            .header("X-Amz-Target", TARGET)
+            .body("""
+                {
+                    "EventPattern": "{\\"account\\":[\\"999999999999\\"]}",
+                    "Event": "{\\"source\\":\\"x\\",\\"detail-type\\":\\"y\\",\\"account\\":\\"999999999999\\",\\"detail\\":{}}"
+                }
+                """)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("Result", equalTo(true));
+    }
+
+    @Test
+    void accountNoMatchFromEventEnvelope() {
+        given()
+            .contentType(EVENT_BRIDGE_CONTENT_TYPE)
+            .header("X-Amz-Target", TARGET)
+            .body("""
+                {
+                    "EventPattern": "{\\"account\\":[\\"999999999999\\"]}",
+                    "Event": "{\\"source\\":\\"x\\",\\"detail-type\\":\\"y\\",\\"account\\":\\"111111111111\\",\\"detail\\":{}}"
+                }
+                """)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("Result", equalTo(false));
+    }
+
+    @Test
+    void regionMatchFromEventEnvelope() {
+        given()
+            .contentType(EVENT_BRIDGE_CONTENT_TYPE)
+            .header("X-Amz-Target", TARGET)
+            .body("""
+                {
+                    "EventPattern": "{\\"region\\":[\\"eu-west-1\\"]}",
+                    "Event": "{\\"source\\":\\"x\\",\\"detail-type\\":\\"y\\",\\"region\\":\\"eu-west-1\\",\\"detail\\":{}}"
+                }
+                """)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("Result", equalTo(true));
+    }
+
+    @Test
+    void regionNoMatchFromEventEnvelope() {
+        given()
+            .contentType(EVENT_BRIDGE_CONTENT_TYPE)
+            .header("X-Amz-Target", TARGET)
+            .body("""
+                {
+                    "EventPattern": "{\\"region\\":[\\"eu-west-1\\"]}",
+                    "Event": "{\\"source\\":\\"x\\",\\"detail-type\\":\\"y\\",\\"region\\":\\"us-east-1\\",\\"detail\\":{}}"
+                }
+                """)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("Result", equalTo(false));
+    }
+
+    @Test
+    void arrayEventRejected() {
+        given()
+            .contentType(EVENT_BRIDGE_CONTENT_TYPE)
+            .header("X-Amz-Target", TARGET)
+            .body("""
+                {
+                    "EventPattern": "{\\"source\\":[\\"com.myapp\\"]}",
+                    "Event": "[]"
+                }
+                """)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(400);
+    }
+
+    @Test
+    void scalarEventRejected() {
+        given()
+            .contentType(EVENT_BRIDGE_CONTENT_TYPE)
+            .header("X-Amz-Target", TARGET)
+            .body("""
+                {
+                    "EventPattern": "{\\"source\\":[\\"com.myapp\\"]}",
+                    "Event": "true"
+                }
+                """)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(400);
+    }
+
+    @Test
+    void nullLiteralEventRejected() {
+        given()
+            .contentType(EVENT_BRIDGE_CONTENT_TYPE)
+            .header("X-Amz-Target", TARGET)
+            .body("""
+                {
+                    "EventPattern": "{\\"source\\":[\\"com.myapp\\"]}",
+                    "Event": "null"
+                }
+                """)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(400);
+    }
+
+    @Test
+    void missingPatternRejected() {
+        given()
+            .contentType(EVENT_BRIDGE_CONTENT_TYPE)
+            .header("X-Amz-Target", TARGET)
+            .body("""
+                {
+                    "Event": "{\\"source\\":\\"com.myapp\\",\\"detail-type\\":\\"OrderPlaced\\",\\"detail\\":{}}"
+                }
+                """)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(400);
+    }
+
+    @Test
+    void malformedPatternRejected() {
+        given()
+            .contentType(EVENT_BRIDGE_CONTENT_TYPE)
+            .header("X-Amz-Target", TARGET)
+            .body("""
+                {
+                    "EventPattern": "{not-json}",
+                    "Event": "{\\"source\\":\\"com.myapp\\",\\"detail-type\\":\\"OrderPlaced\\",\\"detail\\":{}}"
+                }
+                """)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(400);
+    }
+
+    @Test
+    void missingEventRejected() {
+        given()
+            .contentType(EVENT_BRIDGE_CONTENT_TYPE)
+            .header("X-Amz-Target", TARGET)
+            .body("""
+                {
+                    "EventPattern": "{\\"source\\":[\\"com.myapp\\"]}"
+                }
+                """)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(400);
+    }
+}

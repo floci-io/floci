@@ -36,7 +36,7 @@ mark those members `failed` until a successful retry.
 
 Floci manages real PostgreSQL, MySQL, MariaDB, and SQL Server Docker containers and proxies TCP connections to them, including IAM authentication support where the protocol supports it. SQL Server uses a transparent TCP relay for its native TDS protocol.
 
-MySQL and MariaDB master-grant script uploads, and PostgreSQL snapshot restore archive uploads,
+MySQL and MariaDB master-grant script uploads, and snapshot dump script and restore archive uploads,
 retry transient Docker connection failures up to six attempts with exponential backoff starting
 at 500 ms. Every attempt sends a fresh archive. Containers start, or snapshot restore commands
 run, only after the upload succeeds. A permanent Docker error or exhausted retries follows the
@@ -211,6 +211,20 @@ checked against the instance's other window. Modifications apply immediately —
     `Copy`, `Delete` and the `restore` attribute behave as they do for instance snapshots, under
     `arn:aws:rds:<region>:<account>:cluster-snapshot:<name>`. RDS reserved instances aren't
     modeled (there's no reserved-instance API), so tagging doesn't apply to them.
+
+!!! note "DB snapshot engines"
+
+    `CreateDBSnapshot` takes a logical copy of a PostgreSQL, MySQL or MariaDB instance, and
+    `RestoreDBInstanceFromDBSnapshot` loads it into the new instance. PostgreSQL uses `pg_dumpall`.
+    MySQL and MariaDB use `mysqldump` (`mariadb-dump`) of every user schema, with routines,
+    triggers and events, run as the master user, followed by every account other than `root` and
+    the image's system accounts, recreated from `SHOW CREATE USER` and `SHOW GRANTS` so they keep
+    their passwords. Roles are copied too, and created before any grant names them. The `mysql`
+    system schema itself is not copied. The restore waits until the new server accepts the master
+    user over TCP before loading the copy. SQL Server instances are refused with
+    `InvalidDBInstanceState`. The dump runs in one transaction, so InnoDB tables are copied as of
+    one moment; as with `mysqldump --single-transaction` elsewhere, a MyISAM or other
+    non-transactional table written to during the snapshot may not be.
 
 ## Cluster parameter groups
 
@@ -656,7 +670,7 @@ The replica's database is initialised from a `pg_dumpall` of the source taken wh
 created, the same mechanism `RestoreDBInstanceFromDBSnapshot` uses, so it holds the source's data
 as of that moment. Writes made to the source afterwards are not streamed to the replica. Because
 the copy is dump based, only PostgreSQL sources are accepted; MySQL and MariaDB sources are refused
-with `InvalidDBInstanceState`, as `CreateDBSnapshot` refuses them. A source with automated backups
+with `InvalidDBInstanceState`, although `CreateDBSnapshot` accepts them. A source with automated backups
 off (`BackupRetentionPeriod` 0) is refused with the same error AWS uses.
 
 `PromoteReadReplica` clears the link on both ends, sets the requested `BackupRetentionPeriod`
@@ -851,8 +865,8 @@ they are added with `CreateDBInstance`, as on AWS.
 Floci keeps no transaction log, so it cannot rebuild a database as it was at an earlier time. The
 target is seeded from a `pg_dumpall` of the source taken when the request arrives, the mechanism read
 replicas use, so the restored data is the source's latest state whatever time in the window is
-asked for; this is also why `LatestRestorableTime` is always the current time. As with
-`CreateDBSnapshot`, only PostgreSQL sources are accepted.
+asked for; this is also why `LatestRestorableTime` is always the current time. Only PostgreSQL
+sources are accepted.
 
 ## Automated backups
 
@@ -941,7 +955,8 @@ What differs from RDS:
 - The IAM role is not assumed and the KMS key encrypts nothing: both are recorded and reported back
   as given. The bucket must exist, or the request fails with `InvalidS3BucketFault`. A bucket in
   another region than the snapshot's is accepted and the task then ends `FAILED`, as on RDS.
-- Only PostgreSQL snapshots can be exported, since Floci's snapshots hold PostgreSQL data only.
+- Only PostgreSQL snapshots can be exported: the export reads a `pg_dumpall`, and a MySQL or
+  MariaDB snapshot holds a `mysqldump` instead.
   Any other source is refused with `InvalidExportSourceState`, and so is a snapshot that is not
   `available`.
 - `SourceArn` must name a snapshot: exporting a live DB cluster (`SourceType` `CLUSTER`) is not

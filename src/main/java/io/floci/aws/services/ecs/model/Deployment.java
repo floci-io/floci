@@ -1,0 +1,81 @@
+package io.floci.aws.services.ecs.model;
+
+import io.quarkus.runtime.annotations.RegisterForReflection;
+
+import java.time.Instant;
+import java.util.List;
+import java.util.Map;
+
+/**
+ * A deployment of an ECS service, as reported in {@code DescribeServices}'
+ * {@code services[].deployments}. Distinct from {@link ServiceDeployment}, which is the
+ * separate {@code DescribeServiceDeployments} API shape and carries neither counts nor a
+ * rollout state.
+ */
+@RegisterForReflection
+public class Deployment {
+
+    private String id;
+    private String status;
+    private String taskDefinition;
+    private int desiredCount;
+    private int pendingCount;
+    private int runningCount;
+    private int failedTasks;
+    private String rolloutState;
+    private String rolloutStateReason;
+    private LaunchType launchType;
+    private List<CapacityProviderStrategyItem> capacityProviderStrategy;
+    private String platformVersion;
+    private String platformFamily;
+    private NetworkConfiguration networkConfiguration;
+    private Instant createdAt;
+    private Instant updatedAt;
+    /**
+     * Raw passthrough of the service's Service Connect configuration. AWS's own {@code Service}
+     * shape carries no {@code serviceConnectConfiguration} member, only {@code Deployment} does,
+     * so this is the single place a generated client can read it back from.
+     */
+    private Map<String, Object> serviceConnectConfiguration;
+
+    public String getId() { return id; }
+    public void setId(String id) { this.id = id; }
+    public String getStatus() { return status; }
+    public void setStatus(String status) { this.status = status; }
+    public String getTaskDefinition() { return taskDefinition; }
+    public void setTaskDefinition(String taskDefinition) { this.taskDefinition = taskDefinition; }
+    public int getDesiredCount() { return desiredCount; }
+    public void setDesiredCount(int desiredCount) { this.desiredCount = desiredCount; }
+    public int getPendingCount() { return pendingCount; }
+    public void setPendingCount(int pendingCount) { this.pendingCount = pendingCount; }
+    public int getRunningCount() { return runningCount; }
+    public void setRunningCount(int runningCount) { this.runningCount = runningCount; }
+    public int getFailedTasks() { return failedTasks; }
+    public void setFailedTasks(int failedTasks) { this.failedTasks = failedTasks; }
+    public String getRolloutState() { return rolloutState; }
+    public void setRolloutState(String rolloutState) { this.rolloutState = rolloutState; }
+    public String getRolloutStateReason() { return rolloutStateReason; }
+    public void setRolloutStateReason(String rolloutStateReason) { this.rolloutStateReason = rolloutStateReason; }
+    public LaunchType getLaunchType() { return launchType; }
+    public void setLaunchType(LaunchType launchType) { this.launchType = launchType; }
+    public List<CapacityProviderStrategyItem> getCapacityProviderStrategy() { return capacityProviderStrategy; }
+    public void setCapacityProviderStrategy(List<CapacityProviderStrategyItem> capacityProviderStrategy) {
+        this.capacityProviderStrategy = capacityProviderStrategy;
+    }
+    public String getPlatformVersion() { return platformVersion; }
+    public void setPlatformVersion(String platformVersion) { this.platformVersion = platformVersion; }
+    public String getPlatformFamily() { return platformFamily; }
+    public void setPlatformFamily(String platformFamily) { this.platformFamily = platformFamily; }
+    public NetworkConfiguration getNetworkConfiguration() { return networkConfiguration; }
+    public void setNetworkConfiguration(NetworkConfiguration networkConfiguration) {
+        this.networkConfiguration = networkConfiguration;
+    }
+    public Instant getCreatedAt() { return createdAt; }
+    public void setCreatedAt(Instant createdAt) { this.createdAt = createdAt; }
+    public Instant getUpdatedAt() { return updatedAt; }
+    public void setUpdatedAt(Instant updatedAt) { this.updatedAt = updatedAt; }
+    public Map<String, Object> getServiceConnectConfiguration() { return serviceConnectConfiguration; }
+    public void setServiceConnectConfiguration(Map<String, Object> serviceConnectConfiguration) {
+        this.serviceConnectConfiguration = serviceConnectConfiguration;
+    }
+}

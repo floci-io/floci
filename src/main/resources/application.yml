@@ -64,7 +64,8 @@ quarkus:
       # The Pricing service reads its bundled snapshot, EC2 reads its image
       # catalog (ec2/image-catalog.yaml), SageMaker reads its instance type
       # catalog (sagemaker/instance-type-catalog.yaml), KMS reads its AWS managed
-      # key catalog (kms/aws-managed-keys.yaml), AppSync's GraphQL
+      # key catalog (kms/aws-managed-keys.yaml), Bedrock reads its model catalog
+      # (bedrock/model-catalog.yaml), AppSync's GraphQL
       # parser reads its message bundles, Lambda Web Functions copy their
       # runtime (lambdaweb/index.mjs) into each environment, EMR writes its S3DistCp program
       # (emr/s3-dist-cp.py) into a step's container, EC2 security group enforcement builds
@@ -88,6 +89,7 @@ quarkus:
         - docker/*.Dockerfile
         - sagemaker/*.yaml
         - kms/*.yaml
+        - bedrock/*.yaml
         - eks/*.json
         - aws/*.json
         - iam/service-linked-roles.tsv
@@ -140,30 +142,30 @@ quarkus:
       # library in Native's static initializer. Initialized at build time (the Quarkus default),
       # that library loads into the builder and never into the binary, so every JNA call fails
       # with UnsatisfiedLinkError on Native.open. The JNI and proxy metadata JNA needs at run time
-      # is under META-INF/native-image/net.java.dev.jna and META-INF/native-image/io.github.hectorvent/floci.
+      # is under META-INF/native-image/net.java.dev.jna and META-INF/native-image/io.floci/floci.
       - --initialize-at-run-time=com.sun.jna
       - --initialize-at-run-time=com.github.dockerjava.transport.NamedPipeSocket$Kernel32
-      - --initialize-at-run-time=io.github.hectorvent.floci.services.acm.AcmService
-      - --initialize-at-run-time=io.github.hectorvent.floci.services.acm.CertificateGenerator
-      - --initialize-at-run-time=io.github.hectorvent.floci.config.TlsConfigSource
-      - --initialize-at-run-time=io.github.hectorvent.floci.services.cognito.CognitoSrpHelper
-      - --initialize-at-run-time=io.github.hectorvent.floci.core.common.Totp
-      - --initialize-at-run-time=io.github.hectorvent.floci.services.route53.Route53Service
-      - --initialize-at-run-time=io.github.hectorvent.floci.services.kms.KmsService
-      - --initialize-at-run-time=io.github.hectorvent.floci.services.bedrockagentcore.BedrockAgentCoreEventService
-      - --initialize-at-run-time=io.github.hectorvent.floci.services.cloudfront.CloudFrontService
-      - --initialize-at-run-time=io.github.hectorvent.floci.services.emr.EmrService
-      - --initialize-at-run-time=io.github.hectorvent.floci.services.elasticbeanstalk.ElasticBeanstalkService
-      - --initialize-at-run-time=io.github.hectorvent.floci.services.elb.ElbClassicService
-      - --initialize-at-run-time=io.github.hectorvent.floci.services.datasync.DataSyncService
-      - --initialize-at-run-time=io.github.hectorvent.floci.services.dms.DmsService
-      - --initialize-at-run-time=io.github.hectorvent.floci.services.lambda.launcher.LambdaExecutionRoleCredentials
-      - --initialize-at-run-time=io.github.hectorvent.floci.services.ecs.container.EcsTaskRoleCredentials
-      - --initialize-at-run-time=io.github.hectorvent.floci.services.ssoportal.SsoPortalService
-      - --initialize-at-run-time=io.github.hectorvent.floci.services.redshift.proxy.RedshiftRoleAccess
-      - --initialize-at-run-time=io.github.hectorvent.floci.services.redshift.spectrum.SpectrumMaterializer
-      - --initialize-at-run-time=io.github.hectorvent.floci.services.ecs.exec.EcsExecSessionRegistry
-      - --initialize-at-run-time=io.github.hectorvent.floci.services.stepfunctions.ApiGatewayTaskInvoker
+      - --initialize-at-run-time=io.floci.aws.services.acm.AcmService
+      - --initialize-at-run-time=io.floci.aws.services.acm.CertificateGenerator
+      - --initialize-at-run-time=io.floci.aws.config.TlsConfigSource
+      - --initialize-at-run-time=io.floci.aws.services.cognito.CognitoSrpHelper
+      - --initialize-at-run-time=io.floci.aws.core.common.Totp
+      - --initialize-at-run-time=io.floci.aws.services.route53.Route53Service
+      - --initialize-at-run-time=io.floci.aws.services.kms.KmsService
+      - --initialize-at-run-time=io.floci.aws.services.bedrockagentcore.BedrockAgentCoreEventService
+      - --initialize-at-run-time=io.floci.aws.services.cloudfront.CloudFrontService
+      - --initialize-at-run-time=io.floci.aws.services.emr.EmrService
+      - --initialize-at-run-time=io.floci.aws.services.elasticbeanstalk.ElasticBeanstalkService
+      - --initialize-at-run-time=io.floci.aws.services.elb.ElbClassicService
+      - --initialize-at-run-time=io.floci.aws.services.datasync.DataSyncService
+      - --initialize-at-run-time=io.floci.aws.services.dms.DmsService
+      - --initialize-at-run-time=io.floci.aws.services.lambda.launcher.LambdaExecutionRoleCredentials
+      - --initialize-at-run-time=io.floci.aws.services.ecs.container.EcsTaskRoleCredentials
+      - --initialize-at-run-time=io.floci.aws.services.ssoportal.SsoPortalService
+      - --initialize-at-run-time=io.floci.aws.services.redshift.proxy.RedshiftRoleAccess
+      - --initialize-at-run-time=io.floci.aws.services.redshift.spectrum.SpectrumMaterializer
+      - --initialize-at-run-time=io.floci.aws.services.ecs.exec.EcsExecSessionRegistry
+      - --initialize-at-run-time=io.floci.aws.services.stepfunctions.ApiGatewayTaskInvoker
       # snappy-java (Firehose Snappy/HADOOP_SNAPPY delivery) extracts and loads a
       # bundled JNI library from the static initializers of these two classes.
       - --initialize-at-run-time=org.xerial.snappy.Snappy
@@ -440,6 +442,7 @@ floci:
       enabled: true
     lambda:
       enabled: true
+      reconcile-containers-on-startup: true  # FLOCI_SERVICES_LAMBDA_RECONCILE_CONTAINERS_ON_STARTUP
       ephemeral: false
       # Extra Docker create flags for Lambda containers, for example: --env KEY=VALUE --volume /host:/container:ro
       docker-flags: ""
@@ -851,6 +854,7 @@ floci:
       mock: false
       max-memory-mib: 0        # optional k3s container memory ceiling; 0 follows the node type
       max-vcpus: 0             # optional k3s container CPU ceiling; 0 follows the node type
+      # node-instance-type: t2.2xlarge # optional catalog type to size the k3s node from; the API keeps the node group's type
       provider: k3s
       default-image: "rancher/k3s:latest"
       # image-template: "myregistry.io/k3s:v%s" # optional custom image format template taking cluster version
@@ -888,6 +892,8 @@ floci:
     elbv2:
       enabled: true
       mock: false
+      backend-keep-alive: true
+      backend-keep-alive-timeout-seconds: 60
     codebuild:
       enabled: true
       # docker-network: floci-network
@@ -1013,6 +1019,8 @@ floci:
       enabled: true
     efs:
       enabled: true
+    ec2instanceconnect:
+      enabled: true
     organizations:
       enabled: true
       # management-account-email: ""  # When set, overrides the management-account email reported by DescribeOrganization and account listings.
@@ -1069,6 +1077,8 @@ floci:
       enabled: true
     dlm:
       enabled: true
+    signer:
+      enabled: true
     cognitoidentity:
       enabled: true
     globalaccelerator:
@@ -1122,6 +1132,9 @@ floci:
       npm-image: "verdaccio/verdaccio:6.10.4"
       pypi-image: "pypiserver/pypiserver:v2.4.2"
       nuget-image: "bagetter/bagetter:1.6.5"
+    quicksight:
+      enabled: true
+      embed-base-url: ${floci.base-url}
     marketplace:
       enabled: true
     dms:

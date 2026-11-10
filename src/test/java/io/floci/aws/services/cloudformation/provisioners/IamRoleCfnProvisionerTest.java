@@ -1,0 +1,741 @@
+package io.floci.aws.services.cloudformation.provisioners;
+
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import io.floci.aws.core.common.AwsException;
+import io.floci.aws.services.cloudformation.CloudFormationTemplateEngine;
+import io.floci.aws.services.cloudformation.model.StackResource;
+import io.floci.aws.services.iam.IamService;
+import io.floci.aws.services.iam.model.IamRole;
+import io.floci.aws.testutil.IamServiceTestHelper;
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
+import org.mockito.ArgumentCaptor;
+import org.mockito.InOrder;
+
+import java.util.HashMap;
+import java.util.Map;
+
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNotEquals;
+import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.ArgumentMatchers.isNull;
+import static org.mockito.Mockito.doAnswer;
+import static org.mockito.Mockito.doThrow;
+import static org.mockito.Mockito.inOrder;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.spy;
+import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.verifyNoInteractions;
+import static org.mockito.Mockito.when;
+
+/**
+ * The IAM role CFN provisioner in isolation, with the inline {@code Policies} behavior of #1952.
+ * Rollback and role-adoption paths are covered end to end through the public provision entry point
+ * in {@code CloudFormationIamAttachmentProvisionerTest}.
+ */
+class IamRoleCfnProvisionerTest {
+
+    private static final String ACCOUNT_ID = "000000000000";
+    private static final String EMPTY_TRUST = "{\"Version\":\"2012-10-17\",\"Statement\":[]}";
+
+    private final IamService iam = mock(IamService.class);
+    private final IamRoleCfnProvisioner provisioner = new IamRoleCfnProvisioner(iam);
+    private final ObjectMapper mapper = new ObjectMapper();
+
+    private ProvisionContext ctx() {
+        CloudFormationTemplateEngine engine = mock(CloudFormationTemplateEngine.class);
+
+        when(engine.resolve(any())).thenAnswer(inv -> {
+                JsonNode node = inv.getArgument(0);
+                return node == null ? null : node.asText();
+        });
+
+        when(engine.resolveNode(any())).thenAnswer(inv -> inv.getArgument(0));
+
+        // resolveStringList delegates to the real engine method; for the literal arrays these
+        // tests use it just walks the array and calls resolve(...) per element, stubbed above.
+        when(engine.resolveStringList(any())).thenCallRealMethod();
+
+        when(engine.resolveJsonAttribute(any())).thenAnswer(inv -> resolvedDocument(inv.getArgument(0)));
+        when(engine.resolveJsonAttributeStrict(any())).thenAnswer(inv -> resolvedDocument(inv.getArgument(0)));
+
+        return new ProvisionContext(engine, "us-east-1", ACCOUNT_ID, "test-stack");
+        }
+
+    private static String resolvedDocument(JsonNode node) {
+        if (node == null) {
+            return null;
+        }
+        return node.isTextual() ? node.asText() : node.toString();
+    }
+
+    private StackResource resource() {
+        StackResource r = new StackResource();
+        r.setLogicalId("AppRole");
+        r.setResourceType("AWS::IAM::Role");
+        r.setAttributes(new HashMap<>());
+        return r;
+    }
+
+    private JsonNode props(String json) {
+        try {
+            return mapper.readTree(json);
+        } catch (Exception e) {
+            throw new RuntimeException(e);
+        }
+    }
+
+    private IamRole stubCreate(String roleName) {
+        IamRole role = new IamRole("AROA" + roleName, roleName, "/",
+                "arn:aws:iam::" + ACCOUNT_ID + ":role/" + roleName, EMPTY_TRUST);
+        when(iam.createRole(eq(roleName), eq("/"), anyString(), any(), eq(3600), eq(Map.of()), any()))
+                .thenReturn(role);
+        return role;
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"0", "3599", "43201", "7200.5", "\"\"", "\"invalid\""})
+    void invalidSessionDurationIsRejectedBeforeTouchingIam(String duration) {
+        AwsException failure = assertThrows(AwsException.class, () -> provisioner.provision(resource(),
+                props("{\"RoleName\":\"app-role\",\"MaxSessionDuration\":" + duration + "}"), ctx()));
+
+        assertEquals("ValidationError", failure.getErrorCode());
+        verifyNoInteractions(iam);
+    }
+
+    @ParameterizedTest
+    @ValueSource(ints = {3599, 43201})
+    void durationRangeUsesTheIamQueryValidationMessage(int duration) {
+        AwsException failure = assertThrows(AwsException.class, () -> provisioner.provision(resource(),
+                props("{\"RoleName\":\"app-role\",\"MaxSessionDuration\":" + duration + "}"), ctx()));
+
+        String bound = duration < 3600 ? "greater than or equal to 3600" : "less than or equal to 43200";
+        assertEquals("1 validation error detected: Value at 'maxSessionDuration' failed to satisfy constraint: "
+                + "Member must have value " + bound, failure.getMessage());
+        verifyNoInteractions(iam);
+    }
+
+    @Test
+    void durationUpdateCannotChangeAnotherRoleThatTookTheSameName() {
+        IamService realIam = IamServiceTestHelper.iamServiceWithUserPolicy("test", "secret", "user", EMPTY_TRUST);
+        IamRole original = realIam.createRole("app-role", "/", EMPTY_TRUST, null, 7200, Map.of());
+        realIam.deleteRole("app-role");
+        IamRole replacement = realIam.createRole("app-role", "/", EMPTY_TRUST, "new owner", 21600, Map.of());
+
+        AwsException failure = assertThrows(AwsException.class,
+                () -> realIam.updateRole("app-role", "old owner", 43200, original.getRoleId()));
+
+        assertEquals("EntityAlreadyExists", failure.getErrorCode());
+        assertNotEquals(original.getRoleId(), replacement.getRoleId());
+        assertEquals(21600, realIam.getRole("app-role").getMaxSessionDuration());
+        assertEquals("new owner", realIam.getRole("app-role").getDescription());
+    }
+
+    @Test
+    void rollbackDoesNotChangeAReplacementRoleWithTheSameName() {
+        IamService realIam = spy(IamServiceTestHelper.iamServiceWithUserPolicy(
+                "test", "secret", "user", EMPTY_TRUST));
+        IamRoleCfnProvisioner realProvisioner = new IamRoleCfnProvisioner(realIam);
+        StackResource r = resource();
+        realProvisioner.provision(r, props("{\"RoleName\":\"app-role\",\"MaxSessionDuration\":7200}"), ctx());
+        String originalId = realIam.getRole("app-role").getRoleId();
+        String policyArn = "arn:aws:iam::" + ACCOUNT_ID + ":policy/missing";
+        doAnswer(invocation -> {
+            realIam.deleteRole("app-role");
+            realIam.createRole("app-role", "/", EMPTY_TRUST, "new owner", 21600, Map.of());
+            throw new AwsException("NoSuchEntity", "policy missing", 404);
+        }).when(realIam).attachRolePolicy("app-role", policyArn);
+
+        AwsException failure = assertThrows(AwsException.class, () -> realProvisioner.provision(r,
+                props("{\"RoleName\":\"app-role\",\"MaxSessionDuration\":14400,"
+                        + "\"ManagedPolicyArns\":[\"" + policyArn + "\"]}"), ctx()));
+
+        assertEquals("NoSuchEntity", failure.getErrorCode());
+        assertTrue(failure.getSuppressed().length > 0, "Refused rollback must remain visible");
+        assertNotEquals(originalId, realIam.getRole("app-role").getRoleId());
+        assertEquals(21600, realIam.getRole("app-role").getMaxSessionDuration());
+        assertEquals("new owner", realIam.getRole("app-role").getDescription());
+    }
+
+    @Test
+    void stackRollbackRestoresDurationFromSerializedResource() throws Exception {
+        IamService realIam = IamServiceTestHelper.iamServiceWithUserPolicy("test", "secret", "user", EMPTY_TRUST);
+        IamRoleCfnProvisioner owner = new IamRoleCfnProvisioner(realIam);
+        StackResource r = resource();
+        owner.provision(r, props("{\"RoleName\":\"app-role\",\"MaxSessionDuration\":7200}"), ctx());
+        Map<String, String> originalAttributes = new HashMap<>(r.getAttributes());
+        owner.provision(r, props("{\"RoleName\":\"app-role\",\"MaxSessionDuration\":14400}"), ctx());
+        assertEquals(14400, realIam.getRole("app-role").getMaxSessionDuration());
+        ObjectMapper storageMapper = new ObjectMapper().findAndRegisterModules();
+        StackResource restored = storageMapper.readValue(storageMapper.writeValueAsString(r), StackResource.class);
+        assertTrue(owner.rollbackUpdate(restored));
+        assertEquals(7200, realIam.getRole("app-role").getMaxSessionDuration());
+        assertEquals(originalAttributes, restored.getAttributes());
+        assertFalse(owner.requiresUpdateRecovery(restored));
+        assertFalse(owner.rollbackUpdate(restored));
+    }
+
+    @Test
+    void stackRollbackRejectsReplacementAndKeepsRecoverySnapshot() {
+        IamService realIam = IamServiceTestHelper.iamServiceWithUserPolicy("test", "secret", "user", EMPTY_TRUST);
+        IamRoleCfnProvisioner owner = new IamRoleCfnProvisioner(realIam);
+        StackResource r = resource();
+        owner.provision(r, props("{\"RoleName\":\"app-role\",\"MaxSessionDuration\":7200}"), ctx());
+        owner.provision(r, props("{\"RoleName\":\"app-role\",\"MaxSessionDuration\":14400}"), ctx());
+        realIam.deleteRole("app-role");
+        realIam.createRole("app-role", "/", EMPTY_TRUST, null, 21600, Map.of());
+        assertThrows(AwsException.class, () -> owner.rollbackUpdate(r));
+        assertEquals(21600, realIam.getRole("app-role").getMaxSessionDuration());
+        assertTrue(owner.requiresUpdateRecovery(r));
+    }
+
+    @Test
+    void successfulCommitDiscardsOnlyTheCompletedDurationSnapshot() {
+        IamService realIam = IamServiceTestHelper.iamServiceWithUserPolicy("test", "secret", "user", EMPTY_TRUST);
+        IamRoleCfnProvisioner owner = new IamRoleCfnProvisioner(realIam);
+        StackResource r = resource();
+        owner.provision(r, props("{\"RoleName\":\"app-role\",\"MaxSessionDuration\":7200}"), ctx());
+        owner.provision(r, props("{\"RoleName\":\"app-role\",\"MaxSessionDuration\":14400}"), ctx());
+        owner.completeUpdate(r);
+        assertFalse(owner.requiresUpdateRecovery(r));
+        owner.provision(r, props("{\"RoleName\":\"app-role\",\"MaxSessionDuration\":21600}"), ctx());
+        assertTrue(owner.rollbackUpdate(r));
+        assertEquals(14400, realIam.getRole("app-role").getMaxSessionDuration());
+    }
+
+    @Test
+    void durationRestoreDoesNotClaimOtherPolicyChangesWereRolledBack() {
+        IamService realIam = IamServiceTestHelper.iamServiceWithUserPolicy("test", "secret", "user", EMPTY_TRUST);
+        IamRoleCfnProvisioner owner = new IamRoleCfnProvisioner(realIam);
+        StackResource r = resource();
+        owner.provision(r, props("{\"RoleName\":\"app-role\",\"MaxSessionDuration\":7200}"), ctx());
+        owner.provision(r, props("{\"RoleName\":\"app-role\",\"MaxSessionDuration\":14400}"), ctx());
+        realIam.putRolePolicy("app-role", "later", EMPTY_TRUST);
+        assertFalse(owner.rollbackUpdate(r));
+        assertEquals(7200, realIam.getRole("app-role").getMaxSessionDuration());
+        assertTrue(owner.requiresUpdateRecovery(r));
+        realIam.deleteRolePolicy("app-role", "later");
+        assertTrue(owner.rollbackUpdate(r));
+    }
+
+    @Test
+    void inlinePoliciesArePutOnTheRoleWithResolvedDocuments() {
+        stubCreate("app-role");
+        StackResource r = resource();
+
+        provisioner.provision(r, props("""
+                {
+                  "RoleName": "app-role",
+                  "Policies": [
+                    {"PolicyName": "bucket-read",
+                     "PolicyDocument": {"Version": "2012-10-17", "Statement": []}},
+                    {"PolicyName": "log-write",
+                     "PolicyDocument": {"Version": "2012-10-17", "Statement": []}}
+                  ]
+                }
+                """), ctx());
+
+        assertEquals("app-role", r.getPhysicalId());
+        InOrder order = inOrder(iam);
+        order.verify(iam).putRolePolicy("app-role", "bucket-read", EMPTY_TRUST);
+        order.verify(iam).putRolePolicy("app-role", "log-write", EMPTY_TRUST);
+    }
+
+    @Test
+    void inlinePolicyPassesThroughAlreadySerializedPolicyDocumentString() {
+        // Same failure mode as #2317: CDK can emit an inline PolicyDocument as an
+        // already-serialized JSON string (e.g. via Fn::Join). resolveNode collapses that to a
+        // TextNode whose toString() re-quotes/escapes the JSON; the policy must be stored verbatim.
+        stubCreate("app-role");
+        StackResource r = resource();
+        String serialized = "{\"Version\":\"2012-10-17\",\"Statement\":[{\"Effect\":\"Allow\","
+                + "\"Action\":\"s3:GetObject\",\"Resource\":\"*\"}]}";
+        JsonNode props = props(String.format("""
+                {
+                  "RoleName": "app-role",
+                  "Policies": [
+                    {"PolicyName": "serialized-doc",
+                     "PolicyDocument": "%s"}
+                  ]
+                }
+                """, serialized.replace("\"", "\\\"")));
+
+        provisioner.provision(r, props, ctx());
+        @SuppressWarnings("unchecked")
+        ArgumentCaptor<String> docCaptor = ArgumentCaptor.forClass(String.class);
+        verify(iam).putRolePolicy(eq("app-role"), eq("serialized-doc"), docCaptor.capture());
+        assertEquals(serialized, docCaptor.getValue());
+    }
+
+    @Test
+    void inlinePolicyWithoutANameFailsTheResource() {
+        // PolicyName is required on AWS::IAM::Role Policies. Generating one gave the same policy a
+        // fresh name on every execution, so an update accumulated copies instead of replacing it.
+        stubCreate("app-role");
+        StackResource r = resource();
+
+        AwsException failure = assertThrows(AwsException.class, () -> provisioner.provision(r, props("""
+                {
+                  "RoleName": "app-role",
+                  "Policies": [{"PolicyDocument": {"Version": "2012-10-17", "Statement": []}}]
+                }
+                """), ctx()));
+
+        assertEquals("ValidationError", failure.getErrorCode());
+        verify(iam, never()).putRolePolicy(anyString(), anyString(), anyString());
+        verify(iam).deleteRole("app-role");
+        assertNull(r.getAttributes().get(CfnRollback.ROLLBACK_OWNED_ATTR));
+    }
+
+    @Test
+    void inlinePolicyWithoutADocumentFailsTheResource() {
+        // Skipping it reached CREATE_COMPLETE without the declared policy — the same class of
+        // bug as the silent drop this PR is about.
+        stubCreate("app-role");
+        StackResource r = resource();
+
+        AwsException failure = assertThrows(AwsException.class, () -> provisioner.provision(r, props("""
+                {"RoleName": "app-role", "Policies": [{"PolicyName": "no-document"}]}
+                """), ctx()));
+
+        assertEquals("ValidationError", failure.getErrorCode());
+        verify(iam, never()).putRolePolicy(anyString(), anyString(), anyString());
+        // The role this attempt created is cleaned up rather than left behind.
+        verify(iam).deleteRole("app-role");
+        assertNull(r.getAttributes().get(CfnRollback.ROLLBACK_OWNED_ATTR));
+    }
+
+    @Test
+    void inlinePolicyFailureRemovesTheRoleAndTheEarlierInlineWrites() {
+        stubCreate("app-role");
+        doThrow(new AwsException("MalformedPolicyDocument", "bad policy", 400))
+                .when(iam).putRolePolicy(eq("app-role"), eq("second"), anyString());
+        StackResource r = resource();
+
+        assertThrows(AwsException.class, () -> provisioner.provision(r, props("""
+                {
+                  "RoleName": "app-role",
+                  "Policies": [
+                    {"PolicyName": "first", "PolicyDocument": {"Version": "2012-10-17", "Statement": []}},
+                    {"PolicyName": "second", "PolicyDocument": {"Version": "2012-10-17", "Statement": []}}
+                  ]
+                }
+                """), ctx()));
+
+        // "first" was written by this attempt and had no prior value, so it is removed, and the
+        // role goes with it. Previously both survived a CREATE_FAILED.
+        verify(iam).deleteRolePolicy("app-role", "first");
+        verify(iam).deleteRole("app-role");
+        assertNull(r.getAttributes().get(CfnRollback.ROLLBACK_OWNED_ATTR));
+    }
+
+    @Test
+    void updateRemovesTheInlinePoliciesAndAttachmentsTheTemplateDropped() {
+        // A policy the previous execution wrote and the new template no longer declares used to
+        // stay on the role while the stack still reported UPDATE_COMPLETE.
+        IamRole existing = new IamRole("AROAapp-role", "app-role", "/",
+                "arn:aws:iam::" + ACCOUNT_ID + ":role/app-role", EMPTY_TRUST);
+        existing.getInlinePolicies().put("keep,policy", EMPTY_TRUST);
+        existing.getInlinePolicies().put("drop,policy", EMPTY_TRUST);
+        existing.getAttachedPolicyArns().add("arn:aws:iam::aws:policy/Keep");
+        existing.getAttachedPolicyArns().add("arn:aws:iam::aws:policy/Drop");
+        when(iam.createRole(eq("app-role"), eq("/"), anyString(), any(), eq(3600), eq(Map.of()), any()))
+                .thenThrow(new AwsException("EntityAlreadyExists", "exists", 409));
+        when(iam.getRole("app-role")).thenReturn(existing);
+
+        StackResource r = resource();
+        r.setPhysicalId("app-role");
+        r.getAttributes().put("RoleId", "AROAapp-role");
+        r.getAttributes().put("__FlociInlinePolicyNames", "keep,policy\ndrop,policy");
+        r.getAttributes().put("__FlociManagedPolicyArns",
+                "arn:aws:iam::aws:policy/Keep\narn:aws:iam::aws:policy/Drop");
+
+        provisioner.provision(r, props("""
+                {
+                  "RoleName": "app-role",
+                  "ManagedPolicyArns": ["arn:aws:iam::aws:policy/Keep"],
+                  "Policies": [
+                    {"PolicyName": "keep,policy", "PolicyDocument": {"Version": "2012-10-17", "Statement": []}}
+                  ]
+                }
+                """), ctx());
+
+        verify(iam).deleteRolePolicy("app-role", "drop,policy");
+        verify(iam).detachRolePolicy("app-role", "arn:aws:iam::aws:policy/Drop");
+        verify(iam, never()).deleteRolePolicy("app-role", "keep,policy");
+        verify(iam, never()).detachRolePolicy("app-role", "arn:aws:iam::aws:policy/Keep");
+        assertEquals("keep,policy", r.getAttributes().get("__FlociInlinePolicyNames"));
+    }
+
+    @Test
+    void updateToleratesATrackedPolicyThatIsAlreadyGone() {
+        // Removed out of band between executions. deleteRolePolicy and detachRolePolicy both raise
+        // NoSuchEntity on an absent target, which would fail an update whose desired end state,
+        // the policy not being on the role, already holds.
+        IamRole existing = new IamRole("AROAapp-role", "app-role", "/",
+                "arn:aws:iam::" + ACCOUNT_ID + ":role/app-role", EMPTY_TRUST);
+        when(iam.createRole(eq("app-role"), eq("/"), anyString(), any(), eq(3600), eq(Map.of()), any()))
+                .thenThrow(new AwsException("EntityAlreadyExists", "exists", 409));
+        when(iam.getRole("app-role")).thenReturn(existing);
+
+        StackResource r = resource();
+        r.setPhysicalId("app-role");
+        r.getAttributes().put("RoleId", "AROAapp-role");
+        r.getAttributes().put("__FlociInlinePolicyNames", "gone");
+        r.getAttributes().put("__FlociManagedPolicyArns", "arn:aws:iam::aws:policy/Gone");
+
+        provisioner.provision(r, props("""
+                {"RoleName": "app-role", "Policies": []}
+                """), ctx());
+
+        verify(iam, never()).deleteRolePolicy(anyString(), anyString());
+        verify(iam, never()).detachRolePolicy(anyString(), anyString());
+        assertNull(r.getAttributes().get("__FlociInlinePolicyNames"));
+    }
+
+    @Test
+    void updateLeavesInlinePoliciesTheStackNeverWroteAlone() {
+        // Only names a previous execution recorded are removed, so a policy added out of band
+        // survives an update that does not declare it.
+        IamRole existing = new IamRole("AROAapp-role", "app-role", "/",
+                "arn:aws:iam::" + ACCOUNT_ID + ":role/app-role", EMPTY_TRUST);
+        existing.getInlinePolicies().put("added-out-of-band", EMPTY_TRUST);
+        when(iam.createRole(eq("app-role"), eq("/"), anyString(), any(), eq(3600), eq(Map.of()), any()))
+                .thenThrow(new AwsException("EntityAlreadyExists", "exists", 409));
+        when(iam.getRole("app-role")).thenReturn(existing);
+
+        StackResource r = resource();
+        r.setPhysicalId("app-role");
+        r.getAttributes().put("RoleId", "AROAapp-role");
+
+        provisioner.provision(r, props("""
+                {"RoleName": "app-role", "Policies": []}
+                """), ctx());
+
+        verify(iam, never()).deleteRolePolicy(anyString(), anyString());
+    }
+
+    @Test
+    void failedPolicyRenameRestoresOriginalPoliciesWithinQuota() throws Exception {
+        IamService realIam = IamServiceTestHelper.iamServiceWithUserPolicy("test", "secret", "user", EMPTY_TRUST);
+        IamRoleCfnProvisioner realProvisioner = new IamRoleCfnProvisioner(realIam);
+        StackResource r = resource();
+        String policy = "{\"Statement\":[{\"Effect\":\"Allow\",\"Action\":\"s3:GetObject\","
+                + "\"Resource\":\"*\",\"Sid\":\"" + "x".repeat(6_000) + "\"}]}";
+        JsonNode original = mapper.readTree("{\"RoleName\":\"app-role\",\"Policies\":["
+                + "{\"PolicyName\":\"old\",\"PolicyDocument\":" + policy + "}]}");
+        realProvisioner.provision(r, original, ctx());
+        JsonNode replacement = mapper.readTree("{\"RoleName\":\"app-role\",\"Policies\":["
+                + "{\"PolicyName\":\"new\",\"PolicyDocument\":" + policy + "},"
+                + "{\"PolicyName\":\"overflow\",\"PolicyDocument\":" + policy + "}]}");
+
+        AwsException failure = assertThrows(AwsException.class,
+                () -> realProvisioner.provision(r, replacement, ctx()));
+
+        assertEquals("LimitExceeded", failure.getErrorCode());
+        assertEquals(0, failure.getSuppressed().length);
+        assertEquals(Map.of("old", policy), realIam.getRole("app-role").getInlinePolicies());
+    }
+
+    @Test
+    void failedUpdateRestoresTheInlinePolicyItAlreadyOverwrote() {
+        // An update that adopts an existing role must not keep the permissions a half-applied
+        // attempt granted, and must not delete a role it did not create.
+        String priorDocument = "{\"Version\":\"2012-10-17\",\"Statement\":[\"prior\"]}";
+        IamRole existing = new IamRole("AROAapp-role", "app-role", "/",
+                "arn:aws:iam::" + ACCOUNT_ID + ":role/app-role", EMPTY_TRUST);
+        existing.getInlinePolicies().put("first", priorDocument);
+        when(iam.createRole(eq("app-role"), eq("/"), anyString(), any(), eq(3600), eq(Map.of()), any()))
+                .thenThrow(new AwsException("EntityAlreadyExists", "exists", 409));
+        when(iam.getRole("app-role")).thenReturn(existing);
+        doThrow(new AwsException("MalformedPolicyDocument", "bad policy", 400))
+                .when(iam).putRolePolicy(eq("app-role"), eq("second"), anyString());
+
+        StackResource r = resource();
+        r.setPhysicalId("app-role");
+        r.getAttributes().put("RoleId", "AROAapp-role");
+
+        assertThrows(AwsException.class, () -> provisioner.provision(r, props("""
+                {
+                  "RoleName": "app-role",
+                  "Policies": [
+                    {"PolicyName": "first", "PolicyDocument": {"Version": "2012-10-17", "Statement": []}},
+                    {"PolicyName": "second", "PolicyDocument": {"Version": "2012-10-17", "Statement": []}}
+                  ]
+                }
+                """), ctx()));
+
+        InOrder order = inOrder(iam);
+        order.verify(iam).putRolePolicy("app-role", "first", EMPTY_TRUST);
+        order.verify(iam).deleteRolePolicy("app-role", "first");
+        order.verify(iam).putRolePolicy("app-role", "first", priorDocument);
+        verify(iam, never()).deleteRole(anyString());
+    }
+
+    private static final String BOUNDARY_OLD = "arn:aws:iam::" + ACCOUNT_ID + ":policy/boundary-old";
+    private static final String BOUNDARY_NEW = "arn:aws:iam::" + ACCOUNT_ID + ":policy/boundary-new";
+
+    /** A role this stack already owns, so provision() takes the adoption (update) path. */
+    private StackResource adoptExistingRole(String currentBoundary) {
+        IamRole existing = new IamRole("AROAapp-role", "app-role", "/",
+                "arn:aws:iam::" + ACCOUNT_ID + ":role/app-role", EMPTY_TRUST);
+        existing.setPermissionsBoundaryArn(currentBoundary);
+        when(iam.createRole(eq("app-role"), eq("/"), anyString(), any(), eq(3600), eq(Map.of()), any()))
+                .thenThrow(new AwsException("EntityAlreadyExists", "exists", 409));
+        when(iam.getRole("app-role")).thenReturn(existing);
+        StackResource r = resource();
+        r.setPhysicalId("app-role");
+        r.getAttributes().put("RoleId", "AROAapp-role");
+        return r;
+    }
+
+    @Test
+    void createPassesThePermissionsBoundaryToTheRole() {
+        StackResource r = resource();
+        when(iam.createRole(eq("app-role"), eq("/"), anyString(), any(), eq(3600), eq(Map.of()),
+                eq(BOUNDARY_NEW))).thenReturn(new IamRole("AROAapp-role", "app-role", "/",
+                "arn:aws:iam::" + ACCOUNT_ID + ":role/app-role", EMPTY_TRUST));
+
+        provisioner.provision(r, props("""
+                {"RoleName": "app-role", "PermissionsBoundary": "%s"}
+                """.formatted(BOUNDARY_NEW)), ctx());
+
+        assertEquals("arn:aws:iam::" + ACCOUNT_ID + ":role/app-role", r.getAttributes().get("Arn"));
+    }
+
+    @Test
+    void updateAppliesAChangedPermissionsBoundary() {
+        StackResource r = adoptExistingRole(BOUNDARY_OLD);
+
+        provisioner.provision(r, props("""
+                {"RoleName": "app-role", "PermissionsBoundary": "%s"}
+                """.formatted(BOUNDARY_NEW)), ctx());
+
+        verify(iam).putRolePermissionsBoundary("app-role", BOUNDARY_NEW, "AROAapp-role");
+        verify(iam, never()).deleteRolePermissionsBoundary(anyString(), any());
+    }
+
+    @Test
+    void updateRemovesAPermissionsBoundaryTheTemplateDropped() {
+        StackResource r = adoptExistingRole(BOUNDARY_OLD);
+
+        provisioner.provision(r, props("""
+                {"RoleName": "app-role"}
+                """), ctx());
+
+        verify(iam).deleteRolePermissionsBoundary("app-role", "AROAapp-role");
+    }
+
+    @Test
+    void updateLeavesAnUnchangedOrAbsentPermissionsBoundaryAlone() {
+        // deleteRolePermissionsBoundary raises NoSuchEntity on a role without one.
+        StackResource r = adoptExistingRole(null);
+
+        provisioner.provision(r, props("""
+                {"RoleName": "app-role"}
+                """), ctx());
+
+        verify(iam, never()).deleteRolePermissionsBoundary(anyString(), any());
+        verify(iam, never()).putRolePermissionsBoundary(anyString(), anyString(), any());
+    }
+
+    // {"Fn::If": [cond, arn, {"Ref": "AWS::NoValue"}]} resolves to "" (CDK bootstrap's
+    // CloudFormationExecutionRole), which must mean "no boundary", not a policy named "".
+    @Test
+    void createTreatsABlankPermissionsBoundaryAsAbsent() {
+        stubCreate("app-role");
+
+        provisioner.provision(resource(), props("""
+                {"RoleName": "app-role", "PermissionsBoundary": ""}
+                """), ctx());
+
+        verify(iam).createRole(eq("app-role"), eq("/"), anyString(), any(), eq(3600), eq(Map.of()), isNull());
+    }
+
+    @Test
+    void updateTreatsABlankPermissionsBoundaryAsDropped() {
+        StackResource r = adoptExistingRole(BOUNDARY_OLD);
+
+        provisioner.provision(r, props("""
+                {"RoleName": "app-role", "PermissionsBoundary": ""}
+                """), ctx());
+
+        verify(iam).deleteRolePermissionsBoundary("app-role", "AROAapp-role");
+        verify(iam, never()).putRolePermissionsBoundary(anyString(), anyString(), any());
+    }
+
+    @Test
+    void failedUpdateRestoresThePriorPermissionsBoundary() {
+        StackResource r = adoptExistingRole(BOUNDARY_OLD);
+        doThrow(new AwsException("NoSuchEntity", "missing policy", 404))
+                .when(iam).attachRolePolicy("app-role", "arn:aws:iam::aws:policy/Missing");
+
+        assertThrows(AwsException.class, () -> provisioner.provision(r, props("""
+                {"RoleName": "app-role", "PermissionsBoundary": "%s",
+                 "ManagedPolicyArns": ["arn:aws:iam::aws:policy/Missing"]}
+                """.formatted(BOUNDARY_NEW)), ctx()));
+
+        InOrder order = inOrder(iam);
+        order.verify(iam).putRolePermissionsBoundary("app-role", BOUNDARY_NEW, "AROAapp-role");
+        order.verify(iam).putRolePermissionsBoundary("app-role", BOUNDARY_OLD, "AROAapp-role");
+        verify(iam, never()).deleteRole(anyString());
+    }
+
+    @Test
+    void failedUpdateRemovesTheBoundaryItAddedOnlyFromTheAdoptedRole() {
+        StackResource r = adoptExistingRole(null);
+        doThrow(new AwsException("NoSuchEntity", "missing policy", 404))
+                .when(iam).attachRolePolicy("app-role", "arn:aws:iam::aws:policy/Missing");
+
+        assertThrows(AwsException.class, () -> provisioner.provision(r, props("""
+                {"RoleName": "app-role", "PermissionsBoundary": "%s",
+                 "ManagedPolicyArns": ["arn:aws:iam::aws:policy/Missing"]}
+                """.formatted(BOUNDARY_NEW)), ctx()));
+
+        // The ID makes IamService refuse the delete if the name now belongs to a replacement role.
+        verify(iam).deleteRolePermissionsBoundary("app-role", "AROAapp-role");
+    }
+
+    @Test
+    void inlinePolicyFailureFailsTheResourceInsteadOfDroppingThePolicy() {
+        stubCreate("app-role");
+        doThrow(new AwsException("MalformedPolicyDocument", "bad policy", 400))
+                .when(iam).putRolePolicy(eq("app-role"), eq("broken"), anyString());
+
+        AwsException failure = assertThrows(AwsException.class, () -> provisioner.provision(resource(), props("""
+                {
+                  "RoleName": "app-role",
+                  "Policies": [{"PolicyName": "broken",
+                                "PolicyDocument": {"Version": "2012-10-17", "Statement": []}}]
+                }
+                """), ctx()));
+
+        assertEquals("MalformedPolicyDocument", failure.getErrorCode());
+    }
+
+    @Test
+    void deleteRemovesAttachedAndInlinePoliciesBeforeTheRole() {
+        IamRole role = new IamRole("AROAapp-role", "app-role", "/",
+                "arn:aws:iam::" + ACCOUNT_ID + ":role/app-role", EMPTY_TRUST);
+        role.getAttachedPolicyArns().add("arn:aws:iam::aws:policy/ReadOnlyAccess");
+        role.getInlinePolicies().put("bucket-read", EMPTY_TRUST);
+        when(iam.getRole("app-role")).thenReturn(role);
+
+        provisioner.delete("AWS::IAM::Role", "app-role", "us-east-1");
+
+        InOrder order = inOrder(iam);
+        order.verify(iam).detachRolePolicy("app-role", "arn:aws:iam::aws:policy/ReadOnlyAccess");
+        order.verify(iam).deleteRolePolicy("app-role", "bucket-read");
+        order.verify(iam).deleteRole("app-role");
+    }
+
+    @Test
+    void deleteTreatsAnAlreadyMissingRoleAsDeleted() {
+        when(iam.getRole("gone-role")).thenThrow(new AwsException("NoSuchEntity", "gone", 404));
+
+        provisioner.delete("AWS::IAM::Role", "gone-role", "us-east-1");
+
+        verify(iam, never()).deleteRole("gone-role");
+    }
+
+    @Test
+    void deletePropagatesUnexpectedLookupFailures() {
+        when(iam.getRole("denied-role")).thenThrow(new AwsException("AccessDenied", "denied", 403));
+
+        AwsException failure = assertThrows(AwsException.class,
+                () -> provisioner.delete("AWS::IAM::Role", "denied-role", "us-east-1"));
+
+        assertEquals("AccessDenied", failure.getErrorCode());
+        verify(iam, never()).deleteRole("denied-role");
+    }
+@Test
+void assumeRolePolicyIntrinsicsAreResolved() {
+    stubCreate("app-role");
+    StackResource r = resource();
+
+    CloudFormationTemplateEngine engine = mock(CloudFormationTemplateEngine.class);
+
+    when(engine.resolve(any())).thenAnswer(inv -> {
+        JsonNode node = inv.getArgument(0);
+        return node == null ? null : node.asText();
+    });
+
+    JsonNode assumeRolePolicy = props("""
+        {
+          "Version": "2012-10-17",
+          "Statement": [{
+            "Effect": "Allow",
+            "Principal": {
+              "AWS": {
+                "Fn::Sub": "arn:aws:iam::${AWS::AccountId}:root"
+              }
+            },
+            "Action": "sts:AssumeRole"
+          }]
+        }
+        """);
+
+    when(engine.resolveJsonAttributeStrict(any())).thenReturn(
+            "{\"Version\":\"2012-10-17\",\"Statement\":[{\"Effect\":\"Allow\","
+            + "\"Principal\":{\"AWS\":\"arn:aws:iam::" + ACCOUNT_ID + ":root\"},"
+            + "\"Action\":\"sts:AssumeRole\"}]}"
+    );
+
+    ProvisionContext ctx = new ProvisionContext(
+            engine,
+            "us-east-1",
+            ACCOUNT_ID,
+            "test-stack"
+    );
+
+    JsonNode roleProps = props("""
+        {
+          "RoleName": "app-role",
+          "AssumeRolePolicyDocument": {
+            "Version": "2012-10-17",
+            "Statement": [{
+              "Effect": "Allow",
+              "Principal": {
+                "AWS": {
+                  "Fn::Sub": "arn:aws:iam::${AWS::AccountId}:root"
+                }
+              },
+              "Action": "sts:AssumeRole"
+            }]
+          }
+        }
+        """);
+
+    provisioner.provision(r, roleProps, ctx);
+
+    ArgumentCaptor<String> docCaptor = ArgumentCaptor.forClass(String.class);
+
+    verify(iam).createRole(
+            eq("app-role"),
+            eq("/"),
+            docCaptor.capture(),
+            any(),
+            eq(3600),
+            eq(Map.of()),
+            any()
+    );
+
+    String storedDoc = docCaptor.getValue();
+
+    assertFalse(storedDoc.contains("Fn::Sub"));
+    assertFalse(storedDoc.contains("\"Ref\""));
+    assertTrue(storedDoc.contains(
+            "arn:aws:iam::" + ACCOUNT_ID + ":root"
+    ));
+}
+
+}

@@ -35,6 +35,7 @@ c8g.8xlarge,AWS
 c8g.large,AWS
 c8g.medium,AWS
 c8g.xlarge,AWS
+i4i.large,Intel
 m5.large,Intel
 m6g.12xlarge,AWS
 m6g.16xlarge,AWS

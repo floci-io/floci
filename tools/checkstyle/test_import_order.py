@@ -112,7 +112,7 @@ import java.util.List;
             ET.SubElement(directories, f"{NS}sourceDirectory").text = str(source)
             pom = ET.fromstring(
                 '<project xmlns="http://maven.apache.org/POM/4.0.0">'
-                '<modelVersion>4.0.0</modelVersion><groupId>io.github.hectorvent</groupId>'
+                '<modelVersion>4.0.0</modelVersion><groupId>io.floci</groupId>'
                 '<artifactId>import-order-fixtures</artifactId><version>1</version>'
                 '<build><plugins/></build></project>'
             )

@@ -1,0 +1,87 @@
+{
+  "_source": {
+    "generator": "tools/aws/regen_apigateway_documentation_shapes.py",
+    "botocore": "botocore 1.43.118 (installed package)"
+  },
+  "operations": {
+    "CreateDocumentationPart": "CreateDocumentationPartRequest",
+    "GetDocumentationParts": "GetDocumentationPartsRequest"
+  },
+  "shapes": {
+    "CreateDocumentationPartRequest": {
+      "type": "structure",
+      "required": [
+        "restApiId",
+        "location",
+        "properties"
+      ],
+      "members": {
+        "restApiId": "String",
+        "location": "DocumentationPartLocation",
+        "properties": "String"
+      }
+    },
+    "DocumentationPartLocation": {
+      "type": "structure",
+      "required": [
+        "type"
+      ],
+      "members": {
+        "type": "DocumentationPartType",
+        "path": "String",
+        "method": "String",
+        "statusCode": "DocumentationPartLocationStatusCode",
+        "name": "String"
+      }
+    },
+    "DocumentationPartLocationStatusCode": {
+      "type": "string",
+      "pattern": "^([1-5]\\d\\d|\\*|\\s*)$"
+    },
+    "DocumentationPartType": {
+      "type": "string",
+      "enum": [
+        "API",
+        "AUTHORIZER",
+        "MODEL",
+        "RESOURCE",
+        "METHOD",
+        "PATH_PARAMETER",
+        "QUERY_PARAMETER",
+        "REQUEST_HEADER",
+        "REQUEST_BODY",
+        "RESPONSE",
+        "RESPONSE_HEADER",
+        "RESPONSE_BODY"
+      ]
+    },
+    "GetDocumentationPartsRequest": {
+      "type": "structure",
+      "required": [
+        "restApiId"
+      ],
+      "members": {
+        "restApiId": "String",
+        "type": "DocumentationPartType",
+        "nameQuery": "String",
+        "path": "String",
+        "position": "String",
+        "limit": "NullableInteger",
+        "locationStatus": "LocationStatusType"
+      }
+    },
+    "LocationStatusType": {
+      "type": "string",
+      "enum": [
+        "DOCUMENTED",
+        "UNDOCUMENTED"
+      ]
+    },
+    "NullableInteger": {
+      "type": "integer"
+    },
+    "String": {
+      "type": "string"
+    }
+  }
+}

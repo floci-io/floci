@@ -74,6 +74,10 @@
     <dependencies>
         <dependency>
             <groupId>software.amazon.awssdk</groupId>
+            <artifactId>quicksight</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>software.amazon.awssdk</groupId>
             <artifactId>servicequotas</artifactId>
         </dependency>
         <dependency>
@@ -158,6 +162,10 @@
         </dependency>
         <dependency>
             <groupId>software.amazon.awssdk</groupId>
+            <artifactId>paymentcryptographydata</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>software.amazon.awssdk</groupId>
             <artifactId>cognitoidentityprovider</artifactId>
         </dependency>
         <dependency>
@@ -220,6 +228,10 @@
         <dependency>
             <groupId>software.amazon.awssdk</groupId>
             <artifactId>ec2</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>software.amazon.awssdk</groupId>
+            <artifactId>ec2instanceconnect</artifactId>
         </dependency>
         <dependency>
             <groupId>software.amazon.awssdk</groupId>
@@ -642,6 +654,11 @@
         <dependency>
             <groupId>software.amazon.awssdk</groupId>
             <artifactId>dlm</artifactId>
+        </dependency>
+        <!-- Signer client -->
+        <dependency>
+            <groupId>software.amazon.awssdk</groupId>
+            <artifactId>signer</artifactId>
         </dependency>
         <!-- DataSync client -->
         <dependency>

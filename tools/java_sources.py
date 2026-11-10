@@ -7,7 +7,7 @@ package rename changes this file and nothing else in tools/. Registries that lis
 from __future__ import annotations
 
 SOURCE_ROOT = "src/main/java"
-PACKAGE_DIR = f"{SOURCE_ROOT}/io/github/hectorvent/floci"
+PACKAGE_DIR = f"{SOURCE_ROOT}/io/floci/aws"
 SERVICES_PACKAGE_DIR = f"{PACKAGE_DIR}/services"
 
 

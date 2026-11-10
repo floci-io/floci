@@ -76,6 +76,7 @@ nav:
   - Getting Started:
     - Quick Start: getting-started/quick-start.md
     - Installation: getting-started/installation.md
+    - Kubernetes (Helm): getting-started/kubernetes.md
     - AWS CLI & SDK Setup: getting-started/aws-setup.md
     - Terraform: getting-started/terraform.md
     - Migrate from LocalStack: getting-started/migrate-from-localstack.md
@@ -152,6 +153,7 @@ nav:
     - DocumentDB: services/docdb.md
     - DMS: services/dms.md
     - Athena: services/athena.md
+    - QuickSight: services/quicksight.md
     - Redshift: services/redshift.md
     - Redshift Data API: services/redshift-data.md
     - Redshift Serverless: services/redshift-serverless.md
@@ -170,7 +172,9 @@ nav:
     - AppIntegrations: services/appintegrations.md
     - Amazon Data Lifecycle Manager: services/dlm.md
     - ACM: services/acm.md
+    - AWS Signer: services/signer.md
     - Payment Cryptography: services/payment-cryptography.md
+    - Payment Cryptography data plane: services/payment-cryptography-data.md
     - ECS: services/ecs.md
     - ECR: services/ecr.md
     - AWS Resource Groups: services/resource-groups.md
@@ -180,6 +184,7 @@ nav:
     - MWAA: services/mwaa.md
     - OpenSearch: services/opensearch.md
     - EC2: services/ec2.md
+    - EC2 Instance Connect: services/ec2-instance-connect.md
     - Lightsail: services/lightsail.md
     - AppConfig: services/appconfig.md
     - Bedrock: services/bedrock.md

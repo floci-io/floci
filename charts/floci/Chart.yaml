@@ -1,0 +1,26 @@
+apiVersion: v2
+name: floci
+description: Floci, the local AWS emulator, as a single in-cluster endpoint for CI and development clusters
+type: application
+# Chart version. Bump it on every change under charts/floci: `ct lint` fails a pull
+# request that changes the chart without a new version.
+version: 0.1.0
+# Floci release the chart deploys by default (image.tag falls back to it).
+appVersion: "2.4.0"
+kubeVersion: ">=1.25.0-0"
+home: https://floci.io
+icon: https://raw.githubusercontent.com/floci-io/floci/main/docs/assets/floci.svg
+sources:
+  - https://github.com/floci-io/floci
+keywords:
+  - aws
+  - emulator
+  - localstack
+  - testing
+  - s3
+  - lambda
+maintainers:
+  - name: floci-io
+    url: https://github.com/floci-io/floci/blob/main/MAINTAINERS.md
+annotations:
+  artifacthub.io/license: MIT

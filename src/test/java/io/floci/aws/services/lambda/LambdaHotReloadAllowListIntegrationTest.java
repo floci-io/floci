@@ -1,0 +1,64 @@
+package io.floci.aws.services.lambda;
+
+import io.floci.aws.testing.LambdaCodeSourcesProfile;
+import io.quarkus.test.junit.QuarkusTest;
+import io.quarkus.test.junit.TestProfile;
+import io.restassured.response.ValidatableResponse;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
+
+import static io.restassured.RestAssured.given;
+import static org.hamcrest.Matchers.equalTo;
+
+/**
+ * Hot-reload enabled with an allow-list: a path that only reaches the allowed directory through
+ * {@code ..}, or that merely shares its prefix, must be refused over the wire.
+ */
+@QuarkusTest
+@TestProfile(LambdaCodeSourcesProfile.class)
+class LambdaHotReloadAllowListIntegrationTest {
+
+    private static int counter;
+
+    private static ValidatableResponse createFunction(String name, String s3Key) {
+        return given()
+                .contentType("application/json")
+                .body("""
+                        {
+                            "FunctionName": "%s",
+                            "Runtime": "python3.12",
+                            "Role": "arn:aws:iam::000000000000:role/r",
+                            "Handler": "handler.handler",
+                            "Code": { "S3Bucket": "hot-reload", "S3Key": "%s" }
+                        }
+                        """.formatted(name, s3Key))
+                .when()
+                .post("/2015-03-31/functions")
+                .then();
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {
+            "/home/ci/code/../../",
+            "/home/ci/code/../../../etc",
+            "/home/ci/code-evil",
+            "/home/ci/code:/etc"
+    })
+    void createFunctionRejectsPathsOutsideTheAllowedDirectory(String s3Key) {
+        createFunction("hot-reload-allow-list-" + (++counter), s3Key)
+                .statusCode(400)
+                .body("__type", equalTo("InvalidParameterValueException"));
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"/home/ci/code", "/home/ci/code/app"})
+    void createFunctionAcceptsTheAllowedDirectoryAndItsChildren(String s3Key) {
+        String name = "hot-reload-allow-list-" + (++counter);
+        createFunction(name, s3Key).statusCode(201);
+        given()
+                .when()
+                .delete("/2015-03-31/functions/{name}", name)
+                .then()
+                .statusCode(204);
+    }
+}

@@ -107,6 +107,9 @@ without user associations retain their existing behavior.
 | `AddTagsToResource` | - |
 | `RemoveTagsFromResource` | - |
 | `ListTagsForResource` | Read stored tags for supported ElastiCache resource ARNs |
+| `CreateSnapshot` | Take a manual snapshot of a cluster-mode-disabled replication group, named by `ReplicationGroupId` or by one of its `CacheClusterId`s: the RDB file of its backend, `available` as soon as the call returns. See [Snapshots](#snapshots) |
+| `DescribeSnapshots` | List manual snapshots matching every one of `SnapshotName`, `ReplicationGroupId`, `CacheClusterId` and `SnapshotSource`, paged by `MaxRecords` and `Marker` |
+| `DeleteSnapshot` | Delete a snapshot and its RDB archive |
 <!-- floci:actions:end -->
 
 ### Serverless caches and user groups
@@ -141,8 +144,8 @@ security-group placement, KMS encryption and snapshot schedules are metadata; th
 autoscaling, VPC networking, encryption or snapshot storage. Snapshot restore and final snapshots
 are rejected explicitly. Engine/version transitions are rejected; supported major versions are
 Valkey 8, Redis 7 and Memcached 1.6. With Docker unavailable, metadata operations still work and
-connections require a reachable Docker daemon and a runtime restart. Snapshot APIs and serverless
-pagination are not implemented.
+connections require a reachable Docker daemon and a runtime restart. Serverless snapshot APIs and
+serverless pagination are not implemented.
 
 ### Single-node Redis/Valkey clusters
 
@@ -327,6 +330,28 @@ deleted: `DeleteCacheParameterGroup` answers `InvalidCacheParameterGroupState` u
 replication group is gone. The reference counts from the moment `CreateReplicationGroup` accepts
 the name, not from when the group is stored, so a delete that lands while that create is still
 provisioning its container is refused too.
+
+## Snapshots
+
+`CreateSnapshot` saves the backend's dataset (`SAVE`) and keeps the RDB file with the snapshot
+record, so the snapshot is `available` when the call returns; a `SAVE` the server refuses, as
+it does while another save runs, fails the call with `InvalidReplicationGroupState`. `CreateReplicationGroup` with
+`SnapshotName` starts a new cluster-mode-disabled group and loads that file into its backend
+before the group is listed or its endpoint accepts connections; a group the file could not be
+loaded into is rolled back like any failed create. A snapshot whose file is missing is refused
+with `InvalidSnapshotState` before any group is created. A group cannot be deleted or modified
+while its snapshot is being taken, and a `CacheClusterId` given with a `ReplicationGroupId`
+must be one of that group's members. `CreateSnapshot` keeps its `Tags`, which
+`ListTagsForResource`, `AddTagsToResource` and `RemoveTagsFromResource` read and change through the
+snapshot's ARN. `DescribeSnapshots` returns snapshots in name order, `MaxRecords` (20 to 50, default
+50) at a time, with a `Marker` for the next page.
+
+Snapshots outlive the group they were taken from, as on AWS. They are taken of
+cluster-mode-disabled replication groups only: a cluster-mode-enabled group, a standalone cache
+cluster or a group without a running backend is refused, as is seeding a cluster-mode-enabled
+group. Automatic snapshots, `CopySnapshot` and `FinalSnapshotIdentifier` are not modeled. To
+reload the dataset, the backend runs with `--enable-debug-command local`, which allows `DEBUG`
+only for connections from inside its own container; clients always connect through the proxy.
 
 ## Engine version and backend image
 

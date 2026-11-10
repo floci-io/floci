@@ -1,0 +1,409 @@
+package io.floci.aws.services.cognito;
+
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import io.floci.aws.services.cognito.CognitoCustomDomainFixtures.SignedInUser;
+import io.floci.aws.testing.RestAssuredJsonUtils;
+import io.quarkus.test.junit.QuarkusTest;
+import io.restassured.response.Response;
+import org.junit.jupiter.api.BeforeAll;
+import org.junit.jupiter.api.MethodOrderer;
+import org.junit.jupiter.api.Order;
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.TestMethodOrder;
+
+import java.util.ArrayList;
+import java.util.List;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
+import java.util.concurrent.TimeUnit;
+
+import static io.floci.aws.services.cognito.CognitoCustomDomainFixtures.FLOCI_URL;
+import static io.floci.aws.services.cognito.CognitoCustomDomainFixtures.assertInvalidClient;
+import static io.floci.aws.services.cognito.CognitoCustomDomainFixtures.assertRevoked;
+import static io.floci.aws.services.cognito.CognitoCustomDomainFixtures.basic;
+import static io.floci.aws.services.cognito.CognitoCustomDomainFixtures.confidentialClient;
+import static io.floci.aws.services.cognito.CognitoCustomDomainFixtures.createPool;
+import static io.floci.aws.services.cognito.CognitoCustomDomainFixtures.customDomain;
+import static io.floci.aws.services.cognito.CognitoCustomDomainFixtures.expect;
+import static io.floci.aws.services.cognito.CognitoCustomDomainFixtures.jwtPayload;
+import static io.floci.aws.services.cognito.CognitoCustomDomainFixtures.refresh;
+import static io.floci.aws.services.cognito.CognitoCustomDomainFixtures.refreshGrant;
+import static io.floci.aws.services.cognito.CognitoCustomDomainFixtures.requestCertificate;
+import static io.floci.aws.services.cognito.CognitoCustomDomainFixtures.signIn;
+import static io.floci.aws.services.cognito.CognitoCustomDomainFixtures.tokenRequest;
+import static io.floci.aws.services.cognito.CognitoRestAssuredUtils.cognitoJson;
+import static io.restassured.RestAssured.given;
+import static org.hamcrest.Matchers.containsString;
+import static org.hamcrest.Matchers.emptyString;
+import static org.hamcrest.Matchers.equalTo;
+import static org.hamcrest.Matchers.hasKey;
+import static org.hamcrest.Matchers.not;
+import static org.hamcrest.Matchers.nullValue;
+import static org.hamcrest.Matchers.startsWith;
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertTrue;
+
+/**
+ * The OAuth contract of the token, revoke and userInfo endpoints when reached on a custom domain: the
+ * same answers AWS gives on {@code https://<domain>/oauth2/...}.
+ */
+@QuarkusTest
+@TestMethodOrder(MethodOrderer.OrderAnnotation.class)
+class CognitoCustomDomainOAuthContractIntegrationTest {
+
+    private static final String DOMAIN = "auth-c-" + System.nanoTime() + ".teos.localhost.floci.io";
+    private static final ObjectMapper OBJECT_MAPPER = new ObjectMapper();
+
+    private static String poolA;
+    private static String poolB;
+    private static String clientA;
+    private static String secretA;
+    private static String clientB;
+    private static String secretB;
+
+    @BeforeAll
+    static void configureRestAssured() {
+        RestAssuredJsonUtils.configureAwsContentTypes();
+    }
+
+    @Test
+    @Order(1)
+    void setUpTwoPoolsAndOneCustomDomain() throws Exception {
+        poolA = createPool("ContractPoolA");
+        poolB = createPool("ContractPoolB");
+
+        JsonNode a = cognitoJson("CreateUserPoolClient", confidentialClient(poolA)).path("UserPoolClient");
+        clientA = a.path("ClientId").asText();
+        secretA = a.path("ClientSecret").asText();
+        JsonNode b = cognitoJson("CreateUserPoolClient", confidentialClient(poolB)).path("UserPoolClient");
+        clientB = b.path("ClientId").asText();
+        secretB = b.path("ClientSecret").asText();
+
+        cognitoJson("CreateUserPoolDomain", customDomain(DOMAIN, poolA, requestCertificate(DOMAIN)));
+    }
+
+    @Test
+    @Order(2)
+    void clientSecretPostIsAccepted() {
+        given()
+                .header("Host", DOMAIN)
+                .formParam("grant_type", "client_credentials")
+                .formParam("client_id", clientA)
+                .formParam("client_secret", secretA)
+        .when()
+                .post("/oauth2/token")
+        .then()
+                .statusCode(200)
+                .body("token_type", equalTo("Bearer"))
+                .body("expires_in", equalTo(3600));
+    }
+
+    @Test
+    @Order(3)
+    void wrongSecretIsInvalidClient() {
+        tokenRequest(DOMAIN, clientA, "not-the-secret", "/oauth2/token")
+        .then()
+                .statusCode(400)
+                .body("error", equalTo("invalid_client"));
+    }
+
+    @Test
+    @Order(4)
+    void authorizationCodeGrantRequiresItsMandatoryParameters() {
+        given()
+                .header("Host", DOMAIN)
+                .header("Authorization", basic(clientA, secretA))
+                .formParam("grant_type", "authorization_code")
+                .formParam("code", "abc")
+        .when()
+                .post("/oauth2/token")
+        .then()
+                .statusCode(400)
+                .body("error", equalTo("invalid_request"));
+    }
+
+    @Test
+    @Order(5)
+    void scopeNotAllowedForTheClientIsInvalidScope() {
+        given()
+                .header("Host", DOMAIN)
+                .header("Authorization", basic(clientA, secretA))
+                .formParam("grant_type", "client_credentials")
+                .formParam("scope", "openid")
+        .when()
+                .post("/oauth2/token")
+        .then()
+                .statusCode(400)
+                .body("error", equalTo("invalid_scope"));
+    }
+
+    /** The issuer stays the pool's, as on AWS where iss names cognito-idp, never the custom domain. */
+    @Test
+    @Order(6)
+    void tokenNamesThePoolIssuerAndTheClient() throws Exception {
+        Response response = tokenRequest(DOMAIN, clientA, secretA, "/oauth2/token");
+
+        response.then()
+                .statusCode(200)
+                .contentType(containsString("application/json"))
+                .header("Cache-Control", equalTo("no-store"))
+                .header("Pragma", equalTo("no-cache"));
+
+        JsonNode claims = jwtPayload(response.path("access_token"));
+        assertEquals(FLOCI_URL + "/" + poolA, claims.path("iss").asText());
+        assertEquals(clientA, claims.path("client_id").asText());
+        assertEquals("access", claims.path("token_use").asText());
+        assertEquals("aws.cognito.signin.user.admin", claims.path("scope").asText());
+    }
+
+    /** A client-credentials token carries no user, so userInfo cannot serve it. */
+    @Test
+    @Order(7)
+    void userInfoRefusesAMachineToken() {
+        String machineToken = tokenRequest(DOMAIN, clientA, secretA, "/oauth2/token")
+                .then().statusCode(200).extract().path("access_token");
+
+        given()
+                .header("Host", DOMAIN)
+                .header("Authorization", "Bearer " + machineToken)
+        .when()
+                .get("/oauth2/userInfo")
+        .then()
+                .statusCode(401)
+                .header("WWW-Authenticate", startsWith("Bearer error=\"invalid_token\""));
+    }
+
+    @Test
+    @Order(8)
+    void userInfoRefusesAMalformedBearerToken() {
+        given()
+                .header("Host", DOMAIN)
+                .header("Authorization", "Bearer not-a-jwt")
+        .when()
+                .get("/oauth2/userInfo")
+        .then()
+                .statusCode(401)
+                .header("WWW-Authenticate", startsWith("Bearer error=\"invalid_token\""));
+    }
+
+    @Test
+    @Order(9)
+    void authorizeRouteIsServedOnCustomDomain() {
+        given()
+                .header("Host", DOMAIN)
+        .when()
+                .get("/oauth2/authorize")
+        .then()
+                .statusCode(400)
+                .body("error", equalTo("unsupported_response_type"));
+
+        given()
+                .header("Host", DOMAIN)
+        .when()
+                .head("/oauth2/authorize")
+        .then()
+                .statusCode(400)
+                .body(emptyString());
+    }
+
+    @Test
+    @Order(10)
+    void idpResponseRouteIsServedOnCustomDomain() {
+        given()
+                .header("Host", DOMAIN)
+        .when()
+                .get("/oauth2/idpresponse")
+        .then()
+                .statusCode(400)
+                .body("error", equalTo("invalid_request"));
+    }
+
+    @Test
+    @Order(11)
+    void revokeIsServedOnTheCustomDomain() throws Exception {
+        SignedInUser user = signIn(poolA);
+
+        assertRevoked(given()
+                .header("Host", DOMAIN)
+                .formParam("token", user.refreshToken())
+                .formParam("client_id", user.clientId())
+        .when()
+                .post("/oauth2/revoke"));
+
+        refresh(user)
+        .then()
+                .statusCode(400)
+                .body("__type", equalTo("NotAuthorizedException"));
+    }
+
+    /** As on AWS, a client of another pool does not exist on a pool's custom domain. */
+    @Test
+    @Order(12)
+    void revokeRefusesAClientOfAnotherPool() throws Exception {
+        SignedInUser user = signIn(poolB);
+
+        assertInvalidClient(given()
+                .header("Host", DOMAIN)
+                .formParam("token", user.refreshToken())
+                .formParam("client_id", user.clientId())
+        .when()
+                .post("/oauth2/revoke"));
+
+        refresh(user).then().statusCode(200);
+    }
+
+    /**
+     * Cognito answers every path under /oauth2/ on its custom domain, so none reaches S3 as a key of
+     * a bucket named cognito-idp: a served path with an error, a served path called with another
+     * method, and a path Cognito does not serve.
+     */
+    @Test
+    @Order(13)
+    void cognitoAnswersItsPathsWhateverTheAcceptHeader() {
+        for (String accept : List.of("application/json", "application/xml", "text/html", "*/*")) {
+            given()
+                    .header("Host", DOMAIN)
+                    .header("Accept", accept)
+                    .header("Authorization", basic(clientA, secretA))
+                    .formParam("client_id", clientA)
+            .when()
+                    .post("/oauth2/revoke")
+            .then()
+                    .statusCode(400)
+                    .contentType(containsString("application/json"))
+                    .body("error", equalTo("invalid_request"))
+                    .body("error_description", equalTo("Invalid parameter in request"));
+
+            given()
+                    .header("Host", DOMAIN)
+                    .header("Accept", accept)
+            .when()
+                    .get("/oauth2/token")
+            .then()
+                    .statusCode(405)
+                    .header("Allow", equalTo("POST"))
+                    .header("Content-Type", nullValue())
+                    .body(emptyString());
+
+            for (String method : List.of("GET", "POST")) {
+                given()
+                        .header("Host", DOMAIN)
+                        .header("Accept", accept)
+                .when()
+                        .request(method, "/oauth2/no-such-path")
+                .then()
+                        .statusCode(404)
+                        .contentType(containsString("application/json"))
+                        .body(equalTo("{\"error\":\"This URL doesn't exist on the authorization server.\"}"));
+            }
+        }
+    }
+
+    /** A prefix domain's hostname resolves to AWS, so Floci never routes by it. */
+    @Test
+    @Order(14)
+    void prefixDomainHostIsNotRouted() throws Exception {
+        String prefix = "routing-prefix-" + System.nanoTime();
+        cognitoJson("CreateUserPoolDomain", """
+                {"Domain": "%s", "UserPoolId": "%s"}
+                """.formatted(prefix, poolA));
+
+        for (String host : List.of(prefix, prefix + ".auth.us-east-1.amazoncognito.com")) {
+            tokenRequest(host, clientA, secretA, "/oauth2/token")
+            .then()
+                    .statusCode(400)
+                    .body(containsString("<Code>InvalidArgument</Code>"));
+        }
+    }
+
+    /**
+     * The pinned pool and account live on one request. Interleaving custom-domain and generic
+     * requests on many threads must never let one request's pin decide another's answer.
+     */
+    @Test
+    @Order(15)
+    void concurrentRequestsKeepTheirOwnPinnedPool() throws Exception {
+        ExecutorService pool = Executors.newFixedThreadPool(8);
+        try {
+            List<Future<String>> outcomes = new ArrayList<>();
+            for (int i = 0; i < 60; i++) {
+                int kind = i % 3;
+                outcomes.add(pool.submit(() -> switch (kind) {
+                    case 0 -> expect(200, DOMAIN, clientA, secretA, "/oauth2/token");
+                    case 1 -> expect(200, null, clientB, secretB, "/cognito-idp/oauth2/token");
+                    default -> expect(400, DOMAIN, clientB, secretB, "/oauth2/token");
+                }));
+            }
+            List<String> failures = new ArrayList<>();
+            for (Future<String> outcome : outcomes) {
+                String failure = outcome.get(30, TimeUnit.SECONDS);
+                if (failure != null) {
+                    failures.add(failure);
+                }
+            }
+            assertTrue(failures.isEmpty(), () -> String.join("\n", failures));
+        } finally {
+            pool.shutdownNow();
+        }
+    }
+
+    @Test
+    @Order(16)
+    void refreshGrantIsServedOnTheCustomDomain() throws Exception {
+        SignedInUser user = signIn(poolA);
+
+        Response response = refreshGrant(DOMAIN, user.clientId(), user.refreshToken());
+
+        response.then()
+                .statusCode(200)
+                .header("Cache-Control", equalTo("no-store"))
+                .body("token_type", equalTo("Bearer"))
+                .body("$", not(hasKey("refresh_token")));
+        JsonNode claims = jwtPayload(response.path("access_token"));
+        assertEquals(FLOCI_URL + "/" + poolA, claims.path("iss").asText());
+        assertEquals(user.clientId(), claims.path("client_id").asText());
+    }
+
+    /** AWS: a client of another pool does not exist on a pool's custom domain. */
+    @Test
+    @Order(17)
+    void refreshGrantRefusesAClientOfAnotherPool() throws Exception {
+        SignedInUser user = signIn(poolB);
+
+        assertBody(refreshGrant(DOMAIN, user.clientId(), user.refreshToken()), "{\"error\":\"invalid_client\"}");
+
+        refreshGrant(null, user.clientId(), user.refreshToken()).then().statusCode(200);
+    }
+
+    /** AWS: the pool's own client cannot refresh another pool's refresh token on the pool's custom domain. */
+    @Test
+    @Order(18)
+    void refreshGrantRefusesARefreshTokenOfAnotherPool() throws Exception {
+        SignedInUser poolAUser = signIn(poolA);
+        SignedInUser poolBUser = signIn(poolB);
+
+        assertBody(refreshGrant(DOMAIN, poolAUser.clientId(), poolBUser.refreshToken()),
+                "{\"error\":\"invalid_grant\"}");
+    }
+
+    /** AWS: a client of a pool, with its own refresh token, does not exist on another pool's custom domain. */
+    @Test
+    @Order(19)
+    void refreshGrantOnAnotherPoolsDomainRefusesTheClient() throws Exception {
+        String poolBDomain = "auth-c-b-" + System.nanoTime() + ".teos.localhost.floci.io";
+        cognitoJson("CreateUserPoolDomain", customDomain(poolBDomain, poolB, requestCertificate(poolBDomain)));
+        SignedInUser poolAUser = signIn(poolA);
+
+        assertBody(refreshGrant(poolBDomain, poolAUser.clientId(), poolAUser.refreshToken()),
+                "{\"error\":\"invalid_client\"}");
+    }
+
+    /** A 400 without a WWW-Authenticate challenge, whose JSON body is exactly {@code expectedBody}. */
+    private static void assertBody(Response response, String expectedBody) throws Exception {
+        response.then().statusCode(400).contentType(containsString("application/json"))
+                .header("WWW-Authenticate", nullValue());
+        assertEquals(OBJECT_MAPPER.readTree(expectedBody), OBJECT_MAPPER.readTree(response.asString()));
+    }
+}

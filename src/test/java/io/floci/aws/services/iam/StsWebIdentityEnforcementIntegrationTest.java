@@ -1,0 +1,47 @@
+package io.floci.aws.services.iam;
+
+import io.floci.aws.core.common.Base64Url;
+import io.floci.aws.testing.IamEnforcementProfile;
+import io.quarkus.test.junit.QuarkusTest;
+import io.quarkus.test.junit.TestProfile;
+import io.restassured.response.Response;
+import org.junit.jupiter.api.Test;
+
+import static io.restassured.RestAssured.given;
+import static org.hamcrest.Matchers.containsString;
+
+@QuarkusTest
+@TestProfile(IamEnforcementProfile.class)
+class StsWebIdentityEnforcementIntegrationTest {
+
+    @Test
+    void rejectsOpaqueTokenWhenIamEnforcementIsEnabled() {
+        assumeRole("dummy-token")
+        .then()
+            .statusCode(400)
+            .body(containsString("InvalidIdentityToken"));
+    }
+
+    @Test
+    void rejectsUnknownIssuerWhenIamEnforcementIsEnabled() {
+        String header = Base64Url.encode("{\"alg\":\"none\"}");
+        String payload = Base64Url.encode("{\"iss\":\"https://untrusted.example\",\"aud\":\"sts.amazonaws.com\"}");
+
+        assumeRole(header + "." + payload + ".")
+        .then()
+            .statusCode(400)
+            .body(containsString("InvalidIdentityToken"));
+    }
+
+    private static Response assumeRole(String token) {
+        return given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "AssumeRoleWithWebIdentity")
+            .formParam("Version", "2011-06-15")
+            .formParam("RoleArn", "arn:aws:iam::000000000000:role/web-identity-role")
+            .formParam("RoleSessionName", "enforcement-test-session")
+            .formParam("WebIdentityToken", token)
+        .when()
+            .post("/");
+    }
+}

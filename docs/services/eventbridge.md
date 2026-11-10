@@ -362,6 +362,15 @@ aws events put-targets \
 - Pending retries are kept in memory and are dropped by an emulator reset or restart.
 - An `AWS::Events::Rule` target in a CloudFormation template keeps its `RetryPolicy`, `DeadLetterConfig`, `RoleArn`, `EcsParameters` and `AppSyncParameters`, which reach the rule as `PutTargets` would set them. A value of another type than the resource schema declares for them fails the rule before it is created, with the message CloudFormation gives.
 
+## Event Bus Policies under IAM Enforcement
+
+With `floci.services.iam.enforcement-enabled` on, a bus's policy takes part in the decision as IAM's
+policy evaluation logic describes. `PutPermission` with a `Principal` account id adds a statement
+naming that account's root, `{"AWS": "arn:aws:iam::<account>:root"}`, and `*` stays `*`. Within one
+account a statement naming the caller's role or user, or `*`, can allow a call on its own, a statement
+naming only the account leaves it to the caller's identity policies, and an explicit `Deny` in either
+refuses it. Across accounts the bus policy and the caller's identity policies both have to allow it.
+
 ## Current Behavior
 
 - `PutEvents` reports success once the source bus accepts an event. Target delivery failures are retried and dead-lettered as described above, and otherwise surface only as a `WARN` in the Floci logs.

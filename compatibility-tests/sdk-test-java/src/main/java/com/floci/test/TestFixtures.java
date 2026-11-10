@@ -56,6 +56,7 @@ import software.amazon.awssdk.services.dynamodb.streams.DynamoDbStreamsClient;
 import software.amazon.awssdk.services.ec2.Ec2Client;
 import software.amazon.awssdk.services.ec2.model.Subnet;
 import software.amazon.awssdk.services.ec2.model.Vpc;
+import software.amazon.awssdk.services.ec2instanceconnect.Ec2InstanceConnectClient;
 import software.amazon.awssdk.services.ecr.EcrClient;
 import software.amazon.awssdk.services.ecs.EcsClient;
 import software.amazon.awssdk.services.efs.EfsClient;
@@ -107,7 +108,9 @@ import software.amazon.awssdk.services.oam.OamClient;
 import software.amazon.awssdk.services.opensearch.OpenSearchClient;
 import software.amazon.awssdk.services.organizations.OrganizationsClient;
 import software.amazon.awssdk.services.paymentcryptography.PaymentCryptographyClient;
+import software.amazon.awssdk.services.paymentcryptographydata.PaymentCryptographyDataClient;
 import software.amazon.awssdk.services.pipes.PipesClient;
+import software.amazon.awssdk.services.quicksight.QuickSightClient;
 import software.amazon.awssdk.services.ram.RamClient;
 import software.amazon.awssdk.services.rds.RdsClient;
 import software.amazon.awssdk.services.redshift.RedshiftClient;
@@ -158,6 +161,7 @@ import software.amazon.awssdk.services.sesv2.model.GetEmailIdentityRequest;
 import software.amazon.awssdk.services.sfn.SfnClient;
 import software.amazon.awssdk.services.sfn.model.DescribeExecutionResponse;
 import software.amazon.awssdk.services.sfn.model.ExecutionStatus;
+import software.amazon.awssdk.services.signer.SignerClient;
 import software.amazon.awssdk.services.signin.SigninClient;
 import software.amazon.awssdk.services.sns.SnsClient;
 import software.amazon.awssdk.services.sqs.SqsClient;
@@ -639,6 +643,14 @@ public final class TestFixtures {
 
     public static ControlCatalogClient controlCatalogClient() {
         return ControlCatalogClient.builder()
+                .endpointOverride(ENDPOINT)
+                .region(REGION)
+                .credentialsProvider(CREDENTIALS)
+                .build();
+    }
+
+    public static QuickSightClient quickSightClient() {
+        return QuickSightClient.builder()
                 .endpointOverride(ENDPOINT)
                 .region(REGION)
                 .credentialsProvider(CREDENTIALS)
@@ -1127,6 +1139,18 @@ public final class TestFixtures {
                 .build();
     }
 
+    /**
+     * The Payment Cryptography data plane. The real service is a rest-json service of its
+     * own, at its own host, so the client talks to it over the paths of that protocol.
+     */
+    public static PaymentCryptographyDataClient paymentCryptographyDataClient() {
+        return PaymentCryptographyDataClient.builder()
+                .endpointOverride(ENDPOINT)
+                .region(REGION)
+                .credentialsProvider(CREDENTIALS)
+                .build();
+    }
+
     public static SecretsManagerClient secretsManagerClient() {
         return SecretsManagerClient.builder()
                 .endpointOverride(ENDPOINT)
@@ -1605,6 +1629,14 @@ public final class TestFixtures {
                 .build();
     }
 
+    public static SignerClient signerClient() {
+        return SignerClient.builder()
+                .endpointOverride(ENDPOINT)
+                .region(REGION)
+                .credentialsProvider(CREDENTIALS)
+                .build();
+    }
+
     public static PipesClient pipesClient() {
         return PipesClient.builder()
                 .endpointOverride(ENDPOINT)
@@ -1818,6 +1850,14 @@ public final class TestFixtures {
 
     public static GlobalAcceleratorClient globalAcceleratorClient() {
         return GlobalAcceleratorClient.builder()
+                .endpointOverride(ENDPOINT)
+                .region(REGION)
+                .credentialsProvider(CREDENTIALS)
+                .build();
+    }
+
+    public static Ec2InstanceConnectClient ec2InstanceConnectClient() {
+        return Ec2InstanceConnectClient.builder()
                 .endpointOverride(ENDPOINT)
                 .region(REGION)
                 .credentialsProvider(CREDENTIALS)

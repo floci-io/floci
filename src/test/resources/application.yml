@@ -155,6 +155,7 @@ floci:
       enabled: true
     lambda:
       enabled: true
+      reconcile-containers-on-startup: true
       container-drain-timeout-seconds: 15
       docker-flags: ""
       honour-architectures: false
@@ -400,6 +401,8 @@ floci:
     elbv2:
       enabled: true
       mock: true
+      backend-keep-alive: true
+      backend-keep-alive-timeout-seconds: 60
     codebuild:
       enabled: true
       # docker-network: floci-network
@@ -505,6 +508,8 @@ floci:
       enabled: true
     efs:
       enabled: true
+    ec2instanceconnect:
+      enabled: true
     organizations:
       enabled: true
     rum:
@@ -554,6 +559,8 @@ floci:
       enabled: true
     dlm:
       enabled: true
+    signer:
+      enabled: true
     cognitoidentity:
       enabled: true
     globalaccelerator:
@@ -591,6 +598,9 @@ floci:
       enabled: true
     codeartifact:
       enabled: true
+    quicksight:
+      enabled: true
+      embed-base-url: ${floci.base-url}
     marketplace:
       enabled: true
     dms:

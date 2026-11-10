@@ -1,0 +1,939 @@
+package io.floci.aws.services.cloudformation;
+
+import io.floci.aws.core.common.XmlParser;
+import io.floci.aws.services.ec2.Ec2Service;
+import io.floci.aws.testing.CfnStackWaits;
+import io.floci.aws.testing.RestAssuredJsonUtils;
+import io.quarkus.test.junit.QuarkusTest;
+import io.restassured.specification.RequestSpecification;
+import jakarta.inject.Inject;
+import org.junit.jupiter.api.BeforeAll;
+import org.junit.jupiter.api.Test;
+
+import java.util.List;
+import java.util.Map;
+
+import static io.floci.aws.testing.CfnRequests.cfn;
+import static io.restassured.RestAssured.given;
+import static org.hamcrest.Matchers.containsString;
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertTrue;
+
+/**
+ * A public/private networking stack the way CDK lays one out: internet gateway and attachment,
+ * a public subnet with a route table routing {@code 0.0.0.0/0} to the gateway and an association, an
+ * EIP and a NAT gateway in that subnet, and a private route table routing to the NAT. Asserts the
+ * {@code Ref} shapes ({@code Route} is {@code <RouteTableId>|<destination>}, {@code EIP} the public IP)
+ * and the {@code Fn::GetAtt} attributes, that an {@code UpdateStack} with the same template keeps
+ * every id (the legacy switch re-created all of them), that a changed subnet CIDR replaces the subnet
+ * and the NAT gateway inside it and removes the displaced ones, and that {@code DeleteStack} removes
+ * every one of the seven networking resources, which the legacy switch left behind. A second case
+ * changes a route table's tag and a subnet's MapPublicIpOnLaunch in place next to a resource that
+ * fails, and asserts the rollback puts both back. A third provisions a prefix list that a route
+ * targets, updates it in place and rolls a change back. The VPC is
+ * created through the EC2 API and passed in as a literal: {@code Ec2VpcCfnProvisioner} still
+ * re-creates a VPC on every update (the #3033 fix), which would rightly replace everything in it.
+ */
+@QuarkusTest
+class CloudFormationEc2NetworkingIntegrationTest {
+
+    private static final String CFN_AUTH =
+            "AWS4-HMAC-SHA256 Credential=test/20260907/us-east-1/cloudformation/aws4_request";
+    private static final String EC2_AUTH =
+            "AWS4-HMAC-SHA256 Credential=test/20260907/us-east-1/ec2/aws4_request";
+    private static final String STACK = "ec2-networking-it";
+
+    @Inject
+    Ec2Service ec2Service;
+
+    private static String template(String vpcId, String publicSubnetCidr) {
+        return template(vpcId, publicSubnetCidr, "{\"Key\": \"tier\", \"Value\": \"web\"}");
+    }
+
+    private static final String ROLLBACK_STACK = "ec2-networking-rollback-it";
+
+    /** A subnet and a tagged route table; the second form flips the mutable properties and adds a resource that cannot be created. */
+    private static String rollbackTemplate(String vpcId, boolean changed) {
+        String failing = changed
+                ? ",\n            \"Boom\": {\"Type\": \"AWS::SecretsManager::Secret\","
+                  + " \"Properties\": {\"SecretString\": \"x\", \"GenerateSecretString\": {\"SecretStringTemplate\": \"{}\", \"GenerateStringKey\": \"p\"}}}"
+                : "";
+        return """
+        {
+          "Resources": {
+            "Subnet": {"Type": "AWS::EC2::Subnet",
+                       "Properties": {"VpcId": "%1$s", "CidrBlock": "10.41.0.0/24", "MapPublicIpOnLaunch": %2$s}},
+            "Rt": {"Type": "AWS::EC2::RouteTable",
+                   "Properties": {"VpcId": "%1$s", "Tags": [{"Key": "Name", "Value": "%3$s"}]}}%4$s
+          },
+          "Outputs": {"SubnetId": {"Value": {"Ref": "Subnet"}}, "RtId": {"Value": {"Ref": "Rt"}}}
+        }
+        """.formatted(vpcId, changed ? "false" : "true", changed ? "after" : "before", failing);
+    }
+
+    @Test
+    void anInPlaceChangeNextToAFailingResourceIsRolledBack() throws Exception {
+        String vpcId = between(ec2("CreateVpc", Map.of("CidrBlock", "10.41.0.0/16")), "<vpcId>", "</vpcId>");
+        cloudFormation(ROLLBACK_STACK, "CreateStack", rollbackTemplate(vpcId, false));
+        Map<String, String> out = XmlParser.extractPairs(describeStacks(ROLLBACK_STACK, "CREATE_COMPLETE"), "Outputs", "OutputKey", "OutputValue");
+        assertTrue(ec2("DescribeRouteTables").contains("<value>before</value>"));
+        assertTrue(subnetXml(out.get("SubnetId")).contains("<mapPublicIpOnLaunch>true</mapPublicIpOnLaunch>"));
+
+        cloudFormation(ROLLBACK_STACK, "UpdateStack", rollbackTemplate(vpcId, true));
+
+        describeStacks(ROLLBACK_STACK, "UPDATE_ROLLBACK_COMPLETE");
+        String routeTables = ec2("DescribeRouteTables");
+        assertTrue(routeTables.contains("<value>before</value>") && !routeTables.contains("<value>after</value>"),
+                "the route table's prior tag must be back: " + routeTables);
+        assertTrue(subnetXml(out.get("SubnetId")).contains("<mapPublicIpOnLaunch>true</mapPublicIpOnLaunch>"),
+                "the subnet's prior MapPublicIpOnLaunch must be back");
+
+        cloudFormation(ROLLBACK_STACK, "DeleteStack", null);
+        CfnStackWaits.awaitStackDeleted(ROLLBACK_STACK);
+        ec2("DeleteVpc", Map.of("VpcId", vpcId));
+    }
+
+    private static final String REMOVAL_STACK = "ec2-networking-removal-it";
+
+    /** A subnet, a route table and an internet gateway that declare their Tags, plus a route table that never does. */
+    private static String removalTemplate(String vpcId, boolean declared) {
+        String subnetProps = declared ? ", \"MapPublicIpOnLaunch\": true, \"Tags\": [{\"Key\": \"team\", \"Value\": \"subnet-net\"}]" : "";
+        String rtTags = declared ? ", \"Tags\": [{\"Key\": \"env\", \"Value\": \"rt-marker\"}]" : "";
+        String igwProps = declared ? "\"Properties\": {\"Tags\": [{\"Key\": \"env\", \"Value\": \"igw-marker\"}]}" : "\"Properties\": {}";
+        return """
+        {
+          "Resources": {
+            "Subnet": {"Type": "AWS::EC2::Subnet",
+                       "Properties": {"VpcId": "%1$s", "CidrBlock": "10.44.0.0/24"%2$s}},
+            "Rt": {"Type": "AWS::EC2::RouteTable", "Properties": {"VpcId": "%1$s"%3$s}},
+            "Igw": {"Type": "AWS::EC2::InternetGateway", %4$s},
+            "Plain": {"Type": "AWS::EC2::RouteTable", "Properties": {"VpcId": "%1$s"}}
+          },
+          "Outputs": {"SubnetId": {"Value": {"Ref": "Subnet"}}, "PlainId": {"Value": {"Ref": "Plain"}}}
+        }
+        """.formatted(vpcId, subnetProps, rtTags, igwProps);
+    }
+
+    @Test
+    void anUpdateClearsWhatTheNewTemplateDropsAndKeepsWhatTheStackNeverDeclared() {
+        String vpcId = between(ec2("CreateVpc", Map.of("CidrBlock", "10.44.0.0/16")), "<vpcId>", "</vpcId>");
+        cloudFormation(REMOVAL_STACK, "CreateStack", removalTemplate(vpcId, true));
+        Map<String, String> out = XmlParser.extractPairs(describeStacks(REMOVAL_STACK, "CREATE_COMPLETE"),
+                "Outputs", "OutputKey", "OutputValue");
+        ec2("CreateTags", Map.of("ResourceId.1", out.get("PlainId"), "Tag.1.Key", "owner", "Tag.1.Value", "outside-owner"));
+        assertTrue(subnetXml(out.get("SubnetId")).contains("<value>subnet-net</value>"));
+        assertTrue(subnetXml(out.get("SubnetId")).contains("<mapPublicIpOnLaunch>true</mapPublicIpOnLaunch>"));
+
+        cloudFormation(REMOVAL_STACK, "UpdateStack", removalTemplate(vpcId, false));
+
+        describeStacks(REMOVAL_STACK, "UPDATE_COMPLETE");
+        String subnet = subnetXml(out.get("SubnetId"));
+        assertFalse(subnet.contains("subnet-net"), "the subnet's dropped tag must be gone: " + subnet);
+        assertTrue(subnet.contains("<mapPublicIpOnLaunch>false</mapPublicIpOnLaunch>"), "the dropped flag goes back to false");
+        String routeTables = ec2("DescribeRouteTables");
+        assertFalse(routeTables.contains("rt-marker"), "the route table's dropped tag must be gone");
+        assertTrue(routeTables.contains("outside-owner"), "a tag on a resource the stack never tagged stays");
+        assertFalse(ec2("DescribeInternetGateways").contains("igw-marker"), "the gateway's dropped tag must be gone");
+
+        cloudFormation(REMOVAL_STACK, "DeleteStack", null);
+        CfnStackWaits.awaitStackDeleted(REMOVAL_STACK);
+        ec2("DeleteVpc", Map.of("VpcId", vpcId));
+    }
+
+    /**
+     * CreateNatGateway with an Elastic IP another gateway holds succeeds on AWS and leaves the
+     * gateway failed; CloudFormation must still fail the resource rather than report it created.
+     */
+    @Test
+    void aNatGatewayGivenAnAlreadyHeldElasticIpFailsTheStack() {
+        String vpcId = between(ec2("CreateVpc", Map.of("CidrBlock", "10.42.0.0/16")), "<vpcId>", "</vpcId>");
+        String nat = "{\"Type\": \"AWS::EC2::NatGateway\", %s\"Properties\": {\"SubnetId\": {\"Ref\": \"Subnet\"},"
+                + " \"AllocationId\": {\"Fn::GetAtt\": [\"Eip\", \"AllocationId\"]}}}";
+        cloudFormation("ec2-nat-shared-eip-it", "CreateStack", """
+        {"Resources": {
+          "Subnet": {"Type": "AWS::EC2::Subnet", "Properties": {"VpcId": "%s", "CidrBlock": "10.42.0.0/24"}},
+          "Eip": {"Type": "AWS::EC2::EIP", "Properties": {"Domain": "vpc"}},
+          "NatA": %s,
+          "NatB": %s
+        }}
+        """.formatted(vpcId, nat.formatted(""), nat.formatted("\"DependsOn\": \"NatA\", ")));
+
+        describeStacks("ec2-nat-shared-eip-it", "ROLLBACK_COMPLETE");
+        assertFalse(ec2("DescribeNatGateways").contains(vpcId), "no gateway, failed or not, is left behind");
+    }
+
+    /**
+     * A NAT gateway in its own subnet with three Elastic IPs to choose from. {@code natProps} are
+     * the gateway's properties after SubnetId; {@code failing} adds a resource that cannot be
+     * created once the gateway is done.
+     */
+    private static String secondaryNatTemplate(String vpcId, String cidr, String natProps, boolean failing) {
+        String boom = failing
+                ? ",\n            \"Boom\": {\"Type\": \"AWS::SecretsManager::Secret\", \"DependsOn\": \"Nat\","
+                  + " \"Properties\": {\"SecretString\": \"x\", \"GenerateSecretString\": {\"SecretStringTemplate\": \"{}\", \"GenerateStringKey\": \"p\"}}}"
+                : "";
+        return """
+        {
+          "Resources": {
+            "Subnet": {"Type": "AWS::EC2::Subnet", "Properties": {"VpcId": "%1$s", "CidrBlock": "%2$s"}},
+            "Eip": {"Type": "AWS::EC2::EIP", "Properties": {"Domain": "vpc"}},
+            "Eip2": {"Type": "AWS::EC2::EIP", "Properties": {"Domain": "vpc"}},
+            "Eip3": {"Type": "AWS::EC2::EIP", "Properties": {"Domain": "vpc"}},
+            "Nat": {"Type": "AWS::EC2::NatGateway", "Properties": {"SubnetId": {"Ref": "Subnet"}%3$s}}%4$s
+          },
+          "Outputs": {
+            "NatId": {"Value": {"Ref": "Nat"}},
+            "SubnetId": {"Value": {"Ref": "Subnet"}},
+            "Eip2Id": {"Value": {"Fn::GetAtt": ["Eip2", "AllocationId"]}},
+            "Eip3Id": {"Value": {"Fn::GetAtt": ["Eip3", "AllocationId"]}}
+          }
+        }
+        """.formatted(vpcId, cidr, natProps, boom);
+    }
+
+    private static final String PUBLIC_NAT = ", \"AllocationId\": {\"Fn::GetAtt\": [\"Eip\", \"AllocationId\"]}";
+
+    /**
+     * A NAT gateway's secondary addresses are not create-only, so AWS changes them in place and the
+     * gateway keeps its id. Replacing it instead would ask for the Elastic IP the old gateway still
+     * holds and fail with Resource.AlreadyAssociated.
+     */
+    @Test
+    void aPublicNatGatewaysSecondaryElasticIpsChangeInPlace() {
+        String stack = "ec2-nat-secondary-public-it";
+        String vpcId = between(ec2("CreateVpc", Map.of("CidrBlock", "10.45.0.0/16")), "<vpcId>", "</vpcId>");
+        cloudFormation(stack, "CreateStack", secondaryNatTemplate(vpcId, "10.45.0.0/24",
+                PUBLIC_NAT + ", \"SecondaryAllocationIds\": [{\"Fn::GetAtt\": [\"Eip2\", \"AllocationId\"]}]", false));
+        Map<String, String> out = XmlParser.extractPairs(describeStacks(stack, "CREATE_COMPLETE"),
+                "Outputs", "OutputKey", "OutputValue");
+        String natId = out.get("NatId");
+        String eip2 = out.get("Eip2Id");
+        String eip3 = out.get("Eip3Id");
+        assertTrue(natXml(natId).contains("<allocationId>" + eip2 + "</allocationId>"), natXml(natId));
+
+        cloudFormation(stack, "UpdateStack", secondaryNatTemplate(vpcId, "10.45.0.0/24",
+                PUBLIC_NAT + ", \"SecondaryAllocationIds\": [{\"Fn::GetAtt\": [\"Eip3\", \"AllocationId\"]}]", false));
+        assertEquals(natId, XmlParser.extractPairs(describeStacks(stack, "UPDATE_COMPLETE"),
+                "Outputs", "OutputKey", "OutputValue").get("NatId"), "the gateway is kept");
+        String nat = natXml(natId);
+        assertTrue(nat.contains("<allocationId>" + eip3 + "</allocationId>") && !nat.contains(eip2), nat);
+        assertFalse(ec2("DescribeAddresses", Map.of("AllocationId.1", eip2)).contains("<associationId>"),
+                "the dropped Elastic IP is free");
+        assertTrue(ec2("DescribeAddresses", Map.of("AllocationId.1", eip3)).contains("<associationId>"),
+                "the added Elastic IP is held");
+
+        // An Elastic IP another gateway holds fails the update and leaves the gateway as it was.
+        String held = between(ec2("AllocateAddress", Map.of("Domain", "vpc")), "<allocationId>", "</allocationId>");
+        String otherNat = between(ec2("CreateNatGateway", Map.of("SubnetId", out.get("SubnetId"), "AllocationId", held)),
+                "<natGatewayId>", "</natGatewayId>");
+        cloudFormation(stack, "UpdateStack", secondaryNatTemplate(vpcId, "10.45.0.0/24",
+                PUBLIC_NAT + ", \"SecondaryAllocationIds\": [\"" + held + "\"]", false));
+        describeStacks(stack, "UPDATE_ROLLBACK_COMPLETE");
+        String reason = CfnStackWaits.failedResourceReason(stack, CFN_AUTH);
+        assertTrue(reason.contains(held), reason);
+        nat = natXml(natId);
+        assertTrue(nat.contains("<allocationId>" + eip3 + "</allocationId>") && !nat.contains(held), nat);
+        assertTrue(natXml(otherNat).contains("<allocationId>" + held + "</allocationId>"));
+
+        cloudFormation(stack, "UpdateStack", secondaryNatTemplate(vpcId, "10.45.0.0/24", PUBLIC_NAT, false));
+        assertEquals(natId, XmlParser.extractPairs(describeStacks(stack, "UPDATE_COMPLETE"),
+                "Outputs", "OutputKey", "OutputValue").get("NatId"));
+        nat = natXml(natId);
+        assertFalse(nat.contains(eip3) || !secondaryIps(nat).isEmpty(), "no secondary is left: " + nat);
+        assertFalse(ec2("DescribeAddresses", Map.of("AllocationId.1", eip3)).contains("<associationId>"));
+
+        ec2("DeleteNatGateway", Map.of("NatGatewayId", otherNat));
+        ec2("ReleaseAddress", Map.of("AllocationId", held));
+        cloudFormation(stack, "DeleteStack", null);
+        CfnStackWaits.awaitStackDeleted(stack);
+        ec2("DeleteVpc", Map.of("VpcId", vpcId));
+    }
+
+    private static final String TAGGED_PUBLIC_NAT = PUBLIC_NAT + ", \"Tags\": [{\"Key\": \"%s\", \"Value\": \"v\"}]";
+
+    /**
+     * A property the stack never declared keeps the value set outside it. The three secondary-address
+     * properties form one set, so a gateway whose templates declared none of them keeps a secondary
+     * Elastic IP added through the service, which is what AssociateNatGatewayAddress does (the
+     * query action is not exposed, so the test calls the service it maps to).
+     */
+    @Test
+    void aNatGatewaySecondaryElasticIpAddedOutsideTheStackSurvivesAnUnrelatedUpdate() {
+        String stack = "ec2-nat-secondary-outside-it";
+        String vpcId = between(ec2("CreateVpc", Map.of("CidrBlock", "10.97.0.0/16")), "<vpcId>", "</vpcId>");
+        cloudFormation(stack, "CreateStack", secondaryNatTemplate(vpcId, "10.97.0.0/24",
+                TAGGED_PUBLIC_NAT.formatted("before"), false));
+        String natId = XmlParser.extractPairs(describeStacks(stack, "CREATE_COMPLETE"),
+                "Outputs", "OutputKey", "OutputValue").get("NatId");
+        String outside = between(ec2("AllocateAddress", Map.of("Domain", "vpc")), "<allocationId>", "</allocationId>");
+        ec2Service.updateNatGatewaySecondaryAddresses("us-east-1", natId, List.of(outside), List.of(), null);
+        assertTrue(natXml(natId).contains("<allocationId>" + outside + "</allocationId>"), natXml(natId));
+
+        cloudFormation(stack, "UpdateStack", secondaryNatTemplate(vpcId, "10.97.0.0/24",
+                TAGGED_PUBLIC_NAT.formatted("after"), false));
+
+        assertEquals(natId, XmlParser.extractPairs(describeStacks(stack, "UPDATE_COMPLETE"),
+                "Outputs", "OutputKey", "OutputValue").get("NatId"), "the gateway is kept");
+        String nat = natXml(natId);
+        assertTrue(nat.contains("<allocationId>" + outside + "</allocationId>"),
+                "the secondary added outside the stack must survive: " + nat);
+        assertTrue(ec2("DescribeAddresses", Map.of("AllocationId.1", outside)).contains("<associationId>"),
+                "the Elastic IP added outside the stack is still held");
+
+        cloudFormation(stack, "DeleteStack", null);
+        CfnStackWaits.awaitStackDeleted(stack);
+        ec2("ReleaseAddress", Map.of("AllocationId", outside));
+        ec2("DeleteVpc", Map.of("VpcId", vpcId));
+    }
+
+    /** {@code AWS::NoValue} is removed before the provisioner runs, so such a property was never declared. */
+    @Test
+    void aSecondaryPropertyThatIsNoValueCountsAsNeverDeclared() {
+        String stack = "ec2-nat-secondary-novalue-it";
+        String vpcId = between(ec2("CreateVpc", Map.of("CidrBlock", "10.98.0.0/16")), "<vpcId>", "</vpcId>");
+        String noValue = PUBLIC_NAT + ", \"SecondaryAllocationIds\": {\"Ref\": \"AWS::NoValue\"}";
+        cloudFormation(stack, "CreateStack", secondaryNatTemplate(vpcId, "10.98.0.0/24", noValue, false));
+        String natId = XmlParser.extractPairs(describeStacks(stack, "CREATE_COMPLETE"),
+                "Outputs", "OutputKey", "OutputValue").get("NatId");
+        String outside = between(ec2("AllocateAddress", Map.of("Domain", "vpc")), "<allocationId>", "</allocationId>");
+        ec2Service.updateNatGatewaySecondaryAddresses("us-east-1", natId, List.of(outside), List.of(), null);
+
+        cloudFormation(stack, "UpdateStack", secondaryNatTemplate(vpcId, "10.98.0.0/24",
+                noValue + ", \"Tags\": [{\"Key\": \"k\", \"Value\": \"v\"}]", false));
+
+        describeStacks(stack, "UPDATE_COMPLETE");
+        String nat = natXml(natId);
+        assertTrue(nat.contains("<allocationId>" + outside + "</allocationId>"),
+                "a NoValue property never declared the set, so the secondary added outside must survive: " + nat);
+
+        cloudFormation(stack, "DeleteStack", null);
+        CfnStackWaits.awaitStackDeleted(stack);
+        ec2("ReleaseAddress", Map.of("AllocationId", outside));
+        ec2("DeleteVpc", Map.of("VpcId", vpcId));
+    }
+
+    /** The contrast: a secondary Elastic IP the stack declared is released when a template drops the property. */
+    @Test
+    void aSecondaryElasticIpTheStackDeclaredIsClearedWhenATemplateDropsIt() {
+        String stack = "ec2-nat-secondary-dropped-it";
+        String vpcId = between(ec2("CreateVpc", Map.of("CidrBlock", "10.99.0.0/16")), "<vpcId>", "</vpcId>");
+        cloudFormation(stack, "CreateStack", secondaryNatTemplate(vpcId, "10.99.0.0/24",
+                PUBLIC_NAT + ", \"SecondaryAllocationIds\": [{\"Fn::GetAtt\": [\"Eip2\", \"AllocationId\"]}]", false));
+        Map<String, String> out = XmlParser.extractPairs(describeStacks(stack, "CREATE_COMPLETE"),
+                "Outputs", "OutputKey", "OutputValue");
+        String natId = out.get("NatId");
+        String eip2 = out.get("Eip2Id");
+        assertTrue(natXml(natId).contains("<allocationId>" + eip2 + "</allocationId>"), natXml(natId));
+
+        cloudFormation(stack, "UpdateStack", secondaryNatTemplate(vpcId, "10.99.0.0/24", PUBLIC_NAT, false));
+
+        describeStacks(stack, "UPDATE_COMPLETE");
+        String nat = natXml(natId);
+        assertFalse(nat.contains(eip2) || !secondaryIps(nat).isEmpty(), "the declared secondary is cleared: " + nat);
+        assertFalse(ec2("DescribeAddresses", Map.of("AllocationId.1", eip2)).contains("<associationId>"));
+
+        cloudFormation(stack, "DeleteStack", null);
+        CfnStackWaits.awaitStackDeleted(stack);
+        ec2("DeleteVpc", Map.of("VpcId", vpcId));
+    }
+
+    @Test
+    void aPrivateNatGatewaysSecondaryAddressesChangeInPlace() {
+        String stack = "ec2-nat-secondary-private-it";
+        String vpcId = between(ec2("CreateVpc", Map.of("CidrBlock", "10.46.0.0/16")), "<vpcId>", "</vpcId>");
+        String privateNat = ", \"ConnectivityType\": \"private\", \"PrivateIpAddress\": \"10.46.0.10\","
+                + " \"SecondaryPrivateIpAddresses\": [%s]";
+        cloudFormation(stack, "CreateStack", secondaryNatTemplate(vpcId, "10.46.0.0/24",
+                privateNat.formatted("\"10.46.0.20\""), false));
+        Map<String, String> out = XmlParser.extractPairs(describeStacks(stack, "CREATE_COMPLETE"),
+                "Outputs", "OutputKey", "OutputValue");
+        String natId = out.get("NatId");
+
+        cloudFormation(stack, "UpdateStack", secondaryNatTemplate(vpcId, "10.46.0.0/24",
+                privateNat.formatted("\"10.46.0.21\", \"10.46.0.22\""), false));
+        assertEquals(natId, XmlParser.extractPairs(describeStacks(stack, "UPDATE_COMPLETE"),
+                "Outputs", "OutputKey", "OutputValue").get("NatId"), "the gateway is kept");
+        String nat = natXml(natId);
+        assertTrue(nat.contains("<privateIp>10.46.0.10</privateIp>") && nat.contains("<privateIp>10.46.0.21</privateIp>")
+                && nat.contains("<privateIp>10.46.0.22</privateIp>") && !nat.contains("<privateIp>10.46.0.20</privateIp>"), nat);
+
+        // A change next to a resource that fails is put back.
+        cloudFormation(stack, "UpdateStack", secondaryNatTemplate(vpcId, "10.46.0.0/24",
+                privateNat.formatted("\"10.46.0.23\""), true));
+        describeStacks(stack, "UPDATE_ROLLBACK_COMPLETE");
+        nat = natXml(natId);
+        assertTrue(nat.contains("<privateIp>10.46.0.21</privateIp>") && nat.contains("<privateIp>10.46.0.22</privateIp>")
+                && !nat.contains("<privateIp>10.46.0.23</privateIp>"), "the prior secondaries must be back: " + nat);
+
+        // An address another resource holds fails the update and leaves the gateway as it was.
+        String eni = between(ec2("CreateNetworkInterface", Map.of("SubnetId", out.get("SubnetId"),
+                "PrivateIpAddress", "10.46.0.30")), "<networkInterfaceId>", "</networkInterfaceId>");
+        cloudFormation(stack, "UpdateStack", secondaryNatTemplate(vpcId, "10.46.0.0/24",
+                privateNat.formatted("\"10.46.0.30\""), false));
+        describeStacks(stack, "UPDATE_ROLLBACK_COMPLETE");
+        String reason = CfnStackWaits.failedResourceReason(stack, CFN_AUTH);
+        assertTrue(reason.contains("10.46.0.30"), reason);
+        nat = natXml(natId);
+        assertTrue(nat.contains("<privateIp>10.46.0.21</privateIp>") && nat.contains("<privateIp>10.46.0.22</privateIp>")
+                && !nat.contains("<privateIp>10.46.0.30</privateIp>"), nat);
+
+        cloudFormation(stack, "UpdateStack", secondaryNatTemplate(vpcId, "10.46.0.0/24",
+                ", \"ConnectivityType\": \"private\", \"PrivateIpAddress\": \"10.46.0.10\"", false));
+        assertEquals(natId, XmlParser.extractPairs(describeStacks(stack, "UPDATE_COMPLETE"),
+                "Outputs", "OutputKey", "OutputValue").get("NatId"));
+        nat = natXml(natId);
+        assertTrue(nat.contains("<privateIp>10.46.0.10</privateIp>") && secondaryIps(nat).isEmpty(),
+                "only the primary address is left: " + nat);
+
+        ec2("DeleteNetworkInterface", Map.of("NetworkInterfaceId", eni));
+        cloudFormation(stack, "DeleteStack", null);
+        CfnStackWaits.awaitStackDeleted(stack);
+        ec2("DeleteVpc", Map.of("VpcId", vpcId));
+    }
+
+    /** A counted secondary survives a count change and an unrelated update, and the gateway is kept. */
+    @Test
+    void aPrivateNatGatewaysCountedSecondariesChangeInPlace() {
+        String stack = "ec2-nat-secondary-count-it";
+        String vpcId = between(ec2("CreateVpc", Map.of("CidrBlock", "10.47.0.0/16")), "<vpcId>", "</vpcId>");
+        String counted = ", \"ConnectivityType\": \"private\", \"SecondaryPrivateIpAddressCount\": %d%s";
+        cloudFormation(stack, "CreateStack", secondaryNatTemplate(vpcId, "10.47.0.0/24", counted.formatted(1, ""), false));
+        String natId = XmlParser.extractPairs(describeStacks(stack, "CREATE_COMPLETE"),
+                "Outputs", "OutputKey", "OutputValue").get("NatId");
+        List<String> first = secondaryIps(natXml(natId));
+        assertEquals(1, first.size(), natXml(natId));
+
+        // The count unchanged next to another change: the same address.
+        cloudFormation(stack, "UpdateStack", secondaryNatTemplate(vpcId, "10.47.0.0/24",
+                counted.formatted(1, ", \"Tags\": [{\"Key\": \"k\", \"Value\": \"v\"}]"), false));
+        assertEquals(natId, XmlParser.extractPairs(describeStacks(stack, "UPDATE_COMPLETE"),
+                "Outputs", "OutputKey", "OutputValue").get("NatId"));
+        assertEquals(first, secondaryIps(natXml(natId)));
+
+        cloudFormation(stack, "UpdateStack", secondaryNatTemplate(vpcId, "10.47.0.0/24", counted.formatted(2, ""), false));
+        assertEquals(natId, XmlParser.extractPairs(describeStacks(stack, "UPDATE_COMPLETE"),
+                "Outputs", "OutputKey", "OutputValue").get("NatId"));
+        List<String> two = secondaryIps(natXml(natId));
+        assertEquals(2, two.size(), natXml(natId));
+        assertEquals(first.get(0), two.get(0), "the counted address is kept: " + two);
+        assertTrue(!two.get(1).equals(two.get(0)) && two.get(1).startsWith("10.47.0."), "a new address in the subnet: " + two);
+
+        cloudFormation(stack, "UpdateStack", secondaryNatTemplate(vpcId, "10.47.0.0/24", counted.formatted(1, ""), false));
+        assertEquals(natId, XmlParser.extractPairs(describeStacks(stack, "UPDATE_COMPLETE"),
+                "Outputs", "OutputKey", "OutputValue").get("NatId"));
+        List<String> one = secondaryIps(natXml(natId));
+        assertEquals(1, one.size(), natXml(natId));
+        assertEquals(List.of(two.get(1)), one, "the last counted address is kept");
+
+        cloudFormation(stack, "DeleteStack", null);
+        CfnStackWaits.awaitStackDeleted(stack);
+        ec2("DeleteVpc", Map.of("VpcId", vpcId));
+    }
+
+    /**
+     * Listed addresses changing next to a count keep the address the subnet picked, not a listed
+     * one that the template dropped.
+     */
+    @Test
+    void aCountedSecondaryKeepsItsAddressWhenTheListedOnesChange() {
+        String stack = "ec2-nat-secondary-mixed-it";
+        String vpcId = between(ec2("CreateVpc", Map.of("CidrBlock", "10.48.0.0/16")), "<vpcId>", "</vpcId>");
+        String mixed = ", \"ConnectivityType\": \"private\", \"SecondaryPrivateIpAddresses\": [\"%s\"],"
+                + " \"SecondaryPrivateIpAddressCount\": 1";
+        cloudFormation(stack, "CreateStack", secondaryNatTemplate(vpcId, "10.48.0.0/24", mixed.formatted("10.48.0.40"), false));
+        String natId = XmlParser.extractPairs(describeStacks(stack, "CREATE_COMPLETE"),
+                "Outputs", "OutputKey", "OutputValue").get("NatId");
+        List<String> before = secondaryIps(natXml(natId));
+        assertEquals("10.48.0.40", before.get(0), before.toString());
+        String picked = before.get(1);
+
+        cloudFormation(stack, "UpdateStack", secondaryNatTemplate(vpcId, "10.48.0.0/24", mixed.formatted("10.48.0.41"), false));
+        assertEquals(natId, XmlParser.extractPairs(describeStacks(stack, "UPDATE_COMPLETE"),
+                "Outputs", "OutputKey", "OutputValue").get("NatId"));
+        assertEquals(List.of("10.48.0.41", picked), secondaryIps(natXml(natId)),
+                "the listed address is swapped and the picked one kept");
+
+        cloudFormation(stack, "DeleteStack", null);
+        CfnStackWaits.awaitStackDeleted(stack);
+        ec2("DeleteVpc", Map.of("VpcId", vpcId));
+    }
+
+    /** Secondary Elastic IPs moved between listed addresses, and one moved to a new address, in one update each. */
+    @Test
+    void aSecondaryElasticIpMovesToAnotherAddressInPlace() {
+        String stack = "ec2-nat-secondary-move-it";
+        String vpcId = between(ec2("CreateVpc", Map.of("CidrBlock", "10.49.0.0/16")), "<vpcId>", "</vpcId>");
+        String moved = PUBLIC_NAT + ", \"SecondaryAllocationIds\": [{\"Fn::GetAtt\": [\"Eip2\", \"AllocationId\"]},"
+                + " {\"Fn::GetAtt\": [\"Eip3\", \"AllocationId\"]}], \"SecondaryPrivateIpAddresses\": [\"%s\", \"%s\"]";
+        cloudFormation(stack, "CreateStack", secondaryNatTemplate(vpcId, "10.49.0.0/24",
+                moved.formatted("10.49.0.50", "10.49.0.51"), false));
+        Map<String, String> out = XmlParser.extractPairs(describeStacks(stack, "CREATE_COMPLETE"),
+                "Outputs", "OutputKey", "OutputValue");
+        String natId = out.get("NatId");
+        String eip2 = out.get("Eip2Id");
+        String eip3 = out.get("Eip3Id");
+        assertEquals("10.49.0.50", eipPrivateIp(eip2));
+
+        cloudFormation(stack, "UpdateStack", secondaryNatTemplate(vpcId, "10.49.0.0/24",
+                moved.formatted("10.49.0.51", "10.49.0.50"), false));
+        assertEquals(natId, XmlParser.extractPairs(describeStacks(stack, "UPDATE_COMPLETE"),
+                "Outputs", "OutputKey", "OutputValue").get("NatId"));
+        assertEquals(List.of("10.49.0.51", "10.49.0.50"), secondaryIps(natXml(natId)));
+        assertEquals("10.49.0.51", eipPrivateIp(eip2), "the swapped Elastic IP is held at its new address");
+        assertEquals("10.49.0.50", eipPrivateIp(eip3));
+
+        cloudFormation(stack, "UpdateStack", secondaryNatTemplate(vpcId, "10.49.0.0/24",
+                moved.formatted("10.49.0.52", "10.49.0.50"), false));
+        assertEquals(natId, XmlParser.extractPairs(describeStacks(stack, "UPDATE_COMPLETE"),
+                "Outputs", "OutputKey", "OutputValue").get("NatId"));
+        assertEquals(List.of("10.49.0.52", "10.49.0.50"), secondaryIps(natXml(natId)), "10.49.0.51 is given up");
+        assertEquals("10.49.0.52", eipPrivateIp(eip2), "the same Elastic IP is held at the new address");
+        assertEquals("10.49.0.50", eipPrivateIp(eip3));
+
+        cloudFormation(stack, "DeleteStack", null);
+        CfnStackWaits.awaitStackDeleted(stack);
+        ec2("DeleteVpc", Map.of("VpcId", vpcId));
+    }
+
+    /** The gateway's secondary private addresses, in the order DescribeNatGateways lists them. */
+    private static List<String> secondaryIps(String natXml) {
+        return XmlParser.extractElementTree(natXml, "natGatewayAddressSet").children().stream()
+                .filter(item -> "false".equals(item.child("isPrimary").text()))
+                .map(item -> item.child("privateIp").text())
+                .toList();
+    }
+
+    /** The private address an associated Elastic IP is held at. */
+    private static String eipPrivateIp(String allocationId) {
+        String xml = ec2("DescribeAddresses", Map.of("AllocationId.1", allocationId));
+        assertTrue(XmlParser.extractFirst(xml, "associationId", null) != null, "the Elastic IP is held: " + xml);
+        return XmlParser.extractFirst(xml, "privateIpAddress", null);
+    }
+
+    private static String natXml(String natGatewayId) {
+        return ec2("DescribeNatGateways", Map.of("NatGatewayId.1", natGatewayId));
+    }
+
+    private static String subnetXml(String subnetId) {
+        return ec2("DescribeSubnets", Map.of("SubnetId.1", subnetId));
+    }
+
+    private static final String PREFIX_LIST_STACK = "ec2-prefix-list-it";
+
+    /**
+     * A prefix list and a route to it through an internet gateway, the way a template sends a set of
+     * CIDRs out of a VPC. {@code tags} is the Tags list, or empty for none; {@code failing} adds a
+     * resource that cannot be created once the prefix list is done.
+     */
+    private static String prefixListTemplate(String vpcId, String family, int maxEntries, String entries,
+                                             String tags, boolean failing) {
+        String boom = failing
+                ? ",\n            \"Boom\": {\"Type\": \"AWS::SecretsManager::Secret\", \"DependsOn\": \"Firewall\","
+                  + " \"Properties\": {\"SecretString\": \"x\", \"GenerateSecretString\": {\"SecretStringTemplate\": \"{}\", \"GenerateStringKey\": \"p\"}}}"
+                : "";
+        return """
+        {
+          "Resources": {
+            "Firewall": {"Type": "AWS::EC2::PrefixList",
+                         "Properties": {"PrefixListName": "office-egress", "AddressFamily": "%2$s",
+                                        "MaxEntries": %3$d, "Entries": %4$s%5$s}},
+            "Igw": {"Type": "AWS::EC2::InternetGateway"},
+            "Attach": {"Type": "AWS::EC2::VPCGatewayAttachment",
+                       "Properties": {"VpcId": "%1$s", "InternetGatewayId": {"Ref": "Igw"}}},
+            "Rt": {"Type": "AWS::EC2::RouteTable", "Properties": {"VpcId": "%1$s"}},
+            "OfficeRoute": {"Type": "AWS::EC2::Route", "DependsOn": "Attach",
+                            "Properties": {"RouteTableId": {"Ref": "Rt"}, "DestinationPrefixListId": {"Ref": "Firewall"},
+                                           "GatewayId": {"Ref": "Igw"}}}%6$s
+          },
+          "Outputs": {
+            "Ref": {"Value": {"Ref": "Firewall"}},
+            "PrefixListId": {"Value": {"Fn::GetAtt": ["Firewall", "PrefixListId"]}},
+            "Arn": {"Value": {"Fn::GetAtt": ["Firewall", "Arn"]}},
+            "OwnerId": {"Value": {"Fn::GetAtt": ["Firewall", "OwnerId"]}},
+            "RtId": {"Value": {"Ref": "Rt"}},
+            "RouteRef": {"Value": {"Ref": "OfficeRoute"}}
+          }
+        }
+        """.formatted(vpcId, family, maxEntries, entries, tags.isEmpty() ? "" : ", \"Tags\": " + tags, boom);
+    }
+
+    @Test
+    void aPrefixListIsARealListThatARouteCanTargetAndUpdatesInPlace() {
+        String vpcId = between(ec2("CreateVpc", Map.of("CidrBlock", "10.43.0.0/16")), "<vpcId>", "</vpcId>");
+        String office = "[{\"Cidr\": \"192.0.2.0/24\", \"Description\": \"office\"}]";
+        String offices = "[{\"Cidr\": \"192.0.2.0/24\", \"Description\": \"head office\"},"
+                + " {\"Cidr\": \"198.51.100.0/24\", \"Description\": \"branch\"}]";
+        String team = "[{\"Key\": \"team\", \"Value\": \"network\"}]";
+        cloudFormation(PREFIX_LIST_STACK, "CreateStack", prefixListTemplate(vpcId, "IPv4", 2, office, team, false));
+
+        Map<String, String> out = XmlParser.extractPairs(describeStacks(PREFIX_LIST_STACK, "CREATE_COMPLETE"),
+                "Outputs", "OutputKey", "OutputValue");
+        String id = out.get("Ref");
+        assertTrue(id.startsWith("pl-"), "Ref of a prefix list is its EC2 id: " + id);
+        assertEquals(id, out.get("PrefixListId"));
+        assertEquals("arn:aws:ec2:us-east-1:" + out.get("OwnerId") + ":prefix-list/" + id, out.get("Arn"));
+        String list = prefixListXml(id);
+        assertTrue(list.contains("<prefixListName>office-egress</prefixListName>") && list.contains("<version>1</version>")
+                && list.contains("<maxEntries>2</maxEntries>"), list);
+        assertTrue(list.contains("<key>team</key>") && list.contains("<value>network</value>"), "tags must reach EC2: " + list);
+        assertTrue(entriesXml(id).contains("<cidr>192.0.2.0/24</cidr>"));
+        assertEquals(out.get("RtId") + "|" + id, out.get("RouteRef"), "the route is keyed by the list it targets");
+        String routes = ec2("DescribeRouteTables", Map.of("RouteTableId.1", out.get("RtId")));
+        assertTrue(routes.contains("<destinationPrefixListId>" + id + "</destinationPrefixListId>"), routes);
+
+        // Entries change in place. A changed description is a removal and then an addition, two
+        // EC2 calls because EC2 refuses one that removes and adds the same CIDR, so version 3.
+        cloudFormation(PREFIX_LIST_STACK, "UpdateStack", prefixListTemplate(vpcId, "IPv4", 2, offices, team, false));
+        assertEquals(id, XmlParser.extractPairs(describeStacks(PREFIX_LIST_STACK, "UPDATE_COMPLETE"),
+                "Outputs", "OutputKey", "OutputValue").get("Ref"));
+        assertTrue(prefixListXml(id).contains("<version>3</version>"));
+        String entries = entriesXml(id);
+        assertTrue(entries.contains("<description>head office</description>") && entries.contains("198.51.100.0/24"), entries);
+
+        // Capacity alone changes in place and makes no new version.
+        cloudFormation(PREFIX_LIST_STACK, "UpdateStack", prefixListTemplate(vpcId, "IPv4", 3, offices, team, false));
+        describeStacks(PREFIX_LIST_STACK, "UPDATE_COMPLETE");
+        list = prefixListXml(id);
+        assertTrue(list.contains("<maxEntries>3</maxEntries>") && list.contains("<version>3</version>"), list);
+
+        cloudFormation(PREFIX_LIST_STACK, "UpdateStack", prefixListTemplate(vpcId, "IPv4", 1, offices, team, false));
+        describeStacks(PREFIX_LIST_STACK, "UPDATE_ROLLBACK_COMPLETE");
+        list = prefixListXml(id);
+        assertTrue(list.contains("<maxEntries>3</maxEntries>") && list.contains("<version>3</version>"),
+                "shrinking below the entry count must preserve capacity and version: " + list);
+        assertEquals(XmlParser.extractPairs(entries, "item", "cidr", "description"),
+                XmlParser.extractPairs(entriesXml(id), "item", "cidr", "description"),
+                "a rejected shrink must preserve both entries");
+
+        // Capacity and entries together, and another address family, fail the update and change nothing.
+        cloudFormation(PREFIX_LIST_STACK, "UpdateStack", prefixListTemplate(vpcId, "IPv4", 4, office, team, false));
+        describeStacks(PREFIX_LIST_STACK, "UPDATE_ROLLBACK_COMPLETE");
+        String reason = CfnStackWaits.failedResourceReason(PREFIX_LIST_STACK, CFN_AUTH);
+        assertTrue(reason.contains("cannot change MaxEntries (from 3 to 4) and Entries"), reason);
+        cloudFormation(PREFIX_LIST_STACK, "UpdateStack", prefixListTemplate(vpcId, "IPv6", 3, offices, team, false));
+        describeStacks(PREFIX_LIST_STACK, "UPDATE_ROLLBACK_COMPLETE");
+        reason = CfnStackWaits.failedResourceReason(PREFIX_LIST_STACK, CFN_AUTH);
+        assertTrue(reason.contains("cannot change the AddressFamily of prefix list " + id + " from IPv4 to IPv6"), reason);
+        list = prefixListXml(id);
+        assertTrue(list.contains("<maxEntries>3</maxEntries>") && list.contains("<version>3</version>")
+                && list.contains("<addressFamily>IPv4</addressFamily>"), list);
+
+        // An entry and tag change next to a resource that fails is put back.
+        cloudFormation(PREFIX_LIST_STACK, "UpdateStack", prefixListTemplate(vpcId, "IPv4", 3, office,
+                "[{\"Key\": \"team\", \"Value\": \"platform\"}]", true));
+        describeStacks(PREFIX_LIST_STACK, "UPDATE_ROLLBACK_COMPLETE");
+        entries = entriesXml(id);
+        assertTrue(entries.contains("<description>head office</description>") && entries.contains("198.51.100.0/24"),
+                "the prior entries must be back: " + entries);
+        list = prefixListXml(id);
+        assertTrue(list.contains("<value>network</value>") && !list.contains("<value>platform</value>"),
+                "the prior tags must be back: " + list);
+
+        // A rename is no replacement: the change set modifies the list alone, and the route that
+        // targets it is left as it is.
+        String renamed = prefixListTemplate(vpcId, "IPv4", 3, offices, team, false)
+                .replace("\"office-egress\"", "\"office-egress-renamed\"");
+        changeSet("CreateChangeSet", "rename", renamed);
+        String preview = changeSet("DescribeChangeSet", "rename", null);
+        assertTrue(preview.contains("<LogicalResourceId>Firewall</LogicalResourceId>")
+                && preview.contains("<Replacement>False</Replacement>") && !preview.contains("<Replacement>True</Replacement>")
+                && !preview.contains("<LogicalResourceId>OfficeRoute</LogicalResourceId>"), preview);
+        changeSet("ExecuteChangeSet", "rename", null);
+        assertEquals("UPDATE_COMPLETE", CfnStackWaits.awaitTerminal(PREFIX_LIST_STACK, CFN_AUTH).status());
+        assertEquals(id, XmlParser.extractPairs(describeStacks(PREFIX_LIST_STACK, "UPDATE_COMPLETE"),
+                "Outputs", "OutputKey", "OutputValue").get("Ref"));
+        assertTrue(prefixListXml(id).contains("<prefixListName>office-egress-renamed</prefixListName>"));
+
+        // A template that drops Tags removes them.
+        cloudFormation(PREFIX_LIST_STACK, "UpdateStack", prefixListTemplate(vpcId, "IPv4", 3, offices, "", false)
+                .replace("\"office-egress\"", "\"office-egress-renamed\""));
+        describeStacks(PREFIX_LIST_STACK, "UPDATE_COMPLETE");
+        assertFalse(prefixListXml(id).contains("<key>team</key>"), "the dropped tags must be removed");
+
+        String withoutEntries = prefixListTemplate(vpcId, "IPv4", 3, offices, "", false)
+                .replace(", \"Entries\": " + offices, "")
+                .replace("\"office-egress\"", "\"office-egress-renamed\"");
+        cloudFormation(PREFIX_LIST_STACK, "UpdateStack", withoutEntries);
+        assertEquals(id, XmlParser.extractPairs(describeStacks(PREFIX_LIST_STACK, "UPDATE_COMPLETE"),
+                "Outputs", "OutputKey", "OutputValue").get("Ref"));
+        assertFalse(entriesXml(id).contains("<cidr>"), "dropping declared Entries must clear the list");
+        assertTrue(prefixListXml(id).contains("<maxEntries>3</maxEntries>"), "omitting Entries preserves capacity");
+
+        cloudFormation(PREFIX_LIST_STACK, "DeleteStack", null);
+        CfnStackWaits.awaitStackDeleted(PREFIX_LIST_STACK);
+        given().contentType("application/x-www-form-urlencoded").header("Authorization", EC2_AUTH)
+                .formParam("Action", "GetManagedPrefixListEntries").formParam("Version", "2016-11-15")
+                .formParam("PrefixListId", id)
+        .when().post("/").then().statusCode(400).body(containsString("InvalidPrefixListID.NotFound"));
+        ec2("DeleteVpc", Map.of("VpcId", vpcId));
+    }
+
+    /**
+     * {@code Fn::GetAtt Version} is the list's version, and a resource whose integer property reads
+     * it follows the list: here a second list sized by the first one's version.
+     */
+    @Test
+    void aPrefixListVersionCanSizeAnotherList() {
+        String stack = "ec2-prefix-list-version-it";
+        String template = """
+        {
+          "Resources": {
+            "First": {"Type": "AWS::EC2::PrefixList",
+                      "Properties": {"PrefixListName": "version-source", "AddressFamily": "IPv4", "MaxEntries": 2,
+                                     "Entries": %s}},
+            "Second": {"Type": "AWS::EC2::PrefixList",
+                       "Properties": {"PrefixListName": "version-sized", "AddressFamily": "IPv4",
+                                      "MaxEntries": {"Fn::GetAtt": ["First", "Version"]}}}
+          },
+          "Outputs": {"SecondId": {"Value": {"Ref": "Second"}}}
+        }
+        """;
+        cloudFormation(stack, "CreateStack", template.formatted("[{\"Cidr\": \"192.0.2.0/24\"}]"));
+        String second = XmlParser.extractPairs(describeStacks(stack, "CREATE_COMPLETE"),
+                "Outputs", "OutputKey", "OutputValue").get("SecondId");
+        assertTrue(prefixListXml(second).contains("<maxEntries>1</maxEntries>"), prefixListXml(second));
+
+        cloudFormation(stack, "UpdateStack",
+                template.formatted("[{\"Cidr\": \"192.0.2.0/24\"}, {\"Cidr\": \"198.51.100.0/24\"}]"));
+        describeStacks(stack, "UPDATE_COMPLETE");
+        assertTrue(prefixListXml(second).contains("<maxEntries>2</maxEntries>"),
+                "the first list's new version resizes the second: " + prefixListXml(second));
+
+        cloudFormation(stack, "DeleteStack", null);
+        CfnStackWaits.awaitStackDeleted(stack);
+    }
+
+    /** EC2 checks a prefix list's tags; one it refuses fails the create and leaves no list behind. */
+    @Test
+    void aTagEc2RefusesFailsThePrefixListAndLeavesNoList() {
+        String stack = "ec2-prefix-list-bad-tag-it";
+        cloudFormation(stack, "CreateStack", """
+        {"Resources": {"Firewall": {"Type": "AWS::EC2::PrefixList",
+          "Properties": {"PrefixListName": "bad-tag-list", "AddressFamily": "IPv4", "MaxEntries": 1,
+                         "Tags": [{"Key": "%s", "Value": "x"}]}}}}
+        """.formatted("k".repeat(129)));
+
+        describeStacks(stack, "ROLLBACK_COMPLETE");
+        String reason = CfnStackWaits.failedResourceReason(stack, CFN_AUTH);
+        assertTrue(reason.contains("Tag key exceeds the maximum length of 128 characters"), reason);
+        assertFalse(ec2("DescribeManagedPrefixLists").contains("bad-tag-list"), "the new list is removed again");
+        cloudFormation(stack, "DeleteStack", null);
+        CfnStackWaits.awaitStackDeleted(stack);
+    }
+
+    /** A change set action on the prefix list stack; {@code templateBody} only for CreateChangeSet. */
+    private static String changeSet(String action, String changeSetName, String templateBody) {
+        RequestSpecification request = given()
+            .contentType("application/x-www-form-urlencoded")
+            .header("Authorization", CFN_AUTH)
+            .formParam("Action", action)
+            .formParam("StackName", PREFIX_LIST_STACK)
+            .formParam("ChangeSetName", changeSetName);
+        if (templateBody != null) {
+            request.formParam("ChangeSetType", "UPDATE").formParam("TemplateBody", templateBody);
+        }
+        return request.when().post("/").then().statusCode(200).extract().asString();
+    }
+
+    private static String prefixListXml(String prefixListId) {
+        return ec2("DescribeManagedPrefixLists", Map.of("PrefixListId.1", prefixListId));
+    }
+
+    private static String entriesXml(String prefixListId) {
+        return ec2("GetManagedPrefixListEntries", Map.of("PrefixListId", prefixListId));
+    }
+
+    private static String template(String vpcId, String publicSubnetCidr, String extraSubnetTag) {
+        return """
+        {
+          "Resources": {
+            "Igw": {"Type": "AWS::EC2::InternetGateway"},
+            "Attach": {"Type": "AWS::EC2::VPCGatewayAttachment",
+                       "Properties": {"VpcId": "%1$s", "InternetGatewayId": {"Ref": "Igw"}}},
+            "PublicSubnet": {"Type": "AWS::EC2::Subnet",
+                             "Properties": {"VpcId": "%1$s", "CidrBlock": "%2$s",
+                                            "AvailabilityZone": "us-east-1a", "MapPublicIpOnLaunch": true,
+                                            "Tags": [{"Key": "Name", "Value": "public"}, %3$s]}},
+            "PublicRt": {"Type": "AWS::EC2::RouteTable",
+                         "Properties": {"VpcId": "%1$s", "Tags": [{"Key": "Name", "Value": "public-rt"}]}},
+            "PublicRoute": {"Type": "AWS::EC2::Route", "DependsOn": "Attach",
+                            "Properties": {"RouteTableId": {"Ref": "PublicRt"}, "DestinationCidrBlock": "0.0.0.0/0",
+                                           "GatewayId": {"Ref": "Igw"}}},
+            "PeerRoute": {"Type": "AWS::EC2::Route",
+                          "Properties": {"RouteTableId": {"Ref": "PublicRt"}, "DestinationCidrBlock": "10.99.0.18/24",
+                                         "GatewayId": {"Ref": "Igw"}}},
+            "PublicAssoc": {"Type": "AWS::EC2::SubnetRouteTableAssociation",
+                            "Properties": {"RouteTableId": {"Ref": "PublicRt"}, "SubnetId": {"Ref": "PublicSubnet"}}},
+            "NatEip": {"Type": "AWS::EC2::EIP", "Properties": {"Domain": "vpc"}},
+            "Nat": {"Type": "AWS::EC2::NatGateway",
+                    "Properties": {"SubnetId": {"Ref": "PublicSubnet"}, "AllocationId": {"Fn::GetAtt": ["NatEip", "AllocationId"]}}},
+            "PrivateRt": {"Type": "AWS::EC2::RouteTable", "Properties": {"VpcId": "%1$s"}},
+            "PrivateRoute": {"Type": "AWS::EC2::Route",
+                             "Properties": {"RouteTableId": {"Ref": "PrivateRt"}, "DestinationCidrBlock": "0.0.0.0/0",
+                                            "NatGatewayId": {"Ref": "Nat"}}}
+          },
+          "Outputs": {
+            "SubnetId": {"Value": {"Ref": "PublicSubnet"}},
+            "SubnetAz": {"Value": {"Fn::GetAtt": ["PublicSubnet", "AvailabilityZone"]}},
+            "IgwId": {"Value": {"Ref": "Igw"}},
+            "PublicRtId": {"Value": {"Ref": "PublicRt"}},
+            "PrivateRtId": {"Value": {"Ref": "PrivateRt"}},
+            "PublicRouteRef": {"Value": {"Ref": "PublicRoute"}},
+            "PublicRouteCidr": {"Value": {"Fn::GetAtt": ["PublicRoute", "CidrBlock"]}},
+            "PeerRouteRef": {"Value": {"Ref": "PeerRoute"}},
+            "AssocId": {"Value": {"Ref": "PublicAssoc"}},
+            "EipRef": {"Value": {"Ref": "NatEip"}},
+            "EipAllocationId": {"Value": {"Fn::GetAtt": ["NatEip", "AllocationId"]}},
+            "NatId": {"Value": {"Ref": "Nat"}},
+            "NatEniId": {"Value": {"Fn::GetAtt": ["Nat", "EniId"]}}
+          }
+        }
+        """.formatted(vpcId, publicSubnetCidr, extraSubnetTag);
+    }
+
+    @BeforeAll
+    static void configureRestAssured() {
+        RestAssuredJsonUtils.configureAwsContentTypes();
+    }
+
+    @Test
+    void networkingStackExposesTheAwsRefShapesAndDeletesEverythingItCreated() throws Exception {
+        String vpcId = between(ec2("CreateVpc", Map.of("CidrBlock", "10.40.0.0/16")), "<vpcId>", "</vpcId>");
+        cloudFormation("CreateStack", template(vpcId, "10.40.0.0/24"));
+
+        String stacks = describeStacks("CREATE_COMPLETE");
+        Map<String, String> out = XmlParser.extractPairs(stacks, "Outputs", "OutputKey", "OutputValue");
+        assertTrue(out.get("SubnetId").startsWith("subnet-"), out.get("SubnetId"));
+        assertEquals("us-east-1a", out.get("SubnetAz"));
+        assertTrue(out.get("IgwId").startsWith("igw-"), out.get("IgwId"));
+        assertTrue(out.get("PublicRtId").startsWith("rtb-"), out.get("PublicRtId"));
+        assertEquals(out.get("PublicRtId") + "|0.0.0.0/0", out.get("PublicRouteRef"),
+                "Ref of a Route is the registry primary identifier, table id and destination");
+        assertEquals("0.0.0.0/0", out.get("PublicRouteCidr"));
+        assertEquals(out.get("PublicRtId") + "|10.99.0.0/24", out.get("PeerRouteRef"),
+                "a non-canonical destination is keyed by the canonical CIDR the service stores");
+        assertTrue(out.get("AssocId").startsWith("rtbassoc-"), out.get("AssocId"));
+        assertTrue(out.get("EipAllocationId").startsWith("eipalloc-"), out.get("EipAllocationId"));
+        assertFalse(out.get("EipRef").startsWith("eipalloc-"), "Ref of an EIP is its public IP: " + out.get("EipRef"));
+        assertTrue(out.get("NatId").startsWith("nat-"), out.get("NatId"));
+        assertTrue(out.get("NatEniId").startsWith("eni-"), out.get("NatEniId"));
+
+        String subnets = ec2("DescribeSubnets");
+        assertTrue(subnets.contains(out.get("SubnetId")));
+        assertTrue(subnets.contains("<key>tier</key>") && subnets.contains("<value>web</value>"), "subnet tags must reach EC2: " + subnets);
+        String routeTables = ec2("DescribeRouteTables");
+        assertTrue(routeTables.contains("<value>public-rt</value>"), "route table tags must reach EC2");
+        assertTrue(routeTables.contains(out.get("PublicRtId")) && routeTables.contains(out.get("AssocId")));
+        assertTrue(routeTables.contains(out.get("NatId")), "the private route must point at the NAT gateway");
+        String natGateways = ec2("DescribeNatGateways");
+        assertTrue(natGateways.contains(out.get("NatId")));
+        assertTrue(natGateways.contains("<networkInterfaceId>" + out.get("NatEniId") + "</networkInterfaceId>"),
+                "EniId must be the gateway's own interface");
+        assertTrue(ec2("DescribeAddresses").contains(out.get("EipAllocationId")));
+        assertTrue(ec2("DescribeInternetGateways").contains(out.get("IgwId")));
+
+        // The same template again: every id survives (the switch re-created all seven).
+        cloudFormation("UpdateStack", CfnUpdates.forceUpdate(template(vpcId, "10.40.0.0/24")));
+        Map<String, String> again = XmlParser.extractPairs(describeStacks("UPDATE_COMPLETE"), "Outputs", "OutputKey", "OutputValue");
+        again.remove(CfnUpdates.FORCED_OUTPUT);
+        assertEquals(out, again, "an unchanged update must keep every networking resource");
+
+        // Tags are mutable: a dropped key goes, a changed value is written, the subnet stays.
+        cloudFormation("UpdateStack", template(vpcId, "10.40.0.0/24", "{\"Key\": \"env\", \"Value\": \"test\"}"));
+        assertEquals(out.get("SubnetId"), XmlParser.extractPairs(describeStacks("UPDATE_COMPLETE"), "Outputs", "OutputKey", "OutputValue").get("SubnetId"));
+        String retagged = ec2("DescribeSubnets");
+        assertTrue(retagged.contains("<key>env</key>"), "the new tag must be written");
+        assertFalse(retagged.contains("<key>tier</key>"), "the dropped tag must be removed");
+
+        // CidrBlock is createOnly: the public subnet is replaced, and with it the NAT gateway and the
+        // association that name it; the gateway and route tables stay. The replacement gateway gets a
+        // new EIP: CloudFormation creates it before deleting the old one, and on AWS a gateway given
+        // an Elastic IP the displaced gateway still holds is created failed. The old EIP stays in
+        // the template for a second reason: Floci's update cleanup deletes removed resources before
+        // the old copies of replaced ones (AWS deletes in reverse dependency order), so dropping the
+        // EIP while replacing its gateway would try to release it while the old gateway still holds
+        // it. Keeping NatEip sidesteps that; the cleanup order is a separate issue. The old EIP is
+        // free once the displaced gateway is gone. oldEip is NatEip: out is NatEipB's outputs below.
+        cloudFormation("UpdateStack", template(vpcId, "10.40.2.0/24").replace("NatEip", "NatEipB")
+                .replace("\"NatEipB\": {\"Type\"",
+                        "\"NatEip\": {\"Type\": \"AWS::EC2::EIP\", \"Properties\": {\"Domain\": \"vpc\"}},\n"
+                        + "            \"NatEipB\": {\"Type\""));
+        Map<String, String> replaced = XmlParser.extractPairs(describeStacks("UPDATE_COMPLETE"), "Outputs", "OutputKey", "OutputValue");
+        assertFalse(out.get("SubnetId").equals(replaced.get("SubnetId")), "a changed CIDR must replace the subnet");
+        assertFalse(out.get("NatId").equals(replaced.get("NatId")), "the NAT gateway follows its subnet");
+        assertFalse(out.get("NatEniId").equals(replaced.get("NatEniId")), "EniId must not be the displaced gateway's");
+        assertTrue(ec2("DescribeNatGateways", Map.of("NatGatewayId.1", replaced.get("NatId")))
+                        .contains("<networkInterfaceId>" + replaced.get("NatEniId") + "</networkInterfaceId>"),
+                "EniId must be the replacement gateway's own interface");
+        assertFalse(out.get("AssocId").equals(replaced.get("AssocId")), "the association follows its subnet");
+        assertEquals(out.get("IgwId"), replaced.get("IgwId"));
+        assertFalse(out.get("EipAllocationId").equals(replaced.get("EipAllocationId")), "the gateway takes the new EIP");
+        assertFalse(ec2("DescribeAddresses", Map.of("AllocationId.1", out.get("EipAllocationId"))).contains("<associationId>"),
+                "the displaced gateway's EIP must be free");
+        String oldEip = out.get("EipAllocationId");
+        assertEquals(out.get("PublicRtId"), replaced.get("PublicRtId"));
+        assertEquals(out.get("PrivateRtId"), replaced.get("PrivateRtId"));
+        assertFalse(ec2("DescribeSubnets").contains(out.get("SubnetId")), "the displaced subnet must be gone");
+        assertFalse(ec2("DescribeNatGateways").contains(out.get("NatId")), "the displaced NAT gateway must be gone");
+        assertTrue(ec2("DescribeSubnets").contains(replaced.get("SubnetId")));
+        out = replaced;
+
+        cloudFormation("DeleteStack", null);
+        CfnStackWaits.awaitStackDeleted(STACK);
+
+        for (String id : List.of(out.get("SubnetId"), out.get("PublicRtId"), out.get("PrivateRtId"),
+                out.get("AssocId"), out.get("NatId"), out.get("EipAllocationId"), oldEip, out.get("IgwId"))) {
+            String everything = ec2("DescribeSubnets") + ec2("DescribeRouteTables") + ec2("DescribeNatGateways")
+                    + ec2("DescribeAddresses") + ec2("DescribeInternetGateways");
+            assertFalse(everything.contains(id), "stack delete must remove " + id);
+        }
+        ec2("DeleteVpc", Map.of("VpcId", vpcId));
+    }
+
+    private static String between(String haystack, String open, String close) {
+        int start = haystack.indexOf(open);
+        int end = haystack.indexOf(close, start);
+        assertTrue(start >= 0 && end > start, "missing " + open + " in " + haystack);
+        return haystack.substring(start + open.length(), end);
+    }
+
+    private static void cloudFormation(String action, String templateBody) {
+        cloudFormation(STACK, action, templateBody);
+    }
+
+    private static void cloudFormation(String stack, String action, String templateBody) {
+        RequestSpecification request = cfn(action, stack).header("Authorization", CFN_AUTH);
+        if (templateBody != null) {
+            request.formParam("TemplateBody", templateBody);
+        }
+        request.when().post("/").then().statusCode(200);
+    }
+
+    private static String describeStacks(String expectedStatus) {
+        return describeStacks(STACK, expectedStatus);
+    }
+
+    private static String describeStacks(String stack, String expectedStatus) {
+        CfnStackWaits.awaitStatus(stack, expectedStatus);
+        return cfn("DescribeStacks", stack)
+            .header("Authorization", CFN_AUTH)
+        .when().post("/").then().statusCode(200)
+            .body(containsString("<StackStatus>" + expectedStatus + "</StackStatus>"))
+            .extract().asString();
+    }
+
+    private static String ec2(String action) {
+        return ec2(action, Map.of());
+    }
+
+    private static String ec2(String action, Map<String, String> params) {
+        RequestSpecification request = given()
+            .contentType("application/x-www-form-urlencoded")
+            .header("Authorization", EC2_AUTH)
+            .formParam("Action", action)
+            .formParam("Version", "2016-11-15");
+        params.forEach(request::formParam);
+        return request.when().post("/").then().statusCode(200).extract().asString();
+    }
+}

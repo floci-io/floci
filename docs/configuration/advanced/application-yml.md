@@ -417,10 +417,10 @@ Floci ships with `quarkus.log.min-level: TRACE`, so raising a single category to
 
 ```bash
 # SQS: log SendMessage/ReceiveMessage/DeleteMessage bodies and attributes
-QUARKUS_LOG_CATEGORY__IO_GITHUB_HECTORVENT_FLOCI_SERVICES_SQS__LEVEL=TRACE
+QUARKUS_LOG_CATEGORY__IO_FLOCI_AWS_SERVICES_SQS__LEVEL=TRACE
 
 # DynamoDB: log PutItem/GetItem/UpdateItem/DeleteItem items, Query/Scan counts
-QUARKUS_LOG_CATEGORY__IO_GITHUB_HECTORVENT_FLOCI_SERVICES_DYNAMODB__LEVEL=TRACE
+QUARKUS_LOG_CATEGORY__IO_FLOCI_AWS_SERVICES_DYNAMODB__LEVEL=TRACE
 ```
 
 **Or in `application.yml`:**
@@ -429,9 +429,9 @@ QUARKUS_LOG_CATEGORY__IO_GITHUB_HECTORVENT_FLOCI_SERVICES_DYNAMODB__LEVEL=TRACE
 quarkus:
   log:
     category:
-      "io.github.hectorvent.floci.services.sqs":
+      "io.floci.aws.services.sqs":
         level: TRACE
-      "io.github.hectorvent.floci.services.dynamodb":
+      "io.floci.aws.services.dynamodb":
         level: TRACE
 ```
 
@@ -440,7 +440,7 @@ quarkus:
 ```java
 new GenericContainer<>("floci/floci:latest")
     .withExposedPorts(4566)
-    .withEnv("QUARKUS_LOG_CATEGORY__IO_GITHUB_HECTORVENT_FLOCI_SERVICES_SQS__LEVEL", "TRACE");
+    .withEnv("QUARKUS_LOG_CATEGORY__IO_FLOCI_AWS_SERVICES_SQS__LEVEL", "TRACE");
 ```
 
 TRACE output includes the payload alongside the existing DEBUG line:

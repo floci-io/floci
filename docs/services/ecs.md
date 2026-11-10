@@ -38,8 +38,11 @@ eight documented counts split by launch type (`runningEC2TasksCount`, `runningFa
 `pendingEC2TasksCount`, `pendingFargateTasksCount`, `activeEC2ServiceCount`,
 `activeFargateServiceCount`, `drainingEC2ServiceCount`, `drainingFargateServiceCount`) as
 name/value strings. The API reference spells one of those names `RunningFargateTasksCount`; Floci
-follows the wire, which is lower camel case like the other seven. `ATTACHMENTS` is always an empty
-list, because Floci creates no managed scaling policies to attach.
+follows the wire, which is lower camel case like the other seven. The reference also describes
+`pendingTasksCount` as tasks in the `PENDING` state, but ECS counts a task as pending from
+`RunTask` until it runs, so Floci's count and the two pending statistics include a `PROVISIONING`
+task too. `ATTACHMENTS` is always an empty list, because Floci creates no managed scaling policies
+to attach.
 
 `DescribeClusters` reports a cluster it cannot resolve as a `MISSING` entry in `failures` rather
 than dropping it, as `DescribeServices` and `DescribeTasks` do. `ListClusters` pages with
@@ -125,9 +128,10 @@ default) keeps both. It pages with `maxResults` and `nextToken` the same way.
 At launch, a container's `dependsOn` decides the start order, and a `COMPLETE`, `SUCCESS` or
 `HEALTHY` condition holds the dependent container until the dependency gets there. The wait is
 bounded by the dependent container's `startTimeout`, defaulting to 60 seconds rather than AWS's
-longer agent default, because `RunTask` here answers synchronously. A container's `cpu` becomes its
-CPU shares, its `memory` its hard limit, and a container without a `memory` of its own is capped at
-the task's; the task's `cpu` becomes a CPU quota. `stopTimeout` is the grace period the container gets
+longer agent default, because the service scheduler starts a service's tasks on its own thread,
+which a long wait holds up. A container's `cpu` becomes its CPU shares, its `memory` its hard
+limit, and a container without a `memory` of its own is capped at the task's; the task's `cpu`
+becomes a CPU quota. `stopTimeout` is the grace period the container gets
 on teardown; a container that does not ask for one gets 5 seconds rather than AWS's 30, because
 `StopTask` here answers synchronously and most containers ignore SIGTERM as PID 1. A container
 still running when its grace period is up is killed, so its exit code is always reported.
@@ -312,6 +316,14 @@ converging reports none. Each `deployments` entry carries the placement it runs 
 service-only option; `TASK_DEFINITION` copies the task definition's tags onto each task.
 `StartTask` requires the `containerInstances` it places onto, at most 10 of them.
 
+`RunTask` and `StartTask` answer before the task's images are pulled, as AWS does. An `awsvpc` task
+comes back `PROVISIONING` with its ENI attachment `PRECREATED`, and any other task `PENDING`, each
+with its containers `PENDING`. The task then moves to `RUNNING` in the background. A launch that
+fails, on an image that cannot be pulled for example, shows in `DescribeTasks` as `STOPPED` with
+`stopCode` `TaskFailedToStart`. A `StopTask` on a task still launching answers with the task's status
+unchanged and `desiredStatus` `STOPPED`; the task then stops without its containers ever starting,
+or as soon as they have.
+
 `ListTasks` filters by `cluster`, `family`, `desiredStatus`, `launchType`, `containerInstance`,
 `serviceName` and `startedBy`, and pages with `maxResults` and `nextToken` (100 per page by
 default). The default filter is a desired status of `RUNNING`, so a listing that has not asked for
@@ -347,6 +359,14 @@ instance that a task does not have. The ECS attachment is reported as `DELETED` 
 stops, and the ENI is released. Security-group enforcement
 (`FLOCI_NETWORK_SECURITY_GROUP_ENFORCEMENT_ENABLED`) adds packet filtering on top of the ENI; it is
 not needed for the ENI itself.
+
+With Docker-backed VPC networks (`FLOCI_SERVICES_EC2_VPC_NETWORKS_ENABLED=true` and
+`FLOCI_SERVICES_EC2_MOCK=false`), a Docker-mode task also joins its VPC's Docker network at the ENI
+address, so an EC2 instance, a `VpcConfig` Lambda function or any other container on that network
+reaches the task at the `privateIPv4Address` that `DescribeTasks` reports. AWS gives the whole task
+that one address; Floci gives it to one container, the first in the task definition that maps a
+port, else the first, and the task's other containers do not answer at it. A task in a
+security-group protected namespace keeps that namespace and does not join the VPC network.
 
 #### Capacity providers
 
@@ -586,7 +606,7 @@ carries `AWS_INSTANCE_IPV4` and `AWS_INSTANCE_PORT`, chosen by network mode:
 
 | Network mode | `AWS_INSTANCE_IPV4` | `AWS_INSTANCE_PORT` |
 |---|---|---|
-| `awsvpc` | the address the task's container holds on its Docker network | the entry's `containerPort` |
+| `awsvpc` | the address the task's container holds on the Docker network it was created on | the entry's `containerPort` |
 | `bridge` or `host` | the address Floci reaches the container at: `127.0.0.1` when Floci runs natively, the container's Docker network address when Floci runs in Docker | the host port the entry's `containerPort` was published on, or the `containerPort` when it has no binding |
 
 An explicit `port` on the registry entry is registered as-is in every mode, as on AWS. The
@@ -607,8 +627,9 @@ Known differences from AWS:
   only A records, so such a task registers its address and its published host port and
   resolves by address; the port is readable through `DiscoverInstances` rather than DNS.
 - An awsvpc task registers its container's Docker network address, not its ENI address. On
-  AWS the two are the same interface. In Floci a task's containers never join the subnet's
-  network, so the ENI address `DescribeTasks` reports is not one a peer can connect to. The
+  AWS the two are the same interface. In Floci the ENI address is held only on the VPC's
+  Docker network, when VPC networks are enabled, so it is not one a peer outside that network
+  can connect to. The
   registrar falls back to the ENI address only when it cannot read an address from a running
   container. Because the address is the container's own, the port is its `containerPort`, not
   any host port Floci also published it on.
@@ -870,7 +891,7 @@ Every `awsvpc` task receives an ENI in its subnet. With `FLOCI_NETWORK_SECURITY_
 | Variable | Default | Description |
 |---|---|---|
 | `FLOCI_SERVICES_ECS_ENABLED` | `true` | Enable or disable the ECS service |
-| `FLOCI_SERVICES_ECS_MOCK` | `false` | Skip Docker; tasks go straight to `RUNNING` (useful for CI) |
+| `FLOCI_SERVICES_ECS_MOCK` | `false` | Skip Docker; tasks reach `RUNNING` with nothing running behind them (useful for CI) |
 | `FLOCI_SERVICES_ECS_DOCKER_NETWORK` | *(unset)* | Docker network for task containers |
 | `FLOCI_SERVICES_ECS_DEFAULT_MEMORY_MB` | `512` | Default memory (MB) when the task definition omits it |
 | `FLOCI_SERVICES_ECS_DEFAULT_CPU_UNITS` | `256` | Default CPU units when the task definition omits it |
@@ -1036,7 +1057,7 @@ Unlike [real EFS user enforcement](https://docs.aws.amazon.com/efs/latest/ug/enf
 
 ### Mock mode
 
-Set `FLOCI_SERVICES_ECS_MOCK=true` to run without Docker. In this mode tasks skip container launch and immediately transition to `RUNNING`, then to `STOPPED` when stopped. The task still reports a container per container definition and, for `awsvpc`, a real ENI, so a client reading `containers[]` or waiting on the task's address behaves as it does against AWS; nothing is running behind those containers, so ECS Exec answers `TargetNotConnectedException` and no logs are streamed. This is the recommended mode for unit/integration tests and CI pipelines where Docker-in-Docker is unavailable.
+Set `FLOCI_SERVICES_ECS_MOCK=true` to run without Docker. In this mode tasks skip container launch and reach `RUNNING` right after `RunTask` answers, then `STOPPED` when stopped. The task still reports a container per container definition and, for `awsvpc`, a real ENI, so a client reading `containers[]` or waiting on the task's address behaves as it does against AWS; nothing is running behind those containers, so ECS Exec answers `TargetNotConnectedException` and no logs are streamed. This is the recommended mode for unit/integration tests and CI pipelines where Docker-in-Docker is unavailable.
 
 ```yaml
 # docker-compose.yml — CI / test environment

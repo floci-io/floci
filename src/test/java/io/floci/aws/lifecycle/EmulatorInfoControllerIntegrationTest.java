@@ -1,0 +1,267 @@
+package io.floci.aws.lifecycle;
+
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import io.floci.aws.config.FlociVersion;
+import io.floci.aws.testing.RestAssuredJsonUtils;
+import io.quarkus.test.junit.QuarkusTest;
+import io.restassured.response.ValidatableResponse;
+import org.junit.jupiter.api.BeforeAll;
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
+
+import java.io.ByteArrayInputStream;
+import java.nio.charset.StandardCharsets;
+import java.security.cert.CertificateFactory;
+import java.security.cert.X509Certificate;
+import java.util.List;
+import java.util.UUID;
+
+import static io.restassured.RestAssured.given;
+import static org.hamcrest.Matchers.*;
+import static org.junit.jupiter.api.Assertions.*;
+
+@QuarkusTest
+class EmulatorInfoControllerIntegrationTest {
+
+    private static final ObjectMapper MAPPER = new ObjectMapper();
+
+    @BeforeAll
+    static void configureRestAssured() {
+        RestAssuredJsonUtils.configureAwsContentTypes();
+    }
+
+    // Core services that must always be present and running.
+    // New services can be added to Floci without updating this list —
+    // the test verifies all known services are present, not an exact set.
+    private static final List<String> CORE_SERVICES = List.of(
+            "ssm", "sqs", "s3", "dynamodb", "sns", "lambda",
+            "apigateway", "iam", "kafka", "elasticache", "rds",
+            "events", "scheduler", "logs", "monitoring", "secretsmanager",
+            "apigatewayv2", "kinesis", "kms", "cognito-idp", "states",
+            "cloudformation", "acm", "athena", "glue", "firehose",
+            "email", "es", "ec2", "ecs", "appconfig", "appconfigdata",
+            "ecr", "tagging", "bedrock-runtime", "eks", "pipes",
+            "elasticloadbalancing", "codebuild", "codedeploy", "autoscaling",
+            "backup", "route53", "transfer"
+    );
+
+    @ParameterizedTest
+    @ValueSource(strings = {"/_floci/health", "/_localstack/health"})
+    void health_returnsSameResponseOnBothPaths(String path) throws Exception {
+        String body = given()
+            .when().get(path)
+            .then()
+                .statusCode(200)
+                .contentType("application/json")
+                .extract().body().asString();
+
+        JsonNode tree = MAPPER.readTree(body);
+        assertEquals("community", tree.get("edition").asText());
+        assertEquals("floci-always-free", tree.get("original_edition").asText());
+        assertEquals(FlociVersion.current(), tree.get("version").asText());
+
+        JsonNode services = tree.get("services");
+        assertNotNull(services, "services field must be present");
+        for (String service : CORE_SERVICES) {
+            assertEquals("running", services.path(service).asText(),
+                    "Service '" + service + "' must be running");
+        }
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"/_floci/info", "/_localstack/info"})
+    void info_isTheConsoleContractManifestOnBothPaths(String path) {
+        given()
+            .when().get(path)
+            .then()
+                .statusCode(200)
+                .contentType("application/json")
+                .body("manifest_version", equalTo(1))
+                .body("console_contract", equalTo(2))
+                .body("cloud", equalTo("aws"))
+                .body("health_url", equalTo("/_floci/health"))
+                .body("services.s3", equalTo("enabled"))
+                .body("defaults.region", equalTo("us-east-1"))
+                .body("defaults.account_id", equalTo("000000000000"))
+                .body("ui.port", equalTo(4500))
+                .body("version", equalTo(FlociVersion.current()))
+                .body("dynamodb_backend", notNullValue());
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"/_floci/init", "/_localstack/init"})
+    void init_returnsLifecycleStateOnBothPaths(String path) {
+        given()
+            .when().get(path)
+            .then()
+                .statusCode(200)
+                .contentType("application/json")
+                .body("completed.boot", equalTo(true))
+                .body("completed.start", equalTo(true))
+                .body("completed.ready", equalTo(true))
+                .body("completed.shutdown", equalTo(false))
+                .body("scripts.boot", hasSize(0))
+                .body("scripts.start", hasSize(0))
+                .body("scripts.ready", hasSize(0))
+                .body("scripts.shutdown", hasSize(0));
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"/_floci/info", "/_localstack/info"})
+    void info_returnsVersionAndEditionOnBothPaths(String path) {
+        given()
+            .when().get(path)
+            .then()
+                .statusCode(200)
+                .contentType("application/json")
+                .body("edition", equalTo("community"))
+                .body("version", allOf(equalTo(FlociVersion.current()), not(equalTo("dev"))))
+                .body("dynamodb_backend", equalTo("native"));
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"/_floci/diagnose", "/_localstack/diagnose"})
+    void diagnose_returns200OnBothPaths(String path) {
+        given().when().get(path).then().statusCode(200).contentType("application/json");
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"/_floci/config", "/_localstack/config"})
+    void config_returns200OnBothPaths(String path) {
+        given().when().get(path).then().statusCode(200).contentType("application/json");
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"/_floci/ca.pem", "/_localstack/ca.pem"})
+    void caPem_returnsTheLocalCaAsPlainText(String path) throws Exception {
+        String pem = given()
+            .when().get(path)
+            .then()
+                .statusCode(200)
+                .contentType(startsWith("text/plain"))
+                .extract().body().asString();
+
+        X509Certificate cert = (X509Certificate) CertificateFactory.getInstance("X.509")
+                .generateCertificate(new ByteArrayInputStream(pem.getBytes(StandardCharsets.US_ASCII)));
+        assertTrue(cert.getBasicConstraints() >= 0, "must be a CA certificate");
+        assertEquals(cert.getSubjectX500Principal(), cert.getIssuerX500Principal());
+        assertEquals(pem, given().when().get("/_floci/ca.pem").then().extract().body().asString(),
+                "the same CA on every call");
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"/_floci/state/reset", "/_localstack/state/reset", "/_floci/state/nuke", "/_localstack/state/nuke"})
+    void stateReset_returnsOkOnAllPaths(String path) {
+        given()
+            .when().post(path)
+            .then()
+                .statusCode(200)
+                .contentType("application/json")
+                .body("status", equalTo("OK"));
+    }
+
+    @Test
+    void stateReset_keepsBootstrapStateOfServicesThatReseedOnClear() {
+        // IAM Identity Center recreates its bootstrap instance in clear(). A reset that wiped
+        // storage after that step left every SCIM call answering 401 until a restart.
+        given()
+            .when().post("/_floci/state/reset")
+            .then()
+                .statusCode(200);
+
+        given()
+            .header("Authorization", "Bearer floci-scim-token")
+        .when()
+            .get("/9067f2a3c1-00000000-0000-0000-0000-000000000000/scim/v2/ServiceProviderConfig")
+        .then()
+            .statusCode(200)
+            .body("schemas[0]", equalTo("urn:ietf:params:scim:schemas:core:2.0:ServiceProviderConfig"));
+    }
+
+    @Test
+    void stateResetClearsDynamoDbStreams() {
+        String tableName = "reset-streams-" + UUID.randomUUID();
+        dynamoDb("DynamoDB_20120810.CreateTable", """
+                {"TableName": "%s",
+                 "KeySchema": [{"AttributeName": "id", "KeyType": "HASH"}],
+                 "AttributeDefinitions": [{"AttributeName": "id", "AttributeType": "S"}],
+                 "BillingMode": "PAY_PER_REQUEST",
+                 "StreamSpecification": {"StreamEnabled": true, "StreamViewType": "KEYS_ONLY"}}
+                """.formatted(tableName))
+            .statusCode(200);
+        String listStreams = "{\"TableName\": \"" + tableName + "\"}";
+        dynamoDb("DynamoDBStreams_20120810.ListStreams", listStreams).body("Streams", hasSize(1));
+
+        given().when().post("/_floci/state/reset").then().statusCode(200);
+
+        dynamoDb("DynamoDBStreams_20120810.ListStreams", listStreams).statusCode(200).body("Streams", hasSize(0));
+    }
+
+    private static ValidatableResponse dynamoDb(String target, String body) {
+        return given()
+            .header("X-Amz-Target", target)
+            .contentType("application/x-amz-json-1.0")
+            .body(body)
+        .when()
+            .post("/")
+        .then();
+    }
+
+    @Test
+    void stateReset_clearsDatabaseState() {
+        // 1. Put SSM parameter
+        given()
+            .header("X-Amz-Target", "AmazonSSM.PutParameter")
+            .contentType("application/x-amz-json-1.1")
+            .body("""
+                {
+                    "Name": "/test/parameter/to/be/reset",
+                    "Value": "should-be-gone",
+                    "Type": "String"
+                }
+                """)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200);
+
+        // 2. Verify parameter exists
+        given()
+            .header("X-Amz-Target", "AmazonSSM.GetParameter")
+            .contentType("application/x-amz-json-1.1")
+            .body("""
+                {
+                    "Name": "/test/parameter/to/be/reset"
+                }
+                """)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("Parameter.Value", equalTo("should-be-gone"));
+
+        // 3. Trigger state reset
+        given()
+            .when().post("/_floci/state/reset")
+            .then()
+                .statusCode(200)
+                .body("status", equalTo("OK"));
+
+        // 4. Verify parameter is deleted and no longer exists
+        given()
+            .header("X-Amz-Target", "AmazonSSM.GetParameter")
+            .contentType("application/x-amz-json-1.1")
+            .body("""
+                {
+                    "Name": "/test/parameter/to/be/reset"
+                }
+                """)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(400)
+            .body("__type", equalTo("ParameterNotFound"));
+    }
+}

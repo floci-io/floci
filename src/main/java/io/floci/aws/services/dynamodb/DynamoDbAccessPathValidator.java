@@ -1,0 +1,576 @@
+package io.floci.aws.services.dynamodb;
+
+import com.fasterxml.jackson.databind.JsonNode;
+import io.floci.aws.core.common.AwsException;
+import io.floci.aws.core.common.SmithyValidationErrors;
+import io.floci.aws.services.dynamodb.ExpressionEvaluator.AndExpr;
+import io.floci.aws.services.dynamodb.ExpressionEvaluator.BetweenExpr;
+import io.floci.aws.services.dynamodb.ExpressionEvaluator.CompareExpr;
+import io.floci.aws.services.dynamodb.ExpressionEvaluator.Expr;
+import io.floci.aws.services.dynamodb.ExpressionEvaluator.FunctionCallExpr;
+import io.floci.aws.services.dynamodb.ExpressionEvaluator.FunctionOperand;
+import io.floci.aws.services.dynamodb.ExpressionEvaluator.InExpr;
+import io.floci.aws.services.dynamodb.ExpressionEvaluator.NotExpr;
+import io.floci.aws.services.dynamodb.ExpressionEvaluator.Operand;
+import io.floci.aws.services.dynamodb.ExpressionEvaluator.OrExpr;
+import io.floci.aws.services.dynamodb.ExpressionEvaluator.PathOperand;
+import io.floci.aws.services.dynamodb.ExpressionEvaluator.PlaceholderOperand;
+import io.floci.aws.services.dynamodb.ExpressionEvaluator.TokenType;
+import io.floci.aws.services.dynamodb.model.AttributeDefinition;
+import io.floci.aws.services.dynamodb.model.TableDefinition;
+
+import java.util.ArrayList;
+import java.util.Collection;
+import java.util.HashMap;
+import java.util.HashSet;
+import java.util.LinkedHashSet;
+import java.util.List;
+import java.util.Map;
+import java.util.Set;
+
+final class DynamoDbAccessPathValidator {
+
+    private static final String KEY_TYPE_MISMATCH =
+            "One or more parameter values were invalid: Condition parameter type does not match schema type";
+    private static final Set<TokenType> SORT_KEY_COMPARATORS = Set.of(
+            TokenType.EQ, TokenType.LT, TokenType.LE, TokenType.GT, TokenType.GE);
+    private static final Set<String> LEGACY_SORT_KEY_COMPARATORS = Set.of(
+            "EQ", "LT", "LE", "GT", "GE", "BETWEEN", "BEGINS_WITH");
+
+    private DynamoDbAccessPathValidator() {}
+
+    static String validateQuery(TableDefinition table, DynamoDbAccessPath accessPath, JsonNode keyConditions,
+                                String keyConditionExpression, String filterExpression,
+                                JsonNode queryFilter, JsonNode expressionAttributeNames,
+                                JsonNode expressionAttributeValues) {
+        String partitionKeyValuePlaceholder = null;
+        if (keyConditionExpression != null) {
+            partitionKeyValuePlaceholder = validateKeyConditionExpression(
+                    table, accessPath, keyConditionExpression,
+                    expressionAttributeNames, expressionAttributeValues);
+        } else {
+            validateLegacyKeyConditions(table, accessPath, keyConditions);
+        }
+        validateFilterExpression(accessPath, filterExpression, expressionAttributeNames);
+        validateLegacyQueryFilter(accessPath, queryFilter);
+        return partitionKeyValuePlaceholder;
+    }
+
+    static void validateSelection(String select, String indexName,
+                                  String projectionExpression, JsonNode attributesToGet) {
+        validateAttributesToGet(attributesToGet);
+        rejectWithSelect("ProjectionExpression", projectionExpression != null, select);
+        rejectWithSelect("AttributesToGet", attributesToGet != null, select);
+        if ("ALL_PROJECTED_ATTRIBUTES".equals(select) && indexName == null) {
+            throw validationException("1 validation error detected: "
+                    + "ALL_PROJECTED_ATTRIBUTES can be used only when Querying using an IndexName");
+        }
+    }
+
+    static void validateAttributesToGet(JsonNode attributesToGet) {
+        int minimum = DynamoDbConditionKeyMembers.attributesToGetMinimum();
+        if (attributesToGet != null && attributesToGet.isArray() && attributesToGet.size() < minimum) {
+            throw validationException("1 validation error detected: " + SmithyValidationErrors.lengthTooShort(
+                    "attributesToGet", attributesToGet.toString(), minimum));
+        }
+    }
+
+    static void validateGsiProjection(TableDefinition table, DynamoDbAccessPath accessPath,
+                                      String select, String projectionExpression,
+                                      JsonNode attributesToGet, JsonNode expressionAttributeNames) {
+        if (!accessPath.isGlobalSecondaryIndex() || "ALL".equals(accessPath.projectionType())) {
+            return;
+        }
+        if ("ALL_ATTRIBUTES".equals(select)) {
+            throw validationException("One or more parameter values were invalid: "
+                    + "Select type ALL_ATTRIBUTES is not supported for global secondary index "
+                    + accessPath.indexName() + " because its projection type is not ALL");
+        }
+
+        Set<String> requestedAttributes = new LinkedHashSet<>();
+        if (ProjectionEvaluator.hasProjection(projectionExpression)) {
+            requestedAttributes.addAll(ProjectionEvaluator.topLevelAttributes(
+                    projectionExpression, expressionAttributeNames));
+        }
+        if (attributesToGet != null) {
+            attributesToGet.forEach(attribute -> requestedAttributes.add(attribute.asText()));
+        }
+
+        Set<String> projectedAttributes = accessPath.projectedAttributeNames(table);
+        requestedAttributes.removeAll(projectedAttributes);
+        if (!requestedAttributes.isEmpty()) {
+            throw unprojectedGsiAttributes(accessPath.indexName(), requestedAttributes);
+        }
+    }
+
+    static AwsException unprojectedGsiAttributes(String indexName, Collection<String> attributes) {
+        return validationException("One or more parameter values were invalid: Global secondary index "
+                + indexName + " does not project [" + String.join(", ", attributes) + "]");
+    }
+
+    private static void rejectWithSelect(String parameter, boolean present, String select) {
+        if (present && select != null && !"SPECIFIC_ATTRIBUTES".equals(select)) {
+            throw validationException("1 validation error detected: "
+                    + "Cannot specify the " + parameter + " when choosing to get "
+                    + ("COUNT".equals(select) ? "only the Count" : select));
+        }
+    }
+
+    private static String validateKeyConditionExpression(TableDefinition table,
+                                                         DynamoDbAccessPath accessPath,
+                                                         String expression, JsonNode names,
+                                                         JsonNode values) {
+        Expr root = parseExpression(expression, "KeyConditionExpression");
+
+        List<Expr> conditions = root instanceof AndExpr and
+                ? and.operands() : List.of(root);
+        List<String> partitionKeys = accessPath.partitionKeyNames();
+        Set<String> partitionKeySet = Set.copyOf(partitionKeys);
+        List<String> sortKeys = accessPath.sortKeyNames();
+        Set<String> conditionedPartitionKeys = new HashSet<>();
+        String partitionKeyValuePlaceholder = null;
+        Set<String> conditionedAttributes = new HashSet<>();
+        Map<String, Boolean> sortKeyEqualities = new HashMap<>();
+
+        boolean conditionOnNonKeyAttribute = false;
+
+        for (Expr rawCondition : conditions) {
+            Expr condition = normalizeOperandOrder(rawCondition);
+            if (conditionOperand(condition) instanceof PathOperand(List<String> segments) && segments.size() > 1) {
+                throw new AwsException("ValidationException",
+                        "KeyConditionExpressions cannot have conditions on nested attributes", 400);
+            }
+            String attribute = conditionAttribute(condition, names);
+            if (attribute != null && !conditionedAttributes.add(attribute)) {
+                throw new AwsException("ValidationException",
+                        "KeyConditionExpressions must only contain one condition per key", 400);
+            }
+            if (attribute != null && partitionKeySet.contains(attribute)) {
+                if (!isPartitionKeyEquality(condition)) {
+                    throw new AwsException("ValidationException", "Query key condition not supported", 400);
+                }
+                conditionedPartitionKeys.add(attribute);
+                if (attribute.equals(partitionKeys.getFirst())) {
+                    partitionKeyValuePlaceholder = ((PlaceholderOperand) ((CompareExpr) condition).right()).name();
+                }
+            } else if (attribute != null && sortKeys.contains(attribute)) {
+                if (!isSupportedSortKeyCondition(condition)) {
+                    throw new AwsException("ValidationException", "Query key condition not supported", 400);
+                }
+                sortKeyEqualities.put(attribute, isEqualityCondition(condition));
+            } else {
+                conditionOnNonKeyAttribute = true;
+                continue;
+            }
+            validateConditionValueTypes(table, attribute, condition, values);
+        }
+
+        if (!conditionedPartitionKeys.containsAll(partitionKeySet)) {
+            String missing = partitionKeys.stream()
+                    .filter(pk -> !conditionedPartitionKeys.contains(pk))
+                    .findFirst().orElseThrow();
+            throw new AwsException("ValidationException",
+                    "Query condition missed key schema element: " + missing, 400);
+        }
+        if (conditionOnNonKeyAttribute) {
+            throw new AwsException("ValidationException", "Query key condition not supported", 400);
+        }
+        validateCompositeSortKeyConditions(sortKeys, sortKeyEqualities);
+        return partitionKeyValuePlaceholder;
+    }
+
+    private static void validateCompositeSortKeyConditions(List<String> sortKeys,
+                                                            Map<String, Boolean> equalities) {
+        for (int laterIndex = 1; laterIndex < sortKeys.size(); laterIndex++) {
+            String laterSortKey = sortKeys.get(laterIndex);
+            if (!equalities.containsKey(laterSortKey)) {
+                continue;
+            }
+            for (int priorIndex = 0; priorIndex < laterIndex; priorIndex++) {
+                String priorSortKey = sortKeys.get(priorIndex);
+                if (!Boolean.TRUE.equals(equalities.get(priorSortKey))) {
+                    throw validationException("RANGE key attributes " + priorSortKey
+                            + " must have equality conditions specified in the query because a condition is present "
+                            + "on key attribute " + laterSortKey);
+                }
+            }
+        }
+    }
+
+    private static boolean isEqualityCondition(Expr condition) {
+        return condition instanceof CompareExpr compare && compare.op() == TokenType.EQ;
+    }
+
+    private static boolean isPartitionKeyEquality(Expr condition) {
+        return condition instanceof CompareExpr compare
+                && compare.op() == TokenType.EQ
+                && compare.right() instanceof PlaceholderOperand;
+    }
+
+    private static boolean isSupportedSortKeyCondition(Expr condition) {
+        if (condition instanceof CompareExpr compare) {
+            return SORT_KEY_COMPARATORS.contains(compare.op())
+                    && compare.right() instanceof PlaceholderOperand;
+        }
+        if (condition instanceof BetweenExpr between) {
+            return between.low() instanceof PlaceholderOperand
+                    && between.high() instanceof PlaceholderOperand;
+        }
+        if (condition instanceof FunctionCallExpr function) {
+            return "begins_with".equals(function.functionName())
+                    && function.args().size() == 2
+                    && function.args().get(1) instanceof PlaceholderOperand;
+        }
+        return false;
+    }
+
+    // AWS accepts the value on the left of a sort-key comparison (":lo <= #sk"), which means
+    // the same as "#sk >= :lo".
+    private static Expr normalizeOperandOrder(Expr condition) {
+        if (condition instanceof CompareExpr(Operand left, TokenType op, Operand right)
+                && left instanceof PlaceholderOperand
+                && right instanceof PathOperand) {
+            return new CompareExpr(right, flipComparator(op), left);
+        }
+        return condition;
+    }
+
+    private static TokenType flipComparator(TokenType op) {
+        return switch (op) {
+            case LT -> TokenType.GT;
+            case LE -> TokenType.GE;
+            case GT -> TokenType.LT;
+            case GE -> TokenType.LE;
+            default -> op;
+        };
+    }
+
+    private static Operand conditionOperand(Expr condition) {
+        return switch (condition) {
+            case CompareExpr compare -> compare.left();
+            case BetweenExpr between -> between.value();
+            case FunctionCallExpr function when "begins_with".equals(function.functionName())
+                    && !function.args().isEmpty() -> function.args().getFirst();
+            default -> null;
+        };
+    }
+
+    private static String conditionAttribute(Expr condition, JsonNode names) {
+        if (!(conditionOperand(condition) instanceof PathOperand path) || path.segments().size() != 1) {
+            return null;
+        }
+        return topLevelAttribute(path, names);
+    }
+
+    private static void validateConditionValueTypes(TableDefinition table, String attribute,
+                                                    Expr condition, JsonNode values) {
+        String expectedType = attributeType(table, attribute);
+        for (String placeholder : conditionValuePlaceholders(condition)) {
+            if (values == null || !values.has(placeholder)) {
+                throw validationException("Invalid KeyConditionExpression: An expression attribute value used "
+                        + "in expression is not defined; attribute value: " + placeholder);
+            }
+            if (!isValidKeyValue(values.get(placeholder), expectedType)) {
+                throw validationException(KEY_TYPE_MISMATCH);
+            }
+        }
+    }
+
+    private static List<String> conditionValuePlaceholders(Expr condition) {
+        return switch (condition) {
+            case CompareExpr compare when compare.right() instanceof PlaceholderOperand placeholder ->
+                    List.of(placeholder.name());
+            case BetweenExpr between
+                    when between.low() instanceof PlaceholderOperand low
+                    && between.high() instanceof PlaceholderOperand high ->
+                    List.of(low.name(), high.name());
+            case FunctionCallExpr function
+                    when function.args().size() == 2
+                    && function.args().get(1) instanceof PlaceholderOperand placeholder ->
+                    List.of(placeholder.name());
+            default -> List.of();
+        };
+    }
+
+    private static void validateLegacyKeyConditions(TableDefinition table,
+                                                    DynamoDbAccessPath accessPath,
+                                                    JsonNode keyConditions) {
+        List<String> partitionKeys = accessPath.partitionKeyNames();
+        for (String partitionKey : partitionKeys) {
+            if (keyConditions == null || !keyConditions.has(partitionKey)) {
+                throw new AwsException("ValidationException",
+                        "Query condition missed key schema element: " + partitionKey, 400);
+            }
+        }
+
+        Set<String> partitionKeySet = Set.copyOf(partitionKeys);
+        List<String> sortKeys = accessPath.sortKeyNames();
+        Map<String, Boolean> sortKeyEqualities = new HashMap<>();
+        keyConditions.fields().forEachRemaining(entry -> {
+            String attribute = entry.getKey();
+            String operator = entry.getValue().path("ComparisonOperator").asText();
+            int values = entry.getValue().path("AttributeValueList").size();
+            if (partitionKeySet.contains(attribute)) {
+                if (!"EQ".equals(operator) || values != 1) {
+                    throw new AwsException("ValidationException", "Query key condition not supported", 400);
+                }
+            } else if (!sortKeys.contains(attribute)
+                    || !LEGACY_SORT_KEY_COMPARATORS.contains(operator)
+                    || ("BETWEEN".equals(operator) ? values != 2 : values != 1)) {
+                throw new AwsException("ValidationException", "Query key condition not supported", 400);
+            } else {
+                sortKeyEqualities.put(attribute, "EQ".equals(operator));
+            }
+            String expectedType = attributeType(table, attribute);
+            entry.getValue().path("AttributeValueList").forEach(value -> {
+                if (!isValidKeyValue(value, expectedType)) {
+                    throw validationException(KEY_TYPE_MISMATCH);
+                }
+            });
+        });
+        validateCompositeSortKeyConditions(sortKeys, sortKeyEqualities);
+    }
+
+    static String attributeType(TableDefinition table, String attribute) {
+        List<AttributeDefinition> definitions = table.getAttributeDefinitions();
+        if (definitions == null) {
+            throw validationException(KEY_TYPE_MISMATCH);
+        }
+        return definitions.stream()
+                .filter(definition -> attribute.equals(definition.getAttributeName()))
+                .map(AttributeDefinition::getAttributeType)
+                .findFirst()
+                .orElseThrow(() -> validationException(KEY_TYPE_MISMATCH));
+    }
+
+    private static boolean isValidKeyValue(JsonNode value, String expectedType) {
+        if (value == null || !value.isObject() || value.size() != 1 || !value.has(expectedType)) {
+            return false;
+        }
+        JsonNode payload = value.get(expectedType);
+        if (payload == null || !payload.isTextual() || payload.textValue().isEmpty()) {
+            return false;
+        }
+        if ("N".equals(expectedType)) {
+            DynamoDbNumberUtils.validateAndNormalize(payload.textValue());
+        }
+        if ("B".equals(expectedType)) {
+            return payload.textValue().matches(
+                    "(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?");
+        }
+        return true;
+    }
+
+    private static void validateFilterExpression(DynamoDbAccessPath accessPath,
+                                                 String expression, JsonNode names) {
+        if (expression == null) {
+            return;
+        }
+        Expr root = parseExpression(expression, "FilterExpression");
+
+        Set<String> referenced = new HashSet<>();
+        collectAttributes(root, names, referenced);
+        for (String keyAttribute : accessPath.keyAttributeNames()) {
+            if (referenced.contains(keyAttribute)) {
+                throw validationException("Filter Expression can only contain non-primary key attributes: "
+                        + "Primary key attribute: " + keyAttribute);
+            }
+        }
+    }
+
+    private static void validateLegacyQueryFilter(DynamoDbAccessPath accessPath, JsonNode queryFilter) {
+        if (queryFilter == null) {
+            return;
+        }
+        for (String keyAttribute : accessPath.keyAttributeNames()) {
+            if (queryFilter.has(keyAttribute)) {
+                throw validationException("QueryFilter can only contain non-primary key attributes: "
+                        + "Primary key attribute: " + keyAttribute);
+            }
+        }
+    }
+
+    private static void collectAttributes(Expr expression, JsonNode names, Set<String> attributes) {
+        switch (expression) {
+            case AndExpr and -> and.operands().forEach(item -> collectAttributes(item, names, attributes));
+            case OrExpr or -> or.operands().forEach(item -> collectAttributes(item, names, attributes));
+            case NotExpr not -> collectAttributes(not.operand(), names, attributes);
+            case CompareExpr compare -> {
+                collectAttributes(compare.left(), names, attributes);
+                collectAttributes(compare.right(), names, attributes);
+            }
+            case BetweenExpr between -> {
+                collectAttributes(between.value(), names, attributes);
+                collectAttributes(between.low(), names, attributes);
+                collectAttributes(between.high(), names, attributes);
+            }
+            case InExpr in -> {
+                collectAttributes(in.value(), names, attributes);
+                in.candidates().forEach(item -> collectAttributes(item, names, attributes));
+            }
+            case FunctionCallExpr function ->
+                    function.args().forEach(item -> collectAttributes(item, names, attributes));
+        }
+    }
+
+    private static void collectAttributes(Operand operand, JsonNode names, Set<String> attributes) {
+        if (operand instanceof PathOperand path) {
+            String attribute = topLevelAttribute(path, names);
+            if (attribute != null) {
+                attributes.add(attribute);
+            }
+        } else if (operand instanceof FunctionOperand function) {
+            function.args().forEach(item -> collectAttributes(item, names, attributes));
+        }
+    }
+
+    private static String topLevelAttribute(Operand operand, JsonNode names) {
+        if (!(operand instanceof PathOperand path) || path.segments().isEmpty()) {
+            return null;
+        }
+        String segment = path.segments().getFirst();
+        if (segment.startsWith("#") && names != null && names.has(segment)) {
+            return names.get(segment).asText();
+        }
+        return segment;
+    }
+
+    private static Expr parseExpression(String expression, String expressionType) {
+        try {
+            return ExpressionEvaluator.parse(expression);
+        } catch (IllegalArgumentException e) {
+            String detail = e.getMessage();
+            String message = "Invalid " + expressionType + ": Syntax error";
+            if (detail != null && detail.startsWith("token:")) {
+                message += "; " + detail;
+            }
+            throw validationException(message);
+        }
+    }
+
+    private static AwsException validationException(String message) {
+        return new AwsException("ValidationException", message, 400);
+    }
+    // DynamoDB requires an ExclusiveStartKey to exactly match the paged key schema's
+    // attribute names and scalar types.
+    static void validateExclusiveStartKey(JsonNode exclusiveStartKey, TableDefinition table,
+                                          DynamoDbAccessPath accessPath) {
+        if (exclusiveStartKey == null || exclusiveStartKey.isNull()) return;
+        Set<String> expected = startKeyAttributeNames(table, accessPath);
+        for (String attribute : expected) {
+            JsonNode value = exclusiveStartKey.get(attribute);
+            if (value == null) {
+                continue;
+            }
+            String expectedType = startKeyAttributeType(table, attribute);
+            if (isEmptyKeyValue(value, expectedType)) {
+                throw DynamoDbKeyValueErrors.emptyKeyValue(expectedType, attribute);
+            }
+            if (expectedType == null || hasInvalidScalarValue(value, expectedType)) {
+                throw invalidStartingKey();
+            }
+        }
+        Set<String> actual = new HashSet<>();
+        exclusiveStartKey.fieldNames().forEachRemaining(actual::add);
+        if (!actual.equals(expected)) {
+            throw invalidStartingKey();
+        }
+    }
+
+    // A Scan of a table with secondary indexes checks the key values against each index,
+    // in index name order, and names the index in the error. A Scan of an index checks
+    // only that index. With several bad values AWS reports one in no fixed order.
+    static void validateScanExclusiveStartKey(JsonNode exclusiveStartKey, TableDefinition table,
+                                              DynamoDbAccessPath accessPath) {
+        if (exclusiveStartKey == null || exclusiveStartKey.isNull()) {
+            return;
+        }
+        List<DynamoDbAccessPath> indexes = accessPath.isIndex()
+                ? List.of(accessPath)
+                : secondaryIndexNames(table).stream()
+                        .map(indexName -> DynamoDbAccessPath.resolve(table, indexName))
+                        .toList();
+        for (DynamoDbAccessPath index : indexes) {
+            Set<String> attributes = startKeyAttributeNames(table, index);
+            for (String attribute : attributes) {
+                JsonNode value = exclusiveStartKey.get(attribute);
+                String expectedType = startKeyAttributeType(table, attribute);
+                if (value != null && value.isObject() && !value.isEmpty()
+                        && expectedType != null && !value.has(expectedType)) {
+                    throw DynamoDbKeyValueErrors.indexKeyTypeMismatch(attribute, expectedType,
+                            value.fieldNames().next(), index.indexName());
+                }
+            }
+            for (String attribute : attributes) {
+                JsonNode value = exclusiveStartKey.get(attribute);
+                String expectedType = startKeyAttributeType(table, attribute);
+                if (value != null && isEmptyKeyValue(value, expectedType)) {
+                    throw DynamoDbKeyValueErrors.emptyIndexKeyValue(expectedType, index.indexName(), attribute);
+                }
+            }
+        }
+        validateExclusiveStartKey(exclusiveStartKey, table, accessPath);
+    }
+
+    private static Set<String> startKeyAttributeNames(TableDefinition table, DynamoDbAccessPath accessPath) {
+        Set<String> names = new LinkedHashSet<>();
+        if (accessPath.isIndex()) {
+            accessPath.keySchema().forEach(key -> names.add(key.getAttributeName()));
+        }
+        names.add(table.getPartitionKeyName());
+        if (table.getSortKeyName() != null) {
+            names.add(table.getSortKeyName());
+        }
+        return names;
+    }
+
+    private static List<String> secondaryIndexNames(TableDefinition table) {
+        List<String> names = new ArrayList<>();
+        if (table.getGlobalSecondaryIndexes() != null) {
+            table.getGlobalSecondaryIndexes().forEach(gsi -> names.add(gsi.getIndexName()));
+        }
+        if (table.getLocalSecondaryIndexes() != null) {
+            table.getLocalSecondaryIndexes().forEach(lsi -> names.add(lsi.getIndexName()));
+        }
+        return names.stream().sorted().toList();
+    }
+
+    private static String startKeyAttributeType(TableDefinition table, String attribute) {
+        if (table.getAttributeDefinitions() == null) {
+            return null;
+        }
+        return table.getAttributeDefinitions().stream()
+                .filter(definition -> attribute.equals(definition.getAttributeName()))
+                .map(AttributeDefinition::getAttributeType)
+                .findFirst()
+                .orElse(null);
+    }
+
+    private static boolean isEmptyKeyValue(JsonNode value, String expectedType) {
+        return ("S".equals(expectedType) || "B".equals(expectedType))
+                && value.isObject() && value.size() == 1
+                && value.path(expectedType).isTextual() && value.get(expectedType).textValue().isEmpty();
+    }
+
+    private static boolean hasInvalidScalarValue(JsonNode value, String expectedType) {
+        if (value == null || !value.isObject() || value.size() != 1 || !value.has(expectedType)) {
+            return true;
+        }
+        JsonNode payload = value.get(expectedType);
+        if (payload == null || !payload.isTextual() || payload.textValue().isEmpty()) {
+            return true;
+        }
+        if ("N".equals(expectedType)) {
+            DynamoDbNumberUtils.validateAndNormalize(payload.textValue());
+        }
+        if ("B".equals(expectedType)) {
+            return !payload.textValue().matches(
+                    "(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?");
+        }
+        return false;
+    }
+
+    private static AwsException invalidStartingKey() {
+        return new AwsException("ValidationException", "The provided starting key is invalid", 400);
+    }
+}

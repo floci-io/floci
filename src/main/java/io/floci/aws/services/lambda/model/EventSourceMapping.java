@@ -1,0 +1,264 @@
+package io.floci.aws.services.lambda.model;
+
+import com.fasterxml.jackson.annotation.JsonIgnoreProperties;
+import io.quarkus.runtime.annotations.RegisterForReflection;
+
+import java.util.ArrayList;
+import java.util.HashMap;
+import java.util.List;
+import java.util.Map;
+
+@RegisterForReflection
+@JsonIgnoreProperties(ignoreUnknown = true)
+public class EventSourceMapping {
+
+    private String uuid;
+    private String functionArn;
+    private String functionName;
+    private String accountId;
+    private String eventSourceArn;
+    private String queueUrl;
+    private String region;
+    private boolean enabled = true;
+    private int batchSize = 10;
+    private Integer maximumBatchingWindowInSeconds;
+    private String state = "Enabled";
+    private long lastModified;
+    private String startingPosition;
+    private Long startingPositionTimestamp;
+    private List<String> functionResponseTypes = new ArrayList<>();
+    private Map<String, String> shardSequenceNumbers = new HashMap<>();
+    private ScalingConfig scalingConfig;
+    private Boolean bisectBatchOnFunctionError;
+    private Integer maximumRetryAttempts;
+    private Integer maximumRecordAgeInSeconds;
+    private Integer parallelizationFactor;
+    private DestinationConfig destinationConfig;
+    private FilterCriteria filterCriteria;
+    private Map<String, Object> selfManagedEventSource;
+    private List<String> topics = new ArrayList<>();
+    private List<Map<String, Object>> sourceAccessConfigurations = new ArrayList<>();
+    private Map<String, String> tags = new HashMap<>();
+
+    public EventSourceMapping() {
+    }
+
+    public String getUuid() { return uuid; }
+    public void setUuid(String uuid) { this.uuid = uuid; }
+
+    public String getFunctionArn() { return functionArn; }
+    public void setFunctionArn(String functionArn) { this.functionArn = functionArn; }
+
+    public String getFunctionName() { return functionName; }
+    public void setFunctionName(String functionName) { this.functionName = functionName; }
+
+    public String getAccountId() { return accountId; }
+    public void setAccountId(String accountId) { this.accountId = accountId; }
+
+    public String getEventSourceArn() { return eventSourceArn; }
+    public void setEventSourceArn(String eventSourceArn) { this.eventSourceArn = eventSourceArn; }
+
+    public String getQueueUrl() { return queueUrl; }
+    public void setQueueUrl(String queueUrl) { this.queueUrl = queueUrl; }
+
+    public String getRegion() { return region; }
+    public void setRegion(String region) { this.region = region; }
+
+    public boolean isEnabled() { return enabled; }
+    public void setEnabled(boolean enabled) { this.enabled = enabled; }
+
+    public int getBatchSize() { return batchSize; }
+    public void setBatchSize(int batchSize) { this.batchSize = batchSize; }
+
+    /** Seconds to accumulate an underfilled batch before invoking; {@code null} or 0 means invoke as soon as messages arrive. */
+    public Integer getMaximumBatchingWindowInSeconds() { return maximumBatchingWindowInSeconds; }
+    public void setMaximumBatchingWindowInSeconds(Integer maximumBatchingWindowInSeconds) {
+        this.maximumBatchingWindowInSeconds = maximumBatchingWindowInSeconds;
+    }
+
+    public String getState() { return state; }
+    public void setState(String state) { this.state = state; }
+
+    public long getLastModified() { return lastModified; }
+    public void setLastModified(long lastModified) { this.lastModified = lastModified; }
+
+    public String getStartingPosition() { return startingPosition; }
+    public void setStartingPosition(String startingPosition) { this.startingPosition = startingPosition; }
+
+    /** Epoch milliseconds; only ever set alongside an {@code AT_TIMESTAMP} starting position. */
+    public Long getStartingPositionTimestamp() { return startingPositionTimestamp; }
+    public void setStartingPositionTimestamp(Long startingPositionTimestamp) {
+        this.startingPositionTimestamp = startingPositionTimestamp;
+    }
+
+    public List<String> getFunctionResponseTypes() { return functionResponseTypes; }
+    public void setFunctionResponseTypes(List<String> functionResponseTypes) {
+        this.functionResponseTypes = functionResponseTypes != null ? functionResponseTypes : new ArrayList<>();
+    }
+
+    public boolean isReportBatchItemFailures() {
+        return functionResponseTypes != null && functionResponseTypes.contains("ReportBatchItemFailures");
+    }
+
+    public Map<String, String> getShardSequenceNumbers() { return shardSequenceNumbers; }
+    public void setShardSequenceNumbers(Map<String, String> shardSequenceNumbers) {
+        this.shardSequenceNumbers = shardSequenceNumbers != null ? shardSequenceNumbers : new HashMap<>();
+    }
+
+    public ScalingConfig getScalingConfig() { return scalingConfig; }
+    public void setScalingConfig(ScalingConfig scalingConfig) { this.scalingConfig = scalingConfig; }
+
+    /** Convenience accessor: returns {@code null} when no cap is configured. */
+    public Integer getMaximumConcurrency() {
+        return scalingConfig != null ? scalingConfig.getMaximumConcurrency() : null;
+    }
+
+    public Boolean getBisectBatchOnFunctionError() {
+        return bisectBatchOnFunctionError;
+    }
+
+    public void setBisectBatchOnFunctionError(Boolean bisectBatchOnFunctionError) {
+        this.bisectBatchOnFunctionError = bisectBatchOnFunctionError;
+    }
+
+    public Integer getMaximumRetryAttempts() {
+        return maximumRetryAttempts;
+    }
+
+    public void setMaximumRetryAttempts(Integer maximumRetryAttempts) {
+        this.maximumRetryAttempts = maximumRetryAttempts;
+    }
+
+    public Integer getMaximumRecordAgeInSeconds() {
+        return maximumRecordAgeInSeconds;
+    }
+
+    public void setMaximumRecordAgeInSeconds(Integer maximumRecordAgeInSeconds) {
+        this.maximumRecordAgeInSeconds = maximumRecordAgeInSeconds;
+    }
+
+    /** Batches processed concurrently per shard (Kinesis and DynamoDB Streams); {@code null} means the AWS default of 1. */
+    public Integer getParallelizationFactor() {
+        return parallelizationFactor;
+    }
+
+    public void setParallelizationFactor(Integer parallelizationFactor) {
+        this.parallelizationFactor = parallelizationFactor;
+    }
+
+    public DestinationConfig getDestinationConfig() {
+        return destinationConfig;
+    }
+
+    public void setDestinationConfig(DestinationConfig destinationConfig) {
+        this.destinationConfig = destinationConfig;
+    }
+
+    public FilterCriteria getFilterCriteria() {
+        return filterCriteria;
+    }
+
+    public void setFilterCriteria(FilterCriteria filterCriteria) {
+        this.filterCriteria = filterCriteria;
+    }
+
+    public Map<String, Object> getSelfManagedEventSource() {
+        return selfManagedEventSource;
+    }
+
+    public void setSelfManagedEventSource(Map<String, Object> selfManagedEventSource) {
+        this.selfManagedEventSource = selfManagedEventSource;
+    }
+
+    public List<String> getTopics() {
+        return topics;
+    }
+
+    public void setTopics(List<String> topics) {
+        this.topics = topics != null ? topics : new ArrayList<>();
+    }
+
+    public List<Map<String, Object>> getSourceAccessConfigurations() {
+        return sourceAccessConfigurations;
+    }
+
+    public void setSourceAccessConfigurations(List<Map<String, Object>> sourceAccessConfigurations) {
+        this.sourceAccessConfigurations = sourceAccessConfigurations != null ? sourceAccessConfigurations : new ArrayList<>();
+    }
+
+    public Map<String, String> getTags() {
+        return tags;
+    }
+
+    public void setTags(Map<String, String> tags) {
+        this.tags = tags != null ? tags : new HashMap<>();
+    }
+
+    @RegisterForReflection
+    @JsonIgnoreProperties(ignoreUnknown = true)
+    public static class DestinationConfig {
+        private OnFailure onFailure;
+
+        public DestinationConfig() {
+        }
+
+        public OnFailure getOnFailure() {
+            return onFailure;
+        }
+
+        public void setOnFailure(OnFailure onFailure) {
+            this.onFailure = onFailure;
+        }
+    }
+
+    @RegisterForReflection
+    @JsonIgnoreProperties(ignoreUnknown = true)
+    public static class OnFailure {
+        private String destination;
+
+        public OnFailure() {
+        }
+
+        public String getDestination() {
+            return destination;
+        }
+
+        public void setDestination(String destination) {
+            this.destination = destination;
+        }
+    }
+
+    @RegisterForReflection
+    @JsonIgnoreProperties(ignoreUnknown = true)
+    public static class FilterCriteria {
+        private List<Filter> filters = new ArrayList<>();
+
+        public FilterCriteria() {
+        }
+
+        public List<Filter> getFilters() {
+            return filters;
+        }
+
+        public void setFilters(List<Filter> filters) {
+            this.filters = filters != null ? filters : new ArrayList<>();
+        }
+    }
+
+    @RegisterForReflection
+    @JsonIgnoreProperties(ignoreUnknown = true)
+    public static class Filter {
+        private String pattern;
+
+        public Filter() {
+        }
+
+        public String getPattern() {
+            return pattern;
+        }
+
+        public void setPattern(String pattern) {
+            this.pattern = pattern;
+        }
+    }
+}

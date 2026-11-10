@@ -1,0 +1,671 @@
+package io.floci.aws.services.sqs;
+
+import io.floci.aws.core.common.AwsErrorMessages;
+import io.floci.aws.core.common.AwsException;
+import io.floci.aws.core.common.AwsNamespaces;
+import io.floci.aws.core.common.AwsQueryResponse;
+import io.floci.aws.core.common.PaginatedResult;
+import io.floci.aws.core.common.XmlBuilder;
+import io.floci.aws.services.sqs.model.Message;
+import io.floci.aws.services.sqs.model.MessageAttributeValue;
+import io.floci.aws.services.sqs.model.Queue;
+import jakarta.enterprise.context.ApplicationScoped;
+import jakarta.inject.Inject;
+import jakarta.ws.rs.core.MultivaluedMap;
+import jakarta.ws.rs.core.Response;
+import org.jboss.logging.Logger;
+
+import java.util.ArrayList;
+import java.util.Base64;
+import java.util.HashMap;
+import java.util.HashSet;
+import java.util.LinkedHashSet;
+import java.util.List;
+import java.util.Map;
+import java.util.Set;
+
+/**
+ * Query-protocol handler for SQS actions.
+ * Receives pre-dispatched calls from {@link AwsQueryController}.
+ */
+@ApplicationScoped
+public class SqsQueryHandler {
+
+    private static final Logger LOG = Logger.getLogger(SqsQueryHandler.class);
+
+    private final SqsService sqsService;
+
+    @Inject
+    public SqsQueryHandler(SqsService sqsService) {
+        this.sqsService = sqsService;
+    }
+
+    public Response handle(String action, MultivaluedMap<String, String> params, String region) {
+        LOG.debugv("SQS action: {0}", action);
+
+        // Wrap like every other Query handler: without this, AwsExceptions escape to the
+        // global JAX-RS mapper, which renders a JSON error body on this XML protocol.
+        try {
+            return dispatch(action, params, region);
+        } catch (AwsException e) {
+            return AwsQueryResponse.error(e.getErrorCode(), e.getMessage(), AwsNamespaces.SQS, e.getHttpStatus());
+        } catch (Exception e) {
+            LOG.errorv(e, "Unexpected error in SQS {0}", action);
+            return AwsQueryResponse.error("InternalError",
+                    "Unexpected error: " + AwsErrorMessages.describe(e), AwsNamespaces.SQS, 500);
+        }
+    }
+
+    private Response dispatch(String action, MultivaluedMap<String, String> params, String region) {
+        return switch (action) {
+            case "CreateQueue" -> handleCreateQueue(params, region);
+            case "DeleteQueue" -> handleDeleteQueue(params, region);
+            case "ListQueues" -> handleListQueues(params, region);
+            case "GetQueueUrl" -> handleGetQueueUrl(params, region);
+            case "GetQueueAttributes" -> handleGetQueueAttributes(params, region);
+            case "SendMessage" -> handleSendMessage(params, region);
+            case "ReceiveMessage" -> handleReceiveMessage(params, region);
+            case "DeleteMessage" -> handleDeleteMessage(params, region);
+            case "DeleteMessageBatch" -> handleDeleteMessageBatch(params, region);
+            case "SendMessageBatch" -> handleSendMessageBatch(params, region);
+            case "ChangeMessageVisibility" -> handleChangeMessageVisibility(params, region);
+            case "ChangeMessageVisibilityBatch" -> handleChangeMessageVisibilityBatch(params, region);
+            case "SetQueueAttributes" -> handleSetQueueAttributes(params, region);
+            case "TagQueue" -> handleTagQueue(params, region);
+            case "UntagQueue" -> handleUntagQueue(params, region);
+            case "ListQueueTags" -> handleListQueueTags(params, region);
+            case "PurgeQueue" -> handlePurgeQueue(params, region);
+            case "ListDeadLetterSourceQueues" -> handleListDeadLetterSourceQueues(params, region);
+            case "StartMessageMoveTask" -> handleStartMessageMoveTask(params, region);
+            case "ListMessageMoveTasks" -> handleListMessageMoveTasks(params, region);
+            case "CancelMessageMoveTask" -> handleCancelMessageMoveTask(params, region);
+            case "AddPermission" -> handleAddPermission(params, region);
+            case "RemovePermission" -> handleRemovePermission(params, region);
+            default -> AwsQueryResponse.error("UnsupportedOperation",
+                    "Operation " + action + " is not supported by SQS.", AwsNamespaces.SQS, 400);
+        };
+    }
+
+    private Response handleAddPermission(MultivaluedMap<String, String> params, String region) {
+        String queueUrl = getParam(params, "QueueUrl");
+        String label = getParam(params, "Label");
+        List<String> accountIds = collectIndexed(params, "AWSAccountId.");
+        List<String> actions = collectIndexed(params, "ActionName.");
+        sqsService.addPermission(queueUrl, label, accountIds, actions, region);
+        return Response.ok(AwsQueryResponse.envelopeNoResult("AddPermission", null)).build();
+    }
+
+    private Response handleRemovePermission(MultivaluedMap<String, String> params, String region) {
+        String queueUrl = getParam(params, "QueueUrl");
+        String label = getParam(params, "Label");
+        sqsService.removePermission(queueUrl, label, region);
+        return Response.ok(AwsQueryResponse.envelopeNoResult("RemovePermission", null)).build();
+    }
+
+    private static void writeSystemAttributesXml(XmlBuilder xml, Message msg,
+                                                 Set<String> requested, String senderId) {
+        if (requested.isEmpty()) {
+            return;
+        }
+        boolean all = requested.contains("All");
+        if (all || requested.contains("SenderId")) {
+            if (senderId != null) {
+                xml.start("Attribute").elem("Name", "SenderId")
+                        .elem("Value", senderId).end("Attribute");
+            }
+        }
+        if (all || requested.contains("SentTimestamp")) {
+            xml.start("Attribute").elem("Name", "SentTimestamp")
+                    .elem("Value", String.valueOf(msg.getSentTimestamp().toEpochMilli())).end("Attribute");
+        }
+        if (all || requested.contains("ApproximateReceiveCount")) {
+            xml.start("Attribute").elem("Name", "ApproximateReceiveCount")
+                    .elem("Value", String.valueOf(msg.getReceiveCount())).end("Attribute");
+        }
+        if (all || requested.contains("ApproximateFirstReceiveTimestamp")) {
+            if (msg.getFirstReceiveTimestamp() != null) {
+                xml.start("Attribute").elem("Name", "ApproximateFirstReceiveTimestamp")
+                        .elem("Value", String.valueOf(msg.getFirstReceiveTimestamp().toEpochMilli())).end("Attribute");
+            }
+        }
+        if (msg.getMessageGroupId() != null && (all || requested.contains("MessageGroupId"))) {
+            xml.start("Attribute").elem("Name", "MessageGroupId")
+                    .elem("Value", msg.getMessageGroupId()).end("Attribute");
+        }
+        if (msg.getSequenceNumber() > 0 && (all || requested.contains("SequenceNumber"))) {
+            xml.start("Attribute").elem("Name", "SequenceNumber")
+                    .elem("Value", String.valueOf(msg.getSequenceNumber())).end("Attribute");
+        }
+        if (msg.getMessageDeduplicationId() != null && (all || requested.contains("MessageDeduplicationId"))) {
+            xml.start("Attribute").elem("Name", "MessageDeduplicationId")
+                    .elem("Value", msg.getMessageDeduplicationId()).end("Attribute");
+        }
+        if (msg.getAwsTraceHeader() != null && (all || requested.contains("AWSTraceHeader"))) {
+            xml.start("Attribute").elem("Name", "AWSTraceHeader")
+                    .elem("Value", msg.getAwsTraceHeader()).end("Attribute");
+        }
+    }
+
+    private List<String> collectIndexed(MultivaluedMap<String, String> params, String prefix) {
+        List<String> values = new ArrayList<>();
+        for (int i = 1; ; i++) {
+            String v = getParam(params, prefix + i);
+            if (v == null) break;
+            values.add(v);
+        }
+        return values;
+    }
+
+    private Response handleCreateQueue(MultivaluedMap<String, String> params, String region) {
+        String queueName = getParam(params, "QueueName");
+        Map<String, String> attributes = extractAttributes(params);
+        Map<String, String> tags = extractTags(params);
+        Queue queue = sqsService.createQueue(queueName, attributes, tags, region);
+
+        String result = new XmlBuilder().elem("QueueUrl", queue.getQueueUrl()).build();
+        return Response.ok(AwsQueryResponse.envelope("CreateQueue", null, result)).build();
+    }
+
+    private Response handleDeleteQueue(MultivaluedMap<String, String> params, String region) {
+        String queueUrl = getParam(params, "QueueUrl");
+        sqsService.deleteQueue(queueUrl, region);
+        return Response.ok(AwsQueryResponse.envelopeNoResult("DeleteQueue", null)).build();
+    }
+
+    private Response handleListQueues(MultivaluedMap<String, String> params, String region) {
+        String prefix = getParam(params, "QueueNamePrefix");
+        Integer maxResults = getOptionalIntParam(params, "MaxResults");
+        String nextToken = getParam(params, "NextToken");
+        PaginatedResult<Queue> page = sqsService.listQueues(prefix, maxResults, nextToken, region);
+
+        XmlBuilder xml = new XmlBuilder();
+        for (Queue q : page.items()) {
+            xml.elem("QueueUrl", q.getQueueUrl());
+        }
+        if (page.nextToken() != null) {
+            xml.elem("NextToken", page.nextToken());
+        }
+        return Response.ok(AwsQueryResponse.envelope("ListQueues", null, xml.build())).build();
+    }
+
+    private Response handleGetQueueUrl(MultivaluedMap<String, String> params, String region) {
+        String queueName = getParam(params, "QueueName");
+        String queueUrl = sqsService.getQueueUrl(queueName, region);
+
+        String result = new XmlBuilder().elem("QueueUrl", queueUrl).build();
+        return Response.ok(AwsQueryResponse.envelope("GetQueueUrl", null, result)).build();
+    }
+
+    private Response handleGetQueueAttributes(MultivaluedMap<String, String> params, String region) {
+        String queueUrl = getParam(params, "QueueUrl");
+        List<String> attributeNames = new ArrayList<>();
+        for (int i = 1; ; i++) {
+            String name = getParam(params, "AttributeName." + i);
+            if (name == null) break;
+            attributeNames.add(name);
+        }
+        if (attributeNames.isEmpty()) {
+            attributeNames.add("All");
+        }
+
+        Map<String, String> attributes = sqsService.getQueueAttributes(queueUrl, attributeNames, region);
+
+        XmlBuilder xml = new XmlBuilder();
+        for (Map.Entry<String, String> entry : attributes.entrySet()) {
+            xml.start("Attribute")
+               .elem("Name", entry.getKey())
+               .elem("Value", entry.getValue())
+               .end("Attribute");
+        }
+        return Response.ok(AwsQueryResponse.envelope("GetQueueAttributes", null, xml.build())).build();
+    }
+
+    private Response handleSendMessage(MultivaluedMap<String, String> params, String region) {
+        String queueUrl = getParam(params, "QueueUrl");
+        String body = getParam(params, "MessageBody");
+        Integer delaySeconds = getIntegerParam(params, "DelaySeconds");
+        String messageGroupId = getParam(params, "MessageGroupId");
+        String messageDeduplicationId = getParam(params, "MessageDeduplicationId");
+
+        Map<String, MessageAttributeValue> messageAttributes = new HashMap<>();
+        for (int i = 1; ; i++) {
+            String name = getParam(params, "MessageAttribute." + i + ".Name");
+            if (name == null) break;
+            String dataType = getParam(params, "MessageAttribute." + i + ".Value.DataType");
+            String stringValue = getParam(params, "MessageAttribute." + i + ".Value.StringValue");
+            String binaryValueBase64 = getParam(params, "MessageAttribute." + i + ".Value.BinaryValue");
+            if (dataType != null) {
+                if (binaryValueBase64 != null) {
+                    byte[] binaryValue = Base64.getDecoder().decode(binaryValueBase64);
+                    messageAttributes.put(name, new MessageAttributeValue(binaryValue, dataType));
+                } else if (stringValue != null) {
+                    messageAttributes.put(name, new MessageAttributeValue(stringValue, dataType));
+                }
+            }
+        }
+
+        // The AWS SDK only allows AWSTraceHeader to be set via MessageSystemAttributes;
+        // capture it (if present) so ReceiveMessage can return it as a system attribute.
+        String awsTraceHeader = null;
+        for (int i = 1; ; i++) {
+            String name = getParam(params, "MessageSystemAttribute." + i + ".Name");
+            if (name == null) break;
+            if ("AWSTraceHeader".equals(name)) {
+                awsTraceHeader = getParam(params, "MessageSystemAttribute." + i + ".Value.StringValue");
+                break;
+            }
+        }
+
+        Message msg = sqsService.sendMessage(queueUrl, body, delaySeconds, messageGroupId,
+                messageDeduplicationId, messageAttributes, awsTraceHeader,
+                sqsService.resolveCallerSenderId(queueUrl), region);
+
+        XmlBuilder xml = new XmlBuilder()
+                .elem("MessageId", msg.getMessageId())
+                .elem("MD5OfMessageBody", msg.getMd5OfBody());
+        if (msg.getMd5OfMessageAttributes() != null) {
+            xml.elem("MD5OfMessageAttributes", msg.getMd5OfMessageAttributes());
+        }
+        if (msg.getSequenceNumber() > 0) {
+            xml.elem("SequenceNumber", msg.getSequenceNumber());
+        }
+        return Response.ok(AwsQueryResponse.envelope("SendMessage", null, xml.build())).build();
+    }
+
+    private Response handleReceiveMessage(MultivaluedMap<String, String> params, String region) {
+        String queueUrl = getParam(params, "QueueUrl");
+        Integer requestedMax = getOptionalIntParam(params, "MaxNumberOfMessages");
+        int maxMessages = requestedMax == null ? 1 : requestedMax;
+        int visibilityTimeout = getIntParam(params, "VisibilityTimeout", -1);
+        Integer waitTimeSeconds = getOptionalIntParam(params, "WaitTimeSeconds");
+
+        Set<String> requestedAttrs = new LinkedHashSet<>();
+        requestedAttrs.addAll(collectIndexed(params, "AttributeName."));
+        requestedAttrs.addAll(collectIndexed(params, "MessageSystemAttributeName."));
+        Set<String> requestedMessageAttrs = new LinkedHashSet<>(collectIndexed(params, "MessageAttributeName."));
+
+        List<Message> messages = sqsService.receiveMessage(queueUrl, maxMessages, visibilityTimeout, waitTimeSeconds, region);
+        String defaultSenderId = sqsService.senderIdFor(queueUrl);
+
+        XmlBuilder xml = new XmlBuilder();
+        for (Message msg : messages) {
+            Map<String, MessageAttributeValue> selectedMessageAttrs = SqsMessageAttributeSelector.select(
+                    msg.getMessageAttributes(), requestedMessageAttrs);
+            xml.start("Message")
+               .elem("MessageId", msg.getMessageId())
+               .elem("ReceiptHandle", msg.getReceiptHandle())
+               .elem("MD5OfBody", msg.getMd5OfBody());
+            String messageAttrsMd5 = Message.computeMessageAttributesMd5(selectedMessageAttrs);
+            if (messageAttrsMd5 != null) {
+                xml.elem("MD5OfMessageAttributes", messageAttrsMd5);
+            }
+            xml.elem("Body", msg.getBody());
+            String senderId = msg.getSenderId() != null ? msg.getSenderId() : defaultSenderId;
+            writeSystemAttributesXml(xml, msg, requestedAttrs, senderId);
+            if (!selectedMessageAttrs.isEmpty()) {
+                for (Map.Entry<String, MessageAttributeValue> entry : selectedMessageAttrs.entrySet()) {
+                    xml.start("MessageAttribute")
+                       .elem("Name", entry.getKey())
+                       .start("Value")
+                       .elem("DataType", entry.getValue().getDataType());
+                    if (entry.getValue().getBinaryValue() != null) {
+                        xml.elem("BinaryValue", Base64.getEncoder().encodeToString(entry.getValue().getBinaryValue()));
+                    } else {
+                        xml.elem("StringValue", entry.getValue().getStringValue());
+                    }
+                    xml.end("Value")
+                       .end("MessageAttribute");
+                }
+            }
+            xml.end("Message");
+        }
+        return Response.ok(AwsQueryResponse.envelope("ReceiveMessage", null, xml.build())).build();
+    }
+
+    private Response handleDeleteMessage(MultivaluedMap<String, String> params, String region) {
+        String queueUrl = getParam(params, "QueueUrl");
+        String receiptHandle = getParam(params, "ReceiptHandle");
+        sqsService.deleteMessage(queueUrl, receiptHandle, region);
+        return Response.ok(AwsQueryResponse.envelopeNoResult("DeleteMessage", null)).build();
+    }
+
+    private Response handleChangeMessageVisibility(MultivaluedMap<String, String> params, String region) {
+        String queueUrl = getParam(params, "QueueUrl");
+        String receiptHandle = getParam(params, "ReceiptHandle");
+        int visibilityTimeout = getIntParam(params, "VisibilityTimeout", 30);
+        sqsService.changeMessageVisibility(queueUrl, receiptHandle, visibilityTimeout, region);
+        return Response.ok(AwsQueryResponse.envelopeNoResult("ChangeMessageVisibility", null)).build();
+    }
+
+    private Response handleDeleteMessageBatch(MultivaluedMap<String, String> params, String region) {
+        String queueUrl = getParam(params, "QueueUrl");
+        sqsService.validateBatchEntryCount("DeleteMessageBatchRequestEntry",
+                countBatchEntries(params, "DeleteMessageBatchRequestEntry"));
+        XmlBuilder xml = new XmlBuilder();
+
+        for (int i = 1; ; i++) {
+            String id = getParam(params, "DeleteMessageBatchRequestEntry." + i + ".Id");
+            if (id == null) break;
+            String receiptHandle = getParam(params, "DeleteMessageBatchRequestEntry." + i + ".ReceiptHandle");
+            try {
+                sqsService.deleteMessageInBatch(queueUrl, receiptHandle, region);
+                xml.start("DeleteMessageBatchResultEntry").elem("Id", id).end("DeleteMessageBatchResultEntry");
+            } catch (AwsException e) {
+                xml.start("BatchResultErrorEntry")
+                   .elem("Id", id)
+                   .elem("Code", e.getErrorCode())
+                   .elem("Message", e.getMessage())
+                   .elem("SenderFault", "true")
+                   .end("BatchResultErrorEntry");
+            }
+        }
+
+        return Response.ok(AwsQueryResponse.envelope("DeleteMessageBatch", null, xml.build())).build();
+    }
+
+    private Response handleSendMessageBatch(MultivaluedMap<String, String> params, String region) {
+        String queueUrl = getParam(params, "QueueUrl");
+        sqsService.validateBatchEntryCount("SendMessageBatchRequestEntry",
+                countBatchEntries(params, "SendMessageBatchRequestEntry"));
+        XmlBuilder xml = new XmlBuilder();
+
+        record ParsedEntry(String id, String body, Integer delay, String groupId, String dedupId,
+                           Map<String, MessageAttributeValue> attributes, String awsTraceHeader) {}
+
+        List<ParsedEntry> parsedEntries = new ArrayList<>();
+        int totalSize = 0;
+        for (int i = 1; ; i++) {
+            String id = getParam(params, "SendMessageBatchRequestEntry." + i + ".Id");
+            if (id == null) break;
+            String body = getParam(params, "SendMessageBatchRequestEntry." + i + ".MessageBody");
+            Integer delaySeconds = getIntegerParam(params, "SendMessageBatchRequestEntry." + i + ".DelaySeconds");
+            String messageGroupId = getParam(params, "SendMessageBatchRequestEntry." + i + ".MessageGroupId");
+            String messageDeduplicationId = getParam(params, "SendMessageBatchRequestEntry." + i + ".MessageDeduplicationId");
+
+            Map<String, MessageAttributeValue> messageAttributes = new HashMap<>();
+            for (int j = 1; ; j++) {
+                String name = getParam(params, "SendMessageBatchRequestEntry." + i + ".MessageAttribute." + j + ".Name");
+                if (name == null) break;
+                String dataType = getParam(params, "SendMessageBatchRequestEntry." + i + ".MessageAttribute." + j + ".Value.DataType");
+                String stringValue = getParam(params, "SendMessageBatchRequestEntry." + i + ".MessageAttribute." + j + ".Value.StringValue");
+                String binaryValueBase64 = getParam(params, "SendMessageBatchRequestEntry." + i + ".MessageAttribute." + j + ".Value.BinaryValue");
+                if (dataType != null) {
+                    if (binaryValueBase64 != null) {
+                        byte[] binaryValue = Base64.getDecoder().decode(binaryValueBase64);
+                        messageAttributes.put(name, new MessageAttributeValue(binaryValue, dataType));
+                    } else if (stringValue != null) {
+                        messageAttributes.put(name, new MessageAttributeValue(stringValue, dataType));
+                    }
+                }
+            }
+
+            String entryAwsTraceHeader = null;
+            for (int k = 1; ; k++) {
+                String name = getParam(params, "SendMessageBatchRequestEntry." + i + ".MessageSystemAttribute." + k + ".Name");
+                if (name == null) break;
+                if ("AWSTraceHeader".equals(name)) {
+                    entryAwsTraceHeader = getParam(params,
+                            "SendMessageBatchRequestEntry." + i + ".MessageSystemAttribute." + k + ".Value.StringValue");
+                    break;
+                }
+            }
+
+            totalSize += SqsService.computeMessageSize(body, messageAttributes);
+            parsedEntries.add(new ParsedEntry(id, body, delaySeconds, messageGroupId,
+                    messageDeduplicationId, messageAttributes, entryAwsTraceHeader));
+        }
+
+        sqsService.validateBatchPayloadSize(queueUrl, region, totalSize);
+
+        String senderId = sqsService.resolveCallerSenderId(queueUrl);
+        for (ParsedEntry parsed : parsedEntries) {
+            String id = parsed.id();
+            try {
+                Message msg = sqsService.sendMessage(queueUrl, parsed.body(), parsed.delay(),
+                        parsed.groupId(), parsed.dedupId(), parsed.attributes(),
+                        parsed.awsTraceHeader(), senderId, region);
+                xml.start("SendMessageBatchResultEntry")
+                   .elem("Id", id)
+                   .elem("MessageId", msg.getMessageId())
+                   .elem("MD5OfMessageBody", msg.getMd5OfBody());
+                if (msg.getMd5OfMessageAttributes() != null) {
+                    xml.elem("MD5OfMessageAttributes", msg.getMd5OfMessageAttributes());
+                }
+                if (msg.getSequenceNumber() > 0) {
+                    xml.elem("SequenceNumber", msg.getSequenceNumber());
+                }
+                xml.end("SendMessageBatchResultEntry");
+            } catch (AwsException e) {
+                xml.start("BatchResultErrorEntry")
+                   .elem("Id", id)
+                   .elem("Code", e.getErrorCode())
+                   .elem("Message", e.getMessage())
+                   .elem("SenderFault", "true")
+                   .end("BatchResultErrorEntry");
+            }
+        }
+
+        return Response.ok(AwsQueryResponse.envelope("SendMessageBatch", null, xml.build())).build();
+    }
+
+    private Response handleListDeadLetterSourceQueues(MultivaluedMap<String, String> params, String region) {
+        String queueUrl = getParam(params, "QueueUrl");
+        List<String> queues = sqsService.listDeadLetterSourceQueues(queueUrl, region);
+        XmlBuilder xml = new XmlBuilder();
+        for (String q : queues) {
+            xml.elem("QueueUrl", q);
+        }
+        return Response.ok(AwsQueryResponse.envelope("ListDeadLetterSourceQueues", null, xml.build())).build();
+    }
+
+    private Response handleStartMessageMoveTask(MultivaluedMap<String, String> params, String region) {
+        String sourceArn = getParam(params, "SourceArn");
+        String destinationArn = getParam(params, "DestinationArn");
+        int maxRate = getIntParam(params, "MaxNumberOfMessagesPerSecond", 0);
+        String taskHandle = sqsService.startMessageMoveTask(sourceArn, destinationArn, maxRate, region);
+        XmlBuilder xml = new XmlBuilder().elem("TaskHandle", taskHandle);
+        return Response.ok(AwsQueryResponse.envelope("StartMessageMoveTask", null, xml.build())).build();
+    }
+
+    private Response handleListMessageMoveTasks(MultivaluedMap<String, String> params, String region) {
+        String sourceArn = getParam(params, "SourceArn");
+        int maxResults = getIntParam(params, "MaxResults", 10);
+        List<SqsService.MoveTask> tasks = sqsService.listMessageMoveTasks(sourceArn, region);
+        XmlBuilder xml = new XmlBuilder();
+        int count = 0;
+        for (SqsService.MoveTask t : tasks) {
+            if (count++ >= maxResults) break;
+            xml.start("member")
+               .elem("TaskHandle", t.taskHandle())
+               .elem("SourceArn", t.sourceArn());
+            if (t.destinationArn() != null) {
+                xml.elem("DestinationArn", t.destinationArn());
+            }
+            xml.elem("MaxNumberOfMessagesPerSecond", t.maxNumberOfMessagesPerSecond())
+               .elem("Status", t.status())
+               .elem("ApproximateNumberOfMessagesMoved", t.approximateNumberOfMessagesMoved())
+               .elem("ApproximateNumberOfMessagesToMove", t.approximateNumberOfMessagesToMove())
+               .elem("StartedTimestamp", t.startedTimestampMillis());
+            if (t.failureReason() != null) {
+                xml.elem("FailureReason", t.failureReason());
+            }
+            xml.end("member");
+        }
+        return Response.ok(AwsQueryResponse.envelope("ListMessageMoveTasks", null, xml.build())).build();
+    }
+
+    private Response handleCancelMessageMoveTask(MultivaluedMap<String, String> params, String region) {
+        String taskHandle = getParam(params, "TaskHandle");
+        long moved = sqsService.cancelMessageMoveTask(taskHandle, region);
+        XmlBuilder xml = new XmlBuilder().elem("ApproximateNumberOfMessagesMoved", moved);
+        return Response.ok(AwsQueryResponse.envelope("CancelMessageMoveTask", null, xml.build())).build();
+    }
+
+    private Response handlePurgeQueue(MultivaluedMap<String, String> params, String region) {
+        String queueUrl = getParam(params, "QueueUrl");
+        sqsService.purgeQueue(queueUrl, region);
+        return Response.ok(AwsQueryResponse.envelopeNoResult("PurgeQueue", null)).build();
+    }
+
+    private Response handleSetQueueAttributes(MultivaluedMap<String, String> params, String region) {
+        String queueUrl = getParam(params, "QueueUrl");
+        Map<String, String> attributes = extractAttributes(params);
+        sqsService.setQueueAttributes(queueUrl, attributes, region);
+        return Response.ok(AwsQueryResponse.envelopeNoResult("SetQueueAttributes", null)).build();
+    }
+
+    private Response handleChangeMessageVisibilityBatch(MultivaluedMap<String, String> params, String region) {
+        String queueUrl = getParam(params, "QueueUrl");
+        sqsService.validateBatchEntryCount("ChangeMessageVisibilityBatchRequestEntry",
+                countBatchEntries(params, "ChangeMessageVisibilityBatchRequestEntry"));
+        List<SqsService.ChangeVisibilityBatchEntry> entries = new ArrayList<>();
+        for (int i = 1; ; i++) {
+            String id = getParam(params, "ChangeMessageVisibilityBatchRequestEntry." + i + ".Id");
+            if (id == null) break;
+            String receiptHandle = getParam(params, "ChangeMessageVisibilityBatchRequestEntry." + i + ".ReceiptHandle");
+            int visibilityTimeout = getIntParam(params, "ChangeMessageVisibilityBatchRequestEntry." + i + ".VisibilityTimeout", 30);
+            entries.add(new SqsService.ChangeVisibilityBatchEntry(id, receiptHandle, visibilityTimeout));
+        }
+
+        List<SqsService.BatchResultEntry> results = sqsService.changeMessageVisibilityBatch(queueUrl, entries, region);
+        XmlBuilder xml = new XmlBuilder();
+        for (SqsService.BatchResultEntry result : results) {
+            if (result.success()) {
+                xml.start("ChangeMessageVisibilityBatchResultEntry")
+                   .elem("Id", result.id())
+                   .end("ChangeMessageVisibilityBatchResultEntry");
+            } else {
+                xml.start("BatchResultErrorEntry")
+                   .elem("Id", result.id())
+                   .elem("Code", result.errorCode())
+                   .elem("Message", result.errorMessage())
+                   .elem("SenderFault", "true")
+                   .end("BatchResultErrorEntry");
+            }
+        }
+        return Response.ok(AwsQueryResponse.envelope("ChangeMessageVisibilityBatch", null, xml.build())).build();
+    }
+
+    private Response handleTagQueue(MultivaluedMap<String, String> params, String region) {
+        String queueUrl = getParam(params, "QueueUrl");
+        Map<String, String> tags = new HashMap<>();
+        for (int i = 1; ; i++) {
+            String key = getParam(params, "Tag." + i + ".Key");
+            String value = getParam(params, "Tag." + i + ".Value");
+            if (key == null) break;
+            tags.put(key, value);
+        }
+        sqsService.tagQueue(queueUrl, tags, region);
+        return Response.ok(AwsQueryResponse.envelopeNoResult("TagQueue", null)).build();
+    }
+
+    private Response handleUntagQueue(MultivaluedMap<String, String> params, String region) {
+        String queueUrl = getParam(params, "QueueUrl");
+        List<String> tagKeys = new ArrayList<>();
+        for (int i = 1; ; i++) {
+            String key = getParam(params, "TagKey." + i);
+            if (key == null) break;
+            tagKeys.add(key);
+        }
+        sqsService.untagQueue(queueUrl, tagKeys, region);
+        return Response.ok(AwsQueryResponse.envelopeNoResult("UntagQueue", null)).build();
+    }
+
+    private Response handleListQueueTags(MultivaluedMap<String, String> params, String region) {
+        String queueUrl = getParam(params, "QueueUrl");
+        Map<String, String> tags = sqsService.listQueueTags(queueUrl, region);
+
+        XmlBuilder xml = new XmlBuilder();
+        for (Map.Entry<String, String> entry : tags.entrySet()) {
+            xml.start("Tag")
+               .elem("Key", entry.getKey())
+               .elem("Value", entry.getValue())
+               .end("Tag");
+        }
+        return Response.ok(AwsQueryResponse.envelope("ListQueueTags", null, xml.build())).build();
+    }
+
+    // --- Helpers ---
+
+    private int countBatchEntries(MultivaluedMap<String, String> params, String entryPrefix) {
+        if (params == null) {
+            return 0;
+        }
+        String prefix = entryPrefix + ".";
+        Set<String> indices = new HashSet<>();
+        for (String key : params.keySet()) {
+            if (key != null && key.startsWith(prefix)) {
+                int dotIndex = key.indexOf('.', prefix.length());
+                String index = dotIndex > 0 ? key.substring(prefix.length(), dotIndex) : key.substring(prefix.length());
+                if (!index.isEmpty()) {
+                    indices.add(index);
+                }
+            }
+        }
+        return indices.size();
+    }
+
+    private String getParam(MultivaluedMap<String, String> params, String name) {
+        return params.getFirst(name);
+    }
+
+    private Integer getOptionalIntParam(MultivaluedMap<String, String> params, String name) {
+        String value = params.getFirst(name);
+        if (value == null) {
+            return null;
+        }
+        try {
+            return Integer.parseInt(value.trim());
+        } catch (NumberFormatException e) {
+            throw new AwsException("InvalidParameterValue",
+                    "Value " + value + " for parameter " + name + " is invalid. Reason: Must be an integer.", 400);
+        }
+    }
+
+    private int getIntParam(MultivaluedMap<String, String> params, String name, int defaultValue) {
+        String value = params.getFirst(name);
+        if (value == null) return defaultValue;
+        try {
+            return Integer.parseInt(value);
+        } catch (NumberFormatException e) {
+            return defaultValue;
+        }
+    }
+
+    private Integer getIntegerParam(MultivaluedMap<String, String> params, String name) {
+        String value = params.getFirst(name);
+        if (value == null) return null;
+        try {
+            return Integer.parseInt(value);
+        } catch (NumberFormatException e) {
+            throw new AwsException("InvalidParameterValue",
+                    "Value for parameter " + name + " is invalid. Reason: Must be an integer.", 400);
+        }
+    }
+
+    private Map<String, String> extractAttributes(MultivaluedMap<String, String> params) {
+        Map<String, String> attributes = new HashMap<>();
+        for (int i = 1; ; i++) {
+            String name = getParam(params, "Attribute." + i + ".Name");
+            String value = getParam(params, "Attribute." + i + ".Value");
+            if (name == null) break;
+            attributes.put(name, value);
+        }
+        return attributes;
+    }
+
+    private Map<String, String> extractTags(MultivaluedMap<String, String> params) {
+        Map<String, String> tags = new HashMap<>();
+        for (int i = 1; ; i++) {
+            String key = getParam(params, "Tag." + i + ".Key");
+            String value = getParam(params, "Tag." + i + ".Value");
+            if (key == null) break;
+            tags.put(key, value);
+        }
+        return tags;
+    }
+
+    Response xmlErrorResponse(String code, String message, int status) {
+        return AwsQueryResponse.error(code, message, AwsNamespaces.SQS, status);
+    }
+}

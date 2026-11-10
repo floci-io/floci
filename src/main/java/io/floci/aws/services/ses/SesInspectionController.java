@@ -1,0 +1,156 @@
+package io.floci.aws.services.ses;
+
+import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.node.ArrayNode;
+import com.fasterxml.jackson.databind.node.ObjectNode;
+import io.floci.aws.services.ses.model.SentAttachment;
+import io.floci.aws.services.ses.model.SentEmail;
+import jakarta.inject.Inject;
+import jakarta.ws.rs.DELETE;
+import jakarta.ws.rs.GET;
+import jakarta.ws.rs.Path;
+import jakarta.ws.rs.Produces;
+import jakarta.ws.rs.QueryParam;
+import jakarta.ws.rs.core.MediaType;
+import jakarta.ws.rs.core.Response;
+
+import java.util.List;
+
+/**
+ * LocalStack-compatible REST endpoint for inspecting sent SES emails.
+ * Provides GET /_aws/ses and DELETE /_aws/ses for test helpers. GET lists the messages oldest
+ * first and filters them by {@code id} (message id) and {@code email} (message source); DELETE
+ * removes the message named by {@code id}, or every message without it.
+ */
+@Path("/_aws/ses")
+@Produces(MediaType.APPLICATION_JSON)
+public class SesInspectionController {
+
+    private final SesSentEmailService sentEmailService;
+    private final ObjectMapper objectMapper;
+
+    @Inject
+    public SesInspectionController(SesSentEmailService sentEmailService,
+                                   ObjectMapper objectMapper) {
+        this.sentEmailService = sentEmailService;
+        this.objectMapper = objectMapper;
+    }
+
+    @GET
+    public Response getEmails(@QueryParam("id") String messageId,
+                              @QueryParam("email") String source) {
+        List<SentEmail> emails = sentEmailService.listAll();
+
+        ArrayNode messages = objectMapper.createArrayNode();
+        for (SentEmail email : emails) {
+            if (messageId != null && !messageId.equals(email.getMessageId())) {
+                continue;
+            }
+            if (source != null && !source.equals(email.getSource())) {
+                continue;
+            }
+            ObjectNode node = objectMapper.createObjectNode();
+            node.put("Id", email.getMessageId());
+            if (email.getRegion() != null) {
+                node.put("Region", email.getRegion());
+            } else {
+                node.putNull("Region");
+            }
+            node.put("Source", email.getSource());
+            if (email.getRejectReason() != null) {
+                node.put("RejectReason", email.getRejectReason());
+            }
+            if (email.getReturnPath() != null) {
+                node.put("ReturnPath", email.getReturnPath());
+            }
+
+            if (email.getRejectReason() != null) {
+                // A record the content scan rejected holds nothing the scan looked at, so neither
+                // the raw nor the Simple content shape applies: only the envelope is shown.
+                putDestination(node, email);
+            } else if (email.isRaw()) {
+                // LocalStack returns RawData for raw emails, without
+                // Destination / Subject / Body fields.
+                node.put("RawData", email.getRawData());
+            } else {
+                putDestination(node, email);
+
+                if (email.getReplyToAddresses() != null && !email.getReplyToAddresses().isEmpty()) {
+                    ArrayNode replyTo = node.putArray("ReplyToAddresses");
+                    email.getReplyToAddresses().forEach(replyTo::add);
+                }
+
+                node.put("Subject", email.getSubject());
+
+                ObjectNode body = node.putObject("Body");
+                if (email.getBodyText() != null) {
+                    body.put("text_part", email.getBodyText());
+                } else {
+                    body.putNull("text_part");
+                }
+                if (email.getBodyHtml() != null) {
+                    body.put("html_part", email.getBodyHtml());
+                } else {
+                    body.putNull("html_part");
+                }
+
+                // A Simple send with attachments also carries the assembled MIME message, base64
+                // encoded like the RawData of a raw send, and a summary of each attachment.
+                if (email.getAttachments() != null && !email.getAttachments().isEmpty()) {
+                    ArrayNode attachments = node.putArray("Attachments");
+                    for (SentAttachment attachment : email.getAttachments()) {
+                        attachments.add(objectMapper.valueToTree(attachment));
+                    }
+                    if (email.getMimeData() != null) {
+                        node.put("RawData", email.getMimeData());
+                    }
+                }
+            }
+
+            if (email.getHeaders() != null && !email.getHeaders().isEmpty()) {
+                ArrayNode headers = node.putArray("Headers");
+                email.getHeaders().forEach(h -> {
+                    ObjectNode ho = headers.addObject();
+                    ho.put("Name", h.name());
+                    ho.put("Value", h.value());
+                });
+            }
+
+            if (email.getSentAt() != null) {
+                node.put("Timestamp", email.getSentAt().toString());
+            }
+
+            messages.add(node);
+        }
+
+        ObjectNode result = objectMapper.createObjectNode();
+        result.set("messages", messages);
+        return Response.ok(result).build();
+    }
+
+    private static void putDestination(ObjectNode node, SentEmail email) {
+        ObjectNode destination = node.putObject("Destination");
+        if (email.getToAddresses() != null && !email.getToAddresses().isEmpty()) {
+            ArrayNode toArr = destination.putArray("ToAddresses");
+            email.getToAddresses().forEach(toArr::add);
+        }
+        if (email.getCcAddresses() != null && !email.getCcAddresses().isEmpty()) {
+            ArrayNode ccArr = destination.putArray("CcAddresses");
+            email.getCcAddresses().forEach(ccArr::add);
+        }
+        if (email.getBccAddresses() != null && !email.getBccAddresses().isEmpty()) {
+            ArrayNode bccArr = destination.putArray("BccAddresses");
+            email.getBccAddresses().forEach(bccArr::add);
+        }
+    }
+
+    @DELETE
+    public Response clearEmails(@QueryParam("id") String messageId) {
+        if (messageId != null) {
+            sentEmailService.delete(messageId);
+        } else {
+            sentEmailService.clear();
+        }
+        return Response.ok().build();
+    }
+}

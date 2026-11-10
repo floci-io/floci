@@ -1,0 +1,793 @@
+package io.floci.aws.services.apigatewayv2;
+
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import io.quarkus.test.junit.QuarkusTest;
+import io.restassured.http.ContentType;
+import org.junit.jupiter.api.MethodOrderer;
+import org.junit.jupiter.api.Order;
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.TestMethodOrder;
+
+import java.io.ByteArrayOutputStream;
+import java.nio.charset.StandardCharsets;
+import java.util.ArrayList;
+import java.util.Base64;
+import java.util.List;
+import java.util.Map;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
+import java.util.zip.ZipEntry;
+import java.util.zip.ZipOutputStream;
+
+import static io.restassured.RestAssured.given;
+import static org.hamcrest.Matchers.equalTo;
+import static org.hamcrest.Matchers.notNullValue;
+import static org.hamcrest.Matchers.nullValue;
+import static org.junit.jupiter.api.Assertions.*;
+
+/**
+ * Integration tests for Lambda REQUEST authorizer on HTTP API (v2) routes (issue #812).
+ *
+ * <p>Covers payload format versions 1.0 and 2.0, simple responses, identity source
+ * validation, and deny/allow/error scenarios.
+ */
+@QuarkusTest
+@TestMethodOrder(MethodOrderer.OrderAnnotation.class)
+class HttpApiRequestAuthorizerTest {
+
+    private static final ObjectMapper MAPPER = new ObjectMapper();
+
+    private static String httpApiId;
+    private static String integrationId;
+    private static String routeId;
+    private static String allowAuthorizerId;
+    private static String denyAuthorizerId;
+    private static String errorAuthorizerId;
+    private static String simpleAllowAuthorizerId;
+    private static String simpleDenyAuthorizerId;
+    private static String identitySourceAuthorizerId;
+    private static String echoV1AuthorizerId;
+    private static String echoV2AuthorizerId;
+    private static String nestedContextAuthorizerId;
+    private static String contextlessAuthorizerId;
+
+    private static final String ALLOW_FN = "httpv2-auth-allow-fn";
+    private static final String DENY_FN = "httpv2-auth-deny-fn";
+    private static final String ERROR_FN = "httpv2-auth-error-fn";
+    private static final String SIMPLE_ALLOW_FN = "httpv2-auth-simple-allow-fn";
+    private static final String SIMPLE_DENY_FN = "httpv2-auth-simple-deny-fn";
+    private static final String ECHO_FN = "httpv2-auth-echo-fn";
+    private static final String BACKEND_FN = "httpv2-auth-backend-fn";
+    private static final String NESTED_CTX_FN = "httpv2-auth-nested-ctx-fn";
+    private static final String CONTEXTLESS_FN = "httpv2-auth-contextless-fn";
+
+    // ──────────────────────────── Setup ────────────────────────────
+
+    @Test
+    @Order(1)
+    void setupHttpApi() {
+        httpApiId = given()
+                .contentType(ContentType.JSON)
+                .body("""
+                        {"name":"http-v2-authorizer-test","protocolType":"HTTP"}
+                        """)
+                .when().post("/v2/apis")
+                .then()
+                .statusCode(201)
+                .body("apiId", notNullValue())
+                .extract().path("apiId");
+
+        given()
+                .contentType(ContentType.JSON)
+                .body("""
+                        {"stageName":"test","stageVariables":{"environment":"review"}}
+                        """)
+                .when().post("/v2/apis/" + httpApiId + "/stages")
+                .then()
+                .statusCode(201);
+    }
+
+    @Test
+    @Order(2)
+    void setupLambdaFunctions() throws Exception {
+        // Backend Lambda
+        // Echoes requestContext.authorizer back. JSON.stringify drops the key entirely when the
+        // event carries none, which is what the contextless case asserts.
+        createNodeLambda(BACKEND_FN, """
+                exports.handler = async (event) => ({
+                    statusCode: 200,
+                    body: JSON.stringify({
+                        message: "Hello from backend",
+                        path: event.rawPath,
+                        authorizer: event.requestContext ? event.requestContext.authorizer : undefined
+                    })
+                });
+                """);
+
+        // Authorizer that returns Allow policy (IAM policy format)
+        createNodeLambda(ALLOW_FN, """
+                exports.handler = async (event) => ({
+                    principalId: "user123",
+                    policyDocument: {
+                        Version: "2012-10-17",
+                        Statement: [{ Action: "execute-api:Invoke", Effect: "Allow", Resource: event.methodArn || event.routeArn || "*" }]
+                    },
+                    context: { userId: "user123", role: "admin" }
+                });
+                """);
+
+        // Authorizer that returns Deny policy
+        createNodeLambda(DENY_FN, """
+                exports.handler = async (event) => ({
+                    principalId: "user123",
+                    policyDocument: {
+                        Version: "2012-10-17",
+                        Statement: [{ Action: "execute-api:Invoke", Effect: "Deny", Resource: event.methodArn || event.routeArn || "*" }]
+                    }
+                });
+                """);
+
+        // Authorizer that throws an error
+        createNodeLambda(ERROR_FN, """
+                exports.handler = async (event) => { throw new Error("Authorizer error"); };
+                """);
+
+        // Authorizer that returns simple Allow response (format 2.0)
+        createNodeLambda(SIMPLE_ALLOW_FN, """
+                exports.handler = async (event) => ({
+                    isAuthorized: true,
+                    context: { userId: "simple-user", plan: "premium" }
+                });
+                """);
+
+        // Authorizer that returns simple Deny response (format 2.0)
+        createNodeLambda(SIMPLE_DENY_FN, """
+                exports.handler = async (event) => ({
+                    isAuthorized: false
+                });
+                """);
+
+        // Simple-response authorizer whose context nests objects — an HTTP API delivers the
+        // context as JSON, so the nesting has to survive.
+        createNodeLambda(NESTED_CTX_FN, """
+                exports.handler = async (event) => ({
+                    isAuthorized: true,
+                    context: {
+                        jwt: { claims: { sub: "user-abc", scope: "condo/read" } },
+                        tenantId: "CONDO_1",
+                        licenseTier: "PRO",
+                        requestCount: 3,
+                        active: true,
+                        groups: ["admin", "auditor"]
+                    }
+                });
+                """);
+
+        // Simple-response authorizer that allows without returning any context
+        createNodeLambda(CONTEXTLESS_FN, """
+                exports.handler = async (event) => ({ isAuthorized: true });
+                """);
+
+        // Echo authorizer that returns the event payload in context
+        createNodeLambda(ECHO_FN, """
+                exports.handler = async (event) => ({
+                    principalId: "echo-user",
+                    policyDocument: {
+                        Version: "2012-10-17",
+                        Statement: [{ Action: "execute-api:Invoke", Effect: "Allow", Resource: event.methodArn || event.routeArn || "*" }]
+                    },
+                    context: { receivedEvent: JSON.stringify(event) }
+                });
+                """);
+    }
+
+    @Test
+    @Order(3)
+    void prewarmLambdaFunctions() {
+        for (String fn : new String[]{BACKEND_FN, ALLOW_FN, DENY_FN, ERROR_FN, SIMPLE_ALLOW_FN,
+                SIMPLE_DENY_FN, ECHO_FN, NESTED_CTX_FN, CONTEXTLESS_FN}) {
+            given().contentType(ContentType.JSON).body("{}")
+                    .when().post("/2015-03-31/functions/" + fn + "/invocations")
+                    .then().statusCode(200);
+        }
+    }
+
+    @Test
+    @Order(4)
+    void setupIntegrationAndRoute() {
+        integrationId = given()
+                .contentType(ContentType.JSON)
+                .body("""
+                        {"integrationType":"AWS_PROXY","integrationUri":"arn:aws:lambda:us-east-1:000000000000:function:%s/invocations","integrationMethod":"POST","payloadFormatVersion":"2.0"}
+                        """.formatted(BACKEND_FN))
+                .when().post("/v2/apis/" + httpApiId + "/integrations")
+                .then()
+                .statusCode(201)
+                .extract().path("integrationId");
+
+        routeId = given()
+                .contentType(ContentType.JSON)
+                .body("""
+                        {"routeKey":"GET /hello","target":"integrations/%s"}
+                        """.formatted(integrationId))
+                .when().post("/v2/apis/" + httpApiId + "/routes")
+                .then()
+                .statusCode(201)
+                .extract().path("routeId");
+    }
+
+    @Test
+    @Order(5)
+    void setupAuthorizers() {
+        // Allow authorizer (IAM policy format, payload version 1.0)
+        allowAuthorizerId = given()
+                .contentType(ContentType.JSON)
+                .body("""
+                        {"name":"allow-auth","authorizerType":"REQUEST","authorizerPayloadFormatVersion":"1.0","authorizerUri":"arn:aws:lambda:us-east-1:000000000000:function:%s/invocations"}
+                        """.formatted(ALLOW_FN))
+                .when().post("/v2/apis/" + httpApiId + "/authorizers")
+                .then().statusCode(201)
+                .extract().path("authorizerId");
+
+        // Deny authorizer (IAM policy format, payload version 1.0)
+        denyAuthorizerId = given()
+                .contentType(ContentType.JSON)
+                .body("""
+                        {"name":"deny-auth","authorizerType":"REQUEST","authorizerPayloadFormatVersion":"1.0","authorizerUri":"arn:aws:lambda:us-east-1:000000000000:function:%s/invocations"}
+                        """.formatted(DENY_FN))
+                .when().post("/v2/apis/" + httpApiId + "/authorizers")
+                .then().statusCode(201)
+                .extract().path("authorizerId");
+
+        // Error authorizer
+        errorAuthorizerId = given()
+                .contentType(ContentType.JSON)
+                .body("""
+                        {"name":"error-auth","authorizerType":"REQUEST","authorizerPayloadFormatVersion":"1.0","authorizerUri":"arn:aws:lambda:us-east-1:000000000000:function:%s/invocations"}
+                        """.formatted(ERROR_FN))
+                .when().post("/v2/apis/" + httpApiId + "/authorizers")
+                .then().statusCode(201)
+                .extract().path("authorizerId");
+
+        // Simple allow authorizer (format 2.0 with enableSimpleResponses)
+        simpleAllowAuthorizerId = given()
+                .contentType(ContentType.JSON)
+                .body("""
+                        {"name":"simple-allow-auth","authorizerType":"REQUEST","authorizerPayloadFormatVersion":"2.0","enableSimpleResponses":true,"authorizerUri":"arn:aws:lambda:us-east-1:000000000000:function:%s/invocations"}
+                        """.formatted(SIMPLE_ALLOW_FN))
+                .when().post("/v2/apis/" + httpApiId + "/authorizers")
+                .then().statusCode(201)
+                .extract().path("authorizerId");
+
+        // Simple deny authorizer (format 2.0 with enableSimpleResponses)
+        simpleDenyAuthorizerId = given()
+                .contentType(ContentType.JSON)
+                .body("""
+                        {"name":"simple-deny-auth","authorizerType":"REQUEST","authorizerPayloadFormatVersion":"2.0","enableSimpleResponses":true,"authorizerUri":"arn:aws:lambda:us-east-1:000000000000:function:%s/invocations"}
+                        """.formatted(SIMPLE_DENY_FN))
+                .when().post("/v2/apis/" + httpApiId + "/authorizers")
+                .then().statusCode(201)
+                .extract().path("authorizerId");
+
+        // Identity source authorizer (requires Authorization header)
+        identitySourceAuthorizerId = given()
+                .contentType(ContentType.JSON)
+                .body("""
+                        {"name":"identity-auth","authorizerType":"REQUEST","authorizerPayloadFormatVersion":"1.0","identitySource":"$request.header.Authorization","authorizerUri":"arn:aws:lambda:us-east-1:000000000000:function:%s/invocations"}
+                        """.formatted(ALLOW_FN))
+                .when().post("/v2/apis/" + httpApiId + "/authorizers")
+                .then().statusCode(201)
+                .extract().path("authorizerId");
+
+        // Nested-context authorizer (format 2.0 with enableSimpleResponses)
+        nestedContextAuthorizerId = given()
+                .contentType(ContentType.JSON)
+                .body("""
+                        {"name":"nested-ctx-auth","authorizerType":"REQUEST","authorizerPayloadFormatVersion":"2.0","enableSimpleResponses":true,"authorizerUri":"arn:aws:lambda:us-east-1:000000000000:function:%s/invocations"}
+                        """.formatted(NESTED_CTX_FN))
+                .when().post("/v2/apis/" + httpApiId + "/authorizers")
+                .then().statusCode(201)
+                .extract().path("authorizerId");
+
+        // Contextless simple-allow authorizer (format 2.0 with enableSimpleResponses)
+        contextlessAuthorizerId = given()
+                .contentType(ContentType.JSON)
+                .body("""
+                        {"name":"contextless-auth","authorizerType":"REQUEST","authorizerPayloadFormatVersion":"2.0","enableSimpleResponses":true,"authorizerUri":"arn:aws:lambda:us-east-1:000000000000:function:%s/invocations"}
+                        """.formatted(CONTEXTLESS_FN))
+                .when().post("/v2/apis/" + httpApiId + "/authorizers")
+                .then().statusCode(201)
+                .extract().path("authorizerId");
+
+        // Echo authorizer (format 1.0)
+        echoV1AuthorizerId = given()
+                .contentType(ContentType.JSON)
+                .body("""
+                        {"name":"echo-auth-v1","authorizerType":"REQUEST","authorizerPayloadFormatVersion":"1.0","authorizerUri":"arn:aws:lambda:us-east-1:000000000000:function:%s/invocations"}
+                        """.formatted(ECHO_FN))
+                .when().post("/v2/apis/" + httpApiId + "/authorizers")
+                .then().statusCode(201)
+                .extract().path("authorizerId");
+
+        // Echo authorizer (format 2.0)
+        echoV2AuthorizerId = given()
+                .contentType(ContentType.JSON)
+                .body("""
+                        {"name":"echo-auth-v2","authorizerType":"REQUEST","authorizerPayloadFormatVersion":"2.0","authorizerUri":"arn:aws:lambda:us-east-1:000000000000:function:%s/invocations"}
+                        """.formatted(ECHO_FN))
+                .when().post("/v2/apis/" + httpApiId + "/authorizers")
+                .then().statusCode(201)
+                .extract().path("authorizerId");
+    }
+
+    // ──────────────────────────── Test: Allow with IAM policy (format 1.0) ────────────────────────────
+
+    @Test
+    @Order(10)
+    void requestAuthorizerAllowsWithIamPolicy() {
+        given()
+                .contentType(ContentType.JSON)
+                .body("""
+                        {"authorizationType":"CUSTOM","authorizerId":"%s"}
+                        """.formatted(allowAuthorizerId))
+                .when().patch("/v2/apis/" + httpApiId + "/routes/" + routeId)
+                .then().statusCode(200);
+
+        given()
+                .when().get("/execute-api/" + httpApiId + "/test/hello")
+                .then().statusCode(200);
+    }
+
+    /**
+     * The context an IAM-policy authorizer returns alongside its policy document reaches the
+     * backend under requestContext.authorizer.lambda.
+     */
+    @Test
+    @Order(15)
+    void iamPolicyContextReachesBackend() throws Exception {
+        // Route still carries allowAuthorizerId from the previous test.
+        String body = given()
+                .when().get("/execute-api/" + httpApiId + "/test/hello")
+                .then().statusCode(200)
+                .extract().asString();
+
+        JsonNode lambda = MAPPER.readTree(body).path("authorizer").path("lambda");
+        assertEquals("user123", lambda.path("userId").asText());
+        assertEquals("admin", lambda.path("role").asText());
+    }
+
+    // ──────────────────────────── Test: Deny with IAM policy (format 1.0) ────────────────────────────
+
+    @Test
+    @Order(20)
+    void requestAuthorizerDeniesWithIamPolicy() {
+        given()
+                .contentType(ContentType.JSON)
+                .body("""
+                        {"authorizationType":"CUSTOM","authorizerId":"%s"}
+                        """.formatted(denyAuthorizerId))
+                .when().patch("/v2/apis/" + httpApiId + "/routes/" + routeId)
+                .then().statusCode(200);
+
+        given()
+                .when().get("/execute-api/" + httpApiId + "/test/hello")
+                .then().statusCode(403);
+    }
+
+    // ──────────────────────────── Test: Authorizer invocation error returns 500 ────────────────────────────
+
+    @Test
+    @Order(30)
+    void requestAuthorizerErrorReturns500() {
+        given()
+                .contentType(ContentType.JSON)
+                .body("""
+                        {"authorizationType":"CUSTOM","authorizerId":"%s"}
+                        """.formatted(errorAuthorizerId))
+                .when().patch("/v2/apis/" + httpApiId + "/routes/" + routeId)
+                .then().statusCode(200);
+
+        given()
+                .when().get("/execute-api/" + httpApiId + "/test/hello")
+                .then().statusCode(500);
+    }
+
+    // ──────────────────────────── Test: Simple response Allow (format 2.0) ────────────────────────────
+
+    @Test
+    @Order(40)
+    void simpleResponseAllows() {
+        given()
+                .contentType(ContentType.JSON)
+                .body("""
+                        {"authorizationType":"CUSTOM","authorizerId":"%s"}
+                        """.formatted(simpleAllowAuthorizerId))
+                .when().patch("/v2/apis/" + httpApiId + "/routes/" + routeId)
+                .then().statusCode(200);
+
+        given()
+                .when().get("/execute-api/" + httpApiId + "/test/hello")
+                .then().statusCode(200);
+    }
+
+    @Test
+    @Order(45)
+    void simpleResponseContextReachesBackend() throws Exception {
+        // Route still carries simpleAllowAuthorizerId from the previous test.
+        String body = given()
+                .when().get("/execute-api/" + httpApiId + "/test/hello")
+                .then().statusCode(200)
+                .extract().asString();
+
+        JsonNode lambda = MAPPER.readTree(body).path("authorizer").path("lambda");
+        assertEquals("simple-user", lambda.path("userId").asText());
+        assertEquals("premium", lambda.path("plan").asText());
+        assertTrue(MAPPER.readTree(body).path("authorizer").path("jwt").isMissingNode(),
+                "A Lambda authorizer must not render the JWT-authorizer node");
+    }
+
+    /**
+     * An HTTP API delivers the authorizer context as JSON, so nested objects and non-string
+     * scalars survive to the backend, unlike a REST API's flattened string map.
+     */
+    @Test
+    @Order(46)
+    void nestedContextSurvivesToBackend() throws Exception {
+        given()
+                .contentType(ContentType.JSON)
+                .body("""
+                        {"authorizationType":"CUSTOM","authorizerId":"%s"}
+                        """.formatted(nestedContextAuthorizerId))
+                .when().patch("/v2/apis/" + httpApiId + "/routes/" + routeId)
+                .then().statusCode(200);
+
+        String body = given()
+                .when().get("/execute-api/" + httpApiId + "/test/hello")
+                .then().statusCode(200)
+                .extract().asString();
+
+        JsonNode lambda = MAPPER.readTree(body).path("authorizer").path("lambda");
+        assertEquals("user-abc", lambda.path("jwt").path("claims").path("sub").asText(),
+                "Nested objects must not be flattened or stringified");
+        assertEquals("condo/read", lambda.path("jwt").path("claims").path("scope").asText());
+        assertEquals("CONDO_1", lambda.path("tenantId").asText());
+        assertEquals("PRO", lambda.path("licenseTier").asText());
+        assertTrue(lambda.path("requestCount").isNumber(), "A number must stay a number");
+        assertEquals(3, lambda.path("requestCount").asInt());
+        assertTrue(lambda.path("active").isBoolean(), "A boolean must stay a boolean");
+        assertTrue(lambda.path("groups").isArray(), "An array must stay an array");
+        assertEquals("auditor", lambda.path("groups").get(1).asText());
+    }
+
+    /** An authorizer that allows without returning a context leaves the authorizer node absent. */
+    @Test
+    @Order(47)
+    void contextlessAllowLeavesAuthorizerNodeAbsent() throws Exception {
+        given()
+                .contentType(ContentType.JSON)
+                .body("""
+                        {"authorizationType":"CUSTOM","authorizerId":"%s"}
+                        """.formatted(contextlessAuthorizerId))
+                .when().patch("/v2/apis/" + httpApiId + "/routes/" + routeId)
+                .then().statusCode(200);
+
+        String body = given()
+                .when().get("/execute-api/" + httpApiId + "/test/hello")
+                .then().statusCode(200)
+                .extract().asString();
+
+        JsonNode response = MAPPER.readTree(body);
+        assertEquals("Hello from backend", response.path("message").asText());
+        assertTrue(response.path("authorizer").isMissingNode(),
+                "No context returned means no authorizer node on the proxy event");
+    }
+
+    // ──────────────────────────── Test: Simple response Deny (format 2.0) ────────────────────────────
+
+    @Test
+    @Order(50)
+    void simpleResponseDenies() {
+        given()
+                .contentType(ContentType.JSON)
+                .body("""
+                        {"authorizationType":"CUSTOM","authorizerId":"%s"}
+                        """.formatted(simpleDenyAuthorizerId))
+                .when().patch("/v2/apis/" + httpApiId + "/routes/" + routeId)
+                .then().statusCode(200);
+
+        given()
+                .when().get("/execute-api/" + httpApiId + "/test/hello")
+                .then().statusCode(403);
+    }
+
+    // ──────────────────────────── Test: Missing identity source returns 401 ────────────────────────────
+
+    @Test
+    @Order(60)
+    void missingIdentitySourceReturns401() {
+        given()
+                .contentType(ContentType.JSON)
+                .body("""
+                        {"authorizationType":"CUSTOM","authorizerId":"%s"}
+                        """.formatted(identitySourceAuthorizerId))
+                .when().patch("/v2/apis/" + httpApiId + "/routes/" + routeId)
+                .then().statusCode(200);
+
+        // Request WITHOUT the required Authorization header — should get 401
+        given()
+                .when().get("/execute-api/" + httpApiId + "/test/hello")
+                .then().statusCode(401);
+    }
+
+    // ──────────────────────────── Test: Present identity source allows invocation ────────────────────────────
+
+    @Test
+    @Order(61)
+    void presentIdentitySourceAllowsInvocation() {
+        // Route still has identitySourceAuthorizerId from previous test
+        given()
+                .header("Authorization", "Bearer my-token")
+                .when().get("/execute-api/" + httpApiId + "/test/hello")
+                .then().statusCode(200);
+    }
+
+    // ──────────────────────────── Test: The refusals carry the API's CORS headers ────────────────────────────
+
+    /**
+     * Measured on AWS (eu-west-1, 2026-10-18): once the API has a CORS configuration, a Lambda
+     * authorizer's refusals, 401 without the identity source and 403 when it denies, carry
+     * {@code Access-Control-Allow-Origin} and {@code Access-Control-Expose-Headers} for an allowed
+     * origin, and no CORS header for another.
+     */
+    @Test
+    @Order(62)
+    void refusalsCarryTheCorsHeadersOfTheApi() {
+        given()
+                .contentType(ContentType.JSON)
+                .body("""
+                        {"corsConfiguration":{"allowOrigins":["https://app.example.com"],"allowMethods":["GET"],
+                         "allowHeaders":["authorization"],"exposeHeaders":["x-probe"],"maxAge":300}}
+                        """)
+                .when().patch("/v2/apis/" + httpApiId)
+                .then().statusCode(200);
+        try {
+            // Route still has identitySourceAuthorizerId from the previous tests
+            given()
+                    .header("Origin", "https://app.example.com")
+                    .when().get("/execute-api/" + httpApiId + "/test/hello")
+                    .then().statusCode(401)
+                    .header("Access-Control-Allow-Origin", equalTo("https://app.example.com"))
+                    .header("Access-Control-Expose-Headers", equalTo("x-probe"));
+
+            given()
+                    .contentType(ContentType.JSON)
+                    .body("""
+                            {"authorizationType":"CUSTOM","authorizerId":"%s"}
+                            """.formatted(simpleDenyAuthorizerId))
+                    .when().patch("/v2/apis/" + httpApiId + "/routes/" + routeId)
+                    .then().statusCode(200);
+            given()
+                    .header("Origin", "https://app.example.com")
+                    .when().get("/execute-api/" + httpApiId + "/test/hello")
+                    .then().statusCode(403)
+                    .header("Access-Control-Allow-Origin", equalTo("https://app.example.com"))
+                    .header("Access-Control-Expose-Headers", equalTo("x-probe"));
+            given()
+                    .header("Origin", "https://evil.example")
+                    .when().get("/execute-api/" + httpApiId + "/test/hello")
+                    .then().statusCode(403)
+                    .header("Access-Control-Allow-Origin", nullValue());
+        } finally {
+            given().when().delete("/v2/apis/" + httpApiId + "/cors").then().statusCode(204);
+        }
+    }
+
+    // ──────────────────────────── Test: Query string identity source validation ────────────────────────────
+
+    @Test
+    @Order(70)
+    void queryStringIdentitySourceValidation() {
+        String qsAuthorizerId = given()
+                .contentType(ContentType.JSON)
+                .body("""
+                        {"name":"qs-identity-auth","authorizerType":"REQUEST","authorizerPayloadFormatVersion":"1.0","identitySource":"$request.querystring.token","authorizerUri":"arn:aws:lambda:us-east-1:000000000000:function:%s/invocations"}
+                        """.formatted(ALLOW_FN))
+                .when().post("/v2/apis/" + httpApiId + "/authorizers")
+                .then().statusCode(201)
+                .extract().path("authorizerId");
+
+        given()
+                .contentType(ContentType.JSON)
+                .body("""
+                        {"authorizationType":"CUSTOM","authorizerId":"%s"}
+                        """.formatted(qsAuthorizerId))
+                .when().patch("/v2/apis/" + httpApiId + "/routes/" + routeId)
+                .then().statusCode(200);
+
+        // Without required query param — 401
+        given()
+                .when().get("/execute-api/" + httpApiId + "/test/hello")
+                .then().statusCode(401);
+
+        // With required query param — succeeds
+        given()
+                .queryParam("token", "my-secret-token")
+                .when().get("/execute-api/" + httpApiId + "/test/hello")
+                .then().statusCode(200);
+    }
+
+    // ──────────────────────────── Test: Payload format 1.0 event shape ────────────────────────────
+
+    @Test
+    @Order(80)
+    void payloadFormat10EventShape() throws Exception {
+        given()
+                .contentType(ContentType.JSON)
+                .body("""
+                        {"authorizationType":"CUSTOM","authorizerId":"%s"}
+                        """.formatted(echoV1AuthorizerId))
+                .when().patch("/v2/apis/" + httpApiId + "/routes/" + routeId)
+                .then().statusCode(200);
+
+        String response = given()
+                .header("X-Custom-Header", "test-value")
+                .queryParam("foo", "bar")
+                .when().get("/execute-api/" + httpApiId + "/test/hello")
+                .then().statusCode(200)
+                .extract().body().asString();
+
+        JsonNode backendResponse = MAPPER.readTree(response);
+        assertEquals("Hello from backend", backendResponse.path("message").asText());
+        String authEventStr = backendResponse.path("authorizer").path("lambda")
+                .path("receivedEvent").asText(null);
+        assertNotNull(authEventStr, "Echo authorizer should embed receivedEvent in context");
+        JsonNode authEvent = MAPPER.readTree(authEventStr);
+
+        assertEquals("REQUEST", authEvent.path("type").asText(), "Event type should be REQUEST");
+        assertEquals("1.0", authEvent.path("version").asText(), "Event version should be 1.0");
+        assertNotNull(authEvent.path("methodArn").asText(null), "Event should have methodArn");
+        assertEquals("/hello", authEvent.path("resource").asText(), "Event should have resource");
+        assertEquals("GET", authEvent.path("httpMethod").asText(), "Event should have httpMethod");
+        assertEquals("review", authEvent.path("stageVariables").path("environment").asText());
+    }
+
+    // ──────────────────────────── Test: Payload format 2.0 event shape ────────────────────────────
+
+    @Test
+    @Order(90)
+    void payloadFormat20EventShape() throws Exception {
+        given()
+                .contentType(ContentType.JSON)
+                .body("""
+                        {"authorizationType":"CUSTOM","authorizerId":"%s"}
+                        """.formatted(echoV2AuthorizerId))
+                .when().patch("/v2/apis/" + httpApiId + "/routes/" + routeId)
+                .then().statusCode(200);
+
+        String response = given()
+                .header("X-Custom-Header", "test-value-v2")
+                .queryParam("key", "value")
+                .when().get("/execute-api/" + httpApiId + "/test/hello")
+                .then().statusCode(200)
+                .extract().body().asString();
+
+        JsonNode backendResponse = MAPPER.readTree(response);
+        assertEquals("Hello from backend", backendResponse.path("message").asText());
+        String authEventStr = backendResponse.path("authorizer").path("lambda")
+                .path("receivedEvent").asText(null);
+        assertNotNull(authEventStr, "Echo authorizer should embed receivedEvent in context");
+        JsonNode authEvent = MAPPER.readTree(authEventStr);
+
+        assertEquals("REQUEST", authEvent.path("type").asText(), "Event type should be REQUEST");
+        assertEquals("2.0", authEvent.path("version").asText(), "Event version should be 2.0");
+        assertNotNull(authEvent.path("routeArn").asText(null), "Event should have routeArn");
+        assertEquals("GET /hello", authEvent.path("routeKey").asText(), "Event should have routeKey");
+        assertEquals("/hello", authEvent.path("rawPath").asText(), "Event should have rawPath");
+        assertEquals("review", authEvent.path("stageVariables").path("environment").asText());
+    }
+
+    // ──────────────────────────── Test: No authorizer (NONE) allows request ────────────────────────────
+
+    @Test
+    @Order(100)
+    void noAuthorizerAllowsRequest() {
+        given()
+                .contentType(ContentType.JSON)
+                .body("""
+                        {"authorizationType":"NONE","authorizerId":null}
+                        """)
+                .when().patch("/v2/apis/" + httpApiId + "/routes/" + routeId)
+                .then().statusCode(200);
+
+        given()
+                .when().get("/execute-api/" + httpApiId + "/test/hello")
+                .then().statusCode(200);
+    }
+
+    // ──────────────────────── Trailing slash preservation (#2136) ────────────────────────
+
+    /**
+     * A trailing slash is significant in the delivered path, and rawPath is by contract the raw
+     * path. The route key stays {@code GET /hello}, so route matching still runs on the
+     * normalized path while the Lambda receives the slash. REST (V1) has behaved this way since
+     * #1557; this pins the same behaviour for HTTP APIs.
+     */
+    @Test
+    @Order(110)
+    void trailingSlashReachesTheLambdaRawPath() throws Exception {
+        given()
+                .contentType(ContentType.JSON)
+                .body("""
+                        {"authorizationType":"NONE","authorizerId":null}
+                        """)
+                .when().patch("/v2/apis/" + httpApiId + "/routes/" + routeId)
+                .then().statusCode(200);
+
+        String body = given()
+                .when().get("/execute-api/" + httpApiId + "/test/hello/")
+                .then().statusCode(200)
+                .extract().asString();
+
+        // The backend Lambda echoes event.rawPath back as "path".
+        JsonNode response = MAPPER.readTree(body);
+        assertEquals("/hello/", response.path("path").asText(),
+                "rawPath must keep the trailing slash the JAX-RS {proxy} binding strips");
+    }
+
+    // ──────────────────────────── Cleanup ────────────────────────────
+
+    @Test
+    @Order(999)
+    void cleanup() throws Exception {
+        if (routeId != null) given().when().delete("/v2/apis/" + httpApiId + "/routes/" + routeId);
+        if (httpApiId != null) given().when().delete("/v2/apis/" + httpApiId);
+        deleteFunctions(BACKEND_FN, ALLOW_FN, DENY_FN, ERROR_FN, SIMPLE_ALLOW_FN,
+                SIMPLE_DENY_FN, ECHO_FN, NESTED_CTX_FN, CONTEXTLESS_FN);
+    }
+
+    // ──────────────────────────── Helpers ────────────────────────────
+
+    private static void createNodeLambda(String functionName, String handlerSource) throws Exception {
+        String zipBase64 = Base64.getEncoder().encodeToString(zipEntries(Map.of("index.js", handlerSource)));
+        given()
+                .contentType(ContentType.JSON)
+                .body("""
+                        {"FunctionName":"%s","Runtime":"nodejs20.x","Role":"arn:aws:iam::000000000000:role/lambda-role","Handler":"index.handler","Timeout":30,"Code":{"ZipFile":"%s"}}
+                        """.formatted(functionName, zipBase64))
+                .when().post("/2015-03-31/functions")
+                .then().statusCode(201);
+    }
+
+    private static byte[] zipEntries(Map<String, String> entries) throws Exception {
+        ByteArrayOutputStream baos = new ByteArrayOutputStream();
+        try (ZipOutputStream zos = new ZipOutputStream(baos)) {
+            for (Map.Entry<String, String> entry : entries.entrySet()) {
+                zos.putNextEntry(new ZipEntry(entry.getKey()));
+                zos.write(entry.getValue().getBytes(StandardCharsets.UTF_8));
+                zos.closeEntry();
+            }
+        }
+        return baos.toByteArray();
+    }
+
+    private static void deleteFunctions(String... functionNames) throws Exception {
+        try (ExecutorService executor = Executors.newFixedThreadPool(functionNames.length)) {
+            List<Future<?>> deletions = new ArrayList<>();
+            for (String functionName : functionNames) {
+                deletions.add(executor.submit(() -> deleteFunction(functionName)));
+            }
+            for (Future<?> deletion : deletions) {
+                deletion.get();
+            }
+        }
+    }
+
+    private static void deleteFunction(String functionName) {
+        int statusCode = given()
+                .when().delete("/2015-03-31/functions/" + functionName)
+                .then().extract().statusCode();
+        assertTrue(statusCode == 204 || statusCode == 404);
+    }
+}

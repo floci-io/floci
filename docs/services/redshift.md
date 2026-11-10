@@ -129,6 +129,8 @@ The attributes follow the [CloudFormation resource schema](https://docs.aws.amaz
 | `CreateClusterSnapshot` | Back up a cluster to a SQL dump via `pg_dump` |
 | `DescribeClusterSnapshots` | List snapshots, optionally filtered by snapshot or cluster identifier and SnapshotType (manual or automated) |
 | `DeleteClusterSnapshot` | Remove a snapshot and its stored dump |
+| `ModifyClusterSnapshot` | Update the retention period of a manual cluster snapshot |
+| `CopyClusterSnapshot` | Copy an automated cluster snapshot to a manual snapshot with a new identifier and retention period |
 | `RestoreFromClusterSnapshot` | Create a new cluster and load a snapshot's dump into it via `psql`; accepts `SnapshotIdentifier` or a same-account, same-region `SnapshotArn` |
 | `CreateClusterParameterGroup` | Register a parameter group (metadata only) |
 | `DescribeClusterParameterGroups` | List parameter groups, optionally filtered by name |
@@ -170,8 +172,8 @@ The attributes follow the [CloudFormation resource schema](https://docs.aws.amaz
 | `DescribeClusterVersions` | Return the single emulated engine version and its parameter group family |
 | `DescribeOrderableClusterOptions` | Return the static node types and cluster types, optionally filtered by `NodeType` or `ClusterVersion` |
 | `ModifyClusterIamRoles` | Add or remove associated IAM roles and set `DefaultIamRoleArn`; COPY and UNLOAD see the change on new connections |
-| `DescribeLoggingStatus` | Return a cluster's stored audit-logging configuration |
-| `EnableLogging` | Store audit-logging configuration and deliver the selected connection, user, and user-activity audit records to CloudWatch Logs for provisioned clusters |
+| `DescribeLoggingStatus` | Return a cluster's stored audit-logging configuration and delivery status |
+| `EnableLogging` | Store audit-logging configuration and deliver connection, user, and user-activity audit records to CloudWatch Logs or Amazon S3 for provisioned clusters |
 | `DisableLogging` | Clear a cluster's audit-logging configuration |
 | `PauseCluster` | Stop a provisioned cluster and its auth proxy while retaining the container and data |
 | `ResumeCluster` | Restart a paused cluster and restore its auth proxy on the same endpoint |
@@ -180,7 +182,7 @@ The attributes follow the [CloudFormation resource schema](https://docs.aws.amaz
 | `GetClusterCredentialsWithIAM` | Issue short-lived credentials with the DbUser derived from the caller's IAM identity |
 <!-- floci:actions:end -->
 
-CloudWatch audit events use the AWS log groups `/aws/redshift/cluster/<clusterIdentifier>/<logType>` and CSV log records. `connectionlog` and `userlog` follow the logging export selection. `useractivitylog` additionally requires `enable_user_activity_logging=true` in the cluster parameter group, which is false by default.
+CloudWatch audit events use the AWS log groups `/aws/redshift/cluster/<clusterIdentifier>/<logType>` and CSV log records. S3 audit events are compressed with gzip and delivered to `s3://<bucketName>/[<s3KeyPrefix>/]AWSLogs/<accountId>/redshift/<region>/<YYYY>/<MM>/<DD>/<accountId>_redshift_<region>_<clusterIdentifier>_<logType>_<timestamp>.gz` using pipe-delimited records for `connectionlog` and `userlog`, and standard formatted text for `useractivitylog`. `connectionlog` and `userlog` follow the logging export selection. `useractivitylog` additionally requires `enable_user_activity_logging=true` in the cluster parameter group, which is false by default.
 
 Audit delivery covers PostgreSQL wire connections and Data API connections, including batch statements and retained sessions. Records identify the requested database user and database, even when temporary credentials use a master connection internally. User changes are published after commit and discarded on rollback, including rollback to a savepoint on the wire path. SQL password literals are redacted, including literals separated from `PASSWORD` by SQL comments.
 
@@ -206,9 +208,13 @@ committed is removed on failure; if the commit succeeded and a later flush repor
 the dump is retained for the committed snapshot.
 
 `FinalClusterSnapshotRetentionPeriod` defaults to `-1` and accepts `-1` or 1 to 3,653 days.
-It is persisted and returned as the snapshot's `ManualSnapshotRetentionPeriod`; automatic
-expiration is not implemented. Manual snapshots created by `CreateClusterSnapshot`, and older
-snapshots without stored retention metadata, also return the default `-1`. Snapshot metadata
+It is persisted and returned as the snapshot's `ManualSnapshotRetentionPeriod`. The background
+retention sweep expires finite-retention manual snapshots, including final snapshots and
+`CopyClusterSnapshot` targets, and removes their stored dumps. `ModifyClusterSnapshot` can change
+this period; omitting `ManualSnapshotRetentionPeriod` preserves the current setting. An elapsed
+new retention period requires `Force=true` to delete the snapshot immediately.
+Manual snapshots created by `CreateClusterSnapshot`, and older snapshots without stored
+retention metadata, return the default `-1` and are retained indefinitely. Snapshot metadata
 uses the configured storage mode. Persistent and WAL metadata commit failures are reported
 before teardown; hybrid retains its existing
 write-behind durability and logged flush failures.
@@ -449,6 +455,32 @@ restart. While the backfill runs, `DescribeIntegrations` reports `Status` as `sy
 approximation to indicate that initial backfill is in progress); it becomes `active` once the scan is
 exhausted. The landing table is an append-only log, so an item changed while its table is still being
 backfilled can appear twice: once from the scan and once from the stream.
+
+### S3 event integrations
+
+`CreateIntegration` also takes an Amazon S3 bucket as the source (`arn:aws:s3:::<bucket>`), the first step of
+auto-copy. The target is a Serverless namespace ARN, or the provisioned cluster ARN described above; AWS's
+`arn:aws:redshift:<region>:<account>:namespace:<id>` form of a provisioned target is not accepted yet.
+`SourceType` is `s3-event-notifications`, and the `source-types` filter of `DescribeIntegrations` matches it.
+
+```bash
+aws --endpoint-url http://localhost:4566 redshift create-integration \
+  --integration-name lake-auto-copy \
+  --source-arn arn:aws:s3:::my-bucket \
+  --target-arn arn:aws:redshift-serverless:us-east-1:000000000000:namespace/<namespace-id>
+```
+
+The bucket has to exist in the caller's account (`IntegrationSourceNotFoundFault` otherwise), to be in the
+Region of the integration, and to have no period in its name. A bucket with no stored Region is treated as
+Floci's default Region. Its ARN must have empty Region and account fields and the integration's partition. A provisioned
+target must match the local cluster's full ARN (`IntegrationTargetNotFoundFault` otherwise).
+A bucket joins a target once (`IntegrationConflictOperationFault`), and a
+target takes at most 50 S3 event integrations (`IntegrationQuotaExceededFault`). Those two fault names are
+Floci's reading of the AWS API's fault list; their messages are not captured from AWS.
+
+The integration is `active` as soon as it is created, where AWS reports `creating` first. It does not load
+anything yet, and the bucket policy, the namespace resource policy and the existing notifications of the bucket
+are not checked. [COPY JOB](#copy-job) statements work independently of the integration.
 
 ### Resource policies
 
@@ -850,20 +882,19 @@ order) through its own S3 service and streams the rows into the backing PostgreS
 
 - Supported options: `DELIMITER`, `FORMAT CSV` (or a bare `CSV`), `GZIP`, `IGNOREHEADER <n>` and
   `HEADER`, `NULL AS`, `FORMAT AS JSON 'auto'`, `FORMAT AS JSON 'auto ignorecase'` (or bare `JSON 'auto'`),
-  `MANIFEST`, and an explicit column list.
+  `MANIFEST`, `COMPUPDATE`, `STATUPDATE`, `TRIMBLANKS`, and an explicit column list.
+- `COMPUPDATE [PRESET | ON | OFF | TRUE | FALSE]` and `STATUPDATE [ON | OFF | TRUE | FALSE]` (or bare `COMPUPDATE`
+  and `STATUPDATE`) are accepted and treated as no-ops for single-node PostgreSQL compatibility.
 - The default framing is pipe-delimited text, matching Redshift. `FORMAT CSV` switches to CSV with
   a comma default delimiter.
 - `FORMAT AS JSON 'auto'` loads JSON objects, mapping JSON keys to table columns with exact case
   sensitivity. `FORMAT AS JSON 'auto ignorecase'` performs case-insensitive key matching. Input
   objects can be separated by any whitespace, including multiline pretty-printed JSON. Non-object root
   values abort the load. When columns are not specified in the COPY statement, table column names and
-  order are automatically discovered from the database catalog, but only over the **Simple Query
-  protocol**. Over Extended Query (the default for a JDBC `PreparedStatement`, and for a plain
-  `Statement` under recent pgjdbc versions) the column list is fixed by the time `Parse` is sent,
-  before any backend round trip is possible, so catalog discovery cannot run there: omitting the column
-  list fails the COPY with a clear error instead of silently guessing. Specify the column list explicitly
-  for Extended Query, or connect with `preferQueryMode=simple` to use discovery. Nested objects and
-  arrays are serialized as JSON strings.
+  order are automatically discovered from the database catalog when the statement executes, through
+  Simple Query, Extended Query and the Data API. Nested objects and arrays are serialized as JSON strings.
+  With `MAXERROR` greater than 1, input is processed as JSON lines so a malformed line can be skipped;
+  multiline pretty-printed JSON is supported only without error tolerance.
 - `MANIFEST` resolves file keys from a JSON manifest file (`{"entries": [{"url": "s3://...", "mandatory": boolean}]}`),
   compatible with output from `UNLOAD ... MANIFEST`. Missing files marked `mandatory: true` abort the load.
   When `mandatory` is omitted, it defaults to `false`. All entries in the manifest must reside in the same S3
@@ -888,15 +919,17 @@ order) through its own S3 service and streams the rows into the backing PostgreS
   stored, and the statement text keeps them out of Floci's own messages. Combining key credentials with
   `IAM_ROLE`, or giving only one of the pair, is
   not intercepted, and neither is a blank key, secret, token or role.
-- `EMPTYASNULL`, `BLANKSASNULL`, `REMOVEQUOTES` (not with `CSV` or `JSON`), `ACCEPTINVCHARS [AS 'c']`
+- `EMPTYASNULL`, `BLANKSASNULL`, `TRIMBLANKS`, `REMOVEQUOTES` (not with `CSV` or `JSON`), `ACCEPTINVCHARS [AS 'c']`
   (default `?`, one ASCII character) and `TRUNCATECOLUMNS` rewrite field content before loading. Field
   level options need a single-byte `DELIMITER`, are not combined with `FORMAT AS JSON`, and normalise
-  `CRLF` line endings to `LF`. A nulled field is written as the `NULL AS` string, or `\N` in text
+  `CRLF` line endings to `LF`. `TRIMBLANKS` removes trailing white space (spaces and tabs) from `VARCHAR` columns;
+  combined with `EMPTYASNULL`, a field containing only spaces converts to `NULL`. A nulled field is written
+  as the `NULL AS` string, or `\N` in text
   mode and an empty unquoted field in CSV mode. `TRUNCATECOLUMNS` cuts a value to the declared
   `CHAR`/`VARCHAR` length in bytes (Redshift's meaning of the declared length, so `éééé` into
   `VARCHAR(3)` loads `é`), never inside a multi-byte character or a backslash escape. Its column
-  lengths come from the database catalog, so it works only over the **Simple Query protocol** (`preferQueryMode=simple`);
-  over Extended Query the COPY fails with an error that names this requirement. A field-level option
+  lengths come from the database catalog at execution, through Simple Query, Extended Query and the Data API.
+  A field-level option
   buffers each decompressed object in memory, so an object over 64 MiB, or a heap budget shared
   across connections that is used up, fails the COPY instead of exhausting the emulator.
 - `DATEFORMAT [AS] 'format'` reads the fields of `DATE` columns and `TIMEFORMAT [AS] 'format'` those of
@@ -905,8 +938,8 @@ order) through its own S3 service and streams the rows into the backing PostgreS
   `TIMEFORMAT` also takes `'epochsecs'` and `'epochmillisecs'`, read as UTC. A `DATEFORMAT` may name a time
   of day, which is dropped; a `TIMEFORMAT` without one gives midnight. A format that names a time zone, or
   any other text, is not recognized and the statement is forwarded to PostgreSQL. A value that does not
-  match its format fails the COPY, whatever `MAXERROR` says; the message names the column and the format, and
-  Floci writes no `stl_load_errors` row. `ACCEPTANYDATE` loads such a value as
+  match its format is a record error counted against `MAXERROR`; the message names the column and the format,
+  and Floci writes no `stl_load_errors` row. `ACCEPTANYDATE` loads such a value as
   `NULL` instead; when no format is given it reads the ISO form of a date, with an optional time of day, and
   turns anything else into `NULL`. An empty unquoted field of a `DATE`, `TIMESTAMP` or other non-character column
   is loaded as `NULL`, as in AWS, without requiring `ACCEPTANYDATE` or `EMPTYASNULL`. Numeric parts with no
@@ -914,8 +947,8 @@ order) through its own S3 service and streams the rows into the backing PostgreS
   full width, a part may be named once, and `HH12` needs `AM` or `PM`; any other format string is not
   recognized.
   Like `TRUNCATECOLUMNS`, these and the empty non-character rule read column types from the catalog, so
-  they apply only with the options that query column types (`DATEFORMAT`, `TIMEFORMAT`, `FILLRECORD`), over the
-  Simple Query protocol, and are not combined with `FORMAT AS JSON`; a plain `COPY` without those options does
+  they apply only with the options that query column types (`DATEFORMAT`, `TIMEFORMAT`, `FILLRECORD`), through
+  Simple Query, Extended Query and the Data API, and are not combined with `FORMAT AS JSON`; a plain `COPY` without those options does
   not read the catalog. Floci deviations: `'auto'` is accepted but converts
   nothing, leaving every value to PostgreSQL, which reads ISO 8601, Julian and `YYYYMMDD HHMISS` but not every
   form Redshift recognizes (for example `BC` dates and `YYYY.DDD`), and with it `ACCEPTANYDATE` cannot turn a
@@ -928,21 +961,20 @@ order) through its own S3 service and streams the rows into the backing PostgreS
   too. A column that does not allow `NULL` fails the COPY as it would without `FILLRECORD`, and a record with
   too many fields still fails. The number and types of the columns come from the catalog (generated columns
   left out), or from the column list, in which a name that matches no column counts as a non-character column.
-  A domain over a character type counts as a non-character column. It works only over the Simple Query
-  protocol, and it is not combined with `FORMAT AS JSON`.
+  A domain over a character type counts as a non-character column. It works through Simple Query,
+  Extended Query and the Data API, and is not combined with `FORMAT AS JSON`.
 - `MAXERROR [AS] n` (0 to 100000) lets the load go on past records that cannot be converted. With `n` of 0 or 1 the
-  COPY fails at the first error, as it does without the option. With a larger `n` Floci asks the backend to skip
-  the failing records (`ON_ERROR ignore`) and to fail the COPY, rolling it back, once `n` of them have been
-  skipped (`REJECT_LIMIT n - 1`). This uses the PostgreSQL `COPY` options of the same names, so it needs a
-  PostgreSQL 18 backend (set `floci.services.redshift.image-version`, for example `postgres:18-alpine`); the
-  default backend rejects the option as unknown and the COPY fails with that error. The COPY fails when the
-  `n`-th record is rejected, counted across all the files of the load. Floci deviations: only a value that the
-  backend cannot convert to its column type is skipped, whereas Redshift also skips a record with too many or too
-  few fields, a `NOT NULL` violation and other errors, which still fail the COPY here. So do a value that does
-  not match a `DATEFORMAT` or `TIMEFORMAT` (use `ACCEPTANYDATE` to load it as `NULL`), a quoted field without its
-  closing quote under `REMOVEQUOTES`, and a line that `FORMAT AS JSON 'auto'` cannot read, since Floci rejects
-  those before the backend sees them. The backend reports the count of skipped records in its own notice, not
-  Redshift's `Load into table ... completed` message, and no `stl_load_errors` row is written.
+  COPY fails at the first error, as it does without the option. A larger `n` loads logical records under
+  savepoints on the default PostgreSQL 15 backend, through Simple Query, Extended Query and the Data API.
+  Conversion, date/time format, field-count, encoding, string-length and `NOT NULL` errors can be skipped.
+  The `n`-th record error, counted across all source objects, rolls back the entire COPY; earlier statements
+  in an explicit transaction remain subject to the caller's transaction and savepoints. Access denied,
+  cancellation, storage and unexpected internal errors are never ignored. An unterminated CSV quote or
+  unreadable compressed object aborts the load because the next record boundary cannot be established.
+  The returned `COPY` count includes accepted rows only. Floci deviations: tolerant loads use one COPY
+  per record, which costs more round trips and runs PostgreSQL statement triggers per record; PostgreSQL
+  deferred-constraint timing is not promised as Redshift behavior. Tolerant records are buffered within
+  the transform size and shared memory limits. No `stl_load_errors` row or Redshift load-summary message is written.
 - Any other clause (`FIXEDWIDTH`, `PARQUET`, `AVRO`, `ORC`,
   `ENCODING`, `ESCAPE`, `ENCRYPTED`, `MASTER_SYMMETRIC_KEY`,
   `KMS_KEY_ID`, and so on) is not recognized: the statement is forwarded unchanged and PostgreSQL

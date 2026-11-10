@@ -1,0 +1,319 @@
+package io.floci.aws.services.cloudformation.provisioners;
+
+import com.fasterxml.jackson.databind.JsonNode;
+import io.floci.aws.core.common.AwsException;
+import io.floci.aws.services.cloudformation.CloudFormationTemplateEngine;
+import io.floci.aws.services.cloudformation.model.StackEvent;
+
+import java.util.ArrayList;
+import java.util.LinkedHashMap;
+import java.util.LinkedHashSet;
+import java.util.List;
+import java.util.Map;
+import java.util.Set;
+import java.util.UUID;
+import java.util.function.Consumer;
+
+/**
+ * The per-provision context every resource handler drew from: the template engine (for resolving
+ * intrinsic functions in properties) plus the region/account/stack it is being created in. The
+ * helpers were lifted verbatim from the former CloudFormation monolith's private methods
+ * so extracted provisioners produce byte-identical physical ids and resolved values.
+ */
+public record ProvisionContext(CloudFormationTemplateEngine engine, String region,
+                               String accountId, String stackName, String priorPhysicalId,
+                               Consumer<StackEvent> progress, JsonNode priorProperties) {
+
+    public ProvisionContext(CloudFormationTemplateEngine engine, String region,
+                            String accountId, String stackName, String priorPhysicalId) {
+        this(engine, region, accountId, stackName, priorPhysicalId, event -> {}, null);
+    }
+
+    /** Intermediate resource events retain the stack pipeline's event IDs and metadata. */
+    public static void report(Consumer<StackEvent> progress, String physicalId, String status, String reason) {
+        StackEvent event = new StackEvent();
+        event.setPhysicalResourceId(physicalId);
+        event.setResourceStatus(status);
+        event.setResourceStatusReason(reason);
+        progress.accept(event);
+    }
+
+    /** A context for a first-time create, with no prior physical id. */
+    public ProvisionContext(CloudFormationTemplateEngine engine, String region,
+                            String accountId, String stackName) {
+        this(engine, region, accountId, stackName, null);
+    }
+
+    /**
+     * Whether this logical resource already had a physical id from an earlier successful provision,
+     * i.e. {@code provision} is running as the update path rather than the create path.
+     *
+     * <p>Captured when the context is built rather than read from the {@code StackResource},
+     * because {@code provision} assigns the new physical id onto that resource as it works: a
+     * resource-derived check flips from false to true mid-method and silently changes meaning.
+     *
+     * <p>Two things this does not mean. It is not "the stack is being updated" (a resource added by
+     * an UpdateStack reads false, correctly). And it is not "AWS would update rather than replace"
+     * — a replacing update still arrives here with the old physical id, so a provisioner treating
+     * this as "reuse the existing entity" must still reject or replace on createOnly properties.
+     */
+    public boolean isUpdate() {
+        return priorPhysicalId != null && !priorPhysicalId.isBlank();
+    }
+
+    /**
+     * Whether the previous template declared {@code name} on this resource, which tells an update
+     * that removes a property apart from one the stack never declared.
+     *
+     * <p>Reads the previous template's properties after its conditions chose each top-level
+     * {@code Fn::If}, so one that chose {@code AWS::NoValue} was not declared. False for a resource
+     * that was never provisioned, which has no prior physical id: a create, a resource the previous
+     * template did not have, and one whose {@code Condition} kept it out.
+     */
+    public boolean previouslyDeclared(String name) {
+        return isUpdate() && priorProperties != null && priorProperties.has(name)
+                && !priorProperties.get(name).isNull();
+    }
+
+    /**
+     * The top-level properties the previous template declared and {@code props}, the properties
+     * this update applies, no longer has: the ones an update that removes a property has to clear.
+     * A property the stack never declared is not in the set, so a value set outside the stack
+     * survives, and a property whose {@code Fn::If} chose {@code AWS::NoValue} on either template
+     * counts as not declared there, as in {@link #previouslyDeclared}. Empty for a create, and for
+     * a resource whose previous template did not declare it.
+     *
+     * <p>The rule only says which names went; what clearing one means is the service's own. A
+     * provisioner clears each by the call its service offers and leaves out the ones AWS keeps
+     * (a create-only property is a replacement question, not a clear).
+     */
+    public Set<String> droppedProperties(JsonNode props) {
+        Set<String> dropped = new LinkedHashSet<>();
+        if (!isUpdate() || priorProperties == null) {
+            return dropped;
+        }
+        priorProperties.fieldNames().forEachRemaining(name -> {
+            if (previouslyDeclared(name) && (props == null || !props.has(name))) {
+                dropped.add(name);
+            }
+        });
+        return dropped;
+    }
+
+    /**
+     * Resolves a CloudFormation tag property to a map, preserving template order. Both registry
+     * shapes are read: the {@code [{Key, Value}]} list most types declare, and the
+     * {@code {key: value}} object types such as {@code AWS::Batch::*} declare. The whole node is
+     * resolved first so an {@code Fn::If} wrapping it works, not just intrinsics inside each entry.
+     * Entries whose key resolves blank are skipped and a missing value becomes {@code ""}; an
+     * absent property, or one of any other shape, yields an empty map, never null.
+     *
+     * <p>Deliberately does not validate. Callers needing AWS's tag rules (the 50-tag cap, the
+     * reserved {@code aws:} prefix) keep their own validating parse, and callers using null to mean
+     * "the template said nothing, leave stored tags alone" must keep that distinction themselves.
+     */
+    public Map<String, String> resolveTags(JsonNode props, String name) {
+        return resolveTags(props, name, engine);
+    }
+
+    public static Map<String, String> resolveTags(JsonNode props, String name, CloudFormationTemplateEngine engine) {
+        Map<String, String> tags = new LinkedHashMap<>();
+        if (props == null || !props.has(name)) {
+            return tags;
+        }
+        JsonNode resolved = engine.resolveNode(props.get(name));
+        if (resolved == null) {
+            return tags;
+        }
+        if (resolved.isObject()) {
+            resolved.fields().forEachRemaining(entry -> {
+                String value = engine.resolve(entry.getValue());
+                tags.put(entry.getKey(), value == null ? "" : value);
+            });
+            return tags;
+        }
+        if (!resolved.isArray()) {
+            return tags;
+        }
+        for (JsonNode tag : resolved) {
+            String key = engine.resolve(tag.path("Key"));
+            if (key == null || key.isBlank()) {
+                continue;
+            }
+            String value = engine.resolve(tag.path("Value"));
+            tags.put(key, value == null ? "" : value);
+        }
+        return tags;
+    }
+
+    /** Resolves an optional property through the engine, or null when absent/explicitly null. */
+    public String resolveOptional(JsonNode props, String name) {
+        if (props == null || !props.has(name) || props.get(name).isNull()) {
+            return null;
+        }
+        return engine.resolve(props.get(name));
+    }
+
+    /**
+     * Resolves an optional integer property, or null when it is absent or explicitly null. One an
+     * intrinsic resolves to nothing stays null too: the engine resolves {@code AWS::NoValue} to blank,
+     * which is how the common {@code Fn::If [cond, value, AWS::NoValue]} drops a property. A value
+     * written into the template has to be an integer, a literal blank included, as CloudFormation's
+     * schema type check requires. A {@code Ref} to a parameter whose value is blank cannot be told
+     * apart from {@code AWS::NoValue} here, so it stays null as well.
+     */
+    public Integer resolveOptionalInt(JsonNode props, String name) {
+        String value = resolveOptional(props, name);
+        if (value == null || (value.isBlank() && !props.get(name).isTextual())) {
+            return null;
+        }
+        try {
+            return Integer.valueOf(value.trim());
+        } catch (NumberFormatException e) {
+            throw new AwsException("ValidationError", "Value of property " + name + " must be an integer.", 400);
+        }
+    }
+
+    /**
+     * Resolves an optional property through the engine, falling back to {@code defaultValue} when it
+     * is absent or resolves to blank. Shared by the per-service provisioners so none carries its own
+     * copy.
+     */
+    public String resolveOrDefault(JsonNode props, String name, String defaultValue) {
+        String value = resolveOptional(props, name);
+        return (value != null && !value.isBlank()) ? value : defaultValue;
+    }
+
+    /**
+     * Resolves a list property to its non-blank elements, or an empty list when absent.
+     *
+     * <p>Routes through {@code engine.resolveStringList} so a list-valued intrinsic
+     * ({@code Fn::Split} / {@code Fn::GetAZs} / {@code Fn::Cidr}, including one selected by an
+     * {@code Fn::If}) expands to its real values instead of collapsing to a single comma-joined
+     * string — the shape CDK emits for cross-stack references (issue #2937). Kept in lockstep
+     * with the monolith helper the per-service provisioners were split from.
+     */
+    public List<String> resolveStringList(JsonNode props, String name) {
+        if (props == null || !props.has(name)) {
+            return new ArrayList<>();
+        }
+        return new ArrayList<>(engine.resolveStringList(props.get(name)));
+    }
+
+    /**
+     * The resolved {@code PolicyDocument} of an IAM policy resource as a JSON string, defaulting to
+     * an empty policy when the property is absent. Shared by the IAM policy provisioners so neither
+     * carries its own copy.
+     */
+    public String resolvePolicyDocument(JsonNode props) {
+        JsonNode documentNode = props != null ? props.get("PolicyDocument") : null;
+        String resolved = documentNode != null ? engine.resolveJsonAttributeStrict(documentNode) : null;
+        return resolved != null ? resolved : "{\"Version\":\"2012-10-17\",\"Statement\":[]}";
+    }
+
+    /**
+     * The physical name for a resource whose name is create-only: the template's name when it gives
+     * one, otherwise the name this resource already had, and only failing both a freshly generated
+     * one.
+     *
+     * <p>Keeping the prior name is the part that matters. {@code provision} runs again on every
+     * {@code UpdateStack}, so generating unconditionally gives an unnamed resource a new random name
+     * each time, creating a second resource and orphaning the first with its data. The schemas make
+     * this explicit: for these types the name is a {@code createOnlyProperty}, so an unchanged
+     * template must keep the same physical id.
+     *
+     * <p>Only for types whose physical id <em>is</em> the name. Where it is something derived, such
+     * as an SNS topic's ARN, the prior name has to come from the stored attribute instead.
+     */
+    public String stablePhysicalName(String explicitName, String logicalId, int maxLength,
+                                     boolean lowercase) {
+        if (explicitName != null && !explicitName.isBlank()) {
+            return explicitName;
+        }
+        if (priorPhysicalId != null && !priorPhysicalId.isBlank()) {
+            return priorPhysicalId;
+        }
+        return generatePhysicalName(logicalId, maxLength, lowercase);
+    }
+
+    /**
+     * Whether {@code name} identifies the entity this resource already had, so the provisioner must
+     * update it rather than create it.
+     *
+     * <p>Deliberately not the same question as {@link #isUpdate()}. A <em>replacing</em> update also
+     * arrives with a prior physical id, but the provisioner has derived a different name for it and
+     * must create; treating that as an update would try to mutate a resource that does not exist.
+     * Comparing the derived name against the prior id is what separates the two, and it is the
+     * check a provisioner needs whenever its service rejects a duplicate name.
+     *
+     * <p>Pairs with {@link #stablePhysicalName}: that keeps the name steady across an update, and
+     * this tells the caller what the steady name now implies. Without it, a stable name turns the
+     * second UpdateStack into a duplicate-create against services that reject one.
+     */
+    public boolean reusesPriorEntity(String name) {
+        return isUpdate() && priorPhysicalId.equals(name);
+    }
+
+    /**
+     * Tag keys the stored resource carries that the template no longer declares, for the caller to
+     * untag before applying the desired set. CloudFormation drives a resource's tags to the
+     * template's desired state on update: a dropped key is untagged, and a template with no
+     * {@code Tags} at all leaves the resource untagged. A service's tag call alone never removes
+     * anything (ECR's TagResource, for one, documents that unspecified tags are left unchanged), so
+     * the removal has to be computed here.
+     *
+     * <p>Iterates a copy, because some services hand back their live tag map and untagging while
+     * walking it would modify the collection under iteration.
+     */
+    public static List<String> staleTagKeys(Map<String, String> current, Map<String, String> desired) {
+        List<String> stale = new ArrayList<>();
+        if (current == null) {
+            return stale;
+        }
+        for (String key : List.copyOf(current.keySet())) {
+            if (!desired.containsKey(key)) {
+                stale.add(key);
+            }
+        }
+        return stale;
+    }
+
+    /**
+     * Whether {@code name} has the shape {@link #generatePhysicalName} gives this logical id: the
+     * same prefix and length, ending in a 12-character lowercase hex suffix.
+     */
+    public boolean isGeneratedPhysicalName(String name, String logicalId, int maxLength, boolean lowercase) {
+        String sample = generatePhysicalName(logicalId, maxLength, lowercase);
+        if (name == null || name.length() != sample.length()) {
+            return false;
+        }
+        int prefixLength = sample.length() - 12;
+        return name.startsWith(sample.substring(0, prefixLength))
+                && name.substring(prefixLength).matches("[0-9a-f]{12}");
+    }
+
+    /** Generates a CloudFormation-style physical name: {@code <stack>-<logicalId>-<suffix>}. */
+    public String generatePhysicalName(String logicalId, int maxLength, boolean lowercase) {
+        String suffix = UUID.randomUUID().toString().replace("-", "").substring(0, 12);
+        String base = stackName + "-" + logicalId;
+        if (lowercase) {
+            base = base.toLowerCase();
+        }
+        String name = base + "-" + suffix;
+        if (maxLength > 0 && name.length() > maxLength) {
+            // Truncate the descriptive prefix but always keep the trailing uniqueness token. When a
+            // stack's name approaches the length limit, distinct logical resources still get distinct
+            // physical names — CloudFormation preserves the random suffix when it shortens a generated
+            // name. Truncating the whole string (suffix included) would collapse every such resource
+            // onto one name and break Ref/GetAtt-based lookup (e.g. a custom resource's ServiceToken
+            // resolving to the wrong Lambda).
+            int keep = Math.max(0, maxLength - suffix.length() - 1);
+            String prefix = base.length() > keep ? base.substring(0, keep) : base;
+            while (prefix.endsWith("-")) {
+                prefix = prefix.substring(0, prefix.length() - 1);
+            }
+            name = prefix.isEmpty() ? suffix : prefix + "-" + suffix;
+        }
+        return name;
+    }
+}

@@ -92,3 +92,36 @@ def test_the_hand_routed_scopes_are_rendered_with_their_reasons():
 
     assert json.loads(text)["handRouted"] == dict(sorted(r.HAND_ROUTED.items()))
     assert text.splitlines()[2] == '  "handRouted": {'
+
+
+@pytest.mark.parametrize("status", [400, 401, 402, 403])
+def test_denial_status_comes_from_the_declared_error_shape(status):
+    service = model("rest-json", "2020-01-01", GetThing=("GET", "/things/{Name}"))
+    service["operations"]["GetThing"]["errors"] = [{"shape": "Denied"}]
+    service["shapes"] = {
+        "Denied": {"type": "structure", "exception": True,
+                   "error": {"code": "AccessDeniedException", "httpStatusCode": status}},
+        "Unused": {"type": "structure", "exception": True,
+                   "error": {"code": "AccessDeniedException", "httpStatusCode": 499}},
+    }
+    doc = r.build({"quicksight": service}, "botocore test")
+    assert doc["models"]["quicksight"]["accessDeniedStatus"] == status
+    assert json.loads(r.render(doc))["models"]["quicksight"]["accessDeniedStatus"] == status
+
+
+def test_a_non_denial_error_does_not_supply_the_denial_status():
+    service = model("rest-json", "2020-01-01", GetThing=("GET", "/things/{Name}"))
+    service["operations"]["GetThing"]["errors"] = [{"shape": "ValidationException"}]
+    service["shapes"] = {"ValidationException": {"error": {"httpStatusCode": 400}}}
+    doc = r.build({"quicksight": service}, "botocore test")
+    assert "accessDeniedStatus" not in doc["models"]["quicksight"]
+
+
+def test_models_sharing_a_scope_must_agree_on_the_denial_status():
+    first = model("rest-json", "2020-01-01", GetThing=("GET", "/things/{Name}"))
+    second = model("rest-json", "2020-01-01", GetThing=("GET", "/things/{Name}"))
+    for service, status in ((first, 401), (second, 403)):
+        service["operations"]["GetThing"]["errors"] = [{"shape": "AccessDeniedException"}]
+        service["shapes"] = {"AccessDeniedException": {"error": {"httpStatusCode": status}}}
+    with pytest.raises(SystemExit, match="conflicting access-denied HTTP statuses"):
+        r.build({"lambda": first, "lambda-microvms": second}, "botocore test")

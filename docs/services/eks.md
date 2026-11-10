@@ -11,7 +11,7 @@ EKS uses a standard REST API with JSON bodies: not the JSON 1.1 (`X-Amz-Target`)
 |---|---|
 | `CreateCluster` | Create a new EKS cluster |
 | `DescribeCluster` | Describe a cluster by name |
-| `ListClusters` | List all cluster names |
+| `ListClusters` | List cluster names with pagination (`maxResults` 1-100 and `nextToken`) |
 | `DeleteCluster` | Delete a cluster |
 | `CreateAccessEntry` | Create STANDARD or EC2_LINUX access-entry metadata |
 | `DescribeAccessEntry` | Describe an access entry by IAM principal ARN |
@@ -111,8 +111,12 @@ A matching pod is patched exactly the way real EKS patches it. Every init contai
 | `AWS_CONTAINER_CREDENTIALS_FULL_URI` | `http://169.254.170.23/v1/credentials` |
 | `AWS_CONTAINER_AUTHORIZATION_TOKEN_FILE` | `/var/run/secrets/pods.eks.amazonaws.com/serviceaccount/eks-pod-identity-token` |
 | Volume mount | `/var/run/secrets/pods.eks.amazonaws.com/serviceaccount`, read-only, from volume `eks-pod-identity-token` |
+| `AWS_ENDPOINT_URL` | Floci's endpoint, as a cluster container reaches it (Floci only) |
+| `AWS_ENDPOINT_URL_STS` | The same endpoint (Floci only) |
 
-The volume is a projected service account token with audience `pods.eks.amazonaws.com`, `expirationSeconds: 86400` and path `eks-pod-identity-token`. A name the pod already carries (a volume, a mount, or either environment variable) is left as the workload set it.
+The volume is a projected service account token with audience `pods.eks.amazonaws.com`, `expirationSeconds: 86400` and path `eks-pod-identity-token`. A name the pod already carries (a volume, a mount, or any of the environment variables) is left as the workload set it.
+
+Real EKS sets neither endpoint variable. Floci adds them so the credentials it hands out are used against Floci, as every container Floci launches already is, instead of being sent to AWS, which rejects them. `AWS_ENDPOINT_URL_STS` is set beside the global variable because the AWS SDK for Go v2 builds the STS client of its web identity provider before it reads `AWS_ENDPOINT_URL`. A pod cannot resolve the Docker host name (`host.docker.internal` lives only in the cluster container's `/etc/hosts`) or Floci's hostname (on a custom Docker network k3s replaces the loopback resolver `127.0.0.11` with a public one, so `localhost.floci.io` answers `127.0.0.1`), so the endpoint is the Docker host address and is injected only when that is an IP address, as it is when Floci runs in a container. A container that sets `AWS_ENDPOINT_URL` itself gets no `AWS_ENDPOINT_URL_STS`, which would override its choice for STS. A container with any `envFrom` source gets no endpoint variable, because its values are unknown at admission and an injected `env` entry would take precedence over them; it still gets the credentials variables.
 
 ### Credential endpoint
 
@@ -486,6 +490,15 @@ run. `floci.services.eks.max-memory-mib` and `floci.services.eks.max-vcpus` prov
 ceilings; zero means no extra ceiling. Their environment variables are `FLOCI_SERVICES_EKS_MAX_MEMORY_MIB`
 and `FLOCI_SERVICES_EKS_MAX_VCPUS`.
 
+Those ceilings can only lower the node. To give a workload more room locally than its node group
+asks for on AWS, set `floci.services.eks.node-instance-type` (`FLOCI_SERVICES_EKS_NODE_INSTANCE_TYPE`)
+to a catalog type such as `t2.2xlarge`. The node container's memory and CPU and its kubelet
+reservations are then sized from that type (k3s `maxPods` does not change), while
+`DescribeNodegroup`, the node's `node.kubernetes.io/instance-type` label and the synthesized EC2
+instance keep the requested type, so the same Terraform plans no changes. The two ceilings still apply on top. A type absent from the catalog is ignored with a
+warning. Changing the setting recreates a surviving node on the next start, keeping its data volume.
+This setting is Floci-only; it has no AWS equivalent.
+
 The same calculation sets kubelet's `kube-reserved`, `system-reserved`, and `eviction-hard` flags.
 The EKS AMI reserves `255 + 11 * maxPods` MiB and a tiered CPU fraction for kubelet and the
 container runtime. Floci derives `maxPods` from the catalog's primary network card and IPv4
@@ -597,6 +610,7 @@ does not enable it; omitted or false values keep the simulated behavior.
 | `FLOCI_SERVICES_EKS_MOCK` | `false` | Metadata-only mode (no Docker) |
 | `FLOCI_SERVICES_EKS_MAX_MEMORY_MIB` | `0` | Optional k3s container memory ceiling in MiB |
 | `FLOCI_SERVICES_EKS_MAX_VCPUS` | `0` | Optional k3s container vCPU ceiling |
+| `FLOCI_SERVICES_EKS_NODE_INSTANCE_TYPE` | *(unset)* | Catalog instance type the k3s node container is sized from; the API keeps the node group's type |
 | `FLOCI_SERVICES_EKS_DEFAULT_IMAGE` | `rancher/k3s:latest` | k3s Docker image fallback |
 | `FLOCI_SERVICES_EKS_IMAGE_TEMPLATE` | *(unset)* | Format string for custom k3s images (e.g. `myregistry.io/k3s:v%s`), taking cluster version |
 | `FLOCI_SERVICES_EKS_API_SERVER_BASE_PORT` | `6500` | First port in the k3s API server range |
@@ -771,7 +785,7 @@ services:
 ```
 
 ## Instance Metadata Service (IMDS)
-The cluster container is registered as a synthesized EC2 instance node (image `ami-eks-k3s`) regardless of whether IMDS is enabled, making it visible to the EC2 service (`DescribeInstances`, `DescribeInstanceStatus`, volume attachments, tagging). Its instance type is the same type used for the container limits.
+The cluster container is registered as a synthesized EC2 instance node (image `ami-eks-k3s`) regardless of whether IMDS is enabled, making it visible to the EC2 service (`DescribeInstances`, `DescribeInstanceStatus`, volume attachments, tagging). Its instance type is the node group's type, which also sizes the container unless `floci.services.eks.node-instance-type` is set.
 
 When IMDS is enabled (`FLOCI_SERVICES_EKS_IMDS=true`), each k3s cluster container exposes the AWS Instance Metadata Service on the link-local address `169.254.169.254:80`. Inside the container, Floci adds `169.254.169.254/32` to the loopback interface (`lo`) and runs a lightweight `socat` TCP relay forwarding metadata requests to Floci's IMDS server.
 

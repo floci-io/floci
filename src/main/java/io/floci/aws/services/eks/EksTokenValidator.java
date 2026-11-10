@@ -1,0 +1,215 @@
+package io.floci.aws.services.eks;
+
+import io.floci.aws.core.common.Base64Url;
+import io.floci.aws.core.common.Digests;
+import io.floci.aws.core.common.auth.SigV4Canonicalization;
+import io.floci.aws.core.common.auth.SigV4RequestValidator;
+import io.floci.aws.services.iam.IamService;
+import jakarta.enterprise.context.ApplicationScoped;
+import jakarta.inject.Inject;
+import org.jboss.logging.Logger;
+
+import java.net.URI;
+import java.net.URLDecoder;
+import java.nio.charset.StandardCharsets;
+import java.security.MessageDigest;
+import java.time.Clock;
+import java.time.Duration;
+import java.time.Instant;
+import java.time.ZoneOffset;
+import java.time.format.DateTimeFormatter;
+import java.util.Comparator;
+import java.util.HashMap;
+import java.util.HexFormat;
+import java.util.Locale;
+import java.util.Map;
+import java.util.Optional;
+
+/**
+ * Validates the SigV4-presigned STS request embedded in an EKS IAM bearer token.
+ */
+@ApplicationScoped
+class EksTokenValidator {
+
+    private static final Logger LOG = Logger.getLogger(EksTokenValidator.class);
+    private static final String TOKEN_PREFIX = "k8s-aws-v1.";
+    private static final String ALGORITHM = "AWS4-HMAC-SHA256";
+    private static final String EMPTY_PAYLOAD_SHA256 =
+            "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
+    private static final String REQUIRED_SIGNED_HEADERS = "host;x-k8s-aws-id";
+    private static final Duration TOKEN_LIFETIME = Duration.ofMinutes(15);
+    private static final int MAX_PRESIGN_EXPIRY_SECONDS = (int) TOKEN_LIFETIME.toSeconds();
+    private static final int MAX_TOKEN_LENGTH = 4096;
+    private static final Duration MAX_FUTURE_SKEW = Duration.ofMinutes(5);
+    private static final DateTimeFormatter DATETIME_FORMAT =
+            DateTimeFormatter.ofPattern("yyyyMMdd'T'HHmmss'Z'").withZone(ZoneOffset.UTC);
+
+    private final IamService iamService;
+    private final Clock clock;
+
+    @Inject
+    EksTokenValidator(IamService iamService) {
+        this(iamService, Clock.systemUTC());
+    }
+
+    EksTokenValidator(IamService iamService, Clock clock) {
+        this.iamService = iamService;
+        this.clock = clock;
+    }
+
+    /** {@code keyAccountId} owns a long-term key, from the lookup that verified it; null for a temporary key. */
+    record VerifiedToken(String accessKeyId, String region, String keyAccountId) {}
+
+    boolean validate(String token, String clusterName) {
+        return verify(token, clusterName).isPresent();
+    }
+
+    Optional<VerifiedToken> verify(String token, String clusterName) {
+        if (token == null || clusterName == null || clusterName.isBlank() || token.length() > MAX_TOKEN_LENGTH) {
+            return Optional.empty();
+        }
+
+        try {
+            URI request = parseToken(token);
+            if (request == null) {
+                return Optional.empty();
+            }
+
+            Map<String, String> parameters = parseQuery(request.getRawQuery());
+            if (!hasExpectedRequestShape(request, parameters)) {
+                return Optional.empty();
+            }
+
+            CredentialScope scope = parseCredentialScope(parameters.get("X-Amz-Credential"));
+            Instant signedAt = Instant.from(DATETIME_FORMAT.parse(parameters.get("X-Amz-Date")));
+            if (!isCurrent(signedAt, parameters.get("X-Amz-Expires"))
+                    || !scope.date().equals(parameters.get("X-Amz-Date").substring(0, 8))) {
+                return Optional.empty();
+            }
+
+            IamService.OwnedSecretKey key = secretKey(scope.accessKeyId(), parameters.get("X-Amz-Security-Token"));
+            if (key == null) {
+                return Optional.empty();
+            }
+            String secretKey = key.secretAccessKey();
+
+            String canonicalRequest = canonicalRequest(request, parameters, clusterName);
+            String stringToSign = ALGORITHM + "\n"
+                    + parameters.get("X-Amz-Date") + "\n"
+                    + scope.value() + "\n"
+                    + Digests.sha256Hex(canonicalRequest);
+            byte[] signingKey = SigV4RequestValidator.deriveSigningKey(
+                    secretKey, scope.date(), scope.region(), scope.service());
+            String expectedSignature = HexFormat.of().formatHex(
+                    SigV4RequestValidator.hmacSha256(signingKey, stringToSign));
+            boolean valid = MessageDigest.isEqual(
+                    expectedSignature.getBytes(StandardCharsets.UTF_8),
+                    parameters.get("X-Amz-Signature").getBytes(StandardCharsets.UTF_8));
+            return valid ? Optional.of(new VerifiedToken(scope.accessKeyId(), scope.region(), key.accountId()))
+                    : Optional.empty();
+        } catch (Exception exception) {
+            LOG.debugv("EKS IAM token validation rejected a malformed token: {0}", exception.getMessage());
+            return Optional.empty();
+        }
+    }
+
+    private URI parseToken(String token) {
+        if (!token.startsWith(TOKEN_PREFIX)) {
+            return null;
+        }
+        String encodedRequest = token.substring(TOKEN_PREFIX.length());
+        if (encodedRequest.isBlank()) {
+            return null;
+        }
+        String decodedRequest = Base64Url.decode(encodedRequest);
+        URI request = URI.create(decodedRequest);
+        if (!"http".equals(request.getScheme()) && !"https".equals(request.getScheme())) {
+            return null;
+        }
+        if (request.getHost() == null || request.getRawAuthority() == null || request.getUserInfo() != null
+                || request.getRawFragment() != null || !"/".equals(request.getRawPath())) {
+            return null;
+        }
+        return request;
+    }
+
+    private static boolean hasExpectedRequestShape(URI request, Map<String, String> parameters) {
+        return request.getRawQuery() != null
+                && "GetCallerIdentity".equals(parameters.get("Action"))
+                && "2011-06-15".equals(parameters.get("Version"))
+                && ALGORITHM.equals(parameters.get("X-Amz-Algorithm"))
+                && REQUIRED_SIGNED_HEADERS.equals(parameters.get("X-Amz-SignedHeaders"))
+                && parameters.containsKey("X-Amz-Credential")
+                && parameters.containsKey("X-Amz-Date")
+                && parameters.containsKey("X-Amz-Expires")
+                && parameters.containsKey("X-Amz-Signature");
+    }
+
+    private static Map<String, String> parseQuery(String rawQuery) {
+        Map<String, String> parameters = new HashMap<>();
+        for (String pair : rawQuery.split("&", -1)) {
+            int delimiter = pair.indexOf('=');
+            if (delimiter <= 0) {
+                throw new IllegalArgumentException("query parameter has no value");
+            }
+            String name = decode(pair.substring(0, delimiter));
+            String value = decode(pair.substring(delimiter + 1));
+            if (parameters.putIfAbsent(name, value) != null) {
+                throw new IllegalArgumentException("query parameter appears more than once");
+            }
+        }
+        return parameters;
+    }
+
+    private boolean isCurrent(Instant signedAt, String expiryText) {
+        int expirySeconds = Integer.parseInt(expiryText);
+        if (expirySeconds < 0 || expirySeconds > MAX_PRESIGN_EXPIRY_SECONDS) {
+            return false;
+        }
+        Instant now = clock.instant();
+        return !signedAt.isAfter(now.plus(MAX_FUTURE_SKEW)) && !now.isAfter(signedAt.plus(TOKEN_LIFETIME));
+    }
+
+    private IamService.OwnedSecretKey secretKey(String accessKeyId, String sessionToken) {
+        if (iamService.isSeededDeployerAccessKey(accessKeyId)) {
+            return null;
+        }
+        return iamService.findSecretKeyInAnyAccount(accessKeyId, sessionToken).orElse(null);
+    }
+
+    private static CredentialScope parseCredentialScope(String encodedCredential) {
+        String[] parts = encodedCredential.split("/", -1);
+        if (parts.length != 5 || parts[0].isBlank() || !parts[1].matches("[0-9]{8}")
+                || parts[2].isBlank() || !"sts".equals(parts[3]) || !"aws4_request".equals(parts[4])) {
+            throw new IllegalArgumentException("invalid credential scope");
+        }
+        return new CredentialScope(parts[0], parts[1], parts[2], parts[3]);
+    }
+
+    private static String canonicalRequest(URI request, Map<String, String> parameters, String clusterName) {
+        String canonicalQuery = parameters.entrySet().stream()
+                .filter(parameter -> !"X-Amz-Signature".equals(parameter.getKey()))
+                .map(parameter -> SigV4Canonicalization.uriEncode(parameter.getKey()) + "="
+                        + SigV4Canonicalization.uriEncode(parameter.getValue()))
+                .sorted(Comparator.naturalOrder())
+                .reduce((left, right) -> left + "&" + right)
+                .orElse("");
+        String authority = request.getRawAuthority().toLowerCase(Locale.ROOT);
+        return "GET\n/\n"
+                + canonicalQuery + "\n"
+                + "host:" + authority + "\n"
+                + "x-k8s-aws-id:" + clusterName + "\n\n"
+                + REQUIRED_SIGNED_HEADERS + "\n"
+                + EMPTY_PAYLOAD_SHA256;
+    }
+
+    private static String decode(String value) {
+        return URLDecoder.decode(value.replace("+", "%2B"), StandardCharsets.UTF_8);
+    }
+
+    private record CredentialScope(String accessKeyId, String date, String region, String service) {
+        private String value() {
+            return date + "/" + region + "/" + service + "/aws4_request";
+        }
+    }
+}

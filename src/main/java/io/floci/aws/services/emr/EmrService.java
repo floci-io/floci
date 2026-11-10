@@ -1,0 +1,1851 @@
+package io.floci.aws.services.emr;
+
+import com.fasterxml.jackson.core.JsonProcessingException;
+import com.fasterxml.jackson.core.type.TypeReference;
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.datatype.jsr310.JavaTimeModule;
+import io.floci.aws.config.EmulatorConfig;
+import io.floci.aws.core.common.AwsException;
+import io.floci.aws.core.common.AwsRegions;
+import io.floci.aws.core.common.ContainerTeardown;
+import io.floci.aws.core.common.PaginatedResult;
+import io.floci.aws.core.common.Pagination;
+import io.floci.aws.core.common.RegionResolver;
+import io.floci.aws.core.common.RequestScopes;
+import io.floci.aws.core.common.Resettable;
+import io.floci.aws.core.common.SmithyValidationErrors;
+import io.floci.aws.core.common.StoredResourceArns;
+import io.floci.aws.core.storage.AccountAwareStorageBackend;
+import io.floci.aws.core.storage.StorageBackend;
+import io.floci.aws.core.storage.StorageFactory;
+import io.floci.aws.services.emr.model.EmrBlockPublicAccess;
+import io.floci.aws.services.emr.model.EmrCluster;
+import io.floci.aws.services.emr.model.EmrInstanceFleet;
+import io.floci.aws.services.emr.model.EmrInstanceGroup;
+import io.floci.aws.services.emr.model.EmrStep;
+import io.floci.aws.services.emr.model.SecurityConfiguration;
+import io.floci.aws.services.emrserverless.EmrServerlessSparkRunner;
+import io.floci.aws.services.emrserverless.SparkJobRunner;
+import io.floci.aws.services.iam.IamService;
+import io.floci.aws.services.iam.model.IamRole;
+import io.quarkus.runtime.StartupEvent;
+import jakarta.annotation.PreDestroy;
+import jakarta.enterprise.context.ApplicationScoped;
+import jakarta.enterprise.event.Observes;
+import jakarta.inject.Inject;
+import org.jboss.logging.Logger;
+
+import java.security.SecureRandom;
+import java.time.Clock;
+import java.time.Duration;
+import java.time.Instant;
+import java.time.temporal.ChronoUnit;
+import java.util.ArrayList;
+import java.util.HashMap;
+import java.util.HashSet;
+import java.util.LinkedHashMap;
+import java.util.List;
+import java.util.Map;
+import java.util.Objects;
+import java.util.Optional;
+import java.util.Set;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.Executor;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicLong;
+import java.util.function.BooleanSupplier;
+import java.util.function.Consumer;
+import java.util.function.Function;
+import java.util.function.Supplier;
+
+/**
+ * EMR management-plane business logic. Clusters and steps go through the states of
+ * {@link EmrClusterLifecycle}, timed by {@code cluster-startup-delay-seconds},
+ * {@code step-duration-seconds} and {@code cluster-termination-delay-seconds}, all 0 by default, which
+ * makes a cluster ready, and a step complete, before the call that started it returns. A call brings
+ * each cluster it reads up to the time it is made, and the service wakes at each cluster's next
+ * change, so the change's event goes out without anyone asking. Events are published once the call
+ * that made the change no longer holds the service.
+ *
+ * <p>In the default {@code immediate} runner mode nothing runs. In the {@code docker} one each step
+ * runs, in a container of its own, from when it goes RUNNING until its Spark driver exits, on a thread
+ * of its own that ends the step under the service's lock: COMPLETED on exit code 0, FAILED otherwise,
+ * with its ActionOnFailure taken. A cluster's bootstrap actions run there too, while it is
+ * BOOTSTRAPPING, and leave the image its steps then run in.
+ */
+@ApplicationScoped
+public class EmrService implements Resettable, StoredResourceArns, ContainerTeardown {
+
+    private static final Logger LOG = Logger.getLogger(EmrService.class);
+    private static final String UPPER_ALNUM = "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
+    private static final SecureRandom RANDOM = new SecureRandom();
+    // AWS's answer to a change on a terminated cluster, for AddJobFlowSteps and ModifyInstanceFleet; Floci
+    // gives it to AddInstanceGroups and AddInstanceFleet too, for one shutting down.
+    private static final String JOB_FLOW_SHUT_DOWN =
+            "A job flow that is shutting down, terminated, or finished may not be modified.";
+    private static final ObjectMapper SNAPSHOT_MAPPER = new ObjectMapper().registerModule(new JavaTimeModule());
+    private static final String RUNNER_DOCKER = "docker";
+    // The service a step's driver belongs to, which names it and labels it.
+    private static final String SERVICE = "emr";
+    // The reason of a cluster a failed bootstrap action ended, as Terraform reported a real one's
+    // (hashicorp/terraform-provider-aws#4378) and the Management Guide's VPC errors page quotes it.
+    private static final String BOOTSTRAP_ACTION_FAILED =
+            "On the master instance (%s), bootstrap action %d returned a non-zero return code";
+    // No source gives AWS's wording for these; they are Floci's.
+    private static final String BOOTSTRAP_ACTION_NOT_READ =
+            "On the master instance (%s), bootstrap action %d could not be read from %s: %s";
+    private static final String BOOTSTRAP_NOT_RUN = "Floci could not run the bootstrap actions: %s";
+    static final String BOOTSTRAP_INTERRUPTED = "Floci stopped while the cluster's bootstrap actions were running.";
+    // The release whose EMR Serverless Hive image runs the HDFS of a cluster of the AWS runtime for Apache Spark,
+    // which publishes none. Hadoop keeps its wire protocols compatible across a major version's minor releases, so
+    // a newer client, such as the runtime's, reaches its NameNode.
+    static final String SPARK_RUNTIME_HDFS_RELEASE = "emr-7.5.0";
+
+    private final AccountAwareStorageBackend<EmrCluster> clusterStore;
+    private final StorageBackend<String, SecurityConfiguration> secConfigStore;
+    // Block public access is an account setting per Region, so this store is keyed by Region.
+    private final StorageBackend<String, EmrBlockPublicAccess> blockPublicAccessStore;
+    private final RegionResolver regionResolver;
+    private final EmrEventPublisher eventPublisher;
+    private final EmrClusterLifecycle lifecycle;
+    private final Clock clock;
+    private final Wakeups wakeups;
+    // Each cluster's next wakeup, by account and id, so a call that reads a cluster does not add another.
+    private final Map<String, Instant> wakeupsDue = new ConcurrentHashMap<>();
+    // The docker runner mode's; null in the immediate one.
+    private final SparkJobRunner sparkRunner;
+    private final BootstrapRunner bootstrapRunner;
+    private final ClusterStorage clusterStorage;
+    private final ReleaseImages releaseImages;
+    private final Executor stepExecutor;
+    private final IamService iamService;
+    // Where a step's driver runs: image-template, with the release label for %s, and docker-network; null when
+    // not set.
+    private final String imageTemplate;
+    private final String hiveImageTemplate;
+    private final String dockerNetwork;
+    // The steps a thread is running, by account and id; a RUNNING container step not here was left by a restart.
+    private final Set<String> executing = new HashSet<>();
+    // Likewise the clusters a thread is bootstrapping.
+    private final Set<String> bootstrapping = new HashSet<>();
+    // The images of ended clusters a thread is removing. A cluster names its image until it is gone, so one
+    // Docker refused to remove is tried again the next time the cluster is read or stored.
+    private final Set<String> imagesBeingRemoved = new HashSet<>();
+    // Likewise the clusters, by account and id, whose storage a thread is removing.
+    private final Set<String> storageBeingRemoved = new HashSet<>();
+    // Raised by each reset, so a step's thread from before it writes nothing back after the wipe.
+    private long generation;
+    // How many teardowns, by a reset or a shutdown, have begun: a step handed to its thread before one starts no HDFS
+    // and no driver after it.
+    private final AtomicLong teardowns = new AtomicLong();
+    // From a teardown until its reset is over, no step or bootstrap is handed to a thread: a cluster a wakeup moves on
+    // meanwhile would start containers after the teardowns that remove them. After a shutdown's, never again.
+    private volatile boolean tornDown;
+
+    private static final Set<String> COMPUTE_LIMITS_UNIT_TYPES = Set.of("InstanceFleetUnits", "Instances", "VCPU");
+    private static final Set<String> SCALING_STRATEGIES = Set.of("DEFAULT", "ADVANCED");
+    private static final long MIN_IDLE_TIMEOUT_SECONDS = 60;
+    private static final long MAX_IDLE_TIMEOUT_SECONDS = 604_800;
+    private static final int MAX_PORT = 65_535;
+    // The AWS default: block public access enabled in every Region, with port 22 as an exception.
+    private static final String DEFAULT_BLOCK_PUBLIC_ACCESS =
+            "{\"BlockPublicSecurityGroupRules\":true,"
+                    + "\"PermittedPublicSecurityGroupRuleRanges\":[{\"MinRange\":22,\"MaxRange\":22}]}";
+    private final String defaultReleaseLabel;
+
+    /**
+     * When the service next brings a cluster up to date by itself, and where it then sends the events
+     * that queued; a test runs both when it chooses.
+     */
+    interface Wakeups {
+
+        void at(Instant due, Runnable task);
+
+        /** Sends a wakeup's events, by default on the wakeup's own thread. */
+        default void deliver(Runnable delivery) {
+            delivery.run();
+        }
+
+        default void close() {
+        }
+
+        /**
+         * Wakeups on a daemon thread, each at its time by {@code clock}, and their events sent on another,
+         * in the order they queued: a rule's target can take seconds to answer, and no cluster's change
+         * waits for it.
+         */
+        static Wakeups timer(Clock clock) {
+            ScheduledExecutorService executor = Executors.newSingleThreadScheduledExecutor(
+                    Thread.ofPlatform().daemon().name("emr-lifecycle").factory());
+            ExecutorService deliveries = Executors.newSingleThreadExecutor(
+                    Thread.ofPlatform().daemon().name("emr-events").factory());
+            return new Wakeups() {
+                @Override
+                public void at(Instant due, Runnable task) {
+                    long delay = Math.max(0, Duration.between(clock.instant(), due).toMillis());
+                    executor.schedule(task, delay, TimeUnit.MILLISECONDS);
+                }
+
+                @Override
+                public void deliver(Runnable delivery) {
+                    deliveries.execute(delivery);
+                }
+
+                @Override
+                public void close() {
+                    executor.shutdownNow();
+                    deliveries.shutdownNow();
+                }
+            };
+        }
+    }
+
+    @Inject
+    public EmrService(StorageFactory storageFactory, EmulatorConfig config, RegionResolver regionResolver,
+                      EmrEventPublisher eventPublisher, EmrServerlessSparkRunner sparkRunner,
+                      EmrBootstrapRunner bootstrapRunner, EmrClusterStorage clusterStorage,
+                      EmrReleaseImages releaseImages, IamService iamService) {
+        this(storageFactory, config, regionResolver, eventPublisher, Clock.systemUTC(),
+                Wakeups.timer(Clock.systemUTC()),
+                RUNNER_DOCKER.equalsIgnoreCase(config.services().emr().runnerMode()) ? sparkRunner : null,
+                RUNNER_DOCKER.equalsIgnoreCase(config.services().emr().runnerMode()) ? bootstrapRunner : null,
+                RUNNER_DOCKER.equalsIgnoreCase(config.services().emr().runnerMode()) ? clusterStorage : null,
+                RUNNER_DOCKER.equalsIgnoreCase(config.services().emr().runnerMode()) ? releaseImages : null,
+                Executors.newCachedThreadPool(Thread.ofPlatform().daemon().name("emr-step-", 0).factory()),
+                iamService);
+    }
+
+    EmrService(StorageFactory storageFactory, EmulatorConfig config, RegionResolver regionResolver,
+               EmrEventPublisher eventPublisher, Clock clock, Wakeups wakeups) {
+        this(storageFactory, config, regionResolver, eventPublisher, clock, wakeups, null, null, null, null,
+                Runnable::run, null);
+    }
+
+    EmrService(StorageFactory storageFactory, EmulatorConfig config, RegionResolver regionResolver,
+               EmrEventPublisher eventPublisher, Clock clock, Wakeups wakeups, SparkJobRunner sparkRunner,
+               BootstrapRunner bootstrapRunner, ClusterStorage clusterStorage, ReleaseImages releaseImages,
+               Executor stepExecutor, IamService iamService) {
+        this.clusterStore = storageFactory.create("emr", "emr-clusters.json",
+                new TypeReference<Map<String, EmrCluster>>() {});
+        this.secConfigStore = storageFactory.create("emr", "emr-security-configs.json",
+                new TypeReference<Map<String, SecurityConfiguration>>() {});
+        this.blockPublicAccessStore = storageFactory.create("emr", "emr-block-public-access.json",
+                new TypeReference<Map<String, EmrBlockPublicAccess>>() {});
+        this.regionResolver = regionResolver;
+        this.eventPublisher = eventPublisher;
+        this.defaultReleaseLabel = config.services().emr().defaultReleaseLabel();
+        this.sparkRunner = sparkRunner;
+        this.bootstrapRunner = bootstrapRunner;
+        this.clusterStorage = clusterStorage;
+        this.releaseImages = releaseImages;
+        this.stepExecutor = stepExecutor;
+        this.iamService = iamService;
+        this.imageTemplate = config.services().emr().imageTemplate().orElse(null);
+        this.hiveImageTemplate = config.services().emr().hiveImageTemplate().orElse(null);
+        this.dockerNetwork = config.services().emr().dockerNetwork().orElse(null);
+        this.lifecycle = new EmrClusterLifecycle(config.services().emr().clusterStartupDelaySeconds(),
+                config.services().emr().stepDurationSeconds(),
+                config.services().emr().clusterTerminationDelaySeconds(), eventPublisher,
+                sparkRunner != null ? new ContainerSteps() : null,
+                bootstrapRunner != null ? new ContainerBootstrap() : null);
+        this.clock = clock;
+        this.wakeups = wakeups;
+        // Before any step of this process can start, the next step a restarted cluster's wakeup below starts
+        // included: a driver an earlier process left belongs to a step read as FAILED, and the sweep removes
+        // every driver of this deployment it finds.
+        if (sparkRunner != null && config.services().emr().reconcileContainersOnStartup()) {
+            sparkRunner.removeLeftoverDrivers(SERVICE);
+        }
+        // After a restart, a stored cluster with a change still to come wakes the service as before, and one
+        // with a step a container ran, or bootstrap actions, which no thread runs any more, wakes it at once to
+        // fail them. The images bootstrap left for clusters that are gone, or have ended, go first: a wakeup
+        // runs on the timer's thread, and a cluster it moved on could keep an image the sweep never knew of. The
+        // storage of the clusters that are gone, or have ended, goes then too.
+        Set<String> imagesInUse = new HashSet<>();
+        Set<String> clustersUp = new HashSet<>();
+        List<Runnable> wakeAtStart = new ArrayList<>();
+        for (AccountAwareStorageBackend.AccountEntry<EmrCluster> entry
+                : clusterStore.scanAllAccountEntries(k -> true)) {
+            EmrCluster cluster = entry.value();
+            boolean interrupted = sparkRunner != null && hasContainerStepRunning(cluster)
+                    || bootstrapRunner != null && bootstrapsInContainer(cluster);
+            Instant due = interrupted ? clock.instant() : lifecycle.nextChange(cluster);
+            if (due != null) {
+                wakeAtStart.add(() -> wakeAt(entry.accountId(), cluster, due));
+            }
+            if (cluster.getBootstrapImage() != null && !EmrClusterLifecycle.isTerminated(cluster.getState())) {
+                imagesInUse.add(cluster.getBootstrapImage());
+            }
+            if (!EmrClusterLifecycle.isTerminated(cluster.getState())) {
+                clustersUp.add(cluster.getId());
+            }
+        }
+        if (bootstrapRunner != null && config.services().emr().reconcileContainersOnStartup()) {
+            bootstrapRunner.removeImages(imagesInUse);
+        }
+        if (clusterStorage != null && config.services().emr().reconcileContainersOnStartup()) {
+            clusterStorage.removeAllBut(clustersUp);
+        }
+        wakeAtStart.forEach(Runnable::run);
+    }
+
+    // A normal-scoped bean is built on first use, so without this a cluster left mid-change by a restart
+    // would not move on, nor send its events, until the next EMR call.
+    void onStart(@Observes StartupEvent ignored) {
+        LOG.debugv("EMR service ready");
+    }
+
+    @PreDestroy
+    void shutdown() {
+        wakeups.close();
+        if (stepExecutor instanceof ExecutorService executor) {
+            executor.shutdownNow();
+        }
+    }
+
+    /**
+     * A reset's or a shutdown's teardown has begun: a step handed to its thread before it, whose driver the runner's
+     * teardown cannot stop yet, starts no HDFS and no driver after it, as its progress reads it, but stops as a
+     * stopped driver does. This runs before the teardowns that stop containers.
+     */
+    @Override
+    public synchronized void stopManagedContainers() {
+        teardowns.incrementAndGet();
+        tornDown = true;
+    }
+
+    /** A reset is over: steps and bootstraps are handed to threads again. */
+    @Override
+    public synchronized void afterReset() {
+        tornDown = false;
+    }
+
+    @Override
+    public int teardownOrder() {
+        return -1;
+    }
+
+    /**
+     * A reset has begun: the steps' and bootstraps' threads from before it write nothing more, so the storage
+     * wipe that follows leaves none of their clusters behind, and the images bootstrap left, and the clusters'
+     * own storage, go with them. Its teardown has already stopped their containers.
+     */
+    @Override
+    public synchronized void beforeReset() {
+        generation++;
+        executing.clear();
+        bootstrapping.clear();
+        if (bootstrapRunner != null) {
+            bootstrapRunner.removeImages(Set.of());
+        }
+        if (clusterStorage != null) {
+            clusterStorage.removeAllBut(Set.of());
+        }
+    }
+
+    @Override
+    public void clear() {
+        // The clusters live in storage, which the reset has already wiped.
+    }
+
+    // ──────────────────────────── Cluster lifecycle ────────────────────────────
+
+    public EmrCluster runJobFlow(EmrCluster cluster, String region) {
+        return call(() -> {
+            // Only a missing Name fails AWS's framework validation: the member is REQUIRED but its
+            // constraint is len=[0..256], so an explicit empty string is accepted by real EMR.
+            if (cluster.getName() == null) {
+                throw SmithyValidationErrors.validationException(SmithyValidationErrors.notNull("name"));
+            }
+            String id = "j-" + randomId(13);
+            cluster.setId(id);
+            cluster.setRegion(region);
+            cluster.setClusterArn(regionResolver.buildArn("elasticmapreduce", region, "cluster/" + id));
+            if (cluster.getReleaseLabel() == null) {
+                cluster.setReleaseLabel(defaultReleaseLabel);
+            }
+            cluster.setInstanceCollectionType(cluster.getInstanceFleets().isEmpty()
+                    ? "INSTANCE_GROUP" : "INSTANCE_FLEET");
+            cluster.setAutoTerminate(!cluster.isKeepJobFlowAliveWhenNoSteps());
+            cluster.setMasterPublicDnsName(masterDnsName(region));
+            for (EmrInstanceGroup g : cluster.getInstanceGroups()) {
+                g.setId("ig-" + randomId(13));
+                g.setRunningInstanceCount(g.getRequestedInstanceCount());
+                g.setState("RUNNING");
+            }
+            for (EmrInstanceFleet f : cluster.getInstanceFleets()) {
+                f.setId("if-" + randomId(13));
+                f.setProvisionedOnDemandCapacity(f.getTargetOnDemandCapacity());
+                f.setProvisionedSpotCapacity(f.getTargetSpotCapacity());
+                f.setState("RUNNING");
+            }
+            cluster.getSteps().forEach(step -> step.setId("s-" + randomId(13)));
+            lifecycle.start(cluster, now(), region);
+            store(cluster);
+            return cluster;
+        });
+    }
+
+    /** The master node's private DNS name, derived from the region so a stored name never goes stale. */
+    static String masterDnsName(String region) {
+        return AwsRegions.ec2PrivateIpDnsName("10.0.0.1", region);
+    }
+
+    public EmrCluster describeCluster(String id) {
+        return call(() -> snapshotOf(requireCluster(id)));
+    }
+
+    public List<EmrCluster> listClusters(String region, List<String> states,
+                                          Instant createdAfter, Instant createdBefore) {
+        return call(() -> {
+            List<EmrCluster> result = new ArrayList<>();
+            for (EmrCluster c : clusterStore.scan(k -> true)) {
+                if (!region.equals(c.getRegion())) {
+                    continue;
+                }
+                settle(c);
+                if (states != null && !states.isEmpty() && !states.contains(c.getState())) {
+                    continue;
+                }
+                Instant createdAt = c.getCreationDateTime();
+                if (createdAt != null) {
+                    createdAt = createdAt.truncatedTo(ChronoUnit.MILLIS);
+                }
+                if (createdAfter != null && (createdAt == null || !createdAt.isAfter(createdAfter))) {
+                    continue;
+                }
+                if (createdBefore != null && (createdAt == null || !createdAt.isBefore(createdBefore))) {
+                    continue;
+                }
+                result.add(snapshotOf(c));
+            }
+            return result;
+        });
+    }
+
+    public void terminateJobFlows(List<String> ids) {
+        // A request naming a protected cluster still terminates the others before it fails.
+        run(() -> {
+            // AWS terminates the unprotected clusters in the request and then fails it with a
+            // ValidationException if any were termination protected.
+            boolean anyProtected = false;
+            for (String id : ids) {
+                EmrCluster cluster = findCluster(id).orElse(null);
+                if (cluster == null || isShutDown(cluster)) {
+                    continue;
+                }
+                if (cluster.isTerminationProtected()) {
+                    anyProtected = true;
+                    continue;
+                }
+                lifecycle.terminate(cluster, "USER_REQUEST", "Terminated by user request", now(), regionOf(cluster));
+                store(cluster);
+            }
+            if (anyProtected) {
+                throw new AwsException("ValidationException",
+                        "Could not shut down one or more job flows since they are termination protected.", 400);
+            }
+        });
+    }
+
+    public void setTerminationProtection(List<String> ids, boolean value) {
+        run(() -> mutateClusters(ids, c -> c.setTerminationProtected(value)));
+    }
+
+    public void setVisibleToAllUsers(List<String> ids, boolean value) {
+        run(() -> mutateClusters(ids, c -> c.setVisibleToAllUsers(value)));
+    }
+
+    public void setKeepJobFlowAliveWhenNoSteps(List<String> ids, boolean value) {
+        run(() -> mutateClusters(ids, c -> {
+            c.setKeepJobFlowAliveWhenNoSteps(value);
+            c.setAutoTerminate(!value);
+        }));
+    }
+
+    public void setUnhealthyNodeReplacement(List<String> ids, boolean value) {
+        run(() -> mutateClusters(ids, c -> c.setUnhealthyNodeReplacement(value)));
+    }
+
+    public int modifyCluster(String id, Integer stepConcurrencyLevel) {
+        return call(() -> {
+            EmrCluster cluster = requireCluster(id);
+            if (stepConcurrencyLevel != null) {
+                cluster.setStepConcurrencyLevel(stepConcurrencyLevel);
+                lifecycle.concurrencyChanged(cluster, now(), regionOf(cluster));
+                store(cluster);
+            }
+            return cluster.getStepConcurrencyLevel();
+        });
+    }
+
+    // ──────────────────────────── Steps ────────────────────────────
+
+    public List<String> addJobFlowSteps(String clusterId, List<EmrStep> steps) {
+        return call(() -> {
+            // AWS's own wording for an unknown job flow here, not DescribeCluster's: a botocore ClientError
+            // (raster-foundry/raster-foundry#352) and a CloudTrail record on AWS re:Post both show it.
+            EmrCluster cluster = clusterId == null ? requireCluster(null) : findCluster(clusterId).orElseThrow(
+                    () -> new AwsException("ValidationException", "Specified job flow ID does not exist.", 400));
+            if (isShutDown(cluster)) {
+                throw jobFlowShutDownValidation();
+            }
+            steps.forEach(step -> step.setId("s-" + randomId(13)));
+            cluster.getSteps().addAll(steps);
+            lifecycle.submit(cluster, steps, now(), regionOf(cluster));
+            store(cluster);
+            return steps.stream().map(EmrStep::getId).toList();
+        });
+    }
+
+    public EmrStep describeStep(String clusterId, String stepId) {
+        return call(() -> {
+            EmrCluster cluster = snapshotOf(requireCluster(clusterId));
+            return cluster.getSteps().stream()
+                    .filter(s -> s.getId().equals(stepId))
+                    .findFirst()
+                    .orElseThrow(() -> new AwsException("InvalidRequestException",
+                            "Step " + stepId + " does not exist.", 400));
+        });
+    }
+
+    public List<EmrStep> listSteps(String clusterId, List<String> states, List<String> stepIds) {
+        return call(() -> {
+            EmrCluster cluster = snapshotOf(requireCluster(clusterId));
+            List<EmrStep> result = new ArrayList<>();
+            // AWS returns steps in reverse submission order (newest first).
+            List<EmrStep> steps = cluster.getSteps();
+            for (int i = steps.size() - 1; i >= 0; i--) {
+                EmrStep step = steps.get(i);
+                if (states != null && !states.isEmpty() && !states.contains(step.getState())) {
+                    continue;
+                }
+                if (stepIds != null && !stepIds.isEmpty() && !stepIds.contains(step.getId())) {
+                    continue;
+                }
+                result.add(step);
+            }
+            return result;
+        });
+    }
+
+    public record CancelStepInfo(String stepId, String status, String reason) {}
+
+    public List<CancelStepInfo> cancelSteps(String clusterId, List<String> stepIds) {
+        return call(() -> {
+            EmrCluster cluster = requireCluster(clusterId);
+            List<CancelStepInfo> result = new ArrayList<>();
+            for (String stepId : stepIds) {
+                EmrStep step = cluster.getSteps().stream()
+                        .filter(s -> s.getId().equals(stepId)).findFirst().orElse(null);
+                String refusal = step == null ? "Step does not exist."
+                        : lifecycle.cancel(cluster, step, now(), regionOf(cluster));
+                result.add(refusal == null
+                        ? new CancelStepInfo(stepId, "SUBMITTED", null)
+                        : new CancelStepInfo(stepId, "FAILED", refusal));
+            }
+            store(cluster);
+            return result;
+        });
+    }
+
+    // ──────────────────────────── Instance groups / fleets ────────────────────────────
+
+    public List<String> addInstanceGroups(String clusterId, List<EmrInstanceGroup> groups) {
+        return call(() -> {
+            EmrCluster cluster = requireCluster(clusterId);
+            rejectShutDownCluster(cluster, EmrService::jobFlowShutDownValidation);
+            List<String> ids = new ArrayList<>();
+            for (EmrInstanceGroup group : groups) {
+                group.setId("ig-" + randomId(13));
+                group.setRunningInstanceCount(group.getRequestedInstanceCount());
+                group.setState("RUNNING");
+                cluster.getInstanceGroups().add(group);
+                ids.add(group.getId());
+            }
+            clusterStore.put(clusterId, cluster);
+            return ids;
+        });
+    }
+
+    /** One InstanceGroupModifyConfig: a null count or configurations leaves that setting as it is. */
+    public record InstanceGroupModification(String instanceGroupId, Integer instanceCount, String configurations) {}
+
+    /**
+     * Resizes or reconfigures instance groups in place. ClusterId is optional in the request, so
+     * without it each group is looked up across the account's clusters in the Region. Every modification is
+     * checked before any is applied.
+     */
+    public void modifyInstanceGroups(String clusterId, String region, List<InstanceGroupModification> modifications) {
+        run(() -> {
+            if (modifications.isEmpty()) {
+                throw invalid("InstanceGroups must contain at least one instance group.");
+            }
+            Map<String, EmrCluster> touched = new LinkedHashMap<>();
+            List<EmrInstanceGroup> groups = new ArrayList<>();
+            for (InstanceGroupModification mod : modifications) {
+                EmrCluster found = clusterId != null
+                        ? requireCluster(clusterId) : clusterOwning(region, mod.instanceGroupId());
+                // AWS's answer here, recorded by Terraform users
+                // (hashicorp/terraform-provider-aws#1355 and #9400).
+                if (!runsOrWaits(found)) {
+                    throw new AwsException("ValidationException",
+                            "An instance group may only be modified when the cluster is running or waiting.", 400);
+                }
+                // One copy per cluster, so two groups of the same cluster are changed and stored together.
+                EmrCluster cluster = touched.computeIfAbsent(found.getId(), id -> found);
+                EmrInstanceGroup group = requireInstanceGroup(cluster, mod.instanceGroupId());
+                if (mod.instanceCount() != null) {
+                    if (mod.instanceCount() < 0) {
+                        throw invalid("InstanceCount must not be negative.");
+                    }
+                    if ("MASTER".equals(group.getInstanceGroupType())
+                            && mod.instanceCount() != group.getRequestedInstanceCount()) {
+                        throw invalid("The instance count of a master instance group cannot be modified.");
+                    }
+                }
+                groups.add(group);
+            }
+            for (int i = 0; i < modifications.size(); i++) {
+                InstanceGroupModification mod = modifications.get(i);
+                EmrInstanceGroup group = groups.get(i);
+                if (mod.instanceCount() != null) {
+                    group.setRequestedInstanceCount(mod.instanceCount());
+                    group.setRunningInstanceCount(mod.instanceCount());
+                }
+                if (mod.configurations() != null) {
+                    group.setConfigurations(mod.configurations());
+                    group.setConfigurationsVersion(group.getConfigurationsVersion() + 1);
+                }
+            }
+            touched.forEach(clusterStore::put);
+        });
+    }
+
+    @Override
+    public String namespace() {
+        return "elasticmapreduce";
+    }
+
+    @Override
+    public Optional<String> find(String type, List<String> names, String region) {
+        return Optional.empty();
+    }
+
+    /**
+     * The cluster an instance group a {@code ModifyInstanceGroups} names by its id alone is in, the one
+     * {@link #modifyInstanceGroups} finds it in and changes it there, read under the service's lock, as
+     * {@code addInstanceGroups} adds to a cluster's groups.
+     */
+    @Override
+    public List<String> through(String member, String value, String region) {
+        return "InstanceGroups[].InstanceGroupId".equals(member)
+                ? call(() -> clusterWithGroup(region, value).map(EmrCluster::getClusterArn).stream().toList())
+                : List.of();
+    }
+
+    public List<EmrInstanceGroup> listInstanceGroups(String clusterId) {
+        return call(() -> snapshotOf(requireCluster(clusterId)).getInstanceGroups());
+    }
+
+    public String addInstanceFleet(String clusterId, EmrInstanceFleet fleet) {
+        return call(() -> {
+            EmrCluster cluster = requireCluster(clusterId);
+            rejectShutDownCluster(cluster, EmrService::jobFlowShutDown);
+            fleet.setId("if-" + randomId(13));
+            fleet.setProvisionedOnDemandCapacity(fleet.getTargetOnDemandCapacity());
+            fleet.setProvisionedSpotCapacity(fleet.getTargetSpotCapacity());
+            fleet.setState("RUNNING");
+            cluster.getInstanceFleets().add(fleet);
+            clusterStore.put(clusterId, cluster);
+            return fleet.getId();
+        });
+    }
+
+    /** Resizes an instance fleet; a null target leaves that capacity as it is. */
+    public void modifyInstanceFleet(String clusterId, String instanceFleetId,
+                                    Integer targetOnDemandCapacity, Integer targetSpotCapacity) {
+        run(() -> {
+            EmrCluster cluster = requireCluster(clusterId);
+            if (instanceFleetId == null) {
+                throw invalid("InstanceFleetId is required.");
+            }
+            // AWS's answer for a cluster terminated a while before, ErrorCode member included
+            // (hashicorp/terraform-provider-aws#31375, 2023); its wording covers one shutting down.
+            if (isShutDown(cluster)) {
+                throw jobFlowShutDown();
+            }
+            // And for one in any other state but running or waiting, a STARTING or BOOTSTRAPPING one
+            // included, ErrorCode member too (hashicorp/terraform-provider-aws#15548, 2020).
+            if (!runsOrWaits(cluster)) {
+                throw new AwsException("InvalidRequestException",
+                        "An instance fleet may only be modified when the cluster is running or waiting.", 400,
+                        Map.of("ErrorCode", "MODIFY_INSTANCE_FLEET_OF_RUNNING_JOBFLOW_ONLY"));
+            }
+            EmrInstanceFleet fleet = cluster.getInstanceFleets().stream()
+                    .filter(f -> instanceFleetId.equals(f.getId()))
+                    .findFirst()
+                    .orElseThrow(() -> invalid("Instance fleet " + instanceFleetId + " is not in cluster "
+                            + clusterId + "."));
+            int onDemand = targetOnDemandCapacity != null ? targetOnDemandCapacity : fleet.getTargetOnDemandCapacity();
+            int spot = targetSpotCapacity != null ? targetSpotCapacity : fleet.getTargetSpotCapacity();
+            if (onDemand < 0 || spot < 0) {
+                throw invalid("Target capacities must not be negative.");
+            }
+            if ("MASTER".equals(fleet.getInstanceFleetType())
+                    && (onDemand != fleet.getTargetOnDemandCapacity() || spot != fleet.getTargetSpotCapacity())) {
+                throw invalid("The target capacity of a master instance fleet cannot be modified.");
+            }
+            fleet.setTargetOnDemandCapacity(onDemand);
+            fleet.setTargetSpotCapacity(spot);
+            fleet.setProvisionedOnDemandCapacity(onDemand);
+            fleet.setProvisionedSpotCapacity(spot);
+            clusterStore.put(clusterId, cluster);
+        });
+    }
+
+    /** The cluster's bootstrap actions as given to RunJobFlow, raw JSON; null when it had none. */
+    public String listBootstrapActions(String clusterId) {
+        return call(() -> requireCluster(clusterId).getBootstrapActions());
+    }
+
+    public List<EmrInstanceFleet> listInstanceFleets(String clusterId) {
+        return call(() -> snapshotOf(requireCluster(clusterId)).getInstanceFleets());
+    }
+
+    public EmrCluster getClusterForInstances(String clusterId) {
+        return call(() -> snapshotOf(requireCluster(clusterId)));
+    }
+
+    // ──────────────────────────── Security configurations ────────────────────────────
+
+    public SecurityConfiguration createSecurityConfiguration(String name, String json) {
+        if (name == null || name.isBlank()) {
+            throw new AwsException("InvalidRequestException", "Name is required.", 400);
+        }
+        if (secConfigStore.get(name).isPresent()) {
+            throw new AwsException("InvalidRequestException",
+                    "Security configuration already exists: " + name, 400);
+        }
+        SecurityConfiguration sc = new SecurityConfiguration();
+        sc.setName(name);
+        sc.setSecurityConfiguration(json);
+        sc.setCreationDateTime(Instant.now());
+        secConfigStore.put(name, sc);
+        return sc;
+    }
+
+    public SecurityConfiguration describeSecurityConfiguration(String name) {
+        return secConfigStore.get(name).orElseThrow(() -> new AwsException(
+                "InvalidRequestException", "Security configuration does not exist: " + name, 400));
+    }
+
+    public void deleteSecurityConfiguration(String name) {
+        if (secConfigStore.get(name).isEmpty()) {
+            throw new AwsException("InvalidRequestException",
+                    "Security configuration does not exist: " + name, 400);
+        }
+        secConfigStore.delete(name);
+    }
+
+    // ──────────────────────────── Release catalogue ────────────────────────────
+
+    private static final int MAX_RESULTS = 100;
+    private static final int INSTANCE_TYPE_PAGE = 50;
+
+    /**
+     * The catalogue's releases, newest first. Floci's configured default release label is always
+     * among them, with no applications when the catalogue does not describe it, so a non-default
+     * setting never makes Floci's own default unknown.
+     */
+    List<EmrReleaseCatalog.Release> releases() {
+        if (EmrReleaseCatalog.release(defaultReleaseLabel).isPresent()) {
+            return EmrReleaseCatalog.RELEASES;
+        }
+        List<EmrReleaseCatalog.Release> all = new ArrayList<>(EmrReleaseCatalog.RELEASES);
+        all.add(new EmrReleaseCatalog.Release(defaultReleaseLabel, List.of(), List.of()));
+        all.sort((a, b) -> EmrReleaseCatalog.NEWEST_FIRST.compare(a.label(), b.label()));
+        return all;
+    }
+
+    /**
+     * Release labels, newest first, narrowed by {@code prefix} (such as {@code emr-6}) and by
+     * {@code application}, a name or {@code name@version} (such as {@code spark@3.5.2}) matched
+     * without regard to case. A token belongs to the filters it was issued for, so one replayed
+     * with other filters, or altered, is refused.
+     */
+    public PaginatedResult<String> listReleaseLabels(String prefix, String application, String nextToken,
+                                                     Integer maxResults) {
+        if (maxResults != null && (maxResults < 1 || maxResults > MAX_RESULTS)) {
+            throw new AwsException("InvalidRequestException",
+                    "MaxResults must be between 1 and " + MAX_RESULTS + ".", 400);
+        }
+        String appName = null;
+        String appVersion = null;
+        if (application != null && !application.isBlank()) {
+            int at = application.indexOf('@');
+            appName = (at < 0 ? application : application.substring(0, at)).trim();
+            appVersion = at < 0 ? null : application.substring(at + 1).trim();
+        }
+        String name = appName;
+        String version = appVersion;
+        List<String> labels = releases().stream()
+                .filter(r -> prefix == null || prefix.isBlank() || r.label().startsWith(prefix))
+                .filter(r -> name == null || r.applications().stream().anyMatch(a -> a.name().equalsIgnoreCase(name)
+                        && (version == null || version.isEmpty() || a.version().equalsIgnoreCase(version))))
+                .map(EmrReleaseCatalog.Release::label)
+                .toList();
+        String namespace = "ListReleaseLabels|" + Objects.toString(prefix, "") + "|" + Objects.toString(application, "");
+        return Pagination.paginate(labels, positionIn(labels), maxResults != null ? maxResults : MAX_RESULTS,
+                nextToken, namespace, EmrService::invalidToken);
+    }
+
+    /** A release's applications and OS releases; no label means the latest release. */
+    public EmrReleaseCatalog.Release describeReleaseLabel(String label) {
+        return label == null || label.isBlank() ? releases().get(0) : requireRelease(label);
+    }
+
+    public PaginatedResult<EmrReleaseCatalog.InstanceType> listSupportedInstanceTypes(String label, String marker) {
+        if (label == null || label.isBlank()) {
+            throw new AwsException("InvalidRequestException", "ReleaseLabel is required.", 400);
+        }
+        requireRelease(label);
+        List<EmrReleaseCatalog.InstanceType> types = EmrReleaseCatalog.INSTANCE_TYPES;
+        return Pagination.paginate(types, positionIn(types), INSTANCE_TYPE_PAGE, marker,
+                "ListSupportedInstanceTypes|" + label, EmrService::invalidToken);
+    }
+
+    private EmrReleaseCatalog.Release requireRelease(String label) {
+        return releases().stream()
+                .filter(r -> r.label().equals(label))
+                .findFirst()
+                .orElseThrow(() -> new AwsException("InvalidRequestException",
+                        "The specified release label " + label + " is not valid.", 400));
+    }
+
+    /**
+     * A cursor that keeps the catalogue's own order: {@link Pagination} sorts by cursor, and the
+     * catalogue is newest first rather than alphabetical.
+     */
+    private static <T> Function<T, String> positionIn(List<T> items) {
+        Map<T, String> positions = new HashMap<>();
+        for (int i = 0; i < items.size(); i++) {
+            positions.put(items.get(i), String.format("%06d", i));
+        }
+        return positions::get;
+    }
+
+    private static AwsException invalidToken(String token) {
+        return new AwsException("InvalidRequestException", "Invalid pagination token: " + token, 400);
+    }
+
+    public List<SecurityConfiguration> listSecurityConfigurations() {
+        return new ArrayList<>(secConfigStore.scan(k -> true));
+    }
+
+    // ──────────────────────────── Tags ────────────────────────────
+
+    public void addTags(String resourceId, Map<String, String> tags) {
+        run(() -> {
+            EmrCluster cluster = requireCluster(resourceId);
+            cluster.getTags().putAll(tags);
+            clusterStore.put(resourceId, cluster);
+        });
+    }
+
+    public void removeTags(String resourceId, List<String> keys) {
+        run(() -> {
+            EmrCluster cluster = requireCluster(resourceId);
+            keys.forEach(cluster.getTags()::remove);
+            clusterStore.put(resourceId, cluster);
+        });
+    }
+
+    // ──────────────────────────── Helpers ────────────────────────────
+
+    // ──────────────────────────── Scaling and termination policies ────────────────────────────
+
+    public void putManagedScalingPolicy(String clusterId, JsonNode policy) {
+        run(() -> {
+            EmrCluster cluster = requireCluster(clusterId);
+            validateManagedScalingPolicy(policy);
+            cluster.setManagedScalingPolicy(policy.toString());
+            clusterStore.put(clusterId, cluster);
+        });
+    }
+
+    /** The cluster's managed scaling policy as raw JSON, or null when it has none. */
+    public String getManagedScalingPolicy(String clusterId) {
+        return call(() -> requireCluster(clusterId).getManagedScalingPolicy());
+    }
+
+    public void removeManagedScalingPolicy(String clusterId) {
+        run(() -> {
+            EmrCluster cluster = requireCluster(clusterId);
+            cluster.setManagedScalingPolicy(null);
+            clusterStore.put(clusterId, cluster);
+        });
+    }
+
+    /** AutoTerminationPolicy is optional in the request; an absent one is stored as an empty policy. */
+    public void putAutoTerminationPolicy(String clusterId, JsonNode policy) {
+        run(() -> {
+            EmrCluster cluster = requireCluster(clusterId);
+            validateAutoTerminationPolicy(policy);
+            cluster.setAutoTerminationPolicy(
+                    policy == null || policy.isMissingNode() || policy.isNull() ? "{}" : policy.toString());
+            clusterStore.put(clusterId, cluster);
+        });
+    }
+
+    /** The cluster's auto termination policy as raw JSON, or null when it has none. */
+    public String getAutoTerminationPolicy(String clusterId) {
+        return call(() -> requireCluster(clusterId).getAutoTerminationPolicy());
+    }
+
+    public void removeAutoTerminationPolicy(String clusterId) {
+        run(() -> {
+            EmrCluster cluster = requireCluster(clusterId);
+            cluster.setAutoTerminationPolicy(null);
+            clusterStore.put(clusterId, cluster);
+        });
+    }
+
+    /** Attaches an automatic scaling policy to a core or task instance group and returns the group. */
+    public EmrInstanceGroup putAutoScalingPolicy(String clusterId, String instanceGroupId, JsonNode policy) {
+        return call(() -> {
+            EmrCluster cluster = requireCluster(clusterId);
+            EmrInstanceGroup group = requireInstanceGroup(cluster, instanceGroupId);
+            validateAutoScalingPolicy(policy, group.getInstanceGroupType());
+            group.setAutoScalingPolicy(policy.toString());
+            clusterStore.put(clusterId, cluster);
+            return group;
+        });
+    }
+
+    public void removeAutoScalingPolicy(String clusterId, String instanceGroupId) {
+        run(() -> {
+            EmrCluster cluster = requireCluster(clusterId);
+            requireInstanceGroup(cluster, instanceGroupId).setAutoScalingPolicy(null);
+            clusterStore.put(clusterId, cluster);
+        });
+    }
+
+    // ──────────────────────────── Block public access ────────────────────────────
+
+    /**
+     * The account's block public access configuration in {@code region}. Until one is put, it is the
+     * AWS default: enabled for every Region, with port 22 as an exception. The default is stored the
+     * first time it is read, so its metadata stays the same on later reads.
+     */
+    public synchronized EmrBlockPublicAccess getBlockPublicAccess(String region) {
+        return blockPublicAccessStore.get(region).orElseGet(() -> {
+            EmrBlockPublicAccess setting = new EmrBlockPublicAccess();
+            setting.setConfiguration(DEFAULT_BLOCK_PUBLIC_ACCESS);
+            setting.setCreationDateTime(Instant.now());
+            setting.setCreatedByArn(regionResolver.buildGlobalArn("iam", "root"));
+            blockPublicAccessStore.put(region, setting);
+            return setting;
+        });
+    }
+
+    public synchronized void putBlockPublicAccess(String region, JsonNode configuration) {
+        validateBlockPublicAccess(configuration);
+        EmrBlockPublicAccess setting = new EmrBlockPublicAccess();
+        setting.setConfiguration(configuration.toString());
+        setting.setCreationDateTime(Instant.now());
+        setting.setCreatedByArn(regionResolver.buildGlobalArn("iam", "root"));
+        blockPublicAccessStore.put(region, setting);
+    }
+
+    // ──────────────────────────── Policy validation (from the API model) ────────────────────────────
+
+    /** ComputeLimits is required, with UnitType, MinimumCapacityUnits and MaximumCapacityUnits. */
+    static void validateManagedScalingPolicy(JsonNode policy) {
+        if (policy == null || !policy.isObject()) {
+            throw invalid("ManagedScalingPolicy is required.");
+        }
+        JsonNode limits = policy.path("ComputeLimits");
+        if (!limits.isObject()) {
+            throw invalid("ManagedScalingPolicy.ComputeLimits is required.");
+        }
+        if (!COMPUTE_LIMITS_UNIT_TYPES.contains(limits.path("UnitType").asText(""))) {
+            throw invalid("ComputeLimits.UnitType must be one of " + COMPUTE_LIMITS_UNIT_TYPES + ".");
+        }
+        if (!limits.path("MinimumCapacityUnits").isInt() || !limits.path("MaximumCapacityUnits").isInt()) {
+            throw invalid("ComputeLimits.MinimumCapacityUnits and MaximumCapacityUnits are required.");
+        }
+        int min = limits.get("MinimumCapacityUnits").asInt();
+        int max = limits.get("MaximumCapacityUnits").asInt();
+        if (min < 0 || min > max) {
+            throw invalid("ComputeLimits.MinimumCapacityUnits must be between 0 and MaximumCapacityUnits.");
+        }
+        for (String optional : List.of("MaximumOnDemandCapacityUnits", "MaximumCoreCapacityUnits")) {
+            JsonNode value = limits.path(optional);
+            if (!value.isMissingNode() && (!value.isInt() || value.asInt() < 0 || value.asInt() > max)) {
+                throw invalid("ComputeLimits." + optional + " must be between 0 and MaximumCapacityUnits.");
+            }
+        }
+        JsonNode strategy = policy.path("ScalingStrategy");
+        if (!strategy.isMissingNode() && !SCALING_STRATEGIES.contains(strategy.asText(""))) {
+            throw invalid("ScalingStrategy must be one of " + SCALING_STRATEGIES + ".");
+        }
+    }
+
+    /** IdleTimeout, when given, is 60 to 604800 seconds. */
+    static void validateAutoTerminationPolicy(JsonNode policy) {
+        if (policy == null || policy.isMissingNode() || policy.isNull()) {
+            return;
+        }
+        if (!policy.isObject()) {
+            throw invalid("AutoTerminationPolicy must be an object.");
+        }
+        JsonNode idle = policy.path("IdleTimeout");
+        if (!idle.isMissingNode() && (!idle.canConvertToLong()
+                || idle.asLong() < MIN_IDLE_TIMEOUT_SECONDS || idle.asLong() > MAX_IDLE_TIMEOUT_SECONDS)) {
+            throw invalid("AutoTerminationPolicy.IdleTimeout must be between " + MIN_IDLE_TIMEOUT_SECONDS
+                    + " and " + MAX_IDLE_TIMEOUT_SECONDS + " seconds.");
+        }
+    }
+
+    /**
+     * Constraints (MinCapacity not above MaxCapacity) and at least one rule with Name, Action and
+     * Trigger are required; only core and task instance groups scale automatically.
+     */
+    static void validateAutoScalingPolicy(JsonNode policy, String instanceGroupType) {
+        if (policy == null || !policy.isObject()) {
+            throw invalid("AutoScalingPolicy is required.");
+        }
+        if (!"CORE".equals(instanceGroupType) && !"TASK".equals(instanceGroupType)) {
+            throw invalid("An automatic scaling policy can only be attached to a core or task instance group.");
+        }
+        JsonNode constraints = policy.path("Constraints");
+        if (!constraints.path("MinCapacity").isInt() || !constraints.path("MaxCapacity").isInt()) {
+            throw invalid("AutoScalingPolicy.Constraints.MinCapacity and MaxCapacity are required.");
+        }
+        if (constraints.get("MinCapacity").asInt() < 0
+                || constraints.get("MinCapacity").asInt() > constraints.get("MaxCapacity").asInt()) {
+            throw invalid("Constraints.MinCapacity must be between 0 and MaxCapacity.");
+        }
+        JsonNode rules = policy.path("Rules");
+        if (!rules.isArray() || rules.isEmpty()) {
+            throw invalid("AutoScalingPolicy.Rules must contain at least one rule.");
+        }
+        for (JsonNode rule : rules) {
+            if (rule.path("Name").asText("").isEmpty() || !rule.path("Action").isObject() || !rule.path("Trigger").isObject()) {
+                throw invalid("Each scaling rule needs a Name, an Action and a Trigger.");
+            }
+        }
+    }
+
+    /** BlockPublicSecurityGroupRules is required; each port range needs MinRange, within 0 to 65535. */
+    static void validateBlockPublicAccess(JsonNode configuration) {
+        if (configuration == null || !configuration.isObject()
+                || !configuration.path("BlockPublicSecurityGroupRules").isBoolean()) {
+            throw invalid("BlockPublicAccessConfiguration.BlockPublicSecurityGroupRules is required.");
+        }
+        JsonNode ranges = configuration.path("PermittedPublicSecurityGroupRuleRanges");
+        if (ranges.isMissingNode()) {
+            return;
+        }
+        if (!ranges.isArray()) {
+            throw invalid("PermittedPublicSecurityGroupRuleRanges must be a list.");
+        }
+        for (JsonNode range : ranges) {
+            if (!range.path("MinRange").isInt()) {
+                throw invalid("Each port range needs a MinRange.");
+            }
+            int min = range.get("MinRange").asInt();
+            JsonNode maxRange = range.path("MaxRange");
+            if (!maxRange.isMissingNode() && !maxRange.isInt()) {
+                throw invalid("Port range MaxRange must be an integer.");
+            }
+            int max = maxRange.isInt() ? maxRange.asInt() : min;
+            if (min < 0 || max > MAX_PORT || min > max) {
+                throw invalid("Port range " + min + "-" + max + " must lie within 0-" + MAX_PORT + ", MinRange first.");
+            }
+        }
+    }
+
+    /** Each BootstrapActionConfig needs a Name and a ScriptBootstrapAction with a Path. */
+    static void validateBootstrapActions(JsonNode actions) {
+        if (!actions.isArray()) {
+            throw invalid("BootstrapActions must be a list.");
+        }
+        for (JsonNode action : actions) {
+            if (action.path("Name").asText("").isEmpty()
+                    || action.path("ScriptBootstrapAction").path("Path").asText("").isEmpty()) {
+                throw invalid("Each bootstrap action needs a Name and a ScriptBootstrapAction.Path.");
+            }
+        }
+    }
+
+    private EmrCluster clusterOwning(String region, String instanceGroupId) {
+        if (instanceGroupId == null) {
+            throw invalid("InstanceGroupId is required.");
+        }
+        return clusterWithGroup(region, instanceGroupId)
+                .map(this::settle)
+                .orElseThrow(() -> invalid("Instance group " + instanceGroupId + " is not valid."));
+    }
+
+    /** The caller's cluster in the Region that has the instance group, as stored. */
+    private Optional<EmrCluster> clusterWithGroup(String region, String instanceGroupId) {
+        return clusterStore.scan(k -> true).stream()
+                .filter(c -> region.equals(c.getRegion()))
+                .filter(c -> c.getInstanceGroups().stream().anyMatch(g -> instanceGroupId.equals(g.getId())))
+                .findFirst();
+    }
+
+    private static AwsException invalid(String message) {
+        return new AwsException("InvalidRequestException", message, 400);
+    }
+
+    /** ModifyInstanceFleet's answer for a job flow that is shutting down or ended, ErrorCode member included. */
+    private static AwsException jobFlowShutDown() {
+        return new AwsException("InvalidRequestException", JOB_FLOW_SHUT_DOWN, 400,
+                Map.of("ErrorCode", "INVALID_JOB_SHUT_DOWN"));
+    }
+
+    /**
+     * AddJobFlowSteps' answer for a job flow that is shutting down or ended. AddInstanceGroups gives it too:
+     * like AddJobFlowSteps, its model declares no InvalidRequestException.
+     */
+    private static AwsException jobFlowShutDownValidation() {
+        return new AwsException("ValidationException", JOB_FLOW_SHUT_DOWN, 400);
+    }
+
+    /**
+     * AddInstanceGroups and AddInstanceFleet on a cluster that is shutting down or ended. A TERMINATING one
+     * gets {@code shuttingDown}, the operation's answer with AWS's wording, which covers it; a TERMINATED
+     * one keeps Floci's own, since no AWS answer to either operation is recorded.
+     */
+    private static void rejectShutDownCluster(EmrCluster cluster, Supplier<AwsException> shuttingDown) {
+        if (EmrClusterLifecycle.TERMINATING.equals(cluster.getState())) {
+            throw shuttingDown.get();
+        }
+        if (EmrClusterLifecycle.isTerminated(cluster.getState())) {
+            throw invalid("Cluster " + cluster.getId() + " is terminated.");
+        }
+    }
+
+    private static EmrInstanceGroup requireInstanceGroup(EmrCluster cluster, String instanceGroupId) {
+        if (instanceGroupId == null) {
+            throw invalid("InstanceGroupId is required.");
+        }
+        return cluster.getInstanceGroups().stream()
+                .filter(group -> instanceGroupId.equals(group.getId()))
+                .findFirst()
+                .orElseThrow(() -> invalid("Instance group " + instanceGroupId + " is not in cluster " + cluster.getId() + "."));
+    }
+
+    private EmrCluster requireCluster(String id) {
+        if (id == null) {
+            throw new AwsException("InvalidRequestException", "ClusterId is required.", 400);
+        }
+        return findCluster(id).orElseThrow(() -> new AwsException(
+                "InvalidRequestException", "Cluster id '" + id + "' is not valid.", 400));
+    }
+
+    /**
+     * Clusters are stored by id for every region; a request sees only its own region's, and one from
+     * another region reads as an unknown id. A cluster recorded without a region stays reachable.
+     */
+    private Optional<EmrCluster> findCluster(String id) {
+        String region = regionResolver.getRegion();
+        return clusterStore.get(id).filter(c -> c.getRegion() == null || c.getRegion().equals(region))
+                .map(this::settle);
+    }
+
+    private void mutateClusters(List<String> ids, Consumer<EmrCluster> mutation) {
+        for (String id : ids) {
+            findCluster(id).ifPresent(c -> {
+                mutation.accept(c);
+                clusterStore.put(id, c);
+            });
+        }
+    }
+
+    /** Shutting down or ended: "A job flow that is shutting down, terminated, or finished may not be modified." */
+    private static boolean isShutDown(EmrCluster cluster) {
+        return EmrClusterLifecycle.TERMINATING.equals(cluster.getState())
+                || EmrClusterLifecycle.isTerminated(cluster.getState());
+    }
+
+    /** The only states in which a cluster's instance groups and fleets may be modified. */
+    private static boolean runsOrWaits(EmrCluster cluster) {
+        return EmrClusterLifecycle.RUNNING.equals(cluster.getState())
+                || EmrClusterLifecycle.WAITING.equals(cluster.getState());
+    }
+
+    /**
+     * Runs {@code body} holding the service, then publishes the events it queued once it no longer
+     * does, so a rule's target that calls EMR never waits on the call that made the change. Every
+     * call that reads a cluster runs this way, since reading one brings it up to date.
+     */
+    private <T> T call(Supplier<T> body) {
+        try {
+            synchronized (this) {
+                return body.get();
+            }
+        } finally {
+            eventPublisher.publishQueued();
+        }
+    }
+
+    private void run(Runnable body) {
+        call(() -> {
+            body.run();
+            return null;
+        });
+    }
+
+    /**
+     * A copy of the cluster for a call to answer from: the timer goes on changing the stored one, and an
+     * answer built from it after the service is let go could mix two of its states.
+     */
+    private static EmrCluster snapshotOf(EmrCluster cluster) {
+        return SNAPSHOT_MAPPER.convertValue(cluster, EmrCluster.class);
+    }
+
+    /**
+     * The cluster as it stands now: every change due by now made, stored if there was one. A step a
+     * container ran that no thread runs any more, since Floci stopped while it ran, is FAILED.
+     */
+    private EmrCluster settle(EmrCluster cluster) {
+        boolean interrupted = failInterruptedSteps(cluster) | failInterruptedBootstrap(cluster);
+        boolean changed = lifecycle.advance(cluster, now(), regionOf(cluster)) || interrupted;
+        if (changed) {
+            clusterStore.put(cluster.getId(), cluster);
+        }
+        releaseEnded(cluster);
+        wakeForNextChange(cluster);
+        return cluster;
+    }
+
+    /** A cluster whose bootstrap no thread runs any more, since Floci stopped while it ran, ends. */
+    private boolean failInterruptedBootstrap(EmrCluster cluster) {
+        if (bootstrapRunner == null || !bootstrapsInContainer(cluster)
+                || bootstrapping.contains(clusterKey(regionResolver.getAccountId(), cluster.getId()))) {
+            return false;
+        }
+        lifecycle.bootstrapEnded(cluster, null, EmrClusterLifecycle.INTERNAL_ERROR, BOOTSTRAP_INTERRUPTED, now(),
+                regionOf(cluster));
+        return true;
+    }
+
+    private static boolean bootstrapsInContainer(EmrCluster cluster) {
+        return EmrClusterLifecycle.BOOTSTRAPPING.equals(cluster.getState()) && cluster.isBootstrapInContainer();
+    }
+
+    // What an ended cluster kept goes once no step of it still runs in a container: its bootstrap's image and
+    // its storage.
+    private void releaseEnded(EmrCluster cluster) {
+        releaseBootstrapImage(cluster);
+        releaseStorage(cluster);
+    }
+
+    private boolean stepsExecuting(EmrCluster cluster, String accountId) {
+        return cluster.getSteps().stream().anyMatch(step -> executing.contains(stepKey(accountId, step.getId())));
+    }
+
+    /**
+     * Once a cluster has ended and no step of it still runs in a container, the image its bootstrap left
+     * goes, off the service's lock. The cluster names it until it is gone, and while a thread removes it, it
+     * is not removed again.
+     */
+    private void releaseBootstrapImage(EmrCluster cluster) {
+        String image = cluster.getBootstrapImage();
+        if (image == null || bootstrapRunner == null || !EmrClusterLifecycle.isTerminated(cluster.getState())) {
+            return;
+        }
+        String accountId = regionResolver.getAccountId();
+        if (stepsExecuting(cluster, accountId) || !imagesBeingRemoved.add(image)) {
+            return;
+        }
+        String clusterId = cluster.getId();
+        String region = regionOf(cluster);
+        stepExecutor.execute(() -> {
+            boolean gone = bootstrapRunner.removeImage(image);
+            RequestScopes.runAs(accountId, region, () -> run(() -> bootstrapImageRemoved(clusterId, image, gone)));
+        });
+    }
+
+    // A thread's removal of a cluster's image has ended: the cluster names it no more once it is gone.
+    private void bootstrapImageRemoved(String clusterId, String image, boolean gone) {
+        imagesBeingRemoved.remove(image);
+        if (!gone) {
+            return;
+        }
+        clusterStore.get(clusterId).filter(cluster -> image.equals(cluster.getBootstrapImage())).ifPresent(cluster -> {
+            cluster.setBootstrapImage(null);
+            clusterStore.put(clusterId, cluster);
+        });
+    }
+
+    /**
+     * Once a cluster has ended and no step of it still runs in a container, its storage goes, off the service's
+     * lock, as its bootstrap's image does: the cluster keeps it until it is gone, and while a thread removes it,
+     * it is not removed again.
+     */
+    private void releaseStorage(EmrCluster cluster) {
+        if (!cluster.isStorageCreated() || clusterStorage == null
+                || !EmrClusterLifecycle.isTerminated(cluster.getState())) {
+            return;
+        }
+        String accountId = regionResolver.getAccountId();
+        String key = clusterKey(accountId, cluster.getId());
+        if (stepsExecuting(cluster, accountId) || !storageBeingRemoved.add(key)) {
+            return;
+        }
+        String clusterId = cluster.getId();
+        String region = regionOf(cluster);
+        stepExecutor.execute(() -> {
+            boolean gone = clusterStorage.remove(clusterId);
+            RequestScopes.runAs(accountId, region, () -> run(() -> storageRemoved(clusterId, key, gone)));
+        });
+    }
+
+    // A thread's removal of a cluster's storage has ended: the cluster keeps it no more once it is gone.
+    private void storageRemoved(String clusterId, String key, boolean gone) {
+        storageBeingRemoved.remove(key);
+        if (!gone) {
+            return;
+        }
+        clusterStore.get(clusterId).filter(EmrCluster::isStorageCreated).ifPresent(cluster -> {
+            cluster.setStorageCreated(false);
+            clusterStore.put(clusterId, cluster);
+        });
+    }
+
+    private boolean failInterruptedSteps(EmrCluster cluster) {
+        if (sparkRunner == null) {
+            return false;
+        }
+        boolean failed = false;
+        for (EmrStep step : List.copyOf(cluster.getSteps())) {
+            if (runsInContainer(step) && !executing.contains(stepKey(regionResolver.getAccountId(), step.getId()))) {
+                lifecycle.stepEnded(cluster, step, EmrSparkSteps.INTERRUPTED, now(), regionOf(cluster));
+                failed = true;
+            }
+        }
+        return failed;
+    }
+
+    private static boolean hasContainerStepRunning(EmrCluster cluster) {
+        return cluster.getSteps().stream().anyMatch(EmrService::runsInContainer);
+    }
+
+    private static boolean runsInContainer(EmrStep step) {
+        return EmrClusterLifecycle.RUNNING.equals(step.getState()) && step.isRunInContainer();
+    }
+
+    private static String stepKey(String accountId, String stepId) {
+        return accountId + "/" + stepId;
+    }
+
+    private static String clusterKey(String accountId, String clusterId) {
+        return accountId + "/" + clusterId;
+    }
+
+    /**
+     * The role a step's driver runs as: the step's runtime role, or else the role of the cluster's EC2
+     * instance profile, its {@code JobFlowRole}, given by name or ARN; null when IAM knows neither, and the
+     * driver then has the account's placeholder credentials. The guide's "Runtime roles for Amazon EMR
+     * steps": without them, clusters "ran Amazon EMR jobs or queries with permissions based on the IAM
+     * policy attached to the instance profile that you used to launch the cluster".
+     */
+    private String executionRole(EmrCluster cluster, EmrStep step, String accountId) {
+        return step.getExecutionRoleArn() != null
+                ? step.getExecutionRoleArn() : instanceProfileRole(cluster, accountId);
+    }
+
+    /** The role of the cluster's EC2 instance profile, its {@code JobFlowRole}, given by name or ARN, or null. */
+    private String instanceProfileRole(EmrCluster cluster, String accountId) {
+        String profile = cluster.getJobFlowRole();
+        if (profile == null || iamService == null) {
+            return null;
+        }
+        return iamService.findInstanceProfile(accountId, profile.substring(profile.lastIndexOf('/') + 1))
+                .filter(found -> found.getRoleNames() != null && found.getRoleNames().size() == 1)
+                .flatMap(found -> iamService.findRole(accountId, found.getRoleNames().getFirst()))
+                .map(IamRole::getArn)
+                .orElse(null);
+    }
+
+    /**
+     * Ends a step its thread ran, COMPLETED when {@code failure} is null and FAILED otherwise, unless a
+     * reset came since it started or the step is no longer RUNNING: cancelled, or on a cluster that ended.
+     */
+    private void stepEnded(StepLaunch launch, String failure) {
+        if (launch.launchedIn() != generation) {
+            return;
+        }
+        // Read while the step still counts as running, so it is not taken for one a restart left.
+        Optional<EmrCluster> found = findCluster(launch.clusterId());
+        executing.remove(stepKey(launch.accountId(), launch.stepId()));
+        EmrStep step = found.flatMap(cluster -> cluster.getSteps().stream()
+                .filter(candidate -> launch.stepId().equals(candidate.getId())).findFirst()).orElse(null);
+        if (step == null || !EmrClusterLifecycle.RUNNING.equals(step.getState())) {
+            // A step of a cluster that has ended no longer runs: what the cluster kept may go with it, its last one.
+            found.ifPresent(this::releaseEnded);
+            return;
+        }
+        EmrCluster cluster = found.get();
+        lifecycle.stepEnded(cluster, step, failure, now(), regionOf(cluster));
+        store(cluster);
+        LOG.infov("EMR step {0} of cluster {1} ended {2}", step.getId(), cluster.getId(), step.getState());
+    }
+
+    /**
+     * A step's driver was stopped. A cancel, or its cluster's end, has ended the step already. One still
+     * RUNNING was stopped by Floci itself, by a reset's teardown or its shutdown, and is left as it is, still
+     * counted as running: the reset wipes it, a restart fails it, and its ActionOnFailure, which could start
+     * the next step after the teardown has passed, is not taken now.
+     */
+    private void driverStopped(StepLaunch launch) {
+        if (!stillRunning(launch)) {
+            executing.remove(stepKey(launch.accountId(), launch.stepId()));
+            clusterStore.get(launch.clusterId()).ifPresent(this::releaseEnded);
+        }
+    }
+
+    /**
+     * Why a step whose driver ended this way, by itself or before it could start, failed, or null when it
+     * did not. No source gives AWS's wording for these; they are Floci's.
+     */
+    private static String failureOf(SparkJobRunner.Job job, SparkJobRunner.Outcome outcome) {
+        if (outcome.exitCode() != null) {
+            String ended = job.command() != null ? "The step's command" : "The Spark driver";
+            return outcome.exitCode() == 0 ? null : ended + " exited with code " + outcome.exitCode() + ".";
+        }
+        return "The step could not start: " + outcome.failure();
+    }
+
+    // Whether a step's driver may still start, or go on: one cancelled, on a cluster that ended, or a reset
+    // removed, is past it.
+    private synchronized boolean stillRunning(StepLaunch launch) {
+        return launch.launchedIn() == generation && clusterStore.get(launch.clusterId()).stream()
+                .flatMap(cluster -> cluster.getSteps().stream())
+                .anyMatch(step -> launch.stepId().equals(step.getId())
+                        && EmrClusterLifecycle.RUNNING.equals(step.getState()));
+    }
+
+    private synchronized boolean resetSince(StepLaunch launch) {
+        return launch.launchedIn() != generation;
+    }
+
+    /** A step handed to a thread: whose it is, where, and under which reset. */
+    private record StepLaunch(String accountId, String region, String clusterId, String stepId, long launchedIn,
+                              long teardownsBefore) {}
+
+    /** Starts each step a cluster runs on a thread of its own, which ends the step once it is done. */
+    private final class ContainerSteps implements EmrClusterLifecycle.StepExecution {
+
+        @Override
+        public void start(EmrCluster cluster, EmrStep step, String region) {
+            String accountId = regionResolver.getAccountId();
+            if (tornDown) {
+                // Left RUNNING and counted as running, as a step whose driver the teardown stopped: the reset wipes it,
+                // a restart fails it.
+                executing.add(stepKey(accountId, step.getId()));
+                return;
+            }
+            EmrSparkSteps.HiveCommand hive = EmrSparkSteps.hive(step, cluster.getReleaseLabel(),
+                    cluster.getApplications(), cluster.getConfigurations(), SNAPSHOT_MAPPER);
+            List<String> application = hive == null ? EmrSparkSteps.application(step) : null;
+            List<String> command = hive == null && application == null ? EmrSparkSteps.command(step) : null;
+            SparkJobRunner.Storage storage = null;
+            if ((hive != null || application != null || command != null) && clusterStorage != null) {
+                storage = clusterStorage.volumes(cluster.getId());
+                cluster.setStorageCreated(true);
+            }
+            // The image a cluster's bootstrap left, which holds what its release's does; else a cluster with Hive's,
+            // which the step's thread makes, or the release's.
+            String image = cluster.getBootstrapImage() != null ? cluster.getBootstrapImage() : imageTemplate;
+            Supplier<String> releaseImage = cluster.getBootstrapImage() == null ? releaseImage(cluster) : null;
+            // Every EMR cluster runs HDFS on its primary node, which the step's thread starts when it is not running:
+            // a NameNode and a DataNode, in a container of the release's Hive image, the one with HDFS's daemons, and
+            // on a cluster with Hive or HCatalog its metastore service.
+            String clusterId = cluster.getId();
+            String hdfsHost = masterPrivateDnsName(cluster);
+            String hdfsImage = hdfsImage(cluster.getReleaseLabel());
+            ClusterStorage.HiveMetastore hiveMetastore = EmrSparkSteps.installsHive(cluster.getReleaseLabel(),
+                    cluster.getApplications(), SNAPSHOT_MAPPER)
+                    ? new ClusterStorage.HiveMetastore(instanceProfileRole(cluster, accountId),
+                            EmrSparkSteps.hiveMetastoreSettings(cluster.getConfigurations(), SNAPSHOT_MAPPER))
+                    : null;
+            Function<BooleanSupplier, SparkJobRunner.Storage> hdfs = storage == null ? null
+                    : stopped -> clusterStorage.hdfs(clusterId, accountId, region, hdfsHost, hdfsImage, dockerNetwork,
+                            hiveMetastore, stopped);
+            SparkJobRunner.Job job;
+            if (hive != null) {
+                job = new SparkJobRunner.Job(SERVICE, step.getId(), accountId, region, cluster.getReleaseLabel(),
+                        SparkJobRunner.Engine.HIVE, image, null, dockerNetwork,
+                        executionRole(cluster, step, accountId), Map.of(), hive.arguments(), hive.runner(),
+                        Duration.ZERO, EmrSparkSteps.logFolder(cluster, step), null,
+                        EmrSparkSteps.hiveEnvironment(cluster.getConfigurations(), SNAPSHOT_MAPPER), List.of(),
+                        storage, Map.of(), Map.of(), Map.of(), Map.of(), Map.of());
+            } else if (application == null && command == null) {
+                job = null;
+            } else {
+                job = new SparkJobRunner.Job(SERVICE, step.getId(), accountId, region, cluster.getReleaseLabel(),
+                        SparkJobRunner.Engine.SPARK, image, null, dockerNetwork,
+                        executionRole(cluster, step, accountId),
+                        EmrSparkSteps.sparkDefaults(cluster.getConfigurations(), SNAPSHOT_MAPPER),
+                        application != null ? application : List.of(), command, Duration.ZERO,
+                        EmrSparkSteps.logFolder(cluster, step), null,
+                        EmrSparkSteps.environment(step, cluster.getConfigurations(), SNAPSHOT_MAPPER), List.of(),
+                        storage, EmrSparkSteps.coreSite(cluster.getConfigurations(), SNAPSHOT_MAPPER),
+                        EmrSparkSteps.sparkLog4j2(cluster.getConfigurations(), SNAPSHOT_MAPPER),
+                        EmrSparkSteps.mapredSite(cluster.getConfigurations(), SNAPSHOT_MAPPER),
+                        EmrSparkSteps.hadoopLog4j(cluster.getConfigurations(), SNAPSHOT_MAPPER),
+                        EmrSparkSteps.hadoopEnvironment(cluster.getConfigurations(), SNAPSHOT_MAPPER));
+            }
+            StepLaunch launch = new StepLaunch(accountId, region, cluster.getId(), step.getId(), generation,
+                    teardowns.get());
+            executing.add(stepKey(accountId, step.getId()));
+            stepExecutor.execute(() -> runStep(job, launch, releaseImage, hdfs));
+        }
+
+        @Override
+        public void stop(EmrStep step) {
+            sparkRunner.stop(step.getId());
+        }
+    }
+
+    // A step's thread: its driver runs to its end, or the step fails at once when Floci does not run its kind. A
+    // cluster with Hive's image is made first, when it is not there yet, so a failure to make it fails the step.
+    private void runStep(SparkJobRunner.Job job, StepLaunch launch, Supplier<String> releaseImage,
+                         Function<BooleanSupplier, SparkJobRunner.Storage> hdfs) {
+        String failure;
+        if (job == null) {
+            failure = EmrSparkSteps.NOT_RUN;
+        } else {
+            SparkJobRunner.Outcome outcome;
+            StepProgress progress = new StepProgress(launch);
+            try {
+                SparkJobRunner.Job running = releaseImage != null && !progress.cancelled()
+                        ? job.inImage(releaseImage.get()) : job;
+                // The cluster's storage is there, its HDFS running, before its first step's container mounts it. A step
+                // a cancel, its cluster's end or a reset has passed does not start, so it makes none.
+                if (job.storage() != null && !progress.cancelled()) {
+                    clusterStorage.create(launch.clusterId(), launch.accountId(), launch.region());
+                    running = running.onStorage(hdfs.apply(progress::cancelled));
+                }
+                outcome = sparkRunner.run(running, progress);
+            } catch (ClusterStorage.Stopped e) {
+                // It stopped while its HDFS started, before its driver did, as a driver stopped then would.
+                outcome = SparkJobRunner.Outcome.halted();
+            } catch (RuntimeException e) {
+                if (progress.cancelled() || Thread.currentThread().isInterrupted()) {
+                    // A teardown, a cancel or Floci's shutdown cut its start short, as it would have a driver.
+                    LOG.warnv(e, "EMR step {0} stopped while it started, as this failed: {1}", launch.stepId(),
+                            e.getMessage());
+                    outcome = SparkJobRunner.Outcome.halted();
+                } else {
+                    LOG.warnv(e, "EMR step {0} could not run", launch.stepId());
+                    outcome = SparkJobRunner.Outcome.couldNotStart(e.getMessage());
+                }
+            }
+            // A reset since the step started has swept the storage and wiped its cluster, so nothing would remove
+            // volumes made, or mounted, after its sweep: they go now, the step's container being gone.
+            if (job.storage() != null && resetSince(launch)) {
+                clusterStorage.remove(launch.clusterId());
+            }
+            if (outcome.stopped()) {
+                RequestScopes.runAs(launch.accountId(), launch.region(), () -> run(() -> driverStopped(launch)));
+                return;
+            }
+            failure = failureOf(job, outcome);
+        }
+        // A teardown since the step was handed off ends it as it does a driver, whatever it ran to: ending it now
+        // could start the next step after the teardown has passed. The service's lock orders the two.
+        RequestScopes.runAs(launch.accountId(), launch.region(), () -> run(() -> {
+            if (teardowns.get() != launch.teardownsBefore()) {
+                driverStopped(launch);
+            } else {
+                stepEnded(launch, failure);
+            }
+        }));
+    }
+
+    /** A cluster handed to a bootstrap thread: whose it is, where, and under which reset. */
+    private record BootstrapLaunch(String accountId, String region, String clusterId, long launchedIn,
+                                   long teardownsBefore) {}
+
+    /** Runs each cluster's bootstrap actions on a thread of its own, which ends its BOOTSTRAPPING. */
+    private final class ContainerBootstrap implements EmrClusterLifecycle.BootstrapExecution {
+
+        @Override
+        public void start(EmrCluster cluster, String region) {
+            String accountId = regionResolver.getAccountId();
+            if (tornDown) {
+                // Left BOOTSTRAPPING and counted as bootstrapping, as one the teardown stopped: the reset wipes it, a
+                // restart ends it.
+                bootstrapping.add(clusterKey(accountId, cluster.getId()));
+                return;
+            }
+            // "logs/<cluster-id>/node/<primary-instance-id>/bootstrap-actions/<action-number>/stdout.gz"
+            String logFolder = EmrServerlessSparkRunner.logFolder(cluster.getLogUri(),
+                    cluster.getId() + "/node/" + masterInstanceId(cluster) + "/bootstrap-actions/");
+            BootstrapRunner.Bootstrap bootstrap = new BootstrapRunner.Bootstrap(cluster.getId(), accountId, region,
+                    cluster.getReleaseLabel(), imageTemplate, dockerNetwork, instanceProfileRole(cluster, accountId),
+                    bootstrapActions(cluster), logFolder);
+            BootstrapLaunch launch = new BootstrapLaunch(accountId, region, cluster.getId(), generation,
+                    teardowns.get());
+            Supplier<String> releaseImage = releaseImage(cluster);
+            bootstrapping.add(clusterKey(accountId, cluster.getId()));
+            stepExecutor.execute(() -> runBootstrap(bootstrap, launch, releaseImage));
+        }
+
+        @Override
+        public void stop(EmrCluster cluster) {
+            // Off the service's lock, as stopping removes the container; the bootstrap reads the end itself too.
+            String id = cluster.getId();
+            stepExecutor.execute(() -> bootstrapRunner.stop(id));
+        }
+    }
+
+    /**
+     * What makes, on the thread that needs it, the image a cluster that installs Hive starts from, its release's EMR
+     * Serverless image with its EMR Serverless Hive image's Hive, and returns the image's id: an EMR cluster's nodes
+     * hold every application it installs, so its bootstrap actions and steps all run in it. Null for a cluster
+     * without Hive, which starts from the release's EMR Serverless image.
+     */
+    private Supplier<String> releaseImage(EmrCluster cluster) {
+        if (releaseImages == null
+                || !EmrSparkSteps.installsHive(cluster.getReleaseLabel(), cluster.getApplications(), SNAPSHOT_MAPPER)) {
+            return null;
+        }
+        String release = cluster.getReleaseLabel();
+        String spark = EmrServerlessSparkRunner.image(imageTemplate, release);
+        String hive = EmrServerlessSparkRunner.image(hiveImageTemplate, release, SparkJobRunner.Engine.HIVE);
+        return () -> releaseImages.image(release, spark, hive);
+    }
+
+    /**
+     * The image a cluster runs its HDFS in: its release's EMR Serverless Hive image, which has HDFS's daemons, or, for
+     * a release of the AWS runtime for Apache Spark, which has no Hive image, {@link #SPARK_RUNTIME_HDFS_RELEASE}'s.
+     */
+    private String hdfsImage(String releaseLabel) {
+        String release = EmrServerlessSparkRunner.sparkRuntime(releaseLabel) ? SPARK_RUNTIME_HDFS_RELEASE
+                : releaseLabel;
+        return EmrServerlessSparkRunner.image(hiveImageTemplate, release, SparkJobRunner.Engine.HIVE);
+    }
+
+    // A cluster's BootstrapActionConfig list, as RunJobFlow stored it once it had checked it.
+    private static List<BootstrapRunner.Action> bootstrapActions(EmrCluster cluster) {
+        List<BootstrapRunner.Action> actions = new ArrayList<>();
+        try {
+            for (JsonNode action : SNAPSHOT_MAPPER.readTree(cluster.getBootstrapActions())) {
+                JsonNode script = action.path("ScriptBootstrapAction");
+                List<String> args = new ArrayList<>();
+                script.path("Args").forEach(arg -> args.add(arg.asText()));
+                actions.add(new BootstrapRunner.Action(action.path("Name").asText(), script.path("Path").asText(),
+                        args));
+            }
+        } catch (JsonProcessingException ignored) {
+            // RunJobFlow stored the list as it came, and checked that it is one.
+        }
+        return actions;
+    }
+
+    // A cluster's bootstrap thread: its actions run to their end, which then ends its BOOTSTRAPPING. They run in
+    // a cluster with Hive's image, which is made first when it is not there yet, unless the cluster ended, or a reset
+    // removed it, before the thread ran; a failure to make it ends the cluster as one to run the bootstrap does.
+    private void runBootstrap(BootstrapRunner.Bootstrap bootstrap, BootstrapLaunch launch,
+                              Supplier<String> releaseImage) {
+        // A teardown since the bootstrap was handed off stops it as it does a step, before it runs or as it goes.
+        BooleanSupplier cancelled = () -> teardowns.get() != launch.teardownsBefore()
+                || !RequestScopes.callAs(launch.accountId(), launch.region(), () -> stillBootstrapping(launch));
+        BootstrapRunner.Outcome outcome;
+        try {
+            outcome = bootstrapRunner.run(releaseImage != null && !cancelled.getAsBoolean()
+                    ? bootstrap.inImage(releaseImage.get()) : bootstrap, cancelled);
+        } catch (RuntimeException e) {
+            LOG.warnv(e, "The bootstrap actions of EMR cluster {0} could not run", launch.clusterId());
+            outcome = BootstrapRunner.Outcome.couldNotRun(e.getMessage());
+        }
+        BootstrapRunner.Outcome ended = outcome;
+        // One that ended, however, after a teardown began ends as one Floci stopped, which starts no step: the
+        // service's lock orders the two.
+        AtomicBoolean tornDownSince = new AtomicBoolean();
+        RequestScopes.runAs(launch.accountId(), launch.region(), () -> run(() -> {
+            tornDownSince.set(teardowns.get() != launch.teardownsBefore());
+            bootstrapEnded(bootstrap, launch, tornDownSince.get() ? BootstrapRunner.Outcome.halted() : ended);
+        }));
+        // An image it committed as the teardown began goes, as no cluster starts from it.
+        if (tornDownSince.get() && ended.image() != null) {
+            bootstrapRunner.removeImage(ended.image());
+        }
+    }
+
+    // Whether a cluster's bootstrap may still start, or go on: one that ended, or a reset removed, is past it.
+    private synchronized boolean stillBootstrapping(BootstrapLaunch launch) {
+        return launch.launchedIn() == generation
+                && clusterStore.get(launch.clusterId()).filter(EmrService::bootstrapsInContainer).isPresent();
+    }
+
+    /**
+     * Ends a cluster's BOOTSTRAPPING as its bootstrap ended: RUNNING when every action succeeded, or ended,
+     * with errors, when one failed or they could not run. A cluster that ended meanwhile, or that a reset
+     * since removed, stays as it is, and an image its bootstrap left goes. One Floci itself stopped, by a
+     * reset's teardown or its shutdown, is left BOOTSTRAPPING and still counted as bootstrapping: the reset
+     * wipes it, and a restart ends it.
+     */
+    private void bootstrapEnded(BootstrapRunner.Bootstrap bootstrap, BootstrapLaunch launch,
+                                BootstrapRunner.Outcome outcome) {
+        Optional<EmrCluster> current = launch.launchedIn() == generation
+                ? findCluster(launch.clusterId()) : Optional.empty();
+        Optional<EmrCluster> found = current.filter(EmrService::bootstrapsInContainer);
+        if (outcome.stopped() && found.isPresent()) {
+            return;
+        }
+        bootstrapping.remove(clusterKey(launch.accountId(), launch.clusterId()));
+        if (found.isEmpty()) {
+            if (outcome.image() != null && current.isPresent()) {
+                // The cluster ended meanwhile: the image goes as an ended cluster's does.
+                current.get().setBootstrapImage(outcome.image());
+                store(current.get());
+            } else if (outcome.image() != null) {
+                stepExecutor.execute(() -> bootstrapRunner.removeImage(outcome.image()));
+            }
+            return;
+        }
+        EmrCluster cluster = found.get();
+        String master = masterInstanceId(cluster);
+        String code = EmrClusterLifecycle.BOOTSTRAP_FAILURE;
+        String message;
+        if (outcome.image() != null) {
+            code = null;
+            message = null;
+        } else if (outcome.exitCode() != null) {
+            message = BOOTSTRAP_ACTION_FAILED.formatted(master, outcome.failedAction());
+        } else if (outcome.failedAction() != null) {
+            message = BOOTSTRAP_ACTION_NOT_READ.formatted(master, outcome.failedAction(),
+                    bootstrap.actions().get(outcome.failedAction() - 1).path(), outcome.failure());
+        } else {
+            code = EmrClusterLifecycle.INTERNAL_ERROR;
+            message = BOOTSTRAP_NOT_RUN.formatted(outcome.failure());
+        }
+        lifecycle.bootstrapEnded(cluster, outcome.image(), code, message, now(), regionOf(cluster));
+        store(cluster);
+        LOG.infov("The bootstrap actions of EMR cluster {0} ended; it is {1}", cluster.getId(), cluster.getState());
+    }
+
+    /** The EC2 instance id ListInstances gives a cluster's instance {@code index}, counted from 1. */
+    static String ec2InstanceId(int index) {
+        return "i-" + String.format("%017d", index);
+    }
+
+    /** The private IPv4 address ListInstances gives a cluster's instance {@code index}, counted from 1. */
+    static String privateIpAddress(int index) {
+        return "10.0.0." + index;
+    }
+
+    // The primary instance's: the first of the MASTER group, which ListInstances numbers before the others.
+    static String masterInstanceId(EmrCluster cluster) {
+        return ec2InstanceId(1);
+    }
+
+    // The primary instance's private DNS name, as ListInstances gives it, which names the cluster's HDFS: the same
+    // while the other groups resize, so an hdfs:// path naming it keeps leading there.
+    static String masterPrivateDnsName(EmrCluster cluster) {
+        return AwsRegions.ec2PrivateIpDnsName(privateIpAddress(1), cluster.getRegion());
+    }
+
+    static boolean isMasterGroup(EmrInstanceGroup group) {
+        return "MASTER".equals(group.getInstanceGroupType());
+    }
+
+    /** What a step's thread asks the service while its driver goes: a step has no timeout to report. */
+    private final class StepProgress implements SparkJobRunner.Progress {
+
+        private final StepLaunch launch;
+
+        StepProgress(StepLaunch launch) {
+            this.launch = launch;
+        }
+
+        @Override
+        public void started() {
+            // The step has been RUNNING since it started; the driver's start changes nothing a caller sees.
+        }
+
+        @Override
+        public void timedOut() {
+            // A step runs until its driver ends.
+        }
+
+        @Override
+        public boolean cancelled() {
+            return teardowns.get() != launch.teardownsBefore()
+                    || !RequestScopes.callAs(launch.accountId(), launch.region(), () -> stillRunning(launch));
+        }
+    }
+
+    /** Stores a cluster a call changed, once every change that falls due by now is made. */
+    private void store(EmrCluster cluster) {
+        lifecycle.advance(cluster, now(), regionOf(cluster));
+        releaseEnded(cluster);
+        clusterStore.put(cluster.getId(), cluster);
+        wakeForNextChange(cluster);
+    }
+
+    private void wakeForNextChange(EmrCluster cluster) {
+        Instant due = lifecycle.nextChange(cluster);
+        if (due != null) {
+            wakeAt(regionResolver.getAccountId(), cluster, due);
+        }
+    }
+
+    /**
+     * Brings the cluster up to date at {@code due}, as {@code accountId} in its Region, unless an
+     * earlier wakeup will: that one sets the next. Its events go out by {@link Wakeups#deliver}.
+     */
+    private void wakeAt(String accountId, EmrCluster cluster, Instant due) {
+        String key = accountId + "/" + cluster.getId();
+        Instant set = wakeupsDue.get(key);
+        if (set != null && !set.isAfter(due)) {
+            return;
+        }
+        wakeupsDue.put(key, due);
+        String id = cluster.getId();
+        String region = regionOf(cluster);
+        wakeups.at(due, () -> {
+            wakeupsDue.remove(key, due);
+            try {
+                RequestScopes.runAs(accountId, region, () -> {
+                    synchronized (this) {
+                        findCluster(id);
+                    }
+                });
+            } catch (RuntimeException e) {
+                LOG.warnv(e, "EMR could not bring cluster {0} up to date", id);
+            }
+            wakeups.deliver(eventPublisher::publishQueued);
+        });
+    }
+
+    private String regionOf(EmrCluster cluster) {
+        return cluster.getRegion() != null ? cluster.getRegion() : regionResolver.getRegion();
+    }
+
+    private Instant now() {
+        return clock.instant().truncatedTo(ChronoUnit.MILLIS);
+    }
+
+    private String randomId(int length) {
+        StringBuilder sb = new StringBuilder(length);
+        for (int i = 0; i < length; i++) {
+            sb.append(UPPER_ALNUM.charAt(RANDOM.nextInt(UPPER_ALNUM.length())));
+        }
+        return sb.toString();
+    }
+}

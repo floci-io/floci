@@ -1,0 +1,540 @@
+package io.floci.aws.services.stepfunctions;
+
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import io.floci.aws.testing.RestAssuredJsonUtils;
+import io.quarkus.test.junit.QuarkusTest;
+import io.restassured.response.Response;
+import org.junit.jupiter.api.BeforeAll;
+import org.junit.jupiter.api.Test;
+
+import java.time.Duration;
+import java.util.ArrayList;
+import java.util.List;
+
+import static io.restassured.RestAssured.given;
+import static org.awaitility.Awaitility.await;
+import static org.hamcrest.Matchers.equalTo;
+import static org.hamcrest.Matchers.notNullValue;
+import static org.hamcrest.Matchers.nullValue;
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.junit.jupiter.api.Assertions.fail;
+
+@QuarkusTest
+class StepFunctionsExecutionHistoryIntegrationTest {
+
+    private static final String SFN_CONTENT_TYPE = "application/x-amz-json-1.0";
+    private static final String SQS_CONTENT_TYPE = "application/x-amz-json-1.0";
+    private static final String ROLE_ARN = "arn:aws:iam::000000000000:role/test-role";
+    private static final ObjectMapper MAPPER = new ObjectMapper();
+
+    @BeforeAll
+    static void configureRestAssured() {
+        RestAssuredJsonUtils.configureAwsContentTypes();
+    }
+
+    @Test
+    void getExecutionHistory_populatesExecutionSucceededEventDetails() throws Exception {
+        String definition = """
+                {
+                  "Comment": "A Hello World example that demonstrates various state types in the Amazon States Language, and showcases data flow and transformations using variables and JSONata expressions. This example consists solely of flow control states, so no additional resources are needed to run it.",
+                  "QueryLanguage": "JSONata",
+                  "StartAt": "Set Variables and State Output",
+                  "States": {
+                    "Set Variables and State Output": {
+                      "Type": "Pass",
+                      "Comment": "A Pass state passes its input to its output, without performing work. They can also generate static JSON output, or transform JSON input using JSONata expressions, and pass the transformed data to the next state. Pass states are useful when constructing and debugging state machines.",
+                      "End": true,
+                      "Output": {
+                        "ExecutionWaitTimeInSeconds": 3
+                      },
+                      "Assign": {
+                        "CheckpointCount": 0,
+                        "ExecutionWaitTimeInSeconds": 3
+                      }
+                    }
+                  }
+                }
+                """;
+
+        String stateMachineArn = createStateMachine("execution-history-test", definition);
+        String executionArn = startExecution(stateMachineArn);
+        waitForExecution(executionArn);
+
+        given()
+                .header("X-Amz-Target", "AWSStepFunctions.DescribeExecution")
+                .contentType(SFN_CONTENT_TYPE)
+                .body(String.format("{\"executionArn\":\"%s\"}", executionArn))
+                .when()
+                .post("/")
+                .then()
+                .statusCode(200)
+                .body("history", nullValue());
+
+        given()
+                .header("X-Amz-Target", "AWSStepFunctions.GetExecutionHistory")
+                .contentType(SFN_CONTENT_TYPE)
+                .body(String.format("""
+                        {
+                            "executionArn": "%s",
+                            "includeExecutionData": true
+                        }
+                        """, executionArn))
+                .when()
+                .post("/")
+                .then()
+                .statusCode(200)
+                .body("events.find { it.type == 'PassStateEntered' }.type", equalTo("PassStateEntered"))
+                .body("events.find { it.type == 'PassStateEntered' }.stateEnteredEventDetails", notNullValue())
+                .body("events.find { it.type == 'PassStateEntered' }.stateEnteredEventDetails.name",
+                        equalTo("Set Variables and State Output"))
+                .body("events.find { it.type == 'PassStateEntered' }.passStateEnteredEventDetails", nullValue())
+                .body("events.find { it.type == 'PassStateExited' }.type", equalTo("PassStateExited"))
+                .body("events.find { it.type == 'PassStateExited' }.stateExitedEventDetails", notNullValue())
+                .body("events.find { it.type == 'PassStateExited' }.stateExitedEventDetails.name",
+                        equalTo("Set Variables and State Output"))
+                .body("events.find { it.type == 'PassStateExited' }.passStateExitedEventDetails", nullValue())
+                .body("events.find { it.type == 'ExecutionSucceeded' }.type", equalTo("ExecutionSucceeded"))
+                .body("events.find { it.type == 'ExecutionSucceeded' }.executionSucceededEventDetails", notNullValue())
+                .body("events.find { it.type == 'ExecutionSucceeded' }.executionSucceededEventDetails.output",
+                        equalTo("{\"ExecutionWaitTimeInSeconds\":3}"));
+    }
+
+    @Test
+    void getExecutionHistory_omitsExecutionDataWhenIncludeExecutionDataIsFalse() throws Exception {
+        String definition = """
+                {
+                  "StartAt": "Set Output",
+                  "States": {
+                    "Set Output": {
+                      "Type": "Pass",
+                      "End": true,
+                      "Result": {
+                        "message": "hidden"
+                      }
+                    }
+                  }
+                }
+                """;
+
+        String stateMachineArn = createStateMachine("execution-history-no-data-test", definition);
+        String executionArn = startExecution(stateMachineArn);
+        waitForExecution(executionArn);
+
+        given()
+                .header("X-Amz-Target", "AWSStepFunctions.GetExecutionHistory")
+                .contentType(SFN_CONTENT_TYPE)
+                .body(String.format("""
+                        {
+                            "executionArn": "%s",
+                            "includeExecutionData": false
+                        }
+                        """, executionArn))
+                .when()
+                .post("/")
+                .then()
+                .statusCode(200)
+                .body("events.find { it.type == 'PassStateEntered' }.stateEnteredEventDetails.name",
+                        equalTo("Set Output"))
+                .body("events.find { it.type == 'PassStateEntered' }.stateEnteredEventDetails.input", nullValue())
+                .body("events.find { it.type == 'PassStateEntered' }.stateEnteredEventDetails.inputDetails",
+                        nullValue())
+                .body("events.find { it.type == 'PassStateExited' }.stateExitedEventDetails.name",
+                        equalTo("Set Output"))
+                .body("events.find { it.type == 'PassStateExited' }.stateExitedEventDetails.output", nullValue())
+                .body("events.find { it.type == 'PassStateExited' }.stateExitedEventDetails.outputDetails",
+                        nullValue())
+                .body("events.find { it.type == 'ExecutionSucceeded' }.executionSucceededEventDetails",
+                        notNullValue())
+                .body("events.find { it.type == 'ExecutionSucceeded' }.executionSucceededEventDetails.output",
+                        nullValue());
+    }
+
+    @Test
+    void getExecutionHistory_emitsTaskScheduledStartedSucceededWithChainedPreviousEventId() throws Exception {
+        String queueUrl = createQueue("execution-history-sqs-queue");
+        try {
+            String definition = """
+                    {
+                      "StartAt": "Send",
+                      "States": {
+                        "Send": {
+                          "Type": "Task",
+                          "Resource": "arn:aws:states:::sqs:sendMessage",
+                          "Parameters": {
+                            "QueueUrl": "%s",
+                            "MessageBody": "hello"
+                          },
+                          "End": true
+                        }
+                      }
+                    }
+                    """.formatted(queueUrl);
+
+            String stateMachineArn = createStateMachine("execution-history-task-events-test", definition);
+            String executionArn = startExecution(stateMachineArn);
+            waitForExecution(executionArn);
+
+            Response response = given()
+                    .header("X-Amz-Target", "AWSStepFunctions.GetExecutionHistory")
+                    .contentType(SFN_CONTENT_TYPE)
+                    .body(String.format("""
+                            {
+                                "executionArn": "%s",
+                                "includeExecutionData": true
+                            }
+                            """, executionArn))
+                    .when()
+                    .post("/");
+            response.then().statusCode(200);
+
+            JsonNode events = MAPPER.readTree(response.body().asString()).path("events");
+            ArrayList<String> types = new ArrayList<>();
+            events.forEach(event -> types.add(event.path("type").asText()));
+            assertEquals(List.of("ExecutionStarted", "TaskStateEntered", "TaskScheduled", "TaskStarted",
+                    "TaskSucceeded", "TaskStateExited", "ExecutionSucceeded"), types);
+
+            List<Long> expectedPreviousEventIds = List.of(0L, 0L, 2L, 3L, 4L, 5L, 6L);
+            for (int i = 0; i < events.size(); i++) {
+                JsonNode event = events.get(i);
+                assertEquals(i + 1L, event.path("id").asLong());
+                assertEquals(expectedPreviousEventIds.get(i), event.path("previousEventId").asLong());
+            }
+
+            JsonNode scheduled = events.get(2).path("taskScheduledEventDetails");
+            assertFalse(scheduled.has("inputDetails"));
+            assertEquals("sqs", scheduled.path("resourceType").asText());
+            assertEquals("sendMessage", scheduled.path("resource").asText());
+            assertEquals(stateMachineArn.split(":")[3], scheduled.path("region").asText());
+            JsonNode parameters = MAPPER.readTree(scheduled.path("parameters").asText());
+            assertEquals(queueUrl, parameters.path("QueueUrl").asText());
+            assertEquals("hello", parameters.path("MessageBody").asText());
+
+            JsonNode started = events.get(3).path("taskStartedEventDetails");
+            assertEquals("sqs", started.path("resourceType").asText());
+            assertEquals("sendMessage", started.path("resource").asText());
+
+            JsonNode succeeded = events.get(4).path("taskSucceededEventDetails");
+            JsonNode succeededOutputDetails = succeeded.path("outputDetails");
+            assertTrue(succeededOutputDetails.isObject());
+            assertFalse(succeededOutputDetails.path("truncated").asBoolean(true));
+            assertTrue(succeeded.path("output").asText().contains("MessageId"));
+
+            JsonNode entered = events.get(1).path("stateEnteredEventDetails");
+            JsonNode enteredInputDetails = entered.path("inputDetails");
+            assertTrue(enteredInputDetails.isObject());
+            assertFalse(enteredInputDetails.path("truncated").asBoolean(true));
+        } finally {
+            deleteQueue(queueUrl);
+        }
+    }
+
+    /**
+     * The events of the states inside a Parallel branch and a Map iteration reach the caller through
+     * GetExecutionHistory under the details field the SDK names for each event type. Shapes read
+     * off real Step Functions in us-east-1 for issue #2868.
+     */
+    @Test
+    void getExecutionHistory_publishesParallelBranchAndMapIterationEvents() throws Exception {
+        String definition = """
+                {
+                  "StartAt": "P",
+                  "States": {
+                    "P": {
+                      "Type": "Parallel",
+                      "Branches": [
+                        {"StartAt": "A1", "States": {"A1": {"Type": "Pass", "End": true}}}
+                      ],
+                      "Next": "M"
+                    },
+                    "M": {
+                      "Type": "Map",
+                      "ItemsPath": "$[0].items",
+                      "MaxConcurrency": 1,
+                      "ItemProcessor": {
+                        "ProcessorConfig": {"Mode": "INLINE"},
+                        "StartAt": "I1",
+                        "States": {"I1": {"Type": "Pass", "End": true}}
+                      },
+                      "End": true
+                    }
+                  }
+                }
+                """;
+
+        String stateMachineArn = createStateMachine("execution-history-branches-test", definition);
+        String executionArn = startExecution(stateMachineArn, "{\"items\": [1, 2]}");
+        waitForExecution(executionArn);
+
+        JsonNode events = MAPPER.readTree(getExecutionHistory(executionArn).body().asString()).path("events");
+        ArrayList<String> types = new ArrayList<>();
+        events.forEach(event -> types.add(event.path("type").asText()));
+        assertEquals(List.of("ExecutionStarted", "ParallelStateEntered", "ParallelStateStarted",
+                "PassStateEntered", "PassStateExited", "ParallelStateSucceeded", "ParallelStateExited",
+                "MapStateEntered", "MapStateStarted",
+                "MapIterationStarted", "PassStateEntered", "PassStateExited", "MapIterationSucceeded",
+                "MapIterationStarted", "PassStateEntered", "PassStateExited", "MapIterationSucceeded",
+                "MapStateSucceeded", "MapStateExited", "ExecutionSucceeded"), types);
+        List<Long> expectedPreviousEventIds = List.of(0L, 0L, 2L, 3L, 4L, 5L, 5L, 7L, 8L, 9L, 10L, 11L, 12L,
+                9L, 14L, 15L, 16L, 17L, 17L, 19L);
+        for (int i = 0; i < events.size(); i++) {
+            assertEquals(i + 1L, events.get(i).path("id").asLong());
+            assertEquals(expectedPreviousEventIds.get(i), events.get(i).path("previousEventId").asLong(),
+                    "previousEventId of event " + (i + 1) + " in " + events);
+        }
+        assertFalse(events.get(2).has("parallelStateStartedEventDetails"));
+        assertEquals(2, events.get(8).path("mapStateStartedEventDetails").path("length").asInt());
+        assertEquals("M", events.get(9).path("mapIterationStartedEventDetails").path("name").asText());
+        assertEquals(0, events.get(9).path("mapIterationStartedEventDetails").path("index").asInt());
+        assertEquals("M", events.get(16).path("mapIterationSucceededEventDetails").path("name").asText());
+        assertEquals(1, events.get(16).path("mapIterationSucceededEventDetails").path("index").asInt());
+        assertEquals("[1,2]", events.get(18).path("stateExitedEventDetails").path("output").asText());
+    }
+
+    /** The shape reported in issue #2868, verified against us-east-1. */
+    @Test
+    void getExecutionHistory_namesTheBranchStateAFailureBelongsTo() throws Exception {
+        String definition = """
+                {
+                  "StartAt": "P",
+                  "States": {
+                    "P": {
+                      "Type": "Parallel",
+                      "Branches": [
+                        {"StartAt": "Fast", "States": {"Fast": {"Type": "Pass", "Parameters": {"m.$": "$.nope"}, "End": true}}}
+                      ],
+                      "End": true
+                    }
+                  }
+                }
+                """;
+
+        String stateMachineArn = createStateMachine("execution-history-branch-failure-test", definition);
+        String executionArn = startExecution(stateMachineArn, "{\"x\": \"a\"}");
+        String cause = "An error occurred while executing the state 'Fast' (entered at the event id #4). "
+                + "The JSONPath '$.nope' specified for the field 'm.$' could not be found in the input '{\"x\":\"a\"}'";
+        await().atMost(Duration.ofSeconds(5)).pollInterval(Duration.ofMillis(100)).untilAsserted(() -> {
+            Response described = describeExecution(executionArn);
+            assertEquals("FAILED", described.jsonPath().getString("status"), described.body().asString());
+            assertEquals("States.Runtime", described.jsonPath().getString("error"));
+            assertEquals(cause, described.jsonPath().getString("cause"));
+        });
+
+        JsonNode events = MAPPER.readTree(getExecutionHistory(executionArn).body().asString()).path("events");
+        ArrayList<String> types = new ArrayList<>();
+        events.forEach(event -> types.add(event.path("type").asText()));
+        assertEquals(List.of("ExecutionStarted", "ParallelStateEntered", "ParallelStateStarted",
+                "PassStateEntered", "ExecutionFailed"), types);
+        assertEquals("Fast", events.get(3).path("stateEnteredEventDetails").path("name").asText());
+        assertEquals(cause, events.get(4).path("executionFailedEventDetails").path("cause").asText());
+        assertEquals(4L, events.get(4).path("previousEventId").asLong());
+    }
+
+    private Response getExecutionHistory(String executionArn) {
+        Response response = given()
+                .header("X-Amz-Target", "AWSStepFunctions.GetExecutionHistory")
+                .contentType(SFN_CONTENT_TYPE)
+                .body(String.format("""
+                        {
+                            "executionArn": "%s",
+                            "includeExecutionData": true
+                        }
+                        """, executionArn))
+                .when()
+                .post("/");
+        response.then().statusCode(200);
+        return response;
+    }
+
+    private Response describeExecution(String executionArn) {
+        Response response = given()
+                .header("X-Amz-Target", "AWSStepFunctions.DescribeExecution")
+                .contentType(SFN_CONTENT_TYPE)
+                .body(String.format("""
+                        { "executionArn": "%s" }
+                        """, executionArn))
+                .when()
+                .post("/");
+        response.then().statusCode(200);
+        return response;
+    }
+
+    private static String createQueue(String queueName) {
+        Response response = given()
+                .header("X-Amz-Target", "AmazonSQS.CreateQueue")
+                .contentType(SQS_CONTENT_TYPE)
+                .body("""
+                        {"QueueName":"%s"}
+                        """.formatted(queueName))
+                .when()
+                .post("/");
+        response.then().statusCode(200);
+        return response.jsonPath().getString("QueueUrl");
+    }
+
+    private static void deleteQueue(String queueUrl) {
+        given()
+                .header("X-Amz-Target", "AmazonSQS.DeleteQueue")
+                .contentType(SQS_CONTENT_TYPE)
+                .body("""
+                        {"QueueUrl":"%s"}
+                        """.formatted(queueUrl))
+                .when()
+                .post("/")
+                .then()
+                .statusCode(200);
+    }
+
+    private String createStateMachine(String name, String definition) {
+        Response response = given()
+                .header("X-Amz-Target", "AWSStepFunctions.CreateStateMachine")
+                .contentType(SFN_CONTENT_TYPE)
+                .body(String.format("""
+                        {
+                            "name": "%s",
+                            "definition": %s,
+                            "roleArn": "%s"
+                        }
+                        """, name, quote(definition), ROLE_ARN))
+                .when()
+                .post("/");
+        response.then().statusCode(200);
+        return response.jsonPath().getString("stateMachineArn");
+    }
+
+    private String startExecution(String stateMachineArn) {
+        Response response = given()
+                .header("X-Amz-Target", "AWSStepFunctions.StartExecution")
+                .contentType(SFN_CONTENT_TYPE)
+                .body(String.format("""
+                        {
+                            "stateMachineArn": "%s"
+                        }
+                        """, stateMachineArn))
+                .when()
+                .post("/");
+        response.then().statusCode(200);
+        return response.jsonPath().getString("executionArn");
+    }
+
+    private String startExecution(String stateMachineArn, String input) {
+        Response response = given()
+                .header("X-Amz-Target", "AWSStepFunctions.StartExecution")
+                .contentType(SFN_CONTENT_TYPE)
+                .body(String.format("""
+                        {
+                            "stateMachineArn": "%s",
+                            "input": %s
+                        }
+                        """, stateMachineArn, quote(input)))
+                .when()
+                .post("/");
+        response.then().statusCode(200);
+        return response.jsonPath().getString("executionArn");
+    }
+
+    private void waitForExecution(String executionArn) {
+        await()
+                .atMost(Duration.ofSeconds(5))
+                .pollInterval(Duration.ofMillis(100))
+                .untilAsserted(() -> {
+                    Response response = given()
+                            .header("X-Amz-Target", "AWSStepFunctions.DescribeExecution")
+                            .contentType(SFN_CONTENT_TYPE)
+                            .body(String.format("""
+                                    { "executionArn": "%s" }
+                                    """, executionArn))
+                            .when()
+                            .post("/");
+                    response.then().statusCode(200);
+
+                    String status = response.jsonPath().getString("status");
+                    if ("FAILED".equals(status) || "ABORTED".equals(status)) {
+                        fail("Execution " + status + ": " + response.body().asString());
+                    }
+                    if (!"SUCCEEDED".equals(status)) {
+                        fail("Execution status was " + status);
+                    }
+                });
+    }
+
+    /**
+     * A {@code .sync} Task records {@code TaskSubmitted} between {@code TaskStarted} and its terminal
+     * event, carrying the response of the call that started the job, as AWS does (measured in
+     * ap-northeast-1 on 2026-09-29: PascalCase, {@code StartDate} in epoch milliseconds).
+     */
+    @Test
+    void syncTaskRecordsTaskSubmittedWithTheStartExecutionResponse() throws Exception {
+        String childArn = createStateMachine("execution-history-task-submitted-child", """
+                {"StartAt": "Done", "States": {"Done": {"Type": "Pass", "End": true}}}
+                """);
+        String parentArn = createStateMachine("execution-history-task-submitted-parent", """
+                {
+                  "StartAt": "Nest",
+                  "States": {
+                    "Nest": {
+                      "Type": "Task",
+                      "Resource": "arn:aws:states:::states:startExecution.sync:2",
+                      "Parameters": {"StateMachineArn": "%s"},
+                      "End": true
+                    }
+                  }
+                }
+                """.formatted(childArn));
+        String executionArn = startExecution(parentArn);
+        waitForExecution(executionArn);
+
+        Response response = given()
+                .header("X-Amz-Target", "AWSStepFunctions.GetExecutionHistory")
+                .contentType(SFN_CONTENT_TYPE)
+                .body(String.format("""
+                        {"executionArn": "%s"}
+                        """, executionArn))
+                .when()
+                .post("/");
+        response.then().statusCode(200);
+
+        JsonNode events = MAPPER.readTree(response.body().asString()).path("events");
+        List<String> types = new ArrayList<>();
+        events.forEach(event -> types.add(event.path("type").asText()));
+        assertEquals(List.of("ExecutionStarted", "TaskStateEntered", "TaskScheduled", "TaskStarted",
+                "TaskSubmitted", "TaskSucceeded", "TaskStateExited", "ExecutionSucceeded"), types);
+        List<Long> expectedPreviousEventIds = List.of(0L, 0L, 2L, 3L, 4L, 5L, 6L, 7L);
+        for (int i = 0; i < events.size(); i++) {
+            assertEquals(i + 1L, events.get(i).path("id").asLong());
+            assertEquals(expectedPreviousEventIds.get(i), events.get(i).path("previousEventId").asLong());
+        }
+
+        JsonNode submitted = events.get(4).path("taskSubmittedEventDetails");
+        assertEquals("states", submitted.path("resourceType").asText());
+        assertEquals("startExecution.sync:2", submitted.path("resource").asText());
+        assertFalse(submitted.path("outputDetails").path("truncated").asBoolean(true));
+        JsonNode output = MAPPER.readTree(submitted.path("output").asText());
+        assertEquals(List.of("ExecutionArn", "StartDate"), fieldNames(output));
+        String childExecutionPrefix = childArn.replace(":stateMachine:", ":execution:") + ":";
+        assertTrue(output.path("ExecutionArn").asText().startsWith(childExecutionPrefix), output.toString());
+        assertTrue(output.path("StartDate").isIntegralNumber(), output.toString());
+        assertTrue(output.path("StartDate").asLong() > 1_000_000_000_000L, "epoch milliseconds: " + output);
+        // The same integration name on every event of the family, not startExecution.sync / 2.
+        assertEquals("startExecution.sync:2", events.get(2).path("taskScheduledEventDetails").path("resource").asText());
+        assertEquals("startExecution.sync:2", events.get(5).path("taskSucceededEventDetails").path("resource").asText());
+    }
+
+    private static List<String> fieldNames(JsonNode node) {
+        List<String> names = new ArrayList<>();
+        node.fieldNames().forEachRemaining(names::add);
+        return names;
+    }
+
+    private static String quote(String raw) {
+        return "\"" + raw
+                .replace("\\", "\\\\")
+                .replace("\"", "\\\"")
+                .replace("\n", "\\n")
+                .replace("\r", "\\r")
+                .replace("\t", "\\t")
+                + "\"";
+    }
+}

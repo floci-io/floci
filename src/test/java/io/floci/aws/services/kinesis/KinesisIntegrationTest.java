@@ -1,0 +1,1475 @@
+package io.floci.aws.services.kinesis;
+
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.node.ObjectNode;
+import io.floci.aws.testing.RestAssuredJsonUtils;
+import io.quarkus.test.junit.QuarkusTest;
+import io.restassured.response.Response;
+import org.junit.jupiter.api.Assertions;
+import org.junit.jupiter.api.BeforeAll;
+import org.junit.jupiter.api.MethodOrderer;
+import org.junit.jupiter.api.Order;
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.TestMethodOrder;
+
+import java.math.BigDecimal;
+import java.nio.ByteBuffer;
+import java.util.ArrayList;
+import java.util.Base64;
+import java.util.HashSet;
+import java.util.List;
+import java.util.Set;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
+
+import static io.restassured.RestAssured.given;
+import static org.hamcrest.Matchers.*;
+import static org.junit.jupiter.api.Assertions.*;
+
+@QuarkusTest
+@TestMethodOrder(MethodOrderer.OrderAnnotation.class)
+class KinesisIntegrationTest {
+
+    private static final String KINESIS_CONTENT_TYPE = "application/x-amz-json-1.1";
+    private static final String MIN_HASH_KEY = "0";
+    private static final String FIRST_SHARD_ENDING_HASH_KEY = "170141183460469231731687303715884105727";
+    private static final String SECOND_SHARD_STARTING_HASH_KEY = "170141183460469231731687303715884105728";
+    private static final String MAX_HASH_KEY = "340282366920938463463374607431768211455";
+    private static final ObjectMapper MAPPER = new ObjectMapper();
+    private static final Pattern CREATION_TIMESTAMP_PATTERN = Pattern.compile(
+            "\\\"StreamCreationTimestamp\\\"\\s*:\\s*(-?\\d+(?:\\.\\d+)?)(?=\\s*[,}])");
+
+    @BeforeAll
+    static void configureRestAssured() {
+        RestAssuredJsonUtils.configureAwsContentTypes();
+    }
+
+    @Test
+    @Order(1)
+    void createStream() {
+        given()
+            .header("X-Amz-Target", "Kinesis_20131202.CreateStream")
+            .contentType(KINESIS_CONTENT_TYPE)
+            .body("""
+                {"StreamName": "list-shards-test", "ShardCount": 2}
+                """)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200);
+    }
+
+    @Test
+    @Order(2)
+    void listShardsByStreamName() {
+        given()
+            .header("X-Amz-Target", "Kinesis_20131202.ListShards")
+            .contentType(KINESIS_CONTENT_TYPE)
+            .body("""
+                {"StreamName": "list-shards-test"}
+                """)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("Shards.size()", equalTo(2))
+            .body("Shards[0].ShardId", equalTo("shardId-000000000000"))
+            .body("Shards[1].ShardId", equalTo("shardId-000000000001"))
+            .body("Shards[0].HashKeyRange.StartingHashKey", notNullValue())
+            .body("Shards[0].HashKeyRange.EndingHashKey", equalTo(FIRST_SHARD_ENDING_HASH_KEY))
+            .body("Shards[1].HashKeyRange.StartingHashKey", equalTo(SECOND_SHARD_STARTING_HASH_KEY))
+            .body("Shards[1].HashKeyRange.EndingHashKey", equalTo(MAX_HASH_KEY))
+            .body("Shards[0].SequenceNumberRange.StartingSequenceNumber", notNullValue());
+    }
+
+    @Test
+    @Order(3)
+    void listShardsByStreamArn() {
+        String streamArn = given()
+            .header("X-Amz-Target", "Kinesis_20131202.DescribeStreamSummary")
+            .contentType(KINESIS_CONTENT_TYPE)
+            .body("""
+                {"StreamName": "list-shards-test"}
+                """)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .extract().jsonPath().getString("StreamDescriptionSummary.StreamARN");
+
+        given()
+            .header("X-Amz-Target", "Kinesis_20131202.ListShards")
+            .contentType(KINESIS_CONTENT_TYPE)
+            .body("{\"StreamARN\": \"" + streamArn + "\"}")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("Shards.size()", equalTo(2));
+    }
+
+    @Test
+    @Order(4)
+    void describeStreamReturnsPlainDecimalCreationTimestamp() throws Exception {
+        String responseBody = given()
+            .header("X-Amz-Target", "Kinesis_20131202.DescribeStream")
+            .contentType(KINESIS_CONTENT_TYPE)
+            .body("""
+                {"StreamName": "list-shards-test"}
+                """)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .extract().asString();
+
+        Matcher matcher = CREATION_TIMESTAMP_PATTERN.matcher(responseBody);
+        assertTrue(matcher.find(), "timestamp must be serialized as a plain JSON decimal: " + responseBody);
+        String timestampLexeme = matcher.group(1);
+        BigDecimal timestamp = new BigDecimal(timestampLexeme);
+        assertTrue(timestamp.signum() > 0);
+        assertTrue(timestamp.stripTrailingZeros().scale() <= 3);
+
+        JsonNode timestampNode = MAPPER.readTree(responseBody)
+                .path("StreamDescription")
+                .path("StreamCreationTimestamp");
+        assertTrue(timestampNode.isNumber());
+        assertEquals(0, timestamp.compareTo(timestampNode.decimalValue()),
+                "serialized timestamp must preserve the numeric value");
+        assertFalse(timestampLexeme.contains("E"));
+        assertFalse(timestampLexeme.contains("e"));
+    }
+
+    @Test
+    @Order(20)
+    void describeStreamByArn() {
+        String streamArn = given()
+            .header("X-Amz-Target", "Kinesis_20131202.DescribeStreamSummary")
+            .contentType(KINESIS_CONTENT_TYPE)
+            .body("""
+                {"StreamName": "list-shards-test"}
+                """)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .extract().jsonPath().getString("StreamDescriptionSummary.StreamARN");
+
+        given()
+            .header("X-Amz-Target", "Kinesis_20131202.DescribeStream")
+            .contentType(KINESIS_CONTENT_TYPE)
+            .body("{\"StreamARN\": \"" + streamArn + "\"}")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("StreamDescription.StreamName", equalTo("list-shards-test"))
+            .body("StreamDescription.StreamARN", equalTo(streamArn));
+    }
+
+    @Test
+    @Order(21)
+    void putAndGetRecordsByArn() {
+        // Use a dedicated stream to avoid interference from shard splits on list-shards-test
+        given()
+            .header("X-Amz-Target", "Kinesis_20131202.CreateStream")
+            .contentType(KINESIS_CONTENT_TYPE)
+            .body("""
+                {"StreamName": "arn-put-get-test", "ShardCount": 1}
+                """)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200);
+
+        String streamArn = given()
+            .header("X-Amz-Target", "Kinesis_20131202.DescribeStreamSummary")
+            .contentType(KINESIS_CONTENT_TYPE)
+            .body("""
+                {"StreamName": "arn-put-get-test"}
+                """)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .extract().jsonPath().getString("StreamDescriptionSummary.StreamARN");
+
+        // PutRecord by ARN
+        given()
+            .header("X-Amz-Target", "Kinesis_20131202.PutRecord")
+            .contentType(KINESIS_CONTENT_TYPE)
+            .body("{\"StreamARN\": \"" + streamArn + "\", \"Data\": \"dGVzdA==\", \"PartitionKey\": \"pk1\"}")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("SequenceNumber", notNullValue());
+
+        // GetShardIterator by ARN
+        String iterator = given()
+            .header("X-Amz-Target", "Kinesis_20131202.GetShardIterator")
+            .contentType(KINESIS_CONTENT_TYPE)
+            .body("{\"StreamARN\": \"" + streamArn + "\", \"ShardId\": \"shardId-000000000000\", \"ShardIteratorType\": \"TRIM_HORIZON\"}")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .extract().jsonPath().getString("ShardIterator");
+
+        // GetRecords to verify the put worked
+        given()
+            .header("X-Amz-Target", "Kinesis_20131202.GetRecords")
+            .contentType(KINESIS_CONTENT_TYPE)
+            .body("{\"ShardIterator\": \"" + iterator + "\"}")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("Records.size()", equalTo(1))
+            .body("Records[0].PartitionKey", equalTo("pk1"))
+            .body("Records[0].Data", equalTo("dGVzdA=="));
+    }
+
+    @Test
+    @Order(22)
+    void operationWithoutStreamNameOrArnReturns400() {
+        given()
+            .header("X-Amz-Target", "Kinesis_20131202.DescribeStream")
+            .contentType(KINESIS_CONTENT_TYPE)
+            .body("{}")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(400);
+    }
+
+    @Test
+    @Order(23)
+    void operationWithMalformedArnReturns400() {
+        given()
+            .header("X-Amz-Target", "Kinesis_20131202.DescribeStream")
+            .contentType(KINESIS_CONTENT_TYPE)
+            .body("""
+                {"StreamARN": "arn:aws:kinesis:us-east-1:123456789012:not-a-stream"}
+                """)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(400);
+    }
+
+    @Test
+    @Order(4)
+    void listShardsAfterSplitReturnsAllShards() {
+        given()
+            .header("X-Amz-Target", "Kinesis_20131202.SplitShard")
+            .contentType(KINESIS_CONTENT_TYPE)
+            .body("""
+                {
+                    "StreamName": "list-shards-test",
+                    "ShardToSplit": "shardId-000000000000",
+                    "NewStartingHashKey": "85070591730234615865843651857942052864"
+                }
+                """)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200);
+
+        given()
+            .header("X-Amz-Target", "Kinesis_20131202.ListShards")
+            .contentType(KINESIS_CONTENT_TYPE)
+            .body("""
+                {"StreamName": "list-shards-test"}
+                """)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("Shards.size()", equalTo(4));
+    }
+
+    @Test
+    @Order(5)
+    void listShardsWithShardFilterAtLatestExcludesClosedShards() {
+        given()
+            .header("X-Amz-Target", "Kinesis_20131202.ListShards")
+            .contentType(KINESIS_CONTENT_TYPE)
+            .body("""
+                {"StreamName": "list-shards-test", "ShardFilter": {"Type": "AT_LATEST"}}
+                """)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("Shards.size()", equalTo(3))
+            .body("Shards.findAll { !it.SequenceNumberRange.containsKey('EndingSequenceNumber') }.size()", equalTo(3));
+    }
+
+    @Test
+    @Order(6)
+    void listShardsWithoutStreamNameOrArn() {
+        given()
+            .header("X-Amz-Target", "Kinesis_20131202.ListShards")
+            .contentType(KINESIS_CONTENT_TYPE)
+            .body("{}")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(400);
+    }
+
+    @Test
+    @Order(7)
+    void increaseStreamRetentionPeriod() {
+        // Create a dedicated stream for retention tests
+        given()
+            .header("X-Amz-Target", "Kinesis_20131202.CreateStream")
+            .contentType(KINESIS_CONTENT_TYPE)
+            .body("""
+                {"StreamName": "retention-test", "ShardCount": 1}
+                """)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200);
+
+        // Increase from default 24 to 48
+        given()
+            .header("X-Amz-Target", "Kinesis_20131202.IncreaseStreamRetentionPeriod")
+            .contentType(KINESIS_CONTENT_TYPE)
+            .body("""
+                {"StreamName": "retention-test", "RetentionPeriodHours": 48}
+                """)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200);
+
+        // Verify via DescribeStream
+        given()
+            .header("X-Amz-Target", "Kinesis_20131202.DescribeStream")
+            .contentType(KINESIS_CONTENT_TYPE)
+            .body("""
+                {"StreamName": "retention-test"}
+                """)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("StreamDescription.RetentionPeriodHours", equalTo(48));
+    }
+
+    @Test
+    @Order(8)
+    void decreaseStreamRetentionPeriod() {
+        // Decrease from 48 back to 24
+        given()
+            .header("X-Amz-Target", "Kinesis_20131202.DecreaseStreamRetentionPeriod")
+            .contentType(KINESIS_CONTENT_TYPE)
+            .body("""
+                {"StreamName": "retention-test", "RetentionPeriodHours": 24}
+                """)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200);
+
+        // Verify
+        given()
+            .header("X-Amz-Target", "Kinesis_20131202.DescribeStream")
+            .contentType(KINESIS_CONTENT_TYPE)
+            .body("""
+                {"StreamName": "retention-test"}
+                """)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("StreamDescription.RetentionPeriodHours", equalTo(24));
+    }
+
+    @Test
+    @Order(9)
+    void increaseRetentionPeriodRejectsTooHigh() {
+        given()
+            .header("X-Amz-Target", "Kinesis_20131202.IncreaseStreamRetentionPeriod")
+            .contentType(KINESIS_CONTENT_TYPE)
+            .body("""
+                {"StreamName": "retention-test", "RetentionPeriodHours": 9999}
+                """)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(400)
+            .body("__type", equalTo("InvalidArgumentException"));
+    }
+
+    @Test
+    @Order(10)
+    void decreaseRetentionPeriodRejectsTooLow() {
+        given()
+            .header("X-Amz-Target", "Kinesis_20131202.DecreaseStreamRetentionPeriod")
+            .contentType(KINESIS_CONTENT_TYPE)
+            .body("""
+                {"StreamName": "retention-test", "RetentionPeriodHours": 12}
+                """)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(400)
+            .body("__type", equalTo("InvalidArgumentException"));
+    }
+
+    @Test
+    @Order(11)
+    void increaseRetentionPeriodRejectsLowerValue() {
+        // First increase to 48
+        given()
+            .header("X-Amz-Target", "Kinesis_20131202.IncreaseStreamRetentionPeriod")
+            .contentType(KINESIS_CONTENT_TYPE)
+            .body("""
+                {"StreamName": "retention-test", "RetentionPeriodHours": 48}
+                """)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200);
+
+        // Try to "increase" to 24 (lower) - should fail
+        given()
+            .header("X-Amz-Target", "Kinesis_20131202.IncreaseStreamRetentionPeriod")
+            .contentType(KINESIS_CONTENT_TYPE)
+            .body("""
+                {"StreamName": "retention-test", "RetentionPeriodHours": 24}
+                """)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(400)
+            .body("__type", equalTo("InvalidArgumentException"));
+    }
+
+    @Test
+    @Order(12)
+    void increaseRetentionPeriodSameValueIsNoOp() {
+        // Stream is currently at 48 (from Order 11). Increase to 48 should be a no-op,
+        // not an InvalidArgumentException. See #342: real AWS accepts same-value
+        // (terraform-provider-aws stream.go Create path calls this unconditionally on
+        // stream creation with the configured retention_period, so every default-retention
+        // TF stream would fail on first apply if AWS rejected same-value).
+        given()
+            .header("X-Amz-Target", "Kinesis_20131202.IncreaseStreamRetentionPeriod")
+            .contentType(KINESIS_CONTENT_TYPE)
+            .body("""
+                {"StreamName": "retention-test", "RetentionPeriodHours": 48}
+                """)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200);
+
+        given()
+            .header("X-Amz-Target", "Kinesis_20131202.DescribeStream")
+            .contentType(KINESIS_CONTENT_TYPE)
+            .body("""
+                {"StreamName": "retention-test"}
+                """)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("StreamDescription.RetentionPeriodHours", equalTo(48));
+    }
+
+    @Test
+    @Order(13)
+    void decreaseRetentionPeriodSameValueIsNoOp() {
+        // Stream is still at 48. Decrease to 48 should also be a no-op.
+        given()
+            .header("X-Amz-Target", "Kinesis_20131202.DecreaseStreamRetentionPeriod")
+            .contentType(KINESIS_CONTENT_TYPE)
+            .body("""
+                {"StreamName": "retention-test", "RetentionPeriodHours": 48}
+                """)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200);
+
+        given()
+            .header("X-Amz-Target", "Kinesis_20131202.DescribeStream")
+            .contentType(KINESIS_CONTENT_TYPE)
+            .body("""
+                {"StreamName": "retention-test"}
+                """)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("StreamDescription.RetentionPeriodHours", equalTo(48));
+    }
+
+    @Test
+    @Order(14)
+    void listShardsForNonExistentStream() {
+        given()
+            .header("X-Amz-Target", "Kinesis_20131202.ListShards")
+            .contentType(KINESIS_CONTENT_TYPE)
+            .body("""
+                {"StreamName": "non-existent-stream"}
+                """)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(400);
+    }
+
+    @Test
+    @Order(30)
+    void updateStreamModeRoundTrip() {
+        // Create a dedicated stream so other ordered tests aren't affected by the mode flip.
+        given()
+            .header("X-Amz-Target", "Kinesis_20131202.CreateStream")
+            .contentType(KINESIS_CONTENT_TYPE)
+            .body("""
+                {"StreamName": "stream-mode-test", "ShardCount": 1}
+                """)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200);
+
+        // Default mode is PROVISIONED.
+        String streamArn = given()
+            .header("X-Amz-Target", "Kinesis_20131202.DescribeStreamSummary")
+            .contentType(KINESIS_CONTENT_TYPE)
+            .body("""
+                {"StreamName": "stream-mode-test"}
+                """)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("StreamDescriptionSummary.StreamModeDetails.StreamMode", equalTo("PROVISIONED"))
+            .extract().jsonPath().getString("StreamDescriptionSummary.StreamARN");
+
+        // Switch to ON_DEMAND.
+        given()
+            .header("X-Amz-Target", "Kinesis_20131202.UpdateStreamMode")
+            .contentType(KINESIS_CONTENT_TYPE)
+            .body("{\"StreamARN\": \"" + streamArn + "\", \"StreamModeDetails\": {\"StreamMode\": \"ON_DEMAND\"}}")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200);
+
+        // DescribeStream now reports ON_DEMAND.
+        given()
+            .header("X-Amz-Target", "Kinesis_20131202.DescribeStream")
+            .contentType(KINESIS_CONTENT_TYPE)
+            .body("""
+                {"StreamName": "stream-mode-test"}
+                """)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("StreamDescription.StreamModeDetails.StreamMode", equalTo("ON_DEMAND"));
+
+        // Calling UpdateStreamMode again with the same mode is a no-op (mirrors retention semantics)
+        // and is what terraform-provider-aws does on every refresh. See #440.
+        given()
+            .header("X-Amz-Target", "Kinesis_20131202.UpdateStreamMode")
+            .contentType(KINESIS_CONTENT_TYPE)
+            .body("{\"StreamARN\": \"" + streamArn + "\", \"StreamModeDetails\": {\"StreamMode\": \"ON_DEMAND\"}}")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200);
+    }
+
+    @Test
+    @Order(31)
+    void createStreamWithOnDemandMode() {
+        given()
+            .header("X-Amz-Target", "Kinesis_20131202.CreateStream")
+            .contentType(KINESIS_CONTENT_TYPE)
+            .body("""
+                {"StreamName": "on-demand-create-test", "ShardCount": 1, "StreamModeDetails": {"StreamMode": "ON_DEMAND"}}
+                """)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200);
+
+        given()
+            .header("X-Amz-Target", "Kinesis_20131202.DescribeStream")
+            .contentType(KINESIS_CONTENT_TYPE)
+            .body("""
+                {"StreamName": "on-demand-create-test"}
+                """)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("StreamDescription.StreamModeDetails.StreamMode", equalTo("ON_DEMAND"));
+    }
+
+    @Test
+    @Order(32)
+    void updateStreamModeRequiresStreamArn() {
+        given()
+            .header("X-Amz-Target", "Kinesis_20131202.UpdateStreamMode")
+            .contentType(KINESIS_CONTENT_TYPE)
+            .body("""
+                {"StreamName": "stream-mode-test", "StreamModeDetails": {"StreamMode": "ON_DEMAND"}}
+                """)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(400)
+            .body("__type", equalTo("InvalidArgumentException"));
+    }
+
+    @Test
+    @Order(33)
+    void updateStreamModeRejectsInvalidMode() {
+        String streamArn = given()
+            .header("X-Amz-Target", "Kinesis_20131202.DescribeStreamSummary")
+            .contentType(KINESIS_CONTENT_TYPE)
+            .body("""
+                {"StreamName": "stream-mode-test"}
+                """)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .extract().jsonPath().getString("StreamDescriptionSummary.StreamARN");
+
+        given()
+            .header("X-Amz-Target", "Kinesis_20131202.UpdateStreamMode")
+            .contentType(KINESIS_CONTENT_TYPE)
+            .body("{\"StreamARN\": \"" + streamArn + "\", \"StreamModeDetails\": {\"StreamMode\": \"BOGUS\"}}")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(400)
+            .body("__type", equalTo("InvalidArgumentException"));
+    }
+
+    @Test
+    @Order(40)
+    void putRecordReturnsRealShardIdAcrossShards() {
+        given()
+            .header("X-Amz-Target", "Kinesis_20131202.CreateStream")
+            .contentType(KINESIS_CONTENT_TYPE)
+            .body("""
+                {"StreamName": "shardid-put-test", "ShardCount": 2}
+                """)
+        .when().post("/").then().statusCode(200);
+
+        Set<String> reported = new HashSet<>();
+        // Probe enough partition keys that hash(pk) % 2 hits both shards. With 50 keys the
+        // odds of single-shard routing are ~1 in 2^49, so this is effectively deterministic.
+        for (int i = 0; i < 50 && reported.size() < 2; i++) {
+            String pk = "pk-" + i;
+            String shardId = given()
+                .header("X-Amz-Target", "Kinesis_20131202.PutRecord")
+                .contentType(KINESIS_CONTENT_TYPE)
+                .body("{\"StreamName\": \"shardid-put-test\", \"Data\": \"dGVzdA==\", \"PartitionKey\": \"" + pk + "\"}")
+            .when().post("/")
+            .then().statusCode(200)
+                .body("ShardId", startsWith("shardId-"))
+                .extract().jsonPath().getString("ShardId");
+            reported.add(shardId);
+        }
+        Assertions.assertEquals(2, reported.size(),
+                "PutRecord should report distinct ShardIds across partition keys on a 2-shard stream");
+    }
+
+    @Test
+    @Order(41)
+    void putRecordsReturnsRealShardIdPerEntry() {
+        given()
+            .header("X-Amz-Target", "Kinesis_20131202.CreateStream")
+            .contentType(KINESIS_CONTENT_TYPE)
+            .body("""
+                {"StreamName": "shardid-putrecords-test", "ShardCount": 2}
+                """)
+        .when().post("/").then().statusCode(200);
+
+        StringBuilder body = new StringBuilder("{\"StreamName\": \"shardid-putrecords-test\", \"Records\": [");
+        for (int i = 0; i < 10; i++) {
+            if (i > 0) body.append(',');
+            body.append("{\"Data\": \"dGVzdA==\", \"PartitionKey\": \"batch-pk-").append(i).append("\"}");
+        }
+        body.append("]}");
+
+        List<String> shardIds = given()
+            .header("X-Amz-Target", "Kinesis_20131202.PutRecords")
+            .contentType(KINESIS_CONTENT_TYPE)
+            .body(body.toString())
+        .when().post("/")
+        .then().statusCode(200)
+            .body("FailedRecordCount", equalTo(0))
+            .body("Records.size()", equalTo(10))
+            .extract().jsonPath().getList("Records.ShardId", String.class);
+
+        Set<String> distinct = new HashSet<>(shardIds);
+        Assertions.assertTrue(distinct.size() >= 2,
+                "PutRecords should route 10 mixed partition keys across at least 2 shards, got: " + distinct);
+        for (String sid : shardIds) {
+            Assertions.assertTrue(sid != null && sid.startsWith("shardId-"),
+                    "Each record must report a real shardId, got: " + sid);
+        }
+    }
+
+    @Test
+    @Order(42)
+    void putRecordShardIdMatchesGetRecordsShard() {
+        given()
+            .header("X-Amz-Target", "Kinesis_20131202.CreateStream")
+            .contentType(KINESIS_CONTENT_TYPE)
+            .body("""
+                {"StreamName": "shardid-roundtrip-test", "ShardCount": 2}
+                """)
+        .when().post("/").then().statusCode(200);
+
+        String putShardId = given()
+            .header("X-Amz-Target", "Kinesis_20131202.PutRecord")
+            .contentType(KINESIS_CONTENT_TYPE)
+            .body("{\"StreamName\": \"shardid-roundtrip-test\", \"Data\": \"aGVsbG8=\", \"PartitionKey\": \"rt-pk\"}")
+        .when().post("/")
+        .then().statusCode(200)
+            .extract().jsonPath().getString("ShardId");
+
+        String iterator = given()
+            .header("X-Amz-Target", "Kinesis_20131202.GetShardIterator")
+            .contentType(KINESIS_CONTENT_TYPE)
+            .body("{\"StreamName\": \"shardid-roundtrip-test\", \"ShardId\": \"" + putShardId + "\", \"ShardIteratorType\": \"TRIM_HORIZON\"}")
+        .when().post("/")
+        .then().statusCode(200)
+            .extract().jsonPath().getString("ShardIterator");
+
+        given()
+            .header("X-Amz-Target", "Kinesis_20131202.GetRecords")
+            .contentType(KINESIS_CONTENT_TYPE)
+            .body("{\"ShardIterator\": \"" + iterator + "\"}")
+        .when().post("/")
+        .then().statusCode(200)
+            .body("Records.size()", equalTo(1))
+            .body("Records[0].PartitionKey", equalTo("rt-pk"));
+
+        String otherShardId = putShardId.endsWith("0") ? "shardId-000000000001" : "shardId-000000000000";
+        String otherIterator = given()
+            .header("X-Amz-Target", "Kinesis_20131202.GetShardIterator")
+            .contentType(KINESIS_CONTENT_TYPE)
+            .body("{\"StreamName\": \"shardid-roundtrip-test\", \"ShardId\": \"" + otherShardId + "\", \"ShardIteratorType\": \"TRIM_HORIZON\"}")
+        .when().post("/")
+        .then().statusCode(200)
+            .extract().jsonPath().getString("ShardIterator");
+
+        given()
+            .header("X-Amz-Target", "Kinesis_20131202.GetRecords")
+            .contentType(KINESIS_CONTENT_TYPE)
+            .body("{\"ShardIterator\": \"" + otherIterator + "\"}")
+        .when().post("/")
+        .then().statusCode(200)
+            .body("Records.size()", equalTo(0));
+    }
+
+    @Test
+    @Order(43)
+    void putRecordAcceptsPartitionKeyWithMinimumHashCode() {
+        given()
+            .header("X-Amz-Target", "Kinesis_20131202.CreateStream")
+            .contentType(KINESIS_CONTENT_TYPE)
+            .body("""
+                {"StreamName": "minimum-hash-partition-key-test", "ShardCount": 3}
+                """)
+        .when().post("/").then().statusCode(200);
+
+        given()
+            .header("X-Amz-Target", "Kinesis_20131202.PutRecord")
+            .contentType(KINESIS_CONTENT_TYPE)
+            .body("""
+                {"StreamName": "minimum-hash-partition-key-test", "Data": "dGVzdA==", "PartitionKey": "polygenelubricants"}
+                """)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200);
+    }
+
+    @Test
+    @Order(44)
+    void putRecordHonorsExplicitHashKey() {
+        given()
+            .header("X-Amz-Target", "Kinesis_20131202.CreateStream")
+            .contentType(KINESIS_CONTENT_TYPE)
+            .body("""
+                {"StreamName": "explicit-hash-put-test", "ShardCount": 2}
+                """)
+        .when().post("/").then().statusCode(200);
+
+        given()
+            .header("X-Amz-Target", "Kinesis_20131202.PutRecord")
+            .contentType(KINESIS_CONTENT_TYPE)
+            .body("{\"StreamName\": \"explicit-hash-put-test\", \"Data\": \"dGVzdA==\","
+                + "\"PartitionKey\": \"same-key\", \"ExplicitHashKey\": \"" + MIN_HASH_KEY + "\"}")
+        .when().post("/")
+        .then().statusCode(200)
+            .body("ShardId", equalTo("shardId-000000000000"));
+
+        given()
+            .header("X-Amz-Target", "Kinesis_20131202.PutRecord")
+            .contentType(KINESIS_CONTENT_TYPE)
+            .body("{\"StreamName\": \"explicit-hash-put-test\", \"Data\": \"dGVzdA==\","
+                + "\"PartitionKey\": \"same-key\", \"ExplicitHashKey\": \"" + MAX_HASH_KEY + "\"}")
+        .when().post("/")
+        .then().statusCode(200)
+            .body("ShardId", equalTo("shardId-000000000001"));
+    }
+
+    @Test
+    @Order(45)
+    void putRecordsHonorsExplicitHashKeyPerEntry() {
+        given()
+            .header("X-Amz-Target", "Kinesis_20131202.CreateStream")
+            .contentType(KINESIS_CONTENT_TYPE)
+            .body("""
+                {"StreamName": "explicit-hash-putrecords-test", "ShardCount": 2}
+                """)
+        .when().post("/").then().statusCode(200);
+
+        given()
+            .header("X-Amz-Target", "Kinesis_20131202.PutRecords")
+            .contentType(KINESIS_CONTENT_TYPE)
+            .body("{\"StreamName\": \"explicit-hash-putrecords-test\","
+                + "\"Records\": ["
+                + "{\"Data\": \"dGVzdA==\", \"PartitionKey\": \"same-key\", \"ExplicitHashKey\": \""
+                + MIN_HASH_KEY + "\"},"
+                + "{\"Data\": \"dGVzdA==\", \"PartitionKey\": \"same-key\", \"ExplicitHashKey\": \""
+                + MAX_HASH_KEY + "\"}"
+                + "]}")
+        .when().post("/")
+        .then().statusCode(200)
+            .body("FailedRecordCount", equalTo(0))
+            .body("Records[0].ShardId", equalTo("shardId-000000000000"))
+            .body("Records[1].ShardId", equalTo("shardId-000000000001"));
+    }
+
+    @Test
+    @Order(46)
+    void putRecordPreservesShardForNegativeHashCode() {
+        given()
+            .header("X-Amz-Target", "Kinesis_20131202.CreateStream")
+            .contentType(KINESIS_CONTENT_TYPE)
+            .body("""
+                {"StreamName": "negative-hash-partition-key-test", "ShardCount": 3}
+                """)
+        .when().post("/").then().statusCode(200);
+
+        given()
+            .header("X-Amz-Target", "Kinesis_20131202.PutRecord")
+            .contentType(KINESIS_CONTENT_TYPE)
+            .body("""
+                {"StreamName": "negative-hash-partition-key-test", "Data": "dGVzdA==", "PartitionKey": "negative-hash"}
+                """)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("ShardId", equalTo("shardId-000000000002"));
+    }
+
+    // --- AT_TIMESTAMP iterator coverage ---
+
+    private String atTimestampCreateStream(String name) {
+        given()
+            .header("X-Amz-Target", "Kinesis_20131202.CreateStream")
+            .contentType(KINESIS_CONTENT_TYPE)
+            .body("{\"StreamName\": \"" + name + "\", \"ShardCount\": 1}")
+        .when().post("/").then().statusCode(200);
+        return "shardId-000000000000";
+    }
+
+    private String atTimestampPutAndGetSequence(String stream, String data) {
+        given()
+            .header("X-Amz-Target", "Kinesis_20131202.PutRecord")
+            .contentType(KINESIS_CONTENT_TYPE)
+            .body("{\"StreamName\": \"" + stream + "\", \"Data\": \"" + data + "\", \"PartitionKey\": \"pk\"}")
+        .when().post("/").then().statusCode(200);
+        return "ok";
+    }
+
+    private String atTimestampIterator(String stream, String shardId, double timestampSec) {
+        return given()
+            .header("X-Amz-Target", "Kinesis_20131202.GetShardIterator")
+            .contentType(KINESIS_CONTENT_TYPE)
+            .body("{\"StreamName\": \"" + stream + "\", \"ShardId\": \"" + shardId
+                + "\", \"ShardIteratorType\": \"AT_TIMESTAMP\", \"Timestamp\": " + timestampSec + "}")
+        .when().post("/")
+        .then().statusCode(200)
+            .extract().jsonPath().getString("ShardIterator");
+    }
+
+    @Test
+    @Order(50)
+    void atTimestampReturnsRecordsAtAndAfter() throws InterruptedException {
+        String stream = "at-timestamp-basic";
+        String shardId = atTimestampCreateStream(stream);
+
+        long[] tsMillis = new long[5];
+        for (int i = 0; i < 5; i++) {
+            tsMillis[i] = System.currentTimeMillis();
+            atTimestampPutAndGetSequence(stream, "cmVjMA=="); // "rec0" base64
+            Thread.sleep(100);
+        }
+
+        // tsMillis[i] is captured just before rec[i], so rec[i].arrival >= tsMillis[i]
+        // and rec[i-1].arrival < tsMillis[i]. AT_TIMESTAMP at tsMillis[2] returns rec 2,3,4.
+        double targetSec = tsMillis[2] / 1000.0;
+        String iterator = atTimestampIterator(stream, shardId, targetSec);
+
+        given()
+            .header("X-Amz-Target", "Kinesis_20131202.GetRecords")
+            .contentType(KINESIS_CONTENT_TYPE)
+            .body("{\"ShardIterator\": \"" + iterator + "\"}")
+        .when().post("/")
+        .then().statusCode(200)
+            .body("Records.size()", equalTo(3));
+    }
+
+    @Test
+    @Order(57)
+    void getRecordsReturnsPlainDecimalArrivalTimestamp() {
+        String stream = "at-timestamp-plain-decimal";
+        String shardId = atTimestampCreateStream(stream);
+        atTimestampPutAndGetSequence(stream, "cmVjMA==");
+
+        // Timestamp at epoch 1s (before the record) so GetRecords returns it via the same
+        // AT_TIMESTAMP resolution path exercised by the other tests in this group.
+        String iterator = atTimestampIterator(stream, shardId, 1.0);
+
+        String responseBody = given()
+            .header("X-Amz-Target", "Kinesis_20131202.GetRecords")
+            .contentType(KINESIS_CONTENT_TYPE)
+            .body("{\"ShardIterator\": \"" + iterator + "\"}")
+        .when().post("/")
+        .then().statusCode(200)
+            .body("Records.size()", equalTo(1))
+            .extract().asString();
+
+        // ApproximateArrivalTimestamp must be a plain decimal lexeme - real 2020s-era epoch
+        // seconds render as a large double that Java serializes in scientific notation
+        // (e.g. "1.786959659083E9"), which AWS SDK for Java v2's timestamp unmarshaller cannot
+        // parse despite the response returning HTTP 200 (see floci-io/floci#2099 for the same
+        // defect against DescribeStream/DescribeStreamSummary's StreamCreationTimestamp).
+        Matcher matcher = Pattern
+            .compile("\"ApproximateArrivalTimestamp\"\\s*:\\s*(-?\\d+(?:\\.\\d+)?)(?=\\s*[,}])")
+            .matcher(responseBody);
+        assertTrue(matcher.find(), "timestamp must be serialized as a plain JSON decimal: " + responseBody);
+        assertFalse(matcher.group(1).contains("E"));
+        assertFalse(matcher.group(1).contains("e"));
+    }
+
+    @Test
+    @Order(51)
+    void atTimestampBeforeFirstRecordReturnsAll() {
+        String stream = "at-timestamp-before";
+        String shardId = atTimestampCreateStream(stream);
+        for (int i = 0; i < 3; i++) {
+            atTimestampPutAndGetSequence(stream, "YWJj");
+        }
+
+        // Timestamp at epoch 1s (way before any record).
+        String iterator = atTimestampIterator(stream, shardId, 1.0);
+        given()
+            .header("X-Amz-Target", "Kinesis_20131202.GetRecords")
+            .contentType(KINESIS_CONTENT_TYPE)
+            .body("{\"ShardIterator\": \"" + iterator + "\"}")
+        .when().post("/")
+        .then().statusCode(200)
+            .body("Records.size()", equalTo(3));
+    }
+
+    @Test
+    @Order(52)
+    void atTimestampFutureReturnsZeroAndValidContinuation() {
+        String stream = "at-timestamp-future";
+        String shardId = atTimestampCreateStream(stream);
+        for (int i = 0; i < 3; i++) {
+            atTimestampPutAndGetSequence(stream, "eHl6");
+        }
+
+        double futureSec = (System.currentTimeMillis() + 3_600_000) / 1000.0;
+        String iterator = atTimestampIterator(stream, shardId, futureSec);
+
+        String nextIter = given()
+            .header("X-Amz-Target", "Kinesis_20131202.GetRecords")
+            .contentType(KINESIS_CONTENT_TYPE)
+            .body("{\"ShardIterator\": \"" + iterator + "\"}")
+        .when().post("/")
+        .then().statusCode(200)
+            .body("Records.size()", equalTo(0))
+            .body("NextShardIterator", not(isEmptyOrNullString()))
+            .extract().jsonPath().getString("NextShardIterator");
+
+        // NextShardIterator should be a valid (caught-up) iterator — re-use returns 0 records, no error.
+        given()
+            .header("X-Amz-Target", "Kinesis_20131202.GetRecords")
+            .contentType(KINESIS_CONTENT_TYPE)
+            .body("{\"ShardIterator\": \"" + nextIter + "\"}")
+        .when().post("/")
+        .then().statusCode(200)
+            .body("Records.size()", equalTo(0));
+    }
+
+    @Test
+    @Order(53)
+    void atTimestampOnEmptyShardReturnsZero() {
+        String stream = "at-timestamp-empty";
+        String shardId = atTimestampCreateStream(stream);
+
+        String iterator = atTimestampIterator(stream, shardId, System.currentTimeMillis() / 1000.0);
+        given()
+            .header("X-Amz-Target", "Kinesis_20131202.GetRecords")
+            .contentType(KINESIS_CONTENT_TYPE)
+            .body("{\"ShardIterator\": \"" + iterator + "\"}")
+        .when().post("/")
+        .then().statusCode(200)
+            .body("Records.size()", equalTo(0))
+            .body("NextShardIterator", not(isEmptyOrNullString()));
+    }
+
+    @Test
+    @Order(54)
+    void atTimestampWithoutTimestampParamIs400() {
+        String stream = "at-timestamp-missing-param";
+        atTimestampCreateStream(stream);
+
+        given()
+            .header("X-Amz-Target", "Kinesis_20131202.GetShardIterator")
+            .contentType(KINESIS_CONTENT_TYPE)
+            .body("{\"StreamName\": \"" + stream
+                + "\", \"ShardId\": \"shardId-000000000000\", \"ShardIteratorType\": \"AT_TIMESTAMP\"}")
+        .when().post("/")
+        .then().statusCode(400)
+            .body("__type", equalTo("InvalidArgumentException"));
+    }
+
+    @Test
+    @Order(56)
+    void atTimestampWithNonNumericTimestampIs400() {
+        String stream = "at-timestamp-bad-type";
+        atTimestampCreateStream(stream);
+
+        given()
+            .header("X-Amz-Target", "Kinesis_20131202.GetShardIterator")
+            .contentType(KINESIS_CONTENT_TYPE)
+            .body("{\"StreamName\": \"" + stream
+                + "\", \"ShardId\": \"shardId-000000000000\", \"ShardIteratorType\": \"AT_TIMESTAMP\", \"Timestamp\": \"not-a-number\"}")
+        .when().post("/")
+        .then().statusCode(400)
+            .body("__type", equalTo("InvalidArgumentException"));
+    }
+
+    @Test
+    @Order(55)
+    void trimHorizonIteratorStillWorksAfterEncodingBump() {
+        // Regression: 5-part old iterators should still decode via split(-1) compat,
+        // and the new TRIM_HORIZON/LATEST/AT_SEQUENCE_NUMBER paths must not trip over the new 6th slot.
+        String stream = "post-bump-trim-horizon";
+        String shardId = atTimestampCreateStream(stream);
+        atTimestampPutAndGetSequence(stream, "YQ==");
+        atTimestampPutAndGetSequence(stream, "Yg==");
+
+        String iterator = given()
+            .header("X-Amz-Target", "Kinesis_20131202.GetShardIterator")
+            .contentType(KINESIS_CONTENT_TYPE)
+            .body("{\"StreamName\": \"" + stream + "\", \"ShardId\": \"" + shardId
+                + "\", \"ShardIteratorType\": \"TRIM_HORIZON\"}")
+        .when().post("/")
+        .then().statusCode(200)
+            .extract().jsonPath().getString("ShardIterator");
+
+        given()
+            .header("X-Amz-Target", "Kinesis_20131202.GetRecords")
+            .contentType(KINESIS_CONTENT_TYPE)
+            .body("{\"ShardIterator\": \"" + iterator + "\"}")
+        .when().post("/")
+        .then().statusCode(200)
+            .body("Records.size()", equalTo(2));
+    }
+
+    @Test
+    @Order(60)
+    void subscribeToShard_returnsRecords() throws Exception {
+        given()
+            .header("X-Amz-Target", "Kinesis_20131202.CreateStream")
+            .contentType(KINESIS_CONTENT_TYPE)
+            .body("""
+                {"StreamName": "efo-test-stream", "ShardCount": 1}
+                """)
+        .when().post("/")
+        .then().statusCode(200);
+
+        String streamArn = given()
+            .header("X-Amz-Target", "Kinesis_20131202.DescribeStreamSummary")
+            .contentType(KINESIS_CONTENT_TYPE)
+            .body("""
+                {"StreamName": "efo-test-stream"}
+                """)
+        .when().post("/")
+        .then().statusCode(200)
+            .extract().jsonPath().getString("StreamDescriptionSummary.StreamARN");
+
+        given()
+            .header("X-Amz-Target", "Kinesis_20131202.PutRecord")
+            .contentType(KINESIS_CONTENT_TYPE)
+            .body("{\"StreamName\": \"efo-test-stream\", \"Data\": \"aGVsbG8=\", \"PartitionKey\": \"pk1\"}")
+        .when().post("/")
+        .then().statusCode(200);
+
+        String consumerArn = given()
+            .header("X-Amz-Target", "Kinesis_20131202.RegisterStreamConsumer")
+            .contentType(KINESIS_CONTENT_TYPE)
+            .body("{\"StreamARN\": \"" + streamArn + "\", \"ConsumerName\": \"efo-consumer\"}")
+        .when().post("/")
+        .then().statusCode(200)
+            .extract().jsonPath().getString("Consumer.ConsumerARN");
+
+        byte[] body = given()
+            .header("X-Amz-Target", "Kinesis_20131202.SubscribeToShard")
+            .contentType(KINESIS_CONTENT_TYPE)
+            .body("{\"ConsumerARN\": \"" + consumerArn + "\", \"ShardId\": \"shardId-000000000000\","
+                + "\"StartingPosition\": {\"Type\": \"TRIM_HORIZON\"}}")
+        .when().post("/")
+        .then()
+            .statusCode(200)
+            .header("Content-Type", containsString("application/vnd.amazon.eventstream"))
+            .extract().asByteArray();
+
+        JsonNode event = decodeFirstEventStreamMessage(body);
+        assertNotNull(event);
+        assertEquals(1, event.path("Records").size());
+        assertEquals("pk1", event.path("Records").get(0).path("PartitionKey").asText());
+    }
+
+    @Test
+    @Order(61)
+    void subscribeToShard_trimHorizonEmptyShard() throws Exception {
+        given()
+            .header("X-Amz-Target", "Kinesis_20131202.CreateStream")
+            .contentType(KINESIS_CONTENT_TYPE)
+            .body("""
+                {"StreamName": "efo-empty-stream", "ShardCount": 1}
+                """)
+        .when().post("/")
+        .then().statusCode(200);
+
+        String streamArn = given()
+            .header("X-Amz-Target", "Kinesis_20131202.DescribeStreamSummary")
+            .contentType(KINESIS_CONTENT_TYPE)
+            .body("""
+                {"StreamName": "efo-empty-stream"}
+                """)
+        .when().post("/")
+        .then().statusCode(200)
+            .extract().jsonPath().getString("StreamDescriptionSummary.StreamARN");
+
+        String consumerArn = given()
+            .header("X-Amz-Target", "Kinesis_20131202.RegisterStreamConsumer")
+            .contentType(KINESIS_CONTENT_TYPE)
+            .body("{\"StreamARN\": \"" + streamArn + "\", \"ConsumerName\": \"efo-empty-consumer\"}")
+        .when().post("/")
+        .then().statusCode(200)
+            .extract().jsonPath().getString("Consumer.ConsumerARN");
+
+        byte[] body = given()
+            .header("X-Amz-Target", "Kinesis_20131202.SubscribeToShard")
+            .contentType(KINESIS_CONTENT_TYPE)
+            .body("{\"ConsumerARN\": \"" + consumerArn + "\", \"ShardId\": \"shardId-000000000000\","
+                + "\"StartingPosition\": {\"Type\": \"TRIM_HORIZON\"}}")
+        .when().post("/")
+        .then()
+            .statusCode(200)
+            .header("Content-Type", containsString("application/vnd.amazon.eventstream"))
+            .extract().asByteArray();
+
+        JsonNode event = decodeFirstEventStreamMessage(body);
+        assertNotNull(event);
+        assertEquals(0, event.path("Records").size());
+    }
+
+    @Test
+    @Order(62)
+    void subscribeToShard_invalidConsumerArn() {
+        given()
+            .header("X-Amz-Target", "Kinesis_20131202.SubscribeToShard")
+            .contentType(KINESIS_CONTENT_TYPE)
+            .body("{\"ConsumerARN\": \"arn:aws:kinesis:us-east-1:000000000000:stream/no-such/consumer/no-such:99999\","
+                + "\"ShardId\": \"shardId-000000000000\","
+                + "\"StartingPosition\": {\"Type\": \"TRIM_HORIZON\"}}")
+        .when().post("/")
+        .then()
+            .statusCode(400)
+            .body("__type", equalTo("ResourceNotFoundException"));
+    }
+
+    @Test
+    @Order(63)
+    void putRecordRejectsRecordOverSizeLimit() {
+        given()
+            .header("X-Amz-Target", "Kinesis_20131202.CreateStream")
+            .contentType(KINESIS_CONTENT_TYPE)
+            .body("{\"StreamName\": \"size-limit-test\", \"ShardCount\": 1}")
+        .when().post("/")
+        .then().statusCode(200);
+
+        String oversized = Base64.getEncoder().encodeToString(new byte[1_048_577]);
+        given()
+            .header("X-Amz-Target", "Kinesis_20131202.PutRecord")
+            .contentType(KINESIS_CONTENT_TYPE)
+            .body("{\"StreamName\": \"size-limit-test\","
+                + "\"Data\": \"" + oversized + "\","
+                + "\"PartitionKey\": \"pk1\"}")
+        .when().post("/")
+        .then()
+            .statusCode(400)
+            .body("__type", equalTo("InvalidArgumentException"));
+    }
+
+    @Test
+    @Order(64)
+    void putRecordsRejectsWholeBatchOverSizeLimit() {
+        given()
+            .header("X-Amz-Target", "Kinesis_20131202.CreateStream")
+            .contentType(KINESIS_CONTENT_TYPE)
+            .body("{\"StreamName\": \"batch-size-limit-test\", \"ShardCount\": 1}")
+        .when().post("/")
+        .then().statusCode(200);
+
+        String oversized = Base64.getEncoder().encodeToString(new byte[1_048_577]);
+        given()
+            .header("X-Amz-Target", "Kinesis_20131202.PutRecords")
+            .contentType(KINESIS_CONTENT_TYPE)
+            .body("{\"StreamName\": \"batch-size-limit-test\","
+                + "\"Records\": ["
+                + "{\"Data\": \"dGVzdA==\", \"PartitionKey\": \"pk1\"},"
+                + "{\"Data\": \"" + oversized + "\", \"PartitionKey\": \"pk2\"}"
+                + "]}")
+        .when().post("/")
+        .then()
+            .statusCode(400)
+            .body("__type", equalTo("InvalidArgumentException"));
+
+        // The valid first record must not have landed either
+        String iterator = given()
+            .header("X-Amz-Target", "Kinesis_20131202.GetShardIterator")
+            .contentType(KINESIS_CONTENT_TYPE)
+            .body("{\"StreamName\": \"batch-size-limit-test\", \"ShardId\": \"shardId-000000000000\", \"ShardIteratorType\": \"TRIM_HORIZON\"}")
+        .when().post("/")
+        .then().statusCode(200)
+            .extract().jsonPath().getString("ShardIterator");
+
+        given()
+            .header("X-Amz-Target", "Kinesis_20131202.GetRecords")
+            .contentType(KINESIS_CONTENT_TYPE)
+            .body("{\"ShardIterator\": \"" + iterator + "\"}")
+        .when().post("/")
+        .then()
+            .statusCode(200)
+            .body("Records.size()", equalTo(0));
+    }
+
+    @Test
+    @Order(65)
+    void createStreamAppliesTagsFromTheRequest() {
+        // CreateStream's Tags member used to be dropped, which Terraform surfaces as a
+        // permanent tags diff: aws_kinesis_stream tags at create time, then reads back
+        // with ListTagsForStream and finds nothing.
+        given()
+            .header("X-Amz-Target", "Kinesis_20131202.CreateStream")
+            .contentType(KINESIS_CONTENT_TYPE)
+            .body("""
+                {"StreamName": "create-with-tags", "ShardCount": 1,
+                 "Tags": {"Foo": "Bar", "gw:example": "kinesis"}}
+                """)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200);
+
+        given()
+            .header("X-Amz-Target", "Kinesis_20131202.ListTagsForStream")
+            .contentType(KINESIS_CONTENT_TYPE)
+            .body("""
+                {"StreamName": "create-with-tags"}
+                """)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("Tags.size()", equalTo(2))
+            .body("Tags.find { it.Key == 'Foo' }.Value", equalTo("Bar"))
+            .body("Tags.find { it.Key == 'gw:example' }.Value", equalTo("kinesis"));
+    }
+
+    @Test
+    @Order(66)
+    void createStreamWithoutTagsLeavesTheStreamUntagged() {
+        given()
+            .header("X-Amz-Target", "Kinesis_20131202.CreateStream")
+            .contentType(KINESIS_CONTENT_TYPE)
+            .body("""
+                {"StreamName": "create-without-tags", "ShardCount": 1}
+                """)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200);
+
+        given()
+            .header("X-Amz-Target", "Kinesis_20131202.ListTagsForStream")
+            .contentType(KINESIS_CONTENT_TYPE)
+            .body("""
+                {"StreamName": "create-without-tags"}
+                """)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("Tags.size()", equalTo(0));
+    }
+
+    private JsonNode decodeFirstEventStreamMessage(byte[] data) throws Exception {
+        ByteBuffer buf = ByteBuffer.wrap(data);
+        // Skip the first message (initial-response)
+        int firstTotalLen = buf.getInt();
+        buf.position(buf.position() + firstTotalLen - 4);
+        // Decode second message (SubscribeToShardEvent)
+        int totalLen = buf.getInt();
+        int headersLen = buf.getInt();
+        buf.getInt(); // prelude CRC — skip
+        int payloadLen = totalLen - 12 - headersLen - 4;
+        buf.position(buf.position() + headersLen); // skip headers
+        byte[] payload = new byte[payloadLen];
+        buf.get(payload);
+        return new ObjectMapper().readTree(payload);
+    }
+
+    @Test
+    @Order(67)
+    void createStreamRejectsANonStringTagValueWithSerializationException() {
+        // A non-string tag value is a wire deserialization error, not a value to coerce:
+        // it used to be stored as its text ("5"), and the stream was created before the
+        // tags were parsed. Now the whole request is rejected and nothing is created.
+        given()
+            .header("X-Amz-Target", "Kinesis_20131202.CreateStream")
+            .contentType(KINESIS_CONTENT_TYPE)
+            .body("""
+                {"StreamName": "create-with-bad-tags", "ShardCount": 1, "Tags": {"Foo": 5}}
+                """)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(400)
+            .body("__type", equalTo("SerializationException"));
+
+        given()
+            .header("X-Amz-Target", "Kinesis_20131202.DescribeStream")
+            .contentType(KINESIS_CONTENT_TYPE)
+            .body("""
+                {"StreamName": "create-with-bad-tags"}
+                """)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(400)
+            .body("__type", equalTo("ResourceNotFoundException"));
+    }
+
+    private static void createStream(String name, int shardCount) {
+        given()
+            .header("X-Amz-Target", "Kinesis_20131202.CreateStream")
+            .contentType(KINESIS_CONTENT_TYPE)
+            .body("{\"StreamName\": \"" + name + "\", \"ShardCount\": " + shardCount + "}")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200);
+    }
+
+    private static Response listShardsPage(String streamName, Integer maxResults, String nextToken) {
+        ObjectNode request = MAPPER.createObjectNode();
+        if (streamName != null) {
+            request.put("StreamName", streamName);
+        }
+        if (maxResults != null) {
+            request.put("MaxResults", maxResults);
+        }
+        if (nextToken != null) {
+            request.put("NextToken", nextToken);
+        }
+        return given()
+            .header("X-Amz-Target", "Kinesis_20131202.ListShards")
+            .contentType(KINESIS_CONTENT_TYPE)
+            .body(request.toString())
+        .when()
+            .post("/")
+        .then()
+            .extract().response();
+    }
+
+    @Test
+    @Order(68)
+    void listShardsPaginatesWithNextTokenAndExhausts() {
+        createStream("kinesis-pagination-test", 3);
+
+        List<String> seen = new ArrayList<>();
+        String nextToken = null;
+        int pages = 0;
+        do {
+            // AWS documents NextToken as the only stream identifier once paging has started, so only
+            // the first page names the stream.
+            Response response = listShardsPage(pages == 0 ? "kinesis-pagination-test" : null, 1, nextToken);
+            response.then().statusCode(200);
+            seen.addAll(response.jsonPath().getList("Shards.ShardId", String.class));
+            nextToken = response.jsonPath().getString("NextToken");
+            pages++;
+        } while (nextToken != null && pages < 10);
+
+        assertEquals(3, seen.size(), "every shard is seen exactly once across pages");
+        assertEquals(3, new HashSet<>(seen).size(), "no shard repeats across pages");
+        assertNull(nextToken, "the final page must omit NextToken");
+    }
+
+    @Test
+    @Order(69)
+    void listShardsRejectsStreamNameTogetherWithNextToken() {
+        createStream("kinesis-pagination-a", 2);
+
+        Response firstPage = listShardsPage("kinesis-pagination-a", 1, null);
+        firstPage.then().statusCode(200);
+        String token = firstPage.jsonPath().getString("NextToken");
+        assertNotNull(token, "a partial first page must carry a NextToken");
+
+        listShardsPage("kinesis-pagination-a", 1, token)
+            .then()
+            .statusCode(400)
+            .body("__type", equalTo("InvalidArgumentException"));
+    }
+
+    @Test
+    @Order(70)
+    void listShardsRejectsAMalformedToken() {
+        listShardsPage("list-shards-test", 1, "not-a-valid-token!")
+            .then()
+            .statusCode(400)
+            .body("__type", equalTo("InvalidArgumentException"));
+    }
+}

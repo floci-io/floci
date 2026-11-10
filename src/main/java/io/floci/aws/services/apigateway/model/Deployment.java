@@ -1,0 +1,17 @@
+package io.floci.aws.services.apigateway.model;
+
+import com.fasterxml.jackson.annotation.JsonIgnoreProperties;
+import io.quarkus.runtime.annotations.RegisterForReflection;
+
+@JsonIgnoreProperties(ignoreUnknown = true)
+@RegisterForReflection
+public record Deployment(
+        String id,
+        String description,
+        long createdDate,
+        String exportSnapshot
+) {
+    public Deployment(String id, String description, long createdDate) {
+        this(id, description, createdDate, null);
+    }
+}

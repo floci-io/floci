@@ -115,10 +115,14 @@ changing the API. Leading/trailing whitespace and non-ASCII lookalikes are not a
 | **Request Validators** | CreateRequestValidator, GetRequestValidator, GetRequestValidators, UpdateRequestValidator, DeleteRequestValidator |
 | **Gateway Responses** | PutGatewayResponse, GetGatewayResponse, GetGatewayResponses, UpdateGatewayResponse, DeleteGatewayResponse |
 | **Models** | CreateModel, GetModel, GetModels, UpdateModel, DeleteModel |
+| **Documentation Parts** | CreateDocumentationPart, GetDocumentationPart, GetDocumentationParts, UpdateDocumentationPart, DeleteDocumentationPart |
 | **Domain Names** | CreateDomainName, GetDomainName, GetDomainNames, UpdateDomainName, DeleteDomainName |
 | **Base Path Mappings** | CreateBasePathMapping, GetBasePathMapping, GetBasePathMappings, UpdateBasePathMapping, DeleteBasePathMapping |
 | **Account** | GetAccount, UpdateAccount |
 | **Tags** | TagResource, UntagResource, GetTags (ListTagsForResource) |
+
+Documentation part listing covers created parts. The `UNDOCUMENTED` location status does not
+discover API locations without documentation content yet.
 
 `TagResource`, `UntagResource` and `GetTags` also accept API key and usage plan ARNs,
 `arn:aws:apigateway:<region>::/apikeys/<id>` and `arn:aws:apigateway:<region>::/usageplans/<id>`.
@@ -168,7 +172,8 @@ explicitly request values.
 
 `DeleteApiKey` detaches the key from every usage plan before removing it, matching AWS. A usage plan key
 stores its own copy of the key value, so without that sweep a deleted key would stay listed by
-`GetUsagePlanKeys` and keep being recognised on the data plane.
+`GetUsagePlanKeys` and keep being recognised on the data plane. `DeleteUsagePlan` drops the plan's keys
+the same way, so a plan recreated with the same pinned id starts with none.
 
 `requestContext.identity.apiKey` is only populated when the `x-api-key` header matches a key that still
 exists and has `enabled` set to `true`, so disabling a key through `UpdateApiKey` takes effect
@@ -178,6 +183,11 @@ A method with `apiKeyRequired` rejects a request whose `x-api-key` is missing, u
 deleted, or not bound to the stage by a usage plan, with `403` `{"message":"Forbidden"}` and
 `x-amzn-ErrorType: ForbiddenException`, as AWS does. The header stays when the API customises its
 `INVALID_API_KEY` gateway response.
+
+A request whose key is attached to the stage's usage plan is metered on every method of that stage,
+including methods without `apiKeyRequired`, and before request validation, as measured against AWS.
+An unknown key, or one outside the stage's plans, is not metered on a method that does not require a
+key. See [Usage plan enforcement](#usage-plan-enforcement).
 
 #### API key source
 
@@ -375,6 +385,8 @@ This is what lets a browser read a `401`/`403`/`400` as such instead of as a COR
 | Lambda authorizer fails or throws | `AUTHORIZER_FAILURE` | `AuthorizerConfigurationException` |
 | Cognito authorizer gets no token, an invalid one, one from another pool, or one claiming none of the method's authorization scopes (`401 Unauthorized`) | `UNAUTHORIZED` | `UnauthorizedException` |
 | Method with `apiKeyRequired` and no usable `x-api-key` (`403 Forbidden`) | `INVALID_API_KEY` | `ForbiddenException` |
+| Usage plan throttle refuses the key (`429 Too Many Requests`) | `THROTTLED` | `TooManyRequestsException` |
+| Usage plan quota for the period is used up (`429 Limit Exceeded`) | `QUOTA_EXCEEDED` | `LimitExceededException` |
 | Request validator rejects a parameter / the body | `BAD_REQUEST_PARAMETERS` / `BAD_REQUEST_BODY` | `BadRequestException` |
 | `passthroughBehavior` rejects the request `Content-Type` (`415`) | `UNSUPPORTED_MEDIA_TYPE` | `BadRequestException` |
 | Missing or unresolvable integration or URI, MOCK template that does not render | `API_CONFIGURATION_ERROR` | `InternalServerErrorException` |
@@ -383,11 +395,10 @@ This is what lets a browser read a `401`/`403`/`400` as such instead of as a COR
 A customised `statusCode` overrides the status Floci would otherwise send; the `x-amzn-ErrorType` stays, as on AWS.
 A gateway response that maps its own `gatewayresponse.header.x-amzn-ErrorType` (that exact key) replaces it for
 `BAD_REQUEST_PARAMETERS`, `BAD_REQUEST_BODY`, `UNSUPPORTED_MEDIA_TYPE`, `API_CONFIGURATION_ERROR` and
-`INTEGRATION_FAILURE`, and is sent ahead of it for the other types, as AWS does. Throttling, quota, request
-size and WAF answers are not produced on the execute plane, so
-`THROTTLED`, `QUOTA_EXCEEDED`, `REQUEST_TOO_LARGE` and `WAF_FILTERED` can be configured but never
-fire, and an `HTTP`/`HTTP_PROXY` backend's own status is relayed rather than treated as a gateway
-response.
+`INTEGRATION_FAILURE`, and is sent ahead of it for the other types, as AWS does. Request size and WAF
+answers are not produced on the execute plane, so `REQUEST_TOO_LARGE` and `WAF_FILTERED` can be
+configured but never fire, and an `HTTP`/`HTTP_PROXY` backend's own status is relayed rather than
+treated as a gateway response.
 
 ### Not Implemented
 
@@ -395,7 +406,7 @@ These management-plane operations have no handler in v1. Calls will return `404`
 
 - Authorizer testing: `TestInvokeAuthorizer`
 - Model templates: `GetModelTemplate`
-- Documentation parts and versions (the entire family, 10 operations)
+- Documentation versions (5 operations)
 - Client Certificates (5 operations)
 - `ImportDocumentationParts`
 
@@ -629,8 +640,12 @@ an offset inside it, a per-method throttle needs a plan throttle, and adding a s
 lists is a `ConflictException`. `AWS::ApiGateway::UsagePlan` maps its `ApiStages`, with each stage's
 `Throttle`, and its `Throttle` and `Quota` the same way, and an update replaces them.
 
-Floci does not check that a stage's API, stage or method exists, does not filter `GetUsagePlans` by
-`keyId`, and does not enforce throttles or quotas.
+`GetUsagePlans` with a `keyId` returns only the plans that key is added to, and an empty list for a key
+in no plan or an unknown key. A blank `keyId` lists every plan, as on AWS. Every matching plan comes
+back in one page.
+
+Floci does not check that a stage's API, stage or method exists. The plan's throttle and quota are
+enforced on the execute plane, see [Usage plan enforcement](#usage-plan-enforcement).
 
 A `CreateUsagePlan` body member of the wrong JSON type is a `SerializationException` with API
 Gateway's deserializer message, before anything else is validated. The message names the Java class
@@ -673,9 +688,32 @@ The lower bound is a deliberate divergence: real API Gateway answers `limit=0` a
 an `InternalFailure`, which is a fault rather than a contract, so a page size below one is rejected
 as a `BadRequestException` instead of reproducing a 500.
 
-**Both numbers are always zero.** Nothing meters requests per API key, so there is no use to report
-or to subtract from a plan's quota. Throttle settings and quotas are stored and returned but never
-enforced.
+`used` is the number of calls the key made through the plan's stages on that UTC day, and `remaining`
+is the quota limit minus the key's use from the start of the quota period through that day. A plan
+without a quota reports `[0, 0]` for every day, as AWS does. Floci lists every key attached to the
+plan, while AWS lists only the keys with usage in the range.
+
+### Usage plan enforcement
+
+A call with a key attached to the stage's usage plan is counted against that key, per plan and UTC
+day, across all stages of the plan. Counts are kept in the `apigateway-usage.json` store, so they
+follow the configured storage mode. Deleting the plan or the key drops its counts, so a plan or key
+recreated with the same id starts unused.
+
+- **Quota.** Once the key's use in the current period reaches `quota.limit`, the call is refused with
+  `429` `{"message":"Limit Exceeded"}` and `x-amzn-ErrorType: LimitExceededException`. A `DAY` period
+  starts at UTC midnight, a `WEEK` period on Sunday and a `MONTH` period on the 1st, each shifted by
+  `quota.offset` days. AWS bounds the offset to the period's length but does not document the anchor,
+  so the anchor is inferred.
+- **Throttle.** The plan's `throttle` is a token bucket per key that starts full at `burstLimit` and
+  refills at `rateLimit` requests per second. Buckets are held in memory, so a restart or an emulator
+  reset refills them. An empty bucket refuses the call with `429`
+  `{"message":"Too Many Requests"}` and `x-amzn-ErrorType: TooManyRequestsException`. AWS throttles on
+  a best-effort basis, so the exact moment a burst is cut off can differ. Per-method stage throttles
+  and stage or account level throttles are stored but not enforced.
+
+A refused call is not counted, and a call without a key, or with a key outside the stage's plans, is
+not metered.
 
 ### Usage Plan Tags and Custom IDs
 
@@ -912,6 +950,10 @@ listener relays the request unchanged and does not add a hop.
 `TagResource`, `UntagResource` and `GetTags` accept API, stage and VPC link ARNs
 (`arn:<partition>:apigateway:<region>::/vpclinks/<vpcLinkId>`). `UpdateVpcLink` changes only the
 name, as in the API model.
+
+`GetApis` pages with `MaxResults` and `NextToken`: a page holds at most `MaxResults` APIs and
+carries a `NextToken` unless it is the last. Without `MaxResults` every API comes back on one page.
+A `MaxResults` below 1 or an unreadable `NextToken` is refused with `BadRequestException`.
 
 ### Custom Domain Names and API Mappings
 

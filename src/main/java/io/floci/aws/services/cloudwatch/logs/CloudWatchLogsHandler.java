@@ -1,0 +1,813 @@
+package io.floci.aws.services.cloudwatch.logs;
+
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.node.ArrayNode;
+import com.fasterxml.jackson.databind.node.ObjectNode;
+import io.floci.aws.core.common.AwsArnUtils;
+import io.floci.aws.core.common.AwsErrorResponse;
+import io.floci.aws.core.common.AwsException;
+import io.floci.aws.core.common.PaginatedResult;
+import io.floci.aws.core.storage.InMemoryStorage;
+import io.floci.aws.services.cloudwatch.logs.model.AccountPolicy;
+import io.floci.aws.services.cloudwatch.logs.model.LogDestination;
+import io.floci.aws.services.cloudwatch.logs.model.LogEvent;
+import io.floci.aws.services.cloudwatch.logs.model.LogGroup;
+import io.floci.aws.services.cloudwatch.logs.model.LogStream;
+import io.floci.aws.services.cloudwatch.logs.model.ResourcePolicy;
+import io.floci.aws.services.cloudwatch.logs.model.SubscriptionFilter;
+import jakarta.enterprise.context.ApplicationScoped;
+import jakarta.inject.Inject;
+import jakarta.ws.rs.core.Response;
+
+import java.util.ArrayList;
+import java.util.HashMap;
+import java.util.LinkedHashMap;
+import java.util.List;
+import java.util.Map;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
+
+@ApplicationScoped
+public class CloudWatchLogsHandler {
+
+    private static final Pattern LOG_GROUP_NAME = Pattern.compile("[._/#A-Za-z0-9-]+");
+    private static final Pattern QUERY_LOG_GROUP_ARN_WITH_COLON = Pattern.compile("arn:"
+            + AwsArnUtils.PARTITION_REGEX + ":logs:[a-z0-9-]+:[0-9]{12}:log-group:(" + LOG_GROUP_NAME.pattern() + "):");
+
+    private final CloudWatchLogsService logsService;
+    private final CloudWatchLogsCrossAccountService crossAccountService;
+    private final CloudWatchLogsMetricFilterHandler metricFilterHandler;
+    private final CloudWatchLogsDeliveryService deliveryService;
+    private final CloudWatchLogsDeliveryHandler deliveryHandler;
+    private final ObjectMapper objectMapper;
+
+    @Inject
+    public CloudWatchLogsHandler(CloudWatchLogsService logsService,
+                                 CloudWatchLogsCrossAccountService crossAccountService,
+                                 CloudWatchLogsMetricFilterService metricFilterService,
+                                 CloudWatchLogsDeliveryService deliveryService,
+                                 ObjectMapper objectMapper) {
+        this.logsService = logsService;
+        this.crossAccountService = crossAccountService;
+        this.metricFilterHandler = new CloudWatchLogsMetricFilterHandler(metricFilterService, objectMapper);
+        this.deliveryService = deliveryService;
+        this.deliveryHandler = new CloudWatchLogsDeliveryHandler(deliveryService, objectMapper);
+        this.objectMapper = objectMapper;
+    }
+
+    /** For unit tests that exercise log groups only: deliveries live in memory. */
+    CloudWatchLogsHandler(CloudWatchLogsService logsService, CloudWatchLogsCrossAccountService crossAccountService,
+                          CloudWatchLogsMetricFilterService metricFilterService, ObjectMapper objectMapper) {
+        this(logsService, crossAccountService, metricFilterService,
+                new CloudWatchLogsDeliveryService(new InMemoryStorage<>(), new InMemoryStorage<>(),
+                        new InMemoryStorage<>(), logsService.regionResolver()),
+                objectMapper);
+    }
+
+    public Response handle(String action, JsonNode request, String region) {
+        return switch (action) {
+            case "CreateLogGroup" -> handleCreateLogGroup(request, region);
+            case "DeleteLogGroup" -> handleDeleteLogGroup(request, region);
+            case "DescribeLogGroups" -> handleDescribeLogGroups(request, region);
+            case "CreateLogStream" -> handleCreateLogStream(request, region);
+            case "DeleteLogStream" -> handleDeleteLogStream(request, region);
+            case "DescribeLogStreams" -> handleDescribeLogStreams(request, region);
+            case "PutLogEvents" -> handlePutLogEvents(request, region);
+            case "GetLogEvents" -> handleGetLogEvents(request, region);
+            case "FilterLogEvents" -> handleFilterLogEvents(request, region);
+            case "PutRetentionPolicy" -> handlePutRetentionPolicy(request, region);
+            case "DeleteRetentionPolicy" -> handleDeleteRetentionPolicy(request, region);
+            case "PutLogGroupDeletionProtection" -> handlePutLogGroupDeletionProtection(request, region);
+            case "TagLogGroup" -> handleTagLogGroup(request, region);
+            case "UntagLogGroup" -> handleUntagLogGroup(request, region);
+            case "ListTagsLogGroup" -> handleListTagsLogGroup(request, region);
+            case "ListTagsForResource" -> handleListTagsForResource(request, region);
+            case "TagResource" -> handleTagResource(request, region);
+            case "UntagResource" -> handleUntagResource(request, region);
+            case "PutSubscriptionFilter" -> handlePutSubscriptionFilter(request, region);
+            case "DescribeSubscriptionFilters" -> handleDescribeSubscriptionFilters(request, region);
+            case "DeleteSubscriptionFilter" -> handleDeleteSubscriptionFilter(request, region);
+            case "PutMetricFilter", "DescribeMetricFilters", "DeleteMetricFilter", "TestMetricFilter" ->
+                    metricFilterHandler.handle(action, request, region);
+            case "PutDeliverySource", "GetDeliverySource", "DeleteDeliverySource", "DescribeDeliverySources",
+                    "PutDeliveryDestination", "GetDeliveryDestination", "DeleteDeliveryDestination",
+                    "DescribeDeliveryDestinations", "CreateDelivery", "GetDelivery", "UpdateDeliveryConfiguration",
+                    "DeleteDelivery", "DescribeDeliveries" -> deliveryHandler.handle(action, request, region);
+            case "AssociateKmsKey" -> handleAssociateKmsKey(request, region);
+            case "DisassociateKmsKey" -> handleDisassociateKmsKey(request, region);
+            case "PutResourcePolicy" -> handlePutResourcePolicy(request, region);
+            case "DescribeResourcePolicies" -> handleDescribeResourcePolicies(region);
+            case "PutDestination" -> handlePutDestination(request, region);
+            case "PutDestinationPolicy" -> handlePutDestinationPolicy(request, region);
+            case "PutAccountPolicy" -> handlePutAccountPolicy(request, region);
+            case "DescribeAccountPolicies" -> handleDescribeAccountPolicies(request, region);
+            case "GetDataProtectionPolicy" -> handleGetDataProtectionPolicy(request, region);
+            case "StartQuery" -> handleStartQuery(request, region);
+            case "GetQueryResults" -> handleGetQueryResults(request, region);
+            case "StopQuery" -> handleStopQuery(request, region);
+            default -> Response.status(400)
+                    .entity(new AwsErrorResponse("UnsupportedOperation", "Operation " + action + " is not supported."))
+                    .build();
+        };
+    }
+
+    private Response handleCreateLogGroup(JsonNode request, String region) {
+        String name = request.path("logGroupName").asText();
+        requireLogGroupName(name);
+        Integer retentionInDays = request.has("retentionInDays")
+                ? request.path("retentionInDays").asInt() : null;
+        boolean deletionProtectionEnabled = request.path("deletionProtectionEnabled").asBoolean(false);
+        Map<String, String> tags = extractTags(request.path("tags"));
+        String kmsKeyId = request.path("kmsKeyId").asText(null);
+        logsService.createLogGroup(name, retentionInDays, tags, deletionProtectionEnabled, kmsKeyId,
+                logGroupClass(request), region);
+        return Response.ok(objectMapper.createObjectNode()).build();
+    }
+
+    private Response handleDeleteLogGroup(JsonNode request, String region) {
+        String name = request.path("logGroupName").asText();
+        requireLogGroupName(name);
+        logsService.deleteLogGroup(name, region);
+        return Response.ok(objectMapper.createObjectNode()).build();
+    }
+
+    private Response handlePutLogGroupDeletionProtection(JsonNode request, String region) {
+        String identifier = request.path("logGroupIdentifier").asText(null);
+        if (identifier == null || identifier.isBlank()) {
+            throw new AwsException("InvalidParameterException", "logGroupIdentifier is required.", 400);
+        }
+        JsonNode enabled = request.get("deletionProtectionEnabled");
+        if (enabled == null || !enabled.isBoolean()) {
+            throw new AwsException("InvalidParameterException", "deletionProtectionEnabled is required.", 400);
+        }
+        String groupName = extractLogGroupNameFromArn(identifier);
+        logsService.putLogGroupDeletionProtection(groupName, enabled.booleanValue(), region);
+        return Response.ok(objectMapper.createObjectNode()).build();
+    }
+
+    private Response handleDescribeLogGroups(JsonNode request, String region) {
+        String prefix = request.path("logGroupNamePrefix").asText(null);
+        int limit = 50;
+        if (request.hasNonNull("limit")) {
+            JsonNode value = request.get("limit");
+            if (!value.isIntegralNumber() || !value.canConvertToInt()) {
+                throw new AwsException("InvalidParameterException", "limit must be an integer.", 400);
+            }
+            limit = value.intValue();
+        }
+        String nextToken = request.path("nextToken").asText(null);
+        if (request.hasNonNull("nextToken") && !request.get("nextToken").isTextual()) {
+            throw CloudWatchLogsService.invalidNextToken();
+        }
+        PaginatedResult<LogGroup> page = logsService.describeLogGroups(prefix, logGroupClass(request), region, limit, nextToken);
+
+        ObjectNode response = objectMapper.createObjectNode();
+        ArrayNode groupsArray = objectMapper.createArrayNode();
+        for (LogGroup g : page.items()) {
+            ObjectNode node = objectMapper.createObjectNode();
+            node.put("logGroupName", g.getLogGroupName());
+            node.put("logGroupClass", g.getLogGroupClass());
+            node.put("creationTime", g.getCreatedTime());
+            String logGroupArn = logsService.buildArn(g.getLogGroupName(), region);
+            node.put("arn", logGroupArn + ":*");
+            node.put("logGroupArn", logGroupArn);
+            if (g.getRetentionInDays() != null) {
+                node.put("retentionInDays", g.getRetentionInDays());
+            }
+            node.put("deletionProtectionEnabled", g.isDeletionProtectionEnabled());
+            if (g.getKmsKeyId() != null) {
+                node.put("kmsKeyId", g.getKmsKeyId());
+            }
+            node.put("storedBytes", logsService.getStoredBytesForLogGroup(g.getLogGroupName(), region));
+            node.put("metricFilterCount", metricFilterHandler.metricFilterCount(g.getLogGroupName(), region));
+            groupsArray.add(node);
+        }
+        response.set("logGroups", groupsArray);
+        if (page.nextToken() != null) {
+            response.put("nextToken", page.nextToken());
+        }
+        return Response.ok(response).build();
+    }
+
+    private static String logGroupClass(JsonNode request) {
+        JsonNode value = request.get("logGroupClass");
+        if (value == null || value.isNull()) {
+            return null;
+        }
+        if (!value.isTextual()) {
+            throw new AwsException("InvalidParameterException", "logGroupClass must be a string.", 400);
+        }
+        return value.textValue();
+    }
+
+    private Response handlePutResourcePolicy(JsonNode request, String region) {
+        String policyName = request.path("policyName").asText(null);
+        if (policyName == null || policyName.isBlank()) {
+            throw new AwsException("InvalidParameterException", "policyName is required.", 400);
+        }
+        String policyDocument = request.path("policyDocument").asText(null);
+        if (policyDocument == null || policyDocument.isBlank()) {
+            throw new AwsException("InvalidParameterException", "policyDocument is required.", 400);
+        }
+
+        ObjectNode response = objectMapper.createObjectNode();
+        response.set("resourcePolicy", buildResourcePolicy(
+                logsService.putResourcePolicy(policyName, policyDocument, region)));
+        return Response.ok(response).build();
+    }
+
+    private Response handleDescribeResourcePolicies(String region) {
+        ArrayNode policies = objectMapper.createArrayNode();
+        logsService.describeResourcePolicies(region).forEach(
+                policy -> policies.add(buildResourcePolicy(policy)));
+        ObjectNode response = objectMapper.createObjectNode();
+        response.set("resourcePolicies", policies);
+        return Response.ok(response).build();
+    }
+
+    private ObjectNode buildResourcePolicy(ResourcePolicy policy) {
+        ObjectNode node = objectMapper.createObjectNode();
+        node.put("policyName", policy.getPolicyName());
+        node.put("policyDocument", policy.getPolicyDocument());
+        node.put("lastUpdatedTime", policy.getLastUpdatedTime());
+        return node;
+    }
+
+    private Response handlePutDestination(JsonNode request, String region) {
+        LogDestination destination = crossAccountService.putDestination(
+                request.path("destinationName").asText(null),
+                request.path("targetArn").asText(null),
+                request.path("roleArn").asText(null),
+                region);
+        ObjectNode response = objectMapper.createObjectNode();
+        response.set("destination", buildDestination(destination));
+        return Response.ok(response).build();
+    }
+
+    private Response handlePutDestinationPolicy(JsonNode request, String region) {
+        crossAccountService.putDestinationPolicy(
+                request.path("destinationName").asText(null),
+                request.path("accessPolicy").asText(null), region);
+        return Response.ok(objectMapper.createObjectNode()).build();
+    }
+
+    private Response handlePutAccountPolicy(JsonNode request, String region) {
+        AccountPolicy policy = crossAccountService.putAccountPolicy(
+                request.path("policyName").asText(null),
+                request.path("policyDocument").asText(null),
+                request.path("policyType").asText(null),
+                request.path("selectionCriteria").asText(null),
+                request.path("scope").asText(null), region);
+        ObjectNode response = objectMapper.createObjectNode();
+        response.set("accountPolicy", buildAccountPolicy(policy));
+        return Response.ok(response).build();
+    }
+
+    private Response handleDescribeAccountPolicies(JsonNode request, String region) {
+        String policyType = request.path("policyType").asText(null);
+        String policyName = request.path("policyName").asText(null);
+        ObjectNode response = objectMapper.createObjectNode();
+        ArrayNode policies = response.putArray("accountPolicies");
+        for (AccountPolicy policy : crossAccountService.describeAccountPolicies(policyType, policyName, region)) {
+            policies.add(buildAccountPolicy(policy));
+        }
+        return Response.ok(response).build();
+    }
+
+    private ObjectNode buildDestination(LogDestination destination) {
+        ObjectNode node = objectMapper.createObjectNode();
+        node.put("destinationName", destination.getDestinationName());
+        node.put("targetArn", destination.getTargetArn());
+        node.put("roleArn", destination.getRoleArn());
+        node.put("arn", destination.getArn());
+        node.put("creationTime", destination.getCreationTime());
+        if (destination.getAccessPolicy() != null) {
+            node.put("accessPolicy", destination.getAccessPolicy());
+        }
+        return node;
+    }
+
+    private ObjectNode buildAccountPolicy(AccountPolicy policy) {
+        ObjectNode node = objectMapper.createObjectNode();
+        node.put("accountId", policy.getAccountId());
+        node.put("policyName", policy.getPolicyName());
+        node.put("policyDocument", policy.getPolicyDocument());
+        node.put("policyType", policy.getPolicyType());
+        node.put("scope", policy.getScope());
+        node.put("lastUpdatedTime", policy.getLastUpdatedTime());
+        if (policy.getSelectionCriteria() != null) {
+            node.put("selectionCriteria", policy.getSelectionCriteria());
+        }
+        return node;
+    }
+
+    private Response handleCreateLogStream(JsonNode request, String region) {
+        String groupName = request.path("logGroupName").asText();
+        String streamName = request.path("logStreamName").asText();
+        requireLogStreamNames(groupName, streamName);
+        logsService.createLogStream(groupName, streamName, region);
+        return Response.ok(objectMapper.createObjectNode()).build();
+    }
+
+    private Response handleDeleteLogStream(JsonNode request, String region) {
+        String groupName = request.path("logGroupName").asText();
+        String streamName = request.path("logStreamName").asText();
+        requireLogStreamNames(groupName, streamName);
+        logsService.deleteLogStream(groupName, streamName, region);
+        return Response.ok(objectMapper.createObjectNode()).build();
+    }
+
+    private static void requireLogGroupName(String group) {
+        if (group.isEmpty() || group.length() > 512 || !LOG_GROUP_NAME.matcher(group).matches()) {
+            throw new AwsException("InvalidParameterException", "Invalid logGroupName.", 400);
+        }
+    }
+
+    private static void requireLogStreamNames(String group, String stream) {
+        requireLogGroupName(group);
+        int streamLength = stream.codePointCount(0, stream.length());
+        if (streamLength < 1 || streamLength > 512 || stream.indexOf(':') >= 0 || stream.indexOf('*') >= 0) {
+            throw new AwsException("InvalidParameterException", "Invalid logStreamName.", 400);
+        }
+    }
+
+    private Response handleDescribeLogStreams(JsonNode request, String region) {
+        String groupName = resolveLogGroupName(request);
+        String prefix = request.path("logStreamNamePrefix").asText(null);
+        String orderBy = request.path("orderBy").asText(null);
+        boolean descending = request.path("descending").asBoolean(false);
+        int limit = request.path("limit").asInt(0);
+        String nextToken = request.has("nextToken") ? request.path("nextToken").asText(null) : null;
+        CloudWatchLogsService.DescribeLogStreamsResult result =
+                logsService.describeLogStreams(groupName, prefix, orderBy, descending, limit, nextToken, region);
+
+        String logGroupArn = logsService.buildArn(groupName, region);
+        ObjectNode response = objectMapper.createObjectNode();
+        ArrayNode streamsArray = objectMapper.createArrayNode();
+        for (LogStream s : result.logStreams()) {
+            ObjectNode node = objectMapper.createObjectNode();
+            node.put("logStreamName", s.getLogStreamName());
+            node.put("arn", logGroupArn + ":log-stream:" + s.getLogStreamName());
+            node.put("creationTime", s.getCreatedTime());
+            node.put("lastIngestionTime", s.getLastIngestionTime());
+            node.put("uploadSequenceToken", s.getUploadSequenceToken());
+            node.put("storedBytes", s.getStoredBytes());
+            if (s.getFirstEventTimestamp() != null) {
+                node.put("firstEventTimestamp", s.getFirstEventTimestamp());
+            }
+            if (s.getLastEventTimestamp() != null) {
+                node.put("lastEventTimestamp", s.getLastEventTimestamp());
+            }
+            streamsArray.add(node);
+        }
+        response.set("logStreams", streamsArray);
+        if (result.nextToken() != null) {
+            response.put("nextToken", result.nextToken());
+        }
+        return Response.ok(response).build();
+    }
+
+    private Response handlePutLogEvents(JsonNode request, String region) {
+        String groupName = resolveLogGroupName(request);
+        String streamName = request.path("logStreamName").asText();
+
+        List<Map<String, Object>> events = new ArrayList<>();
+        requireListSize(request.path("logEvents"), "logEvents", 1, 10000);
+        request.path("logEvents").forEach(evt -> {
+            Map<String, Object> event = new HashMap<>();
+            event.put("timestamp", evt.path("timestamp").asLong());
+            event.put("message", evt.path("message").asText());
+            events.add(event);
+        });
+
+        String nextToken = logsService.putLogEvents(groupName, streamName, events, region);
+        ObjectNode response = objectMapper.createObjectNode();
+        response.put("nextSequenceToken", nextToken);
+        return Response.ok(response).build();
+    }
+
+    private Response handleGetLogEvents(JsonNode request, String region) {
+        String groupName = resolveLogGroupName(request);
+        String streamName = resolveLogStreamName(request.path("logStreamName").asText(null));
+        Long startTime = request.has("startTime") ? request.path("startTime").asLong() : null;
+        Long endTime = request.has("endTime") ? request.path("endTime").asLong() : null;
+        int limit = request.path("limit").asInt(0);
+        boolean startFromHead = request.path("startFromHead").asBoolean(false);
+        String nextToken = request.has("nextToken") ? request.path("nextToken").asText(null) : null;
+
+        CloudWatchLogsService.LogEventsResult result =
+                logsService.getLogEvents(groupName, streamName, startTime, endTime, limit, startFromHead, nextToken, region);
+
+        ObjectNode response = objectMapper.createObjectNode();
+        response.set("events", buildEventsArray(result.events()));
+        response.put("nextForwardToken", result.nextForwardToken());
+        response.put("nextBackwardToken", result.nextBackwardToken());
+        return Response.ok(response).build();
+    }
+
+    private Response handleFilterLogEvents(JsonNode request, String region) {
+        String groupName = resolveLogGroupName(request);
+        Long startTime = request.has("startTime") ? request.path("startTime").asLong() : null;
+        Long endTime = request.has("endTime") ? request.path("endTime").asLong() : null;
+        String filterPattern = request.path("filterPattern").asText(null);
+        int limit = request.path("limit").asInt(0);
+        String nextToken = request.has("nextToken") ? request.path("nextToken").asText(null) : null;
+
+        List<String> streamNames = new ArrayList<>();
+        if (request.hasNonNull("logStreamNames")) {
+            requireListSize(request.path("logStreamNames"), "logStreamNames", 1, 100);
+        }
+        request.path("logStreamNames").forEach(n -> streamNames.add(resolveLogStreamName(n.asText(null))));
+        // After the logStreamNames check, so a request that check refuses gets its message rather than this one.
+        if (groupName == null || groupName.isBlank()) {
+            throw new AwsException("InvalidParameterException",
+                    "logGroupName or logGroupIdentifier is required.", 400);
+        }
+
+        CloudWatchLogsService.FilteredLogEventsResult result =
+                logsService.filterLogEvents(groupName, streamNames, startTime, endTime, filterPattern, limit,
+                        nextToken, region);
+
+        ObjectNode response = objectMapper.createObjectNode();
+        response.set("events", buildFilteredEventsArray(result.events()));
+        if (result.nextToken() != null) {
+            response.put("nextToken", result.nextToken());
+        }
+        return Response.ok(response).build();
+    }
+
+    // ──────────────────────────── Logs Insights Queries ────────────────────────────
+
+    private Response handleStartQuery(JsonNode request, String region) {
+        // AWS requires exactly one of logGroupName / logGroupNames / logGroupIdentifiers.
+        // The zero-selector case is enforced by the service (it throws when the resolved group
+        // list is empty); here we reject the other invalid shape: more than one selector type.
+        if (presentSelectorCount(request) > 1) {
+            throw new AwsException("InvalidParameterException",
+                    "Exactly one of logGroupName, logGroupNames, or logGroupIdentifiers may be specified.",
+                    400);
+        }
+
+        List<String> logGroupNames = new ArrayList<>();
+        request.path("logGroupNames").forEach(n -> logGroupNames.add(extractLogGroupNameFromArn(n.asText())));
+        if (request.has("logGroupName")) {
+            logGroupNames.add(extractLogGroupNameFromArn(request.path("logGroupName").asText()));
+        }
+        request.path("logGroupIdentifiers").forEach(n -> logGroupNames.add(resolveQueryLogGroupName(n.asText())));
+
+        long startTime = request.path("startTime").asLong();
+        long endTime = request.path("endTime").asLong();
+        String queryString = request.path("queryString").asText("");
+        Integer limit = request.has("limit") ? request.path("limit").asInt() : null;
+
+        String queryId = logsService.startQuery(logGroupNames, startTime, endTime, queryString, limit, region);
+        ObjectNode response = objectMapper.createObjectNode();
+        response.put("queryId", queryId);
+        return Response.ok(response).build();
+    }
+
+    private static String resolveQueryLogGroupName(String identifier) {
+        // Grafana strips only the '*' from DescribeLogGroups' ARN. Keep this tolerance identifier-only.
+        Matcher arn = QUERY_LOG_GROUP_ARN_WITH_COLON.matcher(identifier == null ? "" : identifier);
+        if (arn.matches()) {
+            String name = arn.group(1);
+            if (name.length() <= 512) {
+                return name;
+            }
+        }
+        return extractLogGroupNameFromArn(identifier);
+    }
+
+    /**
+     * Counts how many of the three mutually exclusive StartQuery log-group selector <em>fields</em> the
+     * request carries: {@code logGroupName}, {@code logGroupNames}, {@code logGroupIdentifiers}. A field
+     * counts if it is present at all — even a blank string or empty array — using the same presence rule
+     * ({@code has}) as the merge path below, so a serialized-but-empty selector cannot slip past the
+     * mutual-exclusivity check. A single empty/blank selector yields no groups and is rejected downstream
+     * by the service. (The AWS SDK omits unset list fields, so a well-formed single-selector request
+     * still carries exactly one field.)
+     */
+    private int presentSelectorCount(JsonNode request) {
+        int count = 0;
+        if (request.has("logGroupName")) {
+            count++;
+        }
+        if (request.has("logGroupNames")) {
+            count++;
+        }
+        if (request.has("logGroupIdentifiers")) {
+            count++;
+        }
+        return count;
+    }
+
+    private Response handleGetQueryResults(JsonNode request, String region) {
+        String queryId = request.path("queryId").asText();
+        CloudWatchLogsService.QueryState state = logsService.getQueryResults(queryId);
+
+        ArrayNode results = objectMapper.createArrayNode();
+        for (LinkedHashMap<String, String> row : state.rows()) {
+            ArrayNode rowArray = objectMapper.createArrayNode();
+            row.forEach((field, value) -> {
+                ObjectNode fieldNode = objectMapper.createObjectNode();
+                fieldNode.put("field", field);
+                fieldNode.put("value", value);
+                rowArray.add(fieldNode);
+            });
+            results.add(rowArray);
+        }
+
+        ObjectNode response = objectMapper.createObjectNode();
+        response.set("results", results);
+        response.put("status", state.status());
+        ObjectNode statistics = objectMapper.createObjectNode();
+        statistics.put("recordsMatched", (double) state.recordsMatched());
+        statistics.put("recordsScanned", (double) state.recordsScanned());
+        statistics.put("bytesScanned", 0.0);
+        response.set("statistics", statistics);
+        return Response.ok(response).build();
+    }
+
+    private Response handleStopQuery(JsonNode request, String region) {
+        String queryId = request.path("queryId").asText();
+        boolean success = logsService.stopQuery(queryId);
+        ObjectNode response = objectMapper.createObjectNode();
+        response.put("success", success);
+        return Response.ok(response).build();
+    }
+
+    private Response handleAssociateKmsKey(JsonNode request, String region) {
+        String groupName = resolveKmsTargetLogGroupName(request);
+        String kmsKeyId = request.path("kmsKeyId").asText(null);
+        logsService.associateKmsKey(groupName, kmsKeyId, region);
+        return Response.ok(objectMapper.createObjectNode()).build();
+    }
+
+    private Response handleDisassociateKmsKey(JsonNode request, String region) {
+        logsService.disassociateKmsKey(resolveKmsTargetLogGroupName(request), region);
+        return Response.ok(objectMapper.createObjectNode()).build();
+    }
+
+    /**
+     * Associate/DisassociateKmsKey are the odd ones out in the Logs API: their ARN
+     * alternative is {@code resourceIdentifier}, not the {@code logGroupIdentifier}
+     * the query operations take. AWS requires exactly one of logGroupName or
+     * resourceIdentifier — neither, or both, is an InvalidParameterException.
+     */
+    private String resolveKmsTargetLogGroupName(JsonNode request) {
+        // A present-but-blank member counts as PRESENT: the model pins both fields to
+        // min length 1, so blank never silently degrades to "absent" and hands the
+        // mutation to the other identifier.
+        boolean hasName = request.hasNonNull("logGroupName");
+        boolean hasResourceIdentifier = request.hasNonNull("resourceIdentifier");
+        if (hasName == hasResourceIdentifier) {
+            throw new AwsException("InvalidParameterException",
+                    "Exactly one of logGroupName or resourceIdentifier is required.", 400);
+        }
+        String value = request.path(hasName ? "logGroupName" : "resourceIdentifier").asText();
+        if (value.isBlank()) {
+            throw new AwsException("InvalidParameterException",
+                    (hasName ? "logGroupName" : "resourceIdentifier") + " must not be blank.", 400);
+        }
+        // resourceIdentifier also models the account-wide "arn:...:query-result:*" form,
+        // which targets encryption of future GetQueryResults output rather than a log
+        // group. That is a genuinely separate feature Floci does not implement; reject it
+        // explicitly rather than letting extractLogGroupNameFromArn (which only recognizes
+        // :log-group:) pass it through unchanged and turn it into a misleading
+        // ResourceNotFoundException naming a log group the caller never specified.
+        if (!hasName && value.contains(":query-result:")) {
+            throw new AwsException("InvalidParameterException",
+                    "resourceIdentifier of the query-result form is not supported.", 400);
+        }
+        return extractLogGroupNameFromArn(value);
+    }
+
+    private Response handlePutRetentionPolicy(JsonNode request, String region) {
+        String groupName = request.path("logGroupName").asText();
+        requireLogGroupName(groupName);
+        int days = request.path("retentionInDays").asInt();
+        logsService.putRetentionPolicy(groupName, days, region);
+        return Response.ok(objectMapper.createObjectNode()).build();
+    }
+
+    private Response handleDeleteRetentionPolicy(JsonNode request, String region) {
+        String groupName = request.path("logGroupName").asText();
+        requireLogGroupName(groupName);
+        logsService.deleteRetentionPolicy(groupName, region);
+        return Response.ok(objectMapper.createObjectNode()).build();
+    }
+
+    private Response handleTagLogGroup(JsonNode request, String region) {
+        String groupName = request.path("logGroupName").asText();
+        Map<String, String> tags = extractTags(request.path("tags"));
+        logsService.tagLogGroup(groupName, tags, region);
+        return Response.ok(objectMapper.createObjectNode()).build();
+    }
+
+    private Response handleUntagLogGroup(JsonNode request, String region) {
+        String groupName = request.path("logGroupName").asText();
+        List<String> tagKeys = new ArrayList<>();
+        request.path("tags").forEach(k -> tagKeys.add(k.asText()));
+        logsService.untagLogGroup(groupName, tagKeys, region);
+        return Response.ok(objectMapper.createObjectNode()).build();
+    }
+
+    private Response handleListTagsLogGroup(JsonNode request, String region) {
+        String groupName = request.path("logGroupName").asText();
+        Map<String, String> tags = logsService.listTagsLogGroup(groupName, region);
+
+        ObjectNode response = objectMapper.createObjectNode();
+        ObjectNode tagsNode = objectMapper.createObjectNode();
+        tags.forEach(tagsNode::put);
+        response.set("tags", tagsNode);
+        return Response.ok(response).build();
+    }
+
+    private Response handleListTagsForResource(JsonNode request, String region) {
+        String resourceArn = request.path("resourceArn").asText();
+        if (deliveryService.isDeliveryArn(resourceArn, region)) {
+            ObjectNode response = objectMapper.createObjectNode();
+            response.set("tags", objectMapper.valueToTree(deliveryService.listTags(resourceArn, region)));
+            return Response.ok(response).build();
+        }
+        String groupName = logsService.resolveTagTarget(resourceArn, region).name();
+        Map<String, String> tags = logsService.listTagsLogGroup(groupName, region);
+
+        ObjectNode response = objectMapper.createObjectNode();
+        ObjectNode tagsNode = objectMapper.createObjectNode();
+        tags.forEach(tagsNode::put);
+        response.set("tags", tagsNode);
+        return Response.ok(response).build();
+    }
+
+    private Response handleTagResource(JsonNode request, String region) {
+        String resourceArn = request.path("resourceArn").asText();
+        Map<String, String> tags = extractTags(request.path("tags"));
+        if (deliveryService.isDeliveryArn(resourceArn, region)) {
+            deliveryService.tag(resourceArn, tags, region);
+            return Response.ok(objectMapper.createObjectNode()).build();
+        }
+        String groupName = logsService.resolveTagTarget(resourceArn, region).name();
+        logsService.tagLogGroup(groupName, tags, region);
+        return Response.ok(objectMapper.createObjectNode()).build();
+    }
+
+    private Response handleUntagResource(JsonNode request, String region) {
+        String resourceArn = request.path("resourceArn").asText();
+        List<String> tagKeys = new ArrayList<>();
+        request.path("tagKeys").forEach(k -> tagKeys.add(k.asText()));
+        if (deliveryService.isDeliveryArn(resourceArn, region)) {
+            deliveryService.untag(resourceArn, tagKeys, region);
+            return Response.ok(objectMapper.createObjectNode()).build();
+        }
+        String groupName = logsService.resolveTagTarget(resourceArn, region).name();
+        logsService.untagLogGroup(groupName, tagKeys, region);
+        return Response.ok(objectMapper.createObjectNode()).build();
+    }
+
+    private Response handlePutSubscriptionFilter(JsonNode request, String region) {
+        String logGroupName = request.path("logGroupName").asText();
+        String filterName = request.path("filterName").asText();
+        String filterPattern = request.path("filterPattern").asText();
+        String destinationArn = request.path("destinationArn").asText();
+        String distribution = request.has("distribution") ? request.path("distribution").asText(null) : null;
+        if (distribution != null && !"Random".equals(distribution) && !"ByLogStream".equals(distribution)) {
+            throw new AwsException("InvalidParameterException",
+                    "distribution must be Random or ByLogStream.", 400);
+        }
+
+        logsService.putSubscriptionFilter(logGroupName, filterName, filterPattern, destinationArn, distribution, region);
+        return Response.ok(objectMapper.createObjectNode()).build();
+    }
+
+    private Response handleDescribeSubscriptionFilters(JsonNode request, String region) {
+        String logGroupName = request.path("logGroupName").asText();
+        String filterNamePrefix = request.path("filterNamePrefix").asText(null);
+        String nextToken = request.has("nextToken") ? request.path("nextToken").asText(null) : null;
+        int limit = request.path("limit").asInt(0);
+
+        CloudWatchLogsService.DescribeSubscriptionFiltersResult result =
+                logsService.describeSubscriptionFilters(logGroupName, filterNamePrefix, nextToken, limit, region);
+
+        ObjectNode response = objectMapper.createObjectNode();
+        ArrayNode filtersArray = objectMapper.createArrayNode();
+        for (SubscriptionFilter f : result.subscriptionFilters()) {
+            ObjectNode node = objectMapper.createObjectNode();
+            node.put("filterName", f.getFilterName());
+            node.put("logGroupName", f.getLogGroupName());
+            node.put("filterPattern", f.getFilterPattern());
+            node.put("destinationArn", f.getDestinationArn());
+            if (f.getDistribution() != null) {
+                node.put("distribution", f.getDistribution());
+            }
+            node.put("creationTime", f.getCreationTime());
+            filtersArray.add(node);
+        }
+        response.set("subscriptionFilters", filtersArray);
+        if (result.nextToken() != null) {
+            response.put("nextToken", result.nextToken());
+        }
+        return Response.ok(response).build();
+    }
+
+    private Response handleDeleteSubscriptionFilter(JsonNode request, String region) {
+        String logGroupName = request.path("logGroupName").asText();
+        String filterName = request.path("filterName").asText();
+        logsService.deleteSubscriptionFilter(logGroupName, filterName, region);
+        return Response.ok(objectMapper.createObjectNode()).build();
+    }
+
+    private Response handleGetDataProtectionPolicy(JsonNode request, String region) {
+        // Data-protection policies are not modeled. Return HTTP 200 with the resolved
+        // logGroupIdentifier and no policyDocument ("no policy set"). Real AWS returns
+        // ResourceNotFoundException (HTTP 400) when the resource does not exist — the
+        // 200-empty response is a deliberate Floci simplification for read-only callers.
+        String identifier = resolveLogGroupName(request);
+        ObjectNode response = objectMapper.createObjectNode();
+        if (identifier != null) {
+            response.put("logGroupIdentifier", identifier);
+        }
+        // policyDocument intentionally omitted -> no data-protection policy
+        return Response.ok(response).build();
+    }
+
+    private String resolveLogGroupName(JsonNode request) {
+        String name = request.path("logGroupName").asText(null);
+        if (name == null || name.isBlank()) {
+            name = request.path("logGroupIdentifier").asText(null);
+        }
+        return extractLogGroupNameFromArn(name);
+    }
+
+    private String resolveLogStreamName(String name) {
+        if (name != null && name.contains(":log-stream:")) {
+            return name.substring(name.indexOf(":log-stream:") + ":log-stream:".length());
+        }
+        return name;
+    }
+
+    static String extractLogGroupNameFromArn(String arn) {
+        if (arn != null && arn.contains(":log-group:")) {
+            String name = arn.substring(arn.indexOf(":log-group:") + ":log-group:".length());
+            if (name.endsWith(":*")) {
+                name = name.substring(0, name.length() - 2);
+            }
+            return name;
+        }
+        return arn;
+    }
+
+    // ──────────────────────────── Helpers ────────────────────────────
+
+    private ArrayNode buildEventsArray(List<LogEvent> events) {
+        ArrayNode array = objectMapper.createArrayNode();
+        for (LogEvent e : events) {
+            array.add(buildEventNode(e));
+        }
+        return array;
+    }
+
+    /**
+     * Serializes FilteredLogEvent, which carries {@code logStreamName} on top of the GetLogEvents
+     * shape. The field is what attributes a match back to the stream that emitted it, and real AWS
+     * returns it on every FilterLogEvents result; GetLogEvents omits it, so it stays out of
+     * {@link #buildEventsArray}.
+     */
+    private ArrayNode buildFilteredEventsArray(List<CloudWatchLogsService.FilteredEvent> events) {
+        ArrayNode array = objectMapper.createArrayNode();
+        for (CloudWatchLogsService.FilteredEvent filtered : events) {
+            ObjectNode node = buildEventNode(filtered.event());
+            node.put("logStreamName", filtered.logStreamName());
+            array.add(node);
+        }
+        return array;
+    }
+
+    private ObjectNode buildEventNode(LogEvent e) {
+        ObjectNode node = objectMapper.createObjectNode();
+        node.put("eventId", e.getEventId());
+        node.put("timestamp", e.getTimestamp());
+        node.put("message", e.getMessage());
+        node.put("ingestionTime", e.getIngestionTime());
+        return node;
+    }
+
+    private Map<String, String> extractTags(JsonNode tagsNode) {
+        Map<String, String> tags = new HashMap<>();
+        if (tagsNode != null && tagsNode.isObject()) {
+            tagsNode.fields().forEachRemaining(entry -> tags.put(entry.getKey(), entry.getValue().asText()));
+        }
+        return tags;
+    }
+
+    /** Enforces a modeled list min/max with the InvalidParameterException these operations model. */
+    private static void requireListSize(JsonNode list,
+                                        String member, int min, int max) {
+        int size = list == null || list.isNull() || !list.isArray() ? 0 : list.size();
+        if (size < min || size > max) {
+            throw new AwsException("InvalidParameterException",
+                    member + " must contain between " + min + " and " + max + " entries.", 400);
+        }
+    }
+}

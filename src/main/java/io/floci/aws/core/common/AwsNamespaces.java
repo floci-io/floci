@@ -1,0 +1,32 @@
+package io.floci.aws.core.common;
+
+/**
+ * Canonical XML namespace URIs for every AWS service that uses the Query (XML) protocol.
+ * Use these constants instead of inline string literals in handlers.
+ */
+public final class AwsNamespaces {
+
+    public static final String SQS = "https://sqs.amazonaws.com/doc/2012-11-05/";
+    public static final String SNS = "http://sns.amazonaws.com/doc/2010-03-31/";
+    public static final String IAM = "https://iam.amazonaws.com/doc/2010-05-08/";
+    public static final String STS = "https://sts.amazonaws.com/doc/2011-06-15/";
+    public static final String RDS = "http://rds.amazonaws.com/doc/2014-10-31/";
+    public static final String EC  = "http://elasticache.amazonaws.com/doc/2015-02-02/";
+    public static final String CW  = "http://monitoring.amazonaws.com/doc/2010-08-01/";
+    public static final String S3  = "http://s3.amazonaws.com/doc/2006-03-01/";
+    public static final String S3_CONTROL = "http://awss3control.amazonaws.com/doc/2018-08-20/";
+    public static final String SES = "http://ses.amazonaws.com/doc/2010-12-01/";
+    public static final String EC2    = "http://ec2.amazonaws.com/doc/2016-11-15/";
+    /** Classic (v1) Elastic Load Balancing. Shares an endpoint host with {@link #ELB_V2},
+     *  but is a different API: requests declaring {@code Version=2012-06-01} must be answered
+     *  in this namespace, never in the 2015-12-01 one. */
+    public static final String ELB_CLASSIC = "http://elasticloadbalancing.amazonaws.com/doc/2012-06-01/";
+    public static final String ELB_V2      = "https://elasticloadbalancing.amazonaws.com/doc/2015-12-01/";
+    public static final String AUTOSCALING = "http://autoscaling.amazonaws.com/doc/2011-01-01/";
+    public static final String ELASTIC_BEANSTALK = "https://elasticbeanstalk.amazonaws.com/docs/2010-12-01/";
+    public static final String ROUTE53     = "https://route53.amazonaws.com/doc/2013-04-01/";
+    public static final String CLOUDFRONT  = "http://cloudfront.amazonaws.com/doc/2020-05-31/";
+    public static final String REDSHIFT    = "http://redshift.amazonaws.com/doc/2012-12-01/";
+
+    private AwsNamespaces() {}
+}

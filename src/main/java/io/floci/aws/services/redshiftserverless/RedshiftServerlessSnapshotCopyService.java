@@ -1,0 +1,218 @@
+package io.floci.aws.services.redshiftserverless;
+
+import com.fasterxml.jackson.core.type.TypeReference;
+import io.floci.aws.core.common.AwsRegions;
+import io.floci.aws.core.common.PaginatedResult;
+import io.floci.aws.core.common.Pagination;
+import io.floci.aws.core.common.RegionResolver;
+import io.floci.aws.core.common.Resettable;
+import io.floci.aws.core.storage.AccountAwareStorageBackend;
+import io.floci.aws.core.storage.StorageFactory;
+import io.floci.aws.services.redshiftserverless.model.Namespace;
+import io.floci.aws.services.redshiftserverless.model.SnapshotCopyConfiguration;
+import jakarta.enterprise.context.ApplicationScoped;
+import jakarta.inject.Inject;
+
+import java.time.Instant;
+import java.util.ArrayList;
+import java.util.Comparator;
+import java.util.List;
+import java.util.Map;
+import java.util.Objects;
+import java.util.UUID;
+import java.util.regex.Pattern;
+
+/**
+ * Redshift Serverless snapshot copy configurations. They are stored and echoed, not run: Floci
+ * copies no snapshot to the destination Region.
+ *
+ * <p>A configuration belongs to a namespace but lives in its own store, so deleting the namespace
+ * needs no hook here. Each read checks that the namespace is still there and drops the
+ * configuration otherwise.
+ */
+@ApplicationScoped
+public class RedshiftServerlessSnapshotCopyService implements Resettable {
+
+    /** The model gives {@code destinationRegion} no pattern, so the shape of a Region name is checked here. */
+    private static final Pattern REGION_NAME = Pattern.compile("^[a-z0-9-]+$");
+    private static final int MAX_RETENTION_DAYS = 3653;
+
+    private final AccountAwareStorageBackend<SnapshotCopyConfiguration> configurations;
+    private final RegionResolver regionResolver;
+    private final RedshiftServerlessService serverless;
+
+    @Inject
+    public RedshiftServerlessSnapshotCopyService(StorageFactory storageFactory, RegionResolver regionResolver,
+                                                 RedshiftServerlessService serverless) {
+        this.configurations = storageFactory.create("redshiftserverless",
+                "redshiftserverless-snapshotcopyconfigurations.json",
+                new TypeReference<Map<String, SnapshotCopyConfiguration>>() {});
+        this.regionResolver = regionResolver;
+        this.serverless = serverless;
+    }
+
+    public synchronized SnapshotCopyConfiguration createSnapshotCopyConfiguration(
+            String namespaceName, String destinationRegion, String destinationKmsKeyId,
+            Integer snapshotRetentionPeriod, String region) {
+        if (!REGION_NAME.matcher(destinationRegion).matches()) {
+            throw ServerlessSupport.validation("destinationRegion must be lower-case letters, digits and hyphens.");
+        }
+        if (destinationRegion.equals(region)) {
+            throw ServerlessSupport.validation("destinationRegion must differ from the namespace's Region.");
+        }
+        if (!AwsRegions.isRegionId(destinationRegion)) {
+            throw ServerlessSupport.validation("destinationRegion " + destinationRegion + " is not a known Region.");
+        }
+        if (!AwsRegions.partitionFor(destinationRegion).equals(AwsRegions.partitionFor(region))) {
+            throw ServerlessSupport.validation("destinationRegion must be in the same partition as the namespace's Region.");
+        }
+        validateRetention(snapshotRetentionPeriod);
+        Namespace namespace = serverless.findNamespace(namespaceName, region)
+                .orElseThrow(() -> ServerlessSupport.notFound("The namespace " + namespaceName + " was not found."));
+        boolean duplicate = live(region).stream().anyMatch(existing ->
+                existing.getNamespaceName().equals(namespaceName));
+        if (duplicate) {
+            throw ServerlessSupport.conflict("The namespace " + namespaceName
+                    + " already has a snapshot copy configuration.");
+        }
+
+        SnapshotCopyConfiguration configuration = new SnapshotCopyConfiguration();
+        configuration.setSnapshotCopyConfigurationId(UUID.randomUUID().toString());
+        configuration.setSnapshotCopyConfigurationArn(regionResolver.buildArn("redshift-serverless", region,
+                "snapshotcopyconfiguration/" + configuration.getSnapshotCopyConfigurationId()));
+        configuration.setNamespaceName(namespaceName);
+        configuration.setOwnerId(namespace.getNamespaceId());
+        configuration.setDestinationRegion(destinationRegion);
+        configuration.setDestinationKmsKeyId(destinationKmsKeyId);
+        configuration.setSnapshotRetentionPeriod(snapshotRetentionPeriod);
+        configuration.setCreatedAt(Instant.now());
+        configurations.put(storageKey(region, configuration.getSnapshotCopyConfigurationId()), configuration);
+        return new SnapshotCopyConfiguration(configuration);
+    }
+
+    public synchronized PaginatedResult<SnapshotCopyConfiguration> listSnapshotCopyConfigurations(
+            String namespaceName, String region, Integer maxResults, String nextToken) {
+        int limit = ServerlessSupport.pageSize(maxResults);
+        List<SnapshotCopyConfiguration> matching = live(region).stream()
+                .filter(configuration -> namespaceName == null
+                        || namespaceName.equals(configuration.getNamespaceName()))
+                .sorted(Comparator.comparing(SnapshotCopyConfiguration::getSnapshotCopyConfigurationId))
+                .map(SnapshotCopyConfiguration::new)
+                .toList();
+        return Pagination.paginate(matching, SnapshotCopyConfiguration::getSnapshotCopyConfigurationId,
+                limit, nextToken, "snapshot-copy",
+                token -> ServerlessSupport.invalidPagination("Invalid nextToken."));
+    }
+
+    /** Changes the retention of copied snapshots, the only member AWS lets an update change. */
+    public synchronized SnapshotCopyConfiguration updateSnapshotCopyConfiguration(
+            String snapshotCopyConfigurationId, Integer snapshotRetentionPeriod, String region) {
+        SnapshotCopyConfiguration updated = new SnapshotCopyConfiguration(require(snapshotCopyConfigurationId, region));
+        if (snapshotRetentionPeriod != null) {
+            validateRetention(snapshotRetentionPeriod);
+            updated.setSnapshotRetentionPeriod(snapshotRetentionPeriod);
+            configurations.put(storageKey(region, snapshotCopyConfigurationId), updated);
+        }
+        return new SnapshotCopyConfiguration(updated);
+    }
+
+    public synchronized SnapshotCopyConfiguration deleteSnapshotCopyConfiguration(
+            String snapshotCopyConfigurationId, String region) {
+        SnapshotCopyConfiguration existing = new SnapshotCopyConfiguration(
+                require(snapshotCopyConfigurationId, region));
+        configurations.delete(storageKey(region, snapshotCopyConfigurationId));
+        return existing;
+    }
+
+    /**
+     * One configuration as the copy sweep needs it, with the account and Region it lives in. The
+     * sweep runs outside any request, so it cannot rely on the ambient account.
+     */
+    public record CopyRule(String accountId, String sourceRegion, String namespaceName, String namespaceId,
+                           String destinationRegion, String destinationKmsKeyId, Integer retentionPeriod,
+                           Instant createdAt) {}
+
+    /**
+     * Runs one copy sweep. The monitor is held from listing the rules to the last copy, so
+     * deleting a configuration returns only once no copy of it is still on its way; a namespace
+     * recreated meanwhile is caught by the id each rule carries.
+     */
+    public synchronized void runCopySweep(Instant now) {
+        serverless.copySnapshots(now, activeRules());
+    }
+
+    /**
+     * The configurations of every account whose namespace is still the one they were made for. A
+     * configuration left behind by a deleted or recreated namespace is skipped here and dropped by
+     * the next read in its own Region.
+     */
+    public synchronized List<CopyRule> activeRules() {
+        List<CopyRule> rules = new ArrayList<>();
+        for (AccountAwareStorageBackend.AccountEntry<SnapshotCopyConfiguration> entry
+                : configurations.scanAllAccountEntries(key -> true)) {
+            SnapshotCopyConfiguration stored = entry.value();
+            String sourceRegion = entry.key().substring(0, entry.key().indexOf("::"));
+            boolean current = serverless.findNamespaceForAccount(entry.accountId(),
+                            stored.getNamespaceName(), sourceRegion)
+                    .map(namespace -> Objects.equals(namespace.getNamespaceId(), stored.getOwnerId()))
+                    .orElse(false);
+            if (current) {
+                SnapshotCopyConfiguration configuration = stored;
+                if (configuration.getCreatedAt() == null) {
+                    // Made before the creation time was recorded: copy from now on rather than the whole history.
+                    configuration = new SnapshotCopyConfiguration(stored);
+                    configuration.setCreatedAt(Instant.now());
+                    configurations.putForAccount(entry.accountId(), entry.key(), configuration);
+                }
+                rules.add(new CopyRule(entry.accountId(), sourceRegion, configuration.getNamespaceName(),
+                        configuration.getOwnerId(), configuration.getDestinationRegion(),
+                        configuration.getDestinationKmsKeyId(), configuration.getSnapshotRetentionPeriod(),
+                        configuration.getCreatedAt()));
+            }
+        }
+        return rules;
+    }
+
+    @Override
+    public void clear() {
+        configurations.clear();
+    }
+
+    private SnapshotCopyConfiguration require(String id, String region) {
+        SnapshotCopyConfiguration configuration = configurations.get(storageKey(region, id)).orElse(null);
+        if (configuration != null && !isOnSameNamespace(configuration, region)) {
+            configurations.delete(storageKey(region, id));
+            configuration = null;
+        }
+        if (configuration == null) {
+            throw ServerlessSupport.notFound("The snapshot copy configuration " + id + " was not found.");
+        }
+        return configuration;
+    }
+
+    /** The region's configurations whose namespace is still there; any other is deleted as it is found. */
+    private List<SnapshotCopyConfiguration> live(String region) {
+        return ServerlessSupport.live(configurations, region,
+                configuration -> isOnSameNamespace(configuration, region),
+                configuration -> storageKey(region, configuration.getSnapshotCopyConfigurationId()));
+    }
+
+    /** A namespace recreated under the same name has a new id, so it never inherits its predecessor's configurations. */
+    private boolean isOnSameNamespace(SnapshotCopyConfiguration configuration, String region) {
+        return serverless.findNamespace(configuration.getNamespaceName(), region)
+                .map(namespace -> Objects.equals(namespace.getNamespaceId(), configuration.getOwnerId()))
+                .orElse(false);
+    }
+
+    private static void validateRetention(Integer retentionPeriod) {
+        if (retentionPeriod != null && retentionPeriod != -1
+                && (retentionPeriod < 1 || retentionPeriod > MAX_RETENTION_DAYS)) {
+            throw ServerlessSupport.validation(
+                    "snapshotRetentionPeriod must be -1 (indefinite) or between 1 and " + MAX_RETENTION_DAYS + ".");
+        }
+    }
+
+    private static String storageKey(String region, String id) {
+        return region + "::" + id;
+    }
+}

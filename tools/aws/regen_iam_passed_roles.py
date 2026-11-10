@@ -112,6 +112,7 @@ NOT_COVERED = {
     "kafka": "REST routes no rule maps yet",
     "macie2": "REST routes no rule maps yet",
     "mq": "REST routes no rule maps yet",
+    "quicksight": "metadata-only REST subset; role passing and iam:PassRole checks are not implemented",
     "rum": "REST routes no rule maps yet",
     "s3tables": "REST routes no rule maps yet",
 }

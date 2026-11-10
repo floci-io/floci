@@ -1,0 +1,980 @@
+package io.floci.aws.services.cloudwatch.metrics;
+
+import io.floci.aws.core.common.AwsException;
+import io.floci.aws.core.common.AwsNamespaces;
+import io.floci.aws.core.common.AwsQueryResponse;
+import io.floci.aws.core.common.PaginatedResult;
+import io.floci.aws.core.common.Pagination;
+import io.floci.aws.core.common.XmlBuilder;
+import io.floci.aws.services.cloudwatch.dashboards.CloudWatchDashboardsService;
+import io.floci.aws.services.cloudwatch.dashboards.model.Dashboard;
+import io.floci.aws.services.cloudwatch.metrics.model.Alarm;
+import io.floci.aws.services.cloudwatch.metrics.model.AlarmHistoryItem;
+import io.floci.aws.services.cloudwatch.metrics.model.AlarmMetricDataQuery;
+import io.floci.aws.services.cloudwatch.metrics.model.CompositeAlarm;
+import io.floci.aws.services.cloudwatch.metrics.model.Dimension;
+import io.floci.aws.services.cloudwatch.metrics.model.MetricAlarm;
+import io.floci.aws.services.cloudwatch.metrics.model.MetricDatum;
+import io.floci.aws.services.cloudwatch.metricstreams.CloudWatchMetricStreamsService;
+import io.floci.aws.services.cloudwatch.metricstreams.model.MetricStream;
+import io.floci.aws.services.cloudwatch.metricstreams.model.MetricStreamFilter;
+import io.floci.aws.services.cloudwatch.metricstreams.model.MetricStreamStatisticsConfiguration;
+import jakarta.enterprise.context.ApplicationScoped;
+import jakarta.inject.Inject;
+import jakarta.ws.rs.core.MultivaluedMap;
+import jakarta.ws.rs.core.Response;
+import org.jboss.logging.Logger;
+
+import java.time.Instant;
+import java.time.format.DateTimeFormatter;
+import java.util.ArrayList;
+import java.util.LinkedHashMap;
+import java.util.List;
+import java.util.Map;
+import java.util.SortedSet;
+import java.util.TreeSet;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
+
+@ApplicationScoped
+public class CloudWatchMetricsQueryHandler {
+
+    private static final Logger LOG = Logger.getLogger(CloudWatchMetricsQueryHandler.class);
+    private static final Pattern ENTITY_METRIC_DATA_MEMBER = Pattern.compile("EntityMetricData\\.member\\.(\\d{1,9})\\.");
+
+    private CloudWatchMetricsService metricsService;
+    private final CloudWatchDashboardsService dashboardsService;
+    private final CloudWatchMetricStreamsService metricStreamsService;
+
+    @Inject
+    public CloudWatchMetricsQueryHandler(CloudWatchMetricsService metricsService,
+                                         CloudWatchDashboardsService dashboardsService,
+                                         CloudWatchMetricStreamsService metricStreamsService) {
+        this.metricsService = metricsService;
+        this.dashboardsService = dashboardsService;
+        this.metricStreamsService = metricStreamsService;
+    }
+
+    public Response handle(String action, MultivaluedMap<String, String> params, String region) {
+        String normalizedAction = action.substring(0, 1).toUpperCase() + action.substring(1);
+        return switch (normalizedAction) {
+            case "PutMetricData" -> handlePutMetricData(params, region);
+            case "ListMetrics" -> handleListMetrics(params, region);
+            case "GetMetricStatistics" -> handleGetMetricStatistics(params, region);
+            case "GetMetricData" -> handleGetMetricData(params, region);
+            case "PutMetricAlarm" -> handlePutMetricAlarm(params, region);
+            case "PutCompositeAlarm" -> handlePutCompositeAlarm(params, region);
+            case "DescribeAlarms" -> handleDescribeAlarms(params, region);
+            case "DeleteAlarms" -> handleDeleteAlarms(params, region);
+            case "SetAlarmState" -> handleSetAlarmState(params, region);
+            case "DescribeAlarmHistory" -> handleDescribeAlarmHistory(params, region);
+            case "ListTagsForResource" -> handleListTagsForResource(params, region);
+            case "TagResource" -> handleTagResource(params, region);
+            case "UntagResource" -> handleUntagResource(params, region);
+            case "PutDashboard" -> handlePutDashboard(params, region);
+            case "GetDashboard" -> handleGetDashboard(params, region);
+            case "ListDashboards" -> handleListDashboards(params, region);
+            case "DeleteDashboards" -> handleDeleteDashboards(params, region);
+            case "PutMetricStream" -> handlePutMetricStream(params, region);
+            case "GetMetricStream" -> handleGetMetricStream(params, region);
+            case "ListMetricStreams" -> handleListMetricStreams(params, region);
+            case "DeleteMetricStream" -> handleDeleteMetricStream(params, region);
+            case "StartMetricStreams" -> handleStartMetricStreams(params, region);
+            case "StopMetricStreams" -> handleStopMetricStreams(params, region);
+            default -> AwsQueryResponse.error("UnsupportedOperation",
+                    "Operation " + action + " is not supported by CloudWatch Query.", AwsNamespaces.CW, 400);
+        };
+    }
+
+    private Response handlePutMetricData(MultivaluedMap<String, String> params, String region) {
+        String namespace = params.getFirst("Namespace");
+        List<MetricDatum> datums = parseMetricData(params);
+        metricsService.putMetricData(namespace, datums, region);
+        return Response.ok(AwsQueryResponse.envelopeNoResult("PutMetricData", null)).build();
+    }
+
+    private Response handleListMetrics(MultivaluedMap<String, String> params, String region) {
+        String namespace = params.getFirst("Namespace");
+        String metricName = params.getFirst("MetricName");
+        List<Dimension> dimensions = parseDimensionFilters(params);
+
+        PaginatedResult<CloudWatchMetricsService.MetricIdentity> page =
+                metricsService.listMetricsPage(namespace, metricName, dimensions, params.getFirst("NextToken"), region);
+
+        XmlBuilder xml = new XmlBuilder().start("Metrics");
+        for (CloudWatchMetricsService.MetricIdentity m : page.items()) {
+            XmlBuilder member = xml.start("member")
+                    .elem("Namespace", m.namespace())
+                    .elem("MetricName", m.metricName())
+                    .start("Dimensions");
+            for (Dimension d : m.dimensions()) {
+                xml.start("member")
+                        .elem("Name", d.name())
+                        .elem("Value", d.value())
+                        .end("member");
+            }
+            xml.end("Dimensions").end("member");
+        }
+        xml.end("Metrics");
+        if (page.nextToken() != null) {
+            xml.elem("NextToken", page.nextToken());
+        }
+        return Response.ok(AwsQueryResponse.envelope("ListMetrics", null, xml.build())).build();
+    }
+
+    private Response handleGetMetricStatistics(MultivaluedMap<String, String> params, String region) {
+        String namespace = params.getFirst("Namespace");
+        String metricName = params.getFirst("MetricName");
+        List<Dimension> dimensions = parseDimensionFilters(params);
+        int period = parseIntParam(params, "Period", 60);
+        String unit = params.getFirst("Unit");
+
+        Instant startTime = parseInstant(params.getFirst("StartTime"));
+        Instant endTime = parseInstant(params.getFirst("EndTime"));
+
+        List<String> statistics = new ArrayList<>();
+        for (int i = 1; ; i++) {
+            String stat = params.getFirst("Statistics.member." + i);
+            if (stat == null) {
+                break;
+            }
+            statistics.add(stat);
+        }
+
+        List<CloudWatchMetricsService.Datapoint> datapoints =
+                metricsService.getMetricStatistics(namespace, metricName, dimensions,
+                        startTime, endTime, period, statistics, unit, region);
+
+        DateTimeFormatter fmt = DateTimeFormatter.ISO_INSTANT;
+        XmlBuilder xml = new XmlBuilder()
+                .elem("Label", metricName)
+                .start("Datapoints");
+        for (CloudWatchMetricsService.Datapoint dp : datapoints) {
+            xml.start("member").elem("Timestamp", fmt.format(dp.timestamp()));
+            if (statistics.contains("Average")) {
+                xml.elem("Average", String.valueOf(dp.average()));
+            }
+            if (statistics.contains("Sum")) {
+                xml.elem("Sum", String.valueOf(dp.sum()));
+            }
+            if (statistics.contains("Minimum")) {
+                xml.elem("Minimum", String.valueOf(dp.minimum()));
+            }
+            if (statistics.contains("Maximum")) {
+                xml.elem("Maximum", String.valueOf(dp.maximum()));
+            }
+            if (statistics.contains("SampleCount")) {
+                xml.elem("SampleCount", String.valueOf(dp.sampleCount()));
+            }
+            xml.elem("Unit", dp.unit()).end("member");
+        }
+        xml.end("Datapoints");
+        return Response.ok(AwsQueryResponse.envelope("GetMetricStatistics",
+                AwsNamespaces.CW, xml.build())).build();
+    }
+
+    private Response handleGetMetricData(MultivaluedMap<String, String> params, String region) {
+        Instant startTime = parseInstant(params.getFirst("StartTime"));
+        Instant endTime = parseInstant(params.getFirst("EndTime"));
+
+        List<CloudWatchMetricsService.MetricDataQuery> queries = parseMetricDataQueries(params);
+
+        List<CloudWatchMetricsService.MetricDataResult> results =
+                metricsService.getMetricData(queries, startTime, endTime, region);
+
+        DateTimeFormatter fmt = DateTimeFormatter.ISO_INSTANT;
+        XmlBuilder xml = new XmlBuilder().start("MetricDataResults");
+        for (CloudWatchMetricsService.MetricDataResult r : results) {
+            xml.start("member")
+                    .elem("Id", r.id())
+                    .elem("Label", r.label())
+                    .elem("StatusCode", r.statusCode());
+
+            xml.start("Timestamps");
+            for (Instant ts : r.timestamps()) {
+                xml.elem("member", fmt.format(ts));
+            }
+            xml.end("Timestamps");
+
+            xml.start("Values");
+            for (Double v : r.values()) {
+                xml.elem("member", String.valueOf(v));
+            }
+            xml.end("Values");
+
+            xml.end("member");
+        }
+        xml.end("MetricDataResults");
+        return Response.ok(AwsQueryResponse.envelope("GetMetricData", AwsNamespaces.CW, xml.build())).build();
+    }
+
+    private List<CloudWatchMetricsService.MetricDataQuery> parseMetricDataQueries(
+            MultivaluedMap<String, String> params) {
+        List<CloudWatchMetricsService.MetricDataQuery> queries = new ArrayList<>();
+        for (int i = 1; ; i++) {
+            String prefix = "MetricDataQueries.member." + i;
+            String id = params.getFirst(prefix + ".Id");
+            if (id == null) break;
+
+            String expression = params.getFirst(prefix + ".Expression");
+            String label = params.getFirst(prefix + ".Label");
+            boolean returnData = !"false".equals(params.getFirst(prefix + ".ReturnData"));
+
+            CloudWatchMetricsService.MetricStat metricStat = null;
+            String msNamespace = params.getFirst(prefix + ".MetricStat.Metric.Namespace");
+            if (msNamespace != null) {
+                String msMetricName = params.getFirst(prefix + ".MetricStat.Metric.MetricName");
+                int msPeriod = parseIntParam(params, prefix + ".MetricStat.Period", 60);
+                String msStat = params.getFirst(prefix + ".MetricStat.Stat");
+                String msUnit = params.getFirst(prefix + ".MetricStat.Unit");
+
+                List<Dimension> dims = new ArrayList<>();
+                for (int j = 1; ; j++) {
+                    String dimName = params.getFirst(
+                            prefix + ".MetricStat.Metric.Dimensions.member." + j + ".Name");
+                    if (dimName == null) break;
+                    String dimValue = params.getFirst(
+                            prefix + ".MetricStat.Metric.Dimensions.member." + j + ".Value");
+                    dims.add(new Dimension(dimName, dimValue));
+                }
+
+                metricStat = new CloudWatchMetricsService.MetricStat(
+                        msNamespace, msMetricName, dims, msPeriod, msStat, msUnit);
+            }
+
+            queries.add(new CloudWatchMetricsService.MetricDataQuery(
+                    id, metricStat, expression, label, returnData));
+        }
+        return queries;
+    }
+
+    private Response handlePutMetricAlarm(MultivaluedMap<String, String> params, String region) {
+        MetricAlarm alarm = parseAlarm(params);
+        metricsService.putMetricAlarm(alarm, region);
+        return Response.ok(AwsQueryResponse.envelopeNoResult("PutMetricAlarm", null)).build();
+    }
+
+    private Response handlePutCompositeAlarm(MultivaluedMap<String, String> params, String region) {
+        if (params.containsKey("ActionsSuppressor") || params.containsKey("ActionsSuppressorWaitPeriod")
+                || params.containsKey("ActionsSuppressorExtensionPeriod")) {
+            throw new AwsException("ValidationError", "Composite action suppression is not supported", 400);
+        }
+        CompositeAlarm alarm = new CompositeAlarm();
+        parseAlarmFields(params, alarm);
+        alarm.setAlarmRule(params.getFirst("AlarmRule"));
+        metricsService.putCompositeAlarm(alarm, region);
+        return Response.ok(AwsQueryResponse.envelopeNoResult("PutCompositeAlarm", null)).build();
+    }
+
+    private static List<String> alarmMembers(MultivaluedMap<String, String> params, String key) {
+        List<String> values = new ArrayList<>();
+        for (int i = 1; params.getFirst(key + ".member." + i) != null; i++) {
+            values.add(params.getFirst(key + ".member." + i));
+        }
+        return values;
+    }
+
+    private Response handleDescribeAlarms(MultivaluedMap<String, String> params, String region) {
+        List<String> alarmNames = new ArrayList<>();
+        for (int i = 1; ; i++) {
+            String name = params.getFirst("AlarmNames.member." + i);
+            if (name == null) break;
+            alarmNames.add(name);
+        }
+        String childrenOf = params.getFirst("ChildrenOfAlarmName");
+        String parentsOf = params.getFirst("ParentsOfAlarmName");
+        CloudWatchMetricsService.DescribedAlarms alarms = metricsService.describeAlarms(
+                new CloudWatchMetricsService.AlarmFilter(alarmNames, params.getFirst("AlarmNamePrefix"),
+                        alarmMembers(params, "AlarmTypes"), params.getFirst("StateValue"),
+                        params.getFirst("ActionPrefix"), childrenOf, parentsOf), region);
+        boolean related = childrenOf != null || parentsOf != null;
+
+        XmlBuilder xml = new XmlBuilder().start("MetricAlarms");
+        for (MetricAlarm a : alarms.metricAlarms()) {
+            if (related) {
+                relatedAlarmXml(xml, a, childrenOf != null);
+            } else {
+                toAlarmXml(xml, a);
+            }
+        }
+        xml.end("MetricAlarms").start("CompositeAlarms");
+        for (CompositeAlarm alarm : alarms.compositeAlarms()) {
+            if (related) {
+                relatedAlarmXml(xml, alarm, childrenOf != null);
+            } else {
+                xml.start("member");
+                describeAlarmFields(xml, alarm);
+                xml.elem("AlarmRule", alarm.getAlarmRule()).end("member");
+            }
+        }
+        xml.end("CompositeAlarms").start("LogAlarms").end("LogAlarms");
+        return Response.ok(AwsQueryResponse.envelope("DescribeAlarms", null, xml.build())).build();
+    }
+
+    /**
+     * An alarm as DescribeAlarms lists it for ChildrenOfAlarmName, with only its name, ARN, state value and
+     * state update time, or for ParentsOfAlarmName, with only its name and ARN.
+     */
+    private void relatedAlarmXml(XmlBuilder xml, Alarm a, boolean withState) {
+        xml.start("member").elem("AlarmName", a.getAlarmName()).elem("AlarmArn", a.getAlarmArn());
+        if (withState) {
+            xml.elem("StateValue", a.getStateValue())
+                    .elem("StateUpdatedTimestamp", Instant.ofEpochSecond(a.getStateUpdatedTimestamp()).toString());
+        }
+        xml.end("member");
+    }
+
+    private Response handleDeleteAlarms(MultivaluedMap<String, String> params, String region) {
+        List<String> alarmNames = new ArrayList<>();
+        for (int i = 1; ; i++) {
+            String name = params.getFirst("AlarmNames.member." + i);
+            if (name == null) break;
+            alarmNames.add(name);
+        }
+        metricsService.deleteAlarms(alarmNames, region);
+        return Response.ok(AwsQueryResponse.envelopeNoResult("DeleteAlarms", null)).build();
+    }
+
+    private Response handleSetAlarmState(MultivaluedMap<String, String> params, String region) {
+        String name = params.getFirst("AlarmName");
+        String state = params.getFirst("StateValue");
+        String reason = params.getFirst("StateReason");
+        String reasonData = params.getFirst("StateReasonData");
+        metricsService.setAlarmState(name, state, reason, reasonData, region);
+        return Response.ok(AwsQueryResponse.envelopeNoResult("SetAlarmState", null)).build();
+    }
+
+    private Response handleDescribeAlarmHistory(MultivaluedMap<String, String> params, String region) {
+        PaginatedResult<AlarmHistoryItem> page = metricsService.describeAlarmHistory(params.getFirst("AlarmName"),
+                alarmMembers(params, "AlarmTypes"), params.getFirst("HistoryItemType"),
+                parseInstant(params.getFirst("StartDate")), parseInstant(params.getFirst("EndDate")),
+                Pagination.parseMaxResults(params.getFirst("MaxRecords"), "MalformedInput"),
+                params.getFirst("NextToken"), params.getFirst("ScanBy"), region);
+        XmlBuilder xml = new XmlBuilder().start("AlarmHistoryItems");
+        for (AlarmHistoryItem item : page.items()) {
+            xml.start("member")
+                    .elem("AlarmName", item.alarmName())
+                    .elem("AlarmType", item.alarmType())
+                    .elem("HistoryData", item.historyData())
+                    .elem("HistoryItemType", item.historyItemType())
+                    .elem("HistorySummary", item.historySummary())
+                    .elem("Timestamp", Instant.ofEpochMilli(item.timestamp()).toString())
+                    .end("member");
+        }
+        xml.end("AlarmHistoryItems");
+        if (page.nextToken() != null) {
+            xml.elem("NextToken", page.nextToken());
+        }
+        return Response.ok(AwsQueryResponse.envelope("DescribeAlarmHistory", AwsNamespaces.CW, xml.build())).build();
+    }
+
+    private Response handleListTagsForResource(MultivaluedMap<String, String> params, String region) {
+        String arn = params.getFirst("ResourceARN");
+        Map<String, String> tags;
+        if (CloudWatchDashboardsService.isDashboardArn(arn)) {
+            tags = dashboardsService.listTagsForResource(arn, region);
+        } else if (CloudWatchMetricStreamsService.isMetricStreamArn(arn)) {
+            tags = metricStreamsService.listTagsForResource(arn, region);
+        } else {
+            tags = metricsService.listTagsForResource(arn, region);
+        }
+        XmlBuilder xml = new XmlBuilder().start("Tags");
+        tags.forEach((k, v) -> xml.start("member").elem("Key", k).elem("Value", v).end("member"));
+        xml.end("Tags");
+        return Response.ok(AwsQueryResponse.envelope("ListTagsForResource", null, xml.build())).build();
+    }
+
+    private Response handleTagResource(MultivaluedMap<String, String> params, String region) {
+        String arn = params.getFirst("ResourceARN");
+        Map<String, String> tags = new LinkedHashMap<>();
+        for (int i = 1; ; i++) {
+            String key = params.getFirst("Tags.member." + i + ".Key");
+            if (key == null) break;
+            tags.put(key, params.getFirst("Tags.member." + i + ".Value"));
+        }
+        if (CloudWatchDashboardsService.isDashboardArn(arn)) {
+            dashboardsService.tagResource(arn, tags, region);
+        } else if (CloudWatchMetricStreamsService.isMetricStreamArn(arn)) {
+            metricStreamsService.tagResource(arn, tags, region);
+        } else {
+            metricsService.tagResource(arn, tags, region);
+        }
+        // TagResourceOutput is an empty structure with a declared resultWrapper, so the
+        // wrapper element must be present. The AWS Go SDK v2 unmarshaler, behind the
+        // Terraform AWS provider, fails on a response without it.
+        return Response.ok(AwsQueryResponse.envelopeEmptyResult("TagResource", null)).build();
+    }
+
+    private Response handleUntagResource(MultivaluedMap<String, String> params, String region) {
+        String arn = params.getFirst("ResourceARN");
+        List<String> keys = new ArrayList<>();
+        for (int i = 1; ; i++) {
+            String key = params.getFirst("TagKeys.member." + i);
+            if (key == null) break;
+            keys.add(key);
+        }
+        if (CloudWatchDashboardsService.isDashboardArn(arn)) {
+            dashboardsService.untagResource(arn, keys, region);
+        } else if (CloudWatchMetricStreamsService.isMetricStreamArn(arn)) {
+            metricStreamsService.untagResource(arn, keys, region);
+        } else {
+            metricsService.untagResource(arn, keys, region);
+        }
+        return Response.ok(AwsQueryResponse.envelopeEmptyResult("UntagResource", null)).build();
+    }
+
+    // ──────────────────────────── Dashboards ────────────────────────────
+
+    private Response handlePutDashboard(MultivaluedMap<String, String> params, String region) {
+        Map<String, String> tags = new LinkedHashMap<>();
+        for (int i = 1; ; i++) {
+            String key = params.getFirst("Tags.member." + i + ".Key");
+            if (key == null) {
+                break;
+            }
+            tags.put(key, params.getFirst("Tags.member." + i + ".Value"));
+        }
+        dashboardsService.putDashboard(params.getFirst("DashboardName"),
+                params.getFirst("DashboardBody"), tags, region);
+        // DashboardValidationMessages is optional on the response shape, but AWS always
+        // sends the list. It stays empty: the body is stored opaquely, so nothing here
+        // inspects it and no validation warning can be produced.
+        String xml = new XmlBuilder()
+                .start("DashboardValidationMessages").end("DashboardValidationMessages")
+                .build();
+        return Response.ok(AwsQueryResponse.envelope("PutDashboard", null, xml)).build();
+    }
+
+    private Response handleGetDashboard(MultivaluedMap<String, String> params, String region) {
+        Dashboard dashboard = dashboardsService.getDashboard(params.getFirst("DashboardName"), region);
+        String xml = new XmlBuilder()
+                .elem("DashboardArn", dashboard.getDashboardArn())
+                .elem("DashboardName", dashboard.getDashboardName())
+                .elem("DashboardBody", dashboard.getDashboardBody())
+                .build();
+        return Response.ok(AwsQueryResponse.envelope("GetDashboard", null, xml)).build();
+    }
+
+    private Response handleListDashboards(MultivaluedMap<String, String> params, String region) {
+        PaginatedResult<Dashboard> page = dashboardsService.listDashboardsPage(
+                params.getFirst("DashboardNamePrefix"), params.getFirst("NextToken"), region);
+
+        DateTimeFormatter fmt = DateTimeFormatter.ISO_INSTANT;
+        XmlBuilder xml = new XmlBuilder().start("DashboardEntries");
+        for (Dashboard d : page.items()) {
+            xml.start("member")
+                    .elem("DashboardName", d.getDashboardName())
+                    .elem("DashboardArn", d.getDashboardArn())
+                    .elem("LastModified", fmt.format(Instant.ofEpochSecond(d.getLastModified())))
+                    .elem("Size", d.getSize())
+                    .end("member");
+        }
+        xml.end("DashboardEntries");
+        if (page.nextToken() != null) {
+            xml.elem("NextToken", page.nextToken());
+        }
+        return Response.ok(AwsQueryResponse.envelope("ListDashboards", null, xml.build())).build();
+    }
+
+    private Response handleDeleteDashboards(MultivaluedMap<String, String> params, String region) {
+        List<String> names = new ArrayList<>();
+        for (int i = 1; ; i++) {
+            String name = params.getFirst("DashboardNames.member." + i);
+            if (name == null) break;
+            names.add(name);
+        }
+        dashboardsService.deleteDashboards(names, region);
+        return Response.ok(AwsQueryResponse.envelopeEmptyResult("DeleteDashboards", null)).build();
+    }
+
+    // ──────────────────────────── Metric Streams ────────────────────────────
+
+    private Response handlePutMetricStream(MultivaluedMap<String, String> params, String region) {
+        MetricStream stream = new MetricStream();
+        stream.setName(params.getFirst("Name"));
+        stream.setFirehoseArn(params.getFirst("FirehoseArn"));
+        stream.setRoleArn(params.getFirst("RoleArn"));
+        stream.setOutputFormat(params.getFirst("OutputFormat"));
+        stream.setIncludeLinkedAccountsMetrics(
+                Boolean.parseBoolean(params.getFirst("IncludeLinkedAccountsMetrics")));
+        stream.setIncludeFilters(parseStreamFilters(params, "IncludeFilters"));
+        stream.setExcludeFilters(parseStreamFilters(params, "ExcludeFilters"));
+        stream.setStatisticsConfigurations(parseStatisticsConfigurations(params));
+        Map<String, String> tags = new LinkedHashMap<>();
+        for (int i = 1; ; i++) {
+            String key = params.getFirst("Tags.member." + i + ".Key");
+            if (key == null) {
+                break;
+            }
+            tags.put(key, params.getFirst("Tags.member." + i + ".Value"));
+        }
+        stream.setTags(tags);
+
+        MetricStream stored = metricStreamsService.putMetricStream(stream, region);
+        String xml = new XmlBuilder().elem("Arn", stored.getArn()).build();
+        return Response.ok(AwsQueryResponse.envelope("PutMetricStream", null, xml)).build();
+    }
+
+    private Response handleGetMetricStream(MultivaluedMap<String, String> params, String region) {
+        MetricStream stream = metricStreamsService.getMetricStream(params.getFirst("Name"), region);
+        DateTimeFormatter fmt = DateTimeFormatter.ISO_INSTANT;
+        XmlBuilder xml = new XmlBuilder()
+                .elem("Arn", stream.getArn())
+                .elem("Name", stream.getName())
+                .elem("FirehoseArn", stream.getFirehoseArn())
+                .elem("RoleArn", stream.getRoleArn())
+                .elem("State", stream.getState())
+                .elem("OutputFormat", stream.getOutputFormat())
+                .elem("CreationDate", fmt.format(Instant.ofEpochSecond(stream.getCreationDate())))
+                .elem("LastUpdateDate", fmt.format(Instant.ofEpochSecond(stream.getLastUpdateDate())))
+                .elem("IncludeLinkedAccountsMetrics", stream.isIncludeLinkedAccountsMetrics());
+        appendStreamFilters(xml, "IncludeFilters", stream.getIncludeFilters());
+        appendStreamFilters(xml, "ExcludeFilters", stream.getExcludeFilters());
+        appendStatisticsConfigurations(xml, stream.getStatisticsConfigurations());
+        return Response.ok(AwsQueryResponse.envelope("GetMetricStream", null, xml.build())).build();
+    }
+
+    private Response handleListMetricStreams(MultivaluedMap<String, String> params, String region) {
+        PaginatedResult<MetricStream> page = metricStreamsService.listMetricStreams(
+                Pagination.parseMaxResults(params.getFirst("MaxResults"), "InvalidParameterValue"),
+                params.getFirst("NextToken"), region);
+        DateTimeFormatter fmt = DateTimeFormatter.ISO_INSTANT;
+        XmlBuilder xml = new XmlBuilder().start("Entries");
+        for (MetricStream stream : page.items()) {
+            xml.start("member")
+                    .elem("Arn", stream.getArn())
+                    .elem("Name", stream.getName())
+                    .elem("FirehoseArn", stream.getFirehoseArn())
+                    .elem("State", stream.getState())
+                    .elem("OutputFormat", stream.getOutputFormat())
+                    .elem("CreationDate", fmt.format(Instant.ofEpochSecond(stream.getCreationDate())))
+                    .elem("LastUpdateDate", fmt.format(Instant.ofEpochSecond(stream.getLastUpdateDate())))
+                    .end("member");
+        }
+        xml.end("Entries");
+        if (page.nextToken() != null) {
+            xml.elem("NextToken", page.nextToken());
+        }
+        return Response.ok(AwsQueryResponse.envelope("ListMetricStreams", null, xml.build())).build();
+    }
+
+    private Response handleDeleteMetricStream(MultivaluedMap<String, String> params, String region) {
+        metricStreamsService.deleteMetricStream(params.getFirst("Name"), region);
+        return Response.ok(AwsQueryResponse.envelopeEmptyResult("DeleteMetricStream", null)).build();
+    }
+
+    private Response handleStartMetricStreams(MultivaluedMap<String, String> params, String region) {
+        metricStreamsService.startMetricStreams(parseNames(params), region);
+        return Response.ok(AwsQueryResponse.envelopeEmptyResult("StartMetricStreams", null)).build();
+    }
+
+    private Response handleStopMetricStreams(MultivaluedMap<String, String> params, String region) {
+        metricStreamsService.stopMetricStreams(parseNames(params), region);
+        return Response.ok(AwsQueryResponse.envelopeEmptyResult("StopMetricStreams", null)).build();
+    }
+
+    private List<String> parseNames(MultivaluedMap<String, String> params) {
+        List<String> names = new ArrayList<>();
+        for (int i = 1; ; i++) {
+            String name = params.getFirst("Names.member." + i);
+            if (name == null) {
+                break;
+            }
+            names.add(name);
+        }
+        return names;
+    }
+
+    private void appendStreamFilters(XmlBuilder xml, String element, List<MetricStreamFilter> filters) {
+        if (filters.isEmpty()) {
+            return;
+        }
+        xml.start(element);
+        for (MetricStreamFilter filter : filters) {
+            xml.start("member").elem("Namespace", filter.getNamespace());
+            if (!filter.getMetricNames().isEmpty()) {
+                xml.start("MetricNames");
+                for (String metricName : filter.getMetricNames()) {
+                    xml.elem("member", metricName);
+                }
+                xml.end("MetricNames");
+            }
+            xml.end("member");
+        }
+        xml.end(element);
+    }
+
+    private void appendStatisticsConfigurations(XmlBuilder xml,
+                                                List<MetricStreamStatisticsConfiguration> configurations) {
+        if (configurations.isEmpty()) {
+            return;
+        }
+        xml.start("StatisticsConfigurations");
+        for (MetricStreamStatisticsConfiguration configuration : configurations) {
+            xml.start("member").start("IncludeMetrics");
+            for (MetricStreamStatisticsConfiguration.IncludeMetric metric : configuration.getIncludeMetrics()) {
+                xml.start("member")
+                        .elem("Namespace", metric.namespace())
+                        .elem("MetricName", metric.metricName())
+                        .end("member");
+            }
+            xml.end("IncludeMetrics").start("AdditionalStatistics");
+            for (String stat : configuration.getAdditionalStatistics()) {
+                xml.elem("member", stat);
+            }
+            xml.end("AdditionalStatistics").end("member");
+        }
+        xml.end("StatisticsConfigurations");
+    }
+
+    private List<MetricStreamFilter> parseStreamFilters(MultivaluedMap<String, String> params, String prefix) {
+        List<MetricStreamFilter> filters = new ArrayList<>();
+        for (int i = 1; ; i++) {
+            String base = prefix + ".member." + i;
+            String namespace = params.getFirst(base + ".Namespace");
+            if (namespace == null) {
+                break;
+            }
+            List<String> metricNames = new ArrayList<>();
+            for (int j = 1; ; j++) {
+                String metricName = params.getFirst(base + ".MetricNames.member." + j);
+                if (metricName == null) {
+                    break;
+                }
+                metricNames.add(metricName);
+            }
+            filters.add(new MetricStreamFilter(namespace, metricNames));
+        }
+        return filters;
+    }
+
+    private List<MetricStreamStatisticsConfiguration> parseStatisticsConfigurations(
+            MultivaluedMap<String, String> params) {
+        List<MetricStreamStatisticsConfiguration> configurations = new ArrayList<>();
+        for (int i = 1; ; i++) {
+            String base = "StatisticsConfigurations.member." + i;
+            if (params.getFirst(base + ".IncludeMetrics.member.1.Namespace") == null
+                    && params.getFirst(base + ".AdditionalStatistics.member.1") == null) {
+                break;
+            }
+            MetricStreamStatisticsConfiguration configuration = new MetricStreamStatisticsConfiguration();
+            List<MetricStreamStatisticsConfiguration.IncludeMetric> includeMetrics = new ArrayList<>();
+            for (int j = 1; ; j++) {
+                String namespace = params.getFirst(base + ".IncludeMetrics.member." + j + ".Namespace");
+                if (namespace == null) {
+                    break;
+                }
+                includeMetrics.add(new MetricStreamStatisticsConfiguration.IncludeMetric(namespace,
+                        params.getFirst(base + ".IncludeMetrics.member." + j + ".MetricName")));
+            }
+            configuration.setIncludeMetrics(includeMetrics);
+            List<String> additionalStatistics = new ArrayList<>();
+            for (int j = 1; ; j++) {
+                String stat = params.getFirst(base + ".AdditionalStatistics.member." + j);
+                if (stat == null) {
+                    break;
+                }
+                additionalStatistics.add(stat);
+            }
+            configuration.setAdditionalStatistics(additionalStatistics);
+            configurations.add(configuration);
+        }
+        return configurations;
+    }
+
+    // ──────────────────────────── Parsing Helpers ────────────────────────────
+
+    private List<MetricDatum> parseMetricData(MultivaluedMap<String, String> params) {
+        List<MetricDatum> datums = parseMetricData(params, "MetricData");
+        // An empty EntityMetricData entry serializes to no keys, so its index is absent
+        // while later entries keep theirs: iterate the indexes present, not 1..first gap.
+        SortedSet<Integer> entityIndexes = new TreeSet<>();
+        for (String key : params.keySet()) {
+            Matcher matcher = ENTITY_METRIC_DATA_MEMBER.matcher(key);
+            if (matcher.lookingAt()) {
+                entityIndexes.add(Integer.parseInt(matcher.group(1)));
+            }
+        }
+        for (int index : entityIndexes) {
+            datums.addAll(parseMetricData(params, "EntityMetricData.member." + index + ".MetricData"));
+        }
+        LOG.debugv("Query PutMetricData parsed {0} datums", datums.size());
+        return datums;
+    }
+
+    private List<MetricDatum> parseMetricData(MultivaluedMap<String, String> params, String listPrefix) {
+        List<MetricDatum> datums = new ArrayList<>();
+        for (int i = 1; ; i++) {
+            String memberPrefix = listPrefix + ".member." + i + ".";
+            String metricName = params.getFirst(memberPrefix + "MetricName");
+            if (metricName == null || metricName.isEmpty()) {
+                if (metricName == null && params.keySet().stream().noneMatch(key -> key.startsWith(memberPrefix))) {
+                    break;
+                }
+                throw CloudWatchMetricsException.missingParameter(memberPrefix + "MetricName");
+            }
+            MetricDatum datum = new MetricDatum();
+            datum.setMetricName(metricName);
+            datum.setUnit(params.getFirst(listPrefix + ".member." + i + ".Unit"));
+
+            String valueStr = params.getFirst(listPrefix + ".member." + i + ".Value");
+            if (valueStr != null) {
+                datum.setValue(parseDouble(valueStr, 0));
+            }
+
+            String tsStr = params.getFirst(listPrefix + ".member." + i + ".Timestamp");
+            if (tsStr != null) {
+                Instant ts = parseInstant(tsStr);
+                datum.setTimestamp(ts != null ? ts.getEpochSecond() : 0);
+            }
+
+            // StatisticValues
+            String sc = params.getFirst(listPrefix + ".member." + i + ".StatisticValues.SampleCount");
+            if (sc != null) {
+                datum.setSampleCount(parseDouble(sc, 0));
+                datum.setSum(parseDouble(params.getFirst(listPrefix + ".member." + i + ".StatisticValues.Sum"), 0));
+                datum.setMinimum(parseDouble(params.getFirst(listPrefix + ".member." + i + ".StatisticValues.Minimum"), 0));
+                datum.setMaximum(parseDouble(params.getFirst(listPrefix + ".member." + i + ".StatisticValues.Maximum"), 0));
+            }
+
+            // Dimensions
+            List<Dimension> dims = new ArrayList<>();
+            for (int j = 1; ; j++) {
+                String dimName = params.getFirst(listPrefix + ".member." + i + ".Dimensions.member." + j + ".Name");
+                String dimValue = params.getFirst(listPrefix + ".member." + i + ".Dimensions.member." + j + ".Value");
+                if (dimName == null) {
+                    break;
+                }
+                dims.add(new Dimension(dimName, dimValue));
+            }
+            datum.setDimensions(dims);
+
+            datums.add(datum);
+        }
+        return datums;
+    }
+
+    private List<Dimension> parseDimensionFilters(MultivaluedMap<String, String> params) {
+        List<Dimension> dims = new ArrayList<>();
+        for (int i = 1; ; i++) {
+            String name = params.getFirst("Dimensions.member." + i + ".Name");
+            String value = params.getFirst("Dimensions.member." + i + ".Value");
+            if (name == null) {
+                break;
+            }
+            dims.add(new Dimension(name, value));
+        }
+        return dims;
+    }
+
+    private MetricAlarm parseAlarm(MultivaluedMap<String, String> params) {
+        MetricAlarm a = new MetricAlarm();
+        parseAlarmFields(params, a);
+        a.setMetricName(params.getFirst("MetricName"));
+        a.setNamespace(params.getFirst("Namespace"));
+        a.setStatistic(params.getFirst("Statistic"));
+        a.setMetrics(parseAlarmMetricQueries(params));
+        a.setPeriod(a.getMetrics().isEmpty() ? parseIntParam(params, "Period", 60) : null);
+        a.setUnit(params.getFirst("Unit"));
+        a.setEvaluationPeriods(parseIntParam(params, "EvaluationPeriods", 1));
+        String datapointsToAlarm = params.getFirst("DatapointsToAlarm");
+        a.setDatapointsToAlarm(datapointsToAlarm == null || datapointsToAlarm.isBlank()
+                ? null : Integer.parseInt(datapointsToAlarm));
+        a.setThreshold(parseDouble(params.getFirst("Threshold"), 0));
+        a.setComparisonOperator(params.getFirst("ComparisonOperator"));
+        a.setTreatMissingData(params.getFirst("TreatMissingData"));
+
+        // Dimensions
+        List<Dimension> dims = new ArrayList<>();
+        for (int i = 1; ; i++) {
+            String name = params.getFirst("Dimensions.member." + i + ".Name");
+            String value = params.getFirst("Dimensions.member." + i + ".Value");
+            if (name == null) break;
+            dims.add(new Dimension(name, value));
+        }
+        a.setDimensions(dims);
+
+        return a;
+    }
+
+    private void parseAlarmFields(MultivaluedMap<String, String> params, Alarm alarm) {
+        alarm.setAlarmName(params.getFirst("AlarmName"));
+        alarm.setAlarmDescription(params.getFirst("AlarmDescription"));
+        String actionsEnabled = params.getFirst("ActionsEnabled");
+        alarm.setActionsEnabled(actionsEnabled == null || Boolean.parseBoolean(actionsEnabled));
+        alarm.setAlarmActions(alarmMembers(params, "AlarmActions"));
+        alarm.setOkActions(alarmMembers(params, "OKActions"));
+        alarm.setInsufficientDataActions(alarmMembers(params, "InsufficientDataActions"));
+        Map<String, String> tags = new LinkedHashMap<>();
+        for (int i = 1; params.getFirst("Tags.member." + i + ".Key") != null; i++) {
+            tags.put(params.getFirst("Tags.member." + i + ".Key"), params.getFirst("Tags.member." + i + ".Value"));
+        }
+        alarm.setTags(tags);
+    }
+
+    private List<AlarmMetricDataQuery> parseAlarmMetricQueries(MultivaluedMap<String, String> params) {
+        List<AlarmMetricDataQuery> queries = new ArrayList<>();
+        for (int index = 1; ; index++) {
+            String prefix = "Metrics.member." + index;
+            String id = params.getFirst(prefix + ".Id");
+            if (id == null) {
+                break;
+            }
+            AlarmMetricDataQuery.MetricStat metricStat = null;
+            String metricPrefix = prefix + ".MetricStat.Metric";
+            if (params.getFirst(metricPrefix + ".Namespace") != null) {
+                List<AlarmMetricDataQuery.MetricDimension> dimensions = null;
+                for (int dimensionIndex = 1; ; dimensionIndex++) {
+                    String dimensionPrefix = metricPrefix + ".Dimensions.member." + dimensionIndex;
+                    String name = params.getFirst(dimensionPrefix + ".Name");
+                    if (name == null) {
+                        break;
+                    }
+                    if (dimensions == null) {
+                        dimensions = new ArrayList<>();
+                    }
+                    dimensions.add(new AlarmMetricDataQuery.MetricDimension(
+                            name, params.getFirst(dimensionPrefix + ".Value")));
+                }
+                AlarmMetricDataQuery.Metric metric = new AlarmMetricDataQuery.Metric(
+                        params.getFirst(metricPrefix + ".Namespace"),
+                        params.getFirst(metricPrefix + ".MetricName"), dimensions);
+                metricStat = new AlarmMetricDataQuery.MetricStat(metric,
+                        optionalInteger(params.getFirst(prefix + ".MetricStat.Period")),
+                        params.getFirst(prefix + ".MetricStat.Stat"), params.getFirst(prefix + ".MetricStat.Unit"));
+            }
+            String returnData = params.getFirst(prefix + ".ReturnData");
+            queries.add(new AlarmMetricDataQuery(id, params.getFirst(prefix + ".Expression"),
+                    params.getFirst(prefix + ".Label"), returnData == null ? null : Boolean.valueOf(returnData),
+                    optionalInteger(params.getFirst(prefix + ".Period")),
+                    params.getFirst(prefix + ".AccountId"), metricStat));
+        }
+        return queries;
+    }
+
+    private static Integer optionalInteger(String value) {
+        return value == null ? null : Integer.valueOf(value);
+    }
+
+    private void toAlarmXml(XmlBuilder xml, MetricAlarm a) {
+        xml.start("member");
+        describeAlarmFields(xml, a);
+        if (!a.getMetrics().isEmpty()) {
+            toAlarmMetricsXml(xml, a.getMetrics());
+        } else {
+            xml.start("Dimensions");
+            for (Dimension d : a.getDimensions()) {
+                xml.start("member").elem("Name", d.name()).elem("Value", d.value()).end("member");
+            }
+            xml.end("Dimensions")
+                    .elem("MetricName", a.getMetricName())
+                    .elem("Namespace", a.getNamespace())
+                    .elem("Statistic", a.getStatistic())
+                    .elem("Period", a.getPeriod() == null ? null : a.getPeriod().toString())
+                    .elem("Unit", a.getUnit());
+        }
+
+        xml.elem("EvaluationPeriods", String.valueOf(a.getEvaluationPeriods()))
+                .elem("Threshold", String.valueOf(a.getThreshold()))
+                .elem("ComparisonOperator", a.getComparisonOperator())
+                .elem("TreatMissingData", a.getTreatMissingData());
+        // Only an alarm the caller gave an M for carries the member, matching what AWS returns.
+        if (a.getDatapointsToAlarm() != null) {
+            xml.elem("DatapointsToAlarm", String.valueOf(a.getDatapointsToAlarm()));
+        }
+
+        xml.end("member");
+    }
+
+    private void describeAlarmFields(XmlBuilder xml, Alarm a) {
+        xml.elem("AlarmName", a.getAlarmName())
+                .elem("AlarmArn", a.getAlarmArn())
+                .elem("AlarmDescription", a.getAlarmDescription());
+        xml.start("AlarmActions");
+        a.getAlarmActions().forEach(act -> xml.elem("member", act));
+        xml.end("AlarmActions")
+                .elem("AlarmConfigurationUpdatedTimestamp", Instant.ofEpochSecond(a.getAlarmConfigurationUpdatedTimestamp()).toString())
+                .elem("ActionsEnabled", String.valueOf(a.isActionsEnabled()));
+
+        xml.start("OKActions");
+        a.getOkActions().forEach(act -> xml.elem("member", act));
+        xml.end("OKActions");
+        xml.start("InsufficientDataActions");
+        a.getInsufficientDataActions().forEach(act -> xml.elem("member", act));
+        xml.end("InsufficientDataActions");
+        xml.elem("StateValue", a.getStateValue())
+                .elem("StateReason", a.getStateReason())
+                .elem("StateReasonData", a.getStateReasonData())
+                .elem("StateUpdatedTimestamp", Instant.ofEpochSecond(a.getStateUpdatedTimestamp()).toString())
+                .elem("StateTransitionedTimestamp", Instant.ofEpochSecond(a.lastTransitionTimestamp()).toString());
+    }
+
+    private void toAlarmMetricsXml(XmlBuilder xml, List<AlarmMetricDataQuery> metrics) {
+        xml.start("Metrics");
+        for (AlarmMetricDataQuery query : metrics) {
+            xml.start("member").elem("Id", query.id()).elem("Expression", query.expression())
+                    .elem("Label", query.label()).elem("AccountId", query.accountId())
+                    .elem("Period", query.period() == null ? null : query.period().toString())
+                    .elem("ReturnData", query.returnData() == null ? null : query.returnData().toString());
+            AlarmMetricDataQuery.MetricStat stat = query.metricStat();
+            if (stat != null) {
+                xml.start("MetricStat");
+                AlarmMetricDataQuery.Metric metric = stat.metric();
+                if (metric != null) {
+                    xml.start("Metric").elem("Namespace", metric.namespace()).elem("MetricName", metric.metricName());
+                    if (metric.dimensions() != null) {
+                        xml.start("Dimensions");
+                        for (AlarmMetricDataQuery.MetricDimension dimension : metric.dimensions()) {
+                            xml.start("member").elem("Name", dimension.name()).elem("Value", dimension.value())
+                                    .end("member");
+                        }
+                        xml.end("Dimensions");
+                    }
+                    xml.end("Metric");
+                }
+                xml.elem("Period", stat.period() == null ? null : stat.period().toString())
+                        .elem("Stat", stat.stat()).elem("Unit", stat.unit()).end("MetricStat");
+            }
+            xml.end("member");
+        }
+        xml.end("Metrics");
+    }
+
+    private Instant parseInstant(String value) {
+        if (value == null || value.isBlank()) {
+            return null;
+        }
+        try {
+            return Instant.parse(value);
+        } catch (Exception e) {
+            try {
+                return Instant.ofEpochSecond(Long.parseLong(value));
+            } catch (Exception ex) {
+                return null;
+            }
+        }
+    }
+
+    private int parseIntParam(MultivaluedMap<String, String> params, String name, int defaultValue) {
+        String value = params.getFirst(name);
+        if (value == null) {
+            return defaultValue;
+        }
+        try {
+            return Integer.parseInt(value);
+        } catch (NumberFormatException e) {
+            return defaultValue;
+        }
+    }
+
+    private double parseDouble(String value, double defaultValue) {
+        if (value == null) {
+            return defaultValue;
+        }
+        try {
+            return Double.parseDouble(value);
+        } catch (NumberFormatException e) {
+            return defaultValue;
+        }
+    }
+}
