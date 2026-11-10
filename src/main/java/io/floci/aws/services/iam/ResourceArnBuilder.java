@@ -231,7 +231,7 @@ public class ResourceArnBuilder {
             case "sns"            -> List.of(buildSnsArn(ctx, region, accountId));
             case "dynamodb"       -> buildDynamoDbArns(ctx, region, accountId);
             case "kinesis"        -> List.of(buildKinesisArn(ctx, region, accountId));
-            case "ssm"            -> List.of(buildSsmArn(ctx, region, accountId));
+            case "ssm"            -> buildSsmArns(ctx, region, accountId);
             case "iam"            -> buildIamArns(ctx, region, accountId);
             case "resource-groups" -> List.of(buildResourceGroupArn(ctx, region, accountId));
             case "scheduler"      -> List.of(buildSchedulerArn(path, ctx, region, accountId, partition));
@@ -1905,7 +1905,12 @@ public class ResourceArnBuilder {
     }
 
     // ── SSM ──────────────────────────────────────────────────────────────────────
-    private String buildSsmArn(ContainerRequestContext ctx, String region, String accountId) {
+    /**
+     * The parameters an SSM request is evaluated against: the {@code ResourceArn} of a resource-policy action, the
+     * parameter its {@code Name} gives, each parameter its {@code Names} gives, or the path its {@code Path} gives,
+     * which AWS authorizes {@code GetParametersByPath} against rather than the parameters it returns.
+     */
+    private List<String> buildSsmArns(ContainerRequestContext ctx, String region, String accountId) {
         JsonNode json = readJsonBody(ctx);
         if (json != null && json.isObject()) {
             String operation = IamActionRegistry.targetOperation(ctx);
@@ -1913,21 +1918,43 @@ public class ResourceArnBuilder {
                     && json.hasNonNull("ResourceArn")) {
                 String resourceArn = json.get("ResourceArn").asText().trim();
                 if (AwsArnUtils.isArnFor(resourceArn, "ssm")) {
-                    return resourceArn;
+                    return List.of(resourceArn);
                 }
             }
             if (json.hasNonNull("Name")) {
                 String name = json.get("Name").asText().trim();
                 if (!name.isEmpty()) {
-                    if (AwsArnUtils.isArnFor(name, "ssm")) {
-                        return name;
+                    return List.of(ssmParameterArn(name, region, accountId));
+                }
+            }
+            if (json.path("Names").isArray()) {
+                List<String> arns = new ArrayList<>();
+                for (JsonNode entry : json.get("Names")) {
+                    String name = entry.asText().trim();
+                    if (!name.isEmpty()) {
+                        arns.add(ssmParameterArn(name, region, accountId));
                     }
-                    String paramResource = name.startsWith("/") ? "parameter" + name : "parameter/" + name;
-                    return AwsArnUtils.Arn.of("ssm", region, accountId, paramResource).toString();
+                }
+                if (!arns.isEmpty()) {
+                    return arns;
+                }
+            }
+            if (json.hasNonNull("Path")) {
+                String path = json.get("Path").asText().trim();
+                if (!path.isEmpty() && !"/".equals(path)) {
+                    return List.of(ssmParameterArn(path, region, accountId));
                 }
             }
         }
-        return AwsArnUtils.Arn.of("ssm", region, accountId, "parameter/*").toString();
+        return List.of(AwsArnUtils.Arn.of("ssm", region, accountId, "parameter/*").toString());
+    }
+
+    private static String ssmParameterArn(String name, String region, String accountId) {
+        if (AwsArnUtils.isArnFor(name, "ssm")) {
+            return name;
+        }
+        String paramResource = name.startsWith("/") ? "parameter" + name : "parameter/" + name;
+        return AwsArnUtils.Arn.of("ssm", region, accountId, paramResource).toString();
     }
 
     // ── KMS ──────────────────────────────────────────────────────────────────────

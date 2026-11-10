@@ -1714,6 +1714,33 @@ class ResourceArnBuilderTest {
                 builder.build("ssm", ctx, "us-east-1", "000000000000"));
     }
 
+    @Test
+    void ssmGetParametersByPathActsOnTheParameterItsPathNames() {
+        when(ctx.getHeaderString("X-Amz-Target")).thenReturn("AmazonSSM.GetParametersByPath");
+        setJsonBody("{\"Path\":\"/app/config\",\"Recursive\":true}");
+        assertEquals(List.of("arn:aws:ssm:us-east-1:000000000000:parameter/app/config"),
+                builder.buildResources("ssm", ctx, "us-east-1", "000000000000"));
+
+        setJsonBody("{\"Path\":\"/\"}");
+        assertEquals(List.of("arn:aws:ssm:us-east-1:000000000000:parameter/*"),
+                builder.buildResources("ssm", ctx, "us-east-1", "000000000000"));
+    }
+
+    @Test
+    void ssmGetParametersActsOnEachParameterItsNamesGive() {
+        when(ctx.getHeaderString("X-Amz-Target")).thenReturn("AmazonSSM.GetParameters");
+        setJsonBody("{\"Names\":[\"/app/config/a\",\"plain-key\","
+                + "\"arn:aws:ssm:us-east-1:111122223333:parameter/shared/b\"]}");
+        assertEquals(List.of("arn:aws:ssm:us-east-1:000000000000:parameter/app/config/a",
+                        "arn:aws:ssm:us-east-1:000000000000:parameter/plain-key",
+                        "arn:aws:ssm:us-east-1:111122223333:parameter/shared/b"),
+                builder.buildResources("ssm", ctx, "us-east-1", "000000000000"));
+
+        setJsonBody("{\"Names\":[]}");
+        assertEquals(List.of("arn:aws:ssm:us-east-1:000000000000:parameter/*"),
+                builder.buildResources("ssm", ctx, "us-east-1", "000000000000"));
+    }
+
     // ── SQS ─────────────────────────────────────────────────────────────────────
 
     @Test
