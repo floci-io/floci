@@ -57,7 +57,7 @@ class SsoOidcIntegrationTest {
         Response registration = given()
                 .contentType("application/json")
                 .body("{\"clientName\":\"Device Integration\",\"clientType\":\"public\","
-                        + "\"grantTypes\":[\"urn:ietf:params:oauth:grant-type:device_code\"]}")
+                        + "\"grantTypes\":[\"" + DEVICE_CODE_GRANT + "\"]}")
             .when().post("/client/register")
             .then().statusCode(200)
             .extract().response();
@@ -108,12 +108,7 @@ class SsoOidcIntegrationTest {
             .when().get("/device")
             .then().statusCode(200).body("status", equalTo("authorized"));
 
-        Response token = given()
-                .contentType("application/json")
-                .body("{\"clientId\":\"" + clientId + "\",\"clientSecret\":\"" + clientSecret
-                        + "\",\"grantType\":\"urn:ietf:params:oauth:grant-type:device_code\","
-                        + "\"deviceCode\":\"" + authorization.deviceCode() + "\"}")
-            .when().post("/token")
+        Response token = createDeviceCodeToken(authorization)
             .then().statusCode(200)
                 .body("tokenType", equalTo("Bearer"))
                 .body("accessToken", matchesPattern("[0-9a-f]{64}"))
@@ -196,18 +191,23 @@ class SsoOidcIntegrationTest {
         // AuthorizationPendingException.
         DeviceAuthorization authorization = startDeviceAuthorization("Pending Integration", DEVICE_CODE_GRANT);
 
-        given()
-                .contentType("application/json")
-                .body("{\"clientId\":\"" + authorization.clientId() + "\",\"clientSecret\":\""
-                        + authorization.clientSecret() + "\",\"grantType\":\"" + DEVICE_CODE_GRANT
-                        + "\",\"deviceCode\":\"" + authorization.deviceCode() + "\"}")
-            .when().post("/token")
+        createDeviceCodeToken(authorization)
             .then().statusCode(400)
                 .header("x-amzn-ErrorType", "AuthorizationPendingException")
                 .body("error", equalTo("authorization_pending"));
     }
 
     private record DeviceAuthorization(String clientId, String clientSecret, String deviceCode, String userCode) {
+    }
+
+    /** Sends the device-code CreateToken request a polling client sends for {@code authorization}. */
+    private static Response createDeviceCodeToken(DeviceAuthorization authorization) {
+        return given()
+                .contentType("application/json")
+                .body("{\"clientId\":\"" + authorization.clientId() + "\",\"clientSecret\":\""
+                        + authorization.clientSecret() + "\",\"grantType\":\"" + DEVICE_CODE_GRANT
+                        + "\",\"deviceCode\":\"" + authorization.deviceCode() + "\"}")
+            .when().post("/token");
     }
 
     /** Registers a public client with the given grant types and starts a device authorization for it. */
