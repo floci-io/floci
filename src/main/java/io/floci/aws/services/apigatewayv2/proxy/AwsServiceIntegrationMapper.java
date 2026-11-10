@@ -3,7 +3,9 @@ package io.floci.aws.services.apigatewayv2.proxy;
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
+import com.fasterxml.jackson.databind.node.TextNode;
 import com.jayway.jsonpath.Configuration;
 import com.jayway.jsonpath.JsonPath;
 import com.jayway.jsonpath.JsonPathException;
@@ -25,14 +27,16 @@ import java.util.regex.Pattern;
  * <p>A parameter value is a static string, a whole source expression such as
  * {@code $request.body}, or a string with source expressions embedded as {@code ${request.header.X}}.
  * Beyond the sources {@link ContextValueResolver} reads, it resolves {@code $request.body},
- * {@code $request.body.<JSONPath>} and {@code $stageVariables.<name>}. An embedded expression
- * that resolves to nothing is replaced by the empty string.
+ * {@code $request.body.<JSONPath>}, {@code $stageVariables.<name>} and the {@code $context.<name>}
+ * values the caller supplies. An embedded expression that resolves to nothing is replaced by the
+ * empty string.
  */
 public class AwsServiceIntegrationMapper {
 
     private static final Pattern EMBEDDED_EXPRESSION = Pattern.compile("\\$\\{([^}]+)}");
     private static final String BODY = "$request.body";
     private static final String STAGE_VARIABLES = "$stageVariables.";
+    private static final String CONTEXT = "$context.";
 
     private final ObjectMapper objectMapper;
     private final Configuration jsonPathConfiguration;
@@ -46,35 +50,81 @@ public class AwsServiceIntegrationMapper {
                 .build();
     }
 
-    /** Resolves every parameter value, keeping null for a source that is absent. */
-    public Map<String, String> resolveParameters(Map<String, String> parameters, RequestContext ctx,
-                                                 Map<String, String> stageVariables) {
+    /**
+     * Resolves every parameter value, keeping null for a source that is absent. A JSON parameter
+     * whose value is a JSON object is parsed before anything is resolved, and expressions are
+     * resolved only inside its string values, so a request value cannot add or change members.
+     * {@code contextVariables} holds the {@code $context.<name>} values of this request.
+     */
+    public Map<String, String> resolveParameters(IntegrationSubtype subtype, Map<String, String> parameters,
+                                                 RequestContext ctx, Map<String, String> stageVariables,
+                                                 Map<String, String> contextVariables) {
         Map<String, String> resolved = new LinkedHashMap<>();
         if (parameters == null) {
             return resolved;
         }
-        parameters.forEach((name, value) -> resolved.put(name, resolveValue(value, ctx, stageVariables)));
+        Sources sources = new Sources(ctx, stageVariables, contextVariables);
+        parameters.forEach((name, value) -> {
+            JsonNode template = subtype.isJsonParameter(name) ? jsonTemplate(value) : null;
+            resolved.put(name, template != null
+                    ? resolveLeaves(template, sources).toString()
+                    : resolveValue(value, sources));
+        });
         return resolved;
     }
 
-    private String resolveValue(String value, RequestContext ctx, Map<String, String> stageVariables) {
+    private record Sources(RequestContext ctx, Map<String, String> stageVariables,
+                           Map<String, String> contextVariables) {}
+
+    private JsonNode jsonTemplate(String value) {
+        if (value == null || value.startsWith("$")) {
+            return null;
+        }
+        try {
+            JsonNode node = objectMapper.readTree(value);
+            return node != null && node.isObject() ? node : null;
+        } catch (JsonProcessingException e) {
+            return null;
+        }
+    }
+
+    private JsonNode resolveLeaves(JsonNode node, Sources sources) {
+        if (node.isTextual()) {
+            String resolved = resolveValue(node.asText(), sources);
+            return TextNode.valueOf(resolved != null ? resolved : "");
+        }
+        if (node.isObject()) {
+            ObjectNode copy = objectMapper.createObjectNode();
+            node.properties().forEach(e -> copy.set(e.getKey(), resolveLeaves(e.getValue(), sources)));
+            return copy;
+        }
+        if (node.isArray()) {
+            ArrayNode copy = objectMapper.createArrayNode();
+            node.forEach(element -> copy.add(resolveLeaves(element, sources)));
+            return copy;
+        }
+        return node;
+    }
+
+    private String resolveValue(String value, Sources sources) {
         if (value == null) {
             return null;
         }
         if (value.startsWith("$") && !value.startsWith("${")) {
-            return resolveExpression(value, ctx, stageVariables);
+            return resolveExpression(value, sources);
         }
         Matcher m = EMBEDDED_EXPRESSION.matcher(value);
         StringBuilder out = new StringBuilder();
         while (m.find()) {
-            String resolved = resolveExpression("$" + m.group(1), ctx, stageVariables);
+            String resolved = resolveExpression("$" + m.group(1), sources);
             m.appendReplacement(out, Matcher.quoteReplacement(resolved != null ? resolved : ""));
         }
         m.appendTail(out);
         return out.toString();
     }
 
-    private String resolveExpression(String expression, RequestContext ctx, Map<String, String> stageVariables) {
+    private String resolveExpression(String expression, Sources sources) {
+        RequestContext ctx = sources.ctx();
         if (expression.equals(BODY)) {
             return bodyText(ctx);
         }
@@ -82,7 +132,14 @@ public class AwsServiceIntegrationMapper {
             return bodyPath(ctx, expression.substring(BODY.length() + 1));
         }
         if (expression.startsWith(STAGE_VARIABLES)) {
+            Map<String, String> stageVariables = sources.stageVariables();
             return stageVariables == null ? null : stageVariables.get(expression.substring(STAGE_VARIABLES.length()));
+        }
+        if (expression.startsWith(CONTEXT) && sources.contextVariables() != null) {
+            String value = sources.contextVariables().get(expression.substring(CONTEXT.length()));
+            if (value != null) {
+                return value;
+            }
         }
         return contextValueResolver.resolve(expression, ctx);
     }
@@ -98,8 +155,9 @@ public class AwsServiceIntegrationMapper {
         }
         JsonNode value;
         try {
-            value = JsonPath.using(jsonPathConfiguration).parse(body).read("$." + path);
-        } catch (JsonPathException | IllegalArgumentException e) {
+            Object read = JsonPath.using(jsonPathConfiguration).parse(body).read("$." + path);
+            value = read instanceof JsonNode node ? node : objectMapper.valueToTree(read);
+        } catch (JsonPathException | IllegalArgumentException | ClassCastException e) {
             return null;
         }
         if (value == null || value.isNull() || value.isMissingNode()) {

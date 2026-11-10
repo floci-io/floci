@@ -2968,8 +2968,9 @@ public class ApiGatewayExecuteController {
                                           Map<String, String> jwtClaims, ObjectNode lambdaAuthorizerContext,
                                           String region) {
         IntegrationSubtype subtype = IntegrationSubtype.fromName(integration.getIntegrationSubtype()).orElse(null);
-        if (subtype == null) {
-            LOG.warnv("execute-api v2: unsupported integration subtype {0}", integration.getIntegrationSubtype());
+        if (subtype == null || !subtype.isInvocable()) {
+            LOG.warnv("execute-api v2: integration subtype {0} is not implemented",
+                    integration.getIntegrationSubtype());
             return httpApiError(500, "Internal Server Error");
         }
 
@@ -2996,17 +2997,29 @@ public class ApiGatewayExecuteController {
                         route.getRouteKey(), requestId, routeContext.sourceIp(),
                         requestHeaders, queryParams, pathParams, body, claims, authorizerContext);
 
-        Map<String, String> parameters = awsServiceIntegrationMapper.resolveParameters(
-                integration.getRequestParameters(), ctx, stageVariables);
-        String serviceRegion = parameters.get(IntegrationSubtype.REGION_PARAMETER);
-        if (serviceRegion == null || serviceRegion.isEmpty()) {
-            serviceRegion = region;
-        }
+        Instant requestTime = routeContext.requestTime();
+        String hostRegion = region != null ? region : regionResolver.getDefaultRegion();
+        Map<String, String> contextVariables = new LinkedHashMap<>();
+        contextVariables.put("accountId", regionResolver.getAccountId());
+        contextVariables.put("apiId", apiId);
+        contextVariables.put("domainName", AwsEndpoints.executeApiHost(apiId, hostRegion));
+        contextVariables.put("httpMethod", httpMethod);
+        contextVariables.put("path", path);
+        contextVariables.put("requestTime", GATEWAY_REQUEST_TIME.format(requestTime.atZone(ZoneOffset.UTC)));
+        contextVariables.put("requestTimeEpoch", Long.toString(requestTime.toEpochMilli()));
+        contextVariables.put("routeKey", route.getRouteKey());
+        contextVariables.put("stage", stageName);
 
         LOG.debugv("execute-api v2: {0} {1}/{2}{3} → {4}", httpMethod, apiId, stageName, path,
                 subtype.subtypeName());
 
         try {
+            Map<String, String> parameters = awsServiceIntegrationMapper.resolveParameters(subtype,
+                    integration.getRequestParameters(), ctx, stageVariables, contextVariables);
+            String serviceRegion = parameters.get(IntegrationSubtype.REGION_PARAMETER);
+            if (serviceRegion == null || serviceRegion.isEmpty()) {
+                serviceRegion = region;
+            }
             ObjectNode actionRequest = awsServiceIntegrationMapper.actionRequest(subtype, parameters);
             Response serviceResponse = serviceRouter.invoke(subtype.service(), subtype.action(), actionRequest,
                     serviceRegion);
