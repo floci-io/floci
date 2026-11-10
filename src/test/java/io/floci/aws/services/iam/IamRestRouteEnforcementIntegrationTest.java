@@ -190,20 +190,22 @@ class IamRestRouteEnforcementIntegrationTest {
 
     @Test
     void anEksClusterRouteIsCheckedAgainstTheClusterEksActsOn() {
-        // EKS finds a cluster by its name alone, whatever Region a request is signed for, so a request signed
-        // for another Region is checked against the cluster it acts on.
+        // EKS clusters are Regional: a request signed for the cluster's Region is checked against the cluster it
+        // acts on, and one signed for another Region acts on that Region's cluster of the name, which is not there.
         String user = user("route-eks-region");
         String name = "route-west-" + suffix();
         String cluster = given().header("Authorization", auth(ADMIN, "us-west-2", "eks"))
                 .contentType("application/json")
                 .body("{\"name\":\"" + name + "\",\"roleArn\":\"arn:aws:iam::" + ACCOUNT + ":role/route-cluster\"}")
                 .post("/clusters").then().statusCode(200).extract().path("cluster.arn");
-        cleanup.register(() -> eks().delete("/clusters/" + name));
+        cleanup.register(() -> given().header("Authorization", auth(ADMIN, "us-west-2", "eks"))
+                .delete("/clusters/" + name));
 
         policy(user, allow("eks:DescribeCluster", "*") + "," + deny("eks:DescribeCluster", cluster));
-        refused(as(user, "eks").get("/clusters/" + name).then(), "eks:DescribeCluster");
+        refused(as(user, "us-west-2", "eks").get("/clusters/" + name).then(), "eks:DescribeCluster");
+        as(user, "eks").get("/clusters/" + name).then().statusCode(404);
         policy(user, allow("eks:DescribeCluster", cluster));
-        as(user, "eks").get("/clusters/" + name).then().statusCode(200);
+        as(user, "us-west-2", "eks").get("/clusters/" + name).then().statusCode(200);
     }
 
     @Test
@@ -651,7 +653,11 @@ class IamRestRouteEnforcementIntegrationTest {
     }
 
     private RequestSpecification as(String user, String service) {
-        return given().header("Authorization", auth(keys.get(user), service)).contentType("application/json");
+        return as(user, "us-east-1", service);
+    }
+
+    private RequestSpecification as(String user, String region, String service) {
+        return given().header("Authorization", auth(keys.get(user), region, service)).contentType("application/json");
     }
 
     /** A Lambda request as {@code user}, with an empty JSON body on a write. */

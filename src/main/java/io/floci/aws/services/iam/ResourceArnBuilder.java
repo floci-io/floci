@@ -1293,8 +1293,9 @@ public class ResourceArnBuilder {
      * looks everything up. A cluster is the ARN EKS holds it under, or for one it holds none of, the ARN a
      * create mints in the request's Region; {@code CreateCluster} is checked against the cluster its body
      * names, as the EKS user guide's example policy for creating a cluster grants it. A node group, Fargate
-     * profile, add-on, access entry or Pod Identity association is the ARN EKS holds it under, which ends
-     * in an id the request does not carry, or {@code *} when EKS holds none to act on; listing or creating
+     * profile, add-on, access entry or Pod Identity association is the ARN EKS holds it under in the request's
+     * Region (clusters are Regional), which ends in an id the request does not carry, or {@code *} when EKS
+     * holds none to act on; listing or creating
      * them, and every other route under a cluster, act on the cluster. The path is split as the router
      * splits it, before decoding, so an encoded {@code /} stays inside a name, and an access entry's
      * principal is the rest of the path, as EKS takes it. {@code DescribeUpdate} acts on the add-on its
@@ -1341,14 +1342,15 @@ public class ResourceArnBuilder {
         String collection = segments[2];
         return switch (collection) {
             case "node-groups", "fargate-profiles", "addons", "pod-identity-associations" ->
-                    eksHeldArn(cluster, collection, pathSegment(segments[3]));
+                    eksHeldArn(cluster, collection, pathSegment(segments[3]), region);
             case "access-entries" -> eksHeldArn(cluster, collection,
-                    pathSegment(String.join("/", List.of(segments).subList(3, accessEntryEnd(segments, method)))));
+                    pathSegment(String.join("/", List.of(segments).subList(3, accessEntryEnd(segments, method)))),
+                    region);
             case "updates" -> {
                 // The updates Floci keeps are its add-ons', and EKS returns one whether or not the request names
                 // its add-on, so the update is checked against the add-on it was made to.
-                Optional<String> addon = segments.length == 4 && eksService != null
-                        ? eksService.get().findResourceArn(cluster, collection, pathSegment(segments[3]))
+                Optional<String> addon = segments.length == 4
+                        ? eksHeld(cluster, collection, pathSegment(segments[3]), region)
                         : Optional.empty();
                 yield addon.orElseGet(() -> eksClusterArn(cluster, region, accountId));
             }
@@ -1383,14 +1385,25 @@ public class ResourceArnBuilder {
 
     /** The ARN EKS holds the cluster {@code name} under, or else the one a create mints in {@code region}. */
     private String eksClusterArn(String name, String region, String accountId) {
-        Optional<String> held = eksService == null ? Optional.empty()
-                : eksService.get().findResourceArn(name, null, null);
-        return held.orElseGet(() -> AwsArnUtils.Arn.of("eks", region, accountId, "cluster/" + name).toString());
+        return eksHeld(name, null, null, region)
+                .orElseGet(() -> AwsArnUtils.Arn.of("eks", region, accountId, "cluster/" + name).toString());
     }
 
     /** The ARN EKS holds {@code name} of {@code collection} in the cluster under, or {@code *} when it holds none. */
-    private String eksHeldArn(String cluster, String collection, String name) {
-        return eksService == null ? "*" : eksService.get().findResourceArn(cluster, collection, name).orElse("*");
+    private String eksHeldArn(String cluster, String collection, String name, String region) {
+        return eksHeld(cluster, collection, name, region).orElse("*");
+    }
+
+    /**
+     * The ARN EKS holds the resource under, when the cluster is in {@code region}. EKS clusters are Regional, so a
+     * request signed for another Region does not reach them, and is checked as acting on a resource of its own Region.
+     */
+    private Optional<String> eksHeld(String cluster, String collection, String name, String region) {
+        if (eksService == null) {
+            return Optional.empty();
+        }
+        return eksService.get().findResourceArn(cluster, collection, name)
+                .filter(arn -> region.equals(AwsArnUtils.regionOrDefault(arn, null)));
     }
 
     /** The ARN a shared tagging route names, or {@code *} for any other route. */

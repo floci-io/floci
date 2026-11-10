@@ -2457,8 +2457,8 @@ class ResourceArnBuilderTest {
 
     // ── EKS ──────────────────────────────────────────────────────────────────────
 
-    /** The cluster {@code held}, which EKS keeps in us-west-2 and finds by its name alone, and what it holds. */
-    private static final String HELD_CLUSTER = "arn:aws:eks:us-west-2:000000000000:cluster/held";
+    /** The cluster {@code held}, which EKS keeps in the request's Region (us-east-1), and what it holds. */
+    private static final String HELD_CLUSTER = "arn:aws:eks:us-east-1:000000000000:cluster/held";
     private static final String WORKER = "arn:aws:iam::000000000000:role/team/worker";
     private static final String RUNNER = "arn:aws:iam::000000000000:role/ci/access-policies/runner";
 
@@ -2476,7 +2476,7 @@ class ResourceArnBuilderTest {
             {"access-entries", RUNNER, "access-entry/held/role/000000000000/runner/7"},
         }) {
             when(eks.findResourceArn("held", held[0], held[1]))
-                    .thenReturn(Optional.of("arn:aws:eks:us-west-2:000000000000:" + held[2]));
+                    .thenReturn(Optional.of("arn:aws:eks:us-east-1:000000000000:" + held[2]));
         }
         return backedBy(eks);
     }
@@ -2509,7 +2509,7 @@ class ResourceArnBuilderTest {
     @Test
     void anEksRouteOnWhatAClusterHoldsActsOnTheArnEksHoldsItUnder() {
         ResourceArnBuilder eks = eksHolding();
-        String held = "arn:aws:eks:us-west-2:000000000000:";
+        String held = "arn:aws:eks:us-east-1:000000000000:";
         assertEquals(held + "nodegroup/held/ng/1", eksResource(eks, "GET", "/clusters/held/node-groups/ng"));
         assertEquals(held + "nodegroup/held/ng/1",
                 eksResource(eks, "POST", "/clusters/held/node-groups/ng/update-version"));
@@ -2552,7 +2552,7 @@ class ResourceArnBuilderTest {
     void anEksUpdateActsOnItsAddonAndATagOnTheCallersClusterOfThatName() {
         ResourceArnBuilder eks = eksHolding();
         // EKS returns an add-on's update whatever add-on the request names, if any, so it acts on its own add-on.
-        String addon = "arn:aws:eks:us-west-2:000000000000:addon/held/vpc-cni/4";
+        String addon = "arn:aws:eks:us-east-1:000000000000:addon/held/vpc-cni/4";
         assertEquals(addon, eksResource(eks, "GET", "/clusters/held/updates/u-1"));
         queryParams.putSingle("addonName", "coredns");
         assertEquals(addon, eksResource(eks, "GET", "/clusters/held/updates/u-1"));
@@ -2573,6 +2573,22 @@ class ResourceArnBuilderTest {
                 "/cluster-registrations", "/eks-anywhere-subscriptions")) {
             assertEquals("*", eksResource(eks, "GET", route), route);
         }
+    }
+
+    @Test
+    void anEksRouteOnAClusterHeldInAnotherRegionActsOnTheRequestsRegion() {
+        // EKS clusters are Regional: a request signed for us-east-1 does not reach a cluster EKS keeps in us-west-2,
+        // so it acts on the cluster of that name a create would mint in us-east-1, and on nothing the other holds.
+        EksService eks = mock(EksService.class);
+        when(eks.findResourceArn(any(), any(), any())).thenReturn(Optional.empty());
+        when(eks.findResourceArn("west", null, null))
+                .thenReturn(Optional.of("arn:aws:eks:us-west-2:000000000000:cluster/west"));
+        when(eks.findResourceArn("west", "node-groups", "ng"))
+                .thenReturn(Optional.of("arn:aws:eks:us-west-2:000000000000:nodegroup/west/ng/1"));
+        ResourceArnBuilder builder = backedBy(eks);
+
+        assertEquals("arn:aws:eks:us-east-1:000000000000:cluster/west", eksResource(builder, "GET", "/clusters/west"));
+        assertEquals("*", eksResource(builder, "GET", "/clusters/west/node-groups/ng"));
     }
 
     /** Stubs the request path as sent and, decoded, as {@link UriInfo#getPath()} gives it. */
