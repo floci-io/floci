@@ -77,7 +77,7 @@ public final class SignedServiceRoute {
     public static Optional<String> signingService(ContainerRequestContext ctx) {
         return SigV4CredentialScope.serviceName(ctx.getHeaderString("Authorization"))
                 .or(() -> SigV4CredentialScope.serviceNameFromCredential(
-                        ctx.getUriInfo().getQueryParameters().getFirst("X-Amz-Credential")));
+                        ResteasyRequests.queryParameters(ctx).getFirst("X-Amz-Credential")));
     }
 
     public void apply(ContainerRequestContext ctx) {

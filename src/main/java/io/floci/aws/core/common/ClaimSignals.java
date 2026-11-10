@@ -35,6 +35,6 @@ public record ClaimSignals(String method, String path, String contentType,
                 ctx.getHeaderString("X-Amz-Target"),
                 ctx.getHeaderString("Authorization"),
                 ctx.getHeaderString("Accept"),
-                ctx.getUriInfo().getQueryParameters());
+                ResteasyRequests.queryParameters(ctx));
     }
 }

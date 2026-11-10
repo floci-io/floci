@@ -143,9 +143,10 @@ public class AwsQueryController {
     @RunOnVirtualThread
     public Response dispatch(
             @HeaderParam("Authorization") String authorization,
-            @Context UriInfo uriInfo,
+            @Context ContainerRequestContext request,
             MultivaluedMap<String, String> formParams) {
-        return dispatch(IamEnforcementFilter.requestAuthorization(authorization, uriInfo.getQueryParameters()),
+        return dispatch(IamEnforcementFilter.requestAuthorization(authorization,
+                        ResteasyRequests.queryParameters(request)),
                 formParams);
     }
 

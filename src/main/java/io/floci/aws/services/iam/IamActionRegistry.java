@@ -5,6 +5,7 @@ import io.floci.aws.core.common.AwsProtocolClaimFilter;
 import io.floci.aws.core.common.AwsQueryServiceResolver;
 import io.floci.aws.core.common.ProtocolClaim;
 import io.floci.aws.core.common.RequestResources;
+import io.floci.aws.core.common.ResteasyRequests;
 import io.floci.aws.core.common.WireProtocol;
 import io.floci.aws.services.dynamodb.DynamoDbPartiQLParser;
 import io.floci.aws.services.eks.EksController;
@@ -18,7 +19,6 @@ import jakarta.ws.rs.core.MultivaluedMap;
 import jakarta.ws.rs.core.UriInfo;
 import org.jboss.logging.Logger;
 import org.jboss.resteasy.reactive.server.core.ResteasyReactiveRequestContext;
-import org.jboss.resteasy.reactive.server.spi.ResteasyReactiveContainerRequestContext;
 
 import java.net.URLDecoder;
 import java.nio.charset.StandardCharsets;
@@ -791,7 +791,7 @@ public class IamActionRegistry {
      * a filter rewrote is matched on its new path, decoded. {@link #sentPath} for a synthetic context.
      */
     static String rawPath(ContainerRequestContext ctx) {
-        ResteasyReactiveRequestContext request = routingContext(ctx);
+        ResteasyReactiveRequestContext request = ResteasyRequests.of(ctx);
         return request == null ? sentPath(ctx.getUriInfo()) : rooted(request.getPathWithoutPrefix());
     }
 
@@ -813,19 +813,13 @@ public class IamActionRegistry {
      * matched. {@link UriInfo#getPath()} itself for a synthetic context.
      */
     public static String decodedPath(ContainerRequestContext ctx) {
-        ResteasyReactiveRequestContext request = routingContext(ctx);
+        ResteasyReactiveRequestContext request = ResteasyRequests.of(ctx);
         if (request == null) {
             return ctx.getUriInfo().getPath();
         }
         String path = request.getPathWithoutPrefix();
         boolean rewritten = !request.getPath().equals(request.serverRequest().getRequestNormalisedPath());
         return rooted(rewritten ? path : URLDecoder.decode(path.replace("+", "%2B"), StandardCharsets.UTF_8));
-    }
-
-    private static ResteasyReactiveRequestContext routingContext(ContainerRequestContext ctx) {
-        return ctx instanceof ResteasyReactiveContainerRequestContext container
-                && container.getServerRequestContext() instanceof ResteasyReactiveRequestContext request
-                ? request : null;
     }
 
     private static String rooted(String path) {
