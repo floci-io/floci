@@ -820,6 +820,7 @@ public class Ec2QueryHandler {
         // the instance's primary interface (network_interface { network_interface_id = ... }).
         String networkInterfaceId = p.getFirst("NetworkInterface.1.NetworkInterfaceId");
         int networkInterfaceDeviceIndex = parseIntParam(p, "NetworkInterface.1.DeviceIndex", 0);
+        Boolean explicitDeleteOnTermination = parseOptionalBoolean(p.getFirst("NetworkInterface.1.DeleteOnTermination"), "NetworkInterface.1.DeleteOnTermination");
         String clientToken = p.getFirst("ClientToken");
         List<String> sgIds = getList(p, "SecurityGroupId");
         // With a primary interface spec the groups travel on it: Terraform's aws_instance sends that
@@ -947,12 +948,26 @@ public class Ec2QueryHandler {
             }
         }
 
+        // AWS only allows DeleteOnTermination=true for a newly created interface.
+        if (Boolean.TRUE.equals(explicitDeleteOnTermination) && networkInterfaceId != null && !networkInterfaceId.isBlank()) {
+            throw new AwsException("InvalidParameterCombination",
+                    "You can specify true for DeleteOnTermination only when creating a new network interface.", 400);
+        }
+
         Reservation res = service.runInstances(region, imageId, instanceType, minCount, maxCount,
                 keyName, sgIds, subnetId, clientToken, instanceTags, userData, iamInstanceProfileArn,
                 associatePublicIp, networkInterfaceId, networkInterfaceDeviceIndex, null, metadataOptions,
                 creditSpecificationCpuCredits, userDataEncoded, dryRun(p),
                 p.getFirst("Placement.HostId"), p.getFirst("Placement.Tenancy"), blockDeviceMappings,
                 "spot".equals(marketType), privateIpAddress, capacitySpecification);
+
+        // Apply an explicit NetworkInterface.1.DeleteOnTermination to the launched instance.
+        if (explicitDeleteOnTermination != null) {
+            for (Instance inst : res.getInstances()) {
+                service.setNetworkInterfaceDeleteOnTermination(region, inst.getInstanceId(),
+                        explicitDeleteOnTermination);
+            }
+        }
 
         // The request's EbsOptimized wins over a launch template's. Applied after the launch, on this
         // API path only: CloudFormation, Auto Scaling and Fleet launches still read false. Passing it
@@ -5610,7 +5625,12 @@ public class Ec2QueryHandler {
             if (eni.getAttachTime() != null) {
                 xml.elem("attachTime", eni.getAttachTime());
             }
-            xml.elem("deleteOnTermination", "true")
+            boolean deleteOnTermination = eni.isDeleteOnTermination();
+            NetworkInterface standalone = service.getNetworkInterface(inst.getRegion(), eni.getNetworkInterfaceId());
+            if (standalone != null && standalone.getAttachment() != null) {
+                deleteOnTermination = standalone.getAttachment().isDeleteOnTermination();
+            }
+            xml.elem("deleteOnTermination", String.valueOf(deleteOnTermination))
                     .end("attachment")
                     .start("privateIpAddressesSet")
                     .start("item")
