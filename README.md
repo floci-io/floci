@@ -380,7 +380,7 @@ For operation-level compatibility, see the [Services Overview](https://floci.io/
 | AWS RAM | In-process | EnableSharingWithAwsOrganization opt-in |
 | AWS Batch | In-process | Compute environments, job queues, job definitions, job submission and lifecycle |
 | Auto Scaling | In-process with reconciler | Launch configs, ASGs, desired capacity reconciliation, lifecycle hooks |
-| Application Auto Scaling | In-process | Scalable targets, target-tracking and step scaling policies, CloudWatch alarm creation, tagging (policies are stored but inert) |
+| Application Auto Scaling | In-process | Scalable targets, dynamic ECS scaling, one-off UTC scheduled ECS scaling, CloudWatch alarms, tagging |
 | Elastic Beanstalk | In-process | Applications, application versions, environments, configuration templates, platform and solution stack metadata |
 | AWS Backup | In-process | Vaults, backup plans, selections, simulated job lifecycle, recovery points |
 | Amazon Data Lifecycle Manager | In-process | Lifecycle policy and tag management; schedules are stored but do not create snapshots or AMIs |

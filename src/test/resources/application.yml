@@ -434,6 +434,7 @@ floci:
       enabled: true
     applicationautoscaling:
       enabled: true
+      scheduled-action-interval-seconds: ${FLOCI_SERVICES_APPLICATIONAUTOSCALING_SCHEDULED_ACTION_INTERVAL_SECONDS:1}
     elasticbeanstalk:
       enabled: true
     transfer:

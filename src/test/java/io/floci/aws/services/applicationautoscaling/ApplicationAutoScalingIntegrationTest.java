@@ -1,5 +1,6 @@
 package io.floci.aws.services.applicationautoscaling;
 
+import io.floci.aws.testing.AwsTestClients;
 import io.floci.aws.testing.RestAssuredJsonUtils;
 import io.quarkus.test.junit.QuarkusTest;
 import io.restassured.specification.RequestSpecification;
@@ -9,7 +10,16 @@ import org.junit.jupiter.api.Order;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.TestInstance;
 import org.junit.jupiter.api.TestMethodOrder;
+import software.amazon.awssdk.regions.Region;
+import software.amazon.awssdk.services.applicationautoscaling.ApplicationAutoScalingClient;
+import software.amazon.awssdk.services.applicationautoscaling.model.DescribeScheduledActionsResponse;
+import software.amazon.awssdk.services.applicationautoscaling.model.InvalidNextTokenException;
+import software.amazon.awssdk.services.applicationautoscaling.model.ObjectNotFoundException;
+import software.amazon.awssdk.services.applicationautoscaling.model.ScheduledAction;
+import software.amazon.awssdk.services.applicationautoscaling.model.ValidationException;
 
+import java.time.Instant;
+import java.time.temporal.ChronoUnit;
 import java.util.List;
 
 import static io.restassured.RestAssured.given;
@@ -20,6 +30,7 @@ import static org.hamcrest.Matchers.matchesPattern;
 import static org.hamcrest.Matchers.notNullValue;
 import static org.hamcrest.Matchers.nullValue;
 import static org.hamcrest.Matchers.startsWith;
+import static org.junit.jupiter.api.Assertions.*;
 
 /**
  * Wire-level coverage for the Application Auto Scaling API.
@@ -580,4 +591,114 @@ class ApplicationAutoScalingIntegrationTest {
                 """.formatted(ALARM_RESOURCE_ID, DIMENSION))
         .when().post("/").then().statusCode(200);
     }
+    @Test
+    void scheduledActionSdkLifecycle() {
+        String resource = "service/scheduled-sdk/service";
+        Instant deadline = Instant.now().plusSeconds(3600).truncatedTo(ChronoUnit.SECONDS);
+        try (ApplicationAutoScalingClient client = AwsTestClients.create(ApplicationAutoScalingClient.builder(),
+                "000000000000", Region.US_EAST_1)) {
+            ScheduledActionFixtures.register(client, resource, 1, 10);
+            try {
+                client.putScheduledAction(ScheduledActionFixtures.put(resource, "once")
+                        .schedule(ScheduledActionFixtures.schedule(deadline))
+                        .scalableTargetAction(ScheduledActionFixtures.bounds(2, 8)).build());
+                ScheduledAction original = ScheduledActionFixtures.describe(client, resource).scheduledActions().getFirst();
+                assertNotNull(original.creationTime());
+                assertTrue(original.scheduledActionARN().contains(":autoscaling:us-east-1:000000000000:scheduledAction:"));
+                client.putScheduledAction(ScheduledActionFixtures.put(resource, "once")
+                        .scalableTargetAction(ScheduledActionFixtures.bounds(3, null)).build());
+                ScheduledAction replaced = ScheduledActionFixtures.describe(client, resource).scheduledActions().getFirst();
+                assertEquals(3, replaced.scalableTargetAction().minCapacity());
+                assertNull(replaced.scalableTargetAction().maxCapacity());
+                assertEquals(original.schedule(), replaced.schedule());
+                client.putScheduledAction(ScheduledActionFixtures.put(resource, "once").build());
+                client.putScheduledAction(ScheduledActionFixtures.put(resource, "once")
+                        .schedule(ScheduledActionFixtures.schedule(deadline.plusSeconds(60))).build());
+                ScheduledAction rescheduled = ScheduledActionFixtures.describe(client, resource).scheduledActions().getFirst();
+                assertEquals(original.scheduledActionARN(), rescheduled.scheduledActionARN());
+                assertEquals(original.creationTime(), rescheduled.creationTime());
+                client.putScheduledAction(ScheduledActionFixtures.put(resource, "two")
+                        .schedule(ScheduledActionFixtures.schedule(deadline))
+                        .scalableTargetAction(ScheduledActionFixtures.bounds(null, 4)).build());
+                DescribeScheduledActionsResponse page = client.describeScheduledActions(b -> b.serviceNamespace("ecs")
+                        .resourceId(resource).maxResults(1));
+                assertEquals(1, page.scheduledActions().size());
+                assertNotNull(page.nextToken());
+                assertEquals(1, client.describeScheduledActions(b -> b.serviceNamespace("ecs").resourceId(resource)
+                        .nextToken(page.nextToken()).maxResults(1)).scheduledActions().size());
+                assertThrows(InvalidNextTokenException.class, () -> client.describeScheduledActions(b -> b.serviceNamespace("ecs")
+                        .resourceId("service/other/service").nextToken(page.nextToken())));
+                assertTrue(client.describeScheduledActions(b -> b.serviceNamespace("ecs").resourceId(resource)
+                        .scheduledActionNames("missing")).scheduledActions().isEmpty());
+                client.deleteScheduledAction(b -> b.serviceNamespace("ecs").resourceId(resource)
+                        .scalableDimension(DIMENSION).scheduledActionName("once"));
+                assertThrows(ObjectNotFoundException.class, () -> client.deleteScheduledAction(b -> b.serviceNamespace("ecs")
+                        .resourceId(resource).scalableDimension(DIMENSION).scheduledActionName("once")));
+                assertThrows(ValidationException.class, () -> client.putScheduledAction(ScheduledActionFixtures.put(resource, "two")
+                        .schedule("rate(1 minute)").build()));
+                assertThrows(ValidationException.class, () -> client.putScheduledAction(ScheduledActionFixtures.put(resource, "two")
+                        .timezone("UTC").build()));
+                assertThrows(ValidationException.class, () -> client.putScheduledAction(ScheduledActionFixtures.put(resource, "two")
+                        .startTime(deadline).build()));
+                assertThrows(ValidationException.class, () -> client.putScheduledAction(ScheduledActionFixtures.put(resource, "two")
+                        .endTime(deadline).build()));
+                assertThrows(ValidationException.class, () -> client.describeScheduledActions(b -> b.serviceNamespace("ecs")
+                        .resourceId(resource).maxResults(51)));
+                assertThrows(ValidationException.class, () -> client.describeScheduledActions(b -> b.serviceNamespace("ecs")
+                        .scalableDimension(DIMENSION)));
+            } finally {
+                ScheduledActionFixtures.deregister(client, resource);
+            }
+            assertTrue(ScheduledActionFixtures.describe(client, resource).scheduledActions().isEmpty());
+            assertThrows(ObjectNotFoundException.class, () -> client.putScheduledAction(ScheduledActionFixtures.put(resource, "absent")
+                    .schedule(ScheduledActionFixtures.schedule(deadline)).scalableTargetAction(ScheduledActionFixtures.bounds(0, 0)).build()));
+        }
+    }
+
+    @Test
+    void scheduledActionsAreIsolatedByAccountAndRegion() {
+        String resource = "service/scheduled-isolation/service";
+        try (ApplicationAutoScalingClient first = AwsTestClients.create(ApplicationAutoScalingClient.builder(),
+                "111111111111", Region.US_EAST_1);
+                ApplicationAutoScalingClient account = AwsTestClients.create(ApplicationAutoScalingClient.builder(),
+                        "222222222222", Region.US_EAST_1);
+                ApplicationAutoScalingClient region = AwsTestClients.create(ApplicationAutoScalingClient.builder(),
+                        "111111111111", Region.EU_WEST_1)) {
+            for (ApplicationAutoScalingClient client : List.of(first, account, region)) {
+                ScheduledActionFixtures.register(client, resource, 0, 10);
+            }
+            try {
+                int min = 1;
+                for (ApplicationAutoScalingClient client : List.of(first, account, region)) {
+                    assertTrue(ScheduledActionFixtures.describe(client, resource).scheduledActions().isEmpty());
+                    client.putScheduledAction(ScheduledActionFixtures.put(resource, "same-name")
+                            .schedule("at(2099-01-01T00:00:00)").scalableTargetAction(ScheduledActionFixtures.bounds(min++, null)).build());
+                }
+                assertEquals(1, ScheduledActionFixtures.describe(first, resource).scheduledActions().getFirst().scalableTargetAction().minCapacity());
+                assertEquals(2, ScheduledActionFixtures.describe(account, resource).scheduledActions().getFirst().scalableTargetAction().minCapacity());
+                assertEquals(3, ScheduledActionFixtures.describe(region, resource).scheduledActions().getFirst().scalableTargetAction().minCapacity());
+                first.deleteScheduledAction(b -> b.serviceNamespace("ecs").resourceId(resource)
+                        .scalableDimension(DIMENSION).scheduledActionName("same-name"));
+                assertEquals(1, ScheduledActionFixtures.describe(account, resource).scheduledActions().size());
+                assertEquals(1, ScheduledActionFixtures.describe(region, resource).scheduledActions().size());
+            } finally {
+                for (ApplicationAutoScalingClient client : List.of(first, account, region)) {
+                    ScheduledActionFixtures.deregister(client, resource);
+                }
+            }
+        }
+    }
+
+    @Test
+    void malformedScheduledBoundsAreRejectedWithoutCoercion() {
+        String base = "\"ServiceNamespace\":\"ecs\",\"ResourceId\":\"service/malformed/service\","
+                + "\"ScalableDimension\":\"ecs:service:DesiredCount\",\"ScheduledActionName\":\"bad\","
+                + "\"Schedule\":\"at(2030-01-01T00:00:00)\",\"ScalableTargetAction\":";
+        for (String bounds : List.of("{}", "\"\"", "{\"MinCapacity\":1.5}", "{\"MinCapacity\":\"2\"}",
+                "{\"MaxCapacity\":2147483648}", "{\"MinCapacity\":null}")) {
+            call("PutScheduledAction").body("{" + base + bounds + "}").post("/").then()
+                    .statusCode(400).body("__type", equalTo("ValidationException"));
+        }
+    }
+
 }

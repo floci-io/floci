@@ -71,7 +71,7 @@ class ApplicationAutoScalingServiceTest {
 
         service = new ApplicationAutoScalingService(
                 new InMemoryStorage<>(), new InMemoryStorage<>(), new InMemoryStorage<>(),
-                regionResolver, cloudWatch);
+                new InMemoryStorage<>(), regionResolver, cloudWatch, mock(EcsCapacityAdjuster.class));
     }
 
     private ScalableTarget register() {
