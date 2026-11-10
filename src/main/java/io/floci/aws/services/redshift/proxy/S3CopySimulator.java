@@ -121,12 +121,18 @@ public final class S3CopySimulator {
     static CopyInput prepareCopy(CopyStatementParser.S3CopyFrom spec, S3Service s3, IamService iamService,
                                  String clusterAccountId, List<String> associatedRoleArns) {
         return asKeyAccount(spec, s3, iamService,
-                () -> prepareCopyScoped(spec, s3, iamService, clusterAccountId, associatedRoleArns));
+                () -> prepareCopyScoped(spec, s3, iamService, clusterAccountId, associatedRoleArns, false));
+    }
+
+    static CopyInput prepareObjectCopy(CopyStatementParser.S3CopyFrom spec, S3Service s3, IamService iamService,
+                                       String clusterAccountId, List<String> associatedRoleArns) {
+        return asKeyAccount(spec, s3, iamService,
+                () -> prepareCopyScoped(spec, s3, iamService, clusterAccountId, associatedRoleArns, true));
     }
 
     private static CopyInput prepareCopyScoped(CopyStatementParser.S3CopyFrom spec, S3Service s3,
                                                IamService iamService, String clusterAccountId,
-                                               List<String> associatedRoleArns) {
+                                               List<String> associatedRoleArns, boolean exactObject) {
         requireDefaultIamRole(spec);
         RedshiftRoleAccess.RoleSession roleSession = resolveCopySession(spec, s3, iamService, clusterAccountId,
                 associatedRoleArns);
@@ -134,7 +140,7 @@ public final class S3CopySimulator {
             try {
                 if (spec.manifest()) {
                     authorizeCopyObject(spec, s3, iamService, roleSession, spec.keyOrPrefix());
-                } else {
+                } else if (!exactObject) {
                     if (roleSession != null) {
                         RedshiftRoleAccess.authorizeSessionAction(s3, iamService, roleSession, spec.iamRoleArn(),
                                 "s3:ListBucket", copyBucketArn(spec, s3), Map.of("s3:prefix", List.of(spec.keyOrPrefix())));
@@ -151,7 +157,7 @@ public final class S3CopySimulator {
 
             List<String> keys;
             try {
-                keys = resolveKeys(spec, s3);
+                keys = exactObject ? List.of(spec.keyOrPrefix()) : resolveKeys(spec, s3);
             } catch (AwsException e) {
                 throw new S3TransferException(SQLSTATE_INTERNAL,
                         "S3 COPY could not list s3://" + spec.bucket() + "/" + spec.keyOrPrefix(), e);

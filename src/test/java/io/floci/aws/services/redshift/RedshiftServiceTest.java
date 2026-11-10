@@ -38,6 +38,7 @@ import io.floci.aws.services.redshiftserverless.model.Namespace;
 import io.floci.aws.services.s3.S3Service;
 import io.floci.aws.services.secretsmanager.SecretsManagerService;
 import io.floci.aws.services.secretsmanager.model.Secret;
+import jakarta.enterprise.inject.Instance;
 import jakarta.ws.rs.core.MultivaluedHashMap;
 import jakarta.ws.rs.core.MultivaluedMap;
 import org.junit.jupiter.api.BeforeEach;
@@ -1320,6 +1321,30 @@ class RedshiftServiceTest {
 
         verify(integrationBackend).delete("s3-one");
         verify(integrationEvents, never()).queue(any(), any(), any(), any());
+    }
+
+    @Test
+    @SuppressWarnings("unchecked")
+    void deletingAnS3IntegrationDisablesJobsBeforeRemovingItsMetadata() {
+        Integration stored = new Integration();
+        stored.setIntegrationArn("arn:aws:redshift:us-east-1:111111111111:integration:s3-one");
+        stored.setSourceType("s3-event-notifications");
+        when(integrationBackend.keys()).thenReturn(Set.of("s3-one"));
+        when(integrationBackend.get("s3-one")).thenReturn(Optional.of(stored));
+        Instance<RedshiftS3AutoCopyConsumer> instance = mock(Instance.class);
+        RedshiftS3AutoCopyConsumer consumer = mock(RedshiftS3AutoCopyConsumer.class);
+        when(instance.get()).thenReturn(consumer);
+        service.autoCopyConsumer = instance;
+        doThrow(new AwsException("InvalidClusterState", "Paused", 400)).when(consumer).disable(stored);
+
+        assertThrows(AwsException.class, () -> service.deleteIntegration(stored.getIntegrationArn()));
+        verify(integrationBackend, never()).delete(any());
+        clearInvocations(consumer, integrationBackend);
+        doNothing().when(consumer).disable(stored);
+        service.deleteIntegration(stored.getIntegrationArn());
+        InOrder order = inOrder(consumer, integrationBackend);
+        order.verify(consumer).disable(stored);
+        order.verify(integrationBackend).delete("s3-one");
     }
 
     @Test

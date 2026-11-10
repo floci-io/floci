@@ -435,6 +435,44 @@ BEGIN
 END;
 $$;
 
+CREATE TABLE IF NOT EXISTS floci_internal.copy_job_detail (
+    job_id bigint NOT NULL REFERENCES floci_internal.copy_job(job_id) ON DELETE CASCADE,
+    bucket text NOT NULL,
+    key text NOT NULL,
+    etag text,
+    version_id text,
+    loaded_at timestamptz NOT NULL DEFAULT clock_timestamp(),
+    PRIMARY KEY (job_id, bucket, key)
+);
+
+CREATE OR REPLACE FUNCTION floci_internal.copy_job_for_run(name text)
+RETURNS SETOF floci_internal.copy_job
+LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog, pg_temp AS $$
+BEGIN
+    RETURN QUERY SELECT j.* FROM floci_internal.copy_job j
+      WHERE j.job_name = $1 AND (j.owner = session_user OR (SELECT rolsuper FROM pg_roles WHERE rolname = session_user))
+      FOR UPDATE;
+END;
+$$;
+
+CREATE OR REPLACE FUNCTION floci_internal.reserve_copy_job_file(id bigint, key text, etag text, version_id text)
+RETURNS boolean
+LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog, pg_temp AS $$
+DECLARE
+    source_bucket text;
+BEGIN
+    SELECT j.bucket INTO source_bucket FROM floci_internal.copy_job j
+      WHERE j.job_id = $1 AND (j.owner = session_user OR (SELECT rolsuper FROM pg_roles WHERE rolname = session_user))
+      FOR UPDATE;
+    IF NOT FOUND THEN
+        RAISE EXCEPTION 'Copy job does not exist' USING ERRCODE = '42704';
+    END IF;
+    INSERT INTO floci_internal.copy_job_detail (job_id, bucket, key, etag, version_id)
+      VALUES ($1, source_bucket, $2, $3, $4) ON CONFLICT DO NOTHING;
+    RETURN FOUND;
+END;
+$$;
+
 CREATE OR REPLACE PROCEDURE floci_internal.create_copy_job(
     name text, iam_role text, job_text text, is_auto boolean, target_table text, bucket text, prefix text)
 LANGUAGE plpgsql SECURITY INVOKER AS $$

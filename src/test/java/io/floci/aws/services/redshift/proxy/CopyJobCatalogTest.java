@@ -79,7 +79,7 @@ class CopyJobCatalogTest {
     void truncateJobs() throws SQLException {
         if (cluster != null) {
             try (Connection connection = open(); Statement statement = connection.createStatement()) {
-                statement.execute("TRUNCATE floci_internal.copy_job");
+                statement.execute("TRUNCATE floci_internal.copy_job CASCADE");
             }
         }
     }

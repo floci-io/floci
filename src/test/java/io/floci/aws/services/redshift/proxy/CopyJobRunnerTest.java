@@ -1,0 +1,115 @@
+package io.floci.aws.services.redshift.proxy;
+
+import io.floci.aws.services.iam.IamService;
+import io.floci.aws.services.iam.model.IamRole;
+import io.floci.aws.services.s3.S3Service;
+import io.floci.aws.services.s3.model.S3Object;
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.Timeout;
+
+import java.io.ByteArrayOutputStream;
+import java.net.ServerSocket;
+import java.net.Socket;
+import java.nio.charset.StandardCharsets;
+import java.time.Instant;
+import java.util.ArrayList;
+import java.util.List;
+import java.util.Optional;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.TimeUnit;
+
+import static org.junit.jupiter.api.Assertions.*;
+import static org.mockito.Mockito.*;
+
+@Timeout(10)
+class CopyJobRunnerTest {
+    private static final String ACCOUNT = "000000000000";
+    private static final String ROLE = "arn:aws:iam::000000000000:role/Load";
+    private static final String COPY = "COPY t FROM 's3://bucket/prefix/' IAM_ROLE '" + ROLE + "' CSV";
+
+    @Test
+    void missingOrHiddenJobFailsBeforeReadingS3() throws Exception {
+        S3Service s3 = mock(S3Service.class);
+        try (ServerSocket listener = new ServerSocket(0);
+                Socket socket = new Socket("localhost", listener.getLocalPort());
+                Socket server = listener.accept()) {
+            socket.setSoTimeout(3000);
+            CompletableFuture<Void> response = CompletableFuture.runAsync(() -> {
+                try {
+                    new FakeCopyBackend(server).serveUntilSync(false, sql -> { });
+                } catch (Exception exception) {
+                    throw new AssertionError(exception);
+                }
+            });
+            CopyBackendSession backend = new CopyBackendSession(socket, frame -> { });
+            S3CopySimulator.S3TransferException error = assertThrows(S3CopySimulator.S3TransferException.class,
+                    () -> CopyJobRunner.load(backend, "missing", s3, null, ACCOUNT, List.of()));
+            assertEquals("42704", error.sqlState());
+            backend.synchronize();
+            response.get(5, TimeUnit.SECONDS);
+            verifyNoInteractions(s3);
+        }
+    }
+
+    @Test
+    void skipsOldAndCheckpointedFilesAndLoadsOnlyTheUnseenObjectAcrossPagesAsItsOwner() throws Exception {
+        S3Service s3 = mock(S3Service.class);
+        IamService iam = mock(IamService.class);
+        IamRole role = new IamRole();
+        role.setArn(ROLE);
+        role.setAssumeRolePolicyDocument("""
+                {"Statement":[{"Effect":"Allow","Principal":{"Service":"redshift.amazonaws.com"},"Action":"sts:AssumeRole"}]}
+                """);
+        when(iam.findRole(ACCOUNT, "Load")).thenReturn(Optional.of(role));
+        S3Object old = object("prefix/old", 10);
+        S3Object seen = object("prefix/seen", 30);
+        S3Object fresh = object("prefix/a'b", 40);
+        when(s3.listObjectsWithPrefixes("bucket", "prefix/", null, 1000, null, null))
+                .thenReturn(new S3Service.ListObjectsResult(List.of(old, seen), List.of(), true, "page2"));
+        when(s3.listObjectsWithPrefixes("bucket", "prefix/", null, 1000, "page2", null))
+                .thenReturn(new S3Service.ListObjectsResult(List.of(fresh), List.of(), false, null));
+        when(s3.objectExists("bucket", "prefix/a'b")).thenReturn(true);
+        when(s3.getObject("bucket", "prefix/a'b")).thenReturn(fresh);
+        ByteArrayOutputStream copied = new ByteArrayOutputStream();
+        List<String> statements = new ArrayList<>();
+        try (ServerSocket listener = new ServerSocket(0);
+                Socket socket = new Socket("localhost", listener.getLocalPort());
+                Socket server = listener.accept()) {
+            socket.setSoTimeout(3000);
+            CompletableFuture<Void> response = CompletableFuture.runAsync(() -> {
+                try {
+                    new FakeCopyBackend(server).serveUntilSync(copied, statements::add, sql -> {
+                        if (sql.contains("copy_job_for_run")) {
+                            return List.of(List.of("1", COPY, "bucket", "prefix/", "20", "job_owner"));
+                        }
+                        if (sql.equals("SELECT current_user")) {
+                            return List.of(List.of("admin"));
+                        }
+                        if (sql.contains("reserve_copy_job_file")) {
+                            return List.of(List.of(sql.contains("prefix/seen") ? "f" : "t"));
+                        }
+                        return List.of();
+                    });
+                } catch (Exception exception) {
+                    throw new AssertionError(exception);
+                }
+            });
+            CopyBackendSession backend = new CopyBackendSession(socket, frame -> { });
+            backend.begin(false);
+            assertEquals(1, CopyJobRunner.load(backend, "job", s3, iam, ACCOUNT, List.of(ROLE)));
+            backend.finish(false);
+            backend.synchronize();
+            response.get(5, TimeUnit.SECONDS);
+            assertEquals("1\n", copied.toString(StandardCharsets.UTF_8));
+            assertEquals(2, statements.stream().filter(sql -> sql.contains("reserve_copy_job_file")).count());
+            assertTrue(statements.contains("SET LOCAL ROLE \"job_owner\""));
+            assertTrue(statements.contains("SET LOCAL ROLE \"admin\""));
+        }
+    }
+
+    private static S3Object object(String key, long modified) {
+        S3Object object = new S3Object("bucket", key, "1\n".getBytes(StandardCharsets.UTF_8), "text/plain");
+        object.setLastModified(Instant.ofEpochSecond(modified));
+        return object;
+    }
+}

@@ -44,6 +44,7 @@ import io.floci.aws.services.secretsmanager.model.Secret;
 import io.quarkus.runtime.StartupEvent;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.enterprise.event.Observes;
+import jakarta.enterprise.inject.Instance;
 import jakarta.inject.Inject;
 import org.jboss.logging.Logger;
 
@@ -102,6 +103,9 @@ public class RedshiftService implements ManagedSecretRotator {
     private static final Pattern INTEGRATION_NAME = Pattern.compile(INTEGRATION_NAME_PATTERN);
 
     private final AccountAwareStorageBackend<Integration> integrations;
+
+    @Inject
+    Instance<RedshiftS3AutoCopyConsumer> autoCopyConsumer;
     private final AccountAwareStorageBackend<SnapshotCopyGrant> snapshotCopyGrants;
     private final AccountAwareStorageBackend<SnapshotSchedule> snapshotSchedules;
     private final AccountAwareStorageBackend<AutomatedSnapshotState> automatedSnapshotStates;
@@ -850,6 +854,16 @@ public class RedshiftService implements ManagedSecretRotator {
                 .toList();
     }
 
+    public List<Integration> listS3AutoCopyIntegrations() {
+        return integrations.scanAllAccountEntries(key -> true).stream()
+                .filter(entry -> S3_EVENT_SOURCE_TYPE.equals(entry.value().getSourceType()))
+                .map(entry -> {
+                    Integration integration = entry.value();
+                    integration.setAccountId(entry.accountId());
+                    return integration;
+                }).toList();
+    }
+
     public void updateIntegrationRuntime(String accountId, String integrationArn,
                                          Map<String, String> shardSequenceNumbers,
                                          boolean successful, String error) {
@@ -991,6 +1005,15 @@ public class RedshiftService implements ManagedSecretRotator {
     }
 
     public Integration deleteIntegration(String integrationArn) {
+        if (integrationArn == null || integrationArn.isBlank()) {
+            throw new AwsException("InvalidParameterValue", "IntegrationArn is required.", 400);
+        }
+        if (autoCopyConsumer != null) {
+            integrations.keys().stream().map(integrations::get).flatMap(Optional::stream)
+                    .filter(integration -> integrationArn.equals(integration.getIntegrationArn())
+                            && S3_EVENT_SOURCE_TYPE.equals(integration.getSourceType()))
+                    .findFirst().ifPresent(integration -> autoCopyConsumer.get().disable(integration));
+        }
         Integration deleted = deleteIntegrationLocked(integrationArn);
         publishIntegrationEvents();
         return deleted;

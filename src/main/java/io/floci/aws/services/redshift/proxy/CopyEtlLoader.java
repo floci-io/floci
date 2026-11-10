@@ -30,7 +30,7 @@ final class CopyEtlLoader {
     private CopyEtlLoader() {
     }
 
-    static boolean runSimple(Socket client, Socket socket, CopyStatementParser.S3CopyFrom spec,
+    static boolean runSimple(Socket client, Socket socket, CopyStatementParser.S3Statement spec,
                               S3Service s3, IamService iam, String account, List<String> roles,
                               char status, IntConsumer onStatusChange) throws IOException {
         CopyBackendSession backend = new CopyBackendSession(socket, response -> {
@@ -73,14 +73,29 @@ final class CopyEtlLoader {
         return true;
     }
 
-    static long execute(CopyBackendSession backend, CopyStatementParser.S3CopyFrom spec,
+    static long execute(CopyBackendSession backend, CopyStatementParser.S3Statement spec,
                         S3Service s3, IamService iam, String account, List<String> roles,
                         boolean callerTransaction) throws IOException {
+        return execute(backend, spec, s3, iam, account, roles, callerTransaction, false);
+    }
+
+    static long executeObject(CopyBackendSession backend, CopyStatementParser.S3CopyFrom spec,
+                              S3Service s3, IamService iam, String account, List<String> roles) throws IOException {
+        return execute(backend, spec, s3, iam, account, roles, true, true);
+    }
+
+    private static long execute(CopyBackendSession backend, CopyStatementParser.S3Statement spec,
+                                S3Service s3, IamService iam, String account, List<String> roles,
+                                boolean callerTransaction, boolean exactObject) throws IOException {
         backend.begin(callerTransaction);
         String savepoint = "floci_load_" + UUID.randomUUID().toString().replace("-", "");
         backend.execute("SAVEPOINT " + savepoint);
         try {
-            long rows = load(backend, spec, s3, iam, account, roles);
+            long rows = switch (spec) {
+                case CopyStatementParser.S3CopyFrom copy -> load(backend, copy, s3, iam, account, roles, exactObject);
+                case CopyStatementParser.S3CopyJobRun run -> CopyJobRunner.load(backend, run.name(), s3, iam, account, roles);
+                default -> throw new IllegalArgumentException("Expected COPY statement");
+            };
             backend.execute("RELEASE SAVEPOINT " + savepoint);
             return rows;
         } catch (IOException | RuntimeException exception) {
@@ -99,14 +114,15 @@ final class CopyEtlLoader {
     }
 
     private static long load(CopyBackendSession backend, CopyStatementParser.S3CopyFrom spec,
-                             S3Service s3, IamService iam, String account, List<String> roles) throws IOException {
+                             S3Service s3, IamService iam, String account, List<String> roles, boolean exactObject) throws IOException {
         List<ColumnInfo> catalog = columns(backend, spec);
         List<String> discovered = spec.jsonAuto() && (spec.columns() == null || spec.columns().isEmpty())
                 ? catalog.stream().map(ColumnInfo::name).toList() : null;
         List<Integer> widths = spec.transforms().truncateColumns() ? S3CopySimulator.alignMaxBytes(spec, catalog) : null;
         List<CopyRecordTransformer.ColumnKind> kinds = spec.transforms().needsColumnTypes()
                 ? S3CopySimulator.alignKinds(spec, catalog) : null;
-        CopyInput input = S3CopySimulator.prepareCopy(spec, s3, iam, account, roles);
+        CopyInput input = exactObject ? S3CopySimulator.prepareObjectCopy(spec, s3, iam, account, roles)
+                : S3CopySimulator.prepareCopy(spec, s3, iam, account, roles);
         try {
             if (!spec.transforms().toleratesErrors()) {
                 return backend.copy(S3CopySimulator.copyBackendSql(spec, discovered),

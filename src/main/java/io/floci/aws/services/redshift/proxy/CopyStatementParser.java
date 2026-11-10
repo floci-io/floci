@@ -14,10 +14,22 @@ import java.util.regex.Pattern;
  */
 public final class CopyStatementParser {
 
-    public sealed interface S3Statement permits S3CopyFrom, S3Unload {
+    public sealed interface S3Statement permits S3CopyFrom, S3Unload, S3CopyJobRun {
         String iamRoleArn();
 
         boolean defaultIamRoleRequested();
+    }
+
+    public record S3CopyJobRun(String name) implements S3Statement {
+        @Override
+        public String iamRoleArn() {
+            return null;
+        }
+
+        @Override
+        public boolean defaultIamRoleRequested() {
+            return false;
+        }
     }
 
     /** Access keys a COPY names, as {@code CREDENTIALS 'aws_access_key_id=...'} or {@code ACCESS_KEY_ID}. */
@@ -419,6 +431,10 @@ public final class CopyStatementParser {
     }
 
     public static S3Statement parse(String sql, String defaultIamRoleArn) {
+        String job = CopyJobSql.runName(sql);
+        if (job != null) {
+            return new S3CopyJobRun(job);
+        }
         if (sql == null || sql.isBlank()) {
             return null;
         }

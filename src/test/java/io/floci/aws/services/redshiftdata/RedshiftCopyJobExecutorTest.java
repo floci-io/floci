@@ -1,0 +1,88 @@
+package io.floci.aws.services.redshiftdata;
+
+import io.floci.aws.core.common.AwsException;
+import io.floci.aws.services.redshift.RedshiftService;
+import io.floci.aws.services.redshift.RedshiftZeroEtlEndpoints;
+import io.floci.aws.services.redshift.model.Cluster;
+import io.floci.aws.services.redshift.model.Endpoint;
+import io.floci.aws.services.redshift.model.Integration;
+import io.floci.aws.services.redshiftserverless.RedshiftServerlessService.WorkgroupTarget;
+import org.junit.jupiter.api.Test;
+
+import java.sql.Connection;
+import java.sql.PreparedStatement;
+import java.sql.ResultSet;
+import java.sql.Statement;
+import java.util.List;
+
+import static org.junit.jupiter.api.Assertions.*;
+import static org.mockito.ArgumentMatchers.*;
+import static org.mockito.Mockito.*;
+
+class RedshiftCopyJobExecutorTest {
+    private final RedshiftService service = mock(RedshiftService.class);
+    private final RedshiftZeroEtlEndpoints endpoints = mock(RedshiftZeroEtlEndpoints.class);
+    private final RedshiftDataConnectionFactory connections = mock(RedshiftDataConnectionFactory.class);
+    private final RedshiftCopyJobExecutor executor = new RedshiftCopyJobExecutor(service, endpoints, connections);
+
+    @Test
+    void missingClusterOrNamespaceDoesNotPreventIntegrationDeletion() {
+        Integration cluster = integration("arn:aws:redshift:us-east-1:123456789012:cluster:target");
+        when(service.describeClustersForAccount("123456789012", "target"))
+                .thenThrow(new AwsException("ClusterNotFound", "Gone", 404));
+        assertDoesNotThrow(() -> executor.disable(cluster));
+        Integration namespace = integration("arn:aws:redshift-serverless:us-east-1:123456789012:namespace/target");
+        when(endpoints.targetWorkgroup("123456789012", namespace.getTargetArn()))
+                .thenThrow(new AwsException("ResourceNotFoundException", "Gone", 404));
+        assertDoesNotThrow(() -> executor.disable(namespace));
+        verifyNoInteractions(connections);
+    }
+
+    @Test
+    void pausedClusterSkipsLoadsAndRefusesDeletionWithoutLosingIntegrationState() {
+        Integration integration = integration("arn:aws:redshift:us-east-1:123456789012:cluster:target");
+        Cluster cluster = new Cluster();
+        cluster.setClusterStatus("paused");
+        when(service.describeClustersForAccount("123456789012", "target")).thenReturn(List.of(cluster));
+        executor.runAutomatic(integration);
+        AwsException error = assertThrows(AwsException.class, () -> executor.disable(integration));
+        assertEquals("InvalidClusterState", error.getErrorCode());
+        verifyNoInteractions(connections);
+    }
+
+    @Test
+    void serverlessCleanupUsesTheWorkgroupProxyAndMatchesOnlyTheSourceBucket() throws Exception {
+        Integration integration = integration("arn:aws:redshift-serverless:us-east-1:123456789012:namespace/target");
+        Endpoint endpoint = new Endpoint();
+        endpoint.setPort(15439);
+        WorkgroupTarget target = new WorkgroupTarget("workgroup-arn", "workgroup", "backend", 5432, "analytics",
+                "master", "password", "admin", List.of(), null, endpoint);
+        when(endpoints.targetWorkgroup("123456789012", integration.getTargetArn())).thenReturn(target);
+        Connection connection = mock(Connection.class);
+        Connection database = mock(Connection.class);
+        Statement statement = mock(Statement.class);
+        ResultSet databases = mock(ResultSet.class);
+        PreparedStatement update = mock(PreparedStatement.class);
+        when(connections.open(any())).thenReturn(connection, database);
+        when(connection.createStatement()).thenReturn(statement);
+        when(statement.executeQuery(anyString())).thenReturn(databases);
+        when(databases.next()).thenReturn(true, false);
+        when(databases.getString(1)).thenReturn("analytics");
+        when(database.prepareStatement(anyString())).thenReturn(update);
+        executor.disable(integration);
+        verify(connections, times(2)).open(argThat(value -> value.host().equals("127.0.0.1")
+                && value.port() == 15439 && value.database().equals("analytics")));
+        verify(update).setString(1, "source-bucket");
+        verify(update).executeUpdate();
+        verify(database).close();
+    }
+
+    private static Integration integration(String target) {
+        Integration integration = new Integration();
+        integration.setAccountId("123456789012");
+        integration.setTargetArn(target);
+        integration.setTargetClusterIdentifier("target");
+        integration.setSourceArn("arn:aws:s3:::source-bucket");
+        return integration;
+    }
+}
