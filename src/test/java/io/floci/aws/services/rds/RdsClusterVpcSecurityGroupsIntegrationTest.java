@@ -1,5 +1,6 @@
 package io.floci.aws.services.rds;
 
+import io.floci.aws.core.common.BackupWindows;
 import io.floci.aws.testing.RdsMockProfile;
 import io.quarkus.test.junit.QuarkusTest;
 import io.quarkus.test.junit.TestProfile;
@@ -181,5 +182,45 @@ class RdsClusterVpcSecurityGroupsIntegrationTest {
         rds("ModifyDBCluster").formParam("DBClusterIdentifier", ID)
                 .formParam("PreferredBackupWindow", "garbage").when().post("/").then().statusCode(400);
         assertEquals("05:00-06:00", described("PreferredBackupWindow"));
+    }
+
+    private static void assertOverlapRefused(io.restassured.response.ValidatableResponse r) {
+        r.statusCode(400).body(org.hamcrest.Matchers.containsString("<Code>InvalidParameterValue</Code>"));
+    }
+
+    @Test
+    void windowGivenAloneIsPairedWithAClearOneOnCreateAndRefusedOnModify() {
+        // default maintenance mon:00:00-mon:03:00 overlaps 01:00-02:00, so a clear one is derived
+        create().formParam("PreferredBackupWindow", "01:00-02:00").when().post("/").then().statusCode(200);
+        assertEquals("01:00-02:00", described("PreferredBackupWindow"));
+        String maint = described("PreferredMaintenanceWindow");
+        assertEquals(false, BackupWindows.overlap("01:00-02:00", maint), maint);
+        rds("DeleteDBCluster").formParam("DBClusterIdentifier", ID)
+                .formParam("SkipFinalSnapshot", "true").when().post("/");
+
+        // default backup 04:00-06:00 overlaps mon:04:30-mon:05:30
+        create().formParam("PreferredMaintenanceWindow", "mon:04:30-mon:05:30")
+                .when().post("/").then().statusCode(200);
+        String backup = described("PreferredBackupWindow");
+        assertEquals(false, BackupWindows.overlap(backup, "mon:04:30-mon:05:30"), backup);
+        rds("DeleteDBCluster").formParam("DBClusterIdentifier", ID)
+                .formParam("SkipFinalSnapshot", "true").when().post("/");
+
+        // never-set windows count as the defaults on modify
+        create().when().post("/").then().statusCode(200);
+        assertOverlapRefused(rds("ModifyDBCluster").formParam("DBClusterIdentifier", ID)
+                .formParam("PreferredBackupWindow", "01:00-02:00").when().post("/").then());
+        assertOverlapRefused(rds("ModifyDBCluster").formParam("DBClusterIdentifier", ID)
+                .formParam("PreferredMaintenanceWindow", "mon:04:30-mon:05:30").when().post("/").then());
+        assertEquals("04:00-06:00", described("PreferredBackupWindow"));
+    }
+
+    @Test
+    void modifyWithABadWindowChangesNothing() {
+        create().when().post("/").then().statusCode(200);
+        rds("ModifyDBCluster").formParam("DBClusterIdentifier", ID)
+                .formParam("BackupRetentionPeriod", "9").formParam("PreferredBackupWindow", "garbage")
+                .when().post("/").then().statusCode(400);
+        assertEquals("1", described("BackupRetentionPeriod"));
     }
 }

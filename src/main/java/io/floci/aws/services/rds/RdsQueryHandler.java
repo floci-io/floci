@@ -1344,8 +1344,8 @@ public class RdsQueryHandler {
                     params, "ServerlessV2ScalingConfiguration.SecondsUntilAutoPause");
             Integer requestedPort = parseIntegerParam(params, "Port");
             String globalClusterIdentifier = params.getFirst("GlobalClusterIdentifier");
-            RdsService.validateClusterWindows(null, params.getFirst("PreferredBackupWindow"),
-                    params.getFirst("PreferredMaintenanceWindow"));
+            String[] windows = RdsService.resolveClusterCreateWindows(
+                    params.getFirst("PreferredBackupWindow"), params.getFirst("PreferredMaintenanceWindow"));
             DbCluster cluster;
             if (globalClusterIdentifier != null && !globalClusterIdentifier.isBlank()) {
                 cluster = requestedPort == null
@@ -1400,7 +1400,7 @@ public class RdsQueryHandler {
             }
             cluster = service.setDbClusterRequestSettings(id, region,
                     hasMemberKeys(params, "VpcSecurityGroupIds") ? vpcSecurityGroupIds(params) : null,
-                    params.getFirst("PreferredBackupWindow"), params.getFirst("PreferredMaintenanceWindow"),
+                    windows[0], windows[1],
                     parseOptionalBoolean(params, "DeletionProtection"));
             String result = dbClusterXml(cluster);
             return Response.ok(AwsQueryResponse.envelope("CreateDBCluster", AwsNamespaces.RDS, result)).build();
@@ -1519,6 +1519,8 @@ public class RdsQueryHandler {
             if (Boolean.TRUE.equals(enableHttpEndpoint)) {
                 RdsService.requireDataApiEngine(service.getDbCluster(id, region).getEngineIdentifier());
             }
+            RdsService.validateClusterWindows(service.getDbCluster(id, region),
+                    params.getFirst("PreferredBackupWindow"), params.getFirst("PreferredMaintenanceWindow"));
             DbCluster cluster = service.modifyDbCluster(id, newPassword, iamEnabled,
                     serverlessV2Min, serverlessV2Max, serverlessV2SecondsUntilAutoPause,
                     manageMasterUserPassword, masterUserSecretKmsKeyId,

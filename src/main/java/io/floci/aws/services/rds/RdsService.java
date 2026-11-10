@@ -11469,8 +11469,7 @@ public class RdsService implements Resettable, ResourceProvider {
 
     /**
      * The format checks the instance path applies, and the overlap check against the window that
-     * will be in effect. A window with no counterpart given or stored (a fresh cluster given one
-     * window) is not checked for overlap: AWS then picks a clear counterpart itself.
+     * will be in effect: the given one, else the cluster's stored one, else the default.
      */
     public static void validateClusterWindows(DbCluster current, String backupWindow, String maintenanceWindow) {
         if (backupWindow != null) {
@@ -11480,12 +11479,37 @@ public class RdsService implements Resettable, ResourceProvider {
             BackupWindows.parseMaintenanceWindow(maintenanceWindow);
         }
         String backup = backupWindow != null ? backupWindow
-                : current != null ? current.getPreferredBackupWindow() : null;
+                : current != null && current.getPreferredBackupWindow() != null
+                        ? current.getPreferredBackupWindow() : BackupWindows.DEFAULT_BACKUP_WINDOW;
         String maintenance = maintenanceWindow != null ? maintenanceWindow
-                : current != null ? current.getPreferredMaintenanceWindow() : null;
-        if (backup != null && maintenance != null && DbInstanceSettings.windowsOverlap(backup, maintenance)) {
+                : current != null && current.getPreferredMaintenanceWindow() != null
+                        ? current.getPreferredMaintenanceWindow() : BackupWindows.DEFAULT_MAINTENANCE_WINDOW;
+        if (DbInstanceSettings.windowsOverlap(backup, maintenance)) {
             throw DbInstanceSettings.overlappingWindows();
         }
+    }
+
+    /**
+     * On create a window given alone is paired with the default, or with one starting where the
+     * given one ends when the default would overlap it: AWS picks a clear window itself.
+     * Validates before the cluster exists; returns {backup, maintenance} to store.
+     */
+    public static String[] resolveClusterCreateWindows(String backupWindow, String maintenanceWindow) {
+        if (backupWindow != null) {
+            BackupWindows.parseBackupWindow(backupWindow);
+        }
+        if (maintenanceWindow != null) {
+            BackupWindows.parseMaintenanceWindow(maintenanceWindow);
+        }
+        if (backupWindow != null && maintenanceWindow == null
+                && DbInstanceSettings.windowsOverlap(backupWindow, BackupWindows.DEFAULT_MAINTENANCE_WINDOW)) {
+            maintenanceWindow = DbInstanceSettings.maintenanceWindowAfter(backupWindow);
+        } else if (maintenanceWindow != null && backupWindow == null
+                && DbInstanceSettings.windowsOverlap(BackupWindows.DEFAULT_BACKUP_WINDOW, maintenanceWindow)) {
+            backupWindow = DbInstanceSettings.backupWindowAfter(maintenanceWindow);
+        }
+        validateClusterWindows(null, backupWindow, maintenanceWindow);
+        return new String[] {backupWindow, maintenanceWindow};
     }
 
     /** Stores what a Create/ModifyDBCluster request carries; a null argument leaves that field as it is. */
