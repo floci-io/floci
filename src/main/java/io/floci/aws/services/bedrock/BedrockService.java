@@ -398,7 +398,7 @@ public class BedrockService implements ResourceProvider {
         }
     }
 
-    public Guardrail createGuardrailVersion(String identifier, String description, String region) {
+    public synchronized Guardrail createGuardrailVersion(String identifier, String description, String region) {
         Guardrail draft = getGuardrail(identifier, DRAFT_VERSION, region);
         String guardrailId = draft.getGuardrailId();
         String version = String.valueOf(nextVersionNumber(guardrailId, region));

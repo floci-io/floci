@@ -29,15 +29,24 @@ class BedrockGuardrailLifecycleConcurrencyTest {
 
     @Test
     void deletionAfterAnOverlappingTagWriteLeavesTheGuardrailAbsent() throws Exception {
-        overlappingWrite(false);
+        overlappingWrite(Write.TAG);
     }
 
     @Test
     void deletionAfterAnOverlappingUpdateLeavesTheGuardrailAbsent() throws Exception {
-        overlappingWrite(true);
+        overlappingWrite(Write.UPDATE);
     }
 
-    private static void overlappingWrite(boolean update) throws Exception {
+    @Test
+    void deletionAfterOverlappingVersionCreationLeavesTheNumberedVersionAbsent() throws Exception {
+        overlappingWrite(Write.VERSION);
+    }
+
+    private enum Write {
+        TAG, UPDATE, VERSION
+    }
+
+    private static void overlappingWrite(Write operation) throws Exception {
         PausedWriteStorage storage = new PausedWriteStorage();
         ObjectMapper mapper = new ObjectMapper();
         BedrockService service = new BedrockService(storage, new InMemoryStorage<>(),
@@ -49,8 +58,10 @@ class BedrockGuardrailLifecycleConcurrencyTest {
         AtomicReference<Throwable> failure = new AtomicReference<>();
         Thread writer = new Thread(() -> {
             try {
-                if (update) {
+                if (operation == Write.UPDATE) {
                     service.updateGuardrail(guardrail.getGuardrailId(), request.deepCopy().put("name", "changed"), REGION);
+                } else if (operation == Write.VERSION) {
+                    service.createGuardrailVersion(guardrail.getGuardrailId(), "snapshot", REGION);
                 } else {
                     service.tagResource(guardrail.getGuardrailArn(), Map.of("owner", "test"), REGION);
                 }
@@ -82,6 +93,11 @@ class BedrockGuardrailLifecycleConcurrencyTest {
         AwsException missing = assertThrows(AwsException.class,
                 () -> service.getGuardrail(guardrail.getGuardrailId(), null, REGION));
         assertEquals("ResourceNotFoundException", missing.getErrorCode());
+        if (operation == Write.VERSION) {
+            AwsException missingVersion = assertThrows(AwsException.class,
+                    () -> service.getGuardrail(guardrail.getGuardrailId(), "1", REGION));
+            assertEquals("ResourceNotFoundException", missingVersion.getErrorCode());
+        }
     }
 
     private static final class PausedWriteStorage extends InMemoryStorage<String, Guardrail> {
