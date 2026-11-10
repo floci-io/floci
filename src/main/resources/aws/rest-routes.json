@@ -291,6 +291,41 @@
         "UpdateVpcLink": {"method": "PATCH", "requestUri": "/v2/vpclinks/{vpcLinkId}"}
       }
     },
+    "controltower": {
+      "credentialScope": "controltower",
+      "apiVersion": "2018-05-10",
+      "accessDeniedStatus": 403,
+      "operations": {
+        "CreateLandingZone": {"method": "POST", "requestUri": "/create-landingzone"},
+        "DeleteLandingZone": {"method": "POST", "requestUri": "/delete-landingzone"},
+        "DisableBaseline": {"method": "POST", "requestUri": "/disable-baseline"},
+        "DisableControl": {"method": "POST", "requestUri": "/disable-control"},
+        "EnableBaseline": {"method": "POST", "requestUri": "/enable-baseline"},
+        "EnableControl": {"method": "POST", "requestUri": "/enable-control"},
+        "GetBaseline": {"method": "POST", "requestUri": "/get-baseline"},
+        "GetBaselineOperation": {"method": "POST", "requestUri": "/get-baseline-operation"},
+        "GetControlOperation": {"method": "POST", "requestUri": "/get-control-operation"},
+        "GetEnabledBaseline": {"method": "POST", "requestUri": "/get-enabled-baseline"},
+        "GetEnabledControl": {"method": "POST", "requestUri": "/get-enabled-control"},
+        "GetLandingZone": {"method": "POST", "requestUri": "/get-landingzone"},
+        "GetLandingZoneOperation": {"method": "POST", "requestUri": "/get-landingzone-operation"},
+        "ListBaselines": {"method": "POST", "requestUri": "/list-baselines"},
+        "ListControlOperations": {"method": "POST", "requestUri": "/list-control-operations"},
+        "ListEnabledBaselines": {"method": "POST", "requestUri": "/list-enabled-baselines"},
+        "ListEnabledControls": {"method": "POST", "requestUri": "/list-enabled-controls"},
+        "ListLandingZoneOperations": {"method": "POST", "requestUri": "/list-landingzone-operations"},
+        "ListLandingZones": {"method": "POST", "requestUri": "/list-landingzones"},
+        "ListTagsForResource": {"method": "GET", "requestUri": "/tags/{resourceArn+}"},
+        "ResetEnabledBaseline": {"method": "POST", "requestUri": "/reset-enabled-baseline"},
+        "ResetEnabledControl": {"method": "POST", "requestUri": "/reset-enabled-control"},
+        "ResetLandingZone": {"method": "POST", "requestUri": "/reset-landingzone"},
+        "TagResource": {"method": "POST", "requestUri": "/tags/{resourceArn+}"},
+        "UntagResource": {"method": "DELETE", "requestUri": "/tags/{resourceArn+}"},
+        "UpdateEnabledBaseline": {"method": "POST", "requestUri": "/update-enabled-baseline"},
+        "UpdateEnabledControl": {"method": "POST", "requestUri": "/update-enabled-control"},
+        "UpdateLandingZone": {"method": "POST", "requestUri": "/update-landingzone"}
+      }
+    },
     "dsql": {
       "credentialScope": "dsql",
       "apiVersion": "2018-05-10",

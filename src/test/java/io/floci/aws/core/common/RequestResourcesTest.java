@@ -12,6 +12,7 @@ import org.junit.jupiter.api.Test;
 import java.io.ByteArrayInputStream;
 import java.io.IOException;
 import java.io.UncheckedIOException;
+import java.net.URI;
 import java.nio.charset.StandardCharsets;
 import java.util.List;
 import java.util.Map;
@@ -29,6 +30,69 @@ class RequestResourcesTest {
 
     private static final ObjectMapper CBOR = new ObjectMapper(new CBORFactory());
     private static final String MACHINE = "arn:aws:states:us-east-1:000000000000:stateMachine:orders";
+
+    @Test
+    void controlTowerIdentifiersKeepFullArnsAndLandingZoneIds() {
+        String prefix = "arn:aws:controltower:us-east-1:000000000000:";
+        for (String operation : List.of("GetLandingZone", "UpdateLandingZone", "ResetLandingZone", "DeleteLandingZone")) {
+            for (String identifier : List.of("zone-one", prefix + "landingzone/zone-one")) {
+                assertEquals(List.of(prefix + "landingzone/zone-one"), of("controltower:" + operation,
+                        json("{\"landingZoneIdentifier\":\"" + identifier + "\"}")));
+            }
+        }
+        for (String kind : List.of("Baseline", "Control")) {
+            String member = "enabled" + kind + "Identifier";
+            String arn = prefix + "enabled" + kind.toLowerCase() + "/one";
+            for (String verb : List.of("Get", "Update", "Reset")) {
+                assertEquals(List.of(arn), of("controltower:" + verb + "Enabled" + kind,
+                        json("{\"" + member + "\":\"" + arn + "\"}")));
+            }
+        }
+        assertEquals(List.of(prefix + "enabledcontrol/*"), of("controltower:EnableControl",
+                json("{\"controlIdentifier\":\"arn:aws:controlcatalog:::control/catalog-one\"}")));
+        assertTrue(RequestResources.actsOnNoResource("controltower:ListLandingZones"));
+        assertTrue(RequestResources.actsOnNoResource("controltower:CreateLandingZone"));
+        assertEquals(List.of("arn:aws-us-gov:controltower:us-gov-west-1:111122223333:landingzone/zone-one"),
+                RequestResources.of("controltower:GetLandingZone", json("{\"landingZoneIdentifier\":\"zone-one\"}"),
+                        "aws-us-gov", "us-gov-west-1", "111122223333"));
+    }
+
+    @Test
+    void sharedBareTagsReadTheirActualBodyOrQueryWithoutChangingArnPathPrecedence() {
+        String arn = "arn:aws:controltower:us-east-1:000000000000:landingzone/one";
+        String spoof = arn + "other";
+        for (String method : List.of("POST", "GET", "DELETE")) {
+            String operation = "controltower:" + switch (method) {
+                case "POST" -> "TagResource";
+                case "GET" -> "ListTagsForResource";
+                default -> "UntagResource";
+            };
+            ContainerRequestContext bare = rest(method, "{\"resourceArn\":\"" + (method.equals("POST") ? arn : spoof)
+                    + "\"}", Map.of("resourceArn", arn));
+            when(bare.getUriInfo().getRequestUri()).thenReturn(URI.create("http://localhost/tags///"));
+            when(bare.getUriInfo().getBaseUri()).thenReturn(URI.create("http://localhost/"));
+            assertEquals(List.of(arn), of(operation, bare));
+            ContainerRequestContext path = rest(method, "{\"resourceArn\":\"" + spoof + "\"}", Map.of("resourceArn", spoof));
+            when(path.getUriInfo().getRequestUri()).thenReturn(URI.create("http://localhost/tags/" + arn));
+            when(path.getUriInfo().getBaseUri()).thenReturn(URI.create("http://localhost/"));
+            assertEquals(List.of(arn), RequestResources.of(operation, path, "aws", "us-east-1", "000000000000",
+                    null, Map.of("resourceArn", arn)));
+            assertEquals(List.of(), of(operation, path));
+        }
+        ContainerRequestContext absentQuery = rest("GET", "{\"resourceArn\":\"" + arn + "\"}", Map.of());
+        when(absentQuery.getUriInfo().getRequestUri()).thenReturn(URI.create("http://localhost/tags"));
+        when(absentQuery.getUriInfo().getBaseUri()).thenReturn(URI.create("http://localhost/"));
+        assertEquals(List.of(), of("controltower:ListTagsForResource", absentQuery));
+    }
+
+    @Test
+    void sharedSignerBareTagsUseTheSameLocatedMemberContract() {
+        String arn = "arn:aws:signer:us-east-1:000000000000:/signing-profiles/profile";
+        ContainerRequestContext request = rest("POST", "{\"resourceArn\":\"" + arn + "\"}", Map.of());
+        when(request.getUriInfo().getRequestUri()).thenReturn(URI.create("http://localhost/tags"));
+        when(request.getUriInfo().getBaseUri()).thenReturn(URI.create("http://localhost/"));
+        assertEquals(List.of(arn), of("signer:TagResource", request));
+    }
 
     @Test
     void generatedIdTargetsReadModelListsAndSerializedQueryNamesInOrder() throws Exception {

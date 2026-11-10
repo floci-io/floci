@@ -164,7 +164,7 @@ OUTPUT = REPO_ROOT / "src/main/resources/aws/iam-request-resources.json"
 # are the ones its handlers mint.
 NAMESPACES = ("access-analyzer", "acm", "application-autoscaling", "athena", "bcm-data-exports",
               "bcm-pricing-calculator", "budgets", "ce", "cloudtrail", "codebuild", "codepipeline", "cognito-identity",
-              "cognito-idp", "cur", "datasync", "ec2", "ecr", "elasticloadbalancing", "elasticmapreduce", "es", "events",
+              "cognito-idp", "controltower", "cur", "datasync", "ec2", "ecr", "elasticloadbalancing", "elasticmapreduce", "es", "events",
               "firehose", "globalaccelerator", "kinesisanalytics", "payment-cryptography", "quicksight", "redshift",
               "redshift-data", "rekognition", "servicediscovery", "servicequotas", "sso", "states", "textract",
               "timestream-influxdb", "translate", "signer")
@@ -235,7 +235,6 @@ NOT_COVERED: dict[str, str] = {
     "config": _LATER,
     "connect": _REST,
     "controlcatalog": _REST,
-    "controltower": _REST,
     "detective": _REST,
     "dlm": _REST,
     "dms": _LATER,
@@ -303,6 +302,27 @@ NOT_COVERED: dict[str, str] = {
 # them apart (EventBridge's `events` and EventBridge V2's `eventsv2`): Floci applies it only to a request the service
 # of that endpoint serves, never by a member a caller could add to a request of the other.
 CORRECTIONS: dict[str, tuple[list[dict], str]] = {
+    **{f"controltower:{operation}": ([{"type": "LandingZone",
+                                       "fill": {"LandingZoneId": "landingZoneIdentifier"},
+                                       "arnOf": {"landingZoneIdentifier": "LandingZone"}}],
+                                     "landingZoneIdentifier accepts either the landing zone ARN or its final id; "
+                                     "the unpatterned SDK string does not describe that alternative")
+       for operation in ("GetLandingZone", "UpdateLandingZone", "DeleteLandingZone", "ResetLandingZone")},
+    **{f"controltower:{operation}": ([{"types": [kind], "arn": member}],
+                                     "the Identifier holds the complete ARN, not the id in the resource ARN")
+       for operation, kind, member in (
+           ("GetBaseline", "Baseline", "baselineIdentifier"),
+           ("GetEnabledBaseline", "EnabledBaseline", "enabledBaselineIdentifier"),
+           ("UpdateEnabledBaseline", "EnabledBaseline", "enabledBaselineIdentifier"),
+           ("ResetEnabledBaseline", "EnabledBaseline", "enabledBaselineIdentifier"),
+           ("DisableBaseline", "EnabledBaseline", "enabledBaselineIdentifier"),
+           ("GetEnabledControl", "EnabledControl", "enabledControlIdentifier"),
+           ("UpdateEnabledControl", "EnabledControl", "enabledControlIdentifier"),
+           ("ResetEnabledControl", "EnabledControl", "enabledControlIdentifier"),
+           ("DisableControl", "EnabledControl", "enabledControlIdentifier"))},
+    "controltower:EnableControl": ([{"type": "EnabledControl", "fill": {}}],
+                                   "controlIdentifier names the catalog control, not the enabled control; "
+                                   "the enabled control id is minted by the service"),
     "quicksight:CreateDataSet": ([{"types": ["datasource"], "arn": f"PhysicalTableMap{{}}.{kind}.DataSourceArn"}
                                  for kind in ("S3Source", "RelationalTable", "CustomSql", "SaaSTable", "FileSource")],
                                 "CreateDataSet acts on each data source named by its physical tables; "

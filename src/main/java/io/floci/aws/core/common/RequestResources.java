@@ -3,6 +3,7 @@ package io.floci.aws.core.common;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.node.JsonNodeFactory;
 import com.fasterxml.jackson.databind.node.ObjectNode;
+import io.floci.aws.services.iam.IamActionRegistry;
 import jakarta.ws.rs.container.ContainerRequestContext;
 import jakarta.ws.rs.core.MultivaluedMap;
 
@@ -262,7 +263,7 @@ public final class RequestResources {
      */
     private static JsonNode located(RequestResourceMembers.Table table, String operation, JsonNode body,
                                     ContainerRequestContext ctx, Map<String, String> labels) {
-        Map<String, String> located = table.located().getOrDefault(operation, Map.of());
+        Map<String, String> located = locatedMembers(table, operation, ctx);
         if (located.isEmpty()) {
             return body;
         }
@@ -281,7 +282,7 @@ public final class RequestResources {
     private static Map<String, String> located(RequestResourceMembers.Table table, String operation,
                                                Map<String, String> form, ContainerRequestContext ctx,
                                                Map<String, String> labels) {
-        Map<String, String> located = table.located().getOrDefault(operation, Map.of());
+        Map<String, String> located = locatedMembers(table, operation, ctx);
         if (form.isEmpty() || located.isEmpty()) {
             return form;
         }
@@ -289,6 +290,25 @@ public final class RequestResources {
         overlaid.keySet().removeAll(located.keySet());
         overlaid.putAll(locatedValues(located, ctx, labels));
         return overlaid;
+    }
+
+    private static Map<String, String> locatedMembers(RequestResourceMembers.Table table, String operation,
+                                                       ContainerRequestContext ctx) {
+        Map<String, String> located = table.located().getOrDefault(operation, Map.of());
+        if (!"{resourceArn}".equals(located.get("resourceArn")) || ctx.getUriInfo() == null) {
+            return located;
+        }
+        if (ctx.getUriInfo().getRequestUri() == null || !"/tags".equals(IamActionRegistry.routedPath(ctx))) {
+            return located;
+        }
+        // SharedTagsController's bare route reads POST's JSON member, and GET/DELETE's query parameter.
+        Map<String, String> shared = new HashMap<>(located);
+        if ("POST".equals(ctx.getMethod())) {
+            shared.remove("resourceArn");
+        } else if ("GET".equals(ctx.getMethod()) || "DELETE".equals(ctx.getMethod())) {
+            shared.put("resourceArn", "?resourceArn");
+        }
+        return shared;
     }
 
     /**

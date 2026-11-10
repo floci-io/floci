@@ -595,10 +595,12 @@ def test_every_correction_is_the_vendored_entry_of_an_operation_the_file_reads()
     assert r.CORRECTIONS
     for operation, (resources, reason) in r.CORRECTIONS.items():
         assert operation in operations and reason, operation
-        # A resource's account and the ARNs its members may give are botocore's, and whether a create makes it the
-        # rule's, on top of the correction.
-        assert [{key: value for key, value in resource.items() if key not in ("account", "arnOf", "made")}
-                for resource in operations[operation]["resources"]] == resources, operation
+        # Derived metadata may extend a correction; metadata explicitly supplied by the correction must survive.
+        actual = operations[operation]["resources"]
+        assert len(actual) == len(resources), operation
+        for resource, correction in zip(actual, resources, strict=True):
+            assert {key: value for key, value in resource.items()
+                    if key not in ("account", "arnOf", "made") or key in correction} == correction, operation
 
 
 def test_a_correction_gives_the_operation_its_resources(corrections):

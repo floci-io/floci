@@ -52,6 +52,7 @@ MODELS: dict[str, str] = {
     "accessanalyzer": "access-analyzer",
     "apigateway": "apigateway",
     "apigatewayv2": "apigateway",
+    "controltower": "controltower",
     "dsql": "dsql",
     "eks": "eks",
     "es": "es",
@@ -89,6 +90,7 @@ INTERNAL_ROUTES: dict[str, tuple[str, bool]] = {
 # the service's route filter leaves that path alone; prefixing it here would advertise a route no
 # request ever arrives on, and the IAM check would find no rule for it.
 SHARED_ROUTES: dict[str, frozenset[str]] = {
+    "controltower": frozenset({"TagResource", "UntagResource", "ListTagsForResource"}),
     "signer": frozenset({"TagResource", "UntagResource", "ListTagsForResource"}),
 }
 
