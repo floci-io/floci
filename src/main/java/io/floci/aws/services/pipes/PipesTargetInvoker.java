@@ -379,7 +379,6 @@ public class PipesTargetInvoker {
             JsonNode current = objectMapper.readTree(json);
             String previousSegment = null;
             JsonNode container = null;
-            JsonNode outer = null;
             boolean sourceFieldDecoded = false;
             for (String segment : segments) {
                 // AWS Pipes parses an encoded source body when traversing into it.
@@ -401,7 +400,6 @@ public class PipesTargetInvoker {
                 if (next.isMissingNode() || next.isNull()) {
                     return null;
                 }
-                outer = container;
                 container = current;
                 current = next;
                 previousSegment = segment;
@@ -439,7 +437,6 @@ public class PipesTargetInvoker {
      * is not base64.
      *
      * @param container the object that holds {@code field}
-     * @param outer the object that holds {@code container}
      */
     public static String decodedSourceText(String field, String text, JsonNode container) {
         if (!isBase64SourceField(field, container)) {
@@ -453,7 +450,7 @@ public class PipesTargetInvoker {
         }
     }
 
-    public static boolean isBase64SourceField(String field, JsonNode container) {
+    private static boolean isBase64SourceField(String field, JsonNode container) {
         if ("data".equals(field)) {
             return container != null && "aws:kinesis".equals(container.path("eventSource").asText());
         }
