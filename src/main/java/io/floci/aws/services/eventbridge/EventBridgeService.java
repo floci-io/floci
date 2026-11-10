@@ -378,6 +378,7 @@ public class EventBridgeService implements ResourceProvider, StoredResourceArns 
     public Rule putRule(String name, String busName, String eventPattern,
                         String scheduleExpression, RuleState state, String description,
                         String roleArn, Map<String, String> tags, String region) {
+        validateRuleName(name);
         if ((eventPattern == null || eventPattern.isBlank())
                 && (scheduleExpression == null || scheduleExpression.isBlank())) {
             throw new AwsException("ValidationException",
@@ -419,6 +420,19 @@ public class EventBridgeService implements ResourceProvider, StoredResourceArns 
 
         LOG.infov("Put rule: {0} on bus {1}", name, effectiveBus);
         return rule;
+    }
+
+    private static final Pattern RULE_NAME_PATTERN =
+            Pattern.compile("[\\.\\-_A-Za-z0-9]+");
+
+    private static void validateRuleName(String name) {
+        if (name == null || name.isBlank()) {
+            throw new AwsException("ValidationException", "Rule name is required.", 400);
+        }
+        if (name.length() > 64 || !RULE_NAME_PATTERN.matcher(name).matches()) {
+            throw new AwsException("ValidationException",
+                    "Rule name must match [\\.\\-_A-Za-z0-9]+ and be at most 64 characters.", 400);
+        }
     }
 
     public void deleteRule(String name, String busName, String region) {

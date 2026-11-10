@@ -537,6 +537,50 @@ class EventBridgeServiceTest {
         assertTrue(service.listRules(null, null, REGION).isEmpty());
     }
 
+    @ParameterizedTest
+    @ValueSource(strings = {"a/b", "rule name", "rule:1"})
+    void putRuleRejectsANameOutsideThePattern(String name) {
+        AwsException error = assertThrows(AwsException.class, () ->
+                service.putRule(name, null, "{\"source\":[\"my.app\"]}", null, RuleState.ENABLED,
+                        null, null, null, REGION));
+        assertEquals("ValidationException", error.getErrorCode());
+        assertEquals(400, error.getHttpStatus());
+        assertEquals("Rule name must match [\\.\\-_A-Za-z0-9]+ and be at most 64 characters.",
+                error.getMessage());
+        assertTrue(service.listRules(null, null, REGION).isEmpty());
+    }
+
+    @Test
+    void putRuleRejectsANameLongerThan64Characters() {
+        AwsException error = assertThrows(AwsException.class, () ->
+                service.putRule("r".repeat(65), null, "{\"source\":[\"my.app\"]}", null,
+                        RuleState.ENABLED, null, null, null, REGION));
+        assertEquals("ValidationException", error.getErrorCode());
+        assertDoesNotThrow(() -> service.putRule("r".repeat(64), null, "{\"source\":[\"my.app\"]}",
+                null, RuleState.ENABLED, null, null, null, REGION));
+    }
+
+    @ParameterizedTest
+    @NullAndEmptySource
+    void putRuleRequiresAName(String name) {
+        AwsException error = assertThrows(AwsException.class, () ->
+                service.putRule(name, null, "{\"source\":[\"my.app\"]}", null, RuleState.ENABLED,
+                        null, null, null, REGION));
+        assertEquals("ValidationException", error.getErrorCode());
+        assertEquals("Rule name is required.", error.getMessage());
+    }
+
+    @Test
+    void aRuleNameCannotReachIntoANestedPartnerBus() {
+        String parent = "aws.partner/example.com/orders";
+        service.createEventBus(parent, parent, null, null, REGION);
+        service.createEventBus(parent + "/eu", parent + "/eu", null, null, REGION);
+
+        assertThrows(AwsException.class, () -> service.putRule("eu/child-rule", parent,
+                "{\"source\":[\"example.com\"]}", null, RuleState.ENABLED, null, null, null, REGION));
+        assertTrue(service.listRules(parent + "/eu", null, REGION).isEmpty());
+    }
+
     @Test
     void deleteRuleIsIdempotent() {
         service.putRule("my-rule", null, null, "rate(1 minute)", RuleState.ENABLED,

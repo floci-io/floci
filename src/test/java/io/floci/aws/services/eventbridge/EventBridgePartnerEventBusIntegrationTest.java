@@ -116,6 +116,33 @@ class EventBridgePartnerEventBusIntegrationTest {
     }
 
     @Test
+    void aRuleNameWithASlashIsRejected() {
+        String suffix = Long.toString(System.nanoTime(), 36);
+        String bus = "aws.partner/example.com/" + suffix;
+        given().contentType(EB_CT).header("X-Amz-Target", "AWSEvents.CreateEventBus")
+                .body("{\"Name\":\"" + bus + "\",\"EventSourceName\":\"" + bus + "\"}")
+                .when().post("/").then().statusCode(200);
+
+        given().contentType(EB_CT).header("X-Amz-Target", "AWSEvents.PutRule")
+                .body("{\"Name\":\"eu/rule\",\"EventBusName\":\"" + bus + "\","
+                        + "\"EventPattern\":\"{\\\"source\\\":[\\\"example.com\\\"]}\"}")
+                .when().post("/")
+                .then().statusCode(400)
+                .body("__type", containsString("ValidationException"))
+                .body("message", containsString("Rule name must match"));
+
+        given().contentType(EB_CT).header("X-Amz-Target", "AWSEvents.ListRules")
+                .body("{\"EventBusName\":\"" + bus + "\"}")
+                .when().post("/")
+                .then().statusCode(200)
+                .body("Rules", hasSize(0));
+
+        given().contentType(EB_CT).header("X-Amz-Target", "AWSEvents.DeleteEventBus")
+                .body("{\"Name\":\"" + bus + "\"}")
+                .when().post("/").then().statusCode(200);
+    }
+
+    @Test
     void aNameWithASlashButNoEventSourceNameIsStillRejected() {
         given().contentType(EB_CT).header("X-Amz-Target", "AWSEvents.CreateEventBus")
                 .body("{\"Name\":\"aws.partner/example.com/no-source\"}")

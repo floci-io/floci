@@ -158,7 +158,9 @@ aws events put-events \
 source's name, so `Name` must equal `EventSourceName`, and the name must match
 `aws.partner/<partner>/<source>`. Floci does not model partner event sources, so any well-formed
 source name is accepted without one being created or activated first. Once created, the bus works
-like a custom bus: rules, targets, tags and `PutEvents` address it by name or ARN.
+like a custom bus: rules, targets, tags and `PutEvents` address it by name or ARN. A rule name
+holds no slash on any bus: `PutRule` rejects a name outside `[\.\-_A-Za-z0-9]+` or longer than 64
+characters with `ValidationException`, as AWS does.
 
 ```bash
 aws events create-event-bus \
