@@ -791,11 +791,19 @@ When two partitions hold key values that PostgreSQL casts to the same value, suc
 rows can no longer be told apart by partition, so a query on that table loads every partition and replaces
 the whole table when any of them changes.
 Pruning applies to the simple query protocol, the extended query protocol (the default of the PostgreSQL JDBC
-driver, unless `preferQueryMode=simple`) and statements inside a transaction block, for a query whose predicates
-are literals. The partitions such a query loads are staged for its connection and recorded as loaded only when
-the transaction (or the extended query cycle) commits, so a rollback leaves nothing behind that a later query
-would trust. While a connection holds staged partitions, other connections reload the table on their next query. A statement with
-bind parameters (`$1`, `$2`) and the Data API inside a transaction block still load every partition.
+driver, unless `preferQueryMode=simple`), statements inside a transaction block, and the Data API outside a
+transaction block. A Data API statement inside a transaction block, which includes a batch, loads every
+partition, because that backend cannot report where its transaction ends.
+Only predicates written as literals are used. A predicate on a bind parameter (`$1`, `$2`) is left out, so a
+statement whose partition predicates all use bind parameters loads every partition, while a literal predicate
+in the same statement still prunes.
+The partitions loaded inside a transaction block, or by an extended query cycle, are staged for their connection
+and recorded as loaded only when the transaction (or the cycle) commits. A rollback, an error or a
+`ROLLBACK TO SAVEPOINT` discards them, so nothing is left behind that a later query would trust. Staged
+partitions also stop being trusted when another load changes the table in the meantime, and the next query then
+reloads it. While a connection holds staged partitions, other connections reload the table on their next query.
+A session inside a transaction block waits at most 30 seconds for another connection that is loading the same
+table, then fails with SQLSTATE `58030`; a session outside a transaction block waits for the load to finish.
 
 Materialized relations are cached in the cluster database. Each new query checks the associated
 role, trust policy and S3 access before using cached data, following the existing S3 enforcement
