@@ -354,7 +354,7 @@ public class ExternalTableMaterializer {
         String cacheKey = cacheKey(session, binding, table.getName());
         String label = binding.schemaName() + "." + table.getName();
         ReentrantLock lock = locks.computeIfAbsent(cacheKey, ignored -> new ReentrantLock());
-        acquire(lock, label, false);
+        acquire(lock, label, session.inTransaction());
         try {
             boolean mayRollBack = loadsMayRollBack(session, backend);
             Object connection = backend.connectionKey();
