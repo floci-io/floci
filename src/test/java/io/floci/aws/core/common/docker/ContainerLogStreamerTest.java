@@ -546,7 +546,7 @@ class ContainerLogStreamerTest {
         assertTrue(firstEmissionStarted.await(1, TimeUnit.SECONDS), "the first line should begin emitting");
 
         Thread closer = new Thread(() -> {
-            cb.closeAfterContainerStopped();
+            cb.closeWithDrainGrace();
         });
         closer.start();
         Thread terminal = new Thread(cb::onComplete);
