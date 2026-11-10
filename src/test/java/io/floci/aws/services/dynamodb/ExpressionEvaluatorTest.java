@@ -805,6 +805,33 @@ class ExpressionEvaluatorTest {
                     ExpressionEvaluator.validateExpression(expression, "FilterExpression", null, parsed));
         }
 
+        @ParameterizedTest
+        @CsvSource(delimiter = '|', textBlock = """
+                x < :v AND y = :missing              | Incorrect operand type for operator or function; operator or function: <, operand type: BOOL
+                y = :missing AND x < :v              | An expression attribute value used in expression is not defined; attribute value: :missing
+                (x < :v OR y = :missing) AND z = :w  | Incorrect operand type for operator or function; operator or function: <, operand type: BOOL
+                NOT x < :v AND y = :missing          | Incorrect operand type for operator or function; operator or function: <, operand type: BOOL
+                begins_with(x, :n) OR y = :missing   | Incorrect operand type for operator or function; operator or function: begins_with, operand type: N
+                y < :v AND x IN (:a, :missing)       | Incorrect operand type for operator or function; operator or function: <, operand type: BOOL
+                x IN (:a, :missing) AND y < :v       | An expression attribute value used in expression is not defined; attribute value: :missing
+                contains(x, x) AND y = :missing      | The first operand must be distinct from the remaining operands for this operator or function; operator: contains, first operand: [x]
+                x BETWEEN :b AND :a AND y = :missing | The BETWEEN operator requires upper bound to be greater than or equal to lower bound; lower bound operand: AttributeValue: {N:2}, upper bound operand: AttributeValue: {N:1}
+                x BETWEEN :v AND :missing            | An expression attribute value used in expression is not defined; attribute value: :missing
+                :v < #missing                        | An expression attribute name used in the document path is not defined; attribute name: #missing
+                :missing = #missing                  | An expression attribute value used in expression is not defined; attribute value: :missing
+                a.#missing[0] < :v                   | An expression attribute name used in the document path is not defined; attribute name: #missing
+                """)
+        void checksEachConditionInWrittenOrderWithItsNamesAndValuesFirst(String expression, String error)
+                throws Exception {
+            JsonNode values = mapper.readTree("""
+                    {":v":{"BOOL":true},":w":{"S":"w"},":a":{"N":"1"},":b":{"N":"2"},":n":{"N":"1"}}
+                    """);
+
+            AwsException e = assertThrows(AwsException.class, () ->
+                    ExpressionEvaluator.validateSemantics(expression, "FilterExpression", null, values));
+            assertEquals("Invalid FilterExpression: " + error, e.getMessage());
+        }
+
         @Test
         void missingOperandThrowsSyntaxError() {
             AwsException e = assertThrows(AwsException.class, () ->

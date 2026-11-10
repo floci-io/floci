@@ -1044,6 +1044,7 @@ class LambdaWebServiceTest {
         service.createFunction(REGION, createRequest("app"));
         String domain = service.getEndpoint(REGION, "app", "dev").domainName;
         assertTrue(domain.endsWith(".001.lambda-web.us-east-1.Floci.Example.:4566"), domain);
+        assertTrue(LambdaWebDataPlane.isLambdaWebHost(domain));
         String host = domain.substring(0, domain.indexOf('.')) + ".001.lambda-web.us-east-1.floci.example";
 
         assertEquals(domain, service.endpointDomain(host).orElseThrow());
@@ -1060,6 +1061,8 @@ class LambdaWebServiceTest {
         String near = service.createEndpoint("us-west-2", "app", multiRegion("near", revisionId, REGION)).domainName;
         String far = service.createEndpoint("us-west-2", "app", multiRegion("far", revisionId, "eu-west-1")).domainName;
 
+        assertTrue(LambdaWebDataPlane.isLambdaWebHost(near));
+        assertTrue(LambdaWebDataPlane.isLambdaWebHost(far));
         LambdaWebService.WebFunctionTarget target = service.locate(near).orElseThrow();
         assertEquals("us-west-2", target.region());
         assertEquals(REGION, target.servingRegion());

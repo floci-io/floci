@@ -158,8 +158,12 @@ BY_HAND = {
 }
 
 NO_TAGS = "no member of the request carries tags"
+# For an operation AWS has shipped since the botocore pin. It lasts until a bump brings the operation in, when
+# entry_for refuses it, so that its tags are read.
+NOT_IN_BOTOCORE = "the pinned botocore does not have the operation yet, so its request cannot be read"
 # Operations the reference lists with a tagging action whose request carries no tags this file reads.
 NOT_READ = {
+    "athena:CreateSystemTableConfiguration": NOT_IN_BOTOCORE,
     "cloudformation:ExecuteChangeSet": NO_TAGS,
     "dynamodb:UpdateTable": NO_TAGS,
     "ec2:RequestSpotFleet": "its tags are in spotFleetRequestConfig, deeper than the members this file reads",
@@ -171,6 +175,8 @@ NOT_READ = {
     "rds:DeleteDBInstance": NO_TAGS,
     "rds:DeleteTenantDatabase": NO_TAGS,
     "rds:StopDBInstance": NO_TAGS,
+    "sagemaker:CreateClusterExtension": NOT_IN_BOTOCORE,
+    "ssm:StartExecutionPreview": NO_TAGS,
 }
 
 # Members the rule reads that carry no tags the operation attaches, each with why.
@@ -446,11 +452,13 @@ def entry_for(operation: str, upstream: dict, models: dict[str, dict]) -> dict:
         head["requestTags"] = True
     if operation in BY_HAND:
         return {**head, "byHand": BY_HAND[operation]}
+    name = operation.split(":", 1)[1]
     if operation in NOT_READ:
+        if NOT_READ[operation] == NOT_IN_BOTOCORE and any(name in model["operations"] for model in models.values()):
+            raise ValueError(f"{operation}: the pinned botocore has it now, so take it out of NOT_READ")
         return {**head, "notRead": NOT_READ[operation]}
     if len(upstream["tagging"]) != 1:
         raise ValueError(f"{operation}: needs one of {upstream['tagging']}; check it by hand (BY_HAND)")
-    name = operation.split(":", 1)[1]
     members: dict[str, dict] = {}
     for model in models.values():
         for member in tag_members(model, name):

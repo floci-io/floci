@@ -1,5 +1,8 @@
 package io.floci.aws.services.ssm;
 
+import com.fasterxml.jackson.core.type.TypeReference;
+import io.floci.aws.core.storage.StorageFactory;
+import io.floci.aws.services.ssm.model.Parameter;
 import io.floci.aws.testing.AwsTestClients;
 import io.floci.aws.testing.EnforcementFixtures;
 import io.floci.aws.testing.IamEnforcementProfile;
@@ -7,12 +10,14 @@ import io.floci.aws.testing.PartitionCleanup;
 import io.quarkus.test.junit.QuarkusTest;
 import io.quarkus.test.junit.TestProfile;
 import io.restassured.RestAssured;
+import jakarta.inject.Inject;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.RegisterExtension;
 import software.amazon.awssdk.regions.Region;
 import software.amazon.awssdk.services.ssm.SsmClient;
 import software.amazon.awssdk.services.ssm.model.SsmException;
 
+import java.util.Map;
 import java.util.UUID;
 
 import static io.floci.aws.testing.EnforcementFixtures.auth;
@@ -24,8 +29,51 @@ import static org.junit.jupiter.api.Assertions.assertThrows;
 @TestProfile(IamEnforcementProfile.class)
 class SsmGetParameterArnIamEnforcementIntegrationTest {
 
+    @Inject
+    StorageFactory storageFactory;
+
     @RegisterExtension
     final PartitionCleanup cleanup = new PartitionCleanup();
+
+    @Test
+    void retainedParameterArnCanPopulateAnExactResourcePolicy() {
+        String account = "000000000000";
+        String name = "retained-arn-" + UUID.randomUUID();
+        String legacyArn = "arn:aws:ssm:us-east-1:" + account + ":parameter" + name;
+        Parameter legacy = new Parameter(name, "retained-value", "String");
+        legacy.setArn(legacyArn);
+        storageFactory.create("ssm", "ssm-parameters.json", new TypeReference<Map<String, Parameter>>() {})
+                .putForAccount(account, "us-east-1::" + name, legacy);
+
+        try (SsmClient root = AwsTestClients.create(SsmClient.builder(), account, Region.US_EAST_1)) {
+            try {
+                String returnedArn = root.getParameter(request -> request.name(name)).parameter().arn();
+                String userName = "ssm-retained-" + UUID.randomUUID();
+                EnforcementFixtures.UserCredentials credentials = EnforcementFixtures.createUser(
+                        cleanup, RestAssured.port, auth(account, "iam"), userName);
+                String policy = """
+                        {"Version":"2012-10-17","Statement":[{"Effect":"Allow",
+                          "Action":"ssm:GetParameter","Resource":"%s"}]}""";
+                EnforcementFixtures.putUserPolicy(RestAssured.port, auth(account, "iam"), userName,
+                        "read-retained", policy.formatted(returnedArn));
+                try (SsmClient user = AwsTestClients.create(SsmClient.builder(), credentials.accessKeyId(),
+                        credentials.secretAccessKey(), Region.US_EAST_1)) {
+                    assertEquals("retained-value", user.getParameter(request -> request.name(name)).parameter().value());
+                    assertEquals("retained-value", user.getParameter(request -> request.name(returnedArn)).parameter().value());
+                    assertEquals("arn:aws:ssm:us-east-1:" + account + ":parameter/" + name, returnedArn);
+                    assertEquals(1, root.getParameter(request -> request.name(name)).parameter().version());
+
+                    EnforcementFixtures.putUserPolicy(RestAssured.port, auth(account, "iam"), userName,
+                            "read-retained", policy.formatted(legacyArn));
+                    SsmException error = assertThrows(SsmException.class,
+                            () -> user.getParameter(request -> request.name(name)));
+                    assertEquals("AccessDeniedException", error.awsErrorDetails().errorCode());
+                }
+            } finally {
+                root.deleteParameter(request -> request.name(name));
+            }
+        }
+    }
 
     @Test
     void arnReadsStillRequirePermissionForTheRequestedParameter() {

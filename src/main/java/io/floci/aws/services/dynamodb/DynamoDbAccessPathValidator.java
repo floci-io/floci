@@ -116,35 +116,46 @@ final class DynamoDbAccessPathValidator {
         }
     }
 
+    // DynamoDB checks these before it looks up the table.
+    static void validateKeyConditionAttributes(String expression, JsonNode names) {
+        if (expression == null) {
+            return;
+        }
+        Set<String> conditionedAttributes = new HashSet<>();
+        for (Expr rawCondition : keyConditions(expression)) {
+            Expr condition = normalizeOperandOrder(rawCondition);
+            if (conditionOperand(condition) instanceof PathOperand(List<String> segments) && segments.size() > 1) {
+                throw validationException("Invalid KeyConditionExpression: "
+                        + "KeyConditionExpressions cannot have conditions on nested attributes");
+            }
+            String attribute = conditionAttribute(condition, names);
+            if (attribute != null && !conditionedAttributes.add(attribute)) {
+                throw validationException("Invalid KeyConditionExpression: "
+                        + "KeyConditionExpressions must only contain one condition per key");
+            }
+        }
+    }
+
+    private static List<Expr> keyConditions(String expression) {
+        return DynamoDbKeyConditionParser.conditions(parseExpression(expression, "KeyConditionExpression"));
+    }
+
     private static String validateKeyConditionExpression(TableDefinition table,
                                                          DynamoDbAccessPath accessPath,
                                                          String expression, JsonNode names,
                                                          JsonNode values) {
-        Expr root = parseExpression(expression, "KeyConditionExpression");
-
-        List<Expr> conditions = root instanceof AndExpr and
-                ? and.operands() : List.of(root);
         List<String> partitionKeys = accessPath.partitionKeyNames();
         Set<String> partitionKeySet = Set.copyOf(partitionKeys);
         List<String> sortKeys = accessPath.sortKeyNames();
         Set<String> conditionedPartitionKeys = new HashSet<>();
         String partitionKeyValuePlaceholder = null;
-        Set<String> conditionedAttributes = new HashSet<>();
         Map<String, Boolean> sortKeyEqualities = new HashMap<>();
 
         boolean conditionOnNonKeyAttribute = false;
 
-        for (Expr rawCondition : conditions) {
+        for (Expr rawCondition : keyConditions(expression)) {
             Expr condition = normalizeOperandOrder(rawCondition);
-            if (conditionOperand(condition) instanceof PathOperand(List<String> segments) && segments.size() > 1) {
-                throw new AwsException("ValidationException",
-                        "KeyConditionExpressions cannot have conditions on nested attributes", 400);
-            }
             String attribute = conditionAttribute(condition, names);
-            if (attribute != null && !conditionedAttributes.add(attribute)) {
-                throw new AwsException("ValidationException",
-                        "KeyConditionExpressions must only contain one condition per key", 400);
-            }
             if (attribute != null && partitionKeySet.contains(attribute)) {
                 if (!isPartitionKeyEquality(condition)) {
                     throw new AwsException("ValidationException", "Query key condition not supported", 400);

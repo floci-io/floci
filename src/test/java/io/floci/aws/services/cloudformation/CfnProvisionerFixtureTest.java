@@ -38,11 +38,12 @@ class CfnProvisionerFixtureTest {
 
     /**
      * Provisioners the fixture cannot build from a single service, so they must be passed to
-     * {@code provisioners(...)} explicitly. Both take collaborators beyond one service
-     * ({@code RegionResolver} and an {@code ObjectMapper}), which the Builder does not model.
+     * {@code provisioners(...)} explicitly. The CodeBuild and CodePipeline ones take collaborators beyond one
+     * service ({@code RegionResolver} and an {@code ObjectMapper}), which the Builder does not model, and the
+     * StackSet one takes CloudFormation's own services, which deploy each stack instance as a stack.
      */
     private static final Set<String> NOT_INFERABLE =
-            Set.of("CodeBuildCfnProvisioner", "CodePipelineCfnProvisioner");
+            Set.of("CodeBuildCfnProvisioner", "CodePipelineCfnProvisioner", "StackSetCfnProvisioner");
 
     /**
      * Builder setters that replace the inferred registry outright rather than naming a service.

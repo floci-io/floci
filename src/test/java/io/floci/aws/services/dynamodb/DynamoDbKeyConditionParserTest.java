@@ -33,6 +33,13 @@ class DynamoDbKeyConditionParserTest {
     }
 
     @Test
+    void resolvesPartitionKeyEqualityInsideAGroupedCondition() {
+        assertEquals("USER_alice", DynamoDbKeyConditionParser.partitionKeyEqualityValue(
+                "(h1 = :a AND h2 = :b) AND r1 = :c", null,
+                json("{\":a\":{\"S\":\"USER_alice\"},\":b\":{\"S\":\"x\"},\":c\":{\"S\":\"y\"}}"), "h1"));
+    }
+
+    @Test
     void resolvesAnAliasedPartitionKeyThroughExpressionAttributeNames() {
         assertEquals("USER_alice", DynamoDbKeyConditionParser.partitionKeyEqualityValue(
                 "#p = :v", json("{\"#p\":\"pk\"}"),

@@ -41,6 +41,7 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
 import java.util.concurrent.ThreadFactory;
+import java.util.function.Consumer;
 import java.util.function.Supplier;
 import java.util.regex.Pattern;
 
@@ -231,36 +232,63 @@ public class StackSetService implements PassedRoleLookup, AccountPlacementListen
                                                          Boolean autoDeploymentEnabled,
                                                          Boolean retainStacksOnAccountRemoval,
                                                          Boolean managedExecutionActive) {
+        return updateStackSet(name, templateBody, parameters, capabilities, tags, description, requestedOperationId,
+                autoDeploymentEnabled, retainStacksOnAccountRemoval, managedExecutionActive, false);
+    }
+
+    public synchronized StackSetOperation updateStackSetResource(String name, String templateBody,
+                                                                 Map<String, String> parameters,
+                                                                 List<String> capabilities, Map<String, String> tags,
+                                                                 String description, Boolean autoDeploymentEnabled,
+                                                                 Boolean retainStacksOnAccountRemoval,
+                                                                 Boolean managedExecutionActive) {
+        return updateStackSet(name, templateBody, parameters, capabilities, tags, description, null,
+                autoDeploymentEnabled, retainStacksOnAccountRemoval, managedExecutionActive, true);
+    }
+
+    private StackSetOperation updateStackSet(String name, String templateBody, Map<String, String> parameters,
+                                             List<String> capabilities, Map<String, String> tags, String description,
+                                             String requestedOperationId, Boolean autoDeploymentEnabled,
+                                             Boolean retainStacksOnAccountRemoval, Boolean managedExecutionActive,
+                                             boolean replaceSettings) {
         StackSet ss = getStackSetOrThrow(name);
+        if (replaceSettings) {
+            if ("SERVICE_MANAGED".equals(ss.getPermissionModel())) {
+                autoDeploymentEnabled = Boolean.TRUE.equals(autoDeploymentEnabled);
+            }
+            retainStacksOnAccountRemoval = Boolean.TRUE.equals(retainStacksOnAccountRemoval);
+            managedExecutionActive = Boolean.TRUE.equals(managedExecutionActive);
+        }
+        if (autoDeploymentEnabled != null && !"SERVICE_MANAGED".equals(ss.getPermissionModel())) {
+            throw new AwsException("InvalidOperationException",
+                    "AutoDeployment is valid only for SERVICE_MANAGED StackSets.", 400);
+        }
         // Checked against the template and parameters the update leaves the stack set with, before
         // either is changed or an operation is recorded.
         String keptTemplate = templateBody != null && !templateBody.isBlank() ? templateBody : ss.getTemplateBody();
         requireValidTemplate(keptTemplate);
-        cfnService.requireParameterValues(keptTemplate,
-                parameters != null && !parameters.isEmpty() ? parameters : ss.getParameters());
+        Map<String, String> updatedParameters = replaceSettings
+                ? (parameters == null ? Map.of() : parameters)
+                : (parameters != null && !parameters.isEmpty() ? parameters : ss.getParameters());
+        cfnService.requireParameterValues(keptTemplate, updatedParameters);
         String operationId = reserveOperation(name, "UPDATE", requestedOperationId).getOperationId();
         if (templateBody != null && !templateBody.isBlank()) {
             ss.setTemplateBody(templateBody);
         }
-        if (parameters != null && !parameters.isEmpty()) {
-            ss.setParameters(new LinkedHashMap<>(parameters));
-        }
-        if (capabilities != null && !capabilities.isEmpty()) {
+        ss.setParameters(new LinkedHashMap<>(updatedParameters));
+        if (replaceSettings || (capabilities != null && !capabilities.isEmpty())) {
             ss.getCapabilities().clear();
-            ss.getCapabilities().addAll(capabilities);
+            if (capabilities != null) {
+                ss.getCapabilities().addAll(capabilities);
+            }
         }
-        if (tags != null && !tags.isEmpty()) {
-            ss.setTags(new LinkedHashMap<>(tags));
+        if (replaceSettings || (tags != null && !tags.isEmpty())) {
+            ss.setTags(tags == null ? new LinkedHashMap<>() : new LinkedHashMap<>(tags));
         }
-        if (description != null) {
+        if (replaceSettings || description != null) {
             ss.setDescription(description);
         }
         if (autoDeploymentEnabled != null) {
-            if (!"SERVICE_MANAGED".equals(ss.getPermissionModel())) {
-                completeOperation(name, operationId, "FAILED");
-                throw new AwsException("InvalidOperationException",
-                        "AutoDeployment is valid only for SERVICE_MANAGED StackSets.", 400);
-            }
             ss.setAutoDeploymentEnabled(autoDeploymentEnabled);
         }
         if (retainStacksOnAccountRemoval != null) ss.setRetainStacksOnAccountRemoval(retainStacksOnAccountRemoval);
@@ -301,7 +329,7 @@ public class StackSetService implements PassedRoleLookup, AccountPlacementListen
         }
     }
 
-    public void deleteStackSet(String name) {
+    public synchronized void deleteStackSet(String name) {
         getStackSetOrThrow(name);
         if (!listStackInstances(name, null, null).isEmpty()) {
             throw new AwsException("StackSetNotEmptyException",
@@ -309,6 +337,43 @@ public class StackSetService implements PassedRoleLookup, AccountPlacementListen
         }
         stackSets.delete(name);
         LOG.infov("Deleted StackSet: {0}", name);
+    }
+
+    public synchronized boolean mutateStackSetResource(String stackSetId, Consumer<StackSet> mutation) {
+        if (stackSetId == null || stackSetId.indexOf(':') < 1) {
+            return false;
+        }
+        String name = stackSetId.substring(0, stackSetId.indexOf(':'));
+        StackSet stackSet = stackSets.get(name).orElse(null);
+        if (stackSet == null || !stackSetId.equals(stackSet.getStackSetId())) {
+            return false;
+        }
+        mutation.accept(stackSet);
+        return true;
+    }
+
+    /**
+     * Deletes every stack instance with its stack, then the stack set, as deleting an
+     * {@code AWS::CloudFormation::StackSet} resource does. A stack set already gone is left alone.
+     */
+    public synchronized void deleteStackSetWithInstances(String name) {
+        StackSet stackSet = stackSets.get(name).orElse(null);
+        if (stackSet == null) {
+            return;
+        }
+        for (StackInstance instance : listStackInstances(name, null, null)) {
+            removeInstance(stackSet, instance, false);
+        }
+        if (listStackInstances(name, null, null).isEmpty()) {
+            deleteAutoDeploymentTargets(name);
+        }
+        deleteStackSet(name);
+    }
+
+    private void deleteAutoDeploymentTargets(String name) {
+        for (StackSetAutoDeploymentTarget target : listStackSetAutoDeploymentTargets(name)) {
+            autoDeploymentTargets.delete(name + "::" + target.getOrganizationalUnitId());
+        }
     }
 
     // ── Instances ──────────────────────────────────────────────────────────────
