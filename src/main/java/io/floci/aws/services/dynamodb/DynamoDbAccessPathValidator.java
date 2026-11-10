@@ -137,17 +137,7 @@ final class DynamoDbAccessPathValidator {
     }
 
     private static List<Expr> keyConditions(String expression) {
-        List<Expr> conditions = new ArrayList<>();
-        addKeyConditions(parseExpression(expression, "KeyConditionExpression"), conditions);
-        return conditions;
-    }
-
-    private static void addKeyConditions(Expr expression, List<Expr> conditions) {
-        if (expression instanceof AndExpr and) {
-            and.operands().forEach(operand -> addKeyConditions(operand, conditions));
-        } else {
-            conditions.add(expression);
-        }
+        return DynamoDbKeyConditionParser.conditions(parseExpression(expression, "KeyConditionExpression"));
     }
 
     private static String validateKeyConditionExpression(TableDefinition table,
