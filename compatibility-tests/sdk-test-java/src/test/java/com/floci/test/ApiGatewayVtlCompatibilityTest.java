@@ -12,155 +12,83 @@ import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
 import java.util.Map;
+import java.util.function.UnaryOperator;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
 @DisplayName("API Gateway REST VTL")
 class ApiGatewayVtlCompatibilityTest {
 
+    private static final String STATUS_200_TEMPLATE = "{\"statusCode\": 200}";
+
     @Test
     @DisplayName("Parsed map and collection methods work in native REST response templates")
     void responseTemplateMapMethodsWorkInNativeImage() throws Exception {
-        Assumptions.assumeFalse(TestFixtures.isRealAws(), "Floci native-image regression test");
+        String responseTemplate = "#set($parsed = $util.parseJson($input.body))"
+                + "#if($parsed.headers)$parsed.headers.isEmpty()|$parsed.headers.size()|"
+                + "#foreach($entry in $parsed.headers.entrySet())$entry.getKey()=$entry.getValue()#end|"
+                + "$parsed.items.isEmpty()|$parsed.items.size()|#foreach($item in $parsed.items)$item#end#end";
 
-        ApiGatewayClient apiGateway = TestFixtures.apiGatewayClient();
-        String apiId = apiGateway.createRestApi(request -> request.name(TestFixtures.uniqueName("apigw-vtl-response"))).id();
+        HttpResponse<String> response = invokeMockIntegration("response-map", STATUS_200_TEMPLATE, "200",
+                responseTemplate, request -> request
+                        .header("Content-Type", "application/json")
+                        .POST(HttpRequest.BodyPublishers.ofString(
+                                "{\"headers\":{\"x-test\":\"yes\"},\"items\":[\"a\",\"b\"]}")));
 
-        try {
-            String rootId = apiGateway.getResources(request -> request.restApiId(apiId)).items().stream()
-                    .filter(resource -> "/".equals(resource.path()))
-                    .findFirst()
-                    .map(Resource::id)
-                    .orElseThrow();
-            String resourceId = apiGateway.createResource(request -> request
-                    .restApiId(apiId)
-                    .parentId(rootId)
-                    .pathPart("response-map")).id();
-
-            apiGateway.putMethod(request -> request
-                    .restApiId(apiId)
-                    .resourceId(resourceId)
-                    .httpMethod("POST")
-                    .authorizationType("NONE"));
-            apiGateway.putIntegration(request -> request
-                    .restApiId(apiId)
-                    .resourceId(resourceId)
-                    .httpMethod("POST")
-                    .type(IntegrationType.MOCK)
-                    .requestTemplates(Map.of("application/json", "{\"statusCode\": 200}")));
-            apiGateway.putMethodResponse(request -> request
-                    .restApiId(apiId)
-                    .resourceId(resourceId)
-                    .httpMethod("POST")
-                    .statusCode("200"));
-
-            String responseTemplate = "#set($parsed = $util.parseJson($input.body))"
-                    + "#if($parsed.headers)$parsed.headers.isEmpty()|$parsed.headers.size()|"
-                    + "#foreach($entry in $parsed.headers.entrySet())$entry.getKey()=$entry.getValue()#end|"
-                    + "$parsed.items.isEmpty()|$parsed.items.size()|#foreach($item in $parsed.items)$item#end#end";
-            apiGateway.putIntegrationResponse(request -> request
-                    .restApiId(apiId)
-                    .resourceId(resourceId)
-                    .httpMethod("POST")
-                    .statusCode("200")
-                    .responseTemplates(Map.of("application/json", responseTemplate)));
-
-            String deploymentId = apiGateway.createDeployment(request -> request.restApiId(apiId)).id();
-            apiGateway.createStage(request -> request
-                    .restApiId(apiId)
-                    .stageName("test")
-                    .deploymentId(deploymentId));
-
-            HttpClient httpClient = TestFixtures.emulatorHttpClient();
-            URI uri = URI.create(TestFixtures.endpoint() + "/execute-api/" + apiId + "/test/response-map");
-            HttpRequest request = HttpRequest.newBuilder(uri)
-                    .header("Content-Type", "application/json")
-                    .POST(HttpRequest.BodyPublishers.ofString(
-                            "{\"headers\":{\"x-test\":\"yes\"},\"items\":[\"a\",\"b\"]}"))
-                    .build();
-            HttpResponse<String> response = httpClient.send(request, HttpResponse.BodyHandlers.ofString());
-
-            assertThat(response.statusCode()).isEqualTo(200);
-            assertThat(response.body().trim()).isEqualTo("false|1|x-test=yes|false|2|ab");
-        } finally {
-            apiGateway.deleteRestApi(request -> request.restApiId(apiId));
-            apiGateway.close();
-        }
+        assertThat(response.statusCode()).isEqualTo(200);
+        assertThat(response.body().trim()).isEqualTo("false|1|x-test=yes|false|2|ab");
     }
 
     @Test
     @DisplayName("The $foreach loop scope works in native REST response templates")
     void foreachScopeWorksInNativeImage() throws Exception {
-        Assumptions.assumeFalse(TestFixtures.isRealAws(), "Floci native-image regression test");
+        String responseTemplate = "#foreach($i in [\"a\",\"b\"])"
+                + "$i:$foreach.index:$foreach.count:$foreach.hasNext#if($foreach.hasNext),#end#end";
 
-        ApiGatewayClient apiGateway = TestFixtures.apiGatewayClient();
-        String apiId = apiGateway.createRestApi(request -> request.name(TestFixtures.uniqueName("apigw-vtl-foreach"))).id();
+        HttpResponse<String> response = invokeMockIntegration("foreach", STATUS_200_TEMPLATE, "200",
+                responseTemplate, HttpRequest.Builder::GET);
 
-        try {
-            String rootId = apiGateway.getResources(request -> request.restApiId(apiId)).items().stream()
-                    .filter(resource -> "/".equals(resource.path()))
-                    .findFirst()
-                    .map(Resource::id)
-                    .orElseThrow();
-            String resourceId = apiGateway.createResource(request -> request
-                    .restApiId(apiId)
-                    .parentId(rootId)
-                    .pathPart("foreach")).id();
-
-            apiGateway.putMethod(request -> request
-                    .restApiId(apiId)
-                    .resourceId(resourceId)
-                    .httpMethod("GET")
-                    .authorizationType("NONE"));
-            apiGateway.putIntegration(request -> request
-                    .restApiId(apiId)
-                    .resourceId(resourceId)
-                    .httpMethod("GET")
-                    .type(IntegrationType.MOCK)
-                    .requestTemplates(Map.of("application/json", "{\"statusCode\": 200}")));
-            apiGateway.putMethodResponse(request -> request
-                    .restApiId(apiId)
-                    .resourceId(resourceId)
-                    .httpMethod("GET")
-                    .statusCode("200"));
-
-            String responseTemplate = "#foreach($i in [\"a\",\"b\"])"
-                    + "$i:$foreach.index:$foreach.count:$foreach.hasNext#if($foreach.hasNext),#end#end";
-            apiGateway.putIntegrationResponse(request -> request
-                    .restApiId(apiId)
-                    .resourceId(resourceId)
-                    .httpMethod("GET")
-                    .statusCode("200")
-                    .responseTemplates(Map.of("application/json", responseTemplate)));
-
-            String deploymentId = apiGateway.createDeployment(request -> request.restApiId(apiId)).id();
-            apiGateway.createStage(request -> request
-                    .restApiId(apiId)
-                    .stageName("test")
-                    .deploymentId(deploymentId));
-
-            HttpClient httpClient = TestFixtures.emulatorHttpClient();
-            URI uri = URI.create(TestFixtures.endpoint() + "/execute-api/" + apiId + "/test/foreach");
-            HttpRequest request = HttpRequest.newBuilder(uri).GET().build();
-            HttpResponse<String> response = httpClient.send(request, HttpResponse.BodyHandlers.ofString());
-
-            assertThat(response.statusCode()).isEqualTo(200);
-            assertThat(response.body().trim()).isEqualTo("a:0:1:true,b:1:2:false");
-        } finally {
-            apiGateway.deleteRestApi(request -> request.restApiId(apiId));
-            apiGateway.close();
-        }
+        assertThat(response.statusCode()).isEqualTo(200);
+        assertThat(response.body().trim()).isEqualTo("a:0:1:true,b:1:2:false");
     }
 
     @Test
     @DisplayName("Header map get and keySet work in the native image")
     void headerMapMethodsWorkInNativeImage() throws Exception {
+        String requestTemplate = """
+                #set($headers = $input.params().header)
+                #set($direct = $headers.get('x-repro-header'))
+                #set($status = 500)
+                #foreach($name in $headers.keySet())
+                #if($direct == 'repro-header-value' && $headers.get($name) == 'repro-header-value')
+                #set($status = 201)
+                #end
+                #end
+                {"statusCode": $status}
+                """;
+
+        HttpResponse<String> response = invokeMockIntegration("headers", requestTemplate, "201",
+                null, request -> request
+                        .header("Content-Type", "application/json")
+                        .header("x-repro-header", "repro-header-value")
+                        .POST(HttpRequest.BodyPublishers.ofString("{}")));
+
+        assertThat(response.statusCode()).isEqualTo(201);
+    }
+
+    private static HttpResponse<String> invokeMockIntegration(String pathPart, String requestTemplate,
+            String statusCode, String responseTemplate, UnaryOperator<HttpRequest.Builder> requestCustomizer)
+            throws Exception {
         Assumptions.assumeFalse(TestFixtures.isRealAws(), "Floci native-image regression test");
 
         ApiGatewayClient apiGateway = TestFixtures.apiGatewayClient();
-        String apiId = apiGateway.createRestApi(request -> request.name(TestFixtures.uniqueName("apigw-vtl"))).id();
+        String apiId = apiGateway.createRestApi(request -> request.name(TestFixtures.uniqueName("apigw-vtl-" + pathPart))).id();
 
         try {
+            URI uri = URI.create(TestFixtures.endpoint() + "/execute-api/" + apiId + "/test/" + pathPart);
+            HttpRequest httpRequest = requestCustomizer.apply(HttpRequest.newBuilder(uri)).build();
+            String httpMethod = httpRequest.method();
+
             String rootId = apiGateway.getResources(request -> request.restApiId(apiId)).items().stream()
                     .filter(resource -> "/".equals(resource.path()))
                     .findFirst()
@@ -169,41 +97,32 @@ class ApiGatewayVtlCompatibilityTest {
             String resourceId = apiGateway.createResource(request -> request
                     .restApiId(apiId)
                     .parentId(rootId)
-                    .pathPart("headers")).id();
+                    .pathPart(pathPart)).id();
 
             apiGateway.putMethod(request -> request
                     .restApiId(apiId)
                     .resourceId(resourceId)
-                    .httpMethod("POST")
+                    .httpMethod(httpMethod)
                     .authorizationType("NONE"));
-
-            String requestTemplate = """
-                    #set($headers = $input.params().header)
-                    #set($direct = $headers.get('x-repro-header'))
-                    #set($status = 500)
-                    #foreach($name in $headers.keySet())
-                    #if($direct == 'repro-header-value' && $headers.get($name) == 'repro-header-value')
-                    #set($status = 201)
-                    #end
-                    #end
-                    {"statusCode": $status}
-                    """;
             apiGateway.putIntegration(request -> request
                     .restApiId(apiId)
                     .resourceId(resourceId)
-                    .httpMethod("POST")
+                    .httpMethod(httpMethod)
                     .type(IntegrationType.MOCK)
                     .requestTemplates(Map.of("application/json", requestTemplate)));
             apiGateway.putMethodResponse(request -> request
                     .restApiId(apiId)
                     .resourceId(resourceId)
-                    .httpMethod("POST")
-                    .statusCode("201"));
+                    .httpMethod(httpMethod)
+                    .statusCode(statusCode));
             apiGateway.putIntegrationResponse(request -> request
                     .restApiId(apiId)
                     .resourceId(resourceId)
-                    .httpMethod("POST")
-                    .statusCode("201"));
+                    .httpMethod(httpMethod)
+                    .statusCode(statusCode)
+                    .responseTemplates(responseTemplate == null
+                            ? null
+                            : Map.of("application/json", responseTemplate)));
 
             String deploymentId = apiGateway.createDeployment(request -> request.restApiId(apiId)).id();
             apiGateway.createStage(request -> request
@@ -212,15 +131,7 @@ class ApiGatewayVtlCompatibilityTest {
                     .deploymentId(deploymentId));
 
             HttpClient httpClient = TestFixtures.emulatorHttpClient();
-            URI uri = URI.create(TestFixtures.endpoint() + "/execute-api/" + apiId + "/test/headers");
-            HttpRequest request = HttpRequest.newBuilder(uri)
-                    .header("Content-Type", "application/json")
-                    .header("x-repro-header", "repro-header-value")
-                    .POST(HttpRequest.BodyPublishers.ofString("{}"))
-                    .build();
-            HttpResponse<String> response = httpClient.send(request, HttpResponse.BodyHandlers.ofString());
-
-            assertThat(response.statusCode()).isEqualTo(201);
+            return httpClient.send(httpRequest, HttpResponse.BodyHandlers.ofString());
         } finally {
             apiGateway.deleteRestApi(request -> request.restApiId(apiId));
             apiGateway.close();
