@@ -1,7 +1,7 @@
 package io.floci.aws.services.paymentcryptography.crypto;
 
-import org.bouncycastle.asn1.pkcs.IssuerAndSerialNumber;
 import io.floci.aws.services.acm.CertificateGenerator;
+import org.bouncycastle.asn1.pkcs.IssuerAndSerialNumber;
 import org.bouncycastle.asn1.x500.X500Name;
 import org.junit.jupiter.api.Test;
 

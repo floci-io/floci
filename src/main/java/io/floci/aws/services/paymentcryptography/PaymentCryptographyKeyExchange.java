@@ -7,6 +7,7 @@ import io.floci.aws.services.paymentcryptography.crypto.ConcatKdf;
 import io.floci.aws.services.paymentcryptography.crypto.Ecdh;
 import io.floci.aws.services.paymentcryptography.crypto.RsaOaep;
 import io.floci.aws.services.paymentcryptography.model.PaymentCryptographyKey;
+import org.bouncycastle.asn1.x500.X500Name;
 
 import java.io.IOException;
 import java.security.GeneralSecurityException;
@@ -16,7 +17,6 @@ import java.security.PrivateKey;
 import java.security.PublicKey;
 import java.security.SecureRandom;
 import java.security.cert.X509Certificate;
-import org.bouncycastle.asn1.x500.X500Name;
 import java.security.interfaces.ECKey;
 import java.security.interfaces.ECPrivateKey;
 import java.security.interfaces.ECPublicKey;

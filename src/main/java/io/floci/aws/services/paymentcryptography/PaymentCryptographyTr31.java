@@ -83,14 +83,14 @@ final class PaymentCryptographyTr31 {
         byte[][] derived = deriveKeys(protectionKey, protectionAes);
         byte[] encryptionKey = derived[0];
         byte[] macKey = derived[1];
-        byte[] mac = computeMac(header, lengthEncoded, macKey, protectionAes);
+        byte[] mac = computeMac(header + optional, lengthEncoded, macKey, protectionAes);
 
         // The block is encrypted under the derived key, and the MAC is the vector of that
         // encryption: the block is authenticated before it is read.
         byte[] cipherText = protectionAes
                 ? PaymentCryptographyCrypto.aesCbcEncrypt(encryptionKey, mac, lengthEncoded)
                 : Ciphers.tdesCbcEncrypt(lengthEncoded, Ciphers.widenTdesKey(encryptionKey), mac);
-        return header + hexUpper(cipherText) + hexUpper(mac);
+        return header + optional + hexUpper(cipherText) + hexUpper(mac);
     }
 
     /**

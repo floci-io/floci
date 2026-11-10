@@ -119,6 +119,37 @@ class PaymentCryptographyKeyExchangeTest {
 
 
     @Test
+    void theBlockCarriesTheHeadersTheRequestNames() {
+        // The optional blocks are in the clear and are authenticated with the cipher text, and
+        // the exportability and the version sit in the header.
+        Map<String, Object> material = new LinkedHashMap<>();
+        material.put("WrappingKeyIdentifier", protection.getKeyId());
+        material.put("KeyBlockHeaders", Map.of(
+                "KeyExportability", "SENSITIVE",
+                "KeyVersion", "01",
+                "OptionalBlocks", Map.of("AB", "0011")));
+
+        Map<String, Object> answer = service.exportKey("us-east-1",
+                createKey("AES_128", "TR31_D0_SYMMETRIC_DATA_ENCRYPTION_KEY").getKeyId(),
+                "Tr31KeyBlock", material, "", "");
+        Map<?, ?> wrapped = (Map<?, ?>) answer.get("WrappedKey");
+        String block = (String) wrapped.get("KeyMaterial");
+
+        // The header carries the version and the exportability the request asked for.
+        assertEquals("01", block.substring(9, 11), "the version of the key");
+        assertEquals("S", block.substring(11, 12), "the exportability of the key");
+        // The optional block sits between the header and the cipher text.
+        assertEquals("01", block.substring(12, 14), "the number of optional blocks");
+        assertEquals("AB", block.substring(16, 18), "the optional block's identifier");
+
+        // And the block still opens, so the optional blocks are authenticated with it.
+        PaymentCryptographyKey imported = service.importKey("us-east-1", "Tr31KeyBlock",
+                Map.of("WrappingKeyIdentifier", protection.getKeyId(),
+                        "WrappedKeyBlock", block), "", true, Map.of());
+        assertEquals("TR31_D0_SYMMETRIC_DATA_ENCRYPTION_KEY", imported.getKeyUsage());
+    }
+
+    @Test
     void aKeyThatLeavesUnderACryptogramComesBack() {
         Map<String, Object> importParameters = service.parametersForImport("KEY_CRYPTOGRAM",
                 "RSA_2048", false);
