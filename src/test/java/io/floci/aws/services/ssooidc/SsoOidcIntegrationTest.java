@@ -213,6 +213,37 @@ class SsoOidcIntegrationTest {
                 .body("{\"clientName\":\"Bad Client\",\"clientType\":\"confidential\"}")
             .when().post("/client/register")
             .then().statusCode(400)
-                .body("error", equalTo("invalid_client_metadata"));
+                .body("error", equalTo("invalid_client_metadata"))
+                .header("x-amzn-ErrorType", "InvalidClientMetadataException");
+    }
+
+    @Test
+    void pendingDeviceAuthorizationNamesTheModeledExceptionForSdkRetries() {
+        // AWS SDKs map OIDC errors from x-amzn-ErrorType; `aws sso login` only keeps polling on
+        // AuthorizationPendingException.
+        Response registration = given()
+                .contentType("application/json")
+                .body("{\"clientName\":\"Pending Integration\",\"clientType\":\"public\"}")
+            .when().post("/client/register")
+            .then().statusCode(200)
+            .extract().response();
+        String clientId = registration.path("clientId");
+        String clientSecret = registration.path("clientSecret");
+        String deviceCode = given()
+                .contentType("application/json")
+                .body("{\"clientId\":\"" + clientId + "\",\"clientSecret\":\"" + clientSecret
+                        + "\",\"startUrl\":\"https://example.awsapps.com/start\"}")
+            .when().post("/device_authorization")
+            .then().statusCode(200)
+            .extract().path("deviceCode");
+
+        given()
+                .contentType("application/json")
+                .body("{\"clientId\":\"" + clientId + "\",\"clientSecret\":\"" + clientSecret
+                        + "\",\"grantType\":\"urn:ietf:params:oauth:grant-type:device_code\",\"deviceCode\":\"" + deviceCode + "\"}")
+            .when().post("/token")
+            .then().statusCode(400)
+                .header("x-amzn-ErrorType", "AuthorizationPendingException")
+                .body("error", equalTo("authorization_pending"));
     }
 }
