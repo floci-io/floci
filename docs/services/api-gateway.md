@@ -838,6 +838,23 @@ authorizer's context into request headers, query strings, and paths. For a retur
 `requestParameters`. String, numeric, and boolean context values are rendered as
 text. This works with format `1.0` policy responses and format `2.0` simple responses.
 
+HTTP API `AWS_PROXY` integrations with `integrationSubtype` `SQS-SendMessage` send each request to
+an SQS queue instead of invoking a Lambda function. `requestParameters` name the `SendMessage`
+inputs: `QueueUrl` and `MessageBody` are required, and `DelaySeconds`, `MessageAttributes`,
+`MessageDeduplicationId`, `MessageGroupId`, `MessageSystemAttributes` and `Region` are optional.
+Create and update reject a missing required parameter, any other parameter name, an unknown
+subtype, a subtype on a non-`AWS_PROXY` integration or a WebSocket API, and a
+`payloadFormatVersion` other than `1.0`, which is the default when a subtype is set. A value is a
+static string, a whole expression such as `$request.body`, `$request.body.<JSONPath>`,
+`$request.header.<name>`, `$request.querystring.<name>`, the `$context` values `HTTP_PROXY` mapping reads, or
+`$stageVariables.<name>`, or text with expressions embedded as `${request.header.Authorization}`.
+`MessageAttributes` and `MessageSystemAttributes` must resolve to a JSON object. `Region` selects
+the queue's region and defaults to the API's. A sent message answers `200` with
+`{"SendMessageResponse":{"ResponseMetadata":{"RequestId":...},"SendMessageResult":{...}}}`; a
+required parameter that resolves to nothing, such as an empty body for `$request.body`, answers
+`400` with `{"Error":{"Code":"MissingParameter",...}}`, and an SQS error is relayed in the same
+shape with its status. `credentialsArn` is stored but not enforced.
+
 A Lambda proxy integration's response is read as AWS reads it (measured): a function that raises, a
 format 1.0 result that is not an object with a `statusCode`, and a `statusCode` that is not a whole
 number from 100 to 599 (text that spells one, such as `"201"`, is taken) are answered `500` with
