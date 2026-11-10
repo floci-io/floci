@@ -639,11 +639,6 @@ public class PaymentCryptographyService implements Resettable, StoredResourceArn
      */
     private static PaymentCryptographyKey initialKey(PaymentCryptographyKey base,
                                                       String keySerialNumber) {
-        if (!base.isExportable()) {
-            throw new AwsException("ValidationException",
-                    "the base derivation key " + base.getArn() + " is not exportable, so the key "
-                            + "derived from it may not leave the service", 400);
-        }
         if (!"TR31_B0_BASE_DERIVATION_KEY".equals(base.getKeyUsage())) {
             throw new AwsException("ValidationException",
                     "an initial key under export is derived from a base derivation key, but "

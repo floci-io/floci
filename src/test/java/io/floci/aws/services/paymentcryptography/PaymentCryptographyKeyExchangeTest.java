@@ -582,22 +582,26 @@ class PaymentCryptographyKeyExchangeTest {
     }
 
     @Test
-    void aBaseKeyThatMayNotLeaveDoesNotDeriveAnInitialKey() {
-        // The key derived from a base derivation key leaves the service, so the base key has
-        // to be one that may leave.
+    void aBaseKeyThatMayNotLeaveStillDerivesAnInitialKey() {
+        // The export guide says that even with the base derivation key set to not exportable,
+        // the holder can still derive the initial keys and export them to install on devices,
+        // which the standards allow.
         PaymentCryptographyKey base = service.createKey("us-east-1",
                 Map.of("KeyAlgorithm", "TDES_2KEY", "KeyClass", "SYMMETRIC_KEY",
                         "KeyUsage", "TR31_B0_BASE_DERIVATION_KEY",
                         "KeyModesOfUse", Map.of("DeriveKey", true)),
                 Map.of("DeriveKey", true), false, true, Map.of());
 
-        AwsException refused = assertThrows(AwsException.class,
-                () -> service.exportKey("us-east-1", base.getKeyId(), "Tr31KeyBlock",
-                        Map.of("WrappingKeyIdentifier", protection.getKeyId()),
-                        "12345678900000000001", ""));
+        Map<?, ?> wrapped = (Map<?, ?>) service.exportKey("us-east-1", base.getKeyId(),
+                "Tr31KeyBlock", Map.of("WrappingKeyIdentifier", protection.getKeyId()),
+                "12345678900000000001", "").get("WrappedKey");
+        String block = (String) wrapped.get("KeyMaterial");
 
-        assertEquals("ValidationException", refused.getErrorCode());
-        assertTrue(refused.getMessage().contains("not exportable"), refused.getMessage());
+        // The block carries the derived key, which is an initial derivation key.
+        assertEquals("B1", block.substring(5, 7), "the usage of the derived key");
+        assertEquals("T", block.substring(7, 8), "the algorithm of the derived key");
+        assertNotEquals(base.getKeyCheckValue(), wrapped.get("KeyCheckValue"),
+                "the block carries the base key rather than the derived one");
     }
 
     @Test

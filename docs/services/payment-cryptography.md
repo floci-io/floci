@@ -74,7 +74,8 @@
   does not leave, a key pair has no material a key block could carry, and a counterparty's
   certificate that the named authority did not sign is refused. An export may name an initial
   DUKPT key by its serial number, and the derived key leaves instead of the base derivation
-  key.
+  key. The base derivation key may not be exportable itself and still derive that initial key,
+  which the export guide allows and the standards require.
 - **The TR-34 and the AS2805 forms are not made.** A request that asks for one of them is
   refused with the error that says so, rather than answered with something of another kind,
   and the refusal names the forms the service serves.
