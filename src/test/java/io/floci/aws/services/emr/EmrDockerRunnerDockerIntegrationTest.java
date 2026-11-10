@@ -129,6 +129,39 @@ class EmrDockerRunnerDockerIntegrationTest {
     }
 
     @Test
+    void aStreamingJobsMapperAndReducerRunInYarnContainersOnItsClustersCoreAndTaskNodes() {
+        // Each says the host it ran on, after the words it counted.
+        String where = """
+                import socket
+                print(sys.argv[1] + " " + socket.gethostname() + "\\t1")
+                """;
+        put("side/where-mapper.py", MAPPER + where);
+        put("side/where-reducer.py", REDUCER + where);
+        startCluster("[]", null, ",{\"Name\":\"core\",\"InstanceRole\":\"CORE\",\"InstanceType\":\"m5.xlarge\","
+                + "\"InstanceCount\":1},{\"Name\":\"task\",\"InstanceRole\":\"TASK\",\"InstanceType\":\"m5.xlarge\","
+                + "\"InstanceCount\":1}");
+        List<String> instances = emr("ListInstances", "{\"ClusterId\":\"" + clusterId + "\"}").jsonPath()
+                .getList("Instances.PrivateDnsName");
+        List<String> nodes = instances.subList(1, instances.size());
+
+        // The mapper and the reducer, from the files -files sends, with a shuffle between them, run on the core and
+        // task nodes, not in the step's container.
+        assertEquals("COMPLETED", runStep("command-runner.jar", "hadoop-streaming",
+                "-D", "mapreduce.job.maps=1", "-D", "mapreduce.job.reduces=1",
+                "-files", side("where-mapper.py", "where-reducer.py"), "-mapper", "python3 where-mapper.py mapper",
+                "-reducer", "python3 where-reducer.py reducer", "-input", s3Uri("in/"), "-output", s3Uri("where/")));
+        Map<String, Integer> counts = counts("where/");
+        assertEquals(WORD_COUNTS, counts.entrySet().stream().filter(entry -> !entry.getKey().contains(" "))
+                .collect(Collectors.toMap(Map.Entry::getKey, Map.Entry::getValue)), counts::toString);
+        List<String> ranOn = counts.keySet().stream().filter(key -> key.contains(" ")).toList();
+        assertEquals(List.of("mapper", "reducer"), ranOn.stream().map(task -> task.split(" ")[0]).distinct().toList(),
+                ranOn::toString);
+        for (String task : ranOn) {
+            assertTrue(nodes.contains(task.split(" ")[1]), task + " among " + nodes);
+        }
+    }
+
+    @Test
     void aCustomJarAtEmrsStreamingJarPathRunsItsWordCountInTheDriver() {
         startCluster("[]");
 

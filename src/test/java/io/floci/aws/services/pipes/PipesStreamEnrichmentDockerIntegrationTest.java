@@ -5,10 +5,12 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import io.floci.aws.services.sqs.SqsService;
 import io.floci.aws.testing.DockerAvailability;
 import io.floci.aws.testing.DynamoDbRequests;
+import io.floci.aws.testing.RestAssuredJsonUtils;
 import io.floci.aws.testing.SqsTestQueue;
 import io.quarkus.test.junit.QuarkusTest;
 import jakarta.inject.Inject;
 import org.junit.jupiter.api.Assumptions;
+import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
@@ -41,6 +43,13 @@ class PipesStreamEnrichmentDockerIntegrationTest {
 
     @Inject
     SqsService sqsService;
+
+    // DynamoDB's requests and answers are application/x-amz-json-1.0, which RestAssured encodes and parses only once
+    // told to, whichever classes ran before this one.
+    @BeforeAll
+    static void configure() {
+        RestAssuredJsonUtils.configureAwsContentTypes();
+    }
 
     @BeforeEach
     void requireDocker() throws Exception {
