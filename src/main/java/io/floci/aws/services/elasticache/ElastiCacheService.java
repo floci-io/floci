@@ -900,6 +900,15 @@ public class ElastiCacheService implements ResourceProvider {
     }
 
     /**
+     * Whether a resource belongs to the request's Region. Replication groups, cache clusters, users and user
+     * groups are stored per account; like AWS, the Describe* listings only show the requesting Region's.
+     * The getters stay unscoped: credential lookups, restore and validation run outside a request.
+     */
+    private boolean inRequestRegion(String arn) {
+        return regionResolver.getRegion().equals(regionOf(arn));
+    }
+
+    /**
      * Restarts the container and auth proxy behind a standalone Redis or Valkey cache cluster,
      * the same pair {@link #provisionCacheCluster} creates. The cache comes back empty, as it
      * does for a replication group: only the record is persisted, never the keyspace.
@@ -1298,12 +1307,12 @@ public class ElastiCacheService implements ResourceProvider {
 
     public Collection<ReplicationGroup> listReplicationGroups(String filterGroupId) {
         if (filterGroupId != null && !filterGroupId.isBlank()) {
-            return groups.get(filterGroupId)
+            return groups.get(filterGroupId).filter(g -> inRequestRegion(g.getArn()))
                     .map(List::of)
                     .orElseThrow(() -> new AwsException("ReplicationGroupNotFoundFault",
                             "Replication group " + filterGroupId + " not found.", 404));
         }
-        return groups.scan(k -> true);
+        return groups.scan(k -> true).stream().filter(g -> inRequestRegion(g.getArn())).toList();
     }
 
     public void deleteReplicationGroup(String groupId) {
@@ -2094,6 +2103,9 @@ public class ElastiCacheService implements ResourceProvider {
     public List<MemberCacheCluster> listMemberCacheClusters(String filterClusterId) {
         List<MemberCacheCluster> members = new ArrayList<>();
         for (ReplicationGroup group : groups.scan(k -> true)) {
+            if (!inRequestRegion(group.getArn())) {
+                continue;
+            }
             for (MemberCacheCluster member : memberCacheClusters(group)) {
                 if (filterClusterId == null || filterClusterId.isBlank()
                         || filterClusterId.equals(member.cacheClusterId())) {
@@ -2554,7 +2566,7 @@ public class ElastiCacheService implements ResourceProvider {
     public Collection<ElastiCacheUser> listUsers(String filterUserId, String filterEngine) {
         // UserId wins when both filters are sent; AWS documents no interaction between them.
         if (filterUserId != null && !filterUserId.isBlank()) {
-            return findUser(filterUserId)
+            return findUser(filterUserId).filter(u -> inRequestRegion(u.getArn()))
                     .map(List::of)
                     .orElseThrow(() -> new AwsException("UserNotFound",
                             "User " + filterUserId + " not found.", 404));
@@ -2562,10 +2574,11 @@ public class ElastiCacheService implements ResourceProvider {
         ensureDefaultUser();
         if (filterEngine != null && !filterEngine.isBlank()) {
             return users.scan(k -> true).stream()
+                    .filter(u -> inRequestRegion(u.getArn()))
                     .filter(u -> filterEngine.equalsIgnoreCase(u.getEngine()))
                     .toList();
         }
-        return users.scan(k -> true);
+        return users.scan(k -> true).stream().filter(u -> inRequestRegion(u.getArn())).toList();
     }
 
     /**
@@ -2724,9 +2737,13 @@ public class ElastiCacheService implements ResourceProvider {
 
     public Collection<ElastiCacheUserGroup> listUserGroups(String filterUserGroupId) {
         if (filterUserGroupId != null && !filterUserGroupId.isBlank()) {
-            return List.of(getUserGroup(filterUserGroupId));
+            ElastiCacheUserGroup userGroup = getUserGroup(filterUserGroupId);
+            if (!inRequestRegion(userGroup.getArn())) {
+                throw userGroupNotFound(filterUserGroupId);
+            }
+            return List.of(userGroup);
         }
-        return userGroups.scan(k -> true);
+        return userGroups.scan(k -> true).stream().filter(g -> inRequestRegion(g.getArn())).toList();
     }
 
     public ElastiCacheUserGroup modifyUserGroup(String userGroupId, List<String> userIdsToAdd,
