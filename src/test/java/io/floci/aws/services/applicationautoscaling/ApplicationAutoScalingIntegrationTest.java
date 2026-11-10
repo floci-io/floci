@@ -665,6 +665,33 @@ class ApplicationAutoScalingIntegrationTest {
     }
 
     @Test
+    void scheduledActionsRejectInvalidDatesAndUnsupportedExpressionSyntax() {
+        String resource = "service/scheduled-invalid-expression/service";
+        String validSchedule = "at(2096-02-29T12:34:56)";
+        try (ApplicationAutoScalingClient client = AwsTestClients.create(ApplicationAutoScalingClient.builder(),
+                "000000000000", Region.US_EAST_1)) {
+            ScheduledActionFixtures.register(client, resource, 0, 10);
+            try {
+                client.putScheduledAction(ScheduledActionFixtures.put(resource, "once")
+                        .schedule(validSchedule).scalableTargetAction(ScheduledActionFixtures.bounds(0, 0)).build());
+                for (String schedule : List.of("at(2099-02-29T12:34:56)", "at(2099-04-31T12:34:56)",
+                        "at(2099-01-01T24:00:00)", "at(2099-01-01T00:00:00Z)",
+                        "at(2099-01-01T00:00:00+00:00)", "at(2099-01-01T00:00:00.123)",
+                        "at(2099-01-01T00:00:00)trailing", "AT(2099-01-01T00:00:00)",
+                        " at(2099-01-01T00:00:00)", "at( 2099-01-01T00:00:00)",
+                        "rate(1 minute)", "cron(0 0 * * ? *)")) {
+                    assertThrows(ValidationException.class, () -> client.putScheduledAction(
+                            ScheduledActionFixtures.put(resource, "once").schedule(schedule).build()), schedule);
+                }
+                assertEquals(validSchedule, ScheduledActionFixtures.describe(client, resource)
+                        .scheduledActions().getFirst().schedule());
+            } finally {
+                ScheduledActionFixtures.deregister(client, resource);
+            }
+        }
+    }
+
+    @Test
     void scheduledActionsAreIsolatedByAccountAndRegion() {
         String resource = "service/scheduled-isolation/service";
         try (ApplicationAutoScalingClient first = AwsTestClients.create(ApplicationAutoScalingClient.builder(),

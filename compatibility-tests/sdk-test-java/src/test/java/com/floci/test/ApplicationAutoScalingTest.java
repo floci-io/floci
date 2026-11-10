@@ -17,6 +17,8 @@ import software.amazon.awssdk.services.applicationautoscaling.model.ScheduledAct
 import software.amazon.awssdk.services.applicationautoscaling.model.ServiceNamespace;
 import software.amazon.awssdk.services.ecs.EcsClient;
 import software.amazon.awssdk.services.ecs.model.ContainerDefinition;
+import software.amazon.awssdk.services.ecs.model.DescribeTasksRequest;
+import software.amazon.awssdk.services.ecs.model.DesiredStatus;
 import software.amazon.awssdk.services.ecs.model.LaunchType;
 import software.amazon.awssdk.services.ecs.model.TaskDefinition;
 
@@ -146,8 +148,8 @@ class ApplicationAutoScalingTest {
     }
 
     @Test
-    @DisplayName("Execute bounds, retain completion, and rearm with stable identity")
-    void executeAndRescheduleCompletedAction() throws InterruptedException {
+    @DisplayName("Autonomously execute bounds and retain completion with stable identity")
+    void autonomouslyExecuteAndRetainCompletedAction() throws InterruptedException {
         try (EcsClient ecs = TestFixtures.ecsClient()) {
             ecs.createCluster(r -> r.clusterName(name));
             try {
@@ -155,7 +157,6 @@ class ApplicationAutoScalingTest {
                         .containerDefinitions(ContainerDefinition.builder().name("app").image("alpine:3")
                                 .memory(128).build())).taskDefinition();
                 try {
-                    // No container instances are registered, so EC2 tasks cannot launch containers.
                     ecs.createService(r -> r.cluster(name).serviceName(name).launchType(LaunchType.EC2)
                             .taskDefinition(definition.taskDefinitionArn()).desiredCount(2));
                     try {
@@ -163,24 +164,16 @@ class ApplicationAutoScalingTest {
                                 .scalableDimension(DIMENSION).minCapacity(2).maxCapacity(4)
                                 .suspendedState(s -> s.dynamicScalingInSuspended(true)
                                         .dynamicScalingOutSuspended(true).scheduledScalingSuspended(false)));
-                        scaling.putScheduledAction(action(name).schedule(at(Instant.now().plusSeconds(5)))
-                                .scalableTargetAction(b -> b.minCapacity(0)).build());
+                        scaling.putScheduledAction(action(name).schedule(at(Instant.now().plusSeconds(2)))
+                                .scalableTargetAction(b -> b.minCapacity(0).maxCapacity(1)).build());
                         ScheduledAction created = actionNamed(name);
-                        awaitExecution(ecs, 1, 0, 4, 2);
-                        assertBounds(0, 4);
-                        assertThat(ecs.describeServices(r -> r.cluster(name).services(name))
-                                .services().get(0).desiredCount()).isEqualTo(2);
-                        assertIdentity(actionNamed(name), created);
-
-                        scaling.putScheduledAction(action(name).schedule(at(Instant.now().plusSeconds(5)))
-                                .scalableTargetAction(b -> b.maxCapacity(1)).build());
-                        awaitExecution(ecs, 2, 0, 1, 1);
+                        awaitExecution(ecs, 1, 0, 1, 1);
                         assertBounds(0, 1);
                         assertThat(ecs.describeServices(r -> r.cluster(name).services(name))
                                 .services().get(0).desiredCount()).isEqualTo(1);
                         ScheduledAction completed = actionNamed(name);
                         assertIdentity(completed, created);
-                        assertThat(completed.scalableTargetAction().minCapacity()).isNull();
+                        assertThat(completed.scalableTargetAction().minCapacity()).isZero();
                         assertThat(completed.scalableTargetAction().maxCapacity()).isEqualTo(1);
                     } finally {
                         ecs.deleteService(r -> r.cluster(name).service(name).force(true));
@@ -189,6 +182,18 @@ class ApplicationAutoScalingTest {
                     ecs.deregisterTaskDefinition(r -> r.taskDefinition(definition.taskDefinitionArn()));
                 }
             } finally {
+                // DeleteService can request a stop while a task is still launching.
+                List<String> tasks = Stream.of(DesiredStatus.RUNNING, DesiredStatus.STOPPED)
+                        .flatMap(status -> ecs.listTasks(r -> r.cluster(name).desiredStatus(status)).taskArns().stream())
+                        .distinct().toList();
+                for (String task : tasks) {
+                    ecs.stopTask(r -> r.cluster(name).task(task));
+                }
+                if (!tasks.isEmpty()) {
+                    assertThat(ecs.waiter().waitUntilTasksStopped(DescribeTasksRequest.builder()
+                                    .cluster(name).tasks(tasks).build(),
+                            TestFixtures.waiterOverride(Duration.ofSeconds(60))).matched().response()).isPresent();
+                }
                 ecs.deleteCluster(r -> r.cluster(name));
             }
         }

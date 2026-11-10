@@ -27,16 +27,13 @@ import io.floci.aws.services.cloudwatch.metrics.CloudWatchMetricsService;
 import io.floci.aws.services.cloudwatch.metrics.model.Dimension;
 import io.floci.aws.services.cloudwatch.metrics.model.MetricAlarm;
 import io.floci.aws.services.iam.ServiceLinkedRoles;
+import io.floci.aws.services.scheduler.SchedulerExpressionParser;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 import org.jboss.logging.Logger;
 
 import java.time.Instant;
-import java.time.LocalDateTime;
-import java.time.ZoneOffset;
-import java.time.format.DateTimeFormatter;
 import java.time.format.DateTimeParseException;
-import java.time.format.ResolverStyle;
 import java.time.temporal.ChronoUnit;
 import java.util.ArrayList;
 import java.util.Comparator;
@@ -373,9 +370,7 @@ public class ApplicationAutoScalingService implements StoredResourceArns {
             throw new AwsException("ValidationException", "Only UTC at(yyyy-MM-ddTHH:mm:ss) schedules are supported.", 400);
         }
         try {
-            return LocalDateTime.parse(schedule.substring(3, schedule.length() - 1),
-                    DateTimeFormatter.ofPattern("uuuu-MM-dd'T'HH:mm:ss").withResolverStyle(ResolverStyle.STRICT))
-                    .toInstant(ZoneOffset.UTC);
+            return SchedulerExpressionParser.parseAt(schedule, "UTC");
         } catch (DateTimeParseException e) {
             throw new AwsException("ValidationException", "Invalid scheduled date.", 400);
         }

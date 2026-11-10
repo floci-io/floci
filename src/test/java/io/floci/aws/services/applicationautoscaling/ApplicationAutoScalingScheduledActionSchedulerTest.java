@@ -44,6 +44,7 @@ class ApplicationAutoScalingScheduledActionSchedulerTest {
             return null;
         }).when(service).runScheduledActions(any());
         scheduler.onStart(null);
+        assertTrue(scheduler.active());
         verify(service).recoverScheduledActions(any());
         try (ExecutorService executor = Executors.newFixedThreadPool(2)) {
             Future<?> tick = executor.submit(() -> scheduler.tick(Instant.now()));

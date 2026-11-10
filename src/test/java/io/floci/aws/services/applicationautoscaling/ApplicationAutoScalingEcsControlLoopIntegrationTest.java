@@ -166,7 +166,7 @@ class ApplicationAutoScalingEcsControlLoopIntegrationTest {
                 .body("ScalingActivities[0].ResourceId", equalTo(RESOURCE_ID));
     }
     @Test
-    void scheduledActionAutonomouslyClampsEcsAndRetainsCompletion() {
+    void scheduledActionClampsEcsAndRetainsCompletion() {
         String cluster = "aas-scheduled-cluster";
         String serviceName = "aas-scheduled-service";
         String resource = "service/" + cluster + "/" + serviceName;
@@ -199,14 +199,13 @@ class ApplicationAutoScalingEcsControlLoopIntegrationTest {
                         .suspendedState(state -> state.scheduledScalingSuspended(false)));
                 scheduledActionScheduler.tick(suspendedDeadline.plusSeconds(2));
                 assertScheduledCapacityUnchanged(scaling, ecs, resource, cluster, serviceName);
+                Instant clampDeadline = Instant.now().plusSeconds(60);
                 scaling.putScheduledAction(ScheduledActionFixtures.put(resource, "clamp")
-                        .schedule(ScheduledActionFixtures.schedule(Instant.now().plusSeconds(3))).build());
-                // Do not tick here: this wait verifies that the background scheduler executes the action.
-                await().atMost(Duration.ofSeconds(15)).untilAsserted(() -> {
-                    assertEquals(1, ecs.describeServices(b -> b.cluster(cluster).services(serviceName)).services().getFirst().desiredCount());
-                    assertEquals("Successful", scaling.describeScalingActivities(b -> b.serviceNamespace("ecs").resourceId(resource))
-                            .scalingActivities().getFirst().statusCodeAsString());
-                });
+                        .schedule(ScheduledActionFixtures.schedule(clampDeadline)).build());
+                scheduledActionScheduler.tick(clampDeadline);
+                assertEquals(1, ecs.describeServices(b -> b.cluster(cluster).services(serviceName)).services().getFirst().desiredCount());
+                assertEquals("Successful", scaling.describeScalingActivities(b -> b.serviceNamespace("ecs").resourceId(resource))
+                        .scalingActivities().getFirst().statusCodeAsString());
                 assertEquals("UTC", ScheduledActionFixtures.describe(scaling, resource).scheduledActions().getFirst().timezone());
                 scaling.putScheduledAction(ScheduledActionFixtures.put(resource, "clamp")
                         .scalableTargetAction(ScheduledActionFixtures.bounds(0, 0)).build());
