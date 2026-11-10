@@ -137,38 +137,38 @@ class PipesTargetInvokerTest {
     void redshiftTarget_readsPathsFromAKinesisDataDeliveredAsBase64() throws Exception {
         when(serviceRegistry.isServiceEnabled("redshift-data")).thenReturn(true);
         Pipe pipe = redshiftPipe("{\"RedshiftDataParameters\":{\"Database\":\"dev\","
-                + "\"Sqls\":[\"$[0].kinesis.data.statement\",\"$[0].kinesis.data\"]}}");
+                + "\"Sqls\":[\"$[0].data.statement\",\"$[0].data\"]}}");
         String data = Base64.getEncoder().encodeToString(
                 "{\"statement\":\"INSERT INTO t VALUES (1)\"}".getBytes(StandardCharsets.UTF_8));
-        String event = "[{\"eventSource\":\"aws:kinesis\",\"kinesis\":{\"partitionKey\":\"p\",\"data\":\""
-                + data + "\"}}]";
+        String event = "[{\"eventSource\":\"aws:kinesis\",\"partitionKey\":\"p\",\"data\":\""
+                + data + "\"}]";
 
         invoker.invoke(pipe, event, "us-east-1");
 
         ArgumentCaptor<UnaryOperator<String>> resolver = ArgumentCaptor.captor();
         verify(redshiftSubmitter).submit(any(), any(), any(), any(), any(), resolver.capture(), any());
-        assertEquals("INSERT INTO t VALUES (1)", resolver.getValue().apply("$[0].kinesis.data.statement"));
-        assertEquals("{\"statement\":\"INSERT INTO t VALUES (1)\"}", resolver.getValue().apply("$[0].kinesis.data"));
+        assertEquals("INSERT INTO t VALUES (1)", resolver.getValue().apply("$[0].data.statement"));
+        assertEquals("{\"statement\":\"INSERT INTO t VALUES (1)\"}", resolver.getValue().apply("$[0].data"));
     }
 
     @Test
     void extractJsonPath_decodesBase64OnlyInKafkaAndKinesisSourceRecords() {
         String encoded = Base64.getEncoder().encodeToString("hello".getBytes(StandardCharsets.UTF_8));
         String kafka = "{\"eventSource\":\"aws:kafka\",\"key\":\"" + encoded + "\",\"value\":\"" + encoded + "\"}";
-        String kinesis = "{\"eventSource\":\"aws:kinesis\",\"kinesis\":{\"data\":\"" + encoded + "\"}}";
+        String kinesis = "{\"eventSource\":\"aws:kinesis\",\"data\":\"" + encoded + "\"}";
 
         assertEquals("\"hello\"", invoker.extractJsonPath("$.key", kafka));
         assertEquals("\"hello\"", invoker.extractJsonPath("$.value", kafka));
-        assertEquals("\"hello\"", invoker.extractJsonPath("$.kinesis.data", kinesis));
+        assertEquals("\"hello\"", invoker.extractJsonPath("$.data", kinesis));
     }
 
     @Test
     void extractJsonPath_leavesFieldsOfAnEnrichmentResponseOrAnSqsBodyUnchanged() {
         String encoded = Base64.getEncoder().encodeToString("hello".getBytes(StandardCharsets.UTF_8));
         String enriched = "{\"data\":\"" + encoded + "\",\"key\":\"" + encoded + "\",\"value\":\"" + encoded
-                + "\",\"body\":\"" + encoded + "\",\"kinesis\":{\"data\":\"" + encoded + "\"}}";
+                + "\",\"body\":\"" + encoded + "\"}";
 
-        for (String path : List.of("$.data", "$.key", "$.value", "$.body", "$.kinesis.data")) {
+        for (String path : List.of("$.data", "$.key", "$.value", "$.body")) {
             assertEquals("\"" + encoded + "\"", invoker.extractJsonPath(path, enriched), path);
         }
         assertEquals("\"" + encoded + "\"", invoker.extractJsonPath("$.key", "{\"key\":\"" + encoded + "\"}"));
@@ -177,9 +177,9 @@ class PipesTargetInvokerTest {
     @Test
     void inputTemplate_readsAFieldOfBase64KinesisData() {
         String data = Base64.getEncoder().encodeToString("{\"id\":7}".getBytes(StandardCharsets.UTF_8));
-        String event = "{\"eventSource\":\"aws:kinesis\",\"kinesis\":{\"data\":\"" + data + "\"}}";
+        String event = "{\"eventSource\":\"aws:kinesis\",\"data\":\"" + data + "\"}";
 
-        assertEquals("{\"id\": 7}", invoker.applyInputTemplate("{\"id\": <$.kinesis.data.id>}", event));
+        assertEquals("{\"id\": 7}", invoker.applyInputTemplate("{\"id\": <$.data.id>}", event));
     }
 
     @Test

@@ -108,29 +108,28 @@ public class PipesFilterMatcher {
             }
             JsonNode value = actual == null || !actual.isObject() ? null : actual.get(field.getKey());
             JsonNode expected = field.getValue();
-            if (expected.isObject()) {
-                JsonNode decodedValue = value;
-                // Kinesis data arrives base64-encoded; decode it before parsing as JSON.
-                if (value != null && value.isTextual() && "data".equals(field.getKey())
-                        && actual != null && "aws:kinesis".equals(actual.path("eventSource").asText())) {
-                    try {
-                        String text = new String(Base64.getDecoder().decode(value.asText()), StandardCharsets.UTF_8);
-                        JsonNode parsed = decoder != null ? decoder.readTree(text) : null;
-                        if (parsed != null && (parsed.isObject() || parsed.isArray())) {
-                            decodedValue = parsed;
-                        }
-                    } catch (Exception ignored) {
-                        // Not base64 or not JSON; fall through to normal handling.
+            // Kinesis data arrives base64-encoded; decode it for both object and array patterns.
+            JsonNode decodedValue = value;
+            if (value != null && value.isTextual() && "data".equals(field.getKey())
+                    && actual != null && "aws:kinesis".equals(actual.path("eventSource").asText())) {
+                try {
+                    String text = new String(Base64.getDecoder().decode(value.asText()), StandardCharsets.UTF_8);
+                    if (decoder != null) {
+                        decodedValue = decoder.getNodeFactory().textNode(text);
                     }
+                } catch (Exception ignored) {
+                    // Not base64; fall through to normal handling.
                 }
+            }
+            if (expected.isObject()) {
                 boolean nestedMatches = value == null
                         ? matches(expected, null, decoder)
-                        : matchesNested(expected, decodedValue != value ? decodedValue : decoded(value, decoder), decoder);
+                        : matchesNested(expected, decoded(decodedValue, decoder), decoder);
                 if (!nestedMatches) {
                     return false;
                 }
             } else if (expected.isArray()) {
-                if (!matchesAlternatives(field.getKey(), expected, value)) {
+                if (!matchesAlternatives(field.getKey(), expected, decodedValue)) {
                     return false;
                 }
             } else {

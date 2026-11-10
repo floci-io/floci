@@ -756,10 +756,12 @@ public class PipesPoller implements Resettable {
             ObjectNode eventRecord = objectMapper.createObjectNode();
             eventRecord.put("eventSource", "aws:kinesis");
             eventRecord.put("eventVersion", "1.0");
-            eventRecord.put("eventID", pipe.getSource() + ":" + kr.getSequenceNumber());
+            eventRecord.put("eventID", "shardId-000000000000:" + kr.getSequenceNumber());
             eventRecord.put("eventName", "aws:kinesis:record");
+            eventRecord.put("invokeIdentityArn", pipe.getRoleArn());
             eventRecord.put("awsRegion", region);
             eventRecord.put("eventSourceARN", pipe.getSource());
+            eventRecord.put("kinesisSchemaVersion", "1.0");
             eventRecord.put("partitionKey", kr.getPartitionKey());
             eventRecord.put("sequenceNumber", kr.getSequenceNumber());
             eventRecord.put("approximateArrivalTimestamp",
