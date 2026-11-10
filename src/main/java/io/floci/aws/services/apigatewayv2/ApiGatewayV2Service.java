@@ -755,8 +755,8 @@ public class ApiGatewayV2Service {
                 integrationSubtype != null ? "1.0" : "2.0");
         @SuppressWarnings("unchecked")
         Map<String, String> subtypeParameters = (Map<String, String>) request.get("requestParameters");
-        validateIntegrationSubtype(api, (String) request.get("integrationType"), integrationSubtype,
-                payloadFormatVersion, subtypeParameters);
+        validateIntegrationSubtype(api.getProtocolType(), (String) request.get("integrationType"),
+                integrationSubtype, payloadFormatVersion, subtypeParameters);
 
         Integration integration = new Integration();
         integration.setIntegrationId(shortId(8));
@@ -817,7 +817,7 @@ public class ApiGatewayV2Service {
     public Integration updateIntegration(String region, String apiId, String integrationId,
                                          Map<String, Object> request) {
         Integration integration = getIntegration(region, apiId, integrationId);
-        validateIntegrationSubtype(getApi(region, apiId),
+        validateIntegrationSubtype(getApi(region, apiId).getProtocolType(),
                 updatedValue(request, "integrationType", integration.getIntegrationType()),
                 updatedValue(request, "integrationSubtype", integration.getIntegrationSubtype()),
                 updatedValue(request, "payloadFormatVersion", integration.getPayloadFormatVersion()),
@@ -881,16 +881,16 @@ public class ApiGatewayV2Service {
 
     /**
      * Rejects an integration subtype the way CreateIntegration does: only on an HTTP API
-     * {@code AWS_PROXY} integration with payload format 1.0, a known subtype, every required
-     * parameter mapped and no parameter the subtype's action does not take.
+     * {@code AWS_PROXY} integration with payload format 1.0, a subtype AWS defines, every required
+     * parameter mapped and no parameter the subtype's action does not take. OpenAPI import runs it
+     * over every integration before it changes anything.
      */
-    private static void validateIntegrationSubtype(Api api, String integrationType, String integrationSubtype,
-                                                   String payloadFormatVersion,
-                                                   Map<String, String> requestParameters) {
+    static void validateIntegrationSubtype(String protocolType, String integrationType, String integrationSubtype,
+                                           String payloadFormatVersion, Map<String, String> requestParameters) {
         if (integrationSubtype == null) {
             return;
         }
-        if ("WEBSOCKET".equals(api.getProtocolType())) {
+        if ("WEBSOCKET".equals(protocolType)) {
             throw new AwsException("BadRequestException",
                     "IntegrationSubtype is supported only for HTTP APIs.", 400);
         }

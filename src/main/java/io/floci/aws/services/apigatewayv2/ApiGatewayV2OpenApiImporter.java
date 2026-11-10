@@ -185,6 +185,7 @@ public class ApiGatewayV2OpenApiImporter {
         // rejected reimport leave the previous definition intact.
         List<AuthorizerSpec> authorizerSpecs = authorizerSpecs(openAPI);
         collectUnresolvedSecurity(openAPI, authorizerSpecs, warnings);
+        validateIntegrationSubtypes(openAPI);
 
         if (failOnWarnings && !warnings.isEmpty()) {
             throw new AwsException("BadRequestException",
@@ -658,6 +659,28 @@ public class ApiGatewayV2OpenApiImporter {
     }
 
     // ──────────────────────────── Integrations ────────────────────────────
+
+    /**
+     * Validates every integration's subtype as CreateIntegration will, while planning, so a document
+     * with an invalid subtype is rejected before an import or reimport changes anything.
+     */
+    private static void validateIntegrationSubtypes(OpenAPI openAPI) {
+        forEachImportedOperation(openAPI, (method, path, operation) -> {
+            Map<String, Object> definition = extensionAsMap(
+                    operation == null ? null : operation.getExtensions(), EXT_INTEGRATION);
+            if (definition == null) {
+                return;
+            }
+            Map<String, Object> request = toIntegrationRequest(definition);
+            String integrationSubtype = (String) request.get("integrationSubtype");
+            @SuppressWarnings("unchecked")
+            Map<String, String> requestParameters = (Map<String, String>) request.get("requestParameters");
+            ApiGatewayV2Service.validateIntegrationSubtype("HTTP", (String) request.get("integrationType"),
+                    integrationSubtype, (String) request.getOrDefault("payloadFormatVersion",
+                            integrationSubtype != null ? "1.0" : "2.0"),
+                    requestParameters);
+        });
+    }
 
     private static Map<String, Object> toIntegrationRequest(Map<String, Object> definition) {
         Map<String, Object> request = new HashMap<>();
