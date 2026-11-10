@@ -12,6 +12,7 @@ import io.floci.aws.services.iam.IamService;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.mockito.Answers;
+import org.mockito.ArgumentCaptor;
 
 import java.time.Clock;
 import java.time.Instant;
@@ -19,11 +20,12 @@ import java.time.ZoneOffset;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.function.Function;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.mockito.ArgumentMatchers.anyInt;
-import static org.mockito.ArgumentMatchers.anyMap;
+import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.ArgumentMatchers.nullable;
@@ -166,15 +168,16 @@ class InstanceConnectTunnelHandlerTest {
         when(iam.isKnownAccessKey("AKIAFLOCITUNNELTEST1")).thenReturn(true);
 
         resolve(CLI_QUERY);
-        verify(enforcement).authorizeAdditionalResource(
-                "AWS4-HMAC-SHA256 Credential=AKIAFLOCITUNNELTEST1/20261019/us-east-1/ec2-instance-connect/aws4_request",
-                "ec2-instance-connect:OpenTunnel", ARN, Map.of(
-                        "ec2-instance-connect:remotePort", List.of("22"),
-                        "ec2-instance-connect:privateIpAddress", List.of("10.0.1.10"),
-                        "ec2-instance-connect:maxTunnelDuration", List.of("3600")));
+        ArgumentCaptor<Function<String, String>> parameter = ArgumentCaptor.forClass(Function.class);
+        verify(enforcement).authorizeRequestParameters(
+                eq("AWS4-HMAC-SHA256 Credential=AKIAFLOCITUNNELTEST1/20261019/us-east-1/ec2-instance-connect/aws4_request"),
+                eq("ec2-instance-connect:OpenTunnel"), eq(ARN), parameter.capture());
+        assertEquals("22", parameter.getValue().apply("remotePort"));
+        assertEquals("10.0.1.10", parameter.getValue().apply("privateIpAddress"));
+        assertEquals("3600", parameter.getValue().apply("maxTunnelDuration"));
 
         doThrow(new AwsException("AccessDenied", "denied", 403)).when(enforcement)
-                .authorizeAdditionalResource(anyString(), anyString(), anyString(), anyMap());
+                .authorizeRequestParameters(anyString(), anyString(), anyString(), any());
         assertEquals(403, refusal(CLI_QUERY));
 
         when(iam.isKnownAccessKey("AKIAFLOCITUNNELTEST1")).thenReturn(false);

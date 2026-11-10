@@ -215,7 +215,7 @@ public class InstanceConnectTunnelHandler {
         }
         String akid = scope.accessKeyId();
         String accountId = accountResolver.resolveFromPresignedCredential(signed.credential());
-        if (!akid.matches("\\d{12}")) {
+        if (!AccountResolver.isAccountId(akid)) {
             accountId = sessionAccountLookup.resolveAccountId(akid).orElse(accountId);
         }
         String account = accountId;
@@ -251,10 +251,7 @@ public class InstanceConnectTunnelHandler {
         InstanceConnectEndpoint endpoint = ec2Service.findUsableInstanceConnectEndpoint(region, endpointId)
                 .orElseThrow(() -> new Refusal(404, "No available EC2 Instance Connect Endpoint " + endpointId
                         + " in " + region));
-        authorize(scope.accessKeyId(), accountId, credential, endpoint.getInstanceConnectEndpointArn(), Map.of(
-                "ec2-instance-connect:remotePort", List.of(String.valueOf(port)),
-                "ec2-instance-connect:privateIpAddress", List.of(privateIp),
-                "ec2-instance-connect:maxTunnelDuration", List.of(String.valueOf(maxSeconds))));
+        authorize(scope.accessKeyId(), accountId, credential, endpoint.getInstanceConnectEndpointArn(), query);
         Instance instance = ec2Service.findRunningInstanceByPrivateIp(region, endpoint.getVpcId(), privateIp)
                 .orElseThrow(() -> new Refusal(404, "No running instance at " + privateIp + " in "
                         + endpoint.getVpcId()));
@@ -273,12 +270,11 @@ public class InstanceConnectTunnelHandler {
     /**
      * IAM enforcement for {@code ec2-instance-connect:OpenTunnel}, by the rules
      * {@code IamEnforcementFilter} applies to every JAX-RS request: an access key IAM does not know
-     * is refused, and a known one must be allowed the action on the endpoint, with the
-     * {@code ec2-instance-connect:remotePort}, {@code privateIpAddress} and {@code maxTunnelDuration}
-     * condition keys AWS defines for it.
+     * is refused, and a known one must be allowed the action on the endpoint, with the condition keys
+     * the shared table gives the action filled from the request's query parameters.
      */
     private void authorize(String akid, String accountId, String credential, String endpointArn,
-                           Map<String, List<String>> requestConditions) {
+                           UnaryOperator<String> query) {
         if (!config.services().iam().enforcementEnabled() || LEGACY_ACCESS_KEY_ID.equals(akid)) {
             return;
         }
@@ -287,8 +283,8 @@ public class InstanceConnectTunnelHandler {
             throw new Refusal(403, "The security token included in the request is invalid.");
         }
         try {
-            iamEnforcement.authorizeAdditionalResource(AccountResolver.SIGV4_SCHEME + " Credential=" + credential,
-                    OPEN_TUNNEL_ACTION, endpointArn, requestConditions);
+            iamEnforcement.authorizeRequestParameters(AccountResolver.SIGV4_SCHEME + " Credential=" + credential,
+                    OPEN_TUNNEL_ACTION, endpointArn, query);
         } catch (AwsException e) {
             throw new Refusal(e.getHttpStatus(), e.getMessage());
         }

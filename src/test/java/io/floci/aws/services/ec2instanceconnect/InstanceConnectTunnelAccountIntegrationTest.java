@@ -1,14 +1,11 @@
 package io.floci.aws.services.ec2instanceconnect;
 
 import io.floci.aws.core.common.XmlParser;
+import io.floci.aws.testing.EnforcementFixtures;
 import io.quarkus.test.junit.QuarkusTest;
 import io.restassured.specification.RequestSpecification;
 import jakarta.inject.Inject;
 import org.junit.jupiter.api.Test;
-
-import java.time.Instant;
-import java.time.ZoneOffset;
-import java.time.format.DateTimeFormatter;
 
 import static io.restassured.RestAssured.given;
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -25,8 +22,6 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 class InstanceConnectTunnelAccountIntegrationTest {
 
     private static final String ACCOUNT = "111122223333";
-    private static final DateTimeFormatter AMZ_DATE =
-            DateTimeFormatter.ofPattern("yyyyMMdd'T'HHmmss'Z'").withZone(ZoneOffset.UTC);
 
     @Inject
     InstanceConnectTunnelHandler handler;
@@ -52,12 +47,8 @@ class InstanceConnectTunnelAccountIntegrationTest {
     }
 
     private InstanceConnectTunnelHandler.Refusal refusal(String accessKey, String endpointId) {
-        Instant now = Instant.now();
-        String query = "instanceConnectEndpointId=" + endpointId + "&remotePort=22&privateIpAddress=10.91.1.200"
-                + "&X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential=" + accessKey + "%2F"
-                + AMZ_DATE.format(now).substring(0, 8) + "%2Fus-east-1%2Fec2-instance-connect%2Faws4_request"
-                + "&X-Amz-Date=" + AMZ_DATE.format(now) + "&X-Amz-Expires=60&X-Amz-SignedHeaders=host"
-                + "&X-Amz-Signature=00";
+        String query = "instanceConnectEndpointId=" + endpointId + "&remotePort=22&privateIpAddress=10.91.1.200&"
+                + EnforcementFixtures.presignedQuery(accessKey, "ec2-instance-connect");
         return assertThrows(InstanceConnectTunnelHandler.Refusal.class,
                 () -> handler.resolve("/openTunnel", query, name -> null));
     }
