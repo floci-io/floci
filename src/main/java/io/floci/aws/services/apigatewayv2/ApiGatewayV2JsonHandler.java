@@ -268,15 +268,24 @@ public class ApiGatewayV2JsonHandler {
 
     /**
      * The integration request with lower-camel-case member names. RequestParameters keys keep
-     * their case, since an integration subtype's parameters are named by its action's members.
+     * their case, since an integration subtype's parameters are named by its action's members. A
+     * number or boolean value is read as its text; an object or array value is rejected.
      */
     private Map<String, Object> integrationRequest(JsonNode request) {
         @SuppressWarnings("unchecked")
         Map<String, Object> map = toLowerCamelCase(objectMapper.convertValue(request, Map.class));
         JsonNode requestParameters = request.get("RequestParameters");
         if (requestParameters != null && requestParameters.isObject()) {
-            map.put("requestParameters", objectMapper.convertValue(requestParameters,
-                    new TypeReference<Map<String, String>>() {}));
+            Map<String, String> parameters = new LinkedHashMap<>();
+            for (Map.Entry<String, JsonNode> entry : requestParameters.properties()) {
+                JsonNode value = entry.getValue();
+                if (value.isContainerNode()) {
+                    throw new AwsException("BadRequestException",
+                            "RequestParameters value for " + entry.getKey() + " must be a string.", 400);
+                }
+                parameters.put(entry.getKey(), value.isNull() ? null : value.asText());
+            }
+            map.put("requestParameters", parameters);
         }
         return map;
     }
