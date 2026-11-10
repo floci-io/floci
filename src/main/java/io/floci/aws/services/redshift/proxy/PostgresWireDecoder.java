@@ -7,6 +7,7 @@ import java.io.EOFException;
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.OutputStream;
+import java.nio.ByteBuffer;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.Arrays;
@@ -151,23 +152,28 @@ public class PostgresWireDecoder {
     }
 
     /**
-     * Text-format values of a Bind's parameters, by position. A NULL or a binary-format value is null: the
-     * caller cannot read it as a literal. Only a statement that prunes needs them, so they are read apart from
+     * Values of a Bind's parameters without known type OIDs. Binary values and NULL remain unknown.
+     * Only a statement that prunes needs them, so they are read apart from
      * {@link #decodeBind}. A malformed section gives an empty list: the backend still gets the original frame
      * and reports a malformed Bind itself, so it must not fail here.
      */
     public List<String> decodeBindParameters(FrontendMessage message) throws IOException {
+        return decodeBindParameters(message, List.of());
+    }
+
+    /** Binary int2, int4 and int8 values need the types declared by Parse or inferred by the backend. */
+    public List<String> decodeBindParameters(FrontendMessage message, List<Integer> parameterTypeOids) throws IOException {
         BodyCursor cursor = cursorFor(message, 'B');
         cursor.readCString();
         cursor.readCString();
         try {
-            return readBindParameters(cursor);
+            return readBindParameters(cursor, parameterTypeOids);
         } catch (IOException expected) {
             return List.of();
         }
     }
 
-    private static List<String> readBindParameters(BodyCursor cursor) throws IOException {
+    private static List<String> readBindParameters(BodyCursor cursor, List<Integer> parameterTypeOids) throws IOException {
         int formatCount = cursor.readInt16();
         int[] formats = new int[formatCount];
         for (int i = 0; i < formatCount; i++) {
@@ -189,12 +195,47 @@ public class PostgresWireDecoder {
             int format = formatCount == 0 ? 0 : formatCount == 1 ? formats[0] : formats[i];
             if (format == 0) {
                 values.add(new String(cursor.readBytes(length), StandardCharsets.UTF_8));
+            } else if (format == 1) {
+                int oid = i < parameterTypeOids.size() ? parameterTypeOids.get(i) : 0;
+                values.add(readBinaryInteger(cursor, oid, length));
             } else {
                 cursor.skip(length);
                 values.add(null);
             }
         }
         return values;
+    }
+
+    private static String readBinaryInteger(BodyCursor cursor, int oid, int length) throws IOException {
+        int width = switch (oid) {
+            case 21 -> Short.BYTES;
+            case 23 -> Integer.BYTES;
+            case 20 -> Long.BYTES;
+            default -> 0;
+        };
+        if (width == 0 || length != width) {
+            cursor.skip(length);
+            return null;
+        }
+        ByteBuffer bytes = ByteBuffer.wrap(cursor.readBytes(length));
+        long value = switch (width) {
+            case Short.BYTES -> bytes.getShort();
+            case Integer.BYTES -> bytes.getInt();
+            case Long.BYTES -> bytes.getLong();
+            default -> throw new IOException("Unsupported binary integer width");
+        };
+        return Long.toString(value);
+    }
+
+    static List<Integer> decodeParameterDescription(byte[] body) throws IOException {
+        BodyCursor cursor = new BodyCursor(body);
+        int count = cursor.readInt16();
+        List<Integer> types = new ArrayList<>(count);
+        for (int i = 0; i < count; i++) {
+            types.add(cursor.readInt32());
+        }
+        cursor.requireEnd();
+        return List.copyOf(types);
     }
 
     /** Decode an Execute ({@code 'E'}) message body. */

@@ -11,6 +11,8 @@ import org.jboss.logging.Logger;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.Timeout;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.CsvSource;
 import org.mockito.Mockito;
 
 import java.io.ByteArrayOutputStream;
@@ -22,6 +24,7 @@ import java.net.Socket;
 import java.net.SocketTimeoutException;
 import java.nio.ByteBuffer;
 import java.nio.charset.StandardCharsets;
+import java.util.Collections;
 import java.util.List;
 import java.util.concurrent.atomic.AtomicReference;
 
@@ -550,9 +553,10 @@ class RedshiftInterceptingBridgeTest {
         assertEquals('T', fromBridge.read());
     }
 
-    @Test
+    @ParameterizedTest
+    @CsvSource({"false,23", "true,23", "true,0", "true,-1"})
     @Timeout(20)
-    void preparesExternalQueriesWithoutValuesAtParseAndWithEachBindBeforeForwarding() throws Exception {
+    void preparesExternalQueriesWithoutValuesAtParseAndWithEachBindBeforeForwarding(boolean binary, int oid) throws Exception {
         String sql = "SELECT SUM(amount) FROM lake.events WHERE day = $1";
         SpectrumInterceptor interceptor = inlineMock(SpectrumInterceptor.class);
         SpectrumQueryPreparation preparation = mock(SpectrumQueryPreparation.class);
@@ -562,7 +566,8 @@ class RedshiftInterceptingBridgeTest {
         testClientEnd.setSoTimeout(5000);
         testBackendEnd.setSoTimeout(5000);
         InputStream response = testClientEnd.getInputStream();
-        byte[] parse = PostgresWireDecoder.encodeParse(new PostgresWireDecoder.ParseMessage("s", sql, List.of(23)), sql);
+        List<Integer> types = oid < 0 ? List.of() : List.of(oid);
+        byte[] parse = PostgresWireDecoder.encodeParse(new PostgresWireDecoder.ParseMessage("s", sql, types), sql);
 
         testClientEnd.getOutputStream().write(parse);
         testClientEnd.getOutputStream().flush();
@@ -573,13 +578,33 @@ class RedshiftInterceptingBridgeTest {
         assertEquals('1', response.read());
         skipFrameBody(response);
 
+        if (oid <= 0) {
+            byte[] describe = frame('D', concat(new byte[]{'S'}, cString("s")));
+            testClientEnd.getOutputStream().write(describe);
+            testClientEnd.getOutputStream().flush();
+            assertArrayEquals(describe, nextForwarded().toPacketBytes());
+        }
+
         for (String day : List.of("1", "2")) {
-            byte[] value = day.getBytes(StandardCharsets.UTF_8);
-            byte[] bind = frame('B', concat(cString(""), cString("s"), new byte[]{0, 0, 0, 1},
+            byte[] value = binary ? ByteBuffer.allocate(4).putInt(Integer.parseInt(day)).array()
+                    : day.getBytes(StandardCharsets.UTF_8);
+            byte[] formats = binary ? new byte[]{0, 1, 0, 1, 0, 1} : new byte[]{0, 0, 0, 1};
+            byte[] bind = frame('B', concat(cString(""), cString("s"), formats,
                     ByteBuffer.allocate(4).putInt(value.length).array(), value, new byte[]{0, 0}));
             testClientEnd.getOutputStream().write(bind);
             testClientEnd.getOutputStream().flush();
             assertEquals('H', nextForwarded().type());
+            if (oid <= 0 && day.equals("1")) {
+                // Bind is already queued, but the backend has not yet replied to Describe.
+                byte[] description = frame('t', concat(new byte[]{0, 1}, ByteBuffer.allocate(4).putInt(23).array()));
+                testBackendEnd.getOutputStream().write(description, 0, 7);
+                testBackendEnd.getOutputStream().flush();
+                testBackendEnd.getOutputStream().write(description, 7, description.length - 7);
+                writeBackendFrame('n', new byte[0]);
+                assertArrayEquals(description, new PostgresWireDecoder(response).nextMessage().toPacketBytes());
+                assertEquals('n', response.read());
+                skipFrameBody(response);
+            }
             assertArrayEquals(bind, nextForwarded().toPacketBytes());
             verify(preparation).prepare(eq(sql), any(), any(), eq(List.of(day)));
             writeBackendFrame('2', new byte[0]);
@@ -588,6 +613,32 @@ class RedshiftInterceptingBridgeTest {
         }
         verify(preparation, never()).prepare(anyString(), any(), any());
         verify(preparation, times(3)).prepare(eq(sql), any(), any(), any());
+        if (binary && oid == 0) {
+            byte[] close = frame('C', concat(new byte[]{'S'}, cString("s")));
+            testClientEnd.getOutputStream().write(close);
+            testClientEnd.getOutputStream().flush();
+            assertArrayEquals(close, nextForwarded().toPacketBytes());
+            writeBackendFrame('3', new byte[0]);
+            assertEquals('3', response.read());
+            skipFrameBody(response);
+            testClientEnd.getOutputStream().write(parse);
+            testClientEnd.getOutputStream().flush();
+            assertEquals('H', nextForwarded().type());
+            assertArrayEquals(parse, nextForwarded().toPacketBytes());
+            writeBackendFrame('1', new byte[0]);
+            assertEquals('1', response.read());
+            skipFrameBody(response);
+            byte[] bind = frame('B', concat(cString(""), cString("s"), new byte[]{0, 1, 0, 1, 0, 1},
+                    ByteBuffer.allocate(4).putInt(4).array(), ByteBuffer.allocate(4).putInt(3).array(), new byte[]{0, 0}));
+            testClientEnd.getOutputStream().write(bind);
+            testClientEnd.getOutputStream().flush();
+            assertEquals('H', nextForwarded().type());
+            assertArrayEquals(bind, nextForwarded().toPacketBytes());
+            verify(preparation).prepare(eq(sql), any(), any(), eq(Collections.singletonList(null)));
+            writeBackendFrame('2', new byte[0]);
+            assertEquals('2', response.read());
+            skipFrameBody(response);
+        }
     }
 
     @Test

@@ -1,6 +1,8 @@
 package io.floci.aws.services.redshift.proxy;
 
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.CsvSource;
 
 import java.io.ByteArrayInputStream;
 import java.io.ByteArrayOutputStream;
@@ -8,6 +10,7 @@ import java.io.EOFException;
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.OutputStream;
+import java.nio.ByteBuffer;
 import java.nio.charset.StandardCharsets;
 import java.util.Arrays;
 import java.util.Collections;
@@ -22,6 +25,45 @@ import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class PostgresWireDecoderTest {
+
+    @ParameterizedTest
+    @CsvSource({"21,2,-32768", "21,2,32767", "23,4,-2147483648", "23,4,2147483647", "23,4,0",
+            "20,8,-9223372036854775808", "20,8,9223372036854775807", "23,4,1"})
+    void decodesBinaryIntegersUsingTheirDeclaredType(int oid, int width, long value) throws IOException {
+        byte[] encoded = Arrays.copyOfRange(ByteBuffer.allocate(8).putLong(value).array(), 8 - width, 8);
+        byte[] body = concat(cString("p"), cString("s"), int16(1), int16(1), int16(1),
+                int32(width), encoded, int16(0));
+        assertEquals(List.of(Long.toString(value)), parameters(body, List.of(oid)));
+    }
+
+    @Test
+    void decodesMixedFormatsWithoutGuessingUnsupportedBinaryTypesOrNullValues() throws IOException {
+        byte[] body = concat(cString("p"), cString("s"), int16(4), int16(0), int16(1), int16(1), int16(1),
+                int16(4), int32(2), new byte[]{'1', '2'}, int32(2), new byte[]{-1, -7},
+                int32(4), int32(42), int32(-1), int16(0));
+        assertEquals(Arrays.asList("12", "-7", null, null), parameters(body, List.of(23, 21, 25, 20)));
+    }
+
+    @Test
+    void binaryValuesWithUnknownTypesOrWrongWidthsRemainUnknown() throws IOException {
+        byte[] body = concat(cString("p"), cString("s"), int16(1), int16(1), int16(3),
+                int32(3), new byte[]{0, 0, 1}, int32(4), int32(2), int32(4), int32(3), int16(0));
+        assertEquals(Arrays.asList(null, null, null), parameters(body, List.of(23, 0, 17)));
+        assertEquals(Arrays.asList(null, null, null), parameters(body, List.of()));
+    }
+
+    @Test
+    void truncatedBinaryIntegerLeavesTheBindUnknown() throws IOException {
+        byte[] body = concat(cString("p"), cString("s"), int16(1), int16(1), int16(1), int32(4), new byte[]{0, 1});
+        assertEquals(List.of(), parameters(body, List.of(23)));
+    }
+
+    @Test
+    void decodesOnlyCompleteBackendParameterDescriptions() throws IOException {
+        assertEquals(List.of(23, 20), PostgresWireDecoder.decodeParameterDescription(concat(int16(2), int32(23), int32(20))));
+        assertThrows(IOException.class, () -> PostgresWireDecoder.decodeParameterDescription(concat(int16(2), int32(23))));
+        assertThrows(IOException.class, () -> PostgresWireDecoder.decodeParameterDescription(concat(int16(0), int32(23))));
+    }
 
     @Test
     void decodesParseNameSqlAndParameterTypeOids() throws IOException {
@@ -105,6 +147,11 @@ class PostgresWireDecoderTest {
     private static List<String> parameters(byte[] body) throws IOException {
         PostgresWireDecoder decoder = new PostgresWireDecoder(new ByteArrayInputStream(frame('B', body)));
         return decoder.decodeBindParameters(decoder.nextMessage());
+    }
+
+    private static List<String> parameters(byte[] body, List<Integer> typeOids) throws IOException {
+        PostgresWireDecoder decoder = new PostgresWireDecoder(new ByteArrayInputStream(frame('B', body)));
+        return decoder.decodeBindParameters(decoder.nextMessage(), typeOids);
     }
 
     private static PostgresWireDecoder.BindMessage decodeBind(byte[] body) throws IOException {

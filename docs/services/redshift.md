@@ -802,8 +802,11 @@ partition, because that backend cannot report where its transaction ends.
 A bind parameter (`$1`, `$2`) in a predicate is read as the value the client binds, so a prepared statement
 prunes like the same query written with literals. When the statement is parsed its values are not yet known, so
 it loads no partition at that point, only enough for PostgreSQL to plan it, and each Bind loads the partitions
-its values select. A parameter that is NULL, sent in binary format, or compared in a form Floci does not read
-(for example `$1::int`) leaves its predicate out, and the query loads every partition.
+its values select. Text values and binary PostgreSQL `int2`, `int4` and `int8` values support pruning, including
+pgjdbc's default `setInt` transfer. Binary integers use the type OIDs declared in Parse or returned by the
+backend's ParameterDescription when it infers the types. A parameter that is NULL, has an unknown or unsupported
+binary type, has an invalid binary width, or is compared in a form Floci does not read (for example `$1::int`)
+leaves its predicate out, and the query loads every partition. The original Bind frame is forwarded unchanged.
 The partitions loaded inside a transaction block, or by an extended query cycle, are staged for their connection
 and recorded as loaded only when the transaction (or the cycle) commits. A rollback, an error or a
 `ROLLBACK TO SAVEPOINT` discards them, so nothing is left behind that a later query would trust. Staged
