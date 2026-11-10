@@ -39,9 +39,6 @@ import org.junit.jupiter.params.provider.CsvSource;
 import org.junit.jupiter.params.provider.ValueSource;
 import org.mockito.ArgumentCaptor;
 
-import javax.crypto.Mac;
-import javax.crypto.spec.SecretKeySpec;
-
 import java.lang.management.ManagementFactory;
 import java.lang.management.ThreadInfo;
 import java.lang.management.ThreadMXBean;
@@ -70,6 +67,7 @@ import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.Function;
 
+import static io.floci.aws.services.cognito.CognitoSecretHashTestHelper.secretHash;
 import static io.floci.aws.testing.InlineMocks.inlineMock;
 import static org.junit.jupiter.api.Assertions.*;
 import static org.mockito.ArgumentMatchers.any;
@@ -5491,11 +5489,7 @@ class CognitoServiceTest {
         UserPool pool = createPoolAndUser();
         UserPoolClient client = openClient(service, pool.getId(), "c", true);
 
-        Mac mac = Mac.getInstance("HmacSHA256");
-        mac.init(new SecretKeySpec(
-                client.getClientSecret().getBytes(StandardCharsets.UTF_8), "HmacSHA256"));
-        String secretHash = Base64.getEncoder().encodeToString(
-                mac.doFinal(("alice" + client.getClientId()).getBytes(StandardCharsets.UTF_8)));
+        String secretHash = secretHash(client.getClientId(), client.getClientSecret(), "alice");
 
         Map<String, Object> result = service.initiateAuth(client.getClientId(), "USER_PASSWORD_AUTH",
                 Map.of("USERNAME", "alice",
@@ -6021,7 +6015,7 @@ class CognitoServiceTest {
             client.setExplicitAuthFlows(List.of("ALLOW_USER_PASSWORD_AUTH", "ALLOW_ADMIN_USER_PASSWORD_AUTH",
                     "ALLOW_USER_SRP_AUTH"));
             String supplied = "Fixture@Example.com";
-            String secretHash = secretHash(client, supplied);
+            String secretHash = secretHash(client.getClientId(), client.getClientSecret(), supplied);
             Map<String, String> params = Map.of("USERNAME", supplied, "PASSWORD", password, "SECRET_HASH", secretHash);
             Map<String, Object> authenticated = initiateAuth(admin, pool, client, "USER_PASSWORD_AUTH", params);
             Map<?, ?> tokens = (Map<?, ?>) authenticated.get("AuthenticationResult");
@@ -6037,7 +6031,7 @@ class CognitoServiceTest {
             assertEquals(user.getUsername(), challenge.get("USER_ID_FOR_SRP"));
             Map<String, String> proof = new HashMap<>(CognitoSrpTestClient.proof(
                     pool.getId(), user.getUsername(), password, challenge));
-            proof.put("SECRET_HASH", secretHash(client, user.getUsername()));
+            proof.put("SECRET_HASH", secretHash(client.getClientId(), client.getClientSecret(), user.getUsername()));
             Map<String, Object> completed = respondToChallenge(admin, pool, client, "PASSWORD_VERIFIER", (String) started.get("Session"), proof);
             assertNotNull(completed.get("AuthenticationResult"));
         }
@@ -6056,13 +6050,6 @@ class CognitoServiceTest {
                     : service.respondToAuthChallenge(client.getClientId(), challenge, session, responses);
         }
 
-        private String secretHash(UserPoolClient client, String username) throws Exception {
-            Mac mac = Mac.getInstance("HmacSHA256");
-            mac.init(new SecretKeySpec(client.getClientSecret().getBytes(StandardCharsets.UTF_8), "HmacSHA256"));
-            return Base64.getEncoder().encodeToString(
-                    mac.doFinal((username + client.getClientId()).getBytes(StandardCharsets.UTF_8)));
-        }
-
         @ParameterizedTest
         @CsvSource({"false,false", "true,false", "false,true", "true,true", "false,default", "true,default"})
         void srpChallengeRespectsUsernameCaseSensitivity(boolean admin, String setting) throws Exception {
@@ -6078,7 +6065,7 @@ class CognitoServiceTest {
             String supplied = "false".equals(setting) ? "fixture" : user.getUsername();
             Map<String, Object> started = initiateAuth(admin, pool, client, "USER_SRP_AUTH",
                     Map.of("USERNAME", supplied, "SRP_A", CognitoSrpTestClient.publicA(),
-                            "SECRET_HASH", secretHash(client, supplied)));
+                            "SECRET_HASH", secretHash(client.getClientId(), client.getClientSecret(), supplied)));
             Map<?, ?> challenge = (Map<?, ?>) started.get("ChallengeParameters");
             assertEquals("Fixture", challenge.get("USER_ID_FOR_SRP"));
             String session = (String) started.get("Session");
@@ -6088,16 +6075,16 @@ class CognitoServiceTest {
             assertEquals("InvalidParameterException", assertThrows(AwsException.class,
                     () -> respondToChallenge(admin, pool, client, "PASSWORD_VERIFIER", session, proof)).getErrorCode());
             proof.put("USERNAME", "other");
-            proof.put("SECRET_HASH", secretHash(client, "other"));
+            proof.put("SECRET_HASH", secretHash(client.getClientId(), client.getClientSecret(), "other"));
             assertEquals("NotAuthorizedException", assertThrows(AwsException.class,
                     () -> respondToChallenge(admin, pool, client, "PASSWORD_VERIFIER", session, proof)).getErrorCode());
             proof.put("USERNAME", "fixture");
-            proof.put("SECRET_HASH", secretHash(client, "fixture"));
+            proof.put("SECRET_HASH", secretHash(client.getClientId(), client.getClientSecret(), "fixture"));
             if (!"false".equals(setting)) {
                 assertEquals("NotAuthorizedException", assertThrows(AwsException.class,
                         () -> respondToChallenge(admin, pool, client, "PASSWORD_VERIFIER", session, proof)).getErrorCode());
                 proof.put("USERNAME", user.getUsername());
-                proof.put("SECRET_HASH", secretHash(client, user.getUsername()));
+                proof.put("SECRET_HASH", secretHash(client.getClientId(), client.getClientSecret(), user.getUsername()));
             }
             Map<?, ?> tokens = (Map<?, ?>) respondToChallenge(admin, pool, client, "PASSWORD_VERIFIER", session, proof).get("AuthenticationResult");
             String accessToken = (String) tokens.get("AccessToken");
@@ -6120,7 +6107,7 @@ class CognitoServiceTest {
             String supplied = "false".equals(setting) ? "fixture" : user.getUsername();
             Map<String, Object> started = initiateAuth(admin, pool, client, "USER_PASSWORD_AUTH",
                     Map.of("USERNAME", supplied, "PASSWORD", temporaryPassword,
-                            "SECRET_HASH", secretHash(client, supplied)));
+                            "SECRET_HASH", secretHash(client.getClientId(), client.getClientSecret(), supplied)));
             assertEquals("NEW_PASSWORD_REQUIRED", started.get("ChallengeName"));
             String session = (String) started.get("Session");
             String newPassword = "Permanent-password123!";
@@ -6129,25 +6116,26 @@ class CognitoServiceTest {
                     () -> respondToChallenge(admin, pool, client, "NEW_PASSWORD_REQUIRED", session, responses))
                     .getErrorCode());
             responses.put("USERNAME", "other");
-            responses.put("SECRET_HASH", secretHash(client, "other"));
+            responses.put("SECRET_HASH", secretHash(client.getClientId(), client.getClientSecret(), "other"));
             assertEquals("NotAuthorizedException", assertThrows(AwsException.class,
                     () -> respondToChallenge(admin, pool, client, "NEW_PASSWORD_REQUIRED", session, responses))
                     .getErrorCode());
             responses.put("USERNAME", "fixture");
-            responses.put("SECRET_HASH", secretHash(client, "fixture"));
+            responses.put("SECRET_HASH", secretHash(client.getClientId(), client.getClientSecret(), "fixture"));
             if (!"false".equals(setting)) {
                 assertEquals("NotAuthorizedException", assertThrows(AwsException.class,
                         () -> respondToChallenge(admin, pool, client, "NEW_PASSWORD_REQUIRED", session, responses))
                         .getErrorCode());
                 responses.put("USERNAME", user.getUsername());
-                responses.put("SECRET_HASH", secretHash(client, user.getUsername()));
+                responses.put("SECRET_HASH", secretHash(client.getClientId(), client.getClientSecret(), user.getUsername()));
             }
             Map<?, ?> tokens = (Map<?, ?>) respondToChallenge(admin, pool, client, "NEW_PASSWORD_REQUIRED",
                     session, responses).get("AuthenticationResult");
             assertNotNull(tokens.get("AccessToken"));
             assertEquals("Fixture", service.adminGetUser(pool.getId(), supplied).getUsername());
             assertNotNull(initiateAuth(admin, pool, client, "USER_PASSWORD_AUTH",
-                    Map.of("USERNAME", supplied, "PASSWORD", newPassword, "SECRET_HASH", secretHash(client, supplied)))
+                    Map.of("USERNAME", supplied, "PASSWORD", newPassword, "SECRET_HASH",
+                            secretHash(client.getClientId(), client.getClientSecret(), supplied)))
                     .get("AuthenticationResult"));
         }
 

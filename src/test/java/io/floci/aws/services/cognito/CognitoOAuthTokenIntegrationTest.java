@@ -13,8 +13,6 @@ import org.junit.jupiter.api.Order;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.TestMethodOrder;
 
-import javax.crypto.Mac;
-import javax.crypto.spec.SecretKeySpec;
 import java.math.BigInteger;
 import java.nio.charset.StandardCharsets;
 import java.security.KeyFactory;
@@ -34,6 +32,7 @@ import static io.floci.aws.services.cognito.CognitoCustomDomainFixtures.refreshG
 import static io.floci.aws.services.cognito.CognitoCustomDomainFixtures.signIn;
 import static io.floci.aws.services.cognito.CognitoRestAssuredUtils.cognitoAction;
 import static io.floci.aws.services.cognito.CognitoRestAssuredUtils.cognitoJson;
+import static io.floci.aws.services.cognito.CognitoSecretHashTestHelper.secretHash;
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.containsString;
 import static org.hamcrest.Matchers.equalTo;
@@ -856,10 +855,7 @@ class CognitoOAuthTokenIntegrationTest {
         cognitoAction("AdminSetUserPassword", """
                 {"UserPoolId": "%s", "Username": "%s", "Password": "%s", "Permanent": true}
                 """.formatted(poolId, username, PASSWORD)).then().statusCode(200);
-        Mac mac = Mac.getInstance("HmacSHA256");
-        mac.init(new SecretKeySpec(secret.getBytes(StandardCharsets.UTF_8), "HmacSHA256"));
-        String secretHash = Base64.getEncoder().encodeToString(
-                mac.doFinal((username + confidentialId).getBytes(StandardCharsets.UTF_8)));
+        String secretHash = secretHash(confidentialId, secret, username);
         return cognitoJson("AdminInitiateAuth", """
                 {"UserPoolId": "%s", "ClientId": "%s", "AuthFlow": "ADMIN_USER_PASSWORD_AUTH",
                  "AuthParameters": {"USERNAME": "%s", "PASSWORD": "%s", "SECRET_HASH": "%s"}}
