@@ -1,12 +1,14 @@
 package io.floci.aws.services.paymentcryptography;
 
 import io.floci.aws.core.common.AwsException;
+import io.floci.aws.services.acm.CertificateGenerator;
 import io.floci.aws.services.paymentcryptography.crypto.Certificates;
 import io.floci.aws.services.paymentcryptography.crypto.ConcatKdf;
 import io.floci.aws.services.paymentcryptography.crypto.Ecdh;
 import io.floci.aws.services.paymentcryptography.crypto.RsaOaep;
 import io.floci.aws.services.paymentcryptography.model.PaymentCryptographyKey;
 
+import java.io.IOException;
 import java.security.GeneralSecurityException;
 import java.security.KeyFactory;
 import java.security.KeyPair;
@@ -14,14 +16,17 @@ import java.security.PrivateKey;
 import java.security.PublicKey;
 import java.security.SecureRandom;
 import java.security.cert.X509Certificate;
+import org.bouncycastle.asn1.x500.X500Name;
 import java.security.interfaces.ECKey;
 import java.security.interfaces.ECPrivateKey;
 import java.security.interfaces.ECPublicKey;
 import java.security.interfaces.RSAKey;
 import java.security.spec.PKCS8EncodedKeySpec;
 import java.security.spec.X509EncodedKeySpec;
+import java.time.Clock;
 import java.time.Instant;
 import java.time.temporal.ChronoUnit;
+import java.util.ArrayList;
 import java.util.Base64;
 import java.util.HexFormat;
 import java.util.LinkedHashMap;
@@ -86,7 +91,7 @@ final class PaymentCryptographyKeyExchange {
     static long exportTokenTtlMs = 30L * 24 * 3600 * 1000;
 
     /** How long an import token is good for, in milliseconds. */
-    static long importTokenTtlMs = 7L * 24 * 3600 * 1000;
+    static long importTokenTtlMs = 30L * 24 * 3600 * 1000;
 
     /** The RSA moduli the service makes a wrapping key of. */
     private static final Map<String, Integer> RSA_BITS =
@@ -116,8 +121,48 @@ final class PaymentCryptographyKeyExchange {
     /** The randomness the key pairs and the tokens are made from. */
     private final SecureRandom random = new SecureRandom();
 
-    PaymentCryptographyKeyExchange(PaymentCryptographyService service) {
+    /** The generator the certificates are minted with. */
+    private final CertificateGenerator certificates;
+
+    /** The clock the times come from. */
+    private final Clock clock;
+
+    PaymentCryptographyKeyExchange(PaymentCryptographyService service, CertificateGenerator certificates,
+                                   Clock clock) {
         this.service = service;
+        this.certificates = certificates;
+        this.clock = clock;
+    }
+
+    /**
+     * A certificate over a key pair, signed by an issuer.
+     *
+     * <p>The issuer signs the certificate, so a party that trusts the issuer's public key
+     * trusts the certificate: that is how the key exchange's certificate authority vouches
+     * for the other party's certificate.
+     */
+    private Certificates.Minted mint(PublicKey subjectPublicKey, String subjectCommonName,
+                                     PrivateKey issuerPrivateKey, String issuerCommonName,
+                                     Instant notBefore, Instant notAfter) {
+        try {
+            X500Name subject = new X500Name("CN=" + subjectCommonName);
+            X500Name issuer = new X500Name("CN=" + issuerCommonName);
+            X509Certificate certificate = certificates.signCertificate(subject, subjectPublicKey,
+                    issuer, issuerPrivateKey, List.of(), false, null, notBefore, notAfter);
+            byte[] der = certificate.getEncoded();
+            return new Certificates.Minted(der, Certificates.toPem(der));
+        } catch (IOException e) {
+            throw new IllegalStateException("cannot mint a certificate", e);
+        } catch (Exception e) {
+            throw new IllegalStateException("cannot mint a certificate", e);
+        }
+    }
+
+    /** A certificate over a key pair, signed by the key pair itself. */
+    private Certificates.Minted mintSelfSigned(KeyPair keyPair, String commonName,
+                                              Instant notBefore, Instant notAfter) {
+        return mint(keyPair.getPublic(), commonName, keyPair.getPrivate(), commonName,
+                notBefore, notAfter);
     }
 
     /** A parameter the service issued: the key pair behind it and the token that names it. */
@@ -178,9 +223,6 @@ final class PaymentCryptographyKeyExchange {
     private Exported exportTr31(String region, PaymentCryptographyKey key, byte[] clear,
                                 Map<String, Object> material) {
         String wrappingKeyIdentifier = text(material, "WrappingKeyIdentifier");
-        if (wrappingKeyIdentifier.isEmpty()) {
-            throw validation("KeyMaterial.Tr31KeyBlock.WrappingKeyIdentifier is required");
-        }
         PaymentCryptographyKey protection = usableKey(wrappingKeyIdentifier, region);
         if (!PaymentCryptographyService.isKeyEncryptionKey(protection.getKeyUsage())) {
             throw validation("the key " + protection.getArn() + " is not a key encryption key, so "
@@ -195,11 +237,16 @@ final class PaymentCryptographyKeyExchange {
         if (tooWeak != null) {
             throw validation(tooWeak);
         }
+        Map<String, Object> headers = object(material, "KeyBlockHeaders");
         String block = PaymentCryptographyTr31.wrap(clear,
                 PaymentCryptographyKeyRules.material(protection),
-                PaymentCryptographyService.isAes(protection), PaymentCryptographyService.algorithmByte(key),
-                PaymentCryptographyService.usageCode(key.getKeyUsage()), PaymentCryptographyService.modeCode(key),
-                key.isExportable() ? "E" : "N");
+                PaymentCryptographyService.isAes(protection),
+                PaymentCryptographyService.algorithmByte(key),
+                PaymentCryptographyService.usageCode(key),
+                modeCode(key, headers),
+                exportabilityCode(key, headers),
+                versionCode(headers),
+                optionalBlocks(headers));
         return new Exported(block, "TR31_KEY_BLOCK", protection.getArn());
     }
 
@@ -243,97 +290,29 @@ final class PaymentCryptographyKeyExchange {
     /** A TR-31 key block under a key the two parties agreed with ECDH. */
     private Exported exportEcdh(String region, PaymentCryptographyKey key, byte[] clear,
                                 Map<String, Object> material) {
-        String privateKeyIdentifier = text(material, "PrivateKeyIdentifier");
-        if (privateKeyIdentifier.isEmpty()) {
-            throw validation("KeyMaterial.DiffieHellmanTr31KeyBlock.PrivateKeyIdentifier is required");
-        }
-        PaymentCryptographyKey serviceKey = usableKey(privateKeyIdentifier, region);
-        // The key that agrees has to be a key agreement key, and it has to be allowed to
-        // derive: a key of another purpose may not be named for an agreement.
-        PaymentCryptographyKeyRules.requireUsage(serviceKey,
-                List.of("TR31_K3_ASYMMETRIC_KEY_FOR_KEY_AGREEMENT"), "complete a key agreement");
-        PaymentCryptographyKeyRules.requireMode(serviceKey, "DeriveKey", "complete a key agreement");
-        PrivateKey privateKey = privateKeyOf(serviceKey);
-        if (privateKey == null) {
-            throw validation("the key " + serviceKey.getArn() + " has no private half, so it cannot "
-                    + "complete a key agreement");
-        }
-        if (!(privateKey instanceof ECPrivateKey)) {
-            throw validation("the key " + serviceKey.getArn() + " has a " + privateKey.getAlgorithm()
-                    + " private key, not an elliptic curve one, so it cannot complete a key "
-                    + "agreement");
-        }
-        String caIdentifier = text(material, "CertificateAuthorityPublicKeyIdentifier");
-        PaymentCryptographyKey caKey = usableKey(caIdentifier.isEmpty() ? "(missing)" : caIdentifier,
-                region);
-        String certText = text(material, "PublicKeyCertificate");
-        if (certText.isEmpty()) {
-            throw validation("KeyMaterial.DiffieHellmanTr31KeyBlock.PublicKeyCertificate is required");
-        }
-        X509Certificate counterparty = verifiedCertificate(certText, caKey,
-                "the public key certificate");
-        String deriveAlgorithmName = text(material, "DeriveKeyAlgorithm");
-        PaymentCryptographyKeyAlgorithm deriveAlgorithm =
-                PaymentCryptographyKeyAlgorithm.from(deriveAlgorithmName);
-        if (deriveAlgorithm == null || !deriveAlgorithm.symmetric()) {
-            throw validation("KeyMaterial.DiffieHellmanTr31KeyBlock.DeriveKeyAlgorithm is '"
-                    + deriveAlgorithmName + "', which is not a symmetric algorithm this service "
-                    + "supports (TDES_2KEY, TDES_3KEY, AES_128, AES_192, AES_256)");
-        }
-        String kdf = text(material, "KeyDerivationFunction");
-        if (!"NIST_SP800".equals(kdf) && !"ANSI_X963".equals(kdf)) {
-            throw validation("KeyMaterial.DiffieHellmanTr31KeyBlock.KeyDerivationFunction '" + kdf
-                    + "' not supported (NIST_SP800, ANSI_X963)");
-        }
-        String hash = text(material, "KeyDerivationHashAlgorithm");
-        if (!"SHA_256".equals(hash) && !"SHA_384".equals(hash) && !"SHA_512".equals(hash)) {
-            throw validation("KeyMaterial.DiffieHellmanTr31KeyBlock."
-                    + "KeyDerivationHashAlgorithm '" + hash + "' not supported (SHA_256, SHA_384, "
-                    + "SHA_512)");
-        }
-        Map<String, Object> derivationData = object(material, "DerivationData");
-        String sharedInformation = derivationData == null
-                ? "" : text(derivationData, "SharedInformation");
-        if (sharedInformation.isEmpty() || !isHex(sharedInformation)) {
-            throw validation("KeyMaterial.DiffieHellmanTr31KeyBlock.DerivationData."
-                    + "SharedInformation must be a hexadecimal string");
-        }
-
-        PublicKey counterpartyKey = counterparty.getPublicKey();
-        if (!(counterpartyKey instanceof ECPublicKey)) {
-            throw validation("the public key certificate carries a " + counterpartyKey.getAlgorithm()
-                    + " key, not an EC one");
-        }
-        byte[] secret;
-        try {
-            secret = Ecdh.agree((ECPrivateKey) privateKey, (ECPublicKey) counterpartyKey);
-        } catch (GeneralSecurityException e) {
-            throw validation("the key agreement failed: " + e.getMessage());
-        }
-        byte[] derived = "ANSI_X963".equals(kdf)
-                ? ConcatKdf.deriveX963(hash, secret, HEX.parseHex(sharedInformation),
-                        deriveAlgorithm.bytes)
-                : ConcatKdf.derive(hash, secret, HEX.parseHex(sharedInformation),
-                        deriveAlgorithm.bytes);
+        Agreed agreed = agreed(region, material);
 
         // The derived key is the wrapping key, so it has to be at least as strong as the key it
         // protects. The key agreement is only as strong as the curve it was made on, so the
         // weaker of the two decides.
         int curveBits = Math.min(
-                PaymentCryptographyKeyStrength.eccBitsOf(serviceKey.getKeyAlgorithm()),
-                PaymentCryptographyKeyStrength.eccBitsOf((ECKey) counterparty.getPublicKey()));
-        int derivedBits = Math.min(PaymentCryptographyKeyStrength.bitsOf(deriveAlgorithm.name()),
-                curveBits);
+                PaymentCryptographyKeyStrength.eccBitsOf(agreed.serviceKey().getKeyAlgorithm()),
+                PaymentCryptographyKeyStrength.eccBitsOf((ECKey) agreed.counterpartyKey()));
+        int derivedBits = Math.min(
+                PaymentCryptographyKeyStrength.bitsOf(agreed.deriveAlgorithm().name()), curveBits);
         String tooWeak = PaymentCryptographyKeyStrength.refusal(derivedBits,
                 PaymentCryptographyKeyStrength.bitsOf(key.getKeyAlgorithm()),
-                deriveAlgorithm.name(), key.getKeyAlgorithm());
+                agreed.deriveAlgorithm().name(), key.getKeyAlgorithm());
         if (tooWeak != null) {
             throw validation(tooWeak);
         }
 
-        String block = PaymentCryptographyTr31.wrap(clear, derived, deriveAlgorithm.aes,
-                PaymentCryptographyService.algorithmByte(key), PaymentCryptographyService.usageCode(key.getKeyUsage()),
-                PaymentCryptographyService.modeCode(key), key.isExportable() ? "E" : "N");
+        String block = PaymentCryptographyTr31.wrap(clear, agreed.derived(),
+                agreed.deriveAlgorithm().aes,
+                PaymentCryptographyService.algorithmByte(key),
+                PaymentCryptographyService.usageCode(key),
+                PaymentCryptographyService.modeCode(key),
+                key.isExportable() ? "E" : "N");
         return new Exported(block, "TR31_KEY_BLOCK", null);
     }
 
@@ -364,9 +343,7 @@ final class PaymentCryptographyKeyExchange {
     /** A key out of a TR-31 key block. */
     private Imported importTr31(String region, Map<String, Object> material) {
         String wrappingKeyIdentifier = text(material, "WrappingKeyIdentifier");
-        if (wrappingKeyIdentifier.isEmpty()) {
-            throw validation("KeyMaterial.Tr31KeyBlock.WrappingKeyIdentifier is required");
-        }
+        String block = text(material, "WrappedKeyBlock");
         PaymentCryptographyKey protection = usableKey(wrappingKeyIdentifier, region);
         if (!PaymentCryptographyService.isKeyEncryptionKey(protection.getKeyUsage())) {
             throw validation("the key " + protection.getArn() + " is not a key encryption key, so "
@@ -375,10 +352,6 @@ final class PaymentCryptographyKeyExchange {
         if (!PaymentCryptographyService.mayUnwrap(protection)) {
             throw validation("the key " + protection.getArn() + " does not have the mode of use "
                     + "Unwrap, which it needs to unwrap a key");
-        }
-        String block = text(material, "WrappedKeyBlock");
-        if (block.isEmpty()) {
-            throw validation("KeyMaterial.Tr31KeyBlock.WrappedKeyBlock is required");
         }
         // The block type picks the derivation, and the derivation needs a key encryption key of
         // the matching family.
@@ -466,25 +439,19 @@ final class PaymentCryptographyKeyExchange {
 
 
 
-    /** A key out of a block the two parties agreed with ECDH. */
-    private Imported importEcdh(String region, Map<String, Object> material) {
+    /**
+     * The key the two parties agreed, and what the agreement was made with.
+     *
+     * <p>The service's own key has to be a key agreement key that may derive, the
+     * counterparty's certificate has to be one the named authority signed, and the two have to
+     * be on the same curve.
+     *
+     * @param region the region the keys are in
+     * @param material the form the request names
+     * @return the agreed key and what it was agreed with
+     */
+    private Agreed agreed(String region, Map<String, Object> material) {
         String privateKeyIdentifier = text(material, "PrivateKeyIdentifier");
-        if (privateKeyIdentifier.isEmpty()) {
-            throw validation("KeyMaterial.DiffieHellmanTr31KeyBlock.PrivateKeyIdentifier is required");
-        }
-        String caIdentifier = text(material, "CertificateAuthorityPublicKeyIdentifier");
-        if (caIdentifier.isEmpty()) {
-            throw validation("KeyMaterial.DiffieHellmanTr31KeyBlock."
-                    + "CertificateAuthorityPublicKeyIdentifier is required");
-        }
-        String certText = text(material, "PublicKeyCertificate");
-        if (certText.isEmpty()) {
-            throw validation("KeyMaterial.DiffieHellmanTr31KeyBlock.PublicKeyCertificate is required");
-        }
-        String block = text(material, "WrappedKeyBlock");
-        if (block.isEmpty()) {
-            throw validation("KeyMaterial.DiffieHellmanTr31KeyBlock.WrappedKeyBlock is required");
-        }
         PaymentCryptographyKey serviceKey = usableKey(privateKeyIdentifier, region);
         // The key that agrees has to be a key agreement key, and it has to be allowed to
         // derive: a key of another purpose may not be named for an agreement.
@@ -501,22 +468,42 @@ final class PaymentCryptographyKeyExchange {
                     + " private key, not an elliptic curve one, so it cannot complete a key "
                     + "agreement");
         }
+        String caIdentifier = text(material, "CertificateAuthorityPublicKeyIdentifier");
         PaymentCryptographyKey caKey = usableKey(caIdentifier, region);
+        String certText = text(material, "PublicKeyCertificate");
         X509Certificate counterparty = verifiedCertificate(certText, caKey,
                 "the public key certificate");
         PublicKey counterpartyKey = counterparty.getPublicKey();
-        if (!"EC".equals(counterpartyKey.getAlgorithm())) {
+        if (!(counterpartyKey instanceof ECPublicKey)) {
             throw validation("the public key certificate carries a " + counterpartyKey.getAlgorithm()
                     + " key, not an EC one");
         }
-        String deriveAlgorithmName = text(material, "DeriveKeyAlgorithm");
-        PaymentCryptographyKeyAlgorithm deriveAlgorithm =
-                PaymentCryptographyKeyAlgorithm.from(deriveAlgorithmName);
-        if (deriveAlgorithm == null || !deriveAlgorithm.symmetric()) {
-            throw validation("KeyMaterial.DiffieHellmanTr31KeyBlock.DeriveKeyAlgorithm is '"
-                    + deriveAlgorithmName + "', which is not a symmetric algorithm this service "
-                    + "supports (TDES_2KEY, TDES_3KEY, AES_128, AES_192, AES_256)");
+        PaymentCryptographyKeyAlgorithm deriveAlgorithm = deriveAlgorithm(material);
+        byte[] secret;
+        try {
+            secret = Ecdh.agree((ECPrivateKey) privateKey, (ECPublicKey) counterpartyKey);
+        } catch (GeneralSecurityException e) {
+            throw validation("the key agreement failed: " + e.getMessage());
         }
+        return new Agreed(derive(deriveAlgorithm, secret, material), serviceKey, deriveAlgorithm,
+                counterpartyKey);
+    }
+
+    /** The algorithm the agreed key is derived in. */
+    private static PaymentCryptographyKeyAlgorithm deriveAlgorithm(Map<String, Object> material) {
+        String name = text(material, "DeriveKeyAlgorithm");
+        PaymentCryptographyKeyAlgorithm algorithm = PaymentCryptographyKeyAlgorithm.from(name);
+        if (algorithm == null || !algorithm.symmetric()) {
+            throw validation("KeyMaterial.DiffieHellmanTr31KeyBlock.DeriveKeyAlgorithm is '"
+                    + name + "', which is not a symmetric algorithm this service supports "
+                    + "(TDES_2KEY, TDES_3KEY, AES_128, AES_192, AES_256)");
+        }
+        return algorithm;
+    }
+
+    /** The agreed key, derived from the secret the two parties made. */
+    private static byte[] derive(PaymentCryptographyKeyAlgorithm algorithm, byte[] secret,
+                                 Map<String, Object> material) {
         String kdf = text(material, "KeyDerivationFunction");
         if (!"NIST_SP800".equals(kdf) && !"ANSI_X963".equals(kdf)) {
             throw validation("KeyMaterial.DiffieHellmanTr31KeyBlock.KeyDerivationFunction '" + kdf
@@ -529,33 +516,30 @@ final class PaymentCryptographyKeyExchange {
                     + "SHA_512)");
         }
         Map<String, Object> derivationData = object(material, "DerivationData");
-        String derivationType = derivationData == null ? "" : text(derivationData, "Type");
-        if (!derivationType.isEmpty() && !"SHARED_INFORMATION".equals(derivationType)) {
-            throw validation("KeyMaterial.DiffieHellmanTr31KeyBlock.DerivationData.Type '"
-                    + derivationType + "' not supported (SHARED_INFORMATION)");
-        }
-        String sharedInformation = derivationData == null ? "" : text(derivationData, "SharedInformation");
+        String sharedInformation = derivationData == null
+                ? "" : text(derivationData, "SharedInformation");
         if (sharedInformation.isEmpty() || !isHex(sharedInformation)) {
             throw validation("KeyMaterial.DiffieHellmanTr31KeyBlock.DerivationData."
                     + "SharedInformation must be a hexadecimal string");
         }
+        return "ANSI_X963".equals(kdf)
+                ? ConcatKdf.deriveX963(hash, secret, HEX.parseHex(sharedInformation), algorithm.bytes)
+                : ConcatKdf.derive(hash, secret, HEX.parseHex(sharedInformation), algorithm.bytes);
+    }
 
-        // The two parties agree the key again, so the block opens under it.
-        byte[] secret;
-        try {
-            secret = Ecdh.agree((ECPrivateKey) privateKey, (ECPublicKey) counterpartyKey);
-        } catch (GeneralSecurityException e) {
-            throw validation("the key agreement failed: " + e.getMessage());
-        }
-        byte[] derived = "ANSI_X963".equals(kdf)
-                ? ConcatKdf.deriveX963(hash, secret, HEX.parseHex(sharedInformation),
-                        deriveAlgorithm.bytes)
-                : ConcatKdf.derive(hash, secret, HEX.parseHex(sharedInformation),
-                        deriveAlgorithm.bytes);
+    /** The key the two parties agreed, and the keys they agreed it with. */
+    private record Agreed(byte[] derived, PaymentCryptographyKey serviceKey,
+                           PaymentCryptographyKeyAlgorithm deriveAlgorithm, PublicKey counterpartyKey) {
+    }
+
+    /** A key out of a block the two parties agreed with ECDH. */
+    private Imported importEcdh(String region, Map<String, Object> material) {
+        String block = text(material, "WrappedKeyBlock");
+        Agreed agreed = agreed(region, material);
 
         byte[] clear;
         try {
-            clear = PaymentCryptographyTr31.unwrap(block, derived);
+            clear = PaymentCryptographyTr31.unwrap(block, agreed.derived());
         } catch (RuntimeException e) {
             throw validation("the key block did not open under the key the two parties agreed: "
                     + e.getMessage());
@@ -566,16 +550,21 @@ final class PaymentCryptographyKeyExchange {
         String algorithm = PaymentCryptographyService.algorithmOf(block, clear.length);
         // The derived key protects the imported one, so it has to be as strong as it.
         int derivedBits = Math.min(
-                PaymentCryptographyKeyStrength.bitsOf(deriveAlgorithm.name()),
-                Math.min(PaymentCryptographyKeyStrength.eccBitsOf(serviceKey.getKeyAlgorithm()),
-                        PaymentCryptographyKeyStrength.eccBitsOf((ECKey) counterpartyKey)));
+                PaymentCryptographyKeyStrength.bitsOf(agreed.deriveAlgorithm().name()),
+                Math.min(
+                        PaymentCryptographyKeyStrength.eccBitsOf(
+                                agreed.serviceKey().getKeyAlgorithm()),
+                        PaymentCryptographyKeyStrength.eccBitsOf((ECKey) agreed.counterpartyKey())));
         String tooWeak = PaymentCryptographyKeyStrength.refusal(derivedBits,
-                PaymentCryptographyKeyStrength.bitsOf(algorithm), deriveAlgorithm.name(), algorithm);
+                PaymentCryptographyKeyStrength.bitsOf(algorithm),
+                agreed.deriveAlgorithm().name(), algorithm);
         if (tooWeak != null) {
             throw validation(tooWeak);
         }
         return new Imported(algorithm, PaymentCryptographyService.usageName(usage),
-                PaymentCryptographyService.modesFor(mode, PaymentCryptographyService.isKeyEncryptionKey(PaymentCryptographyService.usageName(usage))),
+                PaymentCryptographyService.modesFor(mode,
+                        PaymentCryptographyService.isKeyEncryptionKey(
+                                PaymentCryptographyService.usageName(usage))),
                 exportable, clear, null, null, null, "SYMMETRIC_KEY");
     }
 
@@ -583,10 +572,8 @@ final class PaymentCryptographyKeyExchange {
     // ---- the certificates ----------------------------------------------------
 
 
-
-
     /**
-     * The certificate of a public key.
+     * The certificate of an asymmetric key.
      *
      * <p>A key that arrived with a certificate keeps it. A key the service made has none, so
      * it gets a self-signed one over its own public half.
@@ -599,8 +586,9 @@ final class PaymentCryptographyKeyExchange {
             if (publicKey == null || privateKey == null) {
                 throw validation("the key " + key.getKeyId() + " has no public key");
             }
-            pem = Certificates.mintSelfSigned(new KeyPair(publicKey, privateKey), "floci",
-                    Instant.now().minusSeconds(3600), Instant.now().plusSeconds(31536000L), random).pem();
+            pem = mintSelfSigned(new KeyPair(publicKey, privateKey), "floci",
+                    clock.instant().minusSeconds(3600),
+                    clock.instant().plusSeconds(31536000L)).pem();
         }
         Map<String, Object> out = new LinkedHashMap<>();
         // The reference names the member KeyCertificate.
@@ -823,8 +811,7 @@ final class PaymentCryptographyKeyExchange {
      *
      * @param tokens the tokens the service has issued
      */
-    private static void sweep(Map<String, Issued> tokens) {
-        long now = System.currentTimeMillis();
+    private static void sweep(Map<String, Issued> tokens, long now) {
         tokens.values().removeIf(issued -> issued.validUntilMs < now);
     }
 
@@ -876,6 +863,60 @@ final class PaymentCryptographyKeyExchange {
         return key;
     }
 
+    /**
+     * The exportability the block carries.
+     *
+     * <p>The request may name one, and the key's own answers when it does not.
+     */
+    private static String exportabilityCode(PaymentCryptographyKey key, Map<String, Object> headers) {
+        String named = text(headers, "KeyExportability");
+        if ("EXPORTABLE".equals(named)) {
+            return "E";
+        }
+        if ("NON_EXPORTABLE".equals(named)) {
+            return "N";
+        }
+        if ("SENSITIVE".equals(named)) {
+            return "S";
+        }
+        // An initial DUKPT key is sensitive: the receiver may export it, but not as a plain
+        // working key.
+        if (PaymentCryptographyService.isInitialDerivationKey(key)) {
+            return "S";
+        }
+        return key.isExportable() ? "E" : "N";
+    }
+
+    /** The mode of use the block carries, as the request asks for it or the key has it. */
+    private static String modeCode(PaymentCryptographyKey key, Map<String, Object> headers) {
+        Map<String, Object> declared = object(headers, "KeyModesOfUse");
+        if (declared == null || declared.isEmpty()) {
+            return PaymentCryptographyService.modeCode(key);
+        }
+        Map<String, Boolean> modes = new LinkedHashMap<>();
+        declared.forEach((name, value) -> modes.put(name, Boolean.TRUE.equals(value)));
+        return PaymentCryptographyService.modeCode(modes);
+    }
+
+    /** The version of the key the block carries. */
+    private static String versionCode(Map<String, Object> headers) {
+        String version = text(headers, "KeyVersion");
+        return version.isEmpty() ? "00" : version;
+    }
+
+    /** The optional blocks the block carries, each its identifier and its value. */
+    private static List<String[]> optionalBlocks(Map<String, Object> headers) {
+        Map<String, Object> named = object(headers, "OptionalBlocks");
+        List<String[]> blocks = new ArrayList<>();
+        if (named == null) {
+            return blocks;
+        }
+        for (Map.Entry<String, Object> entry : named.entrySet()) {
+            blocks.add(new String[] {entry.getKey(), String.valueOf(entry.getValue())});
+        }
+        return blocks;
+    }
+
     /** The error a bad request is refused with. */
     private static AwsException validation(String message) {
         return new AwsException("ValidationException", message, 400);
@@ -905,19 +946,19 @@ final class PaymentCryptographyKeyExchange {
         }
         String last = materialType + "/" + wrappingAlgorithm;
         Issued previous = lastImportParameters.get(last);
-        if (reuse && previous != null && previous.validUntilMs > System.currentTimeMillis()) {
+        if (reuse && previous != null && previous.validUntilMs > clock.millis()) {
             return importParameters(previous);
         }
-        long now = System.currentTimeMillis();
+        long now = clock.millis();
         KeyPair pair = PaymentCryptographyKeyPairs.rsa(bits, random);
         // The certificate lives as long as the token, so the parameters never hand out a
         // certificate that has expired.
-        Certificates.Minted certificate = Certificates.mintSelfSigned(pair, "floci key-import KRD",
+        Certificates.Minted certificate = mintSelfSigned(pair, "floci key-import KRD",
                 Instant.ofEpochMilli(now).minus(1, ChronoUnit.HOURS),
-                Instant.ofEpochMilli(now).plus(importTokenTtlMs, ChronoUnit.MILLIS), random);
+                Instant.ofEpochMilli(now).plus(importTokenTtlMs, ChronoUnit.MILLIS));
         Issued issued = new Issued(token(IMPORT_TOKEN_PREFIX), pair.getPrivate(), certificate.der(),
                 wrappingAlgorithm, materialType, now + importTokenTtlMs);
-        sweep(importTokens);
+        sweep(importTokens, now);
         importTokens.put(issued.token, issued);
         lastImportParameters.put(last, issued);
         return importParameters(issued);
@@ -960,21 +1001,21 @@ final class PaymentCryptographyKeyExchange {
         }
         String last = materialType + "/" + algorithm;
         Issued previous = lastExportParameters.get(last);
-        if (reuse && previous != null && previous.validUntilMs > System.currentTimeMillis()) {
+        if (reuse && previous != null && previous.validUntilMs > clock.millis()) {
             return exportParameters(previous);
         }
-        long now = System.currentTimeMillis();
+        long now = clock.millis();
         KeyPair pair = signing.rsa
                 ? PaymentCryptographyKeyPairs.rsa(signing.bytes * 8, random)
                 : PaymentCryptographyKeyPairs.ec(signing, random);
         // The certificate lives as long as the token, so the parameters never hand out a
         // certificate that has expired.
-        Certificates.Minted certificate = Certificates.mintSelfSigned(pair, "floci key-export KRD",
+        Certificates.Minted certificate = mintSelfSigned(pair, "floci key-export KRD",
                 Instant.ofEpochMilli(now).minus(1, ChronoUnit.HOURS),
-                Instant.ofEpochMilli(now).plus(exportTokenTtlMs, ChronoUnit.MILLIS), random);
+                Instant.ofEpochMilli(now).plus(exportTokenTtlMs, ChronoUnit.MILLIS));
         Issued issued = new Issued(token(EXPORT_TOKEN_PREFIX), pair.getPrivate(), certificate.der(),
                 algorithm, materialType, now + exportTokenTtlMs);
-        sweep(exportTokens);
+        sweep(exportTokens, now);
         exportTokens.put(issued.token, issued);
         lastExportParameters.put(last, issued);
         return exportParameters(issued);
@@ -997,9 +1038,6 @@ final class PaymentCryptographyKeyExchange {
     private Imported importPublicKey(String region, Map<String, Object> material,
                                     String caIdentifier) {
         String certText = text(material, "PublicKeyCertificate");
-        if (certText.isEmpty()) {
-            throw validation("KeyMaterial.PublicKeyCertificate is required");
-        }
         X509Certificate certificate;
         try {
             certificate = Certificates.parseCertificate(certText);

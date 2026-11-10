@@ -19,6 +19,7 @@
 | `DeleteAlias` | Remove an alias name |
 | `ExportKey` | Export a key under a wrapping key, a certificate or an agreed secret |
 | `ImportKey` | Import a key under a wrapping key, a certificate or an agreed secret |
+| `GetPublicKeyCertificate` | The certificate of an asymmetric key |
 | `GetParametersForImport` | The token and the wrapping key certificate an import quotes back |
 | `GetParametersForExport` | The token and the signing key certificate an export quotes back |
 | `TagResource` | Add tags to a key |

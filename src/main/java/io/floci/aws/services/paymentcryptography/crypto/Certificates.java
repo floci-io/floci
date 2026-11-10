@@ -4,35 +4,17 @@ import io.floci.aws.core.common.CertificateMaterialException;
 import io.floci.aws.core.common.Pem;
 import org.bouncycastle.asn1.pkcs.IssuerAndSerialNumber;
 import org.bouncycastle.asn1.x500.X500Name;
-import org.bouncycastle.asn1.x509.BasicConstraints;
-import org.bouncycastle.asn1.x509.Extension;
-import org.bouncycastle.asn1.x509.KeyUsage;
-import org.bouncycastle.cert.X509CertificateHolder;
-import org.bouncycastle.cert.jcajce.JcaX509CertificateConverter;
-import org.bouncycastle.cert.jcajce.JcaX509v3CertificateBuilder;
 import org.bouncycastle.openssl.jcajce.JcaPEMWriter;
-import org.bouncycastle.operator.ContentSigner;
-import org.bouncycastle.operator.OperatorCreationException;
-import org.bouncycastle.operator.jcajce.JcaContentSignerBuilder;
 import org.bouncycastle.util.io.pem.PemObject;
 
 import java.io.ByteArrayInputStream;
 import java.io.IOException;
 import java.io.StringWriter;
-import java.math.BigInteger;
 import java.nio.charset.StandardCharsets;
-import java.security.GeneralSecurityException;
-import java.security.KeyPair;
-import java.security.PrivateKey;
-import java.security.PublicKey;
-import java.security.SecureRandom;
 import java.security.cert.CertificateException;
 import java.security.cert.CertificateFactory;
 import java.security.cert.X509Certificate;
-import java.security.interfaces.ECKey;
-import java.time.Instant;
 import java.util.Base64;
-import java.util.Date;
 
 /**
  * The certificates the key exchange hands out and reads.
@@ -41,10 +23,8 @@ import java.util.Date;
  * and reads the certificate a counterparty brings. A certificate travels in three shapes: PEM,
  * base64 of PEM (which is how the service returns one), and base64 of DER.
  *
- * <p>This is the Payment Cryptography service's own helper rather than a shared one: the
- * emulator already has {@link Pem} for reading certificates and ACM's own generator for
- * minting them, and neither offers what the key exchange needs, which is a certificate over
- * an arbitrary key pair with a chosen common name and a chosen validity window.
+ * <p>Reading a certificate is the emulator's own business, through {@link Pem}; minting one
+ * belongs to ACM's generator, which the service asks for a certificate with.
  */
 public final class Certificates {
 
@@ -104,64 +84,6 @@ public final class Certificates {
     }
 
     /**
-     * Mint a self-signed certificate over the given key pair.
-     *
-     * <p>The issuer is the subject, so the certificate vouches for itself: the two parties in
-     * the exchange trust each other's copy of it, which is what the emulator's certificates are
-     * for.
-     *
-     * @param keyPair the key pair the certificate is over
-     * @param commonName the common name the certificate carries
-     * @param notBefore when the certificate becomes valid
-     * @param notAfter when it stops being valid
-     * @param random the randomness the serial number is made from
-     * @return the certificate in DER and in PEM
-     */
-    public static Minted mintSelfSigned(KeyPair keyPair, String commonName,
-                                         Instant notBefore, Instant notAfter, SecureRandom random) {
-        return mint(keyPair.getPublic(), commonName, keyPair.getPrivate(), commonName,
-                notBefore, notAfter, random);
-    }
-
-    /**
-     * Mint a certificate over a key pair, signed by an issuer.
-     *
-     * <p>The issuer signs the certificate, so a party that trusts the issuer's public key
-     * trusts the certificate: that is how the key exchange's certificate authority vouches
-     * for the other party's certificate.
-     *
-     * @param subjectPublicKey the public key the certificate is over
-     * @param subjectCommonName the common name of the subject
-     * @param issuerPrivateKey the key that signs the certificate
-     * @param issuerCommonName the common name of the issuer
-     * @param notBefore when the certificate becomes valid
-     * @param notAfter when it stops being valid
-     * @param random the randomness the serial number is made from
-     * @return the certificate in DER and in PEM
-     */
-    public static Minted mint(PublicKey subjectPublicKey, String subjectCommonName,
-                               PrivateKey issuerPrivateKey, String issuerCommonName,
-                               Instant notBefore, Instant notAfter, SecureRandom random) {
-        X500Name subject = new X500Name("CN=" + subjectCommonName);
-        X500Name issuer = new X500Name("CN=" + issuerCommonName);
-        try {
-            JcaX509v3CertificateBuilder builder = new JcaX509v3CertificateBuilder(issuer,
-                    new BigInteger(1, random).setBit(127), Date.from(notBefore), Date.from(notAfter),
-                    subject, subjectPublicKey);
-            builder.addExtension(Extension.basicConstraints, true, new BasicConstraints(false));
-            builder.addExtension(Extension.keyUsage, true,
-                    new KeyUsage(KeyUsage.digitalSignature | KeyUsage.keyEncipherment));
-            ContentSigner signer = new JcaContentSignerBuilder(signatureAlgorithm(issuerPrivateKey))
-                    .build(issuerPrivateKey);
-            X509CertificateHolder holder = builder.build(signer);
-            byte[] der = new JcaX509CertificateConverter().getCertificate(holder).getEncoded();
-            return new Minted(der, toPem(der));
-        } catch (GeneralSecurityException | OperatorCreationException | IOException e) {
-            throw new IllegalStateException("cannot mint a certificate", e);
-        }
-    }
-
-    /**
      * The identifier a TR-34 block uses to name its recipient.
      *
      * <p>A RecipientInfo carries the receiver's certificate identifier: an
@@ -209,8 +131,4 @@ public final class Certificates {
         return Base64.getEncoder().encodeToString(pem.getBytes(StandardCharsets.US_ASCII));
     }
 
-    /** The signature algorithm the certificate is signed with: SHA-256 over the key's own kind. */
-    private static String signatureAlgorithm(PrivateKey issuerKey) {
-        return issuerKey instanceof ECKey ? "SHA256withECDSA" : "SHA256withRSA";
-    }
 }

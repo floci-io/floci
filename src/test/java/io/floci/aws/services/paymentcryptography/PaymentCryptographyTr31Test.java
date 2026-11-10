@@ -164,7 +164,11 @@ class PaymentCryptographyTr31Test {
     void aBlockWithOptionalBlocksIsImported() {
         // An optional block sits between the header and the cipher text in the clear, and it
         // is authenticated with it, so the cipher text starts after it.
-        String block = blockWithOptionalBlock("00" + "0008" + "61626364");
+        // The identifier, the length over two characters and the value. The length covers
+        // the whole block, the identifier and the length included.
+        // The identifier, the length over two characters, and the value. The length covers
+        // the whole block, the identifier and the length included.
+        String block = blockWithOptionalBlock("00" + "06" + "61626364");
 
         byte[] key = PaymentCryptographyTr31.unwrap(block,
                 PaymentCryptographyCrypto.fromHex(AES_128_KEK));

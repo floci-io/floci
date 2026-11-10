@@ -67,6 +67,7 @@ public class PaymentCryptographyJsonHandler {
             case "DeleteAlias" -> Response.ok(deleteAlias(request, region)).build();
             case "ExportKey" -> Response.ok(exportKey(request, region)).build();
             case "ImportKey" -> Response.ok(importKey(request, region)).build();
+            case "GetPublicKeyCertificate" -> Response.ok(getPublicKeyCertificate(request, region)).build();
             case "GetParametersForImport" -> Response.ok(getParametersForImport(request, region)).build();
             case "GetParametersForExport" -> Response.ok(getParametersForExport(request, region)).build();
             case "TagResource" -> Response.ok(tagResource(request, region)).build();
@@ -410,6 +411,12 @@ public class PaymentCryptographyJsonHandler {
         return service.exportKey(region, keyIdentifier, form, members(material.path(form)),
                 initialKeySerialNumber(attributes),
                 attributes.path("KeyCheckValueAlgorithm").asText());
+    }
+
+    /** The certificate of an asymmetric key. */
+    private Map<String, Object> getPublicKeyCertificate(JsonNode request, String region) {
+        PaymentCryptographyKey key = requiredKey(request, region, "KeyIdentifier");
+        return service.publicKeyCertificate(key);
     }
 
     /**

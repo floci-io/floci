@@ -3,6 +3,7 @@ package io.floci.aws.services.paymentcryptography;
 import com.fasterxml.jackson.core.type.TypeReference;
 import io.floci.aws.core.common.AwsArnUtils;
 import io.floci.aws.core.common.AwsException;
+import io.floci.aws.services.acm.CertificateGenerator;
 import io.floci.aws.core.common.PaginatedResult;
 import io.floci.aws.core.common.Pagination;
 import io.floci.aws.core.common.RegionResolver;
@@ -19,6 +20,7 @@ import jakarta.inject.Inject;
 
 import java.security.KeyPair;
 import java.security.SecureRandom;
+import java.time.Clock;
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.Base64;
@@ -76,14 +78,17 @@ public class PaymentCryptographyService implements Resettable, StoredResourceArn
 
     @Inject
     public PaymentCryptographyService(StorageFactory storageFactory, RegionResolver regionResolver,
-                                      PaymentCryptographyRequestContext requestContext) {
+                                      PaymentCryptographyRequestContext requestContext,
+                                      CertificateGenerator certificates) {
         this(storageFactory.create(STORAGE_KEY, "payment-cryptography-keys.json",
                         new TypeReference<>() {}),
                 storageFactory.create(STORAGE_KEY, "payment-cryptography-aliases.json",
                         new TypeReference<>() {}),
                 regionResolver,
                 new SecureRandom(),
-                requestContext);
+                requestContext,
+                certificates,
+                Clock.systemUTC());
     }
 
     PaymentCryptographyService(StorageBackend<String, PaymentCryptographyKey> keyStore,
@@ -111,10 +116,21 @@ public class PaymentCryptographyService implements Resettable, StoredResourceArn
                                 RegionResolver regionResolver,
                                 SecureRandom secureRandom,
                                 PaymentCryptographyRequestContext requestContext) {
+        this(keyStore, aliasStore, regionResolver, secureRandom, requestContext,
+                new CertificateGenerator(), Clock.systemUTC());
+    }
+
+    PaymentCryptographyService(StorageBackend<String, PaymentCryptographyKey> keyStore,
+                                StorageBackend<String, PaymentCryptographyAlias> aliasStore,
+                                RegionResolver regionResolver,
+                                SecureRandom secureRandom,
+                                PaymentCryptographyRequestContext requestContext,
+                                CertificateGenerator certificates,
+                                Clock clock) {
         this.keyStore = keyStore;
         this.aliasStore = aliasStore;
         this.regionResolver = regionResolver;
-        this.exchange = new PaymentCryptographyKeyExchange(this);
+        this.exchange = new PaymentCryptographyKeyExchange(this, certificates, clock);
         this.secureRandom = secureRandom;
         this.requestContext = requestContext;
     }
@@ -647,9 +663,10 @@ public class PaymentCryptographyService implements Resettable, StoredResourceArn
         derived.setRegion(base.getRegion());
         derived.setKeyAlgorithm("TDES_2KEY");
         derived.setKeyClass("SYMMETRIC_KEY");
-        derived.setKeyUsage("TR31_P0_PIN_ENCRYPTION_KEY");
-        derived.setKeyModesOfUse(new LinkedHashMap<>(Map.of("Encrypt", Boolean.TRUE,
-                "Decrypt", Boolean.TRUE)));
+        // The standard gives the key derived from a base derivation key the usage of an
+        // initial derivation key, and the mode of a derivable one.
+        derived.setKeyUsage("TR31_B1_INITIAL_DERIVATION_KEY");
+        derived.setKeyModesOfUse(new LinkedHashMap<>(Map.of("DeriveKey", Boolean.TRUE)));
         derived.setKeyMaterialHex(PaymentCryptographyCrypto.toHex(initial));
         derived.setKeyCheckValue(PaymentCryptographyCrypto.checkValue(derived.getKeyMaterialHex(),
                 PaymentCryptographyKeyAlgorithm.TDES_2KEY));
@@ -715,6 +732,7 @@ public class PaymentCryptographyService implements Resettable, StoredResourceArn
      */
     private static final Map<String, String> USAGE_NAMES = Map.ofEntries(
             Map.entry("B0", "TR31_B0_BASE_DERIVATION_KEY"),
+            Map.entry("B1", "TR31_B1_INITIAL_DERIVATION_KEY"),
             Map.entry("C0", "TR31_C0_CARD_VERIFICATION_KEY"),
             Map.entry("D0", "TR31_D0_SYMMETRIC_DATA_ENCRYPTION_KEY"),
             Map.entry("E0", "TR31_E0_EMV_MKEY_APP_CRYPTOGRAMS"),
@@ -735,6 +753,23 @@ public class PaymentCryptographyService implements Resettable, StoredResourceArn
             Map.entry("V1", "TR31_V1_IBM3624_PIN_VERIFICATION_KEY"),
             Map.entry("V2", "TR31_V2_VISA_PIN_VERIFICATION_KEY"),
             Map.entry("S0", "TR31_S0_ASYMMETRIC_KEY_FOR_DIGITAL_SIGNATURE"));
+
+    /**
+     * Whether a key is the one derived from a base derivation key.
+     *
+     * <p>It is an initial derivation key, and the standard gives it the usage code B1.
+     */
+    static boolean isInitialDerivationKey(PaymentCryptographyKey key) {
+        return "TR31_B1_INITIAL_DERIVATION_KEY".equals(key.getKeyUsage());
+    }
+
+    /** The TR-31 usage code of a key, which the initial derivation key has of its own. */
+    static String usageCode(PaymentCryptographyKey key) {
+        if (isInitialDerivationKey(key)) {
+            return "B1";
+        }
+        return usageCode(key.getKeyUsage());
+    }
 
     /** The TR-31 usage code of a usage name, such as {@code D0}. */
     static String usageCode(String usageName) {
@@ -837,6 +872,37 @@ public class PaymentCryptographyService implements Resettable, StoredResourceArn
      * @param key the key the block carries
      * @return the character
      */
+    /** The mode of use a set of modes gives, for the block headers a request names. */
+    static String modeCode(Map<String, Boolean> modes) {
+        boolean encrypt = enabled(modes, "Encrypt");
+        boolean decrypt = enabled(modes, "Decrypt");
+        boolean generate = enabled(modes, "Generate");
+        boolean verify = enabled(modes, "Verify");
+        boolean derive = enabled(modes, "DeriveKey");
+        if (encrypt && decrypt) {
+            return "B";
+        }
+        if (encrypt) {
+            return "E";
+        }
+        if (decrypt) {
+            return "D";
+        }
+        if (generate && verify) {
+            return "C";
+        }
+        if (generate) {
+            return "G";
+        }
+        if (verify) {
+            return "V";
+        }
+        if (derive) {
+            return "X";
+        }
+        return "N";
+    }
+
     static String modeCode(PaymentCryptographyKey key) {
         Map<String, Boolean> modes = key.getKeyModesOfUse();
         boolean isKek = isKeyEncryptionKey(key.getKeyUsage());
@@ -1026,6 +1092,11 @@ public class PaymentCryptographyService implements Resettable, StoredResourceArn
     /** The key store, for the tests. */
     Optional<PaymentCryptographyKey> storedKey(String region, String keyId) {
         return keyStore.get(storageKey(region, keyId));
+    }
+
+    /** The certificate of a public key. */
+    public Map<String, Object> publicKeyCertificate(PaymentCryptographyKey key) {
+        return exchange.publicKeyCertificate(key);
     }
 
     /** The parameters a counterparty needs to import a key into this service. */

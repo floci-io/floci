@@ -5,6 +5,7 @@ import io.floci.aws.core.common.AwsException;
 import io.floci.aws.core.common.RegionResolver;
 import io.floci.aws.core.storage.InMemoryStorage;
 import io.floci.aws.services.paymentcryptography.crypto.Certificates;
+import io.floci.aws.services.paymentcryptography.crypto.CertificatesTest;
 import io.floci.aws.services.paymentcryptography.crypto.RsaOaep;
 import io.floci.aws.services.paymentcryptography.model.PaymentCryptographyKey;
 import org.junit.jupiter.api.BeforeEach;
@@ -162,13 +163,10 @@ class PaymentCryptographyKeyExchangeTest {
         KeyPair counterparty = PaymentCryptographyKeyPairs.ec(
                 PaymentCryptographyKeyAlgorithm.ECC_NIST_P256, random);
         Instant now = Instant.now();
-        Certificates.Minted authorityCertificate = Certificates.mintSelfSigned(authority,
-                "floci key-exchange CA", now.minusSeconds(3600), now.plusSeconds(86400), random);
+        Certificates.Minted authorityCertificate = CertificatesTest.mint(authority.getPublic(), "floci key-exchange CA", authority.getPrivate(), "floci key-exchange CA");
         // The counterparty's certificate is signed by the authority, which is what lets the
         // service trust it.
-        Certificates.Minted counterpartyCertificate = Certificates.mint(counterparty.getPublic(),
-                "floci counterparty", authority.getPrivate(), "floci key-exchange CA",
-                now.minusSeconds(3600), now.plusSeconds(86400), random);
+        Certificates.Minted counterpartyCertificate = CertificatesTest.mint(counterparty.getPublic(), "floci counterparty", authority.getPrivate(), "floci key-exchange CA");
 
         PaymentCryptographyKey ca = service.importKey("us-east-1", "TrustedCertificatePublicKey",
                 Map.of("PublicKeyCertificate", authorityCertificate.pem(),
@@ -215,12 +213,10 @@ class PaymentCryptographyKeyExchangeTest {
         KeyPair counterparty = PaymentCryptographyKeyPairs.ec(
                 PaymentCryptographyKeyAlgorithm.ECC_NIST_P256, random);
         Instant now = Instant.now();
-        Certificates.Minted authorityCertificate = Certificates.mintSelfSigned(authority,
-                "floci key-exchange CA", now.minusSeconds(3600), now.plusSeconds(86400), random);
+        Certificates.Minted authorityCertificate = CertificatesTest.mint(authority.getPublic(), "floci key-exchange CA", authority.getPrivate(), "floci key-exchange CA");
         // Signed by somebody else, so the authority cannot vouch for it.
-        Certificates.Minted counterpartyCertificate = Certificates.mint(counterparty.getPublic(),
-                "floci counterparty", other.getPrivate(), "floci somebody else",
-                now.minusSeconds(3600), now.plusSeconds(86400), random);
+        Certificates.Minted counterpartyCertificate = CertificatesTest.mint(counterparty.getPublic(),
+                "floci counterparty", other.getPrivate(), "floci somebody else");
 
         PaymentCryptographyKey ca = service.importKey("us-east-1", "TrustedCertificatePublicKey",
                 Map.of("PublicKeyCertificate", authorityCertificate.pem(),
@@ -268,11 +264,12 @@ class PaymentCryptographyKeyExchangeTest {
 
         Map<?, ?> wrapped = (Map<?, ?>) answer.get("WrappedKey");
         String block = (String) wrapped.get("KeyMaterial");
-        // The header names the derived key: a PIN encryption key of Triple DES
-        // that does not leave again.
-        assertEquals("P0", block.substring(5, 7), "the usage of the derived key");
+        // The header names the derived key: an initial derivation key of Triple DES, which
+        // the receiver may derive with and may export, but not as a plain working key.
+        assertEquals("B1", block.substring(5, 7), "the usage of the derived key");
         assertEquals("T", block.substring(7, 8), "the algorithm of the derived key");
-        assertEquals("N", block.substring(11, 12), "the derived key does not leave again");
+        assertEquals("X", block.substring(8, 9), "the derived key is a derivable one");
+        assertEquals("S", block.substring(11, 12), "the derived key is a sensitive one");
         // And the check value is the derived key's, not the base key's.
         assertNotEquals(base.getKeyCheckValue(), wrapped.get("KeyCheckValue"));
     }
@@ -413,14 +410,12 @@ class PaymentCryptographyKeyExchangeTest {
         // verify.
         SecureRandom random = new SecureRandom();
         KeyPair authority = PaymentCryptographyKeyPairs.rsa(2048, random);
-        KeyPair counterparty = PaymentCryptographyKeyPairs.ec(
-                PaymentCryptographyKeyAlgorithm.ECC_NIST_P256, random);
+        // The cryptogram is wrapped under the receiver's certificate, and a certificate over
+        // a 3072-bit modulus is as strong as the key it wraps.
+        KeyPair counterparty = PaymentCryptographyKeyPairs.rsa(3072, random);
         Instant now = Instant.now();
-        Certificates.Minted caCertificate = Certificates.mintSelfSigned(authority, "floci CA",
-                now.minusSeconds(3600), now.plusSeconds(86400), random);
-        Certificates.Minted counterpartyCertificate = Certificates.mint(counterparty.getPublic(),
-                "floci counterparty", authority.getPrivate(), "floci CA",
-                now.minusSeconds(3600), now.plusSeconds(86400), random);
+        Certificates.Minted caCertificate = CertificatesTest.mint(authority.getPublic(), "floci CA", authority.getPrivate(), "floci CA");
+        Certificates.Minted counterpartyCertificate = CertificatesTest.mint(counterparty.getPublic(), "floci counterparty", authority.getPrivate(), "floci CA");
         Map<String, Object> attributes = new LinkedHashMap<>();
         attributes.put("KeyAlgorithm", "RSA_2048");
         attributes.put("KeyClass", "PUBLIC_KEY");
@@ -444,15 +439,15 @@ class PaymentCryptographyKeyExchangeTest {
     void anExpiredCertificateIsRefused() {
         SecureRandom random = new SecureRandom();
         KeyPair authority = PaymentCryptographyKeyPairs.rsa(2048, random);
-        KeyPair counterparty = PaymentCryptographyKeyPairs.ec(
-                PaymentCryptographyKeyAlgorithm.ECC_NIST_P256, random);
+        // The cryptogram is wrapped under the receiver's certificate, and a certificate over
+        // a 3072-bit modulus is as strong as the key it wraps.
+        KeyPair counterparty = PaymentCryptographyKeyPairs.rsa(3072, random);
         Instant now = Instant.now();
-        Certificates.Minted caCertificate = Certificates.mintSelfSigned(authority, "floci CA",
-                now.minusSeconds(3600), now.plusSeconds(86400), random);
+        Certificates.Minted caCertificate = CertificatesTest.mint(authority.getPublic(), "floci CA", authority.getPrivate(), "floci CA");
         // The counterparty's certificate has expired, so it protects nothing.
-        Certificates.Minted counterpartyCertificate = Certificates.mint(counterparty.getPublic(),
+        Certificates.Minted counterpartyCertificate = CertificatesTest.mint(counterparty.getPublic(),
                 "floci counterparty", authority.getPrivate(), "floci CA",
-                now.minusSeconds(7200), now.minusSeconds(3600), random);
+                now.minusSeconds(7200), now.minusSeconds(3600));
         PaymentCryptographyKey ca = createAuthority(caCertificate.pem());
 
         AwsException refused = assertThrows(AwsException.class,
