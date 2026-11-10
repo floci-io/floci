@@ -552,6 +552,46 @@ class RedshiftInterceptingBridgeTest {
 
     @Test
     @Timeout(20)
+    void preparesExternalQueriesWithoutValuesAtParseAndWithEachBindBeforeForwarding() throws Exception {
+        String sql = "SELECT SUM(amount) FROM lake.events WHERE day = $1";
+        SpectrumInterceptor interceptor = inlineMock(SpectrumInterceptor.class);
+        SpectrumQueryPreparation preparation = mock(SpectrumQueryPreparation.class);
+        when(interceptor.preparation()).thenReturn(preparation);
+        when(preparation.referencesExternal(eq(sql), any())).thenReturn(true);
+        startBridge(interceptor);
+        testClientEnd.setSoTimeout(5000);
+        testBackendEnd.setSoTimeout(5000);
+        InputStream response = testClientEnd.getInputStream();
+        byte[] parse = PostgresWireDecoder.encodeParse(new PostgresWireDecoder.ParseMessage("s", sql, List.of(23)), sql);
+
+        testClientEnd.getOutputStream().write(parse);
+        testClientEnd.getOutputStream().flush();
+        assertEquals('H', nextForwarded().type());
+        assertArrayEquals(parse, nextForwarded().toPacketBytes());
+        verify(preparation).prepare(eq(sql), any(), any(), isNull());
+        writeBackendFrame('1', new byte[0]);
+        assertEquals('1', response.read());
+        skipFrameBody(response);
+
+        for (String day : List.of("1", "2")) {
+            byte[] value = day.getBytes(StandardCharsets.UTF_8);
+            byte[] bind = frame('B', concat(cString(""), cString("s"), new byte[]{0, 0, 0, 1},
+                    ByteBuffer.allocate(4).putInt(value.length).array(), value, new byte[]{0, 0}));
+            testClientEnd.getOutputStream().write(bind);
+            testClientEnd.getOutputStream().flush();
+            assertEquals('H', nextForwarded().type());
+            assertArrayEquals(bind, nextForwarded().toPacketBytes());
+            verify(preparation).prepare(eq(sql), any(), any(), eq(List.of(day)));
+            writeBackendFrame('2', new byte[0]);
+            assertEquals('2', response.read());
+            skipFrameBody(response);
+        }
+        verify(preparation, never()).prepare(anyString(), any(), any());
+        verify(preparation, times(3)).prepare(eq(sql), any(), any(), any());
+    }
+
+    @Test
+    @Timeout(20)
     void parsingAndDescribingExternalDdlDoesNotExecuteCatalogChanges() throws Exception {
         String sql = "ALTER TABLE lake.events ADD PARTITION (dt='today') LOCATION 's3://bucket/today/'";
         SpectrumInterceptor interceptor = inlineMock(SpectrumInterceptor.class);
