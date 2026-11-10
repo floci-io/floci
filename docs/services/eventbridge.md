@@ -54,6 +54,29 @@
 characters. Empty or overlong tokens return `ValidationException`; unrecognized
 cursors within those bounds return `InvalidToken`.
 
+## Numeric event patterns
+
+`TestEventPattern` and `PutEvents` rule routing support `numeric` comparisons on
+JSON number fields using `=`, `>`, `>=`, `<`, and `<=`. Both bounds of a range
+must match. For example,
+`{"detail":{"severity":[{"numeric":[">=",7,"<",9]}]}}` matches severity `7` or `8`,
+but excludes `6`, `9`, the string `"7"`, and missing or null values.
+
+For array-valued fields, a numeric filter matches when at least one number in the
+array satisfies all comparisons. The range above matches `[3,8]` but excludes
+`[3,9]`; separate elements cannot satisfy separate bounds of the same range.
+
+`PutRule` and `TestEventPattern` reject malformed numeric filters with
+`InvalidEventPatternException` (HTTP 400), independently of the supplied event.
+The comparison array must contain either one operator/number pair or a lower bound
+(`>` or `>=`) followed by an upper bound (`<` or `<=`). Equality (`=`) must stand
+alone. Range endpoints must be strictly increasing, even when both bounds are
+inclusive. Repeated bounds, reversed bounds, and extra comparisons are rejected.
+Nested patterns and every `$or` branch are validated before a rule is saved;
+rejected updates preserve the existing rule.
+
+See [AWS numeric matching](https://docs.aws.amazon.com/eventbridge/latest/userguide/eb-create-pattern-operators.html#filtering-numeric-matching).
+
 ## Configuration
 
 | Variable | Default | Description |

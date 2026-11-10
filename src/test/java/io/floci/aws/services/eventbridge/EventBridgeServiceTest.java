@@ -990,6 +990,99 @@ class EventBridgeServiceTest {
     }
 
     @Test
+    void matchesPatternByNumericSeverity() {
+        Map<String, Object> event = Map.of("Detail", "{\"severity\":7}");
+
+        assertTrue(service.matchesPattern(event, "{\"detail\":{\"severity\":[7]}}"));
+        assertTrue(service.matchesPattern(event, "{\"detail\":{\"severity\":[{\"numeric\":[\">=\",7]}]}}"));
+        assertTrue(service.matchesPattern(event, "{\"detail\":{\"severity\":[{\"numeric\":[\">=\",6]}]}}"));
+    }
+
+    @ParameterizedTest
+    @MethodSource("io.floci.aws.testing.EventBridgeNumericPatterns#cases")
+    void matchesPatternByNumericComparison(String value, String comparisons, boolean expected) {
+        Map<String, Object> event = Map.of("Detail", "{\"value\":" + value + "}");
+        String pattern = "{\"detail\":{\"value\":[{\"numeric\":[" + comparisons + "]}]}}";
+
+        assertEquals(expected, service.matchesPattern(event, pattern));
+        assertEquals(expected, service.testEventPattern(pattern, "{\"detail\":{\"value\":" + value + "}}"));
+        service.putRule("valid-numeric", null, pattern, null, RuleState.ENABLED, null, null, null, REGION);
+        assertEquals(pattern, service.describeRule("valid-numeric", null, REGION).getEventPattern());
+    }
+
+    @ParameterizedTest
+    @MethodSource("io.floci.aws.testing.EventBridgeNumericPatterns#invalidPatterns")
+    void malformedNumericComparisonIsRejectedByPublicApis(String pattern) {
+        for (String detail : List.of("{\"severity\":7}", "{\"severity\":\"7\"}", "{}")) {
+            AwsException error = assertThrows(AwsException.class,
+                    () -> service.testEventPattern(pattern, "{\"source\":\"example.test\",\"detail\":" + detail + "}"));
+            assertEquals("InvalidEventPatternException", error.getErrorCode());
+            assertEquals(400, error.getHttpStatus());
+        }
+        AwsException error = assertThrows(AwsException.class, () -> service.putRule(
+                "invalid-numeric", null, pattern, null, RuleState.ENABLED, null, null, null, REGION));
+        assertEquals("InvalidEventPatternException", error.getErrorCode());
+        assertEquals(400, error.getHttpStatus());
+        assertTrue(service.listRules(null, null, REGION).isEmpty());
+    }
+
+    @Test
+    void invalidNumericUpdateDoesNotMutateExistingRule() {
+        String original = "{\"detail\":{\"value\":[7]}}";
+        service.putRule("existing", null, original, null, RuleState.ENABLED, null, null, null, REGION);
+
+        assertThrows(AwsException.class, () -> service.putRule("existing", null,
+                "{\"detail\":{\"value\":[{\"numeric\":[]}]}}", null,
+                RuleState.ENABLED, null, null, null, REGION));
+
+        assertEquals(original, service.describeRule("existing", null, REGION).getEventPattern());
+    }
+
+    @Test
+    void numericFieldNameIsNotConfusedWithNumericOperator() {
+        assertTrue(service.testEventPattern("{\"detail\":{\"numeric\":[7]}}", "{\"detail\":{\"numeric\":7}}"));
+    }
+
+    @Test
+    void exactLiteralsMatchArrayElements() {
+        assertTrue(service.testEventPattern("{\"detail\":{\"value\":[7]}}", "{\"detail\":{\"value\":[3,7]}}"));
+        assertFalse(service.testEventPattern("{\"detail\":{\"value\":[7]}}", "{\"detail\":{\"value\":[3,6]}}"));
+    }
+
+    @Test
+    void numericComparisonDoesNotMatchMissingField() {
+        assertFalse(service.matchesPattern(Map.of("Detail", "{}"),
+                "{\"detail\":{\"value\":[{\"numeric\":[\">=\",0]}]}}"));
+    }
+
+    @Test
+    void numericComparisonsCanBeAlternativesToLiterals() {
+        String pattern = "{\"detail\":{\"value\":[{\"numeric\":[\"<\",0]},\"unknown\",{\"numeric\":[\">=\",7]}]}}";
+
+        assertTrue(service.matchesPattern(Map.of("Detail", "{\"value\":-1}"), pattern));
+        assertTrue(service.matchesPattern(Map.of("Detail", "{\"value\":\"unknown\"}"), pattern));
+        assertTrue(service.matchesPattern(Map.of("Detail", "{\"value\":7}"), pattern));
+        assertFalse(service.matchesPattern(Map.of("Detail", "{\"value\":3}"), pattern));
+    }
+
+    @ParameterizedTest
+    @ValueSource(ints = {6, 7, 8})
+    void putEventsDispatchesOnlyWhenNumericSeverityMatches(int severity) {
+        Rule rule = service.putRule("severity-rule", null,
+                "{\"detail\":{\"severity\":[{\"numeric\":[\">=\",7]}]}}", null,
+                RuleState.ENABLED, null, null, null, REGION);
+        Target target = new Target("t1", "arn:aws:sns:us-east-1:000000000000:alerts", null, null);
+        service.putTargets("severity-rule", null, List.of(target), REGION);
+
+        EventBridgeService.PutEventsResult result = service.putEvents(List.of(Map.of(
+                "Source", "example.test", "DetailType", "Example", "Detail", "{\"severity\":" + severity + "}")), REGION);
+
+        assertEquals(0, result.failedCount());
+        verify(dispatcherMock, Mockito.times(severity >= 7 ? 1 : 0))
+                .dispatch(eq(rule.getArn()), eq(target), anyString(), eq(REGION), any());
+    }
+
+    @Test
     void matchesPatternByResources() {
      Map<String, Object> event = Map.of(
         "Source", "my.app",
