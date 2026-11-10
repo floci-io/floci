@@ -13,11 +13,14 @@ import org.mockito.ArgumentCaptor;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.atomic.AtomicInteger;
+import java.util.function.Supplier;
 
 import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertInstanceOf;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyString;
@@ -152,6 +155,287 @@ class CognitoMessageDispatcherTest {
             .region("us-east-1")
             .content(new EmailContent.Simple(subject(sent), "Welcome, please verify.\nCode: 999000", null, List.of()))
             .build(), sent);
+    }
+
+    @Test
+    void dispatch_confirmWithLink_usesLinkSubjectAndBody() {
+        UserPool pool = pool(Map.of(
+            "DefaultEmailOption", "CONFIRM_WITH_LINK",
+            "EmailSubject", "Code subject",
+            "EmailMessage", "Your code is {####}.",
+            "EmailSubjectByLink", "Confirm your account",
+            "EmailMessageByLink", "Welcome. {##Click here##} to finish."
+        ));
+        String link = "http://localhost/cognito-idp/confirmUser?client_id=abc"
+                + "&user_name=alice%40example.com&confirmation_code=123456";
+
+        dispatcher.dispatch(pool, user("alice@example.com", null), VerificationCode.Purpose.SIGNUP_CONFIRMATION,
+            "123456", List.of("EMAIL"), null, link);
+
+        SendEmailRequest sent = sentEmail();
+        EmailContent.Simple content = assertInstanceOf(EmailContent.Simple.class, sent.content());
+        assertEquals("Confirm your account", content.subject());
+        assertEquals("Welcome. " + link + " to finish.", content.bodyText());
+        assertEquals("Welcome. <a href=\"" + link.replace("&", "&amp;") + "\">Click here</a> to finish.",
+            content.bodyHtml());
+        verifyNoInteractions(sns);
+    }
+
+    @Test
+    void dispatch_confirmWithLinkWithoutCustomTemplates_usesAwsDefaults() {
+        UserPool pool = pool(Map.of("DefaultEmailOption", "CONFIRM_WITH_LINK"));
+        String link = "http://localhost/cognito-idp/confirmUser?confirmation_code=111222";
+
+        dispatcher.dispatch(pool, user("alice@example.com", null), VerificationCode.Purpose.SIGNUP_CONFIRMATION,
+            "111222", List.of("EMAIL"), null, link);
+
+        EmailContent.Simple content = assertInstanceOf(EmailContent.Simple.class, sentEmail().content());
+        assertEquals("Your verification link", content.subject());
+        assertEquals("Please click the link below to verify your email address. " + link, content.bodyText());
+        assertEquals("Please click the link below to verify your email address. "
+            + "<a href=\"" + link + "\">Verify Email</a>", content.bodyHtml());
+    }
+
+    @Test
+    void dispatch_confirmWithLinkTemplateMissingPlaceholder_appendsTheLink() {
+        UserPool pool = pool(Map.of(
+            "DefaultEmailOption", "CONFIRM_WITH_LINK",
+            "EmailMessageByLink", "Welcome, please verify."
+        ));
+        String link = "http://localhost/cognito-idp/confirmUser?confirmation_code=999000";
+
+        dispatcher.dispatch(pool, user("alice@example.com", null), VerificationCode.Purpose.SIGNUP_CONFIRMATION,
+            "999000", List.of("EMAIL"), null, link);
+
+        EmailContent.Simple content = assertInstanceOf(EmailContent.Simple.class, sentEmail().content());
+        assertEquals("Welcome, please verify.\n" + link, content.bodyText());
+        assertEquals("Welcome, please verify.<br><a href=\"" + link + "\">Verify Email</a>", content.bodyHtml());
+    }
+
+    @Test
+    void dispatch_confirmWithCode_keepsTheCodeTemplateWhenALinkTemplateIsAlsoSet() {
+        UserPool pool = pool(Map.of(
+            "DefaultEmailOption", "CONFIRM_WITH_CODE",
+            "EmailSubject", "Code subject",
+            "EmailMessage", "Your code is {####}.",
+            "EmailSubjectByLink", "Confirm your account",
+            "EmailMessageByLink", "Welcome. {##Click here##}"
+        ));
+
+        dispatcher.dispatch(pool, user("alice@example.com", null), VerificationCode.Purpose.SIGNUP_CONFIRMATION,
+            "123456", List.of("EMAIL"), null, "http://localhost/confirmUser?confirmation_code=123456");
+
+        EmailContent.Simple content = assertInstanceOf(EmailContent.Simple.class, sentEmail().content());
+        assertEquals("Code subject", content.subject());
+        assertEquals("Your code is 123456.", content.bodyText());
+        assertNull(content.bodyHtml());
+    }
+
+    @Test
+    void dispatch_confirmWithLink_passwordResetStaysOnTheCodeTemplate() {
+        UserPool pool = pool(Map.of(
+            "DefaultEmailOption", "CONFIRM_WITH_LINK",
+            "EmailSubject", "Reset subject",
+            "EmailMessage", "Reset code {####}.",
+            "EmailSubjectByLink", "Confirm your account",
+            "EmailMessageByLink", "Welcome. {##Click here##}"
+        ));
+
+        dispatcher.dispatch(pool, user("alice@example.com", null), VerificationCode.Purpose.PASSWORD_RESET,
+            "654321", List.of("EMAIL"), null, "http://localhost/confirmUser?confirmation_code=654321");
+
+        EmailContent.Simple content = assertInstanceOf(EmailContent.Simple.class, sentEmail().content());
+        assertEquals("Reset subject", content.subject());
+        assertEquals("Reset code 654321.", content.bodyText());
+        assertNull(content.bodyHtml());
+    }
+
+    @Test
+    void dispatch_confirmWithLink_attributeVerificationStaysOnTheCodeTemplate() {
+        UserPool pool = pool(Map.of(
+            "DefaultEmailOption", "CONFIRM_WITH_LINK",
+            "EmailSubject", "Attribute subject",
+            "EmailMessage", "Attribute code {####}.",
+            "EmailSubjectByLink", "Confirm your account",
+            "EmailMessageByLink", "Welcome. {##Click here##}"
+        ));
+
+        dispatcher.dispatch(pool, user("alice@example.com", null),
+            VerificationCode.Purpose.EMAIL_ATTRIBUTE_VERIFICATION,
+            "246810", List.of("EMAIL"), null, "http://localhost/confirmUser?confirmation_code=246810");
+
+        EmailContent.Simple content = assertInstanceOf(EmailContent.Simple.class, sentEmail().content());
+        assertEquals("Attribute subject", content.subject());
+        assertEquals("Attribute code 246810.", content.bodyText());
+        assertNull(content.bodyHtml());
+    }
+
+    @Test
+    void dispatch_confirmWithLink_signInCodeStaysOnTheCodeTemplate() {
+        UserPool pool = pool(Map.of(
+            "DefaultEmailOption", "CONFIRM_WITH_LINK",
+            "EmailMessage", "Sign-in code {####}.",
+            "EmailMessageByLink", "Welcome. {##Click here##}"
+        ));
+
+        dispatcher.dispatch(pool, user("alice@example.com", null), VerificationCode.Purpose.EMAIL_OTP,
+            "135790", List.of("EMAIL"), null, "http://localhost/confirmUser?confirmation_code=135790");
+
+        EmailContent.Simple content = assertInstanceOf(EmailContent.Simple.class, sentEmail().content());
+        assertEquals("Sign-in code 135790.", content.bodyText());
+        assertNull(content.bodyHtml());
+    }
+
+    @Test
+    void dispatch_confirmWithLink_emailMfaStaysOnTheMfaTemplate() {
+        UserPool pool = pool(Map.of(
+            "DefaultEmailOption", "CONFIRM_WITH_LINK",
+            "EmailMessageByLink", "Welcome. {##Click here##}"
+        ));
+        pool.setEmailMfaConfiguration(Map.of("Subject", "MFA subject", "Message", "MFA code {####}."));
+
+        dispatcher.dispatch(pool, user("alice@example.com", null), VerificationCode.Purpose.EMAIL_MFA,
+            "112233", List.of("EMAIL"), null, "http://localhost/confirmUser?confirmation_code=112233");
+
+        EmailContent.Simple content = assertInstanceOf(EmailContent.Simple.class, sentEmail().content());
+        assertEquals("MFA subject", content.subject());
+        assertEquals("MFA code 112233.", content.bodyText());
+        assertNull(content.bodyHtml());
+    }
+
+    @Test
+    void dispatch_confirmWithLink_smsStaysOnTheCodeTemplate() {
+        UserPool pool = pool(Map.of(
+            "DefaultEmailOption", "CONFIRM_WITH_LINK",
+            "SmsMessage", "Signup: {####}",
+            "EmailMessageByLink", "Welcome. {##Click here##}"
+        ));
+
+        dispatcher.dispatch(pool, user("alice@example.com", "+5215551234567"),
+            VerificationCode.Purpose.SIGNUP_CONFIRMATION, "654321", List.of("SMS"), null,
+            "http://localhost/confirmUser?confirmation_code=654321");
+
+        verify(sns).publish(isNull(), isNull(), eq("+5215551234567"), eq("Signup: 654321"),
+            isNull(), isNull(), eq("us-east-1"));
+        verifyNoInteractions(ses);
+    }
+
+    @Test
+    void dispatch_confirmWithLink_customMessageRendersTheLinkPlaceholder() {
+        UserPool pool = pool(Map.of(
+            "DefaultEmailOption", "CONFIRM_WITH_LINK",
+            "EmailSubjectByLink", "Pool link subject",
+            "EmailMessageByLink", "Pool link {##Click here##}"
+        ));
+        String link = "http://localhost/cognito-idp/confirmUser?confirmation_code=123456";
+
+        dispatcher.dispatch(pool, user("alice@example.com", null), VerificationCode.Purpose.SIGNUP_CONFIRMATION,
+            "123456", List.of("EMAIL"),
+            Map.of("emailSubject", "Custom link", "emailMessage", "Open {##here & now##}"), link);
+
+        EmailContent.Simple content = assertInstanceOf(EmailContent.Simple.class, sentEmail().content());
+        assertEquals("Custom link", content.subject());
+        assertEquals("Open " + link, content.bodyText());
+        assertEquals("Open <a href=\"" + link + "\">here &amp; now</a>", content.bodyHtml());
+    }
+
+    @Test
+    void dispatch_confirmWithLink_customCodeMessageStaysACode() {
+        UserPool pool = pool(Map.of(
+            "DefaultEmailOption", "CONFIRM_WITH_LINK",
+            "EmailSubjectByLink", "Pool link subject",
+            "EmailMessageByLink", "Pool link {##Click here##}"
+        ));
+
+        dispatcher.dispatch(pool, user("alice@example.com", null), VerificationCode.Purpose.SIGNUP_CONFIRMATION,
+            "123456", List.of("EMAIL"),
+            Map.of("emailSubject", "Custom code", "emailMessage", "code {####}"),
+            "http://localhost/cognito-idp/confirmUser?confirmation_code=123456");
+
+        EmailContent.Simple content = assertInstanceOf(EmailContent.Simple.class, sentEmail().content());
+        assertEquals("Custom code", content.subject());
+        assertEquals("code 123456", content.bodyText());
+        assertNull(content.bodyHtml());
+    }
+
+    @Test
+    void dispatch_confirmWithCode_doesNotBuildTheConfirmationLink() {
+        UserPool pool = pool(Map.of(
+            "DefaultEmailOption", "CONFIRM_WITH_CODE",
+            "EmailMessage", "Your code is {####}.",
+            "EmailMessageByLink", "Welcome. {##Click here##}"
+        ));
+
+        dispatcher.dispatch(pool, user("alice@example.com", null), VerificationCode.Purpose.SIGNUP_CONFIRMATION,
+            "123456", List.of("EMAIL"), null, linkThatMustNotBeBuilt());
+
+        EmailContent.Simple content = assertInstanceOf(EmailContent.Simple.class, sentEmail().content());
+        assertEquals("Your code is 123456.", content.bodyText());
+        assertNull(content.bodyHtml());
+    }
+
+    @Test
+    void dispatch_confirmWithLink_smsDoesNotBuildTheConfirmationLink() {
+        UserPool pool = pool(Map.of(
+            "DefaultEmailOption", "CONFIRM_WITH_LINK",
+            "SmsMessage", "Signup: {####}",
+            "EmailMessageByLink", "Welcome. {##Click here##}"
+        ));
+
+        dispatcher.dispatch(pool, user("alice@example.com", "+5215551234567"),
+            VerificationCode.Purpose.SIGNUP_CONFIRMATION, "654321", List.of("SMS"), null,
+            linkThatMustNotBeBuilt());
+
+        verify(sns).publish(isNull(), isNull(), eq("+5215551234567"), eq("Signup: 654321"),
+            isNull(), isNull(), eq("us-east-1"));
+        verifyNoInteractions(ses);
+    }
+
+    @Test
+    void dispatch_confirmWithLink_customCodeMessageDoesNotBuildTheConfirmationLink() {
+        UserPool pool = pool(Map.of(
+            "DefaultEmailOption", "CONFIRM_WITH_LINK",
+            "EmailMessageByLink", "Pool link {##Click here##}"
+        ));
+
+        dispatcher.dispatch(pool, user("alice@example.com", null), VerificationCode.Purpose.SIGNUP_CONFIRMATION,
+            "123456", List.of("EMAIL"),
+            Map.of("emailSubject", "Custom code", "emailMessage", "code {####}"),
+            linkThatMustNotBeBuilt());
+
+        EmailContent.Simple content = assertInstanceOf(EmailContent.Simple.class, sentEmail().content());
+        assertEquals("code 123456", content.bodyText());
+        assertNull(content.bodyHtml());
+    }
+
+    @Test
+    void dispatch_confirmWithLink_buildsTheConfirmationLinkOnce() {
+        UserPool pool = pool(Map.of(
+            "DefaultEmailOption", "CONFIRM_WITH_LINK",
+            "EmailMessageByLink", "Go {##O'Hara & <friends>##}"
+        ));
+        String link = "http://localhost/confirmUser?user_name=a'b&c=\"d\"";
+        AtomicInteger builds = new AtomicInteger();
+        Supplier<String> confirmationLink = () -> {
+            builds.incrementAndGet();
+            return link;
+        };
+
+        dispatcher.dispatch(pool, user("alice@example.com", null), VerificationCode.Purpose.SIGNUP_CONFIRMATION,
+            "123456", List.of("EMAIL"), null, confirmationLink);
+
+        assertEquals(1, builds.get());
+        EmailContent.Simple content = assertInstanceOf(EmailContent.Simple.class, sentEmail().content());
+        assertEquals("Go " + link, content.bodyText());
+        assertEquals("Go <a href=\"http://localhost/confirmUser?user_name=a&#39;b&amp;c=&quot;d&quot;\">"
+            + "O&#39;Hara &amp; &lt;friends&gt;</a>", content.bodyHtml());
+    }
+
+    /** A link builder that fails the test if a code or SMS delivery reads it. */
+    private static Supplier<String> linkThatMustNotBeBuilt() {
+        return () -> {
+            throw new AssertionError("confirmation link was built");
+        };
     }
 
     @Test
