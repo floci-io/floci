@@ -67,7 +67,6 @@ import static org.awaitility.Awaitility.await;
 import static org.junit.jupiter.api.Assertions.assertAll;
 import static org.junit.jupiter.api.Assertions.assertArrayEquals;
 import static org.junit.jupiter.api.Assertions.assertEquals;
-import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.Mockito.mock;
@@ -268,23 +267,22 @@ class ElbV2TcpDataPlaneIntegrationTest {
     }
 
     @Test
-    void replacingBackendDoesNotRequireItsOccupiedPort() throws Exception {
+    void replacingBackendDoesNotRequireItsReleasedPort() throws Exception {
         NetServer original = backend;
         int oldPort = original.actualPort();
+        NetServer competingListener = vertx.createNetServer().connectHandler(NetSocket::close);
         NetServer closingBackend = mock(NetServer.class);
         try {
             backend = closingBackend;
             when(backend.actualPort()).thenReturn(oldPort);
-            when(backend.close()).thenReturn(Future.succeededFuture());
+            when(backend.close()).thenAnswer(invocation -> {
+                original.close().toCompletionStage().toCompletableFuture().get(5, TimeUnit.SECONDS);
+                competingListener.listen(oldPort, "127.0.0.1")
+                        .toCompletionStage().toCompletableFuture().get(5, TimeUnit.SECONDS);
+                return Future.succeededFuture();
+            });
             replaceBackend(new NetServerOptions(), socket -> socket.handler(socket::write));
-            assertEquals(oldPort, original.actualPort());
-            assertNotEquals(oldPort, backend.actualPort());
-            assertEquals(List.of(backend.actualPort()),
-                    client.describeTargetHealth(request -> request.targetGroupArn(targetGroupArn))
-                            .targetHealthDescriptions().stream().map(target -> target.target().port()).toList());
-            try (Socket socket = connect(oldPort)) {
-                assertEcho(socket, new byte[]{1, 2, 3});
-            }
+            assertEquals(oldPort, competingListener.actualPort());
             try (Socket socket = connect(listenerPort)) {
                 assertEcho(socket, new byte[]{0, 42, (byte) 0xff});
             }
@@ -292,7 +290,9 @@ class ElbV2TcpDataPlaneIntegrationTest {
             if (backend == closingBackend) {
                 backend = original;
             }
-            original.close().toCompletionStage().toCompletableFuture().get(5, TimeUnit.SECONDS);
+            assertAll("Close the original backend and the competing listener",
+                    () -> original.close().toCompletionStage().toCompletableFuture().get(5, TimeUnit.SECONDS),
+                    () -> competingListener.close().toCompletionStage().toCompletableFuture().get(5, TimeUnit.SECONDS));
         }
     }
 
