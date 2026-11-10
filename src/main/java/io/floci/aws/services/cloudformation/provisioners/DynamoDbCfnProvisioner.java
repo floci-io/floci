@@ -230,8 +230,7 @@ public class DynamoDbCfnProvisioner implements CfnResourceProvisioner {
         }
 
         Scope scope = new Scope(ctx.accountId(), region);
-        boolean onDemand = TABLE.equals(r.getResourceType())
-                && "PAY_PER_REQUEST".equals(ctx.resolveOptional(props, "BillingMode"));
+        boolean onDemand = "PAY_PER_REQUEST".equals(ctx.resolveOptional(props, "BillingMode"));
         TableDefinition table;
         boolean created = false;
         try {
