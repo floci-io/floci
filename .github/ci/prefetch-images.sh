@@ -108,19 +108,17 @@ starts EmrServerlessHiveDockerIntegrationTest EmrHiveStepsDockerIntegrationTest 
 # package token in shard.txt -> images its tests are known to launch
 # (measured inline pulls; update alongside image-catalog changes)
 grep -q '/docdb/'       "$SHARD_FILE" && pull mongo:7.0
+configured_image() {
+    image="$(bash .github/ci/service-image.sh "$1" "$2")"
+    if [ -n "$image" ]; then
+        pull "$image"
+    else
+        echo "$(date -u +%H:%M:%S) prefetch skipped: $1.$2 not readable" >> "$PREFETCH_LOG"
+    fi
+}
 if grep -q '/neptune/' "$SHARD_FILE"; then
-    NEO4J_IMAGE="$(bash .github/ci/neptune-image.sh default-neo4j-image)"
-    if [ -n "$NEO4J_IMAGE" ]; then
-        pull "$NEO4J_IMAGE"
-    else
-        echo "$(date -u +%H:%M:%S) prefetch skipped: neptune.default-neo4j-image not readable" >> "$PREFETCH_LOG"
-    fi
-    NEPTUNE_IMAGE="$(bash .github/ci/neptune-image.sh default-image)"
-    if [ -n "$NEPTUNE_IMAGE" ]; then
-        pull "$NEPTUNE_IMAGE"
-    else
-        echo "$(date -u +%H:%M:%S) prefetch skipped: neptune.default-image not readable" >> "$PREFETCH_LOG"
-    fi
+    configured_image neptune default-neo4j-image
+    configured_image neptune default-image
 fi
 grep -q '/elasticache/' "$SHARD_FILE" && { pull valkey/valkey:8; pull memcached:1.6; }
 grep -q '/memorydb/'    "$SHARD_FILE" && pull valkey/valkey:8
@@ -168,21 +166,13 @@ starts RedshiftMaxErrorPostgres18IntegrationTest \
     && [ -n "$REDSHIFT_PG18_IMAGE" ] && pull "$REDSHIFT_PG18_IMAGE"
 # CodeArtifact's real registry fixtures each use one configured sidecar image.
 # Keep unrelated unit-test shards from pulling all four registries.
-codeartifact_image() {
-    image="$(awk -v key="$1" '/^    codeartifact:/ { in_service=1; next } in_service && /^    [a-z]/ { exit } in_service && $1 == key ":" { gsub(/"/, "", $2); print $2; exit }' src/main/resources/application.yml)"
-    if [ -n "$image" ]; then
-        pull "$image"
-    else
-        echo "$(date -u +%H:%M:%S) prefetch skipped: codeartifact.$1 not readable" >> "$PREFETCH_LOG"
-    fi
-}
 starts CodeArtifactMavenDockerIntegrationTest CodeArtifactMavenExternalConnectionDockerIntegrationTest \
-    && codeartifact_image maven-image
+    && configured_image codeartifact maven-image
 starts CodeArtifactNpmDockerIntegrationTest CodeArtifactNpmExternalConnectionDockerIntegrationTest \
-    && codeartifact_image npm-image
+    && configured_image codeartifact npm-image
 starts CodeArtifactNuGetDockerIntegrationTest CodeArtifactNuGetExternalConnectionDockerIntegrationTest \
-    && codeartifact_image nuget-image
-starts CodeArtifactPypiDockerIntegrationTest && codeartifact_image pypi-image
+    && configured_image codeartifact nuget-image
+starts CodeArtifactPypiDockerIntegrationTest && configured_image codeartifact pypi-image
 # RDS's engine fixture starts MySQL at the default and explicitly requested versions.
 # Read both sources rather than duplicating their version pins here.
 if starts RdsParameterGroupEngineIntegrationTest; then

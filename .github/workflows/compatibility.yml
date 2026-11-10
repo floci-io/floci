@@ -347,7 +347,7 @@ jobs:
       - name: Pre-pull service images
         if: matrix.test == 'sdk-test-java'
         run: |
-          NEPTUNE_IMAGE="$(bash .github/ci/neptune-image.sh default-image)"
+          NEPTUNE_IMAGE="$(bash .github/ci/service-image.sh neptune default-image)"
           if [ -z "$NEPTUNE_IMAGE" ]; then
             echo "::warning::Cannot read Neptune default-image from application.yml; skipping Neptune pre-pull"
           fi
@@ -421,7 +421,7 @@ jobs:
       - name: Pre-pull Neptune image for Node SDK
         if: matrix.test == 'sdk-test-node'
         run: |
-          image="$(bash .github/ci/neptune-image.sh default-image)"
+          image="$(bash .github/ci/service-image.sh neptune default-image)"
           if [ -z "$image" ]; then
             echo "::error::Cannot read Neptune default-image from application.yml"
             exit 1
