@@ -887,11 +887,13 @@ curl -s -b jar -o /dev/null -w '%{http_code} %{redirect_url}\n' \
   The event carries `userName` `ClientCredentials`, the granted `scopes`, empty `userAttributes`, a
   null `groupConfiguration`, the request's `aws_client_metadata` (a URL-encoded JSON object of
   strings) as `clientMetadata`, and `response.claimsAndScopeOverrideDetails` set to null, so a
-  function must build the response object rather than write into it.
+  function must build the response object rather than write into it. A metadata value that is
+  not a string, null included, refuses the request with `invalid_request`.
   Only `accessTokenGeneration` applies: its claims and scope changes reach the access token, while
-  `idTokenGeneration` and `groupOverrideDetails` are ignored. The trigger cannot change `sub`,
-  `client_id`, `token_use`, `version`, `iss`, `exp`, `iat`, `jti` or any `cognito:` claim, and an
-  `aud` it adds must equal the client ID.
+  `idTokenGeneration` and `groupOverrideDetails` are ignored. The trigger cannot add, change or
+  suppress `sub`, `client_id`, `token_use`, `version`, `username`, `iss`, `exp`, `iat`, `jti` or any
+  `cognito:` claim, and an `aud` it adds must equal the client ID. It changes `scope` only through
+  `scopesToAdd` and `scopesToSuppress`.
 - Client-credentials returns only `access_token`, `token_type`, and `expires_in`; authorization-code
   redemption returns the Cognito access and refresh tokens, and an ID token when the granted scopes
   include `openid`; a refresh returns the same tokens without a refresh token.

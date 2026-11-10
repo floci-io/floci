@@ -553,17 +553,15 @@ public class CognitoOAuthController {
                     "Only client_credentials, authorization_code and refresh_token are supported");
         }
         String scope = trimToNull(formParams.getFirst("scope"));
-        Map<String, String> clientMetadata;
-        try {
-            clientMetadata = parseClientMetadata(trimToNull(formParams.getFirst("aws_client_metadata")));
-        } catch (JsonProcessingException e) {
-            LOG.debugv(e, "Rejecting malformed aws_client_metadata");
+        Optional<Map<String, String>> clientMetadata =
+                parseClientMetadata(trimToNull(formParams.getFirst("aws_client_metadata")));
+        if (clientMetadata.isEmpty()) {
             return oauthError("invalid_request", "aws_client_metadata must be a JSON object of strings");
         }
 
         try {
             Map<String, Object> result = cognitoService.issueClientCredentialsToken(
-                    clientId, clientSecret, scope, domainPoolId, clientMetadata);
+                    clientId, clientSecret, scope, domainPoolId, clientMetadata.get());
             return Response.ok(objectMapper.valueToTree(result))
                     .type(MediaType.APPLICATION_JSON)
                     .header("Cache-Control", "no-store")
@@ -587,13 +585,28 @@ public class CognitoOAuthController {
         }
     }
 
-    /** The client-credentials {@code aws_client_metadata} parameter: a JSON object of string values. */
-    private Map<String, String> parseClientMetadata(String raw) throws JsonProcessingException {
+    /**
+     * The client-credentials {@code aws_client_metadata} parameter, or empty when it is not a JSON
+     * object of string values. An absent parameter is an empty map.
+     */
+    private Optional<Map<String, String>> parseClientMetadata(String raw) {
         if (raw == null) {
-            return Map.of();
+            return Optional.of(Map.of());
         }
-        Map<String, String> metadata = objectMapper.readValue(raw, new TypeReference<>() {});
-        return metadata == null ? Map.of() : metadata;
+        Map<String, String> metadata;
+        try {
+            metadata = objectMapper.readValue(raw, new TypeReference<>() {});
+        } catch (JsonProcessingException e) {
+            LOG.debugv(e, "Rejecting malformed aws_client_metadata");
+            return Optional.empty();
+        }
+        if (metadata == null) {
+            return Optional.of(Map.of());
+        }
+        if (metadata.containsValue(null)) {
+            return Optional.empty();
+        }
+        return Optional.of(metadata);
     }
 
     private Response redeemAuthorizationCode(String clientId, String clientSecret,

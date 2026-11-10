@@ -877,6 +877,20 @@ class CognitoOAuthTokenIntegrationTest {
                 .body("error", equalTo("invalid_request"));
     }
 
+    @Test
+    @Order(43)
+    void clientCredentialsRejectsAwsClientMetadataWithANullValue() {
+        given()
+                .header("Authorization", basic(confidentialClientId, confidentialClientSecret))
+                .formParam("grant_type", "client_credentials")
+                .formParam("aws_client_metadata", "{\"environment\": null}")
+        .when()
+                .post("/cognito-idp/oauth2/token")
+        .then()
+                .statusCode(400)
+                .body("error", equalTo("invalid_request"));
+    }
+
     private static String confidentialRefreshToken(String confidentialId, String secret) throws Exception {
         String username = "confidential-" + System.nanoTime();
         cognitoAction("AdminCreateUser", """

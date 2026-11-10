@@ -1442,12 +1442,14 @@ class CognitoLambdaTriggersTest {
                         "accessTokenGeneration", Map.of(
                                 "claimsToAddOrOverride", Map.of(
                                         "sub", "other", "client_id", "other", "token_use", "id",
-                                        "cognito:username", "bob", "aud", "someone-else"),
+                                        "cognito:username", "bob", "aud", "someone-else",
+                                        "username", "alice"),
                                 "claimsToSuppress", List.of("iss", "exp", "jti", "version"))))));
 
         Map<String, Object> claims = clientCredentialsClaims(client, Map.of());
 
         assertAll(
+                () -> assertFalse(claims.containsKey("username"), "a machine token names no user"),
                 () -> assertEquals(client.getClientId(), claims.get("sub")),
                 () -> assertEquals(client.getClientId(), claims.get("client_id")),
                 () -> assertEquals("access", claims.get("token_use")),
@@ -1457,6 +1459,22 @@ class CognitoLambdaTriggersTest {
                 () -> assertNotNull(claims.get("jti")),
                 () -> assertFalse(claims.containsKey("cognito:username")),
                 () -> assertFalse(claims.containsKey("aud"), "aud must name the token's own client"));
+    }
+
+    @Test
+    void preTokenGenerationV3ChangesTheClientCredentialsScopeOnlyThroughTheScopeFields() throws Exception {
+        UserPool pool = createPoolWithPreTokenGenerationVersion("V3_0");
+        UserPoolClient client = createM2mClient(pool);
+        when(lambdaService.invoke(anyString(), eq("arn:aws:lambda:::pre-token"), any(byte[].class), any()))
+                .thenReturn(ok(Map.of("claimsAndScopeOverrideDetails", Map.of(
+                        "accessTokenGeneration", Map.of(
+                                "claimsToAddOrOverride", Map.of("scope", "admin/all"),
+                                "claimsToSuppress", List.of("scope"))))));
+
+        Map<String, Object> claims = clientCredentialsClaims(client, Map.of());
+
+        assertEquals("notes/read", claims.get("scope"),
+                "claimsToAddOrOverride and claimsToSuppress must not replace the granted scope");
     }
 
     @ParameterizedTest

@@ -157,9 +157,11 @@ public class CognitoService implements ResourceProvider {
     private static final Set<String> NAMED_PROVIDER_TYPES =
             Set.of("Facebook", "Google", "LoginWithAmazon", "SignInWithApple");
 
+    // scope is included because AWS changes it only through scopesToAdd and scopesToSuppress.
     private static final Set<String> MACHINE_TOKEN_PROTECTED_CLAIMS = Set.of(
             "sub", "client_id", "event_id", "version", "acr", "amr", "auth_time", "azp", "exp", "iat",
-            "iss", "jti", "nbf", "nonce", "origin_jti", "token_use");
+            "iss", "jti", "nbf", "nonce", "origin_jti", "token_use", "username", "device_key", "at_hash",
+            "scope");
 
 
     /**
