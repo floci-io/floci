@@ -544,6 +544,7 @@ class CloudWatchLogsInsightsQueryTest {
                 "level. = 'INFO'",
                 "level = 'INFO' x",
                 "(level = 'INFO'",
+                "level = 'INFO",
                 "level = INFO",
                 "level = web-db",
                 "level = 1+1",
@@ -690,6 +691,7 @@ class CloudWatchLogsInsightsQueryTest {
                 "type = 'A' or (type = 'B' or type = 'C')");
         assertEquals(List.of("a2", "b1", "c1", "o1", "p1"), idsFor(group, "type != 'A' or level = 'WARN'"),
                 "type != 'A' or level = 'WARN'");
+        assertEquals(List.of("b1"), idsFor(group, "(type = 'A)' or type = 'B')"), "(type = 'A)' or type = 'B')");
 
         List<String> sortedDesc = rowsFor(group, "fields id | filter type = 'A' or type = 'B' | sort @timestamp desc")
                 .stream().map(row -> row.get("id")).toList();

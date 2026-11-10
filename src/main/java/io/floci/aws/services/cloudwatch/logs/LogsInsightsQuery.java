@@ -99,32 +99,34 @@ final class LogsInsightsQuery {
     }
 
     /**
-     * Split a query into pipeline stages on {@code |}, ignoring pipes inside single- or double-quoted
-     * values (so {@code filter x = 'a|b'} stays one stage). Escaped quotes are not interpreted.
+     * Split a query into pipeline stages on {@code |} outside quoted text (so {@code filter x = 'a|b'}
+     * stays one stage).
      */
     private static List<String> splitStages(String query) {
         List<String> stages = new ArrayList<>();
-        StringBuilder current = new StringBuilder();
-        char quote = 0;
-        for (int i = 0; i < query.length(); i++) {
-            char c = query.charAt(i);
-            if (quote != 0) {
-                if (c == quote) {
-                    quote = 0;
-                }
-                current.append(c);
-            } else if (c == '\'' || c == '"') {
-                quote = c;
-                current.append(c);
-            } else if (c == '|') {
-                stages.add(current.toString());
-                current.setLength(0);
-            } else {
-                current.append(c);
+        int start = 0;
+        for (int i = unquoted(query, 0); i < query.length(); i = unquoted(query, i + 1)) {
+            if (query.charAt(i) == '|') {
+                stages.add(query.substring(start, i));
+                start = i + 1;
             }
         }
-        stages.add(current.toString());
+        stages.add(query.substring(start));
         return stages;
+    }
+
+    /**
+     * The first index at or after {@code from} (itself outside quoted text) that is outside single- or
+     * double-quoted text and is not a quote itself, or {@code s.length()}. Escaped quotes are not
+     * interpreted; an unclosed quote runs to the end.
+     */
+    private static int unquoted(String s, int from) {
+        int i = from;
+        while (i < s.length() && (s.charAt(i) == '\'' || s.charAt(i) == '"')) {
+            int close = s.indexOf(s.charAt(i), i + 1);
+            i = close < 0 ? s.length() : close + 1;
+        }
+        return i;
     }
 
     private void applyStage(String cmd, String args) {
@@ -220,16 +222,9 @@ final class LogsInsightsQuery {
     /** Index of the parenthesis closing the one at index 0, ignoring quoted text, or -1. */
     private static int closingParen(String s) {
         int depth = 0;
-        char quote = 0;
-        for (int i = 0; i < s.length(); i++) {
+        for (int i = unquoted(s, 0); i < s.length(); i = unquoted(s, i + 1)) {
             char c = s.charAt(i);
-            if (quote != 0) {
-                if (c == quote) {
-                    quote = 0;
-                }
-            } else if (c == '\'' || c == '"') {
-                quote = c;
-            } else if (c == '(') {
+            if (c == '(') {
                 depth++;
             } else if (c == ')' && --depth == 0) {
                 return i;
@@ -243,16 +238,9 @@ final class LogsInsightsQuery {
         List<String> terms = new ArrayList<>();
         int depth = 0;
         int start = 0;
-        char quote = 0;
-        for (int i = 0; i < s.length(); i++) {
+        for (int i = unquoted(s, 0); i < s.length(); i = unquoted(s, i + 1)) {
             char c = s.charAt(i);
-            if (quote != 0) {
-                if (c == quote) {
-                    quote = 0;
-                }
-            } else if (c == '\'' || c == '"') {
-                quote = c;
-            } else if (c == '(') {
+            if (c == '(') {
                 depth++;
             } else if (c == ')') {
                 depth--;
@@ -272,19 +260,11 @@ final class LogsInsightsQuery {
     }
 
     private static Filter parseFilter(String expr) {
-        // Scan for the operator OUTSIDE any quoted value, taking the leftmost one and checking
-        // '!=' / '==' before '='. This avoids mistaking an operator inside a quoted literal
-        // (e.g. filter x = 'a==b') for the real one.
-        char quote = 0;
-        for (int i = 0; i < expr.length(); i++) {
+        // Take the leftmost operator outside quoted text, checking '!=' / '==' before '=', so an
+        // operator inside a quoted literal (e.g. filter x = 'a==b') is not mistaken for the real one.
+        for (int i = unquoted(expr, 0); i < expr.length(); i = unquoted(expr, i + 1)) {
             char c = expr.charAt(i);
-            if (quote != 0) {
-                if (c == quote) {
-                    quote = 0;
-                }
-            } else if (c == '\'' || c == '"') {
-                quote = c;
-            } else if (expr.startsWith(">=", i) || expr.startsWith("<=", i) || expr.startsWith("=~", i)) {
+            if (expr.startsWith(">=", i) || expr.startsWith("<=", i) || expr.startsWith("=~", i)) {
                 // The '=' in >=, <= and =~ would be read as equality below, mangling the field
                 // (>=, <=) or the value (=~) into a dead match; stop so they warn instead.
                 break;
