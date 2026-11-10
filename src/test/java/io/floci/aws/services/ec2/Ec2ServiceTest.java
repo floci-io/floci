@@ -288,11 +288,15 @@ class Ec2ServiceTest {
     }
 
     @Test
-    void defaultSecurityGroupOfIsEmptyOnceTheDefaultGroupIsGone() {
-        Ec2Service service = mockModeService();
+    void defaultSecurityGroupOfIsEmptyWhenTheStoredDefaultGroupIsMissing() {
+        AccountAwareStorageBackend<SecurityGroup> groups = AccountAwareStorageBackend.inMemory("000000000000");
+        Ec2Service service = new Ec2Service(mockConfig(true), mock(Ec2ContainerManager.class),
+                mock(Ec2PortForwardManager.class), mock(AmiImageResolver.class), mock(Ec2ImageCatalog.class),
+                new Ec2InstanceTypeCatalog(), new InMemoryStorageFactory(Map.of("ec2-security-groups.json", groups)));
         String region = "us-east-1";
         String vpcId = service.createVpc(region, "10.94.0.0/16", false).getVpcId();
-        service.deleteSecurityGroup(region, service.defaultSecurityGroupOf(region, vpcId).orElseThrow().getGroupId());
+        // Model a missing persisted record; the public API cannot delete a default group.
+        groups.delete(region + "::" + service.defaultSecurityGroupOf(region, vpcId).orElseThrow().getGroupId());
 
         assertTrue(service.defaultSecurityGroupOf(region, vpcId).isEmpty());
     }
