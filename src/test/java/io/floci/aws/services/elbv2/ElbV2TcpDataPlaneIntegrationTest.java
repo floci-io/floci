@@ -67,6 +67,7 @@ import static org.awaitility.Awaitility.await;
 import static org.junit.jupiter.api.Assertions.assertAll;
 import static org.junit.jupiter.api.Assertions.assertArrayEquals;
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.Mockito.mock;
@@ -256,43 +257,39 @@ class ElbV2TcpDataPlaneIntegrationTest {
     @Test
     void tcpListenerRelaysServerGreetingBeforeClientSendsBytes() throws Exception {
         byte[] greeting = {0, 5, 42, (byte) 0xff};
-        replaceBackend(new NetServerOptions(), socket -> {
-            socket.write(Buffer.buffer(greeting));
-            socket.handler(socket::write);
-        });
+        replaceBackendWithGreeting(greeting);
         try (Socket socket = connect(listenerPort)) {
-            assertArrayEquals(greeting, socket.getInputStream().readNBytes(greeting.length));
-            assertEcho(socket, new byte[]{1, 2, 3});
+            assertGreetingAndEcho(socket, greeting, new byte[]{1, 2, 3});
         }
     }
 
     @Test
-    void replacingBackendDoesNotRequireItsReleasedPort() throws Exception {
+    void replacingBackendDoesNotRequireItsOccupiedPort() throws Exception {
         NetServer original = backend;
         int oldPort = original.actualPort();
-        NetServer competingListener = vertx.createNetServer().connectHandler(NetSocket::close);
-        NetServer closingBackend = mock(NetServer.class);
+        byte[] greeting = {7, 19, 31, (byte) 0xff};
+        NetServer retainedBackend = mock(NetServer.class);
         try {
-            backend = closingBackend;
+            backend = retainedBackend;
             when(backend.actualPort()).thenReturn(oldPort);
-            when(backend.close()).thenAnswer(invocation -> {
-                original.close().toCompletionStage().toCompletableFuture().get(5, TimeUnit.SECONDS);
-                competingListener.listen(oldPort, "127.0.0.1")
-                        .toCompletionStage().toCompletableFuture().get(5, TimeUnit.SECONDS);
-                return Future.succeededFuture();
-            });
-            replaceBackend(new NetServerOptions(), socket -> socket.handler(socket::write));
-            assertEquals(oldPort, competingListener.actualPort());
+            when(backend.close()).thenReturn(Future.succeededFuture());
+            replaceBackendWithGreeting(greeting);
+            assertEquals(oldPort, original.actualPort());
+            assertNotEquals(oldPort, backend.actualPort());
+            assertEquals(List.of(backend.actualPort()),
+                    client.describeTargetHealth(request -> request.targetGroupArn(targetGroupArn))
+                            .targetHealthDescriptions().stream().map(target -> target.target().port()).toList());
+            try (Socket socket = connect(oldPort)) {
+                assertEcho(socket, new byte[]{1, 2, 3});
+            }
             try (Socket socket = connect(listenerPort)) {
-                assertEcho(socket, new byte[]{0, 42, (byte) 0xff});
+                assertGreetingAndEcho(socket, greeting, new byte[]{0, 42, (byte) 0xff});
             }
         } finally {
-            if (backend == closingBackend) {
+            if (backend == retainedBackend) {
                 backend = original;
             }
-            assertAll("Close the original backend and the competing listener",
-                    () -> original.close().toCompletionStage().toCompletableFuture().get(5, TimeUnit.SECONDS),
-                    () -> competingListener.close().toCompletionStage().toCompletableFuture().get(5, TimeUnit.SECONDS));
+            original.close().toCompletionStage().toCompletableFuture().get(5, TimeUnit.SECONDS);
         }
     }
 
@@ -573,6 +570,18 @@ class ElbV2TcpDataPlaneIntegrationTest {
                 assertEquals(port, reservation.getLocalPort());
             }
         });
+    }
+
+    private void replaceBackendWithGreeting(byte[] greeting) throws Exception {
+        replaceBackend(new NetServerOptions(), socket -> {
+            socket.write(Buffer.buffer(greeting));
+            socket.handler(socket::write);
+        });
+    }
+
+    private static void assertGreetingAndEcho(Socket socket, byte[] greeting, byte[] payload) throws IOException {
+        assertArrayEquals(greeting, socket.getInputStream().readNBytes(greeting.length));
+        assertEcho(socket, payload);
     }
 
     private static void assertEcho(Socket socket, byte[] payload) throws IOException {
