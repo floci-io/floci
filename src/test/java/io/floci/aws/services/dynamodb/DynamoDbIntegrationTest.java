@@ -5844,6 +5844,30 @@ given()
 
     @ParameterizedTest
     @CsvSource(delimiter = '|', quoteCharacter = '`', textBlock = """
+            Query              | {"TableName": "ConditionOrderTable", "KeyConditionExpression": "begins_with(sk, :n) AND pk = :missing", "ExpressionAttributeValues": {":n": {"N": "1"}}} | Invalid KeyConditionExpression: Incorrect operand type for operator or function; operator or function: begins_with, operand type: N
+            Scan               | {"TableName": "ConditionOrderTable", "FilterExpression": "(x < :v OR y = :missing) AND z = :w", "ExpressionAttributeValues": {":v": {"BOOL": true}, ":w": {"S": "w"}}} | Invalid FilterExpression: Incorrect operand type for operator or function; operator or function: <, operand type: BOOL
+            PutItem            | {"TableName": "ConditionOrderTable", "Item": {"pk": {"S": "a"}}, "ConditionExpression": "contains(x, x) AND y = :missing"} | 1 validation error detected: Invalid ConditionExpression: The first operand must be distinct from the remaining operands for this operator or function; operator: contains, first operand: [x]
+            DeleteItem         | {"TableName": "ConditionOrderTable", "Key": {"pk": {"S": "a"}}, "ConditionExpression": "x BETWEEN :b AND :a AND y = :missing", "ExpressionAttributeValues": {":a": {"N": "1"}, ":b": {"N": "2"}}} | 1 validation error detected: Invalid ConditionExpression: The BETWEEN operator requires upper bound to be greater than or equal to lower bound; lower bound operand: AttributeValue: {N:2}, upper bound operand: AttributeValue: {N:1}
+            TransactWriteItems | {"TransactItems": [{"ConditionCheck": {"TableName": "ConditionOrderTable", "Key": {"pk": {"S": "a"}}, "ConditionExpression": "contains(x, x) AND y = :missing"}}]} | Invalid ConditionExpression: The first operand must be distinct from the remaining operands for this operator or function; operator: contains, first operand: [x]
+            """)
+    void expressionErrorsComeFromTheFirstFailingConditionInWrittenOrder(String operation, String body, String message) {
+        createOnDemandTableForGsiUpdates("ConditionOrderTable");
+
+        given()
+            .header("X-Amz-Target", "DynamoDB_20120810." + operation)
+            .contentType(DYNAMODB_CONTENT_TYPE)
+            .body(body)
+        .when().post("/")
+        .then()
+            .statusCode(400)
+            .body("__type", containsString("ValidationException"))
+            .body("message", equalTo(message));
+
+        deleteTable("ConditionOrderTable");
+    }
+
+    @ParameterizedTest
+    @CsvSource(delimiter = '|', quoteCharacter = '`', textBlock = """
             {"Put": {"TableName": "EmptyNameTable", "Item": {"pk": {"S": "a"}, "": {"S": "x"}}}}
             {"Put": {"TableName": "EmptyNameTable", "Item": {"pk": {"S": "a"}, "l": {"L": [{"M": {"": {"S": "x"}}}]}}}}
             {"ConditionCheck": {"TableName": "EmptyNameTable", "Key": {"pk": {"S": "a"}}, "ConditionExpression": "m = :m", "ExpressionAttributeValues": {":m": {"M": {"": {"S": "x"}}}}}}

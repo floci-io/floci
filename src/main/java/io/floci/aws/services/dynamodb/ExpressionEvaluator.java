@@ -414,14 +414,12 @@ final class ExpressionEvaluator {
     static void validateExpression(String expression, String exprType,
                                    JsonNode exprAttrNames, JsonNode exprAttrValues) {
         validateSyntax(expression, exprType);
-        validateSemantics(expression, exprType, exprAttrNames, exprAttrValues);
+        validateSemantics(parse(expression), exprType, exprAttrNames, exprAttrValues, false);
     }
 
     /**
      * The tokenize/parse/redundant-parentheses half of {@link #validateExpression}, split out so
-     * callers can run an undefined-#name/:value check between this and {@link #validateSemantics}:
-     * DynamoDB reports a syntax or redundant-parentheses error before an undefined placeholder,
-     * but an undefined placeholder before a semantic error like {@code contains(x, x)}.
+     * callers can run other checks between this and {@link #validateSemantics}.
      */
     static void validateSyntax(String expression, String exprType) {
         if (expression == null || expression.isEmpty()) {
@@ -437,10 +435,26 @@ final class ExpressionEvaluator {
         }
     }
 
-    /** The semantic half of {@link #validateExpression}; see {@link #validateSyntax}. */
+    /**
+     * The semantic half of {@link #validateExpression}, which also refuses an undefined #name or
+     * :value. DynamoDB checks the conditions in written order, and the names and values of a
+     * condition before its other errors.
+     */
     static void validateSemantics(String expression, String exprType,
                                    JsonNode exprAttrNames, JsonNode exprAttrValues) {
-        validateSemantics(parse(expression), exprType, exprAttrNames, exprAttrValues);
+        validateSemantics(parse(expression), exprType, exprAttrNames, exprAttrValues, true);
+    }
+
+    static AwsException undefinedName(String exprType, String name) {
+        return new AwsException("ValidationException", "Invalid " + exprType
+                + ": An expression attribute name used in the document path is not defined; attribute name: "
+                + name, 400);
+    }
+
+    static AwsException undefinedValue(String exprType, String value) {
+        return new AwsException("ValidationException", "Invalid " + exprType
+                + ": An expression attribute value used in expression is not defined; attribute value: "
+                + value, 400);
     }
 
     // A pair of parentheses is redundant when its entire content is itself a single
@@ -475,13 +489,16 @@ final class ExpressionEvaluator {
     private static final Map<TokenType, String> ORDERING_OPERATORS = Map.of(
             TokenType.LT, "<", TokenType.LE, "<=", TokenType.GT, ">", TokenType.GE, ">=");
 
-    private static void validateSemantics(Expr expr, String exprType,
-                                          JsonNode names, JsonNode values) {
+    private static void validateSemantics(Expr expr, String exprType, JsonNode names, JsonNode values,
+                                          boolean requireDefined) {
         if (expr == null) return;
+        if (requireDefined) {
+            conditionOperands(expr).forEach(operand -> requireDefined(operand, exprType, names, values));
+        }
         switch (expr) {
-            case AndExpr a -> a.operands().forEach(o -> validateSemantics(o, exprType, names, values));
-            case OrExpr o -> o.operands().forEach(x -> validateSemantics(x, exprType, names, values));
-            case NotExpr n -> validateSemantics(n.operand(), exprType, names, values);
+            case AndExpr a -> a.operands().forEach(o -> validateSemantics(o, exprType, names, values, requireDefined));
+            case OrExpr o -> o.operands().forEach(x -> validateSemantics(x, exprType, names, values, requireDefined));
+            case NotExpr n -> validateSemantics(n.operand(), exprType, names, values, requireDefined);
             case FunctionCallExpr f -> validateFunction(f, exprType, names, values);
             case CompareExpr c when ORDERING_OPERATORS.containsKey(c.op()) ->
                     requireOrderedOperands(ORDERING_OPERATORS.get(c.op()), exprType, values, c.left(), c.right());
@@ -490,6 +507,40 @@ final class ExpressionEvaluator {
                 validateBetween(b, exprType, values);
             }
             default -> {}
+        }
+    }
+
+    private static List<Operand> conditionOperands(Expr condition) {
+        return switch (condition) {
+            case CompareExpr c -> List.of(c.left(), c.right());
+            case BetweenExpr b -> List.of(b.value(), b.low(), b.high());
+            case InExpr in -> {
+                List<Operand> operands = new ArrayList<>();
+                operands.add(in.value());
+                operands.addAll(in.candidates());
+                yield operands;
+            }
+            case FunctionCallExpr f -> f.args();
+            default -> List.of();
+        };
+    }
+
+    private static void requireDefined(Operand operand, String exprType, JsonNode names, JsonNode values) {
+        switch (operand) {
+            case PathOperand path -> {
+                for (String segment : path.segments()) {
+                    if (segment.startsWith("#") && (names == null || !names.has(segment))) {
+                        throw undefinedName(exprType, segment);
+                    }
+                }
+            }
+            case PlaceholderOperand placeholder -> {
+                if (values == null || !values.has(placeholder.name())) {
+                    throw undefinedValue(exprType, placeholder.name());
+                }
+            }
+            case FunctionOperand function ->
+                    function.args().forEach(arg -> requireDefined(arg, exprType, names, values));
         }
     }
 
