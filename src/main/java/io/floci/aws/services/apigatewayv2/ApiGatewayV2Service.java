@@ -923,6 +923,18 @@ public class ApiGatewayV2Service {
     }
 
     /**
+     * Sets the integration subtype exactly as given, null included. UpdateIntegration keeps a field
+     * the request leaves out, so it cannot remove a subtype that CloudFormation dropped.
+     */
+    public Integration replaceIntegrationSubtype(String region, String apiId, String integrationId,
+                                                 String integrationSubtype) {
+        Integration integration = getIntegration(region, apiId, integrationId);
+        integration.setIntegrationSubtype(integrationSubtype);
+        integrationStore.put(integrationKey(region, apiId, integrationId), integration);
+        return integration;
+    }
+
+    /**
      * Sets the connection type and id exactly as given, null included. UpdateIntegration keeps a
      * field the request leaves out, so it cannot remove a connection that CloudFormation dropped.
      */
