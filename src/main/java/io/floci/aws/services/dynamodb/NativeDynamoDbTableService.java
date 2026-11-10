@@ -144,11 +144,7 @@ public class NativeDynamoDbTableService {
 
         table.setDeletionProtectionEnabled(Boolean.TRUE.equals(settings.deletionProtectionEnabled()));
 
-        if ("PAY_PER_REQUEST".equals(billingMode)) {
-            table.setBillingMode("PAY_PER_REQUEST");
-            table.getProvisionedThroughput().setReadCapacityUnits(0L);
-            table.getProvisionedThroughput().setWriteCapacityUnits(0L);
-        } else {
+        if (!"PAY_PER_REQUEST".equals(billingMode)) {
             table.setBillingMode("PROVISIONED");
         }
 

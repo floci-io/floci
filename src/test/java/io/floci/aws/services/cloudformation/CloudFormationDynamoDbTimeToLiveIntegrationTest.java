@@ -93,6 +93,11 @@ class CloudFormationDynamoDbTimeToLiveIntegrationTest {
 
         cloudFormation(stack, "CreateStack", TEMPLATE.formatted(table, "dev", TTL_ENABLED, ""));
         assertEquals("CREATE_COMPLETE", CfnStackWaits.awaitTerminal(stack, CFN_AUTH).status());
+        dynamoDb("DescribeTable", "{\"TableName\": \"" + table + "\"}")
+            .statusCode(200)
+            .body("Table.BillingModeSummary.BillingMode", equalTo("PAY_PER_REQUEST"))
+            .body("Table.ProvisionedThroughput.ReadCapacityUnits", equalTo(0))
+            .body("Table.ProvisionedThroughput.WriteCapacityUnits", equalTo(0));
         describeTimeToLive(table)
             .body("TimeToLiveDescription.TimeToLiveStatus", equalTo("ENABLED"))
             .body("TimeToLiveDescription.AttributeName", equalTo("expiresAt"));

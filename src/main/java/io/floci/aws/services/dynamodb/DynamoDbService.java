@@ -635,7 +635,11 @@ public class DynamoDbService {
 
         TableDefinition table = new TableDefinition(tableName, keySchema, attributeDefinitions,
                 region, regionResolver.getAccountId());
-        if (readCapacity != null && writeCapacity != null) {
+        if ("PAY_PER_REQUEST".equals(billingMode)) {
+            table.setBillingMode(billingMode);
+            table.getProvisionedThroughput().setReadCapacityUnits(0L);
+            table.getProvisionedThroughput().setWriteCapacityUnits(0L);
+        } else if (readCapacity != null && writeCapacity != null) {
             table.getProvisionedThroughput().setReadCapacityUnits(readCapacity);
             table.getProvisionedThroughput().setWriteCapacityUnits(writeCapacity);
         }
