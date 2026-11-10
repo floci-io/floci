@@ -103,6 +103,13 @@ class EmrReleaseImagesTest {
     }
 
     @Test
+    void theTezUisConfigurationStaysBehindAsEmr6140sHiveImageHasNone() {
+        // Copying a path the Hive image lacks fails making the image, and every step of the release's clusters with
+        // Hive with it. Only a served Tez UI reads this one, and nothing serves it.
+        assertTrue(EmrReleaseImages.COPIES.stream().noneMatch(copy -> copy.from().startsWith("/etc/tez-ui")));
+    }
+
+    @Test
     void theHiveImagesHadoopConfigurationGoesWhereHiveRunsWithIt() {
         assertTrue(EmrReleaseImages.COPIES.contains(new EmrReleaseImages.Copy("/etc/hadoop/conf", "/etc/hadoop",
                 "conf.hive")));
