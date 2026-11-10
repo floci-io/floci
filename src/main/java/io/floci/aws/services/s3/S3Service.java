@@ -15,6 +15,8 @@ import io.floci.aws.core.common.AwsRegions;
 import io.floci.aws.core.common.Base64Url;
 import io.floci.aws.core.common.Digests;
 import io.floci.aws.core.common.FileTrees;
+import io.floci.aws.core.common.PaginatedResult;
+import io.floci.aws.core.common.Pagination;
 import io.floci.aws.core.common.RegionResolver;
 import io.floci.aws.core.common.RequestScopes;
 import io.floci.aws.core.common.Resettable;
@@ -104,6 +106,8 @@ import java.util.stream.Stream;
 
 @ApplicationScoped
 public class S3Service implements Resettable, ResourceProvider {
+    private static final int MAX_LIST_BUCKETS = 10000;
+
     private String ownerId() {
         if (regionResolver != null) {
             return regionResolver.getAccountId();
@@ -618,6 +622,17 @@ public class S3Service implements Resettable, ResourceProvider {
         return bucketStore.scan(key -> true).stream()
                 .filter(bucket -> !isScratchBucket(bucket))
                 .toList();
+    }
+
+    public PaginatedResult<Bucket> listBuckets(Integer maxBuckets, String continuationToken) {
+        if (maxBuckets != null && (maxBuckets < 1 || maxBuckets > MAX_LIST_BUCKETS)) {
+            throw new AwsException("InvalidArgument",
+                    "max-buckets must be between 1 and " + MAX_LIST_BUCKETS + ".", 400);
+        }
+        return Pagination.paginate(listBuckets(), Bucket::getName,
+                maxBuckets == null ? MAX_LIST_BUCKETS : maxBuckets, continuationToken,
+                "buckets:" + ownerId(),
+                token -> new AwsException("InvalidArgument", "The continuation token provided is incorrect.", 400));
     }
 
     private static boolean isScratchBucket(Bucket bucket) {

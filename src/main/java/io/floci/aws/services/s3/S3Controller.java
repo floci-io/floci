@@ -12,6 +12,8 @@ import io.floci.aws.core.common.AwsRegions;
 import io.floci.aws.core.common.Digests;
 import io.floci.aws.core.common.IamEnforcementFilter;
 import io.floci.aws.core.common.MultipartFormParser;
+import io.floci.aws.core.common.PaginatedResult;
+import io.floci.aws.core.common.Pagination;
 import io.floci.aws.core.common.RegionResolver;
 import io.floci.aws.core.common.RequestContext;
 import io.floci.aws.core.common.XmlBuilder;
@@ -260,7 +262,9 @@ public class S3Controller {
         try {
             boolean includeRegion = List.of("bucket-region", "continuation-token", "max-buckets", "prefix")
                     .stream().anyMatch(queryParams::containsKey);
-            List<Bucket> buckets = s3Service.listBuckets();
+            PaginatedResult<Bucket> page = s3Service.listBuckets(
+                    Pagination.parseMaxResults(queryParams.getFirst("max-buckets"), "InvalidArgument"),
+                    queryParams.getFirst("continuation-token"));
             XmlBuilder xml = new XmlBuilder()
                     .raw("<?xml version=\"1.0\" encoding=\"UTF-8\"?>")
                     .start("ListAllMyBucketsResult", AwsNamespaces.S3)
@@ -269,7 +273,7 @@ public class S3Controller {
                     .elem("DisplayName", S3Service.DEFAULT_OWNER_DISPLAY_NAME)
                     .end("Owner")
                     .start("Buckets");
-            for (Bucket b : buckets) {
+            for (Bucket b : page.items()) {
                 xml.start("Bucket")
                    .elem("Name", b.getName())
                    .elem("CreationDate", ISO_FORMAT.format(b.getCreationDate()));
@@ -279,7 +283,11 @@ public class S3Controller {
                 }
                 xml.end("Bucket");
             }
-            xml.end("Buckets").end("ListAllMyBucketsResult");
+            xml.end("Buckets");
+            if (page.nextToken() != null) {
+                xml.elem("ContinuationToken", page.nextToken());
+            }
+            xml.end("ListAllMyBucketsResult");
             return Response.ok(xml.build()).type(MediaType.APPLICATION_XML).build();
         } catch (AwsException e) {
             return xmlErrorResponse(e);
