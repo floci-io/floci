@@ -573,6 +573,8 @@ class RedshiftInterceptingBridgeTest {
         assertEquals('n', response.read());
         skipFrameBody(response);
         Mockito.verify(preparation, Mockito.never()).prepare(Mockito.anyString(), Mockito.any(), Mockito.any());
+        Mockito.verify(preparation, Mockito.never()).prepare(Mockito.anyString(), Mockito.any(), Mockito.any(),
+                Mockito.any());
         Mockito.verify(interceptor, Mockito.never()).execute(Mockito.any(), Mockito.anyString(), Mockito.anyString(), Mockito.any());
     }
 

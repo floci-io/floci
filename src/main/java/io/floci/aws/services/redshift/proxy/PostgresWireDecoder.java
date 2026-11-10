@@ -147,23 +147,26 @@ public class PostgresWireDecoder {
     /** Decode the leading names of a Bind ({@code 'B'}) message body. */
     public BindMessage decodeBind(FrontendMessage message) throws IOException {
         BodyCursor cursor = cursorFor(message, 'B');
-        String portalName = cursor.readCString();
-        String statementName = cursor.readCString();
-        List<String> parameterValues;
-        try {
-            parameterValues = readBindParameters(cursor);
-        } catch (IOException expected) {
-            // Only pruning reads the values and treats an absent one as unknown; the backend still gets the
-            // original frame and reports a malformed Bind itself, so it must not fail here.
-            parameterValues = List.of();
-        }
-        return new BindMessage(portalName, statementName, parameterValues);
+        return new BindMessage(cursor.readCString(), cursor.readCString());
     }
 
     /**
      * Text-format values of a Bind's parameters, by position. A NULL or a binary-format value is null: the
-     * caller cannot read it as a literal.
+     * caller cannot read it as a literal. Only a statement that prunes needs them, so they are read apart from
+     * {@link #decodeBind}. A malformed section gives an empty list: the backend still gets the original frame
+     * and reports a malformed Bind itself, so it must not fail here.
      */
+    public List<String> decodeBindParameters(FrontendMessage message) throws IOException {
+        BodyCursor cursor = cursorFor(message, 'B');
+        cursor.readCString();
+        cursor.readCString();
+        try {
+            return readBindParameters(cursor);
+        } catch (IOException expected) {
+            return List.of();
+        }
+    }
+
     private static List<String> readBindParameters(BodyCursor cursor) throws IOException {
         int formatCount = cursor.readInt16();
         int[] formats = new int[formatCount];
@@ -182,10 +185,14 @@ public class PostgresWireDecoder {
                 values.add(null);
                 continue;
             }
-            byte[] raw = cursor.readBytes(length);
             // zero format codes mean every parameter is text, one applies to all, otherwise one per parameter
             int format = formatCount == 0 ? 0 : formatCount == 1 ? formats[0] : formats[i];
-            values.add(format == 0 ? new String(raw, StandardCharsets.UTF_8) : null);
+            if (format == 0) {
+                values.add(new String(cursor.readBytes(length), StandardCharsets.UTF_8));
+            } else {
+                cursor.skip(length);
+                values.add(null);
+            }
         }
         return values;
     }
@@ -301,6 +308,11 @@ public class PostgresWireDecoder {
             return value;
         }
 
+        private void skip(int count) throws IOException {
+            requireRemaining(count);
+            offset += count;
+        }
+
         private byte[] readBytes(int count) throws IOException {
             requireRemaining(count);
             byte[] value = Arrays.copyOfRange(body, offset, offset + count);
@@ -367,8 +379,7 @@ public class PostgresWireDecoder {
     public record ParseMessage(String statementName, String sql, List<Integer> parameterTypeOids) {
     }
 
-    /** {@code parameterValues} holds the text of each parameter, or null where it is NULL or not text format. */
-    public record BindMessage(String portalName, String statementName, List<String> parameterValues) {
+    public record BindMessage(String portalName, String statementName) {
     }
 
     public record ExecuteMessage(String portalName, int maxRows) {

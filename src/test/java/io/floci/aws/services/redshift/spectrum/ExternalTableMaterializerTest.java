@@ -53,6 +53,7 @@ import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.ArgumentMatchers.isNull;
 import static org.mockito.ArgumentMatchers.notNull;
 import static org.mockito.ArgumentMatchers.startsWith;
+import static org.mockito.Mockito.clearInvocations;
 import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.mock;
@@ -1345,9 +1346,30 @@ class ExternalTableMaterializerTest {
         materializer.ensureCurrent(extended, session(false), BINDING, "events",
                 "SELECT * FROM analytics.events WHERE n = $1", null);
 
-        List<String> added = extended.statements.subList(loaded, extended.statements.size());
-        assertThat(added.stream().noneMatch(sql -> sql.contains("TRUNCATE")), equalTo(true));
-        assertThat(added.stream().anyMatch(sql -> sql.contains("DELETE FROM")), equalTo(true));
+        assertThat(extended.statements.size(), equalTo(loaded));
+    }
+
+    @Test
+    void aBindAfterAParseThatSawAGluePartitionRemovedStillReadsTheRetainedOverlappingPartitions() {
+        Table table = dayPartitionedTable();
+        table.setPartitionKeys(List.of(new Column("n", "int")));
+        Partition one = dayPartition(table, "1", "one/", "e1");
+        Partition paddedOne = dayPartition(table, "01", "padded/", "e2");
+        Partition zeroPaddedOne = dayPartition(table, "001", "zero-padded/", "e3");
+        when(glue.getPartitions("lake", "events")).thenReturn(List.of(one, paddedOne, zeroPaddedOne));
+        RecordingBackend extended = extendedBackend("connection-1");
+        materializer.ensureCurrent(extended, session(false), BINDING, "events",
+                "SELECT * FROM analytics.events WHERE n = 1");
+        when(glue.getPartitions("lake", "events")).thenReturn(List.of(one, paddedOne));
+        String sql = "SELECT * FROM analytics.events WHERE n = $1";
+        materializer.ensureCurrent(extended, session(false), BINDING, "events", sql, null);
+        clearInvocations(duck);
+
+        materializer.ensureCurrent(extended, session(false), BINDING, "events", sql, List.of("1"));
+
+        verify(duck).execute(argThat(load -> load.contains("s3://bucket/one/part-1.csv")
+                && load.contains("s3://bucket/padded/part-1.csv")
+                && !load.contains("s3://bucket/zero-padded/")), any(), anyString(), eq(ACCOUNT));
     }
 
     @Test

@@ -388,6 +388,11 @@ public class ExternalTableMaterializer {
                 previousSignature = schemaSignatures.get(cacheKey);
             }
             boolean reset = state == null || !state.identity().equals(identity) || !definitions.equals(previousSignature);
+            if (awaitingValues && !reset) {
+                // a statement still being parsed loads nothing; its Bind reconciles the table, because a delete by
+                // key value here could remove rows of partitions that stay recorded as loaded
+                return Outcome.CURRENT;
+            }
             Map<List<String>, String> held = reset ? Map.of() : state.partitions();
             Set<List<String>> existing = partitions.stream().map(Partition::getValues).collect(Collectors.toSet());
             List<List<String>> deletions = new ArrayList<>(held.keySet().stream()
@@ -406,8 +411,7 @@ public class ExternalTableMaterializer {
                     loaded.put(values, fingerprint);
                 }
             }
-            // a statement still being parsed loads nothing, so it must not empty a table others have loaded
-            if (overlapping && !awaitingValues && !reset && (!deletions.isEmpty() || !toLoad.isEmpty())) {
+            if (overlapping && !reset &&(!deletions.isEmpty() || !toLoad.isEmpty())) {
                 // a delete by key value cannot tell overlapping partitions apart, so the whole table is replaced
                 reset = true;
                 toLoad.clear();

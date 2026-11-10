@@ -48,7 +48,6 @@ class PostgresWireDecoderTest {
 
         assertEquals("portal-1", bind.portalName());
         assertEquals("stmt-1", bind.statementName());
-        assertEquals(List.of(), bind.parameterValues());
     }
 
     @Test
@@ -61,7 +60,7 @@ class PostgresWireDecoderTest {
                 int32(-1),
                 int16(0));
 
-        assertEquals(Arrays.asList("abc", null, null), decodeBind(body).parameterValues());
+        assertEquals(Arrays.asList("abc", null, null), parameters(body));
     }
 
     @Test
@@ -72,18 +71,16 @@ class PostgresWireDecoderTest {
                 int32(1), "a".getBytes(StandardCharsets.UTF_8),
                 int32(1), "b".getBytes(StandardCharsets.UTF_8), int16(0));
 
-        assertEquals(Collections.singletonList((String) null), decodeBind(binary).parameterValues());
-        assertEquals(List.of("a", "b"), decodeBind(text).parameterValues());
+        assertEquals(Collections.singletonList((String) null), parameters(binary));
+        assertEquals(List.of("a", "b"), parameters(text));
     }
 
     @Test
     void aMalformedBindParameterSectionLeavesTheValuesUnknownWithoutFailing() throws IOException {
         byte[] body = concat(cString("p"), cString("s"), int16(0), int16(1), int32(9), new byte[]{1});
 
-        PostgresWireDecoder.BindMessage bind = decodeBind(body);
-
-        assertEquals("s", bind.statementName());
-        assertEquals(List.of(), bind.parameterValues());
+        assertEquals(List.of(), parameters(body));
+        assertEquals("s", decodeBind(body).statementName());
     }
 
     @Test
@@ -93,7 +90,7 @@ class PostgresWireDecoderTest {
                 int32(1), "b".getBytes(StandardCharsets.UTF_8),
                 int32(1), "c".getBytes(StandardCharsets.UTF_8), int16(0));
 
-        assertEquals(List.of(), decodeBind(body).parameterValues());
+        assertEquals(List.of(), parameters(body));
     }
 
     @Test
@@ -102,7 +99,12 @@ class PostgresWireDecoderTest {
                 int32(1), "a".getBytes(StandardCharsets.UTF_8),
                 int32(1), new byte[]{9}, int16(0));
 
-        assertEquals(Arrays.asList("a", null), decodeBind(body).parameterValues());
+        assertEquals(Arrays.asList("a", null), parameters(body));
+    }
+
+    private static List<String> parameters(byte[] body) throws IOException {
+        PostgresWireDecoder decoder = new PostgresWireDecoder(new ByteArrayInputStream(frame('B', body)));
+        return decoder.decodeBindParameters(decoder.nextMessage());
     }
 
     private static PostgresWireDecoder.BindMessage decodeBind(byte[] body) throws IOException {
