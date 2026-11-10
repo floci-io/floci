@@ -17,7 +17,7 @@ import java.net.URI;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 
-/** Compatibility of generated Identifier inference with signed permission and missing-resource errors. */
+/** Existing direct-ARN fallback with signed permission and missing-resource errors, independent of model inference. */
 @QuarkusTest
 @TestProfile(SignedIamEnforcementProfile.class)
 class RedshiftIdentifierArnPolicyIntegrationTest {
@@ -36,7 +36,7 @@ class RedshiftIdentifierArnPolicyIntegrationTest {
             "describe, denyLocal, 404", "delete, denyLocal, 404",
             "describe, full, 404", "delete, full, 404",
             "describe, name, 404", "delete, name, 404"})
-    void inferredIdentifierPreservesPolicyResourceAndHandlerPrecedence(String operation, String policyKind,
+    void directArnFallbackPreservesPolicyResourceAndHandlerPrecedence(String operation, String policyKind,
                                                                       int status) throws Exception {
         String resource = switch (policyKind) {
             case "raw" -> RAW;

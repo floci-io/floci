@@ -53,7 +53,7 @@ final class RequestResourceMembers {
     /** The one id a child type's format appends to its parent's. */
     private static final Pattern APPENDED_ID = Pattern.compile("[/:]\\$\\{\\w+}");
     /** The keys a resource found by members does not take: it is read no other way, in the caller's account. */
-    private static final List<String> FOUND_ONLY = List.of("absent", "arnOf", "preserveArnContext", "account", "fixed", "before");
+    private static final List<String> FOUND_ONLY = List.of("absent", "arnOf", "account", "fixed", "before");
     /** The keys of a resource named through a member naming another of its service's own: it is read no other way. */
     private static final Set<String> THROUGH_KEYS = Set.of("types", "through", "when", "endpoint");
 
@@ -138,9 +138,8 @@ final class RequestResourceMembers {
      * ARN's account and Region, or the caller's and the request's where the ARN leaves them empty. A member filling
      * a variable may be a field of each of a list's structures ({@code Entries[].EventBusName}), which names one
      * resource for each structure, read as {@code absent} gives for one that lacks it and in the account and Region
-     * of the ARN that structure gives, if any. Inferred single-variable identifiers in {@code preserveArnContext}
-     * instead retain a direct ARN's empty account and Region, as the pre-inference fallback does. Such a member is
-     * in {@code absent} or {@code arnOf} only when it fills a variable. A member filling a variable may also be a field of a structure ({@code pipeline.name}). A
+     * of the ARN that structure gives, if any. Such a member is in {@code absent} or {@code arnOf} only when it
+     * fills a variable. A member filling a variable may also be a field of a structure ({@code pipeline.name}). A
      * variable no member gives may be {@code fixed} to the one value its handler uses (a CodePipeline custom action
      * type's owner, {@code Custom}). A member's value, an ARN or a variable's, is read up to the character
      * {@code before}, when there is one: Step Functions Local's handler drops a test case after {@code #}, and a
@@ -160,15 +159,7 @@ final class RequestResourceMembers {
     record Resource(List<String> types, Member arn, Map<String, Member> fill, Map<String, List<String>> when,
                     Map<String, List<String>> unless, Map<String, String> absent, Map<String, String> arnOf,
                     Member account, String before, Map<String, String> fixed, boolean made, List<Member> find,
-                    String endpoint, Member through, List<String> preserveArnContext) {
-
-        Resource(List<String> types, Member arn, Map<String, Member> fill, Map<String, List<String>> when,
-                 Map<String, List<String>> unless, Map<String, String> absent, Map<String, String> arnOf,
-                 Member account, String before, Map<String, String> fixed, boolean made, List<Member> find,
-                 String endpoint, Member through) {
-            this(types, arn, fill, when, unless, absent, arnOf, account, before, fixed, made, find, endpoint, through,
-                    List.of());
-        }
+                    String endpoint, Member through) {
 
         Resource(List<String> types, Member arn, Map<String, Member> fill, Map<String, List<String>> when,
                  Map<String, List<String>> unless, Map<String, String> absent, Map<String, String> arnOf,
@@ -424,21 +415,13 @@ final class RequestResourceMembers {
             }
             arnOf.put(member.getKey(), member.getValue().asText());
         });
-        JsonNode preserved = resource.path("preserveArnContext");
-        if (!preserved.isMissingNode() && (!preserved.isArray() || preserved.valueStream().anyMatch(member ->
-                !member.isTextual() || !type.equals(arnOf.get(member.asText()))
-                        || fill.size() != 1 || !filled.contains(member.asText())))) {
-            throw new IllegalStateException(RESOURCE_NAME + " preserves ARN context for " + operation
-                    + " outside a sole member naming this resource's ARN");
-        }
-        List<String> preserveArnContext = preserved.valueStream().map(JsonNode::asText).toList();
         Member account = resource.has("account") ? member(operation, resource.path("account").asText("")) : null;
         if (account != null && (account.list() || !format.format().contains("${Account}"))) {
             throw new IllegalStateException(RESOURCE_NAME + " takes " + type + "'s account for " + operation
                     + " from " + account.name() + ", no member of one account or a type of none");
         }
         return new Resource(List.of(type), null, Map.copyOf(fill), when, unless, Map.copyOf(absent), Map.copyOf(arnOf),
-                account, before, Map.copyOf(fixed), made, List.copyOf(find), endpoint, null, preserveArnContext);
+                account, before, Map.copyOf(fixed), made, List.copyOf(find), endpoint, null);
     }
 
     /** The values each member named in {@code when} or {@code unless} may have, an empty one for the member absent. */

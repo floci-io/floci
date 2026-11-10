@@ -489,8 +489,7 @@ public final class RequestResources {
             RequestResourceMembers.ArnFormat named = arnOf(resource, variable.getValue().path(), formats);
             if (resource.fill().size() == 1 && fromRequest == null) {
                 List<String> asArns = values.stream()
-                        .filter(value -> (!isArnOf(named, value)
-                                || resource.preserveArnContext().contains(variable.getValue().path()))
+                        .filter(value -> !isArnOf(named, value)
                                 && format.pattern().matcher(value).matches()).toList();
                 asArns.forEach(value -> addNamed(arns, format.checked(value), format.awsOwned(), partition, region,
                         accountId));

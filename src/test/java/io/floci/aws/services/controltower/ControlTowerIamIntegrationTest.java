@@ -1,5 +1,6 @@
 package io.floci.aws.services.controltower;
 
+import io.floci.aws.core.common.AwsArnUtils;
 import io.floci.aws.testing.AwsTestClients;
 import io.floci.aws.testing.SignedIamEnforcementProfile;
 import io.floci.aws.testing.SignedIamUsers;
@@ -33,7 +34,7 @@ class ControlTowerIamIntegrationTest {
     void inferredLandingZoneArnKeepsMissingContextWithoutNamingTheSeededZone() throws Exception {
         try (ControlTowerClient admin = client("test", "test")) {
             String arn = admin.listLandingZones(ListLandingZonesRequest.builder().build()).landingZones().getFirst().arn();
-            String raw = "arn:aws:controltower:::landingzone/" + arn.substring(arn.lastIndexOf('/') + 1);
+            String raw = "arn:aws:controltower:::landingzone/" + AwsArnUtils.parse(arn).resource().substring("landingzone/".length());
             try (SignedIamUsers.User user = user("Allow", "controltower:*", raw);
                  ControlTowerClient caller = client(user.accessKeyId(), user.secretAccessKey())) {
                 assertEquals(404, assertThrows(ControlTowerException.class,
@@ -58,7 +59,7 @@ class ControlTowerIamIntegrationTest {
                  ControlTowerClient caller = client(user.accessKeyId(), user.secretAccessKey())) {
                 assertEquals(arn, caller.getLandingZone(r -> r.landingZoneIdentifier(arn)).landingZone().arn());
                 assertEquals(arn, caller.getLandingZone(r -> r.landingZoneIdentifier(
-                        arn.substring(arn.lastIndexOf('/') + 1))).landingZone().arn());
+                        AwsArnUtils.parse(arn).resource().substring("landingzone/".length()))).landingZone().arn());
                 denied(() -> caller.getLandingZone(r -> r.landingZoneIdentifier("different")));
             }
         }
@@ -138,7 +139,9 @@ class ControlTowerIamIntegrationTest {
         try (SignedIamUsers.User user = user("Allow", "controltower:EnableControl", enabled);
              ControlTowerClient caller = client(user.accessKeyId(), user.secretAccessKey())) {
             String arn = caller.enableControl(r -> r.controlIdentifier(catalog).targetIdentifier(target)).arn();
-            assertEquals(enabled.substring(0, enabled.length() - 1), arn.substring(0, arn.lastIndexOf('/') + 1));
+            AwsArnUtils.Arn parsed = AwsArnUtils.parse(arn);
+            assertEquals(enabled.substring(0, enabled.length() - 1), new AwsArnUtils.Arn(parsed.partition(),
+                    parsed.service(), parsed.region(), parsed.accountId(), "enabledcontrol/").toString());
         }
     }
 

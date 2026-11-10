@@ -925,7 +925,7 @@ class RequestResourcesTest {
     }
 
     @Test
-    void modelOnlyArnMembersAreFilteredByTheActionsResourceTypes() {
+    void identifierInferenceDoesNotAuthorizeUnrelatedArnPatternMembers() {
         String prefix = "arn:aws:";
         assertEquals(List.of(prefix + "athena:us-east-1:000000000000:workgroup/team"), of("athena:StartSession",
                 json("{\"WorkGroup\":\"team\",\"ExecutionRole\":\"arn:aws:iam::000000000000:role/runner\"}")));
@@ -943,11 +943,11 @@ class RequestResourcesTest {
         String application = prefix + "sso::000000000000:application/ssoins-1234567890123456/apl-1234567890123456";
         assertEquals(List.of(application), of("sso:PutApplicationAccessScope",
                 json("{\"ApplicationArn\":\"" + application + "\",\"AuthorizedTargets\":["
-                        + "\"arn:aws:sso:::instance/ssoins-1234567890123456\"]}")));
+                        + "\"arn:aws:sso::000000000000:application/ssoins-1234567890123456/apl-9999999999999999\"]}")));
     }
 
     @Test
-    void inferredIdentifierArnsPreserveExistingSingleVariableResolution() {
+    void directArnsPreserveExistingSingleVariableResolution() {
         String prefix = "arn:aws:redshift:us-east-1:000000000000:cluster:";
         String foreign = "arn:aws:redshift:us-west-2:222222222222:cluster:other";
         for (String action : List.of("CreateCluster", "DeleteCluster", "DescribeClusters")) {

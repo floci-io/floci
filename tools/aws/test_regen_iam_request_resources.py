@@ -943,39 +943,44 @@ def test_arn_only_identifier_never_fills_a_different_resource_id():
                       {"type": "EnabledControl", "fill": {}}]
 
 
-def test_arn_only_pattern_recognition_does_not_depend_on_member_spelling():
+def test_explicit_arn_member_set_is_respected_by_resource_mapping():
     formats = {"pool": "arn:${Partition}:svc:${Region}:${Account}:pool/${PoolId}"}
     assert r.resources_for("svc:ReadPool", ["pool"], formats,
                            {"opaqueReference": "opaqueReference"}, {"opaqueReference"}) == [
         {"types": ["pool"], "arn": "opaqueReference"}]
 
 
-def test_explicit_name_key_arn_conversion_is_preserved():
-    formats = {"pool": "arn:${Partition}:svc:${Region}:${Account}:pool/${PoolName}"}
-    resource = {"type": "pool", "fill": {"PoolName": "PoolIdentifier"},
-                "arnOf": {"PoolIdentifier": "pool"}}
-    assert r.with_identifier_arns([resource], formats, {"PoolIdentifier": {None}}) == [resource]
 
-
-def test_inferred_identifier_arn_does_not_replace_explicit_metadata():
+@pytest.mark.parametrize("member", ["opaqueReference", "targetApplicationArn", "applicationArn"])
+def test_arn_pattern_does_not_turn_unrelated_members_into_identifiers(member):
+    model = {
+        "metadata": {"protocol": "json", "endpointPrefix": "svc"},
+        "operations": {"ReadPool": {"input": {"shape": "Input"}}},
+        "shapes": {"Input": {"type": "structure", "members": {member: {"shape": "Value"}}},
+                   "Value": {"type": "string", "pattern": "arn:.*"}},
+    }
     formats = {"pool": "arn:${Partition}:svc:${Region}:${Account}:pool/${PoolId}"}
-    resource = {"type": "pool", "fill": {"PoolId": "PoolIdentifier"},
-                "arnOf": {"PoolIdentifier": "parent"}}
-    assert r.with_identifier_arns([resource], formats, {"PoolIdentifier": {None}}) == [resource]
+    entry = r.entry_for("svc:ReadPool", {"action": "svc:ReadPool", "types": ["pool"]}, formats, {"svc": model})
+    assert entry["resources"] == r.resources_for("svc:ReadPool", ["pool"], formats, {member: member})
 
 
-def test_inferred_identifier_preserves_direct_arn_context_without_marking_explicit_metadata():
-    formats = {"pool": "arn:${Partition}:svc:${Region}:${Account}:pool/${PoolId}"}
-    resource = {"type": "pool", "fill": {"PoolId": "PoolIdentifier"}}
-    assert r.with_identifier_arns([resource], formats, {"PoolIdentifier": {None}}) == [
-        dict(resource, arnOf={"PoolIdentifier": "pool"}, preserveArnContext=["PoolIdentifier"])]
-    explicit = dict(resource, arnOf={"PoolIdentifier": "pool"})
-    assert r.with_identifier_arns([explicit], formats, {"PoolIdentifier": {None}}) == [explicit]
-
-
-@pytest.mark.parametrize("preserved", [None, "Bus", ["Unknown"], [17]])
-def test_preserved_arn_context_requires_a_sole_matching_arn_member(preserved):
+def test_no_inferred_identifier_metadata_or_withdrawn_redshift_rows():
     document = json.loads(r.OUTPUT.read_text())
+    assert "preserveArnContext" not in r.OUTPUT.read_text()
     resource = document["operations"]["redshift:DescribeClusters"]["resources"][0]
-    resource["preserveArnContext"] = preserved
-    assert r.validate(document)
+    assert "arnOf" not in resource
+    assert "redshift:CreateCluster" not in r.CORRECTIONS
+    assert "redshift:AssociateDataShareConsumer" not in r.CORRECTIONS
+
+
+def test_sso_access_scope_does_not_authorize_target_applications():
+    from regen_partitions import resolve_botocore_data
+
+    document = json.loads(r.OUTPUT.read_text())
+    data, _ = resolve_botocore_data(None)
+    operation = "sso:PutApplicationAccessScope"
+    entry = document["operations"][operation]
+    models = r.load_models(data, set(document["namespaces"]["sso"]))
+    derived = r.entry_for(operation, {"action": entry["action"], "types": entry["types"]},
+                          document["arnFormats"]["sso"], models)
+    assert derived["resources"] == [{"types": ["Application"], "arn": "ApplicationArn"}]

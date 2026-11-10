@@ -22,8 +22,8 @@ on, the request names a resource when one of its top-level members holds a strin
 strings, or, for an ARN, a member of a structure or of each element of a list of structures does
 (`SetRulePriorities`' `RulePriorities[].RuleArn`), and:
 
-- holds the resource's ARN: its name ends in `Arn` or `Arns`, or its modeled pattern only accepts an ARN,
-  regardless of the member's name. Any of the action's types may be the
+- holds the resource's ARN: its name ends in `Arn` or `Arns`, or it is an Identifier whose modeled
+  pattern only accepts an ARN. Any of the action's types may be the
   one it holds (`ResourceArn` holds whatever the action acts on, `RuleArn` a `listener-rule/app`),
   and a value names a resource of a type when it matches the type's ARN format, so an ARN of
   something the action does not act on is not checked.
@@ -45,10 +45,7 @@ acts in, so `repository/<name>` is that account's. A member whose shape's patter
 the name (`(arn:...:event-bus/)?<name>`) may give the ARN of the type of that name instead, whose one
 variable it is then read as, in the ARN's account and Region: EventBridge's `EventBusName`. So may a
 field of each element of a list of structures, each element's resource in the account and Region of
-the ARN it gives: `PutEvents`' `Entries[].EventBusName`. An unpatterned Identifier may also fill a type's
-sole variable from an ARN. Its inferred `preserveArnContext` retains the reader's direct-ARN fallback,
-including empty account and Region. Explicit `arnOf` corrections retain their existing defaults.
-A format whose account the reference names
+the ARN it gives: `PutEvents`' `Entries[].EventBusName`. A format whose account the reference names
 `${AccountId}` rather than `${Account}` (DataSync's) is read as every other format's account.
 
 An operation that creates a type its action does not act on names the new resource from the ARN of the
@@ -584,40 +581,6 @@ CORRECTIONS: dict[str, tuple[list[dict], str]] = {
                                  "Name (ARN) to which you want to add the tag or tags'), whose name does not end in "
                                  "Arn")
        for operation in ("CreateTags", "DeleteTags", "DescribeTags")},
-    **{f"redshift:{operation}": ([{"type": kind, "fill": fill}], f"{why}, never a {kind}'s")
-       for operation, kind, fill, why in (
-           ("CreateCluster", "cluster", {"ClusterName": "ClusterIdentifier"},
-            "its DefaultIamRoleArn is an IAM role's ARN and its RedshiftIdcApplicationArn an IAM Identity Center "
-            "application's"),
-           ("CreateCustomDomainAssociation", "cluster", {"ClusterName": "ClusterIdentifier"},
-            "its CustomDomainCertificateArn is an ACM certificate's ARN"),
-           ("CreateEventSubscription", "eventsubscription", {"EventSubscriptionName": "SubscriptionName"},
-            "its SnsTopicArn is an SNS topic's ARN"),
-           ("CreateIntegration", "integration", {},
-            "its SourceArn is the source database's ARN and its TargetArn the target data warehouse's"),
-           ("DescribeClusterSnapshots", "cluster", {"ClusterName": "ClusterIdentifier"},
-            "its SnapshotArn is a snapshot's ARN"),
-           ("DescribeNodeConfigurationOptions", "cluster", {"ClusterName": "ClusterIdentifier"},
-            "its SnapshotArn is a snapshot's ARN"),
-           ("ListRecommendations", "cluster", {"ClusterName": "ClusterIdentifier"},
-            "its NamespaceArn is a namespace's ARN"),
-           ("ModifyClusterIamRoles", "cluster", {"ClusterName": "ClusterIdentifier"},
-            "its DefaultIamRoleArn is an IAM role's ARN"),
-           ("ModifyCustomDomainAssociation", "cluster", {"ClusterName": "ClusterIdentifier"},
-            "its CustomDomainCertificateArn is an ACM certificate's ARN"),
-           ("ModifyEventSubscription", "eventsubscription", {"EventSubscriptionName": "SubscriptionName"},
-            "its SnsTopicArn is an SNS topic's ARN"),
-           ("ModifyLakehouseConfiguration", "cluster", {"ClusterName": "ClusterIdentifier"},
-            "its LakehouseIdcApplicationArn is an IAM Identity Center application's ARN"))},
-    **{f"redshift:{operation}": ([{"types": [kind], "arn": arn}], f"{why}, never a {kind}'s")
-       for operation, kind, arn, why in (
-           ("AssociateDataShareConsumer", "datashare", "DataShareArn",
-            "its ConsumerArn is the consumer namespace's ARN"),
-           ("DisassociateDataShareConsumer", "datashare", "DataShareArn",
-            "its ConsumerArn is the consumer namespace's ARN"),
-           ("ModifyRedshiftIdcApplication", "redshiftidcapplication", "RedshiftIdcApplicationArn",
-            "its IamRoleArn is an IAM role's ARN and its AuthorizedTokenIssuerList's TrustedTokenIssuerArn a trusted "
-            "token issuer's"))},
 }
 
 # Resource types whose ARN a request may give with a qualifier, one more `:<name>` past its format, which their
@@ -821,21 +784,6 @@ def only_arn(pattern: str | None) -> bool:
         elif char == "|" and depth == 0:
             return False
     return True
-
-
-def with_identifier_arns(resources: list[dict], formats: dict[str, str], patterns: dict[str, set[str | None]]) -> list[dict]:
-    """An unpatterned Identifier filling a type's sole variable can also give that type's ARN."""
-    found = []
-    for resource in resources:
-        kind = resource.get("type")
-        variables = set(VARIABLE_RE.findall(formats.get(kind, ""))) - KNOWN_VARIABLES
-        arn_of = {member: kind for variable, path in resource.get("fill", {}).items()
-                  if variables == {variable} and kind_of(member := path.removesuffix("[]")) == "identifier"
-                  and patterns.get(member) == {None}}
-        inferred = arn_of.keys() - resource.get("arnOf", {}).keys()
-        found.append(dict(resource, arnOf={**arn_of, **resource.get("arnOf", {})},
-                          preserveArnContext=sorted(inferred)) if inferred else resource)
-    return found
 
 
 def located_members(models: dict[str, dict], operation: str) -> dict[str, str]:
@@ -1231,7 +1179,8 @@ def entry_for(operation: str, upstream: dict, formats: dict[str, str], models: d
     types = upstream["types"] or []
     members = request_members(models, operation.split(":", 1)[1])
     patterns = string_patterns(models, operation.split(":", 1)[1])
-    arn_members = {member for member, values in patterns.items() if all(only_arn(value) for value in values)}
+    arn_members = {member for member, values in patterns.items() if kind_of(member) == "identifier"
+                   and all(only_arn(value) for value in values)}
     if namespace_of(operation) in ID_TARGETS:
         entry = {"action": upstream["action"], "types": types, "resources": []}
         targets = id_targets(operation, types, formats, models)
@@ -1252,7 +1201,6 @@ def entry_for(operation: str, upstream: dict, formats: dict[str, str], models: d
                                  namespace_of(operation), types, members)
     resources = with_account(resources, formats, account_members(models, operation.split(":", 1)[1]))
     resources = with_arn_of(resources, formats, name_or_arn_members(models, operation.split(":", 1)[1]))
-    resources = with_identifier_arns(resources, formats, patterns)
     resources = with_made(resources, operation, formats)
     entry = {"action": upstream["action"], "types": types, "resources": resources}
     creates = creates_for(operation, types, formats, members)
@@ -1472,7 +1420,7 @@ ARN_PATH_RE = re.compile(r"^(?:[A-Za-z][A-Za-z0-9_]*(\[])?(\.[A-Za-z][A-Za-z0-9_
 # A format's resource that is a literal and one variable, at its end.
 ONE_VARIABLE_RE = re.compile(r"^[^$]*\$\{\w+}$")
 # The keys a resource found by members does not take: it is read no other way, in the caller's account.
-FOUND_ONLY = {"absent", "arnOf", "preserveArnContext", "account", "fixed", "before"}
+FOUND_ONLY = {"absent", "arnOf", "account", "fixed", "before"}
 
 
 def validate(document: dict) -> list[str]:
@@ -1562,7 +1510,7 @@ def _resource_problems(operation: str, resource: object, types: set[str], format
                                                                                      "endpoint"}
                                               or {"types", "through"} <= set(resource) <= {"types", "through", "when",
                                                                                             "endpoint"}
-                                              or {"type", "fill"} <= set(resource) <= {"type", "fill", "when", "unless", "absent", "arnOf", "preserveArnContext", "account",
+                                              or {"type", "fill"} <= set(resource) <= {"type", "fill", "when", "unless", "absent", "arnOf", "account",
                                                                                        "fixed", "made", "before", "find", "endpoint"}):
         return [f"{operation} names {resource!r}, which is neither an ARN member nor a type's variables"]
     if "endpoint" in resource and not (isinstance(resource["endpoint"], str) and resource["endpoint"]):
@@ -1615,11 +1563,6 @@ def _resource_problems(operation: str, resource: object, types: set[str], format
             and len(set(VARIABLE_RE.findall(formats.get(kind, ""))) - KNOWN_VARIABLES) == 1
             and formats[kind].endswith("}") for path, kind in arn_of.items()):
         return [f"{operation} reads {arn_of!r} as ARNs of types, which are no members or types of one variable"]
-    preserved = resource.get("preserveArnContext", [])
-    if not isinstance(preserved, list) or not all(
-            isinstance(path, str) and arn_of.get(path) == kinds[0] and path in fill.values()
-            and len(fill) == 1 for path in preserved):
-        return [f"{operation} preserves {preserved!r}, not a sole member naming this resource's ARN"]
     account = resource.get("account")
     if account is not None and (not isinstance(account, str) or not PATH_RE.match(account) or account.endswith("[]")
                                 or "${Account}" not in formats[kinds[0]]):
