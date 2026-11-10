@@ -140,7 +140,7 @@ public class LambdaWebService implements Resettable {
 
     /** AWS assigns one shard label per cell. */
     private static final String DOMAIN_SHARD = "001";
-    private static final int DOMAIN_ID_LENGTH = 16;
+    static final int DOMAIN_ID_LENGTH = 16;
     private static final int DEFAULT_PAGE_SIZE = 50;
     static final int REVISION_CLEANUP_TARGET = 50;
     private static final String LOWERCASE_ALNUM = "abcdefghijklmnopqrstuvwxyz0123456789";

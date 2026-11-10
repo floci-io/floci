@@ -43,6 +43,8 @@ import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.regex.Pattern;
 
+import static io.floci.aws.services.lambdaweb.LambdaWebService.DOMAIN_ID_LENGTH;
+
 /**
  * Serves the endpoint domains of Web Functions. A request whose Host is a {@code lambda-web} domain
  * goes over HTTP/1.1 to the revision's environment with the headers AWS adds and drops; any other
@@ -61,7 +63,8 @@ public class LambdaWebDataPlane {
     static final String REQUEST_ID_HEADER = "lambda-web-request-id";
     private static final String IAM_AUTH = "IamAuth";
     private static final Pattern ENDPOINT_DOMAIN = Pattern.compile(
-            "[a-z0-9]{16}\\.(?:[0-9]{3}\\.lambda-web\\.[a-z0-9-]+|lambda-web\\.global)\\..+", Pattern.CASE_INSENSITIVE);
+            "[a-z0-9]{" + DOMAIN_ID_LENGTH + "}\\.(?:[0-9]{3}\\.lambda-web\\.[a-z0-9-]+|lambda-web\\.global)\\..+",
+            Pattern.CASE_INSENSITIVE);
     private static final Logger LOG = Logger.getLogger(LambdaWebDataPlane.class);
     private static final String BASE32 = "ABCDEFGHIJKLMNOPQRSTUVWXYZ234567";
     private static final int REQUEST_ID_LENGTH = 26;
@@ -511,7 +514,8 @@ public class LambdaWebDataPlane {
     /** The shapes Floci mints, in any case and with any port, so a near miss gets the AWS 404 and not another service. */
     static boolean isLambdaWebHost(String host) {
         // Every request of every service asks, so the dot after the id is checked before the pattern.
-        return host.length() > 16 && host.charAt(16) == '.' && ENDPOINT_DOMAIN.matcher(host).matches();
+        return host.length() > DOMAIN_ID_LENGTH && host.charAt(DOMAIN_ID_LENGTH) == '.'
+                && ENDPOINT_DOMAIN.matcher(host).matches();
     }
 
     /** The app gets the path without dot segments, as on AWS. Repeated slashes and the query stay as sent. */
