@@ -62,6 +62,8 @@ import java.util.regex.Pattern;
 public class AthenaService {
 
     private static final Logger LOG = Logger.getLogger(AthenaService.class);
+    private static final Pattern DECIMAL_TYPE = Pattern.compile("DECIMAL\\((\\d+),\\s*(\\d+)\\)",
+            Pattern.CASE_INSENSITIVE);
     public static final String DEFAULT_CATALOG = "AwsDataCatalog";
     private static final String DEFAULT_OUTPUT_BUCKET = "floci-athena-results";
     private static final String DEFAULT_WORKGROUP = "primary";
@@ -1099,19 +1101,29 @@ public class AthenaService {
     }
 
     /**
-     * The Athena type of each result column, in order. The result CSV carries only the column names,
-     * so the types come from DuckDB describing the same query; a statement it cannot describe gets
-     * no types, and its columns are reported as varchar.
+     * The DuckDB type of each result column, in order. The result CSV carries only the column names,
+     * so the types come from DuckDB describing the same query. The query has already succeeded, so a
+     * failure here only costs the types: its columns are reported as varchar.
      */
     private List<String> describeColumnTypes(String query, String setupDdl) {
         try {
             return duckClient.query("DESCRIBE " + query, setupDdl).stream()
-                    .map(column -> athenaType(String.valueOf(column.get("column_type"))))
+                    .map(column -> String.valueOf(column.get("column_type")))
                     .toList();
         } catch (RuntimeException e) {
-            LOG.debugv("Could not describe the result columns of {0}: {1}", query, e.getMessage());
+            LOG.warnv(e, "Could not describe the result columns of {0}; reporting them as varchar", query);
             return List.of();
         }
+    }
+
+    private static ResultSet.ColumnInfo columnInfo(String name, String duckType) {
+        ResultSet.ColumnInfo column = new ResultSet.ColumnInfo(DEFAULT_CATALOG, "", "", name, athenaType(duckType));
+        Matcher decimal = DECIMAL_TYPE.matcher(duckType.trim());
+        if (decimal.matches()) {
+            column.setPrecision(Integer.parseInt(decimal.group(1)));
+            column.setScale(Integer.parseInt(decimal.group(2)));
+        }
+        return column;
     }
 
     static String athenaType(String duckType) {
@@ -1130,7 +1142,10 @@ public class AthenaService {
             case "DECIMAL" -> "decimal";
             case "BOOLEAN" -> "boolean";
             case "DATE" -> "date";
-            case "TIMESTAMP" -> "timestamp";
+            case "TIMESTAMP", "TIMESTAMP_S", "TIMESTAMP_MS", "TIMESTAMP_NS" -> "timestamp";
+            case "TIMESTAMP WITH TIME ZONE" -> "timestamp with time zone";
+            case "TIME" -> "time";
+            case "TIME WITH TIME ZONE" -> "time with time zone";
             case "BLOB" -> "varbinary";
             case "STRUCT" -> "row";
             case "MAP" -> "map";
@@ -1177,8 +1192,7 @@ public class AthenaService {
 
             String[] headers = CsvParser.parseLine(headerLine).toArray(String[]::new);
             for (int i = 0; i < headers.length; i++) {
-                String type = i < columnTypes.size() ? columnTypes.get(i) : "varchar";
-                columns.add(new ResultSet.ColumnInfo(DEFAULT_CATALOG, "", "", headers[i], type));
+                columns.add(columnInfo(headers[i], i < columnTypes.size() ? columnTypes.get(i) : "VARCHAR"));
             }
 
             // Header row is included in GetQueryResults per AWS spec

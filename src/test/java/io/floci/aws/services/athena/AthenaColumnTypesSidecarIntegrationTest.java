@@ -31,11 +31,14 @@ class AthenaColumnTypesSidecarIntegrationTest {
     @Test
     void describedResultColumnsMapToAthenaTypeNames() {
         List<String> types = duck.query("DESCRIBE SELECT CAST(1 AS BIGINT) AS n, CAST(1.5 AS DOUBLE) AS d, "
-                        + "true AS b, DATE '2026-01-01' AS dt, CAST(2.50 AS DECIMAL(10,2)) AS p, 'x' AS s", null)
+                        + "true AS b, DATE '2026-01-01' AS dt, CAST(2.50 AS DECIMAL(10,2)) AS p, 'x' AS s, "
+                        + "TIME '12:00:00' AS t, CAST(TIMESTAMP '2026-01-01 00:00:00' AS TIMESTAMP_MS) AS ts_ms, "
+                        + "CAST(TIMESTAMP '2026-01-01 00:00:00' AS TIMESTAMPTZ) AS ts_tz", null)
                 .stream()
                 .map(column -> AthenaService.athenaType(String.valueOf(column.get("column_type"))))
                 .toList();
 
-        assertEquals(List.of("bigint", "double", "boolean", "date", "decimal", "varchar"), types);
+        assertEquals(List.of("bigint", "double", "boolean", "date", "decimal", "varchar", "time", "timestamp",
+                "timestamp with time zone"), types);
     }
 }

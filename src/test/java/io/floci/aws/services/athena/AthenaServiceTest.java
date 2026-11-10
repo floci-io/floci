@@ -159,17 +159,49 @@ class AthenaServiceTest {
                 Map.of("column_name", "s", "column_type", "VARCHAR")));
 
         assertEquals(List.of("bigint", "double", "boolean", "date", "decimal", "varchar"),
-                columnTypes(query, "n,d,b,dt,p,s\n1,1.5,true,2026-01-01,2.50,x\n"));
+                columnInfo(query, "n,d,b,dt,p,s\n1,1.5,true,2026-01-01,2.50,x\n").stream()
+                        .map(ResultSet.ColumnInfo::getType).toList());
+    }
+
+    @Test
+    void getQueryResultsReportsThePrecisionAndScaleOfADecimalColumn() throws Exception {
+        String query = "SELECT CAST(2.50 AS DECIMAL(10,2)) AS p";
+        when(duckClient.query(eq("DESCRIBE " + query), any())).thenReturn(List.of(
+                Map.of("column_name", "p", "column_type", "DECIMAL(10,2)")));
+
+        ResultSet.ColumnInfo column = columnInfo(query, "p\n2.50\n").get(0);
+
+        assertEquals("decimal", column.getType());
+        assertEquals(10, column.getPrecision());
+        assertEquals(2, column.getScale());
+    }
+
+    @Test
+    void getQueryResultsReportsTimeAndTimestampVariantsByTheirAthenaNames() throws Exception {
+        String query = "SELECT t, ts_s, ts_ms, ts_ns, ts_tz, t_tz FROM times";
+        when(duckClient.query(eq("DESCRIBE " + query), any())).thenReturn(List.of(
+                Map.of("column_name", "t", "column_type", "TIME"),
+                Map.of("column_name", "ts_s", "column_type", "TIMESTAMP_S"),
+                Map.of("column_name", "ts_ms", "column_type", "TIMESTAMP_MS"),
+                Map.of("column_name", "ts_ns", "column_type", "TIMESTAMP_NS"),
+                Map.of("column_name", "ts_tz", "column_type", "TIMESTAMP WITH TIME ZONE"),
+                Map.of("column_name", "t_tz", "column_type", "TIME WITH TIME ZONE")));
+
+        assertEquals(List.of("time", "timestamp", "timestamp", "timestamp", "timestamp with time zone",
+                        "time with time zone"),
+                columnInfo(query, "t,ts_s,ts_ms,ts_ns,ts_tz,t_tz\n,,,,,\n").stream()
+                        .map(ResultSet.ColumnInfo::getType).toList());
     }
 
     @Test
     void getQueryResultsReportsVarcharWhenTheTypesCannotBeDescribed() throws Exception {
         when(duckClient.query(anyString(), any())).thenThrow(new IllegalStateException("not describable"));
 
-        assertEquals(List.of("varchar", "varchar"), columnTypes("SELECT 1 AS a, 2 AS b", "a,b\n1,2\n"));
+        assertEquals(List.of("varchar", "varchar"), columnInfo("SELECT 1 AS a, 2 AS b", "a,b\n1,2\n").stream()
+                .map(ResultSet.ColumnInfo::getType).toList());
     }
 
-    private List<String> columnTypes(String query, String csv) throws Exception {
+    private List<ResultSet.ColumnInfo> columnInfo(String query, String csv) throws Exception {
         String id = service.startQueryExecution(query, "primary", null,
                 new ResultConfiguration("s3://athena-results/"));
         awaitState(id, QueryExecutionState.SUCCEEDED);
@@ -179,9 +211,7 @@ class AthenaServiceTest {
         when(s3Service.listObjects(eq("athena-results"), anyString(), any(), anyInt())).thenReturn(List.of(result));
         when(s3Service.getObject("athena-results", key)).thenReturn(result);
 
-        return service.getQueryResults(id).getMetadata().getColumnInfo().stream()
-                .map(ResultSet.ColumnInfo::getType)
-                .toList();
+        return service.getQueryResults(id).getMetadata().getColumnInfo();
     }
 
     private void awaitState(String id, QueryExecutionState expected) throws InterruptedException {
