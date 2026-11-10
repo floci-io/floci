@@ -13,6 +13,7 @@ import io.floci.aws.services.lambda.model.InvocationType;
 import io.floci.aws.services.lambda.model.InvokeResult;
 import io.floci.aws.services.lambda.model.LambdaAlias;
 import io.floci.aws.services.lambda.model.LambdaFunction;
+import io.floci.aws.services.lambda.model.LambdaUrlConfig;
 import io.smallrye.common.annotation.RunOnVirtualThread;
 import jakarta.inject.Inject;
 import jakarta.ws.rs.Consumes;
@@ -39,6 +40,8 @@ import java.util.Base64;
 import java.util.List;
 import java.util.Locale;
 import java.util.UUID;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.CompletionException;
 
 /**
  * Handles Lambda Function URL invocations.
@@ -114,6 +117,7 @@ public class LambdaUrlInvocationController {
         String functionArn;
         String region;
         String accountId;
+        LambdaUrlConfig urlConfig;
 
         if (target instanceof LambdaAlias alias) {
             functionName = alias.getFunctionName();
@@ -121,12 +125,14 @@ public class LambdaUrlInvocationController {
             AwsArnUtils.Arn arn = AwsArnUtils.parse(functionArn);
             region = arn.region();
             accountId = arn.accountId();
+            urlConfig = alias.getUrlConfig();
         } else if (target instanceof LambdaFunction fn) {
             functionName = fn.getFunctionName();
             functionArn = fn.getFunctionArn();
             AwsArnUtils.Arn arn = AwsArnUtils.parse(functionArn);
             region = arn.region();
             accountId = fn.getAccountId() != null ? fn.getAccountId() : arn.accountId();
+            urlConfig = fn.getUrlConfig();
         } else {
             return Response.status(404).entity(jsonMessage("Function URL not found")).type(MediaType.APPLICATION_JSON).build();
         }
@@ -139,12 +145,69 @@ public class LambdaUrlInvocationController {
 
         LOG.infov("Lambda URL invocation: {0} {1} -> {2} (region: {3})", method, urlId, functionName, region);
 
+        boolean streamed = urlConfig != null && "RESPONSE_STREAM".equals(urlConfig.getInvokeMode());
         try {
-            InvokeResult result = lambdaService.invokeArn(
-                    functionArn, event.getBytes(), InvocationType.RequestResponse);
-            return buildResponse(result);
+            if (streamed) {
+                return invokeStreamed(functionArn, event.getBytes());
+            }
+            return buildResponse(lambdaService.invokeArn(
+                    functionArn, event.getBytes(), InvocationType.RequestResponse));
         } catch (AwsException e) {
             return Response.status(e.getHttpStatus()).entity(e.getMessage()).build();
+        }
+    }
+
+    /**
+     * Runs the invocation on its own thread and answers as soon as the head of the streamed response
+     * is known, so the body reaches the caller as the function writes it. A function that fails or
+     * returns before it streams anything is answered as a buffered response.
+     */
+    private Response invokeStreamed(String functionArn, byte[] event) {
+        LambdaUrlResponseStream stream = new LambdaUrlResponseStream(objectMapper);
+        CompletableFuture<InvokeResult> invocation = new CompletableFuture<>();
+        Thread.ofVirtual().name("lambda-url-stream").start(() -> {
+            try {
+                invocation.complete(lambdaService.invokeArnStreaming(functionArn, event, stream));
+            } catch (RuntimeException e) {
+                invocation.completeExceptionally(e);
+            } finally {
+                stream.end();
+            }
+        });
+        CompletableFuture.anyOf(stream.head(), invocation).handle((ignored, e) -> null).join();
+
+        if (!stream.head().isDone()) {
+            try {
+                return buildResponse(invocation.join());
+            } catch (CompletionException e) {
+                if (e.getCause() instanceof AwsException aws) {
+                    throw aws;
+                }
+                throw e;
+            }
+        }
+        LambdaUrlResponseStream.Head head;
+        try {
+            head = stream.head().join();
+        } catch (CompletionException e) {
+            LOG.warnv("Streamed response of {0} has an unreadable prelude: {1}", functionArn, e.getMessage());
+            return Response.status(FUNCTION_ERROR_STATUS).build();
+        }
+        Response.ResponseBuilder builder;
+        if (head.prelude() == null) {
+            builder = Response.ok().type(head.contentType() != null ? head.contentType() : MediaType.APPLICATION_OCTET_STREAM);
+        } else {
+            builder = Response.status(head.prelude().path("statusCode").asInt(200));
+            applyHeadersAndCookies(builder, head.prelude());
+        }
+        return builder.entity(stream.body()).build();
+    }
+
+    private static void applyHeadersAndCookies(Response.ResponseBuilder builder, JsonNode response) {
+        response.path("headers").fields().forEachRemaining(e -> builder.header(e.getKey(), e.getValue().asText()));
+        JsonNode cookies = response.path("cookies");
+        if (cookies.isArray()) {
+            cookies.forEach(cookie -> builder.header("Set-Cookie", cookie.asText()));
         }
     }
 
@@ -228,12 +291,7 @@ public class LambdaUrlInvocationController {
             if (node.isObject() && node.has("statusCode")) {
                 int status = node.get("statusCode").asInt();
                 Response.ResponseBuilder builder = Response.status(status);
-                if (node.has("headers")) {
-                    node.get("headers").fields().forEachRemaining(e -> builder.header(e.getKey(), e.getValue().asText()));
-                }
-                if (node.has("cookies") && node.get("cookies").isArray()) {
-                    node.get("cookies").forEach(cookie -> builder.header("Set-Cookie", cookie.asText()));
-                }
+                applyHeadersAndCookies(builder, node);
                 if (node.has("body")) {
                     String body = node.get("body").asText();
                     boolean isBase64 = node.path("isBase64Encoded").asBoolean(false);
