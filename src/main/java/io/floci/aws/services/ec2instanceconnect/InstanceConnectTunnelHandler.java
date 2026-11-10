@@ -251,7 +251,13 @@ public class InstanceConnectTunnelHandler {
         InstanceConnectEndpoint endpoint = ec2Service.findUsableInstanceConnectEndpoint(region, endpointId)
                 .orElseThrow(() -> new Refusal(404, "No available EC2 Instance Connect Endpoint " + endpointId
                         + " in " + region));
-        authorize(scope.accessKeyId(), accountId, credential, endpoint.getInstanceConnectEndpointArn(), query);
+        authorize(scope.accessKeyId(), accountId, credential, endpoint.getInstanceConnectEndpointArn(),
+                name -> switch (name) {
+                    case "remotePort" -> String.valueOf(port);
+                    case "privateIpAddress" -> privateIp;
+                    case "maxTunnelDuration" -> String.valueOf(maxSeconds);
+                    default -> null;
+                });
         Instance instance = ec2Service.findRunningInstanceByPrivateIp(region, endpoint.getVpcId(), privateIp)
                 .orElseThrow(() -> new Refusal(404, "No running instance at " + privateIp + " in "
                         + endpoint.getVpcId()));
@@ -271,10 +277,11 @@ public class InstanceConnectTunnelHandler {
      * IAM enforcement for {@code ec2-instance-connect:OpenTunnel}, by the rules
      * {@code IamEnforcementFilter} applies to every JAX-RS request: an access key IAM does not know
      * is refused, and a known one must be allowed the action on the endpoint, with the condition keys
-     * the shared table gives the action filled from the request's query parameters.
+     * the shared table gives the action filled from the request's parameters, read as this handler resolved
+     * them (an omitted maxTunnelDuration is the default it opens the tunnel with).
      */
     private void authorize(String akid, String accountId, String credential, String endpointArn,
-                           UnaryOperator<String> query) {
+                           UnaryOperator<String> parameter) {
         if (!config.services().iam().enforcementEnabled() || LEGACY_ACCESS_KEY_ID.equals(akid)) {
             return;
         }
@@ -284,7 +291,7 @@ public class InstanceConnectTunnelHandler {
         }
         try {
             iamEnforcement.authorizeRequestParameters(AccountResolver.SIGV4_SCHEME + " Credential=" + credential,
-                    OPEN_TUNNEL_ACTION, endpointArn, query);
+                    OPEN_TUNNEL_ACTION, endpointArn, parameter);
         } catch (AwsException e) {
             throw new Refusal(e.getHttpStatus(), e.getMessage());
         }

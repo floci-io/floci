@@ -176,6 +176,12 @@ class InstanceConnectTunnelHandlerTest {
         assertEquals("10.0.1.10", parameter.getValue().apply("privateIpAddress"));
         assertEquals("3600", parameter.getValue().apply("maxTunnelDuration"));
 
+        // Omitted, it is the 3600 the tunnel opens with, so a policy on it still applies.
+        org.mockito.Mockito.clearInvocations(enforcement);
+        resolve(CLI_QUERY.replace("&maxTunnelDuration=3600", ""));
+        verify(enforcement).authorizeRequestParameters(anyString(), anyString(), anyString(), parameter.capture());
+        assertEquals("3600", parameter.getValue().apply("maxTunnelDuration"));
+
         doThrow(new AwsException("AccessDenied", "denied", 403)).when(enforcement)
                 .authorizeRequestParameters(anyString(), anyString(), anyString(), any());
         assertEquals(403, refusal(CLI_QUERY));
