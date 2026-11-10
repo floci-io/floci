@@ -6089,6 +6089,10 @@ public class RdsService implements Resettable, ResourceProvider {
                 new AwsException("DBClusterNotFoundFault",
                         "DB cluster " + id + " not found.", 404));
 
+        if (cluster.isDeletionProtection()) {
+            throw new AwsException("InvalidParameterCombination",
+                    "Cannot delete protected Cluster, please disable deletion protection and try again.", 400);
+        }
         if (!cluster.getDbClusterMembers().isEmpty()) {
             throw new AwsException("InvalidDBClusterStateFault",
                     "DB cluster " + id + " still has DB instances.", 400);
@@ -11463,12 +11467,34 @@ public class RdsService implements Resettable, ResourceProvider {
         return RESPONSE_COPIER.convertValue(cluster, DbCluster.class);
     }
 
+    /**
+     * The format checks the instance path applies, and the overlap check against the window that
+     * will be in effect. A window with no counterpart given or stored (a fresh cluster given one
+     * window) is not checked for overlap: AWS then picks a clear counterpart itself.
+     */
+    public static void validateClusterWindows(DbCluster current, String backupWindow, String maintenanceWindow) {
+        if (backupWindow != null) {
+            BackupWindows.parseBackupWindow(backupWindow);
+        }
+        if (maintenanceWindow != null) {
+            BackupWindows.parseMaintenanceWindow(maintenanceWindow);
+        }
+        String backup = backupWindow != null ? backupWindow
+                : current != null ? current.getPreferredBackupWindow() : null;
+        String maintenance = maintenanceWindow != null ? maintenanceWindow
+                : current != null ? current.getPreferredMaintenanceWindow() : null;
+        if (backup != null && maintenance != null && DbInstanceSettings.windowsOverlap(backup, maintenance)) {
+            throw DbInstanceSettings.overlappingWindows();
+        }
+    }
+
     /** Stores what a Create/ModifyDBCluster request carries; a null argument leaves that field as it is. */
     public synchronized DbCluster setDbClusterRequestSettings(String id, String region,
             List<String> vpcSecurityGroupIds, String backupWindow, String maintenanceWindow,
             Boolean deletionProtection) {
         String effectiveRegion = effectiveRegion(region);
         DbCluster cluster = getDbCluster(id, effectiveRegion);
+        validateClusterWindows(cluster, backupWindow, maintenanceWindow);
         if (vpcSecurityGroupIds != null) {
             cluster.setVpcSecurityGroupIds(vpcSecurityGroupIds);
         }

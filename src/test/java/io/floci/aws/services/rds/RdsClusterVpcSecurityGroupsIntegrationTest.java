@@ -68,6 +68,9 @@ class RdsClusterVpcSecurityGroupsIntegrationTest {
 
     @AfterEach
     void cleanUp() {
+        // a protected cluster would survive the delete below and leak into the next test
+        rds("ModifyDBCluster").formParam("DBClusterIdentifier", ID)
+                .formParam("DeletionProtection", "false").when().post("/");
         rds("DeleteDBCluster").formParam("DBClusterIdentifier", ID)
                 .formParam("SkipFinalSnapshot", "true").when().post("/");
     }
@@ -139,5 +142,44 @@ class RdsClusterVpcSecurityGroupsIntegrationTest {
         assertEquals("03:00-04:00", described("PreferredBackupWindow"));
         assertEquals("tue:07:00-tue:08:00", described("PreferredMaintenanceWindow"));
         assertEquals("false", described("DeletionProtection"));
+    }
+
+    private static int clusterCount() {
+        return rds("DescribeDBClusters").when().post("/").then().statusCode(200).extract().asString()
+                .split("<DBClusterIdentifier>" + ID + "</DBClusterIdentifier>", -1).length - 1;
+    }
+
+    @Test
+    void protectedClusterIsNotDeletedUntilProtectionIsLifted() {
+        create().formParam("DeletionProtection", "true").when().post("/").then().statusCode(200);
+        rds("DeleteDBCluster").formParam("DBClusterIdentifier", ID).formParam("SkipFinalSnapshot", "true")
+                .when().post("/").then().statusCode(400)
+                .body(org.hamcrest.Matchers.containsString("<Code>InvalidParameterCombination</Code>"))
+                .body(org.hamcrest.Matchers.containsString(
+                        "Cannot delete protected Cluster, please disable deletion protection and try again."));
+        assertEquals(1, clusterCount());
+
+        rds("ModifyDBCluster").formParam("DBClusterIdentifier", ID)
+                .formParam("DeletionProtection", "false").when().post("/").then().statusCode(200);
+        rds("DeleteDBCluster").formParam("DBClusterIdentifier", ID).formParam("SkipFinalSnapshot", "true")
+                .when().post("/").then().statusCode(200);
+        assertEquals(0, clusterCount());
+    }
+
+    @Test
+    void invalidWindowsAreRefusedAndLeaveNoClusterBehind() {
+        create().formParam("PreferredBackupWindow", "garbage").when().post("/").then().statusCode(400)
+                .body(org.hamcrest.Matchers.containsString("<Code>InvalidParameterValue</Code>"));
+        assertEquals(0, clusterCount());
+        create().formParam("PreferredBackupWindow", "05:00-06:00")
+                .formParam("PreferredMaintenanceWindow", "mon:05:30-mon:06:30")
+                .when().post("/").then().statusCode(400)
+                .body(org.hamcrest.Matchers.containsString("<Code>InvalidParameterValue</Code>"));
+        assertEquals(0, clusterCount());
+
+        create().formParam("PreferredBackupWindow", "05:00-06:00").when().post("/").then().statusCode(200);
+        rds("ModifyDBCluster").formParam("DBClusterIdentifier", ID)
+                .formParam("PreferredBackupWindow", "garbage").when().post("/").then().statusCode(400);
+        assertEquals("05:00-06:00", described("PreferredBackupWindow"));
     }
 }

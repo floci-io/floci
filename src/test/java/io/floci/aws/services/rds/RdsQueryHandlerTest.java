@@ -570,6 +570,7 @@ class RdsQueryHandlerTest {
 
     @Test
     void modifyDbCluster_forwardsDbClusterParameterGroupName() {
+        when(service.setDbClusterRequestSettings(any(), any(), any(), any(), any(), any())).thenReturn(makeCluster("mycluster"));
         when(service.modifyDbCluster(eq("mycluster"), isNull(), isNull(),
                 isNull(), isNull(), isNull(), isNull(), isNull(), eq("app-cluster-params"), eq(false), eq(false), any()))
                 .thenReturn(makeCluster("mycluster"));
@@ -871,6 +872,7 @@ class RdsQueryHandlerTest {
         cluster.setMasterUserSecretArn("arn:aws:secretsmanager:us-east-1:000000000000:secret:rds!cluster-ABC");
         cluster.setMasterUserSecretStatus("active");
         cluster.setMasterUserSecretKmsKeyId("kms-key-1");
+        when(service.setDbClusterRequestSettings(any(), any(), any(), any(), any(), any())).thenReturn(cluster);
         when(service.createDbCluster(eq("mycluster"), eq("aurora-postgresql"), any(),
                 eq("omni_admin"), isNull(), eq("omni"), eq(false), isNull(),
                 isNull(), isNull(), eq(false), any(),
@@ -959,6 +961,7 @@ class RdsQueryHandlerTest {
     @CsvSource({"true,true", "true,false", "false,true", "false,false"})
     void modifyDbClusterForwardsRotationAndApplyImmediately(boolean rotatePassword, boolean applyImmediately) {
         DbCluster cluster = makeCluster("mycluster");
+        when(service.setDbClusterRequestSettings(any(), any(), any(), any(), any(), any())).thenReturn(cluster);
         when(service.modifyDbCluster("mycluster", null, null, null, null, null,
                 null, null, null, rotatePassword, applyImmediately, "us-west-2")).thenReturn(cluster);
         MultivaluedMap<String, String> p = params();
