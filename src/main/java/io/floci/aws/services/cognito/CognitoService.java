@@ -157,6 +157,12 @@ public class CognitoService implements ResourceProvider {
     private static final Set<String> NAMED_PROVIDER_TYPES =
             Set.of("Facebook", "Google", "LoginWithAmazon", "SignInWithApple");
 
+    // scope is included because AWS changes it only through scopesToAdd and scopesToSuppress.
+    private static final Set<String> MACHINE_TOKEN_PROTECTED_CLAIMS = Set.of(
+            "sub", "client_id", "event_id", "version", "acr", "amr", "auth_time", "azp", "exp", "iat",
+            "iss", "jti", "nbf", "nonce", "origin_jti", "token_use", "username", "device_key", "at_hash",
+            "scope");
+
 
     /**
      * Claim overrides returned by a PreTokenGeneration Lambda trigger.
@@ -4750,6 +4756,16 @@ public class CognitoService implements ResourceProvider {
      */
     public Map<String, Object> issueClientCredentialsToken(String clientId, String clientSecret, String scope,
                                                            String requiredPoolId) {
+        return issueClientCredentialsToken(clientId, clientSecret, scope, requiredPoolId, Map.of());
+    }
+
+    /**
+     * @param clientMetadata the token request's {@code aws_client_metadata}, passed to a V3_0 pre
+     *                       token generation trigger
+     */
+    public Map<String, Object> issueClientCredentialsToken(String clientId, String clientSecret, String scope,
+                                                           String requiredPoolId,
+                                                           Map<String, String> clientMetadata) {
         UserPoolClient client = clientStore.get(clientId)
                 .filter(c -> requiredPoolId == null || requiredPoolId.equals(c.getUserPoolId()))
                 .orElseThrow(() -> new AwsException("ResourceNotFoundException", "Client not found", 400));
@@ -4757,9 +4773,11 @@ public class CognitoService implements ResourceProvider {
         validateClientAllowsClientCredentials(client);
         validateClientSecret(client, clientSecret);
         String normalizedScope = resolveAuthorizedScopes(client, pool.getId(), scope);
+        ClaimsOverride override = authFlowHandler.preTokenGenerationForClientCredentials(pool, client,
+                List.of(normalizedScope.split(" ")), clientMetadata);
 
         Map<String, Object> response = new LinkedHashMap<>();
-        response.put("access_token", generateClientAccessToken(client, pool, normalizedScope));
+        response.put("access_token", generateClientAccessToken(client, pool, normalizedScope, override));
         response.put("token_type", "Bearer");
         response.put("expires_in", resolveAccessTokenLifetimeSeconds(client));
         return response;
@@ -5219,8 +5237,14 @@ public class CognitoService implements ResourceProvider {
         if (override.preferredRole() != null) {
             claims.put("cognito:preferred_role", override.preferredRole());
         }
-        // V2 access-token scope mutations.
-        if (isAccess && (override.scopesToAdd() != null || override.scopesToSuppress() != null)) {
+        if (isAccess) {
+            applyScopeOverride(claims, override);
+        }
+    }
+
+    /** V2/V3 access-token scope mutations. */
+    private static void applyScopeOverride(Map<String, Object> claims, ClaimsOverride override) {
+        if (override.scopesToAdd() != null || override.scopesToSuppress() != null) {
             Object existing = claims.get("scope");
             List<String> current = new ArrayList<>();
             if (existing instanceof String s && !s.isBlank()) {
@@ -5284,31 +5308,62 @@ public class CognitoService implements ResourceProvider {
         return signJwt(header, payload, getSigningPrivateKey(pool));
     }
 
-    private String generateClientAccessToken(UserPoolClient client, UserPool pool, String scope) {
-        String headerJson = String.format(
-                "{\"alg\":\"RS256\",\"typ\":\"JWT\",\"kid\":\"%s\"}",
-                escapeJson(getSigningKeyId(pool)));
-        String header = Base64Url.encode(headerJson);
-
+    private String generateClientAccessToken(UserPoolClient client, UserPool pool, String scope,
+                                             ClaimsOverride override) {
         long now = System.currentTimeMillis() / 1000L;
         long lifetimeSeconds = resolveAccessTokenLifetimeSeconds(client);
-        StringBuilder payloadJson = new StringBuilder();
-        payloadJson.append("{")
-                .append("\"iss\":\"").append(escapeJson(getIssuer(pool.getId()))).append("\",")
-                .append("\"version\":2,")
-                .append("\"sub\":\"").append(escapeJson(client.getClientId())).append("\",")
-                .append("\"client_id\":\"").append(escapeJson(client.getClientId())).append("\",")
-                .append("\"token_use\":\"access\",")
-                .append("\"exp\":").append(now + lifetimeSeconds).append(",")
-                .append("\"iat\":").append(now).append(",")
-                .append("\"jti\":\"").append(UUID.randomUUID()).append("\"");
+        Map<String, Object> claims = new LinkedHashMap<>();
+        claims.put("iss", getIssuer(pool.getId()));
+        claims.put("version", 2);
+        claims.put("sub", client.getClientId());
+        claims.put("client_id", client.getClientId());
+        claims.put("token_use", "access");
+        claims.put("exp", now + lifetimeSeconds);
+        claims.put("iat", now);
+        claims.put("jti", UUID.randomUUID().toString());
         if (scope != null && !scope.isBlank()) {
-            payloadJson.append(",\"scope\":\"").append(escapeJson(scope)).append("\"");
+            claims.put("scope", scope);
         }
-        payloadJson.append("}");
+        applyClientCredentialsOverride(claims, override, client.getClientId());
+        return signJwt(encodeJwtHeader(pool), encodeJsonBase64Url(claims), getSigningPrivateKey(pool));
+    }
 
-        String payload = Base64Url.encode(payloadJson.toString());
-        return signJwt(header, payload, getSigningPrivateKey(pool));
+    /**
+     * Applies a V3_0 pre token generation response to a client-credentials access token. Only
+     * {@code accessTokenGeneration} reaches a machine identity: it has no ID token and no groups, so
+     * {@code idTokenGeneration} and {@code groupOverrideDetails} are ignored, as on AWS.
+     */
+    private static void applyClientCredentialsOverride(Map<String, Object> claims, ClaimsOverride override,
+                                                       String clientId) {
+        if (override == null) {
+            return;
+        }
+        if (override.accessClaimsToSuppress() != null) {
+            override.accessClaimsToSuppress().stream()
+                    .filter(claim -> !isMachineTokenProtectedClaim(claim))
+                    .forEach(claims::remove);
+        }
+        if (override.accessClaimsToAddOrOverride() != null) {
+            override.accessClaimsToAddOrOverride().forEach((claim, value) -> {
+                if (isMachineTokenProtectedClaim(claim)) {
+                    return;
+                }
+                // AWS accepts an aud claim only when it names the client the token is issued to.
+                if ("aud".equals(claim) && !clientId.equals(value)) {
+                    return;
+                }
+                claims.put(claim, value);
+            });
+        }
+        applyScopeOverride(claims, override);
+    }
+
+    /**
+     * The claims AWS lets no pre token generation trigger add, modify or suppress in an access token
+     * issued to a machine identity, and any claim in the reserved {@code cognito:} namespace.
+     */
+    private static boolean isMachineTokenProtectedClaim(String claim) {
+        return MACHINE_TOKEN_PROTECTED_CLAIMS.contains(claim) || claim.startsWith("cognito:");
     }
 
     private void validateClientSecret(UserPoolClient client, String clientSecret) {

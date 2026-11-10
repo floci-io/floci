@@ -10,6 +10,7 @@ import io.floci.aws.core.common.RegionResolver;
 import io.floci.aws.core.storage.InMemoryStorage;
 import io.floci.aws.services.acm.AcmService;
 import io.floci.aws.services.cognito.model.CognitoUser;
+import io.floci.aws.services.cognito.model.ResourceServerScope;
 import io.floci.aws.services.cognito.model.UserPool;
 import io.floci.aws.services.cognito.model.UserPoolClient;
 import io.floci.aws.services.cognito.verification.CognitoMessageDispatcher;
@@ -1349,6 +1350,166 @@ class CognitoLambdaTriggersTest {
         assertTrue(req.get("scopes") instanceof List<?>);
         assertNotNull(req.get("groupConfiguration"));
         assertNotNull(req.get("userAttributes"));
+    }
+
+    // =========================================================================
+    // PreTokenGeneration for client credentials (M2M)
+    // =========================================================================
+
+    private UserPool createPoolWithPreTokenGenerationVersion(String lambdaVersion) {
+        return createPoolWithLambdaConfig(Map.of(
+                "PreTokenGeneration", "arn:aws:lambda:::pre-token",
+                "PreTokenGenerationConfig", Map.of(
+                        "LambdaArn", "arn:aws:lambda:::pre-token",
+                        "LambdaVersion", lambdaVersion)));
+    }
+
+    private UserPoolClient createM2mClient(UserPool pool) {
+        ResourceServerScope read = new ResourceServerScope();
+        read.setScopeName("read");
+        ResourceServerScope write = new ResourceServerScope();
+        write.setScopeName("write");
+        service.createResourceServer(pool.getId(), "notes", "Notes", List.of(read, write));
+        return service.createUserPoolClient(pool.getId(), "m2m", true, true,
+                List.of("client_credentials"), List.of("notes/read", "notes/write"));
+    }
+
+    private Map<String, Object> clientCredentialsClaims(UserPoolClient client, Map<String, String> metadata)
+            throws IOException {
+        String accessToken = (String) service.issueClientCredentialsToken(client.getClientId(),
+                client.getClientSecret(), "notes/read", null, metadata).get("access_token");
+        return MAPPER.readValue(decodeJwtPayload(accessToken), new TypeReference<>() {});
+    }
+
+    @Test
+    @SuppressWarnings("unchecked")
+    void preTokenGenerationV3FiresForClientCredentialsWithAMachineIdentityEvent() throws Exception {
+        UserPool pool = createPoolWithPreTokenGenerationVersion("V3_0");
+        UserPoolClient client = createM2mClient(pool);
+        ArgumentCaptor<byte[]> payloadCap = ArgumentCaptor.forClass(byte[].class);
+        when(lambdaService.invoke(anyString(), eq("arn:aws:lambda:::pre-token"), payloadCap.capture(),
+                eq(InvocationType.RequestResponse))).thenReturn(ok(Map.of()));
+
+        clientCredentialsClaims(client, Map.of("environment", "dev"));
+
+        Map<String, Object> event = MAPPER.readValue(payloadCap.getValue(), new TypeReference<>() {});
+        Map<String, Object> request = (Map<String, Object>) event.get("request");
+        Map<String, Object> callerContext = (Map<String, Object>) event.get("callerContext");
+        Map<String, Object> response = (Map<String, Object>) event.get("response");
+        assertAll(
+                () -> assertEquals("TokenGeneration_ClientCredentials", event.get("triggerSource")),
+                () -> assertEquals("3", event.get("version")),
+                () -> assertEquals("ClientCredentials", event.get("userName")),
+                () -> assertTrue(response.containsKey("claimsAndScopeOverrideDetails")),
+                () -> assertNull(response.get("claimsAndScopeOverrideDetails")),
+                () -> assertEquals(pool.getId(), event.get("userPoolId")),
+                () -> assertEquals(client.getClientId(), callerContext.get("clientId")),
+                () -> assertEquals(List.of("notes/read"), request.get("scopes")),
+                () -> assertEquals(Map.of("environment", "dev"), request.get("clientMetadata")),
+                () -> assertEquals(Map.of(), request.get("userAttributes")),
+                () -> assertTrue(request.containsKey("groupConfiguration")),
+                () -> assertNull(request.get("groupConfiguration")));
+    }
+
+    @Test
+    void preTokenGenerationV3AddsClaimsAndScopesToTheClientCredentialsToken() throws Exception {
+        UserPool pool = createPoolWithPreTokenGenerationVersion("V3_0");
+        UserPoolClient client = createM2mClient(pool);
+        when(lambdaService.invoke(anyString(), eq("arn:aws:lambda:::pre-token"), any(byte[].class), any()))
+                .thenReturn(ok(Map.of("claimsAndScopeOverrideDetails", Map.of(
+                        "idTokenGeneration", Map.of("claimsToAddOrOverride", Map.of("id_only", "x")),
+                        "accessTokenGeneration", Map.of(
+                                "claimsToAddOrOverride", Map.of("marker", "yes", "tenant", Map.of("id", 7)),
+                                "scopesToAdd", List.of("notes/write")),
+                        "groupOverrideDetails", Map.of("groupsToOverride", List.of("admins"))))));
+
+        Map<String, Object> claims = clientCredentialsClaims(client, Map.of());
+
+        assertAll(
+                () -> assertEquals("yes", claims.get("marker")),
+                () -> assertEquals(Map.of("id", 7), claims.get("tenant")),
+                () -> assertEquals("notes/read notes/write", claims.get("scope")),
+                () -> assertFalse(claims.containsKey("id_only"), "an M2M grant issues no ID token"),
+                () -> assertFalse(claims.containsKey("cognito:groups"), "a machine identity has no groups"));
+    }
+
+    @Test
+    void preTokenGenerationV3CannotChangeTheClaimsThatIdentifyTheClient() throws Exception {
+        UserPool pool = createPoolWithPreTokenGenerationVersion("V3_0");
+        UserPoolClient client = createM2mClient(pool);
+        when(lambdaService.invoke(anyString(), eq("arn:aws:lambda:::pre-token"), any(byte[].class), any()))
+                .thenReturn(ok(Map.of("claimsAndScopeOverrideDetails", Map.of(
+                        "accessTokenGeneration", Map.of(
+                                "claimsToAddOrOverride", Map.of(
+                                        "sub", "other", "client_id", "other", "token_use", "id",
+                                        "cognito:username", "bob", "aud", "someone-else",
+                                        "username", "alice"),
+                                "claimsToSuppress", List.of("iss", "exp", "jti", "version"))))));
+
+        Map<String, Object> claims = clientCredentialsClaims(client, Map.of());
+
+        assertAll(
+                () -> assertFalse(claims.containsKey("username"), "a machine token names no user"),
+                () -> assertEquals(client.getClientId(), claims.get("sub")),
+                () -> assertEquals(client.getClientId(), claims.get("client_id")),
+                () -> assertEquals("access", claims.get("token_use")),
+                () -> assertEquals(2, claims.get("version")),
+                () -> assertNotNull(claims.get("iss")),
+                () -> assertNotNull(claims.get("exp")),
+                () -> assertNotNull(claims.get("jti")),
+                () -> assertFalse(claims.containsKey("cognito:username")),
+                () -> assertFalse(claims.containsKey("aud"), "aud must name the token's own client"));
+    }
+
+    @Test
+    void preTokenGenerationV3ChangesTheClientCredentialsScopeOnlyThroughTheScopeFields() throws Exception {
+        UserPool pool = createPoolWithPreTokenGenerationVersion("V3_0");
+        UserPoolClient client = createM2mClient(pool);
+        when(lambdaService.invoke(anyString(), eq("arn:aws:lambda:::pre-token"), any(byte[].class), any()))
+                .thenReturn(ok(Map.of("claimsAndScopeOverrideDetails", Map.of(
+                        "accessTokenGeneration", Map.of(
+                                "claimsToAddOrOverride", Map.of("scope", "admin/all"),
+                                "claimsToSuppress", List.of("scope"))))));
+
+        Map<String, Object> claims = clientCredentialsClaims(client, Map.of());
+
+        assertEquals("notes/read", claims.get("scope"),
+                "claimsToAddOrOverride and claimsToSuppress must not replace the granted scope");
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"V1_0", "V2_0"})
+    void preTokenGenerationBelowV3IsNotInvokedForClientCredentials(String lambdaVersion) throws Exception {
+        UserPool pool = createPoolWithPreTokenGenerationVersion(lambdaVersion);
+        UserPoolClient client = createM2mClient(pool);
+
+        Map<String, Object> claims = clientCredentialsClaims(client, Map.of());
+
+        assertEquals("notes/read", claims.get("scope"));
+        verify(lambdaService, never()).invoke(anyString(), anyString(), any(byte[].class), any());
+    }
+
+    @Test
+    void preTokenGenerationWithoutAVersionIsNotInvokedForClientCredentials() throws Exception {
+        UserPool pool = createPoolWithLambdaConfig(Map.of("PreTokenGeneration", "arn:aws:lambda:::pre-token"));
+        UserPoolClient client = createM2mClient(pool);
+
+        clientCredentialsClaims(client, Map.of());
+
+        verify(lambdaService, never()).invoke(anyString(), anyString(), any(byte[].class), any());
+    }
+
+    @Test
+    void preTokenGenerationV3LambdaErrorBlocksTheClientCredentialsToken() {
+        UserPool pool = createPoolWithPreTokenGenerationVersion("V3_0");
+        UserPoolClient client = createM2mClient(pool);
+        when(lambdaService.invoke(anyString(), eq("arn:aws:lambda:::pre-token"), any(byte[].class), any()))
+                .thenReturn(lambdaError("Unhandled", "denied"));
+
+        AwsException failure = assertThrows(AwsException.class,
+                () -> clientCredentialsClaims(client, Map.of()));
+
+        assertEquals("UserLambdaValidationException", failure.getErrorCode());
     }
 
     // =========================================================================

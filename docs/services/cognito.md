@@ -881,6 +881,20 @@ curl -s -b jar -o /dev/null -w '%{http_code} %{redirect_url}\n' \
 - Authorization-code redemption validates the client, callback URI and one-time code binding.
 - It requires `AllowedOAuthFlowsUserPoolClient=true` and `AllowedOAuthFlows=["client_credentials"]`.
 - It doesn't require a Cognito domain.
+- Client-credentials invokes the pre token generation trigger with triggerSource
+  `TokenGeneration_ClientCredentials` when, as on AWS, the pool's
+  `PreTokenGenerationConfig.LambdaVersion` is `V3_0`; a `V1_0` or `V2_0` trigger is not invoked.
+  The event carries `version` `3`, `userName` `ClientCredentials`, the granted `scopes`, empty `userAttributes`, a
+  null `groupConfiguration`, the request's `aws_client_metadata` (a URL-encoded JSON object of
+  strings) as `clientMetadata`, and `response.claimsAndScopeOverrideDetails` set to null, so a
+  function must build the response object rather than write into it. Metadata that is not a JSON
+  object, or a value that is not a JSON string (a number, boolean, null, object or array), refuses
+  the request with `invalid_request`.
+  Only `accessTokenGeneration` applies: its claims and scope changes reach the access token, while
+  `idTokenGeneration` and `groupOverrideDetails` are ignored. The trigger cannot add, change or
+  suppress `sub`, `client_id`, `token_use`, `version`, `username`, `iss`, `exp`, `iat`, `jti` or any
+  `cognito:` claim, and an `aud` it adds must equal the client ID. It changes `scope` only through
+  `scopesToAdd` and `scopesToSuppress`.
 - Client-credentials returns only `access_token`, `token_type`, and `expires_in`; authorization-code
   redemption returns the Cognito access and refresh tokens, and an ID token when the granted scopes
   include `openid`; a refresh returns the same tokens without a refresh token.

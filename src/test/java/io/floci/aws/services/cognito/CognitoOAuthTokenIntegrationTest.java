@@ -12,6 +12,8 @@ import org.junit.jupiter.api.MethodOrderer;
 import org.junit.jupiter.api.Order;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.TestMethodOrder;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
 
 import java.math.BigInteger;
 import java.nio.charset.StandardCharsets;
@@ -845,6 +847,57 @@ class CognitoOAuthTokenIntegrationTest {
         assertBody(refreshWithBasic("Basic " + Base64.getEncoder().encodeToString(
                 user.clientId().getBytes(StandardCharsets.UTF_8)), null, user.refreshToken()), 400, bareInvalidClient);
         refreshWithBodySecret(user.clientId(), "wrongsecret", user.refreshToken()).then().statusCode(200);
+    }
+
+    @Test
+    @Order(41)
+    void clientCredentialsAcceptsAwsClientMetadata() throws Exception {
+        Response response = given()
+                .header("Authorization", basic(confidentialClientId, confidentialClientSecret))
+                .formParam("grant_type", "client_credentials")
+                .formParam("aws_client_metadata", "{\"environment\": \"dev\", \"language\": \"en-US\"}")
+        .when()
+                .post("/cognito-idp/oauth2/token");
+
+        response.then().statusCode(200);
+        JsonNode payload = decodeJwtPayload(response.jsonPath().getString("access_token"));
+        assertEquals(confidentialClientId, payload.path("client_id").asText());
+    }
+
+    @Test
+    @Order(42)
+    void clientCredentialsRejectsMalformedAwsClientMetadata() {
+        given()
+                .header("Authorization", basic(confidentialClientId, confidentialClientSecret))
+                .formParam("grant_type", "client_credentials")
+                .formParam("aws_client_metadata", "not-json")
+        .when()
+                .post("/cognito-idp/oauth2/token")
+        .then()
+                .statusCode(400)
+                .body("error", equalTo("invalid_request"));
+    }
+
+    @ParameterizedTest
+    @Order(43)
+    @ValueSource(strings = {
+            "{\"environment\": null}",
+            "{\"retries\": 3}",
+            "{\"enabled\": true}",
+            "{\"nested\": {\"a\": \"b\"}}",
+            "{\"list\": [\"a\"]}",
+            "[\"environment\"]",
+            "\"environment\""})
+    void clientCredentialsRejectsAwsClientMetadataThatIsNotAnObjectOfStrings(String metadata) {
+        given()
+                .header("Authorization", basic(confidentialClientId, confidentialClientSecret))
+                .formParam("grant_type", "client_credentials")
+                .formParam("aws_client_metadata", metadata)
+        .when()
+                .post("/cognito-idp/oauth2/token")
+        .then()
+                .statusCode(400)
+                .body("error", equalTo("invalid_request"));
     }
 
     private static String confidentialRefreshToken(String confidentialId, String secret) throws Exception {
