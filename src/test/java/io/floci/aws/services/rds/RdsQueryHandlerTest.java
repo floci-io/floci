@@ -3081,7 +3081,7 @@ class RdsQueryHandlerTest {
         assertTrue(body.contains("<OptionGroupsList>"), body);
         assertTrue(body.contains("<OptionGroupsList><OptionGroup>"), body);
         assertTrue(body.contains("</OptionGroup></OptionGroupsList>"), body);
-        assertTrue(body.contains("<Marker></Marker>"), body);
+        assertFalse(body.contains("<Marker"), body);
         assertFalse(body.contains("<member>"), body);
     }
 
