@@ -31,33 +31,14 @@ class Ec2InstanceTypeOfferingsPaginationIntegrationTest {
     @Test
     void maxResultsLimitsPagesAndContinuationReturnsEveryOfferingOnce() {
         try (Ec2Client ec2 = AwsTestClients.create(Ec2Client.builder(), "test", Region.US_EAST_1)) {
-            List<InstanceTypeOffering> expected = ec2.describeInstanceTypeOfferings(r -> r
-                    .locationType(LocationType.REGION)).instanceTypeOfferings();
-            assertTrue(expected.size() > 5, "The catalogue must contain more than one page");
-
             DescribeInstanceTypeOfferingsResponse page = ec2.describeInstanceTypeOfferings(r -> r
                     .locationType(LocationType.REGION).maxResults(5));
             assertEquals(5, page.instanceTypeOfferings().size(), "MaxResults must limit the first page");
             assertTrue(page.nextToken() != null && !page.nextToken().isBlank(),
                     "A partial result must include NextToken");
-
-            List<InstanceTypeOffering> collected = new ArrayList<>(page.instanceTypeOfferings());
-            Set<String> tokens = new HashSet<>();
-            while (page.nextToken() != null && !page.nextToken().isBlank()) {
-                String nextToken = page.nextToken();
-                assertTrue(tokens.add(nextToken), "Continuation tokens must advance");
-                page = ec2.describeInstanceTypeOfferings(r -> r
-                        .locationType(LocationType.REGION).maxResults(5).nextToken(nextToken));
-                assertFalse(page.instanceTypeOfferings().isEmpty(), "Continuation must return remaining offerings");
-                assertTrue(page.instanceTypeOfferings().size() <= 5, "MaxResults must limit every page");
-                collected.addAll(page.instanceTypeOfferings());
-                assertTrue(collected.size() <= expected.size(), "Pagination must terminate within the catalogue");
-            }
-
-            assertEquals(expected.size(), collected.size(), "Pagination must return each offering once");
-            assertEquals(new HashSet<>(expected), new HashSet<>(collected),
-                    "Pagination must neither omit nor invent offerings");
         }
+        assertCompleteTraversal(DescribeInstanceTypeOfferingsRequest.builder()
+                .locationType(LocationType.REGION).build());
     }
 
     @Test
