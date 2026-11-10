@@ -49,7 +49,6 @@ AWS::ApiGatewayV2::Deployment	StageName	accepted and ignored
 AWS::ApiGatewayV2::Integration	ContentHandlingStrategy	accepted and ignored
 AWS::ApiGatewayV2::Integration	CredentialsArn	accepted and ignored
 AWS::ApiGatewayV2::Integration	Description	accepted and ignored
-AWS::ApiGatewayV2::Integration	IntegrationSubtype	accepted and ignored
 AWS::ApiGatewayV2::Integration	PassthroughBehavior	accepted and ignored
 AWS::ApiGatewayV2::Integration	ResponseParameters	accepted and ignored
 AWS::ApiGatewayV2::Integration	TlsConfig	accepted and ignored

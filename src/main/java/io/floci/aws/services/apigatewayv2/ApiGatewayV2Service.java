@@ -749,14 +749,23 @@ public class ApiGatewayV2Service {
     // ──────────────────────────── Integration CRUD ────────────────────────────
 
     public Integration createIntegration(String region, String apiId, Map<String, Object> request) {
-        getApi(region, apiId);
+        Api api = getApi(region, apiId);
+        String integrationSubtype = (String) request.get("integrationSubtype");
+        String payloadFormatVersion = (String) request.getOrDefault("payloadFormatVersion",
+                integrationSubtype != null ? "1.0" : "2.0");
+        @SuppressWarnings("unchecked")
+        Map<String, String> subtypeParameters = (Map<String, String>) request.get("requestParameters");
+        validateIntegrationSubtype(api, (String) request.get("integrationType"), integrationSubtype,
+                payloadFormatVersion, subtypeParameters);
+
         Integration integration = new Integration();
         integration.setIntegrationId(shortId(8));
         integration.setIntegrationType((String) request.get("integrationType"));
+        integration.setIntegrationSubtype(integrationSubtype);
         integration.setCredentialsArn((String) request.get("credentialsArn"));
         integration.setIntegrationUri((String) request.get("integrationUri"));
         integration.setConnectionType((String) request.get("connectionType"));
-        integration.setPayloadFormatVersion((String) request.getOrDefault("payloadFormatVersion", "2.0"));
+        integration.setPayloadFormatVersion(payloadFormatVersion);
         integration.setIntegrationMethod((String) request.get("integrationMethod"));
         integration.setTemplateSelectionExpression((String) request.get("templateSelectionExpression"));
 
@@ -808,12 +817,20 @@ public class ApiGatewayV2Service {
     public Integration updateIntegration(String region, String apiId, String integrationId,
                                          Map<String, Object> request) {
         Integration integration = getIntegration(region, apiId, integrationId);
+        validateIntegrationSubtype(getApi(region, apiId),
+                updatedValue(request, "integrationType", integration.getIntegrationType()),
+                updatedValue(request, "integrationSubtype", integration.getIntegrationSubtype()),
+                updatedValue(request, "payloadFormatVersion", integration.getPayloadFormatVersion()),
+                updatedValue(request, "requestParameters", integration.getRequestParameters()));
 
         if (request.get("credentialsArn") != null) {
             integration.setCredentialsArn((String) request.get("credentialsArn"));
         }
         if (request.containsKey("integrationType") && request.get("integrationType") != null) {
             integration.setIntegrationType((String) request.get("integrationType"));
+        }
+        if (request.get("integrationSubtype") != null) {
+            integration.setIntegrationSubtype((String) request.get("integrationSubtype"));
         }
         if (request.containsKey("integrationUri") && request.get("integrationUri") != null) {
             integration.setIntegrationUri((String) request.get("integrationUri"));
@@ -854,6 +871,55 @@ public class ApiGatewayV2Service {
 
         integrationStore.put(integrationKey(region, apiId, integrationId), integration);
         return integration;
+    }
+
+    @SuppressWarnings("unchecked")
+    private static <T> T updatedValue(Map<String, Object> request, String key, T stored) {
+        Object value = request.get(key);
+        return value != null ? (T) value : stored;
+    }
+
+    /**
+     * Rejects an integration subtype the way CreateIntegration does: only on an HTTP API
+     * {@code AWS_PROXY} integration with payload format 1.0, a known subtype, every required
+     * parameter mapped and no parameter the subtype's action does not take.
+     */
+    private static void validateIntegrationSubtype(Api api, String integrationType, String integrationSubtype,
+                                                   String payloadFormatVersion,
+                                                   Map<String, String> requestParameters) {
+        if (integrationSubtype == null) {
+            return;
+        }
+        if ("WEBSOCKET".equals(api.getProtocolType())) {
+            throw new AwsException("BadRequestException",
+                    "IntegrationSubtype is supported only for HTTP APIs.", 400);
+        }
+        if (!"AWS_PROXY".equals(integrationType)) {
+            throw new AwsException("BadRequestException",
+                    "IntegrationSubtype is supported only for AWS_PROXY integrations.", 400);
+        }
+        IntegrationSubtype subtype = IntegrationSubtype.fromName(integrationSubtype)
+                .orElseThrow(() -> new AwsException("BadRequestException",
+                        "Unsupported IntegrationSubtype: " + integrationSubtype, 400));
+        if (!"1.0".equals(payloadFormatVersion)) {
+            throw new AwsException("BadRequestException",
+                    "PayloadFormatVersion must be 1.0 for an integration with an IntegrationSubtype.", 400);
+        }
+        Map<String, String> parameters = requestParameters != null ? requestParameters : Map.of();
+        for (String required : subtype.requiredParameters()) {
+            if (!parameters.containsKey(required)) {
+                throw new AwsException("BadRequestException",
+                        "Missing required parameter " + required + " for IntegrationSubtype "
+                                + subtype.subtypeName() + ".", 400);
+            }
+        }
+        for (String parameter : parameters.keySet()) {
+            if (!subtype.accepts(parameter)) {
+                throw new AwsException("BadRequestException",
+                        "Parameter " + parameter + " is not supported for IntegrationSubtype "
+                                + subtype.subtypeName() + ".", 400);
+            }
+        }
     }
 
     /**

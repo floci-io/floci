@@ -881,9 +881,12 @@ public class ApiGatewayV2CfnProvisioner implements CfnResourceProvisioner {
         String region = ctx.region();
         String apiId = ctx.resolveOptional(props, "ApiId");
         Map<String, Object> req = new HashMap<>();
+        String integrationSubtype = ctx.resolveOptional(props, "IntegrationSubtype");
         req.put("integrationType", ctx.resolveOptional(props, "IntegrationType"));
+        req.put("integrationSubtype", integrationSubtype);
         req.put("integrationUri", ctx.resolveOptional(props, "IntegrationUri"));
-        req.put("payloadFormatVersion", ctx.resolveOrDefault(props, "PayloadFormatVersion", "2.0"));
+        req.put("payloadFormatVersion", ctx.resolveOrDefault(props, "PayloadFormatVersion",
+                integrationSubtype != null ? "1.0" : "2.0"));
         String connectionType = ctx.resolveOptional(props, "ConnectionType");
         String connectionId = ctx.resolveOptional(props, "ConnectionId");
         req.put("connectionType", connectionType);
@@ -959,6 +962,7 @@ public class ApiGatewayV2CfnProvisioner implements CfnResourceProvisioner {
     private String integrationConnectionSnapshot(String region, String apiId, Integration prior,
                                                  Map<String, Object> req) {
         boolean otherFieldChanged = changes(req.get("integrationType"), prior.getIntegrationType())
+                || changes(req.get("integrationSubtype"), prior.getIntegrationSubtype())
                 || changes(req.get("integrationUri"), prior.getIntegrationUri())
                 || changes(req.get("payloadFormatVersion"), prior.getPayloadFormatVersion());
         ObjectNode snapshot = objectMapper.createObjectNode();

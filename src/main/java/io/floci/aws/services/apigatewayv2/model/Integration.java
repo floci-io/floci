@@ -10,6 +10,7 @@ import java.util.Map;
 public class Integration {
     private String integrationId;
     private String integrationType; // AWS_PROXY, HTTP_PROXY
+    private String integrationSubtype;
     private String connectionType; // INTERNET, VPC_LINK
     private String integrationUri;
     private String payloadFormatVersion; // 1.0, 2.0
@@ -33,6 +34,7 @@ public class Integration {
         this.credentialsArn = src.credentialsArn;
         this.integrationId = src.integrationId;
         this.integrationType = src.integrationType;
+        this.integrationSubtype = src.integrationSubtype;
         this.connectionType = src.connectionType;
         this.integrationUri = src.integrationUri;
         this.payloadFormatVersion = src.payloadFormatVersion;
@@ -50,6 +52,9 @@ public class Integration {
 
     public String getIntegrationType() { return integrationType; }
     public void setIntegrationType(String integrationType) { this.integrationType = integrationType; }
+
+    public String getIntegrationSubtype() { return integrationSubtype; }
+    public void setIntegrationSubtype(String integrationSubtype) { this.integrationSubtype = integrationSubtype; }
 
     public String getConnectionType() { return connectionType; }
     public void setConnectionType(String connectionType) { this.connectionType = connectionType; }
