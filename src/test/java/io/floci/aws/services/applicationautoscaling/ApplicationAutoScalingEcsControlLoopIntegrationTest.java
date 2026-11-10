@@ -201,6 +201,7 @@ class ApplicationAutoScalingEcsControlLoopIntegrationTest {
                 assertScheduledCapacityUnchanged(scaling, ecs, resource, cluster, serviceName);
                 scaling.putScheduledAction(ScheduledActionFixtures.put(resource, "clamp")
                         .schedule(ScheduledActionFixtures.schedule(Instant.now().plusSeconds(3))).build());
+                // Do not tick here: this wait verifies that the background scheduler executes the action.
                 await().atMost(Duration.ofSeconds(15)).untilAsserted(() -> {
                     assertEquals(1, ecs.describeServices(b -> b.cluster(cluster).services(serviceName)).services().getFirst().desiredCount());
                     assertEquals("Successful", scaling.describeScalingActivities(b -> b.serviceNamespace("ecs").resourceId(resource))
@@ -211,10 +212,11 @@ class ApplicationAutoScalingEcsControlLoopIntegrationTest {
                         .scalableTargetAction(ScheduledActionFixtures.bounds(0, 0)).build());
                 scheduledActionScheduler.tick(Instant.now().plusSeconds(60));
                 assertEquals(1, ecs.describeServices(b -> b.cluster(cluster).services(serviceName)).services().getFirst().desiredCount());
+                Instant rescheduledDeadline = Instant.now().plusSeconds(60);
                 scaling.putScheduledAction(ScheduledActionFixtures.put(resource, "clamp")
-                        .schedule(ScheduledActionFixtures.schedule(Instant.now().plusSeconds(3))).build());
-                await().atMost(Duration.ofSeconds(15)).untilAsserted(() -> assertEquals(0,
-                        ecs.describeServices(b -> b.cluster(cluster).services(serviceName)).services().getFirst().desiredCount()));
+                        .schedule(ScheduledActionFixtures.schedule(rescheduledDeadline)).build());
+                scheduledActionScheduler.tick(rescheduledDeadline);
+                assertEquals(0, ecs.describeServices(b -> b.cluster(cluster).services(serviceName)).services().getFirst().desiredCount());
                 ScheduledAction completed = ScheduledActionFixtures.describe(scaling, resource).scheduledActions().getFirst();
                 assertEquals(identity.scheduledActionARN(), completed.scheduledActionARN());
                 assertEquals(identity.creationTime(), completed.creationTime());
