@@ -12,6 +12,7 @@ import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
 import software.amazon.awssdk.regions.Region;
 import software.amazon.awssdk.services.applicationautoscaling.ApplicationAutoScalingClient;
+import software.amazon.awssdk.services.applicationautoscaling.model.ScalableTarget;
 import software.amazon.awssdk.services.applicationautoscaling.model.ScheduledAction;
 import software.amazon.awssdk.services.ecs.EcsClient;
 import software.amazon.awssdk.services.ecs.model.ContainerDefinition;
@@ -178,10 +179,27 @@ class ApplicationAutoScalingEcsControlLoopIntegrationTest {
             ecs.createService(b -> b.cluster(cluster).serviceName(serviceName).taskDefinition("aas-scheduled-task").desiredCount(2));
             ScheduledActionFixtures.register(scaling, resource, 1, 10);
             try {
+                scaling.registerScalableTarget(b -> b.serviceNamespace("ecs").resourceId(resource)
+                        .scalableDimension(ScheduledActionFixtures.DIMENSION)
+                        .suspendedState(state -> state.scheduledScalingSuspended(true)));
+                Instant suspendedDeadline = Instant.now().plusSeconds(60);
                 scaling.putScheduledAction(ScheduledActionFixtures.put(resource, "clamp")
-                        .schedule(ScheduledActionFixtures.schedule(Instant.now().plusSeconds(3)))
+                        .schedule(ScheduledActionFixtures.schedule(suspendedDeadline))
                         .scalableTargetAction(ScheduledActionFixtures.bounds(0, 1)).build());
                 ScheduledAction identity = ScheduledActionFixtures.describe(scaling, resource).scheduledActions().getFirst();
+                ScheduledActionFixtures.register(scaling, resource, 1, 10);
+                ScalableTarget suspended = scaling.describeScalableTargets(b -> b.serviceNamespace("ecs")
+                        .resourceIds(resource)).scalableTargets().getFirst();
+                assertEquals(true, suspended.suspendedState().scheduledScalingSuspended());
+                scheduledActionScheduler.tick(suspendedDeadline.plusSeconds(1));
+                assertScheduledCapacityUnchanged(scaling, ecs, resource, cluster, serviceName);
+                scaling.registerScalableTarget(b -> b.serviceNamespace("ecs").resourceId(resource)
+                        .scalableDimension(ScheduledActionFixtures.DIMENSION)
+                        .suspendedState(state -> state.scheduledScalingSuspended(false)));
+                scheduledActionScheduler.tick(suspendedDeadline.plusSeconds(2));
+                assertScheduledCapacityUnchanged(scaling, ecs, resource, cluster, serviceName);
+                scaling.putScheduledAction(ScheduledActionFixtures.put(resource, "clamp")
+                        .schedule(ScheduledActionFixtures.schedule(Instant.now().plusSeconds(3))).build());
                 await().atMost(Duration.ofSeconds(15)).untilAsserted(() -> {
                     assertEquals(1, ecs.describeServices(b -> b.cluster(cluster).services(serviceName)).services().getFirst().desiredCount());
                     assertEquals("Successful", scaling.describeScalingActivities(b -> b.serviceNamespace("ecs").resourceId(resource))
@@ -211,6 +229,17 @@ class ApplicationAutoScalingEcsControlLoopIntegrationTest {
                 ecs.deleteCluster(b -> b.cluster(cluster));
             }
         }
+    }
+
+    private static void assertScheduledCapacityUnchanged(ApplicationAutoScalingClient scaling, EcsClient ecs,
+                                                         String resource, String cluster, String serviceName) {
+        ScalableTarget target = scaling.describeScalableTargets(b -> b.serviceNamespace("ecs").resourceIds(resource))
+                .scalableTargets().getFirst();
+        assertEquals(1, target.minCapacity());
+        assertEquals(10, target.maxCapacity());
+        assertEquals(2, ecs.describeServices(b -> b.cluster(cluster).services(serviceName)).services().getFirst().desiredCount());
+        assertEquals(0, scaling.describeScalingActivities(b -> b.serviceNamespace("ecs").resourceId(resource))
+                .scalingActivities().size());
     }
 
 }
