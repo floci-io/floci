@@ -40,6 +40,7 @@ import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 import org.jboss.logging.Logger;
 
+import javax.net.ssl.SSLContext;
 import java.io.IOException;
 import java.io.UncheckedIOException;
 import java.net.InetAddress;
@@ -108,14 +109,17 @@ public class EventBridgeInvoker {
                               EmulatorConfig config, AppSyncTargetInvoker appSyncTargetInvoker) {
         this(lambdaService, sqsService, snsService, batchService, firehoseService, eventBridgeService,
                 ecsService, ecsJsonHandler, stepFunctionsService, redshiftDataService, redshiftTargetAuthorizer,
-                serviceRegistry, regionResolver, objectMapper, config, apiDestinationClient(config),
-                appSyncTargetInvoker);
+                serviceRegistry, regionResolver, objectMapper, config,
+                apiDestinationClient(ContainerCaBundle.sslContext(config).orElse(null)), appSyncTargetInvoker);
     }
 
-    // Trusts the extra CAs in floci.tls.extra-ca-path, and Floci's CA when TLS is on, besides the JVM's roots
-    private static HttpClient apiDestinationClient(EmulatorConfig config) {
+    // The client API destinations are delivered with: sslContext, when given, adds the extra CAs in
+    // floci.tls.extra-ca-path, and Floci's CA when TLS is on, to the JVM's roots
+    private static HttpClient apiDestinationClient(SSLContext sslContext) {
         HttpClient.Builder builder = HttpClient.newBuilder().connectTimeout(Duration.ofSeconds(5));
-        ContainerCaBundle.sslContext(config).ifPresent(builder::sslContext);
+        if (sslContext != null) {
+            builder.sslContext(sslContext);
+        }
         return builder.build();
     }
 
@@ -136,8 +140,7 @@ public class EventBridgeInvoker {
                               EmulatorConfig config) {
         this(lambdaService, sqsService, snsService, batchService, firehoseService, eventBridgeService,
                 ecsService, ecsJsonHandler, stepFunctionsService, redshiftDataService, redshiftTargetAuthorizer,
-                serviceRegistry, regionResolver, objectMapper, config,
-                HttpClient.newBuilder().connectTimeout(Duration.ofSeconds(5)).build(), null);
+                serviceRegistry, regionResolver, objectMapper, config, apiDestinationClient(null), null);
     }
 
     EventBridgeInvoker(LambdaService lambdaService,
