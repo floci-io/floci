@@ -40,6 +40,7 @@ import io.floci.aws.services.eventbridge.model.ReplayState;
 import io.floci.aws.services.eventbridge.model.Rule;
 import io.floci.aws.services.eventbridge.model.RuleState;
 import io.floci.aws.services.eventbridge.model.Target;
+import io.floci.aws.services.pipes.PipesFilterMatcher;
 import io.floci.aws.services.resourcegroupstagging.ResourceGroupsTaggingService;
 import jakarta.annotation.PostConstruct;
 import jakarta.enterprise.context.ApplicationScoped;
@@ -1371,7 +1372,9 @@ public class EventBridgeService implements ResourceProvider, StoredResourceArns 
                 return value != null && value.equalsIgnoreCase(element.get("equals-ignore-case").asText());
             }
             if (element.has("numeric")) {
-                return matchesNumeric(element.get("numeric"), actual);
+                JsonNode comparisons = element.get("numeric");
+                return actual != null && isValidNumericFilter(comparisons)
+                        && PipesFilterMatcher.matchesNumeric(comparisons, actual);
             }
             if (element.has("anything-but")) {
                 JsonNode anythingBut = element.get("anything-but");
@@ -1420,29 +1423,6 @@ public class EventBridgeService implements ResourceProvider, StoredResourceArns 
         return (">".equals(lowerOperator) || ">=".equals(lowerOperator))
                 && ("<".equals(upperOperator) || "<=".equals(upperOperator))
                 && comparisons.get(1).decimalValue().compareTo(comparisons.get(3).decimalValue()) < 0;
-    }
-
-    private boolean matchesNumeric(JsonNode comparisons, JsonNode actual) {
-        if (actual == null || !actual.isNumber() || !isValidNumericFilter(comparisons)) {
-            return false;
-        }
-        for (int i = 0; i < comparisons.size(); i += 2) {
-            JsonNode operator = comparisons.get(i);
-            JsonNode threshold = comparisons.get(i + 1);
-            int comparison = actual.decimalValue().compareTo(threshold.decimalValue());
-            boolean matches = switch (operator.textValue()) {
-                case "=" -> comparison == 0;
-                case ">" -> comparison > 0;
-                case ">=" -> comparison >= 0;
-                case "<" -> comparison < 0;
-                case "<=" -> comparison <= 0;
-                default -> false;
-            };
-            if (!matches) {
-                return false;
-            }
-        }
-        return true;
     }
 
     private boolean matchesExactValue(JsonNode expected, JsonNode actual) {

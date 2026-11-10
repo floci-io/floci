@@ -1,20 +1,16 @@
 package io.floci.aws.services.eventbridge;
 
+import io.floci.aws.testing.AwsTestClients;
 import io.floci.aws.testing.RestAssuredJsonUtils;
-import io.quarkus.test.common.http.TestHTTPResource;
 import io.quarkus.test.junit.QuarkusTest;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.MethodSource;
-import software.amazon.awssdk.auth.credentials.AwsBasicCredentials;
-import software.amazon.awssdk.auth.credentials.StaticCredentialsProvider;
-import software.amazon.awssdk.http.urlconnection.UrlConnectionHttpClient;
 import software.amazon.awssdk.regions.Region;
 import software.amazon.awssdk.services.eventbridge.EventBridgeClient;
 import software.amazon.awssdk.services.eventbridge.model.InvalidEventPatternException;
 
-import java.net.URI;
 import java.util.List;
 
 import static io.restassured.RestAssured.given;
@@ -28,9 +24,6 @@ class EventBridgeTestEventPatternIntegrationTest {
     private static final String EVENT_BRIDGE_CONTENT_TYPE = "application/x-amz-json-1.1";
     private static final String TARGET = "AWSEvents.TestEventPattern";
 
-    @TestHTTPResource
-    URI endpoint;
-
     @BeforeAll
     static void configureRestAssured() {
         RestAssuredJsonUtils.configureAwsContentTypes();
@@ -39,7 +32,7 @@ class EventBridgeTestEventPatternIntegrationTest {
     @ParameterizedTest
     @MethodSource("io.floci.aws.testing.EventBridgeNumericPatterns#cases")
     void numericComparisonThroughSdk(String value, String comparisons, boolean expected) {
-        try (EventBridgeClient client = sdkClient()) {
+        try (EventBridgeClient client = AwsTestClients.create(EventBridgeClient.builder(), "test", Region.EU_WEST_2)) {
             String event = """
                     {"version":"0","id":"numeric-test","detail-type":"Example","source":"example.test",
                      "account":"000000000000","time":"2026-11-06T00:00:00Z","region":"eu-west-2",
@@ -62,7 +55,7 @@ class EventBridgeTestEventPatternIntegrationTest {
     @ParameterizedTest
     @MethodSource("io.floci.aws.testing.EventBridgeNumericPatterns#invalidPatterns")
     void invalidNumericPatternsRaiseSdkErrors(String pattern) {
-        try (EventBridgeClient client = sdkClient()) {
+        try (EventBridgeClient client = AwsTestClients.create(EventBridgeClient.builder(), "test", Region.EU_WEST_2)) {
             for (String detail : List.of("{\"severity\":7}", "{\"severity\":\"7\"}", "{}")) {
                 String event = """
                         {"version":"0","id":"numeric-test","detail-type":"Example","source":"example.test",
@@ -84,7 +77,7 @@ class EventBridgeTestEventPatternIntegrationTest {
     @ParameterizedTest
     @MethodSource("io.floci.aws.testing.EventBridgeNumericPatterns#invalidPatterns")
     void invalidNumericUpdatePreservesExistingRuleThroughSdk(String pattern) {
-        try (EventBridgeClient client = sdkClient()) {
+        try (EventBridgeClient client = AwsTestClients.create(EventBridgeClient.builder(), "test", Region.EU_WEST_2)) {
             String name = "numeric-update-preservation";
             String original = "{\"detail\":{\"severity\":[7]}}";
             client.putRule(request -> request.name(name).eventPattern(original).description("original"));
@@ -99,15 +92,6 @@ class EventBridgeTestEventPatternIntegrationTest {
                 client.deleteRule(request -> request.name(name));
             }
         }
-    }
-
-    private EventBridgeClient sdkClient() {
-        return EventBridgeClient.builder()
-                .endpointOverride(endpoint)
-                .region(Region.EU_WEST_2)
-                .credentialsProvider(StaticCredentialsProvider.create(AwsBasicCredentials.create("test", "test")))
-                .httpClientBuilder(UrlConnectionHttpClient.builder())
-                .build();
     }
 
     @Test

@@ -259,7 +259,7 @@ public class PipesFilterMatcher {
         return prefix ? text.startsWith(affix.asText()) : text.endsWith(affix.asText());
     }
 
-    private static boolean matchesNumeric(JsonNode conditions, JsonNode value) {
+    public static boolean matchesNumeric(JsonNode conditions, JsonNode value) {
         if (!conditions.isArray() || conditions.isEmpty() || conditions.size() % 2 != 0) {
             throw new IllegalArgumentException("numeric takes pairs of a comparison and a number");
         }
