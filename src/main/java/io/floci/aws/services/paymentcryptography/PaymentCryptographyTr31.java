@@ -62,8 +62,7 @@ final class PaymentCryptographyTr31 {
         byte[][] derived = deriveKeys(protectionKey, protectionAes);
         byte[] encryptionKey = derived[0];
         byte[] macKey = derived[1];
-        byte[][] masks = masksOf(macKey, protectionAes);
-        byte[] mac = computeMac(header, lengthEncoded, macKey, masks, protectionAes);
+        byte[] mac = computeMac(header, lengthEncoded, macKey, protectionAes);
 
         // The block is encrypted under the derived key, and the MAC is the vector of that
         // encryption: the block is authenticated before it is read.
@@ -100,17 +99,21 @@ final class PaymentCryptographyTr31 {
         boolean aes = "D".equals(type);
         int macLength = macLength(aes);
         byte[] mac = fromHex(block.substring(block.length() - macLength));
-        byte[] cipherText = fromHex(block.substring(HEADER_LENGTH, block.length() - macLength));
+        // The optional blocks sit between the header and the cipher text in the clear, and
+        // they are authenticated with it.
+        int optionalLength = optionalLength(header, block);
+        String optional = block.substring(HEADER_LENGTH, HEADER_LENGTH + optionalLength);
+        byte[] cipherText = fromHex(
+                block.substring(HEADER_LENGTH + optionalLength, block.length() - macLength));
 
         byte[][] derived = deriveKeys(protectionKey, aes);
         byte[] encryptionKey = derived[0];
         byte[] macKey = derived[1];
-        byte[][] masks = masksOf(macKey, aes);
         byte[] lengthEncoded = aes
                 ? PaymentCryptographyCrypto.aesCbcDecrypt(encryptionKey, mac, cipherText)
                 : Ciphers.tdesCbcDecrypt(cipherText, Ciphers.widenTdesKey(encryptionKey), mac);
 
-        byte[] recomputed = computeMac(header, lengthEncoded, macKey, masks, aes);
+        byte[] recomputed = computeMac(header + optional, lengthEncoded, macKey, aes);
         // The MACs are compared as bytes and in constant time: a comparison that stopped at
         // the first difference would say how much of the MAC matched.
         if (!MessageDigest.isEqual(recomputed, mac)) {
@@ -118,10 +121,39 @@ final class PaymentCryptographyTr31 {
         }
 
         int bits = parseInt(hexUpper(Arrays.copyOfRange(lengthEncoded, 0, 2)), "the length of the key", 16);
+        if (bits % 8 != 0) {
+            throw new IllegalArgumentException("the key block says its key is " + bits
+                    + " bits long, which is not a whole number of bytes");
+        }
         if (lengthEncoded.length < 2 + bits / 8) {
             throw new IllegalArgumentException("the key block says its key is longer than the block");
         }
         return Arrays.copyOfRange(lengthEncoded, 2, 2 + bits / 8);
+    }
+
+    /**
+     * How many characters the block's optional blocks take.
+     *
+     * <p>An optional block is its identifier over two characters, its length over four, and
+     * then its value. The header says how many of them there are.
+     *
+     * @param header the block's header
+     * @param block the whole block
+     * @return the length of the optional blocks, in characters
+     */
+    private static int optionalLength(String header, String block) {
+        int count = parseInt(header.substring(12, 14), "the number of optional blocks");
+        int length = 0;
+        for (int i = 0; i < count; i++) {
+            int at = HEADER_LENGTH + length;
+            if (block.length() < at + 6) {
+                throw new IllegalArgumentException("the key block says it has " + count
+                        + " optional blocks, and it is too short to hold them");
+            }
+            length += 6 + parseInt(block.substring(at + 2, at + 6),
+                    "the length of an optional block");
+        }
+        return length;
     }
 
     /** The usage code of a block's header, such as {@code D0}. */
@@ -243,7 +275,7 @@ final class PaymentCryptographyTr31 {
      * The key as a length encoded block: its length in bits in front of it, zero padded to the
      * block size.
      */
-    private static byte[] lengthEncode(byte[] clearKey, int blockSize) {
+    static byte[] lengthEncode(byte[] clearKey, int blockSize) {
         byte[] body = new byte[2 + clearKey.length];
         body[0] = (byte) ((clearKey.length * 8) >> 8);
         body[1] = (byte) (clearKey.length * 8);
@@ -264,9 +296,9 @@ final class PaymentCryptographyTr31 {
      * <p>A last block that needed no padding is masked with the first subkey and one that was
      * padded with the second, which is what the reference implementation does.
      */
-    private static byte[] computeMac(String header, byte[] lengthEncoded, byte[] macKey,
-                                      byte[][] masks, boolean aes) {
+    static byte[] computeMac(String header, byte[] lengthEncoded, byte[] macKey, boolean aes) {
         int blockSize = aes ? BLOCK_SIZE : 8;
+        byte[][] masks = masksOf(macKey, aes);
         byte[] data = new byte[header.length() + lengthEncoded.length];
         System.arraycopy(header.getBytes(StandardCharsets.US_ASCII), 0, data, 0, header.length());
         System.arraycopy(lengthEncoded, 0, data, header.length(), lengthEncoded.length);
@@ -295,7 +327,7 @@ final class PaymentCryptographyTr31 {
      * <p>The derivation follows the family of the protection key, because the block type does
      * too: a type D block is derived with AES and a type B one with Triple DES.
      */
-    private static byte[][] deriveKeys(byte[] protectionKey, boolean aes) {
+    static byte[][] deriveKeys(byte[] protectionKey, boolean aes) {
         return aes ? deriveAesKeys(protectionKey) : deriveTypeBKeys(protectionKey);
     }
 
@@ -420,12 +452,6 @@ final class PaymentCryptographyTr31 {
     }
 
     /** Two byte arrays, one after the other. */
-    private static byte[] concat(byte[] left, byte[] right) {
-        byte[] out = new byte[left.length + right.length];
-        System.arraycopy(left, 0, out, 0, left.length);
-        System.arraycopy(right, 0, out, left.length, right.length);
-        return out;
-    }
 
     private static byte[] xor(byte[] left, byte[] right) {
         byte[] out = new byte[left.length];

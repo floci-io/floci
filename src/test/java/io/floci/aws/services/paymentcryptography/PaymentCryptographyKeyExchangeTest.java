@@ -57,7 +57,7 @@ class PaymentCryptographyKeyExchangeTest {
 
     @Test
     void theImportParametersCarryACertificateAndAToken() {
-        Map<String, Object> parameters = service.parametersForImport("TR34_KEY_BLOCK", "RSA_2048");
+        Map<String, Object> parameters = service.parametersForImport("KEY_CRYPTOGRAM", "RSA_2048", false);
 
         assertNotNull(parameters.get("ImportToken"));
         assertNotNull(parameters.get("WrappingKeyCertificate"));
@@ -70,7 +70,7 @@ class PaymentCryptographyKeyExchangeTest {
 
     @Test
     void theExportParametersCarryACertificateAndAToken() {
-        Map<String, Object> parameters = service.parametersForExport("TR34_KEY_BLOCK", "RSA_2048");
+        Map<String, Object> parameters = service.parametersForExport("TR34_KEY_BLOCK", "RSA_2048", false);
 
         assertNotNull(parameters.get("ExportToken"));
         assertNotNull(parameters.get("SigningKeyCertificate"));
@@ -83,9 +83,9 @@ class PaymentCryptographyKeyExchangeTest {
 
     @Test
     void eachTokenIsNamedForTheOperationThatIssuedIt() {
-        String importToken = (String) service.parametersForImport("TR34_KEY_BLOCK", "RSA_2048")
+        String importToken = (String) service.parametersForImport("KEY_CRYPTOGRAM", "RSA_2048", false)
                 .get("ImportToken");
-        String exportToken = (String) service.parametersForExport("TR34_KEY_BLOCK", "RSA_2048")
+        String exportToken = (String) service.parametersForExport("TR34_KEY_BLOCK", "RSA_2048", false)
                 .get("ExportToken");
 
         assertTrue(importToken.startsWith("import-token-"), importToken);
@@ -95,9 +95,9 @@ class PaymentCryptographyKeyExchangeTest {
     @Test
     void aMaterialTypeThatTakesNoParametersIsRefused() {
         AwsException refused = assertThrows(AwsException.class,
-                () -> service.parametersForImport("TR31_KEY_BLOCK", "RSA_2048"));
+                () -> service.parametersForImport("TR31_KEY_BLOCK", "RSA_2048", false));
         AwsException refusedExport = assertThrows(AwsException.class,
-                () -> service.parametersForExport("KEY_CRYPTOGRAM", "RSA_2048"));
+                () -> service.parametersForExport("KEY_CRYPTOGRAM", "RSA_2048", false));
 
         assertEquals("ValidationException", refused.getErrorCode());
         assertEquals("ValidationException", refusedExport.getErrorCode());
@@ -106,9 +106,9 @@ class PaymentCryptographyKeyExchangeTest {
     @Test
     void anAlgorithmThatIsNotAKeyAlgorithmIsRefused() {
         AwsException refused = assertThrows(AwsException.class,
-                () -> service.parametersForImport("TR34_KEY_BLOCK", "AES_256"));
+                () -> service.parametersForImport("TR34_KEY_BLOCK", "AES_256", false));
         AwsException refusedExport = assertThrows(AwsException.class,
-                () -> service.parametersForExport("TR34_KEY_BLOCK", "AES_256"));
+                () -> service.parametersForExport("TR34_KEY_BLOCK", "AES_256", false));
 
         assertEquals("ValidationException", refused.getErrorCode());
         assertEquals("ValidationException", refusedExport.getErrorCode());
@@ -120,7 +120,7 @@ class PaymentCryptographyKeyExchangeTest {
     @Test
     void aKeyThatLeavesUnderACryptogramComesBack() {
         Map<String, Object> importParameters = service.parametersForImport("KEY_CRYPTOGRAM",
-                "RSA_2048");
+                "RSA_2048", false);
 
         PaymentCryptographyKey key = createKey("TDES_2KEY", "TR31_D0_SYMMETRIC_DATA_ENCRYPTION_KEY");
         PaymentCryptographyKey authority = createAuthority(
@@ -132,7 +132,7 @@ class PaymentCryptographyKeyExchangeTest {
         material.put("WrappingSpec", "RSA_OAEP_SHA_256");
 
         Map<String, Object> answer = service.exportKey("us-east-1", key.getKeyId(), "KeyCryptogram",
-                material, "");
+                material, "", "");
         Map<?, ?> wrapped = (Map<?, ?>) answer.get("WrappedKey");
         assertEquals("KEY_CRYPTOGRAM", wrapped.get("WrappedKeyMaterialFormat"));
 
@@ -147,7 +147,7 @@ class PaymentCryptographyKeyExchangeTest {
                 "KeyUsage", "TR31_D0_SYMMETRIC_DATA_ENCRYPTION_KEY",
                 "KeyModesOfUse", Map.of("Encrypt", true, "Decrypt", true)));
 
-        PaymentCryptographyKey imported = service.importKey("us-east-1", "KeyCryptogram", incoming);
+        PaymentCryptographyKey imported = service.importKey("us-east-1", "KeyCryptogram", incoming, "", true, Map.of());
 
         assertEquals(key.getKeyMaterialHex(), imported.getKeyMaterialHex());
     }
@@ -176,7 +176,7 @@ class PaymentCryptographyKeyExchangeTest {
                                 "KeyAlgorithm", "RSA_2048",
                                 "KeyClass", "PUBLIC_KEY",
                                 "KeyUsage", "TR31_S0_ASYMMETRIC_KEY_FOR_DIGITAL_SIGNATURE",
-                                "KeyModesOfUse", Map.of("Verify", Boolean.TRUE))));
+                                "KeyModesOfUse", Map.of("Verify", Boolean.TRUE))), "", true, Map.of());
         PaymentCryptographyKey agreement = createKeyPair("ECC_NIST_P256",
                 "TR31_K3_ASYMMETRIC_KEY_FOR_KEY_AGREEMENT");
         PaymentCryptographyKey key = createKey("AES_128", "TR31_D0_SYMMETRIC_DATA_ENCRYPTION_KEY");
@@ -192,7 +192,7 @@ class PaymentCryptographyKeyExchangeTest {
                 "SharedInformation", "00112233445566778899AABBCCDDEEFF"));
 
         Map<String, Object> answer = service.exportKey("us-east-1", key.getKeyId(),
-                "DiffieHellmanTr31KeyBlock", material, "");
+                "DiffieHellmanTr31KeyBlock", material, "", "");
         Map<?, ?> wrapped = (Map<?, ?>) answer.get("WrappedKey");
 
         assertEquals("TR31_KEY_BLOCK", wrapped.get("WrappedKeyMaterialFormat"));
@@ -201,7 +201,7 @@ class PaymentCryptographyKeyExchangeTest {
         Map<String, Object> incoming = new LinkedHashMap<>(material);
         incoming.put("WrappedKeyBlock", wrapped.get("KeyMaterial"));
         PaymentCryptographyKey imported = service.importKey("us-east-1",
-                "DiffieHellmanTr31KeyBlock", incoming);
+                "DiffieHellmanTr31KeyBlock", incoming, "", true, Map.of());
 
         assertEquals(key.getKeyMaterialHex(), imported.getKeyMaterialHex());
         assertEquals(key.getKeyUsage(), imported.getKeyUsage());
@@ -228,7 +228,7 @@ class PaymentCryptographyKeyExchangeTest {
                                 "KeyAlgorithm", "RSA_2048",
                                 "KeyClass", "PUBLIC_KEY",
                                 "KeyUsage", "TR31_S0_ASYMMETRIC_KEY_FOR_DIGITAL_SIGNATURE",
-                                "KeyModesOfUse", Map.of("Verify", Boolean.TRUE))));
+                                "KeyModesOfUse", Map.of("Verify", Boolean.TRUE))), "", true, Map.of());
         PaymentCryptographyKey agreement = createKeyPair("ECC_NIST_P256",
                 "TR31_K3_ASYMMETRIC_KEY_FOR_KEY_AGREEMENT");
         PaymentCryptographyKey key = createKey("AES_128", "TR31_D0_SYMMETRIC_DATA_ENCRYPTION_KEY");
@@ -245,7 +245,7 @@ class PaymentCryptographyKeyExchangeTest {
 
         AwsException refused = assertThrows(AwsException.class,
                 () -> service.exportKey("us-east-1", key.getKeyId(), "DiffieHellmanTr31KeyBlock",
-                        material, ""));
+                        material, "", ""));
 
         assertEquals("ValidationException", refused.getErrorCode());
         assertTrue(refused.getMessage().contains("not signed by the certificate authority"),
@@ -264,7 +264,7 @@ class PaymentCryptographyKeyExchangeTest {
                 Map.of("DeriveKey", Boolean.TRUE), true, true, Map.of());
 
         Map<String, Object> answer = service.exportKey("us-east-1", base.getKeyId(), "Tr31KeyBlock",
-                Map.of("WrappingKeyIdentifier", protection.getKeyId()), "12345678900000000001");
+                Map.of("WrappingKeyIdentifier", protection.getKeyId()), "12345678900000000001", "");
 
         Map<?, ?> wrapped = (Map<?, ?>) answer.get("WrappedKey");
         String block = (String) wrapped.get("KeyMaterial");
@@ -289,7 +289,7 @@ class PaymentCryptographyKeyExchangeTest {
         AwsException refused = assertThrows(AwsException.class,
                 () -> service.exportKey("us-east-1", key.getKeyId(), "Tr31KeyBlock",
                         Map.of("WrappingKeyIdentifier", protection.getKeyId()),
-                        "12345678900000000001"));
+                        "12345678900000000001", ""));
 
         assertEquals("ValidationException", refused.getErrorCode());
     }
@@ -298,7 +298,7 @@ class PaymentCryptographyKeyExchangeTest {
     @Test
     void anImportTokenWorksForEveryImportUntilItExpires() {
         // A caller that asks for the parameters once may import several keys under them.
-        Map<String, Object> parameters = service.parametersForImport("KEY_CRYPTOGRAM", "RSA_2048");
+        Map<String, Object> parameters = service.parametersForImport("KEY_CRYPTOGRAM", "RSA_2048", false);
         String token = (String) parameters.get("ImportToken");
         // The cryptogram is built under the wrapping key the parameters carry, so it opens.
         X509Certificate certificate =
@@ -314,7 +314,7 @@ class PaymentCryptographyKeyExchangeTest {
                             "KeyAttributes", Map.of("KeyAlgorithm", "AES_128",
                                     "KeyClass", "SYMMETRIC_KEY",
                                     "KeyUsage", "TR31_K1_KEY_BLOCK_PROTECTION_KEY",
-                                    "KeyModesOfUse", Map.of("Wrap", true, "Unwrap", true))));
+                                    "KeyModesOfUse", Map.of("Wrap", true, "Unwrap", true))), "", true, Map.of());
             assertNotNull(imported, "the second import was refused");
         }
     }
@@ -328,8 +328,8 @@ class PaymentCryptographyKeyExchangeTest {
         long lifetime = PaymentCryptographyKeyExchange.importTokenTtlMs;
         try {
             PaymentCryptographyKeyExchange.importTokenTtlMs = 0;
-            service.parametersForImport("KEY_CRYPTOGRAM", "RSA_2048");
-            service.parametersForImport("KEY_CRYPTOGRAM", "RSA_2048");
+            service.parametersForImport("KEY_CRYPTOGRAM", "RSA_2048", false);
+            service.parametersForImport("KEY_CRYPTOGRAM", "RSA_2048", false);
         } finally {
             PaymentCryptographyKeyExchange.importTokenTtlMs = lifetime;
         }
@@ -357,7 +357,7 @@ class PaymentCryptographyKeyExchangeTest {
         PaymentCryptographyKey key = createKey("AES_256", "TR31_D0_SYMMETRIC_DATA_ENCRYPTION_KEY");
 
         AwsException refused = assertThrows(AwsException.class,
-                () -> service.exportKey("us-east-1", key.getKeyId(), "Nonsense", Map.of(), ""));
+                () -> service.exportKey("us-east-1", key.getKeyId(), "Nonsense", Map.of(), "", ""));
         assertEquals("ValidationException", refused.getErrorCode());
     }
 
@@ -382,7 +382,12 @@ class PaymentCryptographyKeyExchangeTest {
         attributes.put("KeyAlgorithm", algorithm);
         attributes.put("KeyClass", "ASYMMETRIC_KEY_PAIR");
         attributes.put("KeyUsage", usage);
-        return service.createKey("us-east-1", attributes, Map.of(), true, true, Map.of());
+        // The modes are the ones the purpose allows: a key agreement key derives, a signing
+        // key signs and verifies.
+        Map<String, Boolean> modes = "TR31_K3_ASYMMETRIC_KEY_FOR_KEY_AGREEMENT".equals(usage)
+                ? Map.of("DeriveKey", true)
+                : Map.of("Sign", true, "Verify", true);
+        return service.createKey("us-east-1", attributes, modes, true, true, Map.of());
     }
 
     /**
@@ -398,7 +403,265 @@ class PaymentCryptographyKeyExchangeTest {
                         "KeyAlgorithm", "RSA_2048",
                         "KeyClass", "PUBLIC_KEY",
                         "KeyUsage", "TR31_S0_ASYMMETRIC_KEY_FOR_DIGITAL_SIGNATURE",
-                        "KeyModesOfUse", Map.of("Verify", Boolean.TRUE))));
+                        "KeyModesOfUse", Map.of("Verify", Boolean.TRUE))), "", true, Map.of());
+    }
+
+
+    @Test
+    void anAuthorityThatMayNotVerifyIsRefused() {
+        // The authority vouches for the other party's certificate, so it has to be allowed to
+        // verify.
+        SecureRandom random = new SecureRandom();
+        KeyPair authority = PaymentCryptographyKeyPairs.rsa(2048, random);
+        KeyPair counterparty = PaymentCryptographyKeyPairs.ec(
+                PaymentCryptographyKeyAlgorithm.ECC_NIST_P256, random);
+        Instant now = Instant.now();
+        Certificates.Minted caCertificate = Certificates.mintSelfSigned(authority, "floci CA",
+                now.minusSeconds(3600), now.plusSeconds(86400), random);
+        Certificates.Minted counterpartyCertificate = Certificates.mint(counterparty.getPublic(),
+                "floci counterparty", authority.getPrivate(), "floci CA",
+                now.minusSeconds(3600), now.plusSeconds(86400), random);
+        Map<String, Object> attributes = new LinkedHashMap<>();
+        attributes.put("KeyAlgorithm", "RSA_2048");
+        attributes.put("KeyClass", "PUBLIC_KEY");
+        attributes.put("KeyUsage", "TR31_S0_ASYMMETRIC_KEY_FOR_DIGITAL_SIGNATURE");
+        attributes.put("KeyModesOfUse", Map.of("Encrypt", Boolean.TRUE));
+        PaymentCryptographyKey ca = service.importKey("us-east-1", "TrustedCertificatePublicKey",
+                Map.of("PublicKeyCertificate", caCertificate.pem(), "KeyAttributes", attributes),
+                "", true, Map.of());
+
+        AwsException refused = assertThrows(AwsException.class,
+                () -> service.exportKey("us-east-1", createKey("AES_128",
+                        "TR31_D0_SYMMETRIC_DATA_ENCRYPTION_KEY").getKeyId(), "KeyCryptogram",
+                        Map.of("WrappingKeyCertificate", counterpartyCertificate.pem(),
+                                "CertificateAuthorityPublicKeyIdentifier", ca.getKeyId()), "", ""));
+
+        assertEquals("ValidationException", refused.getErrorCode());
+        assertTrue(refused.getMessage().contains("Verify"), refused.getMessage());
+    }
+
+    @Test
+    void anExpiredCertificateIsRefused() {
+        SecureRandom random = new SecureRandom();
+        KeyPair authority = PaymentCryptographyKeyPairs.rsa(2048, random);
+        KeyPair counterparty = PaymentCryptographyKeyPairs.ec(
+                PaymentCryptographyKeyAlgorithm.ECC_NIST_P256, random);
+        Instant now = Instant.now();
+        Certificates.Minted caCertificate = Certificates.mintSelfSigned(authority, "floci CA",
+                now.minusSeconds(3600), now.plusSeconds(86400), random);
+        // The counterparty's certificate has expired, so it protects nothing.
+        Certificates.Minted counterpartyCertificate = Certificates.mint(counterparty.getPublic(),
+                "floci counterparty", authority.getPrivate(), "floci CA",
+                now.minusSeconds(7200), now.minusSeconds(3600), random);
+        PaymentCryptographyKey ca = createAuthority(caCertificate.pem());
+
+        AwsException refused = assertThrows(AwsException.class,
+                () -> service.exportKey("us-east-1", createKey("AES_128",
+                        "TR31_D0_SYMMETRIC_DATA_ENCRYPTION_KEY").getKeyId(), "KeyCryptogram",
+                        Map.of("WrappingKeyCertificate", counterpartyCertificate.pem(),
+                                "CertificateAuthorityPublicKeyIdentifier", ca.getKeyId()), "", ""));
+
+        assertEquals("ValidationException", refused.getErrorCode());
+        assertTrue(refused.getMessage().contains("validity window"), refused.getMessage());
+    }
+
+    @Test
+    void aCertificateThatDoesNotParseIsRefused() {
+        // The text is not a certificate, so it is refused rather than stored as one.
+        AwsException refused = assertThrows(AwsException.class,
+                () -> createAuthority("not a certificate at all"));
+
+        assertEquals("ValidationException", refused.getErrorCode());
+        assertTrue(refused.getMessage().contains("not a certificate"), refused.getMessage());
+    }
+
+    @Test
+    void aDisabledKeyDoesNotLeave() {
+        // A disabled key does no work, so it may not be exported.
+        PaymentCryptographyKey key = service.createKey("us-east-1",
+                Map.of("KeyAlgorithm", "AES_128", "KeyClass", "SYMMETRIC_KEY",
+                        "KeyUsage", "TR31_D0_SYMMETRIC_DATA_ENCRYPTION_KEY",
+                        "KeyModesOfUse", Map.of("Encrypt", true, "Decrypt", true)),
+                Map.of("Encrypt", true, "Decrypt", true), true, false, Map.of());
+
+        AwsException refused = assertThrows(AwsException.class,
+                () -> service.exportKey("us-east-1", key.getKeyId(), "Tr31KeyBlock",
+                        Map.of("WrappingKeyIdentifier", protection.getKeyId()), "", ""));
+
+        assertEquals("ValidationException", refused.getErrorCode());
+        assertTrue(refused.getMessage().contains("disabled"), refused.getMessage());
+    }
+
+    @Test
+    void aDataEncryptionKeyMayNotWrapAnExport() {
+        // The wrapping key of a key block is a key encryption key, and a data encryption key
+        // is not one.
+        PaymentCryptographyKey data = service.createKey("us-east-1",
+                Map.of("KeyAlgorithm", "AES_256", "KeyClass", "SYMMETRIC_KEY",
+                        "KeyUsage", "TR31_D0_SYMMETRIC_DATA_ENCRYPTION_KEY",
+                        "KeyModesOfUse", Map.of("Encrypt", true, "Decrypt", true)),
+                Map.of("Encrypt", true, "Decrypt", true), true, true, Map.of());
+        PaymentCryptographyKey key = createKey("AES_128", "TR31_D0_SYMMETRIC_DATA_ENCRYPTION_KEY");
+
+        AwsException refused = assertThrows(AwsException.class,
+                () -> service.exportKey("us-east-1", key.getKeyId(), "Tr31KeyBlock",
+                        Map.of("WrappingKeyIdentifier", data.getKeyId()), "", ""));
+
+        assertEquals("ValidationException", refused.getErrorCode());
+        assertTrue(refused.getMessage().contains("not a key encryption key"), refused.getMessage());
+    }
+
+    @Test
+    void aBaseKeyThatMayNotLeaveDoesNotDeriveAnInitialKey() {
+        // The key derived from a base derivation key leaves the service, so the base key has
+        // to be one that may leave.
+        PaymentCryptographyKey base = service.createKey("us-east-1",
+                Map.of("KeyAlgorithm", "TDES_2KEY", "KeyClass", "SYMMETRIC_KEY",
+                        "KeyUsage", "TR31_B0_BASE_DERIVATION_KEY",
+                        "KeyModesOfUse", Map.of("DeriveKey", true)),
+                Map.of("DeriveKey", true), false, true, Map.of());
+
+        AwsException refused = assertThrows(AwsException.class,
+                () -> service.exportKey("us-east-1", base.getKeyId(), "Tr31KeyBlock",
+                        Map.of("WrappingKeyIdentifier", protection.getKeyId()),
+                        "12345678900000000001", ""));
+
+        assertEquals("ValidationException", refused.getErrorCode());
+        assertTrue(refused.getMessage().contains("not exportable"), refused.getMessage());
+    }
+
+    @Test
+    void anImportedKeyThatMayNotLeaveStaysThatWay() {
+        // The exportability is a member of the form, beside the attributes and not inside
+        // them.
+        Map<String, Object> importParameters = service.parametersForImport("KEY_CRYPTOGRAM",
+                "RSA_2048", false);
+        PaymentCryptographyKey key = createKey("TDES_2KEY", "TR31_D0_SYMMETRIC_DATA_ENCRYPTION_KEY");
+        PaymentCryptographyKey authority = createAuthority(
+                (String) importParameters.get("WrappingKeyCertificate"));
+        Map<String, Object> material = new LinkedHashMap<>();
+        material.put("WrappingKeyCertificate", importParameters.get("WrappingKeyCertificate"));
+        material.put("CertificateAuthorityPublicKeyIdentifier", authority.getKeyId());
+        material.put("WrappingSpec", "RSA_OAEP_SHA_256");
+        Map<String, Object> answer = service.exportKey("us-east-1", key.getKeyId(), "KeyCryptogram",
+                material, "", "");
+        Map<?, ?> wrapped = (Map<?, ?>) answer.get("WrappedKey");
+
+        Map<String, Object> incoming = new LinkedHashMap<>();
+        incoming.put("ImportToken", importParameters.get("ImportToken"));
+        incoming.put("WrappedKeyCryptogram", wrapped.get("KeyMaterial"));
+        incoming.put("WrappingKeyIdentifier", authority.getKeyId());
+        incoming.put("WrappingSpec", "RSA_OAEP_SHA_256");
+        incoming.put("Exportable", Boolean.FALSE);
+        incoming.put("KeyAttributes", Map.of(
+                "KeyAlgorithm", "TDES_2KEY",
+                "KeyClass", "SYMMETRIC_KEY",
+                "KeyUsage", "TR31_D0_SYMMETRIC_DATA_ENCRYPTION_KEY",
+                "KeyModesOfUse", Map.of("Encrypt", true, "Decrypt", true)));
+
+        PaymentCryptographyKey imported = service.importKey("us-east-1", "KeyCryptogram", incoming,
+                "", true, Map.of());
+
+        assertFalse(imported.isExportable(), "the key was imported as one that may leave");
+    }
+
+    @Test
+    void aKeyOfAnotherPurposeMayNotAgree() {
+        // The key that agrees has to be a key agreement key.
+        PaymentCryptographyKey signing = createKeyPair("ECC_NIST_P256");
+        PaymentCryptographyKey key = createKey("AES_128", "TR31_D0_SYMMETRIC_DATA_ENCRYPTION_KEY");
+
+        AwsException refused = assertThrows(AwsException.class,
+                () -> service.exportKey("us-east-1", key.getKeyId(), "DiffieHellmanTr31KeyBlock",
+                        Map.of("PrivateKeyIdentifier", signing.getKeyId(),
+                                "CertificateAuthorityPublicKeyIdentifier", signing.getKeyId(),
+                                "PublicKeyCertificate", "not a certificate",
+                                "DeriveKeyAlgorithm", "AES_128",
+                                "KeyDerivationFunction", "ANSI_X963",
+                                "KeyDerivationHashAlgorithm", "SHA_256",
+                                "DerivationData", Map.of(
+                                        "SharedInformation", "00112233445566778899AABBCCDDEEFF")),
+                        "", ""));
+
+        assertEquals("ValidationException", refused.getErrorCode());
+        assertTrue(refused.getMessage().contains("key agreement"), refused.getMessage());
+    }
+
+    @Test
+    void aKeyThatIsNotACurveKeyIsRefused() {
+        // An RSA key cannot take part in an agreement, and it is refused rather than read as
+        // a curve key.
+        PaymentCryptographyKey rsa = createKeyPair("RSA_2048");
+        PaymentCryptographyKey key = createKey("AES_128", "TR31_D0_SYMMETRIC_DATA_ENCRYPTION_KEY");
+
+        AwsException refused = assertThrows(AwsException.class,
+                () -> service.exportKey("us-east-1", key.getKeyId(), "DiffieHellmanTr31KeyBlock",
+                        Map.of("PrivateKeyIdentifier", rsa.getKeyId(),
+                                "CertificateAuthorityPublicKeyIdentifier", rsa.getKeyId(),
+                                "PublicKeyCertificate", "not a certificate",
+                                "DeriveKeyAlgorithm", "AES_128",
+                                "KeyDerivationFunction", "ANSI_X963",
+                                "KeyDerivationHashAlgorithm", "SHA_256",
+                                "DerivationData", Map.of(
+                                        "SharedInformation", "00112233445566778899AABBCCDDEEFF")),
+                        "", ""));
+
+        assertEquals("ValidationException", refused.getErrorCode());
+    }
+
+    @Test
+    void anExportWithAnotherCheckValueAlgorithmIsRefused() {
+        PaymentCryptographyKey key = createKey("AES_128", "TR31_D0_SYMMETRIC_DATA_ENCRYPTION_KEY");
+
+        AwsException refused = assertThrows(AwsException.class,
+                () -> service.exportKey("us-east-1", key.getKeyId(), "Tr31KeyBlock",
+                        Map.of("WrappingKeyIdentifier", protection.getKeyId()), "", "ANSI_X9_24"));
+
+        assertEquals("ValidationException", refused.getErrorCode());
+        assertTrue(refused.getMessage().contains("check value algorithm"), refused.getMessage());
+    }
+
+    @Test
+    void anImportWithAnotherCheckValueAlgorithmIsRefused() {
+        PaymentCryptographyKey key = createKey("AES_128", "TR31_D0_SYMMETRIC_DATA_ENCRYPTION_KEY");
+        Map<String, Object> answer = service.exportKey("us-east-1", key.getKeyId(), "Tr31KeyBlock",
+                Map.of("WrappingKeyIdentifier", protection.getKeyId()), "", "");
+        Map<?, ?> wrapped = (Map<?, ?>) answer.get("WrappedKey");
+        String block = (String) wrapped.get("KeyMaterial");
+
+        AwsException refused = assertThrows(AwsException.class,
+                () -> service.importKey("us-east-1", "Tr31KeyBlock",
+                        Map.of("WrappingKeyIdentifier", protection.getKeyId(),
+                                "WrappedKeyBlock", block),
+                        "ANSI_X9_24", true, Map.of()));
+
+        assertEquals("ValidationException", refused.getErrorCode());
+        assertTrue(refused.getMessage().contains("check value algorithm"), refused.getMessage());
+    }
+
+    @Test
+    void theParametersCanBeReused() {
+        // A caller that asks for the last parameters gets them, token and certificate alike.
+        Map<String, Object> first = service.parametersForImport("KEY_CRYPTOGRAM", "RSA_2048", false);
+        Map<String, Object> again = service.parametersForImport("KEY_CRYPTOGRAM", "RSA_2048", true);
+        Map<String, Object> fresh = service.parametersForImport("KEY_CRYPTOGRAM", "RSA_2048", false);
+
+        assertEquals(first.get("ImportToken"), again.get("ImportToken"));
+        assertEquals(first.get("WrappingKeyCertificate"), again.get("WrappingKeyCertificate"));
+        assertNotEquals(first.get("ImportToken"), fresh.get("ImportToken"));
+    }
+
+    @Test
+    void theExportParametersOutliveTheirCertificate() {
+        // The parameters are good until the certificate they carry is not.
+        Map<String, Object> parameters = service.parametersForExport("TR34_KEY_BLOCK", "RSA_2048",
+                false);
+        String certificate = (String) parameters.get("SigningKeyCertificate");
+        long validUntil = ((Number) parameters.get("ParametersValidUntilTimestamp")).longValue();
+        X509Certificate parsed = Certificates.parseCertificate(certificate);
+
+        assertTrue(parsed.getNotAfter().toInstant().getEpochSecond() >= validUntil,
+                "the certificate expires before the parameters do");
     }
 
 }

@@ -35,6 +35,15 @@ public class PaymentCryptographyJsonHandler {
         this.service = service;
     }
 
+    /** The forms the model's export union holds. */
+    private static final List<String> EXPORT_UNION = List.of("Tr31KeyBlock", "Tr34KeyBlock",
+            "KeyCryptogram", "DiffieHellmanTr31KeyBlock", "As2805KeyCryptogram");
+
+    /** The forms the model's import union holds. */
+    private static final List<String> IMPORT_UNION = List.of("RootCertificatePublicKey",
+            "TrustedCertificatePublicKey", "Tr31KeyBlock", "Tr34KeyBlock", "KeyCryptogram",
+            "DiffieHellmanTr31KeyBlock", "As2805KeyCryptogram");
+
     /** The actions whose requests are checked against the vendored model constraints first. */
     private static final Set<String> MODEL_CHECKED = Set.of(
             "CreateKey", "GetKey", "ListKeys", "DeleteKey",
@@ -395,9 +404,12 @@ public class PaymentCryptographyJsonHandler {
         // the identifier is read and not checked again.
         String keyIdentifier = request.path("ExportKeyIdentifier").asText();
         JsonNode material = request.path("KeyMaterial");
-        String form = soleForm(material, PaymentCryptographyKeyExchange.EXPORT_FORMS);
+        String form = soleForm(material, EXPORT_UNION, PaymentCryptographyKeyExchange.EXPORT_FORMS,
+                "exports");
+        JsonNode attributes = request.path("ExportAttributes");
         return service.exportKey(region, keyIdentifier, form, members(material.path(form)),
-                initialKeySerialNumber(request.path("ExportAttributes")));
+                initialKeySerialNumber(attributes),
+                attributes.path("KeyCheckValueAlgorithm").asText());
     }
 
     /**
@@ -406,7 +418,8 @@ public class PaymentCryptographyJsonHandler {
      */
     private Map<String, Object> getParametersForImport(JsonNode request, String region) {
         return service.parametersForImport(request.path("KeyMaterialType").asText(),
-                request.path("WrappingKeyAlgorithm").asText());
+                request.path("WrappingKeyAlgorithm").asText(),
+                request.path("ReuseLastGeneratedToken").asBoolean(false));
     }
 
     /**
@@ -415,7 +428,8 @@ public class PaymentCryptographyJsonHandler {
      */
     private Map<String, Object> getParametersForExport(JsonNode request, String region) {
         return service.parametersForExport(request.path("KeyMaterialType").asText(),
-                request.path("SigningKeyAlgorithm").asText());
+                request.path("SigningKeyAlgorithm").asText(),
+                request.path("ReuseLastGeneratedToken").asBoolean(false));
     }
 
     /**
@@ -423,8 +437,11 @@ public class PaymentCryptographyJsonHandler {
      */
     private Map<String, Object> importKey(JsonNode request, String region) {
         JsonNode material = request.path("KeyMaterial");
-        String form = soleForm(material, PaymentCryptographyKeyExchange.IMPORT_FORMS);
-        PaymentCryptographyKey key = service.importKey(region, form, members(material.path(form)));
+        String form = soleForm(material, IMPORT_UNION, PaymentCryptographyKeyExchange.IMPORT_FORMS,
+                "imports");
+        PaymentCryptographyKey key = service.importKey(region, form, members(material.path(form)),
+                request.path("KeyCheckValueAlgorithm").asText(),
+                request.path("Enabled").asBoolean(true), tagsOf(request));
         return Map.of("Key", keyObject(key));
     }
 
@@ -454,24 +471,26 @@ public class PaymentCryptographyJsonHandler {
      * at once is not the same as none: the request says which one it meant, and it cannot be
      * more than one.
      */
-    private static String soleForm(JsonNode material, List<String> forms) {
+    private static String soleForm(JsonNode material, List<String> union, List<String> served,
+                                    String what) {
         List<String> named = new ArrayList<>();
-        for (String form : forms) {
+        for (String form : union) {
             if (material.has(form) && !material.path(form).isNull()) {
                 named.add(form);
             }
         }
-        if (named.size() > 1) {
+        if (named.size() != 1) {
             throw new AwsException("ValidationException",
-                    "KeyMaterial must specify exactly one variant (" + String.join(", ", forms) + ")",
+                    "KeyMaterial must specify exactly one variant (" + String.join(", ", union) + ")",
                     400);
         }
-        if (named.isEmpty()) {
+        String form = named.get(0);
+        if (!served.contains(form)) {
             throw new AwsException("ValidationException",
-                    "KeyMaterial must specify exactly one variant (" + String.join(", ", forms) + ")",
-                    400);
+                    "KeyMaterial." + form + " is not a form the service " + what + " ("
+                            + String.join(", ", served) + ")", 400);
         }
-        return named.get(0);
+        return form;
     }
 
     /** The members of a form, as the service reads them. */

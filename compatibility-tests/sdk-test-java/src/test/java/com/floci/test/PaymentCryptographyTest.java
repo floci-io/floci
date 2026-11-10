@@ -169,7 +169,7 @@ class PaymentCryptographyTest {
     @Test
     void theImportAndExportParametersAreServed() {
         GetParametersForImportResponse importParameters = client.getParametersForImport(r -> r
-                .keyMaterialType(KeyMaterialType.TR34_KEY_BLOCK)
+                .keyMaterialType(KeyMaterialType.KEY_CRYPTOGRAM)
                 .wrappingKeyAlgorithm(KeyAlgorithm.RSA_2048));
 
         assertThat(importParameters.importToken()).startsWith("import-token-");

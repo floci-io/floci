@@ -2,8 +2,12 @@ package io.floci.aws.services.paymentcryptography;
 
 import org.junit.jupiter.api.Test;
 
+import java.util.HexFormat;
+
 import static org.junit.jupiter.api.Assertions.assertArrayEquals;
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
  * The TR-31 key block, against the vectors the standard's examples give.
@@ -18,6 +22,9 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
  * under another.
  */
 class PaymentCryptographyTr31Test {
+
+    /** The hexadecimal the blocks are written in. */
+    private static final HexFormat HEX = HexFormat.of().withUpperCase();
 
     /** A two-key TDES key block protection key, sixteen bytes. */
     private static final String TDES_2KEY_KEK = "0123456789ABCDEFFEDCBA9876543210";
@@ -152,4 +159,71 @@ class PaymentCryptographyTr31Test {
             assertEquals("the key block did not authenticate under the key", expected.getMessage());
         }
     }
+
+    @Test
+    void aBlockWithOptionalBlocksIsImported() {
+        // An optional block sits between the header and the cipher text in the clear, and it
+        // is authenticated with it, so the cipher text starts after it.
+        String block = blockWithOptionalBlock("00" + "0008" + "61626364");
+
+        byte[] key = PaymentCryptographyTr31.unwrap(block,
+                PaymentCryptographyCrypto.fromHex(AES_128_KEK));
+
+        assertArrayEquals(PaymentCryptographyCrypto.fromHex(CLEAR_KEY), key);
+    }
+
+    @Test
+    void aBlockWhoseKeyIsNotAWholeNumberOfBytesIsRefused() {
+        // The length the block declares is in bits, and a key is a whole number of bytes.
+        String block = blockWithLength("0081");
+
+        IllegalArgumentException refused = assertThrows(IllegalArgumentException.class,
+                () -> PaymentCryptographyTr31.unwrap(block,
+                        PaymentCryptographyCrypto.fromHex(AES_128_KEK)));
+
+        assertTrue(refused.getMessage().contains("whole number of bytes"), refused.getMessage());
+    }
+
+    /**
+     * A type D block with an optional block in the clear.
+     *
+     * <p>The optional block is its identifier over two characters, its length over four and
+     * then its value. The header says how many of them there are.
+     */
+    private String blockWithOptionalBlock(String optional) {
+        byte[] lengthEncoded = PaymentCryptographyTr31.lengthEncode(
+                PaymentCryptographyCrypto.fromHex(CLEAR_KEY), 16);
+        byte[][] derived = PaymentCryptographyTr31.deriveKeys(
+                PaymentCryptographyCrypto.fromHex(AES_128_KEK), true);
+        int blockLength = 16 + optional.length() + lengthEncoded.length * 2 + 32;
+        String header = "D" + String.format("%04d", blockLength) + "D0" + "A" + "B" + "00" + "E"
+                + "01" + "00";
+        byte[] mac = PaymentCryptographyTr31.computeMac(header + optional, lengthEncoded,
+                derived[1], true);
+        byte[] cipherText = PaymentCryptographyCrypto.aesCbcEncrypt(derived[0], mac, lengthEncoded);
+        return header + optional + HEX.formatHex(cipherText) + HEX.formatHex(mac);
+    }
+
+    /**
+     * A type D block whose length field says the given bits.
+     *
+     * <p>The length is over the key the block carries, and the rest of the block is built the
+     * way the emulator builds one.
+     */
+    private String blockWithLength(String length) {
+        byte[] clearKey = PaymentCryptographyCrypto.fromHex(CLEAR_KEY);
+        byte[] lengthEncoded = new byte[32];
+        lengthEncoded[0] = (byte) ((Integer.parseInt(length, 16) >> 8) & 0xff);
+        lengthEncoded[1] = (byte) (Integer.parseInt(length, 16) & 0xff);
+        System.arraycopy(clearKey, 0, lengthEncoded, 2, clearKey.length);
+        byte[][] derived = PaymentCryptographyTr31.deriveKeys(
+                PaymentCryptographyCrypto.fromHex(AES_128_KEK), true);
+        int blockLength = 16 + lengthEncoded.length * 2 + 32;
+        String header = "D" + String.format("%04d", blockLength) + "D0" + "A" + "B" + "00" + "E"
+                + "00" + "00";
+        byte[] mac = PaymentCryptographyTr31.computeMac(header, lengthEncoded, derived[1], true);
+        byte[] cipherText = PaymentCryptographyCrypto.aesCbcEncrypt(derived[0], mac, lengthEncoded);
+        return header + HEX.formatHex(cipherText) + HEX.formatHex(mac);
+    }
+
 }

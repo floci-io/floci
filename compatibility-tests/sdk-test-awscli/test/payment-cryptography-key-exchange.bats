@@ -38,7 +38,7 @@ create_key() {
 
 @test "Payment Cryptography key exchange: the import parameters carry a token and a certificate" {
     run aws_cmd payment-cryptography get-parameters-for-import \
-        --key-material-type TR34_KEY_BLOCK \
+        --key-material-type KEY_CRYPTOGRAM \
         --wrapping-key-algorithm RSA_2048
     assert_success
     TOKEN=$(json_get "$output" '.ImportToken')
@@ -114,7 +114,7 @@ create_key() {
     # The request has to carry what the model asks for, or the client refuses it before
     # the service ever sees it.
     run aws_cmd payment-cryptography get-parameters-for-import \
-        --key-material-type TR34_KEY_BLOCK \
+        --key-material-type KEY_CRYPTOGRAM \
         --wrapping-key-algorithm RSA_2048
     assert_success
     CERTIFICATE=$(json_get "$output" '.WrappingKeyCertificate')

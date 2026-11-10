@@ -546,14 +546,23 @@ public class PaymentCryptographyService implements Resettable, StoredResourceArn
      * @return the material, the format it is in, and the key that protects it
      */
     public Map<String, Object> exportKey(String region, String keyIdentifier, String form,
-                                          Map<String, Object> material, String keySerialNumber) {
+                                          Map<String, Object> material, String keySerialNumber,
+                                          String checkValueAlgorithm) {
         PaymentCryptographyKey key = findKey(region, keyIdentifier);
         if (key == null) {
             throw new AwsException("ResourceNotFoundException", "Key not found: " + keyIdentifier, 400);
         }
+        PaymentCryptographyKeyRules.requireEnabled(key);
         // An initial key leaves instead of the key itself: the service derives it and does
         // not keep it.
         PaymentCryptographyKey leaving = keySerialNumber.isEmpty() ? key : initialKey(key, keySerialNumber);
+        if (!checkValueAlgorithm.isEmpty()
+                && !checkValueAlgorithm.equals(leaving.getKeyCheckValueAlgorithm())) {
+            throw new AwsException("ValidationException",
+                    "the check value algorithm " + checkValueAlgorithm + " is not the one the key "
+                            + leaving.getArn() + " has, which is "
+                            + leaving.getKeyCheckValueAlgorithm(), 400);
+        }
         if (!leaving.isExportable() && keySerialNumber.isEmpty()) {
             throw new AwsException("ValidationException",
                     "the key " + key.getArn() + " is not exportable", 400);
@@ -578,13 +587,25 @@ public class PaymentCryptographyService implements Resettable, StoredResourceArn
      * @param material the members of the form
      * @return the key
      */
-    public PaymentCryptographyKey importKey(String region, String form, Map<String, Object> material) {
+    public PaymentCryptographyKey importKey(String region, String form, Map<String, Object> material,
+                                         String checkValueAlgorithm, boolean enabled,
+                                         Map<String, String> tags) {
         PaymentCryptographyKeyExchange.Imported imported = exchange.importKey(region, form, material);
         Map<String, Object> attributes = new LinkedHashMap<>();
         attributes.put("KeyAlgorithm", imported.algorithm());
         attributes.put("KeyClass", imported.keyClass());
         attributes.put("KeyUsage", imported.usage());
-        return makeKey(region, attributes, imported.modes(), imported.exportable(), true, Map.of(),
+        if (!checkValueAlgorithm.isEmpty()) {
+            PaymentCryptographyKeyAlgorithm algorithm =
+                    PaymentCryptographyKeyAlgorithm.from(imported.algorithm());
+            String own = algorithm == null ? "" : algorithm.checkValueAlgorithm();
+            if (!checkValueAlgorithm.equals(own)) {
+                throw new AwsException("ValidationException",
+                        "the check value algorithm " + checkValueAlgorithm + " is not the one a "
+                                + imported.algorithm() + " key has, which is " + own, 400);
+            }
+        }
+        return makeKey(region, attributes, imported.modes(), imported.exportable(), enabled, tags,
                 imported.material() == null ? null
                         : PaymentCryptographyCrypto.toHex(imported.material()),
                 imported.publicKeyBase64(), imported.privateKeyBase64(), imported.certificatePem());
@@ -602,6 +623,11 @@ public class PaymentCryptographyService implements Resettable, StoredResourceArn
      */
     private static PaymentCryptographyKey initialKey(PaymentCryptographyKey base,
                                                       String keySerialNumber) {
+        if (!base.isExportable()) {
+            throw new AwsException("ValidationException",
+                    "the base derivation key " + base.getArn() + " is not exportable, so the key "
+                            + "derived from it may not leave the service", 400);
+        }
         if (!"TR31_B0_BASE_DERIVATION_KEY".equals(base.getKeyUsage())) {
             throw new AwsException("ValidationException",
                     "an initial key under export is derived from a base derivation key, but "
@@ -1003,12 +1029,14 @@ public class PaymentCryptographyService implements Resettable, StoredResourceArn
     }
 
     /** The parameters a counterparty needs to import a key into this service. */
-    public Map<String, Object> parametersForImport(String materialType, String algorithm) {
-        return exchange.parametersForImport(materialType, algorithm);
+    public Map<String, Object> parametersForImport(String materialType, String algorithm,
+                                                    boolean reuse) {
+        return exchange.parametersForImport(materialType, algorithm, reuse);
     }
 
     /** The parameters a counterparty needs to import a key this service exported. */
-    public Map<String, Object> parametersForExport(String materialType, String algorithm) {
-        return exchange.parametersForExport(materialType, algorithm);
+    public Map<String, Object> parametersForExport(String materialType, String algorithm,
+                                                    boolean reuse) {
+        return exchange.parametersForExport(materialType, algorithm, reuse);
     }
 }

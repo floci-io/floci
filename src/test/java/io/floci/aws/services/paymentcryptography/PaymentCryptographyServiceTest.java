@@ -61,6 +61,23 @@ class PaymentCryptographyServiceTest {
         return service.createKey(region, attributes, modes, true, true, Map.of());
     }
 
+    /**
+     * The key a key block is wrapped under.
+     *
+     * <p>A key block is wrapped under a key encryption key, and not under a data encryption
+     * key: the usages keep the two apart.
+     */
+    private PaymentCryptographyKey createWrappingKey(String region) {
+        Map<String, Object> attributes = new LinkedHashMap<>();
+        attributes.put("KeyAlgorithm", "AES_256");
+        attributes.put("KeyClass", "SYMMETRIC_KEY");
+        attributes.put("KeyUsage", "TR31_K1_KEY_BLOCK_PROTECTION_KEY");
+        Map<String, Boolean> modes = new LinkedHashMap<>();
+        modes.put("Wrap", Boolean.TRUE);
+        modes.put("Unwrap", Boolean.TRUE);
+        return service.createKey(region, attributes, modes, true, true, Map.of());
+    }
+
     @Test
     void aCreatedKeyIsInItsRegionAndCarriesMaterial() {
         PaymentCryptographyKey key = createKey("us-east-1");
@@ -543,7 +560,7 @@ class PaymentCryptographyServiceTest {
 
     @Test
     void aKeyLeavesTheServiceAndComesBack() {
-        PaymentCryptographyKey protection = createKey("us-east-1");
+        PaymentCryptographyKey protection = createWrappingKey("us-east-1");
         PaymentCryptographyKey key = createKey("us-east-1");
 
         Map<String, Object> answer = exportTr31Answer("us-east-1", key.getKeyId(),
@@ -718,8 +735,8 @@ class PaymentCryptographyServiceTest {
 
     @Test
     void aBlockThatIsNotTheKeysDoesNotOpen() {
-        PaymentCryptographyKey protection = createKey("us-east-1");
-        PaymentCryptographyKey other = createKey("us-east-1");
+        PaymentCryptographyKey protection = createWrappingKey("us-east-1");
+        PaymentCryptographyKey other = createWrappingKey("us-east-1");
         PaymentCryptographyKey key = createKey("us-east-1");
         String export = exportTr31("us-east-1", key.getKeyId(), protection.getKeyId());
 
@@ -742,7 +759,7 @@ class PaymentCryptographyServiceTest {
      */
     private Map<String, Object> exportTr31Answer(String region, String keyId, String wrappingKeyId) {
         return service.exportKey(region, keyId, "Tr31KeyBlock",
-                Map.of("WrappingKeyIdentifier", wrappingKeyId), "");
+                Map.of("WrappingKeyIdentifier", wrappingKeyId), "", "");
     }
 
     /**
@@ -751,7 +768,7 @@ class PaymentCryptographyServiceTest {
     private PaymentCryptographyKey importTr31(String region, String wrappingKeyId, String block) {
         return service.importKey(region, "Tr31KeyBlock", Map.of(
                 "WrappingKeyIdentifier", wrappingKeyId,
-                "WrappedKeyBlock", block));
+                "WrappedKeyBlock", block), "", true, Map.of());
     }
 
     /** The attributes of a key with that algorithm and usage. */

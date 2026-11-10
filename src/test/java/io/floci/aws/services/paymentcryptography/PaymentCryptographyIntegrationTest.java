@@ -135,7 +135,7 @@ class PaymentCryptographyIntegrationTest {
     @Test
     void theImportParametersAreServedOverTheWire() {
         call("GetParametersForImport", """
-                {"KeyMaterialType":"TR34_KEY_BLOCK","WrappingKeyAlgorithm":"RSA_2048"}
+                {"KeyMaterialType":"KEY_CRYPTOGRAM","WrappingKeyAlgorithm":"RSA_2048"}
                 """)
                 .then().statusCode(200)
                     .body("ImportToken", matchesPattern("import-token-[0-9a-zA-Z]{16,64}"))
@@ -143,6 +143,23 @@ class PaymentCryptographyIntegrationTest {
                     .body("WrappingKeyCertificate", notNullValue())
                     .body("WrappingKeyCertificateChain", notNullValue())
                     .body("ParametersValidUntilTimestamp", greaterThanOrEqualTo(0));
+    }
+
+    @Test
+    void theParametersCanBeReusedOverTheWire() {
+        // A caller that asks for the last parameters gets them, token and certificate alike.
+        String first = call("GetParametersForImport", """
+                {"KeyMaterialType":"KEY_CRYPTOGRAM","WrappingKeyAlgorithm":"RSA_2048"}
+                """)
+                .then().statusCode(200)
+                    .extract().path("ImportToken");
+
+        call("GetParametersForImport", """
+                {"KeyMaterialType":"KEY_CRYPTOGRAM","WrappingKeyAlgorithm":"RSA_2048",
+                 "ReuseLastGeneratedToken":true}
+                """)
+                .then().statusCode(200)
+                    .body("ImportToken", equalTo(first));
     }
 
     @Test
@@ -156,6 +173,70 @@ class PaymentCryptographyIntegrationTest {
                     .body("SigningKeyCertificate", notNullValue())
                     .body("SigningKeyCertificateChain", notNullValue())
                     .body("ParametersValidUntilTimestamp", greaterThanOrEqualTo(0));
+    }
+
+    @Test
+    void anImportedKeyCarriesTheEnabledFlagAndTheTags() {
+        // The import names the key's state and its tags, and the key comes back that way.
+        String wrapping = call("CreateKey", """
+                {"KeyAttributes":{"KeyAlgorithm":"AES_256","KeyClass":"SYMMETRIC_KEY",
+                 "KeyUsage":"TR31_K1_KEY_BLOCK_PROTECTION_KEY",
+                 "KeyModesOfUse":{"Wrap":true,"Unwrap":true}},
+                 "Exportable":true}
+                """)
+                .then().statusCode(200)
+                    .extract().path("Key.KeyArn");
+        String arn = call("CreateKey", CREATE_KEY)
+                .then().statusCode(200)
+                    .extract().path("Key.KeyArn");
+        String block = call("ExportKey", "{\"ExportKeyIdentifier\":\"" + arn
+                + "\",\"KeyMaterial\":{\"Tr31KeyBlock\":{\"WrappingKeyIdentifier\":\""
+                + wrapping + "\"}}}")
+                .then().statusCode(200)
+                    .extract().path("WrappedKey.KeyMaterial");
+
+        String importedArn = call("ImportKey", "{\"KeyMaterial\":{\"Tr31KeyBlock\":{"
+                + "\"WrappingKeyIdentifier\":\"" + wrapping + "\",\"WrappedKeyBlock\":\"" + block
+                + "\"}},\"Enabled\":false,\"Tags\":[{\"Key\":\"Origin\",\"Value\":\"PRIMARY\"}]}")
+                .then().statusCode(200)
+                    .body("Key.Enabled", equalTo(false))
+                    .extract().path("Key.KeyArn");
+
+        // The key's answer carries no tags, so they are read the way they are read elsewhere.
+        call("ListTagsForResource", "{\"ResourceArn\":\"" + importedArn + "\"}")
+                .then().statusCode(200)
+                    .body("Tags[0].Key", equalTo("Origin"))
+                    .body("Tags[0].Value", equalTo("PRIMARY"));
+    }
+
+    @Test
+    void aRequestNamingTwoFormsIsRefused() {
+        // The union holds one form per request, and naming two is not naming one.
+        String arn = call("CreateKey", CREATE_KEY)
+                .then().statusCode(200)
+                    .extract().path("Key.KeyArn");
+
+        call("ExportKey", "{\"ExportKeyIdentifier\":\"" + arn + "\",\"KeyMaterial\":{"
+                + "\"Tr31KeyBlock\":{\"WrappingKeyIdentifier\":\"" + arn + "\"},"
+                + "\"KeyCryptogram\":{\"CertificateAuthorityPublicKeyIdentifier\":\"" + arn
+                + "\",\"WrappingKeyCertificate\":\"x\"}}}")
+                .then().statusCode(400)
+                    .body("__type", equalTo("ValidationException"));
+    }
+
+    @Test
+    void aRequestNamingAFormTheServiceDoesNotServeIsRefused() {
+        // The TR-34 form is one the model has and this service does not make.
+        String arn = call("CreateKey", CREATE_KEY)
+                .then().statusCode(200)
+                    .extract().path("Key.KeyArn");
+
+        call("ExportKey", "{\"ExportKeyIdentifier\":\"" + arn + "\",\"KeyMaterial\":{"
+                + "\"Tr34KeyBlock\":{\"CertificateAuthorityPublicKeyIdentifier\":\"" + arn
+                + "\",\"WrappingKeyCertificate\":\"x\",\"KeyBlockFormat\":\"X9_TR34_2012\"}}}")
+                .then().statusCode(400)
+                    .body("__type", equalTo("ValidationException"))
+                    .body("message", containsString("not a form the service exports"));
     }
 
     @Test

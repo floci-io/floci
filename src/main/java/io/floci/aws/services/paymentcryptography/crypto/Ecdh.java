@@ -52,7 +52,10 @@ public final class Ecdh {
             int from = Math.max(0, raw.length - size);
             System.arraycopy(raw, from, secret, size - (raw.length - from), raw.length - from);
             return secret;
-        } catch (IOException | ClassCastException | IllegalArgumentException e) {
+        } catch (IOException | ClassCastException | IllegalArgumentException
+                | IllegalStateException e) {
+            // The library raises IllegalStateException when the two keys are on different
+            // curves, which is a refusal and not a crash.
             throw new GeneralSecurityException("the key agreement failed: " + e.getMessage(), e);
         }
     }
