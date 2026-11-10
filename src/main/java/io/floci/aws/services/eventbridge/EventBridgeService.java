@@ -1253,6 +1253,18 @@ public class EventBridgeService implements ResourceProvider, StoredResourceArns 
         }
     }
 
+    private boolean matchesNestedDetail(JsonNode actual, JsonNode pattern) {
+        if (actual.isArray()) {
+            for (JsonNode element : actual) {
+                if (matchesDetailNode(element, pattern)) {
+                    return true;
+                }
+            }
+            return false;
+        }
+        return matchesDetailNode(actual, pattern);
+    }
+
     private boolean matchesDetailNode(JsonNode actual, JsonNode pattern) {
         JsonNode orClauses = pattern.get("$or");
         if (orClauses != null && orClauses.isArray()) {
@@ -1276,7 +1288,9 @@ public class EventBridgeService implements ResourceProvider, StoredResourceArns 
             JsonNode expected = field.getValue();
             JsonNode actualField = actual.get(field.getKey());
             if (expected.isArray()) {
-                if (!matchesArrayField(expected, actualField)) {
+                JsonNode leaf = actualField != null && actualField.isArray() && actualField.isEmpty()
+                        ? null : actualField;
+                if (!matchesArrayField(expected, leaf)) {
                     return false;
                 }
             } else if (expected.isObject()) {
@@ -1291,7 +1305,7 @@ public class EventBridgeService implements ResourceProvider, StoredResourceArns 
                         return false;
                     }
                 }
-                if (!matchesDetailNode(nestedActual, expected)) {
+                if (!matchesNestedDetail(nestedActual, expected)) {
                     return false;
                 }
             }
@@ -1314,17 +1328,6 @@ public class EventBridgeService implements ResourceProvider, StoredResourceArns 
     }
 
     private boolean matchesSingleElement(JsonNode element, JsonNode actual) {
-        if (actual != null && actual.isArray()) {
-            if (element.isObject() && element.has("exists")) {
-                return element.get("exists").asBoolean() != actual.isEmpty();
-            }
-            for (JsonNode item : actual) {
-                if (matchesSingleElement(element, item)) {
-                    return true;
-                }
-            }
-            return false;
-        }
         // Content filter object
         if (element.isObject()) {
             String value = actual != null && actual.isTextual() ? actual.asText() : null;
