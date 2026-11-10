@@ -123,13 +123,8 @@ class BackupPaginationIntegrationTest {
         createVault(vault);
         startThreeJobs(vault);
 
-        List<String> collected = new ArrayList<>();
-        int pages = pageThrough(collected, "/backup-jobs/", Map.of("byBackupVaultName", vault, "maxResults", 1),
+        pageThrough("/backup-jobs/", Map.of("byBackupVaultName", vault, "maxResults", 1),
                 "BackupJobs.BackupJobId", "each page must hold exactly one job");
-
-        assertEquals(3, collected.size());
-        assertEquals(3, new HashSet<>(collected).size());
-        assertEquals(3, pages);
     }
 
     @Test
@@ -138,26 +133,18 @@ class BackupPaginationIntegrationTest {
         createVault(vault);
         startThreeJobs(vault);
 
-        List<String> collected = new ArrayList<>();
-        int pages = pageThrough(collected, "/backup-vaults/" + vault + "/recovery-points/",
+        pageThrough("/backup-vaults/" + vault + "/recovery-points/",
                 Map.of("maxResults", 1), "RecoveryPoints.RecoveryPointArn",
                 "each page must hold exactly one recovery point");
-
-        assertEquals(3, collected.size());
-        assertEquals(3, new HashSet<>(collected).size());
-        assertEquals(3, pages);
     }
 
 
-    private int pageThrough(List<String> collected, String path, Map<String, ?> query, String listField,
-            String sizeMessage) {
+    private void pageThrough(String path, Map<String, ?> query, String listField, String sizeMessage) {
+        List<String> collected = new ArrayList<>();
         int pages = 0;
         String token = null;
         do {
-            RequestSpecification req = given().header("Authorization", AUTH);
-            for (Map.Entry<String, ?> e : query.entrySet()) {
-                req = req.queryParam(e.getKey(), e.getValue());
-            }
+            RequestSpecification req = given().header("Authorization", AUTH).queryParams(query);
             if (token != null) req = req.queryParam("nextToken", token);
             JsonPath page = req.get(path).then().statusCode(200).extract().jsonPath();
             List<String> items = page.getList(listField);
@@ -167,7 +154,9 @@ class BackupPaginationIntegrationTest {
             token = page.getString("NextToken");
             pages++;
         } while (token != null);
-        return pages;
+        assertEquals(3, pages, "expected three pages");
+        assertEquals(3, collected.size());
+        assertEquals(3, new HashSet<>(collected).size(), "no duplicate items across pages");
     }
 
     @Test
