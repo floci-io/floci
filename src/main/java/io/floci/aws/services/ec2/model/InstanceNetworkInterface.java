@@ -24,6 +24,7 @@ public class InstanceNetworkInterface {
     private String attachmentId;
     private int deviceIndex;
     private String attachTime;
+    private boolean deleteOnTermination = true;
 
     public InstanceNetworkInterface() {}
 
@@ -68,4 +69,7 @@ public class InstanceNetworkInterface {
 
     public String getAttachTime() { return attachTime; }
     public void setAttachTime(String attachTime) { this.attachTime = attachTime; }
+
+    public boolean isDeleteOnTermination() { return deleteOnTermination; }
+    public void setDeleteOnTermination(boolean deleteOnTermination) { this.deleteOnTermination = deleteOnTermination; }
 }
