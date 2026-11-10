@@ -197,6 +197,7 @@ class RdsControlPlaneTest {
                 .dbSubnetGroupName(subnetGroupName));
 
         assertThat(describeResponse.dbSubnetGroups()).hasSize(1);
+        assertThat(describeResponse.marker()).isNull();
         assertThat(describeResponse.dbSubnetGroups().get(0).subnets())
                 .extracting("subnetIdentifier")
                 .containsExactlyElementsOf(subnetIds);
@@ -210,6 +211,7 @@ class RdsControlPlaneTest {
                 .dbInstanceClass("db.t4g.small"));
 
         assertThat(response.orderableDBInstanceOptions()).hasSize(1);
+        assertThat(response.marker()).isNull();
         assertThat(response.orderableDBInstanceOptions().get(0).engine()).isEqualTo("postgres");
         assertThat(response.orderableDBInstanceOptions().get(0).engineVersion()).isEqualTo("16.14");
         assertThat(response.orderableDBInstanceOptions().get(0).dbInstanceClass()).isEqualTo("db.t4g.small");
@@ -1173,6 +1175,7 @@ class RdsControlPlaneTest {
 
             DescribeOptionGroupsResponse described = rds.describeOptionGroups(b -> b
                     .optionGroupName(optionGroupName));
+            assertThat(described.marker()).isNull();
             assertThat(described.optionGroupsList()).singleElement().satisfies(group ->
                     assertThat(group.options()).extracting("optionName")
                             .containsExactly("MEMCACHED"));

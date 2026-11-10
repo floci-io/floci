@@ -348,7 +348,7 @@ public class RdsQueryHandler {
                     xml.start("DBInstance").raw(row).end("DBInstance");
                 }
             }
-            xml.end("DBInstances").start("Marker").end("Marker");
+            xml.end("DBInstances");
             return Response.ok(AwsQueryResponse.envelope("DescribeDBInstances", AwsNamespaces.RDS, xml.build())).build();
         } catch (AwsException e) {
             return AwsQueryResponse.error(e.getErrorCode(), e.getMessage(), AwsNamespaces.RDS, e.getHttpStatus());
@@ -1041,7 +1041,7 @@ public class RdsQueryHandler {
                .end("AvailabilityZones")
                .end("OrderableDBInstanceOption");
         }
-        xml.end("OrderableDBInstanceOptions").start("Marker").end("Marker");
+        xml.end("OrderableDBInstanceOptions");
         return Response.ok(AwsQueryResponse.envelope("DescribeOrderableDBInstanceOptions",
                 AwsNamespaces.RDS, xml.build())).build();
     }
@@ -1114,7 +1114,7 @@ public class RdsQueryHandler {
             for (DbSubnetGroup group : result) {
                 xml.start("DBSubnetGroup").raw(dbSubnetGroupInnerXml(group)).end("DBSubnetGroup");
             }
-            xml.end("DBSubnetGroups").start("Marker").end("Marker");
+            xml.end("DBSubnetGroups");
             return Response.ok(AwsQueryResponse.envelope("DescribeDBSubnetGroups", AwsNamespaces.RDS, xml.build())).build();
         } catch (AwsException e) {
             return AwsQueryResponse.error(e.getErrorCode(), e.getMessage(), AwsNamespaces.RDS, e.getHttpStatus());
@@ -1454,7 +1454,7 @@ public class RdsQueryHandler {
                     }
                 }
             }
-            xml.end("DBClusters").start("Marker").end("Marker");
+            xml.end("DBClusters");
             return Response.ok(AwsQueryResponse.envelope("DescribeDBClusters", AwsNamespaces.RDS, xml.build())).build();
         } catch (AwsException e) {
             return AwsQueryResponse.error(e.getErrorCode(), e.getMessage(), AwsNamespaces.RDS, e.getHttpStatus());
@@ -1555,7 +1555,7 @@ public class RdsQueryHandler {
             for (DbParameterGroup g : result) {
                 xml.start("DBParameterGroup").raw(paramGroupInnerXml(g)).end("DBParameterGroup");
             }
-            xml.end("DBParameterGroups").start("Marker").end("Marker");
+            xml.end("DBParameterGroups");
             return Response.ok(AwsQueryResponse.envelope("DescribeDBParameterGroups", AwsNamespaces.RDS, xml.build())).build();
         } catch (AwsException e) {
             return AwsQueryResponse.error(e.getErrorCode(), e.getMessage(), AwsNamespaces.RDS, e.getHttpStatus());
@@ -1728,7 +1728,7 @@ public class RdsQueryHandler {
             DbParameterGroup group = service.getDbParameterGroup(name, region);
             XmlBuilder xml = new XmlBuilder().start("Parameters");
             writeParameterRows(xml, group.getParameters(), group.getApplyMethods(), params.getFirst("Source"));
-            xml.end("Parameters").start("Marker").end("Marker");
+            xml.end("Parameters");
             return Response.ok(AwsQueryResponse.envelope("DescribeDBParameters", AwsNamespaces.RDS, xml.build())).build();
         } catch (AwsException e) {
             return AwsQueryResponse.error(e.getErrorCode(), e.getMessage(), AwsNamespaces.RDS, e.getHttpStatus());
@@ -1872,7 +1872,7 @@ public class RdsQueryHandler {
             DbClusterParameterGroup group = service.getDbClusterParameterGroup(name, region);
             XmlBuilder xml = new XmlBuilder().start("Parameters");
             writeParameterRows(xml, group.getParameters(), group.getApplyMethods(), params.getFirst("Source"));
-            xml.end("Parameters").start("Marker").end("Marker");
+            xml.end("Parameters");
             return Response.ok(AwsQueryResponse.envelope("DescribeDBClusterParameters", AwsNamespaces.RDS, xml.build())).build();
         } catch (AwsException e) {
             return AwsQueryResponse.error(e.getErrorCode(), e.getMessage(), AwsNamespaces.RDS, e.getHttpStatus());
@@ -1929,7 +1929,7 @@ public class RdsQueryHandler {
         for (OptionGroup group : result) {
             xml.start("OptionGroup").raw(optionGroupInnerXml(group)).end("OptionGroup");
         }
-        xml.end("OptionGroupsList").start("Marker").end("Marker");
+        xml.end("OptionGroupsList");
         return Response.ok(AwsQueryResponse.envelope(
                 "DescribeOptionGroups", AwsNamespaces.RDS, xml.build())).build();
     }

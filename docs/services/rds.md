@@ -649,7 +649,19 @@ Known gaps, all deliberate:
 | `DescribeOptionGroupOptions` | Not implemented: the per-engine option catalog is not modeled |
 | `OptionGroupQuotaExceededFault` (AWS caps an account at 20 groups) | Not enforced — capping a local emulator would only get in a test's way |
 | `OptionSetting` metadata (`DataType`, `ApplyType`, `AllowedValues`, `DefaultValue`, `Description`) | Omitted — it would require the per-engine option catalog `DescribeOptionGroupOptions` serves |
-| `MaxRecords` / `Marker` pagination | Every group is returned in one page, as with every other RDS list action |
+| `MaxRecords` / `Marker` pagination | Every matching option group is returned in one page, with no `Marker` |
+
+## Pagination
+
+`DescribeDBInstances`, `DescribeDBClusters`, `DescribeDBSubnetGroups`,
+`DescribeDBParameterGroups`, `DescribeDBParameters`,
+`DescribeDBClusterParameters`, `DescribeOrderableDBInstanceOptions` and `DescribeOptionGroups`
+return all matching results without a `Marker`. These handlers do not yet split results by
+`MaxRecords` or resume from `Marker`. An absent marker ends pagination, including for an empty
+result; an empty marker string must not be used as a continuation token.
+
+`DescribeDBClusterParameterGroups` supports `MaxRecords` pagination and returns a
+non-empty `Marker` only when another page is available.
 
 ## Read replicas
 
