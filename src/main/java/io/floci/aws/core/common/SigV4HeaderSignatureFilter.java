@@ -10,7 +10,6 @@ import io.floci.aws.services.apigateway.ApiGatewayAwsExecuteController;
 import io.floci.aws.services.apigateway.ApiGatewayExecuteController;
 import io.floci.aws.services.apigateway.ApiGatewayUserRequestController;
 import io.floci.aws.services.appsync.graphql.AppSyncExecutionController;
-import io.floci.aws.services.cloudwatch.metrics.OtlpMetricsResponses;
 import io.floci.aws.services.iam.IamService;
 import io.floci.aws.services.iam.RequestBodyReader;
 import io.floci.aws.services.s3.S3ControlController;
@@ -477,10 +476,6 @@ public class SigV4HeaderSignatureFilter implements ContainerRequestFilter {
      */
     private void abort(ContainerRequestContext ctx, Class<?> resource, int status, String queryCode,
                        String jsonCode, String message) {
-        if (OtlpMetricsResponses.isRequest(ctx)) {
-            ctx.abortWith(OtlpMetricsResponses.error(ctx.getMediaType(), 403, 7, message));
-            return;
-        }
         if (resource == AwsQueryController.class && Ec2ErrorResponses.isEc2QueryRequest(ctx)) {
             ctx.abortWith(Ec2ErrorResponses.of(queryCode, message, status));
             return;

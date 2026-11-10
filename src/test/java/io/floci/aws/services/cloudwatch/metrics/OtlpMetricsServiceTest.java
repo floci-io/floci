@@ -1,6 +1,7 @@
 package io.floci.aws.services.cloudwatch.metrics;
 
 import com.fasterxml.jackson.core.type.TypeReference;
+import com.google.protobuf.InvalidProtocolBufferException;
 import io.floci.aws.core.common.RequestContext;
 import io.floci.aws.core.storage.AccountAwareStorageBackend;
 import io.floci.aws.core.storage.InMemoryStorage;
@@ -21,13 +22,10 @@ import java.time.Clock;
 import java.time.Duration;
 import java.time.Instant;
 import java.time.ZoneOffset;
-import java.util.Base64;
 import java.util.List;
 import java.util.Map;
-import java.util.UUID;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
-import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.mock;
@@ -40,34 +38,29 @@ class OtlpMetricsServiceTest {
 
     @ParameterizedTest
     @ValueSource(strings = {"memory", "persistent", "hybrid", "wal"})
-    void expiresOldBatchesPerRegionAndPreservesLegacyData(String mode) {
+    void expiresOldBatchesPerRegion(String mode) {
         Instant now = Instant.parse("2026-01-01T00:00:00Z");
         ExportMetricsServiceRequest old = request("old");
         ExportMetricsServiceRequest fresh = request("fresh");
         StorageFactory factory = StorageFactories.open(directory, mode, "111111111111");
         try {
-            StorageBackend<String, String> store = factory.create("cloudwatchmetrics", "cw-otlp-metrics.json",
-                    new TypeReference<Map<String, String>>() {}, WriteProfile.APPEND_HEAVY);
-            String legacyKey = "eu-west-1::" + UUID.randomUUID();
-            store.put(legacyKey, Base64.getEncoder().encodeToString(old.toByteArray()));
             OtlpMetricsService initial = new OtlpMetricsService(factory, Clock.fixed(now, ZoneOffset.UTC));
-            initial.ingest("eu-west-1", old);
-            initial.ingest("us-east-1", old);
-            assertEquals(2, initial.requests("eu-west-1").size());
-            assertTrue(store.get(legacyKey).isEmpty());
+            initial.ingest("eu-west-1", old.toByteArray());
+            initial.ingest("us-east-1", old.toByteArray());
+            assertEquals(1, initial.requests("eu-west-1").size());
 
             Instant boundary = now.plus(Duration.ofDays(14));
             OtlpMetricsService atBoundary = new OtlpMetricsService(factory, Clock.fixed(boundary, ZoneOffset.UTC));
-            atBoundary.ingest("eu-west-1", fresh);
-            assertEquals(3, atBoundary.requests("eu-west-1").size());
+            atBoundary.ingest("eu-west-1", fresh.toByteArray());
+            assertEquals(2, atBoundary.requests("eu-west-1").size());
 
             OtlpMetricsService expired = new OtlpMetricsService(factory,
                     Clock.fixed(boundary.plusMillis(1), ZoneOffset.UTC));
-            expired.ingest("eu-west-1", fresh);
-            assertEquals(List.of(fresh, fresh), expired.requests("eu-west-1"));
-            assertEquals(List.of(old), expired.requests("us-east-1"));
-            expired.ingest("us-east-1", fresh);
-            assertEquals(List.of(fresh), expired.requests("us-east-1"));
+            expired.ingest("eu-west-1", fresh.toByteArray());
+            assertEquals(List.of(fresh, fresh), parsed(expired.requests("eu-west-1")));
+            assertEquals(List.of(old), parsed(expired.requests("us-east-1")));
+            expired.ingest("us-east-1", fresh.toByteArray());
+            assertEquals(List.of(fresh), parsed(expired.requests("us-east-1")));
         } finally {
             factory.shutdownAll();
         }
@@ -91,18 +84,28 @@ class OtlpMetricsServiceTest {
         ExportMetricsServiceRequest old = request("old");
         ExportMetricsServiceRequest fresh = request("fresh");
         context.setAccountId("111111111111");
-        service.ingest("eu-west-1", old);
+        service.ingest("eu-west-1", old.toByteArray());
         context.setAccountId("222222222222");
-        service.ingest("eu-west-1", old);
+        service.ingest("eu-west-1", old.toByteArray());
 
         when(clock.millis()).thenReturn(now + Duration.ofDays(14).toMillis() + 1);
         context.setAccountId("111111111111");
-        service.ingest("eu-west-1", fresh);
-        assertEquals(List.of(fresh), service.requests("eu-west-1"));
+        service.ingest("eu-west-1", fresh.toByteArray());
+        assertEquals(List.of(fresh), parsed(service.requests("eu-west-1")));
         context.setAccountId("222222222222");
-        assertEquals(List.of(old), service.requests("eu-west-1"));
-        service.ingest("eu-west-1", fresh);
-        assertEquals(List.of(fresh), service.requests("eu-west-1"));
+        assertEquals(List.of(old), parsed(service.requests("eu-west-1")));
+        service.ingest("eu-west-1", fresh.toByteArray());
+        assertEquals(List.of(fresh), parsed(service.requests("eu-west-1")));
+    }
+
+    private List<ExportMetricsServiceRequest> parsed(List<byte[]> raw) {
+        return raw.stream().map(b -> {
+            try {
+                return ExportMetricsServiceRequest.parseFrom(b);
+            } catch (InvalidProtocolBufferException e) {
+                throw new AssertionError("Could not parse stored OTLP metrics", e);
+            }
+        }).toList();
     }
 
     private ExportMetricsServiceRequest request(String name) {

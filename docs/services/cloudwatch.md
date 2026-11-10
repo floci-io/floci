@@ -415,8 +415,7 @@ bodies. When only part of a request is invalid, Floci returns an OTLP partial-su
 stores only the accepted datapoints. Empty or untyped metrics produce a partial-success message
 without increasing the rejected datapoint count.
 Stored batches expire 14 days after ingestion and are removed on a later ingestion in the same account
-and region. Cleanup runs at most once per minute for each account and region. Older batches stored before
-timestamped keys were introduced receive a new 14-day retention period when first encountered.
+and region. Cleanup runs at most once per minute for each account and region.
 With IAM enforcement enabled, requests require AWS credentials and the `cloudwatch:PutMetricData`
 permission. Bearer-token authentication for this endpoint is not implemented.
 

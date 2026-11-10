@@ -1,5 +1,6 @@
 package io.floci.aws.services.cloudwatch.metrics;
 
+import com.google.protobuf.InvalidProtocolBufferException;
 import com.google.rpc.Status;
 import io.opentelemetry.proto.collector.metrics.v1.ExportMetricsServiceRequest;
 import io.opentelemetry.proto.collector.metrics.v1.ExportMetricsServiceResponse;
@@ -25,7 +26,11 @@ import org.junit.jupiter.api.Test;
 import java.io.ByteArrayOutputStream;
 import java.nio.charset.StandardCharsets;
 import java.time.Instant;
+import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.List;
 import java.util.UUID;
+import java.util.stream.Stream;
 import java.util.zip.GZIPOutputStream;
 
 import static io.restassured.RestAssured.given;
@@ -51,15 +56,15 @@ class OtlpMetricsIntegrationTest {
                 "asDouble":1.5}]}}]}]}]}
                 """.formatted(name, timestamp);
         byte[] payload = json.getBytes(StandardCharsets.UTF_8);
-        ExportMetricsServiceRequest request = new OtlpMetricsDecoder().decodeJson(payload);
+        byte[] requestBytes = new OtlpMetricsDecoder().decodeJson(payload).toByteArray();
         given().contentType("application/json").body(payload).post("/v1/metrics").then().statusCode(200);
         ByteArrayOutputStream compressed = new ByteArrayOutputStream();
         try (GZIPOutputStream gzip = new GZIPOutputStream(compressed)) {
-            gzip.write(request.toByteArray());
+            gzip.write(requestBytes);
         }
         given().contentType("application/x-protobuf").header("Content-Encoding", "gzip")
                 .body(compressed.toByteArray()).post("/v1/metrics").then().statusCode(200);
-        long count = service.requests("us-east-1").stream().filter(request::equals).count();
+        long count = service.requests("us-east-1").stream().filter(b -> Arrays.equals(b, requestBytes)).count();
         assertTrue(count >= 2);
     }
 
@@ -108,10 +113,7 @@ class OtlpMetricsIntegrationTest {
                         + " is too far in the past for metric '" + name
                         + "' for resource where service.name='checkout' at "
                         + "[ResourceMetrics.1.ScopeMetrics.1.Metrics.1.Datapoint.2]."));
-        assertTrue(service.requests("us-east-1").stream()
-                .flatMap(request -> request.getResourceMetricsList().stream())
-                .flatMap(resource -> resource.getScopeMetricsList().stream())
-                .flatMap(scope -> scope.getMetricsList().stream())
+        assertTrue(metricsStream(service.requests("us-east-1"))
                 .filter(metric -> name.equals(metric.getName()))
                 .anyMatch(metric -> metric.getGauge().getDataPointsCount() == 1));
     }
@@ -151,10 +153,7 @@ class OtlpMetricsIntegrationTest {
         assertEquals("Maximum number of attributes exceeded: 150 "
                         + "[ResourceMetrics.1.ScopeMetrics.1.Metrics.1.Datapoint.2].",
                 decoded.getPartialSuccess().getErrorMessage());
-        assertTrue(service.requests("us-east-1").stream()
-                .flatMap(batch -> batch.getResourceMetricsList().stream())
-                .flatMap(resource -> resource.getScopeMetricsList().stream())
-                .flatMap(scope -> scope.getMetricsList().stream())
+        assertTrue(metricsStream(service.requests("us-east-1"))
                 .anyMatch(metric -> name.equals(metric.getName()) && metric.getGauge().getDataPointsCount() == 1));
     }
 
@@ -169,10 +168,7 @@ class OtlpMetricsIntegrationTest {
                 .body("partialSuccess.rejectedDataPoints", nullValue())
                 .body("partialSuccess.errorMessage",
                         equalTo("Invalid OTel metric type [ResourceMetrics.1.ScopeMetrics.1.Metrics.1]."));
-        assertTrue(service.requests("us-east-1").stream()
-                .flatMap(batch -> batch.getResourceMetricsList().stream())
-                .flatMap(resource -> resource.getScopeMetricsList().stream())
-                .flatMap(scope -> scope.getMetricsList().stream())
+        assertTrue(metricsStream(service.requests("us-east-1"))
                 .anyMatch(metric -> name.equals(metric.getName())));
     }
 
@@ -216,29 +212,31 @@ class OtlpMetricsIntegrationTest {
                 .build();
         given().contentType("application/x-protobuf").body(request.toByteArray())
                 .post("/v1/metrics").then().statusCode(200);
-        assertTrue(service.requests("us-east-1").stream()
-                .flatMap(batch -> batch.getResourceMetricsList().stream())
-                .flatMap(resource -> resource.getScopeMetricsList().stream())
-                .flatMap(scope -> scope.getMetricsList().stream())
+        assertTrue(metricsStream(service.requests("us-east-1"))
                 .anyMatch(metric -> sumName.equals(metric.getName())
                         && metric.getSum().getDataPoints(0).getAsInt() == 100));
-        assertTrue(service.requests("us-east-1").stream()
-                .flatMap(batch -> batch.getResourceMetricsList().stream())
-                .flatMap(resource -> resource.getScopeMetricsList().stream())
-                .flatMap(scope -> scope.getMetricsList().stream())
+        assertTrue(metricsStream(service.requests("us-east-1"))
                 .anyMatch(metric -> histName.equals(metric.getName())
                         && metric.getHistogram().getDataPoints(0).getCount() == 5));
-        assertTrue(service.requests("us-east-1").stream()
-                .flatMap(batch -> batch.getResourceMetricsList().stream())
-                .flatMap(resource -> resource.getScopeMetricsList().stream())
-                .flatMap(scope -> scope.getMetricsList().stream())
+        assertTrue(metricsStream(service.requests("us-east-1"))
                 .anyMatch(metric -> summaryName.equals(metric.getName())
                         && metric.getSummary().getDataPoints(0).getCount() == 3));
-        assertTrue(service.requests("us-east-1").stream()
-                .flatMap(batch -> batch.getResourceMetricsList().stream())
-                .flatMap(resource -> resource.getScopeMetricsList().stream())
-                .flatMap(scope -> scope.getMetricsList().stream())
+        assertTrue(metricsStream(service.requests("us-east-1"))
                 .anyMatch(metric -> expHistName.equals(metric.getName())
                         && metric.getExponentialHistogram().getDataPoints(0).getCount() == 7));
+    }
+
+    private static Stream<Metric> metricsStream(List<byte[]> rawRequests) {
+        List<Metric> all = new ArrayList<>();
+        for (byte[] bytes : rawRequests) {
+            try {
+                ExportMetricsServiceRequest.parseFrom(bytes).getResourceMetricsList()
+                        .forEach(r -> r.getScopeMetricsList()
+                                .forEach(s -> all.addAll(s.getMetricsList())));
+            } catch (InvalidProtocolBufferException e) {
+                throw new AssertionError("Could not parse stored OTLP metrics", e);
+            }
+        }
+        return all.stream();
     }
 }

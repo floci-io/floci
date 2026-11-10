@@ -3,7 +3,7 @@ package io.floci.aws.core.common;
 import com.fasterxml.jackson.databind.JsonNode;
 import io.floci.aws.config.EmulatorConfig;
 import io.floci.aws.services.cloudtrail.CloudTrailService;
-import io.floci.aws.services.cloudwatch.metrics.OtlpMetricsResponses;
+import io.floci.aws.services.cloudwatch.metrics.OtlpMetricsController;
 import io.floci.aws.services.iam.AccessDeniedMessages;
 import io.floci.aws.services.iam.AccessDeniedMessages.PolicyType;
 import io.floci.aws.services.iam.IamActionRegistry;
@@ -364,6 +364,12 @@ public class IamEnforcementFilter implements ContainerRequestFilter {
         boolean emptyHeader = auth != null && auth.isBlank();
         if (auth == null || emptyHeader) {
             auth = requestAuthorization(null, ctx.getUriInfo().getQueryParameters());
+        }
+        if (resourceInfo != null && resourceInfo.getResourceClass() == OtlpMetricsController.class
+                && (auth == null || !claimsSigV4(auth))) {
+            ctx.abortWith(AwsProtocolClaimFilter.errorResponse(403, "MissingAuthenticationTokenException",
+                    "Request is missing Authentication Token"));
+            return;
         }
         if (auth == null) {
             if (emptyHeader) {
@@ -942,10 +948,6 @@ public class IamEnforcementFilter implements ContainerRequestFilter {
      * shared {@link SigV4HeaderSignatureFilter} turns non-S3 ones away when signature validation is on.
      */
     private void refuseUnreadableCredential(ContainerRequestContext ctx, String auth) {
-        if (OtlpMetricsResponses.isRequest(ctx)) {
-            ctx.abortWith(OtlpMetricsResponses.error(ctx.getMediaType(), 403, 7, incompleteSignatureMessage(auth)));
-            return;
-        }
         if (ctx.getProperty(AwsProtocolClaimFilter.CLAIM_PROPERTY) instanceof ProtocolClaim claim
                 && claim.protocol() != WireProtocol.REST
                 && servesWithoutCredentials(claim, ctx)) {
@@ -1902,9 +1904,6 @@ public class IamEnforcementFilter implements ContainerRequestFilter {
 
     private Response accessDeniedForRequest(String action, String credentialScope,
                                                  ContainerRequestContext ctx, String resourceArn) {
-        if (OtlpMetricsResponses.isRequest(ctx)) {
-            return OtlpMetricsResponses.error(ctx.getMediaType(), 403, 7, accessDeniedMessage(action));
-        }
         WireProtocol protocol = claimedProtocol(ctx);
         if (isCbor(protocol)) {
             // 403, the status the Kinesis and CloudWatch common errors give AccessDeniedException.
@@ -2058,9 +2057,6 @@ public class IamEnforcementFilter implements ContainerRequestFilter {
      * and what the API Gateway execute path already returns.
      */
     static Response unrecognizedClientResponse(String credentialScope, ContainerRequestContext ctx) {
-        if (OtlpMetricsResponses.isRequest(ctx)) {
-            return OtlpMetricsResponses.error(ctx.getMediaType(), 403, 7, INVALID_SECURITY_TOKEN);
-        }
         if ("ec2".equals(credentialScope)) {
             return Ec2ErrorResponses.authFailure();
         }
@@ -2084,9 +2080,6 @@ public class IamEnforcementFilter implements ContainerRequestFilter {
      * {@code ExpiredTokenException}, 403, under the same name for Query services as for JSON ones.
      */
     static Response expiredTokenResponse(String credentialScope, ContainerRequestContext ctx) {
-        if (OtlpMetricsResponses.isRequest(ctx)) {
-            return OtlpMetricsResponses.error(ctx.getMediaType(), 403, 7, EXPIRED_TOKEN);
-        }
         if ("ec2".equals(credentialScope)) {
             return Ec2ErrorResponses.of("RequestExpired", EXPIRED_TOKEN, 400);
         }
@@ -2116,9 +2109,6 @@ public class IamEnforcementFilter implements ContainerRequestFilter {
      */
     static Response incompleteSignatureResponse(String credentialScope, ContainerRequestContext ctx,
                                                 String message) {
-        if (OtlpMetricsResponses.isRequest(ctx)) {
-            return OtlpMetricsResponses.error(ctx.getMediaType(), 403, 7, message);
-        }
         if ("ec2".equals(credentialScope) || Ec2ErrorResponses.isEc2QueryRequest(ctx)) {
             return Ec2ErrorResponses.of("IncompleteSignature", message, 400);
         }
@@ -2150,11 +2140,6 @@ public class IamEnforcementFilter implements ContainerRequestFilter {
      * not yet carry for the REST services; that half is tracked with the other route-derived gap.
      */
     private void refuseUnsignedManagementCall(ContainerRequestContext ctx) {
-        if (OtlpMetricsResponses.isRequest(ctx)) {
-            ctx.abortWith(OtlpMetricsResponses.error(ctx.getMediaType(), 403, 7,
-                    "Request is missing Authentication Token"));
-            return;
-        }
         if (!(ctx.getProperty(AwsProtocolClaimFilter.CLAIM_PROPERTY) instanceof ProtocolClaim claim)
                 || claim.protocol() == WireProtocol.REST
                 || servesWithoutCredentials(claim, ctx)) {

@@ -1,12 +1,10 @@
 package io.floci.aws.services.cloudwatch.metrics;
 
 import com.fasterxml.jackson.core.type.TypeReference;
-import com.google.protobuf.InvalidProtocolBufferException;
 import io.floci.aws.core.common.RequestContext;
 import io.floci.aws.core.storage.StorageBackend;
 import io.floci.aws.core.storage.StorageFactory;
 import io.floci.aws.core.storage.WriteProfile;
-import io.opentelemetry.proto.collector.metrics.v1.ExportMetricsServiceRequest;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 
@@ -48,12 +46,12 @@ public class OtlpMetricsService {
         this.clock = clock;
     }
 
-    void ingest(String region, ExportMetricsServiceRequest request) {
-        if (request.getResourceMetricsCount() != 0) {
+    void ingest(String region, byte[] requestBytes) {
+        if (requestBytes != null && requestBytes.length > 0) {
             long now = clock.millis();
             pruneExpired(region, now);
             store.put(region + "::" + now + "::" + UUID.randomUUID(),
-                    Base64.getEncoder().encodeToString(request.toByteArray()));
+                    Base64.getEncoder().encodeToString(requestBytes));
         }
     }
 
@@ -71,7 +69,6 @@ public class OtlpMetricsService {
             String suffix = key.substring(prefix.length());
             int delimiter = suffix.indexOf("::");
             if (delimiter < 0) {
-                migrateLegacyKey(key, prefix, suffix, now);
                 continue;
             }
             try {
@@ -86,26 +83,9 @@ public class OtlpMetricsService {
         nextSweeps.put(scope, now + SWEEP_INTERVAL_MILLIS);
     }
 
-    private void migrateLegacyKey(String key, String prefix, String suffix, long now) {
-        try {
-            UUID.fromString(suffix);
-        } catch (IllegalArgumentException ignored) {
-            // Preserve keys that do not match the previous UUID-only format.
-            return;
-        }
-        store.get(key).ifPresent(value -> {
-            store.put(prefix + now + "::" + suffix, value);
-            store.delete(key);
-        });
-    }
-
-    List<ExportMetricsServiceRequest> requests(String region) {
-        return store.scan(key -> key.startsWith(region + "::")).stream().map(encoded -> {
-            try {
-                return ExportMetricsServiceRequest.parseFrom(Base64.getDecoder().decode(encoded));
-            } catch (InvalidProtocolBufferException e) {
-                throw new IllegalStateException("Stored OTLP metrics could not be decoded", e);
-            }
-        }).toList();
+    List<byte[]> requests(String region) {
+        return store.scan(key -> key.startsWith(region + "::")).stream()
+                .map(encoded -> Base64.getDecoder().decode(encoded))
+                .toList();
     }
 }

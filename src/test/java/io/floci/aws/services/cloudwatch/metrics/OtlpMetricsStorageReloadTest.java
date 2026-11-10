@@ -1,5 +1,6 @@
 package io.floci.aws.services.cloudwatch.metrics;
 
+import com.google.protobuf.InvalidProtocolBufferException;
 import io.floci.aws.core.storage.StorageFactory;
 import io.floci.aws.testing.StorageFactories;
 import io.opentelemetry.proto.collector.metrics.v1.ExportMetricsServiceRequest;
@@ -21,20 +22,22 @@ class OtlpMetricsStorageReloadTest {
 
     @ParameterizedTest
     @ValueSource(strings = {"persistent", "hybrid", "wal"})
-    void storedRequestsSurviveReloadAndRemainRegionScoped(String mode) {
+    void storedRequestsSurviveReloadAndRemainRegionScoped(String mode) throws InvalidProtocolBufferException {
         ExportMetricsServiceRequest request = ExportMetricsServiceRequest.newBuilder()
                 .addResourceMetrics(ResourceMetrics.newBuilder().setSchemaUrl("https://example.org/schema"))
                 .build();
         StorageFactory first = StorageFactories.open(directory, mode, "111111111111");
         try {
-            new OtlpMetricsService(first).ingest("eu-west-1", request);
+            new OtlpMetricsService(first).ingest("eu-west-1", request.toByteArray());
         } finally {
             first.shutdownAll();
         }
         StorageFactory second = StorageFactories.open(directory, mode, "111111111111");
         try {
             OtlpMetricsService service = new OtlpMetricsService(second);
-            assertEquals(List.of(request), service.requests("eu-west-1"));
+            List<byte[]> stored = service.requests("eu-west-1");
+            assertEquals(1, stored.size());
+            assertEquals(request, ExportMetricsServiceRequest.parseFrom(stored.get(0)));
             assertTrue(service.requests("us-east-1").isEmpty());
         } finally {
             second.shutdownAll();

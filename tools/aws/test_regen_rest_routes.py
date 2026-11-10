@@ -27,7 +27,7 @@ def test_each_operation_keeps_its_method_and_request_uri_under_its_scope():
     }, "botocore test")
 
     assert doc["_source"] == {"generator": "tools/aws/regen_rest_routes.py", "botocore": "botocore test"}
-    assert list(doc["models"]) == ["apigatewayv2", "s3"]
+    assert list(doc["models"]) == ["apigatewayv2", "cloudwatch-otlp", "s3"]
     assert doc["models"]["s3"] == {
         "credentialScope": "s3",
         "apiVersion": "2006-03-01",

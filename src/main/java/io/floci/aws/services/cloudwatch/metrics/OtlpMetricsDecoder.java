@@ -4,9 +4,9 @@ import com.fasterxml.jackson.databind.DeserializationFeature;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
+import com.google.protobuf.DynamicMessage;
 import com.google.protobuf.InvalidProtocolBufferException;
 import com.google.protobuf.util.JsonFormat;
-import io.opentelemetry.proto.collector.metrics.v1.ExportMetricsServiceRequest;
 
 import java.io.IOException;
 import java.util.Base64;
@@ -19,14 +19,14 @@ final class OtlpMetricsDecoder {
             .enable(DeserializationFeature.FAIL_ON_TRAILING_TOKENS);
     private static final List<String> METRIC_TYPES = List.of("gauge", "sum", "histogram", "exponentialHistogram");
 
-    ExportMetricsServiceRequest decodeJson(byte[] body) throws InvalidProtocolBufferException {
+    DynamicMessage decodeJson(byte[] body) throws InvalidProtocolBufferException {
         try {
             JsonNode root = MAPPER.readTree(body);
             if (root == null) {
                 throw new InvalidProtocolBufferException("Empty OTLP metrics request");
             }
             convertExemplarIds(root);
-            ExportMetricsServiceRequest.Builder request = ExportMetricsServiceRequest.newBuilder();
+            DynamicMessage.Builder request = DynamicMessage.newBuilder(OtlpDescriptors.EXPORT_REQUEST);
             JsonFormat.parser().ignoringUnknownFields().merge(MAPPER.writeValueAsString(root), request);
             return request.build();
         } catch (InvalidProtocolBufferException e) {
@@ -63,10 +63,10 @@ final class OtlpMetricsDecoder {
         }
     }
 
-    ExportMetricsServiceRequest decodeProtobuf(byte[] body) throws InvalidProtocolBufferException {
+    DynamicMessage decodeProtobuf(byte[] body) throws InvalidProtocolBufferException {
         if (body.length == 0) {
             throw new InvalidProtocolBufferException("Empty OTLP metrics request");
         }
-        return ExportMetricsServiceRequest.parseFrom(body);
+        return DynamicMessage.parseFrom(OtlpDescriptors.EXPORT_REQUEST, body);
     }
 }

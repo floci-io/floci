@@ -1,14 +1,10 @@
 package io.floci.aws.services.cloudwatch.metrics;
 
+import com.google.protobuf.Descriptors.FieldDescriptor;
+import com.google.protobuf.DynamicMessage;
 import com.google.protobuf.util.JsonFormat;
 import io.floci.aws.core.common.RequestContext;
 import io.floci.aws.core.common.ServiceRegistry;
-import io.opentelemetry.proto.collector.metrics.v1.ExportMetricsPartialSuccess;
-import io.opentelemetry.proto.collector.metrics.v1.ExportMetricsServiceRequest;
-import io.opentelemetry.proto.collector.metrics.v1.ExportMetricsServiceResponse;
-import io.opentelemetry.proto.metrics.v1.Metric;
-import io.opentelemetry.proto.metrics.v1.ResourceMetrics;
-import io.opentelemetry.proto.metrics.v1.ScopeMetrics;
 import jakarta.inject.Inject;
 import jakarta.ws.rs.Consumes;
 import jakarta.ws.rs.POST;
@@ -21,6 +17,7 @@ import jakarta.ws.rs.core.Response;
 import java.io.IOException;
 import java.io.InputStream;
 import java.nio.charset.StandardCharsets;
+import java.util.List;
 import java.util.zip.GZIPInputStream;
 
 @Path("/v1/metrics")
@@ -65,38 +62,51 @@ public class OtlpMetricsController {
             if (bytes.length > MAX_REQUEST_BYTES) {
                 return OtlpMetricsResponses.error(mediaType, 413, 8, "Request exceeds maximum size of 5 MB.");
             }
-            ExportMetricsServiceRequest request = json ? decoder.decodeJson(bytes) : decoder.decodeProtobuf(bytes);
+            DynamicMessage request = json ? decoder.decodeJson(bytes) : decoder.decodeProtobuf(bytes);
             OtlpMetricsValidation.Result result = validation.validate(request);
             if (result.rejectedDataPoints() > 0 && result.rejectedDataPoints() == dataPointCount(request)) {
                 return OtlpMetricsResponses.error(mediaType, 400, 3, result.errorMessage());
             }
-            service.ingest(requestContext.getRegion(), result.request());
-            ExportMetricsServiceResponse response = result.hasErrors()
-                    ? ExportMetricsServiceResponse.newBuilder().setPartialSuccess(ExportMetricsPartialSuccess
-                            .newBuilder().setRejectedDataPoints(result.rejectedDataPoints())
-                            .setErrorMessage(result.errorMessage())).build()
-                    : ExportMetricsServiceResponse.getDefaultInstance();
+            service.ingest(requestContext.getRegion(), result.requestBytes());
+            DynamicMessage response = buildResponse(result);
             return successResponse(json, response);
         } catch (IOException e) {
             return OtlpMetricsResponses.error(mediaType, 400, 3, "Bad request.");
         }
     }
 
-    private Response successResponse(boolean json, ExportMetricsServiceResponse response) throws IOException {
-        byte[] body = json ? JsonFormat.printer().print(response).getBytes(StandardCharsets.UTF_8)
-                : response.toByteArray();
-        return Response.ok(body).type(json ? MediaType.APPLICATION_JSON : PROTOBUF).build();
+    private DynamicMessage buildResponse(OtlpMetricsValidation.Result result) {
+        if (result.hasErrors()) {
+            DynamicMessage.Builder psBuilder = DynamicMessage.newBuilder(OtlpDescriptors.PARTIAL_SUCCESS);
+            psBuilder.setField(OtlpDescriptors.REJECTED_DATA_POINTS, (long) result.rejectedDataPoints());
+            psBuilder.setField(OtlpDescriptors.PARTIAL_ERROR_MESSAGE, result.errorMessage());
+            DynamicMessage.Builder respBuilder = DynamicMessage.newBuilder(OtlpDescriptors.EXPORT_RESPONSE);
+            respBuilder.setField(OtlpDescriptors.RESPONSE_PARTIAL_SUCCESS, psBuilder.build());
+            return respBuilder.build();
+        }
+        return DynamicMessage.newBuilder(OtlpDescriptors.EXPORT_RESPONSE).build();
     }
 
-    private int dataPointCount(ExportMetricsServiceRequest request) {
+    private Response successResponse(boolean json, DynamicMessage response) throws IOException {
+        byte[] responseBody = json ? JsonFormat.printer().print(response).getBytes(StandardCharsets.UTF_8)
+                : response.toByteArray();
+        return Response.ok(responseBody).type(json ? MediaType.APPLICATION_JSON : PROTOBUF).build();
+    }
+
+    private int dataPointCount(DynamicMessage request) {
         int count = 0;
-        for (ResourceMetrics resource : request.getResourceMetricsList()) {
-            for (ScopeMetrics scope : resource.getScopeMetricsList()) {
-                for (Metric metric : scope.getMetricsList()) {
-                    count += OtlpMetricsValidation.dataPointCount(metric);
+        for (DynamicMessage resource : getList(request, OtlpDescriptors.RESOURCE_METRICS_LIST)) {
+            for (DynamicMessage scope : getList(resource, OtlpDescriptors.SCOPE_METRICS_LIST)) {
+                for (DynamicMessage metric : getList(scope, OtlpDescriptors.METRICS_LIST)) {
+                    count += OtlpMetricsValidation.metricDataPointCount(metric);
                 }
             }
         }
         return count;
+    }
+
+    @SuppressWarnings("unchecked")
+    private static List<DynamicMessage> getList(DynamicMessage msg, FieldDescriptor field) {
+        return (List<DynamicMessage>) msg.getField(field);
     }
 }

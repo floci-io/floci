@@ -1,8 +1,10 @@
 package io.floci.aws.services.cloudwatch.metrics;
 
+import com.google.protobuf.InvalidProtocolBufferException;
 import com.google.rpc.Status;
 import io.floci.aws.testing.SignedIamEnforcementProfile;
 import io.floci.aws.testutil.AwsRequestSigner;
+import io.opentelemetry.proto.collector.metrics.v1.ExportMetricsServiceRequest;
 import io.quarkus.test.common.http.TestHTTPResource;
 import io.quarkus.test.junit.QuarkusTest;
 import io.quarkus.test.junit.TestProfile;
@@ -50,6 +52,15 @@ class OtlpMetricsSignatureIntegrationTest {
     }
 
     @Test
+    void rejectsIncompleteSignaturesAsOtlpStatus() {
+        given().contentType("application/json")
+                .header("Authorization", "AWS4-HMAC-SHA256 Credential=invalid")
+                .body("{}").post(endpoint).then().statusCode(403).body("code", equalTo(7));
+        given().contentType("application/json").header("Authorization", "Bearer invalid")
+                .body("{}").post(endpoint).then().statusCode(403).body("code", equalTo(7));
+    }
+
+    @Test
     void storesPresignedRequestsInTheirSigningRegion() throws Exception {
         String name = "presigned_" + UUID.randomUUID().toString().replace("-", "");
         byte[] json = """
@@ -64,8 +75,13 @@ class OtlpMetricsSignatureIntegrationTest {
     }
 
     private boolean hasMetric(String region, String name) {
-        return service.requests(region).stream().flatMap(request -> request.getResourceMetricsList().stream())
-                .flatMap(resource -> resource.getScopeMetricsList().stream())
+        return service.requests(region).stream().flatMap(bytes -> {
+            try {
+                return ExportMetricsServiceRequest.parseFrom(bytes).getResourceMetricsList().stream();
+            } catch (InvalidProtocolBufferException e) {
+                throw new AssertionError("Could not parse stored OTLP metrics", e);
+            }
+        }).flatMap(resource -> resource.getScopeMetricsList().stream())
                 .flatMap(scope -> scope.getMetricsList().stream()).anyMatch(metric -> name.equals(metric.getName()));
     }
 }

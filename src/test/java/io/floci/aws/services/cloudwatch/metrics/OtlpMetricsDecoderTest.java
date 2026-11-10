@@ -1,5 +1,6 @@
 package io.floci.aws.services.cloudwatch.metrics;
 
+import com.google.protobuf.DynamicMessage;
 import com.google.protobuf.InvalidProtocolBufferException;
 import io.opentelemetry.proto.collector.metrics.v1.ExportMetricsServiceRequest;
 import io.opentelemetry.proto.metrics.v1.Metric;
@@ -7,6 +8,7 @@ import org.junit.jupiter.api.Test;
 
 import java.nio.charset.StandardCharsets;
 import java.util.HexFormat;
+import java.util.List;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
@@ -23,13 +25,14 @@ class OtlpMetricsDecoderTest {
                 "metrics":[{"name":"requests","sum":{"aggregationTemporality":2,"isMonotonic":true,
                 "dataPoints":[{"timeUnixNano":"1700000000123456789","asInt":"42"}]}}]}]}]}
                 """;
-        ExportMetricsServiceRequest decoded = decoder.decodeJson(json.getBytes(StandardCharsets.UTF_8));
-        ExportMetricsServiceRequest roundTrip = decoder.decodeProtobuf(decoded.toByteArray());
+        DynamicMessage decoded = decoder.decodeJson(json.getBytes(StandardCharsets.UTF_8));
+        DynamicMessage roundTrip = decoder.decodeProtobuf(decoded.toByteArray());
         assertEquals(decoded, roundTrip);
-        assertEquals("checkout", roundTrip.getResourceMetrics(0).getResource().getAttributes(0)
+        ExportMetricsServiceRequest parsed = ExportMetricsServiceRequest.parseFrom(roundTrip.toByteArray());
+        assertEquals("checkout", parsed.getResourceMetrics(0).getResource().getAttributes(0)
                 .getValue().getStringValue());
-        assertEquals("app", roundTrip.getResourceMetrics(0).getScopeMetrics(0).getScope().getName());
-        Metric metric = roundTrip.getResourceMetrics(0).getScopeMetrics(0).getMetrics(0);
+        assertEquals("app", parsed.getResourceMetrics(0).getScopeMetrics(0).getScope().getName());
+        Metric metric = parsed.getResourceMetrics(0).getScopeMetrics(0).getMetrics(0);
         assertEquals("requests", metric.getName());
         assertEquals(1700000000123456789L, metric.getSum().getDataPoints(0).getTimeUnixNano());
         assertEquals(42L, metric.getSum().getDataPoints(0).getAsInt());
@@ -42,13 +45,14 @@ class OtlpMetricsDecoderTest {
                 "dataPoints":[{"exemplars":[{"traceId":"5B8EFFF798038103D269B633813FC60C",
                 "spanId":"0123456789abcdef","asDouble":2}]}]}}]}]}]}
                 """;
-        ExportMetricsServiceRequest request = decoder.decodeJson(json.getBytes(StandardCharsets.UTF_8));
+        DynamicMessage decoded = decoder.decodeJson(json.getBytes(StandardCharsets.UTF_8));
+        ExportMetricsServiceRequest request = ExportMetricsServiceRequest.parseFrom(decoded.toByteArray());
         Metric metric = request.getResourceMetrics(0).getScopeMetrics(0).getMetrics(0);
         assertEquals("5b8efff798038103d269b633813fc60c", HexFormat.of().formatHex(
                 metric.getHistogram().getDataPoints(0).getExemplars(0).getTraceId().toByteArray()));
         assertEquals("0123456789abcdef", HexFormat.of().formatHex(
                 metric.getHistogram().getDataPoints(0).getExemplars(0).getSpanId().toByteArray()));
-        assertEquals(request, decoder.decodeProtobuf(request.toByteArray()));
+        assertEquals(decoded, decoder.decodeProtobuf(decoded.toByteArray()));
         String invalid = json.replace("0123456789abcdef", "not-hex");
         assertThrows(InvalidProtocolBufferException.class,
                 () -> decoder.decodeJson(invalid.getBytes(StandardCharsets.UTF_8)));
@@ -63,7 +67,9 @@ class OtlpMetricsDecoderTest {
     }
 
     @Test
+    @SuppressWarnings("unchecked")
     void acceptsEmptyJsonRequest() throws Exception {
-        assertEquals(0, decoder.decodeJson("{}".getBytes(StandardCharsets.UTF_8)).getResourceMetricsCount());
+        DynamicMessage result = decoder.decodeJson("{}".getBytes(StandardCharsets.UTF_8));
+        assertEquals(0, ((List<?>) result.getField(OtlpDescriptors.RESOURCE_METRICS_LIST)).size());
     }
 }

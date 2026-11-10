@@ -1,29 +1,14 @@
 package io.floci.aws.services.cloudwatch.metrics;
 
-import io.opentelemetry.proto.collector.metrics.v1.ExportMetricsServiceRequest;
-import io.opentelemetry.proto.common.v1.AnyValue;
-import io.opentelemetry.proto.common.v1.KeyValue;
-import io.opentelemetry.proto.metrics.v1.ExponentialHistogram;
-import io.opentelemetry.proto.metrics.v1.ExponentialHistogramDataPoint;
-import io.opentelemetry.proto.metrics.v1.Gauge;
-import io.opentelemetry.proto.metrics.v1.Histogram;
-import io.opentelemetry.proto.metrics.v1.HistogramDataPoint;
-import io.opentelemetry.proto.metrics.v1.Metric;
-import io.opentelemetry.proto.metrics.v1.NumberDataPoint;
-import io.opentelemetry.proto.metrics.v1.ResourceMetrics;
-import io.opentelemetry.proto.metrics.v1.ScopeMetrics;
-import io.opentelemetry.proto.metrics.v1.Sum;
-import io.opentelemetry.proto.metrics.v1.Summary;
-import io.opentelemetry.proto.metrics.v1.SummaryDataPoint;
+import com.google.protobuf.ByteString;
+import com.google.protobuf.Descriptors.FieldDescriptor;
+import com.google.protobuf.DynamicMessage;
 
 import java.nio.charset.StandardCharsets;
 import java.time.Duration;
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.List;
-import java.util.function.Consumer;
-import java.util.function.Function;
-import java.util.function.ToLongFunction;
 
 final class OtlpMetricsValidation {
 
@@ -36,7 +21,7 @@ final class OtlpMetricsValidation {
     private static final Duration MAX_AGE = Duration.ofDays(14);
     private static final Duration MAX_FUTURE = Duration.ofHours(2);
 
-    record Result(ExportMetricsServiceRequest request, int rejectedDataPoints, List<String> errors) {
+    record Result(byte[] requestBytes, int rejectedDataPoints, List<String> errors) {
         boolean hasErrors() {
             return !errors.isEmpty();
         }
@@ -46,11 +31,12 @@ final class OtlpMetricsValidation {
         }
     }
 
-    private record PointContext(ResourceMetrics resource, ScopeMetrics scope, Metric metric,
+    private record PointContext(DynamicMessage resource, DynamicMessage scope, DynamicMessage metric,
                                 String path, long oldestNanos, long newestNanos) {}
 
-    Result validate(ExportMetricsServiceRequest request) {
-        int count = request.getResourceMetricsList().stream().mapToInt(this::dataPointCount).sum();
+    Result validate(DynamicMessage request) {
+        List<DynamicMessage> resourceList = getList(request, OtlpDescriptors.RESOURCE_METRICS_LIST);
+        int count = resourceList.stream().mapToInt(this::dataPointCount).sum();
         if (count > MAX_DATA_POINTS) {
             return new Result(null, count, List.of("Maximum number of datapoints per request exceeded: 1000."));
         }
@@ -59,128 +45,154 @@ final class OtlpMetricsValidation {
         long newest = epochNanos(now.plus(MAX_FUTURE));
         int rejected = 0;
         List<String> errors = new ArrayList<>();
-        ExportMetricsServiceRequest.Builder accepted = request.toBuilder().clearResourceMetrics();
+        DynamicMessage.Builder accepted = request.toBuilder().clearField(OtlpDescriptors.RESOURCE_METRICS_LIST);
         int resourceIndex = 0;
-        for (ResourceMetrics resource : request.getResourceMetricsList()) {
+        for (DynamicMessage resource : resourceList) {
             String resourcePath = "ResourceMetrics." + ++resourceIndex;
             int resourcePoints = dataPointCount(resource);
-            boolean resourceInvalid = resourcePoints > 0
-                    && hasOversizedStringAttribute(resource.getResource().getAttributesList());
+            DynamicMessage resourceProto = getSubMessage(resource, OtlpDescriptors.RESOURCE_FIELD);
+            List<DynamicMessage> resourceAttributes = getList(resourceProto, OtlpDescriptors.RESOURCE_ATTRIBUTES);
+            boolean resourceInvalid = resourcePoints > 0 && hasOversizedStringAttribute(resourceAttributes);
             if (resourceInvalid) {
                 errors.add(sharedAttributeError(resourcePath, resourcePoints));
             }
-            ResourceMetrics.Builder acceptedResource = resource.toBuilder().clearScopeMetrics();
+            DynamicMessage.Builder acceptedResource = resource.toBuilder()
+                    .clearField(OtlpDescriptors.SCOPE_METRICS_LIST);
             int scopeIndex = 0;
-            for (ScopeMetrics scope : resource.getScopeMetricsList()) {
+            for (DynamicMessage scope : getList(resource, OtlpDescriptors.SCOPE_METRICS_LIST)) {
                 String scopePath = resourcePath + ".ScopeMetrics." + ++scopeIndex;
-                int scopePoints = dataPointCount(scope);
-                boolean scopeInvalid = scopePoints > 0
-                        && hasOversizedStringAttribute(scope.getScope().getAttributesList());
+                int scopePoints = scopeDataPointCount(scope);
+                DynamicMessage scopeProto = getSubMessage(scope, OtlpDescriptors.SCOPE_FIELD);
+                List<DynamicMessage> scopeAttributes = getList(scopeProto, OtlpDescriptors.SCOPE_ATTRIBUTES);
+                boolean scopeInvalid = scopePoints > 0 && hasOversizedStringAttribute(scopeAttributes);
                 if (scopeInvalid) {
                     errors.add(sharedAttributeError(scopePath, scopePoints));
                 }
-                ScopeMetrics.Builder acceptedScope = scope.toBuilder().clearMetrics();
+                DynamicMessage.Builder acceptedScope = scope.toBuilder()
+                        .clearField(OtlpDescriptors.METRICS_LIST);
                 int metricIndex = 0;
-                for (Metric metric : scope.getMetricsList()) {
+                for (DynamicMessage metric : getList(scope, OtlpDescriptors.METRICS_LIST)) {
                     String metricPath = scopePath + ".Metrics." + ++metricIndex;
-                    int metricPoints = dataPointCount(metric);
+                    int metricPoints = metricDataPointCount(metric);
                     if (metricPoints == 0) {
                         errors.add("Invalid OTel metric type [" + metricPath + "].");
                         continue;
                     }
-                    boolean metricInvalid = metric.getName().length() > MAX_METRIC_NAME_LENGTH;
+                    String metricName = (String) metric.getField(OtlpDescriptors.METRIC_NAME);
+                    boolean metricInvalid = metricName.length() > MAX_METRIC_NAME_LENGTH;
                     if (metricInvalid) {
                         errors.add("Metric name exceeds maximum length: 256 [" + metricPath + "] ("
                                 + rejectedCount(metricPoints) + ").");
                     }
-                    Metric.Builder acceptedMetric = metric.toBuilder();
+                    DynamicMessage.Builder acceptedMetric = metric.toBuilder();
                     PointContext context = new PointContext(resource, scope, metric, metricPath, oldest, newest);
                     List<String> pointErrors = filterMetric(acceptedMetric, context);
                     errors.addAll(pointErrors);
                     boolean sharedInvalid = resourceInvalid || scopeInvalid || metricInvalid;
                     rejected += sharedInvalid ? metricPoints : pointErrors.size();
-                    if (!sharedInvalid && dataPointCount(acceptedMetric.build()) > 0) {
-                        acceptedScope.addMetrics(acceptedMetric);
+                    if (!sharedInvalid && metricDataPointCount(acceptedMetric.build()) > 0) {
+                        acceptedScope.addRepeatedField(OtlpDescriptors.METRICS_LIST, acceptedMetric.build());
                     }
                 }
-                if (acceptedScope.getMetricsCount() > 0) {
-                    acceptedResource.addScopeMetrics(acceptedScope);
+                if (!getList(acceptedScope.build(), OtlpDescriptors.METRICS_LIST).isEmpty()) {
+                    acceptedResource.addRepeatedField(OtlpDescriptors.SCOPE_METRICS_LIST, acceptedScope.build());
                 }
             }
-            if (acceptedResource.getScopeMetricsCount() > 0) {
-                accepted.addResourceMetrics(acceptedResource);
+            if (!getList(acceptedResource.build(), OtlpDescriptors.SCOPE_METRICS_LIST).isEmpty()) {
+                accepted.addRepeatedField(OtlpDescriptors.RESOURCE_METRICS_LIST, acceptedResource.build());
             }
         }
         errors.sort(String::compareTo);
-        return new Result(accepted.build(), rejected, List.copyOf(errors));
+        return new Result(accepted.build().toByteArray(), rejected, List.copyOf(errors));
     }
 
-    private List<String> filterMetric(Metric.Builder accepted, PointContext context) {
-        Metric metric = context.metric();
+    private List<String> filterMetric(DynamicMessage.Builder accepted, PointContext context) {
+        DynamicMessage metric = context.metric();
         List<String> errors = new ArrayList<>();
-        switch (metric.getDataCase()) {
-            case GAUGE -> {
-                Gauge.Builder data = metric.getGauge().toBuilder().clearDataPoints();
-                filterPoints(metric.getGauge().getDataPointsList(), NumberDataPoint::getTimeUnixNano,
-                        NumberDataPoint::getAttributesList, data::addDataPoints, context, errors);
-                accepted.setGauge(data);
-            }
-            case SUM -> {
-                Sum.Builder data = metric.getSum().toBuilder().clearDataPoints();
-                filterPoints(metric.getSum().getDataPointsList(), NumberDataPoint::getTimeUnixNano,
-                        NumberDataPoint::getAttributesList, data::addDataPoints, context, errors);
-                accepted.setSum(data);
-            }
-            case HISTOGRAM -> {
-                Histogram.Builder data = metric.getHistogram().toBuilder().clearDataPoints();
-                filterPoints(metric.getHistogram().getDataPointsList(), HistogramDataPoint::getTimeUnixNano,
-                        HistogramDataPoint::getAttributesList, data::addDataPoints, context, errors);
-                accepted.setHistogram(data);
-            }
-            case EXPONENTIAL_HISTOGRAM -> {
-                ExponentialHistogram.Builder data = metric.getExponentialHistogram().toBuilder().clearDataPoints();
-                filterPoints(metric.getExponentialHistogram().getDataPointsList(),
-                        ExponentialHistogramDataPoint::getTimeUnixNano,
-                        ExponentialHistogramDataPoint::getAttributesList, data::addDataPoints, context, errors);
-                accepted.setExponentialHistogram(data);
-            }
-            case SUMMARY -> {
-                Summary.Builder data = metric.getSummary().toBuilder().clearDataPoints();
-                filterPoints(metric.getSummary().getDataPointsList(), SummaryDataPoint::getTimeUnixNano,
-                        SummaryDataPoint::getAttributesList, data::addDataPoints, context, errors);
-                accepted.setSummary(data);
-            }
-            case DATA_NOT_SET -> { }
+        FieldDescriptor activeField = metric.getOneofFieldDescriptor(OtlpDescriptors.METRIC_DATA_ONEOF);
+        if (activeField == null) {
+            return errors;
         }
-        return errors;
-    }
-
-    private <T> void filterPoints(List<T> points, ToLongFunction<T> timestamp,
-                                  Function<T, List<KeyValue>> attributes, Consumer<T> add,
-                                  PointContext context, List<String> errors) {
+        DynamicMessage data = (DynamicMessage) metric.getField(activeField);
+        FieldDescriptor dataPointsField = dataPointsFieldFor(activeField);
+        DynamicMessage.Builder dataBuilder = data.toBuilder().clearField(dataPointsField);
+        FieldDescriptor timestampField = timestampFieldFor(activeField);
+        FieldDescriptor attributesField = attributesFieldFor(activeField);
         int pointIndex = 0;
-        for (T point : points) {
+        for (DynamicMessage point : getList(data, dataPointsField)) {
             String path = context.path() + ".Datapoint." + ++pointIndex;
-            String error = pointError(timestamp.applyAsLong(point), attributes.apply(point), context, path);
+            long timestamp = (Long) point.getField(timestampField);
+            String error = pointError(timestamp, getList(point, attributesField), context, path);
             if (error == null) {
-                add.accept(point);
+                dataBuilder.addRepeatedField(dataPointsField, point);
             } else {
                 errors.add(error);
             }
         }
+        accepted.setField(activeField, dataBuilder.build());
+        return errors;
     }
 
-    private String pointError(long timestamp, List<KeyValue> attributes, PointContext context, String path) {
+    private static FieldDescriptor dataPointsFieldFor(FieldDescriptor metricField) {
+        if (metricField == OtlpDescriptors.GAUGE_FIELD) {
+            return OtlpDescriptors.GAUGE_DATA_POINTS;
+        }
+        if (metricField == OtlpDescriptors.SUM_FIELD) {
+            return OtlpDescriptors.SUM_DATA_POINTS;
+        }
+        if (metricField == OtlpDescriptors.HISTOGRAM_FIELD) {
+            return OtlpDescriptors.HISTOGRAM_DATA_POINTS;
+        }
+        if (metricField == OtlpDescriptors.EXPONENTIAL_HISTOGRAM_FIELD) {
+            return OtlpDescriptors.EXPONENTIAL_HISTOGRAM_DATA_POINTS;
+        }
+        return OtlpDescriptors.SUMMARY_DATA_POINTS;
+    }
+
+    private static FieldDescriptor timestampFieldFor(FieldDescriptor metricField) {
+        if (metricField == OtlpDescriptors.GAUGE_FIELD || metricField == OtlpDescriptors.SUM_FIELD) {
+            return OtlpDescriptors.NUMBER_POINT_TIME_UNIX_NANO;
+        }
+        if (metricField == OtlpDescriptors.HISTOGRAM_FIELD) {
+            return OtlpDescriptors.HISTOGRAM_POINT_TIME_UNIX_NANO;
+        }
+        if (metricField == OtlpDescriptors.EXPONENTIAL_HISTOGRAM_FIELD) {
+            return OtlpDescriptors.EXP_HISTOGRAM_POINT_TIME_UNIX_NANO;
+        }
+        return OtlpDescriptors.SUMMARY_POINT_TIME_UNIX_NANO;
+    }
+
+    private static FieldDescriptor attributesFieldFor(FieldDescriptor metricField) {
+        if (metricField == OtlpDescriptors.GAUGE_FIELD || metricField == OtlpDescriptors.SUM_FIELD) {
+            return OtlpDescriptors.NUMBER_POINT_ATTRIBUTES;
+        }
+        if (metricField == OtlpDescriptors.HISTOGRAM_FIELD) {
+            return OtlpDescriptors.HISTOGRAM_POINT_ATTRIBUTES;
+        }
+        if (metricField == OtlpDescriptors.EXPONENTIAL_HISTOGRAM_FIELD) {
+            return OtlpDescriptors.EXP_HISTOGRAM_POINT_ATTRIBUTES;
+        }
+        return OtlpDescriptors.SUMMARY_POINT_ATTRIBUTES;
+    }
+
+    private String pointError(long timestamp, List<DynamicMessage> attributes,
+                              PointContext context, String path) {
         if (hasOversizedStringAttribute(attributes)) {
             return "Attribute string value exceeds maximum length: 1024 [" + path + "].";
         }
-        List<KeyValue> resourceAttributes = context.resource().getResource().getAttributesList();
-        List<KeyValue> scopeAttributes = context.scope().getScope().getAttributesList();
+        DynamicMessage resourceProto = getSubMessage(context.resource(), OtlpDescriptors.RESOURCE_FIELD);
+        List<DynamicMessage> resourceAttributes = getList(resourceProto, OtlpDescriptors.RESOURCE_ATTRIBUTES);
+        DynamicMessage scopeProto = getSubMessage(context.scope(), OtlpDescriptors.SCOPE_FIELD);
+        List<DynamicMessage> scopeAttributes = getList(scopeProto, OtlpDescriptors.SCOPE_ATTRIBUTES);
         if (resourceAttributes.size() + scopeAttributes.size() + attributes.size() > MAX_ATTRIBUTES) {
             return "Maximum number of attributes exceeded: 150 [" + path + "].";
         }
-        long metadataSize = utf8Size(context.metric().getName()) + utf8Size(context.metric().getUnit())
-                + utf8Size(context.scope().getScope().getName()) + utf8Size(context.scope().getScope().getVersion())
+        String metricName = (String) context.metric().getField(OtlpDescriptors.METRIC_NAME);
+        String metricUnit = (String) context.metric().getField(OtlpDescriptors.METRIC_UNIT);
+        String scopeName = (String) scopeProto.getField(OtlpDescriptors.SCOPE_NAME);
+        String scopeVersion = (String) scopeProto.getField(OtlpDescriptors.SCOPE_VERSION);
+        long metadataSize = utf8Size(metricName) + utf8Size(metricUnit)
+                + utf8Size(scopeName) + utf8Size(scopeVersion)
                 + attributesSize(resourceAttributes) + attributesSize(scopeAttributes) + attributesSize(attributes);
         if (metadataSize > MAX_METADATA_BYTES) {
             return "Maximum size of datapoint metadata exceeded: 40 KB [" + path + "].";
@@ -191,73 +203,102 @@ final class OtlpMetricsValidation {
         }
         String direction = Long.compareUnsigned(timestamp, context.oldestNanos()) < 0
                 ? "too far in the past" : "too far in the future";
-        String resourceName = resourceAttributes.stream().filter(attribute -> "service.name".equals(attribute.getKey()))
-                .map(attribute -> "service.name='" + attribute.getValue().getStringValue() + "'")
+        String serviceNameValue = resourceAttributes.stream()
+                .filter(kv -> "service.name".equals(kv.getField(OtlpDescriptors.KV_KEY)))
+                .map(kv -> {
+                    DynamicMessage value = (DynamicMessage) kv.getField(OtlpDescriptors.KV_VALUE);
+                    return "service.name='" + value.getField(OtlpDescriptors.STRING_VALUE) + "'";
+                })
                 .findFirst().orElse("service.name is not present");
-        String metricName = context.metric().getName();
-        if (metricName.length() > 60) {
-            metricName = metricName.substring(0, 60) + "...";
-        }
+        String displayName = metricName.length() > 60 ? metricName.substring(0, 60) + "..." : metricName;
         return "TimeUnixNano " + Long.toUnsignedString(timestamp) + " is " + direction + " for metric '"
-                + metricName + "' for resource where " + resourceName + " at [" + path + "].";
+                + displayName + "' for resource where " + serviceNameValue + " at [" + path + "].";
     }
 
     private long epochNanos(Instant instant) {
         return instant.getEpochSecond() * NANOS_PER_SECOND + instant.getNano();
     }
 
-    private int dataPointCount(ResourceMetrics resource) {
-        return resource.getScopeMetricsList().stream().mapToInt(this::dataPointCount).sum();
+    int dataPointCount(DynamicMessage resource) {
+        return getList(resource, OtlpDescriptors.SCOPE_METRICS_LIST).stream()
+                .mapToInt(this::scopeDataPointCount).sum();
     }
 
-    private int dataPointCount(ScopeMetrics scope) {
-        return scope.getMetricsList().stream().mapToInt(OtlpMetricsValidation::dataPointCount).sum();
+    private int scopeDataPointCount(DynamicMessage scope) {
+        return getList(scope, OtlpDescriptors.METRICS_LIST).stream()
+                .mapToInt(OtlpMetricsValidation::metricDataPointCount).sum();
     }
 
-    static int dataPointCount(Metric metric) {
-        return switch (metric.getDataCase()) {
-            case GAUGE -> metric.getGauge().getDataPointsCount();
-            case SUM -> metric.getSum().getDataPointsCount();
-            case HISTOGRAM -> metric.getHistogram().getDataPointsCount();
-            case EXPONENTIAL_HISTOGRAM -> metric.getExponentialHistogram().getDataPointsCount();
-            case SUMMARY -> metric.getSummary().getDataPointsCount();
-            case DATA_NOT_SET -> 0;
-        };
+    static int metricDataPointCount(DynamicMessage metric) {
+        FieldDescriptor activeField = metric.getOneofFieldDescriptor(OtlpDescriptors.METRIC_DATA_ONEOF);
+        if (activeField == null) {
+            return 0;
+        }
+        DynamicMessage data = (DynamicMessage) metric.getField(activeField);
+        return getList(data, dataPointsFieldFor(activeField)).size();
     }
 
-    private boolean hasOversizedStringAttribute(List<KeyValue> attributes) {
+    private boolean hasOversizedStringAttribute(List<DynamicMessage> attributes) {
         // CloudWatch counts UTF-16 code units here; the metadata limit counts UTF-8 bytes.
-        return attributes.stream().map(KeyValue::getValue).anyMatch(this::hasOversizedString);
+        return attributes.stream()
+                .map(kv -> (DynamicMessage) kv.getField(OtlpDescriptors.KV_VALUE))
+                .anyMatch(this::hasOversizedString);
     }
 
-    private boolean hasOversizedString(AnyValue value) {
-        return switch (value.getValueCase()) {
-            case STRING_VALUE -> value.getStringValue().length() > MAX_ATTRIBUTE_LENGTH;
-            case ARRAY_VALUE -> value.getArrayValue().getValuesList().stream().anyMatch(this::hasOversizedString);
-            case KVLIST_VALUE -> hasOversizedStringAttribute(value.getKvlistValue().getValuesList());
-            default -> false;
-        };
+    private boolean hasOversizedString(DynamicMessage value) {
+        FieldDescriptor active = value.getOneofFieldDescriptor(OtlpDescriptors.ANY_VALUE_ONEOF);
+        if (active == null) {
+            return false;
+        }
+        if (active == OtlpDescriptors.STRING_VALUE) {
+            return ((String) value.getField(active)).length() > MAX_ATTRIBUTE_LENGTH;
+        }
+        if (active == OtlpDescriptors.ARRAY_VALUE) {
+            DynamicMessage array = (DynamicMessage) value.getField(active);
+            return getList(array, OtlpDescriptors.ARRAY_VALUES).stream().anyMatch(this::hasOversizedString);
+        }
+        if (active == OtlpDescriptors.KVLIST_VALUE) {
+            DynamicMessage kvList = (DynamicMessage) value.getField(active);
+            return hasOversizedStringAttribute(getList(kvList, OtlpDescriptors.KVLIST_VALUES));
+        }
+        return false;
     }
 
-    private long attributesSize(List<KeyValue> attributes) {
+    private long attributesSize(List<DynamicMessage> attributes) {
         long size = 0;
-        for (KeyValue attribute : attributes) {
-            size += utf8Size(attribute.getKey());
-            size += valueSize(attribute.getValue());
+        for (DynamicMessage kv : attributes) {
+            size += utf8Size((String) kv.getField(OtlpDescriptors.KV_KEY));
+            size += valueSize((DynamicMessage) kv.getField(OtlpDescriptors.KV_VALUE));
         }
         return size;
     }
 
-    private long valueSize(AnyValue value) {
-        return switch (value.getValueCase()) {
-            case STRING_VALUE -> utf8Size(value.getStringValue());
-            case BOOL_VALUE -> 1;
-            case INT_VALUE, DOUBLE_VALUE -> 8;
-            case BYTES_VALUE -> value.getBytesValue().size();
-            case ARRAY_VALUE -> value.getArrayValue().getValuesList().stream().mapToLong(this::valueSize).sum();
-            case KVLIST_VALUE -> attributesSize(value.getKvlistValue().getValuesList());
-            case VALUE_NOT_SET -> 0;
-        };
+    private long valueSize(DynamicMessage value) {
+        FieldDescriptor active = value.getOneofFieldDescriptor(OtlpDescriptors.ANY_VALUE_ONEOF);
+        if (active == null) {
+            return 0;
+        }
+        if (active == OtlpDescriptors.STRING_VALUE) {
+            return utf8Size((String) value.getField(active));
+        }
+        if (active == OtlpDescriptors.BOOL_VALUE) {
+            return 1;
+        }
+        if (active == OtlpDescriptors.INT_VALUE || active == OtlpDescriptors.DOUBLE_VALUE) {
+            return 8;
+        }
+        if (active == OtlpDescriptors.BYTES_VALUE) {
+            return ((ByteString) value.getField(active)).size();
+        }
+        if (active == OtlpDescriptors.ARRAY_VALUE) {
+            DynamicMessage array = (DynamicMessage) value.getField(active);
+            return getList(array, OtlpDescriptors.ARRAY_VALUES).stream().mapToLong(this::valueSize).sum();
+        }
+        if (active == OtlpDescriptors.KVLIST_VALUE) {
+            DynamicMessage kvList = (DynamicMessage) value.getField(active);
+            return attributesSize(getList(kvList, OtlpDescriptors.KVLIST_VALUES));
+        }
+        return 0;
     }
 
     private int utf8Size(String value) {
@@ -271,5 +312,14 @@ final class OtlpMetricsValidation {
 
     private String rejectedCount(int count) {
         return count + (count == 1 ? " datapoint rejected" : " datapoints rejected");
+    }
+
+    @SuppressWarnings("unchecked")
+    static List<DynamicMessage> getList(DynamicMessage msg, FieldDescriptor field) {
+        return (List<DynamicMessage>) msg.getField(field);
+    }
+
+    private static DynamicMessage getSubMessage(DynamicMessage msg, FieldDescriptor field) {
+        return (DynamicMessage) msg.getField(field);
     }
 }

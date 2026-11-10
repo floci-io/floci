@@ -339,6 +339,9 @@
       "StartPolicyGeneration",
       "ValidatePolicy"
     ],
+    "cloudwatch": [
+      "PutMetricData"
+    ],
     "dsql": [
       "InjectError",
       "ListClusters"

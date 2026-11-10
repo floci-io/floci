@@ -95,7 +95,6 @@ public class IamActionRegistry {
      * type, so IAM checks them against the wildcard rather than a bucket.
      */
     private static final List<ActionRule> RULES = List.of(
-        rule("cloudwatch", "POST", "^/v1/metrics/?$", "cloudwatch:PutMetricData"),
         // ── S3 Control ───────────────────────────────────────────────────────────
         s3ControlRule("GET",    "^/v20180820/tags/.+",        "s3:ListTagsForResource"),
         s3ControlRule("POST",   "^/v20180820/tags/.+",        "s3:TagResource"),
