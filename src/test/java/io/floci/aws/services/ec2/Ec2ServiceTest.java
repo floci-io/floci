@@ -9613,9 +9613,8 @@ class Ec2ServiceTest {
     @Test
     void templateResolutionCopiesVersionBeforeConcurrentDeletion() throws Exception {
         AccountAwareStorageBackend<LaunchTemplate> templates = AccountAwareStorageBackend.inMemory("000000000000");
-        Ec2Service service = new Ec2Service(mockConfig(true), mock(Ec2ContainerManager.class),
-                mock(Ec2PortForwardManager.class), mock(AmiImageResolver.class), mock(Ec2ImageCatalog.class),
-                new Ec2InstanceTypeCatalog(), new InMemoryStorageFactory(Map.of("ec2-launch-templates.json", templates)));
+        Ec2Service service = tagTestService(
+                new InMemoryStorageFactory(Map.of("ec2-launch-templates.json", templates)));
         LaunchTemplateData first = new LaunchTemplateData();
         first.setImageId("ami-first");
         LaunchTemplate created = service.createLaunchTemplate("us-east-1", "resolution-race", first, List.of());
@@ -9665,9 +9664,7 @@ class Ec2ServiceTest {
 
     @Test
     void deletingOnlyReconstructedLegacyVersionPreservesItsData() {
-        Ec2Service service = new Ec2Service(mockConfig(true), mock(Ec2ContainerManager.class),
-                mock(Ec2PortForwardManager.class), mock(AmiImageResolver.class), mock(Ec2ImageCatalog.class),
-                new Ec2InstanceTypeCatalog(), new InMemoryStorageFactory());
+        Ec2Service service = sgService();
         LaunchTemplateData data = new LaunchTemplateData();
         data.setImageId("ami-legacy-latest");
         LaunchTemplate template = service.createLaunchTemplate("us-east-1", "legacy-singleton", data, List.of());
@@ -9685,9 +9682,7 @@ class Ec2ServiceTest {
 
     @Test
     void templateResolutionAfterVersionDeletionReturnsNotFound() {
-        Ec2Service service = new Ec2Service(mockConfig(true), mock(Ec2ContainerManager.class),
-                mock(Ec2PortForwardManager.class), mock(AmiImageResolver.class), mock(Ec2ImageCatalog.class),
-                new Ec2InstanceTypeCatalog(), new InMemoryStorageFactory());
+        Ec2Service service = sgService();
         LaunchTemplate template = service.createLaunchTemplate("us-east-1", "already-deleted-version",
                 new LaunchTemplateData(), List.of());
         service.createLaunchTemplateVersion("us-east-1", template.getLaunchTemplateId(), null, null,
@@ -9701,15 +9696,42 @@ class Ec2ServiceTest {
 
     @Test
     void deletingOnlyDefaultVersionStillReturnsDefaultError() {
-        Ec2Service service = new Ec2Service(mockConfig(true), mock(Ec2ContainerManager.class),
-                mock(Ec2PortForwardManager.class), mock(AmiImageResolver.class), mock(Ec2ImageCatalog.class),
-                new Ec2InstanceTypeCatalog(), new InMemoryStorageFactory());
+        Ec2Service service = sgService();
         LaunchTemplate template = service.createLaunchTemplate("us-east-1", "default-singleton",
                 new LaunchTemplateData(), List.of());
         Ec2Service.LaunchTemplateVersionDeletion result = service.deleteLaunchTemplateVersions(
                 "us-east-1", template.getLaunchTemplateId(), null, List.of("1"), false).getFirst();
         assertEquals("unexpectedError", result.errorCode());
         assertEquals("The default version of a launch template cannot be deleted.", result.errorMessage());
+        assertEquals(Set.of("1"), template.getVersions().keySet());
+    }
+
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    void versionDeletionRetainsSelectorErrorAfterTemplateDisappears(boolean byId) {
+        AccountAwareStorageBackend<LaunchTemplate> templates = spy(
+                AccountAwareStorageBackend.<LaunchTemplate>inMemory("000000000000"));
+        Ec2Service service = tagTestService(
+                new InMemoryStorageFactory(Map.of("ec2-launch-templates.json", templates)));
+        LaunchTemplate template = service.createLaunchTemplate("us-east-1", "stale-selector",
+                new LaunchTemplateData(), List.of());
+        String storageKey = "us-east-1::" + template.getLaunchTemplateId();
+        templates.delete(storageKey);
+        if (byId) {
+            doReturn(Optional.of(template), Optional.empty()).when(templates).get(storageKey);
+        } else {
+            doReturn(List.of(template)).when(templates).scan(any());
+        }
+
+        List<Ec2Service.LaunchTemplateVersionDeletion> results = service.deleteLaunchTemplateVersions(
+                "us-east-1", byId ? template.getLaunchTemplateId() : null,
+                byId ? null : template.getLaunchTemplateName(), List.of("1", "2"), false);
+
+        assertEquals(2, results.size());
+        assertTrue(results.stream().allMatch(result -> (byId
+                ? "launchTemplateIdDoesNotExist" : "launchTemplateNameDoesNotExist").equals(result.errorCode())));
+        assertEquals(List.of(1, 2), results.stream()
+                .map(Ec2Service.LaunchTemplateVersionDeletion::versionNumber).toList());
         assertEquals(Set.of("1"), template.getVersions().keySet());
     }
 

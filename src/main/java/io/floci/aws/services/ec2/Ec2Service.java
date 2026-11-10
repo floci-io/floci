@@ -9732,12 +9732,7 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
     }
 
     public LaunchTemplate modifyLaunchTemplate(String region, String id, String name, String defaultVersion, boolean dryRun) {
-        boolean hasId = id != null && !id.isBlank();
-        boolean hasName = name != null && !name.isBlank();
-        if (hasId == hasName) {
-            throw new AwsException(hasId ? "InvalidParameterCombination" : "MissingParameter",
-                    "Specify either LaunchTemplateId or LaunchTemplateName, but not both.", 400);
-        }
+        validateLaunchTemplateSelector(id, name);
         ensureDefaultResources(region);
         LaunchTemplate launchTemplate = findLaunchTemplate(region, id, name);
         synchronized (launchTemplate) {
@@ -9908,13 +9903,7 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
 
     public List<LaunchTemplateVersionDeletion> deleteLaunchTemplateVersions(
             String region, String id, String name, List<String> requestedVersions, boolean dryRun) {
-        if (isSet(id) && isSet(name)) {
-            throw new AwsException("InvalidParameterCombination",
-                    "Specify either LaunchTemplateId or LaunchTemplateName, not both.", 400);
-        }
-        if (!isSet(id) && !isSet(name)) {
-            throw new AwsException("MissingParameter", "Specify LaunchTemplateId or LaunchTemplateName.", 400);
-        }
+        validateLaunchTemplateSelector(id, name);
         if (requestedVersions == null || requestedVersions.isEmpty()) {
             throw new AwsException("MissingParameter", "The request must contain LaunchTemplateVersion.", 400);
         }
@@ -9930,10 +9919,7 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
         try {
             LaunchTemplate template = findLaunchTemplate(region, id, name);
             synchronized (template) {
-                if (launchTemplates.get(key(region, template.getLaunchTemplateId())).isEmpty()) {
-                    throw new AwsException("InvalidLaunchTemplateId.NotFound",
-                            "The specified launch template does not exist.", 400);
-                }
+                ensureLaunchTemplatePresent(region, template, id);
                 if (dryRun) {
                     throw new AwsException("DryRunOperation",
                             "Request would have succeeded, but DryRun flag is set.", 412);
@@ -9989,6 +9975,15 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
         // Older records have no counter; preserve their latest version before deleting it.
         return Math.max(template.getLastIssuedVersionNumber(),
                 parseLaunchTemplateVersion(template.getLatestVersionNumber()));
+    }
+
+    private void validateLaunchTemplateSelector(String id, String name) {
+        boolean hasId = id != null && !id.isBlank();
+        boolean hasName = name != null && !name.isBlank();
+        if (hasId == hasName) {
+            throw new AwsException(hasId ? "InvalidParameterCombination" : "MissingParameter",
+                    "Specify either LaunchTemplateId or LaunchTemplateName, but not both.", 400);
+        }
     }
 
     private void ensureLaunchTemplatePresent(String region, LaunchTemplate template, String requestedId) {
