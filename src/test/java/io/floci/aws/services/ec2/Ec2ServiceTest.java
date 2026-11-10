@@ -3652,9 +3652,7 @@ class Ec2ServiceTest {
         ParkingStore<LaunchTemplate> parking = new ParkingStore<>();
         AccountAwareStorageBackend<LaunchTemplate> store =
                 new AccountAwareStorageBackend<>(parking, null, "000000000000");
-        Ec2Service service = new Ec2Service(mockConfig(true), mock(Ec2ContainerManager.class),
-                mock(Ec2PortForwardManager.class), mock(AmiImageResolver.class), mock(Ec2ImageCatalog.class),
-                new Ec2InstanceTypeCatalog(),
+        Ec2Service service = tagTestService(
                 new InMemoryStorageFactory(Map.of("ec2-launch-templates.json", store)));
         LaunchTemplate template = service.createLaunchTemplate(
                 "us-east-1", "deleted-while-resolving", new LaunchTemplateData(), List.of());
@@ -3687,9 +3685,7 @@ class Ec2ServiceTest {
     @ParameterizedTest
     @ValueSource(strings = {"create", "modify"})
     void launchTemplateMutationByNameCannotReplaceANewTemplate(String operation) throws Exception {
-        Ec2Service service = new Ec2Service(mockConfig(true), mock(Ec2ContainerManager.class),
-                mock(Ec2PortForwardManager.class), mock(AmiImageResolver.class), mock(Ec2ImageCatalog.class),
-                new Ec2InstanceTypeCatalog(), new InMemoryStorageFactory());
+        Ec2Service service = sgService();
         String name = "reused-template-name";
         LaunchTemplate original = service.createLaunchTemplate(
                 "us-east-1", name, new LaunchTemplateData(), List.of());
@@ -3732,9 +3728,7 @@ class Ec2ServiceTest {
     @ParameterizedTest
     @ValueSource(strings = {"create", "modify"})
     void launchTemplateMutationStillWorksWhileTemplateExists(String operation) {
-        Ec2Service service = new Ec2Service(mockConfig(true), mock(Ec2ContainerManager.class),
-                mock(Ec2PortForwardManager.class), mock(AmiImageResolver.class), mock(Ec2ImageCatalog.class),
-                new Ec2InstanceTypeCatalog(), new InMemoryStorageFactory());
+        Ec2Service service = sgService();
         LaunchTemplate template = service.createLaunchTemplate(
                 "us-east-1", "existing-template", new LaunchTemplateData(), List.of());
         String id = template.getLaunchTemplateId();
@@ -9649,8 +9643,7 @@ class Ec2ServiceTest {
                 return service.deleteLaunchTemplateVersions("us-east-1", template.getLaunchTemplateId(), null,
                         List.of("2"), false);
             });
-            Awaitility.await().atMost(Duration.ofSeconds(5)).until(() -> deleted.isDone()
-                    || deletingThread.get() != null && deletingThread.get().getState() == Thread.State.BLOCKED);
+            awaitBlockedOrDone(deletingThread, deleted);
             release.countDown();
             assertEquals("ami-second", assertDoesNotThrow(() -> resolved.get(5, TimeUnit.SECONDS)).getImageId());
             assertNull(deleted.get(5, TimeUnit.SECONDS).getFirst().errorCode());
