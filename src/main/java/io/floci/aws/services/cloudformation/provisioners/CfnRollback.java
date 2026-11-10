@@ -3,10 +3,17 @@ package io.floci.aws.services.cloudformation.provisioners;
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.floci.aws.services.cloudformation.model.StackResource;
 import org.jboss.logging.Logger;
 
+import java.util.ArrayList;
+import java.util.Collection;
+import java.util.LinkedHashMap;
+import java.util.List;
+import java.util.Map;
+import java.util.TreeSet;
 import java.util.function.BiConsumer;
 
 /**
@@ -150,6 +157,13 @@ public final class CfnRollback {
      * {@code rollbackUpdate}.
      */
     public static final String API_DESTINATION_UPDATE_SNAPSHOT_ATTR = "__FlociApiDestinationUpdateSnapshot";
+
+    /**
+     * Holds the tags an EventBridge event bus carried, for the keys an in-place update manages,
+     * and the managed tag keys it was tracking, so a failed stack update can put them back. Written
+     * by {@code EventsCfnProvisioner} before its tag calls and spent by its {@code rollbackUpdate}.
+     */
+    public static final String EVENT_BUS_UPDATE_SNAPSHOT_ATTR = "__FlociEventBusUpdateSnapshot";
 
     /**
      * Holds the name, description and endpoint configuration a REST API had before an in-place
@@ -476,6 +490,38 @@ public final class CfnRollback {
     public static String snapshotText(JsonNode snapshot, String field) {
         JsonNode value = snapshot.get(field);
         return value == null || value.isNull() ? null : value.asText();
+    }
+
+    /**
+     * Records the tags an in-place update is about to reconcile under {@code tagKeys} and
+     * {@code tags} of {@code snapshot}: every key it manages, and the value {@code current} holds
+     * for it. A managed key the resource did not carry is listed without a value, so the rollback
+     * removes it. {@link #snapshotTagKeys} and {@link #snapshotTags} read them back.
+     */
+    public static void putTagSnapshot(ObjectNode snapshot, Collection<String> managedKeys,
+                                      Map<String, String> current) {
+        ArrayNode tagKeys = snapshot.putArray("tagKeys");
+        ObjectNode tags = snapshot.putObject("tags");
+        for (String key : new TreeSet<>(managedKeys)) {
+            tagKeys.add(key);
+            if (current.containsKey(key)) {
+                tags.put(key, current.get(key));
+            }
+        }
+    }
+
+    /** The tag keys {@link #putTagSnapshot} recorded as managed by the update. */
+    public static List<String> snapshotTagKeys(JsonNode snapshot) {
+        List<String> keys = new ArrayList<>();
+        snapshot.path("tagKeys").forEach(key -> keys.add(key.asText()));
+        return keys;
+    }
+
+    /** The tags {@link #putTagSnapshot} recorded, which are what the rollback puts back. */
+    public static Map<String, String> snapshotTags(JsonNode snapshot) {
+        Map<String, String> tags = new LinkedHashMap<>();
+        snapshot.path("tags").properties().forEach(tag -> tags.put(tag.getKey(), tag.getValue().textValue()));
+        return tags;
     }
 
     /**
