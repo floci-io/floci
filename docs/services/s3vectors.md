@@ -11,9 +11,9 @@ shape, so the AWS SDK and CLI `s3vectors` clients work without modification.
 
 | Category | Operations |
 |---|---|
-| **Vector buckets** | CreateVectorBucket, GetVectorBucket, ListVectorBuckets, DeleteVectorBucket |
+| **Vector buckets** | CreateVectorBucket, GetVectorBucket, ListVectorBuckets, DeleteVectorBucket, PutVectorBucketPolicy, GetVectorBucketPolicy, DeleteVectorBucketPolicy |
 | **Indexes** | CreateIndex, GetIndex, ListIndexes, DeleteIndex |
-| **Vectors** | PutVectors, GetVectors, DeleteVectors, QueryVectors |
+| **Vectors** | PutVectors, GetVectors, ListVectors, DeleteVectors, QueryVectors |
 
 ## Example
 
@@ -69,8 +69,14 @@ Index dimensions must be between 1 and 4096. Metadata configuration accepts up t
 10 unique non-filterable keys, each a non-blank string of 1 to 63 characters.
 Queries reject filters on these keys, including filters nested in logical expressions.
 
-Writes to the same bucket are serialized across tags, indexes, vectors, and bucket
-deletion so concurrent changes do not overwrite each other or restore deleted data.
+Writes to the same bucket are serialized across policies, tags, indexes, vectors, and
+bucket deletion so concurrent changes do not overwrite each other or restore deleted data.
+
+Bucket policies can be attached, retrieved, and deleted by either `vectorBucketName` or
+`vectorBucketArn`. `PutVectorBucketPolicy` validates that the policy is a JSON object and
+stores it with the bucket; `GetVectorBucketPolicy` returns `NotFoundException` when no
+policy is attached. Bucket policies are stored and returned, but Floci does not evaluate
+or enforce them on requests.
 
 Encryption settings are stored and returned; Floci does not perform KMS encryption.
 Standalone S3 Vectors tagging APIs are not implemented.

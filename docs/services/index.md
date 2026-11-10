@@ -14,7 +14,7 @@ Operation counts are exact. For dispatch-table services (Query and JSON 1.1) eac
 | [SQS](sqs.md) | `POST /` with `Action=` param | Query / JSON | 23 |
 | [SNS](sns.md) | `POST /` with `Action=` param | Query / JSON | 39 |
 | [S3](s3.md) | `/{bucket}/{key}` | REST XML | 58 |
-| [S3 Vectors](s3vectors.md) | `POST /{OperationName}` | REST JSON | 12 |
+| [S3 Vectors](s3vectors.md) | `POST /{OperationName}` | REST JSON | 16 |
 | [S3 Tables](s3tables.md) | `/buckets`, `/namespaces/*`, `/tables/*` | REST JSON | 25 |
 | [DynamoDB](dynamodb.md) | `POST /` + `X-Amz-Target: DynamoDB_20120810.*` | JSON 1.1 | 28 |
 | [DynamoDB Streams](dynamodb.md#streams) | `POST /` + `X-Amz-Target: DynamoDBStreams_20120810.*` | JSON 1.1 | 4 |

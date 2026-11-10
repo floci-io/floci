@@ -9,6 +9,8 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.TestInstance;
 import org.junit.jupiter.api.TestMethodOrder;
 
+import java.util.Map;
+
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.*;
 
@@ -717,5 +719,73 @@ class S3VectorsIntegrationTest {
             .statusCode(200)
             .body("vectors", hasSize(1))
             .body("vectors[0].key", equalTo("only"));
+    }
+
+    @Test
+    @Order(19)
+    void vectorBucketPolicyLifecycleByNameAndArn() {
+        String bucketName = "policy-vector-bucket";
+        String policy = "{\"Version\":\"2012-10-17\",\"Statement\":[{\"Effect\":\"Allow\",\"Principal\":\"*\",\"Action\":\"s3vectors:*\",\"Resource\":\"*\"}]}";
+
+        String bucketArn =
+            given()
+                .contentType(JSON_CONTENT_TYPE)
+                .body("""
+                    { "vectorBucketName": "%s" }
+                    """.formatted(bucketName))
+            .when()
+                .post("/CreateVectorBucket")
+            .then()
+                .statusCode(200)
+            .extract().path("vectorBucketArn");
+
+        given()
+            .contentType(JSON_CONTENT_TYPE)
+            .body(Map.of("vectorBucketName", bucketName))
+        .when()
+            .post("/GetVectorBucketPolicy")
+        .then()
+            .statusCode(404);
+
+        given()
+            .contentType(JSON_CONTENT_TYPE)
+            .body(Map.of("vectorBucketName", bucketName, "policy", policy))
+        .when()
+            .post("/PutVectorBucketPolicy")
+        .then()
+            .statusCode(200);
+
+        given()
+            .contentType(JSON_CONTENT_TYPE)
+            .body(Map.of("vectorBucketArn", bucketArn))
+        .when()
+            .post("/GetVectorBucketPolicy")
+        .then()
+            .statusCode(200)
+            .body("policy", equalTo(policy));
+
+        given()
+            .contentType(JSON_CONTENT_TYPE)
+            .body(Map.of("vectorBucketArn", bucketArn))
+        .when()
+            .post("/DeleteVectorBucketPolicy")
+        .then()
+            .statusCode(200);
+
+        given()
+            .contentType(JSON_CONTENT_TYPE)
+            .body(Map.of("vectorBucketName", bucketName))
+        .when()
+            .post("/GetVectorBucketPolicy")
+        .then()
+            .statusCode(404);
+
+        given()
+            .contentType(JSON_CONTENT_TYPE)
+            .body(Map.of("vectorBucketName", bucketName))
+        .when()
+            .post("/DeleteVectorBucket")
+        .then()
+            .statusCode(200);
     }
 }
