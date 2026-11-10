@@ -154,12 +154,6 @@ grep -qE '/rds/|/rdsdata/' "$SHARD_FILE" && pull postgres:16.3-alpine
 DSQL_IMAGE="$(awk '/^    dsql:/ { in_dsql=1; next } in_dsql && /^    [a-z]/ { exit } in_dsql && /^      image:/ { gsub(/"/, "", $2); print $2; exit }' src/main/resources/application.yml)"
 starts DsqlDataPlaneIntegrationTest DsqlClusterPolicyIntegrationTest DsqlTransactionAgeIntegrationTest \
     && [ -n "$DSQL_IMAGE" ] && pull "$DSQL_IMAGE"
-# This regression deliberately overrides Redshift's default image to PostgreSQL 18.
-# Read that test's pin so updating its override also updates the prefetch.
-REDSHIFT_PG18_TEST="$(find src/test/java -name RedshiftMaxErrorPostgres18IntegrationTest.java -print -quit)"
-REDSHIFT_PG18_IMAGE="$(grep -oE '"postgres:[^"]+"' "${REDSHIFT_PG18_TEST:-/dev/null}" | tr -d '"')"
-starts RedshiftMaxErrorPostgres18IntegrationTest \
-    && [ -n "$REDSHIFT_PG18_IMAGE" ] && pull "$REDSHIFT_PG18_IMAGE"
 # CodeArtifact's real registry fixtures each use one configured sidecar image.
 # Keep unrelated unit-test shards from pulling all four registries.
 codeartifact_image() {
