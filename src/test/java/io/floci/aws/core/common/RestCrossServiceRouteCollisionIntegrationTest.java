@@ -2,10 +2,12 @@ package io.floci.aws.core.common;
 
 import io.floci.aws.testing.RestAssuredJsonUtils;
 import io.quarkus.test.junit.QuarkusTest;
+import io.restassured.specification.RequestSpecification;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.CsvSource;
+import org.junit.jupiter.params.provider.NullAndEmptySource;
 
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.containsString;
@@ -24,14 +26,22 @@ class RestCrossServiceRouteCollisionIntegrationTest {
         RestAssuredJsonUtils.configureAwsContentTypes();
     }
 
-    @Test
-    void querySignedCollidingRestCallWithBlankAuthorizationHeaderIsSafelyRejectedWith404() {
-        given()
-            .header("Authorization", "")
+    private static String authorization(String service) {
+        return "AWS4-HMAC-SHA256 Credential=test/20260707/us-east-1/" + service
+                + "/aws4_request, SignedHeaders=host;x-amz-date, Signature=deadbeef";
+    }
+
+    @ParameterizedTest
+    @NullAndEmptySource
+    void querySignedCollidingRestCallIsSafelyRejectedWith404(String authorization) {
+        RequestSpecification spec = given()
             .queryParam("X-Amz-Credential", "test/20260707/us-east-1/appsync/aws4_request")
             .contentType("application/json")
-            .body("{}")
-        .when()
+            .body("{}");
+        if (authorization != null) {
+            spec.header("Authorization", authorization);
+        }
+        spec.when()
             .post("/v2/apis")
         .then()
             .statusCode(404)
@@ -39,11 +49,6 @@ class RestCrossServiceRouteCollisionIntegrationTest {
             .header("X-Amzn-Errortype", "UnknownOperationException")
             .body("__type", equalTo("UnknownOperationException"))
             .body("message", equalTo("Unknown operation: POST /v2/apis"));
-    }
-
-    private static String authorization(String service) {
-        return "AWS4-HMAC-SHA256 Credential=test/20260707/us-east-1/" + service
-                + "/aws4_request, SignedHeaders=host;x-amz-date, Signature=deadbeef";
     }
 
     @ParameterizedTest
@@ -93,22 +98,6 @@ class RestCrossServiceRouteCollisionIntegrationTest {
             .header("x-amzn-query-error", "UnknownOperationException;Sender")
             .body("__type", equalTo("UnknownOperationException"))
             .body("message", equalTo("Unknown operation: " + method + " " + path));
-    }
-
-    @Test
-    void querySignedCollidingRestCallIsSafelyRejectedWith404() {
-        given()
-            .queryParam("X-Amz-Credential", "test/20260707/us-east-1/appsync/aws4_request")
-            .contentType("application/json")
-            .body("{}")
-        .when()
-            .post("/v2/apis")
-        .then()
-            .statusCode(404)
-            .contentType(containsString("application/json"))
-            .header("X-Amzn-Errortype", "UnknownOperationException")
-            .body("__type", equalTo("UnknownOperationException"))
-            .body("message", equalTo("Unknown operation: POST /v2/apis"));
     }
 
     @Test
