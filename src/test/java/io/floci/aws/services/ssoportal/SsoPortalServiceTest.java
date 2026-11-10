@@ -62,7 +62,7 @@ class SsoPortalServiceTest {
                 new Assignment(accountId, permissionSetArn, principalId, "USER")));
         when(organizationsService.findAccountForPortal(accountId)).thenReturn(Optional.empty());
         when(ssoAdminService.permissionSetForPortal(permissionSetArn)).thenReturn(new PermissionSet(
-                permissionSetArn, "PlatformAdmins", null, "PT1H", Map.of(), Map.of(), null, null, Map.of()));
+                permissionSetArn, "PlatformAdmins", null, "PT1H", Map.of(), Map.of(), null, null, Map.of(), null));
 
         PaginatedResult<PortalAccountInfo> accounts = service.listAccounts(accessToken, null, null);
         assertEquals(List.of(accountId), accounts.items().stream().map(a -> a.accountId()).toList());
