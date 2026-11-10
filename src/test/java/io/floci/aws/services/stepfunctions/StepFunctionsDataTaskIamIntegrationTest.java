@@ -859,17 +859,15 @@ class StepFunctionsDataTaskIamIntegrationTest {
     }
 
     private String role(String trust, String policy) {
-        return EnforcementFixtures.createRole(cleanup, baseUri.getPort(), ACCOUNT, "/",
-                "sfn-data-" + UUID.randomUUID(), trust, policy);
+        return sfn().role(ACCOUNT, "sfn-data-", trust, policy);
     }
 
     private String machine(Map<String, Object> task, String role) throws Exception {
-        return machineWithDefinition(MAPPER.writeValueAsString(
-                Map.of("StartAt", "Send", "States", Map.of("Send", task))), role);
+        return sfn().machine(ACCOUNT, "sfn-data-iam-", task, role);
     }
 
     private String machineWithDefinition(String definition, String role) {
-        return sfn().createMachine(ACCOUNT, "sfn-data-iam-", definition, "STANDARD", role);
+        return sfn().machineWithDefinition(ACCOUNT, "sfn-data-iam-", definition, role);
     }
 
     private String start(String machine, String input) {
