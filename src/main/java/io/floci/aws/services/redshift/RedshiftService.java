@@ -44,7 +44,6 @@ import io.floci.aws.services.secretsmanager.model.Secret;
 import io.quarkus.runtime.StartupEvent;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.enterprise.event.Observes;
-import jakarta.enterprise.inject.Instance;
 import jakarta.inject.Inject;
 import org.jboss.logging.Logger;
 
@@ -103,9 +102,6 @@ public class RedshiftService implements ManagedSecretRotator {
     private static final Pattern INTEGRATION_NAME = Pattern.compile(INTEGRATION_NAME_PATTERN);
 
     private final AccountAwareStorageBackend<Integration> integrations;
-
-    @Inject
-    Instance<RedshiftS3AutoCopyConsumer> autoCopyConsumer;
     private final AccountAwareStorageBackend<SnapshotCopyGrant> snapshotCopyGrants;
     private final AccountAwareStorageBackend<SnapshotSchedule> snapshotSchedules;
     private final AccountAwareStorageBackend<AutomatedSnapshotState> automatedSnapshotStates;
@@ -125,6 +121,7 @@ public class RedshiftService implements ManagedSecretRotator {
     private final RedshiftZeroEtlEndpoints zeroEtlEndpoints;
     private final S3Service s3Service;
     private final ServiceCallAuthorizer serviceCallAuthorizer;
+    private final RedshiftS3AutoCopyConsumer autoCopyConsumer;
     // Proxy ports currently handed out, so allocateProxyPort never double-assigns within this JVM.
     private final Set<Integer> usedPorts = ConcurrentHashMap.newKeySet();
     private final ConcurrentHashMap<ResourceKey, ResourceLock> resourceLocks = new ConcurrentHashMap<>();
@@ -209,7 +206,8 @@ public class RedshiftService implements ManagedSecretRotator {
                             DynamoDbStreamReader streamReader, RedshiftAuditLogPublisher auditLogPublisher,
                             RedshiftEventService events, RedshiftIntegrationEventPublisher integrationEvents,
                             Ec2Service ec2Service, RedshiftZeroEtlEndpoints zeroEtlEndpoints,
-                            S3Service s3Service, ServiceCallAuthorizer serviceCallAuthorizer) {
+                            S3Service s3Service, ServiceCallAuthorizer serviceCallAuthorizer,
+                            RedshiftS3AutoCopyConsumer autoCopyConsumer) {
         this.clusters = storageFactory.create("redshift", "redshift-clusters.json", new TypeReference<Map<String, Cluster>>() {});
         this.snapshots = storageFactory.create("redshift", "redshift-snapshots.json", new TypeReference<Map<String, Snapshot>>() {});
         this.snapshotCopies = storageFactory.create("redshift", "redshift-snapshot-copies.json", new TypeReference<Map<String, Snapshot>>() {});
@@ -236,9 +234,24 @@ public class RedshiftService implements ManagedSecretRotator {
         this.zeroEtlEndpoints = zeroEtlEndpoints;
         this.s3Service = s3Service;
         this.serviceCallAuthorizer = serviceCallAuthorizer;
+        this.autoCopyConsumer = autoCopyConsumer;
         if (this.auditLogPublisher != null) {
             this.auditLogPublisher.setDeliveryStatusListener(this::recordAuditDeliveryOutcome);
         }
+    }
+
+    public RedshiftService(StorageFactory storageFactory, RedshiftContainerManager containerManager,
+                           EmulatorConfig config, RegionResolver regionResolver,
+                           RedshiftProxyManager proxyManager, DockerHostResolver dockerHostResolver,
+                           RedshiftCredentialBroker credentialBroker,
+                           SecretsManagerService secretsManagerService, ObjectMapper objectMapper,
+                           DynamoDbStreamReader streamReader, RedshiftAuditLogPublisher auditLogPublisher,
+                           RedshiftEventService events, RedshiftIntegrationEventPublisher integrationEvents,
+                           Ec2Service ec2Service, RedshiftZeroEtlEndpoints zeroEtlEndpoints,
+                           S3Service s3Service, ServiceCallAuthorizer serviceCallAuthorizer) {
+        this(storageFactory, containerManager, config, regionResolver, proxyManager, dockerHostResolver,
+                credentialBroker, secretsManagerService, objectMapper, streamReader, auditLogPublisher, events,
+                integrationEvents, ec2Service, zeroEtlEndpoints, s3Service, serviceCallAuthorizer, null);
     }
 
     RedshiftService(StorageFactory storageFactory, RedshiftContainerManager containerManager,
@@ -251,7 +264,7 @@ public class RedshiftService implements ManagedSecretRotator {
                     Ec2Service ec2Service, RedshiftZeroEtlEndpoints zeroEtlEndpoints) {
         this(storageFactory, containerManager, config, regionResolver, proxyManager, dockerHostResolver,
                 credentialBroker, secretsManagerService, objectMapper, streamReader, auditLogPublisher, events,
-                integrationEvents, ec2Service, zeroEtlEndpoints, null, null);
+                integrationEvents, ec2Service, zeroEtlEndpoints, null, null, null);
     }
 
     // Hand-built test constructions need not supply EC2; a null ec2Service skips subnet resolution.
@@ -263,7 +276,7 @@ public class RedshiftService implements ManagedSecretRotator {
                     RedshiftEventService events, RedshiftIntegrationEventPublisher integrationEvents) {
         this(storageFactory, containerManager, config, regionResolver, proxyManager, dockerHostResolver,
                 credentialBroker, secretsManagerService, objectMapper, streamReader, auditLogPublisher, events,
-                integrationEvents, null, null);
+                integrationEvents, null, null, null, null, null);
     }
 
     // Hand-built test constructions that create integrations in the AWS form need the endpoints.
@@ -277,6 +290,18 @@ public class RedshiftService implements ManagedSecretRotator {
         this(storageFactory, containerManager, config, regionResolver, proxyManager, dockerHostResolver,
                 credentialBroker, secretsManagerService, objectMapper, streamReader, auditLogPublisher, events,
                 integrationEvents, null, zeroEtlEndpoints);
+    }
+
+    RedshiftService(StorageFactory storageFactory, RedshiftContainerManager containerManager,
+                    EmulatorConfig config, RegionResolver regionResolver, RedshiftProxyManager proxyManager,
+                    DockerHostResolver dockerHostResolver, RedshiftCredentialBroker credentialBroker,
+                    SecretsManagerService secretsManagerService, ObjectMapper objectMapper,
+                    DynamoDbStreamReader streamReader, RedshiftAuditLogPublisher auditLogPublisher,
+                    RedshiftEventService events, RedshiftIntegrationEventPublisher integrationEvents,
+                    RedshiftZeroEtlEndpoints zeroEtlEndpoints, RedshiftS3AutoCopyConsumer autoCopyConsumer) {
+        this(storageFactory, containerManager, config, regionResolver, proxyManager, dockerHostResolver,
+                credentialBroker, secretsManagerService, objectMapper, streamReader, auditLogPublisher, events,
+                integrationEvents, null, zeroEtlEndpoints, null, null, autoCopyConsumer);
     }
 
     RedshiftService(StorageFactory storageFactory, RedshiftContainerManager containerManager,
@@ -609,6 +634,9 @@ public class RedshiftService implements ManagedSecretRotator {
                                          Map<String, String> tags, String region) {
         Integration integration = createIntegrationLocked(integrationName, sourceArn, targetArn, kmsKeyId,
                 description, additionalEncryptionContext, tags, region);
+        if (autoCopyConsumer != null && S3_EVENT_SOURCE_TYPE.equals(integration.getSourceType())) {
+            autoCopyConsumer.markReconcile();
+        }
         publishIntegrationEvents();
         return integration;
     }
@@ -1012,7 +1040,7 @@ public class RedshiftService implements ManagedSecretRotator {
             integrations.keys().stream().map(integrations::get).flatMap(Optional::stream)
                     .filter(integration -> integrationArn.equals(integration.getIntegrationArn())
                             && S3_EVENT_SOURCE_TYPE.equals(integration.getSourceType()))
-                    .findFirst().ifPresent(integration -> autoCopyConsumer.get().disable(integration));
+                    .findFirst().ifPresent(autoCopyConsumer::disable);
         }
         Integration deleted = deleteIntegrationLocked(integrationArn);
         publishIntegrationEvents();
@@ -1709,6 +1737,9 @@ public class RedshiftService implements ManagedSecretRotator {
                 clusters.put(clusterIdentifier, cluster);
                 clusters.flush();
                 registerAuditLogging(accountId, cluster);
+                if (autoCopyConsumer != null) {
+                    autoCopyConsumer.markReconcile();
+                }
                 return cluster;
             } catch (RuntimeException failure) {
                 cluster.setClusterStatus("paused");

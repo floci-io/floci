@@ -9,10 +9,24 @@ import io.floci.aws.services.s3.model.S3Object;
 import java.io.IOException;
 import java.math.BigDecimal;
 import java.time.Instant;
+import java.util.HashMap;
+import java.util.HashSet;
 import java.util.List;
+import java.util.Map;
+import java.util.Objects;
+import java.util.Set;
+import java.util.UUID;
 
 /** Checkpoints and target rows are written on the same backend transaction. */
 final class CopyJobRunner {
+    static int MAX_FILES_PER_RUN = 100;
+
+    private record FileRevision(String etag, String versionId) {
+        boolean matches(S3Object object) {
+            return Objects.equals(etag, object.getETag()) && Objects.equals(versionId, object.getVersionId());
+        }
+    }
+
     private CopyJobRunner() {
     }
 
@@ -47,25 +61,97 @@ final class CopyJobRunner {
         long id = Long.parseLong(job.get(0));
         // S3 stores lastModified at millisecond precision.
         Instant created = Instant.ofEpochMilli(new BigDecimal(job.get(4)).movePointRight(3).longValue());
+        Set<String> checkpointed = new HashSet<>();
+        Map<String, FileRevision> failedFiles = new HashMap<>();
+        for (List<String> row : backend.query(
+                "SELECT key, status, etag, version_id FROM floci_internal.copy_job_loaded_keys(" + id + ")")) {
+            if (row.isEmpty() || row.getFirst() == null) {
+                continue;
+            }
+            String status = row.size() > 1 && row.get(1) != null ? row.get(1) : "I";
+            if ("E".equals(status)) {
+                failedFiles.put(row.getFirst(), new FileRevision(
+                        row.size() > 2 ? row.get(2) : null,
+                        row.size() > 3 ? row.get(3) : null));
+            } else {
+                checkpointed.add(row.getFirst());
+            }
+        }
         long count = 0;
+        int processedFiles = 0;
         String token = null;
         do {
             S3Service.ListObjectsResult page = s3.listObjectsWithPrefixes(job.get(2), job.get(3), null, 1000, token, null);
             for (S3Object object : page.objects()) {
+                if (processedFiles >= MAX_FILES_PER_RUN) {
+                    break;
+                }
                 if (object.getLastModified() != null && object.getLastModified().isBefore(created)) {
                     continue;
                 }
-                String checkpoint = "SELECT floci_internal.reserve_copy_job_file(" + id + ", "
-                        + PostgresWire.quoteLiteral(object.getKey()) + ", "
-                        + literal(object.getETag()) + ", " + literal(object.getVersionId()) + ")";
-                if (!"t".equals(backend.query(checkpoint).getFirst().getFirst())) {
+                if (checkpointed.contains(object.getKey())) {
                     continue;
                 }
-                count += CopyEtlLoader.executeObject(backend, forObject(copy, object.getKey()), s3, iam, account, roles);
+                FileRevision previousFailure = failedFiles.get(object.getKey());
+                if (previousFailure != null && previousFailure.matches(object)) {
+                    continue;
+                }
+                String fileSavepoint = "floci_job_file_" + UUID.randomUUID().toString().replace("-", "");
+                backend.execute("SAVEPOINT " + fileSavepoint);
+                try {
+                    String checkpoint = "SELECT floci_internal.reserve_copy_job_file("
+                            + fileMetadataArgs(id, object) + ")";
+                    if (!"t".equals(backend.query(checkpoint).getFirst().getFirst())) {
+                        backend.execute("RELEASE SAVEPOINT " + fileSavepoint);
+                        checkpointed.add(object.getKey());
+                        continue;
+                    }
+                    count += CopyEtlLoader.executeObject(backend, forObject(copy, object.getKey()),
+                            object.getETag(), object.getVersionId(), s3, iam, account, roles);
+                    backend.execute("RELEASE SAVEPOINT " + fileSavepoint);
+                    checkpointed.add(object.getKey());
+                    failedFiles.remove(object.getKey());
+                    processedFiles++;
+                } catch (IOException | RuntimeException exception) {
+                    rollbackFileSavepoint(backend, fileSavepoint, exception);
+                    if (exception instanceof S3TransferException transfer && isJobFailure(transfer.sqlState())) {
+                        throw transfer;
+                    }
+                    backend.query("SELECT floci_internal.record_copy_job_file_error("
+                            + fileMetadataArgs(id, object) + ")");
+                    failedFiles.put(object.getKey(), new FileRevision(object.getETag(), object.getVersionId()));
+                    processedFiles++;
+                }
             }
-            token = page.isTruncated() ? page.nextContinuationToken() : null;
+            token = processedFiles < MAX_FILES_PER_RUN && page.isTruncated() ? page.nextContinuationToken() : null;
         } while (token != null);
         return count;
+    }
+
+    private static boolean isJobFailure(String sqlState) {
+        return sqlState != null && (sqlState.startsWith("42") || "0A000".equals(sqlState));
+    }
+
+    private static String fileMetadataArgs(long id, S3Object object) {
+        String modified = object.getLastModified() == null
+                ? "NULL"
+                : PostgresWire.quoteLiteral(object.getLastModified().toString()) + "::timestamptz";
+        return id + ", " + PostgresWire.quoteLiteral(object.getKey()) + ", "
+                + literal(object.getETag()) + ", " + literal(object.getVersionId()) + ", "
+                + object.getSize() + ", " + modified;
+    }
+
+    private static void rollbackFileSavepoint(CopyBackendSession backend, String savepoint,
+                                              Exception cause) throws IOException {
+        try {
+            backend.recover();
+            backend.execute("ROLLBACK TO SAVEPOINT " + savepoint);
+            backend.execute("RELEASE SAVEPOINT " + savepoint);
+        } catch (IOException | RuntimeException recoveryFailure) {
+            IOException failure = new IOException("Unable to recover failed COPY job file", recoveryFailure);
+            failure.addSuppressed(cause);
+            throw failure;
+        }
     }
 
     static CopyStatementParser.S3CopyFrom forObject(CopyStatementParser.S3CopyFrom copy, String key) {

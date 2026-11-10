@@ -22,6 +22,7 @@ import java.util.List;
 @ApplicationScoped
 public class RedshiftCopyJobExecutor {
     private static final Logger LOG = Logger.getLogger(RedshiftCopyJobExecutor.class);
+    static final int BATCH_FILE_LIMIT = 100;
 
     private final RedshiftService service;
     private final RedshiftZeroEtlEndpoints endpoints;
@@ -98,26 +99,53 @@ public class RedshiftCopyJobExecutor {
             }
         }
         for (String job : jobs) {
-            connection.setAutoCommit(false);
-            try (PreparedStatement lock = connection.prepareStatement(
-                    "SELECT job_id FROM floci_internal.copy_job WHERE job_name = ? AND is_auto FOR UPDATE")) {
-                lock.setQueryTimeout(5);
-                lock.setString(1, job);
-                try (ResultSet row = lock.executeQuery()) {
-                    if (row.next()) {
-                        try (Statement statement = connection.createStatement()) {
-                            statement.setQueryTimeout(60);
-                            statement.execute("COPY JOB RUN \"" + job.replace("\"", "\"\"") + "\"");
+            while (runAutomaticBatch(connection, job)) {
+                // Commit each bounded batch before starting the next batch.
+            }
+        }
+    }
+
+    private static boolean runAutomaticBatch(Connection connection, String job) throws SQLException {
+        connection.setAutoCommit(false);
+        try (PreparedStatement lock = connection.prepareStatement(
+                "SELECT job_id, (SELECT count(*) FROM floci_internal.copy_job_detail d WHERE d.job_id = j.job_id) "
+                        + "FROM floci_internal.copy_job j WHERE j.job_name = ? AND j.is_auto FOR UPDATE")) {
+            lock.setQueryTimeout(5);
+            lock.setString(1, job);
+            long jobId = -1;
+            long before = 0;
+            try (ResultSet row = lock.executeQuery()) {
+                if (row.next()) {
+                    jobId = row.getLong(1);
+                    before = row.getLong(2);
+                    try (Statement statement = connection.createStatement()) {
+                        statement.setQueryTimeout(60);
+                        statement.execute("COPY JOB RUN \"" + job.replace("\"", "\"\"") + "\"");
+                    }
+                }
+            }
+            long added = 0;
+            if (jobId >= 0) {
+                try (PreparedStatement afterQuery = connection.prepareStatement(
+                        "SELECT count(*) FROM floci_internal.copy_job_detail WHERE job_id = ?")) {
+                    if (afterQuery != null) {
+                        afterQuery.setLong(1, jobId);
+                        try (ResultSet afterRow = afterQuery.executeQuery()) {
+                            if (afterRow != null && afterRow.next()) {
+                                added = afterRow.getLong(1) - before;
+                            }
                         }
                     }
                 }
-                connection.commit();
-            } catch (SQLException exception) {
-                connection.rollback();
-                LOG.warnv(exception, "Automatic COPY job {0} failed; its files will be retried", job);
-            } finally {
-                connection.setAutoCommit(true);
             }
+            connection.commit();
+            return added >= BATCH_FILE_LIMIT;
+        } catch (SQLException exception) {
+            connection.rollback();
+            LOG.warnv(exception, "Automatic COPY job {0} failed; its files will be retried", job);
+            return false;
+        } finally {
+            connection.setAutoCommit(true);
         }
     }
 
@@ -127,31 +155,36 @@ public class RedshiftCopyJobExecutor {
             try {
                 workgroup = endpoints.targetWorkgroup(integration.getAccountId(), integration.getTargetArn());
             } catch (AwsException exception) {
-                if (disable && "ResourceNotFoundException".equals(exception.getErrorCode())
-                        || "ValidationException".equals(exception.getErrorCode())
-                        && exception.getMessage().endsWith("has no workgroup.")) {
-                    LOG.debugv("No workgroup for S3 integration {0}", integration.getIntegrationArn());
+                if ("ResourceNotFoundException".equals(exception.getErrorCode())
+                        || "ValidationException".equals(exception.getErrorCode())) {
+                    LOG.debugv("Workgroup target unavailable for S3 integration {0}: {1}",
+                            integration.getIntegrationArn(), exception.getMessage());
                     return null;
                 }
                 throw exception;
             }
-            if (workgroup.endpoint() == null || workgroup.endpoint().getPort() <= 0) {
+            if (workgroup == null || workgroup.host() == null || workgroup.port() <= 0
+                    || workgroup.endpoint() == null || workgroup.endpoint().getPort() <= 0) {
                 return null;
             }
             return new RedshiftDataResourceResolver.DatabaseTarget(workgroup.arn(), "127.0.0.1",
                     workgroup.endpoint().getPort(), workgroup.database(), workgroup.masterUsername(), workgroup.masterPassword());
         }
-        Cluster cluster;
+        List<Cluster> clusters;
         try {
-            cluster = service.describeClustersForAccount(integration.getAccountId(),
-                    integration.getTargetClusterIdentifier()).getFirst();
+            clusters = service.describeClustersForAccount(integration.getAccountId(),
+                    integration.getTargetClusterIdentifier());
         } catch (AwsException exception) {
-            if (disable && "ClusterNotFound".equals(exception.getErrorCode())) {
-                LOG.debugv("Target cluster already deleted for S3 integration {0}", integration.getIntegrationArn());
+            if ("ClusterNotFound".equals(exception.getErrorCode())) {
+                LOG.debugv("Target cluster not found for S3 integration {0}", integration.getIntegrationArn());
                 return null;
             }
             throw exception;
         }
+        if (clusters.isEmpty()) {
+            return null;
+        }
+        Cluster cluster = clusters.getFirst();
         if (!"available".equals(cluster.getClusterStatus()) || cluster.getProxyPort() <= 0) {
             if (disable) {
                 throw new AwsException("InvalidClusterState", "Resume the cluster before deleting its S3 integration.", 400);

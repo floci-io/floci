@@ -30,10 +30,17 @@ class RedshiftCopyJobExecutorTest {
         Integration cluster = integration("arn:aws:redshift:us-east-1:123456789012:cluster:target");
         when(service.describeClustersForAccount("123456789012", "target"))
                 .thenThrow(new AwsException("ClusterNotFound", "Gone", 404));
+        assertDoesNotThrow(() -> executor.runAutomatic(cluster));
         assertDoesNotThrow(() -> executor.disable(cluster));
         Integration namespace = integration("arn:aws:redshift-serverless:us-east-1:123456789012:namespace/target");
-        when(endpoints.targetWorkgroup("123456789012", namespace.getTargetArn()))
-                .thenThrow(new AwsException("ResourceNotFoundException", "Gone", 404));
+        doThrow(new AwsException("ResourceNotFoundException", "Gone", 404))
+                .when(endpoints).targetWorkgroup("123456789012", namespace.getTargetArn());
+        assertDoesNotThrow(() -> executor.runAutomatic(namespace));
+        assertDoesNotThrow(() -> executor.disable(namespace));
+        doThrow(new AwsException("ValidationException",
+                "Workgroup runtime is not available for Data API execution.", 400))
+                .when(endpoints).targetWorkgroup("123456789012", namespace.getTargetArn());
+        assertDoesNotThrow(() -> executor.runAutomatic(namespace));
         assertDoesNotThrow(() -> executor.disable(namespace));
         verifyNoInteractions(connections);
     }

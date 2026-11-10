@@ -85,8 +85,11 @@ class CopyJobRunnerTest {
                         if (sql.equals("SELECT current_user")) {
                             return List.of(List.of("admin"));
                         }
+                        if (sql.contains("copy_job_loaded_keys")) {
+                            return List.of(List.of("prefix/seen"));
+                        }
                         if (sql.contains("reserve_copy_job_file")) {
-                            return List.of(List.of(sql.contains("prefix/seen") ? "f" : "t"));
+                            return List.of(List.of("t"));
                         }
                         return List.of();
                     });
@@ -101,9 +104,71 @@ class CopyJobRunnerTest {
             backend.synchronize();
             response.get(5, TimeUnit.SECONDS);
             assertEquals("1\n", copied.toString(StandardCharsets.UTF_8));
-            assertEquals(2, statements.stream().filter(sql -> sql.contains("reserve_copy_job_file")).count());
+            assertEquals(1, statements.stream().filter(sql -> sql.contains("reserve_copy_job_file")).count());
             assertTrue(statements.contains("SET LOCAL ROLE \"job_owner\""));
             assertTrue(statements.contains("SET LOCAL ROLE \"admin\""));
+        }
+    }
+
+    @Test
+    void isolatesFailedOrOverwrittenObjectAndContinuesWithValidFiles() throws Exception {
+        S3Service s3 = mock(S3Service.class);
+        IamService iam = mock(IamService.class);
+        IamRole role = new IamRole();
+        role.setArn(ROLE);
+        role.setAssumeRolePolicyDocument("""
+                {"Statement":[{"Effect":"Allow","Principal":{"Service":"redshift.amazonaws.com"},"Action":"sts:AssumeRole"}]}
+                """);
+        when(iam.findRole(ACCOUNT, "Load")).thenReturn(Optional.of(role));
+        S3Object overwritten = object("prefix/a", 30);
+        overwritten.setETag("\"etag-listed\"");
+        S3Object replaced = object("prefix/a", 31);
+        replaced.setETag("\"etag-new\"");
+        S3Object versioned = object("prefix/b", 35);
+        versioned.setETag("\"etag-v1\"");
+        versioned.setVersionId("v1");
+        when(s3.listObjectsWithPrefixes("bucket", "prefix/", null, 1000, null, null))
+                .thenReturn(new S3Service.ListObjectsResult(List.of(overwritten, versioned), List.of(), false, null));
+        when(s3.getObject("bucket", "prefix/a")).thenReturn(replaced);
+        when(s3.getObject("bucket", "prefix/b", "v1")).thenReturn(versioned);
+        ByteArrayOutputStream copied = new ByteArrayOutputStream();
+        List<String> statements = new ArrayList<>();
+        try (ServerSocket listener = new ServerSocket(0);
+                Socket socket = new Socket("localhost", listener.getLocalPort());
+                Socket server = listener.accept()) {
+            socket.setSoTimeout(3000);
+            CompletableFuture<Void> response = CompletableFuture.runAsync(() -> {
+                try {
+                    new FakeCopyBackend(server).serveUntilSync(copied, statements::add, sql -> {
+                        if (sql.contains("copy_job_for_run")) {
+                            return List.of(List.of("1", COPY, "bucket", "prefix/", "20", "job_owner"));
+                        }
+                        if (sql.equals("SELECT current_user")) {
+                            return List.of(List.of("admin"));
+                        }
+                        if (sql.contains("reserve_copy_job_file")) {
+                            return List.of(List.of("t"));
+                        }
+                        if (sql.contains("record_copy_job_file_error")) {
+                            return List.of(List.of(""));
+                        }
+                        return List.of();
+                    });
+                } catch (Exception exception) {
+                    throw new AssertionError(exception);
+                }
+            });
+            CopyBackendSession backend = new CopyBackendSession(socket, frame -> { });
+            backend.begin(false);
+            assertEquals(1, CopyJobRunner.load(backend, "job", s3, iam, ACCOUNT, List.of(ROLE)));
+            backend.finish(false);
+            backend.synchronize();
+            response.get(5, TimeUnit.SECONDS);
+            assertEquals("1\n", copied.toString(StandardCharsets.UTF_8));
+            assertTrue(statements.stream().anyMatch(sql -> sql.startsWith("ROLLBACK TO SAVEPOINT floci_job_file_")));
+            assertTrue(statements.stream().anyMatch(sql -> sql.contains("record_copy_job_file_error")
+                    && sql.contains("'prefix/a'")));
+            verify(s3).getObject("bucket", "prefix/b", "v1");
         }
     }
 

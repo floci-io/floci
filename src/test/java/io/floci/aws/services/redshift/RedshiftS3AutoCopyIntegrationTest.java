@@ -22,11 +22,9 @@ import java.sql.Connection;
 import java.sql.ResultSet;
 import java.sql.SQLException;
 import java.sql.Statement;
-import java.time.Duration;
 import java.util.List;
 import java.util.UUID;
 
-import static org.awaitility.Awaitility.await;
 import static org.junit.jupiter.api.Assertions.*;
 
 @QuarkusTest
@@ -77,7 +75,8 @@ class RedshiftS3AutoCopyIntegrationTest {
             try {
                 put(s3, id, "elsewhere/ignored", "98\n");
                 put(s3, id, "prefix/first", "1\n");
-                await().atMost(Duration.ofSeconds(30)).untilAsserted(() -> assertEquals(1, count(statement, "events")));
+                consumer.pollOnce();
+                assertEquals(1, count(statement, "events"));
                 put(s3, id, "prefix/first", "2\n");
                 consumer.pollOnce();
                 consumer.clear();
@@ -103,11 +102,16 @@ class RedshiftS3AutoCopyIntegrationTest {
             statement.execute("COPY JOB RUN ingest");
             assertEquals(2, count(statement, "events"));
             put(s3, id, "prefix/bad", "invalid\n");
-            assertThrows(SQLException.class, () -> statement.execute("COPY JOB RUN ingest"));
-            assertEquals(2, count(statement, "floci_internal.copy_job_detail"));
-            put(s3, id, "prefix/bad", "4\n");
+            put(s3, id, "prefix/good", "4\n");
             statement.execute("COPY JOB RUN ingest");
             assertEquals(3, count(statement, "events"));
+            assertEquals(4, count(statement, "floci_internal.copy_job_detail"));
+            assertEquals("E", fileStatus(statement, "prefix/bad"));
+            assertEquals("I", fileStatus(statement, "prefix/good"));
+            put(s3, id, "prefix/bad", "5\n");
+            statement.execute("COPY JOB RUN ingest");
+            assertEquals(4, count(statement, "events"));
+            assertEquals("I", fileStatus(statement, "prefix/bad"));
             statement.execute("COPY JOB DROP ingest");
             assertEquals(0, count(statement, "floci_internal.copy_job_detail"));
 
@@ -116,10 +120,10 @@ class RedshiftS3AutoCopyIntegrationTest {
             statement.execute("COPY public.events FROM 's3://" + id + "/protected/' IAM_ROLE '"
                     + role + "' JOB CREATE blocked_job AUTO OFF");
             statement.execute("RESET SESSION AUTHORIZATION");
-            put(s3, id, "protected/file", "5\n");
+            put(s3, id, "protected/file", "6\n");
             SQLException denied = assertThrows(SQLException.class, () -> statement.execute("COPY JOB RUN blocked_job"));
             assertEquals("42501", denied.getSQLState());
-            assertEquals(3, count(statement, "events"));
+            assertEquals(4, count(statement, "events"));
             assertEquals(0, count(statement, "floci_internal.copy_job_detail"));
         } finally {
             service.deleteCluster(id);
@@ -134,6 +138,14 @@ class RedshiftS3AutoCopyIntegrationTest {
         try (ResultSet rows = statement.executeQuery("SELECT count(*) FROM " + table)) {
             assertTrue(rows.next());
             return rows.getLong(1);
+        }
+    }
+
+    private static String fileStatus(Statement statement, String fileName) throws SQLException {
+        try (ResultSet rows = statement.executeQuery(
+                "SELECT status FROM sys_copy_job_detail WHERE file_name = '" + fileName + "'")) {
+            assertTrue(rows.next());
+            return rows.getString(1).trim();
         }
     }
 }

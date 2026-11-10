@@ -30,7 +30,7 @@ class RedshiftS3AutoCopyConsumerTest {
             assertTrue(release.await(5, TimeUnit.SECONDS));
             return null;
         }).when(writer).runAutomatic(integration);
-        RedshiftS3AutoCopyConsumer consumer = new RedshiftS3AutoCopyConsumer(service, writer, null, 1000);
+        RedshiftS3AutoCopyConsumer consumer = new RedshiftS3AutoCopyConsumer(service, writer, false, 1);
         CompletableFuture<Void> poll = CompletableFuture.runAsync(consumer::pollOnce);
         try {
             assertTrue(copying.await(5, TimeUnit.SECONDS));
@@ -38,7 +38,6 @@ class RedshiftS3AutoCopyConsumerTest {
         } finally {
             release.countDown();
             poll.get(5, TimeUnit.SECONDS);
-            consumer.close();
         }
     }
 
@@ -51,37 +50,51 @@ class RedshiftS3AutoCopyConsumerTest {
         Integration inactive = integration("inactive", "creating");
         when(service.listS3AutoCopyIntegrations()).thenReturn(List.of(failed, inactive, healthy));
         doThrow(new IllegalStateException("Target unavailable")).when(writer).runAutomatic(failed);
-        RedshiftS3AutoCopyConsumer consumer = new RedshiftS3AutoCopyConsumer(service, writer, null, 1000);
-        try {
-            consumer.pollOnce();
-            verify(writer).runAutomatic(failed);
-            verify(writer).runAutomatic(healthy);
-            verify(writer, never()).runAutomatic(inactive);
-            consumer.beforeReset();
-            consumer.pollOnce();
-            verify(writer, times(1)).runAutomatic(healthy);
-            consumer.clear();
-            consumer.afterReset();
-            consumer.pollOnce();
-            verify(writer, times(2)).runAutomatic(healthy);
-        } finally {
-            consumer.close();
-        }
+        RedshiftS3AutoCopyConsumer consumer = new RedshiftS3AutoCopyConsumer(service, writer, false, 1);
+        consumer.pollOnce();
+        verify(writer).runAutomatic(failed);
+        verify(writer).runAutomatic(healthy);
+        verify(writer, never()).runAutomatic(inactive);
+        consumer.beforeReset();
+        consumer.pollOnce();
+        verify(writer, times(1)).runAutomatic(healthy);
+        consumer.clear();
+        consumer.afterReset();
+        consumer.pollOnce();
+        verify(writer, times(2)).runAutomatic(healthy);
     }
 
     @Test
     void deletionDisablesJobsWithoutDroppingTheirMetadata() {
         RedshiftService service = mock(RedshiftService.class);
         RedshiftCopyJobExecutor writer = mock(RedshiftCopyJobExecutor.class);
-        RedshiftS3AutoCopyConsumer consumer = new RedshiftS3AutoCopyConsumer(service, writer, null, 1000);
+        RedshiftS3AutoCopyConsumer consumer = new RedshiftS3AutoCopyConsumer(service, writer, false, 1);
         Integration integration = integration("deleted", "active");
-        try {
-            consumer.disable(integration);
-            verify(writer).disable(integration);
-            verifyNoMoreInteractions(writer);
-        } finally {
-            consumer.close();
-        }
+        consumer.disable(integration);
+        verify(writer).disable(integration);
+        verifyNoMoreInteractions(writer);
+    }
+
+    @Test
+    void timerSkipsIdleTicksAfterInitialReconciliationAndEventsTargetMatchingBucket() {
+        RedshiftService service = mock(RedshiftService.class);
+        RedshiftCopyJobExecutor writer = mock(RedshiftCopyJobExecutor.class);
+        Integration first = integration("first", "active");
+        first.setSourceArn("arn:aws:s3:::bucket-a");
+        Integration second = integration("second", "active");
+        second.setSourceArn("arn:aws:s3:::bucket-b");
+        when(service.listS3AutoCopyIntegrations()).thenReturn(List.of(first, second));
+        RedshiftS3AutoCopyConsumer consumer = new RedshiftS3AutoCopyConsumer(service, writer, false, 1);
+        consumer.pollOnce();
+        verify(writer, times(1)).runAutomatic(first);
+        verify(writer, times(1)).runAutomatic(second);
+        consumer.pollOnce();
+        verifyNoMoreInteractions(writer);
+
+        consumer.updated(new S3ObjectUpdatedEvent("bucket-a", "key"));
+        consumer.pollOnce();
+        verify(writer, times(2)).runAutomatic(first);
+        verify(writer, times(1)).runAutomatic(second);
     }
 
     private static Integration integration(String name, String status) {

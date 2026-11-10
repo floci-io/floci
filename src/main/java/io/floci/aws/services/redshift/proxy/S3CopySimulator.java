@@ -80,7 +80,23 @@ public final class S3CopySimulator {
     }
 
     record CopyInput(CopyStatementParser.S3CopyFrom spec, List<String> keys, S3Service s3,
-                     IamService iamService, RedshiftRoleAccess.RoleSession roleSession) {
+                     IamService iamService, RedshiftRoleAccess.RoleSession roleSession,
+                     String expectedETag, String versionId) {
+        CopyInput(CopyStatementParser.S3CopyFrom spec, List<String> keys, S3Service s3,
+                  IamService iamService, RedshiftRoleAccess.RoleSession roleSession) {
+            this(spec, keys, s3, iamService, roleSession, null, null);
+        }
+
+        S3Object readObject(String key) {
+            S3Object object = versionId != null
+                    ? s3.getObject(spec.bucket(), key, versionId)
+                    : s3.getObject(spec.bucket(), key);
+            if (expectedETag != null && (object == null || !expectedETag.equals(object.getETag()))) {
+                throw new S3TransferException(SQLSTATE_INTERNAL,
+                        "S3 object s3://" + spec.bucket() + "/" + key + " changed during COPY", null);
+            }
+            return object;
+        }
     }
 
     interface UnloadCollector extends AutoCloseable {
@@ -121,18 +137,26 @@ public final class S3CopySimulator {
     static CopyInput prepareCopy(CopyStatementParser.S3CopyFrom spec, S3Service s3, IamService iamService,
                                  String clusterAccountId, List<String> associatedRoleArns) {
         return asKeyAccount(spec, s3, iamService,
-                () -> prepareCopyScoped(spec, s3, iamService, clusterAccountId, associatedRoleArns, false));
+                () -> prepareCopyScoped(spec, s3, iamService, clusterAccountId, associatedRoleArns, false, null, null));
     }
 
     static CopyInput prepareObjectCopy(CopyStatementParser.S3CopyFrom spec, S3Service s3, IamService iamService,
                                        String clusterAccountId, List<String> associatedRoleArns) {
+        return prepareObjectCopy(spec, s3, iamService, clusterAccountId, associatedRoleArns, null, null);
+    }
+
+    static CopyInput prepareObjectCopy(CopyStatementParser.S3CopyFrom spec, S3Service s3, IamService iamService,
+                                       String clusterAccountId, List<String> associatedRoleArns,
+                                       String expectedETag, String versionId) {
         return asKeyAccount(spec, s3, iamService,
-                () -> prepareCopyScoped(spec, s3, iamService, clusterAccountId, associatedRoleArns, true));
+                () -> prepareCopyScoped(spec, s3, iamService, clusterAccountId, associatedRoleArns, true,
+                        expectedETag, versionId));
     }
 
     private static CopyInput prepareCopyScoped(CopyStatementParser.S3CopyFrom spec, S3Service s3,
                                                IamService iamService, String clusterAccountId,
-                                               List<String> associatedRoleArns, boolean exactObject) {
+                                               List<String> associatedRoleArns, boolean exactObject,
+                                               String expectedETag, String versionId) {
         requireDefaultIamRole(spec);
         RedshiftRoleAccess.RoleSession roleSession = resolveCopySession(spec, s3, iamService, clusterAccountId,
                 associatedRoleArns);
@@ -175,7 +199,7 @@ public final class S3CopySimulator {
                 throw new S3TransferException(SQLSTATE_INSUFFICIENT_PRIVILEGE,
                         "S3 access denied for s3://" + spec.bucket() + "/" + spec.keyOrPrefix(), e);
             }
-            return new CopyInput(spec, List.copyOf(keys), s3, iamService, roleSession);
+            return new CopyInput(spec, List.copyOf(keys), s3, iamService, roleSession, expectedETag, versionId);
         } catch (RuntimeException e) {
             RedshiftRoleAccess.releaseRoleSession(roleSession, spec.iamRoleArn(), iamService);
             throw e;
@@ -258,8 +282,7 @@ public final class S3CopySimulator {
         String account = keyAccount(input.spec(), input.s3(), input.iamService());
         try {
             RequestScopes.callAsChecked(account, () -> {
-                streamObjects(input.spec(), discoveredColumns, columnMaxBytes, columnKinds, input.s3(),
-                        input.iamService(), input.roleSession(), input.keys(), backendOut);
+                streamObjects(input, discoveredColumns, columnMaxBytes, columnKinds, backendOut);
                 return null;
             });
         } catch (IOException | RuntimeException e) {
@@ -570,10 +593,10 @@ public final class S3CopySimulator {
         return value.replace("'", "''");
     }
 
-    private static void streamObjects(CopyStatementParser.S3CopyFrom spec, List<String> discoveredColumns,
+    private static void streamObjects(CopyInput input, List<String> discoveredColumns,
                                       List<Integer> columnMaxBytes, List<CopyRecordTransformer.ColumnKind> columnKinds,
-                                      S3Service s3, IamService iamService, RedshiftRoleAccess.RoleSession roleSession,
-                                      List<String> keys, OutputStream backendOut) throws IOException {
+                                      OutputStream backendOut) throws IOException {
+        CopyStatementParser.S3CopyFrom spec = input.spec();
         if (spec.transforms().truncateColumns() && columnMaxBytes == null) {
             // Extended Query fixes the statement at Parse time, so there is no catalog round trip to
             // learn column lengths; same limitation and remedy as FORMAT AS JSON 'auto'.
@@ -587,9 +610,10 @@ public final class S3CopySimulator {
                             + "available over the Simple Query protocol; connect with preferQueryMode=simple", null);
         }
         byte[] buffer = new byte[CHUNK];
+        List<String> keys = input.keys();
         for (int i = 0; i < keys.size(); i++) {
-            authorizeCopyObject(spec, s3, iamService, roleSession, keys.get(i));
-            S3Object object = s3.getObject(spec.bucket(), keys.get(i));
+            authorizeCopyObject(spec, input.s3(), input.iamService(), input.roleSession(), keys.get(i));
+            S3Object object = input.readObject(keys.get(i));
             byte[] data = object != null && object.getData() != null ? object.getData() : new byte[0];
             InputStream rawIn = new ByteArrayInputStream(data);
             try (InputStream in = CopySourceInputStream.open(rawIn, spec.gzip())) {

@@ -332,14 +332,18 @@ implement. The COPY JOB restrictions above are checked at creation time.
 Serverless workgroups. Each object uses the stored COPY options and IAM role, with the same role association,
 trust and S3 authorization checks as an ordinary COPY.
 
-Files older than the job are skipped. Filenames are loaded once per job, even after an overwrite or
-notification redelivery. Checkpoints record bucket, key, ETag, version ID and load time in
-`floci_internal.copy_job_detail`, in the same PostgreSQL transaction as the target rows. They survive
-Floci restarts with the target database. Dropping a job removes its checkpoints.
+Files older than the job are skipped. Successfully ingested filenames (`status = 'I'`) are loaded once per job,
+even after an overwrite or notification redelivery. A file whose load fails is rolled back to its own savepoint
+and recorded with `status = 'E'` so later files in the same run continue; overwriting a failed file with a new
+ETag or version ID lets a subsequent run retry it. Checkpoints record bucket, key, ETag, version ID, file size,
+modification time, enqueue time and status in `floci_internal.copy_job_detail` and expose them through
+`sys_copy_job_detail`, in the same PostgreSQL transaction as the target rows. They survive Floci restarts with
+the target database. Dropping a job removes its checkpoints.
 
-The consumer reconciles on the Redshift polling interval to retry failures and recover missed notifications.
-Paused clusters do not load files. Deleting an integration switches its bucket's jobs to `AUTO OFF`, retaining
-their definitions and checkpoints. Resume a paused cluster before deleting its integration.
+S3 uploads mark their bucket for the background sweep scheduler, which reconciles on startup and when marked
+rather than listing prefixes on idle ticks. Paused clusters do not load files until resumed. Deleting an
+integration switches its bucket's jobs to `AUTO OFF`, retaining their definitions and checkpoints. Resume a
+paused cluster before deleting its integration.
 The SQLSTATEs and messages of job validation errors are Floci's own, not captured from AWS.
 
 See AWS's [COPY JOB](https://docs.aws.amazon.com/redshift/latest/dg/r_COPY-JOB.html) and
