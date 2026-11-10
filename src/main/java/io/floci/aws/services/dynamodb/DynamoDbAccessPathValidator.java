@@ -153,7 +153,9 @@ final class DynamoDbAccessPathValidator {
 
         boolean conditionOnNonKeyAttribute = false;
 
-        for (Expr rawCondition : keyConditions(expression)) {
+        List<Expr> conditions = keyConditions(expression);
+        requireConditionCountWithinKeySchema(conditions.size(), accessPath);
+        for (Expr rawCondition : conditions) {
             Expr condition = normalizeOperandOrder(rawCondition);
             String attribute = conditionAttribute(condition, names);
             if (attribute != null && partitionKeySet.contains(attribute)) {
@@ -188,6 +190,14 @@ final class DynamoDbAccessPathValidator {
         }
         validateCompositeSortKeyConditions(sortKeys, sortKeyEqualities);
         return partitionKeyValuePlaceholder;
+    }
+
+    private static void requireConditionCountWithinKeySchema(int conditions, DynamoDbAccessPath accessPath) {
+        int keyAttributes = accessPath.keySchema().size();
+        if (keyAttributes < conditions) {
+            throw validationException("The number of query conditions (" + conditions
+                    + ") exceeds the number of key attributes defined in the schema (" + keyAttributes + ")");
+        }
     }
 
     private static void validateCompositeSortKeyConditions(List<String> sortKeys,
@@ -306,6 +316,7 @@ final class DynamoDbAccessPathValidator {
     private static void validateLegacyKeyConditions(TableDefinition table,
                                                     DynamoDbAccessPath accessPath,
                                                     JsonNode keyConditions) {
+        requireConditionCountWithinKeySchema(keyConditions == null ? 0 : keyConditions.size(), accessPath);
         List<String> partitionKeys = accessPath.partitionKeyNames();
         for (String partitionKey : partitionKeys) {
             if (keyConditions == null || !keyConditions.has(partitionKey)) {
