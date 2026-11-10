@@ -1927,7 +1927,7 @@ public class ResourceArnBuilder {
                     return List.of(resourceArn);
                 }
             }
-            boolean selectorRead = SSM_SELECTOR_READ_OPERATIONS.contains(operation);
+            boolean selectorRead = operation != null && SSM_SELECTOR_READ_OPERATIONS.contains(operation);
             if ("GetParametersByPath".equals(operation)) {
                 if (json.hasNonNull("Path")) {
                     String path = json.get("Path").asText().trim();
@@ -1935,7 +1935,7 @@ public class ResourceArnBuilder {
                         return List.of(ssmParameterArn(path, region, accountId));
                     }
                 }
-            } else if (SSM_NAMES_OPERATIONS.contains(operation)) {
+            } else if (operation != null && SSM_NAMES_OPERATIONS.contains(operation)) {
                 List<String> arns = new ArrayList<>();
                 for (JsonNode entry : json.path("Names")) {
                     String name = entry.asText().trim();
