@@ -78,6 +78,7 @@ class CognitoCustomDomainFilterTest {
 
             verify(request, never()).setRequestUri(any());
             verify(request, never()).setProperty(any(), any());
+            verify(request.getUriInfo(), never()).getRequestUri();
         }
         verifyNoInteractions(cognitoService);
     }
@@ -203,6 +204,7 @@ class CognitoCustomDomainFilterTest {
         when(request.getMethod()).thenReturn(method);
         UriInfo uriInfo = mock(UriInfo.class);
         when(uriInfo.getRequestUri()).thenReturn(URI.create(uri));
+        when(uriInfo.getPath()).thenReturn(URI.create(uri).getPath());
         when(request.getUriInfo()).thenReturn(uriInfo);
         when(request.getHeaderString("Host")).thenReturn(hostHeader);
         return request;

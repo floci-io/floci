@@ -117,16 +117,16 @@ public class S3VirtualHostFilter implements ContainerRequestFilter {
 
     @Override
     public void filter(ContainerRequestContext requestContext) {
-        URI uri = requestContext.getUriInfo().getRequestUri();
-
         // HTTP/2 (RFC 9113) has no "Host" header — the authority travels in the
         // ":authority" pseudo-header, surfaced here as the request URI authority.
         // Falling back to it keeps virtual-hosted-style routing working when a
         // browser negotiates HTTP/2 over HTTPS (where the Host header is absent).
         // Reverse proxies (e.g. Traefik, Nginx) preserve the client's original host
         // in X-Forwarded-Host when Host is rewritten to the internal upstream.
-        String host = resolveHost(requestContext.getHeaderString("Host"),
-                requestContext.getHeaderString("X-Forwarded-Host"), uri);
+        String hostHeader = requestContext.getHeaderString("Host");
+        // Every request of every service passes here, so the URI is parsed only when the host or a bucket needs it.
+        URI hostUri = hostHeader == null || hostHeader.isBlank() ? requestContext.getUriInfo().getRequestUri() : null;
+        String host = resolveHost(hostHeader, requestContext.getHeaderString("X-Forwarded-Host"), hostUri);
         if (host == null) return;
 
         // Do not hijack requests meant for other AWS services
@@ -156,6 +156,7 @@ public class S3VirtualHostFilter implements ContainerRequestFilter {
         }
         if (bucket == null) return;
 
+        URI uri = requestContext.getUriInfo().getRequestUri();
         String path = uri.getRawPath();
 
         // Do not rewrite S3 Control API paths — the account ID appears as a host label

@@ -72,9 +72,13 @@ public class CognitoCustomDomainFilter implements ContainerRequestFilter {
 
     @Override
     public void filter(ContainerRequestContext requestContext) {
+        // Every request of every service passes here, so the URI is parsed only for a path this filter may serve.
+        if (!mayServe(requestContext.getUriInfo().getPath())) {
+            return;
+        }
         URI originalUri = requestContext.getUriInfo().getRequestUri();
         String path = originalUri.getRawPath();
-        if (path == null || !(path.startsWith(OAUTH_PREFIX) || MANAGED_LOGIN_PATHS.contains(path))) {
+        if (path == null || !mayServe(path)) {
             return;
         }
         String host = RequestHost.of(requestContext);
@@ -114,6 +118,10 @@ public class CognitoCustomDomainFilter implements ContainerRequestFilter {
         requestContext.setProperty(POOL_PROPERTY, domain.get().getUserPoolId());
         requestContext.setProperty(AccountContextFilter.PINNED_ACCOUNT_PROPERTY, domain.get().getAwsAccountId());
         RequestUriRewrite.apply(requestContext, newUri);
+    }
+
+    private static boolean mayServe(String path) {
+        return path.startsWith(OAUTH_PREFIX) || MANAGED_LOGIN_PATHS.contains(path);
     }
 
     private static String stripPort(String host) {
