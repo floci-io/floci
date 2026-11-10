@@ -661,6 +661,7 @@ public class BackupService {
 
     public BackupPlan getBackupPlan(String planId) {
         return planStore.get(planId)
+                .filter(plan -> plan.getDeletionDate() == null)
                 .orElseThrow(() -> new AwsException("ResourceNotFoundException", "Backup plan not found: " + planId, 400));
     }
 
@@ -688,19 +689,22 @@ public class BackupService {
                 throw new AwsException("InvalidRequestException",
                         "Backup plan has active selections and cannot be deleted", 400);
             }
-            planStore.delete(planId);
-            plan.setDeletionDate(Instant.now().getEpochSecond());
-            return plan;
+            BackupPlan deleted = objectMapper.convertValue(plan, BackupPlan.class);
+            deleted.setDeletionDate(Instant.now().getEpochSecond());
+            planStore.put(planId, deleted);
+            return deleted;
         }
     }
 
     public List<BackupPlan> listBackupPlans() {
-        return planStore.scan(k -> true);
+        return planStore.scan(k -> true).stream()
+                .filter(plan -> plan.getDeletionDate() == null)
+                .toList();
     }
 
     public PaginatedResult<BackupPlan> listBackupPlans(String region, boolean includeDeleted,
                                                        Integer maxResults, String nextToken) {
-        List<BackupPlan> plans = listBackupPlans().stream()
+        List<BackupPlan> plans = planStore.scan(k -> true).stream()
                 .filter(plan -> region.equals(AwsArnUtils.regionOrDefault(plan.getBackupPlanArn(),
                         regionResolver.getDefaultRegion())))
                 .filter(plan -> includeDeleted || plan.getDeletionDate() == null)
@@ -714,19 +718,21 @@ public class BackupService {
     public BackupSelection createBackupSelection(String planId, String selectionName,
                                                   String iamRoleArn, List<String> resources,
                                                   List<String> notResources, String creatorRequestId) {
-        getBackupPlan(planId);
-        String selectionId = UUID.randomUUID().toString();
-        BackupSelection selection = new BackupSelection();
-        selection.setSelectionId(selectionId);
-        selection.setSelectionName(selectionName);
-        selection.setBackupPlanId(planId);
-        selection.setIamRoleArn(iamRoleArn);
-        selection.setResources(resources);
-        selection.setNotResources(notResources);
-        selection.setCreationDate(Instant.now().getEpochSecond());
-        selection.setCreatorRequestId(creatorRequestId);
-        selectionStore.put(selectionId, selection);
-        return selection;
+        synchronized (lockFor(planLockKey(planId))) {
+            getBackupPlan(planId);
+            String selectionId = UUID.randomUUID().toString();
+            BackupSelection selection = new BackupSelection();
+            selection.setSelectionId(selectionId);
+            selection.setSelectionName(selectionName);
+            selection.setBackupPlanId(planId);
+            selection.setIamRoleArn(iamRoleArn);
+            selection.setResources(resources);
+            selection.setNotResources(notResources);
+            selection.setCreationDate(Instant.now().getEpochSecond());
+            selection.setCreatorRequestId(creatorRequestId);
+            selectionStore.put(selectionId, selection);
+            return selection;
+        }
     }
 
     public BackupSelection getBackupSelection(String planId, String selectionId) {
@@ -1034,7 +1040,7 @@ public class BackupService {
     }
 
     private BackupPlan findPlanByArn(String arn) {
-        return planStore.scan(k -> true).stream()
+        return listBackupPlans().stream()
                 .filter(plan -> arn.equals(plan.getBackupPlanArn()))
                 .findFirst()
                 .orElseThrow(() -> new AwsException("ResourceNotFoundException", "Resource not found: " + arn, 400));
