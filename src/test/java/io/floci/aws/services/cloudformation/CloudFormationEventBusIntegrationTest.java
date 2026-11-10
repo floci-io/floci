@@ -552,7 +552,7 @@ class CloudFormationEventBusIntegrationTest {
     // provisionEventBridgeEventBus), so rejecting it would regress templates main supports today.
     @ParameterizedTest
     @ValueSource(strings = {
-            "EventSourceName", "KmsKeyIdentifier", "DeadLetterConfig", "LogConfig"
+            "KmsKeyIdentifier", "DeadLetterConfig", "LogConfig"
     })
     void unsupportedEventBusPropertiesFailInsteadOfBeingIgnored(String propertyName) {
         String suffix = Long.toString(System.nanoTime(), 36);

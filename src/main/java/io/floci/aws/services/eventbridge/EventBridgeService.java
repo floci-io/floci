@@ -181,18 +181,28 @@ public class EventBridgeService implements ResourceProvider, StoredResourceArns 
 
     public EventBus createEventBus(String name, String description,
                                    Map<String, String> tags, String region) {
-        return createEventBus(name, description, null, null, null, tags, region);
+        return createEventBus(name, null, description, tags, region);
+    }
+
+    public EventBus createEventBus(String name, String eventSourceName, String description,
+                                   Map<String, String> tags, String region) {
+        return createEventBus(name, eventSourceName, description, null, null, null, tags, region);
     }
 
     /**
      * Creates a custom bus with the KMS key, dead-letter queue and log configuration the request
      * gives, as {@code CreateEventBus} takes them; a null member leaves the bus without it. The
      * dead-letter and log configurations are stored as their JSON, as {@link #updateEventBus} does.
+     * A non-null {@code eventSourceName} makes it a partner bus, which takes the source's name.
      */
-    public EventBus createEventBus(String name, String description, String kmsKeyIdentifier,
-                                   String deadLetterConfig, String logConfig,
+    public EventBus createEventBus(String name, String eventSourceName, String description,
+                                   String kmsKeyIdentifier, String deadLetterConfig, String logConfig,
                                    Map<String, String> tags, String region) {
-        validateCustomEventBusName(name);
+        if (eventSourceName == null) {
+            validateCustomEventBusName(name);
+        } else {
+            validatePartnerEventBusName(name, eventSourceName);
+        }
         validateEventBusDescription(description);
         String key = busKey(region, name);
         if (busStore.get(key).isPresent()) {
@@ -239,7 +249,7 @@ public class EventBridgeService implements ResourceProvider, StoredResourceArns 
             return;
         }
         String rulePrefix = ruleKeyPrefix(region, effectiveName);
-        boolean hasRules = ruleStore.keys().stream().anyMatch(k -> k.startsWith(rulePrefix));
+        boolean hasRules = ruleStore.keys().stream().anyMatch(k -> isRuleKeyOfBus(k, rulePrefix));
         if (hasRules) {
             throw new AwsException("ValidationException",
                     "Cannot delete event bus with existing rules: " + name, 400);
@@ -318,6 +328,20 @@ public class EventBridgeService implements ResourceProvider, StoredResourceArns 
                 || "default".equals(name)) {
             throw new AwsException("ValidationException",
                     "Invalid custom event bus name: " + name, 400);
+        }
+    }
+
+    private static final Pattern PARTNER_EVENT_SOURCE_NAME =
+            Pattern.compile("aws\\.partner(/[\\.\\-_A-Za-z0-9]+){2,}");
+
+    private void validatePartnerEventBusName(String name, String eventSourceName) {
+        if (eventSourceName.length() > 256 || !PARTNER_EVENT_SOURCE_NAME.matcher(eventSourceName).matches()) {
+            throw new AwsException("ValidationException",
+                    "Invalid partner event source name: " + eventSourceName, 400);
+        }
+        if (!eventSourceName.equals(name)) {
+            throw new AwsException("ValidationException",
+                    "Partner event bus name must match its event source name: " + eventSourceName, 400);
         }
     }
 
@@ -431,7 +455,7 @@ public class EventBridgeService implements ResourceProvider, StoredResourceArns 
         String effectiveBus = resolvedBusName(busName);
         String prefix = ruleKeyPrefix(region, effectiveBus);
         return ruleStore.scan(k -> {
-            if (!k.startsWith(prefix)) return false;
+            if (!isRuleKeyOfBus(k, prefix)) return false;
             if (namePrefix == null || namePrefix.isBlank()) return true;
             String ruleName = k.substring(prefix.length());
             return ruleName.startsWith(namePrefix);
@@ -700,7 +724,7 @@ public class EventBridgeService implements ResourceProvider, StoredResourceArns 
 
     private static RuleRef parseRuleResource(String resource) {
         String afterRule = resource.substring("rule/".length());
-        int slashIdx = afterRule.indexOf('/');
+        int slashIdx = afterRule.lastIndexOf('/');
         if (slashIdx >= 0) {
             // Custom bus: rule/{busName}/{ruleName}
             return new RuleRef(afterRule.substring(0, slashIdx), afterRule.substring(slashIdx + 1));
@@ -1070,7 +1094,7 @@ public class EventBridgeService implements ResourceProvider, StoredResourceArns 
 
             String eventId = UUID.randomUUID().toString();
             String rulePrefix = ruleKeyPrefix(region, effectiveBus);
-            List<Rule> candidateRules = accountScan(ruleStore, accountId, k -> k.startsWith(rulePrefix));
+            List<Rule> candidateRules = accountScan(ruleStore, accountId, k -> isRuleKeyOfBus(k, rulePrefix));
 
             for (Rule rule : candidateRules) {
                 if (rule.getState() != RuleState.ENABLED) {
@@ -1594,6 +1618,10 @@ public class EventBridgeService implements ResourceProvider, StoredResourceArns 
 
     private static String ruleKeyPrefix(String region, String busName) {
         return "rule:" + region + ":" + busName + "/";
+    }
+
+    private static boolean isRuleKeyOfBus(String key, String rulePrefix) {
+        return key.startsWith(rulePrefix) && key.indexOf('/', rulePrefix.length()) < 0;
     }
 
     private static String ruleKey(String region, String busName, String ruleName) {

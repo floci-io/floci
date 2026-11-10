@@ -152,6 +152,21 @@ aws events put-events \
   --endpoint-url $AWS_ENDPOINT_URL
 ```
 
+## Partner Event Buses
+
+`CreateEventBus` with `EventSourceName` creates a partner event bus. As in AWS, the bus takes the
+source's name, so `Name` must equal `EventSourceName`, and the name must match
+`aws.partner/<partner>/<source>`. Floci does not model partner event sources, so any well-formed
+source name is accepted without one being created or activated first. Once created, the bus works
+like a custom bus: rules, targets, tags and `PutEvents` address it by name or ARN.
+
+```bash
+aws events create-event-bus \
+  --name aws.partner/example.com/123/orders \
+  --event-source-name aws.partner/example.com/123/orders \
+  --endpoint-url $AWS_ENDPOINT_URL
+```
+
 ## Event Bus Targets
 
 A rule can target another event bus by ARN: the event is republished there, and that bus's own rules evaluate it and fan out normally. `Source`, `DetailType`, `Resources` and the originating `account`/`region` carry over, and each hop gets a new event id.

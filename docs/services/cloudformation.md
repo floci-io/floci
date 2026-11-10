@@ -310,9 +310,11 @@ address. Dropping exhausted debt prevents later retries, but does not establish 
 the bus name, and `Fn::GetAtt` supports `Arn` and `Name`. `Description` and `Tags` are applied when
 the bus is created. Rules that reference the bus are removed before stack deletion.
 
-The current implementation is limited to custom buses with the `Name`, `Description`, `Tags`, and
-`Policy` properties. `EventSourceName`, `KmsKeyIdentifier`, `DeadLetterConfig`, and `LogConfig` are
-rejected with `ValidationError` instead of being silently ignored. AWS models a `Name` change as
+The current implementation supports the `Name`, `EventSourceName`, `Description`, `Tags`, and
+`Policy` properties. With `EventSourceName` the resource creates a
+[partner event bus](eventbridge.md#partner-event-buses), whose `Name` must equal it.
+`KmsKeyIdentifier`, `DeadLetterConfig`, and `LogConfig` are rejected with `ValidationError`
+instead of being silently ignored. AWS models a `Name` change as
 resource replacement; Floci currently rejects that update until generic replacement handling is
 available. `Policy` is applied when the bus is created. On `UpdateStack` the template's `Tags` are
 applied to the same bus in place: a key the stack recorded setting and the new template drops is
