@@ -483,7 +483,7 @@ BEGIN
     END IF;
     INSERT INTO floci_internal.copy_job_detail (job_id, bucket, key, etag, version_id, file_size, modification_time, status, loaded_at)
       VALUES ($1, source_bucket, $2, $3, $4, COALESCE($5, 0), COALESCE($6, clock_timestamp()), 'I', clock_timestamp())
-      ON CONFLICT (job_id, bucket, key) DO UPDATE
+      ON CONFLICT ON CONSTRAINT copy_job_detail_pkey DO UPDATE
         SET etag = EXCLUDED.etag,
             version_id = EXCLUDED.version_id,
             file_size = EXCLUDED.file_size,
@@ -512,7 +512,7 @@ BEGIN
     END IF;
     INSERT INTO floci_internal.copy_job_detail (job_id, bucket, key, etag, version_id, file_size, modification_time, status, loaded_at)
       VALUES ($1, source_bucket, $2, $3, $4, COALESCE($5, 0), COALESCE($6, clock_timestamp()), 'E', clock_timestamp())
-      ON CONFLICT (job_id, bucket, key) DO UPDATE
+      ON CONFLICT ON CONSTRAINT copy_job_detail_pkey DO UPDATE
         SET etag = EXCLUDED.etag,
             version_id = EXCLUDED.version_id,
             file_size = EXCLUDED.file_size,
