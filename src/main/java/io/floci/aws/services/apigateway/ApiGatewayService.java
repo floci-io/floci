@@ -1161,7 +1161,9 @@ public class ApiGatewayService implements ResourceProvider, Resettable {
             if (!path.endsWith(suffix)) continue;
 
             String methodKey = path.substring(1, path.length() - suffix.length());
-            if (methodKey.lastIndexOf('/') < 0) return;
+            if (methodKey.lastIndexOf('/') < 0) {
+                return;
+            }
 
             MethodSetting setting = stage.getMethodSettings()
                     .computeIfAbsent(methodKey, k -> new MethodSetting());

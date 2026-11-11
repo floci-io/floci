@@ -769,10 +769,14 @@ public class ApiGatewayExecuteController {
         Map<String, MethodSetting> settings = stage.getMethodSettings();
         if (resourcePath != null) {
             MethodSetting escaped = settings.get(escapeJsonPointer(resourcePath) + "/" + httpMethod);
-            if (escaped != null) return escaped;
+            if (escaped != null) {
+                return escaped;
+            }
             String plain = resourcePath.startsWith("/") ? resourcePath.substring(1) : resourcePath;
             MethodSetting exact = settings.get(plain + "/" + httpMethod);
-            if (exact != null) return exact;
+            if (exact != null) {
+                return exact;
+            }
         }
         return settings.get("*/*");
     }
