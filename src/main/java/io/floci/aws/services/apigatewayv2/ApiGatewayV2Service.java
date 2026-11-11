@@ -931,7 +931,7 @@ public class ApiGatewayV2Service {
     /**
      * Rejects an integration subtype the way CreateIntegration does: only on an HTTP API
      * {@code AWS_PROXY} integration with payload format 1.0, a subtype AWS defines, every required
-     * parameter mapped to a non-blank value, every JSON parameter either a source expression or a
+     * parameter mapped to a non-empty value, every JSON parameter either a source expression or a
      * JSON object, every source expression one the gateway reads, and no parameter the subtype's
      * action does not take. OpenAPI import runs it over every integration before it changes anything.
      */
@@ -958,7 +958,7 @@ public class ApiGatewayV2Service {
         Map<String, String> parameters = requestParameters != null ? requestParameters : Map.of();
         for (String required : subtype.requiredParameters()) {
             String value = parameters.get(required);
-            if (value == null || value.isBlank()) {
+            if (value == null || value.isEmpty()) {
                 throw new AwsException("BadRequestException",
                         "Missing required parameter " + required + " for IntegrationSubtype "
                                 + subtype.subtypeName() + ".", 400);
