@@ -168,8 +168,10 @@ partner bus is accepted and fans out to its rules, where AWS reserves that bus f
 own events; this lets a test publish an event a partner would send.
 
 When upgrading, a rule persisted by an earlier Floci version with a slash in its name is no longer
-found by `ListRules`, `PutEvents` or `DeleteEventBus`. Delete and recreate such a rule under a name
-without a slash.
+listed by `ListRules` or matched by `PutEvents`, but it is still reachable by its exact name on its
+own bus, and it keeps `DeleteEventBus` from deleting that bus. Remove its targets, delete it and
+recreate it under a name without a slash. `DeleteRule`, `EnableRule`, `DisableRule`, `PutTargets`,
+`RemoveTargets` and `ListTargetsByRule` otherwise reject a slashed rule name as `PutRule` does.
 
 ```bash
 aws events create-event-bus \
