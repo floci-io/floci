@@ -1117,6 +1117,17 @@ class SqsJsonProtocolTest {
 
         given()
             .contentType(CONTENT_TYPE)
+            .header("X-Amz-Target", "AmazonSQS.SendMessage")
+            .body("{\"QueueUrl\":\"" + attributeQueueUrl + "\",\"MessageBody\":\"x\","
+                    + "\"MessageAttributes\":{\"bin\":{\"DataType\":\"Binary\",\"BinaryValue\":\"\"}}}")
+        .when().post("/").then()
+            .statusCode(400)
+            .body("__type", equalTo("InvalidParameterValue"))
+            .body("message", equalTo(
+                    "Message (user) attribute 'bin' must contain a non-empty value of type 'Binary'."));
+
+        given()
+            .contentType(CONTENT_TYPE)
             .header("X-Amz-Target", "AmazonSQS.SendMessageBatch")
             .body("{\"QueueUrl\":\"" + attributeQueueUrl + "\",\"Entries\":["
                     + "{\"Id\":\"ok\",\"MessageBody\":\"x\",\"MessageAttributes\":"

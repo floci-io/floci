@@ -1117,6 +1117,20 @@ class SqsIntegrationTest {
 
             given()
                 .contentType("application/x-www-form-urlencoded")
+                .formParam("Action", "SendMessage")
+                .formParam("QueueUrl", attributeQueueUrl)
+                .formParam("MessageBody", "x")
+                .formParam("MessageAttribute.1.Name", "bin")
+                .formParam("MessageAttribute.1.Value.DataType", "Binary")
+                .formParam("MessageAttribute.1.Value.BinaryValue", "")
+            .when().post("/").then()
+                .statusCode(400)
+                .body("ErrorResponse.Error.Code", equalTo("InvalidParameterValue"))
+                .body("ErrorResponse.Error.Message", equalTo(
+                        "Message (user) attribute 'bin' must contain a non-empty value of type 'Binary'."));
+
+            given()
+                .contentType("application/x-www-form-urlencoded")
                 .formParam("Action", "SendMessageBatch")
                 .formParam("QueueUrl", attributeQueueUrl)
                 .formParam("SendMessageBatchRequestEntry.1.Id", "ok")
