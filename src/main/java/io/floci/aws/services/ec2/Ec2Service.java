@@ -2174,11 +2174,11 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
     // correctly keyed by region. RdsService derives the same ids from these methods so its
     // default DB subnet group resolves against the right region's default VPC.
     public static String defaultVpcId(String region) {
-        return "vpc-default-" + region;
+        return "vpc-" + Ec2Ids.stableHex("vpc::" + region);
     }
 
     public static String defaultSubnetId(String region, String azSuffix) {
-        return "subnet-default-" + region + "-" + azSuffix;
+        return "subnet-" + Ec2Ids.stableHex("subnet::" + region + "::" + azSuffix);
     }
 
     public static boolean isModelledAvailabilityZone(String region, String zone) {
@@ -2186,65 +2186,42 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
     }
 
     public static String defaultSecurityGroupId(String region) {
-        return "sg-default-" + region;
-    }
-
-    // Persisted default VPCs may retain the unscoped id from before ids became region-scoped.
-    // Resolve against storage so callers still find the existing VPC instead of a computed id.
-
-    /**
-     * Generates a deterministic 17-hex-digit suffix from a seed string using CRC32.
-     * Two CRC32 passes with different seeds provide 64 bits; we take the first 17 hex chars.
-     */
-    private static String deterministicIdSuffix(String seed) {
-        CRC32 crc1 = new CRC32();
-        crc1.update(seed.getBytes(StandardCharsets.UTF_8));
-        CRC32 crc2 = new CRC32();
-        crc2.update((seed + "|second").getBytes(StandardCharsets.UTF_8));
-        long combined = (crc1.getValue() << 32) ^ crc2.getValue();
-        return String.format("%017x", combined & 0x1FFFFFFFFFFFFFFFL);
+        return "sg-" + Ec2Ids.stableHex("sg::" + region);
     }
 
     /**
      * Internet Gateway ID for the default network in a region: igw-<17 hex digits>.
      */
     public static String defaultInternetGatewayId(String region) {
-        return "igw-" + deterministicIdSuffix("igw::" + region);
+        return "igw-" + Ec2Ids.stableHex("igw::" + region);
     }
 
     /**
      * Main Route Table ID for the default network in a region: rtb-<17 hex digits>.
      */
     public static String defaultRouteTableId(String region) {
-        return "rtb-" + deterministicIdSuffix("rtb::" + region);
+        return "rtb-" + Ec2Ids.stableHex("rtb::" + region);
     }
 
     /**
      * Main Route Table Association ID for the default network in a region: rtbassoc-<17 hex digits>.
      */
     public static String defaultRouteTableAssociationId(String region) {
-        return "rtbassoc-" + deterministicIdSuffix("rtbassoc::" + region);
+        return "rtbassoc-" + Ec2Ids.stableHex("rtbassoc::" + region);
     }
 
     /**
      * Default Network ACL ID for the default network in a region: acl-<17 hex digits>.
      */
     public static String defaultNetworkAclId(String region) {
-        return "acl-" + deterministicIdSuffix("acl::" + region);
+        return "acl-" + Ec2Ids.stableHex("acl::" + region);
     }
 
     /**
      * Network ACL Association ID for a default subnet in a region: aclassoc-<17 hex digits>.
      */
     public static String defaultNetworkAclAssociationId(String region, String subnetId) {
-        return "aclassoc-" + deterministicIdSuffix("aclassoc::" + subnetId);
-    }
-
-    /**
-     * Default Internet Gateway Attachment ID: igw-attach-<17 hex digits>.
-     */
-    public static String defaultInternetGatewayAttachmentId(String region, String vpcId) {
-        return "igw-attach-" + deterministicIdSuffix("igw-attach::" + region + "::" + vpcId);
+        return "aclassoc-" + Ec2Ids.stableHex("aclassoc::" + region + "::" + subnetId);
     }
 
     // Resolves the default VPC/security-group id actually on file for a region, falling back to
@@ -2258,8 +2235,13 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
         if (vpcs.get(key(region, scoped)).isPresent()) {
             return scoped;
         }
-        String legacy = "vpc-default";
-        return vpcs.get(key(region, legacy)).isPresent() ? legacy : scoped;
+        // Legacy literals from before ids became region-scoped.
+        for (String legacy : List.of("vpc-default", "vpc-default-" + region)) {
+            if (vpcs.get(key(region, legacy)).isPresent()) {
+                return legacy;
+            }
+        }
+        return scoped;
     }
 
     // Per-resource mutation locks (#1464): storage get() returns the live stored object, so
