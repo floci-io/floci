@@ -485,6 +485,7 @@ public class EventBridgeService implements ResourceProvider, StoredResourceArns 
 
     public Rule describeRule(String name, String busName, String region) {
         String effectiveBus = resolvedBusName(busName);
+        validateRuleReference("name", name, effectiveBus, region);
         return ruleStore.get(ruleKey(region, effectiveBus, name))
                 .orElseThrow(() -> new AwsException("ResourceNotFoundException",
                         "Rule not found: " + name, 400));

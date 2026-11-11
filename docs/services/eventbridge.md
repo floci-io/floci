@@ -171,8 +171,9 @@ When upgrading, a rule persisted by an earlier Floci version under a name `PutRu
 such as one with a slash or a space or longer than 64 characters, is still reachable by its exact
 name on its own bus, and it keeps `DeleteEventBus` from deleting that bus. One with a slash in its
 name is also no longer listed by `ListRules` or matched by `PutEvents`. Remove its targets, delete
-it and recreate it under a valid name. `DeleteRule`, `EnableRule`, `DisableRule`, `PutTargets`,
-`RemoveTargets` and `ListTargetsByRule` otherwise reject an invalid rule name as `PutRule` does.
+it and recreate it under a valid name. `DescribeRule`, `DeleteRule`, `EnableRule`, `DisableRule`,
+`PutTargets`, `RemoveTargets` and `ListTargetsByRule` otherwise reject an invalid rule name as
+`PutRule` does.
 
 ```bash
 aws events create-event-bus \

@@ -643,6 +643,7 @@ class EventBridgeServiceTest {
         Target target = new Target("t1", "arn:aws:sqs:us-east-1:000000000000:queue-1", null, null);
 
         assertRuleNameRejected(() -> service.deleteRule("a/b", null, REGION), "name");
+        assertRuleNameRejected(() -> service.describeRule("a/b", null, REGION), "name");
         assertRuleNameRejected(() -> service.enableRule("a/b", null, REGION), "name");
         assertRuleNameRejected(() -> service.disableRule("a/b", null, REGION), "name");
         assertRuleNameRejected(() -> service.putTargets("a/b", null, List.of(target), REGION), "rule");
