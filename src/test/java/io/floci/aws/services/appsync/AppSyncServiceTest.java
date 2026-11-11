@@ -705,4 +705,18 @@ class AppSyncServiceTest {
         assertEquals(SchemaCreationStatusType.PROCESSING,
                 svc.getSchemaCreationStatus(api.getApiId()).getStatus());
     }
+
+    @Test
+    void invalidTypeFormatLeavesTheStoredDefinitionUnchanged() {
+        GraphqlApi api = service.createGraphqlApi(
+                Map.of("name", "types", "authenticationType", "API_KEY"), "us-east-1");
+        service.createType(api.getApiId(), Map.of("name", "Item", "definition", "type Item { id: ID }", "format", "SDL"));
+
+        AwsException refused = assertThrows(AwsException.class, () -> service.updateType(api.getApiId(), "Item",
+                Map.of("definition", "type Item { changed: ID }", "format", "BOGUS")));
+
+        assertEquals("BadRequestException", refused.getErrorCode());
+        assertEquals("type Item { id: ID }", service.getType(api.getApiId(), "Item").getDefinition());
+        assertEquals("SDL", service.getType(api.getApiId(), "Item").getFormat().name());
+    }
 }
