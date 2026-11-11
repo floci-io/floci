@@ -109,10 +109,11 @@ NAMESPACES = (
     "codedeploy", "codepipeline", "cognito-identity", "cognito-idp", "comprehend", "config", "controltower", "cur", "datasync",
     "dms", "dsql", "dynamodb", "ec2", "ecr", "ecs", "eks", "elasticache", "elasticloadbalancing",
     "elasticmapreduce", "es", "events", "firehose", "globalaccelerator", "glue", "iam", "kinesis", "kinesisanalytics",
-    "kms", "lambda", "lightsail", "logs", "memorydb", "network-firewall", "organizations", "payment-cryptography",
-    "pipes", "rds", "redshift", "redshift-serverless", "rekognition", "resource-groups", "route53resolver",
-    "sagemaker", "scheduler", "secretsmanager", "servicediscovery", "ses", "signer", "sns", "sqs", "ssm", "sso", "states",
-    "sts", "swf", "textract", "timestream-influxdb", "transcribe", "transfer", "translate", "wafv2",
+    "kms", "lambda", "lightsail", "logs", "macie2", "memorydb", "network-firewall", "organizations",
+    "payment-cryptography", "pipes", "rds", "redshift", "redshift-serverless", "rekognition", "resource-groups",
+    "route53resolver", "sagemaker", "scheduler", "secretsmanager", "servicediscovery", "ses", "signer", "sns", "sqs",
+    "ssm", "sso", "states", "sts", "swf", "textract", "timestream-influxdb", "transcribe", "transfer", "translate",
+    "wafv2",
 )
 
 _NO_ROUTES = "REST routes no rule maps yet"
@@ -126,7 +127,7 @@ NOT_COVERED = {
     "detective": _NO_ROUTES, "dlm": _NO_ROUTES,
     "elasticfilesystem": _NO_ROUTES, "emr-serverless": _NO_ROUTES, "fis": _NO_ROUTES,
     "guardduty": _NO_ROUTES, "inspector2": _NO_ROUTES, "iot": _NO_ROUTES, "kafka": _NO_ROUTES,
-    "macie2": _NO_ROUTES, "mq": _NO_ROUTES, "oam": _NO_ROUTES,
+    "mq": _NO_ROUTES, "oam": _NO_ROUTES,
     "quicksight": "metadata-only REST subset; creation-tag IAM authorization is not implemented",
     "ram": _NO_ROUTES,
     "resource-explorer-2": _NO_ROUTES, "rum": _NO_ROUTES, "s3tables": _NO_ROUTES, "securityhub": _NO_ROUTES,

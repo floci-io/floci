@@ -514,6 +514,75 @@ class IamRestRouteEnforcementIntegrationTest {
     }
 
     /**
+     * A route of Lake Formation, Macie or Inspector that AWS authorizes on no resource type is checked as its vendored
+     * route's operation, with no hand rule, Macie's on the paths it shares with other services among them: refused
+     * without its action, past the check with it.
+     */
+    @Test
+    void lakeFormationMacieAndInspectorAreCheckedByTheirRoutes() {
+        String user = user("route-no-type");
+
+        policy(user, allow("lakeformation:ListLFTags", "*"));
+        refused(as(user, "lakeformation").body("{}").post("/GetDataLakeSettings").then(),
+                "lakeformation:GetDataLakeSettings");
+        refused(as(user, "macie2").get("/admin/configuration").then(), "macie2:DescribeOrganizationConfiguration");
+        refused(as(user, "macie2").get("/members").then(), "macie2:ListMembers");
+        refused(as(user, "macie2").get("/admin").then(), "macie2:ListOrganizationAdminAccounts");
+        refused(as(user, "inspector2").body("{}").post("/status/batch/get").then(),
+                "inspector2:BatchGetAccountStatus");
+        refused(as(user, "inspector2").body("{}").post("/disable").then(), "inspector2:Disable");
+
+        policy(user, allow("lakeformation:GetDataLakeSettings", "*") + ","
+                + allow("macie2:DescribeOrganizationConfiguration", "*") + ","
+                + allow("inspector2:BatchGetAccountStatus", "*"));
+        as(user, "lakeformation").body("{}").post("/GetDataLakeSettings").then().statusCode(200);
+        // Past the check, Macie answers that this account has no session.
+        as(user, "macie2").get("/admin/configuration").then().statusCode(404);
+        as(user, "inspector2").body("{}").post("/status/batch/get").then().statusCode(200);
+    }
+
+    /**
+     * Macie's {@code CreateMember} is checked on the member its {@code account.accountId} names: a grant scoped to the
+     * member lets the request reach Macie, which answers that this account has no session, a request naming another
+     * member is refused, and a deny on the member holds under an allow on everything.
+     */
+    @Test
+    void macieCreateMemberIsCheckedOnTheMemberItNames() {
+        String user = user("route-macie-member");
+        String member = "arn:aws:macie2:us-east-1:" + ACCOUNT + ":member/111122223333";
+
+        policy(user, allow("macie2:CreateMember", member));
+        createMember(user, "111122223333", null).statusCode(404);
+        refused(createMember(user, "444455556666", null), "macie2:CreateMember");
+
+        policy(user, allow("macie2:CreateMember", "*") + "," + deny("macie2:CreateMember", member));
+        refused(createMember(user, "111122223333", null), "macie2:CreateMember");
+        createMember(user, "444455556666", null).statusCode(404);
+    }
+
+    /**
+     * A Macie {@code CreateMember} that carries tags also needs {@code macie2:TagResource} on the member it makes, and
+     * a condition on {@code aws:RequestTag/<key>} sees those tags. One that carries none needs only its own action.
+     */
+    @Test
+    void macieCreateMemberIsCheckedWithTheTagsItCarries() {
+        String user = user("route-macie-tags");
+        String member = "arn:aws:macie2:us-east-1:" + ACCOUNT + ":member/111122223333";
+
+        policy(user, allow("macie2:CreateMember", member));
+        createMember(user, "111122223333", null).statusCode(404);
+        refused(createMember(user, "111122223333", "blue"), "macie2:TagResource");
+
+        policy(user, allow("macie2:CreateMember", member) + "," + allow("macie2:TagResource", member));
+        createMember(user, "111122223333", "blue").statusCode(404);
+
+        policy(user, allow("macie2:*", "*") + ",{\"Effect\":\"Deny\",\"Action\":\"macie2:CreateMember\","
+                + "\"Resource\":\"*\",\"Condition\":{\"StringEquals\":{\"aws:RequestTag/team\":\"red\"}}}");
+        refused(createMember(user, "111122223333", "red"), "macie2:CreateMember");
+        createMember(user, "111122223333", "blue").statusCode(404);
+    }
+
+    /**
      * An OpenSearch request naming its domain in its path, or its ARN in its query, is checked on that domain, in
      * both API versions: a grant scoped to the domain lets the request reach OpenSearch, which has no such domain, a
      * request naming another domain is refused, and a deny on the domain holds under an allow on everything. A domain
@@ -624,6 +693,14 @@ class IamRestRouteEnforcementIntegrationTest {
 
     private static RequestSpecification admin() {
         return given().header("Authorization", auth(ADMIN, "lambda")).contentType("application/json");
+    }
+
+    /** Macie's {@code CreateMember} for {@code accountId}, with a {@code team} tag unless {@code team} is null. */
+    private ValidatableResponse createMember(String user, String accountId, String team) {
+        String tags = team == null ? "" : ",\"tags\":{\"team\":\"" + team + "\"}";
+        return as(user, "macie2")
+                .body("{\"account\":{\"accountId\":\"" + accountId + "\",\"email\":\"m@example.com\"}" + tags + "}")
+                .post("/members").then();
     }
 
     private static String deny(String action, String resource) {
