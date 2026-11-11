@@ -318,6 +318,17 @@ class AutoScalingServiceTest {
         verifyNoInteractions(ec2Service);
     }
 
+    @Test
+    void omittedLaunchTemplateVersionLooksUpDefaultProfile() {
+        Ec2Service ec2Service = mock(Ec2Service.class);
+        service.ec2Service = ec2Service;
+        when(ec2Service.describeLaunchTemplateVersions(REGION, "lt-original", null, List.of("$Default")))
+                .thenReturn(List.of(withProfile("default-profile")));
+
+        assertEquals(Optional.of("default-profile"),
+                service.launchTemplateInstanceProfile("lt-original", null, null, REGION));
+    }
+
     private static LaunchTemplate withProfile(String profileName) {
         LaunchTemplate version = new LaunchTemplate();
         version.getData().setIamInstanceProfile(new LaunchTemplateData.IamInstanceProfile(null, profileName));
@@ -663,6 +674,7 @@ class AutoScalingServiceTest {
     void describeInstanceRefreshesPaginatesNewestFirst() {
         InstanceRefresh first = service.startInstanceRefresh(REGION, "test-asg", new InstanceRefresh());
         InstanceRefresh second = service.startInstanceRefresh(REGION, "test-asg", new InstanceRefresh());
+        first.setStartTime(Instant.EPOCH);
 
         AutoScalingService.InstanceRefreshPage firstPage =
                 service.describeInstanceRefreshes(REGION, "test-asg", List.of(), 1, null);

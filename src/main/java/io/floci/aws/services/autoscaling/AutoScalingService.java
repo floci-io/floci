@@ -2069,12 +2069,11 @@ public class AutoScalingService implements PassedRoleLookup {
         if (ec2Service == null) {
             return;
         }
-        List<String> versions = isBlank(launchTemplateVersion) ? List.of() : List.of(launchTemplateVersion);
         List<LaunchTemplate> launchTemplateVersions = ec2Service.describeLaunchTemplateVersions(
                 region,
                 launchTemplateId,
                 launchTemplateName,
-                versions);
+                launchTemplateVersionSelector(launchTemplateVersion));
         if (launchTemplateVersions.isEmpty()) {
             throw invalidLaunchTemplate();
         }
@@ -2107,7 +2106,7 @@ public class AutoScalingService implements PassedRoleLookup {
         List<LaunchTemplate> versions;
         try {
             versions = ec2Service.describeLaunchTemplateVersions(region, templateId, templateName,
-                    isBlank(version) ? List.of() : List.of(version));
+                    launchTemplateVersionSelector(version));
         } catch (AwsException e) {
             // A version that does not exist is the operation's to refuse, and passes no role.
             LOG.debugv("Launch template {0} has no version {1}, so it passes no role: {2}",
@@ -2151,6 +2150,10 @@ public class AutoScalingService implements PassedRoleLookup {
 
     private static boolean isBlank(String value) {
         return value == null || value.isBlank();
+    }
+
+    static List<String> launchTemplateVersionSelector(String version) {
+        return List.of(isBlank(version) ? "$Default" : version);
     }
 
     private record LaunchIdentity(
