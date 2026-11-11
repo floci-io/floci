@@ -816,7 +816,8 @@ public class ApiGatewayV2Service {
     public Integration updateIntegration(String region, String apiId, String integrationId,
                                          Map<String, Object> request) {
         Integration integration = getIntegration(region, apiId, integrationId);
-        Map<String, String> requestParameters = stringParameters(request.get("requestParameters"));
+        Map<String, String> requestParameters = mergedParameters(integration.getRequestParameters(),
+                stringParameters(request.get("requestParameters")));
         String payloadFormatVersion = (String) request.get("payloadFormatVersion");
         if (payloadFormatVersion == null) {
             payloadFormatVersion = request.get("integrationSubtype") != null
@@ -827,8 +828,7 @@ public class ApiGatewayV2Service {
         validateIntegrationSubtype(getApi(region, apiId).getProtocolType(),
                 updatedValue(request, "integrationType", integration.getIntegrationType()),
                 updatedValue(request, "integrationSubtype", integration.getIntegrationSubtype()),
-                payloadFormatVersion,
-                requestParameters != null ? requestParameters : integration.getRequestParameters());
+                payloadFormatVersion, requestParameters);
 
         if (request.get("credentialsArn") != null) {
             integration.setCredentialsArn((String) request.get("credentialsArn"));
@@ -865,9 +865,7 @@ public class ApiGatewayV2Service {
             Map<String, String> responseTemplates = (Map<String, String>) request.get("responseTemplates");
             integration.setResponseTemplates(responseTemplates);
         }
-        if (requestParameters != null) {
-            integration.setRequestParameters(requestParameters);
-        }
+        integration.setRequestParameters(requestParameters);
         if (request.containsKey("connectionId") && request.get("connectionId") != null) {
             integration.setConnectionId((String) request.get("connectionId"));
         }
@@ -888,6 +886,27 @@ public class ApiGatewayV2Service {
      */
     public static String defaultPayloadFormatVersion(String integrationSubtype) {
         return integrationSubtype != null ? "1.0" : "2.0";
+    }
+
+    /**
+     * The stored RequestParameters with the update's entries merged in, as UpdateIntegration applies
+     * them: an entry whose value is the empty string removes that key, and every other entry adds or
+     * replaces it. An update without RequestParameters keeps the stored map, and a merge that removes
+     * every key leaves none.
+     */
+    private static Map<String, String> mergedParameters(Map<String, String> stored, Map<String, String> update) {
+        if (update == null) {
+            return stored;
+        }
+        Map<String, String> merged = stored != null ? new LinkedHashMap<>(stored) : new LinkedHashMap<>();
+        update.forEach((key, value) -> {
+            if ("".equals(value)) {
+                merged.remove(key);
+            } else {
+                merged.put(key, value);
+            }
+        });
+        return merged.isEmpty() ? null : merged;
     }
 
     /**
