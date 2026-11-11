@@ -356,6 +356,27 @@ class OrganizationsServiceTest {
     }
 
     @Test
+    void acceptingAnInvitationAttachesItsTagsToTheAccount() {
+        service.createOrganization(MANAGEMENT_ACCOUNT, "ALL");
+        Handshake handshake = service.inviteAccountToOrganization(
+                MANAGEMENT_ACCOUNT, OUTSIDER_ACCOUNT, "ACCOUNT", null, Map.of("team", "red"));
+
+        service.acceptHandshake(OUTSIDER_ACCOUNT, handshake.getId());
+
+        assertEquals(Map.of("team", "red"), service.listTagsForResource(MANAGEMENT_ACCOUNT, OUTSIDER_ACCOUNT));
+    }
+
+    @Test
+    void anInvalidTagFailsTheWholeInvitation() {
+        service.createOrganization(MANAGEMENT_ACCOUNT, "ALL");
+
+        AwsException error = assertThrows(AwsException.class, () -> service.inviteAccountToOrganization(
+                MANAGEMENT_ACCOUNT, OUTSIDER_ACCOUNT, "ACCOUNT", null, Map.of("", "red")));
+        assertEquals("InvalidInputException", error.getErrorCode());
+        assertTrue(service.listHandshakesForOrganization(MANAGEMENT_ACCOUNT, null, null).isEmpty());
+    }
+
+    @Test
     void memberAccountsCannotPerformManagementActions() {
         Organization organization = service.createOrganization(MANAGEMENT_ACCOUNT, "ALL");
         Handshake handshake = service.inviteAccountToOrganization(

@@ -1290,6 +1290,11 @@ public class OrganizationsService implements ScpProvider, RootAccessOrganization
 
     public Handshake inviteAccountToOrganization(String callerAccountId, String targetId, String targetType,
                                                  String notes) {
+        return inviteAccountToOrganization(callerAccountId, targetId, targetType, notes, null);
+    }
+
+    public Handshake inviteAccountToOrganization(String callerAccountId, String targetId, String targetType,
+                                                 String notes, Map<String, String> tags) {
         Organization organization = requireManagementAccount(callerAccountId);
         if (targetId == null || targetId.isEmpty()) {
             throw invalidInput("Target.Id is required.");
@@ -1298,6 +1303,7 @@ public class OrganizationsService implements ScpProvider, RootAccessOrganization
         if (!"ACCOUNT".equals(resolvedType) && !"EMAIL".equals(resolvedType)) {
             throw invalidInput("Target.Type must be ACCOUNT or EMAIL.");
         }
+        validateTags(tags);
 
         String invitedAccountId = null;
         String invitedEmail = null;
@@ -1334,6 +1340,9 @@ public class OrganizationsService implements ScpProvider, RootAccessOrganization
         Handshake handshake = newHandshake(organization, HANDSHAKE_INVITE);
         handshake.setTargetAccountId(invitedAccountId);
         handshake.setTargetEmail(invitedEmail);
+        if (tags != null) {
+            handshake.getTags().putAll(tags);
+        }
         handshake.getParties().add(new HandshakeParty(organization.getId(), "ORGANIZATION"));
         handshake.getParties().add(new HandshakeParty(targetId, resolvedType));
 
@@ -1378,6 +1387,7 @@ public class OrganizationsService implements ScpProvider, RootAccessOrganization
                     : "account-" + callerAccountId + "@example.com";
             OrganizationAccount account = newMemberAccount(
                     organization, callerAccountId, email, "invited-" + callerAccountId, "INVITED");
+            account.getTags().putAll(handshake.getTags());
             accounts.putForAccount(organization.getMasterAccountId(), callerAccountId, account);
             attachFullAwsAccess(organization, callerAccountId);
             handshake.setTargetAccountId(callerAccountId);

@@ -588,7 +588,8 @@ public class OrganizationsJsonHandler {
     private Response inviteAccountToOrganization(JsonNode request, String caller) {
         JsonNode target = request.path("Target");
         Handshake handshake = service.inviteAccountToOrganization(caller,
-                text(target, "Id"), text(target, "Type"), text(request, "Notes"));
+                text(target, "Id"), text(target, "Type"), text(request, "Notes"),
+                parseTags(request.path("Tags")));
         return handshakeResponse(handshake);
     }
 
