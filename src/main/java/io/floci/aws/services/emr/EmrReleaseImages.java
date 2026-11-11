@@ -67,7 +67,6 @@ public class EmrReleaseImages implements ReleaseImages {
             new Copy("/usr/lib/bigtop-groovy", "/usr/lib"),
             new Copy("/etc/hive", "/etc"),
             new Copy("/etc/tez", "/etc"),
-            new Copy("/etc/tez-ui", "/etc"),
             new Copy(EMR_SHARE + "/s3-dist-cp", EMR_SHARE),
             new Copy("/usr/bin/hive", "/usr/bin"),
             new Copy("/usr/bin/beeline", "/usr/bin"),
