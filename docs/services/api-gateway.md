@@ -850,7 +850,11 @@ JSON object nor a whole expression, a name that is not a subtype, a subtype on a
 integration or a WebSocket API, and a `payloadFormatVersion` other than `1.0`. `1.0` is the default
 when a subtype is set, including on an update that adds a subtype to an integration that had none.
 A number or boolean parameter value is stored as its text, and an object or array value is
-rejected. Import and reimport check every integration in the document before changing anything,
+rejected. `UpdateIntegration` merges `requestParameters` into the stored ones for every HTTP API
+integration, as AWS does: a key it names is added or replaced, a key whose value is an empty string
+is removed, and a key it leaves out is kept. The subtype check runs on the merged parameters, so an
+update that sets only `DelaySeconds` keeps `QueueUrl` and `MessageBody`, and one that sets `QueueUrl`
+to an empty string is rejected. Import and reimport check every integration in the document before changing anything,
 so a rejected reimport leaves the API as it was. CloudFormation carries `IntegrationSubtype` and
 `RequestParameters` from an `AWS::ApiGatewayV2::Integration` and from the
 `x-amazon-apigateway-integration` extension of an `AWS::ApiGatewayV2::Api` `Body`. A CloudFormation
