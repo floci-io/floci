@@ -162,12 +162,19 @@
       "BatchUpdateCase": "cases:UpdateCase"
     },
     "cassandra": {
+      "CreateKeyspace": "cassandra:Create",
+      "CreateTable": "cassandra:Create",
+      "CreateType": "cassandra:Create",
       "GetKeyspace": "cassandra:Select",
       "GetTable": "cassandra:Select",
       "GetType": "cassandra:Select",
       "ListKeyspaces": "cassandra:Select",
       "ListTables": "cassandra:Select",
-      "ListTypes": "cassandra:Select"
+      "ListTypes": "cassandra:Select",
+      "RestoreTable": "cassandra:Restore"
+    },
+    "cloudfront": {
+      "CreateDistributionWithTags": "cloudfront:CreateDistribution"
     },
     "connect": {
       "UpdateUserConfig": "connect:UpdateUserPhoneConfig"
@@ -238,6 +245,7 @@
       "CreatePresignedUrl": "qapps:ImportDocument"
     },
     "quicksight": {
+      "CreateTopicV2": "quicksight:CreateTopic",
       "DeleteTopicV2": "quicksight:DeleteTopic",
       "DescribeAnalysisDefinition": "quicksight:DescribeAnalysis",
       "DescribeDashboardDefinition": "quicksight:DescribeDashboard",
@@ -246,7 +254,8 @@
       "DescribeTopicV2": "quicksight:DescribeTopic",
       "ListTopicsV2": "quicksight:ListTopics",
       "SearchTopicsV2": "quicksight:SearchTopics",
-      "UpdateTopicPermissionsV2": "quicksight:UpdateTopicPermissions"
+      "UpdateTopicPermissionsV2": "quicksight:UpdateTopicPermissions",
+      "UpdateTopicV2": "quicksight:UpdateTopic"
     },
     "redshift-data": {
       "GetStatementResultV2": "redshift-data:GetStatementResult"

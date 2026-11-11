@@ -198,6 +198,31 @@ def test_stems_drop_the_suffixes_names_carry():
     # A plural's s goes, from a type's name and a member's alike, so they still meet.
     assert r.related(r.stem("EventBusName"), r.stem("event-bus"))
     assert r.related("autoscalinggroup", "group") and not r.related("ab", "b")
+    # A read of a resource's config is a read of the resource, and a type may carry the config in its name.
+    assert r.stem("DistributionConfig") == "distribution"
+    assert r.related(r.stem("FieldLevelEncryption"), r.stem("field-level-encryption-config"))
+
+
+def test_a_bare_id_names_the_resource_whose_config_an_operation_reads():
+    formats = {"distribution": "arn:${Partition}:cloudfront::${Account}:distribution/${DistributionId}"}
+    assert r.resources_for("cloudfront:GetDistributionConfig", ["distribution"], formats, {"Id": "Id"}) == [
+        {"type": "distribution", "fill": {"DistributionId": "Id"}}]
+
+
+def test_a_resource_member_taking_only_an_arn_holds_the_resource_the_action_acts_on():
+    model = {
+        "metadata": {"protocol": "rest-xml", "endpointPrefix": "svc"},
+        "operations": {"TagResource": {"input": {"shape": "Input"}}},
+        "shapes": {"Input": {"type": "structure", "members": {
+                       "Resource": {"shape": "Value", "location": "querystring", "locationName": "Resource"}}},
+                   "Value": {"type": "string", "pattern": "arn:aws(-cn)?:svc::[0-9]+:.*"}},
+    }
+    formats = {"distribution": "arn:${Partition}:svc::${Account}:distribution/${DistributionId}",
+               "function": "arn:${Partition}:svc::${Account}:function/${Name}"}
+    entry = r.entry_for("svc:TagResource", {"action": "svc:TagResource", "types": ["distribution", "function"]},
+                        formats, {"svc": model})
+    assert entry["resources"] == [{"types": ["distribution", "function"], "arn": "Resource"}]
+    assert entry["located"] == {"Resource": "?Resource"}
 
 
 def reference(namespace: str, operations: dict[str, list[str]], resources: dict[str, str]) -> dict:

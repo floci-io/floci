@@ -53,6 +53,9 @@ class CloudFrontIamIntegrationTest {
             denied(send(user.signer("cloudfront"), "POST", API + "/cache-policy", CACHE_POLICY.formatted(name)),
                     "cloudfront:CreateCachePolicy");
             denied(send(user.signer("cloudfront"), "GET", API + "/distribution", null), "cloudfront:ListDistributions");
+            // CreateDistributionWithTags is no IAM action: AWS checks it as CreateDistribution.
+            denied(send(user.signer("cloudfront"), "POST", API + "/distribution?WithTags", "<DistributionConfigWithTags/>"),
+                    "cloudfront:CreateDistribution");
         }
         send(admin, "GET", API + "/cache-policy?Type=custom", null).then().statusCode(200)
                 .body(not(containsString(name)));
@@ -62,11 +65,17 @@ class CloudFrontIamIntegrationTest {
     void cachePolicyScopedAllowReadsThatPolicyAndRefusesAnother() throws Exception {
         String allowed = createCachePolicy();
         String other = createCachePolicy();
-        try (SignedIamUsers.User user = user("Allow", "cloudfront:GetCachePolicy", cachePolicyArn(allowed))) {
+        try (SignedIamUsers.User user = user("Allow", "[\"cloudfront:GetCachePolicy\",\"cloudfront:GetCachePolicyConfig\"]",
+                cachePolicyArn(allowed))) {
             send(user.signer("cloudfront"), "GET", API + "/cache-policy/" + allowed, null).then().statusCode(200)
                     .body(containsString("<Id>" + allowed + "</Id>"));
             denied(send(user.signer("cloudfront"), "GET", API + "/cache-policy/" + other, null),
                     "cloudfront:GetCachePolicy");
+            // A config read is checked on the policy its path names, as the policy's read is.
+            send(user.signer("cloudfront"), "GET", API + "/cache-policy/" + allowed + "/config", null).then()
+                    .statusCode(200).body(containsString("<CachePolicyConfig"));
+            denied(send(user.signer("cloudfront"), "GET", API + "/cache-policy/" + other + "/config", null),
+                    "cloudfront:GetCachePolicyConfig");
         } finally {
             deleteCachePolicy(allowed);
             deleteCachePolicy(other);
@@ -120,7 +129,8 @@ class CloudFrontIamIntegrationTest {
         String allow = "Deny".equals(effect) ? "{\"Effect\":\"Allow\",\"Action\":\"cloudfront:*\",\"Resource\":\"*\"}," : "";
         return SignedIamUsers.createUser(endpoint, "cf-iam-", "access",
                 "{\"Version\":\"2012-10-17\",\"Statement\":[" + allow + "{\"Effect\":\"" + effect
-                        + "\",\"Action\":\"" + action + "\",\"Resource\":\"" + resource + "\"}]}");
+                        + "\",\"Action\":" + (action.startsWith("[") ? action : "\"" + action + "\"")
+                        + ",\"Resource\":\"" + resource + "\"}]}");
     }
 
     private Response send(AwsRequestSigner signer, String method, String path, String body) throws Exception {
