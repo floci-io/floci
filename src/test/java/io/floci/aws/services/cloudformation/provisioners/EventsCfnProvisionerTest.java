@@ -496,8 +496,6 @@ class EventsCfnProvisionerTest {
         assertTrue(thrown.getMessage().contains("requires resource replacement"));
     }
 
-    // ── a partner event bus is held to its event source name ──────────────────
-
     @ParameterizedTest
     @ValueSource(strings = {"aws.partner/example.com", "partner/example.com/orders", "aws.partner/example.com/x y"})
     void aMalformedEventSourceNameIsAValidationError(String eventSourceName) {
