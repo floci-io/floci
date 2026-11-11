@@ -480,6 +480,7 @@ public class EmrService implements Resettable, StoredResourceArns, ContainerTear
     public int modifyCluster(String id, Integer stepConcurrencyLevel) {
         return call(() -> {
             EmrCluster cluster = requireCluster(id);
+            rejectShutDownCluster(cluster, EmrService::jobFlowShutDown);
             if (stepConcurrencyLevel != null) {
                 cluster.setStepConcurrencyLevel(stepConcurrencyLevel);
                 lifecycle.concurrencyChanged(cluster, now(), regionOf(cluster));
@@ -858,6 +859,7 @@ public class EmrService implements Resettable, StoredResourceArns, ContainerTear
     public void addTags(String resourceId, Map<String, String> tags) {
         run(() -> {
             EmrCluster cluster = requireCluster(resourceId);
+            rejectTerminatedTagging(cluster);
             cluster.getTags().putAll(tags);
             clusterStore.put(resourceId, cluster);
         });
@@ -866,6 +868,7 @@ public class EmrService implements Resettable, StoredResourceArns, ContainerTear
     public void removeTags(String resourceId, List<String> keys) {
         run(() -> {
             EmrCluster cluster = requireCluster(resourceId);
+            rejectTerminatedTagging(cluster);
             keys.forEach(cluster.getTags()::remove);
             clusterStore.put(resourceId, cluster);
         });
@@ -878,6 +881,7 @@ public class EmrService implements Resettable, StoredResourceArns, ContainerTear
     public void putManagedScalingPolicy(String clusterId, JsonNode policy) {
         run(() -> {
             EmrCluster cluster = requireCluster(clusterId);
+            rejectShutDownCluster(cluster, EmrService::jobFlowShutDownValidation);
             validateManagedScalingPolicy(policy);
             cluster.setManagedScalingPolicy(policy.toString());
             clusterStore.put(clusterId, cluster);
@@ -892,6 +896,7 @@ public class EmrService implements Resettable, StoredResourceArns, ContainerTear
     public void removeManagedScalingPolicy(String clusterId) {
         run(() -> {
             EmrCluster cluster = requireCluster(clusterId);
+            rejectShutDownCluster(cluster, EmrService::jobFlowShutDownValidation);
             cluster.setManagedScalingPolicy(null);
             clusterStore.put(clusterId, cluster);
         });
@@ -901,6 +906,7 @@ public class EmrService implements Resettable, StoredResourceArns, ContainerTear
     public void putAutoTerminationPolicy(String clusterId, JsonNode policy) {
         run(() -> {
             EmrCluster cluster = requireCluster(clusterId);
+            rejectShutDownCluster(cluster, EmrService::jobFlowShutDownValidation);
             validateAutoTerminationPolicy(policy);
             cluster.setAutoTerminationPolicy(
                     policy == null || policy.isMissingNode() || policy.isNull() ? "{}" : policy.toString());
@@ -916,6 +922,7 @@ public class EmrService implements Resettable, StoredResourceArns, ContainerTear
     public void removeAutoTerminationPolicy(String clusterId) {
         run(() -> {
             EmrCluster cluster = requireCluster(clusterId);
+            rejectShutDownCluster(cluster, EmrService::jobFlowShutDownValidation);
             cluster.setAutoTerminationPolicy(null);
             clusterStore.put(clusterId, cluster);
         });
@@ -925,6 +932,7 @@ public class EmrService implements Resettable, StoredResourceArns, ContainerTear
     public EmrInstanceGroup putAutoScalingPolicy(String clusterId, String instanceGroupId, JsonNode policy) {
         return call(() -> {
             EmrCluster cluster = requireCluster(clusterId);
+            rejectShutDownCluster(cluster, EmrService::jobFlowShutDownValidation);
             EmrInstanceGroup group = requireInstanceGroup(cluster, instanceGroupId);
             validateAutoScalingPolicy(policy, group.getInstanceGroupType());
             group.setAutoScalingPolicy(policy.toString());
@@ -936,6 +944,7 @@ public class EmrService implements Resettable, StoredResourceArns, ContainerTear
     public void removeAutoScalingPolicy(String clusterId, String instanceGroupId) {
         run(() -> {
             EmrCluster cluster = requireCluster(clusterId);
+            rejectShutDownCluster(cluster, EmrService::jobFlowShutDownValidation);
             requireInstanceGroup(cluster, instanceGroupId).setAutoScalingPolicy(null);
             clusterStore.put(clusterId, cluster);
         });
@@ -1111,31 +1120,43 @@ public class EmrService implements Resettable, StoredResourceArns, ContainerTear
         return new AwsException("InvalidRequestException", message, 400);
     }
 
-    /** ModifyInstanceFleet's answer for a job flow that is shutting down or ended, ErrorCode member included. */
+    /**
+     * ModifyInstanceFleet's answer for a job flow that is shutting down or ended, ErrorCode member included.
+     * AddInstanceFleet and ModifyCluster give it too, as their models also declare InvalidRequestException.
+     */
     private static AwsException jobFlowShutDown() {
         return new AwsException("InvalidRequestException", JOB_FLOW_SHUT_DOWN, 400,
                 Map.of("ErrorCode", "INVALID_JOB_SHUT_DOWN"));
     }
 
     /**
-     * AddJobFlowSteps' answer for a job flow that is shutting down or ended. AddInstanceGroups gives it too:
-     * like AddJobFlowSteps, its model declares no InvalidRequestException.
+     * AddJobFlowSteps' answer for a job flow that is shutting down or ended. The operations whose models,
+     * like AddJobFlowSteps', declare no InvalidRequestException give it too: AddInstanceGroups, the Set*
+     * setters, and Put and Remove of the managed scaling, auto-termination and automatic scaling policies.
      */
     private static AwsException jobFlowShutDownValidation() {
         return new AwsException("ValidationException", JOB_FLOW_SHUT_DOWN, 400);
     }
 
     /**
-     * AddInstanceGroups and AddInstanceFleet on a cluster that is shutting down or ended. A TERMINATING one
-     * gets {@code shuttingDown}, the operation's answer with AWS's wording, which covers it; a TERMINATED
-     * one keeps Floci's own, since no AWS answer to either operation is recorded.
+     * Refuses a change to a cluster that is shutting down or ended with {@code answer}, the job flow message in
+     * the code the operation's model points at. AWS's answer is recorded for AddJobFlowSteps and
+     * ModifyInstanceFleet only; the operations calling this, documented for running clusters, take it from them.
      */
-    private static void rejectShutDownCluster(EmrCluster cluster, Supplier<AwsException> shuttingDown) {
-        if (EmrClusterLifecycle.TERMINATING.equals(cluster.getState())) {
-            throw shuttingDown.get();
+    private static void rejectShutDownCluster(EmrCluster cluster, Supplier<AwsException> answer) {
+        if (isShutDown(cluster)) {
+            throw answer.get();
         }
+    }
+
+    /**
+     * AddTags and RemoveTags on an ended cluster: the Management Guide's "you cannot add, edit, or remove tags
+     * from a terminated cluster" names no error, so the message is the one a tagging tool matches from AWS, in
+     * the InvalidRequestException both models declare.
+     */
+    private static void rejectTerminatedTagging(EmrCluster cluster) {
         if (EmrClusterLifecycle.isTerminated(cluster.getState())) {
-            throw invalid("Cluster " + cluster.getId() + " is terminated.");
+            throw invalid("Tags cannot be modified on terminated clusters.");
         }
     }
 
@@ -1167,12 +1188,16 @@ public class EmrService implements Resettable, StoredResourceArns, ContainerTear
                 .map(this::settle);
     }
 
+    /**
+     * The Set* setters: an unknown id is passed over, and one cluster shutting down or ended refuses the
+     * request before any of the clusters it names is changed.
+     */
     private void mutateClusters(List<String> ids, Consumer<EmrCluster> mutation) {
-        for (String id : ids) {
-            findCluster(id).ifPresent(c -> {
-                mutation.accept(c);
-                clusterStore.put(id, c);
-            });
+        List<EmrCluster> clusters = ids.stream().map(this::findCluster).flatMap(Optional::stream).toList();
+        clusters.forEach(c -> rejectShutDownCluster(c, EmrService::jobFlowShutDownValidation));
+        for (EmrCluster c : clusters) {
+            mutation.accept(c);
+            clusterStore.put(c.getId(), c);
         }
     }
 

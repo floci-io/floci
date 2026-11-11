@@ -95,10 +95,22 @@ and `ModifyInstanceFleet` answers `InvalidRequestException` "A job flow that is 
 terminated, or finished may not be modified." with `ErrorCode` `INVALID_JOB_SHUT_DOWN` for a
 `TERMINATING` or `TERMINATED` one, and "An instance fleet may only be modified when the cluster is
 running or waiting." with `ErrorCode` `MODIFY_INSTANCE_FLEET_OF_RUNNING_JOBFLOW_ONLY` for one in any
-other state, such as `STARTING` or `BOOTSTRAPPING`. `AddInstanceFleet` gives a `TERMINATING` cluster
-the "shutting down" answer, and `AddInstanceGroups` gives it as `ValidationException`, as
-`AddJobFlowSteps` does. `InstanceStates` filters the modeled `RUNNING` and `TERMINATED`
-instances.
+other state, such as `STARTING` or `BOOTSTRAPPING`. `AddInstanceFleet` gives a `TERMINATING` or
+`TERMINATED` cluster the "shutting down" answer, and `AddInstanceGroups` gives it as
+`ValidationException`, as `AddJobFlowSteps` does. `InstanceStates` filters the modeled `RUNNING` and
+`TERMINATED` instances.
+
+A cluster that is `TERMINATING`, `TERMINATED` or `TERMINATED_WITH_ERRORS` also refuses `ModifyCluster`,
+the four `Set*` setters, and `Put` and `Remove` of its managed scaling, auto-termination and automatic
+scaling policies, with the same "shutting down" message: `ModifyCluster` as `InvalidRequestException`
+with `ErrorCode` `INVALID_JOB_SHUT_DOWN`, since its model declares that exception, and the others as
+`ValidationException`, since theirs declare none. AWS documents these operations for running clusters,
+but no answer for an ended one is recorded, so this is Floci's reading, taken from the operations whose
+answer is. A `Set*` request naming such a cluster changes none of the clusters it names. `AddTags` and
+`RemoveTags` refuse a `TERMINATED` or `TERMINATED_WITH_ERRORS` cluster, as the Management Guide says "you
+cannot add, edit, or remove tags from a terminated cluster", with `InvalidRequestException` "Tags cannot
+be modified on terminated clusters." The guide names no error: the message is the one a tagging tool
+matches from AWS, and the code is Floci's reading.
 
 `TerminateJobFlows`, the four `Set*` cluster setters and `CancelSteps` refuse a request without a
 member their model requires (`JobFlowIds` and the setting, or `StepIds`) with `ValidationException`
