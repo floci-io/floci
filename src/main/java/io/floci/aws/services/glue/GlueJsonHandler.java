@@ -90,9 +90,7 @@ public class GlueJsonHandler {
                 Database db = glueService.getDatabase(name);
                 yield Response.ok(Map.of("Database", db)).build();
             }
-            case "GetDatabases" -> {
-                yield Response.ok(Map.of("DatabaseList", glueService.getDatabases())).build();
-            }
+            case "GetDatabases" -> handleGetDatabases(request);
             case "DeleteDatabase" -> {
                 String name = request.get("Name").asText();
                 glueService.deleteDatabase(name, region);
@@ -141,9 +139,12 @@ public class GlueJsonHandler {
                         glueService.getPartitionIndexes(dbName, tableName))).build();
             }
             case "GetTables" -> {
+                validateCatalogPagination(request);
                 String dbName = request.get("DatabaseName").asText();
-                List<Table> tables = glueService.getTables(dbName).stream().map(GlueService::withReadDefaults).toList();
-                yield Response.ok(Map.of("TableList", tables)).build();
+                GlueService.Page<Table> page = glueService.getTables(
+                        dbName, readMaxResults(request), readNextToken(request));
+                List<Table> tables = page.items().stream().map(GlueService::withReadDefaults).toList();
+                yield Response.ok(pageResponse("TableList", tables, page.nextToken())).build();
             }
             case "UpdateTable" -> {
                 String dbName = request.get("DatabaseName").asText();
@@ -153,9 +154,12 @@ public class GlueJsonHandler {
                 yield Response.ok().build();
             }
             case "GetTableVersions" -> {
+                validateCatalogPagination(request);
                 String dbName = request.get("DatabaseName").asText();
                 String tableName = request.get("TableName").asText();
-                yield Response.ok(Map.of("TableVersions", glueService.getTableVersions(dbName, tableName))).build();
+                GlueService.Page<Map<String, Object>> page = glueService.getTableVersions(
+                        dbName, tableName, readMaxResults(request), readNextToken(request));
+                yield Response.ok(pageResponse("TableVersions", page.items(), page.nextToken())).build();
             }
             case "GetTableVersion" -> {
                 String dbName = request.get("DatabaseName").asText();
@@ -203,13 +207,15 @@ public class GlueJsonHandler {
             case "GetPartition" -> handleGetPartition(request);
             case "BatchGetPartition" -> handleBatchGetPartition(request);
             case "GetPartitions" -> {
+                validateCatalogPagination(request);
                 String dbName = request.get("DatabaseName").asText();
                 String tableName = request.get("TableName").asText();
                 String expression = request.path("Expression").asText(null);
                 GlueService.Segment segment = request.hasNonNull("Segment") ? segment(request.get("Segment")) : null;
-                List<Partition> partitions = glueService.getPartitions(dbName, tableName, expression, segment).stream()
-                        .map(GlueService::withReadDefaults).toList();
-                yield Response.ok(Map.of("Partitions", partitions)).build();
+                GlueService.Page<Partition> page = glueService.getPartitions(dbName, tableName, expression, segment,
+                        readMaxResults(request), readNextToken(request));
+                List<Partition> partitions = page.items().stream().map(GlueService::withReadDefaults).toList();
+                yield Response.ok(pageResponse("Partitions", partitions, page.nextToken())).build();
             }
             case "DeletePartition" -> handleDeletePartition(request);
             case "BatchDeletePartition" -> handleBatchDeletePartition(request);
@@ -1100,6 +1106,23 @@ public class GlueJsonHandler {
             return null;
         }
         return vn.asLong();
+    }
+
+    private Response handleGetDatabases(JsonNode request) {
+        validateCatalogPagination(request);
+        GlueService.Page<Database> page = glueService.getDatabases(readMaxResults(request), readNextToken(request));
+        return Response.ok(pageResponse("DatabaseList", page.items(), page.nextToken())).build();
+    }
+
+    private void validateCatalogPagination(JsonNode request) {
+        JsonNode limit = request.get("MaxResults");
+        if (limit != null && !limit.isNull() && (!limit.isIntegralNumber() || !limit.canConvertToInt())) {
+            throw new AwsException("InvalidInputException", "MaxResults must be an integer", 400);
+        }
+        JsonNode token = request.get("NextToken");
+        if (token != null && !token.isNull() && !token.isTextual()) {
+            throw new AwsException("InvalidInputException", "NextToken must be a string", 400);
+        }
     }
 
     private Integer readMaxResults(JsonNode request) {

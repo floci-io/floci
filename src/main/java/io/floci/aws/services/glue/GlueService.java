@@ -388,6 +388,11 @@ public class GlueService {
         return databases;
     }
 
+    public Page<Database> getDatabases(Integer maxResults, String nextToken) {
+        return paginate(() -> getDatabases().stream()
+                .sorted(Comparator.comparing(Database::getName)).toList(), maxResults, nextToken, 100);
+    }
+
     /**
      * Heals a database persisted before CatalogId was modelled. The store is namespaced by
      * account, so the reader is always the owning account and the healed value is stable —
@@ -464,6 +469,10 @@ public class GlueService {
             resolved.add(withResolvedSchemaReference(table));
         }
         return resolved;
+    }
+
+    public Page<Table> getTables(String databaseName, Integer maxResults, String nextToken) {
+        return paginate(() -> getTables(databaseName), maxResults, nextToken, 100);
     }
 
     /**
@@ -696,6 +705,11 @@ public class GlueService {
                         "Table", withReadDefaults(withResolvedSchemaReference(table)),
                         "VersionId", table.getVersionId()))
                 .toList();
+    }
+
+    public Page<Map<String, Object>> getTableVersions(String databaseName, String tableName,
+                                                    Integer maxResults, String nextToken) {
+        return paginate(() -> getTableVersions(databaseName, tableName), maxResults, nextToken, 100);
     }
 
     /** One archived version, or the current table when no VersionId is given, as AWS answers. */
@@ -951,6 +965,12 @@ public class GlueService {
                 .filter(partition -> matchesPartitionExpression(table, partition, expression))
                 .sorted(GlueService::comparePartitionValues)
                 .toList();
+    }
+
+    public Page<Partition> getPartitions(String databaseName, String tableName, String expression,
+                                         Segment segment, Integer maxResults, String nextToken) {
+        return paginate(() -> getPartitions(databaseName, tableName, expression, segment),
+                maxResults, nextToken, 1000);
     }
 
     private static void validateSegment(Segment segment) {

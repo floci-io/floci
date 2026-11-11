@@ -31,7 +31,7 @@ descriptor keeps the `AdditionalLocations`, `BucketColumns`, `SortColumns`, `Ske
 |--------|-------------|
 | CreateDatabase | Creates a database in the local Glue Data Catalog. |
 | GetDatabase | Returns a stored Data Catalog database. |
-| GetDatabases | Lists databases in the local Glue Data Catalog. |
+| GetDatabases | Lists databases in pages using `MaxResults` and `NextToken`. |
 | DeleteDatabase | Deletes a database from the local Glue Data Catalog. |
 
 #### Tables
@@ -40,11 +40,11 @@ descriptor keeps the `AdditionalLocations`, `BucketColumns`, `SortColumns`, `Ske
 |--------|-------------|
 | CreateTable | Creates a table definition in the local Glue Data Catalog. |
 | GetTable | Returns a stored table definition and resolves schema references when possible. |
-| GetTables | Lists table definitions for a database. |
+| GetTables | Lists table definitions for a database in pages using `MaxResults` and `NextToken`. |
 | UpdateTable | Replaces a table definition; the previous version is archived unless `SkipArchive` is set. |
 | DeleteTable | Deletes a table definition from a database. |
 | BatchDeleteTable | Deletes several tables of a database, reporting the missing ones in `Errors`. |
-| GetTableVersions | Lists the current and archived versions of a table, newest first. |
+| GetTableVersions | Lists the current and archived versions of a table, newest first, in pages using `MaxResults` and `NextToken`. |
 | GetTableVersion | Returns one version by `VersionId`, or the current version when none is given. |
 | DeleteTableVersion | Deletes an archived version; the current version cannot be deleted, as on AWS. |
 | BatchDeleteTableVersion | Deletes several archived versions, reporting the ones not deleted in `Errors`. |
@@ -55,7 +55,7 @@ descriptor keeps the `AdditionalLocations`, `BucketColumns`, `SortColumns`, `Ske
 | Action | Description |
 |--------|-------------|
 | CreatePartition | Creates a partition for a Data Catalog table. |
-| GetPartitions | Lists partitions stored for a Data Catalog table. With a `Segment`, returns that segment's share of them: each partition is in exactly one of `TotalSegments` (1 to 10) segments; a `Segment` member that is not an integer is a `SerializationException`. AWS documents `SegmentNumber` values from 0 through `TotalSegments` minus 1 and not what a larger one returns, so a `SegmentNumber` of `TotalSegments` or more returning no partitions is Floci's reading. |
+| GetPartitions | Lists partitions stored for a Data Catalog table in pages using `MaxResults` and `NextToken`. With a `Segment`, returns that segment's share of them: each partition is in exactly one of `TotalSegments` (1 to 10) segments; a `Segment` member that is not an integer is a `SerializationException`. AWS documents `SegmentNumber` values from 0 through `TotalSegments` minus 1 and not what a larger one returns, so a `SegmentNumber` of `TotalSegments` or more returning no partitions is Floci's reading. |
 | BatchDeletePartition | Deletes up to 25 partitions, reporting the ones not found in `Errors`. |
 | CreatePartitionIndex | Registers a partition index on a table. Keys must name partition columns, and a table holds at most 3 indexes. The index reports `CREATING` before `ACTIVE`. |
 | GetPartitionIndexes | Lists a table's partition indexes, each with its keys resolved to name and type. |
