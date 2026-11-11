@@ -893,9 +893,7 @@ name any queue in the emulator. A sent message answers `200` with
 required parameter that resolves to nothing, such as an empty body for `$request.body`, answers
 `400` with `{"Error":{"Code":"MissingParameter",...}}` (a value of only whitespace is sent as it is,
 since SQS accepts it), and an SQS error is relayed in the same
-shape with its status. A message attribute whose `StringValue` resolves to an empty string, or
-whose `BinaryValue` is empty or not base64, is such an error: `400` with `InvalidParameterValue`.
-`credentialsArn` is stored but not enforced, as for every other integration.
+shape with its status. `credentialsArn` is stored but not enforced, as for every other integration.
 
 A Lambda proxy integration's response is read as AWS reads it (measured): a function that raises, a
 format 1.0 result that is not an object with a `statusCode`, and a `statusCode` that is not a whole
