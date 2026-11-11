@@ -29,16 +29,22 @@ import io.floci.aws.core.common.docker.ContainerSpec;
 import io.floci.aws.core.common.docker.CurrentContainerNetworkResolver;
 import io.floci.aws.core.common.docker.HostBlindPortAllocator;
 import io.floci.aws.core.common.docker.PortAllocator;
+import io.floci.aws.core.common.docker.SidecarHealthHelper;
 import io.floci.aws.testing.ManualClock;
+import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.CsvSource;
+import org.junit.jupiter.params.provider.ValueSource;
+import org.mockito.MockMakers;
+import org.mockito.MockedStatic;
 import org.mockito.Mockito;
 
 import java.io.Closeable;
 import java.time.Duration;
 import java.time.Instant;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
@@ -89,9 +95,11 @@ class EcrRegistryManagerTest {
     private InspectImageCmd inspectImage;
     private RegionResolver regionResolver;
     private EcrRegistryManager manager;
+    private MockedStatic<SidecarHealthHelper> health;
 
     @BeforeEach
     void setUp() {
+        health = Mockito.mockStatic(SidecarHealthHelper.class, Mockito.withSettings().mockMaker(MockMakers.INLINE));
         portAllocator = new HostBlindPortAllocator();
 
         containerBuilder = Mockito.mock(ContainerBuilder.class);
@@ -140,6 +148,78 @@ class EcrRegistryManagerTest {
 
         manager = new EcrRegistryManager(containerBuilder, lifecycleManager, logStreamer,
                 containerDetector, currentContainerNetworkResolver, portAllocator, config, regionResolver);
+    }
+
+    @AfterEach
+    void tearDown() {
+        health.close();
+    }
+
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    void ensureStartedWaitsForRegistryHttpWhenStartingOrAdopting(boolean adopt) {
+        ContainerLifecycleManager.ContainerInfo info =
+                new ContainerLifecycleManager.ContainerInfo("container-id", Map.of());
+        if (adopt) {
+            Container existing = Mockito.mock(Container.class);
+            when(existing.getId()).thenReturn("container-id");
+            when(existing.getPorts()).thenReturn(new ContainerPort[] {
+                    new ContainerPort().withIp("127.0.0.1").withPrivatePort(5000).withPublicPort(BASE_PORT)
+            });
+            when(lifecycleManager.findByName(REGISTRY_NAME)).thenReturn(Optional.of(existing));
+            when(lifecycleManager.adopt("container-id", List.of(5000), Optional.empty())).thenReturn(info);
+        } else {
+            when(lifecycleManager.createAndStart(any())).thenReturn(info);
+        }
+
+        manager.ensureStarted();
+
+        health.verify(() -> SidecarHealthHelper.waitForHealth("http://localhost:" + BASE_PORT, "/v2/"));
+        manager.ensureStarted();
+        health.verifyNoMoreInteractions();
+    }
+
+    @Test
+    void ensureStartedRetriesReadinessAfterHealthCheckFails() {
+        when(lifecycleManager.createAndStart(any())).thenReturn(
+                new ContainerLifecycleManager.ContainerInfo("container-id", Map.of()));
+        health.when(() -> SidecarHealthHelper.waitForHealth("http://localhost:" + BASE_PORT, "/v2/"))
+                .thenThrow(new IllegalStateException("Registry is not healthy"))
+                .thenAnswer(invocation -> null);
+
+        assertFalse(manager.tryEnsureStarted());
+        assertTrue(manager.tryEnsureStarted());
+
+        health.verify(() -> SidecarHealthHelper.waitForHealth("http://localhost:" + BASE_PORT, "/v2/"), times(2));
+        verify(lifecycleManager).createAndStart(any());
+    }
+
+    @Test
+    void ensureStartedReconcilesOnlyAfterHttpReadiness() throws Exception {
+        when(lifecycleManager.createAndStart(any())).thenReturn(
+                new ContainerLifecycleManager.ContainerInfo("container-id", Map.of()));
+        List<String> events = new ArrayList<>();
+        RegistryHttpClient client = Mockito.mock(RegistryHttpClient.class);
+        when(client.baseUrl()).thenReturn("http://localhost:" + BASE_PORT);
+        when(client.catalog()).thenAnswer(invocation -> {
+            events.add("catalog");
+            return List.of("repository");
+        });
+        manager = Mockito.spy(manager);
+        Mockito.doReturn(client).when(manager).httpClient();
+        health.when(() -> SidecarHealthHelper.waitForHealth(client.baseUrl(), "/v2/"))
+                .thenAnswer(invocation -> {
+                    events.add("healthy");
+                    return null;
+                });
+        manager.setReconcileHook(repositories -> {
+            assertEquals(List.of("repository"), repositories);
+            events.add("reconciled");
+        });
+
+        manager.ensureStarted();
+
+        assertEquals(List.of("healthy", "catalog", "reconciled"), events);
     }
 
     @Test
