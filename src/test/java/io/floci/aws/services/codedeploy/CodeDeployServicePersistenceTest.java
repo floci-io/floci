@@ -2,6 +2,7 @@ package io.floci.aws.services.codedeploy;
 
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import io.floci.aws.core.common.AwsException;
 import io.floci.aws.core.common.RegionResolver;
 import io.floci.aws.core.storage.AccountAwareStorageBackend;
 import io.floci.aws.core.storage.InMemoryStorage;
@@ -116,6 +117,33 @@ class CodeDeployServicePersistenceTest {
         String renamedArn = reloaded.deploymentGroupArn(REGION, "rename-app", "new-group");
         assertEquals(List.of(Map.of("Key", "team", "Value", "red")), reloaded.listTagsForResource(renamedArn));
         assertEquals(List.of(), reloaded.listTagsForResource(originalArn));
+    }
+
+    @Test
+    void renamingDeploymentGroupToExistingNamePreservesBothGroupsAndTags() {
+        SharedStorageFactory storage = new SharedStorageFactory();
+        CodeDeployService service = serviceWithStorage(storage);
+        service.createApplication(REGION, "rename-conflict-app", "Server", null);
+        DeploymentGroup source = service.createDeploymentGroup(REGION, "rename-conflict-app", "source",
+                null, "arn:source-role", null, List.of(Map.of("Key", "team", "Value", "red")));
+        DeploymentGroup destination = service.createDeploymentGroup(REGION, "rename-conflict-app", "destination",
+                null, "arn:destination-role", null, List.of(Map.of("Key", "team", "Value", "blue")));
+        String sourceArn = service.deploymentGroupArn(REGION, "rename-conflict-app", "source");
+        String destinationArn = service.deploymentGroupArn(REGION, "rename-conflict-app", "destination");
+
+        AwsException error = assertThrows(AwsException.class, () -> service.updateDeploymentGroup(
+                REGION, "rename-conflict-app", "source", "destination", null, "arn:changed-role", null));
+
+        assertEquals("DeploymentGroupAlreadyExistsException", error.getErrorCode());
+        CodeDeployService reloaded = serviceWithStorage(storage);
+        assertEquals(source.getDeploymentGroupId(),
+                reloaded.getDeploymentGroup(REGION, "rename-conflict-app", "source").getDeploymentGroupId());
+        assertEquals(destination.getDeploymentGroupId(),
+                reloaded.getDeploymentGroup(REGION, "rename-conflict-app", "destination").getDeploymentGroupId());
+        assertEquals("arn:source-role",
+                reloaded.getDeploymentGroup(REGION, "rename-conflict-app", "source").getServiceRoleArn());
+        assertEquals(List.of(Map.of("Key", "team", "Value", "red")), reloaded.listTagsForResource(sourceArn));
+        assertEquals(List.of(Map.of("Key", "team", "Value", "blue")), reloaded.listTagsForResource(destinationArn));
     }
 
     @Test

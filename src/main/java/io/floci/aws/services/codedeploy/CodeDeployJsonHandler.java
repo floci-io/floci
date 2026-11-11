@@ -78,7 +78,7 @@ public class CodeDeployJsonHandler {
     private Response createApplication(JsonNode req, String region) {
         String name = req.path("applicationName").asText(null);
         String computePlatform = req.has("computePlatform") ? req.path("computePlatform").asText() : null;
-        List<Map<String, String>> tags = parseTags(req, "tags");
+        List<Map<String, String>> tags = parseOptionalTags(req, "tags");
         Application app = service.createApplication(region, name, computePlatform, tags);
         return Response.ok(Map.of("applicationId", app.getApplicationId())).build();
     }
@@ -126,7 +126,7 @@ public class CodeDeployJsonHandler {
         String deploymentConfigName = req.has("deploymentConfigName") ? req.path("deploymentConfigName").asText() : null;
         String serviceRoleArn = req.has("serviceRoleArn") ? req.path("serviceRoleArn").asText() : null;
         Map<String, Object> fields = extractGroupFields(req);
-        List<Map<String, String>> tags = parseTags(req, "tags");
+        List<Map<String, String>> tags = parseOptionalTags(req, "tags");
         DeploymentGroup group = service.createDeploymentGroup(region, appName, groupName,
                 deploymentConfigName, serviceRoleArn, fields, tags);
         return Response.ok(Map.of("deploymentGroupId", group.getDeploymentGroupId())).build();
@@ -353,7 +353,7 @@ public class CodeDeployJsonHandler {
     }
 
     private List<Map<String, String>> parseTagFilters(JsonNode req) {
-        if (!req.has("tagFilters")) {
+        if (!req.has("tagFilters") || req.get("tagFilters").isNull()) {
             return List.of();
         }
         JsonNode filterList = req.get("tagFilters");
@@ -367,7 +367,7 @@ public class CodeDeployJsonHandler {
             }
             Map<String, String> values = new HashMap<>();
             for (String member : List.of("Key", "Value", "Type")) {
-                if (filter.has(member)) {
+                if (filter.hasNonNull(member)) {
                     JsonNode value = filter.get(member);
                     if (!value.isTextual()
                             || (member.equals("Type") && !TAG_FILTER_TYPES.contains(value.asText()))) {
@@ -383,6 +383,10 @@ public class CodeDeployJsonHandler {
 
     private List<Map<String, String>> parseTags(JsonNode req, String fieldName) {
         return parseTags(req, fieldName, "InvalidTagsToAddException");
+    }
+
+    private List<Map<String, String>> parseOptionalTags(JsonNode req, String fieldName) {
+        return req.path(fieldName).isNull() ? List.of() : parseTags(req, fieldName);
     }
 
     private List<Map<String, String>> parseTags(JsonNode req, String fieldName, String invalidType) {

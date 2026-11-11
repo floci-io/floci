@@ -468,6 +468,12 @@ public class CodeDeployService {
         Map<String, DeploymentGroup> groupStore = deploymentGroupsFor(region)
                 .computeIfAbsent(appName, a -> new ConcurrentHashMap<>());
 
+        if (newGroupName != null && !newGroupName.equals(currentGroupName)
+                && groupStore.containsKey(newGroupName)) {
+            throw new AwsException("DeploymentGroupAlreadyExistsException",
+                    "Deployment group already exists: " + newGroupName, 400);
+        }
+
         if (deploymentConfigName != null) { group.setDeploymentConfigName(deploymentConfigName); }
         if (serviceRoleArn != null) { group.setServiceRoleArn(serviceRoleArn); }
         applyGroupFields(group, fields);
@@ -1132,6 +1138,7 @@ public class CodeDeployService {
             String key = filter.get("Key");
             String value = filter.get("Value");
             String type = filter.get("Type");
+            if (key == null && type == null) { continue; }
             boolean found = instanceTags.stream().anyMatch(tag -> {
                 if ("VALUE_ONLY".equals(type)) {
                     return value != null && value.equals(tag.get("Value"));

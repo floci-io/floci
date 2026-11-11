@@ -95,6 +95,23 @@ class CodeDeployServiceTest {
                 List.of(Map.of("Key", "team", "Value", "red"))));
     }
 
+    @Test
+    void keylessUntypedOnPremisesFilterStillSelectsRegisteredDeploymentTargets() {
+        service.registerOnPremisesInstance(REGION, "matching-onprem", null, null);
+        service.registerOnPremisesInstance(REGION, "untagged-onprem", null, null);
+        service.addTagsToOnPremisesInstances(REGION, List.of("matching-onprem"),
+                List.of(Map.of("Key", "team", "Value", "red")));
+        service.createApplication(REGION, "keyless-filter-app", "Server", null);
+        service.createDeploymentGroup(REGION, "keyless-filter-app", "group", null, ROLE_ARN,
+                Map.of("onPremisesInstanceTagFilters", List.of(Map.of("Value", "red"))), null);
+
+        String deploymentId = service.createDeployment(REGION, "keyless-filter-app", "group", null,
+                Map.of("appSpecContent", Map.of("content", "os: linux")), null);
+
+        assertEquals(Set.of("matching-onprem", "untagged-onprem"),
+                Set.copyOf(service.listDeploymentTargets(REGION, deploymentId)));
+    }
+
     // ---- Server platform (SSM) hooks ---------------------------------------------------
 
     @Test

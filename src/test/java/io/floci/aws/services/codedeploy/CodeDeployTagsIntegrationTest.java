@@ -74,6 +74,39 @@ class CodeDeployTagsIntegrationTest {
     }
 
     @Test
+    void explicitNullTagsRemainOptional() {
+        String application = "null-tag-app-7949-" + UUID.randomUUID();
+        String group = "null-tag-group-7949-" + UUID.randomUUID();
+        deleteApplicationLater(application);
+        deleteDeploymentGroupLater(application, group);
+
+        given()
+            .header("X-Amz-Target", "CodeDeploy_20141006.CreateApplication")
+            .contentType(CONTENT_TYPE)
+            .body("{\"applicationName\":\"" + application + "\",\"tags\":null}")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200);
+
+        given()
+            .header("X-Amz-Target", "CodeDeploy_20141006.CreateDeploymentGroup")
+            .contentType(CONTENT_TYPE)
+            .body("""
+                {
+                    "applicationName": "%s",
+                    "deploymentGroupName": "%s",
+                    "serviceRoleArn": "arn:aws:iam::000000000000:role/codedeploy",
+                    "tags": null
+                }
+                """.formatted(application, group))
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200);
+    }
+
+    @Test
     void createApplicationRejectsUnmodeledTagShapes() {
         String[] invalidTags = {
             "[{\"key\":\"team\",\"value\":\"red\"}]",
@@ -83,8 +116,9 @@ class CodeDeployTagsIntegrationTest {
         };
         for (int i = 0; i < invalidTags.length; i++) {
             String application = "invalid-tag-app-7949-" + UUID.randomUUID();
+            String applicationArn = "arn:aws:codedeploy:us-east-1:000000000000:application:" + application;
             deleteApplicationLater(application);
-            untagLater("arn:aws:codedeploy:us-east-1:000000000000:application:" + application);
+            untagLater(applicationArn);
             given()
                 .header("X-Amz-Target", "CodeDeploy_20141006.CreateApplication")
                 .contentType(CONTENT_TYPE)
@@ -92,7 +126,28 @@ class CodeDeployTagsIntegrationTest {
             .when()
                 .post("/")
             .then()
-                .statusCode(400);
+                .statusCode(400)
+                .body("__type", equalTo("InvalidTagsToAddException"));
+
+            given()
+                .header("X-Amz-Target", "CodeDeploy_20141006.GetApplication")
+                .contentType(CONTENT_TYPE)
+                .body("{\"applicationName\":\"" + application + "\"}")
+            .when()
+                .post("/")
+            .then()
+                .statusCode(400)
+                .body("__type", equalTo("ApplicationDoesNotExistException"));
+
+            given()
+                .header("X-Amz-Target", "CodeDeploy_20141006.ListTagsForResource")
+                .contentType(CONTENT_TYPE)
+                .body("{\"ResourceArn\":\"" + applicationArn + "\"}")
+            .when()
+                .post("/")
+            .then()
+                .statusCode(200)
+                .body("Tags", hasSize(0));
         }
     }
 
@@ -101,6 +156,8 @@ class CodeDeployTagsIntegrationTest {
         String application = "invalid-tag-group-app-7949-" + UUID.randomUUID();
         String group = "invalid-tag-group-7949-" + UUID.randomUUID();
         String applicationArn = "arn:aws:codedeploy:us-east-1:000000000000:application:" + application;
+        String groupArn = "arn:aws:codedeploy:us-east-1:000000000000:deploymentgroup:"
+                + application + "/" + group;
         deleteApplicationLater(application);
         given()
             .header("X-Amz-Target", "CodeDeploy_20141006.CreateApplication")
@@ -126,7 +183,29 @@ class CodeDeployTagsIntegrationTest {
         .when()
             .post("/")
         .then()
-            .statusCode(400);
+            .statusCode(400)
+            .body("__type", equalTo("InvalidTagsToAddException"));
+
+        given()
+            .header("X-Amz-Target", "CodeDeploy_20141006.GetDeploymentGroup")
+            .contentType(CONTENT_TYPE)
+            .body("{\"applicationName\":\"" + application
+                    + "\",\"deploymentGroupName\":\"" + group + "\"}")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(400)
+            .body("__type", equalTo("DeploymentGroupDoesNotExistException"));
+
+        given()
+            .header("X-Amz-Target", "CodeDeploy_20141006.ListTagsForResource")
+            .contentType(CONTENT_TYPE)
+            .body("{\"ResourceArn\":\"" + groupArn + "\"}")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("Tags", hasSize(0));
 
         untagLater(applicationArn);
         given()
@@ -141,7 +220,18 @@ class CodeDeployTagsIntegrationTest {
         .when()
             .post("/")
         .then()
-            .statusCode(400);
+            .statusCode(400)
+            .body("__type", equalTo("InvalidTagsToAddException"));
+
+        given()
+            .header("X-Amz-Target", "CodeDeploy_20141006.ListTagsForResource")
+            .contentType(CONTENT_TYPE)
+            .body("{\"ResourceArn\":\"" + applicationArn + "\"}")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("Tags", hasSize(0));
     }
 
     @Test
