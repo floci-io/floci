@@ -28,6 +28,7 @@ import regen_ecs_shapes
 import regen_emr_serverless_shapes
 import regen_iam_shapes
 import regen_kinesis_shapes
+import regen_lambda_microvm_shapes
 import regen_payment_cryptography_data_shapes
 import regen_payment_cryptography_shapes
 import regen_logs_delivery_shapes
@@ -441,6 +442,7 @@ def vendored(script) -> tuple[str, ...]:
     regen_rekognition_shapes,
     regen_athena_shapes,
     regen_cur_shapes,
+    regen_lambda_microvm_shapes,
 ])
 def test_each_vendored_constraints_file_carries_its_operations_and_resolves_its_shapes(script):
     doc = json.loads(script.OUTPUT.read_text(encoding="utf-8"))

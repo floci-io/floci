@@ -112,6 +112,25 @@ class LambdaMicrovmsServicePersistenceTest {
     }
 
     @Test
+    void requestedMicrovmRunSettingsSurviveARestart() {
+        LambdaMicrovmsService first = process();
+        createImage(first, "run-image");
+        first.updateImage(REGION, "run-image", "arn:aws:lambda:us-east-1::microvm-image/al2023-1",
+                "arn:aws:iam::000000000000:role/build", "s3://bucket/next.zip", null);
+        LambdaMicrovmsService.RunSettings settings = new LambdaMicrovmsService.RunSettings(
+                "1.0", "arn:aws:iam::000000000000:role/runtime", List.of("ingress"), List.of("egress"),
+                3600, false, 60, 0);
+        LambdaMicrovmsService.Microvm created = first.runMicrovm(REGION, ACCOUNT_ID, "run-image", settings);
+        assertEquals("PENDING", created.state);
+        assertEquals(settings, created.runSettings);
+
+        LambdaMicrovmsService.Microvm reloaded = process().getMicrovm(REGION, created.microvmId);
+        assertEquals("RUNNING", reloaded.state);
+        assertEquals("1.0", reloaded.imageVersion);
+        assertEquals(settings, reloaded.runSettings);
+    }
+
+    @Test
     void tagMutationsReachTheBackend() {
         LambdaMicrovmsService first = process();
         String arn = createImage(first, "probe-image").imageArn;

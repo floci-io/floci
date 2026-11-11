@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
-"""Vendor MicroVM image request-body constraints from the pinned botocore service model.
+"""Vendor MicroVM request-body constraints from the pinned botocore service model.
 
 URI, query and header members are transport inputs, outside the JSON body checked by
-LambdaMicrovmImageRequestShapes. All modeled body constraints remain in the generated resource.
+LambdaMicrovmRequestShapes. All modeled body constraints remain in the generated resource.
 """
 from __future__ import annotations
 
@@ -11,9 +11,9 @@ from pathlib import Path
 
 import request_shapes
 
-OUTPUT = request_shapes.REPO_ROOT / "src/main/resources/aws/lambda-microvm-image-request-shapes.json"
+OUTPUT = request_shapes.REPO_ROOT / "src/main/resources/aws/lambda-microvm-request-shapes.json"
 MODEL = Path("lambda-microvms/2025-09-09")
-OPERATIONS = ("CreateMicrovmImage", "UpdateMicrovmImage")
+OPERATIONS = ("CreateMicrovmImage", "UpdateMicrovmImage", "RunMicrovm")
 
 
 def body_members(model: dict) -> dict:
