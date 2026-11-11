@@ -677,7 +677,7 @@ public class ApiGatewayV2OpenApiImporter {
             Map<String, String> requestParameters = (Map<String, String>) request.get("requestParameters");
             ApiGatewayV2Service.validateIntegrationSubtype("HTTP", (String) request.get("integrationType"),
                     integrationSubtype, (String) request.getOrDefault("payloadFormatVersion",
-                            integrationSubtype != null ? "1.0" : "2.0"),
+                            ApiGatewayV2Service.defaultPayloadFormatVersion(integrationSubtype)),
                     requestParameters);
         });
     }
