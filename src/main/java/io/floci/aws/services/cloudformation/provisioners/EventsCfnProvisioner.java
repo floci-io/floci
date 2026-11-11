@@ -406,12 +406,13 @@ public class EventsCfnProvisioner implements CfnResourceProvisioner {
         validateEventBusProperties(props);
         String existingBusName = ctx.isUpdate() ? ctx.priorPhysicalId() : null;
         String busName = ctx.resolveOptional(props, "Name");
-        String eventSourceName;
-        if (existingBusName != null && existingBusName.equals(busName)) {
-            eventSourceName = busName.indexOf('/') >= 0 ? busName : null;
-        } else {
-            eventSourceName = ctx.resolveOptional(props, "EventSourceName");
+        String eventSourceName = ctx.resolveOptional(props, "EventSourceName");
+        boolean sameBus = existingBusName != null && existingBusName.equals(busName);
+        if (eventSourceName != null || !sameBus) {
             validateEventBusName(busName, eventSourceName);
+        }
+        if (sameBus) {
+            eventSourceName = busName.indexOf('/') >= 0 ? busName : null;
         }
         if (existingBusName != null && !existingBusName.equals(busName)) {
             throw new AwsException("ValidationError",

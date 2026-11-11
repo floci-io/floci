@@ -608,7 +608,7 @@ class CloudFormationEventBusIntegrationTest {
     }
 
     @Test
-    void partnerEventBusUpdateTreatsEventSourceNameAsMetadata() {
+    void partnerEventBusUpdateValidatesASuppliedEventSourceName() {
         String suffix = Long.toString(System.nanoTime(), 36);
         String busName = "aws.partner/example.com/cfn-update-" + suffix;
         String stackName = "eventbus-partner-update-" + suffix;
@@ -630,8 +630,15 @@ class CloudFormationEventBusIntegrationTest {
                 """.formatted(busName));
         assertStackStatus(stackName, "UPDATE_COMPLETE");
 
-        updateStack(stackName, partnerEventBusTemplate(busName, "aws.partner/example.com/other-" + suffix));
+        updateStack(stackName, partnerEventBusTemplate(busName, busName));
         assertStackStatus(stackName, "UPDATE_COMPLETE");
+
+        updateStack(stackName, partnerEventBusTemplate(busName, "aws.partner/example.com/other-" + suffix));
+        assertStackStatus(stackName, "UPDATE_ROLLBACK_COMPLETE");
+        String events = describeStackEvents(stackName);
+        if (!events.contains("Name must match EventSourceName")) {
+            throw new AssertionError("partner-name mismatch on update was not preserved: " + events);
+        }
 
         assertEquals(busArn, callEventBridge("AWSEvents.DescribeEventBus",
                 "{\"Name\":\"" + busName + "\"}", 200).getString("Arn"));
