@@ -691,6 +691,13 @@ plain, so branding is stored and returned rather than rendered. Two divergences 
 | `POST /cognito-idp/oauth2/revoke`                    | OAuth refresh token revocation endpoint                          |
 | `GET`, `POST /cognito-idp/oauth2/userInfo`           | OIDC userInfo endpoint, for a user's access token                |
 
+`token`, `revoke` and `userInfo` answer CORS as AWS does, so a browser app can call them with
+`fetch` from any origin, on Floci's host and on a custom domain alike: a response to a request
+with an `Origin` echoes it in `Access-Control-Allow-Origin`, with
+`Access-Control-Allow-Credentials: true`, on success and on error. A preflight is answered with
+200, the requested method and headers, and `Access-Control-Max-Age: 1800`. As on AWS,
+`authorize` and `logout`, which the browser navigates to, carry no CORS headers.
+
 The OAuth endpoints support browser-style authorization-code sign-in, for the pool's own
 users and through a federated OIDC provider, as well as the emulator-friendly
 client-credentials flow:
