@@ -847,6 +847,16 @@ authorizer's context into request headers, query strings, and paths. For a retur
 `requestParameters`. String, numeric, and boolean context values are rendered as
 text. This works with format `1.0` policy responses and format `2.0` simple responses.
 
+HTTP API `HTTP_PROXY` header, query string and path mappings also read `$request.body`,
+`$request.body.<JSONPath>`, `$stageVariables.<name>` and the `$context` variables `accountId`,
+`apiId`, `domainName`, `domainPrefix`, `extendedRequestId`, `httpMethod`, `path`, `protocol`,
+`requestTime`, `requestTimeEpoch`, `routeKey` and `stage`, alongside `requestId`,
+`identity.sourceIp` and the authorizer values above. A JSONPath that selects a scalar maps its text,
+and one that selects an object or array maps its JSON. A missing field, an empty body or a body
+that is not JSON resolves to nothing, so that header or query mapping is skipped, and the same
+expression embedded in an `overwrite:path` value such as `/orders/$request.body.order.id` becomes
+an empty string. Floci evaluates the whole body, where AWS reads only its first 100 KB.
+
 HTTP API `AWS_PROXY` integrations accept every `integrationSubtype` AWS defines:
 `EventBridge-PutEvents`, `SQS-SendMessage`, `SQS-ReceiveMessage`, `SQS-DeleteMessage`,
 `SQS-PurgeQueue`, `AppConfig-GetConfiguration`, `Kinesis-PutRecord`,
