@@ -3968,6 +3968,38 @@ public class RdsService implements Resettable, ResourceProvider {
         return instance;
     }
 
+    /**
+     * Gives a DB instance exactly the VPC security groups {@code groupIds}, as CloudFormation sets
+     * them on an update and puts them back on a rollback. ModifyDBInstance keeps the groups when the
+     * request names none; here an empty list leaves the instance with none, as one created without.
+     */
+    public synchronized DbInstance setDbInstanceVpcSecurityGroups(String region, String instanceId,
+                                                                  List<String> groupIds) {
+        String effectiveRegion = effectiveRegion(region);
+        DbInstance instance = getDbInstance(instanceId, effectiveRegion);
+        requireAvailableInstance(instance, instanceId);
+        instance.setVpcSecurityGroupIds(groupIds);
+        putInstanceForScope(currentAccountId(), effectiveRegion, instanceId, instance);
+        LOG.infov("DB instance {0} security groups set to {1}", instanceId, groupIds);
+        return RESPONSE_COPIER.convertValue(instance, DbInstance.class);
+    }
+
+    /**
+     * The groups AWS's CloudFormation handler gives a standalone DB instance whose template stops
+     * declaring {@code VPCSecurityGroups}: the default security group of its VPC, or none when EC2
+     * has no default group for it.
+     */
+    public List<String> defaultVpcSecurityGroupIds(String region, String instanceId) {
+        String effectiveRegion = effectiveRegion(region);
+        String vpcId = getDbInstance(instanceId, effectiveRegion).getVpcId();
+        if (isBlank(vpcId)) {
+            return List.of();
+        }
+        return ec2Service.defaultSecurityGroupOf(effectiveRegion, vpcId)
+                .map(group -> List.of(group.getGroupId()))
+                .orElse(List.of());
+    }
+
     private static void validateInstanceSettings(DbInstanceSettings settings) {
         settings.validate();
     }

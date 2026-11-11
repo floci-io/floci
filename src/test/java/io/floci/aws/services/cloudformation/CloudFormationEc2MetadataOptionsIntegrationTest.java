@@ -320,24 +320,17 @@ class CloudFormationEc2MetadataOptionsIntegrationTest {
                   "Outputs": {"InstanceId": {"Value": {"Ref": "Inst"}}}
                 }
                 """.formatted(createdOptions);
-        // The second instance names a launch template that does not exist, so it fails after Inst
-        // has been updated, which it depends on.
         String failing = """
                 {
                   "Resources": {
                     "Inst": {
                       "Type": "AWS::EC2::Instance",
                       "Properties": {"ImageId": "ami-12345678", "MetadataOptions": {"HttpTokens": "%s"}}
-                    },
-                    "Later": {
-                      "Type": "AWS::EC2::Instance",
-                      "DependsOn": "Inst",
-                      "Properties": {"LaunchTemplate": {"LaunchTemplateId": "lt-0123456789abcdef0", "Version": "1"}}
-                    }
+                    }%s
                   },
                   "Outputs": {"InstanceId": {"Value": {"Ref": "Inst"}}}
                 }
-                """.formatted(updatedTokens);
+                """.formatted(updatedTokens, CfnStackWaits.failingResourceAfter("Inst"));
         try {
             cfn("CreateStack", stackName, created);
             String instanceId = output(describeStack(stackName, "CREATE_COMPLETE"), "InstanceId");
