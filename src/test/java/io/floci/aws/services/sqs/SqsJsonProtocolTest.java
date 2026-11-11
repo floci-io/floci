@@ -1090,84 +1090,104 @@ class SqsJsonProtocolTest {
         String attributeQueueUrl = given()
             .contentType(CONTENT_TYPE)
             .header("X-Amz-Target", "AmazonSQS.CreateQueue")
-            .body("{\"QueueName\":\"json-attribute-value-queue\"}")
+            .body("{\"QueueName\":\"json-attribute-value-queue\","
+                    + "\"Attributes\":{\"MaximumMessageSize\":\"1024\"}}")
         .when().post("/").then().statusCode(200)
             .extract().jsonPath().getString("QueueUrl");
 
-        given()
-            .contentType(CONTENT_TYPE)
-            .header("X-Amz-Target", "AmazonSQS.SendMessage")
-            .body("{\"QueueUrl\":\"" + attributeQueueUrl + "\",\"MessageBody\":\"x\","
-                    + "\"MessageAttributes\":{\"empty\":{\"DataType\":\"String\",\"StringValue\":\"\"}}}")
-        .when().post("/").then()
-            .statusCode(400)
-            .body("__type", equalTo("InvalidParameterValue"))
-            .body("message", equalTo(
-                    "Message (user) attribute 'empty' must contain a non-empty value of type 'String'."));
+        try {
+            given()
+                .contentType(CONTENT_TYPE)
+                .header("X-Amz-Target", "AmazonSQS.SendMessage")
+                .body("{\"QueueUrl\":\"" + attributeQueueUrl + "\",\"MessageBody\":\"x\","
+                        + "\"MessageAttributes\":{\"empty\":{\"DataType\":\"String\",\"StringValue\":\"\"}}}")
+            .when().post("/").then()
+                .statusCode(400)
+                .body("__type", equalTo("InvalidParameterValue"))
+                .body("message", equalTo(
+                        "Message (user) attribute 'empty' must contain a non-empty value of type 'String'."));
 
-        given()
-            .contentType(CONTENT_TYPE)
-            .header("X-Amz-Target", "AmazonSQS.SendMessage")
-            .body("{\"QueueUrl\":\"" + attributeQueueUrl + "\",\"MessageBody\":\"x\","
-                    + "\"MessageAttributes\":{\"bin\":{\"DataType\":\"Binary\",\"BinaryValue\":\"not base64!\"}}}")
-        .when().post("/").then()
-            .statusCode(400)
-            .body("__type", equalTo("InvalidParameterValue"))
-            .body("message", equalTo("Message (user) attribute 'bin' has an invalid binary value."));
+            given()
+                .contentType(CONTENT_TYPE)
+                .header("X-Amz-Target", "AmazonSQS.SendMessage")
+                .body("{\"QueueUrl\":\"" + attributeQueueUrl + "\",\"MessageBody\":\"x\","
+                        + "\"MessageAttributes\":{\"count\":{\"DataType\":\"Number.int\",\"StringValue\":\"\"}}}")
+            .when().post("/").then()
+                .statusCode(400)
+                .body("__type", equalTo("InvalidParameterValue"))
+                .body("message", equalTo(
+                        "Message (user) attribute 'count' must contain a non-empty value of type 'Number'."));
 
-        given()
-            .contentType(CONTENT_TYPE)
-            .header("X-Amz-Target", "AmazonSQS.SendMessage")
-            .body("{\"QueueUrl\":\"" + attributeQueueUrl + "\",\"MessageBody\":\"x\","
-                    + "\"MessageAttributes\":{\"bin\":{\"DataType\":\"Binary\",\"BinaryValue\":\"\"}}}")
-        .when().post("/").then()
-            .statusCode(400)
-            .body("__type", equalTo("InvalidParameterValue"))
-            .body("message", equalTo(
-                    "Message (user) attribute 'bin' must contain a non-empty value of type 'Binary'."));
+            given()
+                .contentType(CONTENT_TYPE)
+                .header("X-Amz-Target", "AmazonSQS.SendMessage")
+                .body("{\"QueueUrl\":\"" + attributeQueueUrl + "\",\"MessageBody\":\"x\","
+                        + "\"MessageAttributes\":{\"bin\":{\"DataType\":\"Binary\",\"BinaryValue\":\"not base64!\"}}}")
+            .when().post("/").then()
+                .statusCode(400)
+                .body("__type", equalTo("InvalidParameterValue"))
+                .body("message", equalTo("Message (user) attribute 'bin' has an invalid binary value."));
 
-        given()
-            .contentType(CONTENT_TYPE)
-            .header("X-Amz-Target", "AmazonSQS.SendMessage")
-            .body("{\"QueueUrl\":\"" + attributeQueueUrl + "\",\"MessageBody\":\"x\","
-                    + "\"MessageAttributes\":{\"novalue\":{\"DataType\":\"String\"}}}")
-        .when().post("/").then()
-            .statusCode(400)
-            .body("__type", equalTo("InvalidParameterValue"))
-            .body("message", equalTo(
-                    "Message (user) attribute 'novalue' must contain a non-empty value of type 'String'."));
+            given()
+                .contentType(CONTENT_TYPE)
+                .header("X-Amz-Target", "AmazonSQS.SendMessage")
+                .body("{\"QueueUrl\":\"" + attributeQueueUrl + "\",\"MessageBody\":\"x\","
+                        + "\"MessageAttributes\":{\"bin\":{\"DataType\":\"Binary\",\"BinaryValue\":\"\"}}}")
+            .when().post("/").then()
+                .statusCode(400)
+                .body("__type", equalTo("InvalidParameterValue"))
+                .body("message", equalTo(
+                        "Message (user) attribute 'bin' must contain a non-empty value of type 'Binary'."));
 
-        given()
-            .contentType(CONTENT_TYPE)
-            .header("X-Amz-Target", "AmazonSQS.SendMessage")
-            .body("{\"QueueUrl\":\"" + attributeQueueUrl + "\",\"MessageBody\":\"x\","
-                    + "\"MessageAttributes\":{\"notype\":{\"StringValue\":\"v\"}}}")
-        .when().post("/").then()
-            .statusCode(400)
-            .body("__type", equalTo("InvalidParameterValue"))
-            .body("message", equalTo("Missing required parameter DataType"));
+            given()
+                .contentType(CONTENT_TYPE)
+                .header("X-Amz-Target", "AmazonSQS.SendMessage")
+                .body("{\"QueueUrl\":\"" + attributeQueueUrl + "\",\"MessageBody\":\"x\","
+                        + "\"MessageAttributes\":{\"novalue\":{\"DataType\":\"String\"}}}")
+            .when().post("/").then()
+                .statusCode(400)
+                .body("__type", equalTo("InvalidParameterValue"))
+                .body("message", equalTo(
+                        "Message (user) attribute 'novalue' must contain a non-empty value of type 'String'."));
 
-        given()
-            .contentType(CONTENT_TYPE)
-            .header("X-Amz-Target", "AmazonSQS.SendMessageBatch")
-            .body("{\"QueueUrl\":\"" + attributeQueueUrl + "\",\"Entries\":["
-                    + "{\"Id\":\"ok\",\"MessageBody\":\"x\",\"MessageAttributes\":"
-                    + "{\"bin\":{\"DataType\":\"Binary\",\"BinaryValue\":\"AQID\"}}},"
-                    + "{\"Id\":\"empty\",\"MessageBody\":\"x\",\"MessageAttributes\":"
-                    + "{\"a\":{\"DataType\":\"Number\",\"StringValue\":\"\"}}},"
-                    + "{\"Id\":\"bad-binary\",\"MessageBody\":\"x\",\"MessageAttributes\":"
-                    + "{\"b\":{\"DataType\":\"Binary\",\"BinaryValue\":\"not base64!\"}}},"
-                    + "{\"Id\":\"plain\",\"MessageBody\":\"x\"}]}")
-        .when().post("/").then()
-            .statusCode(200)
-            .body("Successful.Id", containsInAnyOrder("ok", "plain"))
-            .body("Failed.Id", contains("empty", "bad-binary"))
-            .body("Failed.Code", everyItem(equalTo("InvalidParameterValue")))
-            .body("Failed.SenderFault", everyItem(equalTo(true)))
-            .body("Failed[0].Message", equalTo(
-                    "Message (user) attribute 'a' must contain a non-empty value of type 'Number'."));
+            given()
+                .contentType(CONTENT_TYPE)
+                .header("X-Amz-Target", "AmazonSQS.SendMessage")
+                .body("{\"QueueUrl\":\"" + attributeQueueUrl + "\",\"MessageBody\":\"x\","
+                        + "\"MessageAttributes\":{\"notype\":{\"StringValue\":\"v\"}}}")
+            .when().post("/").then()
+                .statusCode(400)
+                .body("__type", equalTo("InvalidParameterValue"))
+                .body("message", equalTo("Missing required parameter DataType"));
 
-        assertMessageCounts(attributeQueueUrl, "2", "0");
+            given()
+                .contentType(CONTENT_TYPE)
+                .header("X-Amz-Target", "AmazonSQS.SendMessageBatch")
+                .body("{\"QueueUrl\":\"" + attributeQueueUrl + "\",\"Entries\":["
+                        + "{\"Id\":\"ok\",\"MessageBody\":\"x\",\"MessageAttributes\":"
+                        + "{\"bin\":{\"DataType\":\"Binary\",\"BinaryValue\":\"AQID\"}}},"
+                        + "{\"Id\":\"empty\",\"MessageBody\":\"" + "x".repeat(1024) + "\",\"MessageAttributes\":"
+                        + "{\"a\":{\"DataType\":\"Number\",\"StringValue\":\"\"}}},"
+                        + "{\"Id\":\"bad-binary\",\"MessageBody\":\"x\",\"MessageAttributes\":"
+                        + "{\"b\":{\"DataType\":\"Binary\",\"BinaryValue\":\"not base64!\"}}},"
+                        + "{\"Id\":\"plain\",\"MessageBody\":\"x\"}]}")
+            .when().post("/").then()
+                .statusCode(200)
+                .body("Successful.Id", containsInAnyOrder("ok", "plain"))
+                .body("Failed.Id", contains("empty", "bad-binary"))
+                .body("Failed.Code", everyItem(equalTo("InvalidParameterValue")))
+                .body("Failed.SenderFault", everyItem(equalTo(true)))
+                .body("Failed[0].Message", equalTo(
+                        "Message (user) attribute 'a' must contain a non-empty value of type 'Number'."));
+
+            assertMessageCounts(attributeQueueUrl, "2", "0");
+        } finally {
+            given()
+                .contentType(CONTENT_TYPE)
+                .header("X-Amz-Target", "AmazonSQS.DeleteQueue")
+                .body("{\"QueueUrl\":\"" + attributeQueueUrl + "\"}")
+            .when().post("/");
+        }
     }
 
     @Test

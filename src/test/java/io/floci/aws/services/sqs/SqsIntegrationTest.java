@@ -1082,6 +1082,8 @@ class SqsIntegrationTest {
             .contentType("application/x-www-form-urlencoded")
             .formParam("Action", "CreateQueue")
             .formParam("QueueName", "query-attribute-value-queue")
+            .formParam("Attribute.1.Name", "MaximumMessageSize")
+            .formParam("Attribute.1.Value", "1024")
         .when().post("/").then().statusCode(200)
             .extract().xmlPath().getString("CreateQueueResponse.CreateQueueResult.QueueUrl");
 
@@ -1164,7 +1166,7 @@ class SqsIntegrationTest {
                 .formParam("SendMessageBatchRequestEntry.1.MessageAttribute.1.Value.DataType", "Binary")
                 .formParam("SendMessageBatchRequestEntry.1.MessageAttribute.1.Value.BinaryValue", "AQID")
                 .formParam("SendMessageBatchRequestEntry.2.Id", "empty")
-                .formParam("SendMessageBatchRequestEntry.2.MessageBody", "x")
+                .formParam("SendMessageBatchRequestEntry.2.MessageBody", "x".repeat(1024))
                 .formParam("SendMessageBatchRequestEntry.2.MessageAttribute.1.Name", "a")
                 .formParam("SendMessageBatchRequestEntry.2.MessageAttribute.1.Value.DataType", "Number")
                 .formParam("SendMessageBatchRequestEntry.2.MessageAttribute.1.Value.StringValue", "")
@@ -1182,6 +1184,8 @@ class SqsIntegrationTest {
                         everyItem(equalTo("InvalidParameterValue")))
                 .body("SendMessageBatchResponse.SendMessageBatchResult.BatchResultErrorEntry.SenderFault",
                         everyItem(equalTo("true")));
+
+            assertEquals("1", allQueueAttributes(attributeQueueUrl).get("ApproximateNumberOfMessages"));
         } finally {
             given()
                 .contentType("application/x-www-form-urlencoded")
