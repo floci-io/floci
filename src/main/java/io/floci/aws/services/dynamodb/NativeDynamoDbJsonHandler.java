@@ -48,6 +48,7 @@ import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.function.BiConsumer;
 import java.util.function.Consumer;
 import java.util.function.Supplier;
 import java.util.regex.Pattern;
@@ -2491,23 +2492,17 @@ public class NativeDynamoDbJsonHandler {
         if (stream.isObject() && !stream.hasNonNull("StreamEnabled")) {
             violations.add(SmithyValidationErrors.notNull("streamSpecification.streamEnabled"));
         }
-        List<JsonNode> definitions = listMembers(request.path("AttributeDefinitions"));
-        for (int i = 0; i < definitions.size(); i++) {
-            String member = "attributeDefinitions." + (i + 1) + ".member";
-            addRequiredEnumError(definitions.get(i), "AttributeType", member + ".attributeType", ATTRIBUTE_TYPES,
-                    violations);
-            addAttributeNameError(definitions.get(i), member + ".attributeName", violations);
-        }
+        forEachMember(request.path("AttributeDefinitions"), "attributeDefinitions", (definition, member) -> {
+            addRequiredEnumError(definition, "AttributeType", member + ".attributeType", ATTRIBUTE_TYPES, violations);
+            addAttributeNameError(definition, member + ".attributeName", violations);
+        });
         addIndexViolations(request.path("LocalSecondaryIndexes"), "localSecondaryIndexes", false, violations);
         return violations.subList(0, Math.min(violations.size(), 10));
     }
 
     // A local secondary index has no ProvisionedThroughput member, so DynamoDB ignores one there.
     private static void addIndexViolations(JsonNode indexes, String path, boolean global, List<String> violations) {
-        List<JsonNode> members = listMembers(indexes);
-        for (int i = 0; i < members.size(); i++) {
-            JsonNode index = members.get(i);
-            String member = path + "." + (i + 1) + ".member";
+        forEachMember(indexes, path, (index, member) -> {
             violations.addAll(indexNameViolations(index.path("IndexName"), member + ".indexName"));
             if (index.hasNonNull("KeySchema")) {
                 addKeySchemaViolations(index.get("KeySchema"), member + ".keySchema", violations);
@@ -2523,7 +2518,7 @@ public class NativeDynamoDbJsonHandler {
                 violations.addAll(throughputViolations(index.path("ProvisionedThroughput"),
                         member + ".provisionedThroughput"));
             }
-        }
+        });
     }
 
     // A table key schema over two elements is refused later, with its own message.
@@ -2531,22 +2526,21 @@ public class NativeDynamoDbJsonHandler {
         if (!keySchema.isArray()) {
             return;
         }
-        List<JsonNode> elements = listMembers(keySchema);
-        if (elements.isEmpty()) {
+        if (keySchema.isEmpty()) {
             violations.add(SmithyValidationErrors.lengthTooShort(path, "[]", 1));
         }
-        for (int i = 0; i < elements.size(); i++) {
-            String member = path + "." + (i + 1) + ".member";
-            addAttributeNameError(elements.get(i), member + ".attributeName", violations);
-            addRequiredEnumError(elements.get(i), "KeyType", member + ".keyType", KEY_TYPES, violations);
-        }
+        forEachMember(keySchema, path, (element, member) -> {
+            addAttributeNameError(element, member + ".attributeName", violations);
+            addRequiredEnumError(element, "KeyType", member + ".keyType", KEY_TYPES, violations);
+        });
     }
 
     // DynamoDB quotes the whole NonKeyAttributes list in each of its errors.
     private static void addProjectionViolations(JsonNode projection, String path, List<String> violations) {
         JsonNode nonKeyAttributes = projection.path("NonKeyAttributes");
         if (nonKeyAttributes.isArray()) {
-            List<String> names = listMembers(nonKeyAttributes).stream().map(JsonNode::asText).toList();
+            List<String> names = new ArrayList<>();
+            nonKeyAttributes.forEach(name -> names.add(name.isNull() ? null : name.asText()));
             String nonKeyPath = path + ".nonKeyAttributes";
             String value = names.toString();
             if (names.isEmpty()) {
@@ -2555,7 +2549,8 @@ public class NativeDynamoDbJsonHandler {
                 violations.add(SmithyValidationErrors.Violations.QUOTED.constraint(nonKeyPath, value,
                         "Member must have length less than or equal to 20"));
             }
-            if (names.stream().anyMatch(name -> name.isEmpty() || 255 < name.codePointCount(0, name.length()))) {
+            if (names.stream().anyMatch(name -> name != null
+                    && (name.isEmpty() || 255 < name.codePointCount(0, name.length())))) {
                 violations.add(SmithyValidationErrors.Violations.QUOTED.constraint(nonKeyPath, value,
                         "Member must satisfy constraint: " + SmithyValidationErrors.constraintSet(1, 255, null, null)));
             }
@@ -2579,15 +2574,14 @@ public class NativeDynamoDbJsonHandler {
         }
     }
 
-    // DynamoDB drops the null members of a list before it checks the list.
-    private static List<JsonNode> listMembers(JsonNode list) {
-        List<JsonNode> members = new ArrayList<>();
-        list.forEach(member -> {
-            if (!member.isNull()) {
-                members.add(member);
+    // DynamoDB skips a null member here, but still counts it in the positions and in the list length.
+    private static void forEachMember(JsonNode list, String path, BiConsumer<JsonNode, String> check) {
+        for (int i = 0; i < list.size(); i++) {
+            JsonNode member = list.get(i);
+            if (member != null && !member.isNull()) {
+                check.accept(member, path + "." + (i + 1) + ".member");
             }
-        });
-        return members;
+        }
     }
 
     private static RestoreOverrides parseRestoreOverrides(JsonNode request) {
