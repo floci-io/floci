@@ -45,16 +45,6 @@ class IamRestRouteCoverageTest {
     private static final Set<String> ROUTED_NAMESPACES = Set.of("s3", "apigateway", "lambda");
 
     /**
-     * Operations Floci does not serve, whose request runs as another operation instead and so is checked
-     * as that one: S3 has no bucket metadata configuration, and {@code ?metadataConfiguration} on a
-     * bucket falls through to ListObjects and DeleteBucket. Checking it as the metadata table action
-     * would let that action list or delete the bucket.
-     */
-    private static final Map<String, String> RUN_AS_ANOTHER_OPERATION = Map.of(
-            "GetBucketMetadataConfiguration", "s3:ListBucket",
-            "DeleteBucketMetadataConfiguration", "s3:DeleteBucket");
-
-    /**
      * The S3 Control operations Floci serves, the rest-routes entry of which is a route the
      * registry maps. Every other operation of the s3control model has no route in Floci: the
      * request falls through to the S3 data plane and is checked as the object or bucket
@@ -110,7 +100,7 @@ class IamRestRouteCoverageTest {
             while (entries.hasNext()) {
                 Map.Entry<String, JsonNode> entry = entries.next();
                 List<Route> routes = routesOf(models, namespace, entry.getKey());
-                String expected = RUN_AS_ANOTHER_OPERATION.getOrDefault(entry.getKey(), entry.getValue().asText());
+                String expected = entry.getValue().asText();
                 tests.add(DynamicTest.dynamicTest(namespace + " " + entry.getKey(), () -> {
                     assertFalse(routes.isEmpty(), "no model route for " + entry.getKey());
                     for (Route route : routes) {
@@ -144,8 +134,7 @@ class IamRestRouteCoverageTest {
                 Map.Entry<String, JsonNode> operation = operations.next();
                 Route route = new Route(scope, model, operation.getKey(), operation.getValue().path("method").asText(),
                         operation.getValue().path("requestUri").asText());
-                String action = RUN_AS_ANOTHER_OPERATION.getOrDefault(operation.getKey(),
-                        authorized.path(scope).path(operation.getKey()).asText(scope + ":" + operation.getKey()));
+                String action = authorized.path(scope).path(operation.getKey()).asText(scope + ":" + operation.getKey());
                 boolean read = requestResources.path("operations").has(scope + ":" + operation.getKey());
                 String expected = handBuilt.contains(scope) || read
                         || IamAuthorizedActions.actsOnNoResourceType(action)

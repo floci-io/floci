@@ -112,6 +112,31 @@ class CodeDeployServiceTest {
                 Set.copyOf(service.listDeploymentTargets(REGION, deploymentId)));
     }
 
+    @Test
+    void deploymentGroupMatchesAnyOnPremisesTagFilterWithoutChangingListFiltering() {
+        for (String name : List.of("team-only", "role-only", "both", "neither")) {
+            service.registerOnPremisesInstance(REGION, name, null, null);
+        }
+        service.addTagsToOnPremisesInstances(REGION, List.of("team-only", "both"),
+                List.of(Map.of("Key", "team", "Value", "red")));
+        service.addTagsToOnPremisesInstances(REGION, List.of("role-only", "both"),
+                List.of(Map.of("Key", "role", "Value", "web")));
+        List<Map<String, String>> filters = List.of(
+                Map.of("Key", "team", "Value", "red", "Type", "KEY_AND_VALUE"),
+                Map.of("Key", "role", "Value", "web", "Type", "KEY_AND_VALUE"));
+
+        assertEquals(Set.of("both"), Set.copyOf(service.listOnPremisesInstances(REGION, null, filters)));
+        service.createApplication(REGION, "any-filter-app", "Server", null);
+        service.createDeploymentGroup(REGION, "any-filter-app", "group", null, ROLE_ARN,
+                Map.of("onPremisesInstanceTagFilters", filters), null);
+
+        String deploymentId = service.createDeployment(REGION, "any-filter-app", "group", null,
+                Map.of("appSpecContent", Map.of("content", "os: linux")), null);
+
+        assertEquals(Set.of("team-only", "role-only", "both"),
+                Set.copyOf(service.listDeploymentTargets(REGION, deploymentId)));
+    }
+
     // ---- Server platform (SSM) hooks ---------------------------------------------------
 
     @Test

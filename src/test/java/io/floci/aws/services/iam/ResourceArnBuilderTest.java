@@ -20,6 +20,9 @@ import io.floci.aws.services.iam.model.ServerCertificate;
 import io.floci.aws.services.kms.KmsService;
 import io.floci.aws.services.lambdamicrovms.LambdaMicrovmsService;
 import io.floci.aws.services.secretsmanager.SecretsManagerService;
+import io.quarkus.vertx.http.runtime.CurrentVertxRequest;
+import io.vertx.core.http.HttpServerRequest;
+import io.vertx.ext.web.RoutingContext;
 import jakarta.enterprise.inject.Instance;
 import jakarta.ws.rs.container.ContainerRequestContext;
 import jakarta.ws.rs.core.MediaType;
@@ -1795,6 +1798,65 @@ class ResourceArnBuilderTest {
         assertEquals("arn:aws:s3:::my-bucket/folder/", arn);
     }
 
+    /**
+     * A key keeps the slashes it is sent with, and so does the ARN the request is checked against.
+     * {@code PUT /bucket//email.txt} stores the key {@code /email.txt}; read from the collapsed
+     * path it was checked on {@code bucket/email.txt}, so a grant on that object covered this one
+     * and a statement naming {@code bucket//*} reached nothing.
+     */
+    @Test
+    void s3ReadsAKeysOwnLeadingSlashFromThePathAsSent() {
+        when(uriInfo.getPath()).thenReturn("/my-bucket/email.txt");
+        when(uriInfo.getRequestUri()).thenReturn(URI.create("http://localhost/my-bucket//email.txt"));
+
+        assertEquals("arn:aws:s3:::my-bucket//email.txt", builder.build("s3", ctx, "us-east-1", ACCOUNT));
+    }
+
+    /** The same inside a key, where the collapsed path named a key one separator short. */
+    @Test
+    void s3KeepsADoubleSlashInsideAKey() {
+        when(uriInfo.getPath()).thenReturn("/my-bucket/a/b.txt");
+        when(uriInfo.getRequestUri()).thenReturn(URI.create("http://localhost/my-bucket/a//b.txt"));
+
+        assertEquals("arn:aws:s3:::my-bucket/a//b.txt", builder.build("s3", ctx, "us-east-1", ACCOUNT));
+    }
+
+    /**
+     * Virtual-hosted, where the bucket came from the Host header and S3VirtualHostFilter rewrote the
+     * path: the key's leading slash is then only in the request the server received.
+     */
+    @Test
+    void s3ReadsAVirtualHostedKeysOwnSlashFromTheRequestAsReceived() {
+        when(uriInfo.getPath()).thenReturn("/my-bucket/email.txt");
+        when(uriInfo.getRequestUri()).thenReturn(URI.create("http://my-bucket.localhost/my-bucket/email.txt"));
+        ResourceArnBuilder withRequest = new ResourceArnBuilder(new ObjectMapper(), vertxRequestOn("//email.txt"));
+
+        assertEquals("arn:aws:s3:::my-bucket//email.txt", withRequest.build("s3", ctx, "us-east-1", ACCOUNT));
+    }
+
+    /**
+     * A key of slashes alone reaches the object route through the escaped path S3SlashOnlyKeyFilter
+     * rewrites it to, and still reads as that object rather than as the bucket.
+     */
+    @Test
+    void s3KeepsAKeyOfOnlySlashes() {
+        when(uriInfo.getPath()).thenReturn("/my-bucket//");
+        when(uriInfo.getRequestUri()).thenReturn(URI.create("http://localhost/my-bucket/%2F"));
+
+        assertEquals("arn:aws:s3:::my-bucket//", builder.build("s3", ctx, "us-east-1", ACCOUNT));
+    }
+
+    /** A current request whose path is {@code sentPath}, the path the server received. */
+    private static CurrentVertxRequest vertxRequestOn(String sentPath) {
+        HttpServerRequest request = mock(HttpServerRequest.class);
+        when(request.path()).thenReturn(sentPath);
+        RoutingContext routingContext = mock(RoutingContext.class);
+        when(routingContext.request()).thenReturn(request);
+        CurrentVertxRequest current = mock(CurrentVertxRequest.class);
+        when(current.getCurrent()).thenReturn(routingContext);
+        return current;
+    }
+
     // ── S3 Control ─────────────────────────────────────────────────────────────
 
     /**
@@ -1816,6 +1878,20 @@ class ResourceArnBuilderTest {
             assertEquals(List.of("arn:aws:s3:us-east-1:000000000000:bucket/repro-bucket"),
                     builder.buildResources("s3", action, ctx, "us-east-1", ACCOUNT, "aws"), action);
         }
+    }
+
+    /**
+     * An S3 Control route names no object, so nothing of it is read as a bucket and a key: the ARN
+     * in its path is still taken as written, percent-encoded as the Go SDK sends it or not.
+     */
+    @Test
+    void s3ControlTaggingIsNotReadAsABucketAndAKey() {
+        when(uriInfo.getPath()).thenReturn("/v20180820/tags/arn:aws:s3:::repro-bucket");
+        when(uriInfo.getRequestUri())
+                .thenReturn(URI.create("http://localhost/v20180820/tags/arn%3Aaws%3As3%3A%3A%3Arepro-bucket"));
+
+        assertEquals(List.of("arn:aws:s3:::repro-bucket"),
+                builder.buildResources("s3", "s3:TagResource", ctx, "us-east-1", ACCOUNT, "aws"));
     }
 
     /** A tagging route naming no ARN stays on the wildcard, under which the handler refuses it. */
@@ -1851,7 +1927,7 @@ class ResourceArnBuilderTest {
     /**
      * The operation tells S3 Control's requests from the data plane, not the path: a request a
      * data-plane action claims under the same prefix, a bucket actually named v20180820, keeps
-     * the bucket and object ARN of its own path.
+     * the bucket and object ARN of its own path, the slashes of its key included.
      */
     @Test
     void aDataPlaneOperationUnderTheS3ControlPrefixKeepsItsOwnArn() {
@@ -1861,6 +1937,10 @@ class ResourceArnBuilderTest {
         when(uriInfo.getPath()).thenReturn("/v20180820");
         assertEquals(List.of("arn:aws:s3:::v20180820"),
                 builder.buildResources("s3", "s3:ListBucket", ctx, "us-east-1", ACCOUNT, "aws"));
+        when(uriInfo.getPath()).thenReturn("/v20180820/a/b.txt");
+        when(uriInfo.getRequestUri()).thenReturn(URI.create("http://localhost/v20180820/a//b.txt"));
+        assertEquals(List.of("arn:aws:s3:::v20180820/a//b.txt"),
+                builder.buildResources("s3", "s3:PutObject", ctx, "us-east-1", ACCOUNT, "aws"));
     }
 
     // ── The vendored table of request resources ─────────────────────────────────

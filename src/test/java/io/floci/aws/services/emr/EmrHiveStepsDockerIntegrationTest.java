@@ -26,11 +26,9 @@ import software.amazon.awssdk.services.s3.model.S3Object;
 
 import java.io.IOException;
 import java.io.UncheckedIOException;
-import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.UUID;
-import java.util.zip.GZIPInputStream;
 
 import static io.floci.aws.testing.EmrRequests.awaitStep;
 import static io.floci.aws.testing.EmrRequests.emr;
@@ -248,12 +246,7 @@ class EmrHiveStepsDockerIntegrationTest {
 
     /** A log of the step's, in the step log folder of the Management Guide's "Log locations". */
     private String stepLog(String stepId, String name) {
-        String key = "logs/" + clusterId + "/steps/" + stepId + "/" + name;
-        try (GZIPInputStream in = new GZIPInputStream(s3.getObject(request -> request.bucket(bucket).key(key)))) {
-            return new String(in.readAllBytes(), StandardCharsets.UTF_8);
-        } catch (IOException e) {
-            throw new UncheckedIOException(e);
-        }
+        return S3TestClients.gunzipped(s3, bucket, "logs/" + clusterId + "/steps/" + stepId + "/" + name);
     }
 
     private void put(String key, String text) {

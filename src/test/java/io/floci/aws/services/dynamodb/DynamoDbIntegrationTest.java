@@ -23,6 +23,7 @@ import java.util.zip.CRC32;
 
 import static io.floci.aws.testing.DynamoDbRequests.assertEpochMillisBetween;
 import static io.floci.aws.testing.DynamoDbRequests.decimalAt;
+import static io.floci.aws.testing.DynamoDbRequests.nestedMap;
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.*;
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -6004,7 +6005,7 @@ given()
             """)
     void itemWritesGetTheOlderChecksWhenTheNewerValidatorGivesUp(String operation, String body,
             String message) {
-        String deep = "{\"M\": {\"n\": ".repeat(63) + "{\"S\": \"leaf\"}" + "}}".repeat(63);
+        String deep = nestedMap(63, "n", "{\"S\": \"leaf\"}");
         given()
             .header("X-Amz-Target", "DynamoDB_20120810." + operation)
             .contentType(DYNAMODB_CONTENT_TYPE)
@@ -6024,7 +6025,7 @@ given()
             """)
     void queryAndScanCheckTheConditionalOperatorBeforeTheTableLookup(String operation, String body,
             String message) {
-        String deep = "{\"M\": {\"n\": ".repeat(40) + "{\"S\": \"leaf\"}" + "}}".repeat(40);
+        String deep = nestedMap(40, "n", "{\"S\": \"leaf\"}");
         given()
             .header("X-Amz-Target", "DynamoDB_20120810." + operation)
             .contentType(DYNAMODB_CONTENT_TYPE)

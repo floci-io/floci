@@ -308,6 +308,7 @@ public class S3Controller {
                     return headOnlyResponse(websiteResponse);
                 }
             }
+            rejectUnservedSubresource("HEAD", uriInfo);
             s3Service.authorizeBucketRead(bucket, "s3:ListBucket", authorization);
             s3Service.headBucket(bucket);
             String bucketRegion = s3Service.getBucketRegion(bucket);
@@ -418,20 +419,14 @@ public class S3Controller {
                 s3Service.putBucketReplication(bucket, new String(body, StandardCharsets.UTF_8));
                 return Response.ok().build();
             }
-            // Must be handled here: an unmatched subresource falls through to CreateBucket below,
-            // which answers a metrics call with BucketAlreadyOwnedByYou.
             if (hasQueryParam(uriInfo, "metrics")) {
                 s3Service.authorizeBucketWrite(bucket, "s3:PutMetricsConfiguration", authorization);
                 return handlePutBucketMetricsConfiguration(bucket, uriInfo, body);
             }
-            // Same fall-through hazard as metrics: an intelligent-tiering PUT must not become a
-            // CreateBucket.
             if (hasQueryParam(uriInfo, "intelligent-tiering")) {
                 s3Service.authorizeBucketWrite(bucket, "s3:PutIntelligentTieringConfiguration", authorization);
                 return handlePutBucketIntelligentTieringConfiguration(bucket, uriInfo, body);
             }
-            // Same fall-through hazard as metrics: an analytics or inventory PUT must not become
-            // a CreateBucket.
             if (hasQueryParam(uriInfo, "analytics")) {
                 s3Service.authorizeBucketWrite(bucket, "s3:PutAnalyticsConfiguration", authorization);
                 return handlePutBucketAnalyticsConfiguration(bucket, uriInfo, body);
@@ -440,6 +435,7 @@ public class S3Controller {
                 s3Service.authorizeBucketWrite(bucket, "s3:PutInventoryConfiguration", authorization);
                 return handlePutBucketInventoryConfiguration(bucket, uriInfo, body);
             }
+            rejectUnservedSubresource("PUT", uriInfo);
 
             // Detect a PutObject request that reached this handler before virtual-host rewriting.
             if (isMisplacedObjectPut(httpHeaders, body, bucket)) {
@@ -569,36 +565,27 @@ public class S3Controller {
                 return Response.noContent().build();
             }
             if (hasQueryParam(uriInfo, "metrics")) {
-                // Likewise this must not fall through to deleting the bucket.
                 s3Service.authorizeBucketWrite(bucket, "s3:PutMetricsConfiguration", authorization);
                 s3Service.deleteBucketMetricsConfiguration(bucket, requireMetricsId(uriInfo));
                 return Response.noContent().build();
             }
             if (hasQueryParam(uriInfo, "intelligent-tiering")) {
-                // Likewise this must not fall through to deleting the bucket.
                 s3Service.authorizeBucketWrite(bucket, "s3:PutIntelligentTieringConfiguration", authorization);
                 s3Service.deleteBucketIntelligentTieringConfiguration(bucket,
                         requireIntelligentTieringId(uriInfo));
                 return Response.noContent().build();
             }
             if (hasQueryParam(uriInfo, "analytics")) {
-                // Likewise this must not fall through to deleting the bucket.
                 s3Service.authorizeBucketWrite(bucket, "s3:PutAnalyticsConfiguration", authorization);
                 s3Service.deleteBucketAnalyticsConfiguration(bucket, requireAnalyticsId(uriInfo));
                 return Response.noContent().build();
             }
             if (hasQueryParam(uriInfo, "inventory")) {
-                // Likewise this must not fall through to deleting the bucket.
                 s3Service.authorizeBucketWrite(bucket, "s3:PutInventoryConfiguration", authorization);
                 s3Service.deleteBucketInventoryConfiguration(bucket, requireInventoryId(uriInfo));
                 return Response.noContent().build();
             }
-            if (hasQueryParam(uriInfo, "accelerate")) {
-                // AWS defines no DELETE for the accelerate subresource; reject it here so
-                // it does NOT fall through to deleting the whole bucket.
-                throw new AwsException("MethodNotAllowed",
-                        "The specified method is not allowed against this resource.", 405);
-            }
+            rejectUnservedSubresource("DELETE", uriInfo);
             s3Service.authorizeBucketWrite(bucket, "s3:DeleteBucket", authorization);
             s3Service.deleteBucket(bucket);
             return Response.noContent().build();
@@ -773,6 +760,7 @@ public class S3Controller {
                     return website;
                 }
             }
+            rejectUnservedSubresource("GET", uriInfo);
 
             s3Service.authorizeListBucket(bucket, authorization);
 
@@ -1676,6 +1664,7 @@ public class S3Controller {
                             body);
                 }
             }
+            rejectUnservedSubresource("POST", uriInfo);
             return xmlErrorResponse(new AwsException("InvalidArgument",
                     "POST on bucket requires ?delete parameter.", 400));
         } catch (AwsException e) {
@@ -4588,6 +4577,32 @@ public class S3Controller {
             }
         } catch (java.nio.file.InvalidPathException e) {
             throw new AwsException("InvalidKey", "The specified key contains invalid characters.", 400);
+        }
+    }
+
+    /**
+     * Refuses a bucket request that names a sub-resource the handler above did not serve, rather than running the
+     * bucket's own operation in its place, which would create, list or delete the bucket: one S3 defines for the
+     * method is not implemented here, and one it defines for other methods only is not allowed. The names are read
+     * from the parsed query parameters, as the IAM check reads them, so an escaped {@code &} inside a value, as in
+     * {@code ?prefix=reports%26abac}, names no sub-resource.
+     */
+    private static void rejectUnservedSubresource(String method, UriInfo uriInfo) {
+        S3BucketSubresources subresources = S3BucketSubresources.vendored();
+        MultivaluedMap<String, String> params = uriInfo.getQueryParameters();
+        boolean named = false;
+        for (String name : subresources.names()) {
+            if (params.containsKey(name)) {
+                if (!subresources.operations(method, name).isEmpty()) {
+                    throw new AwsException("NotImplemented",
+                            "A header you provided implies functionality that is not implemented.", 501);
+                }
+                named = true;
+            }
+        }
+        if (named) {
+            throw new AwsException("MethodNotAllowed",
+                    "The specified method is not allowed against this resource.", 405);
         }
     }
 

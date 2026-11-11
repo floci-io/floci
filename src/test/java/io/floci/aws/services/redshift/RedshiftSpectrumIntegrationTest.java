@@ -23,6 +23,7 @@ import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.Timeout;
 import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.CsvSource;
 import org.junit.jupiter.params.provider.ValueSource;
 import org.postgresql.PGStatement;
 
@@ -680,9 +681,10 @@ class RedshiftSpectrumIntegrationTest {
     }
 
     @ParameterizedTest
-    @ValueSource(booleans = {false, true})
+    @CsvSource({"false,false", "true,false", "true,true"})
     @Timeout(120)
-    void readsOnlyThePartitionsTheWhereSelectsOnTheExtendedProtocolAndInATransaction(boolean bindParameters) throws Exception {
+    void readsOnlyThePartitionsTheWhereSelectsOnTheExtendedProtocolAndInATransaction(
+            boolean bindParameters, boolean binaryTransfer) throws Exception {
         bucket = "spectrum-pruning-ext-" + System.nanoTime();
         s3Service.createBucket(bucket, "us-east-1");
         s3Service.putObject(bucket, "events/day=1/part-1.csv", "1,10\n2,20\n".getBytes(StandardCharsets.UTF_8),
@@ -730,7 +732,8 @@ class RedshiftSpectrumIntegrationTest {
                 }
             }
             String select = bindParameters ? "SELECT SUM(amount) FROM " + schemaName + ".events WHERE day = ?" : selectDayOne;
-            try (Connection extended = DriverManager.getConnection(baseUrl + "&preferQueryMode=extended&binaryTransfer=false",
+            String extendedUrl = baseUrl + "&preferQueryMode=extended" + (binaryTransfer ? "" : "&binaryTransfer=false");
+            try (Connection extended = DriverManager.getConnection(extendedUrl,
                     "admin", "Secret123");
                  PreparedStatement query = extended.prepareStatement(select)) {
                 query.unwrap(PGStatement.class).setPrepareThreshold(1);

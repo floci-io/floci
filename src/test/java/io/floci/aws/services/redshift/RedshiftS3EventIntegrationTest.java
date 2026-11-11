@@ -14,6 +14,9 @@ import software.amazon.awssdk.auth.credentials.AwsBasicCredentials;
 import software.amazon.awssdk.auth.credentials.StaticCredentialsProvider;
 import software.amazon.awssdk.regions.Region;
 import software.amazon.awssdk.services.redshift.RedshiftClient;
+import software.amazon.awssdk.services.redshift.model.CreateIntegrationResponse;
+import software.amazon.awssdk.services.redshift.model.DeleteIntegrationResponse;
+import software.amazon.awssdk.services.redshift.model.DescribeIntegrationsResponse;
 import software.amazon.awssdk.services.redshift.model.RedshiftException;
 
 import java.net.URI;
@@ -22,6 +25,7 @@ import java.util.List;
 import static org.hamcrest.Matchers.containsString;
 import static org.hamcrest.Matchers.not;
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 
 @QuarkusTest
@@ -126,6 +130,22 @@ class RedshiftS3EventIntegrationTest {
                 assertEquals(400, error.statusCode());
                 assertEquals("InvalidParameterValue", error.awsErrorDetails().errorCode());
             }
+            CreateIntegrationResponse createdIntegration = client.createIntegration(
+                    request -> request.integrationName("s3-sdk-roundtrip")
+                            .sourceArn("arn:aws:s3:::" + BUCKET).targetArn(namespaceArn));
+            assertNotNull(createdIntegration.integrationArn());
+            assertEquals("s3-sdk-roundtrip", createdIntegration.integrationName());
+            assertEquals("arn:aws:s3:::" + BUCKET, createdIntegration.sourceArn());
+            assertEquals(namespaceArn, createdIntegration.targetArn());
+            assertEquals("active", createdIntegration.statusAsString());
+            DescribeIntegrationsResponse described = client.describeIntegrations(
+                    request -> request.integrationArn(createdIntegration.integrationArn()));
+            assertEquals(1, described.integrations().size());
+            assertEquals(createdIntegration.integrationArn(), described.integrations().getFirst().integrationArn());
+            DeleteIntegrationResponse deletedIntegration = client.deleteIntegration(
+                    request -> request.integrationArn(createdIntegration.integrationArn()));
+            assertEquals(createdIntegration.integrationArn(), deletedIntegration.integrationArn());
+            assertEquals("s3-sdk-roundtrip", deletedIntegration.integrationName());
         }
     }
 

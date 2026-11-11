@@ -14,6 +14,7 @@ import java.util.List;
 import java.util.stream.Collectors;
 import java.util.stream.IntStream;
 
+import static io.floci.aws.testing.DynamoDbRequests.nestedMap;
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.contains;
 import static org.hamcrest.Matchers.containsInAnyOrder;
@@ -615,7 +616,7 @@ class DynamoDbPartiQLEdgeCaseIntegrationTest {
     void refusesAWriteThatLeavesTheItemTooDeep() {
         putItem("deep-path", "\"m\":{\"M\":{}}");
         String update = "UPDATE " + QUOTED_TABLE + " SET m.deep = ? WHERE pk='deep-path' AND sk='1'";
-        String parameters = "[" + "{\"M\":{\"a\":".repeat(31) + "{\"S\":\"x\"}" + "}}".repeat(31) + "]";
+        String parameters = "[" + nestedMap(31, "a", "{\"S\":\"x\"}") + "]";
         String tooDeep = "Nesting Levels have exceeded supported limits";
 
         statement(update, parameters)

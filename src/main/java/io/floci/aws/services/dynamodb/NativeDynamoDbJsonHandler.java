@@ -1270,6 +1270,12 @@ public class NativeDynamoDbJsonHandler {
         }
     }
 
+    private void requireReadableFilterValues(JsonNode filter) {
+        ObjectNode values = legacyValues(filter);
+        values.forEach(DynamoDbAttributeValueValidator::requireBase64);
+        requireReadableValues(values, "");
+    }
+
     private static final List<String> CONDITIONAL_OPERATORS = List.of("AND", "OR");
 
     private static void requireValidConditionalOperator(JsonNode request, String filterMember) {
@@ -1345,7 +1351,7 @@ public class NativeDynamoDbJsonHandler {
         requireReadableValues(exprAttrValues, "");
         requireReadableValues(exclusiveStartKey, "");
         requireReadableValues(legacyValues(keyConditions), "");
-        requireReadableValues(legacyValues(queryFilter), "");
+        requireReadableFilterValues(queryFilter);
 
         if (keyConditionExpr == null && keyConditions == null) {
             throw new AwsException("ValidationException",
@@ -1416,7 +1422,7 @@ public class NativeDynamoDbJsonHandler {
         if (queryFilter != null) {
             final JsonNode qf = queryFilter;
             queryItems = queryItems.stream()
-                    .filter(i -> dynamoDbService.matchesScanFilterPublic(i, qf))
+                    .filter(i -> dynamoDbService.matchesScanFilterPublic(i, qf, textOrNull(request, "ConditionalOperator")))
                     .toList();
         }
         // Apply index projection (KEYS_ONLY / INCLUDE) when querying a secondary index
@@ -1513,7 +1519,7 @@ public class NativeDynamoDbJsonHandler {
         requireValidConditionalOperator(request, "ScanFilter");
         requireReadableValues(exprAttrValues, "");
         requireReadableValues(exclusiveStartKey, "");
-        requireReadableValues(legacyValues(scanFilter), "");
+        requireReadableFilterValues(scanFilter);
 
         DynamoDbExpressionSize.checkReadWithSize(filterExpr, "FilterExpression");
         DynamoDbExpressionSize.checkRead(projectionExpressionScan, "ProjectionExpression");
@@ -1565,7 +1571,8 @@ public class NativeDynamoDbJsonHandler {
 
         DynamoDbService.ScanResult result = dynamoDbService.scan(
                 tableName, filterExpr, exprAttrNames, exprAttrValues, scanFilter, limit,
-                exclusiveStartKey, indexNameScan, segment, totalSegments, region);
+                exclusiveStartKey, indexNameScan, segment, totalSegments,
+                textOrNull(request, "ConditionalOperator"), region);
 
         List<JsonNode> scanItems = result.items();
         // Apply index projection (KEYS_ONLY / INCLUDE) when scanning a secondary index
