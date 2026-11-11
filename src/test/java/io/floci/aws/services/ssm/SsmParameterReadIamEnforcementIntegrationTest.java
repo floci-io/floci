@@ -18,6 +18,7 @@ import software.amazon.awssdk.services.ssm.model.GetParametersResponse;
 import software.amazon.awssdk.services.ssm.model.ParameterType;
 import software.amazon.awssdk.services.ssm.model.SsmException;
 
+import java.util.List;
 import java.util.UUID;
 
 import static io.floci.aws.testing.EnforcementFixtures.auth;
@@ -181,6 +182,37 @@ class SsmParameterReadIamEnforcementIntegrationTest {
                         SsmException batchDenied = assertThrows(SsmException.class,
                                 () -> user.getParameters(r -> r.names(selected)));
                         assertEquals("AccessDeniedException", batchDenied.awsErrorDetails().errorCode());
+                    }
+                }
+            } finally {
+                root.deleteParameter(r -> r.name(name));
+            }
+        }
+    }
+
+    @Test
+    void aDoubleSlashArnDoesNotReadTheParameterADenyCovers() {
+        String name = "/iam-double-slash-" + UUID.randomUUID();
+        String doubleSlashArn = "arn:aws:ssm:us-east-1:000000000000:parameter/" + name;
+        try (SsmClient root = AwsTestClients.create(SsmClient.builder(), ACCOUNT, Region.US_EAST_1)) {
+            try {
+                root.putParameter(r -> r.name(name).type(ParameterType.STRING).value("v1"));
+                root.labelParameterVersion(r -> r.name(name).parameterVersion(1L).labels("stable"));
+                EnforcementFixtures.UserCredentials credentials = user("""
+                        {"Version":"2012-10-17","Statement":[
+                          {"Effect":"Allow","Action":["ssm:GetParameter","ssm:GetParameters"],
+                           "Resource":"arn:aws:ssm:us-east-1:000000000000:parameter/*"},
+                          {"Effect":"Deny","Action":["ssm:GetParameter","ssm:GetParameters"],
+                           "Resource":"arn:aws:ssm:us-east-1:000000000000:parameter%s"}]}""".formatted(name));
+                try (SsmClient user = AwsTestClients.create(SsmClient.builder(), credentials.accessKeyId(),
+                        Region.US_EAST_1)) {
+                    for (String selected : new String[] {doubleSlashArn, doubleSlashArn + ":stable"}) {
+                        SsmException refused = assertThrows(SsmException.class,
+                                () -> user.getParameter(r -> r.name(selected)));
+                        assertEquals("ParameterNotFound", refused.awsErrorDetails().errorCode());
+                        GetParametersResponse read = user.getParameters(r -> r.names(selected));
+                        assertEquals(0, read.parameters().size());
+                        assertEquals(List.of(selected), read.invalidParameters());
                     }
                 }
             } finally {
