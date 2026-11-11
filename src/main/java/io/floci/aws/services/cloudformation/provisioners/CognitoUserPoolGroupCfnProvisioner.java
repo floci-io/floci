@@ -95,6 +95,9 @@ public class CognitoUserPoolGroupCfnProvisioner implements CfnResourceProvisione
             cognitoService.createGroup(userPoolId, groupName, description, precedence, roleArn);
         } else {
             cognitoService.updateGroup(userPoolId, groupName, description, precedence, roleArn);
+            if (description == null && ctx.droppedProperties(props).contains("Description")) {
+                cognitoService.replaceGroupDescription(userPoolId, groupName, null);
+            }
         }
 
         r.setPhysicalId(groupName);

@@ -440,6 +440,35 @@ public class SecretsManagerService implements ResourceProvider {
     }
 
     public Secret updateSecret(String secretId, String description, String kmsKeyId, String region) {
+        Secret secret = rewriteSecret(secretId, kmsKeyId, region, stored -> {
+            if (description != null) {
+                stored.setDescription(description);
+            }
+            if (kmsKeyId != null) {
+                // AWS: "If you set this to an empty string, Secrets Manager uses the AWS managed key
+                // aws/secretsmanager" - which DescribeSecret reports by omitting KmsKeyId entirely.
+                stored.setKmsKeyId(kmsKeyId.isEmpty() ? null : kmsKeyId);
+            }
+        });
+        LOG.infov("Updated secret metadata: {0}", secret.getName());
+        return secret;
+    }
+
+    /**
+     * Writes the description exactly as given, null included, which {@link #updateSecret} reads as
+     * "keep". Only a CloudFormation update that drops the description calls it.
+     */
+    public Secret replaceSecretDescription(String secretId, String description, String region) {
+        Secret secret = rewriteSecret(secretId, null, region, stored -> stored.setDescription(description));
+        LOG.infov("Replaced secret description: {0}", secret.getName());
+        return secret;
+    }
+
+    /**
+     * Checks the secret and {@code kmsKeyId} (null for none), then under the secret's lock applies
+     * {@code change} to it, stamps the change date and persists it.
+     */
+    private Secret rewriteSecret(String secretId, String kmsKeyId, String region, Consumer<Secret> change) {
         Secret secret = resolveSecret(secretId, region);
         throwIfPendingDeletion(secret);
         throwIfReplica(secret);
@@ -448,18 +477,10 @@ public class SecretsManagerService implements ResourceProvider {
 
         synchronized (lockFor(secret.getArn())) {
             throwIfManagedRelease(secret.getArn());
-            if (description != null) {
-                secret.setDescription(description);
-            }
-            if (kmsKeyId != null) {
-                // AWS: "If you set this to an empty string, Secrets Manager uses the AWS managed key
-                // aws/secretsmanager" - which DescribeSecret reports by omitting KmsKeyId entirely.
-                secret.setKmsKeyId(kmsKeyId.isEmpty() ? null : kmsKeyId);
-            }
+            change.accept(secret);
             secret.setLastChangedDate(Instant.now());
 
             persist(secret, region);
-            LOG.infov("Updated secret metadata: {0}", secret.getName());
             return secret;
         }
     }

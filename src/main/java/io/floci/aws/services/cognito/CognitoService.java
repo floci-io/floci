@@ -102,6 +102,7 @@ import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicLong;
+import java.util.function.Consumer;
 import java.util.regex.Pattern;
 
 import static io.floci.aws.core.common.ReservedTags.rejectUnknownReservedTags;
@@ -3441,13 +3442,31 @@ public class CognitoService implements ResourceProvider {
 
     public CognitoGroup updateGroup(String userPoolId, String groupName, String description,
                                      Integer precedence, String roleArn) {
+        CognitoGroup group = rewriteGroup(userPoolId, groupName, stored -> {
+            if (description != null) stored.setDescription(description);
+            if (precedence != null) stored.setPrecedence(precedence);
+            if (roleArn != null) stored.setRoleArn(roleArn);
+        });
+        LOG.infov("Updated Cognito group: {0} in pool {1}", groupName, userPoolId);
+        return group;
+    }
+
+    /**
+     * Writes the group description exactly as given, null included, which {@link #updateGroup} reads
+     * as "keep". Only a CloudFormation update that drops the description calls it.
+     */
+    public CognitoGroup replaceGroupDescription(String userPoolId, String groupName, String description) {
+        CognitoGroup group = rewriteGroup(userPoolId, groupName, stored -> stored.setDescription(description));
+        LOG.infov("Replaced Cognito group description: {0} in pool {1}", groupName, userPoolId);
+        return group;
+    }
+
+    /** Reads the stored group, applies {@code change} to it, stamps the modification date and stores it. */
+    private CognitoGroup rewriteGroup(String userPoolId, String groupName, Consumer<CognitoGroup> change) {
         CognitoGroup group = getGroup(userPoolId, groupName);
-        if (description != null) group.setDescription(description);
-        if (precedence != null) group.setPrecedence(precedence);
-        if (roleArn != null) group.setRoleArn(roleArn);
+        change.accept(group);
         group.setLastModifiedDate(System.currentTimeMillis() / 1000L);
         groupStore.put(groupKey(userPoolId, groupName), group);
-        LOG.infov("Updated Cognito group: {0} in pool {1}", groupName, userPoolId);
         return group;
     }
 
