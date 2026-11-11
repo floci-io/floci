@@ -23,6 +23,7 @@ import io.floci.aws.core.common.docker.ContainerSpec;
 import io.floci.aws.core.common.docker.ContainerStorageHelper;
 import io.floci.aws.core.common.docker.CurrentContainerNetworkResolver;
 import io.floci.aws.core.common.docker.PortAllocator;
+import io.floci.aws.core.common.docker.SidecarHealthHelper;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 import org.jboss.logging.Logger;
@@ -421,6 +422,9 @@ public class EcrRegistryManager {
         if (started) {
             ContainerPresence presence = lifecycleManager.presenceOf(containerId);
             if (presence == ContainerPresence.RUNNING || presence == ContainerPresence.UNKNOWN) {
+                if (!ready) {
+                    completeStartup();
+                }
                 return;
             }
             String previousContainerId = containerId;
@@ -453,8 +457,7 @@ public class EcrRegistryManager {
             } else if (!onAnotherNetwork(existing.get())) {
                 this.activeContainerName = adoptedName;
                 adoptExisting(existing.get());
-                runReconcileOnce();
-                this.ready = true;
+                completeStartup();
                 return;
             }
             // Recreated under the current name; the data volume is resolved by its own probe.
@@ -480,6 +483,11 @@ public class EcrRegistryManager {
         } catch (Exception e) {
             throw new RuntimeException("Failed to start ECR backing registry container: " + e.getMessage(), e);
         }
+        completeStartup();
+    }
+
+    private void completeStartup() {
+        SidecarHealthHelper.waitForHealth(httpClient().baseUrl(), "/v2/");
         runReconcileOnce();
         this.ready = true;
     }
@@ -587,18 +595,6 @@ public class EcrRegistryManager {
             return;
         }
         try {
-            // Give the registry a moment to be ready on first start
-            for (int i = 0; i < 10; i++) {
-                if (httpClient().ping()) {
-                    break;
-                }
-                try {
-                    Thread.sleep(200);
-                } catch (InterruptedException ie) {
-                    Thread.currentThread().interrupt();
-                    return;
-                }
-            }
             List<String> repos = httpClient().catalog();
             reconcileHook.accept(repos);
             reconciled = true;
