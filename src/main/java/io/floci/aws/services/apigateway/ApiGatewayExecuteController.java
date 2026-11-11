@@ -26,6 +26,7 @@ import io.floci.aws.core.common.AwsPartitions;
 import io.floci.aws.core.common.CookieHeaders;
 import io.floci.aws.core.common.RegionResolver;
 import io.floci.aws.core.common.RequestContext;
+import io.floci.aws.core.common.ResteasyRequests;
 import io.floci.aws.core.common.auth.SigV4AuthorizationHeader;
 import io.floci.aws.services.apigateway.model.ApiGatewayResource;
 import io.floci.aws.services.apigateway.model.ApiKey;
@@ -665,7 +666,7 @@ public class ApiGatewayExecuteController {
         }
         Map<String, List<String>> multiValueQuery = new LinkedHashMap<>();
         Map<String, String> queryMap = new LinkedHashMap<>();
-        for (Map.Entry<String, List<String>> e : uriInfo.getQueryParameters().entrySet()) {
+        for (Map.Entry<String, List<String>> e : ResteasyRequests.queryParameters(uriInfo).entrySet()) {
             if (e.getValue().isEmpty()) continue;
             multiValueQuery.put(e.getKey(), List.copyOf(e.getValue()));
             queryMap.put(e.getKey(), String.join(",", e.getValue()));
@@ -792,7 +793,7 @@ public class ApiGatewayExecuteController {
     private String cacheKeyParameterValue(String param, HttpHeaders headers, UriInfo uriInfo,
                                           String resourcePath, String path) {
         if (param.startsWith("method.request.querystring.")) {
-            return uriInfo.getQueryParameters()
+            return ResteasyRequests.queryParameters(uriInfo)
                     .getFirst(param.substring("method.request.querystring.".length()));
         }
         if (param.startsWith("method.request.header.")) {
@@ -990,7 +991,7 @@ public class ApiGatewayExecuteController {
             if (!e.getValue().isEmpty()) headerMap.put(e.getKey(), e.getValue().get(0));
         }
         Map<String, String> queryMap = new HashMap<>();
-        for (Map.Entry<String, List<String>> e : uriInfo.getQueryParameters().entrySet()) {
+        for (Map.Entry<String, List<String>> e : ResteasyRequests.queryParameters(uriInfo).entrySet()) {
             if (!e.getValue().isEmpty()) queryMap.put(e.getKey(), e.getValue().get(0));
         }
         Map<String, String> pathMap = new HashMap<>();
@@ -1221,7 +1222,7 @@ public class ApiGatewayExecuteController {
             return null;
         }
         if (source.startsWith("method.request.querystring.")) {
-            return scope.uriInfo().getQueryParameters().getFirst(source.substring("method.request.querystring.".length()));
+            return ResteasyRequests.queryParameters(scope.uriInfo()).getFirst(source.substring("method.request.querystring.".length()));
         }
         if (source.startsWith("stageVariables.")) {
             return scope.stage().getVariables().get(source.substring("stageVariables.".length()));
@@ -1249,7 +1250,7 @@ public class ApiGatewayExecuteController {
         if (validator.isValidateRequestParameters()) {
             Map<String, Boolean> requiredParams = method.getRequestParameters();
             if (requiredParams != null) {
-                MultivaluedMap<String, String> queryParams = uriInfo.getQueryParameters();
+                MultivaluedMap<String, String> queryParams = ResteasyRequests.queryParameters(uriInfo);
                 for (Map.Entry<String, Boolean> entry : requiredParams.entrySet()) {
                     if (!Boolean.TRUE.equals(entry.getValue())) continue;
                     String paramKey = entry.getKey();
@@ -1665,7 +1666,7 @@ public class ApiGatewayExecuteController {
     }
 
     void putQueryStringParameters(ObjectNode event, UriInfo uriInfo) {
-        MultivaluedMap<String, String> queryParams = uriInfo.getQueryParameters();
+        MultivaluedMap<String, String> queryParams = ResteasyRequests.queryParameters(uriInfo);
         if (!queryParams.isEmpty()) {
             ObjectNode qsp = event.putObject("queryStringParameters");
             queryParams.forEach((name, values) -> {
@@ -1681,7 +1682,7 @@ public class ApiGatewayExecuteController {
     }
 
     void putMultiValueQueryStringParameters(ObjectNode event, UriInfo uriInfo) {
-        MultivaluedMap<String, String> queryParams = uriInfo.getQueryParameters();
+        MultivaluedMap<String, String> queryParams = ResteasyRequests.queryParameters(uriInfo);
         if (!queryParams.isEmpty()) {
             ObjectNode mqsp = event.putObject("multiValueQueryStringParameters");
             queryParams.forEach((name, values) -> {
@@ -1900,7 +1901,7 @@ public class ApiGatewayExecuteController {
             if (!e.getValue().isEmpty()) headerMap.put(e.getKey(), e.getValue().getFirst());
         }
         Map<String, String> queryMap = new HashMap<>();
-        for (Map.Entry<String, List<String>> e : uriInfo.getQueryParameters().entrySet()) {
+        for (Map.Entry<String, List<String>> e : ResteasyRequests.queryParameters(uriInfo).entrySet()) {
             if (!e.getValue().isEmpty()) queryMap.put(e.getKey(), e.getValue().getFirst());
         }
         Map<String, String> pathMap = new HashMap<>();
@@ -2414,7 +2415,7 @@ public class ApiGatewayExecuteController {
             return nonemptyValues(scope.headers().getRequestHeader(source.substring("method.request.multivalueheader.".length())));
         }
         if (source.startsWith("method.request.multivaluequerystring.")) {
-            return nonemptyValues(scope.uriInfo().getQueryParameters().get(source.substring("method.request.multivaluequerystring.".length())));
+            return nonemptyValues(ResteasyRequests.queryParameters(scope.uriInfo()).get(source.substring("method.request.multivaluequerystring.".length())));
         }
         String value = resolveScalarRequestParameter(source, scope, path, context);
         return value != null ? List.of(value) : null;
@@ -2427,7 +2428,7 @@ public class ApiGatewayExecuteController {
     private String resolveScalarRequestParameter(String source, GatewayResponseScope scope,
                                                   Map<String, String> path, Map<String, Object> context) {
         if (source.startsWith("method.request.querystring.")) {
-            return scope.uriInfo().getQueryParameters().getFirst(source.substring("method.request.querystring.".length()));
+            return ResteasyRequests.queryParameters(scope.uriInfo()).getFirst(source.substring("method.request.querystring.".length()));
         }
         if (source.startsWith("method.request.path.")) {
             return path.get(source.substring("method.request.path.".length()));
@@ -2496,7 +2497,7 @@ public class ApiGatewayExecuteController {
             }
         }
         Map<String, String> queryMap = new HashMap<>();
-        for (Map.Entry<String, List<String>> e : uriInfo.getQueryParameters().entrySet()) {
+        for (Map.Entry<String, List<String>> e : ResteasyRequests.queryParameters(uriInfo).entrySet()) {
             if (!e.getValue().isEmpty()) {
                 queryMap.put(e.getKey(), e.getValue().get(0));
             }
@@ -2995,7 +2996,7 @@ public class ApiGatewayExecuteController {
             }
         }
         Map<String, String> queryParams = new LinkedHashMap<>();
-        for (Map.Entry<String, List<String>> e : uriInfo.getQueryParameters().entrySet()) {
+        for (Map.Entry<String, List<String>> e : ResteasyRequests.queryParameters(uriInfo).entrySet()) {
             if (!e.getValue().isEmpty()) {
                 queryParams.put(e.getKey(), String.join(",", e.getValue()));
             }
@@ -3140,7 +3141,7 @@ public class ApiGatewayExecuteController {
         }
         Map<String, List<String>> multiValueQueryParams = new LinkedHashMap<>();
         Map<String, String> queryParams = new LinkedHashMap<>();
-        for (Map.Entry<String, List<String>> e : uriInfo.getQueryParameters().entrySet()) {
+        for (Map.Entry<String, List<String>> e : ResteasyRequests.queryParameters(uriInfo).entrySet()) {
             if (e.getValue().isEmpty()) {
                 continue;
             }
@@ -3710,7 +3711,7 @@ public class ApiGatewayExecuteController {
         event.put("rawQueryString", uriInfo.getRequestUri().getRawQuery() != null
                 ? uriInfo.getRequestUri().getRawQuery() : "");
 
-        putV2CookiesHeadersAndQuery(event, headers.getRequestHeaders(), uriInfo.getQueryParameters());
+        putV2CookiesHeadersAndQuery(event, headers.getRequestHeaders(), ResteasyRequests.queryParameters(uriInfo));
 
         event.putObject("pathParameters");
         putStageVariables(event, stageVariables);
@@ -3789,7 +3790,7 @@ public class ApiGatewayExecuteController {
                 if (value != null) return stripBearer(value);
             } else if (source.startsWith("$request.querystring.")) {
                 String paramName = source.substring("$request.querystring.".length());
-                String value = uriInfo.getQueryParameters().getFirst(paramName);
+                String value = ResteasyRequests.queryParameters(uriInfo).getFirst(paramName);
                 if (value != null) return stripBearer(value);
             }
         }
@@ -4074,7 +4075,7 @@ public class ApiGatewayExecuteController {
         event.put("rawQueryString", uriInfo.getRequestUri().getRawQuery() != null
                 ? uriInfo.getRequestUri().getRawQuery() : "");
 
-        putV2CookiesHeadersAndQuery(event, headers.getRequestHeaders(), uriInfo.getQueryParameters());
+        putV2CookiesHeadersAndQuery(event, headers.getRequestHeaders(), ResteasyRequests.queryParameters(uriInfo));
 
         Map<String, String> pathParams = extractV2PathParams(routeKey, path);
         if (!pathParams.isEmpty()) {
@@ -4399,7 +4400,7 @@ public class ApiGatewayExecuteController {
             return queryMap.get(source.substring("method.request.querystring.".length()));
         }
         if (source.startsWith("method.request.multivaluequerystring.")) {
-            return joinedValues(scope.uriInfo() != null ? scope.uriInfo().getQueryParameters() : null,
+            return joinedValues(scope.uriInfo() != null ? ResteasyRequests.queryParameters(scope.uriInfo()) : null,
                     source.substring("method.request.multivaluequerystring.".length()));
         }
         if (source.startsWith("method.request.path.")) {
@@ -4482,10 +4483,10 @@ public class ApiGatewayExecuteController {
 
     private static Map<String, String> gatewayRequestQuery(UriInfo uriInfo) {
         Map<String, String> queryMap = new HashMap<>();
-        if (uriInfo == null || uriInfo.getQueryParameters() == null) {
+        if (uriInfo == null || ResteasyRequests.queryParameters(uriInfo) == null) {
             return queryMap;
         }
-        for (Map.Entry<String, List<String>> entry : uriInfo.getQueryParameters().entrySet()) {
+        for (Map.Entry<String, List<String>> entry : ResteasyRequests.queryParameters(uriInfo).entrySet()) {
             if (entry.getValue() != null && !entry.getValue().isEmpty()) {
                 queryMap.put(entry.getKey(), entry.getValue().get(0));
             }
