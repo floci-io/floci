@@ -105,6 +105,8 @@ aws sqs set-queue-attributes \
 
 `DelaySeconds` must be 0 to 900, both on a message and as a queue attribute: `SendMessage` rejects other values with `InvalidParameterValue` (in `SendMessageBatch` only that entry fails), and `CreateQueue` and `SetQueueAttributes` reject them with `InvalidAttributeValue`.
 
+A message attribute whose `StringValue` or `BinaryValue` is empty, or whose `BinaryValue` is not base64, is rejected by `SendMessage` with `InvalidParameterValue` on both the JSON and query protocols. In `SendMessageBatch` only the entry carrying that attribute fails; the other entries are sent.
+
 `SqsManagedSseEnabled` is `true` for a queue with no `KmsMasterKeyId`, matching AWS, and `false` once a KMS key is set. It is derived on read rather than stored, so clearing `KmsMasterKeyId` returns the queue to `true`, unless you set `SqsManagedSseEnabled` yourself, in which case your value stands. AWS does not document the cleared-key case crisply, so that behaviour is Floci's choice rather than a copied one. `CreateQueue` on an existing name compares requested attributes against these reported values, so asking for `SqsManagedSseEnabled=false` on a queue that reports `true` fails with `QueueAlreadyExists` (`QueueNameExists` over JSON).
 
 ## Message Retention
