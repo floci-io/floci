@@ -21,7 +21,8 @@ import java.util.Set;
 import java.util.TreeSet;
 
 /**
- * Provisions {@code AWS::SSM::Parameter}. The parameter name is the physical id and {@code Ref}.
+ * Provisions {@code AWS::SSM::Parameter}. The parameter name is the physical id and {@code Ref}, without the
+ * surrounding spaces {@code PutParameter} strips before it stores the parameter.
  *
  * <p>A create, and the replacement a changed name makes, is one {@code PutParameter} that carries
  * the template's tags and does not overwrite, as AWS's handler sends it: a name that already exists
@@ -60,7 +61,7 @@ public class SsmCfnProvisioner implements CfnResourceProvisioner {
         }
         Map<String, String> attributesBefore = new HashMap<>(r.getAttributes());
         String name = ctx.stablePhysicalName(ctx.resolveOptional(props, "Name"),
-                r.getLogicalId(), PARAMETER_NAME_MAX_LENGTH, false);
+                r.getLogicalId(), PARAMETER_NAME_MAX_LENGTH, false).strip();
         String value = ctx.resolveOptional(props, "Value");
         if (value == null) {
             value = "";
