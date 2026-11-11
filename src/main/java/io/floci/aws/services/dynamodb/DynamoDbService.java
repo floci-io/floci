@@ -2611,15 +2611,6 @@ public class DynamoDbService {
                 if (4000 > table.getWarmWriteUnitsPerSecond()) {
                     table.setWarmWriteUnitsPerSecond(4000);
                 }
-            } else {
-                long rcu = table.getProvisionedThroughput().getReadCapacityUnits();
-                long wcu = table.getProvisionedThroughput().getWriteCapacityUnits();
-                if (rcu > table.getWarmReadUnitsPerSecond()) {
-                    table.setWarmReadUnitsPerSecond(rcu);
-                }
-                if (wcu > table.getWarmWriteUnitsPerSecond()) {
-                    table.setWarmWriteUnitsPerSecond(wcu);
-                }
             }
         }
 

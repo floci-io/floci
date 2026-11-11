@@ -647,6 +647,63 @@ class NativeDynamoDbJsonHandlerTest {
     }
 
     @Test
+    void updateTableWalksWarmThroughputThroughCutRaiseAndOnDemandSwitch() throws Exception {
+        handler.handle("CreateTable", json("""
+                {
+                    "TableName": "table-warm-walk",
+                    "KeySchema": [{"AttributeName": "pk", "KeyType": "HASH"}],
+                    "AttributeDefinitions": [{"AttributeName": "pk", "AttributeType": "S"}],
+                    "ProvisionedThroughput": {"ReadCapacityUnits": 10, "WriteCapacityUnits": 20}
+                }
+                """), "eu-west-1");
+
+        // cut: warm stays at the previous peak (10/20)
+        handler.handle("UpdateTable", json("""
+                {
+                    "TableName": "table-warm-walk",
+                    "ProvisionedThroughput": {"ReadCapacityUnits": 5, "WriteCapacityUnits": 8}
+                }
+                """), "eu-west-1");
+        JsonNode body = mapper.convertValue(
+                handler.handle("DescribeTable",
+                        mapper.createObjectNode().put("TableName", "table-warm-walk"), "eu-west-1").getEntity(),
+                JsonNode.class);
+        JsonNode warm = body.get("Table").get("WarmThroughput");
+        assertEquals(10, warm.get("ReadUnitsPerSecond").asLong());
+        assertEquals(20, warm.get("WriteUnitsPerSecond").asLong());
+
+        // raise: warm follows the new capacity
+        handler.handle("UpdateTable", json("""
+                {
+                    "TableName": "table-warm-walk",
+                    "ProvisionedThroughput": {"ReadCapacityUnits": 15000, "WriteCapacityUnits": 25000}
+                }
+                """), "eu-west-1");
+        body = mapper.convertValue(
+                handler.handle("DescribeTable",
+                        mapper.createObjectNode().put("TableName", "table-warm-walk"), "eu-west-1").getEntity(),
+                JsonNode.class);
+        warm = body.get("Table").get("WarmThroughput");
+        assertEquals(15000, warm.get("ReadUnitsPerSecond").asLong());
+        assertEquals(25000, warm.get("WriteUnitsPerSecond").asLong());
+
+        // on-demand switch: warm only rises to the baseline, never drops the peak
+        handler.handle("UpdateTable", json("""
+                {
+                    "TableName": "table-warm-walk",
+                    "BillingMode": "PAY_PER_REQUEST"
+                }
+                """), "eu-west-1");
+        body = mapper.convertValue(
+                handler.handle("DescribeTable",
+                        mapper.createObjectNode().put("TableName", "table-warm-walk"), "eu-west-1").getEntity(),
+                JsonNode.class);
+        warm = body.get("Table").get("WarmThroughput");
+        assertEquals(15000, warm.get("ReadUnitsPerSecond").asLong());
+        assertEquals(25000, warm.get("WriteUnitsPerSecond").asLong());
+    }
+
+    @Test
     void createTableOmitsTableWarmThroughput() throws Exception {
         Response response = handler.handle("CreateTable", json("""
                 {
