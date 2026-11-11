@@ -7,6 +7,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.floci.aws.core.common.AwsArnUtils;
 import io.floci.aws.core.common.AwsException;
+import io.floci.aws.services.apigatewayv2.ApiGatewayV2OpenApiImporter;
 import io.floci.aws.services.apigatewayv2.ApiGatewayV2Service;
 import io.floci.aws.services.apigatewayv2.model.Api;
 import io.floci.aws.services.apigatewayv2.model.Authorizer;
@@ -324,8 +325,9 @@ public class ApiGatewayV2CfnProvisioner implements CfnResourceProvisioner {
                             JsonNode requestParameters = integration.path("requestParameters");
                             if (requestParameters.isObject() && !requestParameters.isEmpty()) {
                                 integrationRequest.put("requestParameters",
-                                        objectMapper.convertValue(requestParameters,
-                                                new TypeReference<Map<String, Object>>() {}));
+                                        ApiGatewayV2OpenApiImporter.stringValues(
+                                                objectMapper.convertValue(requestParameters,
+                                                        new TypeReference<Map<String, Object>>() {})));
                             }
                             Integration createdIntegration = apiGatewayV2Service.createIntegration(region, apiId,
                                     integrationRequest);

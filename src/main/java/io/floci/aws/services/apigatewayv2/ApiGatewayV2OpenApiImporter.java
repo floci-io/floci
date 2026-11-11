@@ -769,9 +769,17 @@ public class ApiGatewayV2OpenApiImporter {
         if (!(source.get(key) instanceof Map<?, ?> map) || map.isEmpty()) {
             return;
         }
+        target.put(key, stringValues(map));
+    }
+
+    /**
+     * The map with every value read as text the way an imported {@code x-amazon-apigateway-integration}
+     * reads it: a number or boolean as its text, and an object or array as its JSON text.
+     */
+    public static Map<String, String> stringValues(Map<?, ?> map) {
         Map<String, String> copy = new LinkedHashMap<>();
         map.forEach((k, v) -> copy.put(String.valueOf(k), mapValue(v)));
-        target.put(key, copy);
+        return copy;
     }
 
     private static String mapValue(Object value) {
