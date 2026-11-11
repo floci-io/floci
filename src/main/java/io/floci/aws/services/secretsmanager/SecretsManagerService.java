@@ -260,16 +260,20 @@ public class SecretsManagerService implements ResourceProvider {
         String arn = buildSecretArn(region, name);
         Instant now = Instant.now();
 
-        String versionId = clientRequestToken != null ? clientRequestToken : UUID.randomUUID().toString();
-        SecretVersion version = new SecretVersion();
-        version.setVersionId(versionId);
-        version.setSecretString(secretString);
-        version.setSecretBinary(secretBinary);
-        version.setVersionStages(List.of(AWSCURRENT));
-        version.setCreatedDate(now);
-
+        // AWS creates the first version only when the request carries a value; a secret created
+        // without one has no version until its first PutSecretValue.
         Map<String, SecretVersion> versions = new HashMap<>();
-        versions.put(versionId, version);
+        String versionId = null;
+        if (secretString != null || secretBinary != null) {
+            versionId = clientRequestToken != null ? clientRequestToken : UUID.randomUUID().toString();
+            SecretVersion version = new SecretVersion();
+            version.setVersionId(versionId);
+            version.setSecretString(secretString);
+            version.setSecretBinary(secretBinary);
+            version.setVersionStages(List.of(AWSCURRENT));
+            version.setCreatedDate(now);
+            versions.put(versionId, version);
+        }
 
         Secret secret = new Secret();
         secret.setName(name);
