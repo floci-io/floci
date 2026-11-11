@@ -254,6 +254,10 @@ public class SsmService implements ResourceProvider {
         return putParameter(name, value, type, description, overwrite, tags, null, null, null, null, region);
     }
 
+    /**
+     * Create or update a parameter, returning its version. As AWS does, surrounding spaces are removed from the
+     * name before it is validated and stored.
+     */
     public long putParameter(String name, String value, String type, String description,
                              boolean overwrite, Map<String, String> tags, String keyId, String allowedPattern,
                              String tier, List<JsonNode> policies, String region) {
@@ -265,6 +269,7 @@ public class SsmService implements ResourceProvider {
                             + "Member must satisfy enum value set: [Standard, Advanced, Intelligent-Tiering]");
         }
         validateTagKeys(tags);
+        name = name == null ? null : name.strip();
         rejectInvalidName(name);
 
         if (overwrite && tags != null && !tags.isEmpty()) {
@@ -539,8 +544,8 @@ public class SsmService implements ResourceProvider {
      * keys on the first path segment rather than a bare prefix, so a name such as
      * {@code ssm-auto-stack-Param-ABC}, which CloudFormation generates for a stack whose name
      * starts with ssm, is still accepted. A name holding anything but letters, numbers, {@code .-_} and the
-     * {@code /} separator, such as a space or the colon that starts a read's version or label selector, is
-     * rejected with the same message.
+     * {@code /} separator, such as an interior space or the colon that starts a read's version or label selector,
+     * is rejected with the same message.
      */
     private static void rejectInvalidName(String name) {
         String bare = name == null ? "" : name.startsWith("/") ? name.substring(1) : name;
