@@ -25,6 +25,7 @@ import io.floci.aws.services.s3.S3ControlArnUtils;
 import io.floci.aws.services.s3.S3ObjectKeys;
 import io.floci.aws.services.secretsmanager.SecretsManagerService;
 import io.floci.aws.services.sqs.SqsService;
+import io.floci.aws.services.ssm.SsmService;
 import io.quarkus.vertx.http.runtime.CurrentVertxRequest;
 import io.vertx.ext.web.RoutingContext;
 import jakarta.enterprise.context.ApplicationScoped;
@@ -91,7 +92,10 @@ public class ResourceArnBuilder {
     /** The SSM actions whose {@code ResourceArn} names the parameter they act on, in place of {@code Name}. */
     private static final Set<String> SSM_RESOURCE_POLICY_ACTIONS =
             Set.of("PutResourcePolicy", "GetResourcePolicies", "DeleteResourcePolicy");
-    /** The SSM tagging actions, whose handler tags the parameter {@code ResourceId} names, whatever its type. */
+    /**
+     * The SSM tagging actions, whose handler tags the parameter {@code ResourceId} names, whatever its type, reading
+     * a legacy {@code parameter<name>} ARN as {@code parameter/<name>}.
+     */
     private static final Set<String> SSM_TAGGING_OPERATIONS =
             Set.of("AddTagsToResource", "ListTagsForResource", "RemoveTagsFromResource");
     private static final Set<String> SSM_NAMES_OPERATIONS = Set.of("GetParameters", "DeleteParameters");
@@ -1931,7 +1935,9 @@ public class ResourceArnBuilder {
             }
             boolean selectorRead = operation != null && SSM_SELECTOR_READ_OPERATIONS.contains(operation);
             if (operation != null && SSM_TAGGING_OPERATIONS.contains(operation)) {
-                return List.of(ssmParameterArn(json.path("ResourceId").asText(), region, accountId));
+                String resourceId = SsmService.withLegacyParameterSlash(json.path("ResourceId").asText(),
+                        AwsRegions.partitionFor(region), region, accountId);
+                return List.of(ssmParameterArn(resourceId, region, accountId));
             } else if ("GetParametersByPath".equals(operation)) {
                 String path = json.path("Path").asText();
                 if (path.length() > 1 && path.endsWith("/")) {

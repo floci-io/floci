@@ -1878,6 +1878,18 @@ class ResourceArnBuilderTest {
             assertEquals(List.of("arn:aws:ssm:us-east-1:111122223333:parameter/shared/b"),
                     builder.buildResources("ssm", ctx, "us-east-1", "000000000000"));
 
+            setJsonBody("{\"ResourceType\":\"Parameter\","
+                    + "\"ResourceId\":\"arn:aws:ssm:us-east-1:000000000000:parametermyparam\"}");
+            assertEquals(List.of("arn:aws:ssm:us-east-1:000000000000:parameter/myparam"),
+                    builder.buildResources("ssm", ctx, "us-east-1", "000000000000"));
+
+            for (String foreign : List.of("arn:aws:ssm:us-west-2:000000000000:parametermyparam",
+                    "arn:aws:ssm:us-east-1:111122223333:parametermyparam",
+                    "arn:aws-us-gov:ssm:us-east-1:000000000000:parametermyparam")) {
+                setJsonBody("{\"ResourceType\":\"Parameter\",\"ResourceId\":\"" + foreign + "\"}");
+                assertEquals(List.of(foreign), builder.buildResources("ssm", ctx, "us-east-1", "000000000000"));
+            }
+
             setJsonBody("{\"ResourceType\":\"Document\",\"ResourceId\":\"/secret\",\"Name\":\"/allowed\"}");
             assertEquals(List.of("arn:aws:ssm:us-east-1:000000000000:parameter/secret"),
                     builder.buildResources("ssm", ctx, "us-east-1", "000000000000"));

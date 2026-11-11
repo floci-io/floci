@@ -121,4 +121,37 @@ class SsmTaggingIamEnforcementIntegrationTest {
             }
         }
     }
+
+    @Test
+    void aLegacyArnWithoutParameterSlashIsCheckedAgainstTheParameterItTags() {
+        String denied = "iam-tagging-legacy-" + UUID.randomUUID();
+        try (SsmClient root = AwsTestClients.create(SsmClient.builder(), ACCOUNT, Region.US_EAST_1)) {
+            try {
+                root.putParameter(r -> r.name(denied).type(ParameterType.STRING).value("v"));
+                String userName = "ssm-tagging-" + UUID.randomUUID();
+                EnforcementFixtures.UserCredentials credentials = EnforcementFixtures.createUser(
+                        cleanup, RestAssured.port, auth(ACCOUNT, "iam"), userName);
+                EnforcementFixtures.putUserPolicy(RestAssured.port, auth(ACCOUNT, "iam"), userName, "p", """
+                        {"Version":"2012-10-17","Statement":[
+                          {"Effect":"Allow","Action":"ssm:AddTagsToResource","Resource":"*"},
+                          {"Effect":"Deny","Action":"ssm:AddTagsToResource",
+                           "Resource":"arn:aws:ssm:us-east-1:000000000000:parameter/%s"}]}""".formatted(denied));
+
+                given()
+                        .header("Authorization", auth(credentials.accessKeyId(), "ssm"))
+                        .header("X-Amz-Target", "AmazonSSM.AddTagsToResource")
+                        .contentType("application/x-amz-json-1.1")
+                        .body("{\"ResourceType\":\"Parameter\",\"ResourceId\":\"arn:aws:ssm:us-east-1:"
+                                + ACCOUNT + ":parameter" + denied
+                                + "\",\"Tags\":[{\"Key\":\"team\",\"Value\":\"x\"}]}")
+                .when().post("/")
+                .then().statusCode(400).body(containsString("AccessDeniedException"));
+
+                assertTrue(root.listTagsForResource(r -> r.resourceType(ResourceTypeForTagging.PARAMETER)
+                        .resourceId(denied)).tagList().isEmpty());
+            } finally {
+                root.deleteParameter(r -> r.name(denied));
+            }
+        }
+    }
 }
