@@ -27,8 +27,9 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 
 /**
- * {@code GetParametersByPath} is checked against the parameter its {@code Path} names, and {@code GetParameters}
- * against each parameter its {@code Names} give, without the version or label selector a name may carry.
+ * {@code GetParametersByPath} is checked against the parameter its {@code Path} names, the root path when it names
+ * none, and {@code GetParameters} against each parameter its {@code Names} give, without the version or label selector
+ * a name may carry.
  */
 @QuarkusTest
 @TestProfile(IamEnforcementProfile.class)
@@ -155,6 +156,58 @@ class SsmParameterReadIamEnforcementIntegrationTest {
                 root.deleteParameter(r -> r.name(name));
             }
         }
+    }
+
+    @Test
+    void aDenyOnAParameterRefusesReadingItsVersionsAndLabels() {
+        String name = "/iam-selector-deny-" + UUID.randomUUID() + "/db";
+        try (SsmClient root = AwsTestClients.create(SsmClient.builder(), ACCOUNT, Region.US_EAST_1)) {
+            try {
+                root.putParameter(r -> r.name(name).type(ParameterType.STRING).value("v1"));
+                root.labelParameterVersion(r -> r.name(name).parameterVersion(1L).labels("stable"));
+                String arn = root.getParameter(r -> r.name(name)).parameter().arn();
+                EnforcementFixtures.UserCredentials credentials = user("""
+                        {"Version":"2012-10-17","Statement":[
+                          {"Effect":"Allow","Action":"ssm:GetParameter",
+                           "Resource":"arn:aws:ssm:us-east-1:000000000000:parameter/*"},
+                          {"Effect":"Deny","Action":"ssm:GetParameter",
+                           "Resource":"arn:aws:ssm:us-east-1:000000000000:parameter%s"}]}""".formatted(name));
+                try (SsmClient user = AwsTestClients.create(SsmClient.builder(), credentials.accessKeyId(),
+                        Region.US_EAST_1)) {
+                    for (String selected : new String[] {name + ":1", name + ":stable", arn + ":stable"}) {
+                        SsmException denied = assertThrows(SsmException.class,
+                                () -> user.getParameter(r -> r.name(selected)));
+                        assertEquals("AccessDeniedException", denied.awsErrorDetails().errorCode());
+                    }
+                }
+            } finally {
+                root.deleteParameter(r -> r.name(name));
+            }
+        }
+    }
+
+    @Test
+    void aDenyOnTheRootPathRefusesGetParametersByPathOnItAndWithoutAPath() {
+        EnforcementFixtures.UserCredentials credentials = user("""
+                {"Version":"2012-10-17","Statement":[
+                  {"Effect":"Allow","Action":"ssm:GetParametersByPath",
+                   "Resource":"arn:aws:ssm:us-east-1:000000000000:parameter/*"},
+                  {"Effect":"Deny","Action":"ssm:GetParametersByPath",
+                   "Resource":"arn:aws:ssm:us-east-1:000000000000:parameter/"}]}""");
+        try (SsmClient user = AwsTestClients.create(SsmClient.builder(), credentials.accessKeyId(),
+                Region.US_EAST_1)) {
+            SsmException denied = assertThrows(SsmException.class,
+                    () -> user.getParametersByPath(r -> r.path("/").recursive(true)));
+            assertEquals("AccessDeniedException", denied.awsErrorDetails().errorCode());
+        }
+
+        given()
+                .header("Authorization", auth(credentials.accessKeyId(), "ssm"))
+                .header("X-Amz-Target", "AmazonSSM.GetParametersByPath")
+                .contentType("application/x-amz-json-1.1")
+                .body("{\"Recursive\":true}")
+        .when().post("/")
+        .then().statusCode(400).body(containsString("AccessDeniedException"));
     }
 
     private EnforcementFixtures.UserCredentials user(String policy) {
