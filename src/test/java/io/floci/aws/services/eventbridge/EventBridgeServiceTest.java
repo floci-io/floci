@@ -642,18 +642,27 @@ class EventBridgeServiceTest {
     void ruleAndTargetOperationsRejectANameOutsideThePattern() {
         Target target = new Target("t1", "arn:aws:sqs:us-east-1:000000000000:queue-1", null, null);
 
-        assertRuleNameRejected(() -> service.deleteRule("a/b", null, REGION));
-        assertRuleNameRejected(() -> service.enableRule("a/b", null, REGION));
-        assertRuleNameRejected(() -> service.disableRule("a/b", null, REGION));
-        assertRuleNameRejected(() -> service.putTargets("a/b", null, List.of(target), REGION));
-        assertRuleNameRejected(() -> service.removeTargets("a/b", null, List.of("t1"), REGION));
-        assertRuleNameRejected(() -> service.listTargetsByRule("a/b", null, REGION));
+        assertRuleNameRejected(() -> service.deleteRule("a/b", null, REGION), "name");
+        assertRuleNameRejected(() -> service.enableRule("a/b", null, REGION), "name");
+        assertRuleNameRejected(() -> service.disableRule("a/b", null, REGION), "name");
+        assertRuleNameRejected(() -> service.putTargets("a/b", null, List.of(target), REGION), "rule");
+        assertRuleNameRejected(() -> service.removeTargets("a/b", null, List.of("t1"), REGION), "rule");
+        assertRuleNameRejected(() -> service.listTargetsByRule("a/b", null, REGION), "rule");
     }
 
     private static void assertRuleNameRejected(Executable call) {
         AwsException error = assertThrows(AwsException.class, call);
         assertEquals("ValidationException", error.getErrorCode());
         assertEquals(400, error.getHttpStatus());
+    }
+
+    private static void assertRuleNameRejected(Executable call, String member) {
+        AwsException error = assertThrows(AwsException.class, call);
+        assertEquals("ValidationException", error.getErrorCode());
+        assertEquals(400, error.getHttpStatus());
+        assertEquals("1 validation error detected: Value 'a/b' at '" + member + "' failed to satisfy "
+                + "constraint: Member must satisfy regular expression pattern: [\\.\\-_A-Za-z0-9]+",
+                error.getMessage());
     }
 
     @Test

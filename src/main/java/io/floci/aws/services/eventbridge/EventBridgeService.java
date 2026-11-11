@@ -381,7 +381,7 @@ public class EventBridgeService implements ResourceProvider, StoredResourceArns 
     public Rule putRule(String name, String busName, String eventPattern,
                         String scheduleExpression, RuleState state, String description,
                         String roleArn, Map<String, String> tags, String region) {
-        validateRuleName(name);
+        validateRuleName("name", name);
         if ((eventPattern == null || eventPattern.isBlank())
                 && (scheduleExpression == null || scheduleExpression.isBlank())) {
             throw new AwsException("ValidationException",
@@ -427,20 +427,20 @@ public class EventBridgeService implements ResourceProvider, StoredResourceArns 
 
     private static final Pattern NON_PARTNER_NAME = Pattern.compile("[\\.\\-_A-Za-z0-9]+");
 
-    private static void validateRuleName(String name) {
-        List<String> violations = nameViolations("name", name, 64, NON_PARTNER_NAME);
+    private static void validateRuleName(String member, String name) {
+        List<String> violations = nameViolations(member, name, 64, NON_PARTNER_NAME);
         if (!violations.isEmpty()) {
             throw SmithyValidationErrors.validationException(violations);
         }
     }
 
-    private void validateRuleReference(String name, String busName, String region) {
+    private void validateRuleReference(String member, String name, String busName, String region) {
         boolean legacyRuleOfBus = name != null
                 && ruleStore.get(ruleKey(region, busName, name))
                         .map(rule -> busName.equals(rule.getEventBusName()))
                         .orElse(false);
         if (!legacyRuleOfBus) {
-            validateRuleName(name);
+            validateRuleName(member, name);
         }
     }
 
@@ -461,7 +461,7 @@ public class EventBridgeService implements ResourceProvider, StoredResourceArns 
 
     public void deleteRule(String name, String busName, String region) {
         String effectiveBus = resolvedBusName(busName);
-        validateRuleReference(name, effectiveBus, region);
+        validateRuleReference("name", name, effectiveBus, region);
         ensureBusExists(effectiveBus, region);
         String key = ruleKey(region, effectiveBus, name);
         Rule rule = ruleStore.get(key).orElse(null);
@@ -533,7 +533,7 @@ public class EventBridgeService implements ResourceProvider, StoredResourceArns 
 
     public void enableRule(String name, String busName, String region) {
         String effectiveBus = resolvedBusName(busName);
-        validateRuleReference(name, effectiveBus, region);
+        validateRuleReference("name", name, effectiveBus, region);
         String key = ruleKey(region, effectiveBus, name);
         Rule rule = ruleStore.get(key)
                 .orElseThrow(() -> new AwsException("ResourceNotFoundException",
@@ -545,7 +545,7 @@ public class EventBridgeService implements ResourceProvider, StoredResourceArns 
 
     public void disableRule(String name, String busName, String region) {
         String effectiveBus = resolvedBusName(busName);
-        validateRuleReference(name, effectiveBus, region);
+        validateRuleReference("name", name, effectiveBus, region);
         String key = ruleKey(region, effectiveBus, name);
         Rule rule = ruleStore.get(key)
                 .orElseThrow(() -> new AwsException("ResourceNotFoundException",
@@ -577,7 +577,7 @@ public class EventBridgeService implements ResourceProvider, StoredResourceArns 
 
     private int upsertTargets(String ruleName, String busName, List<Target> newTargets, String region) {
         String effectiveBus = resolvedBusName(busName);
-        validateRuleReference(ruleName, effectiveBus, region);
+        validateRuleReference("rule", ruleName, effectiveBus, region);
         String key = ruleKey(region, effectiveBus, ruleName);
         Rule rule = ruleStore.get(key)
                 .orElseThrow(() -> new AwsException("ResourceNotFoundException",
@@ -688,7 +688,7 @@ public class EventBridgeService implements ResourceProvider, StoredResourceArns 
     public RemoveTargetsResult removeTargets(String ruleName, String busName,
                                              List<String> ids, String region) {
         String effectiveBus = resolvedBusName(busName);
-        validateRuleReference(ruleName, effectiveBus, region);
+        validateRuleReference("rule", ruleName, effectiveBus, region);
         String key = ruleKey(region, effectiveBus, ruleName);
         List<Target> existing = new ArrayList<>(targetStore.get(key).orElse(new ArrayList<>()));
         int removed = 0;
@@ -704,7 +704,7 @@ public class EventBridgeService implements ResourceProvider, StoredResourceArns 
 
     public List<Target> listTargetsByRule(String ruleName, String busName, String region) {
         String effectiveBus = resolvedBusName(busName);
-        validateRuleReference(ruleName, effectiveBus, region);
+        validateRuleReference("rule", ruleName, effectiveBus, region);
         String key = ruleKey(region, effectiveBus, ruleName);
         ruleStore.get(key)
                 .orElseThrow(() -> new AwsException("ResourceNotFoundException",
