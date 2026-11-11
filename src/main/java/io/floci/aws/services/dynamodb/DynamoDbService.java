@@ -2599,6 +2599,30 @@ public class DynamoDbService {
             }
         }
 
+        // Handle billing mode switch.
+        if (billingMode != null && !billingMode.equals(table.getBillingMode())) {
+            table.setBillingMode(billingMode);
+            if ("PAY_PER_REQUEST".equals(billingMode)) {
+                table.getProvisionedThroughput().setReadCapacityUnits(0L);
+                table.getProvisionedThroughput().setWriteCapacityUnits(0L);
+                if (12000 > table.getWarmReadUnitsPerSecond()) {
+                    table.setWarmReadUnitsPerSecond(12000);
+                }
+                if (4000 > table.getWarmWriteUnitsPerSecond()) {
+                    table.setWarmWriteUnitsPerSecond(4000);
+                }
+            } else {
+                long rcu = table.getProvisionedThroughput().getReadCapacityUnits();
+                long wcu = table.getProvisionedThroughput().getWriteCapacityUnits();
+                if (rcu > table.getWarmReadUnitsPerSecond()) {
+                    table.setWarmReadUnitsPerSecond(rcu);
+                }
+                if (wcu > table.getWarmWriteUnitsPerSecond()) {
+                    table.setWarmWriteUnitsPerSecond(wcu);
+                }
+            }
+        }
+
         for (String indexName : gsiDeletes) {
             table.getGlobalSecondaryIndexes().removeIf(g -> indexName.equals(g.getIndexName()));
         }
