@@ -1905,7 +1905,7 @@ class SsmIntegrationTest {
 
     @Test
     void putParameterRejectsANameOutsideTheParameterNameSyntaxAndStoresNothing() {
-        for (String name : List.of("/name-syntax/db:secret", "/name-syntax/db ")) {
+        for (String name : List.of("/name-syntax/db:secret", "/name-syntax/db secret")) {
             given()
                 .header("X-Amz-Target", "AmazonSSM.PutParameter")
                 .contentType(SSM_CONTENT_TYPE)
@@ -1929,6 +1929,30 @@ class SsmIntegrationTest {
                 .statusCode(400)
                 .body("__type", equalTo("ParameterNotFound"));
         }
+    }
+
+    @Test
+    void putParameterStoresANameWithoutItsSurroundingSpaces() {
+        given()
+            .header("X-Amz-Target", "AmazonSSM.PutParameter")
+            .contentType(SSM_CONTENT_TYPE)
+            .body("{ \"Name\": \" /name-spaces/db \", \"Value\": \"v\", \"Type\": \"String\" }")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("Version", equalTo(1));
+
+        given()
+            .header("X-Amz-Target", "AmazonSSM.GetParameter")
+            .contentType(SSM_CONTENT_TYPE)
+            .body("{ \"Name\": \"/name-spaces/db\" }")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("Parameter.Name", equalTo("/name-spaces/db"))
+            .body("Parameter.Value", equalTo("v"));
     }
 
     private void putIntelligentTiering(String name, String jsonEscapedValue) {
