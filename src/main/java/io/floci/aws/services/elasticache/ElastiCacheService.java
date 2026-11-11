@@ -905,7 +905,7 @@ public class ElastiCacheService implements ResourceProvider {
      * like AWS, the Describe* listings only show the requesting Region's.
      * The getters stay unscoped: credential lookups, restore and validation run outside a request.
      */
-    private boolean inRequestRegion(String arn) {
+    boolean inRequestRegion(String arn) {
         return regionResolver.getRegion().equals(regionOf(arn));
     }
 
@@ -2567,7 +2567,7 @@ public class ElastiCacheService implements ResourceProvider {
     public Collection<ElastiCacheUser> listUsers(String filterUserId, String filterEngine) {
         // UserId wins when both filters are sent; AWS documents no interaction between them.
         if (filterUserId != null && !filterUserId.isBlank()) {
-            return findUser(filterUserId).filter(u -> inRequestRegion(u.getArn()))
+            return findUser(filterUserId).flatMap(this::inRequestRegion)
                     .map(List::of)
                     .orElseThrow(() -> new AwsException("UserNotFound",
                             "User " + filterUserId + " not found.", 404));
@@ -2575,11 +2575,31 @@ public class ElastiCacheService implements ResourceProvider {
         ensureDefaultUser();
         if (filterEngine != null && !filterEngine.isBlank()) {
             return users.scan(k -> true).stream()
-                    .filter(u -> inRequestRegion(u.getArn()))
+                    .map(this::inRequestRegion).flatMap(Optional::stream)
                     .filter(u -> filterEngine.equalsIgnoreCase(u.getEngine()))
                     .toList();
         }
-        return users.scan(k -> true).stream().filter(u -> inRequestRegion(u.getArn())).toList();
+        return users.scan(k -> true).stream().map(this::inRequestRegion).flatMap(Optional::stream).toList();
+    }
+
+    /**
+     * {@code user} as the request's Region lists it, or empty when it is another Region's. AWS has the built-in
+     * default user in every Region; Floci seeds one per account, so it is listed in every Region, with that
+     * Region's ARN.
+     */
+    private Optional<ElastiCacheUser> inRequestRegion(ElastiCacheUser user) {
+        if (!DEFAULT_USER_ID.equals(user.getUserId())) {
+            return inRequestRegion(user.getArn()) ? Optional.of(user) : Optional.empty();
+        }
+        String arn = regionResolver.buildArn("elasticache", regionResolver.getRegion(), "user:" + DEFAULT_USER_ID);
+        if (arn.equals(user.getArn())) {
+            return Optional.of(user);
+        }
+        ElastiCacheUser regional = new ElastiCacheUser(user.getUserId(), user.getUserName(), user.getAuthMode(),
+                user.getPasswords(), user.getAccessString(), user.getEngine(), user.getStatus(), user.getCreatedAt());
+        regional.setTags(user.getTags());
+        regional.setArn(arn);
+        return Optional.of(regional);
     }
 
     /**

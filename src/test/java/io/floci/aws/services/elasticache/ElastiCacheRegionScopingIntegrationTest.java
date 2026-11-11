@@ -1,12 +1,12 @@
 package io.floci.aws.services.elasticache;
 
+import io.floci.aws.testing.DockerAvailability;
+import io.floci.aws.testing.QueryRequests;
 import io.quarkus.test.junit.QuarkusTest;
 import io.restassured.response.Response;
-import io.restassured.specification.RequestSpecification;
 import org.junit.jupiter.api.Assumptions;
 import org.junit.jupiter.api.Test;
 
-import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.containsString;
 import static org.hamcrest.Matchers.not;
 
@@ -37,6 +37,17 @@ class ElastiCacheRegionScopingIntegrationTest {
     }
 
     @Test
+    void builtInDefaultUserIsListedAndFoundInEveryRegionWithThatRegionsArn() {
+        for (String region : new String[] {HOME, OTHER_REGION}) {
+            String arn = "<ARN>arn:aws:elasticache:" + region + ":" + ACCOUNT + ":user:default</ARN>";
+            send(ACCOUNT, region, "DescribeUsers").then().statusCode(200)
+                    .body(containsString("<UserId>default</UserId>")).body(containsString(arn));
+            send(ACCOUNT, region, "DescribeUsers", "UserId", "default").then().statusCode(200)
+                    .body(containsString(arn));
+        }
+    }
+
+    @Test
     void userGroupIsOnlyVisibleInItsRegionAndAccount() {
         String member = "region-scoped-default";
         String group = "region-scoped-group";
@@ -55,7 +66,7 @@ class ElastiCacheRegionScopingIntegrationTest {
     }
 
     @Test
-    void replicationGroupAndItsMembersAreOnlyVisibleInTheirRegionAndAccount() {
+    void replicationGroupAndItsMembersAreOnlyVisibleInTheirRegionAndAccount() throws InterruptedException {
         requireDocker();
         String group = "region-scoped-rg";
         send(ACCOUNT, HOME, "CreateReplicationGroup", "ReplicationGroupId", group,
@@ -72,13 +83,13 @@ class ElastiCacheRegionScopingIntegrationTest {
     }
 
     @Test
-    void redisCacheClusterIsOnlyVisibleInItsRegionAndAccount() {
+    void redisCacheClusterIsOnlyVisibleInItsRegionAndAccount() throws InterruptedException {
         requireDocker();
         assertCacheClusterIsRegional("region-scoped-redis", "redis");
     }
 
     @Test
-    void memcachedCacheClusterIsOnlyVisibleInItsRegionAndAccount() {
+    void memcachedCacheClusterIsOnlyVisibleInItsRegionAndAccount() throws InterruptedException {
         requireDocker();
         assertCacheClusterIsRegional("region-scoped-memcached", "memcached");
     }
@@ -116,27 +127,11 @@ class ElastiCacheRegionScopingIntegrationTest {
 
     /** An ElastiCache Query request from {@code region} of {@code account}, with {@code params} as name/value pairs. */
     private static Response send(String account, String region, String action, String... params) {
-        RequestSpecification request = given().header("Authorization", auth(account, region))
-                .formParam("Action", action);
-        for (int i = 0; i + 1 < params.length; i += 2) {
-            request.formParam(params[i], params[i + 1]);
-        }
-        return request.when().post("/");
+        return QueryRequests.request(account, region, "elasticache", action, params).when().post("/");
     }
 
-    private static String auth(String account, String region) {
-        return "AWS4-HMAC-SHA256 Credential=" + account + "/20261110/" + region
-                + "/elasticache/aws4_request, SignedHeaders=host, Signature=abc";
-    }
-
-    private static void requireDocker() {
-        boolean available;
-        try {
-            available = new ProcessBuilder("docker", "version", "--format", "{{.Server.Version}}")
-                    .redirectErrorStream(true).start().waitFor() == 0;
-        } catch (Exception e) {
-            available = false;
-        }
-        Assumptions.assumeTrue(available, "Docker daemon must be available for ElastiCache container tests");
+    private static void requireDocker() throws InterruptedException {
+        Assumptions.assumeTrue(DockerAvailability.isAvailable(),
+                "Docker daemon must be available for ElastiCache container tests");
     }
 }
