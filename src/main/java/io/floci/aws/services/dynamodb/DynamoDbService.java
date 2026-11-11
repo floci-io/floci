@@ -1394,6 +1394,12 @@ public class DynamoDbService {
 
         String itemKey = buildItemKey(table, key, true);
 
+        // AWS refuses an over-limit statement before it evaluates the condition.
+        if (sizeRule == UpdateSizeRule.UPDATE_ITEM && updateExpression != null) {
+            requireUpdateStatementWithinSizeLimit(DynamoDbItemSize.updateStatementSize(updateExpression,
+                    path -> parsePath(path, expressionAttrNames), expressionAttrValues));
+        }
+
         return withItemLock(storageKey, itemKey, () -> {
             ConcurrentSkipListMap<String, JsonNode> items = itemsFor(storageKey, stagedItems, true);
 
@@ -1503,12 +1509,7 @@ public class DynamoDbService {
             // AWS validates index key values against the item the update produces.
             validateIndexKeyTypes(table, item, true);
 
-            if (sizeRule == UpdateSizeRule.UPDATE_ITEM && updateExpression != null) {
-                requireUpdateItemWithinSizeLimit(item, DynamoDbItemSize.updateStatementSize(updateExpression,
-                        path -> parsePath(path, expressionAttrNames), expressionAttrValues));
-            } else {
-                requireUpdatedItemWithinSizeLimit(item);
-            }
+            requireUpdatedItemWithinSizeLimit(item);
 
             if (stagedItems == null) {
                 pointInTimeRecovery.recordItem(regionResolver.getAccountId(), storageKey, table, itemKey, existing);
@@ -2421,8 +2422,8 @@ public class DynamoDbService {
         }
     }
 
-    private static void requireUpdateItemWithinSizeLimit(JsonNode item, int statementSize) {
-        if (!DynamoDbItemSize.updateItemWithinLimit(item, statementSize)) {
+    private static void requireUpdateStatementWithinSizeLimit(int statementSize) {
+        if (!DynamoDbItemSize.updateStatementWithinLimit(statementSize)) {
             throw new UpdatedItemTooLargeException();
         }
     }

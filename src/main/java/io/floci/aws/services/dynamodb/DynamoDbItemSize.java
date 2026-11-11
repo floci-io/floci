@@ -62,8 +62,8 @@ final class DynamoDbItemSize {
         return calculateItemSize(item) <= MAX_ITEM_SIZE;
     }
 
-    static boolean updateItemWithinLimit(JsonNode item, int statementSize) {
-        return calculateItemSize(item) <= MAX_ITEM_SIZE && statementSize <= MAX_ITEM_SIZE;
+    static boolean updateStatementWithinLimit(int statementSize) {
+        return statementSize <= MAX_ITEM_SIZE;
     }
 
     static int updateStatementSize(String expression, Function<String, List<Object>> paths, JsonNode values) {
