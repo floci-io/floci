@@ -2112,13 +2112,13 @@ class RdsCfnProvisionerTest {
 
     /** An instance created on {@code sg-first}, then updated to {@code json}; it is kept, under the same id. */
     private StackResource updateFromFirstGroup(String json) {
-        return updateFromFirstGroup(json, onFile -> { });
+        return updateFromFirstGroup(json, created -> { });
     }
 
-    /** As {@link #updateFromFirstGroup(String)}, with {@code beforeUpdate} given the instance on file first. */
-    private StackResource updateFromFirstGroup(String json, Consumer<DbInstance> beforeUpdate) {
+    /** As {@link #updateFromFirstGroup(String)}, with {@code beforeUpdate} given the created instance first. */
+    private StackResource updateFromFirstGroup(String json, Consumer<Created> beforeUpdate) {
         Created created = createInstance(SG_FIRST, "sg-first");
-        beforeUpdate.accept(created.onFile());
+        beforeUpdate.accept(created);
         return updateInstance(created, json);
     }
 
@@ -2215,7 +2215,7 @@ class RdsCfnProvisionerTest {
         // The instance reports IAM authentication off when the update starts and on once modified.
         StackResource r = updateFromFirstGroup("""
                 {"Engine":"postgres","VPCSecurityGroups":["sg-second"],"EnableIAMDatabaseAuthentication":true}
-                """, onFile -> when(onFile.isIamDatabaseAuthenticationEnabled()).thenReturn(false, true));
+                """, created -> when(created.onFile().isIamDatabaseAuthenticationEnabled()).thenReturn(false, true));
 
         assertFalse(provisioner.rollbackUpdate(r), "IAM authentication has no rollback here");
         verify(rdsService).setDbInstanceVpcSecurityGroups("us-east-1", r.getPhysicalId(), List.of("sg-first"));
@@ -2245,6 +2245,22 @@ class RdsCfnProvisionerTest {
         assertFalse(r.getAttributes().containsKey("__FlociAssociatedRolesPrior"));
         assertFalse(r.getAttributes().containsKey(ENCRYPTION_ATTR + "Prior"));
         assertFalse(r.getAttributes().containsKey(IN_PLACE_ATTR));
+    }
+
+    @Test
+    void aRollbackPutsBackTheRolesRecordTheUpdateFoundAndNotOneAnOlderFlociLeftBehind() {
+        // Before completeUpdate dropped it, a committed in-place update left the roles record it
+        // overwrote on the resource, and a stack can still carry one from then. The update found one
+        // record, writes another, and the rollback has to put back the one it found.
+        String found = "[{\"RoleArn\":\"arn:aws:iam::000000000000:role/declared\"}]";
+        StackResource r = updateFromFirstGroup(SG_SECOND, created -> created.resource().getAttributes().putAll(Map.of(
+                "__FlociAssociatedRoles", found,
+                "__FlociAssociatedRolesPrior", "[{\"RoleArn\":\"arn:aws:iam::000000000000:role/old\"}]")));
+        assertEquals("[]", r.getAttributes().get("__FlociAssociatedRoles"));
+
+        assertTrue(provisioner.rollbackUpdate(r));
+
+        assertEquals(found, r.getAttributes().get("__FlociAssociatedRoles"));
     }
 
     @Test

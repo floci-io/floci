@@ -579,9 +579,9 @@ Dynamic-reference expansion is currently scoped to these RDS credential properti
   commits, or kept, with the replacement deleted, when the update rolls back. An instance with a
   custom `DBInstanceIdentifier` cannot be replaced, so that update fails with a `ValidationError`, as
   in AWS. An instance created before Floci applied `StorageEncrypted` is unencrypted whatever its
-  template said, and is replaced only by an update that changes the property. That first update
-  reads the previous value from the previous template, so a change made only through a parameter
-  is not seen there.
+  template said, and is replaced only by an update that changes the property. Its first update
+  reads the previous value from the previous template, resolved on that update, so a change made
+  only through a parameter, or anything else the update changes, is not seen there.
 - `KmsKeyId` is still accepted and ignored, so an encrypted instance reports no key.
 
 ## S3 ownership controls

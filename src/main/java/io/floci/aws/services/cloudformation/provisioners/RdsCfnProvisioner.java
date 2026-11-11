@@ -62,7 +62,7 @@ public class RdsCfnProvisioner implements CfnResourceProvisioner {
      * emulate a KMS key, public access, a subnet group placement chosen by the template or a
      * restore source on a cluster, so a change to one of these can only be seen against what the
      * template said last time. The values the last successful provision resolved are kept on the
-     * resource under {@link #DB_CLUSTER_CREATE_ONLY_ATTR}, which is how CloudFormation decides too:
+     * resource under {@link #DB_CLUSTER_CREATE_ONLY}, which is how CloudFormation decides too:
      * on the template's change, not on the live entity.
      */
     static final List<String> DB_CLUSTER_RECORDED_CREATE_ONLY = List.of(
@@ -84,26 +84,22 @@ public class RdsCfnProvisioner implements CfnResourceProvisioner {
     /**
      * The recorded createOnly values of a DB cluster resource, a JSON object keyed by property.
      * Internal, like the other {@code __Floci} attributes. A resource provisioned before these were
-     * recorded has none, and its first update records them without replacing anything.
+     * recorded has none, and its first update records them without replacing anything. The record
+     * an update overwrote is kept until the update commits, so a rollback puts it back beside the
+     * prior cluster.
      */
-    static final String DB_CLUSTER_CREATE_ONLY_ATTR = "__FlociDbClusterCreateOnly";
-    /**
-     * The record an update overwrote, kept until the update commits so a rollback puts it back
-     * beside the prior cluster; an empty value means there was no record before.
-     */
-    static final String DB_CLUSTER_CREATE_ONLY_PRIOR_ATTR = "__FlociDbClusterCreateOnlyPrior";
+    private static final CreateOnlyInputs DB_CLUSTER_CREATE_ONLY = new CreateOnlyInputs(
+            "__FlociDbClusterCreateOnly", "__FlociDbClusterCreateOnlyPrior");
 
     /**
      * The {@code AssociatedRoles} the template declared at the last successful provision, a JSON
      * array of {@code {RoleArn, FeatureName}}. An update removes only roles this record names and
-     * the template no longer does, so a role associated outside the stack is left in place.
+     * the template no longer does, so a role associated outside the stack is left in place. The
+     * record an update overwrote is kept until the update commits, so a rollback that puts the prior
+     * cluster or instance back puts its record back too.
      */
-    static final String ASSOCIATED_ROLES_ATTR = "__FlociAssociatedRoles";
-    /**
-     * The roles record an update overwrote, kept until the update commits so a rollback that puts
-     * the prior cluster back puts its record back too; an empty value means there was none.
-     */
-    static final String ASSOCIATED_ROLES_PRIOR_ATTR = "__FlociAssociatedRolesPrior";
+    private static final CreateOnlyInputs ASSOCIATED_ROLES = new CreateOnlyInputs(
+            "__FlociAssociatedRoles", "__FlociAssociatedRolesPrior");
 
     /**
      * The {@code StorageEncrypted} a DB instance resource was last provisioned with, {@code true} or
@@ -112,8 +108,9 @@ public class RdsCfnProvisioner implements CfnResourceProvisioner {
      * against the instance: one a stack created before Floci applied the property is unencrypted
      * whatever its template said. Such a resource has no record, so its first update reads the
      * previous template's value instead, resolved as well as it still can be, and replaces the
-     * instance only when that changed. As in {@link Ec2Tags#ownedKeys}, a value taken from a
-     * parameter resolves to the new value there, so a change made only through a parameter is not seen.
+     * instance only when that changed. As in {@link Ec2Tags#ownedKeys}, that template resolves on this
+     * update, so a value taken from a parameter, or from anything else the update changes, reads as the
+     * new one, and a change made only that way is not seen.
      */
     private static final CreateOnlyInputs DB_INSTANCE_STORAGE_ENCRYPTED = new CreateOnlyInputs(
             "__FlociDbInstanceStorageEncrypted", "__FlociDbInstanceStorageEncryptedPrior");
@@ -199,19 +196,13 @@ public class RdsCfnProvisioner implements CfnResourceProvisioner {
         // An in-place update owes no cleanup, so the engine calls clearUpdate only after a
         // replacement: the records a rollback would have spent go here, or the next update's
         // rollback would put back the ones this update replaced.
-        resource.getAttributes().remove(DB_CLUSTER_CREATE_ONLY_PRIOR_ATTR);
-        resource.getAttributes().remove(ASSOCIATED_ROLES_PRIOR_ATTR);
-        DB_INSTANCE_STORAGE_ENCRYPTED.clearPrior(resource);
-        resource.getAttributes().remove(DB_INSTANCE_PRIOR_IN_PLACE_ATTR);
+        clearPriorRecords(resource);
         return ReplacementCleanup.complete(resource, this::delete);
     }
 
     @Override
     public void clearUpdate(StackResource resource) {
-        resource.getAttributes().remove(DB_CLUSTER_CREATE_ONLY_PRIOR_ATTR);
-        resource.getAttributes().remove(ASSOCIATED_ROLES_PRIOR_ATTR);
-        DB_INSTANCE_STORAGE_ENCRYPTED.clearPrior(resource);
-        resource.getAttributes().remove(DB_INSTANCE_PRIOR_IN_PLACE_ATTR);
+        clearPriorRecords(resource);
         ReplacementCleanup.clear(resource);
     }
 
@@ -240,22 +231,16 @@ public class RdsCfnProvisioner implements CfnResourceProvisioner {
     }
 
     private static void restorePriorRecords(StackResource resource) {
-        restorePriorRecord(resource, DB_CLUSTER_CREATE_ONLY_ATTR, DB_CLUSTER_CREATE_ONLY_PRIOR_ATTR);
-        restorePriorRecord(resource, ASSOCIATED_ROLES_ATTR, ASSOCIATED_ROLES_PRIOR_ATTR);
+        DB_CLUSTER_CREATE_ONLY.restorePrior(resource);
+        ASSOCIATED_ROLES.restorePrior(resource);
         DB_INSTANCE_STORAGE_ENCRYPTED.restorePrior(resource);
     }
 
-    /** Puts back the record {@code priorAttribute} saved; an empty one means there was none. */
-    private static void restorePriorRecord(StackResource resource, String attribute, String priorAttribute) {
-        String prior = resource.getAttributes().remove(priorAttribute);
-        if (prior == null) {
-            return;
-        }
-        if (prior.isEmpty()) {
-            resource.getAttributes().remove(attribute);
-        } else {
-            resource.getAttributes().put(attribute, prior);
-        }
+    private static void clearPriorRecords(StackResource resource) {
+        DB_CLUSTER_CREATE_ONLY.clearPrior(resource);
+        ASSOCIATED_ROLES.clearPrior(resource);
+        DB_INSTANCE_STORAGE_ENCRYPTED.clearPrior(resource);
+        resource.getAttributes().remove(DB_INSTANCE_PRIOR_IN_PLACE_ATTR);
     }
 
     /**
@@ -443,7 +428,7 @@ public class RdsCfnProvisioner implements CfnResourceProvisioner {
                 && !recordedEncryption.equals(encryptionRecord);
         if (replacing) {
             if (customNamed) {
-                throw customNamedReplacementRefused(id);
+                throw CfnExceptions.customNamedReplacement(id);
             }
             id = ctx.generatePhysicalName(r.getLogicalId(), 60, true);
             LOG.infov("Replacing DB instance {0} with {1}: StorageEncrypted {2} -> {3}",
@@ -486,7 +471,8 @@ public class RdsCfnProvisioner implements CfnResourceProvisioner {
         // The roles go on before a renamed instance's predecessor is deleted, so a refused list
         // deletes only the new instance and the stack still has the old one to roll back to. A
         // replaced instance is kept until the update commits instead.
-        instance = reconcileInstanceRoles(r, instance, roles, created, ctx.isUpdate(), region);
+        instance = reconcileInstanceRoles(r, instance, roles, created, region);
+        ASSOCIATED_ROLES.record(r, ctx, attributesBefore, associatedRolesRecord(roles));
         if (created && !replacing) {
             deleteRenamedResource(priorPhysicalId, id, rdsService::deleteDbInstance, "DB instance");
         }
@@ -594,12 +580,6 @@ public class RdsCfnProvisioner implements CfnResourceProvisioner {
         }
     }
 
-    private static AwsException customNamedReplacementRefused(String id) {
-        return new AwsException("ValidationError",
-                "CloudFormation cannot update a stack when a custom-named resource requires "
-                        + "replacing. Rename " + id + " and update the stack again.", 400);
-    }
-
     /**
      * A DB cluster follows CloudFormation's replacement lifecycle. A change to any of the
      * createOnlyProperties in the {@code AWS::RDS::DBCluster} schema ({@code DBClusterIdentifier},
@@ -636,10 +616,10 @@ public class RdsCfnProvisioner implements CfnResourceProvisioner {
         Map<String, String> createOnly = dbClusterRecordedCreateOnly(props, engine);
         String replacementReason = cluster == null ? null : dbClusterReplacementReason(cluster,
                 engineMode, storageEncrypted, databaseName,
-                readDbClusterCreateOnly(attributesBefore.get(DB_CLUSTER_CREATE_ONLY_ATTR)), createOnly);
+                readDbClusterCreateOnly(DB_CLUSTER_CREATE_ONLY.read(attributesBefore)), createOnly);
         if (replacementReason != null) {
             if (customNamed) {
-                throw customNamedReplacementRefused(id);
+                throw CfnExceptions.customNamedReplacement(id);
             }
             id = ctx.generatePhysicalName(r.getLogicalId(), 60, true);
             LOG.infov("Replacing DB cluster {0} with {1}: {2}", priorPhysicalId, id, replacementReason);
@@ -681,7 +661,8 @@ public class RdsCfnProvisioner implements CfnResourceProvisioner {
                     serverlessV2MinCapacity, serverlessV2MaxCapacity, serverlessV2SecondsUntilAutoPause,
                     false, null, engineMode, storageEncrypted);
         }
-        cluster = reconcileClusterRoles(r, cluster, roles, created, ctx.isUpdate(), region);
+        cluster = reconcileClusterRoles(r, cluster, roles, created, region);
+        ASSOCIATED_ROLES.record(r, ctx, attributesBefore, associatedRolesRecord(roles));
         // EnableHttpEndpoint updates with no interruption; a template that leaves it out wants it off.
         if (httpEndpoint != cluster.isHttpEndpointEnabled()) {
             cluster = rdsService.setHttpEndpoint(region, cluster.getDbClusterIdentifier(), httpEndpoint);
@@ -749,7 +730,7 @@ public class RdsCfnProvisioner implements CfnResourceProvisioner {
      * this template adds are associated.
      */
     private DbCluster reconcileClusterRoles(StackResource r, DbCluster cluster, List<DbRoleAssociation> roles,
-                                            boolean created, boolean update, String region) {
+                                            boolean created, String region) {
         String id = cluster.getDbClusterIdentifier();
         if (created) {
             if (!roles.isEmpty()) {
@@ -776,7 +757,7 @@ public class RdsCfnProvisioner implements CfnResourceProvisioner {
                 // A role the last template already declared is left as it is. One the template newly
                 // declares is always added, so a role attached by hand first fails the update with
                 // DBClusterRoleAlreadyExists, as it does on AWS.
-                List<DbRoleAssociation> declared = readAssociatedRoles(r.getAttributes().get(ASSOCIATED_ROLES_ATTR));
+                List<DbRoleAssociation> declared = readAssociatedRoles(ASSOCIATED_ROLES.read(r.getAttributes()));
                 for (DbRoleAssociation role : roles) {
                     if (!containsRole(declared, role) || !containsRole(cluster.getAssociatedRoles(), role)) {
                         cluster = rdsService.addRoleToDbCluster(region, id, role.getRoleArn(), role.getFeatureName());
@@ -788,13 +769,12 @@ public class RdsCfnProvisioner implements CfnResourceProvisioner {
                 throw e;
             }
         }
-        recordAssociatedRoles(r, roles, update);
         return cluster;
     }
 
     /** As {@link #reconcileClusterRoles}, for an instance; each role is added on its own. */
     private DbInstance reconcileInstanceRoles(StackResource r, DbInstance instance, List<DbRoleAssociation> roles,
-                                              boolean created, boolean update, String region) {
+                                              boolean created, String region) {
         String id = instance.getDbInstanceIdentifier();
         if (created) {
             try {
@@ -830,7 +810,6 @@ public class RdsCfnProvisioner implements CfnResourceProvisioner {
                 throw e;
             }
         }
-        recordAssociatedRoles(r, roles, update);
         return instance;
     }
 
@@ -893,7 +872,7 @@ public class RdsCfnProvisioner implements CfnResourceProvisioner {
     /** The roles the last template declared that this one does not. */
     private static List<DbRoleAssociation> droppedRoles(StackResource r, List<DbRoleAssociation> roles) {
         List<DbRoleAssociation> dropped = new ArrayList<>();
-        for (DbRoleAssociation previous : readAssociatedRoles(r.getAttributes().get(ASSOCIATED_ROLES_ATTR))) {
+        for (DbRoleAssociation previous : readAssociatedRoles(ASSOCIATED_ROLES.read(r.getAttributes()))) {
             if (!containsRole(roles, previous)) {
                 dropped.add(previous);
             }
@@ -911,11 +890,7 @@ public class RdsCfnProvisioner implements CfnResourceProvisioner {
         return value == null || value.isBlank() ? null : value;
     }
 
-    private static void recordAssociatedRoles(StackResource r, List<DbRoleAssociation> roles, boolean update) {
-        String priorRecord = r.getAttributes().get(ASSOCIATED_ROLES_ATTR);
-        if (update && !r.getAttributes().containsKey(ASSOCIATED_ROLES_PRIOR_ATTR)) {
-            r.getAttributes().put(ASSOCIATED_ROLES_PRIOR_ATTR, priorRecord == null ? "" : priorRecord);
-        }
+    private static String associatedRolesRecord(List<DbRoleAssociation> roles) {
         ArrayNode record = MAPPER.createArrayNode();
         for (DbRoleAssociation role : roles) {
             ObjectNode entry = record.addObject().put("RoleArn", role.getRoleArn());
@@ -923,7 +898,7 @@ public class RdsCfnProvisioner implements CfnResourceProvisioner {
                 entry.put("FeatureName", role.getFeatureName());
             }
         }
-        r.getAttributes().put(ASSOCIATED_ROLES_ATTR, record.toString());
+        return record.toString();
     }
 
     private static List<DbRoleAssociation> readAssociatedRoles(String raw) {
@@ -1004,20 +979,21 @@ public class RdsCfnProvisioner implements CfnResourceProvisioner {
     }
 
     /**
-     * Writes the createOnly record the next update compares against. On an update that changed it
-     * (a replacement, or the first record of a resource that predates it) the previous record is
-     * kept beside it until the update commits, so {@link #rollbackUpdate} can put it back.
+     * Writes the createOnly record the next update compares against. An update that leaves it as it
+     * was writes nothing. One that changed it (a replacement, or the first record of a resource that
+     * predates it) keeps the previous record beside it until the update commits, so
+     * {@link #rollbackUpdate} can put it back.
      */
     private static void recordDbClusterCreateOnly(StackResource r, ProvisionContext ctx,
                                                   Map<String, String> attributesBefore,
                                                   Map<String, String> createOnly) {
-        String priorRecord = attributesBefore.get(DB_CLUSTER_CREATE_ONLY_ATTR);
-        if (ctx.isUpdate() && !createOnly.equals(readDbClusterCreateOnly(priorRecord))) {
-            r.getAttributes().put(DB_CLUSTER_CREATE_ONLY_PRIOR_ATTR, priorRecord == null ? "" : priorRecord);
+        Map<String, String> recorded = readDbClusterCreateOnly(DB_CLUSTER_CREATE_ONLY.read(attributesBefore));
+        if (ctx.isUpdate() && createOnly.equals(recorded)) {
+            return;
         }
         ObjectNode record = MAPPER.createObjectNode();
         createOnly.forEach(record::put);
-        r.getAttributes().put(DB_CLUSTER_CREATE_ONLY_ATTR, record.toString());
+        DB_CLUSTER_CREATE_ONLY.record(r, ctx, attributesBefore, record.toString());
     }
 
     /** The record as a map, or null when the resource carries none or it cannot be read. */
