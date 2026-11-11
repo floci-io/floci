@@ -18,6 +18,7 @@ import io.floci.aws.services.codedeploy.model.DeploymentConfig;
 import io.floci.aws.services.codedeploy.model.DeploymentGroup;
 import io.floci.aws.services.codedeploy.model.OnPremisesInstance;
 import io.floci.aws.services.ec2.Ec2Service;
+import io.floci.aws.services.ec2.model.Tag;
 import io.floci.aws.services.ecs.EcsService;
 import io.floci.aws.services.ecs.model.CreateTaskSetRequest;
 import io.floci.aws.services.ecs.model.TaskSet;
@@ -36,6 +37,7 @@ import java.time.Clock;
 import java.time.Duration;
 import java.time.Instant;
 import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
@@ -1092,17 +1094,11 @@ public class CodeDeployService {
         // EC2 instances by tag filters
         List<Map<String, String>> ec2TagFilters = group.getEc2TagFilters();
         if (ec2TagFilters != null && !ec2TagFilters.isEmpty()) {
-            Map<String, List<String>> filters = new java.util.LinkedHashMap<>();
-            for (Map<String, String> filter : ec2TagFilters) {
-                String key = filter.get("Key");
-                String value = filter.get("Value");
-                if (key != null && value != null) {
-                    filters.computeIfAbsent("tag:" + key, k -> new ArrayList<>()).add(value);
-                }
-            }
             try {
-                ec2Service.describeInstances(region, null, filters).stream()
+                ec2Service.describeInstances(region, List.of(), Map.of()).stream()
                         .flatMap(r -> r.getInstances().stream())
+                        .filter(inst -> matchesTagFilters(ec2TagMaps(inst.getTags()),
+                                ec2TagFilters, TagFilterMatchMode.ANY))
                         .map(inst -> inst.getInstanceId())
                         .filter(id -> id != null)
                         .forEach(instanceIds::add);
@@ -1131,6 +1127,18 @@ public class CodeDeployService {
         }
 
         return instanceIds;
+    }
+
+    private List<Map<String, String>> ec2TagMaps(List<Tag> tags) {
+        if (tags == null) { return List.of(); }
+        List<Map<String, String>> result = new ArrayList<>();
+        for (Tag tag : tags) {
+            Map<String, String> fields = new HashMap<>();
+            fields.put("Key", tag.getKey());
+            fields.put("Value", tag.getValue());
+            result.add(fields);
+        }
+        return result;
     }
 
     private enum TagFilterMatchMode { ALL, ANY }
