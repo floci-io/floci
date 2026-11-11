@@ -1253,7 +1253,7 @@ public class S3Service implements Resettable, ResourceProvider {
      */
     public void authorizeSignedListBucket(String accessKeyId, String sessionToken, String bucketName, String prefix) {
         authorizeBucketRead(bucketName, "s3:ListBucket", new RequestAuthorization(true, accessKeyId, sessionToken),
-                Map.of("s3:prefix", List.of(prefix == null ? "" : prefix)));
+                S3ConditionKeys.listing(prefix));
     }
 
     /** Authorize a signed {@code s3:DeleteObject}; see {@link #authorizeSignedGetObject}. */
@@ -1306,7 +1306,7 @@ public class S3Service implements Resettable, ResourceProvider {
         Bucket bucket = bucketStore.get(bucketName)
                 .orElseThrow(() ->
                         new AwsException("NoSuchBucket", "The specified bucket does not exist.", 404));
-        String resourceArn = S3PublicAccessEvaluator.objectArn(bucketPartition(bucketName), bucketName, key);
+        String resourceArn = S3ResourceArns.object(bucketPartition(bucketName), bucketName, key);
         S3PublicAccessEvaluator.PublicAccessDecision decision =
                 S3PublicAccessEvaluator.principalPolicyDecision(
                         objectMapper,
@@ -1332,7 +1332,7 @@ public class S3Service implements Resettable, ResourceProvider {
 
     void authorizeBucketRead(String bucketName, String action, RequestAuthorization authorization,
                              Map<String, List<String>> requestConditions) {
-        String bucketArn = S3PublicAccessEvaluator.bucketArn(bucketPartition(bucketName), bucketName);
+        String bucketArn = S3ResourceArns.bucket(bucketPartition(bucketName), bucketName);
         authorizeS3Read(bucketName, null, null, action, bucketArn, authorization, requestConditions);
     }
 
@@ -1360,7 +1360,7 @@ public class S3Service implements Resettable, ResourceProvider {
                 ? authorization
                 : RequestAuthorization.unsigned();
         if (requestAuthorization.signed()) {
-            String bucketArn = S3PublicAccessEvaluator.bucketArn(bucketPartition(bucketName), bucketName);
+            String bucketArn = S3ResourceArns.bucket(bucketPartition(bucketName), bucketName);
             authorizeSignedBucketPolicy(bucketName, null, action, bucketArn, requestAuthorization, null);
             return;
         }
@@ -1374,7 +1374,7 @@ public class S3Service implements Resettable, ResourceProvider {
             throw accessDeniedException(bucketName, null);
         }
 
-        String bucketArn = S3PublicAccessEvaluator.bucketArn(bucketPartition(bucketName), bucketName);
+        String bucketArn = S3ResourceArns.bucket(bucketPartition(bucketName), bucketName);
         S3PublicAccessEvaluator.PublicAccessDecision policyDecision =
                 S3PublicAccessEvaluator.publicPolicyDecision(objectMapper, bucket.getPolicy(), action, bucketArn);
         if (policyDecision == S3PublicAccessEvaluator.PublicAccessDecision.DENY) {
@@ -1392,7 +1392,7 @@ public class S3Service implements Resettable, ResourceProvider {
      * the action's version counterpart (see {@link S3ObjectActions#forVersion}), as IAM checks it.
      */
     void authorizeObjectRead(String bucketName, String key, String versionId, String action, RequestAuthorization authorization) {
-        String objectArn = S3PublicAccessEvaluator.objectArn(bucketPartition(bucketName), bucketName, key);
+        String objectArn = S3ResourceArns.object(bucketPartition(bucketName), bucketName, key);
         authorizeS3Read(bucketName, key, versionId, S3ObjectActions.forVersion(action, versionId), objectArn,
                 authorization, null);
     }
@@ -1450,7 +1450,7 @@ public class S3Service implements Resettable, ResourceProvider {
                 ? authorization
                 : RequestAuthorization.unsigned();
         if (requestAuthorization.signed()) {
-            String objectArn = S3PublicAccessEvaluator.objectArn(bucketPartition(bucketName), bucketName, key);
+            String objectArn = S3ResourceArns.object(bucketPartition(bucketName), bucketName, key);
             authorizeSignedBucketPolicy(bucketName, key, action, objectArn, requestAuthorization, requestConditions);
             return;
         }
@@ -1461,7 +1461,7 @@ public class S3Service implements Resettable, ResourceProvider {
         S3BlockPublicAccessSettings blockPublicAccess =
                 blockPublicAccessFor(bucket, ownedBucket.account());
 
-        String objectArn = S3PublicAccessEvaluator.objectArn(bucketPartition(bucketName), bucketName, key);
+        String objectArn = S3ResourceArns.object(bucketPartition(bucketName), bucketName, key);
         S3PublicAccessEvaluator.PublicAccessDecision policyDecision =
                 S3PublicAccessEvaluator.publicPolicyDecision(objectMapper, bucket.getPolicy(), action, objectArn);
         if (policyDecision == S3PublicAccessEvaluator.PublicAccessDecision.DENY) {
