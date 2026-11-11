@@ -722,6 +722,18 @@ class EventBridgeServiceTest {
     }
 
     @Test
+    void ruleExistsLooksUpAnInvalidNameWithoutRejectingIt() {
+        Rule legacy = new Rule();
+        legacy.setName("team/rule-1");
+        legacy.setEventBusName("default");
+        legacy.setState(RuleState.ENABLED);
+        ruleStore.put("rule:" + REGION + ":default/team/rule-1", legacy);
+
+        assertTrue(service.ruleExists("team/rule-1", null, REGION));
+        assertFalse(service.ruleExists("team/rule-2", null, REGION));
+    }
+
+    @Test
     void aLegacySlashNamedRuleOnACustomBusIsTaggableByItsArn() {
         service.createEventBus("foo", null, null, REGION);
         String arn = "arn:aws:events:us-east-1:000000000000:rule/foo/team/r1";

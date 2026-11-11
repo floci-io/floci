@@ -483,6 +483,14 @@ public class EventBridgeService implements ResourceProvider, StoredResourceArns 
         LOG.infov("Deleted rule: {0}", name);
     }
 
+    /**
+     * Whether a rule is stored under this exact name on the bus, without validating the name, so a
+     * caller can tell a rule persisted before name validation from one that is already gone.
+     */
+    public boolean ruleExists(String name, String busName, String region) {
+        return name != null && ruleStore.get(ruleKey(region, resolvedBusName(busName), name)).isPresent();
+    }
+
     public Rule describeRule(String name, String busName, String region) {
         String effectiveBus = resolvedBusName(busName);
         validateRuleReference("name", name, effectiveBus, region);

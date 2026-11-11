@@ -717,6 +717,10 @@ public class EventsCfnProvisioner implements CfnResourceProvisioner {
 
     private void deleteEventBridgeRuleSafe(String ruleName, String busName, String region) {
         try {
+            if (!eventBridgeService.ruleExists(ruleName, busName, region)) {
+                LOG.debugv("EventBridge rule already gone, treating as deleted: {0}", ruleName);
+                return;
+            }
             // Remove all targets before deleting the rule (busName scopes the lookup to the rule's bus).
             List<Target> targets = eventBridgeService.listTargetsByRule(ruleName, busName, region);
             if (!targets.isEmpty()) {
