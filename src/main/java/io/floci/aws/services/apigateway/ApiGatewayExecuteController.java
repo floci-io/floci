@@ -762,13 +762,23 @@ public class ApiGatewayExecuteController {
 
     /**
      * The method's own settings, falling back to the stage-wide wildcard entry. Settings are keyed
-     * by the resource path without its leading slash ({@code pets/GET}), matching what AWS reports.
+     * by the patch path as the client sent it, so the method is found under either the JSON Pointer
+     * escaped resource path AWS reports ({@code ~1pets/GET}) or the plain one ({@code pets/GET}).
      */
     private static MethodSetting methodSettingFor(Stage stage, String resourcePath, String httpMethod) {
-        String normalized = resourcePath != null && resourcePath.startsWith("/")
-                ? resourcePath.substring(1) : resourcePath;
-        MethodSetting exact = stage.getMethodSettings().get(normalized + "/" + httpMethod);
-        return exact != null ? exact : stage.getMethodSettings().get("*/*");
+        Map<String, MethodSetting> settings = stage.getMethodSettings();
+        if (resourcePath != null) {
+            MethodSetting escaped = settings.get(escapeJsonPointer(resourcePath) + "/" + httpMethod);
+            if (escaped != null) return escaped;
+            String plain = resourcePath.startsWith("/") ? resourcePath.substring(1) : resourcePath;
+            MethodSetting exact = settings.get(plain + "/" + httpMethod);
+            if (exact != null) return exact;
+        }
+        return settings.get("*/*");
+    }
+
+    private static String escapeJsonPointer(String segment) {
+        return segment.replace("~", "~0").replace("/", "~1");
     }
 
     private String cacheKeyParameterValue(String param, HttpHeaders headers, UriInfo uriInfo,
