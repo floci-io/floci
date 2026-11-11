@@ -185,7 +185,7 @@ public class RedshiftQueryHandler {
         case "CreateClusterSnapshot" -> {
             String snapshotIdentifier = params.getFirst("SnapshotIdentifier");
             String clusterIdentifier = params.getFirst("ClusterIdentifier");
-            Snapshot snapshot = service.createSnapshot(snapshotIdentifier, clusterIdentifier);
+            Snapshot snapshot = service.createSnapshot(snapshotIdentifier, clusterIdentifier, parseTags(params));
             String xml = new XmlBuilder()
                     .start("CreateClusterSnapshotResponse")
                       .start("CreateClusterSnapshotResult")
@@ -304,7 +304,8 @@ public class RedshiftQueryHandler {
             String parameterGroupName = params.getFirst("ParameterGroupName");
             String parameterGroupFamily = params.getFirst("ParameterGroupFamily");
             String description = params.getFirst("Description");
-            ClusterParameterGroup group = service.createClusterParameterGroup(parameterGroupName, parameterGroupFamily, description);
+            ClusterParameterGroup group = service.createClusterParameterGroup(parameterGroupName, parameterGroupFamily,
+                    description, parseTags(params));
             String xml = new XmlBuilder()
                     .start("CreateClusterParameterGroupResponse")
                       .start("CreateClusterParameterGroupResult")
@@ -1327,8 +1328,12 @@ public class RedshiftQueryHandler {
         if (snapshot.getKmsKeyId() != null) {
             builder.elem("Encrypted", "true").elem("KmsKeyId", snapshot.getKmsKeyId());
         }
+        builder.start("Tags");
+        for (Map.Entry<String, String> tag : snapshot.getTags().entrySet()) {
+            builder.start("Tag").elem("Key", tag.getKey()).elem("Value", tag.getValue()).end("Tag");
+        }
 
-        return builder.end("Snapshot").build();
+        return builder.end("Tags").end("Snapshot").build();
     }
 
     private Response clusterResponse(String operation, Cluster cluster) {
@@ -1460,9 +1465,12 @@ public class RedshiftQueryHandler {
             .start("ClusterParameterGroup")
             .elem("ParameterGroupName", group.getParameterGroupName())
             .elem("ParameterGroupFamily", group.getParameterGroupFamily())
-            .elem("Description", group.getDescription());
-        
-        return builder.end("ClusterParameterGroup").build();
+            .elem("Description", group.getDescription())
+            .start("Tags");
+        for (Map.Entry<String, String> tag : group.getTags().entrySet()) {
+            builder.start("Tag").elem("Key", tag.getKey()).elem("Value", tag.getValue()).end("Tag");
+        }
+        return builder.end("Tags").end("ClusterParameterGroup").build();
     }
 
     private String buildClusterSubnetGroupXml(ClusterSubnetGroup group) {
