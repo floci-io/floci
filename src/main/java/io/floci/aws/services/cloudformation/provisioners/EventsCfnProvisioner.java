@@ -61,8 +61,6 @@ public class EventsCfnProvisioner implements CfnResourceProvisioner {
     private static final String EVENT_BUS_MANAGED_POLICY_ATTR = "FlociEventBusManagedPolicy";
     private static final Set<String> EVENT_BUS_SUPPORTED_PROPERTIES =
             Set.of("Name", "EventSourceName", "Description", "Tags", "Policy");
-    private static final Pattern PARTNER_EVENT_SOURCE_NAME_PATTERN =
-            Pattern.compile("aws\\.partner(/[\\.\\-_A-Za-z0-9]+){2,}");
     private static final Pattern EVENT_BUS_TAG_PATTERN =
             Pattern.compile("[\\p{L}\\p{N}\\p{Z}_.:/=+\\-@]*");
     private static final Pattern STATEMENT_ID_PATTERN = Pattern.compile("[a-zA-Z0-9\\-_]+");
@@ -499,7 +497,7 @@ public class EventsCfnProvisioner implements CfnResourceProvisioner {
         }
         if (eventSourceName != null) {
             if (eventSourceName.length() > 256
-                    || !PARTNER_EVENT_SOURCE_NAME_PATTERN.matcher(eventSourceName).matches()) {
+                    || !EventBridgeService.PARTNER_EVENT_SOURCE_NAME.matcher(eventSourceName).matches()) {
                 throw new AwsException("ValidationError",
                         "Invalid AWS::Events::EventBus EventSourceName: " + eventSourceName, 400);
             }

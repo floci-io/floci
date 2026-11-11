@@ -129,7 +129,7 @@ class EventBridgePartnerEventBusIntegrationTest {
                 .when().post("/")
                 .then().statusCode(400)
                 .body("__type", containsString("ValidationException"))
-                .body("message", containsString("Rule name must match"));
+                .body("message", containsString("Value 'eu/rule' at 'name' failed to satisfy constraint"));
 
         given().contentType(EB_CT).header("X-Amz-Target", "AWSEvents.ListRules")
                 .body("{\"EventBusName\":\"" + bus + "\"}")

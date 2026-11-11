@@ -230,7 +230,18 @@ class EventBridgeServiceTest {
         AwsException error = assertThrows(AwsException.class, () ->
                 service.createEventBus(name, name, null, null, REGION));
         assertEquals("ValidationException", error.getErrorCode());
-        assertTrue(error.getMessage().contains("Invalid partner event source name"));
+        assertTrue(error.getMessage().contains("Value '" + name + "' at 'eventSourceName' failed to "
+                + "satisfy constraint: Member must satisfy regular expression pattern: "
+                + "aws\\.partner(/[\\.\\-_A-Za-z0-9]+){2,}"), error.getMessage());
+    }
+
+    @Test
+    void createPartnerEventBusRequiresAName() {
+        AwsException error = assertThrows(AwsException.class, () ->
+                service.createEventBus(null, "aws.partner/example.com/orders", null, null, REGION));
+        assertEquals("ValidationException", error.getErrorCode());
+        assertEquals("1 validation error detected: Value null at 'name' failed to satisfy constraint: "
+                + "Member must not be null", error.getMessage());
     }
 
     @Test
@@ -545,7 +556,8 @@ class EventBridgeServiceTest {
                         null, null, null, REGION));
         assertEquals("ValidationException", error.getErrorCode());
         assertEquals(400, error.getHttpStatus());
-        assertEquals("Rule name must match [\\.\\-_A-Za-z0-9]+ and be at most 64 characters.",
+        assertEquals("1 validation error detected: Value '" + name + "' at 'name' failed to satisfy "
+                + "constraint: Member must satisfy regular expression pattern: [\\.\\-_A-Za-z0-9]+",
                 error.getMessage());
         assertTrue(service.listRules(null, null, REGION).isEmpty());
     }
@@ -556,18 +568,19 @@ class EventBridgeServiceTest {
                 service.putRule("r".repeat(65), null, "{\"source\":[\"my.app\"]}", null,
                         RuleState.ENABLED, null, null, null, REGION));
         assertEquals("ValidationException", error.getErrorCode());
+        assertTrue(error.getMessage().endsWith("Member must have length less than or equal to 64"));
         assertDoesNotThrow(() -> service.putRule("r".repeat(64), null, "{\"source\":[\"my.app\"]}",
                 null, RuleState.ENABLED, null, null, null, REGION));
     }
 
-    @ParameterizedTest
-    @NullAndEmptySource
-    void putRuleRequiresAName(String name) {
+    @Test
+    void putRuleRequiresAName() {
         AwsException error = assertThrows(AwsException.class, () ->
-                service.putRule(name, null, "{\"source\":[\"my.app\"]}", null, RuleState.ENABLED,
+                service.putRule(null, null, "{\"source\":[\"my.app\"]}", null, RuleState.ENABLED,
                         null, null, null, REGION));
         assertEquals("ValidationException", error.getErrorCode());
-        assertEquals("Rule name is required.", error.getMessage());
+        assertEquals("1 validation error detected: Value null at 'name' failed to satisfy constraint: "
+                + "Member must not be null", error.getMessage());
     }
 
     @Test

@@ -331,13 +331,15 @@ public class EventBridgeService implements ResourceProvider, StoredResourceArns 
         }
     }
 
-    private static final Pattern PARTNER_EVENT_SOURCE_NAME =
+    public static final Pattern PARTNER_EVENT_SOURCE_NAME =
             Pattern.compile("aws\\.partner(/[\\.\\-_A-Za-z0-9]+){2,}");
+    private static final Pattern EVENT_BUS_NAME = Pattern.compile("[/\\.\\-_A-Za-z0-9]+");
 
     private void validatePartnerEventBusName(String name, String eventSourceName) {
-        if (eventSourceName.length() > 256 || !PARTNER_EVENT_SOURCE_NAME.matcher(eventSourceName).matches()) {
-            throw new AwsException("ValidationException",
-                    "Invalid partner event source name: " + eventSourceName, 400);
+        List<String> violations = new ArrayList<>(nameViolations("name", name, 256, EVENT_BUS_NAME));
+        violations.addAll(nameViolations("eventSourceName", eventSourceName, 256, PARTNER_EVENT_SOURCE_NAME));
+        if (!violations.isEmpty()) {
+            throw SmithyValidationErrors.validationException(violations);
         }
         if (!eventSourceName.equals(name)) {
             throw new AwsException("ValidationException",
@@ -422,17 +424,28 @@ public class EventBridgeService implements ResourceProvider, StoredResourceArns 
         return rule;
     }
 
-    private static final Pattern RULE_NAME_PATTERN =
-            Pattern.compile("[\\.\\-_A-Za-z0-9]+");
+    private static final Pattern NON_PARTNER_NAME = Pattern.compile("[\\.\\-_A-Za-z0-9]+");
 
     private static void validateRuleName(String name) {
-        if (name == null || name.isBlank()) {
-            throw new AwsException("ValidationException", "Rule name is required.", 400);
+        List<String> violations = nameViolations("name", name, 64, NON_PARTNER_NAME);
+        if (!violations.isEmpty()) {
+            throw SmithyValidationErrors.validationException(violations);
         }
-        if (name.length() > 64 || !RULE_NAME_PATTERN.matcher(name).matches()) {
-            throw new AwsException("ValidationException",
-                    "Rule name must match [\\.\\-_A-Za-z0-9]+ and be at most 64 characters.", 400);
+    }
+
+    private static List<String> nameViolations(String path, String value, int maxLength, Pattern pattern) {
+        if (value == null) {
+            return List.of(SmithyValidationErrors.notNull(path));
         }
+        List<String> violations = new ArrayList<>();
+        String length = SmithyValidationErrors.lengthOutOfRange(path, value, 1, maxLength);
+        if (length != null) {
+            violations.add(length);
+        }
+        if (!pattern.matcher(value).matches()) {
+            violations.add(SmithyValidationErrors.pattern(path, value, pattern.pattern()));
+        }
+        return violations;
     }
 
     public void deleteRule(String name, String busName, String region) {
