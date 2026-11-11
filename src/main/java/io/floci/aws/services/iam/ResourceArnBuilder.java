@@ -1915,7 +1915,8 @@ public class ResourceArnBuilder {
      * The parameters an SSM request is evaluated against, read from the field its handler acts on. A
      * resource-policy action names its parameter in {@code ResourceArn}. {@code GetParametersByPath} is
      * authorized against its {@code Path} rather than the parameters it returns; the root path {@code /}, which
-     * a missing or empty {@code Path} also lists from, is the empty parameter name {@code parameter/}.
+     * a missing or empty {@code Path} also lists from, is the empty parameter name {@code parameter/}. The handler
+     * lists {@code /app/} as it lists {@code /app}, so one trailing slash is dropped from any other path.
      * {@code GetParameters} and {@code DeleteParameters} act on each parameter in {@code Names}, read element by
      * element or value by value as their handlers read it. Any other action acts on the parameter in
      * {@code Name}, a null {@code Name} being the text {@code null} where the handler reads it as text. A name is
@@ -1937,6 +1938,9 @@ public class ResourceArnBuilder {
             boolean selectorRead = operation != null && SSM_SELECTOR_READ_OPERATIONS.contains(operation);
             if ("GetParametersByPath".equals(operation)) {
                 String path = json.path("Path").asText();
+                if (path.length() > 1 && path.endsWith("/")) {
+                    path = path.substring(0, path.length() - 1);
+                }
                 return List.of(ssmParameterArn(path.isEmpty() ? "/" : path, region, accountId));
             } else if (operation != null && SSM_NAMES_OPERATIONS.contains(operation)) {
                 List<String> arns = new ArrayList<>();
