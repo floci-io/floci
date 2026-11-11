@@ -845,7 +845,7 @@ HTTP API `AWS_PROXY` integrations accept every `integrationSubtype` AWS defines:
 `StepFunctions-StopExecution`. `requestParameters` name the action's inputs, and create, update
 and OpenAPI import and reimport check them against that subtype's required and optional
 parameters from the AWS reference. They reject a required parameter that is missing, null or
-blank, any other parameter name, a JSON parameter such as `MessageAttributes` that is neither a
+empty, any other parameter name, a JSON parameter such as `MessageAttributes` that is neither a
 JSON object nor a whole expression, a name that is not a subtype, a subtype on a non-`AWS_PROXY`
 integration or a WebSocket API, and a `payloadFormatVersion` other than `1.0`. `1.0` is the default
 when a subtype is set, including on an update that adds a subtype to an integration that had none.
@@ -891,7 +891,8 @@ empty string, the API's region is used. `QueueUrl` is sent as resolved, so a map
 name any queue in the emulator. A sent message answers `200` with
 `{"SendMessageResponse":{"ResponseMetadata":{"RequestId":...},"SendMessageResult":{...}}}`; a
 required parameter that resolves to nothing, such as an empty body for `$request.body`, answers
-`400` with `{"Error":{"Code":"MissingParameter",...}}`, and an SQS error is relayed in the same
+`400` with `{"Error":{"Code":"MissingParameter",...}}` (a value of only whitespace is sent as it is,
+since SQS accepts it), and an SQS error is relayed in the same
 shape with its status. A message attribute whose `StringValue` resolves to an empty string, or
 whose `BinaryValue` is empty or not base64, is such an error: `400` with `InvalidParameterValue`.
 `credentialsArn` is stored but not enforced, as for every other integration.
