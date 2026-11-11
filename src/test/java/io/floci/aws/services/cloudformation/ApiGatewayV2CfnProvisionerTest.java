@@ -26,7 +26,6 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.atomic.AtomicInteger;
-import java.util.function.Function;
 
 import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -1224,9 +1223,7 @@ class ApiGatewayV2CfnProvisionerTest {
     }
 
     private CloudFormationTemplateEngine engine(Map<String, Boolean> conditions) {
-        return new CloudFormationTemplateEngine("000000000000", REGION, "test-stack", "stack/id",
-                Map.of(), Map.of(), Map.of(), conditions, Map.of(), mapper,
-                (Function<String, String>) name -> null);
+        return CfnProvisionerFixture.engine(mapper, REGION, conditions);
     }
 
     private static Route route(String id, String routeKey) {

@@ -494,6 +494,26 @@ public class ApiGatewayV2Service {
         return auth;
     }
 
+    /**
+     * Sets the URI, payload format version, JWT configuration, result TTL and simple-responses flag
+     * exactly as given, null included. UpdateAuthorizer keeps a field the request leaves out, so it
+     * cannot remove one that CloudFormation dropped.
+     */
+    public Authorizer replaceAuthorizerSettings(String region, String apiId, String authorizerId,
+                                                String authorizerUri, String authorizerPayloadFormatVersion,
+                                                Authorizer.JwtConfiguration jwtConfiguration,
+                                                Integer authorizerResultTtlInSeconds,
+                                                Boolean enableSimpleResponses) {
+        Authorizer auth = getAuthorizer(region, apiId, authorizerId);
+        auth.setAuthorizerUri(authorizerUri);
+        auth.setAuthorizerPayloadFormatVersion(authorizerPayloadFormatVersion);
+        auth.setJwtConfiguration(jwtConfiguration);
+        auth.setAuthorizerResultTtlInSeconds(authorizerResultTtlInSeconds);
+        auth.setEnableSimpleResponses(enableSimpleResponses);
+        authorizerStore.put(authorizerKey(region, apiId, authorizerId), auth);
+        return auth;
+    }
+
     // AuthorizerResultTtlInSeconds is modeled as an integer in [0, 3600]. doubleValue() keeps the
     // bounds check exact for a Long or BigInteger body value that intValue() would wrap into range.
     static Integer authorizerResultTtl(Object value) {
@@ -605,6 +625,19 @@ public class ApiGatewayV2Service {
             route.setRouteResponseSelectionExpression((String) request.get("routeResponseSelectionExpression"));
         }
 
+        routeStore.put(routeKey(region, apiId, routeId), route);
+        return route;
+    }
+
+    /**
+     * Sets the authorizer id and the target exactly as given, null included. UpdateRoute keeps a
+     * field the request leaves out, so it cannot remove one that CloudFormation dropped.
+     */
+    public Route replaceRouteLinks(String region, String apiId, String routeId, String authorizerId,
+                                   String target) {
+        Route route = getRoute(region, apiId, routeId);
+        route.setAuthorizerId(authorizerId);
+        route.setTarget(target);
         routeStore.put(routeKey(region, apiId, routeId), route);
         return route;
     }

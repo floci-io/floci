@@ -855,6 +855,22 @@ public class ApiGatewayV2CfnProvisioner implements CfnResourceProvisioner {
             authorizer = apiGatewayV2Service.createAuthorizer(region, apiId, req);
         } else {
             authorizer = apiGatewayV2Service.updateAuthorizer(region, apiId, r.getPhysicalId(), req);
+            Set<String> dropped = ctx.droppedProperties(props);
+            if (dropped.contains("AuthorizerUri") || dropped.contains("AuthorizerPayloadFormatVersion")
+                    || dropped.contains("JwtConfiguration") || dropped.contains("AuthorizerResultTtlInSeconds")
+                    || dropped.contains("EnableSimpleResponses")) {
+                // UpdateAuthorizer keeps a field it is not given, so a dropped one is cleared here and
+                // the others keep what the update left, a value set outside the stack included.
+                authorizer = apiGatewayV2Service.replaceAuthorizerSettings(region, apiId, r.getPhysicalId(),
+                        dropped.contains("AuthorizerUri") ? null : authorizer.getAuthorizerUri(),
+                        dropped.contains("AuthorizerPayloadFormatVersion")
+                                ? null : authorizer.getAuthorizerPayloadFormatVersion(),
+                        dropped.contains("JwtConfiguration") ? null : authorizer.getJwtConfiguration(),
+                        dropped.contains("AuthorizerResultTtlInSeconds")
+                                ? null : authorizer.getAuthorizerResultTtlInSeconds(),
+                        dropped.contains("EnableSimpleResponses")
+                                ? null : authorizer.getEnableSimpleResponses());
+            }
         }
         r.setPhysicalId(authorizer.getAuthorizerId());
         r.getAttributes().put("AuthorizerId", authorizer.getAuthorizerId());
@@ -881,6 +897,18 @@ public class ApiGatewayV2CfnProvisioner implements CfnResourceProvisioner {
             route = apiGatewayV2Service.createRoute(region, apiId, req);
         } else {
             route = apiGatewayV2Service.updateRoute(region, apiId, r.getPhysicalId(), req);
+            Set<String> dropped = ctx.droppedProperties(props);
+            if (dropped.contains("AuthorizerId") || dropped.contains("Target")) {
+                // UpdateRoute keeps a field it is not given, so a dropped one is cleared here and the
+                // other keeps what the update left, a value set outside the stack included.
+                // A route that stays JWT or CUSTOM keeps its authorizer: without it the route would be
+                // served without any authorizer.
+                String type = route.getAuthorizationType();
+                boolean protectedRoute = "JWT".equalsIgnoreCase(type) || "CUSTOM".equalsIgnoreCase(type);
+                route = apiGatewayV2Service.replaceRouteLinks(region, apiId, r.getPhysicalId(),
+                        dropped.contains("AuthorizerId") && !protectedRoute ? null : route.getAuthorizerId(),
+                        dropped.contains("Target") ? null : route.getTarget());
+            }
         }
         r.setPhysicalId(route.getRouteId());
         r.getAttributes().put("RouteId", route.getRouteId());
