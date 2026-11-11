@@ -2990,7 +2990,7 @@ public class ApiGatewayExecuteController {
         Map<String, Object> claims = jwtClaims != null ? Map.copyOf(jwtClaims) : Map.of();
         Map<String, Object> authorizerContext = lambdaAuthorizerContext == null
                 ? Map.of() : objectMapper.convertValue(lambdaAuthorizerContext, MAP_TYPE);
-        String requestId = UUID.randomUUID().toString();
+        String requestId = routeContext.requestId(headers);
         io.floci.aws.services.apigatewayv2.proxy.RequestContext ctx =
                 new io.floci.aws.services.apigatewayv2.proxy.RequestContext(
                         apiId, stageName, httpMethod, path, pathParams.getOrDefault("proxy", ""),
@@ -2999,12 +2999,16 @@ public class ApiGatewayExecuteController {
 
         Instant requestTime = routeContext.requestTime();
         String hostRegion = region != null ? region : regionResolver.getDefaultRegion();
+        String domain = restDomainName(apiId, hostRegion, headers);
         Map<String, String> contextVariables = new LinkedHashMap<>();
         contextVariables.put("accountId", regionResolver.getAccountId());
         contextVariables.put("apiId", apiId);
-        contextVariables.put("domainName", AwsEndpoints.executeApiHost(apiId, hostRegion));
+        contextVariables.put("domainName", domain);
+        contextVariables.put("domainPrefix", domain.split("\\.")[0]);
+        contextVariables.put("extendedRequestId", routeContext.extendedRequestId());
         contextVariables.put("httpMethod", httpMethod);
-        contextVariables.put("path", path);
+        contextVariables.put("path", ("$default".equals(stageName) ? "" : "/" + stageName) + path);
+        contextVariables.put("protocol", "HTTP/1.1");
         contextVariables.put("requestTime", GATEWAY_REQUEST_TIME.format(requestTime.atZone(ZoneOffset.UTC)));
         contextVariables.put("requestTimeEpoch", Long.toString(requestTime.toEpochMilli()));
         contextVariables.put("routeKey", route.getRouteKey());
@@ -3018,7 +3022,7 @@ public class ApiGatewayExecuteController {
                     integration.getRequestParameters(), ctx, stageVariables, contextVariables);
             String serviceRegion = parameters.get(IntegrationSubtype.REGION_PARAMETER);
             if (serviceRegion == null || serviceRegion.isEmpty()) {
-                serviceRegion = region;
+                serviceRegion = hostRegion;
             }
             ObjectNode actionRequest = awsServiceIntegrationMapper.actionRequest(subtype, parameters);
             Response serviceResponse = serviceRouter.invoke(subtype.service(), subtype.action(), actionRequest,
