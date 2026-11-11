@@ -1355,6 +1355,134 @@ class CodePipelineServiceTest {
     }
 
     @Test
+    void actionFailureWaitsForStopPublicationBeforeEndingTheExecution() throws Exception {
+        String pipeline = "action-failure-during-stop";
+        String executionId = "failing-execution";
+        CountDownLatch actionEntered = new CountDownLatch(1);
+        CountDownLatch releaseAction = new CountDownLatch(1);
+        CountDownLatch stopChecked = new CountDownLatch(1);
+        CountDownLatch releaseStop = new CountDownLatch(1);
+        AtomicReference<Thread> actionThread = new AtomicReference<>();
+        AtomicReference<Thread> stoppingThread = new AtomicReference<>();
+        CodeBuildService codeBuild = mock(CodeBuildService.class);
+        when(codeBuild.startBuild(anyString(), anyString(), anyString(),
+                any(), any(), any(), any(), any(), any(), any())).thenAnswer(invocation -> {
+                    actionThread.set(Thread.currentThread());
+                    actionEntered.countDown();
+                    assertTrue(releaseAction.await(5, TimeUnit.SECONDS));
+                    throw new AwsException("ResourceNotFoundException", "Build project is missing", 400);
+                });
+        CapturingStorageFactory captured = new CapturingStorageFactory();
+        CodePipelineService pipelineService = new CodePipelineService(captured, mapper, codeBuild,
+                mock(CodeDeployService.class), mock(LambdaService.class), mock(S3Service.class),
+                configWithPollInterval(500L));
+        try (ExecutorService requests = Executors.newSingleThreadExecutor()) {
+            createExternalActionPipeline(pipelineService, pipeline, """
+                    {
+                      "name": "BuildAction",
+                      "actionTypeId": {
+                        "category": "Build",
+                        "owner": "AWS",
+                        "provider": "CodeBuild",
+                        "version": "1"
+                      },
+                      "configuration": {
+                        "ProjectName": "missing-project"
+                      }
+                    }
+                    """);
+            CodePipelineExecution execution = spy(waitingExecution(captured, pipeline, executionId, 1, null));
+            doAnswer(invocation -> {
+                String status = (String) invocation.callRealMethod();
+                if (Thread.currentThread() == stoppingThread.get()) {
+                    stopChecked.countDown();
+                    assertTrue(releaseStop.await(5, TimeUnit.SECONDS));
+                }
+                return status;
+            }).when(execution).getStatus();
+            captured.executionStore.putForAccount(ACCOUNT, REGION + ":" + pipeline + ":" + executionId, execution);
+            pipelineService.resumePersistedExecutions();
+            assertTrue(actionEntered.await(5, TimeUnit.SECONDS));
+            Future<?> stopped = requests.submit(() -> {
+                stoppingThread.set(Thread.currentThread());
+                stopExecution(pipelineService, pipeline, executionId, false);
+                return null;
+            });
+            try {
+                assertTrue(stopChecked.await(5, TimeUnit.SECONDS));
+                releaseAction.countDown();
+                ThreadStates.awaitBlockedOrDone(actionThread.get());
+                assertEquals(Thread.State.BLOCKED, actionThread.get().getState());
+                assertEquals("InProgress", execution.getStatus());
+                assertFalse(execution.isStopRequested());
+            } finally {
+                releaseStop.countDown();
+            }
+            stopped.get(5, TimeUnit.SECONDS);
+            await().atMost(Duration.ofSeconds(5))
+                    .until(() -> !pipelineService.activeRuns.contains(ACCOUNT + ":" + executionId));
+            assertEquals("Failed", execution.getStatus());
+            assertEquals("Failed", execution.getActionExecutions().getFirst().getStatus());
+            assertTrue(execution.getStatusSummary().contains("Build project is missing"));
+        } finally {
+            releaseAction.countDown();
+            releaseStop.countDown();
+            pipelineService.shutdown();
+        }
+    }
+
+    @Test
+    void aStopThatLosesToTheRunsOwnEndingIsRefusedInsteadOfReplacingIt() throws Exception {
+        // A run ends under its execution's monitor, Stopped in answer to the stop signal or Failed
+        // or Succeeded on its own, and then leaves. A stop that raised its signal or checked the
+        // status outside that monitor could write Stopping after the ending, where it stood for
+        // good: no run was left to finish it.
+        String pipeline = "stop-losing-to-the-run-ending";
+        String executionId = "ending-execution";
+        try (ExecutorService requests = Executors.newSingleThreadExecutor()) {
+            createExternalActionPipeline(service, pipeline, """
+                    {
+                      "name": "Approve",
+                      "actionTypeId": {
+                        "category": "Approval",
+                        "owner": "AWS",
+                        "provider": "Manual",
+                        "version": "1"
+                      }
+                    }
+                    """);
+            CodePipelineExecution execution = waitingExecution(storage, pipeline, executionId, 1, "External");
+            AtomicReference<Thread> stoppingThread = new AtomicReference<>();
+            Future<JsonNode> stopped;
+            synchronized (execution) {
+                stopped = requests.submit(() -> {
+                    stoppingThread.set(Thread.currentThread());
+                    return handle("StopPipelineExecution", """
+                            {
+                              "pipelineName": "%s",
+                              "pipelineExecutionId": "%s",
+                              "abandon": true
+                            }
+                            """.formatted(pipeline, executionId));
+                });
+                ThreadStates.awaitBlockedOrDone(stoppingThread, stopped);
+                assertFalse(execution.isStopRequested());
+                assertEquals("InProgress", execution.getStatus());
+                // The run ends here, as it does under this monitor.
+                execution.setStatus("Succeeded");
+            }
+            ExecutionException refused = assertThrows(ExecutionException.class,
+                    () -> stopped.get(5, TimeUnit.SECONDS));
+            AwsException cause = (AwsException) refused.getCause();
+            assertEquals("PipelineExecutionNotStoppableException", cause.getErrorCode());
+            assertEquals("Succeeded", execution.getStatus());
+            assertFalse(execution.isStopRequested());
+        } finally {
+            service.shutdown();
+        }
+    }
+
+    @Test
     void listActionsIncludesAnActionRegisteredWhileTheRequestWaits() throws Exception {
         String pipeline = "list-during-action-registration";
         try {

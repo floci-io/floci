@@ -1884,10 +1884,12 @@ public class CodePipelineService {
     }
 
     private void failForCondition(CodePipelineExecution execution, String stageName, String conditionType) {
-        execution.setStatus("Failed");
-        execution.setStatusSummary(
-                "Condition " + conditionType + " failed in stage " + stageName + ".");
-        putExecution(execution);
+        synchronized (execution) {
+            execution.setStatus("Failed");
+            execution.setStatusSummary(
+                    "Condition " + conditionType + " failed in stage " + stageName + ".");
+            putExecution(execution);
+        }
     }
 
     private void finishExecutionRun(CodePipelineExecution execution) {
@@ -1984,7 +1986,9 @@ public class CodePipelineService {
                     .toList();
             CompletableFuture.allOf(futures.toArray(CompletableFuture[]::new)).join();
             if (futures.stream().anyMatch(CompletableFuture::isCompletedExceptionally)) {
-                execution.setStatus("Failed");
+                synchronized (execution) {
+                    execution.setStatus("Failed");
+                }
             }
         });
     }
@@ -2029,8 +2033,10 @@ public class CodePipelineService {
             state.setErrorDetails(Map.of(
                     "code", e instanceof AwsException aws ? aws.getErrorCode() : "ActionExecutionFailed",
                     "message", Objects.toString(e.getMessage(), "Action failed")));
-            execution.setStatus("Failed");
-            execution.setStatusSummary("Action " + state.getActionName() + " failed: " + state.getSummary());
+            synchronized (execution) {
+                execution.setStatus("Failed");
+                execution.setStatusSummary("Action " + state.getActionName() + " failed: " + state.getSummary());
+            }
         } finally {
             state.setLastUpdateTime(now());
             putExecution(execution);
