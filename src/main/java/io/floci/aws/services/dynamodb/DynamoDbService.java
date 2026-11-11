@@ -3715,6 +3715,7 @@ public class DynamoDbService {
 
     private String applyRemoveClause(ObjectNode item, String clause, JsonNode exprAttrNames,
                                      List<String> touched) {
+        List<String> paths = new ArrayList<>();
         while (!clause.isEmpty()) {
             String upper = clause.toUpperCase();
             if (upper.startsWith("SET ") || upper.startsWith("ADD ") || upper.startsWith("DELETE ")) {
@@ -3740,9 +3741,35 @@ public class DynamoDbService {
             }
 
             touched.add(attrPart);
-            removeValueAtPath(item, attrPart, exprAttrNames);
+            paths.add(attrPart);
+        }
+        // Every action addresses the item as it was before the update, so a list loses its later
+        // indexes first and an earlier removal never shifts the element a later one names.
+        paths.sort(Comparator.comparing((String path) -> parsePath(path, exprAttrNames), DynamoDbService::removalOrder));
+        for (String path : paths) {
+            removeValueAtPath(item, path, exprAttrNames);
         }
         return clause;
+    }
+
+    /** Orders parsed paths so that, within one list, a higher index sorts first. */
+    private static int removalOrder(List<Object> left, List<Object> right) {
+        for (int i = 0; i < Math.min(left.size(), right.size()); i++) {
+            Object a = left.get(i);
+            Object b = right.get(i);
+            int order;
+            if (a instanceof Long x && b instanceof Long y) {
+                order = Long.compare(y, x);
+            } else if (a instanceof String x && b instanceof String y) {
+                order = x.compareTo(y);
+            } else {
+                order = a instanceof Long ? -1 : 1;
+            }
+            if (order != 0) {
+                return order;
+            }
+        }
+        return Integer.compare(right.size(), left.size());
     }
 
     private String applyAddClause(ObjectNode item, String clause,

@@ -2064,6 +2064,56 @@ class DynamoDbServiceTest {
         assertTrue(exception.getMessage().contains("List index is not within the allowable range"));
         assertTrue(exception.getMessage().contains("4294967295"));
     }
+    @Test
+    void removeOfSeveralListIndexesAddressesTheOriginalList() {
+        assertEquals(List.of("one"), listAfter("REMOVE tags[0], tags[2]", "zero", "one", "two"));
+    }
+
+    @Test
+    void removeOfAnIndexInsideAnElementAddressesTheOriginalElement() {
+        String region = "us-east-1";
+        createUsersTable(region);
+        ObjectNode item = mapper.createObjectNode();
+        item.set("userId", attributeValue("S", "user-1"));
+        ArrayNode inner = mapper.createArrayNode().add(attributeValue("S", "a")).add(attributeValue("S", "b"));
+        ArrayNode outer = mapper.createArrayNode()
+                .add(attributeValue("S", "first"))
+                .add(mapper.createObjectNode().set("L", inner));
+        item.set("nested", mapper.createObjectNode().set("L", outer));
+        service.putItem("Users", item, region);
+        ObjectNode key = mapper.createObjectNode();
+        key.set("userId", attributeValue("S", "user-1"));
+
+        JsonNode updated = service.updateItem("Users", key, null,
+                "REMOVE nested[0], nested[1][0]", null, null, "ALL_NEW", region).newItem();
+
+        JsonNode remaining = updated.get("nested").get("L");
+        assertEquals(1, remaining.size());
+        assertEquals("b", remaining.get(0).get("L").get(0).get("S").asText());
+        assertEquals(1, remaining.get(0).get("L").size());
+    }
+
+    private List<String> listAfter(String updateExpression, String... values) {
+        String region = "us-east-1";
+        createUsersTable(region);
+        ObjectNode item = mapper.createObjectNode();
+        item.set("userId", attributeValue("S", "user-1"));
+        ArrayNode list = mapper.createArrayNode();
+        for (String value : values) {
+            list.add(attributeValue("S", value));
+        }
+        item.set("tags", mapper.createObjectNode().set("L", list));
+        service.putItem("Users", item, region);
+        ObjectNode key = mapper.createObjectNode();
+        key.set("userId", attributeValue("S", "user-1"));
+
+        JsonNode updated = service.updateItem("Users", key, null, updateExpression,
+                null, null, "ALL_NEW", region).newItem();
+        List<String> remaining = new ArrayList<>();
+        updated.get("tags").get("L").forEach(element -> remaining.add(element.get("S").asText()));
+        return remaining;
+    }
+
     /**
      * Test REMOVE with nested map paths (e.g. "ratings.foo").
      * Reproduces GitHub issue #402: REMOVE on a map key succeeds but data is unchanged.
