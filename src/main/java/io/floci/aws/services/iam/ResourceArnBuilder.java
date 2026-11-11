@@ -242,7 +242,7 @@ public class ResourceArnBuilder {
             case "sns"            -> List.of(buildSnsArn(ctx, region, accountId));
             case "dynamodb"       -> buildDynamoDbArns(ctx, region, accountId);
             case "kinesis"        -> List.of(buildKinesisArn(ctx, region, accountId));
-            case "ssm"            -> buildSsmArns(ctx, region, accountId);
+            case "ssm"            -> buildSsmArns(ctx, region, accountId, partition);
             case "iam"            -> buildIamArns(ctx, region, accountId);
             case "resource-groups" -> List.of(buildResourceGroupArn(ctx, region, accountId));
             case "scheduler"      -> List.of(buildSchedulerArn(path, ctx, region, accountId, partition));
@@ -1920,7 +1920,8 @@ public class ResourceArnBuilder {
      * The parameter ARNs an SSM request is evaluated against, read from the field its handler acts on, with each
      * name taken as the handler reads it.
      */
-    private List<String> buildSsmArns(ContainerRequestContext ctx, String region, String accountId) {
+    private List<String> buildSsmArns(ContainerRequestContext ctx, String region, String accountId,
+                                      String partition) {
         JsonNode json = readJsonBody(ctx);
         if (json != null && json.isObject()) {
             String operation = IamActionRegistry.targetOperation(ctx);
@@ -1934,7 +1935,7 @@ public class ResourceArnBuilder {
             boolean selectorRead = operation != null && SSM_SELECTOR_READ_OPERATIONS.contains(operation);
             if (operation != null && SSM_TAGGING_OPERATIONS.contains(operation)) {
                 String resourceId = SsmService.withLegacyParameterSlash(json.path("ResourceId").asText(),
-                        AwsRegions.partitionFor(region), region, accountId);
+                        partition, region, accountId);
                 return List.of(ssmParameterArn(resourceId, region, accountId));
             } else if ("GetParametersByPath".equals(operation)) {
                 String path = json.path("Path").asText();

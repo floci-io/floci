@@ -1804,7 +1804,8 @@ public class IamEnforcementFilter implements ContainerRequestFilter {
                 || "apigateway".equals(credentialScope)) {
             return arnBuilder.buildResources(credentialScope, ctx, region, accountId, requestPartition());
         }
-        String partition = "route53".equals(credentialScope) ? requestPartition() : AwsRegions.partitionFor(region);
+        String partition = "route53".equals(credentialScope) || "ssm".equals(credentialScope)
+                ? requestPartition() : AwsRegions.partitionFor(region);
         return arnBuilder.buildResources(credentialScope, operation, ctx, region, accountId, partition);
     }
 
