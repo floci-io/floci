@@ -22,7 +22,8 @@ import java.util.TreeSet;
 
 /**
  * Provisions {@code AWS::SSM::Parameter}. The parameter name is the physical id and {@code Ref}, without the
- * surrounding spaces {@code PutParameter} strips before it stores the parameter.
+ * surrounding spaces {@code PutParameter} strips before it stores the parameter. A prior physical id recorded
+ * with those spaces names the same parameter, so an update that keeps the name still updates it in place.
  *
  * <p>A create, and the replacement a changed name makes, is one {@code PutParameter} that carries
  * the template's tags and does not overwrite, as AWS's handler sends it: a name that already exists
@@ -72,8 +73,9 @@ public class SsmCfnProvisioner implements CfnResourceProvisioner {
         }
         Map<String, String> tags = ctx.resolveTags(props, "Tags");
         SsmService.validateTagKeys(tags);
+        boolean keepsName = ctx.isUpdate() && ctx.priorPhysicalId().strip().equals(name);
         // A dispatcher stub created nothing, so a parameter that takes over its id is a create.
-        if (ctx.reusesPriorEntity(name) && !CfnResourceDispatcher.isStub(name, attributesBefore)) {
+        if (keepsName && !CfnResourceDispatcher.isStub(name, attributesBefore)) {
             snapshotBeforeUpdate(r, name, attributesBefore, tags.keySet(), ctx.region());
             ssmService.putParameter(name, value, type, null, true, ctx.region());
             reconcileTags(name, templateTagKeys(attributesBefore), tags, ctx.region());
@@ -92,7 +94,7 @@ public class SsmCfnProvisioner implements CfnResourceProvisioner {
         } else {
             r.getAttributes().put(SSM_TEMPLATE_TAG_KEYS_ATTR, String.join(",", new TreeSet<>(tags.keySet())));
         }
-        ReplacementCleanup.record(r, ctx, attributesBefore);
+        ReplacementCleanup.record(r, ctx, attributesBefore, ctx.isUpdate() && !keepsName);
     }
 
     /**
