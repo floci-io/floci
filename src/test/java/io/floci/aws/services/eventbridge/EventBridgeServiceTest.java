@@ -22,6 +22,7 @@ import io.floci.aws.services.resourcegroupstagging.ResourceGroupsTaggingService;
 import io.floci.aws.testing.PartitionMatrix;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.function.Executable;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.Arguments;
 import org.junit.jupiter.params.provider.CsvSource;
@@ -635,6 +636,51 @@ class EventBridgeServiceTest {
         assertThrows(AwsException.class, () -> service.putRule("eu/child-rule", parent,
                 "{\"source\":[\"example.com\"]}", null, RuleState.ENABLED, null, null, null, REGION));
         assertTrue(service.listRules(parent + "/eu", null, REGION).isEmpty());
+    }
+
+    @Test
+    void ruleAndTargetOperationsRejectANameOutsideThePattern() {
+        Target target = new Target("t1", "arn:aws:sqs:us-east-1:000000000000:queue-1", null, null);
+
+        assertRuleNameRejected(() -> service.deleteRule("a/b", null, REGION));
+        assertRuleNameRejected(() -> service.enableRule("a/b", null, REGION));
+        assertRuleNameRejected(() -> service.disableRule("a/b", null, REGION));
+        assertRuleNameRejected(() -> service.putTargets("a/b", null, List.of(target), REGION));
+        assertRuleNameRejected(() -> service.removeTargets("a/b", null, List.of("t1"), REGION));
+        assertRuleNameRejected(() -> service.listTargetsByRule("a/b", null, REGION));
+    }
+
+    private static void assertRuleNameRejected(Executable call) {
+        AwsException error = assertThrows(AwsException.class, call);
+        assertEquals("ValidationException", error.getErrorCode());
+        assertEquals(400, error.getHttpStatus());
+    }
+
+    @Test
+    void aRuleOperationCannotReachIntoANestedPartnerBus() {
+        String parent = "aws.partner/example.com/orders";
+        service.createEventBus(parent, parent, null, null, REGION);
+        service.createEventBus(parent + "/eu", parent + "/eu", null, null, REGION);
+        service.putRule("child-rule", parent + "/eu", "{\"source\":[\"example.com\"]}", null,
+                RuleState.ENABLED, null, null, null, REGION);
+
+        assertRuleNameRejected(() -> service.deleteRule("eu/child-rule", parent, REGION));
+        assertEquals(1, service.listRules(parent + "/eu", null, REGION).size());
+    }
+
+    @Test
+    void aLegacySlashNamedRuleStaysRemovableByItsExactName() {
+        Rule legacy = new Rule();
+        legacy.setName("team/rule-1");
+        legacy.setArn("arn:aws:events:us-east-1:000000000000:rule/team/rule-1");
+        legacy.setEventBusName("default");
+        legacy.setState(RuleState.ENABLED);
+        ruleStore.put("rule:" + REGION + ":default/team/rule-1", legacy);
+
+        assertTrue(service.listTargetsByRule("team/rule-1", null, REGION).isEmpty());
+        service.deleteRule("team/rule-1", null, REGION);
+
+        assertThrows(AwsException.class, () -> service.describeRule("team/rule-1", null, REGION));
     }
 
     @Test
