@@ -17,6 +17,7 @@ import io.floci.aws.services.apigatewayv2.model.IntegrationSubtype;
 
 import java.nio.charset.StandardCharsets;
 import java.util.LinkedHashMap;
+import java.util.List;
 import java.util.Map;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
@@ -38,6 +39,8 @@ public class AwsServiceIntegrationMapper {
     private static final String BODY = "$request.body";
     private static final String STAGE_VARIABLES = "$stageVariables.";
     private static final String CONTEXT = "$context.";
+    private static final List<String> SOURCE_PREFIXES = List.of("$request.header.", "$request.querystring.",
+            "$request.path.", BODY + ".", CONTEXT, STAGE_VARIABLES);
     private static final ObjectMapper TEMPLATE_READER = new ObjectMapper()
             .enable(DeserializationFeature.FAIL_ON_TRAILING_TOKENS);
 
@@ -90,6 +93,58 @@ public class AwsServiceIntegrationMapper {
      */
     public static boolean isValidJsonParameter(String value) {
         return value == null || isWholeExpression(value) || jsonTemplate(value) != null;
+    }
+
+    /**
+     * The first source expression in a parameter value that names no source the mapper reads, or null when there is
+     * none. A value starting with {@code $} is one whole expression, {@code ${...}} marks an embedded one, and a
+     * {@code $} anywhere else is static text. For a JSON parameter holding a JSON object, the expressions are those in
+     * its string values.
+     */
+    public static String unsupportedExpression(String value, boolean jsonParameter) {
+        if (value == null) {
+            return null;
+        }
+        if (jsonParameter && !isWholeExpression(value)) {
+            JsonNode template = jsonTemplate(value);
+            return template == null ? null : unsupportedLeafExpression(template);
+        }
+        if (value.startsWith("$") && !value.startsWith("${")) {
+            return isSupportedSource(value) ? null : value;
+        }
+        Matcher m = EMBEDDED_EXPRESSION.matcher(value);
+        while (m.find()) {
+            String expression = "$" + m.group(1);
+            if (!isSupportedSource(expression)) {
+                return expression;
+            }
+        }
+        return null;
+    }
+
+    private static String unsupportedLeafExpression(JsonNode node) {
+        if (node.isTextual()) {
+            return unsupportedExpression(node.asText(), false);
+        }
+        for (JsonNode child : node) {
+            String unsupported = unsupportedLeafExpression(child);
+            if (unsupported != null) {
+                return unsupported;
+            }
+        }
+        return null;
+    }
+
+    private static boolean isSupportedSource(String expression) {
+        if (expression.equals(BODY)) {
+            return true;
+        }
+        for (String prefix : SOURCE_PREFIXES) {
+            if (expression.startsWith(prefix) && expression.length() > prefix.length()) {
+                return true;
+            }
+        }
+        return false;
     }
 
     private static boolean isWholeExpression(String value) {

@@ -912,8 +912,8 @@ public class ApiGatewayV2Service {
      * Rejects an integration subtype the way CreateIntegration does: only on an HTTP API
      * {@code AWS_PROXY} integration with payload format 1.0, a subtype AWS defines, every required
      * parameter mapped to a non-blank value, every JSON parameter either a source expression or a
-     * JSON object, and no parameter the subtype's action does not take. OpenAPI import runs it over
-     * every integration before it changes anything.
+     * JSON object, every source expression one the gateway reads, and no parameter the subtype's
+     * action does not take. OpenAPI import runs it over every integration before it changes anything.
      */
     static void validateIntegrationSubtype(String protocolType, String integrationType, String integrationSubtype,
                                            String payloadFormatVersion, Map<String, String> requestParameters) {
@@ -954,6 +954,13 @@ public class ApiGatewayV2Service {
                     && !AwsServiceIntegrationMapper.isValidJsonParameter(parameter.getValue())) {
                 throw new AwsException("BadRequestException",
                         "Parameter " + parameter.getKey() + " must be a JSON object or a source expression.", 400);
+            }
+            String unsupported = AwsServiceIntegrationMapper.unsupportedExpression(parameter.getValue(),
+                    subtype.isJsonParameter(parameter.getKey()));
+            if (unsupported != null) {
+                throw new AwsException("BadRequestException",
+                        "Parameter " + parameter.getKey() + " has an unsupported source expression: "
+                                + unsupported + ".", 400);
             }
         }
     }
