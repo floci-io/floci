@@ -2,6 +2,7 @@ package io.floci.aws.services.eventbridge;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.floci.aws.config.EmulatorConfig;
+import io.floci.aws.core.common.AwsException;
 import io.floci.aws.core.common.RegionResolver;
 import io.floci.aws.core.storage.InMemoryStorage;
 import io.floci.aws.core.storage.StorageBackend;
@@ -74,6 +75,21 @@ class EventBridgeSchedulerIntegrationTest {
                     RuleState.ENABLED, null, null, null, REGION);
 
             assertTrue(scheduler.isRunning(rule.getArn()));
+        }
+
+        @Test
+        void rejectedRateUpdateLeavesTheOriginalTimerRunning() {
+            Rule rule = eventBridgeService.putRule(
+                    "preserved-timer", "default", null, "rate(5 minutes)",
+                    RuleState.ENABLED, null, null, null, REGION);
+
+            assertThrows(AwsException.class, () -> eventBridgeService.putRule(
+                    "preserved-timer", "default", null, "rate(1 minutes)",
+                    RuleState.DISABLED, null, null, null, REGION));
+
+            assertTrue(scheduler.isRunning(rule.getArn()));
+            assertEquals("rate(5 minutes)", rule.getScheduleExpression());
+            assertEquals(RuleState.ENABLED, rule.getState());
         }
 
         @Test

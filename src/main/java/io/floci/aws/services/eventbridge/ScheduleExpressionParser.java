@@ -5,6 +5,7 @@ import com.cronutils.model.time.ExecutionTime;
 import com.cronutils.parser.CronParser;
 import io.floci.aws.core.common.AwsCronDefinitions;
 
+import java.time.ZoneOffset;
 import java.time.ZonedDateTime;
 import java.time.temporal.ChronoUnit;
 import java.util.regex.Matcher;
@@ -14,6 +15,10 @@ public final class ScheduleExpressionParser {
 
     private static final Pattern RATE_PATTERN = Pattern.compile(
             "^rate\\(\\s*(\\d+)\\s+(minutes?|hours?|days?|weeks?)\\s*\\)$",
+            Pattern.CASE_INSENSITIVE);
+
+    private static final Pattern AWS_RATE_PATTERN = Pattern.compile(
+            "^rate\\(\\s*(\\d+)\\s+(minutes?|hours?|days?)\\s*\\)$",
             Pattern.CASE_INSENSITIVE);
 
     private static final Pattern CRON_PATTERN = Pattern.compile(
@@ -30,6 +35,28 @@ public final class ScheduleExpressionParser {
 
     public static boolean isCronExpression(String expression) {
         return expression != null && CRON_PATTERN.matcher(expression.trim()).matches();
+    }
+
+    /** Validates API input without changing parsing of previously stored expressions. */
+    public static void validate(String expression) {
+        if (isCronExpression(expression)) {
+            getNextFireTime(expression, ZonedDateTime.now(ZoneOffset.UTC));
+            return;
+        }
+        if (expression == null) {
+            throw new IllegalArgumentException("Schedule expression cannot be null");
+        }
+        Matcher rate = AWS_RATE_PATTERN.matcher(expression.trim());
+        if (!rate.matches()) {
+            throw new IllegalArgumentException("Not a valid rate expression: " + expression);
+        }
+        parseRateToMillis(expression);
+        int value = Integer.parseInt(rate.group(1));
+        String unit = rate.group(2);
+        boolean plural = unit.endsWith("s") || unit.endsWith("S");
+        if ((value == 1) == plural) {
+            throw new IllegalArgumentException("Rate unit must be singular for 1 and plural for values greater than 1");
+        }
     }
 
     public static long parseRateToMillis(String expression) {
