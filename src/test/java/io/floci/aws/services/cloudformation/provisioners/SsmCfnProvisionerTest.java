@@ -149,23 +149,29 @@ class SsmCfnProvisionerTest {
     }
 
     @Test
-    void aPriorPhysicalIdWithSurroundingSpacesIsUpdatedInPlace() {
+    void aPriorPhysicalIdWithSurroundingSpacesIsReplacedByTheStrippedName() {
         String spaced = " " + NAME + " ";
         StackResource r = parameter(spaced, null);
-        when(ssm.getParameter(NAME, REGION)).thenReturn(stored("old", Map.of()));
         ProvisionContext create = ctx();
         ProvisionContext update = new ProvisionContext(create.engine(), create.region(), create.accountId(),
                 create.stackName(), spaced);
 
         provisioner.provision(r, props().put("Name", spaced), update);
 
-        verify(ssm).putParameter(NAME, "v", "String", null, true, REGION);
-        verify(ssm, never()).putParameter(anyString(), anyString(), anyString(), any(), eq(false), anyMap(),
-                anyString());
+        verify(ssm, never()).getParameter(anyString(), anyString());
+        verify(ssm).putParameter(NAME, "v", "String", null, false, Map.of(), REGION);
+        verify(ssm, never()).putParameter(anyString(), anyString(), anyString(), any(), eq(true), anyString());
         assertEquals(NAME, r.getPhysicalId());
-        assertTrue(provisioner.retainsFailedUpdateState(r));
-        assertFalse(provisioner.hasReplacementUpdate(r));
-        assertNull(provisioner.updateCleanupPhysicalId(r));
+        assertTrue(provisioner.hasReplacementUpdate(r));
+        assertEquals(spaced, provisioner.updateCleanupPhysicalId(r));
+        assertFalse(provisioner.retainsFailedUpdateState(r));
+
+        UpdateCleanupResult cleanup = provisioner.completeUpdate(r);
+        provisioner.clearUpdate(r);
+
+        assertTrue(cleanup.complete());
+        verify(ssm).deleteParameter(spaced, REGION);
+        verify(ssm, never()).deleteParameter(NAME, REGION);
     }
 
     @Test
