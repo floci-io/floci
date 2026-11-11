@@ -170,10 +170,14 @@ own events; this lets a test publish an event a partner would send.
 When upgrading, a rule persisted by an earlier Floci version under a name `PutRule` now rejects,
 such as one with a slash or a space or longer than 64 characters, is still reachable by its exact
 name on its own bus, and it keeps `DeleteEventBus` from deleting that bus. One with a slash in its
-name is also no longer listed by `ListRules` or matched by `PutEvents`. Remove its targets, delete
-it and recreate it under a valid name. `DescribeRule`, `DeleteRule`, `EnableRule`, `DisableRule`,
-`PutTargets`, `RemoveTargets` and `ListTargetsByRule` otherwise reject an invalid rule name as
-`PutRule` does.
+name is also no longer listed by `ListRules` or matched by `PutEvents`. On a custom bus it can still
+be tagged by its ARN, but on the default bus it cannot: an ARN such as `rule/team/rule-1` reads as
+rule `rule-1` on bus `team`, so that rule is reachable by its exact name for the rule and target
+operations only. A CloudFormation stack holding any of these legacy rules can still be deleted, but
+an `UpdateStack` that touches the rule fails, since `PutRule` rejects its name. Remove its targets,
+delete it and recreate it under a valid name. `DescribeRule`, `DeleteRule`, `EnableRule`,
+`DisableRule`, `PutTargets`, `RemoveTargets` and `ListTargetsByRule` otherwise reject an invalid
+rule name as `PutRule` does.
 
 ```bash
 aws events create-event-bus \
