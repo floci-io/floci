@@ -1131,6 +1131,31 @@ class SqsIntegrationTest {
 
             given()
                 .contentType("application/x-www-form-urlencoded")
+                .formParam("Action", "SendMessage")
+                .formParam("QueueUrl", attributeQueueUrl)
+                .formParam("MessageBody", "x")
+                .formParam("MessageAttribute.1.Name", "novalue")
+                .formParam("MessageAttribute.1.Value.DataType", "String")
+            .when().post("/").then()
+                .statusCode(400)
+                .body("ErrorResponse.Error.Code", equalTo("InvalidParameterValue"))
+                .body("ErrorResponse.Error.Message", equalTo(
+                        "Message (user) attribute 'novalue' must contain a non-empty value of type 'String'."));
+
+            given()
+                .contentType("application/x-www-form-urlencoded")
+                .formParam("Action", "SendMessage")
+                .formParam("QueueUrl", attributeQueueUrl)
+                .formParam("MessageBody", "x")
+                .formParam("MessageAttribute.1.Name", "notype")
+                .formParam("MessageAttribute.1.Value.StringValue", "v")
+            .when().post("/").then()
+                .statusCode(400)
+                .body("ErrorResponse.Error.Code", equalTo("InvalidParameterValue"))
+                .body("ErrorResponse.Error.Message", equalTo("Missing required parameter DataType"));
+
+            given()
+                .contentType("application/x-www-form-urlencoded")
                 .formParam("Action", "SendMessageBatch")
                 .formParam("QueueUrl", attributeQueueUrl)
                 .formParam("SendMessageBatchRequestEntry.1.Id", "ok")

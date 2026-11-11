@@ -234,11 +234,8 @@ public class SqsQueryHandler {
             String dataType = getParam(params, "MessageAttribute." + i + ".Value.DataType");
             String stringValue = getParam(params, "MessageAttribute." + i + ".Value.StringValue");
             String binaryValueBase64 = getParam(params, "MessageAttribute." + i + ".Value.BinaryValue");
-            MessageAttributeValue value = SqsService.messageAttributeValue(name, dataType, stringValue,
-                    binaryValueBase64);
-            if (value != null) {
-                messageAttributes.put(name, value);
-            }
+            messageAttributes.put(name, SqsService.messageAttributeValue(name, dataType, stringValue,
+                    binaryValueBase64));
         }
 
         // The AWS SDK only allows AWSTraceHeader to be set via MessageSystemAttributes;
@@ -389,11 +386,8 @@ public class SqsQueryHandler {
                 String stringValue = getParam(params, "SendMessageBatchRequestEntry." + i + ".MessageAttribute." + j + ".Value.StringValue");
                 String binaryValueBase64 = getParam(params, "SendMessageBatchRequestEntry." + i + ".MessageAttribute." + j + ".Value.BinaryValue");
                 try {
-                    MessageAttributeValue value = SqsService.messageAttributeValue(name, dataType, stringValue,
-                            binaryValueBase64);
-                    if (value != null) {
-                        messageAttributes.put(name, value);
-                    }
+                    messageAttributes.put(name, SqsService.messageAttributeValue(name, dataType, stringValue,
+                            binaryValueBase64));
                 } catch (AwsException e) {
                     attributeError = e;
                     break;

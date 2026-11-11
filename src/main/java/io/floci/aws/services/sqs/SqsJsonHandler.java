@@ -213,12 +213,8 @@ public class SqsJsonHandler {
         Map<String, MessageAttributeValue> messageAttributes = new HashMap<>();
         JsonNode attrsNode = request.path("MessageAttributes");
         if (attrsNode.isObject()) {
-            attrsNode.fields().forEachRemaining(entry -> {
-                MessageAttributeValue value = messageAttribute(entry.getKey(), entry.getValue());
-                if (value != null) {
-                    messageAttributes.put(entry.getKey(), value);
-                }
-            });
+            attrsNode.fields().forEachRemaining(entry ->
+                    messageAttributes.put(entry.getKey(), messageAttribute(entry.getKey(), entry.getValue())));
         }
 
         // The AWS SDK only allows AWSTraceHeader to be set via MessageSystemAttributes;
@@ -389,12 +385,8 @@ public class SqsJsonHandler {
             JsonNode attrsNode = entry.path("MessageAttributes");
             if (attrsNode.isObject()) {
                 try {
-                    attrsNode.fields().forEachRemaining(attrEntry -> {
-                        MessageAttributeValue value = messageAttribute(attrEntry.getKey(), attrEntry.getValue());
-                        if (value != null) {
-                            messageAttributes.put(attrEntry.getKey(), value);
-                        }
-                    });
+                    attrsNode.fields().forEachRemaining(attrEntry -> messageAttributes.put(attrEntry.getKey(),
+                            messageAttribute(attrEntry.getKey(), attrEntry.getValue())));
                 } catch (AwsException e) {
                     attributeError = e;
                 }

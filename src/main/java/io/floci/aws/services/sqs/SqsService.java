@@ -1372,15 +1372,16 @@ public class SqsService implements Resettable, ResourceProvider {
     }
 
     /**
-     * Builds a message (user) attribute from its wire fields, or returns null when the attribute carries no data type
-     * or no value. A BinaryValue takes precedence over a StringValue, as on the wire.
+     * Builds a message (user) attribute from its wire fields. A BinaryValue takes precedence over a StringValue, as on
+     * the wire.
      *
-     * @throws AwsException InvalidParameterValue when the BinaryValue is not valid base64 or either value is empty
+     * @throws AwsException InvalidParameterValue when the DataType is missing or empty, when the attribute has no
+     *                      value or an empty one, or when the BinaryValue is not valid base64
      */
     public static MessageAttributeValue messageAttributeValue(String name, String dataType, String stringValue,
                                                               String binaryValueBase64) {
-        if (dataType == null) {
-            return null;
+        if (dataType == null || dataType.isEmpty()) {
+            throw new AwsException("InvalidParameterValue", "Missing required parameter DataType", 400);
         }
         if (binaryValueBase64 != null) {
             byte[] binaryValue;
@@ -1395,10 +1396,7 @@ public class SqsService implements Resettable, ResourceProvider {
             }
             return new MessageAttributeValue(binaryValue, dataType);
         }
-        if (stringValue == null) {
-            return null;
-        }
-        if (stringValue.isEmpty()) {
+        if (stringValue == null || stringValue.isEmpty()) {
             throw emptyAttributeValue(name, dataType);
         }
         return new MessageAttributeValue(stringValue, dataType);
