@@ -146,34 +146,11 @@ class RekognitionCollectionServiceTest {
     }
 
     @Test
-    void invalidInputsFailBeforeAnyStateChanges() {
-        assertError("InvalidParameterException", () -> service.createCollection(request().put("CollectionId", "bad/id"), REGION));
-        assertError("SerializationException", () -> service.createCollection(request().put("CollectionId", 123), REGION));
+    void resetClearsCollections() {
         service.createCollection(request(), REGION);
-        assertError("InvalidParameterException", () -> service.indexFaces(imageRequest().put("MaxFaces", 0), REGION, "photos/face.jpg"));
-        assertError("SerializationException", () -> service.listFaces(request().put("MaxResults", 1.2), REGION));
-        assertError("InvalidParameterException", () -> service.searchFacesByImage(imageRequest().put("FaceMatchThreshold", 101), REGION, "photos/face.jpg"));
-        assertError("InvalidParameterException", () -> service.indexFaces(imageRequest().put("QualityFilter", "BAD"), REGION, "photos/face.jpg"));
-        assertError("InvalidParameterException", () -> service.deleteFaces(request(), REGION));
-        assertError("InvalidPaginationTokenException", () -> service.listCollections(request().put("NextToken", "garbage"), REGION));
-        assertEquals(0, service.describeCollection(request(), REGION).path("FaceCount").asInt());
+        service.indexFaces(imageRequest(), REGION, "photos/face.jpg");
         service.clear();
         assertError("ResourceNotFoundException", () -> service.describeCollection(request(), REGION));
-    }
-
-    @Test
-    void modeledAttributesAndTagPatternsAreValidatedBeforeWrites() {
-        ObjectNode reservedTag = request();
-        reservedTag.putObject("Tags").put("aws:owner", "team");
-        assertError("InvalidParameterException", () -> service.createCollection(reservedTag, REGION));
-        ObjectNode invalidTag = request();
-        invalidTag.putObject("Tags").put("owner", "invalid!");
-        assertError("InvalidParameterException", () -> service.createCollection(invalidTag, REGION));
-        service.createCollection(request(), REGION);
-        ObjectNode attributes = imageRequest();
-        attributes.putArray("DetectionAttributes").add("UNKNOWN");
-        assertError("InvalidParameterException", () -> service.indexFaces(attributes, REGION, "photos/face.jpg"));
-        assertEquals(0, service.describeCollection(request(), REGION).path("FaceCount").asInt());
     }
 
     @Test

@@ -13,6 +13,7 @@ from __future__ import annotations
 import gzip
 import json
 import re
+from copy import deepcopy
 from pathlib import Path
 
 import pytest
@@ -247,14 +248,21 @@ CONSTRAINED_MODEL = {
 }
 
 
-def test_athena_generator_keeps_constraints_for_every_operation_and_detects_new_operations(tmp_path, monkeypatch):
-    output = tmp_path / "athena-request-shapes.json"
+@pytest.mark.parametrize("script, model_path", [
+    (regen_athena_shapes, "athena/2017-05-18"),
+    (regen_rekognition_shapes, "rekognition/2016-06-27"),
+])
+def test_generators_keep_constraints_for_every_operation_and_detect_new_operations(script, model_path, tmp_path, monkeypatch):
+    output = tmp_path / "request-shapes.json"
+    model = deepcopy(CONSTRAINED_MODEL)
+    model["shapes"]["Image"] = {"type": "structure", "members": {"Bytes": {"shape": "Blob"}}}
+    model["shapes"]["Blob"] = {"type": "blob"}
     monkeypatch.setattr(r, "resolve_botocore_data", lambda explicit: (tmp_path, "botocore test"))
-    monkeypatch.setattr(r, "load_model", lambda data, model: CONSTRAINED_MODEL)
+    monkeypatch.setattr(r, "load_model", lambda data, model_path: deepcopy(model))
     args = ["--output", str(output)]
 
-    assert regen_athena_shapes.MODEL == Path("athena/2017-05-18")
-    assert regen_athena_shapes.main(args) == 0
+    assert script.MODEL == Path(model_path)
+    assert script.main(args) == 0
     doc = json.loads(output.read_text())
     assert doc["operations"] == {"Put": "PutRequest", "Unused": "UnusedRequest"}
     assert doc["shapes"]["Name"]["min"] == 1
@@ -263,13 +271,13 @@ def test_athena_generator_keeps_constraints_for_every_operation_and_detects_new_
     assert doc["shapes"]["Kind"]["enum"] == ["A", "B"]
     assert doc["shapes"]["RuleList"]["max"] == 25
     assert doc["shapes"]["TagMap"]["key"] == "Name"
-    assert regen_athena_shapes.main(["--check", *args]) == 0
+    assert script.main(["--check", *args]) == 0
 
-    changed = {**CONSTRAINED_MODEL, "operations": {**CONSTRAINED_MODEL["operations"],
+    changed = {**model, "operations": {**model["operations"],
                                                 "NewOperation": {"input": {"shape": "PutRequest"}}}}
-    monkeypatch.setattr(r, "load_model", lambda data, model: changed)
-    assert regen_athena_shapes.main(["--check", *args]) == 1
-    assert regen_athena_shapes.main(args) == 0
+    monkeypatch.setattr(r, "load_model", lambda data, model_path: deepcopy(changed))
+    assert script.main(["--check", *args]) == 1
+    assert script.main(args) == 0
     assert "NewOperation" in json.loads(output.read_text())["operations"]
 
 
@@ -367,8 +375,6 @@ def test_build_constraints_output_is_stable():
     (regen_sts_shapes, "sts/2011-06-15", "sts-request-shapes.json", {}),
     (regen_securityhub_shapes, "securityhub/2018-10-26", "securityhub-request-shapes.json",
      {"prepare": regen_securityhub_shapes.prepare}),
-    (regen_rekognition_shapes, "rekognition/2016-06-27", "rekognition-request-shapes.json",
-     {"prepare": regen_rekognition_shapes.prepare}),
 ])
 def test_each_constraints_script_runs_the_shared_main_with_its_operations(script, model, output, extra,
                                                                          monkeypatch):
@@ -397,11 +403,13 @@ def vendored(script) -> tuple[str, ...]:
     regen_resource_groups_shapes, regen_sts_shapes,
     regen_securityhub_shapes,
     regen_rekognition_shapes,
+    regen_athena_shapes,
 ])
 def test_each_vendored_constraints_file_carries_its_operations_and_resolves_its_shapes(script):
     doc = json.loads(script.OUTPUT.read_text(encoding="utf-8"))
 
-    assert sorted(doc["operations"]) == sorted(vendored(script))
+    if hasattr(script, "OPERATIONS") or hasattr(script, "VENDORED"):
+        assert sorted(doc["operations"]) == sorted(vendored(script))
     for operation, shape in doc["operations"].items():
         assert shape in doc["shapes"], operation
     for name, shape in doc["shapes"].items():

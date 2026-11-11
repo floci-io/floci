@@ -6,7 +6,7 @@ import io.floci.aws.core.common.RequestConstraintCheck;
 
 import java.util.List;
 
-/** Collection request constraints vendored from botocore by regen_rekognition_shapes.py. */
+/** Request constraints vendored from botocore by regen_rekognition_shapes.py. */
 final class RekognitionRequestShapes {
 
     private static final RequestConstraintCheck CHECK = RequestConstraintCheck.load(

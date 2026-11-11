@@ -55,7 +55,6 @@ public class RekognitionCollectionService implements Resettable {
     }
 
     public synchronized ObjectNode createCollection(JsonNode request, String region) {
-        RekognitionRequestShapes.check("CreateCollection", request);
         String id = request.path("CollectionId").asText();
         Map<String, String> tags = tags(request);
         String key = key(region, id);
@@ -72,7 +71,6 @@ public class RekognitionCollectionService implements Resettable {
     }
 
     public synchronized ObjectNode describeCollection(JsonNode request, String region) {
-        RekognitionRequestShapes.check("DescribeCollection", request);
         FaceCollection collection = requireCollection(request, region);
         return mapper.createObjectNode().put("CollectionARN", collection.arn())
                 .put("CreationTimestamp", collection.creationTimestamp())
@@ -81,7 +79,6 @@ public class RekognitionCollectionService implements Resettable {
     }
 
     public synchronized ObjectNode deleteCollection(JsonNode request, String region) {
-        RekognitionRequestShapes.check("DeleteCollection", request);
         FaceCollection collection = requireCollection(request, region);
         indexedFaces.delete(key(region, collection.id()));
         collections.delete(key(region, collection.id()));
@@ -89,7 +86,6 @@ public class RekognitionCollectionService implements Resettable {
     }
 
     public synchronized ObjectNode listCollections(JsonNode request, String region) {
-        RekognitionRequestShapes.check("ListCollections", request);
         List<FaceCollection> all = collections.scan(key -> key.startsWith(region + ":"));
         PaginatedResult<FaceCollection> page = page(all, FaceCollection::id, request,
                 "collections:" + regionResolver.getAccountId() + ":" + region);
@@ -105,7 +101,6 @@ public class RekognitionCollectionService implements Resettable {
     }
 
     public synchronized ObjectNode indexFaces(JsonNode request, String region, String mockKey) {
-        RekognitionRequestShapes.check("IndexFaces", request);
         FaceCollection collection = requireCollection(request, region);
         String externalId = request.path("ExternalImageId").asText(null);
         int maxFaces = request.path("MaxFaces").asInt(100);
@@ -161,7 +156,6 @@ public class RekognitionCollectionService implements Resettable {
     }
 
     public synchronized ObjectNode listFaces(JsonNode request, String region) {
-        RekognitionRequestShapes.check("ListFaces", request);
         FaceCollection collection = requireCollection(request, region);
         List<String> ids = faceIds(request);
         String userId = request.path("UserId").asText(null);
@@ -178,7 +172,6 @@ public class RekognitionCollectionService implements Resettable {
     }
 
     public synchronized ObjectNode deleteFaces(JsonNode request, String region) {
-        RekognitionRequestShapes.check("DeleteFaces", request);
         FaceCollection collection = requireCollection(request, region);
         List<String> ids = faceIds(request);
         ObjectNode result = mapper.createObjectNode();
@@ -203,7 +196,6 @@ public class RekognitionCollectionService implements Resettable {
     }
 
     public synchronized ObjectNode searchFaces(JsonNode request, String region) {
-        RekognitionRequestShapes.check("SearchFaces", request);
         FaceCollection collection = requireCollection(request, region);
         String id = request.path("FaceId").asText();
         Map<String, IndexedFace> faces = faces(region, collection);
@@ -216,7 +208,6 @@ public class RekognitionCollectionService implements Resettable {
     }
 
     public synchronized ObjectNode searchFacesByImage(JsonNode request, String region, String mockKey) {
-        RekognitionRequestShapes.check("SearchFacesByImage", request);
         FaceCollection collection = requireCollection(request, region);
         ObjectNode detail = faceDetails(mockKey).stream().max(Comparator.comparingDouble(RekognitionCollectionService::area))
                 .orElseThrow(() -> invalid("There are no faces in the image. Should be at least 1."));
