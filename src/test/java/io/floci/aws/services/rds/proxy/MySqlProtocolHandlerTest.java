@@ -29,6 +29,8 @@ import java.security.cert.X509Certificate;
 import java.time.Instant;
 import java.util.Arrays;
 import java.util.HexFormat;
+import java.util.concurrent.FutureTask;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.zip.DeflaterOutputStream;
@@ -194,13 +196,12 @@ class MySqlProtocolHandlerTest {
         query.writeBytes("*/".getBytes(StandardCharsets.UTF_8));
         byte[] command = wrapPacket(0, query.toByteArray());
         byte[] frame = zlibPayload ? wrapZlibCompressedPacket(command) : wrapCompressedPacket(command);
-        assertRelayedCommandFrames(frame, true, false);
+        assertRelayedCommandFrames(frame, CLIENT_COMPRESS, false, true);
     }
 
     @ParameterizedTest
     @ValueSource(booleans = {false, true})
     void relaysEachCompressedCommandBeforeTheNextArrives(boolean zlibPayload) throws Exception {
-        byte[] nonce = fixedNonce();
         byte[] firstCommand = wrapPacket(0, new byte[]{0x03, 'S', 'E', 'L', 'E', 'C', 'T', ' ', '1'});
         byte[] secondCommand = wrapPacket(0, new byte[]{0x03, 'S', 'E', 'L', 'E', 'C', 'T', ' ', '2'});
         byte[] firstFrame = zlibPayload ? wrapZlibCompressedPacket(firstCommand)
@@ -208,64 +209,17 @@ class MySqlProtocolHandlerTest {
         byte[] secondFrame = zlibPayload ? wrapZlibCompressedPacket(secondCommand)
                 : wrapCompressedPacket(secondCommand);
         byte[] responseFrame = wrapCompressedPacket(wrapPacket(1, OK_PAYLOAD), 1);
-        AtomicReference<byte[]> receivedFirstFrame = new AtomicReference<>();
-        AtomicReference<byte[]> receivedSecondFrame = new AtomicReference<>();
-        AtomicReference<Exception> backendFailure = new AtomicReference<>();
-
-        try (ServerSocket backendServer = new ServerSocket(0);
-             ServerSocket clientServer = new ServerSocket(0)) {
-            Thread backendThread = Thread.ofVirtual().start(() -> {
-                try (Socket socket = backendServer.accept()) {
-                    InputStream in = socket.getInputStream();
-                    OutputStream out = socket.getOutputStream();
-                    out.write(buildHandshakeV10(nonce, null, CLIENT_COMPRESS));
-                    out.flush();
-                    readMysqlPacketRaw(in);
-                    writeMysqlPacket(out, 2, OK_PAYLOAD);
-                    out.flush();
-                    socket.setSoTimeout(2_000);
-                    receivedFirstFrame.set(readCompressedFrame(in));
-                    out.write(responseFrame);
-                    out.flush();
-                    receivedSecondFrame.set(readCompressedFrame(in));
-                } catch (Exception e) {
-                    backendFailure.set(e);
-                }
-            });
-
-            try (Socket ourClient = new Socket("localhost", clientServer.getLocalPort());
-                 Socket proxyClient = clientServer.accept();
-                 Socket backend = new Socket("localhost", backendServer.getLocalPort())) {
-                ourClient.setSoTimeout(2_500);
-                Thread authThread = startProxy(proxyClient, backend, NO_RECONNECT, false, testTlsCertificates());
-                try {
-                    InputStream clientIn = ourClient.getInputStream();
-                    OutputStream clientOut = ourClient.getOutputStream();
-                    assertNotNull(readMysqlPacketRaw(clientIn));
-                    clientOut.write(buildHandshakeResponse41("admin", scrambleNativePassword("secret", nonce),
-                            (byte) 1, CLIENT_PROTOCOL_41 | CLIENT_SECURE_CONNECTION | CLIENT_COMPRESS));
-                    clientOut.flush();
-                    assertArrayEquals(wrapPacket(2, OK_PAYLOAD), readMysqlPacketRaw(clientIn));
-                    clientOut.write(firstFrame);
-                    clientOut.flush();
-                    assertArrayEquals(responseFrame, readCompressedFrame(clientIn));
-                    clientOut.write(secondFrame);
-                    clientOut.flush();
-
-                    backendThread.join(3_000);
-                    assertFalse(backendThread.isAlive(), "backend did not finish reading both commands");
-                    assertNull(backendFailure.get(), "backend could not read both commands");
-                    assertArrayEquals(firstFrame, receivedFirstFrame.get());
-                    assertArrayEquals(secondFrame, receivedSecondFrame.get());
-                } finally {
-                    ourClient.close();
-                    proxyClient.close();
-                    backend.close();
-                    authThread.join(3_000);
-                    backendThread.join(3_000);
-                }
-            }
-        }
+        withLoggedInClient(CLIENT_COMPRESS, CLIENT_COMPRESS, false, streams -> {
+            streams.clientOut().write(firstFrame);
+            streams.clientOut().flush();
+            assertArrayEquals(firstFrame, readCompressedFrame(streams.backendIn()));
+            streams.backendOut().write(responseFrame);
+            streams.backendOut().flush();
+            assertArrayEquals(responseFrame, readCompressedFrame(streams.clientIn()));
+            streams.clientOut().write(secondFrame);
+            streams.clientOut().flush();
+            assertArrayEquals(secondFrame, readCompressedFrame(streams.backendIn()));
+        });
     }
 
     private void assertRelayedCommandFrames(byte[] expectedFrame, boolean compressed, boolean tls)
@@ -275,76 +229,103 @@ class MySqlProtocolHandlerTest {
 
     private void assertRelayedCommandFrames(byte[] expectedFrame, int compressionCapability, boolean tls)
             throws Exception {
-        byte[] nonce = fixedNonce();
-        AtomicReference<byte[]> receivedFrame = new AtomicReference<>();
-        AtomicReference<Exception> backendFailure = new AtomicReference<>();
-        AtomicReference<Integer> backendClientCapabilities = new AtomicReference<>();
+        assertRelayedCommandFrames(expectedFrame, compressionCapability, tls, false);
+    }
 
-        try (ServerSocket backendServer = new ServerSocket(0);
-             ServerSocket clientServer = new ServerSocket(0)) {
-            Thread backendThread = Thread.ofVirtual().start(() -> {
-                try (Socket socket = backendServer.accept()) {
-                    InputStream in = socket.getInputStream();
-                    OutputStream out = socket.getOutputStream();
-                    out.write(buildHandshakeV10(nonce, null,
-                            CLIENT_COMPRESS | CLIENT_ZSTD_COMPRESSION_ALGORITHM));
-                    out.flush();
-                    byte[] response = readMysqlPacketRaw(in);
-                    backendClientCapabilities.set((response[4] & 0xFF) | ((response[5] & 0xFF) << 8)
-                            | ((response[6] & 0xFF) << 16) | ((response[7] & 0xFF) << 24));
-                    writeMysqlPacket(out, 2, OK_PAYLOAD);
-                    out.flush();
-                    socket.setSoTimeout(1_500);
-                    receivedFrame.set(in.readNBytes(expectedFrame.length));
-                } catch (Exception e) {
-                    backendFailure.set(e);
-                }
-            });
-
-            try (Socket ourClient = new Socket("localhost", clientServer.getLocalPort());
-                 Socket proxyClient = clientServer.accept();
-                 Socket backend = new Socket("localhost", backendServer.getLocalPort())) {
-                ourClient.setSoTimeout(2_000);
-                Thread authThread = startProxy(proxyClient, backend, NO_RECONNECT, false, testTlsCertificates());
-                try {
-                    InputStream clientIn = ourClient.getInputStream();
-                    OutputStream clientOut = ourClient.getOutputStream();
-                    byte[] handshake = readMysqlPacketRaw(clientIn);
-                    assertNotNull(handshake);
-                    assertTrue((capabilityFlagsLower(handshake) & CLIENT_COMPRESS) != 0);
-                    int capabilities = CLIENT_PROTOCOL_41 | CLIENT_SECURE_CONNECTION
-                            | compressionCapability;
-                    int sequence = 1;
-                    if (tls) {
-                        clientOut.write(buildSslRequest());
-                        clientOut.flush();
-                        SSLSocket sslClient = trustedClientSocket(ourClient);
-                        sslClient.startHandshake();
-                        clientIn = sslClient.getInputStream();
-                        clientOut = sslClient.getOutputStream();
-                        capabilities |= CLIENT_SSL;
-                        sequence = 2;
+    private void assertRelayedCommandFrames(byte[] expectedFrame, int compressionCapability, boolean tls,
+                                          boolean readConcurrently) throws Exception {
+        withLoggedInClient(CLIENT_COMPRESS | CLIENT_ZSTD_COMPRESSION_ALGORITHM,
+                compressionCapability, tls, streams -> {
+                    FutureTask<byte[]> receivedFrame = null;
+                    if (readConcurrently) {
+                        receivedFrame = new FutureTask<>(
+                                () -> streams.backendIn().readNBytes(expectedFrame.length));
+                        Thread.ofVirtual().start(receivedFrame);
+                        FutureTask<Void> sentFrame = new FutureTask<>(() -> {
+                            streams.clientOut().write(expectedFrame);
+                            streams.clientOut().flush();
+                            return null;
+                        });
+                        Thread.ofVirtual().start(sentFrame);
+                        sentFrame.get(3, TimeUnit.SECONDS);
+                    } else {
+                        streams.clientOut().write(expectedFrame);
+                        streams.clientOut().flush();
                     }
-                    clientOut.write(buildHandshakeResponse41("admin", scrambleNativePassword("secret", nonce),
-                            (byte) sequence, capabilities));
-                    clientOut.flush();
-                    assertArrayEquals(wrapPacket(sequence + 1, OK_PAYLOAD), readMysqlPacketRaw(clientIn));
-
-                    clientOut.write(expectedFrame);
-                    clientOut.flush();
-                    backendThread.join(3_000);
-                    assertFalse(backendThread.isAlive(), "backend did not finish reading the command");
-                    assertNull(backendFailure.get(), "backend could not read a complete command frame");
-                    assertEquals(compressionCapability, backendClientCapabilities.get()
+                    assertEquals(compressionCapability, streams.backendClientCapabilities()
                             & (CLIENT_COMPRESS | CLIENT_ZSTD_COMPRESSION_ALGORITHM));
-                    assertArrayEquals(expectedFrame, receivedFrame.get());
-                } finally {
-                    ourClient.close();
-                    proxyClient.close();
-                    backend.close();
-                    authThread.join(3_000);
-                    backendThread.join(3_000);
+                    byte[] received = readConcurrently
+                            ? receivedFrame.get(3, TimeUnit.SECONDS)
+                            : streams.backendIn().readNBytes(expectedFrame.length);
+                    assertArrayEquals(expectedFrame, received);
+                });
+    }
+
+    private record ClientBackendStreams(InputStream clientIn, OutputStream clientOut,
+                                        InputStream backendIn, OutputStream backendOut,
+                                        int backendClientCapabilities) {}
+
+    @FunctionalInterface
+    private interface LoggedInClientAssertion {
+        void accept(ClientBackendStreams streams) throws Exception;
+    }
+
+    private void withLoggedInClient(int backendCompressionCapabilities, int clientCompressionCapability,
+                                    boolean tls, LoggedInClientAssertion assertion) throws Exception {
+        byte[] nonce = fixedNonce();
+        try (ServerSocket backendServer = new ServerSocket(0);
+             ServerSocket clientServer = new ServerSocket(0);
+             Socket ourClient = new Socket("localhost", clientServer.getLocalPort());
+             Socket proxyClient = clientServer.accept();
+             Socket backend = new Socket("localhost", backendServer.getLocalPort());
+             Socket backendPeer = backendServer.accept()) {
+            ourClient.setSoTimeout(2_500);
+            backendPeer.setSoTimeout(2_500);
+            Thread authThread = startProxy(proxyClient, backend, NO_RECONNECT, false, testTlsCertificates());
+            try {
+                InputStream clientIn = ourClient.getInputStream();
+                OutputStream clientOut = ourClient.getOutputStream();
+                InputStream backendIn = backendPeer.getInputStream();
+                OutputStream backendOut = backendPeer.getOutputStream();
+                backendOut.write(buildHandshakeV10(nonce, null, backendCompressionCapabilities));
+                backendOut.flush();
+                byte[] handshake = readMysqlPacketRaw(clientIn);
+                assertNotNull(handshake);
+                assertTrue((capabilityFlagsLower(handshake) & CLIENT_COMPRESS) != 0);
+                int capabilities = CLIENT_PROTOCOL_41 | CLIENT_SECURE_CONNECTION
+                        | clientCompressionCapability;
+                int sequence = 1;
+                if (tls) {
+                    clientOut.write(buildSslRequest());
+                    clientOut.flush();
+                    SSLSocket sslClient = trustedClientSocket(ourClient);
+                    sslClient.startHandshake();
+                    clientIn = sslClient.getInputStream();
+                    clientOut = sslClient.getOutputStream();
+                    capabilities |= CLIENT_SSL;
+                    sequence = 2;
                 }
+                clientOut.write(buildHandshakeResponse41("admin", scrambleNativePassword("secret", nonce),
+                        (byte) sequence, capabilities));
+                clientOut.flush();
+                byte[] backendResponse = readMysqlPacketRaw(backendIn);
+                assertNotNull(backendResponse);
+                int backendClientCapabilities = (backendResponse[4] & 0xFF)
+                        | ((backendResponse[5] & 0xFF) << 8)
+                        | ((backendResponse[6] & 0xFF) << 16)
+                        | ((backendResponse[7] & 0xFF) << 24);
+                writeMysqlPacket(backendOut, 2, OK_PAYLOAD);
+                backendOut.flush();
+                assertArrayEquals(wrapPacket(sequence + 1, OK_PAYLOAD), readMysqlPacketRaw(clientIn));
+                assertion.accept(new ClientBackendStreams(clientIn, clientOut, backendIn, backendOut,
+                        backendClientCapabilities));
+            } finally {
+                ourClient.close();
+                proxyClient.close();
+                backend.close();
+                backendPeer.close();
+                authThread.join(3_000);
+                assertFalse(authThread.isAlive(), "proxy did not terminate");
             }
         }
     }
