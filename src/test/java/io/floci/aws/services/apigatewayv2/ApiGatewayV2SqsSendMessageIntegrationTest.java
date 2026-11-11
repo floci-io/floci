@@ -87,6 +87,40 @@ class ApiGatewayV2SqsSendMessageIntegrationTest {
     }
 
     @Test
+    void updateMergesRequestParametersAndEmptyValueRemovesKey() {
+        String queueUrl = "http://localhost/000000000000/merge";
+        try (ApiGatewayV2Client client = apigw()) {
+            String api = client.createApi(b -> b.name("sqs-subtype-merge").protocolType("HTTP")).apiId();
+            try {
+                String id = client.createIntegration(b -> b.apiId(api).integrationType("AWS_PROXY")
+                        .integrationSubtype(SUBTYPE).requestParameters(parameters(queueUrl))).integrationId();
+
+                Map<String, String> delayed = client.updateIntegration(b -> b.apiId(api).integrationId(id)
+                        .requestParameters(Map.of("DelaySeconds", "5"))).requestParameters();
+                assertEquals("5", delayed.get("DelaySeconds"));
+                assertEquals(queueUrl, delayed.get("QueueUrl"));
+                assertEquals("$request.body", delayed.get("MessageBody"));
+                assertEquals(ATTRIBUTES, delayed.get("MessageAttributes"));
+
+                Map<String, String> removed = client.updateIntegration(b -> b.apiId(api).integrationId(id)
+                        .requestParameters(Map.of("MessageAttributes", ""))).requestParameters();
+                assertFalse(removed.containsKey("MessageAttributes"));
+                assertEquals(queueUrl, removed.get("QueueUrl"));
+                assertEquals("5", removed.get("DelaySeconds"));
+
+                BadRequestException missing = assertThrows(BadRequestException.class, () ->
+                        client.updateIntegration(b -> b.apiId(api).integrationId(id)
+                                .requestParameters(Map.of("QueueUrl", ""))));
+                assertThat(missing.getMessage(), containsString("QueueUrl"));
+                assertEquals(queueUrl, client.getIntegration(b -> b.apiId(api).integrationId(id))
+                        .requestParameters().get("QueueUrl"));
+            } finally {
+                client.deleteApi(b -> b.apiId(api));
+            }
+        }
+    }
+
+    @Test
     void jsonCompatibilityPathKeepsSubtypeAndParameterNames() throws Exception {
         try (ApiGatewayV2Client client = apigw()) {
             String api = client.createApi(b -> b.name("sqs-subtype-json").protocolType("HTTP")).apiId();
