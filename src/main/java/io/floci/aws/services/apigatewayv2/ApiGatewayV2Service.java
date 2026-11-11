@@ -752,8 +752,9 @@ public class ApiGatewayV2Service {
     public Integration createIntegration(String region, String apiId, Map<String, Object> request) {
         Api api = getApi(region, apiId);
         String integrationSubtype = (String) request.get("integrationSubtype");
-        String payloadFormatVersion = (String) request.getOrDefault("payloadFormatVersion",
-                defaultPayloadFormatVersion(integrationSubtype));
+        String payloadFormatVersion = request.get("payloadFormatVersion") != null
+                ? (String) request.get("payloadFormatVersion")
+                : defaultPayloadFormatVersion(integrationSubtype);
         Map<String, String> requestParameters = stringParameters(request.get("requestParameters"));
         validateIntegrationSubtype(api.getProtocolType(), (String) request.get("integrationType"),
                 integrationSubtype, payloadFormatVersion, requestParameters);
