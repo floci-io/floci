@@ -24,11 +24,12 @@ import java.util.function.Function;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
-import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.ArgumentMatchers.nullable;
+import static org.mockito.Mockito.clearInvocations;
 import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.verify;
@@ -177,7 +178,7 @@ class InstanceConnectTunnelHandlerTest {
         assertEquals("3600", parameter.getValue().apply("maxTunnelDuration"));
 
         // Omitted, it is the 3600 the tunnel opens with, so a policy on it still applies.
-        org.mockito.Mockito.clearInvocations(enforcement);
+        clearInvocations(enforcement);
         resolve(CLI_QUERY.replace("&maxTunnelDuration=3600", ""));
         verify(enforcement).authorizeRequestParameters(anyString(), anyString(), anyString(), parameter.capture());
         assertEquals("3600", parameter.getValue().apply("maxTunnelDuration"));

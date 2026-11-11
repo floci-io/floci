@@ -158,7 +158,8 @@ public class IamConditionContextResolver {
             case "iam" -> iamConditionContext(action, ctx);
             case "logs" -> logsConditionContext(action, ctx);
             case "lambda" -> lambdaConditionContext(action, ctx);
-            case "redshift" -> requestConditions(action, name -> formParameters(ctx).get(name));
+            case "redshift" -> RequestConditionKeys.requestKeys(action).isEmpty() ? null
+                    : requestConditions(action, formParameters(ctx)::get);
             default -> null;
         };
     }

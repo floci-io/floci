@@ -34,6 +34,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
+import java.util.function.Function;
 import java.util.function.UnaryOperator;
 
 /**
@@ -281,7 +282,7 @@ public class InstanceConnectTunnelHandler {
      * them (an omitted maxTunnelDuration is the default it opens the tunnel with).
      */
     private void authorize(String akid, String accountId, String credential, String endpointArn,
-                           UnaryOperator<String> parameter) {
+                           Function<String, String> parameter) {
         if (!config.services().iam().enforcementEnabled() || LEGACY_ACCESS_KEY_ID.equals(akid)) {
             return;
         }
