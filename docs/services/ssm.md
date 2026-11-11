@@ -36,6 +36,14 @@ Retained flat-name parameters from older Floci versions expose canonical
 preserves the ARN's partition, region and account, along with the parameter's value,
 version, tags and history. Refresh cached Terraform outputs or policies that consumed
 the old malformed ARN; malformed policy resources do not grant access to the canonical ARN.
+The tagging actions still accept that old `parameter<name>` form as `ResourceId` when it names
+the request's partition, region and account, and read it as `parameter/<name>`.
+
+`PutParameter` removes leading and trailing spaces from `Name` before it validates and stores it,
+as AWS does; a tab, newline or other whitespace is not removed. The name must then consist of
+letters, numbers, `.`, `-`, `_` and the `/` separator, so a colon or an interior space fails with
+a `ValidationException`. A parameter stored under such a name by an older Floci version can still
+be read, overwritten by a CloudFormation rollback, and deleted.
 
 `GetParametersByPath` supports `Type` and `KeyId` entries in `ParameterFilters`, with `Equals`
 (the default) or `BeginsWith`. Values within one filter combine with OR; multiple
@@ -201,8 +209,9 @@ aws ssm get-parameter --name /aws/reference/secretsmanager/my-app/api-key --with
 A parameter's ARN is `arn:<partition>:ssm:<region>:<account>:parameter/<name without leading slash>`
 for both a top-level name such as `db-host` and a path such as `/app/db/host`, as on AWS.
 The CloudFormation `Arn` attribute of an `AWS::SSM::Parameter` is the same ARN, and
-`AddTagsToResource`, `ListTagsForResource` and `RemoveTagsFromResource` accept it as `ResourceId`.
-An ECS container secret's `valueFrom` accepts it too.
+`AddTagsToResource`, `ListTagsForResource` and `RemoveTagsFromResource` accept it as `ResourceId`
+when it names the request's partition, region and account; an ARN naming another one fails with
+`InvalidResourceId`. An ECS container secret's `valueFrom` accepts it too.
 
 `GetParameter` and `GetParameters` accept the returned ARN, optionally followed by
 `:version` or `:label`, for parameters in the caller's account and request region.
@@ -211,6 +220,13 @@ ARNs naming another account, region or partition never resolve to a same-name lo
 parameter. Cross-account shared parameters are not modeled. Secrets Manager
 references continue to use `/aws/reference/secretsmanager/<secret-id>`, not a
 parameter ARN.
+
+With IAM enforcement on, each action is checked against the parameter its handler acts on:
+`GetParametersByPath` against its `Path` (the root path `/` when it is empty or missing),
+`GetParameters` and `DeleteParameters` against every entry in `Names`, the tagging actions against
+`ResourceId`, and the other parameter actions against `Name`. A `:version` or `:label` selector on a
+read is dropped, and a `PutParameter` name is checked without the surrounding spaces it is stored
+without.
 
 ## Parameter Resource Policies
 
