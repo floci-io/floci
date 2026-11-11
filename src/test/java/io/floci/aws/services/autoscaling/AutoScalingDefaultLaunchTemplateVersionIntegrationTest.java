@@ -1,6 +1,7 @@
 package io.floci.aws.services.autoscaling;
 
 import io.quarkus.test.junit.QuarkusTest;
+import io.restassured.response.ValidatableResponse;
 import jakarta.inject.Inject;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
@@ -39,7 +40,7 @@ class AutoScalingDefaultLaunchTemplateVersionIntegrationTest {
                     .formParam("LaunchTemplateData.InstanceType", "t3.small")
                     .post("/").then().statusCode(200);
 
-            given().header("Authorization", AUTH)
+            ValidatableResponse created = given().header("Authorization", AUTH)
                     .formParam("Action", "CreateAutoScalingGroup")
                     .formParam("AutoScalingGroupName", name)
                     .formParam("LaunchTemplate.LaunchTemplateName", name)
@@ -47,9 +48,9 @@ class AutoScalingDefaultLaunchTemplateVersionIntegrationTest {
                     .formParam("MaxSize", "1")
                     .formParam("DesiredCapacity", "0")
                     .formParam("AvailabilityZones.member.1", "us-east-1a")
-                    .post("/").then().statusCode(200)
-                    .body(containsString("CreateAutoScalingGroupResponse"));
+                    .post("/").then().statusCode(200);
             groupCreated = true;
+            created.body(containsString("CreateAutoScalingGroupResponse"));
         } finally {
             if (groupCreated) {
                 given().header("Authorization", AUTH)
