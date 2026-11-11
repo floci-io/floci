@@ -3034,7 +3034,7 @@ public class ApiGatewayExecuteController {
 
         try {
             Map<String, String> parameters = awsServiceIntegrationMapper.resolveParameters(subtype,
-                    integration.getRequestParameters(), ctx, stageVariables, contextVariables);
+                    integration.getRequestParameters(), ctx.withVariables(stageVariables, contextVariables));
             String serviceRegion = parameters.get(IntegrationSubtype.REGION_PARAMETER);
             if (serviceRegion == null || serviceRegion.isEmpty()) {
                 serviceRegion = hostRegion;
