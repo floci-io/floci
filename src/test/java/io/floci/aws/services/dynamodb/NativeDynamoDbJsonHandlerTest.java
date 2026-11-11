@@ -3220,4 +3220,17 @@ class NativeDynamoDbJsonHandlerTest {
                 + "Expected: S Actual: N IndexName: TitleIndex", onlyValidationErrorMessage(response));
         assertEquals("Old", service.getItem("Movies", item("id", "m1"), "eu-west-1").get("title").get("S").asText());
     }
+
+    @ParameterizedTest
+    @CsvSource(delimiter = '|', quoteCharacter = '`', textBlock = """
+            {"TableName":"t","SearchVector":[{"N":"1"}],"TopK":1} | ValidationException | missing field `IndexName` at line 1 column 53
+            {"TableName":"t","IndexName":"vix","SearchVector":[{"N":"1"}]} | ValidationException | missing field `TopK` at line 1 column 62
+            {"TableName":"t","IndexName":"vix","SearchVector":[{"N":"1"}],"TopK":null} | SerializationException | invalid type: null, expected i32 at line 1 column 73
+            """)
+    void searchVectorsWithoutAJsonBodyStillRefusesANullOrOmittedRequiredMember(String body, String type,
+                                                                                 String message) {
+        AwsException ex = assertThrows(AwsException.class, () -> handler.handle("SearchVectors", json(body), "eu-west-1"));
+        assertEquals(type, ex.getErrorCode());
+        assertEquals(message, ex.getMessage());
+    }
 }

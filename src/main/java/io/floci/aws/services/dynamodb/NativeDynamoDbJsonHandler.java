@@ -1617,8 +1617,7 @@ public class NativeDynamoDbJsonHandler {
     private static final int MAX_VECTOR_SEARCH_TOP_K = 100;
 
     private Response handleSearchVectors(JsonNode request, String region) {
-        requireSearchVectorsMember(request, "SearchVector");
-        requireSearchVectorsMember(request, "IndexName");
+        DynamoDbRequestShapes.requireSearchVectorsMembers(request);
         String tableName = request.path("TableName").asText();
         String indexName = request.get("IndexName").asText();
         String rccSearchError = returnConsumedCapacityError(request);
@@ -1627,7 +1626,6 @@ public class NativeDynamoDbJsonHandler {
             throw new AwsException("ValidationException", rccSearchError, 400);
         }
         String rccSearch = request.path("ReturnConsumedCapacity").asText("NONE");
-        requireSearchVectorsMember(request, "TopK");
         int topK = request.get("TopK").asInt();
         if (topK < 1) {
             // AWS names this member TopK and quotes no value, unlike every other member of this
@@ -1674,19 +1672,6 @@ public class NativeDynamoDbJsonHandler {
             response.set("ConsumedCapacity", consumedCapacity);
         }
         return Response.ok(response).build();
-    }
-
-    /**
-     * Rejects an omitted required member of SearchVectors the way the AWS frontend does: as a
-     * deserialisation failure quoting the offset of the body's closing brace, which for the
-     * compact JSON an SDK sends is the body length. Measured in eu-west-2, 2026-09-23.
-     */
-    private static void requireSearchVectorsMember(JsonNode request, String member) {
-        if (!request.hasNonNull(member)) {
-            throw new AwsException("ValidationException",
-                    "missing field `" + member + "` at line 1 column "
-                    + request.toString().length(), 400);
-        }
     }
 
     /**

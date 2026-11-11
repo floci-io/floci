@@ -7,6 +7,7 @@
 shape of every operation, reduced to the members carried in the JSON body, and for every shape
 reachable from one, its type and the shapes of its members, list elements or map values.
 `regen_emr_serverless_shapes.py` keeps every operation's output shape too, with `outputs=True`.
+`regen_dynamodb_shapes.py` keeps the members each structure requires too, with `required=True`.
 `regen_iam_shapes.py` and `regen_sts_shapes.py` name their operations instead, which switches
 `main()` to `build_constraints()`.
 
@@ -35,7 +36,7 @@ def load_model(data: Path, model: Path) -> dict:
     return load_json_model(source)
 
 
-def build(model: dict, provenance: str, generator: str, outputs: bool = False) -> dict:
+def build(model: dict, provenance: str, generator: str, outputs: bool = False, required: bool = False) -> dict:
     shapes = model["shapes"]
     kept: dict[str, dict] = {}
 
@@ -49,6 +50,8 @@ def build(model: dict, provenance: str, generator: str, outputs: bool = False) -
         if kind == "structure":
             members = {member: spec for member, spec in shape.get("members", {}).items()
                        if not (body_only and "location" in spec)}
+            if required and "required" in shape:
+                entry["required"] = [member for member in shape["required"] if member in members]
             entry["members"] = {member: spec["shape"] for member, spec in members.items()}
             for spec in members.values():
                 keep(spec["shape"])
@@ -150,7 +153,7 @@ def generator_name(script: str) -> str:
 
 
 def main(argv: list[str] | None, *, script: str, model: Path, output: Path, description: str,
-         outputs: bool = False, operations: tuple[str, ...] | None = None,
+         outputs: bool = False, required: bool = False, operations: tuple[str, ...] | None = None,
          constraints: bool = False,
          prepare: Callable[[dict], dict] | None = None) -> int:
     """Drives one generator: parse the flags, read the model, write or check the vendored file.
@@ -181,7 +184,7 @@ def main(argv: list[str] | None, *, script: str, model: Path, output: Path, desc
         operations = tuple(name for name, operation in sorted(loaded["operations"].items()) if "input" in operation)
     generator = generator_name(script)
     fresh = render(build_constraints(loaded, operations, provenance, generator) if operations is not None
-                   else build(loaded, provenance, generator, outputs))
+                   else build(loaded, provenance, generator, outputs, required))
 
     if args.check:
         current = args.output.read_text(encoding="utf-8") if args.output.exists() else ""
