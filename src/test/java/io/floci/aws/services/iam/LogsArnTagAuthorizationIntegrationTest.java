@@ -236,6 +236,24 @@ class LogsArnTagAuthorizationIntegrationTest {
     }
 
     @Test
+    void destinationCreationChecksTheNamedResourceArn() {
+        String selected = "logs-destination-tag-" + UUID.randomUUID();
+        String other = "logs-destination-tag-" + UUID.randomUUID();
+        registerDestinationCleanup(selected);
+        registerDestinationCleanup(other);
+        String caller = user(statement("Allow", "PutDestination", destinationArn(selected)) + ","
+                + statement("Allow", "TagResource", "*") + ","
+                + "{\"Effect\":\"Allow\",\"Action\":\"iam:PassRole\",\"Resource\":\"*\"}");
+
+        putTaggedDestination(caller, other).statusCode(400).body(containsString("AccessDeniedException"));
+        invoke(ACCOUNT, "ListTagsForResource", destinationArn(other)).statusCode(400)
+                .body(containsString("ResourceNotFoundException"));
+        putTaggedDestination(caller, selected).statusCode(200);
+        invoke(ACCOUNT, "ListTagsForResource", destinationArn(selected)).statusCode(200)
+                .body("tags.team", equalTo("blue"));
+    }
+
+    @Test
     void taggedDestinationCreationAcceptsResourceScopedTagPermission() {
         String selected = "logs-destination-tag-" + UUID.randomUUID();
         String other = "logs-destination-tag-" + UUID.randomUUID();
