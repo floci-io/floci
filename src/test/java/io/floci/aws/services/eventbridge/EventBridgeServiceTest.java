@@ -690,7 +690,10 @@ class EventBridgeServiceTest {
         assertTrue(service.listTargetsByRule("team/rule-1", null, REGION).isEmpty());
         service.deleteRule("team/rule-1", null, REGION);
 
-        assertThrows(AwsException.class, () -> service.describeRule("team/rule-1", null, REGION));
+        assertTrue(ruleStore.get("rule:" + REGION + ":default/team/rule-1").isEmpty());
+        AwsException error = assertThrows(AwsException.class,
+                () -> service.describeRule("team/rule-1", null, REGION));
+        assertEquals("ValidationException", error.getErrorCode());
     }
 
     @ParameterizedTest
