@@ -10,6 +10,12 @@ Floci emulates Amazon Athena with **real SQL execution** powered by a [floci-duc
 <!-- floci:actions:start -->
 | Action | Description |
 | --- | --- |
+| `CreateNamedQuery` | Saves SQL text in a workgroup and returns its ID |
+| `GetNamedQuery` | Returns a saved query's name, database, SQL text, description and workgroup |
+| `BatchGetNamedQuery` | Returns up to 50 saved queries and per-ID errors for missing queries |
+| `ListNamedQueries` | Lists saved query IDs in a workgroup with pagination |
+| `UpdateNamedQuery` | Updates a saved query's name, SQL text and description |
+| `DeleteNamedQuery` | Deletes a saved query |
 | `StartQueryExecution` | Submits a SQL query; executed asynchronously via DuckDB |
 | `GetQueryExecution` | Returns query status (`QUEUED`, `RUNNING`, `SUCCEEDED`, `FAILED`) |
 | `GetQueryResults` | Returns the result set for a completed query |
@@ -32,6 +38,28 @@ Floci emulates Amazon Athena with **real SQL execution** powered by a [floci-duc
 | `ListTagsForResource` | Returns the tags on a workgroup or data catalog |
 | `DeleteWorkGroup` | Deletes a workgroup |
 <!-- floci:actions:end -->
+
+Named queries store SQL text without executing it or requiring the database to
+exist. `CreateNamedQuery` defaults to the `primary` workgroup; a named workgroup
+must already exist. The AWS SDK and CLI supply `ClientRequestToken` automatically;
+raw requests must provide 32 to 128 characters. Retrying the same token returns
+the original ID, while changing its creation parameters returns
+`InvalidRequestException`. Saved queries and retry requests use Athena's configured
+storage mode and are isolated by account and region.
+
+`UpdateNamedQuery` changes the name, SQL text, and optionally the description;
+the database and workgroup stay fixed. Omitting the description preserves it,
+and an empty description clears it. A missing query returns
+`InvalidRequestException` from get or update; batch get reports it under
+`UnprocessedNamedQueryIds`. Deleting an absent query succeeds.
+
+`ListNamedQueries` defaults to `primary` and returns IDs in deterministic order.
+`MaxResults` accepts 0 to 50; Floci uses 50 when it is omitted, null, or zero,
+matching its `ListQueryExecutions` convention because AWS documents neither a
+default nor the behavior of zero. Pass the opaque `NextToken` to continue; final
+pages omit it. Tokens are scoped to the action, account, region, and workgroup,
+and remain resumable after a cursor query is deleted. Invalid sizes or tokens
+return `InvalidRequestException`.
 
 `ListDataCatalogs` accepts `MaxResults` from 2 to 50. Floci uses 50 when it is
 omitted, since the API reference does not document a default. The built-in

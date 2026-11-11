@@ -6,6 +6,7 @@ import io.floci.aws.core.common.AwsException;
 import io.floci.aws.core.common.PaginatedResult;
 import io.floci.aws.core.common.Pagination;
 import io.floci.aws.services.athena.model.CreateWorkGroupRequest;
+import io.floci.aws.services.athena.model.NamedQuery;
 import io.floci.aws.services.athena.model.QueryExecution;
 import io.floci.aws.services.athena.model.QueryExecutionContext;
 import io.floci.aws.services.athena.model.ResultConfiguration;
@@ -25,16 +26,64 @@ import java.util.Map;
 public class AthenaJsonHandler {
 
     private final AthenaService athenaService;
+    private final AthenaNamedQueryService namedQueryService;
     private final ObjectMapper mapper;
 
     @Inject
-    public AthenaJsonHandler(AthenaService athenaService, ObjectMapper mapper) {
+    public AthenaJsonHandler(AthenaService athenaService, AthenaNamedQueryService namedQueryService,
+                              ObjectMapper mapper) {
         this.athenaService = athenaService;
+        this.namedQueryService = namedQueryService;
         this.mapper = mapper;
     }
 
     public Response handle(String action, JsonNode request, String region) throws Exception {
         return switch (action) {
+            case "CreateNamedQuery" -> {
+                String id = namedQueryService.createNamedQuery(region, namedQueryText(request, "Name"),
+                        namedQueryText(request, "Database"), namedQueryText(request, "QueryString"),
+                        namedQueryText(request, "Description"), namedQueryText(request, "WorkGroup"),
+                        namedQueryText(request, "ClientRequestToken"));
+                yield Response.ok(Map.of("NamedQueryId", id)).build();
+            }
+            case "GetNamedQuery" -> Response.ok(Map.of("NamedQuery",
+                    namedQueryService.getNamedQuery(region, namedQueryText(request, "NamedQueryId")))).build();
+            case "BatchGetNamedQuery" -> {
+                JsonNode ids = request.get("NamedQueryIds");
+                if (ids == null || !ids.isArray()) {
+                    throw new AwsException("InvalidRequestException", "NamedQueryIds must be an array.", 400);
+                }
+                List<String> queryIds = new ArrayList<>();
+                for (JsonNode id : ids) {
+                    if (!id.isTextual()) {
+                        throw new AwsException("InvalidRequestException", "NamedQueryIds must contain strings.", 400);
+                    }
+                    queryIds.add(id.textValue());
+                }
+                yield Response.ok(namedQueryService.batchGetNamedQuery(region, queryIds)).build();
+            }
+            case "ListNamedQueries" -> {
+                PaginatedResult<NamedQuery> page = namedQueryService.listNamedQueries(region,
+                        namedQueryText(request, "WorkGroup"),
+                        Pagination.parseMaxResults(request, "MaxResults", "InvalidRequestException"),
+                        Pagination.parseNextToken(request, "NextToken", "InvalidRequestException"));
+                Map<String, Object> response = new LinkedHashMap<>();
+                response.put("NamedQueryIds", page.items().stream().map(NamedQuery::namedQueryId).toList());
+                if (page.nextToken() != null) {
+                    response.put("NextToken", page.nextToken());
+                }
+                yield Response.ok(response).build();
+            }
+            case "UpdateNamedQuery" -> {
+                namedQueryService.updateNamedQuery(region, namedQueryText(request, "NamedQueryId"),
+                        namedQueryText(request, "Name"), namedQueryText(request, "QueryString"),
+                        namedQueryText(request, "Description"));
+                yield Response.ok().build();
+            }
+            case "DeleteNamedQuery" -> {
+                namedQueryService.deleteNamedQuery(region, namedQueryText(request, "NamedQueryId"));
+                yield Response.ok().build();
+            }
             case "StartQueryExecution" -> {
                 String query = request.get("QueryString").asText();
                 String named = text(request, "WorkGroup");
@@ -185,6 +234,14 @@ public class AthenaJsonHandler {
             }
             default -> throw new AwsException("InvalidAction", "Action " + action + " is not supported", 400);
         };
+    }
+
+    private static String namedQueryText(JsonNode request, String field) {
+        JsonNode node = request.get(field);
+        if (node != null && !node.isNull() && !node.isTextual()) {
+            throw new AwsException("InvalidRequestException", field + " must be a string.", 400);
+        }
+        return text(request, field);
     }
 
     private static String text(JsonNode request, String field) {
