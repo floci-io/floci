@@ -974,7 +974,6 @@ public class ApiGatewayV2CfnProvisioner implements CfnResourceProvisioner {
     private String integrationConnectionSnapshot(String region, String apiId, Integration prior,
                                                  Map<String, Object> req) {
         boolean otherFieldChanged = changes(req.get("integrationType"), prior.getIntegrationType())
-                || changes(req.get("integrationSubtype"), prior.getIntegrationSubtype())
                 || changes(req.get("integrationUri"), prior.getIntegrationUri())
                 || changes(req.get("payloadFormatVersion"), prior.getPayloadFormatVersion());
         ObjectNode snapshot = objectMapper.createObjectNode();
@@ -1022,10 +1021,10 @@ public class ApiGatewayV2CfnProvisioner implements CfnResourceProvisioner {
                 textOrNull(snapshot, "integrationMethod"), textOrNull(snapshot, "templateSelectionExpression"),
                 snapshot.path("timeoutInMillis").asInt(), stringMapOrNull(snapshot.path("requestParameters")),
                 stringMapOrNull(snapshot.path("requestTemplates")));
-        String integrationSubtype = textOrNull(snapshot, "integrationSubtype");
-        if (integrationSubtype != null) {
+        if (snapshot.has("integrationSubtype")) {
             apiGatewayV2Service.replaceIntegrationSubtype(snapshot.path("region").asText(),
-                    snapshot.path("apiId").asText(), resource.getPhysicalId(), integrationSubtype);
+                    snapshot.path("apiId").asText(), resource.getPhysicalId(),
+                    textOrNull(snapshot, "integrationSubtype"));
         }
         // Spent only once the restore succeeded, so a restore that throws can be tried again.
         resource.getAttributes().remove(CfnRollback.INTEGRATION_CONNECTION_SNAPSHOT_ATTR);
