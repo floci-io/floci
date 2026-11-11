@@ -134,6 +134,34 @@ class ApiGatewayPathArnEnforcementIntegrationTest {
         refused(get(user, "/v2/tags/" + encoded));
     }
 
+    /**
+     * A tagging route is checked as the action its HTTP method names: v1 tags a REST API with a PUT on
+     * {@code /tags/<arn>}, the ARN sent encoded or not, the shared tags controller's bare {@code /tags} with a POST
+     * naming the ARN in its body, and v2 an HTTP API with a POST on {@code /v2/tags/<arn>}.
+     */
+    @Test
+    void eachTaggingRouteIsCheckedAsTheActionItsMethodNames() {
+        String restApiId = createRestApi();
+        String restArn = "arn:aws:apigateway:us-east-1::/restapis/" + restApiId;
+        String encodedRestArn = "arn%3Aaws%3Aapigateway%3Aus-east-1%3A%3A%2Frestapis%2F" + restApiId;
+        String httpArn = "arn:aws:apigateway:us-east-1::/apis/" + createHttpApiWithDefaultStage();
+        String tags = "{\"tags\":{\"team\":\"a\"}}";
+        String bare = "{\"resourceArn\":\"" + restArn + "\",\"tags\":{\"team\":\"b\"}}";
+        String user = user("apigw-tagging");
+
+        policy(user, allow("apigateway:POST", "*"));
+        refused("apigateway:PUT", send(user, "PUT", "/tags/" + encodedRestArn, tags));
+        refused("apigateway:PUT", send(user, "PUT", "/tags/" + restArn, tags));
+        send(user, "POST", "/tags", bare).statusCode(200);
+        send(user, "POST", "/v2/tags/" + httpArn, tags).statusCode(201);
+
+        policy(user, allow("apigateway:PUT", "*"));
+        send(user, "PUT", "/tags/" + encodedRestArn, tags).statusCode(204);
+        send(user, "PUT", "/tags/" + restArn, tags).statusCode(204);
+        refused("apigateway:POST", send(user, "POST", "/tags", bare));
+        refused("apigateway:POST", send(user, "POST", "/v2/tags/" + httpArn, tags));
+    }
+
     private String createHttpApiWithDefaultStage() {
         String apiId = given()
                 .header("Authorization", auth(ADMIN, "apigateway"))
@@ -171,6 +199,13 @@ class ApiGatewayPathArnEnforcementIntegrationTest {
                 .header("Authorization", auth(keys.get(user), "apigateway")).get(path).then();
     }
 
+    private ValidatableResponse send(String user, String method, String path, String body) {
+        return given().urlEncodingEnabled(false)
+                .header("Authorization", auth(keys.get(user), "apigateway"))
+                .contentType("application/json").body(body)
+                .request(method, path).then();
+    }
+
     /** Sends {@code path} with its empty segments, which RestAssured collapses before sending. */
     private HttpResponse<String> getAsWritten(String user, String path) throws Exception {
         URI uri = URI.create(baseUri.getScheme() + "://" + baseUri.getRawAuthority() + path);
@@ -198,9 +233,13 @@ class ApiGatewayPathArnEnforcementIntegrationTest {
     }
 
     private static void refused(ValidatableResponse response) {
+        refused("apigateway:GET", response);
+    }
+
+    private static void refused(String action, ValidatableResponse response) {
         response.statusCode(403)
                 .body(containsString("AccessDeniedException"))
-                .body(containsString("apigateway:GET"));
+                .body(containsString(action));
     }
 
     private static String allow(String action, String resource) {

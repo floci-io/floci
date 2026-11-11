@@ -61,16 +61,34 @@ read from `Actions`, not `Operations`, because the reference lists the operation
 per namespace: OpenSearch's are the `es` client's alone, none of the `opensearch` client's, whose
 operations are named after `es` actions all the same.
 
+It lists too, for those scopes, the operations a request on whose route is checked as the action its HTTP
+method names, `authorizedByMethod`. API Gateway's management API is authorized by method: its developer
+guide has "The API-managing Action expression has the format apigateway:action, where action is one of the
+following API Gateway actions: GET, POST, PUT, DELETE, PATCH (to update resources)". The reference lists each
+operation the actions of the methods its routes use, in v1 and v2 alike (`TagResource` is a PUT in v1 and a
+POST in v2), beside actions AWS checks only when the request carries what they guard: the Service
+Authorization Reference has `UpdateRestApiPolicy` as "an additional authorization control for managing an
+API due to the sensitive nature of the resource policy", `AddCertificateToDomain` and
+`RemoveCertificateFromDomain` alike for mTLS, `iam:PassRole` passes a role, and the developer guide has a
+tagged resource's `PATCH` beside the tags' own method: "To update the tags for a resource, the user must have
+PATCH permissions for that resource". An operation is listed when, for every route the vendored routes give
+it, a shared controller's alternative included, the reference lists the action named after that route's
+method, and the one-action shape above does not already name its action. An operation an action of whose
+own name exists keeps it, as everywhere in this file: `CreatePortal` lists `apigateway:CreatePortal` beside
+`apigateway:POST`.
+
 The endpoint is live rather than a pinned dependency, so a fresh generation is not byte-identical.
 As with `regen_iam_action_resources.py`, what must hold is that nothing here is invented:
 
 - `--check` is offline and structural: sorted, every name usable, every action in its own
-  namespace and differing from the operation, and the anchor cases still present; and the actions
-  without resource types are listed for exactly the scopes `rest-routes.json` reads routes for.
+  namespace and differing from the operation, and the anchor cases still present; the actions
+  without resource types are listed for exactly the scopes `rest-routes.json` reads routes for; and
+  an operation authorized by method is one a route of its scope serves, named nowhere else here.
 - `--verify` is the real gate and needs the network. Every vendored entry must still be what AWS
-  publishes for that operation, and every action listed without resource types must still have
-  none. An entry AWS has added is reported without failing: being behind leaves that operation
-  authorized as its own name, or that route unchecked, which is where it was before this existed.
+  publishes for that operation, every action listed without resource types must still have none,
+  and every operation authorized by method must still list its routes' methods. An entry AWS has
+  added is reported without failing: being behind leaves that operation authorized as its own name,
+  or that route unchecked, which is where it was before this existed.
 
 Run from anywhere in the repo:
     python3 tools/aws/regen_iam_authorized_actions.py           # rewrite the vendored file in place
@@ -248,7 +266,57 @@ def actions_without_resource_types(documents: list[dict], namespaces: list[str])
     return found
 
 
-def build(documents: list[dict], provenance: str, routed: list[str]) -> dict:
+def route_methods(routes: dict) -> dict[str, dict[str, list[str]]]:
+    """Each routed scope's operations, with the HTTP methods of every route the vendored routes give them, an
+    alternative's own method included."""
+    routed = set(routed_namespaces(routes))
+    methods: dict[str, dict[str, set[str]]] = {}
+    for model in (routes.get("models") or {}).values():
+        scope = model["credentialScope"]
+        if scope not in routed:
+            continue
+        for operation, route in (model.get("operations") or {}).items():
+            found = methods.setdefault(scope, {}).setdefault(operation, set())
+            found.add(route["method"])
+            found.update(alternative.get("method", route["method"]) for alternative in route.get("alternatives", []))
+    return {scope: {operation: sorted(found) for operation, found in sorted(operations.items())}
+            for scope, operations in sorted(methods.items())}
+
+
+def authorized_by_method(documents: list[dict], methods: dict[str, dict[str, list[str]]],
+                         renamed: dict[str, dict[str, str]]) -> dict[str, list[str]]:
+    """Each routed scope's operations a request on whose route is checked as the action its method names: those
+    the reference lists, every time it lists them, with the action of each of their routes' methods, which the
+    one-action shape does not already name and no action of their own name settles. Scopes with none are left
+    out."""
+    by_name = {document.get("Name"): document for document in documents}
+    found = {}
+    for scope, operations in methods.items():
+        document = by_name.get(scope)
+        if document is None:
+            raise ValueError(f"the Service Reference has no namespace {scope}, whose REST routes rest-routes.json "
+                             f"reads")
+        own_actions = {action["Name"].lower() for action in document.get("Actions", [])
+                       if isinstance(action, dict) and isinstance(action.get("Name"), str)}
+        listed: dict[str, list[set[str]]] = {}
+        for operation in document.get("Operations", []):
+            name = operation.get("Name") if isinstance(operation, dict) else None
+            if not isinstance(name, str) or not NAME_RE.match(name):
+                raise ValueError(f"{scope}: operation entry without a usable 'Name': {operation!r}")
+            listed.setdefault(name, []).append({action for service, action in _authorized_actions(scope, operation)
+                                                if service == scope})
+        chosen = [operation for operation, route_methods_of in operations.items()
+                  if operation in listed and operation not in renamed.get(scope, {})
+                  and operation.lower() not in own_actions
+                  and all(set(route_methods_of) <= actions for actions in listed[operation])]
+        if chosen:
+            found[scope] = sorted(chosen)
+    return found
+
+
+def build(documents: list[dict], provenance: str, routed: list[str],
+          methods: dict[str, dict[str, list[str]]] | None = None) -> dict:
+    renamed = authorized_actions_from(documents)
     return {
         "_source": {
             "generator": "tools/aws/regen_iam_authorized_actions.py",
@@ -256,8 +324,9 @@ def build(documents: list[dict], provenance: str, routed: list[str]) -> dict:
             "retrieved": datetime.now(timezone.utc).strftime("%Y-%m-%d"),
             "note": "make iam-authorized-actions-verify checks every entry against AWS.",
         },
-        "authorizedActions": authorized_actions_from(documents),
+        "authorizedActions": renamed,
         "actionsWithoutResourceTypes": actions_without_resource_types(documents, routed),
+        "authorizedByMethod": authorized_by_method(documents, methods or {}, renamed),
     }
 
 
@@ -265,12 +334,14 @@ def render(document: dict) -> str:
     return json.dumps(document, indent=2) + "\n"
 
 
-def validate(document: dict, routed: list[str]) -> list[str]:
-    """Problems that make the vendored file unusable, rather than merely out of date."""
+def validate(document: dict, routed: list[str], methods: dict[str, dict[str, list[str]]] | None = None) -> list[str]:
+    """Problems that make the vendored file unusable, rather than merely out of date. With the routed scopes'
+    route methods, an operation authorized by method must be one of their operations."""
     problems = _unscoped_problems(document.get("actionsWithoutResourceTypes"), routed)
     namespaces = document.get("authorizedActions")
     if not isinstance(namespaces, dict) or not namespaces:
         return ["authorizedActions is missing or empty"]
+    problems += _by_method_problems(document.get("authorizedByMethod"), routed, methods, namespaces)
     if list(namespaces) != sorted(namespaces):
         problems.append("authorizedActions is not sorted by namespace")
     for namespace, operations in namespaces.items():
@@ -314,6 +385,49 @@ def _unscoped_problems(unscoped: object, routed: list[str]) -> list[str]:
         elif actions != sorted(set(actions)):
             problems.append(f"actionsWithoutResourceTypes.{namespace} is not sorted, or repeats an action")
     return problems
+
+
+def _by_method_problems(by_method: object, routed: list[str], methods: dict[str, dict[str, list[str]]] | None,
+                        renamed: dict) -> list[str]:
+    """Problems with the operations authorized by method: for each routed scope listing any, a sorted list of
+    usable names, none of them also given an action of another name, and each, when the routes are known, an
+    operation a route of its scope serves."""
+    if not isinstance(by_method, dict):
+        return ["authorizedByMethod is missing"]
+    problems = []
+    if list(by_method) != sorted(by_method):
+        problems.append("authorizedByMethod is not sorted by scope")
+    for scope, operations in by_method.items():
+        if scope not in routed:
+            problems.append(f"authorizedByMethod lists {scope}, a scope rest-routes.json reads no routes for")
+        if not isinstance(operations, list) or not operations or not all(
+                isinstance(operation, str) and NAME_RE.match(operation) for operation in operations):
+            problems.append(f"authorizedByMethod.{scope} is not a list of operation names")
+            continue
+        if operations != sorted(set(operations)):
+            problems.append(f"authorizedByMethod.{scope} is not sorted, or repeats an operation")
+        for operation in operations:
+            if operation in (renamed.get(scope) or {}):
+                problems.append(f"{scope}:{operation} is authorized by method and as {renamed[scope][operation]}")
+            if methods is not None and operation not in methods.get(scope, {}):
+                problems.append(f"authorizedByMethod lists {scope}:{operation}, which no route of {scope} serves")
+    return problems
+
+
+def verify_by_method_against(vendored: dict[str, list[str]],
+                             upstream: dict[str, list[str]]) -> tuple[list[str], list[str]]:
+    """The operations the vendored file authorizes by method that AWS no longer lists with their routes' methods,
+    and those it has since added.
+
+    A listed operation AWS no longer authorizes by its method is a failure: its request would be checked as an
+    action AWS does not check for it. One AWS has added stays authorized as its own name until the next sync.
+    """
+    untrue = [f"AWS no longer authorizes {scope}:{operation} by the methods of its routes"
+              for scope, operations in vendored.items() for operation in operations
+              if operation not in upstream.get(scope, [])]
+    added = sorted(f"{scope}:{operation} by method" for scope, operations in upstream.items()
+                   for operation in operations if operation not in vendored.get(scope, []))
+    return untrue, added
 
 
 def verify_against(vendored: dict[str, dict[str, str]],
@@ -361,9 +475,16 @@ def _unscoped_count(document: dict) -> str:
             f"{len(unscoped)} routed scopes")
 
 
-def _routed(routes: Path) -> list[str]:
-    """The scopes the vendored REST routes read routes for."""
-    return routed_namespaces(json.loads(routes.read_text(encoding="utf-8")))
+def _routes(routes: Path) -> dict:
+    """The vendored REST routes."""
+    return json.loads(routes.read_text(encoding="utf-8"))
+
+
+def _by_method_count(document: dict) -> str:
+    """How many operations the document authorizes by method, over how many scopes."""
+    by_method = document["authorizedByMethod"]
+    return (f"{sum(len(operations) for operations in by_method.values())} operations authorized by method over "
+            f"{len(by_method)} scopes")
 
 
 def _shown(path: Path) -> Path:
@@ -392,7 +513,8 @@ def main(argv: list[str] | None = None) -> int:
             print(f"error: {args.output} does not exist", file=sys.stderr)
             return 1
         document = json.loads(args.output.read_text(encoding="utf-8"))
-        problems = validate(document, _routed(args.routes))
+        routes = _routes(args.routes)
+        problems = validate(document, routed_namespaces(routes), route_methods(routes))
         for problem in problems:
             print(f"error: {problem}", file=sys.stderr)
         if problems:
@@ -400,7 +522,7 @@ def main(argv: list[str] | None = None) -> int:
         entries = sum(len(operations) for operations in document["authorizedActions"].values())
         print(f"{_shown(args.output)} is well-formed "
               f"({entries} operations over {len(document['authorizedActions'])} namespaces, "
-              f"{_unscoped_count(document)})")
+              f"{_unscoped_count(document)}, {_by_method_count(document)})")
         return 0
 
     if args.verify:
@@ -410,10 +532,14 @@ def main(argv: list[str] | None = None) -> int:
         vendored_document = json.loads(args.output.read_text(encoding="utf-8"))
         vendored = vendored_document["authorizedActions"]
         unscoped = vendored_document.get("actionsWithoutResourceTypes") or {}
+        by_method = vendored_document.get("authorizedByMethod") or {}
         try:
             documents, provenance = fetch_references(args.source_dir)
             upstream = authorized_actions_from(documents)
             upstream_unscoped = actions_without_resource_types(documents, list(unscoped))
+            methods = route_methods(_routes(args.routes)) if by_method else {}
+            upstream_by_method = authorized_by_method(
+                documents, {scope: methods.get(scope, {}) for scope in by_method}, upstream)
         except (OSError, ValueError) as e:
             # The gate could not run, which CI has to tell apart from having found something
             # invented. ValueError covers a malformed or truncated response as well.
@@ -421,8 +547,9 @@ def main(argv: list[str] | None = None) -> int:
             return 2
         untrue, added = verify_against(vendored, upstream)
         untrue_unscoped, added_unscoped = verify_unscoped_against(unscoped, upstream_unscoped)
-        untrue += untrue_unscoped
-        added += added_unscoped
+        untrue_by_method, added_by_method = verify_by_method_against(by_method, upstream_by_method)
+        untrue += untrue_unscoped + untrue_by_method
+        added += added_unscoped + added_by_method
         for claim in untrue:
             print(f"error: {claim}", file=sys.stderr)
         entries = sum(len(operations) for operations in vendored.values())
@@ -442,12 +569,14 @@ def main(argv: list[str] | None = None) -> int:
 
     try:
         documents, provenance = fetch_references(args.source_dir)
-        routed = _routed(args.routes)
-        document = build(documents, provenance, routed)
+        routes = _routes(args.routes)
+        routed = routed_namespaces(routes)
+        methods = route_methods(routes)
+        document = build(documents, provenance, routed, methods)
     except (OSError, ValueError) as e:
         print(f"error: could not read the Service Reference ({e})", file=sys.stderr)
         return 2
-    problems = validate(document, routed)
+    problems = validate(document, routed, methods)
     for problem in problems:
         print(f"error: {problem}", file=sys.stderr)
     if problems:
@@ -455,7 +584,8 @@ def main(argv: list[str] | None = None) -> int:
     args.output.write_text(render(document), encoding="utf-8")
     entries = sum(len(operations) for operations in document["authorizedActions"].values())
     print(f"wrote {_shown(args.output)} ({entries} operations over "
-          f"{len(document['authorizedActions'])} namespaces, {_unscoped_count(document)}, from {provenance})")
+          f"{len(document['authorizedActions'])} namespaces, {_unscoped_count(document)}, "
+          f"{_by_method_count(document)}, from {provenance})")
     return 0
 
 

@@ -83,7 +83,7 @@ def test_a_route_naming_two_operations_of_a_scope_the_rules_do_not_route_alone_i
                     UploadPart=("PUT", "/{Bucket}/{Key+}")),
     }, "botocore test")
     assert doc["handRouted"] == dict(sorted(r.HAND_ROUTED.items()))
-    assert set(doc["handRouted"]) == {"apigateway", "s3"}
+    assert set(doc["handRouted"]) == {"s3"}
 
 
 def test_the_hand_routed_scopes_are_rendered_with_their_reasons():
@@ -152,3 +152,37 @@ def test_a_model_a_route_filter_moves_under_a_prefix_keeps_its_own_paths(name):
     # IAM matches a moved request on its path without the prefix its filter records, so the routes are the model's.
     doc = r.build({name: model("rest-json", "2020-01-01", GetThing=("GET", "/things/{ThingId}"))}, "test")
     assert doc["models"][name]["operations"]["GetThing"]["requestUri"] == "/things/{ThingId}"
+
+
+def test_a_service_tagging_with_put_keeps_the_bare_post_the_shared_controller_serves():
+    # API Gateway v1 tags with PUT on /tags/{resource_arn}, and SharedTagsController's bare /tags tags with a POST
+    # naming the ARN in its body whatever the service's method, so that alternative says it is a POST.
+    doc = r.build({"apigateway": model("rest-json", "2015-07-09", TagResource=("PUT", "/tags/{resource_arn}"),
+                                       UntagResource=("DELETE", "/tags/{resource_arn}"),
+                                       GetTags=("GET", "/tags/{resource_arn}"))}, "test")
+    operations = doc["models"]["apigateway"]["operations"]
+    assert operations["TagResource"] == {"method": "PUT", "requestUri": "/tags/{resource_arn+}", "alternatives": [
+        {"method": "POST", "requestUri": "/tags", "located": {"resourceArn": "body"}}]}
+    assert operations["UntagResource"]["alternatives"] == [
+        {"requestUri": "/tags", "located": {"resourceArn": "?resourceArn"}}]
+    assert operations["GetTags"]["alternatives"] == [{"requestUri": "/tags", "located": {"resourceArn": "?resourceArn"}}]
+    assert json.loads(r.render(doc)) == doc
+
+
+def test_an_alternative_is_keyed_by_its_own_method():
+    # The bare POST of a PUT tags route collides with another operation's POST /tags, never with a PUT /tags.
+    with pytest.raises(SystemExit, match="one route names more than one operation"):
+        r.build({"apigateway": model("rest-json", "2015-07-09", TagResource=("PUT", "/tags/{resource_arn}"),
+                                     CreateTag=("POST", "/tags"))}, "test")
+    r.build({"apigateway": model("rest-json", "2015-07-09", TagResource=("PUT", "/tags/{resource_arn}"),
+                                 PutTags=("PUT", "/tags"))}, "test")
+
+
+def test_an_arn_label_the_controller_lets_span_slashes_is_greedy():
+    # API Gateway v2's controller serves /v2/tags/{resourceArn: .+}, so an ARN sent unencoded reaches it; its other
+    # routes and labels keep the model's one segment, and it has no bare route.
+    doc = r.build({"apigatewayv2": model("rest-json", "2018-11-29", TagResource=("POST", "/v2/tags/{resource-arn}"),
+                                         GetApi=("GET", "/v2/apis/{apiId}"))}, "test")
+    operations = doc["models"]["apigatewayv2"]["operations"]
+    assert operations["TagResource"] == {"method": "POST", "requestUri": "/v2/tags/{resource-arn+}"}
+    assert operations["GetApi"] == {"method": "GET", "requestUri": "/v2/apis/{apiId}"}

@@ -116,6 +116,44 @@ class IamActionRegistryTest {
     }
 
     /**
+     * API Gateway's management routes, v1 and v2, are checked as the Service Reference gives their operations: the
+     * action their HTTP method names, {@code TagResource} a PUT in v1 and a POST in v2 and the shared tags
+     * controller's bare POST, with an ARN sent encoded or not; and the operations AWS authorizes by an action of
+     * their own name as that action, Floci serving none of them. A path no route of either model has, such as a
+     * deployed API's execute path, is no management call.
+     */
+    @ParameterizedTest
+    @CsvSource({"GET,/restapis,apigateway:GET",
+            "PATCH,/restapis/abc,apigateway:PATCH",
+            "DELETE,/v2/apis/abc/stages/prod,apigateway:DELETE",
+            "GET,/v2/apis/abc/stages/prod,apigateway:GET",
+            "PUT,/tags/arn%3Aaws%3Aapigateway%3Aus-east-1%3A%3A%2Frestapis%2Fabc,apigateway:PUT",
+            "PUT,/tags/arn:aws:apigateway:us-east-1::/restapis/abc,apigateway:PUT",
+            "DELETE,/tags/arn:aws:apigateway:us-east-1::/restapis/abc,apigateway:DELETE",
+            "POST,/tags,apigateway:POST",
+            "POST,/v2/tags/arn:aws:apigateway:us-east-1::/apis/abc,apigateway:POST",
+            "GET,/v2/tags/arn%3Aaws%3Aapigateway%3Aus-east-1%3A%3A%2Fapis%2Fabc,apigateway:GET",
+            "POST,/rejectdomainnameaccessassociations,apigateway:RejectAccessAssociation",
+            "PUT,/v2/domainnames/example.com/routingrules/r1,apigateway:UpdateRoutingRule",
+            "POST,/v2/domainnames/example.com/routingrules,apigateway:CreateRoutingRule",
+            "POST,/v2/portals,apigateway:CreatePortal",
+            "PATCH,/v2/portals/p1,apigateway:UpdatePortal"})
+    void anApiGatewayRouteIsCheckedAsTheServiceReferenceGivesItsOperation(String method, String path, String action) {
+        assertEquals(action, apiGatewayAction(method, path));
+    }
+
+    @ParameterizedTest
+    @CsvSource({"GET,/execute-api/abc/prod/pets", "POST,/restapis/abc/prod/_user_request_/pets"})
+    void anApiGatewayPathNoModelRoutesIsNoManagementCall(String method, String path) {
+        assertNull(apiGatewayAction(method, path));
+    }
+
+    private String apiGatewayAction(String method, String path) {
+        return registry.resolveRoute("apigateway",
+                mockCtx(method, path, new MultivaluedHashMap<>(), MediaType.APPLICATION_JSON_TYPE, "{}"));
+    }
+
+    /**
      * Access Analyzer's analyzer routes are checked as their operations, the vendored request resources reading the
      * analyzer from the path or the body, and so are those of its archive rules, findings and access previews, which
      * Floci does not serve.
