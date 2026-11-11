@@ -1161,6 +1161,17 @@ class SqsJsonProtocolTest {
 
             given()
                 .contentType(CONTENT_TYPE)
+                .header("X-Amz-Target", "AmazonSQS.SendMessage")
+                .body("{\"QueueUrl\":\"" + attributeQueueUrl + "\",\"MessageBody\":\"x\","
+                        + "\"MessageAttributes\":{\"odd\":{\"DataType\":\"Strin\",\"StringValue\":\"v\"}}}")
+            .when().post("/").then()
+                .statusCode(400)
+                .body("__type", equalTo("InvalidParameterValue"))
+                .body("message", equalTo("Type for parameter MessageAttributes.Attribute_name.DataType must be "
+                        + "prefixed with \"String\", \"Binary\", or \"Number\", but was: Strin"));
+
+            given()
+                .contentType(CONTENT_TYPE)
                 .header("X-Amz-Target", "AmazonSQS.SendMessageBatch")
                 .body("{\"QueueUrl\":\"" + attributeQueueUrl + "\",\"Entries\":["
                         + "{\"Id\":\"ok\",\"MessageBody\":\"x\",\"MessageAttributes\":"

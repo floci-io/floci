@@ -1375,13 +1375,20 @@ public class SqsService implements Resettable, ResourceProvider {
      * Builds a message (user) attribute from its wire fields. A BinaryValue takes precedence over a StringValue, as on
      * the wire.
      *
-     * @throws AwsException InvalidParameterValue when the DataType is missing or empty, when the attribute has no
+     * @throws AwsException InvalidParameterValue when the DataType is missing or empty, when its base type (the part
+     *                      before the first period) is not String, Number or Binary, when the attribute has no
      *                      value or an empty one, or when the BinaryValue is not valid base64
      */
     public static MessageAttributeValue messageAttributeValue(String name, String dataType, String stringValue,
                                                               String binaryValueBase64) {
         if (dataType == null || dataType.isEmpty()) {
             throw new AwsException("InvalidParameterValue", "Missing required parameter DataType", 400);
+        }
+        String baseDataType = baseDataType(dataType);
+        if (!"String".equals(baseDataType) && !"Number".equals(baseDataType) && !"Binary".equals(baseDataType)) {
+            throw new AwsException("InvalidParameterValue",
+                    "Type for parameter MessageAttributes.Attribute_name.DataType must be prefixed with "
+                            + "\"String\", \"Binary\", or \"Number\", but was: " + dataType, 400);
         }
         if (binaryValueBase64 != null) {
             byte[] binaryValue;
@@ -1392,19 +1399,19 @@ public class SqsService implements Resettable, ResourceProvider {
                         "Message (user) attribute '" + name + "' has an invalid binary value.", 400);
             }
             if (binaryValue.length == 0) {
-                throw emptyAttributeValue(name, dataType);
+                throw emptyAttributeValue(name, baseDataType);
             }
             return new MessageAttributeValue(binaryValue, dataType);
         }
         if (stringValue == null || stringValue.isEmpty()) {
-            throw emptyAttributeValue(name, dataType);
+            throw emptyAttributeValue(name, baseDataType);
         }
         return new MessageAttributeValue(stringValue, dataType);
     }
 
-    private static AwsException emptyAttributeValue(String name, String dataType) {
+    private static AwsException emptyAttributeValue(String name, String baseDataType) {
         return new AwsException("InvalidParameterValue", "Message (user) attribute '" + name
-                + "' must contain a non-empty value of type '" + baseDataType(dataType) + "'.", 400);
+                + "' must contain a non-empty value of type '" + baseDataType + "'.", 400);
     }
 
     private static String baseDataType(String dataType) {
