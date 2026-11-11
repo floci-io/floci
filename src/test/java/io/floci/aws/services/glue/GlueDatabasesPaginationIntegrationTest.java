@@ -1,17 +1,13 @@
 package io.floci.aws.services.glue;
 
+import io.floci.aws.testing.AwsTestClients;
 import io.quarkus.test.junit.QuarkusTest;
-import io.restassured.RestAssured;
 import org.junit.jupiter.api.Test;
-import software.amazon.awssdk.auth.credentials.AwsBasicCredentials;
-import software.amazon.awssdk.auth.credentials.StaticCredentialsProvider;
-import software.amazon.awssdk.http.urlconnection.UrlConnectionHttpClient;
 import software.amazon.awssdk.regions.Region;
 import software.amazon.awssdk.services.glue.GlueClient;
 import software.amazon.awssdk.services.glue.model.Database;
 import software.amazon.awssdk.services.glue.model.GetDatabasesResponse;
 
-import java.net.URI;
 import java.util.List;
 import java.util.UUID;
 
@@ -27,8 +23,8 @@ class GlueDatabasesPaginationIntegrationTest {
     void sdkPagesDatabasesWithoutLosingFieldsOrCrossingAccounts() {
         String prefix = "page-" + UUID.randomUUID();
         List<String> names = List.of(prefix + "-a", prefix + "-b", prefix + "-c");
-        try (GlueClient client = client("741648700611", Region.US_EAST_1);
-                GlueClient foreignAccount = client("741648700612", Region.US_EAST_1)) {
+        try (GlueClient client = AwsTestClients.create(GlueClient.builder(), "741648700611", Region.US_EAST_1);
+                GlueClient foreignAccount = AwsTestClients.create(GlueClient.builder(), "741648700612", Region.US_EAST_1)) {
             for (String name : names.reversed()) {
                 client.createDatabase(request -> request.databaseInput(builder -> builder
                         .name(name).description("details-" + name)));
@@ -64,17 +60,10 @@ class GlueDatabasesPaginationIntegrationTest {
 
     @Test
     void sdkReadsAnEmptyPageAtTheMaximumPageSizeWithoutAToken() {
-        try (GlueClient client = client("741648700613", Region.US_EAST_1)) {
+        try (GlueClient client = AwsTestClients.create(GlueClient.builder(), "741648700613", Region.US_EAST_1)) {
             GetDatabasesResponse response = client.getDatabases(request -> request.maxResults(100));
             assertTrue(response.databaseList().isEmpty());
             assertNull(response.nextToken());
         }
-    }
-
-    private static GlueClient client(String account, Region region) {
-        return GlueClient.builder().endpointOverride(URI.create("http://localhost:" + RestAssured.port))
-                .httpClientBuilder(UrlConnectionHttpClient.builder()).region(region)
-                .credentialsProvider(StaticCredentialsProvider.create(AwsBasicCredentials.create(account, "test")))
-                .build();
     }
 }

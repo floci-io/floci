@@ -3479,21 +3479,16 @@ public class GlueService {
 
     private <T> Page<T> paginate(Supplier<List<T>> items, Integer maxResults, String nextToken, int maximum,
                                   Function<T, String> cursorOf, String namespace) {
-        if (maxResults != null && (maxResults < 1 || maxResults > maximum)) {
-            throw new AwsException("InvalidInputException", "MaxResults must be between 1 and " + maximum, 400);
-        }
+        int limit = pageLimit(maxResults, maximum);
         PaginatedResult<T> page = Pagination.paginate(items.get(), cursorOf,
-                maxResults == null ? 100 : maxResults, nextToken, namespace,
+                limit, nextToken, namespace,
                 token -> new AwsException("InvalidInputException", "Invalid NextToken", 400));
         return new Page<>(page.items(), page.nextToken());
     }
 
     private <T> Page<T> paginate(Supplier<List<T>> items, Integer maxResults, String nextToken, int maximum) {
-        if (maxResults != null && (maxResults < 1 || maxResults > maximum)) {
-            throw new AwsException("InvalidInputException", "MaxResults must be between 1 and " + maximum, 400);
-        }
+        int limit = pageLimit(maxResults, maximum);
         List<T> all = items.get();
-        int limit = maxResults == null ? 100 : maxResults;
         int start = 0;
         if (nextToken != null && !nextToken.isBlank()) {
             try {
@@ -3508,5 +3503,12 @@ public class GlueService {
         int end = Math.min(start + limit, all.size());
         String newToken = end < all.size() ? String.valueOf(end) : null;
         return new Page<>(List.copyOf(all.subList(start, end)), newToken);
+    }
+
+    private static int pageLimit(Integer maxResults, int maximum) {
+        if (maxResults != null && (maxResults < 1 || maxResults > maximum)) {
+            throw new AwsException("InvalidInputException", "MaxResults must be between 1 and " + maximum, 400);
+        }
+        return maxResults == null ? 100 : maxResults;
     }
 }

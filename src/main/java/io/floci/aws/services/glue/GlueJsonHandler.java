@@ -6,6 +6,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import io.floci.aws.core.common.AwsException;
 import io.floci.aws.core.common.AwsJsonTimestamp;
 import io.floci.aws.core.common.EpochSeconds;
+import io.floci.aws.core.common.Pagination;
 import io.floci.aws.services.glue.model.*;
 import io.floci.aws.services.glue.schemaregistry.GlueSchemaRegistryService;
 import io.floci.aws.services.glue.schemaregistry.model.Registry;
@@ -139,10 +140,11 @@ public class GlueJsonHandler {
                         glueService.getPartitionIndexes(dbName, tableName))).build();
             }
             case "GetTables" -> {
-                validateCatalogPagination(request);
+                Integer maxResults = Pagination.parseMaxResults(request, "MaxResults", "InvalidInputException");
+                String nextToken = Pagination.parseNextToken(request, "NextToken", "InvalidInputException");
                 String dbName = request.get("DatabaseName").asText();
                 GlueService.Page<Table> page = glueService.getTables(
-                        dbName, readMaxResults(request), readNextToken(request));
+                        dbName, maxResults, nextToken);
                 List<Table> tables = page.items().stream().map(GlueService::withReadDefaults).toList();
                 yield Response.ok(pageResponse("TableList", tables, page.nextToken())).build();
             }
@@ -154,11 +156,12 @@ public class GlueJsonHandler {
                 yield Response.ok().build();
             }
             case "GetTableVersions" -> {
-                validateCatalogPagination(request);
+                Integer maxResults = Pagination.parseMaxResults(request, "MaxResults", "InvalidInputException");
+                String nextToken = Pagination.parseNextToken(request, "NextToken", "InvalidInputException");
                 String dbName = request.get("DatabaseName").asText();
                 String tableName = request.get("TableName").asText();
                 GlueService.Page<Map<String, Object>> page = glueService.getTableVersions(
-                        dbName, tableName, readMaxResults(request), readNextToken(request));
+                        dbName, tableName, maxResults, nextToken);
                 yield Response.ok(pageResponse("TableVersions", page.items(), page.nextToken())).build();
             }
             case "GetTableVersion" -> {
@@ -207,13 +210,14 @@ public class GlueJsonHandler {
             case "GetPartition" -> handleGetPartition(request);
             case "BatchGetPartition" -> handleBatchGetPartition(request);
             case "GetPartitions" -> {
-                validateCatalogPagination(request);
+                Integer maxResults = Pagination.parseMaxResults(request, "MaxResults", "InvalidInputException");
+                String nextToken = Pagination.parseNextToken(request, "NextToken", "InvalidInputException");
                 String dbName = request.get("DatabaseName").asText();
                 String tableName = request.get("TableName").asText();
                 String expression = request.path("Expression").asText(null);
                 GlueService.Segment segment = request.hasNonNull("Segment") ? segment(request.get("Segment")) : null;
                 GlueService.Page<Partition> page = glueService.getPartitions(dbName, tableName, expression, segment,
-                        readMaxResults(request), readNextToken(request));
+                        maxResults, nextToken);
                 List<Partition> partitions = page.items().stream().map(GlueService::withReadDefaults).toList();
                 yield Response.ok(pageResponse("Partitions", partitions, page.nextToken())).build();
             }
@@ -1109,20 +1113,10 @@ public class GlueJsonHandler {
     }
 
     private Response handleGetDatabases(JsonNode request) {
-        validateCatalogPagination(request);
-        GlueService.Page<Database> page = glueService.getDatabases(readMaxResults(request), readNextToken(request));
+        GlueService.Page<Database> page = glueService.getDatabases(
+                Pagination.parseMaxResults(request, "MaxResults", "InvalidInputException"),
+                Pagination.parseNextToken(request, "NextToken", "InvalidInputException"));
         return Response.ok(pageResponse("DatabaseList", page.items(), page.nextToken())).build();
-    }
-
-    private void validateCatalogPagination(JsonNode request) {
-        JsonNode limit = request.get("MaxResults");
-        if (limit != null && !limit.isNull() && (!limit.isIntegralNumber() || !limit.canConvertToInt())) {
-            throw new AwsException("InvalidInputException", "MaxResults must be an integer", 400);
-        }
-        JsonNode token = request.get("NextToken");
-        if (token != null && !token.isNull() && !token.isTextual()) {
-            throw new AwsException("InvalidInputException", "NextToken must be a string", 400);
-        }
     }
 
     private Integer readMaxResults(JsonNode request) {
