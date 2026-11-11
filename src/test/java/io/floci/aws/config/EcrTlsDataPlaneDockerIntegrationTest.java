@@ -1,7 +1,12 @@
 package io.floci.aws.config;
 
+import com.github.dockerjava.api.DockerClient;
+import com.github.dockerjava.api.async.ResultCallback;
+import com.github.dockerjava.api.command.InspectContainerResponse;
+import com.github.dockerjava.api.model.Frame;
 import io.floci.aws.core.common.Digests;
 import io.floci.aws.services.ecr.registry.EcrRegistryManager;
+import io.floci.aws.services.ecr.registry.RegistryHttpClient;
 import io.floci.aws.testing.SidecarContainersProfile;
 import io.quarkus.test.junit.QuarkusTest;
 import io.quarkus.test.junit.TestProfile;
@@ -15,10 +20,12 @@ import io.vertx.core.http.RequestOptions;
 import io.vertx.core.net.PemTrustOptions;
 import io.vertx.core.net.SocketAddress;
 import jakarta.inject.Inject;
+import org.awaitility.core.ConditionTimeoutException;
 import org.eclipse.microprofile.config.inject.ConfigProperty;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
 
+import java.net.URI;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Path;
 import java.util.List;
@@ -51,6 +58,9 @@ class EcrTlsDataPlaneDockerIntegrationTest {
     @Inject
     EcrRegistryManager registryManager;
 
+    @Inject
+    DockerClient dockerClient;
+
     @BeforeAll
     static void requireDocker() {
         SidecarContainersProfile.requireDockerAndImage("floci.services.ecr.registry-image");
@@ -59,7 +69,13 @@ class EcrTlsDataPlaneDockerIntegrationTest {
     @Test
     void pushAndPullImageOverTlsAndVerifyPlainHttpRegression() throws Exception {
         registryManager.ensureStarted();
-        await().atMost(10, TimeUnit.SECONDS).until(() -> registryManager.httpClient().ping());
+        RegistryHttpClient readiness = registryManager.httpClient();
+        try {
+            await().alias("backing ECR registry HTTP readiness")
+                    .atMost(10, TimeUnit.SECONDS).until(readiness::ping);
+        } catch (ConditionTimeoutException e) {
+            throw new AssertionError("Backing ECR registry did not become ready: " + registryDiagnostics(), e);
+        }
 
         String tlsHost = "000000000000.dkr.ecr.us-east-1.localhost.floci.io";
         HttpClient tlsClient = vertx.createHttpClient(new HttpClientOptions()
@@ -180,6 +196,40 @@ class EcrTlsDataPlaneDockerIntegrationTest {
         } finally {
             tlsClient.close();
         }
+    }
+
+    private String registryDiagnostics() {
+        String endpoint = registryManager.internalEndpoint();
+        StringBuilder diagnostics = new StringBuilder("container endpoint=").append(endpoint)
+                .append(", host port=").append(registryManager.effectivePort())
+                .append(", manager started=").append(registryManager.isStarted());
+        try {
+            String containerName = URI.create(endpoint).getHost();
+            InspectContainerResponse container = dockerClient.inspectContainerCmd(containerName).exec();
+            diagnostics.append(", container=").append(container.getId())
+                    .append(", status=").append(container.getState().getStatus());
+            StringBuffer logs = new StringBuffer();
+            try (ResultCallback.Adapter<Frame> callback = new ResultCallback.Adapter<>() {
+                @Override
+                public void onNext(Frame frame) {
+                    logs.append(new String(frame.getPayload(), StandardCharsets.UTF_8));
+                }
+            }) {
+                boolean completed = dockerClient.logContainerCmd(container.getId())
+                        .withStdOut(true).withStdErr(true).withTail(100).withFollowStream(false)
+                        .exec(callback).awaitCompletion(5, TimeUnit.SECONDS);
+                diagnostics.append("\nRegistry log tail:\n").append(logs);
+                if (!completed) {
+                    diagnostics.append("\n(timed out reading registry logs)");
+                }
+            }
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            diagnostics.append("\n(interrupted while collecting registry diagnostics)");
+        } catch (Exception e) {
+            diagnostics.append("\n(could not collect registry diagnostics: ").append(e).append(')');
+        }
+        return diagnostics.toString();
     }
 
     private SimpleResponse execute(HttpClient client, HttpMethod method, int port, String host,
