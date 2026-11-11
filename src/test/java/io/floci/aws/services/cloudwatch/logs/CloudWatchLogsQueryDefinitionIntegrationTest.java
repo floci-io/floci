@@ -1,15 +1,12 @@
 package io.floci.aws.services.cloudwatch.logs;
 
+import io.floci.aws.testing.AwsTestClients;
 import io.floci.aws.testing.RestAssuredJsonUtils;
 import io.quarkus.test.junit.QuarkusTest;
-import io.restassured.RestAssured;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.CsvSource;
-import software.amazon.awssdk.auth.credentials.AwsBasicCredentials;
-import software.amazon.awssdk.auth.credentials.StaticCredentialsProvider;
-import software.amazon.awssdk.http.urlconnection.UrlConnectionHttpClient;
 import software.amazon.awssdk.regions.Region;
 import software.amazon.awssdk.services.cloudwatchlogs.CloudWatchLogsClient;
 import software.amazon.awssdk.services.cloudwatchlogs.model.DescribeQueryDefinitionsResponse;
@@ -19,11 +16,11 @@ import software.amazon.awssdk.services.cloudwatchlogs.model.QueryDefinition;
 import software.amazon.awssdk.services.cloudwatchlogs.model.QueryParameter;
 import software.amazon.awssdk.services.cloudwatchlogs.model.ResourceNotFoundException;
 
-import java.net.URI;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Set;
 import java.util.UUID;
+import java.util.stream.IntStream;
 
 import static io.floci.aws.testing.LogsRequests.logs;
 import static org.hamcrest.Matchers.equalTo;
@@ -162,6 +159,32 @@ class CloudWatchLogsQueryDefinitionIntegrationTest {
         }
     }
 
+    @Test
+    void sdkAcceptsModeledBoundsForSavedQueryFields() {
+        String name = UUID.randomUUID() + "x".repeat(219);
+        String query = "q".repeat(10000);
+        String group = "g".repeat(512);
+        List<QueryParameter> parameters = IntStream.range(0, 20).mapToObj(index -> QueryParameter.builder()
+                .name(index == 0 ? "p".repeat(128) : "parameter_" + index)
+                .defaultValue("v".repeat(1024)).description("d".repeat(512)).build()).toList();
+        try (CloudWatchLogsClient client = client(Region.US_EAST_1, "111111111111")) {
+            String id = client.putQueryDefinition(request -> request.name(name).queryString(query)
+                    .queryLanguage("CWLI").logGroupNames(group).parameters(parameters)
+                    .clientToken(UUID.randomUUID() + "t".repeat(92))).queryDefinitionId();
+            try {
+                QueryDefinition saved = client.describeQueryDefinitions(request -> request
+                        .queryDefinitionNamePrefix(name).maxResults(1000)).queryDefinitions().getFirst();
+                assertEquals(id, saved.queryDefinitionId());
+                assertEquals(name, saved.name());
+                assertEquals(query, saved.queryString());
+                assertEquals(List.of(group), saved.logGroupNames());
+                assertEquals(parameters, saved.parameters());
+            } finally {
+                client.deleteQueryDefinition(request -> request.queryDefinitionId(id));
+            }
+        }
+    }
+
     @ParameterizedTest
     @CsvSource(delimiter = ';', value = {
             "PutQueryDefinition;{}",
@@ -170,12 +193,16 @@ class CloudWatchLogsQueryDefinitionIntegrationTest {
             "PutQueryDefinition;{\"name\":\"q\",\"queryString\":\"q\",\"logGroupNames\":\"group\"}",
             "PutQueryDefinition;{\"name\":\"q\",\"queryString\":\"q\",\"logGroupNames\":[7]}",
             "PutQueryDefinition;{\"name\":\"q\",\"queryString\":\"q\",\"parameters\":[7]}",
+            "PutQueryDefinition;{\"name\":\"q\",\"queryString\":\"q\",\"parameters\":[{}]}",
+            "PutQueryDefinition;{\"name\":\"q\",\"queryString\":\"q\",\"parameters\":[{\"name\":\"1bad\"}]}",
+            "PutQueryDefinition;{\"name\":\"q\",\"queryString\":\"q\",\"parameters\":[{\"name\":\"p\"}],\"queryLanguage\":\"SQL\"}",
             "PutQueryDefinition;{\"name\":\"q\",\"queryString\":\"q\",\"queryLanguage\":\"invalid\"}",
             "DescribeQueryDefinitions;{\"maxResults\":0}",
             "DescribeQueryDefinitions;{\"maxResults\":1001}",
             "DescribeQueryDefinitions;{\"maxResults\":1.5}",
             "DescribeQueryDefinitions;{\"maxResults\":\"1\"}",
             "DescribeQueryDefinitions;{\"nextToken\":7}",
+            "DescribeQueryDefinitions;{\"nextToken\":\"\"}",
             "DescribeQueryDefinitions;{\"nextToken\":\"bogus\"}",
             "DeleteQueryDefinition;{}"
     })
@@ -184,11 +211,6 @@ class CloudWatchLogsQueryDefinitionIntegrationTest {
     }
 
     private static CloudWatchLogsClient client(Region region, String account) {
-        return CloudWatchLogsClient.builder()
-                .endpointOverride(URI.create("http://localhost:" + RestAssured.port))
-                .httpClientBuilder(UrlConnectionHttpClient.builder())
-                .region(region)
-                .credentialsProvider(StaticCredentialsProvider.create(AwsBasicCredentials.create(account, "test")))
-                .build();
+        return AwsTestClients.create(CloudWatchLogsClient.builder(), account, region);
     }
 }

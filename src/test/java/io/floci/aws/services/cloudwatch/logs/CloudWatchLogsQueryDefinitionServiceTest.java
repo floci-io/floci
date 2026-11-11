@@ -164,31 +164,16 @@ class CloudWatchLogsQueryDefinitionServiceTest {
     }
 
     @ParameterizedTest
-    @ValueSource(ints = {-1, 0, 1001})
-    void pageSizeMustBeWithinAwsBounds(int limit) {
-        assertInvalid(() -> page(null, null, limit, null));
-    }
-
-    @ParameterizedTest
-    @ValueSource(strings = {"", "not-a-token", "e30"})
-    void rejectsInvalidTokens(String token) {
+    @ValueSource(strings = {"not-a-token", "e30"})
+    void rejectsMalformedSignedTokens(String token) {
         assertInvalid(() -> page(null, null, 1, token));
     }
 
-    @Test
-    void validatesRequiredFieldsAndDocumentedLengthBounds() {
-        assertInvalid(() -> service.putQueryDefinition(definition(null, null, "query", null), REGION));
-        assertInvalid(() -> service.putQueryDefinition(definition(null, "", "query", null), REGION));
-        assertInvalid(() -> service.putQueryDefinition(definition(null, "x".repeat(256), "query", null), REGION));
-        assertInvalid(() -> service.putQueryDefinition(definition(null, "name", "", null), REGION));
-        assertInvalid(() -> service.putQueryDefinition(definition(null, "name", "x".repeat(10001), null), REGION));
-        assertInvalid(() -> service.putQueryDefinition(definition("", "name", "query", null), REGION));
-        assertInvalid(() -> service.putQueryDefinition(definition(null, "name", "query", "short"), REGION));
-        assertInvalid(() -> page("", null, null, null));
-        assertInvalid(() -> page(null, "invalid", null, null));
-        assertInvalid(() -> service.putQueryDefinition(new QueryDefinition(null, "name", "query", List.of("bad:*"),
-                null, List.of(), 0, null), REGION));
-        service.putQueryDefinition(definition(null, "x".repeat(255), "x".repeat(10000), null), REGION);
+    @ParameterizedTest
+    @ValueSource(strings = {"SQL", "PPL"})
+    void queryParametersAreOnlySupportedForCwli(String language) {
+        assertInvalid(() -> service.putQueryDefinition(new QueryDefinition(null, "name", "query", List.of(),
+                language, List.of(new QueryParameter("level", "ERROR", null)), 0, null), REGION));
     }
 
     @ParameterizedTest

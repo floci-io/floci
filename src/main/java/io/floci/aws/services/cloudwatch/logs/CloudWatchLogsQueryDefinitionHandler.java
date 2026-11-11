@@ -4,9 +4,7 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
-import io.floci.aws.core.common.AwsException;
 import io.floci.aws.core.common.PaginatedResult;
-import io.floci.aws.core.common.Pagination;
 import io.floci.aws.services.cloudwatch.logs.model.QueryDefinition;
 import io.floci.aws.services.cloudwatch.logs.model.QueryDefinition.QueryParameter;
 import jakarta.ws.rs.core.Response;
@@ -25,9 +23,7 @@ class CloudWatchLogsQueryDefinitionHandler {
     }
 
     Response handle(String action, JsonNode request, String region) {
-        if (request == null || !request.isObject()) {
-            throw invalid("request must be an object.");
-        }
+        CloudWatchLogsRequestShapes.check(action, request);
         return switch (action) {
             case "PutQueryDefinition" -> put(request, region);
             case "DescribeQueryDefinitions" -> describe(request, region);
@@ -39,17 +35,11 @@ class CloudWatchLogsQueryDefinitionHandler {
 
     private Response put(JsonNode request, String region) {
         List<String> groups = new ArrayList<>();
-        for (JsonNode group : array(request, "logGroupNames")) {
-            if (!group.isTextual()) {
-                throw invalid("logGroupNames members must be strings.");
-            }
+        for (JsonNode group : request.path("logGroupNames")) {
             groups.add(group.textValue());
         }
         List<QueryParameter> parameters = new ArrayList<>();
-        for (JsonNode parameter : array(request, "parameters")) {
-            if (!parameter.isObject()) {
-                throw invalid("parameters members must be objects.");
-            }
+        for (JsonNode parameter : request.path("parameters")) {
             parameters.add(new QueryParameter(text(parameter, "name"), text(parameter, "defaultValue"),
                     text(parameter, "description")));
         }
@@ -63,7 +53,7 @@ class CloudWatchLogsQueryDefinitionHandler {
     private Response describe(JsonNode request, String region) {
         PaginatedResult<QueryDefinition> page = service.describeQueryDefinitions(
                 text(request, "queryDefinitionNamePrefix"), text(request, "queryLanguage"),
-                Pagination.parseMaxResults(request, "maxResults", "InvalidParameterException"),
+                request.hasNonNull("maxResults") ? request.get("maxResults").intValue() : null,
                 text(request, "nextToken"), region);
         ObjectNode response = mapper.createObjectNode();
         ArrayNode definitions = response.putArray("queryDefinitions");
@@ -93,31 +83,8 @@ class CloudWatchLogsQueryDefinitionHandler {
         return Response.ok(response).build();
     }
 
-    private List<JsonNode> array(JsonNode request, String field) {
-        JsonNode value = request.get(field);
-        if (value == null || value.isNull()) {
-            return List.of();
-        }
-        if (!value.isArray()) {
-            throw invalid(field + " must be an array.");
-        }
-        List<JsonNode> values = new ArrayList<>();
-        value.forEach(values::add);
-        return values;
-    }
-
     private static String text(JsonNode request, String field) {
         JsonNode value = request.get(field);
-        if (value == null || value.isNull()) {
-            return null;
-        }
-        if (!value.isTextual()) {
-            throw invalid(field + " must be a string.");
-        }
-        return value.textValue();
-    }
-
-    private static AwsException invalid(String message) {
-        return new AwsException("InvalidParameterException", message, 400);
+        return value == null || value.isNull() ? null : value.textValue();
     }
 }
