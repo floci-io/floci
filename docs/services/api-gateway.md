@@ -844,12 +844,18 @@ HTTP API `AWS_PROXY` integrations accept every `integrationSubtype` AWS defines:
 `StepFunctions-StartExecution`, `StepFunctions-StartSyncExecution` and
 `StepFunctions-StopExecution`. `requestParameters` name the action's inputs, and create, update
 and OpenAPI import and reimport check them against that subtype's required and optional
-parameters from the AWS reference. They reject a missing required parameter, any other parameter
-name, a name that is not a subtype, a subtype on a non-`AWS_PROXY` integration or a WebSocket API,
-and a `payloadFormatVersion` other than `1.0`, which is the default when a subtype is set. Import
-and reimport check every integration in the document before changing anything, so a rejected
-reimport leaves the API as it was. A CloudFormation update that drops `IntegrationSubtype` removes
-it from the integration.
+parameters from the AWS reference. They reject a required parameter that is missing, null or
+blank, any other parameter name, a JSON parameter such as `MessageAttributes` that is neither a
+JSON object nor a whole expression, a name that is not a subtype, a subtype on a non-`AWS_PROXY`
+integration or a WebSocket API, and a `payloadFormatVersion` other than `1.0`. `1.0` is the default
+when a subtype is set, including on an update that adds a subtype to an integration that had none.
+A number or boolean parameter value is stored as its text, and an object or array value is
+rejected. Import and reimport check every integration in the document before changing anything,
+so a rejected reimport leaves the API as it was. CloudFormation carries `IntegrationSubtype` and
+`RequestParameters` from an `AWS::ApiGatewayV2::Integration` and from the
+`x-amazon-apigateway-integration` extension of an `AWS::ApiGatewayV2::Api` `Body`. A CloudFormation
+update that drops `IntegrationSubtype` removes it from the integration, and a failed update that
+added one rolls back to an integration without it.
 
 Only `SQS-SendMessage` is invoked: each request is sent to an SQS queue instead of a Lambda
 function. A request that reaches any other subtype answers `500` with
@@ -859,17 +865,26 @@ required, and `DelaySeconds`, `MessageAttributes`, `MessageDeduplicationId`, `Me
 expression, or text with expressions embedded as `${request.header.Authorization}`. The
 expressions are `$request.body`, `$request.body.<JSONPath>`, `$request.header.<name>`,
 `$request.querystring.<name>`, `$request.path.<name>`, `$stageVariables.<name>`, and these
-`$context` variables: `accountId`, `apiId`, `domainName`, `httpMethod`, `path`, `requestTime`,
-`requestTimeEpoch`, `routeKey`, `stage`, `requestId`, `identity.sourceIp`, `authorizer.<key>` and
-`authorizer.claims.<claim>`. Any other expression resolves to nothing, or to an empty string where it is embedded. `MessageAttributes`
+`$context` variables: `accountId`, `apiId`, `domainName`, `domainPrefix`, `extendedRequestId`,
+`httpMethod`, `path`, `protocol`, `requestTime`, `requestTimeEpoch`, `routeKey`, `stage`,
+`requestId`, `identity.sourceIp`, `authorizer.<key>` and `authorizer.claims.<claim>`. `requestId`
+and `domainName` are the values the rest of the gateway reports for the request, and `path`
+starts with the stage name, as in `/test/send`, except on the `$default` stage. Any other
+expression resolves to nothing, or to an empty string where it is embedded. `MessageAttributes`
 and `MessageSystemAttributes` are JSON object templates: expressions are resolved only inside
 their string values, so a header holding quotes or braces stays one string value and cannot add
-attributes. `Region` selects the queue's region and defaults to the API's. A sent message answers
-`200` with
+attributes. This differs from AWS, which substitutes the raw text into the template before
+parsing it: a value that is meant to add JSON structure becomes one string here. A JSON parameter
+that is a whole expression and resolves to anything but a JSON object answers `400` with
+`InvalidParameterValue`. `Region` selects the queue's region; when it is absent or resolves to an
+empty string, the API's region is used. `QueueUrl` is sent as resolved, so a mapped value can
+name any queue in the emulator. A sent message answers `200` with
 `{"SendMessageResponse":{"ResponseMetadata":{"RequestId":...},"SendMessageResult":{...}}}`; a
 required parameter that resolves to nothing, such as an empty body for `$request.body`, answers
 `400` with `{"Error":{"Code":"MissingParameter",...}}`, and an SQS error is relayed in the same
-shape with its status. `credentialsArn` is stored but not enforced.
+shape with its status. A message attribute whose `StringValue` resolves to an empty string, or
+whose `BinaryValue` is not base64, is such an error: `400` with `InvalidParameterValue`.
+`credentialsArn` is stored but not enforced, as for every other integration.
 
 A Lambda proxy integration's response is read as AWS reads it (measured): a function that raises, a
 format 1.0 result that is not an object with a `statusCode`, and a `statusCode` that is not a whole
