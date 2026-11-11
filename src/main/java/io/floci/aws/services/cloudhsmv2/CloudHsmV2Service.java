@@ -701,7 +701,7 @@ public class CloudHsmV2Service {
         return backup;
     }
 
-    public Backup copyBackupToRegion(String destinationRegion, String backupId, String sourceRegion) {
+    public synchronized Backup copyBackupToRegion(String destinationRegion, String backupId, Map<String, String> tags, String sourceRegion) {
         // Source region emulation: we'll just clone the backup locally.
         Backup source = getBackup(backupId, sourceRegion);
         Backup copy = new Backup();
@@ -717,6 +717,7 @@ public class CloudHsmV2Service {
         copy.setHsmType(source.getHsmType());
         copy.setClusterCertificate(source.getClusterCertificate());
         copy.setNeverExpires(source.getNeverExpires());
+        copy.setTagList(new LinkedHashMap<>(tags != null ? tags : source.getTagList()));
         backups.put(regionKey(destinationRegion, copy.getBackupId()), copy);
         return copy;
     }

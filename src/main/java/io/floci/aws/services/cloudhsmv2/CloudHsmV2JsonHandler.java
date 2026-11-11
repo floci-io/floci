@@ -27,6 +27,7 @@ import java.util.Iterator;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.regex.Pattern;
 import java.util.stream.Collectors;
 
 
@@ -39,6 +40,7 @@ import java.util.stream.Collectors;
 public class CloudHsmV2JsonHandler {
 
     private static final Logger LOG = Logger.getLogger(CloudHsmV2JsonHandler.class);
+    private static final Pattern TAG_CHARACTERS = Pattern.compile("[\\p{L}\\p{Z}\\p{N}_.:/=+@-]*");
 
     private final CloudHsmV2Service service;
     private final ObjectMapper objectMapper;
@@ -429,7 +431,27 @@ public class CloudHsmV2JsonHandler {
                     "DestinationRegion is required when copying a backup.", 400);
         }
         String backupId = text(request, "BackupId");
-        Backup backup = service.copyBackupToRegion(destRegion, backupId, region);
+        JsonNode tagList = request.path("TagList");
+        Map<String, String> tags = null;
+        if (!tagList.isMissingNode()) {
+            if (!tagList.isArray() || tagList.isEmpty() || tagList.size() > 50) {
+                throw new AwsException("CloudHsmInvalidRequestException", "TagList must have length between 1 and 50", 400);
+            }
+            for (JsonNode tag : tagList) {
+                JsonNode key = tag.path("Key");
+                JsonNode value = tag.path("Value");
+                if (!key.isTextual() || key.textValue().isEmpty()
+                        || key.textValue().codePointCount(0, key.textValue().length()) > 128
+                        || !TAG_CHARACTERS.matcher(key.textValue()).matches()
+                        || !value.isTextual()
+                        || value.textValue().codePointCount(0, value.textValue().length()) > 256
+                        || !TAG_CHARACTERS.matcher(value.textValue()).matches()) {
+                    throw new AwsException("CloudHsmInvalidRequestException", "TagList contains an invalid tag", 400);
+                }
+            }
+            tags = parseTagList(tagList);
+        }
+        Backup backup = service.copyBackupToRegion(destRegion, backupId, tags, region);
         ObjectNode response = objectMapper.createObjectNode();
         ObjectNode destBackup = objectMapper.createObjectNode();
         destBackup.put("CreateTimestamp", EpochSeconds.fromInstant(backup.getCreateTimestamp()));
