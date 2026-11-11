@@ -48,6 +48,7 @@ import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.TreeMap;
 import java.util.function.BiConsumer;
 import java.util.function.Consumer;
 import java.util.function.Supplier;
@@ -1617,8 +1618,7 @@ public class NativeDynamoDbJsonHandler {
     private static final int MAX_VECTOR_SEARCH_TOP_K = 100;
 
     private Response handleSearchVectors(JsonNode request, String region) {
-        requireSearchVectorsMember(request, "SearchVector");
-        requireSearchVectorsMember(request, "IndexName");
+        requireSearchVectorsMembers(request);
         String tableName = request.path("TableName").asText();
         String indexName = request.get("IndexName").asText();
         String rccSearchError = returnConsumedCapacityError(request);
@@ -1627,7 +1627,6 @@ public class NativeDynamoDbJsonHandler {
             throw new AwsException("ValidationException", rccSearchError, 400);
         }
         String rccSearch = request.path("ReturnConsumedCapacity").asText("NONE");
-        requireSearchVectorsMember(request, "TopK");
         int topK = request.get("TopK").asInt();
         if (topK < 1) {
             // AWS names this member TopK and quotes no value, unlike every other member of this
@@ -1676,16 +1675,31 @@ public class NativeDynamoDbJsonHandler {
         return Response.ok(response).build();
     }
 
+    private static final Map<String, String> SEARCH_VECTORS_REQUIRED_TYPES = new TreeMap<>(Map.of(
+            "IndexName", "a string", "SearchVector", "a sequence", "TableName", "a string", "TopK", "i32"));
+
     /**
-     * Rejects an omitted required member of SearchVectors the way the AWS frontend does: as a
-     * deserialisation failure quoting the offset of the body's closing brace, which for the
-     * compact JSON an SDK sends is the body length. Measured in eu-west-2, 2026-09-23.
+     * SearchVectors has its own frontend, which fails to deserialise a null or omitted required
+     * member before any other check. The columns assume the compact JSON an SDK sends.
      */
-    private static void requireSearchVectorsMember(JsonNode request, String member) {
-        if (!request.hasNonNull(member)) {
-            throw new AwsException("ValidationException",
-                    "missing field `" + member + "` at line 1 column "
-                    + request.toString().length(), 400);
+    private static void requireSearchVectorsMembers(JsonNode request) {
+        if (SEARCH_VECTORS_REQUIRED_TYPES.keySet().stream().anyMatch(member -> request.path(member).isNull())) {
+            int column = 1;
+            for (Map.Entry<String, JsonNode> field : request.properties()) {
+                column += field.getKey().length() + 3;
+                String expected = SEARCH_VECTORS_REQUIRED_TYPES.get(field.getKey());
+                if (expected != null && field.getValue().isNull()) {
+                    throw new AwsException("SerializationException", "invalid type: null, expected " + expected
+                            + " at line 1 column " + (column + "null".length()), 400);
+                }
+                column += field.getValue().toString().length() + 1;
+            }
+        }
+        for (String member : SEARCH_VECTORS_REQUIRED_TYPES.keySet()) {
+            if (!request.has(member)) {
+                throw new AwsException("ValidationException",
+                        "missing field `" + member + "` at line 1 column " + request.toString().length(), 400);
+            }
         }
     }
 
