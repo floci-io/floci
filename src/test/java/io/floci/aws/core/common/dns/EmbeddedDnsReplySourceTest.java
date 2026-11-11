@@ -56,10 +56,13 @@ class EmbeddedDnsReplySourceTest {
             assertArrayEquals(serverAddress.getAddress(),
                     Arrays.copyOfRange(reply.getData(), request.length + 12, request.length + 16));
         } finally {
-            if (server != null) {
-                server.close().toCompletionStage().toCompletableFuture().get(5, TimeUnit.SECONDS);
+            try {
+                if (server != null) {
+                    server.close().toCompletionStage().toCompletableFuture().get(5, TimeUnit.SECONDS);
+                }
+            } finally {
+                vertx.close().toCompletionStage().toCompletableFuture().get(5, TimeUnit.SECONDS);
             }
-            vertx.close().toCompletionStage().toCompletableFuture().get(5, TimeUnit.SECONDS);
         }
     }
 
