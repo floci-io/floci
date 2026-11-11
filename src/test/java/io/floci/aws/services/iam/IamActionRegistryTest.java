@@ -1035,6 +1035,29 @@ class IamActionRegistryTest {
     }
 
     @Test
+    void s3BucketSubResourcesFlociDoesNotServeAreCheckedAsTheOperationsTheyName() {
+        // S3Controller answers them NotImplemented instead of listing, creating or deleting the bucket, so they are
+        // checked as AWS checks the operation the AWS model gives the sub-resource and method.
+        assertEquals("s3:GetBucketMetadataTableConfiguration", bucketAction("GET", "metadataConfiguration"));
+        assertEquals("s3:DeleteBucketMetadataTableConfiguration", bucketAction("DELETE", "metadataConfiguration"));
+        assertEquals("s3:GetBucketMetadataTableConfiguration", bucketAction("GET", "metadataTable"));
+        assertEquals("s3:DeleteBucketMetadataTableConfiguration", bucketAction("DELETE", "metadataTable"));
+        assertEquals("s3:UpdateBucketMetadataJournalTableConfiguration", bucketAction("PUT", "metadataJournalTable"));
+        assertEquals("s3:GetBucketAbac", bucketAction("GET", "abac"));
+        assertEquals("s3:PutBucketAbac", bucketAction("PUT", "abac"));
+        assertEquals("s3:CreateBucketMetadataTableConfiguration", bucketAction("POST", "metadataTable"));
+        // A sub-resource sent with a method AWS defines none for is refused as not allowed, checked as before.
+        assertEquals("s3:DeleteBucket", bucketAction("DELETE", "versioning"));
+        assertEquals("s3:CreateBucket", bucketAction("PUT", "location"));
+        assertNull(bucketAction("POST", "versioning"));
+        // A browser-form PostObject runs ahead of any sub-resource and is checked per key, as DeleteObjects is.
+        MultivaluedMap<String, String> params = new MultivaluedHashMap<>();
+        params.add("metadataTable", "");
+        assertNull(registry.resolve("s3", mockCtx("POST", "/bucket", params, MediaType.MULTIPART_FORM_DATA_TYPE, "")));
+        assertNull(bucketAction("POST", "delete"));
+    }
+
+    @Test
     void s3BucketOnlySubResourcesStayInertOnAnObjectPath() {
         // ?notification on an object path is ignored by the object routes, so the request really
         // is a GetObject/PutObject and must resolve as one.

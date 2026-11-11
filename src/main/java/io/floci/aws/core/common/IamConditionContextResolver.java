@@ -650,24 +650,10 @@ public class IamConditionContextResolver {
         }
         URI requestUri = ctx.getUriInfo().getRequestUri();
         RoutingContext current = currentVertxRequest == null ? null : currentVertxRequest.getCurrent();
-        String rawPath = current != null && current.request() != null ? current.request().path()
+        String sentPath = current != null && current.request() != null ? current.request().path()
                 : requestUri == null ? null : requestUri.getRawPath();
-        String key = rawPath == null ? null
-                : S3ObjectKeys.fromRawPath(rawPath, requestUri == null ? null : requestUri.getPath(), bucket);
-        if (key == null) {
-            key = s3PathObjectKey(ctx.getUriInfo().getPath());
-        }
-        return key == null || key.isEmpty() ? null : key;
-    }
-
-    /** The object key of a path-style (or filter-rewritten) S3 path, null for a bucket-level one. */
-    private static String s3PathObjectKey(String path) {
-        String stripped = path.startsWith("/") ? path.substring(1) : path;
-        int slash = stripped.indexOf('/');
-        if (slash < 0 || slash == stripped.length() - 1) {
-            return null;
-        }
-        return stripped.substring(slash + 1);
+        return S3ObjectKeys.objectKey(sentPath, requestUri == null ? null : requestUri.getPath(),
+                ctx.getUriInfo().getPath(), bucket);
     }
 
     Map<String, List<String>> s3BucketListConditionContext(MultivaluedMap<String, String> queryParameters) {

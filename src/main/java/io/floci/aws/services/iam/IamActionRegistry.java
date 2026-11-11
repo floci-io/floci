@@ -11,6 +11,7 @@ import io.floci.aws.core.common.WireProtocol;
 import io.floci.aws.services.dynamodb.DynamoDbPartiQLParser;
 import io.floci.aws.services.eks.EksController;
 import io.floci.aws.services.route53.Route53Controller;
+import io.floci.aws.services.s3.S3BucketSubresources;
 import io.floci.aws.services.s3.S3ObjectActions;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.ws.rs.container.ContainerRequestContext;
@@ -891,6 +892,12 @@ public class IamActionRegistry {
                 && "x-www-form-urlencoded".equalsIgnoreCase(mediaType.getSubtype());
     }
 
+    private static boolean isFormUpload(MediaType mediaType) {
+        return mediaType != null
+                && "multipart".equalsIgnoreCase(mediaType.getType())
+                && "form-data".equalsIgnoreCase(mediaType.getSubtype());
+    }
+
     /** One bucket sub-resource operation: the query parameter that selects it, and the IAM action. */
     private record SubResourceAction(String queryParameter, String action) {}
 
@@ -976,6 +983,13 @@ public class IamActionRegistry {
         if (!isBucketLevel) {
             return objectSubResourceAction(method, params);
         }
+        if ("POST".equals(method)) {
+            // S3Controller runs DeleteObjects and a browser-form PostObject ahead of any other sub-resource and
+            // checks them per key; another sub-resource S3 defines for POST, such as ?metadataTable, it answers
+            // NotImplemented, so that request is checked as the operation it names.
+            return params.containsKey("delete") || isFormUpload(ctx.getMediaType())
+                    ? null : unservedSubresourceAction(method, params);
+        }
         List<SubResourceAction> chain = switch (method) {
             case "GET" -> GET_BUCKET_SUBRESOURCES;
             case "PUT" -> PUT_BUCKET_SUBRESOURCES;
@@ -985,6 +999,23 @@ public class IamActionRegistry {
         for (SubResourceAction entry : chain) {
             if (params.containsKey(entry.queryParameter())) {
                 return entry.action();
+            }
+        }
+        return chain.isEmpty() ? null : unservedSubresourceAction(method, params);
+    }
+
+    /**
+     * A sub-resource S3 defines for the method that the lists above, or POST's DeleteObjects, do not hold is one
+     * S3Controller does not serve: it answers the request NotImplemented rather than run the bucket's operation, so
+     * the request is checked as the operation it names, as AWS checks it. Null when it names none, or one S3 defines
+     * for other methods only, which S3Controller refuses as not allowed.
+     */
+    private static String unservedSubresourceAction(String method, MultivaluedMap<String, String> params) {
+        S3BucketSubresources subresources = S3BucketSubresources.vendored();
+        for (String name : subresources.names()) {
+            List<String> operations = subresources.operations(method, name);
+            if (params.containsKey(name) && operations.size() == 1) {
+                return IamAuthorizedActions.actionFor("s3", operations.get(0));
             }
         }
         return null;

@@ -2122,9 +2122,19 @@ An S3 object operation is checked as the action the S3 documentation gives it:
   - Removing a configuration needs its Put action.
   - `DeleteBucketTagging` is checked as `s3:PutBucketTagging`, since AWS has no
     `s3:DeleteBucketTagging` action.
+  - A bucket sub-resource Floci does not serve, such as S3 Metadata's `?metadataTable`, is checked
+    as the action AWS's Service Reference gives the operation the AWS model names for it:
+    `DELETE ?metadataTable` needs `s3:DeleteBucketMetadataTableConfiguration`, not
+    `s3:DeleteBucket`, and `POST ?metadataTable` needs `s3:CreateBucketMetadataTableConfiguration`.
+    S3 answers it `501 NotImplemented`.
 
 A request naming several of these sub-resources is checked as the one S3 runs. `GET ?acl&tagging`
-returns the tags, so it needs `s3:GetObjectTagging`.
+returns the tags, so it needs `s3:GetObjectTagging`. An object key keeps every slash it is sent
+with, and the ARN the request is checked against keeps them too: `PUT /bucket//email.txt` writes the
+key `/email.txt` and needs `s3:PutObject` on `arn:aws:s3:::bucket//email.txt`, which a statement
+naming `bucket/email.txt` does not cover and one naming `bucket//*` does. The same holds inside a
+key, where `a//b.txt` is its own object. A key made only of slashes is an object as well:
+`PUT /bucket//` writes the key `/` and needs `s3:PutObject` on `arn:aws:s3:::bucket//`.
 
 A request that passes a role to a service also needs `iam:PassRole` on that role, as the IAM user
 guide requires: "To pass a role (and its permissions) to an AWS service, a user must have
