@@ -413,6 +413,9 @@ public class EventBridgeHandler {
                 if (!entryNode.path("Resources").isMissingNode()) {
                     entry.put("Resources", entryNode.path("Resources"));
                 }
+                if (entryNode.path("Time").isNumber()) {
+                    entry.put("Time", Instant.ofEpochSecond(entryNode.path("Time").longValue()));
+                }
                 entries.add(entry);
             }
         }
