@@ -143,9 +143,7 @@ class MySqlProtocolHandlerTest {
         queryPayload.write(0x03); // COM_QUERY
         queryPayload.writeBytes("SET @floci_probe=1".getBytes(StandardCharsets.UTF_8));
         byte[] command = wrapPacket(0, queryPayload.toByteArray());
-        byte[] expectedFrame = compressed
-                ? zlibPayload ? wrapZlibCompressedPacket(command) : wrapCompressedPacket(command)
-                : command;
+        byte[] expectedFrame = compressed ? wrapCompressedFrame(command, zlibPayload) : command;
         assertRelayedCommandFrames(expectedFrame, compressed, tls);
     }
 
@@ -176,10 +174,8 @@ class MySqlProtocolHandlerTest {
             secondPayload = Arrays.copyOfRange(command, split, command.length);
         }
         ByteArrayOutputStream frames = new ByteArrayOutputStream();
-        frames.writeBytes(zlibPayload ? wrapZlibCompressedPacket(firstPayload, 0)
-                : wrapCompressedPacket(firstPayload, 0));
-        frames.writeBytes(zlibPayload ? wrapZlibCompressedPacket(secondPayload, 1)
-                : wrapCompressedPacket(secondPayload, 1));
+        frames.writeBytes(wrapCompressedFrame(firstPayload, zlibPayload, 0));
+        frames.writeBytes(wrapCompressedFrame(secondPayload, zlibPayload, 1));
         assertRelayedCommandFrames(frames.toByteArray(), true, false);
     }
 
@@ -195,7 +191,7 @@ class MySqlProtocolHandlerTest {
         query.writeBytes(padding);
         query.writeBytes("*/".getBytes(StandardCharsets.UTF_8));
         byte[] command = wrapPacket(0, query.toByteArray());
-        byte[] frame = zlibPayload ? wrapZlibCompressedPacket(command) : wrapCompressedPacket(command);
+        byte[] frame = wrapCompressedFrame(command, zlibPayload);
         assertRelayedCommandFrames(frame, CLIENT_COMPRESS, false, true);
     }
 
@@ -204,10 +200,8 @@ class MySqlProtocolHandlerTest {
     void relaysEachCompressedCommandBeforeTheNextArrives(boolean zlibPayload) throws Exception {
         byte[] firstCommand = wrapPacket(0, new byte[]{0x03, 'S', 'E', 'L', 'E', 'C', 'T', ' ', '1'});
         byte[] secondCommand = wrapPacket(0, new byte[]{0x03, 'S', 'E', 'L', 'E', 'C', 'T', ' ', '2'});
-        byte[] firstFrame = zlibPayload ? wrapZlibCompressedPacket(firstCommand)
-                : wrapCompressedPacket(firstCommand);
-        byte[] secondFrame = zlibPayload ? wrapZlibCompressedPacket(secondCommand)
-                : wrapCompressedPacket(secondCommand);
+        byte[] firstFrame = wrapCompressedFrame(firstCommand, zlibPayload);
+        byte[] secondFrame = wrapCompressedFrame(secondCommand, zlibPayload);
         byte[] responseFrame = wrapCompressedPacket(wrapPacket(1, OK_PAYLOAD), 1);
         withLoggedInClient(CLIENT_COMPRESS, CLIENT_COMPRESS, false, streams -> {
             streams.clientOut().write(firstFrame);
@@ -338,7 +332,7 @@ class MySqlProtocolHandlerTest {
         query.writeBytes("CREATE USER 'app'@'%' IDENTIFIED WITH AWSAuthenticationPlugin AS 'RDS'"
                 .getBytes(StandardCharsets.UTF_8));
         byte[] command = wrapPacket(0, query.toByteArray());
-        byte[] frame = zlibPayload ? wrapZlibCompressedPacket(command) : wrapCompressedPacket(command);
+        byte[] frame = wrapCompressedFrame(command, zlibPayload);
         assertRelayedCommandFrames(frame, true, false);
     }
 
@@ -1221,6 +1215,14 @@ class MySqlProtocolHandlerTest {
         return raw;
     }
 
+    private static byte[] wrapCompressedFrame(byte[] payload, boolean zlibPayload) throws IOException {
+        return wrapCompressedFrame(payload, zlibPayload, 0);
+    }
+
+    private static byte[] wrapCompressedFrame(byte[] payload, boolean zlibPayload, int sequence) throws IOException {
+        return zlibPayload ? wrapZlibCompressedPacket(payload, sequence) : wrapCompressedPacket(payload, sequence);
+    }
+
     private static byte[] wrapCompressedPacket(byte[] mysqlPacket) {
         return wrapCompressedPacket(mysqlPacket, 0);
     }
@@ -1234,10 +1236,6 @@ class MySqlProtocolHandlerTest {
         // Uncompressed length 0: short commands may use an uncompressed payload.
         System.arraycopy(mysqlPacket, 0, raw, 7, mysqlPacket.length);
         return raw;
-    }
-
-    private static byte[] wrapZlibCompressedPacket(byte[] mysqlPacket) throws IOException {
-        return wrapZlibCompressedPacket(mysqlPacket, 0);
     }
 
     private static byte[] wrapZlibCompressedPacket(byte[] mysqlPacket, int sequence) throws IOException {
