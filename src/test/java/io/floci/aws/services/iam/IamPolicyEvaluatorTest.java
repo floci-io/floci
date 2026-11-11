@@ -84,6 +84,31 @@ class IamPolicyEvaluatorTest {
     }
 
     @Test
+    void openTunnelConditionKeysScopeAnAllowToPortAddressAndDuration() {
+        String policy = """
+                {"Version":"2012-10-17","Statement":[{"Effect":"Allow",
+                  "Action":"ec2-instance-connect:OpenTunnel","Resource":"*","Condition":{
+                  "NumericEquals":{"ec2-instance-connect:remotePort":22},
+                  "IpAddress":{"ec2-instance-connect:privateIpAddress":"10.0.0.0/24"},
+                  "NumericLessThanEquals":{"ec2-instance-connect:maxTunnelDuration":600}}}]}""";
+        String action = "ec2-instance-connect:OpenTunnel";
+        String port = "ec2-instance-connect:remotePort";
+        String ip = "ec2-instance-connect:privateIpAddress";
+        String max = "ec2-instance-connect:maxTunnelDuration";
+
+        assertEquals(Decision.ALLOW, evaluator.simulateCustomPolicy(List.of(policy), action, "*",
+                Map.of(port, List.of("22"), ip, List.of("10.0.0.5"), max, List.of("300"))));
+        assertEquals(Decision.DENY, evaluator.simulateCustomPolicy(List.of(policy), action, "*",
+                Map.of(port, List.of("3389"), ip, List.of("10.0.0.5"), max, List.of("300"))));
+        assertEquals(Decision.DENY, evaluator.simulateCustomPolicy(List.of(policy), action, "*",
+                Map.of(port, List.of("22"), ip, List.of("10.0.1.5"), max, List.of("300"))));
+        assertEquals(Decision.DENY, evaluator.simulateCustomPolicy(List.of(policy), action, "*",
+                Map.of(port, List.of("22"), ip, List.of("10.0.0.5"), max, List.of("900"))));
+        assertEquals(Decision.DENY, evaluator.simulateCustomPolicy(List.of(policy), action, "*",
+                Map.of(port, List.of("22"), ip, List.of("10.0.0.5"))), "a key the caller never supplies");
+    }
+
+    @Test
     void nullConditionReadsUnquotedBooleanValues() {
         String requireAbsent = """
                 {"Version":"2012-10-17","Statement":[{"Effect":"Allow","Action":"s3:ListBucket",
