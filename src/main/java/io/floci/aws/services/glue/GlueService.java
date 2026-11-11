@@ -437,6 +437,11 @@ public class GlueService {
                 .map(Table::getName)
                 .toList();
         tableNames.forEach(tableName -> deleteTable(name, tableName));
+        List<String> functionNames = functionStore.scan(k -> true).stream()
+                .filter(function -> databaseName.equals(function.getDatabaseName()))
+                .map(UserDefinedFunction::getFunctionName)
+                .toList();
+        functionNames.forEach(functionName -> functionStore.delete(functionKey(databaseName, functionName)));
         databaseStore.delete(databaseName);
         resourceGroupsTaggingService.deleteResources(List.of(databaseArn(region, databaseName)), region);
         LOG.infov("Deleted Glue Database: {0}", name);
