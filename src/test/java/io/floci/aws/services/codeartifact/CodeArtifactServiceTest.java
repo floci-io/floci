@@ -7383,4 +7383,17 @@ class CodeArtifactServiceTest {
         return lookupService;
     }
 
+    @Test
+    void aRefusedUpdateRepositoryLeavesTheUpstreamsUnchanged() {
+        service.createDomain(REGION, "refused-update", null, Map.of());
+        service.createRepository(REGION, "refused-update", null, "consumer", null, null, Map.of());
+        service.createRepository(REGION, "refused-update", null, "upstream", null, null, Map.of());
+
+        AwsException refused = assertThrows(AwsException.class, () -> service.updateRepository(
+                REGION, "refused-update", null, "consumer", "x".repeat(1001), List.of("upstream")));
+
+        assertEquals("ValidationException", refused.getErrorCode());
+        assertEquals(List.of(),
+                service.describeRepository(REGION, "refused-update", null, "consumer").getUpstreams());
+    }
 }
