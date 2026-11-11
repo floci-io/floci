@@ -1,11 +1,13 @@
 package io.floci.aws.services.cloudformation.provisioners;
 
 import com.fasterxml.jackson.core.JsonProcessingException;
+import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.floci.aws.core.common.AwsArnUtils;
 import io.floci.aws.core.common.AwsException;
+import io.floci.aws.services.apigatewayv2.ApiGatewayV2OpenApiImporter;
 import io.floci.aws.services.apigatewayv2.ApiGatewayV2Service;
 import io.floci.aws.services.apigatewayv2.model.Api;
 import io.floci.aws.services.apigatewayv2.model.Authorizer;
@@ -318,6 +320,15 @@ public class ApiGatewayV2CfnProvisioner implements CfnResourceProvisioner {
                                     "httpMethod");
                             putOpenApiIntegrationValue(integrationRequest, "payloadFormatVersion", integration,
                                     "payloadFormatVersion");
+                            putOpenApiIntegrationValue(integrationRequest, "integrationSubtype", integration,
+                                    "integrationSubtype");
+                            JsonNode requestParameters = integration.path("requestParameters");
+                            if (requestParameters.isObject() && !requestParameters.isEmpty()) {
+                                integrationRequest.put("requestParameters",
+                                        ApiGatewayV2OpenApiImporter.stringValues(
+                                                objectMapper.convertValue(requestParameters,
+                                                        new TypeReference<Map<String, Object>>() {})));
+                            }
                             Integration createdIntegration = apiGatewayV2Service.createIntegration(region, apiId,
                                     integrationRequest);
                             integrationIds.add(createdIntegration.getIntegrationId());
@@ -881,9 +892,12 @@ public class ApiGatewayV2CfnProvisioner implements CfnResourceProvisioner {
         String region = ctx.region();
         String apiId = ctx.resolveOptional(props, "ApiId");
         Map<String, Object> req = new HashMap<>();
+        String integrationSubtype = ctx.resolveOptional(props, "IntegrationSubtype");
         req.put("integrationType", ctx.resolveOptional(props, "IntegrationType"));
+        req.put("integrationSubtype", integrationSubtype);
         req.put("integrationUri", ctx.resolveOptional(props, "IntegrationUri"));
-        req.put("payloadFormatVersion", ctx.resolveOrDefault(props, "PayloadFormatVersion", "2.0"));
+        req.put("payloadFormatVersion", ctx.resolveOrDefault(props, "PayloadFormatVersion",
+                ApiGatewayV2Service.defaultPayloadFormatVersion(integrationSubtype)));
         String connectionType = ctx.resolveOptional(props, "ConnectionType");
         String connectionId = ctx.resolveOptional(props, "ConnectionId");
         req.put("connectionType", connectionType);
@@ -931,6 +945,9 @@ public class ApiGatewayV2CfnProvisioner implements CfnResourceProvisioner {
                         (String) req.get("integrationMethod"),
                         (String) req.get("templateSelectionExpression"), timeoutInMillis,
                         requestParameters, requestTemplates);
+                if (integrationSubtype == null && prior.getIntegrationSubtype() != null) {
+                    apiGatewayV2Service.replaceIntegrationSubtype(region, apiId, r.getPhysicalId(), null);
+                }
                 integration = apiGatewayV2Service.updateIntegration(region, apiId, r.getPhysicalId(), req);
             } catch (RuntimeException failure) {
                 // The stack skips rollbackUpdate for a resource whose own update failed, so undo it here.
@@ -952,9 +969,9 @@ public class ApiGatewayV2CfnProvisioner implements CfnResourceProvisioner {
     }
 
     /**
-     * The connection and the five settings the integration had before this update, and whether the
-     * update also changes another field. UpdateIntegration keeps a field the request leaves out, so
-     * only a value that is set and differs counts as a change.
+     * The connection, the five settings and the subtype the integration had before this update, and
+     * whether the update also changes another field. UpdateIntegration keeps a field the request
+     * leaves out, so only a value that is set and differs counts as a change.
      */
     private String integrationConnectionSnapshot(String region, String apiId, Integration prior,
                                                  Map<String, Object> req) {
@@ -971,6 +988,7 @@ public class ApiGatewayV2CfnProvisioner implements CfnResourceProvisioner {
         snapshot.put("timeoutInMillis", prior.getTimeoutInMillis());
         snapshot.set("requestParameters", objectMapper.valueToTree(prior.getRequestParameters()));
         snapshot.set("requestTemplates", objectMapper.valueToTree(prior.getRequestTemplates()));
+        snapshot.put("integrationSubtype", prior.getIntegrationSubtype());
         snapshot.put("otherFieldChanged", otherFieldChanged);
         return snapshot.toString();
     }
@@ -1005,6 +1023,11 @@ public class ApiGatewayV2CfnProvisioner implements CfnResourceProvisioner {
                 textOrNull(snapshot, "integrationMethod"), textOrNull(snapshot, "templateSelectionExpression"),
                 snapshot.path("timeoutInMillis").asInt(), stringMapOrNull(snapshot.path("requestParameters")),
                 stringMapOrNull(snapshot.path("requestTemplates")));
+        if (snapshot.has("integrationSubtype")) {
+            apiGatewayV2Service.replaceIntegrationSubtype(snapshot.path("region").asText(),
+                    snapshot.path("apiId").asText(), resource.getPhysicalId(),
+                    textOrNull(snapshot, "integrationSubtype"));
+        }
         // Spent only once the restore succeeded, so a restore that throws can be tried again.
         resource.getAttributes().remove(CfnRollback.INTEGRATION_CONNECTION_SNAPSHOT_ATTR);
         return !snapshot.path("otherFieldChanged").asBoolean();

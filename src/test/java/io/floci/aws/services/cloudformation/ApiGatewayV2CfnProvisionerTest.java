@@ -365,6 +365,36 @@ class ApiGatewayV2CfnProvisionerTest {
     }
 
     @Test
+    void bodyMapsIntegrationSubtypeAndRequestParameters() throws Exception {
+        Integration integration = new Integration();
+        integration.setIntegrationId("body-integration");
+        when(apiGatewayV2Service.createIntegration(eq(REGION), eq(API_ID), anyMap())).thenReturn(integration);
+        when(apiGatewayV2Service.createRoute(eq(REGION), eq(API_ID), anyMap()))
+                .thenReturn(route("body-route", "POST /send"));
+
+        StackResource resource = provision(body("""
+                {"paths":{"/send":{"post":{
+                  "x-amazon-apigateway-integration":{"type":"aws_proxy",
+                    "integrationSubtype":"SQS-SendMessage",
+                    "credentials":"arn:aws:iam::000000000000:role/integration",
+                    "payloadFormatVersion":"1.0",
+                    "requestParameters":{"QueueUrl":"http://localhost/000000000000/q",
+                      "MessageBody":"$request.body","DelaySeconds":5,
+                      "MessageAttributes":{"Authorization":{"DataType":"String",
+                        "StringValue":"${request.header.Authorization}"}}}}}}}}
+                """), null, Map.of());
+
+        assertEquals("CREATE_COMPLETE", resource.getStatus());
+        verify(apiGatewayV2Service).createIntegration(eq(REGION), eq(API_ID), argThat(request ->
+                "SQS-SendMessage".equals(request.get("integrationSubtype"))
+                        && Map.of("QueueUrl", "http://localhost/000000000000/q", "MessageBody", "$request.body",
+                                "DelaySeconds", "5",
+                                "MessageAttributes", "{\"Authorization\":{\"DataType\":\"String\","
+                                        + "\"StringValue\":\"${request.header.Authorization}\"}}")
+                        .equals(request.get("requestParameters"))));
+    }
+
+    @Test
     void materializesInheritedJwtSecurityAndHonorsOperationOptOut() throws Exception {
         Authorizer authorizer = new Authorizer();
         authorizer.setAuthorizerId("body-authorizer");

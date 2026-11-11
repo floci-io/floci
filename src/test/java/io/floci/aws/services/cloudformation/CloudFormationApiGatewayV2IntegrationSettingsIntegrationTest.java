@@ -41,6 +41,8 @@ class CloudFormationApiGatewayV2IntegrationSettingsIntegrationTest {
     private static final String PARAMETERS =
             ",\"RequestParameters\":{\"overwrite:header.x-example\":\"%s\"}";
     private static final String TIMEOUT = ",\"TimeoutInMillis\":15000";
+    private static final String SUBTYPE = ",\"IntegrationSubtype\":\"SQS-SendMessage\",\"RequestParameters\":{"
+            + "\"QueueUrl\":\"http://localhost/000000000000/q\",\"MessageBody\":\"$request.body\"}";
 
     @Inject
     ApiGatewayV2Service apiGatewayV2Service;
@@ -112,6 +114,20 @@ class CloudFormationApiGatewayV2IntegrationSettingsIntegrationTest {
         assertEquals(15000, integration.getTimeoutInMillis());
         getIntegrationResponse(rolledBack)
                 .body("requestParameters.'overwrite:header.x-example'", equalTo("original"));
+    }
+
+    @Test
+    void failedUpdateRemovesTheSubtypeItAdded() {
+        String stackName = "integration-subtype-rollback-stack";
+        stackAction("CreateStack", stackName, awsProxy(template("", "")));
+        CfnStackWaits.awaitStatus(stackName, "CREATE_COMPLETE");
+
+        stackAction("UpdateStack", stackName, awsProxy(template(SUBTYPE, FAILING_RESOURCE)));
+        CfnStackWaits.awaitStatus(stackName, "UPDATE_ROLLBACK_COMPLETE");
+
+        Integration integration = integration(apiGatewayV2Service, stack(cloudFormationService, stackName));
+        assertNull(integration.getIntegrationSubtype());
+        assertNull(integration.getRequestParameters());
     }
 
     @Test
@@ -209,6 +225,10 @@ class CloudFormationApiGatewayV2IntegrationSettingsIntegrationTest {
         String integrationId = stack.getResources().get("Integration").getPhysicalId();
         return given().when().get("/v2/apis/" + apiId + "/integrations/" + integrationId)
                 .then().statusCode(200);
+    }
+
+    private static String awsProxy(String template) {
+        return template.replace("\"IntegrationType\":\"HTTP_PROXY\"", "\"IntegrationType\":\"AWS_PROXY\"");
     }
 
     /**
