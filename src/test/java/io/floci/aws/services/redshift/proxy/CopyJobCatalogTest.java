@@ -79,7 +79,7 @@ class CopyJobCatalogTest {
     void truncateJobs() throws SQLException {
         if (cluster != null) {
             try (Connection connection = open(); Statement statement = connection.createStatement()) {
-                statement.execute("TRUNCATE floci_internal.copy_job");
+                statement.execute("TRUNCATE floci_internal.copy_job CASCADE");
             }
         }
     }
@@ -142,6 +142,64 @@ class CopyJobCatalogTest {
                 assertTrue(error.getSQLState().startsWith("2"), error.getMessage());
                 connection.rollback();
             }
+        }
+    }
+
+    @Test
+    void fileCheckpointsDeduplicateAndRetryOnlyChangedFailedFiles() throws SQLException {
+        try (Connection connection = open(); Statement statement = connection.createStatement()) {
+            statement.execute(CopyJobSql.rewrite(COPY + " JOB CREATE checkpoint_job", false));
+            long jobId;
+            try (ResultSet job = statement.executeQuery("SELECT job_id FROM floci_internal.copy_job WHERE job_name = 'checkpoint_job'")) {
+                assertTrue(job.next());
+                jobId = job.getLong(1);
+            }
+            try (PreparedStatement reserve = connection.prepareStatement(
+                    "SELECT floci_internal.reserve_copy_job_file(?, ?, ?, NULL, 2, CURRENT_TIMESTAMP)");
+                 PreparedStatement failure = connection.prepareStatement(
+                    "SELECT floci_internal.record_copy_job_file_error(?, ?, ?, NULL, 2, CURRENT_TIMESTAMP)")) {
+                reserve.setLong(1, jobId);
+                reserve.setString(2, "loaded.csv");
+                reserve.setString(3, "v1");
+                assertReservation(reserve, true);
+                assertReservation(reserve, false);
+
+                failure.setLong(1, jobId);
+                failure.setString(2, "retry.csv");
+                failure.setString(3, "v1");
+                failure.execute();
+                failure.setString(3, "v2");
+                failure.execute();
+                assertCheckpoint(statement, "retry.csv", "E", "v2");
+
+                reserve.setString(2, "retry.csv");
+                reserve.setString(3, "v2");
+                assertReservation(reserve, false);
+                reserve.setString(3, "v3");
+                assertReservation(reserve, true);
+                assertReservation(reserve, false);
+                failure.setString(3, "v4");
+                failure.execute();
+                assertCheckpoint(statement, "retry.csv", "I", "v3");
+                assertCheckpoint(statement, "loaded.csv", "I", "v1");
+            }
+        }
+    }
+
+    private static void assertReservation(PreparedStatement statement, boolean expected) throws SQLException {
+        try (ResultSet result = statement.executeQuery()) {
+            assertTrue(result.next());
+            assertEquals(expected, result.getBoolean(1));
+        }
+    }
+
+    private static void assertCheckpoint(Statement statement, String key, String status, String etag) throws SQLException {
+        try (ResultSet checkpoint = statement.executeQuery(
+                "SELECT status, etag FROM floci_internal.copy_job_detail WHERE key = '" + key + "'")) {
+            assertTrue(checkpoint.next());
+            assertEquals(status, checkpoint.getString(1).trim());
+            assertEquals(etag, checkpoint.getString(2));
+            assertFalse(checkpoint.next());
         }
     }
 

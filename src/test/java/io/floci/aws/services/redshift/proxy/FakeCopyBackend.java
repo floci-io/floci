@@ -2,14 +2,19 @@ package io.floci.aws.services.redshift.proxy;
 
 import io.floci.aws.core.common.PostgresWire;
 
+import java.io.ByteArrayOutputStream;
 import java.io.OutputStream;
 import java.net.Socket;
+import java.nio.charset.StandardCharsets;
 import java.util.HashMap;
+import java.util.List;
 import java.util.Map;
+import java.util.function.Function;
 
 /** Extended-query backend for COPY tests, including catalog discovery and transaction recovery. */
 final class FakeCopyBackend {
     private final Socket socket;
+    private Function<String, List<List<String>>> rows = sql -> List.of();
 
     FakeCopyBackend(Socket socket) {
         this.socket = socket;
@@ -21,6 +26,12 @@ final class FakeCopyBackend {
 
     void serveUntilSync(boolean failCommit, StatementObserver observer) throws Exception {
         serve(OutputStream.nullOutputStream(), false, failCommit, observer);
+    }
+
+    void serveUntilSync(OutputStream copied, StatementObserver observer,
+                        Function<String, List<List<String>>> rows) throws Exception {
+        this.rows = rows;
+        serve(copied, false, false, observer);
     }
 
     private void serve(OutputStream copied, boolean stopAfterLoad, boolean failCommit,
@@ -69,6 +80,9 @@ final class FakeCopyBackend {
                     } else if (sql.startsWith("COPY ")) {
                         PostgresWire.write(out, 'G', new byte[]{0, 0, 0});
                     } else {
+                        for (List<String> row : rows.apply(sql)) {
+                            PostgresWire.write(out, 'D', dataRow(row));
+                        }
                         if (sql.startsWith("SELECT a.attname")) {
                             PostgresWire.write(out, 'D', new byte[]{0, 3}, PostgresWire.int32(2), new byte[]{'i', 'd'},
                                     PostgresWire.int32(-1), PostgresWire.int32(2), new byte[]{'2', '3'});
@@ -116,5 +130,16 @@ final class FakeCopyBackend {
     @FunctionalInterface
     interface StatementObserver {
         void executed(String sql) throws Exception;
+    }
+
+    private static byte[] dataRow(List<String> row) throws Exception {
+        ByteArrayOutputStream bytes = new ByteArrayOutputStream();
+        bytes.write(new byte[]{(byte) (row.size() >> 8), (byte) row.size()});
+        for (String value : row) {
+            byte[] field = value.getBytes(StandardCharsets.UTF_8);
+            bytes.write(PostgresWire.int32(field.length));
+            bytes.write(field);
+        }
+        return bytes.toByteArray();
     }
 }

@@ -312,6 +312,7 @@ JOB CREATE my_copy_job AUTO ON;
 COPY JOB LIST;
 COPY JOB SHOW my_copy_job;
 COPY JOB ALTER my_copy_job AUTO OFF;
+COPY JOB RUN my_copy_job;
 COPY JOB DROP my_copy_job;
 ```
 
@@ -326,8 +327,24 @@ and see their own rows in `sys_copy_job`; superusers can see all rows.
 COPY options are stored for execution time, including formats the ordinary COPY simulator does not yet
 implement. The COPY JOB restrictions above are checked at creation time.
 
-Jobs only record the COPY for now: nothing loads files automatically, and `COPY JOB RUN` is refused. The
-SQLSTATEs and messages of the refusals are Floci's own, not captured from AWS.
+`COPY JOB RUN` scans the job's S3 prefix and loads files not yet committed by that job, including with
+`AUTO OFF`. An active S3 event integration runs matching `AUTO ON` jobs in provisioned clusters and
+Serverless workgroups. Each object uses the stored COPY options and IAM role, with the same role association,
+trust and S3 authorization checks as an ordinary COPY.
+
+Files older than the job are skipped. Successfully ingested filenames (`status = 'I'`) are loaded once per job,
+even after an overwrite or notification redelivery. A file whose load fails is rolled back to its own savepoint
+and recorded with `status = 'E'` so later files in the same run continue; overwriting a failed file with a new
+ETag or version ID lets a subsequent run retry it. Checkpoints record bucket, key, ETag, version ID, file size,
+modification time, enqueue time and status in `floci_internal.copy_job_detail` and expose them through
+`sys_copy_job_detail`, in the same PostgreSQL transaction as the target rows. They survive Floci restarts with
+the target database. Dropping a job removes its checkpoints.
+
+The background sweep scheduler reconciles on startup and when S3 uploads mark a bucket. If a target is
+temporarily unavailable or a job run fails, the scheduler marks the bucket again for the next sweep. Deleting an
+integration switches its bucket's jobs to `AUTO OFF`, retaining their definitions and checkpoints. Resume a
+paused cluster before deleting its integration.
+The SQLSTATEs and messages of job validation errors are Floci's own, not captured from AWS.
 
 See AWS's [COPY JOB](https://docs.aws.amazon.com/redshift/latest/dg/r_COPY-JOB.html) and
 [auto-copy](https://docs.aws.amazon.com/redshift/latest/dg/loading-data-copy-job.html) references.
@@ -478,9 +495,10 @@ A bucket joins a target once (`IntegrationConflictOperationFault`), and a
 target takes at most 50 S3 event integrations (`IntegrationQuotaExceededFault`). Those two fault names are
 Floci's reading of the AWS API's fault list; their messages are not captured from AWS.
 
-The integration is `active` as soon as it is created, where AWS reports `creating` first. It does not load
-anything yet, and the bucket policy, the namespace resource policy and the existing notifications of the bucket
-are not checked. [COPY JOB](#copy-job) statements work independently of the integration.
+The integration is `active` as soon as it is created, where AWS reports `creating` first. It enables
+automatic ingestion for matching [COPY JOB](#copy-job) definitions. Integration creation does not check
+the bucket notification policy, namespace resource policy or existing bucket notifications. Loading still
+checks the job's IAM role and S3 access. Manual `COPY JOB RUN` works independently of the integration.
 
 ### Resource policies
 

@@ -898,6 +898,7 @@ class RedshiftServiceTest {
     private RedshiftServerlessService zeroEtlServerless;
     private EmulatorConfig config;
     private S3Service zeroEtlS3;
+    private RedshiftS3AutoCopyConsumer autoCopyConsumer;
     private RedshiftService service;
 
     @BeforeEach
@@ -971,10 +972,12 @@ class RedshiftServiceTest {
         zeroEtlServerless = mock(RedshiftServerlessService.class);
         zeroEtlS3 = mock(S3Service.class);
         when(zeroEtlS3.ownsBucket(any())).thenReturn(true);
+        autoCopyConsumer = mock(RedshiftS3AutoCopyConsumer.class);
         service = new RedshiftService(sf, cm, config, regionResolver, proxyManager, dockerHostResolver,
                 credentialBroker, secretsManagerService, mapper,
                 new DynamoDbApiStreamReader(streams, CheckpointLifetime.PROCESS), null, events, integrationEvents,
-                new RedshiftZeroEtlEndpoints(zeroEtlDynamoDb, zeroEtlServerless, zeroEtlS3, regionResolver));
+                new RedshiftZeroEtlEndpoints(zeroEtlDynamoDb, zeroEtlServerless, zeroEtlS3, regionResolver),
+                autoCopyConsumer);
     }
 
     private static final String ORDERS_TABLE_ARN = "arn:aws:dynamodb:us-east-1:111111111111:table/orders";
@@ -1320,6 +1323,25 @@ class RedshiftServiceTest {
 
         verify(integrationBackend).delete("s3-one");
         verify(integrationEvents, never()).queue(any(), any(), any(), any());
+    }
+
+    @Test
+    void deletingAnS3IntegrationDisablesJobsBeforeRemovingItsMetadata() {
+        Integration stored = new Integration();
+        stored.setIntegrationArn("arn:aws:redshift:us-east-1:111111111111:integration:s3-one");
+        stored.setSourceType("s3-event-notifications");
+        when(integrationBackend.keys()).thenReturn(Set.of("s3-one"));
+        when(integrationBackend.get("s3-one")).thenReturn(Optional.of(stored));
+        doThrow(new AwsException("InvalidClusterState", "Paused", 400)).when(autoCopyConsumer).disable(stored);
+
+        assertThrows(AwsException.class, () -> service.deleteIntegration(stored.getIntegrationArn()));
+        verify(integrationBackend, never()).delete(any());
+        clearInvocations(autoCopyConsumer, integrationBackend);
+        doNothing().when(autoCopyConsumer).disable(stored);
+        service.deleteIntegration(stored.getIntegrationArn());
+        InOrder order = inOrder(autoCopyConsumer, integrationBackend);
+        order.verify(autoCopyConsumer).disable(stored);
+        order.verify(integrationBackend).delete("s3-one");
     }
 
     @Test

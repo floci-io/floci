@@ -316,6 +316,9 @@ public class RedshiftInterceptingBridge {
         if (parsed != null) {
             CopyStatementParser.S3Statement statement = parsed;
             boolean intercepted = runWithBackendOwned(() -> switch (statement) {
+                case CopyStatementParser.S3CopyJobRun run -> CopyEtlLoader.runSimple(
+                        client, backend, run, s3Service, iamService, clusterAccountId, iamRoleArns,
+                        coordinator.lastReadyStatus(), status -> coordinator.onBackendFrame('Z', new byte[]{(byte) status}));
                 case CopyStatementParser.S3CopyFrom copy -> S3CopySimulator.runCopyFrom(
                         client, backend, copy, s3Service, iamService, clusterAccountId, iamRoleArns, coordinator.lastReadyStatus(),
                         status -> coordinator.onBackendFrame('Z', new byte[]{(byte) status}));
@@ -394,7 +397,7 @@ public class RedshiftInterceptingBridge {
         coordinator.register(BackendResponseCoordinator.Operation.PARSE, mutation);
 
         String rewritten = parse.sql();
-        if (statement instanceof CopyStatementParser.S3CopyFrom copy) {
+        if (statement instanceof CopyStatementParser.S3CopyFrom || statement instanceof CopyStatementParser.S3CopyJobRun) {
             rewritten = "DO $$BEGIN NULL; END$$";
         } else if (statement instanceof CopyStatementParser.S3Unload unload) {
             rewritten = S3CopySimulator.unloadBackendSql(unload);
@@ -660,7 +663,7 @@ public class RedshiftInterceptingBridge {
     }
 
     private CopyStatementParser.S3Statement parseS3Statement(String sql) {
-        if (CopyJobSql.matches(sql)) {
+        if (CopyJobSql.matches(sql) && CopyJobSql.runName(sql) == null) {
             return null;
         }
         try {

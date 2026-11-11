@@ -97,8 +97,8 @@ class CopyJobSqlTest {
     }
 
     @Test
-    void runIsRefusedUntilItIsSupported() {
-        assertThat(CopyJobSql.rewrite("COPY JOB RUN j", false), containsString("COPY JOB RUN is not supported"));
+    void runIsExecutedByTheS3Interceptor() {
+        assertThat(CopyJobSql.rewrite("COPY JOB RUN j", false), equalTo("COPY JOB RUN j"));
     }
 
     @Test
