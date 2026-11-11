@@ -190,6 +190,94 @@ class ApiGatewayV2SqsSendMessageIntegrationTest {
     }
 
     @Test
+    void createRejectsUnsupportedSourceExpressions() {
+        String queueUrl = "http://localhost/000000000000/expressions";
+        List<Map.Entry<String, Map<String, String>>> rejected = List.of(
+                Map.entry("$5 off", Map.of("QueueUrl", queueUrl, "MessageBody", "$5 off")),
+                Map.entry("$request.heder.x", Map.of("QueueUrl", queueUrl, "MessageBody", "$request.heder.x")),
+                Map.entry("$request.heder.x", Map.of("QueueUrl", queueUrl, "MessageBody", "id ${request.heder.x}")),
+                Map.entry("$request.heder.Authorization", Map.of("QueueUrl", queueUrl,
+                        "MessageBody", "$request.body", "MessageAttributes", ATTRIBUTES.replace("header", "heder"))));
+        try (ApiGatewayV2Client client = apigw()) {
+            String api = client.createApi(b -> b.name("sqs-subtype-expressions").protocolType("HTTP")).apiId();
+            try {
+                for (Map.Entry<String, Map<String, String>> entry : rejected) {
+                    BadRequestException error = assertThrows(BadRequestException.class, () ->
+                            client.createIntegration(b -> b.apiId(api).integrationType("AWS_PROXY")
+                                    .integrationSubtype(SUBTYPE).requestParameters(entry.getValue())));
+                    assertThat(error.getMessage(), containsString(entry.getKey()));
+                }
+                assertThrows(BadRequestException.class, () ->
+                        client.createIntegration(b -> b.apiId(api).integrationType("AWS_PROXY")
+                                .integrationSubtype(SUBTYPE)
+                                .requestParameters(Map.of("QueueUrl", queueUrl, "MessageBody", "$request.body",
+                                        "MessageAttributes", ATTRIBUTES + " {}"))));
+                CreateIntegrationResponse mixed = client.createIntegration(b -> b.apiId(api)
+                        .integrationType("AWS_PROXY").integrationSubtype(SUBTYPE)
+                        .requestParameters(Map.of("QueueUrl", queueUrl,
+                                "MessageBody", "price $5 for ${request.header.X-Item} on ${context.stage}")));
+                assertEquals(SUBTYPE, mixed.integrationSubtype());
+            } finally {
+                client.deleteApi(b -> b.apiId(api));
+            }
+        }
+    }
+
+    @Test
+    void restPathTreatsNullPayloadFormatVersionAsAbsent() {
+        try (ApiGatewayV2Client client = apigw()) {
+            String api = client.createApi(b -> b.name("sqs-subtype-null-version").protocolType("HTTP")).apiId();
+            try {
+                String id = given().contentType(ContentType.JSON)
+                        .body("""
+                                {"integrationType":"AWS_PROXY","integrationSubtype":"SQS-SendMessage",
+                                 "payloadFormatVersion":null,
+                                 "requestParameters":{"QueueUrl":"http://localhost/000000000000/rest",
+                                 "MessageBody":"$request.body"}}
+                                """)
+                        .when().post("/v2/apis/" + api + "/integrations")
+                        .then().statusCode(201)
+                        .body("payloadFormatVersion", equalTo("1.0"))
+                        .extract().path("integrationId");
+                given().contentType(ContentType.JSON)
+                        .body("{\"payloadFormatVersion\":null}")
+                        .when().patch("/v2/apis/" + api + "/integrations/" + id)
+                        .then().statusCode(200)
+                        .body("payloadFormatVersion", equalTo("1.0"));
+            } finally {
+                client.deleteApi(b -> b.apiId(api));
+            }
+        }
+    }
+
+    @Test
+    void importReadsObjectValuedParameterAsJson() throws Exception {
+        String document = """
+                {"openapi": "3.0.1", "info": {"title": "subtype-object-parameter", "version": "1.0"},
+                 "paths": {"/send": {"post": {"x-amazon-apigateway-integration": {
+                   "type": "aws_proxy", "integrationSubtype": "SQS-SendMessage",
+                   "payloadFormatVersion": "1.0", "credentials": "%s",
+                   "requestParameters": {"QueueUrl": "http://localhost/000000000000/q",
+                     "MessageBody": "$request.body",
+                     "MessageAttributes": {"Authorization": {"DataType": "String",
+                       "StringValue": "${request.header.Authorization}"}}}}}}}}
+                """.formatted(ROLE);
+        try (ApiGatewayV2Client client = apigw()) {
+            String api = client.importApi(b -> b.body(document)).apiId();
+            try {
+                String attributes = client.getIntegrations(b -> b.apiId(api)).items().getFirst()
+                        .requestParameters().get("MessageAttributes");
+                assertEquals(mapper.readTree(ATTRIBUTES), mapper.readTree(attributes));
+                assertThrows(BadRequestException.class, () -> client.reimportApi(b -> b.apiId(api)
+                        .body(document.replace("\"MessageAttributes\": {", "\"MessageAttributes\": [{")
+                                .replace("}}}}}}}}", "}}]}}}}}}"))));
+            } finally {
+                client.deleteApi(b -> b.apiId(api));
+            }
+        }
+    }
+
+    @Test
     void updateThatAddsSubtypeDefaultsPayloadFormatVersion() {
         try (ApiGatewayV2Client client = apigw()) {
             String api = client.createApi(b -> b.name("sqs-subtype-add").protocolType("HTTP")).apiId();
