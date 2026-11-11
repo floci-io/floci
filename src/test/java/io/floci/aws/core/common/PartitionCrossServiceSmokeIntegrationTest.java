@@ -55,7 +55,7 @@ class PartitionCrossServiceSmokeIntegrationTest {
             "eventbridge", "eventbridgev2", "firehose", "fis", "glue", "guardduty", "iot", "kinesis", "kinesisanalytics", "lambda",
             "lambdamicrovms", "lambdaweb", "memorydb", "msk", "mwaa", "networkfirewall", "oam", "opensearch", "organizations",
             "paymentcryptography", "pipes", "quicksight", "ram", "rds", "redshift", "redshiftserverless",
-            "resourceexplorer2", "resourcegroups", "route53resolver",
+            "rekognition", "resourceexplorer2", "resourcegroups", "route53resolver",
             "s3tables", "s3vectors", "sagemaker", "scheduler", "secretsmanager", "servicequotas", "ses", "signer", "sns", "sqs",
             "stepfunctions", "timestreaminfluxdb", "transfer", "verifiedpermissions", "wafv2",
             "xray");
@@ -70,6 +70,20 @@ class PartitionCrossServiceSmokeIntegrationTest {
     @BeforeAll
     static void configureRestAssured() {
         RestAssuredJsonUtils.configureAwsContentTypes();
+    }
+
+    @ParameterizedTest
+    @MethodSource(PartitionMatrix.NON_COMMERCIAL_CASES)
+    void rekognitionCollectionArn(PartitionCase partitionCase) {
+        String region = offered(partitionCase, "rekognition");
+        String id = unique("smoke-collection", partitionCase);
+        String body = "{\"CollectionId\":\"" + id + "\"}";
+        String arn = signed(region, "rekognition").contentType(JSON_1_1)
+                .header("X-Amz-Target", "RekognitionService.CreateCollection").body(body)
+                .post("/").then().statusCode(200).extract().path("CollectionArn");
+        cleanup.register(() -> signed(region, "rekognition").contentType(JSON_1_1)
+                .header("X-Amz-Target", "RekognitionService.DeleteCollection").body(body).post("/"));
+        PartitionMatrix.assertArnIn(partitionCase, arn);
     }
 
     @ParameterizedTest

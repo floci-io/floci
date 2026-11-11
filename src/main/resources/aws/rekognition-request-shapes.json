@@ -1,0 +1,253 @@
+{
+  "_source": {
+    "generator": "tools/aws/regen_rekognition_shapes.py",
+    "botocore": "botocore 1.43.118 (installed package)"
+  },
+  "operations": {
+    "CreateCollection": "CreateCollectionRequest",
+    "DeleteCollection": "DeleteCollectionRequest",
+    "DescribeCollection": "DescribeCollectionRequest",
+    "ListCollections": "ListCollectionsRequest",
+    "IndexFaces": "IndexFacesRequest",
+    "ListFaces": "ListFacesRequest",
+    "DeleteFaces": "DeleteFacesRequest",
+    "SearchFaces": "SearchFacesRequest",
+    "SearchFacesByImage": "SearchFacesByImageRequest"
+  },
+  "shapes": {
+    "Attribute": {
+      "type": "string",
+      "enum": [
+        "DEFAULT",
+        "ALL",
+        "AGE_RANGE",
+        "BEARD",
+        "EMOTIONS",
+        "EYE_DIRECTION",
+        "EYEGLASSES",
+        "EYES_OPEN",
+        "GENDER",
+        "MOUTH_OPEN",
+        "MUSTACHE",
+        "FACE_OCCLUDED",
+        "SMILE",
+        "SUNGLASSES"
+      ]
+    },
+    "Attributes": {
+      "type": "list",
+      "member": "Attribute"
+    },
+    "CollectionId": {
+      "type": "string",
+      "min": 1,
+      "max": 255,
+      "pattern": "[a-zA-Z0-9_.\\-]+"
+    },
+    "CreateCollectionRequest": {
+      "type": "structure",
+      "required": [
+        "CollectionId"
+      ],
+      "members": {
+        "CollectionId": "CollectionId",
+        "Tags": "TagMap"
+      }
+    },
+    "DeleteCollectionRequest": {
+      "type": "structure",
+      "required": [
+        "CollectionId"
+      ],
+      "members": {
+        "CollectionId": "CollectionId"
+      }
+    },
+    "DeleteFacesRequest": {
+      "type": "structure",
+      "required": [
+        "CollectionId",
+        "FaceIds"
+      ],
+      "members": {
+        "CollectionId": "CollectionId",
+        "FaceIds": "FaceIdList"
+      }
+    },
+    "DescribeCollectionRequest": {
+      "type": "structure",
+      "required": [
+        "CollectionId"
+      ],
+      "members": {
+        "CollectionId": "CollectionId"
+      }
+    },
+    "ExternalImageId": {
+      "type": "string",
+      "min": 1,
+      "max": 255,
+      "pattern": "[a-zA-Z0-9_.\\-:]+"
+    },
+    "FaceId": {
+      "type": "string",
+      "pattern": "[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}"
+    },
+    "FaceIdList": {
+      "type": "list",
+      "min": 1,
+      "max": 4096,
+      "member": "FaceId"
+    },
+    "Image": {
+      "type": "structure",
+      "members": {
+        "S3Object": "S3Object"
+      }
+    },
+    "IndexFacesRequest": {
+      "type": "structure",
+      "required": [
+        "CollectionId",
+        "Image"
+      ],
+      "members": {
+        "CollectionId": "CollectionId",
+        "Image": "Image",
+        "ExternalImageId": "ExternalImageId",
+        "DetectionAttributes": "Attributes",
+        "MaxFaces": "MaxFacesToIndex",
+        "QualityFilter": "QualityFilter"
+      }
+    },
+    "ListCollectionsRequest": {
+      "type": "structure",
+      "members": {
+        "NextToken": "PaginationToken",
+        "MaxResults": "PageSize"
+      }
+    },
+    "ListFacesRequest": {
+      "type": "structure",
+      "required": [
+        "CollectionId"
+      ],
+      "members": {
+        "CollectionId": "CollectionId",
+        "NextToken": "PaginationToken",
+        "MaxResults": "PageSize",
+        "UserId": "UserId",
+        "FaceIds": "FaceIdList"
+      }
+    },
+    "MaxFaces": {
+      "type": "integer",
+      "min": 1,
+      "max": 4096
+    },
+    "MaxFacesToIndex": {
+      "type": "integer",
+      "min": 1
+    },
+    "PageSize": {
+      "type": "integer",
+      "min": 0,
+      "max": 4096
+    },
+    "PaginationToken": {
+      "type": "string",
+      "max": 255
+    },
+    "Percent": {
+      "type": "float",
+      "min": 0,
+      "max": 100
+    },
+    "QualityFilter": {
+      "type": "string",
+      "enum": [
+        "NONE",
+        "AUTO",
+        "LOW",
+        "MEDIUM",
+        "HIGH"
+      ]
+    },
+    "S3Bucket": {
+      "type": "string",
+      "min": 3,
+      "max": 255,
+      "pattern": "[0-9A-Za-z\\.\\-_]*"
+    },
+    "S3Object": {
+      "type": "structure",
+      "members": {
+        "Bucket": "S3Bucket",
+        "Name": "S3ObjectName",
+        "Version": "S3ObjectVersion"
+      }
+    },
+    "S3ObjectName": {
+      "type": "string",
+      "min": 1,
+      "max": 1024
+    },
+    "S3ObjectVersion": {
+      "type": "string",
+      "min": 1,
+      "max": 1024
+    },
+    "SearchFacesByImageRequest": {
+      "type": "structure",
+      "required": [
+        "CollectionId",
+        "Image"
+      ],
+      "members": {
+        "CollectionId": "CollectionId",
+        "Image": "Image",
+        "MaxFaces": "MaxFaces",
+        "FaceMatchThreshold": "Percent",
+        "QualityFilter": "QualityFilter"
+      }
+    },
+    "SearchFacesRequest": {
+      "type": "structure",
+      "required": [
+        "CollectionId",
+        "FaceId"
+      ],
+      "members": {
+        "CollectionId": "CollectionId",
+        "FaceId": "FaceId",
+        "MaxFaces": "MaxFaces",
+        "FaceMatchThreshold": "Percent"
+      }
+    },
+    "TagKey": {
+      "type": "string",
+      "min": 1,
+      "max": 128,
+      "pattern": "^(?!aws:)[\\p{L}\\p{Z}\\p{N}_.:/=+\\-@]*$"
+    },
+    "TagMap": {
+      "type": "map",
+      "min": 0,
+      "max": 200,
+      "key": "TagKey",
+      "value": "TagValue"
+    },
+    "TagValue": {
+      "type": "string",
+      "min": 0,
+      "max": 256,
+      "pattern": "^([\\p{L}\\p{Z}\\p{N}_.:/=+\\-@]*)$"
+    },
+    "UserId": {
+      "type": "string",
+      "min": 1,
+      "max": 128,
+      "pattern": "[a-zA-Z0-9_.\\-:]+"
+    }
+  }
+}

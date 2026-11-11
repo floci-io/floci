@@ -19,15 +19,17 @@ public class RekognitionJsonHandler {
     private static final Logger LOG = Logger.getLogger(RekognitionJsonHandler.class);
     private final RekognitionService rekognitionService;
     private final RekognitionImageValidator imageValidator;
+    private final RekognitionCollectionService collectionService;
     @Inject
-    public RekognitionJsonHandler(RekognitionService rekognitionService, RekognitionImageValidator imageValidator) {
+    public RekognitionJsonHandler(RekognitionService rekognitionService, RekognitionImageValidator imageValidator,
+                                  RekognitionCollectionService collectionService) {
         this.rekognitionService = rekognitionService;
         this.imageValidator = imageValidator;
+        this.collectionService = collectionService;
     }
     /**
      * Dispatches Rekognition actions received via the AwsJson11Controller.
-     * Only sync image-analysis actions are implemented; face-collection persistence
-     * (CreateCollection/IndexFaces/SearchFaces), custom-model training (Projects/
+     * Sync image-analysis and face collections are implemented; custom-model training (Projects/
      * Datasets/ProjectVersions), live video (StreamProcessor), async video jobs
      * (the Start and Get pairs for Celebrity/Content/Face/Label/Person/Segment/Text
      * detection), and Face Liveness sessions are out of scope.
@@ -35,6 +37,17 @@ public class RekognitionJsonHandler {
     public Response handle(String action, JsonNode request, String region) {
         LOG.debugv("Rekognition action: {0}", action);
         return switch (action) {
+            case "CreateCollection" -> Response.ok(collectionService.createCollection(request, region)).build();
+            case "DeleteCollection" -> Response.ok(collectionService.deleteCollection(request, region)).build();
+            case "DescribeCollection" -> Response.ok(collectionService.describeCollection(request, region)).build();
+            case "ListCollections" -> Response.ok(collectionService.listCollections(request, region)).build();
+            case "IndexFaces" -> Response.ok(collectionService.indexFaces(request, region,
+                    validImage(action, request, region))).build();
+            case "ListFaces" -> Response.ok(collectionService.listFaces(request, region)).build();
+            case "DeleteFaces" -> Response.ok(collectionService.deleteFaces(request, region)).build();
+            case "SearchFaces" -> Response.ok(collectionService.searchFaces(request, region)).build();
+            case "SearchFacesByImage" -> Response.ok(collectionService.searchFacesByImage(request, region,
+                    validImage(action, request, region))).build();
             case "DetectLabels" -> rekognitionService.detectLabels(validImage(action, request, region));
             case "DetectFaces" -> rekognitionService.detectFaces(validImage(action, request, region));
             case "DetectText" -> rekognitionService.detectText(validImage(action, request, region));

@@ -28,6 +28,7 @@ import regen_iam_shapes
 import regen_payment_cryptography_shapes
 import regen_logs_delivery_shapes
 import regen_resource_groups_shapes
+import regen_rekognition_shapes
 import regen_securityhub_shapes
 import regen_sesv2_shapes
 import regen_sts_shapes
@@ -366,6 +367,8 @@ def test_build_constraints_output_is_stable():
     (regen_sts_shapes, "sts/2011-06-15", "sts-request-shapes.json", {}),
     (regen_securityhub_shapes, "securityhub/2018-10-26", "securityhub-request-shapes.json",
      {"prepare": regen_securityhub_shapes.prepare}),
+    (regen_rekognition_shapes, "rekognition/2016-06-27", "rekognition-request-shapes.json",
+     {"prepare": regen_rekognition_shapes.prepare}),
 ])
 def test_each_constraints_script_runs_the_shared_main_with_its_operations(script, model, output, extra,
                                                                          monkeypatch):
@@ -393,6 +396,7 @@ def vendored(script) -> tuple[str, ...]:
     regen_payment_cryptography_shapes,
     regen_resource_groups_shapes, regen_sts_shapes,
     regen_securityhub_shapes,
+    regen_rekognition_shapes,
 ])
 def test_each_vendored_constraints_file_carries_its_operations_and_resolves_its_shapes(script):
     doc = json.loads(script.OUTPUT.read_text(encoding="utf-8"))
@@ -425,6 +429,23 @@ def test_securityhub_shapes_keep_modelled_findings_and_filter_constraints():
     assert shapes["FindingProviderFields"]["members"]["RelatedFindings"] == "RelatedFindingList"
     assert shapes["RelatedFinding"]["required"] == ["ProductArn", "Id"]
     assert "Double" not in shapes
+
+
+def test_rekognition_shapes_keep_constraints_and_leave_image_bytes_to_the_image_validator():
+    doc = json.loads(regen_rekognition_shapes.OUTPUT.read_text(encoding="utf-8"))
+    shapes = doc["shapes"]
+
+    assert shapes["IndexFacesRequest"]["required"] == ["CollectionId", "Image"]
+    assert shapes["PageSize"]["min"] == 0
+    assert shapes["PageSize"]["max"] == 4096
+    assert shapes["Percent"] == {"type": "float", "min": 0, "max": 100}
+    assert shapes["Attributes"]["member"] == "Attribute"
+    assert "FACE_OCCLUDED" in shapes["Attribute"]["enum"]
+    assert shapes["TagKey"]["pattern"].startswith("^(?!aws:)")
+    assert shapes["FaceIdList"]["max"] == 4096
+    assert shapes["MaxFacesToIndex"] == {"type": "integer", "min": 1}
+    assert shapes["Image"]["members"] == {"S3Object": "S3Object"}
+    assert "ImageBlob" not in shapes
 
 
 def test_securityhub_shapes_keep_required_findings_and_resource_strings():
