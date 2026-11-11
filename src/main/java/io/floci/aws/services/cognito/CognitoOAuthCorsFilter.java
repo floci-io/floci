@@ -1,5 +1,6 @@
 package io.floci.aws.services.cognito;
 
+import io.floci.aws.services.s3.S3VirtualHostFilter;
 import jakarta.annotation.Priority;
 import jakarta.ws.rs.HttpMethod;
 import jakarta.ws.rs.Priorities;
@@ -15,7 +16,6 @@ import jakarta.ws.rs.ext.Provider;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
-import java.util.Map;
 import java.util.Set;
 import java.util.stream.Collectors;
 
@@ -24,20 +24,22 @@ import java.util.stream.Collectors;
  * allows any Origin there, with credentials, on success and error alike, and answers the preflight
  * itself; authorize and logout, which a browser navigates to, carry no CORS headers. Runs after
  * {@link CognitoCustomDomainFilter} has rewritten a custom-domain request onto these paths, after
- * {@code S3VirtualHostFilter} has moved a bucket's requests off them, and after an opted-in
- * {@code GlobalCorsFilter}, whose preflight answer keeps its Private Network Access grant; and
- * before matching, so S3's {@code OPTIONS /{bucket}/{key}} route never refuses the preflight.
+ * {@link S3VirtualHostFilter} has marked a bucket host's requests, which keep S3's CORS like any
+ * method Cognito does not serve there; after an opted-in {@code GlobalCorsFilter}, whose preflight
+ * answer keeps its Private Network Access grant; and before matching, so S3's
+ * {@code OPTIONS /{bucket}/{key}} route never refuses the preflight.
  */
 @Provider
 @PreMatching
-@Priority(Priorities.USER + 1) // after S3VirtualHostFilter (USER), which moves a bucket's requests elsewhere
+@Priority(Priorities.USER + 1) // after S3VirtualHostFilter (USER), whose marker leaves a bucket host's requests to S3
 public class CognitoOAuthCorsFilter implements ContainerRequestFilter, ContainerResponseFilter {
 
-    /** The methods Cognito serves on each path; any other method there falls through to S3's object routes. */
-    private static final Map<String, Set<String>> CORS_ROUTES = Map.of(
-            "/cognito-idp/oauth2/token", Set.of(HttpMethod.POST, HttpMethod.OPTIONS),
-            "/cognito-idp/oauth2/revoke", Set.of(HttpMethod.POST, HttpMethod.OPTIONS),
-            "/cognito-idp/oauth2/userInfo", Set.of(HttpMethod.GET, HttpMethod.POST, HttpMethod.OPTIONS));
+    /** The method and path of each request Cognito serves; any other there falls through to S3's object routes. */
+    private static final Set<String> CORS_ROUTES = Set.of(
+            "POST /cognito-idp/oauth2/token",
+            "POST /cognito-idp/oauth2/revoke",
+            "GET /cognito-idp/oauth2/userInfo",
+            "POST /cognito-idp/oauth2/userInfo");
     private static final String REQUEST_METHOD = "Access-Control-Request-Method";
     private static final String REQUEST_HEADERS = "Access-Control-Request-Headers";
     private static final List<Object> VARY = List.of("Origin", REQUEST_METHOD, REQUEST_HEADERS);
@@ -47,14 +49,11 @@ public class CognitoOAuthCorsFilter implements ContainerRequestFilter, Container
         if (!HttpMethod.OPTIONS.equals(request.getMethod()) || corsOrigin(request) == null) {
             return;
         }
-        Response.ResponseBuilder preflight = Response.ok();
-        String method = request.getHeaderString(REQUEST_METHOD);
-        if (method != null) {
-            preflight.header("Access-Control-Allow-Methods", method)
-                    .header("Access-Control-Allow-Headers", requestedHeaders(request))
-                    .header("Access-Control-Max-Age", "1800");
-        }
-        request.abortWith(preflight.build());
+        request.abortWith(Response.ok()
+                .header("Access-Control-Allow-Methods", request.getHeaderString(REQUEST_METHOD))
+                .header("Access-Control-Allow-Headers", requestedHeaders(request))
+                .header("Access-Control-Max-Age", "1800")
+                .build());
     }
 
     @Override
@@ -69,9 +68,15 @@ public class CognitoOAuthCorsFilter implements ContainerRequestFilter, Container
         headers.put("Vary", new ArrayList<>(VARY));
     }
 
+    /** The Origin of a request Cognito serves, or of a preflight for one; null for S3's, which keep S3's CORS. */
     private static String corsOrigin(ContainerRequestContext request) {
-        Set<String> methods = CORS_ROUTES.get(request.getUriInfo().getPath());
-        return methods != null && methods.contains(request.getMethod()) ? request.getHeaderString("Origin") : null;
+        if (request.getProperty(S3VirtualHostFilter.ORIGINAL_REQUEST_URI_PROPERTY) != null) {
+            return null;
+        }
+        String method = HttpMethod.OPTIONS.equals(request.getMethod())
+                ? request.getHeaderString(REQUEST_METHOD)
+                : request.getMethod();
+        return CORS_ROUTES.contains(method + " " + request.getUriInfo().getPath()) ? request.getHeaderString("Origin") : null;
     }
 
     /** The requested headers as AWS echoes them, trimmed and comma-separated, or null, which leaves the header out. */

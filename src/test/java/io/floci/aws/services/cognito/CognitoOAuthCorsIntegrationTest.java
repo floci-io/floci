@@ -10,6 +10,7 @@ import org.junit.jupiter.api.Order;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.TestMethodOrder;
 import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.CsvSource;
 import org.junit.jupiter.params.provider.ValueSource;
 
 import java.util.List;
@@ -28,7 +29,7 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 /**
  * AWS answers CORS on the token, revoke and userInfo endpoints for any Origin, with credentials,
  * on success and error alike, so a browser app can call them with fetch. A preflight there must
- * not reach S3's OPTIONS route, which refuses it, while the same path on an S3 virtual host stays a bucket's key.
+ * not reach S3's OPTIONS route, which refuses it, while S3's own requests, on a bucket host or for a method Cognito does not serve, keep S3's CORS.
  */
 @QuarkusTest
 @TestMethodOrder(MethodOrderer.OrderAnnotation.class)
@@ -151,15 +152,19 @@ class CognitoOAuthCorsIntegrationTest {
                 .header("Access-Control-Allow-Credentials", "true");
     }
 
-    @Test
+    @ParameterizedTest
+    @CsvSource({
+            "cors-bucket.s3.localhost.floci.io, /cognito-idp/oauth2/token, POST",
+            "cognito-idp.s3.localhost.floci.io, /oauth2/token, POST",
+            "localhost, /cognito-idp/oauth2/token, PUT"})
     @Order(8)
-    void s3VirtualHostPreflightIsLeftToS3() {
+    void s3PreflightIsLeftToS3(String host, String path, String method) {
         given()
-                .header("Host", "cors-bucket.s3.localhost.floci.io")
+                .header("Host", host)
                 .header("Origin", ORIGIN)
-                .header("Access-Control-Request-Method", "POST")
+                .header("Access-Control-Request-Method", method)
         .when()
-                .options("/cognito-idp/oauth2/token")
+                .options(path)
         .then()
                 .statusCode(403)
                 .header("Access-Control-Allow-Origin", nullValue());
