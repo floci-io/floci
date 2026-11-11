@@ -1,6 +1,7 @@
 package io.floci.aws.services.apigatewayv2.proxy;
 
 import com.fasterxml.jackson.core.JsonProcessingException;
+import com.fasterxml.jackson.databind.DeserializationFeature;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ArrayNode;
@@ -37,7 +38,8 @@ public class AwsServiceIntegrationMapper {
     private static final String BODY = "$request.body";
     private static final String STAGE_VARIABLES = "$stageVariables.";
     private static final String CONTEXT = "$context.";
-    private static final ObjectMapper TEMPLATE_READER = new ObjectMapper();
+    private static final ObjectMapper TEMPLATE_READER = new ObjectMapper()
+            .enable(DeserializationFeature.FAIL_ON_TRAILING_TOKENS);
 
     private final ObjectMapper objectMapper;
     private final Configuration jsonPathConfiguration;
@@ -223,14 +225,9 @@ public class AwsServiceIntegrationMapper {
         }
     }
 
-    private JsonNode jsonObject(String name, String value) {
-        JsonNode node;
-        try {
-            node = objectMapper.readTree(value);
-        } catch (JsonProcessingException e) {
-            node = null;
-        }
-        if (node == null || !node.isObject()) {
+    private static JsonNode jsonObject(String name, String value) {
+        JsonNode node = jsonTemplate(value);
+        if (node == null) {
             throw new AwsException("InvalidParameterValue",
                     "Value for parameter " + name + " is invalid. Reason: Must be a JSON object.", 400);
         }
