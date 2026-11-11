@@ -1,5 +1,7 @@
 package io.floci.aws.services.apigatewayv2;
 
+import com.fasterxml.jackson.core.JsonProcessingException;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import io.floci.aws.core.common.AwsException;
 import io.floci.aws.services.apigatewayv2.model.Api;
 import io.floci.aws.services.apigatewayv2.model.Authorizer;
@@ -19,6 +21,7 @@ import jakarta.inject.Inject;
 import org.jboss.logging.Logger;
 
 import java.util.ArrayList;
+import java.util.Collection;
 import java.util.HashMap;
 import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
@@ -42,6 +45,7 @@ import java.util.stream.Collectors;
 public class ApiGatewayV2OpenApiImporter {
 
     private static final Logger LOG = Logger.getLogger(ApiGatewayV2OpenApiImporter.class);
+    private static final ObjectMapper MAP_VALUE_WRITER = new ObjectMapper();
 
     private static final String EXT_INTEGRATION = "x-amazon-apigateway-integration";
     private static final String EXT_AUTHORIZER = "x-amazon-apigateway-authorizer";
@@ -766,8 +770,19 @@ public class ApiGatewayV2OpenApiImporter {
             return;
         }
         Map<String, String> copy = new LinkedHashMap<>();
-        map.forEach((k, v) -> copy.put(String.valueOf(k), v == null ? null : String.valueOf(v)));
+        map.forEach((k, v) -> copy.put(String.valueOf(k), mapValue(v)));
         target.put(key, copy);
+    }
+
+    private static String mapValue(Object value) {
+        if (!(value instanceof Map<?, ?>) && !(value instanceof Collection<?>)) {
+            return value == null ? null : String.valueOf(value);
+        }
+        try {
+            return MAP_VALUE_WRITER.writeValueAsString(value);
+        } catch (JsonProcessingException e) {
+            return String.valueOf(value);
+        }
     }
 
     private static void copyStringList(Map<String, Object> source, Map<String, Object> target, String key) {
