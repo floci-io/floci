@@ -1862,6 +1862,33 @@ class ResourceArnBuilderTest {
     }
 
     @Test
+    void ssmTaggingActsOnTheParameterItsResourceIdNames() {
+        for (String operation : List.of("AddTagsToResource", "ListTagsForResource", "RemoveTagsFromResource")) {
+            when(ctx.getHeaderString("X-Amz-Target")).thenReturn("AmazonSSM." + operation);
+            setJsonBody("{\"ResourceType\":\"Parameter\",\"ResourceId\":\"/secret\",\"Name\":\"/allowed\"}");
+            assertEquals(List.of("arn:aws:ssm:us-east-1:000000000000:parameter/secret"),
+                    builder.buildResources("ssm", ctx, "us-east-1", "000000000000"));
+
+            setJsonBody("{\"ResourceType\":\"Parameter\",\"ResourceId\":\"plain-key\"}");
+            assertEquals(List.of("arn:aws:ssm:us-east-1:000000000000:parameter/plain-key"),
+                    builder.buildResources("ssm", ctx, "us-east-1", "000000000000"));
+
+            setJsonBody("{\"ResourceType\":\"Parameter\","
+                    + "\"ResourceId\":\"arn:aws:ssm:us-east-1:111122223333:parameter/shared/b\"}");
+            assertEquals(List.of("arn:aws:ssm:us-east-1:111122223333:parameter/shared/b"),
+                    builder.buildResources("ssm", ctx, "us-east-1", "000000000000"));
+
+            setJsonBody("{\"ResourceType\":\"Document\",\"ResourceId\":\"/secret\",\"Name\":\"/allowed\"}");
+            assertEquals(List.of("arn:aws:ssm:us-east-1:000000000000:parameter/secret"),
+                    builder.buildResources("ssm", ctx, "us-east-1", "000000000000"));
+
+            setJsonBody("{\"ResourceType\":\"Parameter\",\"Name\":\"/allowed\"}");
+            assertEquals(List.of("arn:aws:ssm:us-east-1:000000000000:parameter/"),
+                    builder.buildResources("ssm", ctx, "us-east-1", "000000000000"));
+        }
+    }
+
+    @Test
     void ssmReadsActOnTheParameterAVersionOrLabelSelectorPicksFrom() {
         when(ctx.getHeaderString("X-Amz-Target")).thenReturn("AmazonSSM.GetParameter");
         setJsonBody("{\"Name\":\"/app/db:3\"}");
