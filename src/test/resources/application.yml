@@ -38,6 +38,7 @@ floci:
       lambda:
         flush-interval-ms: 60000
       cloudwatchlogs:
+        # Includes saved Logs Insights query definitions.
         flush-interval-ms: 60000
       cloudwatchmetrics:
         flush-interval-ms: 60000

@@ -50,6 +50,9 @@ Floci supports both CloudWatch Logs and CloudWatch Metrics.
 | `StartQuery` | Start a Logs Insights query (see [Logs Insights](#logs-insights)) |
 | `GetQueryResults` | Get the status and results of a Logs Insights query |
 | `StopQuery` | Stop a query that has not completed yet |
+| `PutQueryDefinition` | Create or replace a saved Logs Insights query definition |
+| `DescribeQueryDefinitions` | List saved queries, with name prefix and query language filters and pagination |
+| `DeleteQueryDefinition` | Delete a saved query definition by ID |
 | `PutDeliverySource` | Create or replace a vended-log delivery source (see [Vended log delivery](#vended-log-delivery)) |
 | `GetDeliverySource` | Return a delivery source |
 | `DeleteDeliverySource` | Delete a delivery source no delivery uses |
@@ -89,6 +92,25 @@ metric filters and subscription filters use: terms, quoted phrases, `?` alternat
 exclusions, JSON and space-delimited patterns. An invalid pattern is refused with
 `InvalidParameterException`, and so is a request that names no log group by `logGroupName` or
 `logGroupIdentifier`.
+
+### Saved query definitions
+
+`PutQueryDefinition`, `DescribeQueryDefinitions`, and `DeleteQueryDefinition` store and manage
+saved Logs Insights queries, including the metadata used by Terraform's
+`aws_cloudwatch_query_definition`. Definitions are isolated by account and region and use the
+configured CloudWatch Logs storage mode, including persistence across restarts.
+
+Create a definition with `name` and `queryString`; pass its returned `queryDefinitionId` to
+update it. Updates replace the definition, so omitting `logGroupNames` or `parameters` clears
+those lists. `queryLanguage` defaults to `CWLI`; `SQL` and `PPL` are also stored as metadata.
+Query parameters are supported for `CWLI` definitions. Saving a definition does not execute or
+validate its query syntax, and does not extend the query execution subset described below.
+Log group names can be saved before their groups exist.
+
+`DescribeQueryDefinitions` accepts `queryDefinitionNamePrefix`, `queryLanguage`, and
+`maxResults` from 1 to 1000. Pass the returned `nextToken` with the same account, region, and
+filters for the next page; the final page omits it. Tokens expire after 24 hours or an emulator
+restart. Updating or deleting an unknown definition returns `ResourceNotFoundException`.
 
 ### Vended log delivery {#vended-log-delivery}
 

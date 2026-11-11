@@ -468,6 +468,7 @@ public interface EmulatorConfig {
     }
 
     interface CloudWatchLogsStorageConfig {
+        // Saved query definitions share the Logs storage mode and flush interval.
         Optional<String> mode();
 
         // Log events are the largest and most write-heavy store, so they flush less often than the rest.
