@@ -367,8 +367,7 @@ public class SqsJsonHandler {
         ArrayNode failed = objectMapper.createArrayNode();
 
         record ParsedEntry(String id, String body, Integer delay, String groupId, String dedupId,
-                           Map<String, MessageAttributeValue> attributes, String awsTraceHeader,
-                           AwsException attributeError) {}
+                           Map<String, MessageAttributeValue> attributes, String awsTraceHeader) {}
 
         List<ParsedEntry> parsedEntries = new ArrayList<>();
         int totalSize = 0;
@@ -381,26 +380,24 @@ public class SqsJsonHandler {
             String messageDeduplicationId = entry.path("MessageDeduplicationId").asText(null);
 
             Map<String, MessageAttributeValue> messageAttributes = new HashMap<>();
-            AwsException attributeError = null;
             JsonNode attrsNode = entry.path("MessageAttributes");
             if (attrsNode.isObject()) {
                 try {
                     attrsNode.fields().forEachRemaining(attrEntry -> messageAttributes.put(attrEntry.getKey(),
                             messageAttribute(attrEntry.getKey(), attrEntry.getValue())));
                 } catch (AwsException e) {
-                    attributeError = e;
+                    failed.add(batchFailure(id, e));
+                    continue;
                 }
             }
 
             String entryAwsTraceHeader = entry.path("MessageSystemAttributes")
                     .path("AWSTraceHeader").path("StringValue").asText(null);
 
-            if (attributeError == null) {
-                totalSize += SqsService.computeMessageSize(messageBody, messageAttributes);
-            }
+            totalSize += SqsService.computeMessageSize(messageBody, messageAttributes);
             parsedEntries.add(new ParsedEntry(id, messageBody, delaySeconds,
                     messageGroupId, messageDeduplicationId, messageAttributes,
-                    entryAwsTraceHeader, attributeError));
+                    entryAwsTraceHeader));
         }
 
         sqsService.validateBatchPayloadSize(queueUrl, region, totalSize);
@@ -409,9 +406,6 @@ public class SqsJsonHandler {
         for (ParsedEntry parsed : parsedEntries) {
             String id = parsed.id();
             try {
-                if (parsed.attributeError() != null) {
-                    throw parsed.attributeError();
-                }
                 Message msg = sqsService.sendMessage(queueUrl, parsed.body(), parsed.delay(),
                         parsed.groupId(), parsed.dedupId(), parsed.attributes(),
                         parsed.awsTraceHeader(), senderId, region);
@@ -427,12 +421,7 @@ public class SqsJsonHandler {
                 }
                 successful.add(success);
             } catch (AwsException e) {
-                ObjectNode fail = objectMapper.createObjectNode();
-                fail.put("Id", id);
-                fail.put("Code", e.getErrorCode());
-                fail.put("Message", e.getMessage());
-                fail.put("SenderFault", true);
-                failed.add(fail);
+                failed.add(batchFailure(id, e));
             }
         }
 
@@ -442,6 +431,15 @@ public class SqsJsonHandler {
             response.set("Failed", failed);
         }
         return Response.ok(response).build();
+    }
+
+    private ObjectNode batchFailure(String id, AwsException e) {
+        ObjectNode fail = objectMapper.createObjectNode();
+        fail.put("Id", id);
+        fail.put("Code", e.getErrorCode());
+        fail.put("Message", e.getMessage());
+        fail.put("SenderFault", true);
+        return fail;
     }
 
     private Response handleListDeadLetterSourceQueues(JsonNode request, String region) {

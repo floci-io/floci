@@ -227,16 +227,7 @@ public class SqsQueryHandler {
         String messageGroupId = getParam(params, "MessageGroupId");
         String messageDeduplicationId = getParam(params, "MessageDeduplicationId");
 
-        Map<String, MessageAttributeValue> messageAttributes = new HashMap<>();
-        for (int i = 1; ; i++) {
-            String name = getParam(params, "MessageAttribute." + i + ".Name");
-            if (name == null) break;
-            String dataType = getParam(params, "MessageAttribute." + i + ".Value.DataType");
-            String stringValue = getParam(params, "MessageAttribute." + i + ".Value.StringValue");
-            String binaryValueBase64 = getParam(params, "MessageAttribute." + i + ".Value.BinaryValue");
-            messageAttributes.put(name, SqsService.messageAttributeValue(name, dataType, stringValue,
-                    binaryValueBase64));
-        }
+        Map<String, MessageAttributeValue> messageAttributes = messageAttributes(params, "");
 
         // The AWS SDK only allows AWSTraceHeader to be set via MessageSystemAttributes;
         // capture it (if present) so ReceiveMessage can return it as a system attribute.
@@ -364,8 +355,7 @@ public class SqsQueryHandler {
         XmlBuilder xml = new XmlBuilder();
 
         record ParsedEntry(String id, String body, Integer delay, String groupId, String dedupId,
-                           Map<String, MessageAttributeValue> attributes, String awsTraceHeader,
-                           AwsException attributeError) {}
+                           Map<String, MessageAttributeValue> attributes, String awsTraceHeader) {}
 
         List<ParsedEntry> parsedEntries = new ArrayList<>();
         int totalSize = 0;
@@ -377,21 +367,12 @@ public class SqsQueryHandler {
             String messageGroupId = getParam(params, "SendMessageBatchRequestEntry." + i + ".MessageGroupId");
             String messageDeduplicationId = getParam(params, "SendMessageBatchRequestEntry." + i + ".MessageDeduplicationId");
 
-            Map<String, MessageAttributeValue> messageAttributes = new HashMap<>();
-            AwsException attributeError = null;
-            for (int j = 1; ; j++) {
-                String name = getParam(params, "SendMessageBatchRequestEntry." + i + ".MessageAttribute." + j + ".Name");
-                if (name == null) break;
-                String dataType = getParam(params, "SendMessageBatchRequestEntry." + i + ".MessageAttribute." + j + ".Value.DataType");
-                String stringValue = getParam(params, "SendMessageBatchRequestEntry." + i + ".MessageAttribute." + j + ".Value.StringValue");
-                String binaryValueBase64 = getParam(params, "SendMessageBatchRequestEntry." + i + ".MessageAttribute." + j + ".Value.BinaryValue");
-                try {
-                    messageAttributes.put(name, SqsService.messageAttributeValue(name, dataType, stringValue,
-                            binaryValueBase64));
-                } catch (AwsException e) {
-                    attributeError = e;
-                    break;
-                }
+            Map<String, MessageAttributeValue> messageAttributes;
+            try {
+                messageAttributes = messageAttributes(params, "SendMessageBatchRequestEntry." + i + ".");
+            } catch (AwsException e) {
+                writeBatchFailure(xml, id, e);
+                continue;
             }
 
             String entryAwsTraceHeader = null;
@@ -405,11 +386,9 @@ public class SqsQueryHandler {
                 }
             }
 
-            if (attributeError == null) {
-                totalSize += SqsService.computeMessageSize(body, messageAttributes);
-            }
+            totalSize += SqsService.computeMessageSize(body, messageAttributes);
             parsedEntries.add(new ParsedEntry(id, body, delaySeconds, messageGroupId,
-                    messageDeduplicationId, messageAttributes, entryAwsTraceHeader, attributeError));
+                    messageDeduplicationId, messageAttributes, entryAwsTraceHeader));
         }
 
         sqsService.validateBatchPayloadSize(queueUrl, region, totalSize);
@@ -418,9 +397,6 @@ public class SqsQueryHandler {
         for (ParsedEntry parsed : parsedEntries) {
             String id = parsed.id();
             try {
-                if (parsed.attributeError() != null) {
-                    throw parsed.attributeError();
-                }
                 Message msg = sqsService.sendMessage(queueUrl, parsed.body(), parsed.delay(),
                         parsed.groupId(), parsed.dedupId(), parsed.attributes(),
                         parsed.awsTraceHeader(), senderId, region);
@@ -436,16 +412,37 @@ public class SqsQueryHandler {
                 }
                 xml.end("SendMessageBatchResultEntry");
             } catch (AwsException e) {
-                xml.start("BatchResultErrorEntry")
-                   .elem("Id", id)
-                   .elem("Code", e.getErrorCode())
-                   .elem("Message", e.getMessage())
-                   .elem("SenderFault", "true")
-                   .end("BatchResultErrorEntry");
+                writeBatchFailure(xml, id, e);
             }
         }
 
         return Response.ok(AwsQueryResponse.envelope("SendMessageBatch", null, xml.build())).build();
+    }
+
+    private Map<String, MessageAttributeValue> messageAttributes(MultivaluedMap<String, String> params,
+                                                                 String prefix) {
+        Map<String, MessageAttributeValue> messageAttributes = new HashMap<>();
+        for (int i = 1; ; i++) {
+            String attributePrefix = prefix + "MessageAttribute." + i;
+            String name = getParam(params, attributePrefix + ".Name");
+            if (name == null) {
+                break;
+            }
+            messageAttributes.put(name, SqsService.messageAttributeValue(name,
+                    getParam(params, attributePrefix + ".Value.DataType"),
+                    getParam(params, attributePrefix + ".Value.StringValue"),
+                    getParam(params, attributePrefix + ".Value.BinaryValue")));
+        }
+        return messageAttributes;
+    }
+
+    private static void writeBatchFailure(XmlBuilder xml, String id, AwsException e) {
+        xml.start("BatchResultErrorEntry")
+           .elem("Id", id)
+           .elem("Code", e.getErrorCode())
+           .elem("Message", e.getMessage())
+           .elem("SenderFault", "true")
+           .end("BatchResultErrorEntry");
     }
 
     private Response handleListDeadLetterSourceQueues(MultivaluedMap<String, String> params, String region) {
