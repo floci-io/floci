@@ -1903,6 +1903,34 @@ class SsmIntegrationTest {
             .body("Parameters", hasSize(0));
     }
 
+    @Test
+    void putParameterRejectsANameOutsideTheParameterNameSyntaxAndStoresNothing() {
+        for (String name : List.of("/name-syntax/db:secret", "/name-syntax/db ")) {
+            given()
+                .header("X-Amz-Target", "AmazonSSM.PutParameter")
+                .contentType(SSM_CONTENT_TYPE)
+                .body("{ \"Name\": \"" + name + "\", \"Value\": \"v\", \"Type\": \"String\" }")
+            .when()
+                .post("/")
+            .then()
+                .statusCode(400)
+                .body("__type", equalTo("ValidationException"))
+                .body("message", equalTo("Parameter name: can't be prefixed with \"aws\" or \"ssm\" "
+                        + "(case-insensitive). If formed as a path, it can consist of sub-paths divided by slash "
+                        + "symbol; each sub-path can be formed as a mix of letters, numbers and the following 3 "
+                        + "symbols .-_"));
+            given()
+                .header("X-Amz-Target", "AmazonSSM.GetParameter")
+                .contentType(SSM_CONTENT_TYPE)
+                .body("{ \"Name\": \"" + name + "\" }")
+            .when()
+                .post("/")
+            .then()
+                .statusCode(400)
+                .body("__type", equalTo("ParameterNotFound"));
+        }
+    }
+
     private void putIntelligentTiering(String name, String jsonEscapedValue) {
         given()
             .header("X-Amz-Target", "AmazonSSM.PutParameter")
