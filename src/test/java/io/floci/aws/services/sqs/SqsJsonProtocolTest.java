@@ -1090,8 +1090,7 @@ class SqsJsonProtocolTest {
         String attributeQueueUrl = given()
             .contentType(CONTENT_TYPE)
             .header("X-Amz-Target", "AmazonSQS.CreateQueue")
-            .body("{\"QueueName\":\"json-attribute-value-queue\","
-                    + "\"Attributes\":{\"MaximumMessageSize\":\"1024\"}}")
+            .body("{\"QueueName\":\"json-attribute-value-queue\"}")
         .when().post("/").then().statusCode(200)
             .extract().jsonPath().getString("QueueUrl");
 
@@ -1166,7 +1165,7 @@ class SqsJsonProtocolTest {
                 .body("{\"QueueUrl\":\"" + attributeQueueUrl + "\",\"Entries\":["
                         + "{\"Id\":\"ok\",\"MessageBody\":\"x\",\"MessageAttributes\":"
                         + "{\"bin\":{\"DataType\":\"Binary\",\"BinaryValue\":\"AQID\"}}},"
-                        + "{\"Id\":\"empty\",\"MessageBody\":\"" + "x".repeat(1024) + "\",\"MessageAttributes\":"
+                        + "{\"Id\":\"empty\",\"MessageBody\":\"x\",\"MessageAttributes\":"
                         + "{\"a\":{\"DataType\":\"Number\",\"StringValue\":\"\"}}},"
                         + "{\"Id\":\"bad-binary\",\"MessageBody\":\"x\",\"MessageAttributes\":"
                         + "{\"b\":{\"DataType\":\"Binary\",\"BinaryValue\":\"not base64!\"}}},"
@@ -1179,6 +1178,19 @@ class SqsJsonProtocolTest {
                 .body("Failed.SenderFault", everyItem(equalTo(true)))
                 .body("Failed[0].Message", equalTo(
                         "Message (user) attribute 'a' must contain a non-empty value of type 'Number'."));
+
+            String bigBody = "x".repeat(400_000);
+            given()
+                .contentType(CONTENT_TYPE)
+                .header("X-Amz-Target", "AmazonSQS.SendMessageBatch")
+                .body("{\"QueueUrl\":\"" + attributeQueueUrl + "\",\"Entries\":["
+                        + "{\"Id\":\"a\",\"MessageBody\":\"" + bigBody + "\"},"
+                        + "{\"Id\":\"b\",\"MessageBody\":\"" + bigBody + "\"},"
+                        + "{\"Id\":\"c\",\"MessageBody\":\"" + bigBody + "\",\"MessageAttributes\":"
+                        + "{\"a\":{\"DataType\":\"String\",\"StringValue\":\"\"}}}]}")
+            .when().post("/").then()
+                .statusCode(400)
+                .body("__type", equalTo("BatchRequestTooLong"));
 
             assertMessageCounts(attributeQueueUrl, "2", "0");
         } finally {

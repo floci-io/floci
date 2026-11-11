@@ -1082,8 +1082,6 @@ class SqsIntegrationTest {
             .contentType("application/x-www-form-urlencoded")
             .formParam("Action", "CreateQueue")
             .formParam("QueueName", "query-attribute-value-queue")
-            .formParam("Attribute.1.Name", "MaximumMessageSize")
-            .formParam("Attribute.1.Value", "1024")
         .when().post("/").then().statusCode(200)
             .extract().xmlPath().getString("CreateQueueResponse.CreateQueueResult.QueueUrl");
 
@@ -1166,7 +1164,7 @@ class SqsIntegrationTest {
                 .formParam("SendMessageBatchRequestEntry.1.MessageAttribute.1.Value.DataType", "Binary")
                 .formParam("SendMessageBatchRequestEntry.1.MessageAttribute.1.Value.BinaryValue", "AQID")
                 .formParam("SendMessageBatchRequestEntry.2.Id", "empty")
-                .formParam("SendMessageBatchRequestEntry.2.MessageBody", "x".repeat(1024))
+                .formParam("SendMessageBatchRequestEntry.2.MessageBody", "x")
                 .formParam("SendMessageBatchRequestEntry.2.MessageAttribute.1.Name", "a")
                 .formParam("SendMessageBatchRequestEntry.2.MessageAttribute.1.Value.DataType", "Number")
                 .formParam("SendMessageBatchRequestEntry.2.MessageAttribute.1.Value.StringValue", "")
@@ -1184,6 +1182,24 @@ class SqsIntegrationTest {
                         everyItem(equalTo("InvalidParameterValue")))
                 .body("SendMessageBatchResponse.SendMessageBatchResult.BatchResultErrorEntry.SenderFault",
                         everyItem(equalTo("true")));
+
+            String bigBody = "x".repeat(400_000);
+            given()
+                .contentType("application/x-www-form-urlencoded")
+                .formParam("Action", "SendMessageBatch")
+                .formParam("QueueUrl", attributeQueueUrl)
+                .formParam("SendMessageBatchRequestEntry.1.Id", "a")
+                .formParam("SendMessageBatchRequestEntry.1.MessageBody", bigBody)
+                .formParam("SendMessageBatchRequestEntry.2.Id", "b")
+                .formParam("SendMessageBatchRequestEntry.2.MessageBody", bigBody)
+                .formParam("SendMessageBatchRequestEntry.3.Id", "c")
+                .formParam("SendMessageBatchRequestEntry.3.MessageBody", bigBody)
+                .formParam("SendMessageBatchRequestEntry.3.MessageAttribute.1.Name", "a")
+                .formParam("SendMessageBatchRequestEntry.3.MessageAttribute.1.Value.DataType", "String")
+                .formParam("SendMessageBatchRequestEntry.3.MessageAttribute.1.Value.StringValue", "")
+            .when().post("/").then()
+                .statusCode(400)
+                .body("ErrorResponse.Error.Code", equalTo("BatchRequestTooLong"));
 
             assertEquals("1", allQueueAttributes(attributeQueueUrl).get("ApproximateNumberOfMessages"));
         } finally {

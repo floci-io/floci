@@ -17,6 +17,7 @@ import jakarta.ws.rs.core.Response;
 import java.util.ArrayList;
 import java.util.Base64;
 import java.util.HashMap;
+import java.util.Iterator;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
@@ -202,6 +203,21 @@ public class SqsJsonHandler {
                 attribute.path("StringValue").asText(null), attribute.path("BinaryValue").asText(null));
     }
 
+    private static int messageAttributesSize(JsonNode attrsNode) {
+        int size = 0;
+        if (!attrsNode.isObject()) {
+            return size;
+        }
+        Iterator<Map.Entry<String, JsonNode>> attributes = attrsNode.fields();
+        while (attributes.hasNext()) {
+            Map.Entry<String, JsonNode> attribute = attributes.next();
+            JsonNode value = attribute.getValue();
+            size += SqsService.messageAttributeSize(attribute.getKey(), value.path("DataType").asText(null),
+                    value.path("StringValue").asText(null), value.path("BinaryValue").asText(null));
+        }
+        return size;
+    }
+
     private Response handleSendMessage(JsonNode request, String region) {
         String queueUrl = request.path("QueueUrl").asText(null);
         String messageBody = request.path("MessageBody").asText(null);
@@ -379,8 +395,10 @@ public class SqsJsonHandler {
             String messageGroupId = entry.path("MessageGroupId").asText(null);
             String messageDeduplicationId = entry.path("MessageDeduplicationId").asText(null);
 
-            Map<String, MessageAttributeValue> messageAttributes = new HashMap<>();
             JsonNode attrsNode = entry.path("MessageAttributes");
+            totalSize += SqsService.computeMessageSize(messageBody, null) + messageAttributesSize(attrsNode);
+
+            Map<String, MessageAttributeValue> messageAttributes = new HashMap<>();
             if (attrsNode.isObject()) {
                 try {
                     attrsNode.fields().forEachRemaining(attrEntry -> messageAttributes.put(attrEntry.getKey(),
@@ -394,7 +412,6 @@ public class SqsJsonHandler {
             String entryAwsTraceHeader = entry.path("MessageSystemAttributes")
                     .path("AWSTraceHeader").path("StringValue").asText(null);
 
-            totalSize += SqsService.computeMessageSize(messageBody, messageAttributes);
             parsedEntries.add(new ParsedEntry(id, messageBody, delaySeconds,
                     messageGroupId, messageDeduplicationId, messageAttributes,
                     entryAwsTraceHeader));

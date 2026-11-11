@@ -1408,6 +1408,29 @@ public class SqsService implements Resettable, ResourceProvider {
     }
 
     /**
+     * Wire-level size, in bytes, of one message (user) attribute as sent, whether or not it is valid: name UTF-8 +
+     * type UTF-8 + value bytes. A BinaryValue counts its decoded length, or its UTF-8 length when it is not base64.
+     */
+    public static int messageAttributeSize(String name, String dataType, String stringValue,
+                                           String binaryValueBase64) {
+        int total = name.getBytes(StandardCharsets.UTF_8).length;
+        if (dataType != null) {
+            total += dataType.getBytes(StandardCharsets.UTF_8).length;
+        }
+        if (binaryValueBase64 != null) {
+            try {
+                return total + Base64.getDecoder().decode(binaryValueBase64).length;
+            } catch (IllegalArgumentException e) {
+                return total + binaryValueBase64.getBytes(StandardCharsets.UTF_8).length;
+            }
+        }
+        if (stringValue != null) {
+            total += stringValue.getBytes(StandardCharsets.UTF_8).length;
+        }
+        return total;
+    }
+
+    /**
      * Total wire-level message size, in bytes, matching AWS SQS accounting:
      * UTF-8 body bytes + per-attribute (name UTF-8 + type UTF-8 + value bytes).
      */

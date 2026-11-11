@@ -367,9 +367,12 @@ public class SqsQueryHandler {
             String messageGroupId = getParam(params, "SendMessageBatchRequestEntry." + i + ".MessageGroupId");
             String messageDeduplicationId = getParam(params, "SendMessageBatchRequestEntry." + i + ".MessageDeduplicationId");
 
+            String entryPrefix = "SendMessageBatchRequestEntry." + i + ".";
+            totalSize += SqsService.computeMessageSize(body, null) + messageAttributesSize(params, entryPrefix);
+
             Map<String, MessageAttributeValue> messageAttributes;
             try {
-                messageAttributes = messageAttributes(params, "SendMessageBatchRequestEntry." + i + ".");
+                messageAttributes = messageAttributes(params, entryPrefix);
             } catch (AwsException e) {
                 writeBatchFailure(xml, id, e);
                 continue;
@@ -386,7 +389,6 @@ public class SqsQueryHandler {
                 }
             }
 
-            totalSize += SqsService.computeMessageSize(body, messageAttributes);
             parsedEntries.add(new ParsedEntry(id, body, delaySeconds, messageGroupId,
                     messageDeduplicationId, messageAttributes, entryAwsTraceHeader));
         }
@@ -434,6 +436,22 @@ public class SqsQueryHandler {
                     getParam(params, attributePrefix + ".Value.BinaryValue")));
         }
         return messageAttributes;
+    }
+
+    private int messageAttributesSize(MultivaluedMap<String, String> params, String prefix) {
+        int size = 0;
+        for (int i = 1; ; i++) {
+            String attributePrefix = prefix + "MessageAttribute." + i;
+            String name = getParam(params, attributePrefix + ".Name");
+            if (name == null) {
+                break;
+            }
+            size += SqsService.messageAttributeSize(name,
+                    getParam(params, attributePrefix + ".Value.DataType"),
+                    getParam(params, attributePrefix + ".Value.StringValue"),
+                    getParam(params, attributePrefix + ".Value.BinaryValue"));
+        }
+        return size;
     }
 
     private static void writeBatchFailure(XmlBuilder xml, String id, AwsException e) {
