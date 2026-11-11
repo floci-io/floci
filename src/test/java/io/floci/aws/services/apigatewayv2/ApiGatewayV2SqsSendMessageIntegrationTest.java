@@ -167,12 +167,16 @@ class ApiGatewayV2SqsSendMessageIntegrationTest {
                                 .integrationSubtype(SUBTYPE)
                                 .requestParameters(Map.of("QueueUrl", "http://localhost/000000000000/q"))));
                 assertThat(missing.getMessage(), containsString("MessageBody"));
-                BadRequestException blank = assertThrows(BadRequestException.class, () ->
+                BadRequestException empty = assertThrows(BadRequestException.class, () ->
                         client.createIntegration(b -> b.apiId(api).integrationType("AWS_PROXY")
                                 .integrationSubtype(SUBTYPE)
                                 .requestParameters(Map.of("QueueUrl", "http://localhost/000000000000/q",
-                                        "MessageBody", "  "))));
-                assertThat(blank.getMessage(), containsString("MessageBody"));
+                                        "MessageBody", ""))));
+                assertThat(empty.getMessage(), containsString("MessageBody"));
+                assertEquals("  ", client.createIntegration(b -> b.apiId(api).integrationType("AWS_PROXY")
+                        .integrationSubtype(SUBTYPE)
+                        .requestParameters(Map.of("QueueUrl", "http://localhost/000000000000/q",
+                                "MessageBody", "  "))).requestParameters().get("MessageBody"));
                 BadRequestException malformed = assertThrows(BadRequestException.class, () ->
                         client.createIntegration(b -> b.apiId(api).integrationType("AWS_PROXY")
                                 .integrationSubtype(SUBTYPE)
@@ -410,6 +414,17 @@ class ApiGatewayV2SqsSendMessageIntegrationTest {
                             .then().statusCode(400)
                             .body("Error.Code", equalTo("MissingParameter"));
                     assertThat(sqs.receiveMessage(b -> b.queueUrl(queueUrl)).messages(), hasSize(0));
+                });
+    }
+
+    @Test
+    void invokeSendsWhitespaceOnlyBody() {
+        withSendMessageRoute("sqs-invoke-blank", ApiGatewayV2SqsSendMessageIntegrationTest::parameters,
+                (sqs, queueUrl, api) -> {
+                    given().contentType("text/plain").header("Authorization", "Bearer token-123").body("   ")
+                            .post("/execute-api/" + api + "/test/send")
+                            .then().statusCode(200);
+                    assertThat(onlyMessage(sqs, queueUrl).body(), equalTo("   "));
                 });
     }
 
