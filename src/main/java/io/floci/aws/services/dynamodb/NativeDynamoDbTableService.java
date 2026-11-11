@@ -38,7 +38,8 @@ public class NativeDynamoDbTableService {
 
     private static final String DEFAULT_ACCOUNT_ID = "000000000000";
     private static final String SSE_TYPE_KMS = "KMS";
-    private static final Set<String> VALID_SSE_TYPES = Set.of("AES256", "KMS");
+    // The order AWS prints the enum constraint in.
+    static final List<String> SSE_TYPES = List.of("AES256", "KMS");
 
     // A null field or throughput record means "not specified in the request". Collections and the
     // settings record must not be null.
@@ -651,11 +652,9 @@ public class NativeDynamoDbTableService {
     }
 
     private static void validateSseType(String sseType) {
-        if (!VALID_SSE_TYPES.contains(sseType)) {
+        if (!SSE_TYPES.contains(sseType)) {
             throw SmithyValidationErrors.validationException(
-                    "Value '" + sseType
-                    + "' at 'sSESpecification.sSEType' failed to satisfy constraint: "
-                    + "Member must satisfy enum value set: [AES256, KMS]");
+                    SmithyValidationErrors.notInEnum(sseType, "sSESpecification.sSEType", SSE_TYPES));
         }
     }
 
