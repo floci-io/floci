@@ -12,6 +12,8 @@ import io.floci.aws.services.paymentcryptography.model.PaymentCryptographyKey;
 import io.floci.aws.testing.ManualClock;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
 
 import java.security.KeyPair;
 import java.security.SecureRandom;
@@ -284,16 +286,19 @@ class PaymentCryptographyKeyExchangeTest {
                 refused.getMessage());
     }
 
-    @Test
-    void anInitialKeyLeavesInsteadOfTheBaseKey() {
+    @ParameterizedTest
+    @ValueSource(booleans = {true, false})
+    void anInitialKeyLeavesInsteadOfTheBaseKey(boolean baseMayLeave) {
         // The initial key of the DUKPT derivation is derived from the base
-        // derivation key, and it is the derived key that leaves.
+        // derivation key, and it is the derived key that leaves. The base key may not
+        // leave itself and still derive that initial key, which the export guide says
+        // the standards allow.
         Map<String, Object> attributes = new LinkedHashMap<>();
         attributes.put("KeyAlgorithm", "TDES_2KEY");
         attributes.put("KeyClass", "SYMMETRIC_KEY");
         attributes.put("KeyUsage", "TR31_B0_BASE_DERIVATION_KEY");
         PaymentCryptographyKey base = service.createKey("us-east-1", attributes,
-                Map.of("DeriveKey", Boolean.TRUE), true, true, Map.of());
+                Map.of("DeriveKey", Boolean.TRUE), baseMayLeave, true, Map.of());
 
         Map<String, Object> answer = service.exportKey("us-east-1", base.getKeyId(), "Tr31KeyBlock",
                 Map.of("WrappingKeyIdentifier", protection.getKeyId()), "12345678900000000001", "");
@@ -579,29 +584,6 @@ class PaymentCryptographyKeyExchangeTest {
 
         assertEquals("ValidationException", refused.getErrorCode());
         assertTrue(refused.getMessage().contains("not a key encryption key"), refused.getMessage());
-    }
-
-    @Test
-    void aBaseKeyThatMayNotLeaveStillDerivesAnInitialKey() {
-        // The export guide says that even with the base derivation key set to not exportable,
-        // the holder can still derive the initial keys and export them to install on devices,
-        // which the standards allow.
-        PaymentCryptographyKey base = service.createKey("us-east-1",
-                Map.of("KeyAlgorithm", "TDES_2KEY", "KeyClass", "SYMMETRIC_KEY",
-                        "KeyUsage", "TR31_B0_BASE_DERIVATION_KEY",
-                        "KeyModesOfUse", Map.of("DeriveKey", true)),
-                Map.of("DeriveKey", true), false, true, Map.of());
-
-        Map<?, ?> wrapped = (Map<?, ?>) service.exportKey("us-east-1", base.getKeyId(),
-                "Tr31KeyBlock", Map.of("WrappingKeyIdentifier", protection.getKeyId()),
-                "12345678900000000001", "").get("WrappedKey");
-        String block = (String) wrapped.get("KeyMaterial");
-
-        // The block carries the derived key, which is an initial derivation key.
-        assertEquals("B1", block.substring(5, 7), "the usage of the derived key");
-        assertEquals("T", block.substring(7, 8), "the algorithm of the derived key");
-        assertNotEquals(base.getKeyCheckValue(), wrapped.get("KeyCheckValue"),
-                "the block carries the base key rather than the derived one");
     }
 
     @Test
