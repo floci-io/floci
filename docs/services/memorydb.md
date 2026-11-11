@@ -25,9 +25,9 @@ Set `FLOCI_SERVICES_MEMORYDB_MOCK=true` to manage clusters as control-plane-only
 | `CreateACL` | - |
 | `DescribeACLs` | - |
 | `DeleteACL` | - |
-| `ListTags` | List tags for a cluster |
-| `TagResource` | Add tags to a cluster |
-| `UntagResource` | Remove tags from a cluster |
+| `ListTags` | List tags for a cluster, user or ACL |
+| `TagResource` | Add tags to a cluster, user or ACL |
+| `UntagResource` | Remove tags from a cluster, user or ACL |
 <!-- floci:actions:end -->
 
 ## Configuration
