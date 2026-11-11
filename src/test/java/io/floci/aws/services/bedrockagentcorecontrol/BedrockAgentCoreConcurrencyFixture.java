@@ -32,7 +32,7 @@ final class BedrockAgentCoreConcurrencyFixture {
         AgentRuntime runtime = service.createAgentRuntime("probe", artifact, network,
                 "arn:aws:iam::000000000000:role/probe", null, null, null, null, null, REGION);
         runtimeId = runtime.getAgentRuntimeId();
-        arn = service.arn(runtime, "1", REGION);
+        arn = service.arn(runtime, REGION);
     }
 
     AgentRuntime delete() {

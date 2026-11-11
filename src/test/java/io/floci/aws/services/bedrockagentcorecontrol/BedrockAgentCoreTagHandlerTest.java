@@ -24,7 +24,7 @@ class BedrockAgentCoreTagHandlerTest {
 
     private static String endpointArn(String partition) {
         return "arn:" + partition + ":bedrock-agentcore:" + CUSTOM_REGION + ":" + ACCOUNT
-                + ":agentEndpoint/abc123";
+                + ":runtime/test-AbCdEfGhIj/runtime-endpoint/prod";
     }
 
     @Test

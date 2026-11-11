@@ -289,8 +289,8 @@ public class BedrockAgentCoreControlService {
         return String.format("%05d", Integer.parseInt(version));
     }
 
-    public String arn(AgentRuntime runtime, String version, String region) {
-        return regionResolver.buildArn(ARN_SERVICE, region, "agent/" + runtime.getUuid() + ":" + version);
+    public String arn(AgentRuntime runtime, String region) {
+        return regionResolver.buildArn(ARN_SERVICE, region, "runtime/" + runtime.getAgentRuntimeId());
     }
 
     /**
@@ -300,17 +300,18 @@ public class BedrockAgentCoreControlService {
      */
     public boolean runtimeArnExists(String region, String arn) {
         String resource = BedrockAgentCoreArns.resource(arn);
-        if (resource == null || !resource.startsWith("agent/")) {
+        if (resource == null || !resource.startsWith("runtime/")) {
             return true;
         }
-        String uuid = resource.substring("agent/".length());
+        String runtimeId = resource.substring("runtime/".length());
         String prefix = keyPrefix(region);
         return storage.scan(k -> k.startsWith(prefix)).stream()
-                .anyMatch(r -> uuid.equals(r.getUuid()));
+                .anyMatch(r -> runtimeId.equals(r.getAgentRuntimeId()));
     }
 
-    public String endpointArn(AgentRuntimeEndpoint endpoint, String region) {
-        return regionResolver.buildArn(ARN_SERVICE, region, "agentEndpoint/" + endpoint.getUuid());
+    public String endpointArn(String runtimeId, AgentRuntimeEndpoint endpoint, String region) {
+        return regionResolver.buildArn(ARN_SERVICE, region,
+                "runtime/" + runtimeId + "/runtime-endpoint/" + endpoint.getName());
     }
 
     // ──────────────────────────── Tagging (Phase 4) ────────────────────────────
@@ -341,12 +342,12 @@ public class BedrockAgentCoreControlService {
         }
     }
 
-    /** The runtime a runtime ARN names, at any version; ResourceNotFoundException when none does. */
+    /** The runtime a runtime ARN names; ResourceNotFoundException when none does. */
     public AgentRuntime getAgentRuntimeByArn(String region, String arn) {
-        String uuid = uuidFromArn(arn);
+        String runtimeId = runtimeIdFromArn(arn);
         String prefix = keyPrefix(region);
         return storage.scan(k -> k.startsWith(prefix)).stream()
-                .filter(r -> uuid.equals(r.getUuid()))
+                .filter(r -> runtimeId.equals(r.getAgentRuntimeId()))
                 .findFirst()
                 .orElseThrow(() -> new AwsException("ResourceNotFoundException",
                         "AgentCore resource not found: " + arn, 404));
@@ -390,13 +391,12 @@ public class BedrockAgentCoreControlService {
                         "AgentCore resource not found: " + arn, 404));
     }
 
-    private static String uuidFromArn(String arn) {
-        // arn:aws:bedrock-agentcore:<region>:<account>:agent/<uuid>:<version>
+    private static String runtimeIdFromArn(String arn) {
         String resource = BedrockAgentCoreArns.resource(arn);
-        if (resource == null || !resource.startsWith("agent/")) {
+        if (resource == null || !resource.startsWith("runtime/")) {
             throw new AwsException("ValidationException", "Unsupported resource ARN: " + arn, 400);
         }
-        return resource.substring("agent/".length());
+        return resource.substring("runtime/".length());
     }
 
     // ──────────────────────────── Endpoints (Phase 2) ────────────────────────────
@@ -533,32 +533,27 @@ public class BedrockAgentCoreControlService {
     public record EndpointLocation(AgentRuntime runtime, AgentRuntimeEndpoint endpoint) {
     }
 
-    /**
-     * The endpoint an endpoint ARN ({@code agentEndpoint/<uuid>}) names, with its runtime, or empty
-     * when no runtime in the region holds it. Endpoints are addressed by runtime id and name on the
-     * API, so this is the only way back from the ARN CloudFormation keeps as the physical id.
-     */
+    /** The endpoint and parent runtime named by a runtime endpoint ARN, or empty when absent. */
     public Optional<EndpointLocation> findEndpointByArn(String region, String arn) {
         String resource = BedrockAgentCoreArns.resource(arn);
-        if (resource == null || !resource.startsWith("agentEndpoint/")) {
+        if (resource == null || !resource.startsWith("runtime/")) {
             return Optional.empty();
         }
-        String uuid = resource.substring("agentEndpoint/".length());
-        String prefix = keyPrefix(region);
-        for (AgentRuntime runtime : storage.scan(k -> k.startsWith(prefix))) {
-            synchronized (runtimeLock(region, runtime.getAgentRuntimeId())) {
-                Optional<AgentRuntime> current = storage.get(key(region, runtime.getAgentRuntimeId()));
-                if (current.isEmpty()) {
-                    continue;
-                }
-                for (AgentRuntimeEndpoint endpoint : current.get().getEndpoints()) {
-                    if (uuid.equals(endpoint.getUuid())) {
-                        return Optional.of(new EndpointLocation(current.get(), endpoint));
-                    }
-                }
-            }
+        String[] parts = resource.split("/", -1);
+        if (parts.length != 4 || !"runtime-endpoint".equals(parts[2])) {
+            return Optional.empty();
         }
-        return Optional.empty();
+        String runtimeId = parts[1];
+        synchronized (runtimeLock(region, runtimeId)) {
+            Optional<AgentRuntime> runtime = storage.get(key(region, runtimeId));
+            if (runtime.isEmpty()) {
+                return Optional.empty();
+            }
+            return runtime.get().getEndpoints().stream()
+                    .filter(endpoint -> parts[3].equals(endpoint.getName()))
+                    .map(endpoint -> new EndpointLocation(runtime.get(), endpoint))
+                    .findFirst();
+        }
     }
 
     private Object runtimeLock(String region, String runtimeId) {

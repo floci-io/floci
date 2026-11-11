@@ -52,7 +52,7 @@ class BedrockAgentCoreInvokeValidateIntegrationTest {
     @Test
     void invokeUnknownRuntimeReturns404() {
         String unknown =
-                "arn:aws:bedrock-agentcore:us-east-1:000000000000:agent/00000000-0000-0000-0000-000000000000:1";
+                "arn:aws:bedrock-agentcore:us-east-1:000000000000:runtime/missing-AbCdEfGhIj";
         given().contentType("application/json").body("{}")
                 .when().post("/runtimes/" + unknown + "/invocations")
                 .then().statusCode(404);

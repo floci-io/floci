@@ -190,8 +190,9 @@ block is ever produced even when a request supplies `tools`.
 
 ## Behavior notes
 
-- `agentRuntimeId` is `<name>-<10 alphanumerics>`; the ARN embeds a UUID and the
-  version: `arn:aws:bedrock-agentcore:<region>:<account>:agent/<uuid>:<version>`.
+- `agentRuntimeId` is `<name>-<10 alphanumerics>`; the runtime ARN is
+  `arn:<partition>:bedrock-agentcore:<region>:<account>:runtime/<agentRuntimeId>` and
+  stays the same across versions. Endpoint ARNs append `/runtime-endpoint/<name>`, including `DEFAULT`.
 - `agentRuntimeName` must match `[a-zA-Z][a-zA-Z0-9_]{0,47}` (no hyphens); invalid
   names return `ValidationException`.
 - Each `UpdateAgentRuntime` increments the version and preserves prior versions for
