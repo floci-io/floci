@@ -91,6 +91,9 @@ public class ResourceArnBuilder {
     /** The SSM actions whose {@code ResourceArn} names the parameter they act on, in place of {@code Name}. */
     private static final Set<String> SSM_RESOURCE_POLICY_ACTIONS =
             Set.of("PutResourcePolicy", "GetResourcePolicies", "DeleteResourcePolicy");
+    /** The SSM tagging actions, whose handler tags the parameter {@code ResourceId} names, whatever its type. */
+    private static final Set<String> SSM_TAGGING_OPERATIONS =
+            Set.of("AddTagsToResource", "ListTagsForResource", "RemoveTagsFromResource");
     private static final Set<String> SSM_NAMES_OPERATIONS = Set.of("GetParameters", "DeleteParameters");
     private static final Set<String> SSM_SELECTOR_READ_OPERATIONS = Set.of("GetParameter", "GetParameters");
     private static final Set<String> SSM_TEXT_NAME_OPERATIONS = Set.of("PutParameter", "GetParameter",
@@ -1918,7 +1921,9 @@ public class ResourceArnBuilder {
      * a missing or empty {@code Path} also lists from, is the empty parameter name {@code parameter/}. The handler
      * lists {@code /app/} as it lists {@code /app}, so one trailing slash is dropped from any other path.
      * {@code GetParameters} and {@code DeleteParameters} act on each parameter in {@code Names}, read element by
-     * element or value by value as their handlers read it. Any other action acts on the parameter in
+     * element or value by value as their handlers read it. The tagging actions act on the parameter in
+     * {@code ResourceId}, name or ARN, whatever {@code ResourceType} says, as their handlers tag no other kind of
+     * resource. Any other action acts on the parameter in
      * {@code Name}, a null {@code Name} being the text {@code null} where the handler reads it as text. A name is
      * taken as sent, surrounding whitespace included, except where the handler strips it. A version or label
      * selector on a {@code GetParameter} or {@code GetParameters} name is not part of the parameter's ARN, so it
@@ -1936,7 +1941,9 @@ public class ResourceArnBuilder {
                 }
             }
             boolean selectorRead = operation != null && SSM_SELECTOR_READ_OPERATIONS.contains(operation);
-            if ("GetParametersByPath".equals(operation)) {
+            if (operation != null && SSM_TAGGING_OPERATIONS.contains(operation)) {
+                return List.of(ssmParameterArn(json.path("ResourceId").asText(), region, accountId));
+            } else if ("GetParametersByPath".equals(operation)) {
                 String path = json.path("Path").asText();
                 if (path.length() > 1 && path.endsWith("/")) {
                     path = path.substring(0, path.length() - 1);
