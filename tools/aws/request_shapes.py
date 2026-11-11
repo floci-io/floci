@@ -149,8 +149,10 @@ def generator_name(script: str) -> str:
     return path.relative_to(REPO_ROOT).as_posix() if path.is_relative_to(REPO_ROOT) else path.name
 
 
-def main(argv: list[str] | None, *, script: str, model: Path, output: Path, description: str,
+def main(argv: list[str] | None, *, script: str, model: Path, output: Path,
+         description: str | None = None,
          outputs: bool = False, operations: tuple[str, ...] | None = None,
+         all_operations: bool = False,
          prepare: Callable[[dict], dict] | None = None) -> int:
     """Drives one generator: parse the flags, read the model, write or check the vendored file.
 
@@ -159,6 +161,10 @@ def main(argv: list[str] | None, *, script: str, model: Path, output: Path, desc
     `build`. The two vendor different things and are driven the same way, which is why the
     Query-protocol generators share this too rather than each repeating the flags and the
     staleness check.
+
+    `all_operations` keeps every operation's constraints, so a service that serves an operation
+    the model names has its rules vendored without the generator naming it, and an operation
+    served later is covered without anyone adding it to a list.
 
     `prepare` is the one thing a generator may do to the model before any of that, for an operation
     it vendors in part: IAM reduces a paged request to its paging members, the rest of it keeping
@@ -174,8 +180,13 @@ def main(argv: list[str] | None, *, script: str, model: Path, output: Path, desc
     if prepare is not None:
         loaded = prepare(loaded)
     generator = generator_name(script)
-    fresh = render(build_constraints(loaded, operations, provenance, generator) if operations is not None
-                   else build(loaded, provenance, generator, outputs))
+    if all_operations:
+        fresh = render(build_constraints(loaded, tuple(sorted(loaded["operations"])),
+                                        provenance, generator))
+    elif operations is not None:
+        fresh = render(build_constraints(loaded, operations, provenance, generator))
+    else:
+        fresh = render(build(loaded, provenance, generator, outputs))
 
     if args.check:
         current = args.output.read_text(encoding="utf-8") if args.output.exists() else ""

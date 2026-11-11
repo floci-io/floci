@@ -20,17 +20,12 @@ import request_shapes
 
 OUTPUT = request_shapes.REPO_ROOT / "src/main/resources/aws/payment-cryptography-request-shapes.json"
 MODEL = Path("payment-cryptography/2021-09-14")
-OPERATIONS = (
-    "CreateKey", "GetKey", "ListKeys", "DeleteKey",
-    "CreateAlias", "GetAlias", "ListAliases", "UpdateAlias", "DeleteAlias",
-    "ExportKey", "ImportKey", "GetParametersForImport", "GetParametersForExport",
-    "TagResource", "UntagResource", "ListTagsForResource",
-)
 
 
 def main(argv: list[str] | None = None) -> int:
     return request_shapes.main(argv, script=__file__, model=MODEL, output=OUTPUT,
-                               description=__doc__ or "", operations=OPERATIONS,
+                               description=__doc__ or "",
+                               all_operations=True,
                                prepare=request_shapes.widen_partition_and_region)
 
 

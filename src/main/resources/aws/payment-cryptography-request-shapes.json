@@ -4,24 +4,51 @@
     "botocore": "botocore 1.43.118 (installed package)"
   },
   "operations": {
-    "CreateKey": "CreateKeyInput",
-    "GetKey": "GetKeyInput",
-    "ListKeys": "ListKeysInput",
-    "DeleteKey": "DeleteKeyInput",
+    "AddKeyReplicationRegions": "AddKeyReplicationRegionsInput",
+    "AssociateMpaTeam": "AssociateMpaTeamInput",
     "CreateAlias": "CreateAliasInput",
-    "GetAlias": "GetAliasInput",
-    "ListAliases": "ListAliasesInput",
-    "UpdateAlias": "UpdateAliasInput",
+    "CreateKey": "CreateKeyInput",
     "DeleteAlias": "DeleteAliasInput",
+    "DeleteKey": "DeleteKeyInput",
+    "DeleteResourcePolicy": "DeleteResourcePolicyInput",
+    "DisableDefaultKeyReplicationRegions": "DisableDefaultKeyReplicationRegionsInput",
+    "DisassociateMpaTeam": "DisassociateMpaTeamInput",
+    "EnableDefaultKeyReplicationRegions": "EnableDefaultKeyReplicationRegionsInput",
     "ExportKey": "ExportKeyInput",
-    "ImportKey": "ImportKeyInput",
-    "GetParametersForImport": "GetParametersForImportInput",
+    "GetAlias": "GetAliasInput",
+    "GetCertificateSigningRequest": "GetCertificateSigningRequestInput",
+    "GetDefaultKeyReplicationRegions": "GetDefaultKeyReplicationRegionsInput",
+    "GetKey": "GetKeyInput",
+    "GetMpaTeamAssociation": "GetMpaTeamAssociationInput",
     "GetParametersForExport": "GetParametersForExportInput",
+    "GetParametersForImport": "GetParametersForImportInput",
+    "GetPublicKeyCertificate": "GetPublicKeyCertificateInput",
+    "GetResourcePolicy": "GetResourcePolicyInput",
+    "ImportKey": "ImportKeyInput",
+    "ListAliases": "ListAliasesInput",
+    "ListKeys": "ListKeysInput",
+    "ListTagsForResource": "ListTagsForResourceInput",
+    "PutResourcePolicy": "PutResourcePolicyInput",
+    "RemoveKeyReplicationRegions": "RemoveKeyReplicationRegionsInput",
+    "RestoreKey": "RestoreKeyInput",
+    "StartKeyUsage": "StartKeyUsageInput",
+    "StopKeyUsage": "StopKeyUsageInput",
     "TagResource": "TagResourceInput",
     "UntagResource": "UntagResourceInput",
-    "ListTagsForResource": "ListTagsForResourceInput"
+    "UpdateAlias": "UpdateAliasInput"
   },
   "shapes": {
+    "AddKeyReplicationRegionsInput": {
+      "type": "structure",
+      "required": [
+        "KeyIdentifier",
+        "ReplicationRegions"
+      ],
+      "members": {
+        "KeyIdentifier": "KeyArnOrKeyAliasType",
+        "ReplicationRegions": "Regions"
+      }
+    },
     "AliasName": {
       "type": "string",
       "min": 7,
@@ -37,8 +64,77 @@
         "DATA_ENCRYPTION_KEY_VARIANT_22"
       ]
     },
+    "AssociateMpaTeamInput": {
+      "type": "structure",
+      "required": [
+        "Action",
+        "MpaTeamArn"
+      ],
+      "members": {
+        "Action": "MpaOperation",
+        "MpaTeamArn": "MpaTeamArn",
+        "RequesterComment": "MpaRequesterComment"
+      }
+    },
     "Boolean": {
       "type": "boolean"
+    },
+    "CertificateSubjectType": {
+      "type": "structure",
+      "required": [
+        "CommonName"
+      ],
+      "members": {
+        "CommonName": "CertificateSubjectTypeCommonNameString",
+        "OrganizationUnit": "CertificateSubjectTypeOrganizationUnitString",
+        "Organization": "CertificateSubjectTypeOrganizationString",
+        "City": "CertificateSubjectTypeCityString",
+        "Country": "CertificateSubjectTypeCountryString",
+        "StateOrProvince": "CertificateSubjectTypeStateOrProvinceString",
+        "EmailAddress": "CertificateSubjectTypeEmailAddressString"
+      }
+    },
+    "CertificateSubjectTypeCityString": {
+      "type": "string",
+      "min": 1,
+      "max": 128,
+      "pattern": "[^\\[;\\]<>]+"
+    },
+    "CertificateSubjectTypeCommonNameString": {
+      "type": "string",
+      "min": 1,
+      "max": 64,
+      "pattern": "[^\\[;\\]<>]+"
+    },
+    "CertificateSubjectTypeCountryString": {
+      "type": "string",
+      "min": 2,
+      "max": 2,
+      "pattern": "[A-Za-z]+"
+    },
+    "CertificateSubjectTypeEmailAddressString": {
+      "type": "string",
+      "min": 1,
+      "max": 128,
+      "pattern": "[a-zA-Z0-9.!#$%&\u2019*+/=?^_`{|}~-]+@[a-zA-Z0-9-]+(?:\\.[a-zA-Z0-9-]+)*"
+    },
+    "CertificateSubjectTypeOrganizationString": {
+      "type": "string",
+      "min": 1,
+      "max": 64,
+      "pattern": "[^\\[;\\]<>]+"
+    },
+    "CertificateSubjectTypeOrganizationUnitString": {
+      "type": "string",
+      "min": 1,
+      "max": 64,
+      "pattern": "[^\\[;\\]<>]+"
+    },
+    "CertificateSubjectTypeStateOrProvinceString": {
+      "type": "string",
+      "min": 1,
+      "max": 128,
+      "pattern": "[^\\[;\\]<>]+"
     },
     "CertificateType": {
       "type": "string",
@@ -96,6 +192,15 @@
       "min": 3,
       "max": 180
     },
+    "DeleteResourcePolicyInput": {
+      "type": "structure",
+      "required": [
+        "ResourceArn"
+      ],
+      "members": {
+        "ResourceArn": "ResourceArn"
+      }
+    },
     "DeriveKeyUsage": {
       "type": "string",
       "enum": [
@@ -124,6 +229,34 @@
       "type": "structure",
       "members": {
         "SharedInformation": "SharedInformation"
+      }
+    },
+    "DisableDefaultKeyReplicationRegionsInput": {
+      "type": "structure",
+      "required": [
+        "ReplicationRegions"
+      ],
+      "members": {
+        "ReplicationRegions": "Regions"
+      }
+    },
+    "DisassociateMpaTeamInput": {
+      "type": "structure",
+      "required": [
+        "Action"
+      ],
+      "members": {
+        "Action": "MpaOperation",
+        "RequesterComment": "MpaRequesterComment"
+      }
+    },
+    "EnableDefaultKeyReplicationRegionsInput": {
+      "type": "structure",
+      "required": [
+        "ReplicationRegions"
+      ],
+      "members": {
+        "ReplicationRegions": "Regions"
       }
     },
     "EvenHexLengthBetween16And32": {
@@ -256,6 +389,23 @@
         "AliasName": "AliasName"
       }
     },
+    "GetCertificateSigningRequestInput": {
+      "type": "structure",
+      "required": [
+        "KeyIdentifier",
+        "SigningAlgorithm",
+        "CertificateSubject"
+      ],
+      "members": {
+        "KeyIdentifier": "KeyArnOrKeyAliasType",
+        "SigningAlgorithm": "SigningAlgorithmType",
+        "CertificateSubject": "CertificateSubjectType"
+      }
+    },
+    "GetDefaultKeyReplicationRegionsInput": {
+      "type": "structure",
+      "members": {}
+    },
     "GetKeyInput": {
       "type": "structure",
       "required": [
@@ -263,6 +413,15 @@
       ],
       "members": {
         "KeyIdentifier": "KeyArnOrKeyAliasType"
+      }
+    },
+    "GetMpaTeamAssociationInput": {
+      "type": "structure",
+      "required": [
+        "Action"
+      ],
+      "members": {
+        "Action": "MpaOperation"
       }
     },
     "GetParametersForExportInput": {
@@ -287,6 +446,24 @@
         "KeyMaterialType": "KeyMaterialType",
         "WrappingKeyAlgorithm": "KeyAlgorithm",
         "ReuseLastGeneratedToken": "Boolean"
+      }
+    },
+    "GetPublicKeyCertificateInput": {
+      "type": "structure",
+      "required": [
+        "KeyIdentifier"
+      ],
+      "members": {
+        "KeyIdentifier": "KeyArnOrKeyAliasType"
+      }
+    },
+    "GetResourcePolicyInput": {
+      "type": "structure",
+      "required": [
+        "ResourceArn"
+      ],
+      "members": {
+        "ResourceArn": "ResourceArn"
       }
     },
     "HexLength20Or24": {
@@ -610,10 +787,22 @@
       "min": 1,
       "max": 100
     },
+    "MpaOperation": {
+      "type": "string",
+      "enum": [
+        "IMPORT_ROOT_PUBLIC_KEY_CERTIFICATE"
+      ]
+    },
     "MpaRequesterComment": {
       "type": "string",
       "min": 0,
       "max": 200
+    },
+    "MpaTeamArn": {
+      "type": "string",
+      "min": 20,
+      "max": 2048,
+      "pattern": "arn:aws(-[^:]+)?:mpa:[a-z0-9-]{1,20}:[0-9]{12}:approval-team/[a-zA-Z0-9._-]+"
     },
     "NextToken": {
       "type": "string",
@@ -640,6 +829,17 @@
     "PrimitiveBoolean": {
       "type": "boolean"
     },
+    "PutResourcePolicyInput": {
+      "type": "structure",
+      "required": [
+        "ResourceArn",
+        "Policy"
+      ],
+      "members": {
+        "ResourceArn": "ResourceArn",
+        "Policy": "ResourcePolicy"
+      }
+    },
     "Region": {
       "type": "string",
       "pattern": "[a-z]{2,4}(-[a-z]{1,16})+-[0-9]+"
@@ -648,11 +848,37 @@
       "type": "list",
       "member": "Region"
     },
+    "RemoveKeyReplicationRegionsInput": {
+      "type": "structure",
+      "required": [
+        "KeyIdentifier",
+        "ReplicationRegions"
+      ],
+      "members": {
+        "KeyIdentifier": "KeyArnOrKeyAliasType",
+        "ReplicationRegions": "Regions"
+      }
+    },
     "ResourceArn": {
       "type": "string",
       "min": 70,
       "max": 150,
       "pattern": "arn:aws[a-z0-9-]*:payment-cryptography:[a-z]{2,4}(-[a-z]{1,16})+-[0-9]+:[0-9]{12}:key/[0-9a-zA-Z]{16,64}"
+    },
+    "ResourcePolicy": {
+      "type": "string",
+      "min": 1,
+      "max": 20480,
+      "pattern": "[\\u0009\\u000A\\u000D\\u0020-\\u00FF]+"
+    },
+    "RestoreKeyInput": {
+      "type": "structure",
+      "required": [
+        "KeyIdentifier"
+      ],
+      "members": {
+        "KeyIdentifier": "KeyArnOrKeyAliasType"
+      }
     },
     "RootCertificatePublicKey": {
       "type": "structure",
@@ -670,6 +896,33 @@
       "min": 2,
       "max": 2048,
       "pattern": "(?:[0-9a-fA-F][0-9a-fA-F])+"
+    },
+    "SigningAlgorithmType": {
+      "type": "string",
+      "enum": [
+        "SHA224",
+        "SHA256",
+        "SHA384",
+        "SHA512"
+      ]
+    },
+    "StartKeyUsageInput": {
+      "type": "structure",
+      "required": [
+        "KeyIdentifier"
+      ],
+      "members": {
+        "KeyIdentifier": "KeyArnOrKeyAliasType"
+      }
+    },
+    "StopKeyUsageInput": {
+      "type": "structure",
+      "required": [
+        "KeyIdentifier"
+      ],
+      "members": {
+        "KeyIdentifier": "KeyArnOrKeyAliasType"
+      }
     },
     "SymmetricKeyAlgorithm": {
       "type": "string",

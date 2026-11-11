@@ -14,7 +14,6 @@ import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
-import java.util.Set;
 
 /**
  * The Payment Cryptography control plane.
@@ -44,17 +43,10 @@ public class PaymentCryptographyJsonHandler {
             "TrustedCertificatePublicKey", "Tr31KeyBlock", "Tr34KeyBlock", "KeyCryptogram",
             "DiffieHellmanTr31KeyBlock", "As2805KeyCryptogram");
 
-    /** The actions whose requests are checked against the vendored model constraints first. */
-    private static final Set<String> MODEL_CHECKED = Set.of(
-            "CreateKey", "GetKey", "ListKeys", "DeleteKey",
-            "CreateAlias", "GetAlias", "ListAliases", "UpdateAlias", "DeleteAlias",
-            "ExportKey", "ImportKey", "GetParametersForImport", "GetParametersForExport",
-            "TagResource", "UntagResource", "ListTagsForResource");
-
     public Response handle(String action, JsonNode request, String region) {
-        if (MODEL_CHECKED.contains(action)) {
-            PaymentCryptographyRequestShapes.check(action, request);
-        }
+        // The vendored model holds every operation it names, so the request is checked against
+        // the model's own rules without this class listing the operations it serves.
+        PaymentCryptographyRequestShapes.check(action, request);
         return switch (action) {
             case "CreateKey" -> Response.ok(createKey(request, region)).build();
             case "GetKey" -> Response.ok(getKey(request, region)).build();

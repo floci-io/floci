@@ -65,6 +65,12 @@ class PaymentCryptographyIntegrationTest {
              "KeyModesOfUse":{"Encrypt":true,"Decrypt":true}},
              "Exportable":true}""";
 
+    private static final String CREATE_KEY_PAIR = """
+            {"KeyAttributes":{"KeyAlgorithm":"RSA_2048","KeyClass":"ASYMMETRIC_KEY_PAIR",
+             "KeyUsage":"TR31_S0_ASYMMETRIC_KEY_FOR_DIGITAL_SIGNATURE",
+             "KeyModesOfUse":{"Sign":true,"Verify":true}},
+             "Exportable":true}""";
+
     @Test
     void aKeyIsCreatedAndReadBack() {
         String arn = call("CreateKey", CREATE_KEY)
@@ -342,6 +348,33 @@ class PaymentCryptographyIntegrationTest {
         call("EncryptKey", "{}")
                 .then().statusCode(400)
                     .body("__type", containsString("UnknownOperationException"));
+    }
+
+    @Test
+    void theCertificateOfAKeyIsServedOverTheWire() {
+        // The certificate of an asymmetric key, with the chain that goes with it.
+        String arn = call("CreateKey", CREATE_KEY_PAIR)
+                .then().statusCode(200)
+                    .extract().path("Key.KeyArn");
+
+        call("GetPublicKeyCertificate", "{\"KeyIdentifier\":\"" + arn + "\"}")
+                .then().statusCode(200)
+                    .body("KeyCertificate", notNullValue())
+                    .body("KeyCertificateChain", notNullValue());
+    }
+
+    @Test
+    void theCertificateOfAKeyIsNotServedForABareKeyId() {
+        // The identifier of a key is its ARN, an alias ARN or an alias name, and the model's
+        // pattern is what settles it, the same as for the other operations that take one. A
+        // bare id names no key, so it is refused the way GetKey refuses it.
+        String arn = call("CreateKey", CREATE_KEY_PAIR).then().statusCode(200)
+                .extract().path("Key.KeyArn");
+        String id = arn.substring(arn.lastIndexOf('/') + 1);
+
+        call("GetPublicKeyCertificate", "{\"KeyIdentifier\":\"" + id + "\"}")
+                .then().statusCode(400)
+                    .body("__type", containsString("ValidationException"));
     }
 
     /**
