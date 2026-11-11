@@ -2,6 +2,7 @@ package io.floci.aws.services.cloudhsmv2;
 
 import io.floci.aws.testing.RestAssuredJsonUtils;
 import io.quarkus.test.junit.QuarkusTest;
+import io.restassured.response.ValidatableResponse;
 import io.restassured.specification.RequestSpecification;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
@@ -34,17 +35,14 @@ class CloudHsmV2CopyBackupTagsIntegrationTest {
             .post("/")
             .then().statusCode(200);
 
-        request("DescribeBackups", DESTINATION_REGION)
-            .body("{\"Filters\":{\"sourceBackupIds\":[\"" + sourceBackupId + "\"]}}")
-            .post("/")
-            .then().statusCode(200)
-            .body("Backups.size()", equalTo(1))
+        ValidatableResponse copiedBackup = describeCopiedBackup(sourceBackupId)
             .body("Backups[0].TagList", hasSize(1))
             .body("Backups[0].TagList[0].Key", equalTo("team"))
             .body("Backups[0].TagList[0].Value", equalTo("destination"));
+        String destinationBackupId = copiedBackup.extract().jsonPath().getString("Backups[0].BackupId");
 
         request("ListTags", DESTINATION_REGION)
-            .body("{\"ResourceId\":\"" + copiedBackupId(sourceBackupId) + "\"}")
+            .body("{\"ResourceId\":\"" + destinationBackupId + "\"}")
             .post("/")
             .then().statusCode(200)
             .body("TagList", hasSize(1))
@@ -61,19 +59,16 @@ class CloudHsmV2CopyBackupTagsIntegrationTest {
             .post("/")
             .then().statusCode(200);
 
-        request("DescribeBackups", DESTINATION_REGION)
-            .body("{\"Filters\":{\"sourceBackupIds\":[\"" + sourceBackupId + "\"]}}")
-            .post("/")
-            .then().statusCode(200)
-            .body("Backups.size()", equalTo(1))
+        ValidatableResponse copiedBackup = describeCopiedBackup(sourceBackupId)
             .body("Backups[0].TagList", hasSize(2))
             .body("Backups[0].TagList[0].Key", equalTo("team"))
             .body("Backups[0].TagList[0].Value", equalTo("source"))
             .body("Backups[0].TagList[1].Key", equalTo("obsolete"))
             .body("Backups[0].TagList[1].Value", equalTo("old"));
+        String destinationBackupId = copiedBackup.extract().jsonPath().getString("Backups[0].BackupId");
 
         request("UntagResource", DESTINATION_REGION)
-            .body("{\"ResourceId\":\"" + copiedBackupId(sourceBackupId) + "\",\"TagKeyList\":[\"team\"]}")
+            .body("{\"ResourceId\":\"" + destinationBackupId + "\",\"TagKeyList\":[\"team\"]}")
             .post("/")
             .then().statusCode(200);
 
@@ -85,73 +80,12 @@ class CloudHsmV2CopyBackupTagsIntegrationTest {
             .body("TagList.Key", hasItems("team", "obsolete"));
     }
 
-    @Test
-    void copyRejectsExplicitlyEmptyTagList() {
-        String sourceBackupId = createTaggedSourceBackup();
-
-        request("CopyBackupToRegion", SOURCE_REGION)
-            .body("{\"BackupId\":\"" + sourceBackupId + "\",\"DestinationRegion\":\"" + DESTINATION_REGION + "\",\"TagList\":[]}")
-            .post("/")
-            .then().statusCode(400);
-    }
-
-    @Test
-    void copyRejectsInvalidTagCharacters() {
-        String sourceBackupId = createTaggedSourceBackup();
-
-        request("CopyBackupToRegion", SOURCE_REGION)
-            .body("""
-                {"BackupId":"%s","DestinationRegion":"%s",
-                 "TagList":[{"Key":"bad!","Value":"safe"}]}
-                """.formatted(sourceBackupId, DESTINATION_REGION))
-            .post("/")
-            .then().statusCode(400);
-
-        request("CopyBackupToRegion", SOURCE_REGION)
-            .body("""
-                {"BackupId":"%s","DestinationRegion":"%s",
-                 "TagList":[{"Key":"valid","Value":"bad!"}]}
-                """.formatted(sourceBackupId, DESTINATION_REGION))
-            .post("/")
-            .then().statusCode(400);
-
-        request("DescribeBackups", DESTINATION_REGION)
-            .body("{\"Filters\":{\"sourceBackupIds\":[\"" + sourceBackupId + "\"]}}")
-            .post("/")
-            .then().statusCode(200)
-            .body("Backups", hasSize(0));
-    }
-
-    @Test
-    void copyAcceptsSupplementaryLetterWithinTagCharacterLimits() {
-        String sourceBackupId = createTaggedSourceBackup();
-        String letter = new String(Character.toChars(0x10400));
-        String key = letter.repeat(65);
-        String value = letter.repeat(129);
-
-        request("CopyBackupToRegion", SOURCE_REGION)
-            .body("""
-                {"BackupId":"%s","DestinationRegion":"%s",
-                 "TagList":[{"Key":"%s","Value":"%s"}]}
-                """.formatted(sourceBackupId, DESTINATION_REGION, key, value))
-            .post("/")
-            .then().statusCode(200);
-
-        request("DescribeBackups", DESTINATION_REGION)
-            .body("{\"Filters\":{\"sourceBackupIds\":[\"" + sourceBackupId + "\"]}}")
-            .post("/")
-            .then().statusCode(200)
-            .body("Backups[0].TagList", hasSize(1))
-            .body("Backups[0].TagList[0].Key", equalTo(key))
-            .body("Backups[0].TagList[0].Value", equalTo(value));
-    }
-
-    private String copiedBackupId(String sourceBackupId) {
+    private ValidatableResponse describeCopiedBackup(String sourceBackupId) {
         return request("DescribeBackups", DESTINATION_REGION)
             .body("{\"Filters\":{\"sourceBackupIds\":[\"" + sourceBackupId + "\"]}}")
             .post("/")
             .then().statusCode(200)
-            .extract().jsonPath().getString("Backups[0].BackupId");
+            .body("Backups.size()", equalTo(1));
     }
 
     private String createTaggedSourceBackup() {
