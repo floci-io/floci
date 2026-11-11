@@ -1915,19 +1915,8 @@ public class ResourceArnBuilder {
 
     // ── SSM ──────────────────────────────────────────────────────────────────────
     /**
-     * The parameters an SSM request is evaluated against, read from the field its handler acts on. A
-     * resource-policy action names its parameter in {@code ResourceArn}. {@code GetParametersByPath} is
-     * authorized against its {@code Path} rather than the parameters it returns; the root path {@code /}, which
-     * a missing or empty {@code Path} also lists from, is the empty parameter name {@code parameter/}. The handler
-     * lists {@code /app/} as it lists {@code /app}, so one trailing slash is dropped from any other path.
-     * {@code GetParameters} and {@code DeleteParameters} act on each parameter in {@code Names}, read element by
-     * element or value by value as their handlers read it. The tagging actions act on the parameter in
-     * {@code ResourceId}, name or ARN, whatever {@code ResourceType} says, as their handlers tag no other kind of
-     * resource. Any other action acts on the parameter in
-     * {@code Name}, a null {@code Name} being the text {@code null} where the handler reads it as text. A name is
-     * taken as sent, surrounding whitespace included, except where the handler strips it. A version or label
-     * selector on a {@code GetParameter} or {@code GetParameters} name is not part of the parameter's ARN, so it
-     * is left out. An empty name, as the root path is, is the empty parameter name {@code parameter/}.
+     * The parameter ARNs an SSM request is evaluated against, read from the field its handler acts on, with each
+     * name taken as the handler reads it.
      */
     private List<String> buildSsmArns(ContainerRequestContext ctx, String region, String accountId) {
         JsonNode json = readJsonBody(ctx);
