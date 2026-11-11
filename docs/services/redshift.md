@@ -340,8 +340,8 @@ modification time, enqueue time and status in `floci_internal.copy_job_detail` a
 `sys_copy_job_detail`, in the same PostgreSQL transaction as the target rows. They survive Floci restarts with
 the target database. Dropping a job removes its checkpoints.
 
-S3 uploads mark their bucket for the background sweep scheduler, which reconciles on startup and when marked
-rather than listing prefixes on idle ticks. Paused clusters do not load files until resumed. Deleting an
+The background sweep scheduler reconciles on startup and when S3 uploads mark a bucket. If a target is
+temporarily unavailable or a job run fails, the scheduler marks the bucket again for the next sweep. Deleting an
 integration switches its bucket's jobs to `AUTO OFF`, retaining their definitions and checkpoints. Resume a
 paused cluster before deleting its integration.
 The SQLSTATEs and messages of job validation errors are Floci's own, not captured from AWS.

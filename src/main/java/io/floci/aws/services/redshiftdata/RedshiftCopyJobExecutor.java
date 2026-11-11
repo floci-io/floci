@@ -22,11 +22,15 @@ import java.util.List;
 @ApplicationScoped
 public class RedshiftCopyJobExecutor {
     private static final Logger LOG = Logger.getLogger(RedshiftCopyJobExecutor.class);
-    static final int BATCH_FILE_LIMIT = 100;
 
     private final RedshiftService service;
     private final RedshiftZeroEtlEndpoints endpoints;
     private final RedshiftDataConnectionFactory connections;
+
+    private record TargetResolution(RedshiftDataResourceResolver.DatabaseTarget database, boolean unavailable) {
+        private static final TargetResolution MISSING = new TargetResolution(null, false);
+        private static final TargetResolution UNAVAILABLE = new TargetResolution(null, true);
+    }
 
     @Inject
     RedshiftCopyJobExecutor(RedshiftService service, RedshiftZeroEtlEndpoints endpoints,
@@ -36,19 +40,22 @@ public class RedshiftCopyJobExecutor {
         this.connections = connections;
     }
 
-    public void runAutomatic(Integration integration) {
-        apply(integration, false);
+    /** Returns whether the bucket needs another sweep. */
+    public boolean runAutomatic(Integration integration) {
+        return apply(integration, false);
     }
 
     public void disable(Integration integration) {
         apply(integration, true);
     }
 
-    private void apply(Integration integration, boolean disable) {
-        RedshiftDataResourceResolver.DatabaseTarget target = target(integration, disable);
+    private boolean apply(Integration integration, boolean disable) {
+        TargetResolution resolution = target(integration, disable);
+        RedshiftDataResourceResolver.DatabaseTarget target = resolution.database();
         if (target == null) {
-            return;
+            return !disable && resolution.unavailable();
         }
+        boolean retry = false;
         try (Connection connection = connections.open(target)) {
             List<String> databases = new ArrayList<>();
             try (Statement statement = connection.createStatement(); ResultSet rows = statement.executeQuery(
@@ -61,13 +68,14 @@ public class RedshiftCopyJobExecutor {
                 RedshiftDataResourceResolver.DatabaseTarget databaseTarget = new RedshiftDataResourceResolver.DatabaseTarget(
                         target.arn(), target.host(), target.port(), database, target.user(), target.password());
                 try (Connection databaseConnection = connections.open(databaseTarget)) {
-                    applyToDatabase(databaseConnection, integration, disable);
+                    retry |= applyToDatabase(databaseConnection, integration, disable);
                 } catch (SQLException exception) {
                     if (!"42P01".equals(exception.getSQLState()) && !"3F000".equals(exception.getSQLState())) {
                         if (disable) {
                             throw exception;
                         }
-                        LOG.warnv(exception, "S3 auto-copy failed in database {0} for integration {1}",
+                        retry = true;
+                        LOG.warnv(exception, "S3 auto-copy failed in database {0} for integration {1}; will retry",
                                 database, integration.getIntegrationArn());
                     }
                 }
@@ -76,9 +84,11 @@ public class RedshiftCopyJobExecutor {
             throw new AwsException("InternalFailure", "Could not process Redshift S3 copy jobs: "
                     + exception.getMessage(), 500);
         }
+        return retry;
     }
 
-    private static void applyToDatabase(Connection connection, Integration integration, boolean disable) throws SQLException {
+    private static boolean applyToDatabase(Connection connection, Integration integration, boolean disable)
+            throws SQLException {
         String bucket = AwsArnUtils.parse(integration.getSourceArn()).resource();
         if (disable) {
             try (PreparedStatement statement = connection.prepareStatement(
@@ -86,7 +96,7 @@ public class RedshiftCopyJobExecutor {
                 statement.setString(1, bucket);
                 statement.executeUpdate();
             }
-            return;
+            return false;
         }
         List<String> jobs = new ArrayList<>();
         try (PreparedStatement statement = connection.prepareStatement(
@@ -98,77 +108,63 @@ public class RedshiftCopyJobExecutor {
                 }
             }
         }
+        boolean retry = false;
         for (String job : jobs) {
-            while (runAutomaticBatch(connection, job)) {
-                // Commit each bounded batch before starting the next batch.
-            }
+            retry |= runAutomaticJob(connection, job);
         }
+        return retry;
     }
 
-    private static boolean runAutomaticBatch(Connection connection, String job) throws SQLException {
+    private static boolean runAutomaticJob(Connection connection, String job) throws SQLException {
         connection.setAutoCommit(false);
-        try (PreparedStatement lock = connection.prepareStatement(
-                "SELECT job_id, (SELECT count(*) FROM floci_internal.copy_job_detail d WHERE d.job_id = j.job_id) "
-                        + "FROM floci_internal.copy_job j WHERE j.job_name = ? AND j.is_auto FOR UPDATE")) {
-            lock.setQueryTimeout(5);
-            lock.setString(1, job);
-            long jobId = -1;
-            long before = 0;
-            try (ResultSet row = lock.executeQuery()) {
-                if (row.next()) {
-                    jobId = row.getLong(1);
-                    before = row.getLong(2);
-                    try (Statement statement = connection.createStatement()) {
-                        statement.setQueryTimeout(60);
-                        statement.execute("COPY JOB RUN \"" + job.replace("\"", "\"\"") + "\"");
-                    }
-                }
-            }
-            long added = 0;
-            if (jobId >= 0) {
-                try (PreparedStatement afterQuery = connection.prepareStatement(
-                        "SELECT count(*) FROM floci_internal.copy_job_detail WHERE job_id = ?")) {
-                    if (afterQuery != null) {
-                        afterQuery.setLong(1, jobId);
-                        try (ResultSet afterRow = afterQuery.executeQuery()) {
-                            if (afterRow != null && afterRow.next()) {
-                                added = afterRow.getLong(1) - before;
-                            }
+        boolean retry = false;
+        try {
+            try (PreparedStatement lock = connection.prepareStatement(
+                    "SELECT 1 FROM floci_internal.copy_job WHERE job_name = ? AND is_auto FOR UPDATE")) {
+                lock.setQueryTimeout(5);
+                lock.setString(1, job);
+                try (ResultSet row = lock.executeQuery()) {
+                    if (row.next()) {
+                        try (Statement statement = connection.createStatement()) {
+                            statement.execute("COPY JOB RUN \"" + job.replace("\"", "\"\"") + "\"");
                         }
                     }
                 }
             }
             connection.commit();
-            return added >= BATCH_FILE_LIMIT;
         } catch (SQLException exception) {
-            connection.rollback();
             LOG.warnv(exception, "Automatic COPY job {0} failed; its files will be retried", job);
-            return false;
-        } finally {
-            connection.setAutoCommit(true);
+            connection.rollback();
+            retry = true;
         }
+        connection.setAutoCommit(true);
+        return retry;
     }
 
-    private RedshiftDataResourceResolver.DatabaseTarget target(Integration integration, boolean disable) {
+    private TargetResolution target(Integration integration, boolean disable) {
         if (RedshiftZeroEtlEndpoints.isNamespaceArn(integration.getTargetArn())) {
             WorkgroupTarget workgroup;
             try {
                 workgroup = endpoints.targetWorkgroup(integration.getAccountId(), integration.getTargetArn());
             } catch (AwsException exception) {
-                if ("ResourceNotFoundException".equals(exception.getErrorCode())
-                        || "ValidationException".equals(exception.getErrorCode())) {
+                if ("ResourceNotFoundException".equals(exception.getErrorCode())) {
+                    LOG.debugv("Target namespace not found for S3 integration {0}", integration.getIntegrationArn());
+                    return TargetResolution.MISSING;
+                }
+                if ("ValidationException".equals(exception.getErrorCode())) {
                     LOG.debugv("Workgroup target unavailable for S3 integration {0}: {1}",
                             integration.getIntegrationArn(), exception.getMessage());
-                    return null;
+                    return TargetResolution.UNAVAILABLE;
                 }
                 throw exception;
             }
             if (workgroup == null || workgroup.host() == null || workgroup.port() <= 0
                     || workgroup.endpoint() == null || workgroup.endpoint().getPort() <= 0) {
-                return null;
+                return TargetResolution.UNAVAILABLE;
             }
-            return new RedshiftDataResourceResolver.DatabaseTarget(workgroup.arn(), "127.0.0.1",
-                    workgroup.endpoint().getPort(), workgroup.database(), workgroup.masterUsername(), workgroup.masterPassword());
+            return new TargetResolution(new RedshiftDataResourceResolver.DatabaseTarget(workgroup.arn(), "127.0.0.1",
+                    workgroup.endpoint().getPort(), workgroup.database(), workgroup.masterUsername(), workgroup.masterPassword()),
+                    false);
         }
         List<Cluster> clusters;
         try {
@@ -177,21 +173,21 @@ public class RedshiftCopyJobExecutor {
         } catch (AwsException exception) {
             if ("ClusterNotFound".equals(exception.getErrorCode())) {
                 LOG.debugv("Target cluster not found for S3 integration {0}", integration.getIntegrationArn());
-                return null;
+                return TargetResolution.MISSING;
             }
             throw exception;
         }
         if (clusters.isEmpty()) {
-            return null;
+            return TargetResolution.MISSING;
         }
         Cluster cluster = clusters.getFirst();
         if (!"available".equals(cluster.getClusterStatus()) || cluster.getProxyPort() <= 0) {
             if (disable) {
                 throw new AwsException("InvalidClusterState", "Resume the cluster before deleting its S3 integration.", 400);
             }
-            return null;
+            return TargetResolution.UNAVAILABLE;
         }
-        return new RedshiftDataResourceResolver.DatabaseTarget(integration.getTargetArn(), "127.0.0.1",
-                cluster.getProxyPort(), "dev", cluster.getMasterUsername(), cluster.getMasterPassword());
+        return new TargetResolution(new RedshiftDataResourceResolver.DatabaseTarget(integration.getTargetArn(),
+                "127.0.0.1", cluster.getProxyPort(), "dev", cluster.getMasterUsername(), cluster.getMasterPassword()), false);
     }
 }

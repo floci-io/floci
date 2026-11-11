@@ -19,6 +19,7 @@ import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.function.Supplier;
 
 @ApplicationScoped
 public class RedshiftS3AutoCopyConsumer extends SweepScheduler {
@@ -87,7 +88,9 @@ public class RedshiftS3AutoCopyConsumer extends SweepScheduler {
                 continue;
             }
             try {
-                scoped(integration, () -> writer.runAutomatic(integration));
+                if (scoped(integration, () -> writer.runAutomatic(integration))) {
+                    work.pendingBuckets.add(sourceBucket);
+                }
             } catch (RuntimeException exception) {
                 work.pendingBuckets.add(sourceBucket);
                 LOG.warnv(exception, "S3 auto-copy failed for integration {0}; will retry",
@@ -97,14 +100,15 @@ public class RedshiftS3AutoCopyConsumer extends SweepScheduler {
     }
 
     public void disable(Integration integration) {
-        scoped(integration, () -> writer.disable(integration));
-    }
-
-    private static void scoped(Integration integration, Runnable action) {
-        RequestScopes.callAs(integration.getAccountId(), AwsArnUtils.parse(integration.getIntegrationArn()).region(), () -> {
-            action.run();
+        scoped(integration, () -> {
+            writer.disable(integration);
             return null;
         });
+    }
+
+    private static <T> T scoped(Integration integration, Supplier<T> action) {
+        return RequestScopes.callAs(integration.getAccountId(),
+                AwsArnUtils.parse(integration.getIntegrationArn()).region(), action);
     }
 
     @Override

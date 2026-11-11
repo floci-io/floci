@@ -82,11 +82,6 @@ public final class S3CopySimulator {
     record CopyInput(CopyStatementParser.S3CopyFrom spec, List<String> keys, S3Service s3,
                      IamService iamService, RedshiftRoleAccess.RoleSession roleSession,
                      String expectedETag, String versionId) {
-        CopyInput(CopyStatementParser.S3CopyFrom spec, List<String> keys, S3Service s3,
-                  IamService iamService, RedshiftRoleAccess.RoleSession roleSession) {
-            this(spec, keys, s3, iamService, roleSession, null, null);
-        }
-
         S3Object readObject(String key) {
             S3Object object = versionId != null
                     ? s3.getObject(spec.bucket(), key, versionId)

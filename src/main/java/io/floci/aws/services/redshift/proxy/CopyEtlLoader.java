@@ -103,11 +103,6 @@ final class CopyEtlLoader {
     }
 
     static long executeObject(CopyBackendSession backend, CopyStatementParser.S3CopyFrom spec,
-                              S3Service s3, IamService iam, String account, List<String> roles) throws IOException {
-        return executeObject(backend, spec, null, null, s3, iam, account, roles);
-    }
-
-    static long executeObject(CopyBackendSession backend, CopyStatementParser.S3CopyFrom spec,
                               String expectedETag, String versionId,
                               S3Service s3, IamService iam, String account, List<String> roles) throws IOException {
         return load(backend, spec, expectedETag, versionId, s3, iam, account, roles, true);

@@ -97,6 +97,25 @@ class RedshiftS3AutoCopyConsumerTest {
         verify(writer, times(1)).runAutomatic(second);
     }
 
+    @Test
+    void retriesMarkedBucketWithoutAnotherUploadAndStopsAfterSuccess() {
+        RedshiftService service = mock(RedshiftService.class);
+        RedshiftCopyJobExecutor writer = mock(RedshiftCopyJobExecutor.class);
+        Integration retry = integration("retry", "active");
+        Integration healthy = integration("healthy", "active");
+        healthy.setSourceArn("arn:aws:s3:::other-bucket");
+        when(service.listS3AutoCopyIntegrations()).thenReturn(List.of(retry, healthy));
+        when(writer.runAutomatic(retry)).thenReturn(true, false);
+        RedshiftS3AutoCopyConsumer consumer = new RedshiftS3AutoCopyConsumer(service, writer, false, 1);
+
+        consumer.pollOnce();
+        consumer.pollOnce();
+        consumer.pollOnce();
+
+        verify(writer, times(2)).runAutomatic(retry);
+        verify(writer).runAutomatic(healthy);
+    }
+
     private static Integration integration(String name, String status) {
         Integration integration = new Integration();
         integration.setAccountId("123456789012");

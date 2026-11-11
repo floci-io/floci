@@ -19,8 +19,6 @@ import java.util.UUID;
 
 /** Checkpoints and target rows are written on the same backend transaction. */
 final class CopyJobRunner {
-    static int MAX_FILES_PER_RUN = 100;
-
     private record FileRevision(String etag, String versionId) {
         boolean matches(S3Object object) {
             return Objects.equals(etag, object.getETag()) && Objects.equals(versionId, object.getVersionId());
@@ -78,14 +76,10 @@ final class CopyJobRunner {
             }
         }
         long count = 0;
-        int processedFiles = 0;
         String token = null;
         do {
             S3Service.ListObjectsResult page = s3.listObjectsWithPrefixes(job.get(2), job.get(3), null, 1000, token, null);
             for (S3Object object : page.objects()) {
-                if (processedFiles >= MAX_FILES_PER_RUN) {
-                    break;
-                }
                 if (object.getLastModified() != null && object.getLastModified().isBefore(created)) {
                     continue;
                 }
@@ -111,7 +105,6 @@ final class CopyJobRunner {
                     backend.execute("RELEASE SAVEPOINT " + fileSavepoint);
                     checkpointed.add(object.getKey());
                     failedFiles.remove(object.getKey());
-                    processedFiles++;
                 } catch (IOException | RuntimeException exception) {
                     rollbackFileSavepoint(backend, fileSavepoint, exception);
                     if (exception instanceof S3TransferException transfer && isJobFailure(transfer.sqlState())) {
@@ -120,10 +113,9 @@ final class CopyJobRunner {
                     backend.query("SELECT floci_internal.record_copy_job_file_error("
                             + fileMetadataArgs(id, object) + ")");
                     failedFiles.put(object.getKey(), new FileRevision(object.getETag(), object.getVersionId()));
-                    processedFiles++;
                 }
             }
-            token = processedFiles < MAX_FILES_PER_RUN && page.isTruncated() ? page.nextContinuationToken() : null;
+            token = page.isTruncated() ? page.nextContinuationToken() : null;
         } while (token != null);
         return count;
     }
