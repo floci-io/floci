@@ -3881,6 +3881,11 @@ public class RdsService implements Resettable, ResourceProvider {
         // Resolved before the first setter runs, since the checks it carries read the instance's
         // current size and engine version: a refusal here must leave the whole request unapplied.
         DbInstanceScalingChanges resolvedScaling = scaling.resolveFor(instance);
+        if (!config.services().rds().mock() && !isBlank(resolvedScaling.engineVersion())
+                && !resolvedScaling.engineVersion().equals(instance.getEngineVersion())) {
+            throw new AwsException("InvalidParameterCombination",
+                    "EngineVersion changes are not supported for container-backed DB instances.", 400);
+        }
         DbInstanceSettings effective = withEffectiveWindows(settings, instance);
         if (isBlank(instance.getDbClusterIdentifier()) && !isAuroraEngine(engineName(instance))) {
             effective.validateStorageType();

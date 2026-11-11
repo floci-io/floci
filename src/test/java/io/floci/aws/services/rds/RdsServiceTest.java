@@ -2441,6 +2441,7 @@ class RdsServiceTest {
 
     @Test
     void modifyDbInstanceAppliesInstanceClassStorageAndEngineVersion() {
+        when(rdsConfig.mock()).thenReturn(true);
         createScalingInstance("scaled", "postgres", "13", 20);
 
         DbInstance modified = rdsService.modifyDbInstance("scaled", null, null, null,
@@ -2519,6 +2520,7 @@ class RdsServiceTest {
 
     @Test
     void modifyDbInstanceRejectsMajorEngineVersionUpgradeWithoutTheFlag() {
+        when(rdsConfig.mock()).thenReturn(true);
         createScalingInstance("major", "postgres", "13", 20);
 
         AwsException error = assertThrows(AwsException.class, () ->
@@ -2532,6 +2534,7 @@ class RdsServiceTest {
 
     @Test
     void modifyDbInstanceAppliesMajorEngineVersionUpgradeWithTheFlag() {
+        when(rdsConfig.mock()).thenReturn(true);
         createScalingInstance("major-allowed", "postgres", "13", 20);
 
         DbInstance modified = rdsService.modifyDbInstance("major-allowed", null, null, null,
@@ -2583,6 +2586,73 @@ class RdsServiceTest {
         DbInstance stored = rdsService.getDbInstance("rejected-whole");
         assertTrue(stored.isAutoMinorVersionUpgrade());
         assertEquals(1, stored.getBackupRetentionPeriod());
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"17.2", "16.5"})
+    void modifyDbInstanceRejectsContainerBackedEngineVersionChanges(String targetVersion) {
+        createScalingInstance("real-engine", "postgres", "16.4", 20);
+
+        AwsException error = assertThrows(AwsException.class, () ->
+                rdsService.modifyDbInstance("real-engine", null, null, null,
+                        null, null, null, null, DbInstanceSettings.unchanged(), null,
+                        new DbInstanceScalingChanges(null, null, targetVersion, true)));
+
+        assertEquals("InvalidParameterCombination", error.getErrorCode());
+        assertEquals(400, error.getHttpStatus());
+        assertEquals("16.4", rdsService.getDbInstance("real-engine").getEngineVersion());
+    }
+
+    @ParameterizedTest
+    @CsvSource({"mysql,8.0,8.4", "mariadb,10.11,11.4", "sqlserver-se,15.00,16.00",
+            "postgres,16.4,16.3"})
+    void modifyDbInstanceRejectsOtherContainerBackedVersionChanges(
+            String engine, String currentVersion, String targetVersion) {
+        createScalingInstance("other-engine", engine, currentVersion, 20);
+
+        AwsException error = assertThrows(AwsException.class, () ->
+                rdsService.modifyDbInstance("other-engine", null, null, null,
+                        null, null, null, null, DbInstanceSettings.unchanged(), null,
+                        new DbInstanceScalingChanges(null, null, targetVersion, true)));
+
+        assertEquals("InvalidParameterCombination", error.getErrorCode());
+        assertEquals(currentVersion, rdsService.getDbInstance("other-engine").getEngineVersion());
+    }
+
+    @Test
+    void rejectedContainerEngineUpgradeLeavesOtherSettingsAndBackendsUntouched() {
+        createScalingInstance("atomic-upgrade", "postgres", "16.4", 20);
+        clearInvocations(containerManager, proxyManager);
+
+        assertThrows(AwsException.class, () ->
+                rdsService.modifyDbInstance("atomic-upgrade", "ChangedPassword!", true, null,
+                        null, null, null, false,
+                        new DbInstanceSettings(null, null, 7, null, null, null), null,
+                        new DbInstanceScalingChanges("db.t3.large", 100, "17.2", true)));
+
+        DbInstance stored = rdsService.getDbInstance("atomic-upgrade");
+        assertEquals("16.4", stored.getEngineVersion());
+        assertEquals("db.t3.micro", stored.getDbInstanceClass());
+        assertEquals(20, stored.getAllocatedStorage());
+        assertEquals("Password123!", stored.getMasterPassword());
+        assertFalse(stored.isIamDatabaseAuthenticationEnabled());
+        assertTrue(stored.isAutoMinorVersionUpgrade());
+        assertEquals(1, stored.getBackupRetentionPeriod());
+        verifyNoInteractions(containerManager, proxyManager);
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"16.4", "", "  "})
+    void modifyDbInstanceAcceptsUnchangedContainerBackedEngineVersion(String version) {
+        createScalingInstance("same-engine", "postgres", "16.4", 20);
+
+        DbInstance modified = rdsService.modifyDbInstance("same-engine", null, null, null,
+                null, null, null, null, DbInstanceSettings.unchanged(), null,
+                new DbInstanceScalingChanges("db.t3.large", 100, version, null));
+
+        assertEquals("16.4", modified.getEngineVersion());
+        assertEquals("db.t3.large", modified.getDbInstanceClass());
+        assertEquals(100, modified.getAllocatedStorage());
     }
 
     private void createScalingInstance(String id, String engine, String engineVersion, int storage) {
