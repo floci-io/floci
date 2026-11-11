@@ -118,19 +118,22 @@ class CognitoOAuthCorsIntegrationTest {
                 .header("Access-Control-Allow-Credentials", nullValue());
     }
 
-    @Test
+    @ParameterizedTest
+    @CsvSource({
+            "POST, /oauth2/token",
+            "HEAD, /oauth2/userInfo"})
     @Order(6)
-    void customDomainPreflightIsAnsweredByCognito() {
+    void customDomainPreflightIsAnsweredByCognito(String method, String path) {
         given()
                 .header("Host", DOMAIN)
                 .header("Origin", ORIGIN)
-                .header("Access-Control-Request-Method", "POST")
+                .header("Access-Control-Request-Method", method)
         .when()
-                .options("/oauth2/token")
+                .options(path)
         .then()
                 .statusCode(200)
                 .header("Access-Control-Allow-Origin", ORIGIN)
-                .header("Access-Control-Allow-Methods", "POST")
+                .header("Access-Control-Allow-Methods", method)
                 .header("Access-Control-Allow-Headers", nullValue())
                 .header("Access-Control-Max-Age", "1800");
     }
@@ -156,7 +159,8 @@ class CognitoOAuthCorsIntegrationTest {
     @CsvSource({
             "cors-bucket.s3.localhost.floci.io, /cognito-idp/oauth2/token, POST",
             "cognito-idp.s3.localhost.floci.io, /oauth2/token, POST",
-            "localhost, /cognito-idp/oauth2/token, PUT"})
+            "localhost, /cognito-idp/oauth2/token, PUT",
+            "localhost, /cognito-idp/oauth2/userInfo, HEAD"})
     @Order(8)
     void s3PreflightIsLeftToS3(String host, String path, String method) {
         given()

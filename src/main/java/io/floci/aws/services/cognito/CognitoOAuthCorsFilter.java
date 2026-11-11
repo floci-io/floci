@@ -76,6 +76,10 @@ public class CognitoOAuthCorsFilter implements ContainerRequestFilter, Container
         String method = HttpMethod.OPTIONS.equals(request.getMethod())
                 ? request.getHeaderString(REQUEST_METHOD)
                 : request.getMethod();
+        if (HttpMethod.HEAD.equals(method) && request.getProperty(CognitoCustomDomainFilter.POOL_PROPERTY) != null) {
+            // The custom-domain filter serves HEAD with the GET handler.
+            method = HttpMethod.GET;
+        }
         return CORS_ROUTES.contains(method + " " + request.getUriInfo().getPath()) ? request.getHeaderString("Origin") : null;
     }
 
