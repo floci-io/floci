@@ -254,8 +254,8 @@ public class SsmCfnProvisioner implements CfnResourceProvisioner {
                 && Objects.equals(tier, current.getTier())
                 && Objects.equals(policies, current.getPolicies());
         if (!unchanged) {
-            ssmService.putParameter(name, value, type, description, true, null, keyId, allowedPattern, tier,
-                    policies, region);
+            ssmService.restoreParameter(name, value, type, description, keyId, allowedPattern, tier, policies,
+                    region);
         }
         reconcileTags(name, CfnRollback.snapshotTagKeys(snapshot), CfnRollback.snapshotTags(snapshot), region);
     }

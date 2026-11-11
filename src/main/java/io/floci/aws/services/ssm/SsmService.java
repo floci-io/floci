@@ -271,7 +271,24 @@ public class SsmService implements ResourceProvider {
         validateTagKeys(tags);
         name = withoutSurroundingSpaces(name);
         rejectInvalidName(name);
+        return writeParameter(name, value, type, description, overwrite, tags, keyId, allowedPattern, tier, policies,
+                region);
+    }
 
+    /**
+     * Overwrites a parameter under the name it is stored with, without the name trimming and validation
+     * {@code PutParameter} applies, so a CloudFormation rollback can restore a parameter stored before those checks.
+     * Returns the new version.
+     */
+    public long restoreParameter(String name, String value, String type, String description, String keyId,
+                                 String allowedPattern, String tier, List<JsonNode> policies, String region) {
+        return writeParameter(name, value, type, description, true, null, keyId, allowedPattern, tier, policies,
+                region);
+    }
+
+    private long writeParameter(String name, String value, String type, String description,
+                                boolean overwrite, Map<String, String> tags, String keyId, String allowedPattern,
+                                String tier, List<JsonNode> policies, String region) {
         if (overwrite && tags != null && !tags.isEmpty()) {
             throw new AwsException("ValidationException",
                     "Invalid request: tags and overwrite can't be used together. To create a "

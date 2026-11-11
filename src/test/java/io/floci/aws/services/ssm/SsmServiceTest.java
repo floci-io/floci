@@ -237,6 +237,24 @@ class SsmServiceTest {
     }
 
     @Test
+    void restoreParameter_overwritesANameThatPutParameterRejectsUnderThatExactName() {
+        String legacy = " /legacy name ";
+        assertThrows(AwsException.class,
+                () -> ssmService.putParameter(legacy, "v", "String", null, true, "us-east-1"));
+
+        ssmService.restoreParameter(legacy, "v1", "String", null, null, null, null, null, "us-east-1");
+        long version = ssmService.restoreParameter(legacy, "v2", "String", "restored", null, null, null, null,
+                "us-east-1");
+
+        assertEquals(2L, version);
+        Parameter restored = ssmService.getParameter(legacy, "us-east-1");
+        assertEquals(legacy, restored.getName());
+        assertEquals("v2", restored.getValue());
+        assertEquals("restored", restored.getDescription());
+        assertThrows(AwsException.class, () -> ssmService.getParameter("/legacy name", "us-east-1"));
+    }
+
+    @Test
     void putParameter_invalidTagKeyIsRejectedAndTheParameterIsNotCreated() {
         String region = "eu-west-1";
         AwsException ex = assertThrows(AwsException.class, () ->
