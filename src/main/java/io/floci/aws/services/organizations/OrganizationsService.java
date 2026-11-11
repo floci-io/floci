@@ -1289,11 +1289,6 @@ public class OrganizationsService implements ScpProvider, RootAccessOrganization
     // ──────────────────────────── Handshakes ────────────────────────────
 
     public Handshake inviteAccountToOrganization(String callerAccountId, String targetId, String targetType,
-                                                 String notes) {
-        return inviteAccountToOrganization(callerAccountId, targetId, targetType, notes, null);
-    }
-
-    public Handshake inviteAccountToOrganization(String callerAccountId, String targetId, String targetType,
                                                  String notes, Map<String, String> tags) {
         Organization organization = requireManagementAccount(callerAccountId);
         if (targetId == null || targetId.isEmpty()) {

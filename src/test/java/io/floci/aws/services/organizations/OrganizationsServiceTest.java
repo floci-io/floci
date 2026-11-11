@@ -328,7 +328,7 @@ class OrganizationsServiceTest {
     void anExpiredHandshakeReportsExpiredAndCannotBeAccepted() {
         service.createOrganization(MANAGEMENT_ACCOUNT, "ALL");
         Handshake handshake = service.inviteAccountToOrganization(
-                MANAGEMENT_ACCOUNT, OUTSIDER_ACCOUNT, "ACCOUNT", null);
+                MANAGEMENT_ACCOUNT, OUTSIDER_ACCOUNT, "ACCOUNT", null, null);
 
         handshake.setExpirationTimestamp(Instant.now().minus(1, ChronoUnit.DAYS));
         handshakes.putForAccount(MANAGEMENT_ACCOUNT, handshake.getId(), handshake);
@@ -344,7 +344,7 @@ class OrganizationsServiceTest {
     void acceptingAnInvitationJoinsTheOrganizationAsAnInvitedMember() {
         Organization organization = service.createOrganization(MANAGEMENT_ACCOUNT, "ALL");
         Handshake handshake = service.inviteAccountToOrganization(
-                MANAGEMENT_ACCOUNT, OUTSIDER_ACCOUNT, "ACCOUNT", null);
+                MANAGEMENT_ACCOUNT, OUTSIDER_ACCOUNT, "ACCOUNT", null, null);
 
         Handshake accepted = service.acceptHandshake(OUTSIDER_ACCOUNT, handshake.getId());
         assertEquals("ACCEPTED", accepted.getState());
@@ -380,7 +380,7 @@ class OrganizationsServiceTest {
     void memberAccountsCannotPerformManagementActions() {
         Organization organization = service.createOrganization(MANAGEMENT_ACCOUNT, "ALL");
         Handshake handshake = service.inviteAccountToOrganization(
-                MANAGEMENT_ACCOUNT, OUTSIDER_ACCOUNT, "ACCOUNT", null);
+                MANAGEMENT_ACCOUNT, OUTSIDER_ACCOUNT, "ACCOUNT", null, null);
         service.acceptHandshake(OUTSIDER_ACCOUNT, handshake.getId());
 
         AwsException error = assertThrows(AwsException.class, () -> service.createOrganizationalUnit(
