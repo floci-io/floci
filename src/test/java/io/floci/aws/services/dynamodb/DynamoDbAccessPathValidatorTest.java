@@ -352,6 +352,31 @@ class DynamoDbAccessPathValidatorTest {
     }
 
     @Test
+    void queryRejectsIndexFilterOnNonProjectedAttributes() {
+        ObjectNode names = mapper.createObjectNode();
+        names.put("#z", "zeta");
+        ObjectNode queryFilter = mapper.createObjectNode();
+        queryFilter.putObject("details");
+
+        assertDoesNotThrow(() -> queryWithFilter(gsiPath, "status = :status", "summary = :s", null, null));
+        AwsException expressionError = assertThrows(AwsException.class, () -> queryWithFilter(gsiPath,
+                "status = :status", "#z.a = :v OR summary = :s OR size(#z) > :n", null, names));
+        assertEquals("One or more parameter values were invalid: Secondary index status-index "
+                + "does not project one or more filter attributes: [zeta]", expressionError.getMessage());
+        AwsException legacyError = assertThrows(AwsException.class,
+                () -> queryWithFilter(lsiPath, "pk = :pk", null, queryFilter, null));
+        assertEquals("One or more parameter values were invalid: Secondary index alternate-index "
+                + "does not project one or more filter attributes: [details]", legacyError.getMessage());
+        assertDoesNotThrow(() -> queryWithFilter(tablePath, "pk = :pk", "details = :d", queryFilter, null));
+    }
+
+    private void queryWithFilter(DynamoDbAccessPath accessPath, String keyCondition, String filter,
+                                 ObjectNode queryFilter, ObjectNode names) {
+        DynamoDbAccessPathValidator.validateQuery(table, accessPath, null, keyCondition, filter,
+                queryFilter, names, expressionValues(extractPlaceholders(keyCondition)));
+    }
+
+    @Test
     void listsTheUnprojectedGsiAttributesOnceInRequestOrder() {
         ObjectNode names = mapper.createObjectNode();
         names.put("#q", "qq");

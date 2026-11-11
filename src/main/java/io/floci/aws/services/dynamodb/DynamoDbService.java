@@ -1776,7 +1776,9 @@ public class DynamoDbService {
             // is not read, does not count toward ScannedCount, and the cursor
             // anchors to the previous scanned item (which, with a filter, may well
             // be an item that was not returned).
-            int sz = readItemSize(item, accessPath, table);
+            // Scan reads and filters only what the index holds, so non-projected attributes never match.
+            JsonNode filtered = indexItem(item, accessPath, table);
+            int sz = DynamoDbItemSize.calculateItemSize(filtered);
             if (accSize > 0 && accSize + sz > MAX_RESPONSE_BYTES) {
                 lastEvaluatedKey = buildKeyNode(table, lastScanned, lekPkName, lekSkName, indexScan);
                 break;
@@ -1787,8 +1789,8 @@ public class DynamoDbService {
             scannedItems.add(item);
             lastScanned = item;
             boolean matched = (filterExpression == null
-                    || matchesFilterExpression(item, filterExpression, expressionAttrNames, expressionAttrValues))
-                    && (scanFilter == null || matchesScanFilterPublic(item, scanFilter, conditionalOperator));
+                    || matchesFilterExpression(filtered, filterExpression, expressionAttrNames, expressionAttrValues))
+                    && (scanFilter == null || matchesScanFilterPublic(filtered, scanFilter, conditionalOperator));
             if (matched) {
                 results.add(item);
             }
@@ -1812,11 +1814,15 @@ public class DynamoDbService {
     // index stores, not on the full base item. Characterised on real AWS (us-east-1,
     // 2026-09-05): querying a 20KB item through a KEYS_ONLY GSI costs 0.5 units.
     private int readItemSize(JsonNode item, DynamoDbAccessPath accessPath, TableDefinition table) {
+        return DynamoDbItemSize.calculateItemSize(indexItem(item, accessPath, table));
+    }
+
+    private static JsonNode indexItem(JsonNode item, DynamoDbAccessPath accessPath, TableDefinition table) {
         if (!accessPath.isIndex() || "ALL".equals(accessPath.projectionType())) {
-            return DynamoDbItemSize.calculateItemSize(item);
+            return item;
         }
-        return DynamoDbItemSize.calculateItemSize(ProjectionEvaluator.trimToAttributes(
-                (ObjectNode) item, accessPath.projectedAttributeNames(table)));
+        return ProjectionEvaluator.trimToAttributes(
+                (ObjectNode) item, accessPath.projectedAttributeNames(table));
     }
 
     // The 1 MB page counts the size above. The bill of a base table read counts a vector
