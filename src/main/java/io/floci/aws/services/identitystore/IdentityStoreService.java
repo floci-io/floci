@@ -20,6 +20,7 @@ import java.time.Instant;
 import java.util.Comparator;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 import java.util.Set;
 import java.util.UUID;
 import java.util.regex.Pattern;
@@ -208,6 +209,14 @@ public class IdentityStoreService implements Resettable {
     public User describeUser(JsonNode request) {
         String storeId = requireStore(required(request, "IdentityStoreId"));
         return requireUser(storeId, requireResourceId(required(request, "UserId"), "UserId"));
+    }
+
+    /** The user {@code userId} of the identity store {@code storeId}, if the store holds one. */
+    public Optional<User> findUser(String storeId, String userId) {
+        if (storeId == null || userId == null) {
+            return Optional.empty();
+        }
+        return users.getForAccount(GLOBAL_PARTITION, userKey(storeId, userId));
     }
 
     public synchronized void updateUser(JsonNode request) {
