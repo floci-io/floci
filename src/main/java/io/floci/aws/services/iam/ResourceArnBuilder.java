@@ -102,8 +102,6 @@ public class ResourceArnBuilder {
     private static final Set<String> SSM_SELECTOR_READ_OPERATIONS = Set.of("GetParameter", "GetParameters");
     private static final Set<String> SSM_TEXT_NAME_OPERATIONS = Set.of("PutParameter", "GetParameter",
             "DeleteParameter", "GetParameterHistory", "LabelParameterVersion");
-    /** The SSM actions whose handler strips surrounding whitespace from {@code Name} before acting on it. */
-    private static final Set<String> SSM_STRIPPED_NAME_OPERATIONS = Set.of("PutParameter", "UnlabelParameterVersion");
 
     private final ObjectMapper objectMapper;
     /**
@@ -1956,7 +1954,9 @@ public class ResourceArnBuilder {
             } else if (json.hasNonNull("Name")
                     || operation != null && SSM_TEXT_NAME_OPERATIONS.contains(operation)) {
                 String name = json.path("Name").asText();
-                if (operation != null && SSM_STRIPPED_NAME_OPERATIONS.contains(operation)) {
+                if ("PutParameter".equals(operation)) {
+                    name = SsmService.withoutSurroundingSpaces(name);
+                } else if ("UnlabelParameterVersion".equals(operation)) {
                     name = name.strip();
                 }
                 return List.of(ssmParameterArn(selectorRead ? withoutSsmSelector(name) : name, region, accountId));

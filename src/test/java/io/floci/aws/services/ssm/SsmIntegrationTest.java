@@ -1905,7 +1905,8 @@ class SsmIntegrationTest {
 
     @Test
     void putParameterRejectsANameOutsideTheParameterNameSyntaxAndStoresNothing() {
-        for (String name : List.of("/name-syntax/db:secret", "/name-syntax/db secret")) {
+        for (String name : List.of("/name-syntax/db:secret", "/name-syntax/db secret", "/name-syntax/db\\t",
+                "\\u00a0/name-syntax/db")) {
             given()
                 .header("X-Amz-Target", "AmazonSSM.PutParameter")
                 .contentType(SSM_CONTENT_TYPE)

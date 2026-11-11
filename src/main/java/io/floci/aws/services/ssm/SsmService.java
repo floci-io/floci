@@ -269,7 +269,7 @@ public class SsmService implements ResourceProvider {
                             + "Member must satisfy enum value set: [Standard, Advanced, Intelligent-Tiering]");
         }
         validateTagKeys(tags);
-        name = name == null ? null : name.strip();
+        name = withoutSurroundingSpaces(name);
         rejectInvalidName(name);
 
         if (overwrite && tags != null && !tags.isEmpty()) {
@@ -1116,6 +1116,25 @@ public class SsmService implements ResourceProvider {
         param.getTags().putAll(tags);
         parameterStore.put(storageKey, param);
         LOG.debugv("Added tags to parameter: {0}", resourceId);
+    }
+
+    /**
+     * The name without its leading and trailing spaces, as {@code PutParameter} stores it. Only the space character
+     * is removed; a tab, newline or other whitespace stays and fails name validation.
+     */
+    public static String withoutSurroundingSpaces(String name) {
+        if (name == null) {
+            return null;
+        }
+        int start = 0;
+        int end = name.length();
+        while (start < end && name.charAt(start) == ' ') {
+            start++;
+        }
+        while (end > start && name.charAt(end - 1) == ' ') {
+            end--;
+        }
+        return name.substring(start, end);
     }
 
     /**

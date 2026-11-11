@@ -61,8 +61,8 @@ public class SsmCfnProvisioner implements CfnResourceProvisioner {
             ReplacementCleanup.endRollbackRetry(r);
         }
         Map<String, String> attributesBefore = new HashMap<>(r.getAttributes());
-        String name = ctx.stablePhysicalName(ctx.resolveOptional(props, "Name"),
-                r.getLogicalId(), PARAMETER_NAME_MAX_LENGTH, false).strip();
+        String name = SsmService.withoutSurroundingSpaces(ctx.stablePhysicalName(
+                ctx.resolveOptional(props, "Name"), r.getLogicalId(), PARAMETER_NAME_MAX_LENGTH, false));
         String value = ctx.resolveOptional(props, "Value");
         if (value == null) {
             value = "";

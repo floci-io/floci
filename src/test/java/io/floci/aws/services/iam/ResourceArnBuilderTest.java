@@ -1806,6 +1806,9 @@ class ResourceArnBuilderTest {
         setJsonBody("{\"Name\":\" /prod/db \",\"Value\":\"v\",\"Type\":\"String\"}");
         assertEquals(List.of("arn:aws:ssm:us-east-1:000000000000:parameter/prod/db"),
                 builder.buildResources("ssm", ctx, "us-east-1", "000000000000"));
+        setJsonBody("{\"Name\":\"\\t/prod/db \",\"Value\":\"v\",\"Type\":\"String\"}");
+        assertEquals(List.of("arn:aws:ssm:us-east-1:000000000000:parameter/\t/prod/db"),
+                builder.buildResources("ssm", ctx, "us-east-1", "000000000000"));
     }
 
     @Test
