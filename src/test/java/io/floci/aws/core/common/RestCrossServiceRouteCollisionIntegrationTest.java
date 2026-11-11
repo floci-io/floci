@@ -1,5 +1,6 @@
 package io.floci.aws.core.common;
 
+import io.floci.aws.testing.PartitionMatrix;
 import io.floci.aws.testing.RestAssuredJsonUtils;
 import io.quarkus.test.junit.QuarkusTest;
 import io.restassured.specification.RequestSpecification;
@@ -24,11 +25,6 @@ class RestCrossServiceRouteCollisionIntegrationTest {
     @BeforeAll
     static void configureRestAssured() {
         RestAssuredJsonUtils.configureAwsContentTypes();
-    }
-
-    private static String authorization(String service) {
-        return "AWS4-HMAC-SHA256 Credential=test/20260707/us-east-1/" + service
-                + "/aws4_request, SignedHeaders=host;x-amz-date, Signature=deadbeef";
     }
 
     @ParameterizedTest
@@ -84,7 +80,7 @@ class RestCrossServiceRouteCollisionIntegrationTest {
     })
     void collidingRestCallsAreSafelyRejectedWith404(String service, String method, String path) {
         given()
-            .header("Authorization", authorization(service))
+            .header("Authorization", PartitionMatrix.sigV4Auth("us-east-1", service))
             .contentType("application/json")
             .body("{}")
         .when()
@@ -102,7 +98,7 @@ class RestCrossServiceRouteCollisionIntegrationTest {
     void legitimateAppConfigCallIsNotRejectedByCollisionGuard() {
         // AppConfig owns /applications, so signed as appconfig it must not be rejected with UnknownOperationException
         given()
-            .header("Authorization", authorization("appconfig"))
+            .header("Authorization", PartitionMatrix.sigV4Auth("us-east-1", "appconfig"))
             .contentType("application/json")
             .body("{\"Name\":\"test-app\"}")
         .when()
@@ -115,7 +111,7 @@ class RestCrossServiceRouteCollisionIntegrationTest {
     void legitimateBedrockResourcePolicyWithHyphenIsNotRejectedByCollisionGuard() {
         // Bedrock owns /resource-policy (with hyphen), must not collide with /resourcepolicy
         given()
-            .header("Authorization", authorization("bedrock"))
+            .header("Authorization", PartitionMatrix.sigV4Auth("us-east-1", "bedrock"))
             .contentType("application/json")
         .when()
             .get("/resource-policy/arn:aws:bedrock:us-east-1:123456789012:test-resource")
@@ -129,7 +125,7 @@ class RestCrossServiceRouteCollisionIntegrationTest {
         // AppSync owns /v2/apis/{apiId}/channelNamespaces, so signed as appsync it reaches AppSync
         // (returning AppSync's NotFoundException for an unknown apiId, NOT UnknownOperationException)
         given()
-            .header("Authorization", authorization("appsync"))
+            .header("Authorization", PartitionMatrix.sigV4Auth("us-east-1", "appsync"))
             .contentType("application/json")
             .body("{\"name\":\"test-ns\"}")
         .when()
