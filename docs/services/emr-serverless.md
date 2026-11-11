@@ -83,6 +83,11 @@ runner mode a Spark run executes; see [Running Spark job runs](#running-spark-jo
   the 7.11.0 release notes say; a run outside that is refused with `ValidationException`.
 * **CancelJobRun** moves a run that has not finished to `CANCELLED`. A finished run answers
   `ValidationException` "Job run is not in a cancellable state".
+* **StopApplication** refuses an application with a run that has not finished, a `STREAMING` run or
+  a `CANCELLING` one included, as the API reference says "All scheduled and running jobs must be
+  completed or cancelled before stopping an application." It answers `ValidationException`, the one
+  error the model declares for this, with that sentence as its message: AWS's own message is not
+  recorded, so the wording is Floci's reading.
 * **ListJobRuns** returns the newest runs first, filtered by `states`, `createdAtAfter`,
   `createdAtBefore` and `mode`, at most 50 per page. With several `states`, the runs are grouped by
   state in the order the filter names them. A state or mode that does not exist, or more than 8
@@ -241,7 +246,6 @@ application's `imageConfiguration`; a `TezTask` image is not used, as Tez's task
   directory; Spark alone unpacks the others, into its own files folder. Floci reads an archive itself,
   whatever the execution role may read, though Spark's own read of it uses the role's credentials.
 * **Custom images**: Floci does not check an `imageUri` against the model's pattern, which would refuse the repository URIs Floci's own ECR hands out, nor that the image was built from its release's base image (AWS refuses one that was not from `emr-7.14.0` and `emr-spark-8.1.0` on), nor the image's size. An image that cannot be pulled fails the run, not the request that names it. Every run resolves its image again, as releases from 7.14 do and earlier ones with `applicationLevelDigestResolution` false: Floci keeps no digest from the application's start, and reports no `resolvedImageDigest`, on the application or on a job run.
-* **StopApplication with running jobs**: AWS requires running jobs to finish or be cancelled before an application stops. Floci does not enforce it; with the default duration of `0` no `BATCH` run is ever running.
 * **Not emulated**: the "EMR Serverless Job Run Retry" event, as Floci sends no EMR Serverless events, queuing (`QUEUED`), `totalResourceUtilization` and `billedResourceUtilization`, and `shutdownGracePeriodInSeconds` (accepted and ignored: a cancelled run's driver is stopped at once).
 * **Instant Start/Stop**: Floci marks the application `STARTED` or `STOPPED` immediately without provisioning actual compute capacity in the background.
 * **Data Plane**: Floci does not implement the data-plane API, such as interactive sessions.

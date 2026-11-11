@@ -223,7 +223,7 @@ class AslExecutorEmrServerlessSyncTest {
         run(task("startApplication.sync"), APPLICATION);
 
         verify(applications).startApplication(APPLICATION_ID);
-        verify(applications).stopApplication(APPLICATION_ID);
+        verify(jobRuns).stopApplication(APPLICATION_ID);
         assertEquals(List.of(), history.stream().map(HistoryEvent::getType)
                 .filter(type -> type.equals("TaskFailed") || type.equals("TaskSucceeded")).toList());
     }
@@ -235,7 +235,7 @@ class AslExecutorEmrServerlessSyncTest {
         Execution execution = run(timingOut("stopApplication.sync"), APPLICATION);
 
         assertEquals("States.Timeout", execution.getError());
-        verify(applications).stopApplication(APPLICATION_ID);
+        verify(jobRuns).stopApplication(APPLICATION_ID);
         verify(applications, never()).startApplication(anyString());
         verify(applications, never()).deleteApplication(anyString());
     }
