@@ -234,7 +234,9 @@ public class SecretsManagerJsonHandler {
         ObjectNode response = objectMapper.createObjectNode();
         response.put("ARN", secret.getArn());
         response.put("Name", secret.getName());
-        response.put("VersionId", secret.getCurrentVersionId());
+        if (secret.getCurrentVersionId() != null) {
+            response.put("VersionId", secret.getCurrentVersionId());
+        }
         if (!replicaRegions.isEmpty()) {
             response.set("ReplicationStatus", replicationStatusNode(secret));
         }
@@ -392,7 +394,10 @@ public class SecretsManagerJsonHandler {
             response.set("ReplicationStatus", replicationStatusNode(secret));
         }
         response.set("Tags", tagsNode(secret));
-        response.set("VersionIdsToStages", versionStagesNode(secret));
+        ObjectNode versionIdsToStages = versionStagesNode(secret);
+        if (!versionIdsToStages.isEmpty()) {
+            response.set("VersionIdsToStages", versionIdsToStages);
+        }
         return Response.ok(response).build();
     }
 
