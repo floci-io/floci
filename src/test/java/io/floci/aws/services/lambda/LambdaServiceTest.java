@@ -112,6 +112,48 @@ class LambdaServiceTest {
     }
 
     @Test
+    void createFunctionRejectsEnvironmentOverFourKilobytes() {
+        Map<String, Object> request = baseRequest("oversized-environment-create");
+        request.put("Environment", Map.of("Variables", Map.of("BIG", "x".repeat(5000))));
+
+        AwsException error = assertThrows(AwsException.class,
+                () -> service.createFunction(REGION, request));
+
+        assertEquals("InvalidParameterValueException", error.getErrorCode());
+        assertEquals(400, error.getHttpStatus());
+        assertTrue(error.getMessage().contains("environment variables you have provided exceeded the 4KB limit"));
+        AwsException missing = assertThrows(AwsException.class,
+                () -> service.getFunction(REGION, "oversized-environment-create"));
+        assertEquals("ResourceNotFoundException", missing.getErrorCode());
+    }
+
+    @Test
+    void updateFunctionConfigurationRejectsEnvironmentOverFourKilobytes() {
+        Map<String, Object> request = baseRequest("oversized-environment-update");
+        request.put("Environment", Map.of("Variables", Map.of("MARKER", "original")));
+        LambdaFunction original = service.createFunction(REGION, request);
+        String description = original.getDescription();
+        String revisionId = original.getRevisionId();
+
+        AwsException error = assertThrows(AwsException.class,
+                () -> service.updateFunctionConfiguration(REGION, "oversized-environment-update", Map.of(
+                        "Description", "rejected update",
+                        "Timeout", 60,
+                        "MemorySize", 512,
+                        "Environment", Map.of("Variables", Map.of("BIG", "x".repeat(5000))))));
+
+        assertEquals("InvalidParameterValueException", error.getErrorCode());
+        assertEquals(400, error.getHttpStatus());
+        assertTrue(error.getMessage().contains("environment variables you have provided exceeded the 4KB limit"));
+        LambdaFunction unchanged = service.getFunction(REGION, "oversized-environment-update");
+        assertEquals(Map.of("MARKER", "original"), unchanged.getEnvironment());
+        assertEquals(description, unchanged.getDescription());
+        assertEquals(10, unchanged.getTimeout());
+        assertEquals(256, unchanged.getMemorySize());
+        assertEquals(revisionId, unchanged.getRevisionId());
+    }
+
+    @Test
     void createAndUpdateFunctionFileSystemConfig() {
         Map<String, Object> request = baseRequest("efs-function");
         request.put("VpcConfig", vpcConfig());

@@ -4,6 +4,7 @@ import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.SerializationFeature;
 import io.floci.aws.config.EmulatorConfig;
 import io.floci.aws.core.common.AwsArnUtils;
 import io.floci.aws.core.common.AwsException;
@@ -110,6 +111,7 @@ public class LambdaService implements ResourceProvider {
     private static final int MAX_SOURCE_ACCESS_CONFIGURATIONS = 23;
     private static final int LIST_FUNCTIONS_PAGE_SIZE = 50;
     private static final int MAX_LIST_FUNCTIONS_ITEMS = 10_000;
+    private static final int MAX_ENVIRONMENT_BYTES = 4096;
     // UpdateFunctionCode S3Bucket (3-63 characters, [0-9A-Za-z\.\-_]*(?<!\.)) and S3Key (1-1024) shapes.
     private static final Pattern S3_BUCKET_PATTERN = Pattern.compile("[0-9A-Za-z\\.\\-_]*(?<!\\.)");
     // Create/UpdateAlias FunctionVersion (VersionWithLatestPublished: 1-1024, pattern below) and Description (max 256).
@@ -2842,12 +2844,27 @@ public class LambdaService implements ResourceProvider {
     }
 
     @SuppressWarnings("unchecked")
-    private static Map<String, String> environmentVariables(Map<String, Object> environment) {
+    private Map<String, String> environmentVariables(Map<String, Object> environment) {
         if (environment == null) {
             return null;
         }
-        return (Map<String, String>) (Map<?, ?>) structureValue(
+        Map<String, String> variables = (Map<String, String>) (Map<?, ?>) structureValue(
                 environment.get("Variables"), "Environment.Variables");
+        if (variables != null) {
+            int size;
+            try {
+                size = objectMapper.writer().without(SerializationFeature.INDENT_OUTPUT)
+                        .writeValueAsString(variables).getBytes(StandardCharsets.UTF_8).length;
+            } catch (JsonProcessingException e) {
+                throw new AwsException("SerializationException", "Environment.Variables could not be serialized", 400);
+            }
+            if (size > MAX_ENVIRONMENT_BYTES) {
+                throw new AwsException("InvalidParameterValueException",
+                        "Lambda was unable to configure your environment variables because the environment variables "
+                                + "you have provided exceeded the 4KB limit.", 400);
+            }
+        }
+        return variables;
     }
 
     /**

@@ -75,6 +75,14 @@ Floci Lambda runs your function code locally inside real Docker containers - clo
 supported ranges before changing any stored settings. A rejected value returns
 `InvalidParameterValueException` and leaves the function configuration unchanged.
 
+`CreateFunction` and `UpdateFunctionConfiguration` enforce the 4 KB environment-variable
+limit. The compact JSON `Variables` object must fit within 4,096 UTF-8 bytes, including
+keys, values, punctuation, and JSON escaping, as described in the
+[AWS deployment guidance](https://docs.aws.amazon.com/lambda/latest/dg/troubleshooting-deployment.html).
+An oversized environment returns HTTP 400 with `InvalidParameterValueException` before
+creating a function or changing any stored configuration. Omitting `Environment` on an
+update preserves the existing variables; an empty `Variables` object clears them.
+
 The event invoke configuration is stored and returned as AWS does, and `AWS::Lambda::EventInvokeConfig`
 provisions it from a stack. A SAM function's `EventInvokeConfig` expands into that resource as
 `sam deploy` does: on `$LATEST`, or on the `AutoPublishAlias` alias, with the inline role policy for
