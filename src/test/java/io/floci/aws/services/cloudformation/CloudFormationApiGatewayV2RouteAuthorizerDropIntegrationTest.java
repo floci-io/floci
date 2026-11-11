@@ -85,6 +85,7 @@ class CloudFormationApiGatewayV2RouteAuthorizerDropIntegrationTest {
         String stackName = "route-novalue-stack";
         stackAction("CreateStack", stackName, template(ROUTE_SETTINGS, ""));
         CfnStackWaits.awaitStatus(stackName, "CREATE_COMPLETE");
+        Stack created = stack(cloudFormationService, stackName);
 
         stackAction("UpdateStack", stackName, template(
                 ",\"AuthorizationType\":\"CUSTOM\","
@@ -95,8 +96,9 @@ class CloudFormationApiGatewayV2RouteAuthorizerDropIntegrationTest {
         Stack updated = stack(cloudFormationService, stackName);
         Route route = route(apiGatewayV2Service, updated);
         assertNull(route.getTarget());
-        assertNull(route.getAuthorizerId());
-        getRouteResponse(updated).body("target", nullValue()).body("authorizerId", nullValue());
+        assertEquals(created.getResources().get("Authorizer").getPhysicalId(), route.getAuthorizerId());
+        getRouteResponse(updated).body("target", nullValue())
+                .body("authorizerId", equalTo(created.getResources().get("Authorizer").getPhysicalId()));
     }
 
     @Test

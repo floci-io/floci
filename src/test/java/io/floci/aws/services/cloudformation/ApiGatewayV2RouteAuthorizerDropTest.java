@@ -12,6 +12,8 @@ import io.floci.aws.services.s3.S3Service;
 import io.floci.aws.testing.InMemoryStorageFactory;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
 
 import java.util.List;
 import java.util.Map;
@@ -95,11 +97,53 @@ class ApiGatewayV2RouteAuthorizerDropTest {
     @Test
     void routeAuthorizerIdDroppedFromTheTemplateReadsBackAbsent() throws Exception {
         String authorizerId = createAuthorizerId();
-        String declared = ",\"AuthorizationType\":\"CUSTOM\",\"AuthorizerId\":\"" + authorizerId + "\"";
+        String declared = ",\"AuthorizationType\":\"NONE\",\"AuthorizerId\":\"" + authorizerId + "\"";
         StackResource created = createRoute(declared);
         assertEquals(authorizerId, route(created).getAuthorizerId());
 
-        updateRoute(created, declared, ",\"AuthorizationType\":\"CUSTOM\"");
+        updateRoute(created, declared, ",\"AuthorizationType\":\"NONE\"");
+
+        assertNull(route(created).getAuthorizerId());
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"JWT", "CUSTOM"})
+    void routeAuthorizerIdDroppedWhileTheRouteStaysProtectedIsKeptAndTargetIsStillCleared(String type)
+            throws Exception {
+        String authorizerId = createAuthorizerId();
+        String declared = ",\"AuthorizationType\":\"" + type + "\",\"AuthorizerId\":\"" + authorizerId
+                + "\",\"Target\":\"integrations/int-1\"";
+        StackResource created = createRoute(declared);
+
+        updateRoute(created, declared, ",\"AuthorizationType\":\"" + type + "\"");
+
+        Route route = route(created);
+        assertEquals(type, route.getAuthorizationType());
+        assertEquals(authorizerId, route.getAuthorizerId());
+        assertNull(route.getTarget());
+    }
+
+    @Test
+    void routeAuthorizerIdDroppedWhileTheTypeBecomesJwtIsKept() throws Exception {
+        String authorizerId = createAuthorizerId();
+        String before = ",\"AuthorizationType\":\"AWS_IAM\",\"AuthorizerId\":\"" + authorizerId + "\"";
+        StackResource created = createRoute(before);
+
+        updateRoute(created, before, ",\"AuthorizationType\":\"JWT\"");
+
+        Route route = route(created);
+        assertEquals("JWT", route.getAuthorizationType());
+        assertEquals(authorizerId, route.getAuthorizerId());
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {",\"AuthorizationType\":\"NONE\"", ",\"AuthorizationType\":\"AWS_IAM\"", ""})
+    void routeAuthorizerIdDroppedWhileTheRouteBecomesOpenOrIamIsCleared(String after) throws Exception {
+        String authorizerId = createAuthorizerId();
+        String before = ",\"AuthorizationType\":\"JWT\",\"AuthorizerId\":\"" + authorizerId + "\"";
+        StackResource created = createRoute(before);
+
+        updateRoute(created, before, after);
 
         assertNull(route(created).getAuthorizerId());
     }
