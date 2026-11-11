@@ -7,6 +7,7 @@ import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.floci.aws.core.common.AwsErrorResponse;
 import io.floci.aws.core.common.AwsException;
 import io.floci.aws.core.common.AwsJson11Controller;
+import io.floci.aws.core.common.AwsJsonTimestamp;
 import io.floci.aws.core.common.PaginatedResult;
 import io.floci.aws.core.common.Pagination;
 import io.floci.aws.services.eventbridge.model.ApiDestination;
@@ -31,7 +32,6 @@ import jakarta.inject.Inject;
 import jakarta.ws.rs.core.Response;
 import org.jboss.logging.Logger;
 
-import java.time.DateTimeException;
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.HashMap;
@@ -393,14 +393,6 @@ public class EventBridgeHandler {
         return Response.ok(response).build();
     }
 
-    private static Instant entryTime(JsonNode time) {
-        try {
-            return Instant.ofEpochSecond(time.longValue());
-        } catch (DateTimeException e) {
-            throw new AwsException("SerializationException", "Time is not a valid timestamp: " + time.asText(), 400);
-        }
-    }
-
     private Response handlePutEvents(JsonNode request, String region) {
         List<Map<String, Object>> entries = new ArrayList<>();
         JsonNode entriesNode = request.path("Entries");
@@ -422,8 +414,9 @@ public class EventBridgeHandler {
                 if (!entryNode.path("Resources").isMissingNode()) {
                     entry.put("Resources", entryNode.path("Resources"));
                 }
-                if (entryNode.path("Time").isNumber()) {
-                    entry.put("Time", entryTime(entryNode.path("Time")));
+                Instant time = AwsJsonTimestamp.epochSeconds(entryNode, "Time", "SerializationException");
+                if (time != null) {
+                    entry.put("Time", time);
                 }
                 entries.add(entry);
             }

@@ -83,11 +83,20 @@ class EventBridgeEventTimeIntegrationTest {
 
     @Test
     void entryTimeOutsideTheTimestampRangeIsRefusedAsASerializationError() {
+        putEventsWithTime("1e30");
+    }
+
+    @Test
+    void entryTimeThatIsNotANumberIsRefusedAsASerializationError() {
+        putEventsWithTime("\"yesterday\"");
+    }
+
+    private void putEventsWithTime(String time) {
         given()
                 .contentType("application/x-amz-json-1.1")
                 .header("X-Amz-Target", "AWSEvents.PutEvents")
                 .body("{\"Entries\":[{\"Source\":\"" + source
-                        + "\",\"DetailType\":\"far\",\"Detail\":\"{}\",\"Time\":1e30}]}")
+                        + "\",\"DetailType\":\"bad-time\",\"Detail\":\"{}\",\"Time\":" + time + "}]}")
                 .when().post("/")
                 .then().statusCode(400)
                 .body("__type", equalTo("SerializationException"));
