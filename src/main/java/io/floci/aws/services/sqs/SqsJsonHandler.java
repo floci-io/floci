@@ -197,6 +197,31 @@ public class SqsJsonHandler {
         return Response.ok(response).build();
     }
 
+    private static MessageAttributeValue messageAttribute(String name, JsonNode attribute) {
+        String dataType = attribute.path("DataType").asText(null);
+        if (dataType == null) {
+            return null;
+        }
+        String binaryValueBase64 = attribute.path("BinaryValue").asText(null);
+        if (binaryValueBase64 != null) {
+            try {
+                return new MessageAttributeValue(Base64.getDecoder().decode(binaryValueBase64), dataType);
+            } catch (IllegalArgumentException e) {
+                throw new AwsException("InvalidParameterValue",
+                        "Message (user) attribute '" + name + "' has an invalid binary value.", 400);
+            }
+        }
+        String stringValue = attribute.path("StringValue").asText(null);
+        if (stringValue == null) {
+            return null;
+        }
+        if (stringValue.isEmpty()) {
+            throw new AwsException("InvalidParameterValue", "Message (user) attribute '" + name
+                    + "' must contain a non-empty value of type '" + dataType.split("\\.")[0] + "'.", 400);
+        }
+        return new MessageAttributeValue(stringValue, dataType);
+    }
+
     private Response handleSendMessage(JsonNode request, String region) {
         String queueUrl = request.path("QueueUrl").asText(null);
         String messageBody = request.path("MessageBody").asText(null);
@@ -209,17 +234,9 @@ public class SqsJsonHandler {
         JsonNode attrsNode = request.path("MessageAttributes");
         if (attrsNode.isObject()) {
             attrsNode.fields().forEachRemaining(entry -> {
-                String name = entry.getKey();
-                String dataType = entry.getValue().path("DataType").asText(null);
-                String stringValue = entry.getValue().path("StringValue").asText(null);
-                String binaryValueBase64 = entry.getValue().path("BinaryValue").asText(null);
-                if (dataType != null) {
-                    if (binaryValueBase64 != null) {
-                        byte[] binaryValue = Base64.getDecoder().decode(binaryValueBase64);
-                        messageAttributes.put(name, new MessageAttributeValue(binaryValue, dataType));
-                    } else if (stringValue != null) {
-                        messageAttributes.put(name, new MessageAttributeValue(stringValue, dataType));
-                    }
+                MessageAttributeValue value = messageAttribute(entry.getKey(), entry.getValue());
+                if (value != null) {
+                    messageAttributes.put(entry.getKey(), value);
                 }
             });
         }
@@ -390,17 +407,9 @@ public class SqsJsonHandler {
             JsonNode attrsNode = entry.path("MessageAttributes");
             if (attrsNode.isObject()) {
                 attrsNode.fields().forEachRemaining(attrEntry -> {
-                    String name = attrEntry.getKey();
-                    String dataType = attrEntry.getValue().path("DataType").asText(null);
-                    String stringValue = attrEntry.getValue().path("StringValue").asText(null);
-                    String binaryValueBase64 = attrEntry.getValue().path("BinaryValue").asText(null);
-                    if (dataType != null) {
-                        if (binaryValueBase64 != null) {
-                            byte[] binaryValue = Base64.getDecoder().decode(binaryValueBase64);
-                            messageAttributes.put(name, new MessageAttributeValue(binaryValue, dataType));
-                        } else if (stringValue != null) {
-                            messageAttributes.put(name, new MessageAttributeValue(stringValue, dataType));
-                        }
+                    MessageAttributeValue value = messageAttribute(attrEntry.getKey(), attrEntry.getValue());
+                    if (value != null) {
+                        messageAttributes.put(attrEntry.getKey(), value);
                     }
                 });
             }
