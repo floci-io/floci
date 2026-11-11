@@ -64,7 +64,8 @@ public class CloudWatchLogsHandler {
                           CloudWatchLogsMetricFilterService metricFilterService,
                           CloudWatchLogsDeliveryService deliveryService, ObjectMapper objectMapper) {
         this(logsService, crossAccountService, metricFilterService, deliveryService,
-                new CloudWatchLogsQueryDefinitionService(new InMemoryStorage<>(), logsService.regionResolver(),
+                new CloudWatchLogsQueryDefinitionService(new InMemoryStorage<>(), new InMemoryStorage<>(),
+                        logsService.regionResolver(),
                         Clock.systemUTC()), objectMapper);
     }
 

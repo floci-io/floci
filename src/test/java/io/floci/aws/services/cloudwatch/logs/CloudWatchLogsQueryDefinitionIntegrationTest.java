@@ -143,11 +143,22 @@ class CloudWatchLogsQueryDefinitionIntegrationTest {
             String id = client.putQueryDefinition(request).queryDefinitionId();
             try {
                 assertEquals(id, client.putQueryDefinition(request).queryDefinitionId());
-                assertEquals(1, client.describeQueryDefinitions(describe -> describe.queryDefinitionNamePrefix(name))
-                        .queryDefinitions().size());
+                client.putQueryDefinition(update -> update.queryDefinitionId(id).name(name + "/updated")
+                        .queryString("stats count()"));
+                assertEquals(id, client.putQueryDefinition(request).queryDefinitionId());
+                List<QueryDefinition> saved = client.describeQueryDefinitions(describe -> describe
+                        .queryDefinitionNamePrefix(name)).queryDefinitions();
+                assertEquals(1, saved.size());
+                assertEquals(name + "/updated", saved.getFirst().name());
+                assertEquals("stats count()", saved.getFirst().queryString());
+                assertThrows(InvalidParameterException.class, () -> client.putQueryDefinition(request.toBuilder()
+                        .queryString("different query").build()));
             } finally {
                 client.deleteQueryDefinition(delete -> delete.queryDefinitionId(id));
             }
+            assertEquals(id, client.putQueryDefinition(request).queryDefinitionId());
+            assertTrue(client.describeQueryDefinitions(describe -> describe.queryDefinitionNamePrefix(name))
+                    .queryDefinitions().isEmpty());
         }
     }
 

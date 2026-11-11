@@ -107,6 +107,13 @@ Query parameters are supported for `CWLI` definitions. Saving a definition does 
 validate its query syntax, and does not extend the query execution subset described below.
 Log group names can be saved before their groups exist.
 
+`clientToken` retries are scoped to the account and region and retain the original request and
+returned ID independently of later updates. Repeating that request returns the same ID without
+overwriting newer content; reusing its token with different input returns `InvalidParameterException`.
+Floci retains these records until emulator reset, including after the definition is deleted, so
+a delayed retry cannot recreate a deleted definition. They use the same storage mode as definitions.
+During reset, saves and deletes return `ServiceUnavailableException` until the reset hooks resume writes.
+
 `DescribeQueryDefinitions` accepts `queryDefinitionNamePrefix`, `queryLanguage`, and
 `maxResults` from 1 to 1000. Pass the returned `nextToken` with the same account, region, and
 filters for the next page; the final page omits it. Tokens expire after 24 hours or an emulator
