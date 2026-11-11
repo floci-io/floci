@@ -149,6 +149,26 @@ class SsmCfnProvisionerTest {
     }
 
     @Test
+    void aPriorPhysicalIdWithSurroundingSpacesIsUpdatedInPlace() {
+        String spaced = " " + NAME + " ";
+        StackResource r = parameter(spaced, null);
+        when(ssm.getParameter(NAME, REGION)).thenReturn(stored("old", Map.of()));
+        ProvisionContext create = ctx();
+        ProvisionContext update = new ProvisionContext(create.engine(), create.region(), create.accountId(),
+                create.stackName(), spaced);
+
+        provisioner.provision(r, props().put("Name", spaced), update);
+
+        verify(ssm).putParameter(NAME, "v", "String", null, true, REGION);
+        verify(ssm, never()).putParameter(anyString(), anyString(), anyString(), any(), eq(false), anyMap(),
+                anyString());
+        assertEquals(NAME, r.getPhysicalId());
+        assertTrue(provisioner.retainsFailedUpdateState(r));
+        assertFalse(provisioner.hasReplacementUpdate(r));
+        assertNull(provisioner.updateCleanupPhysicalId(r));
+    }
+
+    @Test
     void parameterWithoutTagsIsNotTagged() {
         StackResource r = parameter(null, null);
 
