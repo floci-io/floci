@@ -506,17 +506,27 @@ public class RdsCfnProvisioner implements CfnResourceProvisioner {
 
     /**
      * The VPC security groups a kept instance should have, or null to leave them as they are. A
-     * declared list is the groups. A list the previous template declared and this one drops puts a
-     * standalone instance on its VPC's default security group, as AWS's handler does, and leaves
-     * them when there is no such group, as there; a cluster member keeps its groups, as there too. A
-     * list the stack never declared leaves groups set outside it alone.
+     * declared list is the groups, but a cluster member's groups are its cluster's: a template that
+     * changes a member's list fails the update, as on AWS, where the handler sends the change to
+     * ModifyDBInstance and RDS refuses it for a member. The change is read from the template, as
+     * there, so a member a stack created before Floci applied the list still takes it. A list the
+     * previous template declared and this one drops puts a standalone instance on its VPC's default
+     * security group, as AWS's handler does, and leaves them when there is no such group, as there; a
+     * cluster member keeps its groups, as there too. A list the stack never declared leaves groups set
+     * outside it alone.
      */
     private List<String> desiredVpcSecurityGroups(List<String> declared, String clusterMember, String id,
                                                   ProvisionContext ctx) {
+        boolean member = clusterMember != null && !clusterMember.isBlank();
         if (!declared.isEmpty()) {
+            if (member && ctx.priorProperties() != null && !Set.copyOf(declared).equals(
+                    Set.copyOf(resolveStringList(ctx.priorProperties(), "VPCSecurityGroups", ctx.engine())))) {
+                throw new AwsException("InvalidParameterCombination", "The specified DB Instance is a member of a"
+                        + " cluster. Modify vpc security group for the DB Cluster using the ModifyDbCluster API", 400);
+            }
             return declared;
         }
-        if (!ctx.previouslyDeclared("VPCSecurityGroups") || (clusterMember != null && !clusterMember.isBlank())) {
+        if (!ctx.previouslyDeclared("VPCSecurityGroups") || member) {
             return null;
         }
         List<String> defaultGroup = rdsService.defaultVpcSecurityGroupIds(ctx.region(), id);

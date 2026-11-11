@@ -2210,6 +2210,33 @@ class RdsCfnProvisionerTest {
         verify(rdsService, never()).setDbInstanceVpcSecurityGroups(any(), any(), any());
     }
 
+    @ParameterizedTest
+    @CsvSource(delimiter = '|', value = {
+        MEMBER + ",\"VPCSecurityGroups\":[\"sg-first\"]} | " + MEMBER + ",\"VPCSecurityGroups\":[\"sg-second\"]}",
+        MEMBER + "} | " + MEMBER + ",\"VPCSecurityGroups\":[\"sg-cluster\"]}"
+    })
+    void aClusterMemberWhoseTemplateChangesItsGroupsFailsBeforeAnythingChanges(String template, String updated) {
+        // AWS's handler sends the change to ModifyDBInstance, and RDS refuses it for a member, even one
+        // that names the groups the member already has.
+        StackResource r = updateInstance(createInstance(template, "sg-cluster"), updated);
+
+        assertEquals("CREATE_FAILED", r.getStatus());
+        assertTrue(r.getStatusReason().contains("Modify vpc security group for the DB Cluster"), r.getStatusReason());
+        assertEquals(0, modifyCalls());
+        verify(rdsService, never()).setDbInstanceVpcSecurityGroups(any(), any(), any());
+    }
+
+    @Test
+    void aClusterMemberWhoseTemplateKeepsItsGroupsIsGivenThemAndNotRefused() {
+        // A member a stack created before Floci applied VPCSecurityGroups has none of them on file, but
+        // its template did not change them, so AWS's handler would send RDS nothing to refuse.
+        String template = MEMBER + ",\"VPCSecurityGroups\":[\"sg-first\"]}";
+        StackResource r = updateInstance(createInstance(template), template);
+
+        assertEquals("CREATE_COMPLETE", r.getStatus(), r.getStatusReason());
+        verify(rdsService).setDbInstanceVpcSecurityGroups("us-east-1", r.getPhysicalId(), List.of("sg-first"));
+    }
+
     @Test
     void aRollbackOfAnUpdateThatAlsoChangedOtherSettingsPutsTheGroupsBackButIsNotComplete() {
         // The instance reports IAM authentication off when the update starts and on once modified.

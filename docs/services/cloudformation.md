@@ -567,10 +567,12 @@ Dynamic-reference expansion is currently scoped to these RDS credential properti
 `CreateDBInstance` does, so `DescribeDBInstances` reports the declared groups and the encryption.
 
 - On `UpdateStack`, a changed `VPCSecurityGroups` moves the instance to the new groups in place, as
-  in AWS. When the previous template declared groups and the new one does not, a standalone instance
-  is put on its VPC's default security group, as AWS's handler does; a cluster member, or an instance
-  whose VPC has no default group, keeps its groups. While the template never declares groups, groups
-  set outside the stack are kept.
+  in AWS. A cluster member's groups are its cluster's, so an update whose template changes a
+  member's list fails with `InvalidParameterCombination` before anything changes, as RDS refuses
+  that change for a member. When the previous template declared groups and the new one does not, a
+  standalone instance is put on its VPC's default security group, as AWS's handler does; a cluster
+  member, or an instance whose VPC has no default group, keeps its groups. While the template never
+  declares groups, groups set outside the stack are kept.
 - A failed update puts the groups back. The rollback is complete when the update changed nothing
   else Floci applies; a change to the password, IAM authentication, subnet group, CA certificate or
   roles is still reported as not rolled back.
