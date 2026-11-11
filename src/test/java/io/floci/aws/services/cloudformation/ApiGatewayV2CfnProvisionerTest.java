@@ -379,14 +379,19 @@ class ApiGatewayV2CfnProvisionerTest {
                     "credentials":"arn:aws:iam::000000000000:role/integration",
                     "payloadFormatVersion":"1.0",
                     "requestParameters":{"QueueUrl":"http://localhost/000000000000/q",
-                      "MessageBody":"$request.body","DelaySeconds":5}}}}}}
+                      "MessageBody":"$request.body","DelaySeconds":5,
+                      "MessageAttributes":{"Authorization":{"DataType":"String",
+                        "StringValue":"${request.header.Authorization}"}}}}}}}}
                 """), null, Map.of());
 
         assertEquals("CREATE_COMPLETE", resource.getStatus());
         verify(apiGatewayV2Service).createIntegration(eq(REGION), eq(API_ID), argThat(request ->
                 "SQS-SendMessage".equals(request.get("integrationSubtype"))
                         && Map.of("QueueUrl", "http://localhost/000000000000/q", "MessageBody", "$request.body",
-                                "DelaySeconds", 5).equals(request.get("requestParameters"))));
+                                "DelaySeconds", "5",
+                                "MessageAttributes", "{\"Authorization\":{\"DataType\":\"String\","
+                                        + "\"StringValue\":\"${request.header.Authorization}\"}}")
+                        .equals(request.get("requestParameters"))));
     }
 
     @Test
