@@ -102,6 +102,10 @@ use a `dynamodb:Select` condition when the policy must require specific attribut
 
 ## Legacy conditional requests
 
+Legacy `QueryFilter` and `ScanFilter` honor `ConditionalOperator`: `OR` retains an
+item when any condition matches; `AND`, including the omitted default, requires
+every condition. Read limits and scanned counts apply before filtering.
+
 The native backend accepts `KeyConditions` together with `FilterExpression`.
 For legacy `Expected` conditions it also accepts `ComparisonOperator` with a single
 `Value`, including EQ and NE, just as the live AWS service does. Supplying both

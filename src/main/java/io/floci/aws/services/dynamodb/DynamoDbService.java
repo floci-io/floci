@@ -1707,6 +1707,15 @@ public class DynamoDbService {
                             JsonNode expressionAttrNames, JsonNode expressionAttrValues,
                             JsonNode scanFilter, Integer limit, JsonNode exclusiveStartKey,
                             String indexName, Integer segment, Integer totalSegments, String region) {
+        return scan(tableName, filterExpression, expressionAttrNames, expressionAttrValues,
+                scanFilter, limit, exclusiveStartKey, indexName, segment, totalSegments, "AND", region);
+    }
+
+    public ScanResult scan(String tableName, String filterExpression,
+                            JsonNode expressionAttrNames, JsonNode expressionAttrValues,
+                            JsonNode scanFilter, Integer limit, JsonNode exclusiveStartKey,
+                            String indexName, Integer segment, Integer totalSegments,
+                            String conditionalOperator, String region) {
         DynamoDbReservedWords.check(filterExpression, "FilterExpression");
         String canonicalTableName = canonicalTableName(region, tableName);
         String storageKey = regionKey(region, canonicalTableName);
@@ -1779,7 +1788,7 @@ public class DynamoDbService {
             lastScanned = item;
             boolean matched = (filterExpression == null
                     || matchesFilterExpression(item, filterExpression, expressionAttrNames, expressionAttrValues))
-                    && (scanFilter == null || matchesScanFilter(item, scanFilter));
+                    && (scanFilter == null || matchesScanFilterPublic(item, scanFilter, conditionalOperator));
             if (matched) {
                 results.add(item);
             }
@@ -1818,25 +1827,27 @@ public class DynamoDbService {
     }
 
     public boolean matchesScanFilterPublic(JsonNode item, JsonNode scanFilter) {
-        return matchesScanFilter(item, scanFilter);
+        return matchesScanFilterPublic(item, scanFilter, "AND");
     }
 
     public boolean matchesKeyConditionPublic(JsonNode attrValue, JsonNode condition) {
         return matchesKeyCondition(attrValue, condition);
     }
 
-    private boolean matchesScanFilter(JsonNode item, JsonNode scanFilter) {
+    public boolean matchesScanFilterPublic(JsonNode item, JsonNode scanFilter, String conditionalOperator) {
+        boolean useOr = "OR".equals(conditionalOperator);
         Iterator<Map.Entry<String, JsonNode>> fields = scanFilter.fields();
         while (fields.hasNext()) {
             Map.Entry<String, JsonNode> entry = fields.next();
             String attrName = entry.getKey();
             JsonNode condition = entry.getValue();
             JsonNode attrValue = item.get(attrName);
-            if (!matchesKeyCondition(attrValue, condition)) {
-                return false;
+            boolean matched = matchesKeyCondition(attrValue, condition);
+            if (matched == useOr) {
+                return useOr;
             }
         }
-        return true;
+        return !useOr;
     }
 
     // --- Batch Operations ---

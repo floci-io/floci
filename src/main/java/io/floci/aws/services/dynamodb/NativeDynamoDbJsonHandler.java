@@ -1416,7 +1416,7 @@ public class NativeDynamoDbJsonHandler {
         if (queryFilter != null) {
             final JsonNode qf = queryFilter;
             queryItems = queryItems.stream()
-                    .filter(i -> dynamoDbService.matchesScanFilterPublic(i, qf))
+                    .filter(i -> dynamoDbService.matchesScanFilterPublic(i, qf, textOrNull(request, "ConditionalOperator")))
                     .toList();
         }
         // Apply index projection (KEYS_ONLY / INCLUDE) when querying a secondary index
@@ -1565,7 +1565,8 @@ public class NativeDynamoDbJsonHandler {
 
         DynamoDbService.ScanResult result = dynamoDbService.scan(
                 tableName, filterExpr, exprAttrNames, exprAttrValues, scanFilter, limit,
-                exclusiveStartKey, indexNameScan, segment, totalSegments, region);
+                exclusiveStartKey, indexNameScan, segment, totalSegments,
+                textOrNull(request, "ConditionalOperator"), region);
 
         List<JsonNode> scanItems = result.items();
         // Apply index projection (KEYS_ONLY / INCLUDE) when scanning a secondary index
