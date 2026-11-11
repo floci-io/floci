@@ -8,6 +8,7 @@ import io.floci.aws.testing.AwsTestClients;
 import io.quarkus.test.junit.QuarkusTest;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.CsvSource;
+import software.amazon.awssdk.core.SdkBytes;
 import software.amazon.awssdk.regions.Region;
 import software.amazon.awssdk.services.dynamodb.DynamoDbClient;
 import software.amazon.awssdk.services.dynamodb.model.AttributeDefinition;
@@ -88,6 +89,45 @@ class DynamoDbConditionalOperatorIntegrationTest {
                 assertEquals("OR".equals(operator) ? List.of("0", "1", "2") : List.of("0"),
                         items.stream().map(i -> i.get("sk").s()).sorted().toList());
                 assertCborCount(table, action, operator, expected);
+            } finally {
+                client.deleteTable(r -> r.tableName(table));
+            }
+        }
+    }
+
+    @ParameterizedTest
+    @CsvSource({"Query,OR,!!!!,400", "Scan,OR,!!!!,400", "Query,AND,!!!!,400", "Scan,AND,!!!!,400",
+            "Query,OR,Yg==,200", "Scan,OR,Yg==,200", "Query,AND,Yg==,200", "Scan,AND,Yg==,200"})
+    void binaryFilterOperandsAreValidatedBeforeCombination(String action, String operator,
+                                                           String encoded, int status) throws Exception {
+        try (DynamoDbClient client = AwsTestClients.create(DynamoDbClient.builder(), "test", Region.US_EAST_1)) {
+            String table = "binary-filter-" + UUID.randomUUID();
+            client.createTable(r -> r.tableName(table).billingMode(BillingMode.PAY_PER_REQUEST)
+                    .keySchema(KeySchemaElement.builder().attributeName("pk").keyType(KeyType.HASH).build())
+                    .attributeDefinitions(AttributeDefinition.builder().attributeName("pk")
+                            .attributeType(ScalarAttributeType.S).build()));
+            try {
+                client.putItem(r -> r.tableName(table).item(Map.of("pk", text("group"), "left", text("yes"),
+                        "right", AttributeValue.builder().b(SdkBytes.fromUtf8String("a")).build())));
+                ObjectNode request = JSON.createObjectNode().put("TableName", table).put("ConditionalOperator", operator);
+                request.set("Query".equals(action) ? "QueryFilter" : "ScanFilter", JSON.readTree("""
+                        {"left":{"ComparisonOperator":"EQ","AttributeValueList":[{"S":"yes"}]},
+                         "right":{"ComparisonOperator":"LT","AttributeValueList":[{"B":"%s"}]}}
+                        """.formatted(encoded)));
+                if ("Query".equals(action)) {
+                    request.set("KeyConditions", JSON.readTree("""
+                            {"pk":{"ComparisonOperator":"EQ","AttributeValueList":[{"S":"group"}]}}
+                            """));
+                }
+                String response = given().contentType("application/x-amz-json-1.0")
+                        .header("X-Amz-Target", "DynamoDB_20120810." + action)
+                        .body(JSON.writeValueAsBytes(request)).post("/").then().statusCode(status).extract().asString();
+                if (status == 400) {
+                    assertEquals("SerializationException", JSON.readTree(response).path("__type").asText()
+                            .replace("com.amazonaws.dynamodb.v20120810#", ""));
+                } else {
+                    assertEquals(1, JSON.readTree(response).path("Count").asInt());
+                }
             } finally {
                 client.deleteTable(r -> r.tableName(table));
             }
