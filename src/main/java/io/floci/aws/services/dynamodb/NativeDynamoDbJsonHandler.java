@@ -75,8 +75,6 @@ public class NativeDynamoDbJsonHandler {
     // The order AWS prints the enum constraint in.
     private static final List<String> CONTRIBUTOR_INSIGHTS_MODES = List.of("THROTTLED_KEYS", "ACCESSED_AND_THROTTLED_KEYS");
     // The orders AWS prints the enum constraints in.
-    private static final List<String> BILLING_MODES = List.of("PROVISIONED", "PAY_PER_REQUEST");
-    private static final List<String> SSE_TYPES = List.of("AES256", "KMS");
     private static final List<String> KEY_TYPES = List.of("HASH", "RANGE");
     private static final List<String> STREAM_VIEW_TYPES =
             List.of("OLD_IMAGE", "KEYS_ONLY", "NEW_AND_OLD_IMAGES", "NEW_IMAGE");
@@ -2476,14 +2474,15 @@ public class NativeDynamoDbJsonHandler {
     private static List<String> createTableViolations(JsonNode request) {
         List<String> violations = new ArrayList<>();
         addIndexViolations(request.path("GlobalSecondaryIndexes"), "globalSecondaryIndexes", true, violations);
-        addOlderEnumError(request, "BillingMode", "billingMode", BILLING_MODES, violations);
+        addOlderEnumError(request, "BillingMode", "billingMode", DynamoDbService.BILLING_MODES, violations);
         JsonNode sse = request.path("SSESpecification");
         String kmsMasterKeyId = textOrNull(sse, "KMSMasterKeyId");
         if (kmsMasterKeyId != null) {
             addIfPresent(violations, SmithyValidationErrors.lengthOutOfRange(
-                    "sSESpecification.kMSMasterKeyId", kmsMasterKeyId, 0, 2048));
+                    "sSESpecification.kMSMasterKeyId", kmsMasterKeyId, 1, 2048));
         }
-        addOlderEnumError(sse, "SSEType", "sSESpecification.sSEType", SSE_TYPES, violations);
+        addOlderEnumError(sse, "SSEType", "sSESpecification.sSEType", NativeDynamoDbTableService.SSE_TYPES,
+                violations);
         addKeySchemaViolations(request.path("KeySchema"), "keySchema", violations);
         violations.addAll(throughputViolations(request.path("ProvisionedThroughput"), "provisionedThroughput"));
         JsonNode stream = request.path("StreamSpecification");

@@ -143,9 +143,10 @@ public class DynamoDbService {
     private static final int MAX_VECTOR_INDEXES_PER_TABLE = 5;
     private static final int MAX_VECTOR_DIMENSIONS = 4096;
     private static final int MIN_VECTOR_INDEX_NAME_LENGTH = 3;
+    // The order AWS prints the enum constraint in.
+    static final List<String> BILLING_MODES = List.of("PROVISIONED", "PAY_PER_REQUEST");
     // The order AWS prints the enum constraint in, which is neither alphabetical nor the order
     // the API reference lists.
-    private static final Set<String> VALID_BILLING_MODES = Set.of("PROVISIONED", "PAY_PER_REQUEST");
     private static final List<String> VECTOR_DISTANCE_FUNCTIONS = List.of(
             DynamoDbVectorScoring.DOT_PRODUCT,
             DynamoDbVectorScoring.COSINE,
@@ -5707,11 +5708,9 @@ public class DynamoDbService {
      */
     static void validateBillingMode(JsonNode request, String memberPrefix) {
         JsonNode billingMode = request.path("BillingMode");
-        if (billingMode.isTextual() && !VALID_BILLING_MODES.contains(billingMode.asText())) {
-            throw SmithyValidationErrors.validationException(
-                    "Value '" + billingMode.asText() + "' at '" + memberPrefix
-                    + "billingMode' failed to satisfy constraint: "
-                    + "Member must satisfy enum value set: [PROVISIONED, PAY_PER_REQUEST]");
+        if (billingMode.isTextual() && !BILLING_MODES.contains(billingMode.asText())) {
+            throw SmithyValidationErrors.validationException(SmithyValidationErrors.notInEnum(
+                    billingMode.asText(), memberPrefix + "billingMode", BILLING_MODES));
         }
     }
 

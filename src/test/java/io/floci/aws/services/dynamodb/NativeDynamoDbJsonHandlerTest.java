@@ -776,6 +776,24 @@ class NativeDynamoDbJsonHandlerTest {
                 expectValidationException("CreateTable", request).getMessage());
     }
 
+    @ParameterizedTest
+    @CsvSource(delimiter = '|', quoteCharacter = '`', textBlock = """
+            k            | 0    | 2 validation errors detected: Value 'BOGUS' at 'billingMode' failed to satisfy constraint: Member must satisfy enum value set: [PROVISIONED, PAY_PER_REQUEST]; Value '%s' at 'sSESpecification.kMSMasterKeyId' failed to satisfy constraint: Member must have length greater than or equal to 1
+            k            | 2048 | 1 validation error detected: Value 'BOGUS' at 'billingMode' failed to satisfy constraint: Member must satisfy enum value set: [PROVISIONED, PAY_PER_REQUEST]
+            k            | 2049 | 2 validation errors detected: Value 'BOGUS' at 'billingMode' failed to satisfy constraint: Member must satisfy enum value set: [PROVISIONED, PAY_PER_REQUEST]; Value '%s' at 'sSESpecification.kMSMasterKeyId' failed to satisfy constraint: Member must have length less than or equal to 2048
+            😀 | 1025 | 1 validation error detected: Value 'BOGUS' at 'billingMode' failed to satisfy constraint: Member must satisfy enum value set: [PROVISIONED, PAY_PER_REQUEST]
+            """)
+    void createTableChecksTheKmsMasterKeyIdLength(String character, int count, String message) {
+        String key = character.repeat(count);
+        ObjectNode request = (ObjectNode) json("""
+                {"TableName":"Tbl","BillingMode":"BOGUS","KeySchema":[{"AttributeName":"pk","KeyType":"HASH"}],
+                 "AttributeDefinitions":[{"AttributeName":"pk","AttributeType":"S"}]}
+                """);
+        request.putObject("SSESpecification").put("Enabled", true).put("SSEType", "KMS").put("KMSMasterKeyId", key);
+
+        assertEquals(message.formatted(key), expectValidationException("CreateTable", request).getMessage());
+    }
+
     @Test
     void createTableRejectsProvisionedThroughputWithPayPerRequest() {
         AwsException ex = expectValidationException("CreateTable", json("""
