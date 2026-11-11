@@ -1404,7 +1404,12 @@ public class SqsService implements Resettable, ResourceProvider {
 
     private static AwsException emptyAttributeValue(String name, String dataType) {
         return new AwsException("InvalidParameterValue", "Message (user) attribute '" + name
-                + "' must contain a non-empty value of type '" + dataType.split("\\.")[0] + "'.", 400);
+                + "' must contain a non-empty value of type '" + baseDataType(dataType) + "'.", 400);
+    }
+
+    private static String baseDataType(String dataType) {
+        int dot = dataType.indexOf('.');
+        return dot < 0 ? dataType : dataType.substring(0, dot);
     }
 
     /**
