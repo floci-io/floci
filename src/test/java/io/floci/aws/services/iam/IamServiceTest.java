@@ -24,6 +24,7 @@ import io.floci.aws.services.iam.model.OrganizationRootFeatures;
 import io.floci.aws.services.iam.model.PolicyVersion;
 import io.floci.aws.services.iam.model.SessionCredential;
 import io.floci.aws.services.iam.model.VirtualMfaDevice;
+import io.floci.aws.testing.ManualClock;
 import io.floci.aws.testing.MutableClock;
 import jakarta.enterprise.inject.Instance;
 import org.junit.jupiter.api.BeforeEach;
@@ -94,6 +95,12 @@ class IamServiceTest {
                 regionResolver,
                 seedDeployerPrincipal
         );
+    }
+
+    private static IamService iamServiceOn(Clock clock) {
+        return new IamService(new InMemoryStorage<>(), new InMemoryStorage<>(), new InMemoryStorage<>(),
+                new InMemoryStorage<>(), new InMemoryStorage<>(), new InMemoryStorage<>(), new InMemoryStorage<>(),
+                new RegionResolver("us-east-1", "000000000000"), false, clock);
     }
 
     @Test
@@ -3662,17 +3669,21 @@ class IamServiceTest {
      * changes: otherwise a changed password would still report the original creation time.
      */
     @Test
-    void updateLoginProfilePasswordChangeMovesPasswordLastChanged() throws InterruptedException {
-        iamService.createUser("cred-report-changed-user", "/");
-        iamService.createLoginProfile("cred-report-changed-user", "Original-P4ss!", false);
-        Instant createdAt = iamService.getLoginProfile("cred-report-changed-user").getPasswordLastChanged();
+    void updateLoginProfilePasswordChangeMovesPasswordLastChanged() {
+        ManualClock clock = new ManualClock(Instant.parse("2026-03-01T00:00:00Z"));
+        IamService service = iamServiceOn(clock);
+        service.createUser("cred-report-changed-user", "/");
+        service.createLoginProfile("cred-report-changed-user", "Original-P4ss!", false);
+        LoginProfile created = service.getLoginProfile("cred-report-changed-user");
+        assertEquals(clock.instant(), created.getCreateDate());
+        assertEquals(clock.instant(), created.getPasswordLastChanged());
 
-        Thread.sleep(20);
-        iamService.updateLoginProfile("cred-report-changed-user", "Updated-P4ss!", null);
-        Instant changedAt = iamService.getLoginProfile("cred-report-changed-user").getPasswordLastChanged();
+        clock.advance(Duration.ofDays(30));
+        service.updateLoginProfile("cred-report-changed-user", "Updated-P4ss!", null);
 
-        assertTrue(changedAt.isAfter(createdAt),
-                "expected password_last_changed to move: created=" + createdAt + " changed=" + changedAt);
+        LoginProfile changed = service.getLoginProfile("cred-report-changed-user");
+        assertEquals(Instant.parse("2026-03-31T00:00:00Z"), changed.getPasswordLastChanged());
+        assertEquals(Instant.parse("2026-03-01T00:00:00Z"), changed.getCreateDate());
     }
 
     /** Toggling only passwordResetRequired is not a password change, so the timestamp must not move. */
@@ -3688,33 +3699,60 @@ class IamServiceTest {
     }
 
     @Test
-    void getCredentialReportOnAnExpiredReportThrowsReportExpired() {
-        StorageBackend<String, CredentialReport> credentialReports = new InMemoryStorage<>();
-        credentialReports.put("credential-report/aws",
-                new CredentialReport("dGVzdA==", Instant.now().minus(Duration.ofHours(5))));
-        IamService withExpiredReport = new IamService(
-                new InMemoryStorage<>(), new InMemoryStorage<>(), new InMemoryStorage<>(),
-                new InMemoryStorage<>(), new InMemoryStorage<>(), new InMemoryStorage<>(),
-                new InMemoryStorage<>(), new InMemoryStorage<>(), new InMemoryStorage<>(),
-                new InMemoryStorage<>(), new InMemoryStorage<>(), new InMemoryStorage<>(),
-                new InMemoryStorage<>(), credentialReports, new InMemoryStorage<>(),
-                new InMemoryStorage<>(),
-                new InMemoryStorage<>(),
-                new InMemoryStorage<>(),
-                new InMemoryStorage<>(),
-                new InMemoryStorage<>(), new InMemoryStorage<>(), new InMemoryStorage<>(),
-                new RegionResolver("us-east-1", "000000000000"), false, null);
+    void getCredentialReportServesAReportUntilItIsOlderThanFourHours() {
+        ManualClock clock = new ManualClock(Instant.parse("2026-03-01T00:00:00Z"));
+        IamService service = iamServiceOn(clock);
+        service.generateCredentialReport();
 
-        AwsException ex = assertThrows(AwsException.class, withExpiredReport::getCredentialReport);
+        clock.advance(Duration.ofHours(4));
+        assertEquals(Instant.parse("2026-03-01T00:00:00Z"), service.getCredentialReport().generatedTime());
+
+        clock.advance(Duration.ofMillis(1));
+        AwsException ex = assertThrows(AwsException.class, service::getCredentialReport);
         assertEquals("ReportExpired", ex.getErrorCode());
     }
 
     @Test
-    void generateCredentialReportOnAnExpiredReportStartsANewOne() {
+    void generateCredentialReportReusesAReportUntilItIsFourHoursOld() {
+        ManualClock clock = new ManualClock(Instant.parse("2026-03-01T00:00:00Z"));
+        IamService service = iamServiceOn(clock);
+        service.generateCredentialReport();
+
+        clock.advance(Duration.ofHours(4).minusMillis(1));
+        IamService.CredentialReportGeneration reused = service.generateCredentialReport();
+        assertEquals("COMPLETE", reused.state());
+        assertEquals(Instant.parse("2026-03-01T00:00:00Z"), service.getCredentialReport().generatedTime());
+
+        clock.advance(Duration.ofMillis(1));
+        IamService.CredentialReportGeneration regenerated = service.generateCredentialReport();
+        assertEquals("STARTED", regenerated.state());
+        assertEquals("The previous report has expired. Starting a new report generation task",
+                regenerated.description());
+        assertEquals(Instant.parse("2026-03-01T04:00:00Z"), service.getCredentialReport().generatedTime());
+    }
+
+    @Test
+    void generateCredentialReportOnAnExpiredReportMakesItReadableAgain() {
+        ManualClock clock = new ManualClock(Instant.parse("2026-03-01T00:00:00Z"));
+        IamService service = iamServiceOn(clock);
+        service.generateCredentialReport();
+        clock.advance(Duration.ofHours(4).plusMillis(1));
+        assertThrows(AwsException.class, service::getCredentialReport);
+
+        IamService.CredentialReportGeneration generation = service.generateCredentialReport();
+
+        assertEquals("STARTED", generation.state());
+        assertEquals(clock.instant(), service.getCredentialReport().generatedTime());
+    }
+
+    /** A report read back from storage ages on the service's clock like one it generated itself. */
+    @Test
+    void aStoredCredentialReportExpiresOnTheServicesClock() {
+        Instant start = Instant.parse("2026-03-01T00:00:00Z");
         StorageBackend<String, CredentialReport> credentialReports = new InMemoryStorage<>();
-        credentialReports.put("credential-report/aws",
-                new CredentialReport("dGVzdA==", Instant.now().minus(Duration.ofHours(5))));
-        IamService withExpiredReport = new IamService(
+        credentialReports.put("credential-report/aws", new CredentialReport("dGVzdA==", start));
+        ManualClock clock = new ManualClock(start.plus(Duration.ofHours(4)));
+        IamService withStoredReport = new IamService(
                 new InMemoryStorage<>(), new InMemoryStorage<>(), new InMemoryStorage<>(),
                 new InMemoryStorage<>(), new InMemoryStorage<>(), new InMemoryStorage<>(),
                 new InMemoryStorage<>(), new InMemoryStorage<>(), new InMemoryStorage<>(),
@@ -3725,14 +3763,13 @@ class IamServiceTest {
                 new InMemoryStorage<>(),
                 new InMemoryStorage<>(),
                 new InMemoryStorage<>(), new InMemoryStorage<>(), new InMemoryStorage<>(),
-                new RegionResolver("us-east-1", "000000000000"), false, null);
+                new RegionResolver("us-east-1", "000000000000"), false, null, clock);
 
-        IamService.CredentialReportGeneration generation = withExpiredReport.generateCredentialReport();
+        assertEquals(start, withStoredReport.getCredentialReport().generatedTime());
 
-        assertEquals("STARTED", generation.state());
-        assertEquals("The previous report has expired. Starting a new report generation task",
-                generation.description());
-        assertDoesNotThrow(withExpiredReport::getCredentialReport);
+        clock.advance(Duration.ofMillis(1));
+        AwsException ex = assertThrows(AwsException.class, withStoredReport::getCredentialReport);
+        assertEquals("ReportExpired", ex.getErrorCode());
     }
 
     @Test
