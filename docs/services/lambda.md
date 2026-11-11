@@ -82,6 +82,11 @@ keys, values, punctuation, and JSON escaping, as described in the
 An oversized environment returns HTTP 400 with `InvalidParameterValueException` before
 creating a function or changing any stored configuration. Omitting `Environment` on an
 update preserves the existing variables; an empty `Variables` object clears them.
+Validation stops serializing oversized input without allocating full JSON and UTF-8 copies.
+CloudFormation omits unchanged environment variables during in-place configuration updates,
+so a function persisted before quota enforcement can retain an oversized environment when
+another property changes. Changing or removing its variables still updates the environment
+and enforces the quota.
 
 The event invoke configuration is stored and returned as AWS does, and `AWS::Lambda::EventInvokeConfig`
 provisions it from a stack. A SAM function's `EventInvokeConfig` expands into that resource as

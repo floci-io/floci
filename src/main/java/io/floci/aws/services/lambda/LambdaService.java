@@ -54,6 +54,8 @@ import jakarta.inject.Inject;
 import org.jboss.logging.Logger;
 
 import java.io.IOException;
+import java.io.OutputStream;
+import java.io.OutputStreamWriter;
 import java.math.BigDecimal;
 import java.net.URLEncoder;
 import java.nio.charset.StandardCharsets;
@@ -2851,20 +2853,43 @@ public class LambdaService implements ResourceProvider {
         Map<String, String> variables = (Map<String, String>) (Map<?, ?>) structureValue(
                 environment.get("Variables"), "Environment.Variables");
         if (variables != null) {
-            int size;
-            try {
-                size = objectMapper.writer().without(SerializationFeature.INDENT_OUTPUT)
-                        .writeValueAsString(variables).getBytes(StandardCharsets.UTF_8).length;
-            } catch (JsonProcessingException e) {
+            EnvironmentSizeOutputStream output = new EnvironmentSizeOutputStream();
+            // A Writer preserves Unicode characters; Jackson's byte generator escapes surrogate pairs.
+            try (OutputStreamWriter writer = new OutputStreamWriter(output, StandardCharsets.UTF_8)) {
+                objectMapper.writer().without(SerializationFeature.INDENT_OUTPUT).writeValue(writer, variables);
+            } catch (IOException e) {
+                if (output.size > MAX_ENVIRONMENT_BYTES) {
+                    throw new AwsException("InvalidParameterValueException",
+                            "Lambda was unable to configure your environment variables because the environment variables "
+                                    + "you have provided exceeded the 4KB limit.", 400);
+                }
                 throw new AwsException("SerializationException", "Environment.Variables could not be serialized", 400);
-            }
-            if (size > MAX_ENVIRONMENT_BYTES) {
-                throw new AwsException("InvalidParameterValueException",
-                        "Lambda was unable to configure your environment variables because the environment variables "
-                                + "you have provided exceeded the 4KB limit.", 400);
             }
         }
         return variables;
+    }
+
+    private static final class EnvironmentSizeOutputStream extends OutputStream {
+        private int size;
+
+        @Override
+        public void write(int value) throws IOException {
+            addSize(1);
+        }
+
+        @Override
+        public void write(byte[] source, int offset, int length) throws IOException {
+            Objects.checkFromIndexSize(offset, length, source.length);
+            addSize(length);
+        }
+
+        private void addSize(int length) throws IOException {
+            if (length > MAX_ENVIRONMENT_BYTES - size) {
+                size = MAX_ENVIRONMENT_BYTES + 1;
+                throw new IOException("Environment exceeds the 4KB limit");
+            }
+            size += length;
+        }
     }
 
     /**

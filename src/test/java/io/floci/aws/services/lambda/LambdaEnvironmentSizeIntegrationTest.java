@@ -1,7 +1,11 @@
 package io.floci.aws.services.lambda;
 
+import com.fasterxml.jackson.databind.ObjectMapper;
+import io.floci.aws.services.lambda.model.LambdaFunction;
 import io.floci.aws.testing.AwsTestClients;
+import io.floci.aws.testing.CfnStackWaits;
 import io.quarkus.test.junit.QuarkusTest;
+import jakarta.inject.Inject;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -9,6 +13,7 @@ import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.MethodSource;
 import software.amazon.awssdk.core.SdkBytes;
 import software.amazon.awssdk.regions.Region;
+import software.amazon.awssdk.services.cloudformation.CloudFormationClient;
 import software.amazon.awssdk.services.lambda.LambdaClient;
 import software.amazon.awssdk.services.lambda.model.CreateFunctionRequest;
 import software.amazon.awssdk.services.lambda.model.Environment;
@@ -21,6 +26,7 @@ import java.io.ByteArrayOutputStream;
 import java.io.IOException;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
@@ -36,6 +42,9 @@ class LambdaEnvironmentSizeIntegrationTest {
     private static final String ACCOUNT = "799500000001";
     private final List<String> functions = new ArrayList<>();
     private LambdaClient client;
+
+    @Inject
+    LambdaFunctionStore functionStore;
 
     @BeforeEach
     void openClient() {
@@ -113,6 +122,75 @@ class LambdaEnvironmentSizeIntegrationTest {
         assertNull(configuration(name).environment());
     }
 
+    @Test
+    void substantiallyOversizedEnvironmentIsRejectedOnCreateAndUpdate() throws IOException {
+        Map<String, String> variables = Map.of("BIG", "x".repeat(1_000_000));
+        createRejectsOversizedEnvironmentWithoutCreatingFunction(variables);
+        rejectedUpdatePreservesConfiguration(variables);
+    }
+
+    @Test
+    void cloudFormationUpdatesLegacyEnvironmentOnlyWhenVariablesChange() throws IOException {
+        String stackName = "legacy-environment-" + UUID.randomUUID();
+        String name = functionName();
+        Map<String, String> legacy = Map.of("BIG", "x".repeat(5000));
+        try (CloudFormationClient cloudFormation = AwsTestClients.create(
+                CloudFormationClient.builder(), ACCOUNT, Region.US_EAST_1)) {
+            cloudFormation.createStack(request -> request.stackName(stackName)
+                    .templateBody(stackTemplate(name, "original", Map.of("MARKER", "original"))));
+            try {
+                CfnStackWaits.awaitStatus(cloudFormation, stackName, "CREATE_COMPLETE");
+                // Seed the stored state of a function created before quota enforcement existed.
+                LambdaFunction stored = functionStore.getForAccount(ACCOUNT, "us-east-1", name).orElseThrow();
+                stored.setEnvironment(legacy);
+                functionStore.saveForAccount(ACCOUNT, "us-east-1", stored);
+
+                updateStack(cloudFormation, stackName, stackTemplate(name, "updated", legacy));
+                assertEquals("updated", configuration(name).description());
+                assertEnvironment(name, legacy);
+                assertThrows(InvalidParameterValueException.class, () -> client.updateFunctionConfiguration(
+                        request -> request.functionName(name).environment(environment(legacy))));
+
+                cloudFormation.updateStack(request -> request.stackName(stackName)
+                        .templateBody(stackTemplate(name, "rejected", Map.of("BIG", "x".repeat(5001)))));
+                CfnStackWaits.awaitStatus(cloudFormation, stackName, "UPDATE_ROLLBACK_COMPLETE");
+                assertEquals("updated", configuration(name).description());
+                assertEnvironment(name, legacy);
+
+                updateStack(cloudFormation, stackName,
+                        stackTemplate(name, "reduced", Map.of("MARKER", "valid")));
+                assertEnvironment(name, Map.of("MARKER", "valid"));
+
+                updateStack(cloudFormation, stackName, stackTemplate(name, "cleared", null));
+                assertNull(configuration(name).environment());
+            } finally {
+                cloudFormation.deleteStack(request -> request.stackName(stackName));
+                CfnStackWaits.awaitStackDeleted(stackName, "AWS4-HMAC-SHA256 Credential=" + ACCOUNT
+                        + "/20261111/us-east-1/cloudformation/aws4_request");
+            }
+        }
+    }
+
+    private static void updateStack(CloudFormationClient client, String name, String template) {
+        client.updateStack(request -> request.stackName(name).templateBody(template));
+        CfnStackWaits.awaitStatus(client, name, "UPDATE_COMPLETE");
+    }
+
+    private static String stackTemplate(String name, String description, Map<String, String> variables) {
+        Map<String, Object> properties = new HashMap<>(Map.of(
+                "FunctionName", name,
+                "Runtime", "nodejs20.x",
+                "Handler", "index.handler",
+                "Role", "arn:aws:iam::" + ACCOUNT + ":role/lambda-role",
+                "Code", Map.of("ZipFile", "exports.handler = async () => 1;"),
+                "Description", description));
+        if (variables != null) {
+            properties.put("Environment", Map.of("Variables", variables));
+        }
+        return new ObjectMapper().valueToTree(Map.of("Resources", Map.of("Function", Map.of(
+                "Type", "AWS::Lambda::Function", "Properties", properties)))).toString();
+    }
+
     private static Stream<Map<String, String>> oversizedEnvironments() {
         return Stream.of(
                 Map.of("BIG", "x".repeat(5000)),
@@ -120,6 +198,7 @@ class LambdaEnvironmentSizeIntegrationTest {
                 Map.of("AA", "x".repeat(2040), "BB", "x".repeat(2040)),
                 Map.of("BIG", "é".repeat(2043) + "x"),
                 Map.of("BIG", "😀".repeat(1022)),
+                Map.of("BIG", "x".repeat(3991) + "😀" + "x".repeat(92)),
                 Map.of("BIG", "\"".repeat(2043) + "x"),
                 Map.of("BIG", "\n".repeat(2043) + "x"));
     }
@@ -132,6 +211,7 @@ class LambdaEnvironmentSizeIntegrationTest {
                 Map.of("AA", "x".repeat(2040), "BB", "x".repeat(2039)),
                 Map.of("BIG", "é".repeat(2043)),
                 Map.of("BIG", "😀".repeat(1021) + "xx"),
+                Map.of("BIG", "x".repeat(3991) + "😀" + "x".repeat(91)),
                 Map.of("BIG", "\"".repeat(2043)),
                 Map.of("BIG", "\n".repeat(2043)));
     }

@@ -29,10 +29,13 @@ import java.io.ByteArrayOutputStream;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.util.AbstractMap;
+import java.util.AbstractSet;
 import java.util.ArrayList;
 import java.util.Base64;
 import java.util.HashMap;
 import java.util.HashSet;
+import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
@@ -44,6 +47,7 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.BiFunction;
 import java.util.stream.Collectors;
@@ -125,6 +129,40 @@ class LambdaServiceTest {
         AwsException missing = assertThrows(AwsException.class,
                 () -> service.getFunction(REGION, "oversized-environment-create"));
         assertEquals("ResourceNotFoundException", missing.getErrorCode());
+    }
+
+    @Test
+    void oversizedEnvironmentStopsSerializationBeforeTraversingTheWholeMap() {
+        AtomicInteger visited = new AtomicInteger();
+        Map<String, String> variables = new AbstractMap<>() {
+            @Override
+            public Set<Entry<String, String>> entrySet() {
+                return new AbstractSet<>() {
+                    @Override
+                    public Iterator<Entry<String, String>> iterator() {
+                        return Stream.generate(() -> {
+                            int index = visited.incrementAndGet();
+                            if (index > 64) {
+                                throw new AssertionError("Quota validation traversed too much of the environment");
+                            }
+                            return Map.entry("KEY_" + index, "x".repeat(512));
+                        }).limit(10_000).iterator();
+                    }
+
+                    @Override
+                    public int size() {
+                        return 10_000;
+                    }
+                };
+            }
+        };
+        Map<String, Object> request = baseRequest("bounded-environment-create");
+        request.put("Environment", Map.of("Variables", variables));
+
+        AwsException error = assertThrows(AwsException.class, () -> service.createFunction(REGION, request));
+
+        assertEquals("InvalidParameterValueException", error.getErrorCode());
+        assertTrue(visited.get() < 64);
     }
 
     @Test
