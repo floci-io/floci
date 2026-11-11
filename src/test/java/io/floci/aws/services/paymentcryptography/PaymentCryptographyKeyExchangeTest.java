@@ -130,7 +130,7 @@ class PaymentCryptographyKeyExchangeTest {
         Map<String, Object> material = new LinkedHashMap<>();
         material.put("WrappingKeyIdentifier", protection.getKeyId());
         material.put("KeyBlockHeaders", Map.of(
-                "KeyExportability", "SENSITIVE",
+                "KeyExportability", "NON_EXPORTABLE",
                 "KeyVersion", "01",
                 "OptionalBlocks", Map.of("AB", "0011")));
 
@@ -142,7 +142,7 @@ class PaymentCryptographyKeyExchangeTest {
 
         // The header carries the version and the exportability the request asked for.
         assertEquals("01", block.substring(9, 11), "the version of the key");
-        assertEquals("S", block.substring(11, 12), "the exportability of the key");
+        assertEquals("N", block.substring(11, 12), "the exportability of the key");
         // The optional block sits between the header and the cipher text, and its length is
         // in hexadecimal and covers the whole block, the identifier and the length included.
         assertEquals("AB", block.substring(16, 18), "the optional block's identifier");
@@ -247,7 +247,7 @@ class PaymentCryptographyKeyExchangeTest {
         Exchange exchange = agreedExchange(authorityCertificate, counterpartyCertificate);
         Map<String, Object> material = new LinkedHashMap<>(exchange.material());
         material.put("KeyBlockHeaders", Map.of(
-                "KeyExportability", "SENSITIVE",
+                "KeyExportability", "NON_EXPORTABLE",
                 "KeyVersion", "01",
                 "OptionalBlocks", Map.of("AB", "0011")));
 
@@ -258,7 +258,7 @@ class PaymentCryptographyKeyExchangeTest {
         // The header carries the version and the exportability the request asked for, and
         // the optional block sits between the header and the cipher text.
         assertEquals("01", block.substring(9, 11), "the version of the key");
-        assertEquals("S", block.substring(11, 12), "the exportability of the key");
+        assertEquals("N", block.substring(11, 12), "the exportability of the key");
         assertEquals("AB", block.substring(16, 18), "the optional block's identifier");
         assertEquals("08", block.substring(18, 20), "the optional block's length");
     }
@@ -440,13 +440,23 @@ class PaymentCryptographyKeyExchangeTest {
      * so the key that holds its public half is the authority that can vouch for it.
      */
     private PaymentCryptographyKey createAuthority(String certificate) {
+        return createAuthority(certificate, true);
+    }
+
+    /** An authority that vouches for a certificate, enabled or not. */
+    private PaymentCryptographyKey createAuthority(String certificate, boolean enabled) {
         return service.importKey("us-east-1", "TrustedCertificatePublicKey", Map.of(
                 "PublicKeyCertificate", certificate,
-                "KeyAttributes", Map.of(
-                        "KeyAlgorithm", "RSA_2048",
-                        "KeyClass", "PUBLIC_KEY",
-                        "KeyUsage", "TR31_S0_ASYMMETRIC_KEY_FOR_DIGITAL_SIGNATURE",
-                        "KeyModesOfUse", Map.of("Verify", Boolean.TRUE))), "", true, Map.of());
+                "KeyAttributes", authorityAttributes()), "", enabled, Map.of());
+    }
+
+    /** The attributes an authority carries: a public key that may verify. */
+    private static Map<String, Object> authorityAttributes() {
+        return Map.of(
+                "KeyAlgorithm", "RSA_2048",
+                "KeyClass", "PUBLIC_KEY",
+                "KeyUsage", "TR31_S0_ASYMMETRIC_KEY_FOR_DIGITAL_SIGNATURE",
+                "KeyModesOfUse", Map.of("Verify", Boolean.TRUE));
     }
 
     /**
@@ -573,9 +583,7 @@ class PaymentCryptographyKeyExchangeTest {
         // both spellings of a direction stand for it. A block that says B gives the key all
         // four of Encrypt, Decrypt, Wrap and Unwrap, whichever use the key has.
         PaymentCryptographyKey key = createKey("AES_128", "TR31_D0_SYMMETRIC_DATA_ENCRYPTION_KEY");
-        Map<String, Object> answer = service.exportKey("us-east-1", key.getKeyId(), "Tr31KeyBlock",
-                Map.of("WrappingKeyIdentifier", protection.getKeyId()), "", "");
-        String block = (String) ((Map<?, ?>) answer.get("WrappedKey")).get("KeyMaterial");
+        String block = blockOf(key);
         assertEquals("B", block.substring(8, 9), "the mode of use of the block");
 
         PaymentCryptographyKey imported = service.importKey("us-east-1", "Tr31KeyBlock",
@@ -612,9 +620,27 @@ class PaymentCryptographyKeyExchangeTest {
 
     @Test
     void anExportMayNotLoosenTheExportability() {
-        // The initial key of the DUKPT derivation is sensitive: it may leave, but not as a
-        // plain working key. An export that says it is exportable is looser than that, so
-        // it is refused.
+        // The exportability says what the receiver may do with the key once it has it, and
+        // the model states SENSITIVE as the loosest of the three: it lets the receiver
+        // export under a key block, a TR-34 block or a cryptogram, where EXPORTABLE lets it
+        // export under a key block or a TR-34 block only. So an exportable key may not
+        // leave as SENSITIVE, because that is looser than what the key has.
+        PaymentCryptographyKey key = createKey("AES_128", "TR31_D0_SYMMETRIC_DATA_ENCRYPTION_KEY");
+
+        AwsException refused = assertThrows(AwsException.class,
+                () -> service.exportKey("us-east-1", key.getKeyId(), "Tr31KeyBlock",
+                        Map.of("WrappingKeyIdentifier", protection.getKeyId(),
+                                "KeyBlockHeaders", Map.of("KeyExportability", "SENSITIVE")),
+                        "", ""));
+
+        assertEquals("ValidationException", refused.getErrorCode());
+        assertTrue(refused.getMessage().contains("looser"), refused.getMessage());
+    }
+
+    @Test
+    void anExportMayTightenTheExportability() {
+        // The other way round: the initial key of the DUKPT derivation is sensitive, and
+        // EXPORTABLE is stricter than that, so it may leave as one.
         Map<String, Object> attributes = new LinkedHashMap<>();
         attributes.put("KeyAlgorithm", "TDES_2KEY");
         attributes.put("KeyClass", "SYMMETRIC_KEY");
@@ -622,14 +648,13 @@ class PaymentCryptographyKeyExchangeTest {
         PaymentCryptographyKey base = service.createKey("us-east-1", attributes,
                 Map.of("DeriveKey", Boolean.TRUE), true, true, Map.of());
 
-        AwsException refused = assertThrows(AwsException.class,
-                () -> service.exportKey("us-east-1", base.getKeyId(), "Tr31KeyBlock",
-                        Map.of("WrappingKeyIdentifier", protection.getKeyId(),
-                                "KeyBlockHeaders", Map.of("KeyExportability", "EXPORTABLE")),
-                        "12345678900000000001", ""));
+        Map<String, Object> answer = service.exportKey("us-east-1", base.getKeyId(), "Tr31KeyBlock",
+                Map.of("WrappingKeyIdentifier", protection.getKeyId(),
+                        "KeyBlockHeaders", Map.of("KeyExportability", "EXPORTABLE")),
+                "12345678900000000001", "");
+        String block = (String) ((Map<?, ?>) answer.get("WrappedKey")).get("KeyMaterial");
 
-        assertEquals("ValidationException", refused.getErrorCode());
-        assertTrue(refused.getMessage().contains("looser"), refused.getMessage());
+        assertEquals("E", block.substring(11, 12), "the exportability of the derived key");
     }
 
     @Test
@@ -643,20 +668,13 @@ class PaymentCryptographyKeyExchangeTest {
                 authority.getPrivate(), "floci CA");
         Certificates.Minted counterpartyCertificate = CertificatesTest.mint(counterparty.getPublic(),
                 "floci counterparty", authority.getPrivate(), "floci CA");
-        Map<String, Object> attributes = new LinkedHashMap<>();
-        attributes.put("KeyAlgorithm", "RSA_2048");
-        attributes.put("KeyClass", "PUBLIC_KEY");
-        attributes.put("KeyUsage", "TR31_S0_ASYMMETRIC_KEY_FOR_DIGITAL_SIGNATURE");
-        attributes.put("KeyModesOfUse", Map.of("Verify", Boolean.TRUE));
-        PaymentCryptographyKey ca = service.importKey("us-east-1", "TrustedCertificatePublicKey",
-                Map.of("PublicKeyCertificate", caCertificate.pem(), "KeyAttributes", attributes),
-                "", false, Map.of());
+        PaymentCryptographyKey ca = createAuthority(caCertificate.pem(), false);
 
         AwsException refused = assertThrows(AwsException.class,
                 () -> service.importKey("us-east-1", "TrustedCertificatePublicKey",
                         Map.of("PublicKeyCertificate", counterpartyCertificate.pem(),
                                 "CertificateAuthorityPublicKeyIdentifier", ca.getKeyId(),
-                                "KeyAttributes", attributes),
+                                "KeyAttributes", authorityAttributes()),
                         "", true, Map.of()));
 
         assertEquals("ValidationException", refused.getErrorCode());
@@ -868,15 +886,17 @@ class PaymentCryptographyKeyExchangeTest {
     void aSensitiveKeyMayLeaveTheServiceAgain() {
         // The exportability of a block says whether the key that comes in may leave again.
         // A sensitive one may: it is only under a trusted key that it may not be worked with.
-        Map<String, Object> material = new LinkedHashMap<>();
-        material.put("WrappingKeyIdentifier", protection.getKeyId());
-        material.put("KeyBlockHeaders", Map.of("KeyExportability", "SENSITIVE"));
-
-        PaymentCryptographyKey key = createKey("AES_128", "TR31_D0_SYMMETRIC_DATA_ENCRYPTION_KEY");
-        Map<?, ?> wrapped = (Map<?, ?>) service.exportKey("us-east-1", key.getKeyId(),
-                "Tr31KeyBlock", material, "", "").get("WrappedKey");
-        String block = (String) wrapped.get("KeyMaterial");
-        assertEquals("S", block.substring(11, 12), "the exportability of the key");
+        //
+        // The block is made here rather than exported, because the service writes the
+        // exportability of the block it makes itself: a key it exports is exportable, and
+        // the only key it exports as sensitive is the initial DUKPT key, whose usage the
+        // model has no name for. A counterparty's block may carry the sensitive one all the
+        // same.
+        String block = PaymentCryptographyTr31.wrap(
+                PaymentCryptographyKeyRules.material(
+                        createKey("AES_128", "TR31_D0_SYMMETRIC_DATA_ENCRYPTION_KEY")),
+                PaymentCryptographyKeyRules.material(protection),
+                true, "A", "D0", "B", "S");
 
         PaymentCryptographyKey imported = service.importKey("us-east-1", "Tr31KeyBlock",
                 Map.of("WrappingKeyIdentifier", protection.getKeyId(), "WrappedKeyBlock", block),

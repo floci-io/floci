@@ -93,6 +93,10 @@
   stricter exportability is refused a looser one. A key encryption key wraps and unwraps
   where another key encrypts and decrypts, so for one the two spellings of a direction are
   the same permission.
+- **The order of the exportabilities:** the exportability says what the receiver may do with
+  the key once it has it. `SENSITIVE` is the loosest, for it lets the receiver export under
+  a key block, a TR-34 block or a cryptogram, `EXPORTABLE` lets it export under a key block
+  or a TR-34 block only, and `NON_EXPORTABLE` does not let it export at all.
 - **The exportability of a key that comes in:** the exportability of the block says whether
   the key may leave the service again. An exportable or a sensitive key may, and only a
   non-exportable one may not.

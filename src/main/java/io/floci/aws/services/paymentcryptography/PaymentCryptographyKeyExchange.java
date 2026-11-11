@@ -939,8 +939,8 @@ final class PaymentCryptographyKeyExchange {
     /**
      * The exportability the key itself has.
      *
-     * <p>An initial DUKPT key is sensitive: the receiver may export it, but not as a plain
-     * working key. Every other key is exportable or it is not.
+     * <p>An initial DUKPT key is sensitive, which is what the reference exports it as, and
+     * every other key is exportable or it is not.
      */
     private static String ownExportability(PaymentCryptographyKey key) {
         if (PaymentCryptographyService.isInitialDerivationKey(key)) {
@@ -950,13 +950,20 @@ final class PaymentCryptographyKeyExchange {
     }
 
     /**
-     * How loose an exportability is: {@code E} lets a key leave in the clear, {@code S} only
-     * under a key block, and {@code N} not at all.
+     * How loose an exportability is.
+     *
+     * <p>The exportability says what the receiver may do with the key once it has it, and
+     * the model states the three in that order: {@code S} lets the receiver export under a
+     * key block, a TR-34 block or a cryptogram, {@code E} under a key block or a TR-34 block
+     * only, and {@code N} not at all.
+     *
+     * <p>So {@code S} is the loosest of the three and {@code N} the strictest, and a key
+     * may only be exported with an exportability that is not looser than its own.
      */
     private static int permissiveness(String exportability) {
         return switch (exportability) {
-            case "E" -> 2;
-            case "S" -> 1;
+            case "S" -> 2;
+            case "E" -> 1;
             default -> 0;
         };
     }
