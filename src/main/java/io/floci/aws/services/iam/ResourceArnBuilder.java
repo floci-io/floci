@@ -1922,7 +1922,7 @@ public class ResourceArnBuilder {
      * {@code Name}, a null {@code Name} being the text {@code null} where the handler reads it as text. A name is
      * taken as sent, surrounding whitespace included, except where the handler strips it. A version or label
      * selector on a {@code GetParameter} or {@code GetParameters} name is not part of the parameter's ARN, so it
-     * is left out.
+     * is left out. An empty name, as the root path is, is the empty parameter name {@code parameter/}.
      */
     private List<String> buildSsmArns(ContainerRequestContext ctx, String region, String accountId) {
         JsonNode json = readJsonBody(ctx);
@@ -1946,10 +1946,7 @@ public class ResourceArnBuilder {
                 List<String> arns = new ArrayList<>();
                 for (JsonNode entry : json.path("Names")) {
                     String name = entry.asText();
-                    if (!name.isEmpty()) {
-                        arns.add(ssmParameterArn(selectorRead ? withoutSsmSelector(name) : name,
-                                region, accountId));
-                    }
+                    arns.add(ssmParameterArn(selectorRead ? withoutSsmSelector(name) : name, region, accountId));
                 }
                 if (!arns.isEmpty()) {
                     return arns;
@@ -1960,10 +1957,7 @@ public class ResourceArnBuilder {
                 if (operation != null && SSM_STRIPPED_NAME_OPERATIONS.contains(operation)) {
                     name = name.strip();
                 }
-                if (!name.isEmpty()) {
-                    return List.of(ssmParameterArn(selectorRead ? withoutSsmSelector(name) : name,
-                            region, accountId));
-                }
+                return List.of(ssmParameterArn(selectorRead ? withoutSsmSelector(name) : name, region, accountId));
             }
         }
         return List.of(AwsArnUtils.Arn.of("ssm", region, accountId, "parameter/*").toString());
