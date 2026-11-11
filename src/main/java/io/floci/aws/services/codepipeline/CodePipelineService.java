@@ -69,6 +69,7 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.RejectedExecutionException;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
+import java.util.function.Consumer;
 import java.util.regex.Pattern;
 import java.util.zip.CRC32;
 import java.util.zip.Inflater;
@@ -1304,13 +1305,21 @@ public class CodePipelineService {
         }
         ObjectNode actionType = mapper.createObjectNode();
         actionType.setAll((ObjectNode) request.deepCopy());
+        actionType.remove("tags");
         actionType.putObject("id")
                 .put("category", request.path("category").asText())
                 .put("owner", "Custom")
                 .put("provider", request.path("provider").asText())
                 .put("version", request.path("version").asText());
-        storeItem(account, region, "action", id, "Active", actionType);
-        return mapper.createObjectNode().set("actionType", actionType);
+        CodePipelineStoredItem item = newItem(account, region, "action", id, "Active", actionType);
+        item.setTags(parseTags(request.path("tags")));
+        putItem(item);
+        ObjectNode response = mapper.createObjectNode();
+        response.set("actionType", actionType);
+        if (!item.getTags().isEmpty()) {
+            response.set("tags", tagsNode(item.getTags()));
+        }
+        return response;
     }
 
     private ObjectNode updateActionType(JsonNode request, String region, String account) {
@@ -1472,22 +1481,45 @@ public class CodePipelineService {
     }
 
     private ObjectNode tagResource(JsonNode request, String region, String account) {
-        CodePipelinePipeline pipeline = requirePipelineByArn(account, region, text(request, "resourceArn"));
-        pipeline.getTags().putAll(parseTags(request.path("tags")));
-        putPipeline(pipeline);
+        updateTags(account, region, text(request, "resourceArn"),
+                tags -> tags.putAll(parseTags(request.path("tags"))));
         return mapper.createObjectNode();
     }
 
     private ObjectNode untagResource(JsonNode request, String region, String account) {
-        CodePipelinePipeline pipeline = requirePipelineByArn(account, region, text(request, "resourceArn"));
-        request.path("tagKeys").forEach(k -> pipeline.getTags().remove(k.asText()));
-        putPipeline(pipeline);
+        updateTags(account, region, text(request, "resourceArn"),
+                tags -> request.path("tagKeys").forEach(k -> tags.remove(k.asText())));
         return mapper.createObjectNode();
     }
 
     private ObjectNode listTagsForResource(JsonNode request, String region, String account) {
-        CodePipelinePipeline pipeline = requirePipelineByArn(account, region, text(request, "resourceArn"));
-        return mapper.createObjectNode().set("tags", tagsNode(pipeline.getTags()));
+        String arn = text(request, "resourceArn");
+        Map<String, String> tags = actionTypeByArn(account, region, arn)
+                .map(CodePipelineStoredItem::getTags)
+                .orElseGet(() -> requirePipelineByArn(account, region, arn).getTags());
+        return mapper.createObjectNode().set("tags", tagsNode(tags));
+    }
+
+    private void updateTags(String account, String region, String arn, Consumer<Map<String, String>> update) {
+        Optional<CodePipelineStoredItem> actionType = actionTypeByArn(account, region, arn);
+        if (actionType.isPresent()) {
+            update.accept(actionType.get().getTags());
+            putItem(actionType.get());
+            return;
+        }
+        CodePipelinePipeline pipeline = requirePipelineByArn(account, region, arn);
+        update.accept(pipeline.getTags());
+        putPipeline(pipeline);
+    }
+
+    private Optional<CodePipelineStoredItem> actionTypeByArn(String account, String region, String arn) {
+        return AwsArnUtils.parseIfArnIn(arn, "codepipeline", region)
+                .filter(parsed -> account.equals(parsed.accountId()) && parsed.resource().startsWith("actiontype:"))
+                // The ARN names the type as Owner/Category/Provider/Version.
+                .map(parsed -> parsed.resource().substring("actiontype:".length()).split("/"))
+                .filter(id -> id.length == 4)
+                .flatMap(id -> itemStore.getForAccount(account,
+                        itemKey(region, "action", actionTypeId(id[1], id[0], id[2], id[3]))));
     }
 
     /**
@@ -2659,6 +2691,11 @@ public class CodePipelineService {
 
     private void storeItem(String account, String region, String type, String id,
                            String status, JsonNode data) {
+        putItem(newItem(account, region, type, id, status, data));
+    }
+
+    private CodePipelineStoredItem newItem(String account, String region, String type, String id,
+                                           String status, JsonNode data) {
         CodePipelineStoredItem item = new CodePipelineStoredItem();
         item.setAccountId(account);
         item.setRegion(region);
@@ -2668,7 +2705,7 @@ public class CodePipelineService {
         item.setCreated(now());
         item.setUpdated(item.getCreated());
         item.setData(data.deepCopy());
-        putItem(item);
+        return item;
     }
 
     private void putItem(CodePipelineStoredItem item) {

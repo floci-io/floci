@@ -696,6 +696,39 @@ class CodePipelineServiceTest {
         assertEquals("Failed", summaries.get(0).path("status").asText());
     }
 
+    @Test
+    void customActionTypeTagsAreResourceTagsOfItsArn() throws Exception {
+        String arn = "arn:aws:codepipeline:us-east-1:000000000000:actiontype:Custom/Build/TagProvider/1";
+        JsonNode created = handle("CreateCustomActionType", """
+                {
+                    "category": "Build",
+                    "provider": "TagProvider",
+                    "version": "1",
+                    "inputArtifactDetails": {"minimumCount": 0, "maximumCount": 1},
+                    "outputArtifactDetails": {"minimumCount": 0, "maximumCount": 1},
+                    "tags": [{"key": "team", "value": "red"}]
+                }
+                """);
+
+        assertEquals(mapper.readTree("[{\"key\": \"team\", \"value\": \"red\"}]"), created.path("tags"));
+        assertFalse(created.path("actionType").has("tags"));
+        assertEquals(created.path("tags"),
+                handle("ListTagsForResource", "{\"resourceArn\": \"" + arn + "\"}").path("tags"));
+
+        handle("TagResource", """
+                {"resourceArn": "%s", "tags": [{"key": "env", "value": "dev"}]}
+                """.formatted(arn));
+        handle("UntagResource", """
+                {"resourceArn": "%s", "tagKeys": ["team"]}
+                """.formatted(arn));
+
+        assertEquals(mapper.readTree("[{\"key\": \"env\", \"value\": \"dev\"}]"),
+                handle("ListTagsForResource", "{\"resourceArn\": \"" + arn + "\"}").path("tags"));
+        AwsException missing = assertThrows(AwsException.class, () -> handle("ListTagsForResource",
+                "{\"resourceArn\": \"" + arn.replace("TagProvider", "OtherProvider") + "\"}"));
+        assertEquals("ResourceNotFoundException", missing.getErrorCode());
+    }
+
     private JsonNode handle(String action, String body) throws Exception {
         return service.handle(action, mapper.readTree(body), REGION, ACCOUNT);
     }
