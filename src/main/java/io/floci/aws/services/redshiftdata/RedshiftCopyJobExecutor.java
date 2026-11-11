@@ -6,6 +6,7 @@ import io.floci.aws.services.redshift.RedshiftService;
 import io.floci.aws.services.redshift.RedshiftZeroEtlEndpoints;
 import io.floci.aws.services.redshift.model.Cluster;
 import io.floci.aws.services.redshift.model.Integration;
+import io.floci.aws.services.redshift.proxy.S3CopySimulator.S3TransferException;
 import io.floci.aws.services.redshiftserverless.RedshiftServerlessService.WorkgroupTarget;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
@@ -133,9 +134,13 @@ public class RedshiftCopyJobExecutor {
             }
             connection.commit();
         } catch (SQLException exception) {
-            LOG.warnv(exception, "Automatic COPY job {0} failed; its files will be retried", job);
             connection.rollback();
-            retry = true;
+            if (S3TransferException.isJobFailure(exception.getSQLState())) {
+                LOG.warnv(exception, "Automatic COPY job {0} failed and will run again on the next upload", job);
+            } else {
+                LOG.warnv(exception, "Automatic COPY job {0} failed; its files will be retried", job);
+                retry = true;
+            }
         }
         connection.setAutoCommit(true);
         return retry;

@@ -118,6 +118,11 @@ public final class S3CopySimulator {
         public String sqlState() {
             return sqlState;
         }
+
+        /** Syntax or unsupported-feature states: retrying the same job cannot succeed until the job is fixed. */
+        public static boolean isJobFailure(String sqlState) {
+            return sqlState != null && (sqlState.startsWith("42") || "0A000".equals(sqlState));
+        }
     }
 
     static CopyInput prepareCopy(CopyStatementParser.S3CopyFrom spec, S3Service s3, IamService iamService) {

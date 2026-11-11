@@ -107,7 +107,7 @@ final class CopyJobRunner {
                     failedFiles.remove(object.getKey());
                 } catch (IOException | RuntimeException exception) {
                     rollbackFileSavepoint(backend, fileSavepoint, exception);
-                    if (exception instanceof S3TransferException transfer && isJobFailure(transfer.sqlState())) {
+                    if (exception instanceof S3TransferException transfer && S3TransferException.isJobFailure(transfer.sqlState())) {
                         throw transfer;
                     }
                     backend.query("SELECT floci_internal.record_copy_job_file_error("
@@ -118,10 +118,6 @@ final class CopyJobRunner {
             token = page.isTruncated() ? page.nextContinuationToken() : null;
         } while (token != null);
         return count;
-    }
-
-    private static boolean isJobFailure(String sqlState) {
-        return sqlState != null && (sqlState.startsWith("42") || "0A000".equals(sqlState));
     }
 
     private static String fileMetadataArgs(long id, S3Object object) {

@@ -100,9 +100,40 @@ class RedshiftCopyJobExecutorTest {
         when(jobs.getString(1)).thenReturn("failed", "healthy");
         when(lock.executeQuery()).thenReturn(locked);
         when(locked.next()).thenReturn(true);
-        when(run.execute("COPY JOB RUN \"failed\"")).thenThrow(new SQLException("Target table is missing", "42P01"));
+        when(run.execute("COPY JOB RUN \"failed\"")).thenThrow(new SQLException("Connection lost", "08006"));
 
         assertTrue(executor.runAutomatic(integration));
+
+        verify(database).rollback();
+        verify(run).execute("COPY JOB RUN \"healthy\"");
+        verify(database).commit();
+    }
+
+    @Test
+    void jobFailureRollsBackWithoutRequestingRetryWhileOtherJobsStillRun() throws Exception {
+        Integration integration = integration("arn:aws:redshift:us-east-1:123456789012:cluster:target");
+        Cluster cluster = new Cluster();
+        cluster.setClusterStatus("available");
+        cluster.setProxyPort(15439);
+        when(service.describeClustersForAccount("123456789012", "target")).thenReturn(List.of(cluster));
+        Connection database = mock(Connection.class);
+        openDatabase(database);
+        PreparedStatement findJobs = mock(PreparedStatement.class);
+        PreparedStatement lock = mock(PreparedStatement.class);
+        Statement run = mock(Statement.class);
+        ResultSet jobs = mock(ResultSet.class);
+        ResultSet locked = mock(ResultSet.class);
+        when(database.prepareStatement(startsWith("SELECT job_name"))).thenReturn(findJobs);
+        when(database.prepareStatement(contains("FOR UPDATE"))).thenReturn(lock);
+        when(database.createStatement()).thenReturn(run);
+        when(findJobs.executeQuery()).thenReturn(jobs);
+        when(jobs.next()).thenReturn(true, true, false);
+        when(jobs.getString(1)).thenReturn("failed", "healthy");
+        when(lock.executeQuery()).thenReturn(locked);
+        when(locked.next()).thenReturn(true);
+        when(run.execute("COPY JOB RUN \"failed\"")).thenThrow(new SQLException("Target table is missing", "42P01"));
+
+        assertFalse(executor.runAutomatic(integration));
 
         verify(database).rollback();
         verify(run).execute("COPY JOB RUN \"healthy\"");
