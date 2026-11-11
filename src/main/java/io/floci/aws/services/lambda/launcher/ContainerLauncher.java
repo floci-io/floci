@@ -460,6 +460,12 @@ public class ContainerLauncher implements LambdaRuntimeLauncher {
                     COPY_MAX_ATTEMPTS, COPY_RETRY_BACKOFF_MS);
         }
 
+        // AWS runs an image as its own user, not the image's USER; init fails when that user
+        // cannot enter the working directory.
+        if ("Image".equals(fn.getPackageType())) {
+            WorkingDirectoryAccess.requireLambdaUserCanEnter(dockerClient, containerId);
+        }
+
         // Now start the container with code in place
         joinVpcNetwork(fn, containerId, lambdaAccountId, lambdaRegion);
         lifecycleManager.startCreated(containerId, spec);

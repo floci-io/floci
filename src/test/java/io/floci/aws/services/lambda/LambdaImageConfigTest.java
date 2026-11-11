@@ -2,6 +2,7 @@ package io.floci.aws.services.lambda;
 
 import com.github.dockerjava.api.DockerClient;
 import com.github.dockerjava.api.command.CopyArchiveToContainerCmd;
+import com.github.dockerjava.api.command.InspectContainerCmd;
 import io.floci.aws.config.EmulatorConfig;
 import io.floci.aws.core.common.RegionResolver;
 import io.floci.aws.core.common.dns.EmbeddedDnsServer;
@@ -264,6 +265,8 @@ class LambdaImageConfigTest {
             when(lifecycleManager.startCreated(eq("container-123"), any()))
                     .thenReturn(new ContainerLifecycleManager.ContainerInfo("container-123", Map.of()));
             when(lifecycleManager.getDockerClient()).thenReturn(dockerClient);
+            lenient().when(dockerClient.inspectContainerCmd(any()))
+                    .thenReturn(mock(InspectContainerCmd.class, RETURNS_DEEP_STUBS));
 
             lenient().when(dockerClient.copyArchiveToContainerCmd(any())).thenAnswer(inv -> {
                 CopyArchiveToContainerCmd cmd = mock(CopyArchiveToContainerCmd.class);

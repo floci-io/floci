@@ -7,6 +7,7 @@ import io.floci.aws.core.common.AwsArnUtils;
 import io.floci.aws.core.common.AwsException;
 import io.floci.aws.core.common.Resettable;
 import io.floci.aws.services.lambda.launcher.ContainerHandle;
+import io.floci.aws.services.lambda.launcher.LambdaInitException;
 import io.floci.aws.services.lambda.model.FunctionEventInvokeConfig;
 import io.floci.aws.services.lambda.model.InvocationType;
 import io.floci.aws.services.lambda.model.InvokeResult;
@@ -363,6 +364,10 @@ public class LambdaExecutorService implements Resettable {
      * message.
      */
     static String initFailureMessage(Exception e, boolean dockerExecutor) {
+        LambdaInitException initFailure = initException(e);
+        if (initFailure != null) {
+            return initFailure.getMessage();
+        }
         for (Throwable cause = e; dockerExecutor && cause != null; cause = cause.getCause()) {
             if (cause instanceof SocketException || cause instanceof UnknownHostException) {
                 return "Failed to start Lambda container: Docker is not reachable (" + cause.getMessage()
@@ -370,6 +375,21 @@ public class LambdaExecutorService implements Resettable {
             }
         }
         return "Failed to start Lambda container: " + e.getMessage();
+    }
+
+    /** The error type an init failure reports: the runtime's own when it has one, else {@code Lambda.InitError}. */
+    static String initFailureType(Exception e) {
+        LambdaInitException initFailure = initException(e);
+        return initFailure != null ? initFailure.errorType() : "Lambda.InitError";
+    }
+
+    private static LambdaInitException initException(Throwable e) {
+        for (Throwable cause = e; cause != null; cause = cause.getCause()) {
+            if (cause instanceof LambdaInitException initFailure) {
+                return initFailure;
+            }
+        }
+        return null;
     }
 
     private InvokeResult executeSync(LambdaFunction fn, byte[] payload, String requestId,
@@ -384,7 +404,7 @@ public class LambdaExecutorService implements Resettable {
         } catch (Exception e) {
             LOG.warnv("Failed to acquire container for function {0}: {1}", fn.getFunctionName(), e.getMessage());
             return new InvokeResult(200, "Unhandled",
-                    buildErrorPayload(initFailureMessage(e, dockerExecutor), "Lambda.InitError"),
+                    buildErrorPayload(initFailureMessage(e, dockerExecutor), initFailureType(e)),
                     null, requestId);
         }
         long deadlineMs = System.currentTimeMillis() + (long) fn.getTimeout() * 1000;
