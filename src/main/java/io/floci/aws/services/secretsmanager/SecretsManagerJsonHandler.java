@@ -394,10 +394,7 @@ public class SecretsManagerJsonHandler {
             response.set("ReplicationStatus", replicationStatusNode(secret));
         }
         response.set("Tags", tagsNode(secret));
-        ObjectNode versionIdsToStages = versionStagesNode(secret);
-        if (!versionIdsToStages.isEmpty()) {
-            response.set("VersionIdsToStages", versionIdsToStages);
-        }
+        putVersionStages(response, "VersionIdsToStages", secret);
         return Response.ok(response).build();
     }
 
@@ -460,9 +457,17 @@ public class SecretsManagerJsonHandler {
     }
 
     /**
-     * The version-id to staging-label map. DescribeSecret calls it {@code VersionIdsToStages} and
-     * ListSecrets calls it {@code SecretVersionsToStages}; the shape is identical.
+     * Sets the version-id to staging-label map. DescribeSecret calls it {@code VersionIdsToStages} and
+     * ListSecrets calls it {@code SecretVersionsToStages}; the shape is identical. AWS leaves the field
+     * out for a secret with no staged version, such as one created without a value.
      */
+    private void putVersionStages(ObjectNode node, String field, Secret secret) {
+        ObjectNode versionStages = versionStagesNode(secret);
+        if (!versionStages.isEmpty()) {
+            node.set(field, versionStages);
+        }
+    }
+
     private ObjectNode versionStagesNode(Secret secret) {
         ObjectNode versionIdsToStages = objectMapper.createObjectNode();
         if (secret.getVersions() != null) {
@@ -607,7 +612,7 @@ public class SecretsManagerJsonHandler {
                 node.set("ReplicationStatus", replicationStatusNode(secret));
             }
             node.set("Tags", tagsNode(secret));
-            node.set("SecretVersionsToStages", versionStagesNode(secret));
+            putVersionStages(node, "SecretVersionsToStages", secret);
             secretList.add(node);
         }
         response.set("SecretList", secretList);

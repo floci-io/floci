@@ -9,8 +9,10 @@ import software.amazon.awssdk.regions.Region;
 import software.amazon.awssdk.services.secretsmanager.SecretsManagerClient;
 import software.amazon.awssdk.services.secretsmanager.model.CreateSecretResponse;
 import software.amazon.awssdk.services.secretsmanager.model.DescribeSecretResponse;
+import software.amazon.awssdk.services.secretsmanager.model.FilterNameStringType;
 import software.amazon.awssdk.services.secretsmanager.model.PutSecretValueResponse;
 import software.amazon.awssdk.services.secretsmanager.model.ResourceNotFoundException;
+import software.amazon.awssdk.services.secretsmanager.model.SecretListEntry;
 
 import java.util.List;
 import java.util.Map;
@@ -48,9 +50,12 @@ class SecretsManagerCreateWithoutValueIntegrationTest {
     void secretCreatedWithoutAValueHasNoVersion() {
         CreateSecretResponse created = client.createSecret(request -> request.name(name));
         DescribeSecretResponse described = client.describeSecret(request -> request.secretId(name));
+        SecretListEntry listed = client.listSecrets(request -> request.filters(filter -> filter
+                .key(FilterNameStringType.NAME).values(name))).secretList().get(0);
 
         assertNull(created.versionId());
         assertFalse(described.hasVersionIdsToStages());
+        assertFalse(listed.hasSecretVersionsToStages());
     }
 
     @Test
