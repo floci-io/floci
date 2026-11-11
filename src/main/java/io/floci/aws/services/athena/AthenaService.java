@@ -326,7 +326,7 @@ public class AthenaService {
         workGroupStore.put(workGroupKey(region, workGroup.getName()), workGroup);
     }
 
-    public void deleteWorkGroup(String name, String region) {
+    void removeWorkGroup(String name, String region) {
         workGroupStore.delete(workGroupKey(region, name));
     }
 

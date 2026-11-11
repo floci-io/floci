@@ -206,6 +206,84 @@ class AthenaNamedQueryIntegrationTest {
                 () -> client.listNamedQueries(request -> request.workGroup("missing")));
     }
 
+    @Test
+    void populatedWorkGroupRequiresRecursiveDeletion() {
+        client.createWorkGroup(request -> request.name("populated"));
+        String id = create("populated");
+        assertThrows(InvalidRequestException.class,
+                () -> client.deleteWorkGroup(request -> request.workGroup("populated")));
+        assertThrows(InvalidRequestException.class, () -> client.deleteWorkGroup(request -> request
+                .workGroup("populated").recursiveDeleteOption(false)));
+        assertEquals("populated", client.getWorkGroup(request -> request.workGroup("populated")).workGroup().name());
+        assertEquals(id, client.getNamedQuery(request -> request.namedQueryId(id)).namedQuery().namedQueryId());
+    }
+
+    @Test
+    void recursiveDeletionRemovesSavedQueriesBeforeTheWorkGroupIsRecreated() {
+        client.createWorkGroup(request -> request.name("recreated"));
+        CreateNamedQueryRequest original = CreateNamedQueryRequest.builder().name("saved").database("db")
+                .queryString("select 1").workGroup("recreated").clientRequestToken(UUID.randomUUID().toString()).build();
+        String first = client.createNamedQuery(original).namedQueryId();
+        String second = create("recreated");
+        String primary = create("primary");
+        client.deleteWorkGroup(request -> request.workGroup("recreated").recursiveDeleteOption(true));
+        assertThrows(InvalidRequestException.class,
+                () -> client.getWorkGroup(request -> request.workGroup("recreated")));
+        for (String id : List.of(first, second)) {
+            assertThrows(InvalidRequestException.class,
+                    () -> client.getNamedQuery(request -> request.namedQueryId(id)));
+        }
+        assertEquals(2, client.batchGetNamedQuery(request -> request.namedQueryIds(first, second))
+                .unprocessedNamedQueryIds().size());
+        client.createWorkGroup(request -> request.name("recreated"));
+        assertTrue(client.listNamedQueries(request -> request.workGroup("recreated")).namedQueryIds().isEmpty());
+        assertEquals(List.of(primary), client.listNamedQueries().namedQueryIds());
+        String recreated = client.createNamedQuery(original).namedQueryId();
+        assertNotEquals(first, recreated);
+        assertEquals(recreated, client.getNamedQuery(request -> request.namedQueryId(recreated)).namedQuery().namedQueryId());
+    }
+
+    @Test
+    void recursiveDeletionIsIsolatedByAccountAndRegion() {
+        client.createWorkGroup(request -> request.name("scoped"));
+        String removed = create("scoped");
+        try (AthenaClient anotherAccount = AwsTestClients.create(AthenaClient.builder(), "741680899997", Region.of(REGION));
+             AthenaClient anotherRegion = AwsTestClients.create(AthenaClient.builder(), account, Region.US_WEST_2)) {
+            CreateNamedQueryRequest original = CreateNamedQueryRequest.builder().name("saved").database("db")
+                    .queryString("select 1").workGroup("scoped").clientRequestToken(UUID.randomUUID().toString()).build();
+            List<AthenaClient> isolatedClients = List.of(anotherAccount, anotherRegion);
+            List<String> preserved = new ArrayList<>();
+            for (AthenaClient isolated : isolatedClients) {
+                isolated.createWorkGroup(request -> request.name("scoped"));
+                preserved.add(isolated.createNamedQuery(original).namedQueryId());
+            }
+            client.deleteWorkGroup(request -> request.workGroup("scoped").recursiveDeleteOption(true));
+            assertThrows(InvalidRequestException.class,
+                    () -> client.getNamedQuery(request -> request.namedQueryId(removed)));
+            for (int i = 0; i < isolatedClients.size(); i++) {
+                AthenaClient isolated = isolatedClients.get(i);
+                String id = preserved.get(i);
+                assertEquals(List.of(id), isolated.listNamedQueries(request -> request.workGroup("scoped")).namedQueryIds());
+                assertEquals(id, isolated.getNamedQuery(request -> request.namedQueryId(id)).namedQuery().namedQueryId());
+                assertEquals(id, isolated.createNamedQuery(original).namedQueryId());
+            }
+        }
+    }
+
+    @Test
+    void emptyWorkGroupCanBeDeletedWithoutTheRecursiveOption() {
+        client.createWorkGroup(request -> request.name("empty"));
+        client.deleteWorkGroup(request -> request.workGroup("empty"));
+        assertThrows(InvalidRequestException.class,
+                () -> client.getWorkGroup(request -> request.workGroup("empty")));
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"\"true\"", "1", "[]", "{}"})
+    void deleteWorkGroupRejectsNonBooleanRecursiveOptions(String option) {
+        invalidRequest("DeleteWorkGroup", "{\"WorkGroup\":\"invalid-option\",\"RecursiveDeleteOption\":" + option + "}");
+    }
+
     @ParameterizedTest
     @ValueSource(strings = {
             "{}", "{\"Name\":\"\"}", "{\"Name\":3}", "{\"Database\":\"\"}", "{\"Database\":[]}",

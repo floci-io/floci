@@ -48,6 +48,23 @@ class AthenaNamedQueryServiceTest {
         assertTrue(deleted.listNamedQueries("eu-west-2", null, null, null).items().isEmpty());
     }
 
+    @Test
+    void recursiveWorkGroupDeletionPersistsAndRemovesItsRetryRequests() {
+        AthenaNamedQueryService service = persistentService();
+        String token = UUID.randomUUID().toString();
+        String removed = service.createNamedQuery("eu-west-2", "saved", "db", "select 1", null, "removed", token);
+        String preserved = service.createNamedQuery("eu-west-2", "saved", "db", "select 1", null,
+                "primary", UUID.randomUUID().toString());
+        service.deleteWorkGroup("eu-west-2", "removed", true);
+
+        AthenaNamedQueryService reloaded = persistentService();
+        assertThrows(AwsException.class, () -> reloaded.getNamedQuery("eu-west-2", removed));
+        assertEquals(preserved, reloaded.getNamedQuery("eu-west-2", preserved).namedQueryId());
+        String recreated = reloaded.createNamedQuery("eu-west-2", "saved", "db", "select 1", null, "removed", token);
+        assertNotEquals(removed, recreated);
+        assertEquals(recreated, reloaded.getNamedQuery("eu-west-2", recreated).namedQueryId());
+    }
+
     private AthenaNamedQueryService persistentService() {
         StorageFactory factory = mock(StorageFactory.class);
         when(factory.<NamedQuery>create(eq("athena"), anyString(), any())).thenAnswer(invocation -> {

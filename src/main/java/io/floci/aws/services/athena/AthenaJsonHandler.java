@@ -222,14 +222,12 @@ public class AthenaJsonHandler {
                 yield Response.ok(Map.of("Tags", athenaService.listTagsForResource(resourceArn))).build();
             }
             case "DeleteWorkGroup" -> {
-                String wg = request.path("WorkGroup").asText(null);
-                if (wg == null || !wg.matches("[a-zA-Z0-9._-]{1,128}")) {
-                    throw new AwsException("InvalidRequestException", "WorkGroup is required.", 400);
+                String wg = namedQueryText(request, "WorkGroup");
+                JsonNode recursive = request.get("RecursiveDeleteOption");
+                if (recursive != null && !recursive.isNull() && !recursive.isBoolean()) {
+                    throw new AwsException("InvalidRequestException", "RecursiveDeleteOption must be a boolean.", 400);
                 }
-                if ("primary".equals(wg)) {
-                    throw new AwsException("InvalidRequestException", "The primary workgroup cannot be deleted.", 400);
-                }
-                athenaService.deleteWorkGroup(wg, region);
+                namedQueryService.deleteWorkGroup(region, wg, recursive != null && recursive.asBoolean());
                 yield Response.ok(Map.of()).build();
             }
             default -> throw new AwsException("InvalidAction", "Action " + action + " is not supported", 400);

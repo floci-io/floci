@@ -53,6 +53,12 @@ and an empty description clears it. A missing query returns
 `InvalidRequestException` from get or update; batch get reports it under
 `UnprocessedNamedQueryIds`. Deleting an absent query succeeds.
 
+`DeleteWorkGroup` rejects a workgroup containing saved queries unless
+`RecursiveDeleteOption` is `true`. Recursive deletion removes the group's saved
+queries and creation retry records in the caller's account and region before
+removing the workgroup. Recreating the same workgroup name starts with no saved
+queries. The `primary` workgroup cannot be deleted.
+
 `ListNamedQueries` defaults to `primary` and returns IDs in deterministic order.
 `MaxResults` accepts 0 to 50; Floci uses 50 when it is omitted, null, or zero,
 matching its `ListQueryExecutions` convention because AWS documents neither a

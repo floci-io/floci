@@ -121,6 +121,30 @@ public class AthenaNamedQueryService {
         queries.delete(key(region, id));
     }
 
+    public synchronized void deleteWorkGroup(String region, String workGroup, boolean recursive) {
+        if (workGroup == null || !workGroup.matches("[a-zA-Z0-9._-]{1,128}")) {
+            throw invalid("WorkGroup is required.");
+        }
+        if ("primary".equals(workGroup)) {
+            throw invalid("The primary workgroup cannot be deleted.");
+        }
+        List<NamedQuery> contents = queries.scan(k -> k.startsWith(region + ":")).stream()
+                .filter(query -> workGroup.equals(query.workGroup())).toList();
+        if (!recursive && !contents.isEmpty()) {
+            throw invalid("WorkGroup contains named queries. Set RecursiveDeleteOption to true to delete it.");
+        }
+        for (NamedQuery query : contents) {
+            queries.delete(key(region, query.namedQueryId()));
+        }
+        for (String requestKey : requests.keys()) {
+            if (requestKey.startsWith(region + ":") && requests.get(requestKey)
+                    .map(query -> workGroup.equals(query.workGroup())).orElse(false)) {
+                requests.delete(requestKey);
+            }
+        }
+        athenaService.removeWorkGroup(workGroup, region);
+    }
+
     private static String resolveWorkGroup(String workGroup) {
         String group = workGroup == null ? "primary" : workGroup;
         if (!group.matches("[a-zA-Z0-9._-]{1,128}")) {
