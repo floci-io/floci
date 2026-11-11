@@ -397,6 +397,21 @@ class EmrServiceTest {
     }
 
     @Test
+    void aClusterShuttingDownHasNoManagedScalingPolicyToRead() {
+        EmrServiceFixture fixture = new EmrServiceFixture(0, 0, 30);
+        EmrService service = fixture.service;
+        String id = service.runJobFlow(cluster("scaled", true), REGION).getId();
+        service.putManagedScalingPolicy(id, json(MANAGED_SCALING));
+        service.terminateJobFlows(List.of(id));
+
+        AwsException reading = assertThrows(AwsException.class, () -> service.getManagedScalingPolicy(id));
+
+        assertEquals("TERMINATING", service.describeCluster(id).getState());
+        assertEquals("ValidationException", reading.getErrorCode());
+        assertEquals(SHUT_DOWN, reading.getMessage());
+    }
+
+    @Test
     void tagsChangeUntilTheClusterHasEnded() {
         EmrServiceFixture fixture = new EmrServiceFixture(0, 0, 30);
         EmrService service = fixture.service;

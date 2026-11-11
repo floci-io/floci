@@ -183,12 +183,15 @@ class EmrPoliciesIntegrationTest {
 
     @Test
     @Order(8)
-    void anEndedClustersPoliciesCannotBePutOrRemoved() {
+    void anEndedClustersPoliciesCannotBeChangedNorItsManagedScalingPolicyRead() {
         String core = ",\"InstanceGroupId\":\"" + coreGroupId + "\"";
+        emr("PutManagedScalingPolicy", cluster() + ",\"ManagedScalingPolicy\":" + MANAGED_SCALING + "}")
+                .then().statusCode(200);
         emr("PutAutoScalingPolicy", cluster() + core + ",\"AutoScalingPolicy\":" + AUTO_SCALING + "}")
                 .then().statusCode(200);
         emr("TerminateJobFlows", "{\"JobFlowIds\":[\"" + clusterId + "\"]}").then().statusCode(200);
 
+        assertShutDown("GetManagedScalingPolicy", cluster() + "}");
         assertShutDown("PutManagedScalingPolicy", cluster() + ",\"ManagedScalingPolicy\":" + MANAGED_SCALING + "}");
         assertShutDown("RemoveManagedScalingPolicy", cluster() + "}");
         assertShutDown("PutAutoTerminationPolicy", cluster() + ",\"AutoTerminationPolicy\":{\"IdleTimeout\":3600}}");
