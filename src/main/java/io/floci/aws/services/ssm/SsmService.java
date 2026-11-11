@@ -1105,7 +1105,7 @@ public class SsmService implements ResourceProvider {
 
     public void addTagsToResource(String resourceId, Map<String, String> tags, String region) {
         validateTagKeys(tags);
-        String storageKey = regionKey(region, parameterReadName(resourceId, region));
+        String storageKey = regionKey(region, parameterTagName(resourceId, region));
         Parameter param = parameterStore.get(storageKey)
                 .orElseThrow(() -> new AwsException("InvalidResourceId",
                         "Resource " + resourceId + " not found.", 400));
@@ -1145,7 +1145,7 @@ public class SsmService implements ResourceProvider {
     }
 
     public Map<String, String> listTagsForResource(String resourceId, String region) {
-        String storageKey = regionKey(region, parameterReadName(resourceId, region));
+        String storageKey = regionKey(region, parameterTagName(resourceId, region));
         Parameter param = parameterStore.get(storageKey)
                 .orElseThrow(() -> new AwsException("InvalidResourceId",
                         "Resource " + resourceId + " not found.", 400));
@@ -1153,7 +1153,7 @@ public class SsmService implements ResourceProvider {
     }
 
     public void removeTagsFromResource(String resourceId, List<String> tagKeys, String region) {
-        String storageKey = regionKey(region, parameterReadName(resourceId, region));
+        String storageKey = regionKey(region, parameterTagName(resourceId, region));
         Parameter param = parameterStore.get(storageKey)
                 .orElseThrow(() -> new AwsException("InvalidResourceId",
                         "Resource " + resourceId + " not found.", 400));
@@ -1302,6 +1302,43 @@ public class SsmService implements ResourceProvider {
 
     String parameterReadName(String nameOrArn, String region) {
         return parameterName(nameOrArn, region, true);
+    }
+
+    /**
+     * The stored name a tagging {@code ResourceId} addresses. A legacy {@code parameter<name>} ARN of the request's
+     * partition, region and account is read as {@code parameter/<name>}; see {@link #withLegacyParameterSlash}.
+     */
+    private String parameterTagName(String resourceId, String region) {
+        return parameterReadName(withLegacyParameterSlash(resourceId,
+                regionResolver.partitionForRegion(region), region, regionResolver.getAccountId()), region);
+    }
+
+    /**
+     * The {@code parameter/<name>} ARN for a legacy {@code parameter<name>} ARN of the given partition, region and
+     * account. Floci gave a top-level parameter that form before its ARNs matched AWS, and tagging still resolves
+     * it. Any other value, including a legacy ARN of another partition, region or account, is returned as is.
+     */
+    public static String withLegacyParameterSlash(String resourceId, String partition, String region,
+                                                  String accountId) {
+        if (resourceId == null || !AwsArnUtils.looksLikeArn(resourceId)) {
+            return resourceId;
+        }
+        AwsArnUtils.Arn arn;
+        try {
+            arn = AwsArnUtils.parse(resourceId);
+        } catch (IllegalArgumentException e) {
+            return resourceId;
+        }
+        if (!"ssm".equals(arn.service()) || !arn.resource().startsWith("parameter")) {
+            return resourceId;
+        }
+        String name = arn.resource().substring("parameter".length());
+        if (name.isEmpty() || name.startsWith("/") || !arn.partition().equals(partition)
+                || !arn.region().equals(region) || !arn.accountId().equals(accountId)) {
+            return resourceId;
+        }
+        return new AwsArnUtils.Arn(arn.partition(), arn.service(), arn.region(), arn.accountId(),
+                "parameter/" + name).toString();
     }
 
     private String parameterName(String nameOrArn, String region, boolean parameterRead) {
