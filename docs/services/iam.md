@@ -2352,9 +2352,9 @@ As with passed roles, an operation Floci does not serve is in the table too.
 - The tags are read from a top-level request member named `Tags`, `TagList`, `TagSpecifications` or
   the like that holds a tag list or map, as the Floci handler that applies them reads it, so the check
   sees the tags the resource gets. A JSON or CBOR body's member is read under its own name, and an
-  alarm's in CloudWatch's `PutMetricAlarm` and `PutCompositeAlarm` under `tags` too; a CodeDeploy
-  tag's key and value as `Key` and `Value`, or `key` and `value`, as its handler takes either, each as
-  text whatever it holds (a key `123` is the tag `123`). Query form
+  alarm's in CloudWatch's `PutMetricAlarm` and `PutCompositeAlarm` under `tags` too. CodeDeploy
+  accepts tag lists of objects with a textual `Key` and an optional textual `Value`; lowercase
+  member names and numeric keys are rejected by its handler. Query form
   parameters are read under the spelling the SDK sends, from 1 to the first number with no key, and
   under the further spellings the RDS, DocumentDB, Neptune, ElastiCache and Redshift handlers read.
   EC2's are read from every tag specification, under `TagSpecification` or `TagSpecifications`, as EC2
@@ -2364,8 +2364,9 @@ As with passed roles, an operation Floci does not serve is in the table too.
   tag list and an object's structures, a form's list under any spelling and every number, so none a
   handler applies goes unchecked. An object's members, read as a map's tags, are a set of their own
   beside its structures, so a member named as a structure's key does not hide the structure's tag
-  from a handler that iterates the object, as KMS's `CreateKey` does. CodeDeploy's handler iterates
-  its tags member whatever it holds, so an object's structures are its tags too.
+  from a handler that iterates the object, as KMS's `CreateKey` does. CodeDeploy rejects an
+  object-shaped tag collection at its handler boundary; the wider authorization scan is defensive
+  and does not make that shape valid CodeDeploy input.
 - CloudWatch Logs `CreateLogGroup`, which takes either of two tagging actions, is checked as described
   under CloudWatch Logs groups below.
 - Not read: an operation whose request carries no tags, which the Service Reference lists with a

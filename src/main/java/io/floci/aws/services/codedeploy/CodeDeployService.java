@@ -424,7 +424,7 @@ public class CodeDeployService {
 
     public DeploymentGroup createDeploymentGroup(String region, String appName, String groupName,
                                                   String deploymentConfigName, String serviceRoleArn,
-                                                  Map<String, Object> fields) {
+                                                  Map<String, Object> fields, List<Map<String, String>> tags) {
         getApplication(region, appName);
         Map<String, Map<String, DeploymentGroup>> appGroups = deploymentGroupsFor(region);
         Map<String, DeploymentGroup> groupStore = appGroups.computeIfAbsent(appName, a -> new ConcurrentHashMap<>());
@@ -442,6 +442,9 @@ public class CodeDeployService {
         applyGroupFields(group, fields);
         groupStore.put(groupName, group);
         persistRegion(deploymentGroups, region);
+        if (tags != null && !tags.isEmpty()) {
+            applyTags(deploymentGroupArn(region, appName, groupName), tags);
+        }
         return group;
     }
 
@@ -465,14 +468,25 @@ public class CodeDeployService {
         Map<String, DeploymentGroup> groupStore = deploymentGroupsFor(region)
                 .computeIfAbsent(appName, a -> new ConcurrentHashMap<>());
 
+        if (newGroupName != null && !newGroupName.equals(currentGroupName)
+                && groupStore.containsKey(newGroupName)) {
+            throw new AwsException("DeploymentGroupAlreadyExistsException",
+                    "Deployment group already exists: " + newGroupName, 400);
+        }
+
         if (deploymentConfigName != null) { group.setDeploymentConfigName(deploymentConfigName); }
         if (serviceRoleArn != null) { group.setServiceRoleArn(serviceRoleArn); }
         applyGroupFields(group, fields);
 
         if (newGroupName != null && !newGroupName.equals(currentGroupName)) {
+            String oldArn = deploymentGroupArn(region, appName, currentGroupName);
             groupStore.remove(currentGroupName);
             group.setDeploymentGroupName(newGroupName);
             groupStore.put(newGroupName, group);
+            Map<String, String> groupTags = tags.remove(oldArn);
+            if (groupTags != null) {
+                tags.put(deploymentGroupArn(region, appName, newGroupName), groupTags);
+            }
         }
         persistRegion(deploymentGroups, region);
         return group;
@@ -486,6 +500,7 @@ public class CodeDeployService {
             throw new AwsException("DeploymentGroupDoesNotExistException",
                     "Deployment group does not exist: " + groupName, 400);
         }
+        tags.remove(deploymentGroupArn(region, appName, groupName));
         persistRegion(deploymentGroups, region);
     }
 
@@ -1122,10 +1137,21 @@ public class CodeDeployService {
         for (Map<String, String> filter : filters) {
             String key = filter.get("Key");
             String value = filter.get("Value");
-            if (key == null) { continue; }
-            boolean found = instanceTags.stream()
-                    .anyMatch(t -> key.equals(t.get("Key"))
-                            && (value == null || value.equals(t.get("Value"))));
+            String type = filter.get("Type");
+            if (key == null && type == null) { continue; }
+            boolean found = instanceTags.stream().anyMatch(tag -> {
+                if ("VALUE_ONLY".equals(type)) {
+                    return value != null && value.equals(tag.get("Value"));
+                }
+                if ("KEY_ONLY".equals(type)) {
+                    return key != null && key.equals(tag.get("Key"));
+                }
+                if ("KEY_AND_VALUE".equals(type) && value == null) {
+                    return false;
+                }
+                return key != null && key.equals(tag.get("Key"))
+                        && (value == null || value.equals(tag.get("Value")));
+            });
             if (!found) { return false; }
         }
         return true;

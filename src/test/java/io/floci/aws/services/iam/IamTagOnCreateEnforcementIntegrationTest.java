@@ -504,22 +504,15 @@ class IamTagOnCreateEnforcementIntegrationTest {
                 .body("TagList.size()", equalTo(2));
     }
 
-    /**
-     * CodeDeploy's handler reads a tag's key and value in either case, so the tagging action is checked for both,
-     * and the create's own action sees them.
-     */
+    /** CodeDeploy's modeled tags need TagResource and are visible to the create's own condition keys. */
     @Test
-    void anApplicationsTagsInEitherCaseNeedTagResource() {
+    void anApplicationsTagsNeedTagResource() {
         User user = user("tag-application");
         String application = "tag-app-" + suffix();
-        String create = "{\"applicationName\":\"" + application + "\",\"tags\":[{\"key\":\"team\",\"value\":\"red\"}]}";
+        String create = "{\"applicationName\":\"" + application + "\",\"tags\":[{\"Key\":\"team\",\"Value\":\"red\"}]}";
         user.policy(allow("codedeploy:CreateApplication"));
         refusedJson(user.json("codedeploy", "CodeDeploy_20141006.CreateApplication", "1.1").body(create).post("/").then(),
                 "codedeploy:TagResource");
-        // The handler keeps a key that is a number as its text, so it needs the tagging action too.
-        refusedJson(user.json("codedeploy", "CodeDeploy_20141006.CreateApplication", "1.1")
-                .body("{\"applicationName\":\"" + application + "\",\"tags\":[{\"key\":123,\"value\":\"red\"}]}")
-                .post("/").then(), "codedeploy:TagResource");
 
         user.policy("{\"Effect\":\"Allow\",\"Action\":\"codedeploy:CreateApplication\",\"Resource\":\"*\","
                 + "\"Condition\":{\"StringEquals\":{\"aws:RequestTag/team\":\"red\"}}}," + allow("codedeploy:TagResource"));
@@ -527,14 +520,50 @@ class IamTagOnCreateEnforcementIntegrationTest {
                 .statusCode(200);
         cleanup.register(() -> admin("codedeploy").header("X-Amz-Target", "CodeDeploy_20141006.DeleteApplication")
                 .contentType("application/x-amz-json-1.1").body("{\"applicationName\":\"" + application + "\"}").post("/"));
+        cleanup.register(() -> admin("codedeploy").header("X-Amz-Target", "CodeDeploy_20141006.UntagResource")
+                .contentType("application/x-amz-json-1.1")
+                .body("{\"ResourceArn\":\"arn:aws:codedeploy:us-east-1:000000000000:application:" + application
+                        + "\",\"TagKeys\":[\"team\"]}").post("/"));
+    }
 
-        // The handler iterates an object's values as tags, so a deny on one holds however they are shaped.
-        user.policy(allow("codedeploy:CreateApplication") + "," + allow("codedeploy:TagResource")
-                + ",{\"Effect\":\"Deny\",\"Action\":\"codedeploy:CreateApplication\",\"Resource\":\"*\","
-                + "\"Condition\":{\"StringEquals\":{\"aws:RequestTag/team\":\"red\"}}}");
-        refusedJson(user.json("codedeploy", "CodeDeploy_20141006.CreateApplication", "1.1")
-                .body("{\"applicationName\":\"" + application + "-object\",\"tags\":{\"0\":{\"key\":\"team\",\"value\":\"red\"}}}")
-                .post("/").then(), "codedeploy:CreateApplication");
+    @Test
+    void aDeploymentGroupsTagsNeedTagResource() {
+        User user = user("tag-deployment-group");
+        String application = "tag-group-app-" + suffix();
+        String group = "tag-group-" + suffix();
+        String groupArn = "arn:aws:codedeploy:us-east-1:000000000000:deploymentgroup:"
+                + application + "/" + group;
+        cleanup.register(() -> admin("codedeploy").header("X-Amz-Target", "CodeDeploy_20141006.DeleteApplication")
+                .contentType("application/x-amz-json-1.1").body("{\"applicationName\":\"" + application + "\"}").post("/"));
+        admin("codedeploy").header("X-Amz-Target", "CodeDeploy_20141006.CreateApplication")
+                .contentType("application/x-amz-json-1.1")
+                .body("{\"applicationName\":\"" + application + "\"}").post("/").then().statusCode(200);
+
+        cleanup.register(() -> admin("codedeploy").header("X-Amz-Target", "CodeDeploy_20141006.DeleteDeploymentGroup")
+                .contentType("application/x-amz-json-1.1")
+                .body("{\"applicationName\":\"" + application + "\",\"deploymentGroupName\":\"" + group + "\"}")
+                .post("/"));
+        cleanup.register(() -> admin("codedeploy").header("X-Amz-Target", "CodeDeploy_20141006.UntagResource")
+                .contentType("application/x-amz-json-1.1")
+                .body("{\"ResourceArn\":\"" + groupArn + "\",\"TagKeys\":[\"team\"]}").post("/"));
+        String create = """
+                {"applicationName":"%s","deploymentGroupName":"%s",
+                 "serviceRoleArn":"arn:aws:iam::000000000000:role/codedeploy",
+                 "tags":[{"Key":"team","Value":"red"}]}
+                """.formatted(application, group);
+        user.policy(allow("codedeploy:CreateDeploymentGroup") + "," + allow("iam:PassRole"));
+        refusedJson(user.json("codedeploy", "CodeDeploy_20141006.CreateDeploymentGroup", "1.1")
+                .body(create).post("/").then(), "codedeploy:TagResource");
+
+        user.policy("{\"Effect\":\"Allow\",\"Action\":\"codedeploy:CreateDeploymentGroup\",\"Resource\":\"*\","
+                + "\"Condition\":{\"StringEquals\":{\"aws:RequestTag/team\":\"red\"}}},"
+                + allow("codedeploy:TagResource") + "," + allow("iam:PassRole"));
+        user.json("codedeploy", "CodeDeploy_20141006.CreateDeploymentGroup", "1.1")
+                .body(create).post("/").then().statusCode(200);
+        admin("codedeploy").header("X-Amz-Target", "CodeDeploy_20141006.ListTagsForResource")
+                .contentType("application/x-amz-json-1.1")
+                .body("{\"ResourceArn\":\"" + groupArn + "\"}").post("/").then().statusCode(200)
+                .body("Tags.find { it.Key == 'team' }.Value", equalTo("red"));
     }
 
     @Test
