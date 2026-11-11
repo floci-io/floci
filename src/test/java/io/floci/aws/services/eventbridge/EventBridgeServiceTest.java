@@ -736,6 +736,50 @@ class EventBridgeServiceTest {
     }
 
     @Test
+    void aLegacySlashNamedRuleOnACustomBusStaysManageableByItsExactName() {
+        service.createEventBus("foo", null, null, REGION);
+        Rule legacy = new Rule();
+        legacy.setName("team/r1");
+        legacy.setArn("arn:aws:events:us-east-1:000000000000:rule/foo/team/r1");
+        legacy.setEventBusName("foo");
+        legacy.setState(RuleState.ENABLED);
+        ruleStore.put("rule:" + REGION + ":foo/team/r1", legacy);
+        Target target = new Target("t1", "arn:aws:sqs:us-east-1:000000000000:queue-1", null, null);
+
+        service.putTargets("team/r1", "foo", List.of(target), REGION);
+        assertEquals(1, service.listTargetsByRule("team/r1", "foo", REGION).size());
+        service.disableRule("team/r1", "foo", REGION);
+        assertEquals(RuleState.DISABLED, service.describeRule("team/r1", "foo", REGION).getState());
+        service.enableRule("team/r1", "foo", REGION);
+        assertEquals(1, service.removeTargets("team/r1", "foo", List.of("t1"), REGION).successfulCount());
+        service.deleteRule("team/r1", "foo", REGION);
+
+        assertTrue(ruleStore.get("rule:" + REGION + ":foo/team/r1").isEmpty());
+        assertDoesNotThrow(() -> service.deleteEventBus("foo", REGION));
+    }
+
+    @Test
+    void aSlashNamedRuleStoredForAnotherBusIsRejected() {
+        service.createEventBus("foo", null, null, REGION);
+        Rule nested = new Rule();
+        nested.setName("b");
+        nested.setArn("arn:aws:events:us-east-1:000000000000:rule/foo/a/b");
+        nested.setEventBusName("foo/a");
+        nested.setState(RuleState.ENABLED);
+        ruleStore.put("rule:" + REGION + ":foo/a/b", nested);
+        Target target = new Target("t1", "arn:aws:sqs:us-east-1:000000000000:queue-1", null, null);
+
+        assertRuleNameRejected(() -> service.describeRule("a/b", "foo", REGION), "name");
+        assertRuleNameRejected(() -> service.deleteRule("a/b", "foo", REGION), "name");
+        assertRuleNameRejected(() -> service.enableRule("a/b", "foo", REGION), "name");
+        assertRuleNameRejected(() -> service.disableRule("a/b", "foo", REGION), "name");
+        assertRuleNameRejected(() -> service.putTargets("a/b", "foo", List.of(target), REGION), "rule");
+        assertRuleNameRejected(() -> service.removeTargets("a/b", "foo", List.of("t1"), REGION), "rule");
+        assertRuleNameRejected(() -> service.listTargetsByRule("a/b", "foo", REGION), "rule");
+        assertTrue(ruleStore.get("rule:" + REGION + ":foo/a/b").isPresent());
+    }
+
+    @Test
     void deleteRuleIsIdempotent() {
         service.putRule("my-rule", null, null, "rate(1 minute)", RuleState.ENABLED,
                 null, null, null, REGION);
