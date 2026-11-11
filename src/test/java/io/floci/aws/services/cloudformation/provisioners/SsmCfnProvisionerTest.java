@@ -137,6 +137,18 @@ class SsmCfnProvisionerTest {
     }
 
     @Test
+    void aNameWithSurroundingSpacesIsRecordedAsTheNameSsmStores() {
+        StackResource r = parameter(null, null);
+
+        provisioner.provision(r, props().put("Name", " " + NAME + " "), ctx());
+
+        verify(ssm).putParameter(NAME, "v", "String", null, false, Map.of(), REGION);
+        assertEquals(NAME, r.getPhysicalId());
+        assertEquals(NAME, r.getAttributes().get("Name"));
+        assertEquals(ARN, r.getAttributes().get("Arn"));
+    }
+
+    @Test
     void parameterWithoutTagsIsNotTagged() {
         StackResource r = parameter(null, null);
 
