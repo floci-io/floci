@@ -1,6 +1,7 @@
 package io.floci.aws.services.cloudformation.provisioners;
 
 import com.fasterxml.jackson.core.JsonProcessingException;
+import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
@@ -318,6 +319,14 @@ public class ApiGatewayV2CfnProvisioner implements CfnResourceProvisioner {
                                     "httpMethod");
                             putOpenApiIntegrationValue(integrationRequest, "payloadFormatVersion", integration,
                                     "payloadFormatVersion");
+                            putOpenApiIntegrationValue(integrationRequest, "integrationSubtype", integration,
+                                    "integrationSubtype");
+                            JsonNode requestParameters = integration.path("requestParameters");
+                            if (requestParameters.isObject() && !requestParameters.isEmpty()) {
+                                integrationRequest.put("requestParameters",
+                                        objectMapper.convertValue(requestParameters,
+                                                new TypeReference<Map<String, Object>>() {}));
+                            }
                             Integration createdIntegration = apiGatewayV2Service.createIntegration(region, apiId,
                                     integrationRequest);
                             integrationIds.add(createdIntegration.getIntegrationId());
@@ -886,7 +895,7 @@ public class ApiGatewayV2CfnProvisioner implements CfnResourceProvisioner {
         req.put("integrationSubtype", integrationSubtype);
         req.put("integrationUri", ctx.resolveOptional(props, "IntegrationUri"));
         req.put("payloadFormatVersion", ctx.resolveOrDefault(props, "PayloadFormatVersion",
-                integrationSubtype != null ? "1.0" : "2.0"));
+                ApiGatewayV2Service.defaultPayloadFormatVersion(integrationSubtype)));
         String connectionType = ctx.resolveOptional(props, "ConnectionType");
         String connectionId = ctx.resolveOptional(props, "ConnectionId");
         req.put("connectionType", connectionType);
