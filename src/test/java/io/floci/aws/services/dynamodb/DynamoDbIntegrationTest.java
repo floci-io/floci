@@ -649,6 +649,56 @@ class DynamoDbIntegrationTest {
     }
 
     @Test
+    void createTableListsTheGsiErrorsBeforeTheBillingModeAndLsiErrors() {
+        assertIndexNameRejected("CreateTable", """
+                {
+                    "TableName": "IndexNameListTable",
+                    "KeySchema": [
+                        {"AttributeName": "pk", "KeyType": "HASH"},
+                        {"AttributeName": "sk", "KeyType": "RANGE"}
+                    ],
+                    "AttributeDefinitions": [
+                        {"AttributeName": "pk", "AttributeType": "S"},
+                        {"AttributeName": "sk", "AttributeType": "S"},
+                        {"AttributeName": "l", "AttributeType": "S"},
+                        {"AttributeName": "g", "AttributeType": "S"}
+                    ],
+                    "LocalSecondaryIndexes": [{
+                        "IndexName": "aa",
+                        "KeySchema": [
+                            {"AttributeName": "pk", "KeyType": "HASH"},
+                            {"AttributeName": "l", "KeyType": "RANGE"}
+                        ],
+                        "Projection": {"ProjectionType": "ALL"}
+                    }],
+                    "BillingMode": "BOGUS",
+                    "GlobalSecondaryIndexes": [
+                        {
+                            "IndexName": "zz",
+                            "KeySchema": [{"AttributeName": "g", "KeyType": "HASH"}],
+                            "Projection": {"ProjectionType": "ALL"}
+                        },
+                        {
+                            "IndexName": "g2",
+                            "KeySchema": [{"AttributeName": "g", "KeyType": "HASH"}],
+                            "Projection": {"ProjectionType": "BOGUS"}
+                        }
+                    ]
+                }
+                """, "5 validation errors detected: "
+                + "Value 'zz' at 'globalSecondaryIndexes.1.member.indexName' failed to satisfy constraint: "
+                + "Member must have length greater than or equal to 3; "
+                + "Value 'g2' at 'globalSecondaryIndexes.2.member.indexName' failed to satisfy constraint: "
+                + "Member must have length greater than or equal to 3; "
+                + "Value 'BOGUS' at 'globalSecondaryIndexes.2.member.projection.projectionType' failed to satisfy "
+                + "constraint: Member must satisfy enum value set: [ALL, INCLUDE, KEYS_ONLY]; "
+                + "Value 'BOGUS' at 'billingMode' failed to satisfy constraint: "
+                + "Member must satisfy enum value set: [PROVISIONED, PAY_PER_REQUEST]; "
+                + "Value 'aa' at 'localSecondaryIndexes.1.member.indexName' failed to satisfy constraint: "
+                + "Member must have length greater than or equal to 3");
+    }
+
+    @Test
     void updateTableRejectsAnInvalidIndexNameBeforeTheTableLookup() {
         assertIndexNameRejected("UpdateTable", """
                 {
@@ -5955,6 +6005,26 @@ given()
     void itemWritesGetTheOlderChecksWhenTheNewerValidatorGivesUp(String operation, String body,
             String message) {
         String deep = "{\"M\": {\"n\": ".repeat(63) + "{\"S\": \"leaf\"}" + "}}".repeat(63);
+        given()
+            .header("X-Amz-Target", "DynamoDB_20120810." + operation)
+            .contentType(DYNAMODB_CONTENT_TYPE)
+            .body(body.replace("\"DEEP\"", deep))
+        .when().post("/")
+        .then()
+            .statusCode(400)
+            .body("__type", containsString("ValidationException"))
+            .body("message", equalTo(message));
+    }
+
+    @ParameterizedTest
+    @CsvSource(delimiter = '|', quoteCharacter = '`', textBlock = """
+            Query | {"TableName": "Missing", "KeyConditions": {"pk": {"ComparisonOperator": "EQ", "AttributeValueList": [{"S": "a"}]}}, "QueryFilter": {"b": {"ComparisonOperator": "NULL"}, "c": {"ComparisonOperator": "NULL"}}, "ConditionalOperator": "XOR", "Select": "BOGUS"} | Value 'XOR' at 'conditionalOperator' failed to satisfy constraint: Member must satisfy enum value set: [AND, OR]
+            Scan  | {"TableName": "Missing", "ScanFilter": {"a": {"ComparisonOperator": "EQ", "AttributeValueList": ["DEEP"]}}, "ConditionalOperator": "AND"} | ConditionalOperator can only be used when Filter or Expected has two or more elements
+            Scan  | {"TableName": "Missing", "ConditionalOperator": "AND"} | ConditionalOperator cannot be used without Filter or Expected
+            """)
+    void queryAndScanCheckTheConditionalOperatorBeforeTheTableLookup(String operation, String body,
+            String message) {
+        String deep = "{\"M\": {\"n\": ".repeat(40) + "{\"S\": \"leaf\"}" + "}}".repeat(40);
         given()
             .header("X-Amz-Target", "DynamoDB_20120810." + operation)
             .contentType(DYNAMODB_CONTENT_TYPE)

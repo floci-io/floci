@@ -171,7 +171,7 @@ NAMESPACES = ("access-analyzer", "acm", "application-autoscaling", "athena", "bc
               "cognito-idp", "controltower", "cur", "datasync", "ec2", "ecr", "elasticloadbalancing", "elasticmapreduce", "es", "events",
               "firehose", "globalaccelerator", "inspector2", "kinesisanalytics", "macie2", "payment-cryptography",
               "quicksight", "redshift", "redshift-data", "redshift-serverless", "rekognition", "servicediscovery",
-              "servicequotas", "sso", "states", "textract", "timestream-influxdb", "translate", "signer")
+              "servicequotas", "sso", "states", "textract", "timestream-influxdb", "translate", "signer", "xray")
 
 # SDK clients the reference lists for a namespace's operations whose requests Floci does not serve, and why: their
 # members are not read.

@@ -1,5 +1,7 @@
 package io.floci.aws.services.apigatewayv2;
 
+import com.fasterxml.jackson.core.JsonProcessingException;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import io.floci.aws.core.common.AwsException;
 import io.floci.aws.services.apigatewayv2.model.Api;
 import io.floci.aws.services.apigatewayv2.model.Authorizer;
@@ -19,6 +21,7 @@ import jakarta.inject.Inject;
 import org.jboss.logging.Logger;
 
 import java.util.ArrayList;
+import java.util.Collection;
 import java.util.HashMap;
 import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
@@ -42,6 +45,7 @@ import java.util.stream.Collectors;
 public class ApiGatewayV2OpenApiImporter {
 
     private static final Logger LOG = Logger.getLogger(ApiGatewayV2OpenApiImporter.class);
+    private static final ObjectMapper MAP_VALUE_WRITER = new ObjectMapper();
 
     private static final String EXT_INTEGRATION = "x-amazon-apigateway-integration";
     private static final String EXT_AUTHORIZER = "x-amazon-apigateway-authorizer";
@@ -185,6 +189,7 @@ public class ApiGatewayV2OpenApiImporter {
         // rejected reimport leave the previous definition intact.
         List<AuthorizerSpec> authorizerSpecs = authorizerSpecs(openAPI);
         collectUnresolvedSecurity(openAPI, authorizerSpecs, warnings);
+        validateIntegrationSubtypes(openAPI);
 
         if (failOnWarnings && !warnings.isEmpty()) {
             throw new AwsException("BadRequestException",
@@ -659,6 +664,28 @@ public class ApiGatewayV2OpenApiImporter {
 
     // ──────────────────────────── Integrations ────────────────────────────
 
+    /**
+     * Validates every integration's subtype as CreateIntegration will, while planning, so a document
+     * with an invalid subtype is rejected before an import or reimport changes anything.
+     */
+    private static void validateIntegrationSubtypes(OpenAPI openAPI) {
+        forEachImportedOperation(openAPI, (method, path, operation) -> {
+            Map<String, Object> definition = extensionAsMap(
+                    operation == null ? null : operation.getExtensions(), EXT_INTEGRATION);
+            if (definition == null) {
+                return;
+            }
+            Map<String, Object> request = toIntegrationRequest(definition);
+            String integrationSubtype = (String) request.get("integrationSubtype");
+            @SuppressWarnings("unchecked")
+            Map<String, String> requestParameters = (Map<String, String>) request.get("requestParameters");
+            ApiGatewayV2Service.validateIntegrationSubtype("HTTP", (String) request.get("integrationType"),
+                    integrationSubtype, (String) request.getOrDefault("payloadFormatVersion",
+                            ApiGatewayV2Service.defaultPayloadFormatVersion(integrationSubtype)),
+                    requestParameters);
+        });
+    }
+
     private static Map<String, Object> toIntegrationRequest(Map<String, Object> definition) {
         Map<String, Object> request = new HashMap<>();
 
@@ -666,6 +693,7 @@ public class ApiGatewayV2OpenApiImporter {
         if (type != null) {
             request.put("integrationType", type.toUpperCase(Locale.ROOT));
         }
+        putIfPresent(request, "integrationSubtype", stringValue(definition.get("integrationSubtype")));
         putIfPresent(request, "credentialsArn", stringValue(definition.get("credentials")));
         putIfPresent(request, "integrationUri", stringValue(definition.get("uri")));
         putIfPresent(request, "integrationMethod", stringValue(definition.get("httpMethod")));
@@ -741,9 +769,28 @@ public class ApiGatewayV2OpenApiImporter {
         if (!(source.get(key) instanceof Map<?, ?> map) || map.isEmpty()) {
             return;
         }
+        target.put(key, stringValues(map));
+    }
+
+    /**
+     * The map with every value read as text the way an imported {@code x-amazon-apigateway-integration}
+     * reads it: a number or boolean as its text, and an object or array as its JSON text.
+     */
+    public static Map<String, String> stringValues(Map<?, ?> map) {
         Map<String, String> copy = new LinkedHashMap<>();
-        map.forEach((k, v) -> copy.put(String.valueOf(k), v == null ? null : String.valueOf(v)));
-        target.put(key, copy);
+        map.forEach((k, v) -> copy.put(String.valueOf(k), mapValue(v)));
+        return copy;
+    }
+
+    private static String mapValue(Object value) {
+        if (!(value instanceof Map<?, ?>) && !(value instanceof Collection<?>)) {
+            return value == null ? null : String.valueOf(value);
+        }
+        try {
+            return MAP_VALUE_WRITER.writeValueAsString(value);
+        } catch (JsonProcessingException e) {
+            return String.valueOf(value);
+        }
     }
 
     private static void copyStringList(Map<String, Object> source, Map<String, Object> target, String key) {

@@ -1,5 +1,6 @@
 package io.floci.aws.services.s3;
 
+import io.floci.aws.core.common.ResteasyRequests;
 import jakarta.ws.rs.core.MultivaluedMap;
 import jakarta.ws.rs.core.UriInfo;
 
@@ -13,7 +14,7 @@ final class S3QueryParams {
 
     S3QueryParams(UriInfo uriInfo) {
         this.uriInfo = uriInfo;
-        this.decoded = uriInfo.getQueryParameters();
+        this.decoded = ResteasyRequests.queryParameters(uriInfo);
     }
 
     MultivaluedMap<String, String> decoded() {

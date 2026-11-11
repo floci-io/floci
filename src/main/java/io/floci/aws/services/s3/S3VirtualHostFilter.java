@@ -6,6 +6,7 @@ import io.floci.aws.core.common.AwsPartitions;
 import io.floci.aws.core.common.AwsRegions;
 import io.floci.aws.core.common.RequestHost;
 import io.floci.aws.core.common.RequestUriRewrite;
+import io.floci.aws.core.common.ResteasyRequests;
 import io.floci.aws.core.common.dns.EmbeddedDnsServer;
 import io.floci.aws.core.common.docker.ContainerDetector;
 import io.floci.aws.services.apigateway.ApiGatewayCustomDomainFilter;
@@ -136,7 +137,7 @@ public class S3VirtualHostFilter implements ContainerRequestFilter {
         if (hasAuthorizationCredential && !headerSignedForS3) {
             return;
         }
-        String queryCredential = requestContext.getUriInfo().getQueryParameters()
+        String queryCredential = ResteasyRequests.queryParameters(requestContext)
                 .getFirst("X-Amz-Credential");
         boolean signedForS3 = headerSignedForS3
                 || queryCredential != null && queryCredential.contains("/s3/aws4_request");

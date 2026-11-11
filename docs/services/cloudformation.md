@@ -765,8 +765,11 @@ regenerates it from AWS's published schemas, and `cfn-schema-drift.yml` compares
 A property the previous template declared and the new template drops is cleared on `UpdateStack`,
 goes back to its create default, or is kept, on the AppSync resources, the EC2 networking types
 (`Subnet`, `InternetGateway`, `RouteTable`, `NatGateway`, `EIP`, `PrefixList`), an
-`AWS::ApiGatewayV2::Stage`, an `AWS::EC2::Instance` and an `AWS::ECS::Service`. Kept: required members
-(`AuthenticationType`, `Type`, a function's `DataSourceName`), a data source's and a function's `Name`,
+`AWS::ApiGatewayV2::Stage`, `Route` and `Authorizer`, an `AWS::EC2::Instance`, an `AWS::ECS::Service`, an
+`AWS::Lambda::Alias`, an `AWS::SecretsManager::Secret`, an `AWS::Cognito::UserPoolGroup` and an
+`AWS::CloudTrail::Trail`. Kept: required members (`AuthenticationType`, `Type`, a function's
+`DataSourceName`, a `Route`'s `RouteKey`, an authorizer's `Name` and `AuthorizerType`), a data source's
+and a function's `Name`,
 an API key's `Expires`, a GraphQL API's `ApiType` and `Visibility`, a UNIT resolver's `DataSourceName`,
 a `NatGateway`'s `PrivateIpAddress`, a `PrefixList`'s `MaxEntries`, a `Stage`'s `StageName` and an
 `Instance`'s `SecurityGroupIds`, `NetworkInterfaces` and `LaunchTemplate`. A dropped `LaunchTemplate` keeps
@@ -776,13 +779,22 @@ their defaults, and the instance profile it supplied is disassociated. A service
 `ServiceRegistries` are kept, and its `DesiredCount` goes back to 1. A service's dropped
 `DeploymentConfiguration` is cleared. An empty `CapacityProviderStrategy` or `ServiceRegistries` in the
 template clears it; a failed stabilisation puts the prior values back, and a deployment configuration
-the service did not have goes back to none. A `Stage`'s dropped `StageVariables` become empty. An `Instance`'s dropped `UserData` is
+the service did not have goes back to none. A `Stage`'s dropped `StageVariables` become empty. A `Route`'s
+dropped `Target` and `AuthorizerId`, and an `Authorizer`'s dropped `AuthorizerUri`,
+`AuthorizerPayloadFormatVersion`, `JwtConfiguration`, `AuthorizerResultTtlInSeconds` and
+`EnableSimpleResponses`, read back absent, as on a create without them. A dropped `AuthorizerId` is kept
+while the route's authorization type stays `JWT` or `CUSTOM`. An `Instance`'s dropped `UserData` is
 cleared: a running instance is stopped for the rewrite and started again, and a stopped one stays stopped.
-An update that drops a `PrefixList`'s `AddressFamily` or `PrefixListName` fails. Create-only members are
-not cleared either.
-A property the stack never declared keeps the value set outside it, with one exception: a GraphQL API's
-`Tags` and `EnvironmentVariables`, which every update drives to the template. The table says so on
-those rows. The three `NatGateway` `Secondary*` properties count as one
+An `Alias`'s, a `Secret`'s and a `UserPoolGroup`'s dropped `Description` and a `Trail`'s dropped
+`S3KeyPrefix` are cleared. A dropped `RoutingConfig` removes the alias weights. The other members of
+those four types are kept or create-only when dropped, as the drop policy table lists them, except a
+`Secret`'s `Tags`, which every update drives to the template.
+An update that drops a `PrefixList`'s `AddressFamily` or `PrefixListName`, or a `Route`'s or
+`Authorizer`'s `ApiId`, fails. Create-only members are not cleared either.
+A property the stack never declared keeps the value set outside it, with these exceptions, which every
+update drives to the template: a GraphQL API's `Tags` and `EnvironmentVariables`, a Secret's `Tags`, a
+Lambda alias's `RoutingConfig`, a `Route`'s `AuthorizationScopes` and an `Authorizer`'s
+`IdentitySource`. The table says so on those rows. The three `NatGateway` `Secondary*` properties count as one
 address set: when the new or the previous template declares any of them, an update brings all three
 to the template.
 

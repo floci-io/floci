@@ -108,6 +108,7 @@ import io.floci.aws.services.signin.SigninController;
 import io.floci.aws.services.ssooidc.SsoOidcController;
 import io.floci.aws.services.ssoportal.SsoPortalController;
 import io.floci.aws.services.swf.model.SwfConstants;
+import io.floci.aws.services.xray.XrayController;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 
@@ -777,6 +778,10 @@ public class ResolvedServiceCatalog {
                         protocols(ServiceProtocol.REST_JSON),
                         Set.of(), Set.of("app-integrations"), Set.of(),
                         Set.of(AppIntegrationsController.class)),
+                descriptor("xray", "xray", config.services().xray().enabled(), true,
+                        "xray", config.storage().mode(), 5000L, null, ServiceProtocol.REST_JSON,
+                        protocols(ServiceProtocol.REST_JSON),
+                        Set.of(), Set.of("xray"), Set.of(), Set.of(XrayController.class)),
                 descriptor("dlm", "dlm", config.services().dlm().enabled(), true,
                         "dlm", config.storage().mode(), 5000L, null, ServiceProtocol.REST_JSON,
                         protocols(ServiceProtocol.REST_JSON),

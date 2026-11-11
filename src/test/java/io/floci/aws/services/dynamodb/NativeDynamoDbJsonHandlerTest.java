@@ -6,6 +6,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.floci.aws.core.common.AwsException;
+import io.floci.aws.core.common.SmithyValidationErrors;
 import io.floci.aws.core.storage.InMemoryStorage;
 import io.floci.aws.core.storage.PersistentStorage;
 import io.floci.aws.services.dynamodb.model.AttributeDefinition;
@@ -731,6 +732,68 @@ class NativeDynamoDbJsonHandlerTest {
         return ex;
     }
 
+    @ParameterizedTest
+    @CsvSource(delimiter = '|', quoteCharacter = '`', textBlock = """
+            {"LocalSecondaryIndexes":[{"IndexName":"l1","KeySchema":[{"AttributeName":"pk","KeyType":"HASH"}],"Projection":{}}],"GlobalSecondaryIndexes":[{"IndexName":"g1","KeySchema":[{"AttributeName":"g","KeyType":"HASH"}],"Projection":{}}]} | 2 validation errors detected: Value 'g1' at 'globalSecondaryIndexes.1.member.indexName' failed to satisfy constraint: Member must have length greater than or equal to 3; Value 'l1' at 'localSecondaryIndexes.1.member.indexName' failed to satisfy constraint: Member must have length greater than or equal to 3
+            {"BillingMode":"BOGUS","AttributeDefinitions":[{"AttributeName":"pk","AttributeType":"X"}],"KeySchema":[{"AttributeName":"pk","KeyType":"BOGUS"}],"LocalSecondaryIndexes":[{"IndexName":"l1","KeySchema":[{"AttributeName":"pk","KeyType":"HASH"}],"Projection":{}}],"ProvisionedThroughput":{"ReadCapacityUnits":0,"WriteCapacityUnits":0},"StreamSpecification":{"StreamViewType":"BOGUS"},"SSESpecification":{"SSEType":"BOGUS"},"GlobalSecondaryIndexes":[{"IndexName":"g1","KeySchema":[{"AttributeName":"g","KeyType":"HASH"}],"Projection":{}}]} | 10 validation errors detected: Value 'g1' at 'globalSecondaryIndexes.1.member.indexName' failed to satisfy constraint: Member must have length greater than or equal to 3; Value 'BOGUS' at 'billingMode' failed to satisfy constraint: Member must satisfy enum value set: [PROVISIONED, PAY_PER_REQUEST]; Value 'BOGUS' at 'sSESpecification.sSEType' failed to satisfy constraint: Member must satisfy enum value set: [AES256, KMS]; Value 'BOGUS' at 'keySchema.1.member.keyType' failed to satisfy constraint: Member must satisfy enum value set: [HASH, RANGE]; Value '0' at 'provisionedThroughput.writeCapacityUnits' failed to satisfy constraint: Member must have value greater than or equal to 1; Value '0' at 'provisionedThroughput.readCapacityUnits' failed to satisfy constraint: Member must have value greater than or equal to 1; Value 'BOGUS' at 'streamSpecification.streamViewType' failed to satisfy constraint: Member must satisfy enum value set: [OLD_IMAGE, KEYS_ONLY, NEW_AND_OLD_IMAGES, NEW_IMAGE]; Value null at 'streamSpecification.streamEnabled' failed to satisfy constraint: Member must not be null; Value 'X' at 'attributeDefinitions.1.member.attributeType' failed to satisfy constraint: Member must satisfy enum value set: [B, N, S]; Value 'l1' at 'localSecondaryIndexes.1.member.indexName' failed to satisfy constraint: Member must have length greater than or equal to 3
+            {"GlobalSecondaryIndexes":[{"IndexName":"a!","KeySchema":[{"AttributeName":"g","KeyType":"HASH"}],"Projection":{}}]} | 2 validation errors detected: Value 'a!' at 'globalSecondaryIndexes.1.member.indexName' failed to satisfy constraint: Member must have length greater than or equal to 3; Value 'a!' at 'globalSecondaryIndexes.1.member.indexName' failed to satisfy constraint: Member must satisfy regular expression pattern: [a-zA-Z0-9_.-]+
+            {"GlobalSecondaryIndexes":[{"IndexName":"g1","KeySchema":[{"AttributeName":"g","KeyType":"BOGUS"}],"Projection":{"ProjectionType":"BOGUS","NonKeyAttributes":[]},"ProvisionedThroughput":{"ReadCapacityUnits":0,"WriteCapacityUnits":0}}]} | 6 validation errors detected: Value 'g1' at 'globalSecondaryIndexes.1.member.indexName' failed to satisfy constraint: Member must have length greater than or equal to 3; Value 'BOGUS' at 'globalSecondaryIndexes.1.member.keySchema.1.member.keyType' failed to satisfy constraint: Member must satisfy enum value set: [HASH, RANGE]; Value '[]' at 'globalSecondaryIndexes.1.member.projection.nonKeyAttributes' failed to satisfy constraint: Member must have length greater than or equal to 1; Value 'BOGUS' at 'globalSecondaryIndexes.1.member.projection.projectionType' failed to satisfy constraint: Member must satisfy enum value set: [ALL, INCLUDE, KEYS_ONLY]; Value '0' at 'globalSecondaryIndexes.1.member.provisionedThroughput.writeCapacityUnits' failed to satisfy constraint: Member must have value greater than or equal to 1; Value '0' at 'globalSecondaryIndexes.1.member.provisionedThroughput.readCapacityUnits' failed to satisfy constraint: Member must have value greater than or equal to 1
+            {"GlobalSecondaryIndexes":[{"IndexName":"g1","KeySchema":[{"AttributeName":"g","KeyType":"HASH"}],"Projection":{"ProjectionType":"INCLUDE","NonKeyAttributes":["","n0","n1","n2","n3","n4","n5","n6","n7","n8","n9","n10","n11","n12","n13","n14","n15","n16","n17","n18","n19"]}}]} | 3 validation errors detected: Value 'g1' at 'globalSecondaryIndexes.1.member.indexName' failed to satisfy constraint: Member must have length greater than or equal to 3; Value '[, n0, n1, n2, n3, n4, n5, n6, n7, n8, n9, n10, n11, n12, n13, n14, n15, n16, n17, n18, n19]' at 'globalSecondaryIndexes.1.member.projection.nonKeyAttributes' failed to satisfy constraint: Member must have length less than or equal to 20; Value '[, n0, n1, n2, n3, n4, n5, n6, n7, n8, n9, n10, n11, n12, n13, n14, n15, n16, n17, n18, n19]' at 'globalSecondaryIndexes.1.member.projection.nonKeyAttributes' failed to satisfy constraint: Member must satisfy constraint: [Member must have length less than or equal to 255, Member must have length greater than or equal to 1]
+            {"GlobalSecondaryIndexes":[{}]} | 3 validation errors detected: Value null at 'globalSecondaryIndexes.1.member.indexName' failed to satisfy constraint: Member must not be null; Value null at 'globalSecondaryIndexes.1.member.keySchema' failed to satisfy constraint: Member must not be null; Value null at 'globalSecondaryIndexes.1.member.projection' failed to satisfy constraint: Member must not be null
+            {"KeySchema":[null],"GlobalSecondaryIndexes":[{"IndexName":"g1","KeySchema":[{"AttributeName":"g","KeyType":"HASH"}],"Projection":{"NonKeyAttributes":[null]}}]} | 1 validation error detected: Value 'g1' at 'globalSecondaryIndexes.1.member.indexName' failed to satisfy constraint: Member must have length greater than or equal to 3
+            {"KeySchema":[null,{"AttributeName":"","KeyType":"BOGUS"}],"GlobalSecondaryIndexes":[null,{"IndexName":"g1","KeySchema":[{"AttributeName":"g","KeyType":"HASH"}],"Projection":{"NonKeyAttributes":[null,""]}}]} | 4 validation errors detected: Value 'g1' at 'globalSecondaryIndexes.2.member.indexName' failed to satisfy constraint: Member must have length greater than or equal to 3; Value '[null, ]' at 'globalSecondaryIndexes.2.member.projection.nonKeyAttributes' failed to satisfy constraint: Member must satisfy constraint: [Member must have length less than or equal to 255, Member must have length greater than or equal to 1]; Value '' at 'keySchema.2.member.attributeName' failed to satisfy constraint: Member must have length greater than or equal to 1; Value 'BOGUS' at 'keySchema.2.member.keyType' failed to satisfy constraint: Member must satisfy enum value set: [HASH, RANGE]
+            {"KeySchema":[],"AttributeDefinitions":[null,{"AttributeName":"","AttributeType":"X"}]} | 3 validation errors detected: Value '[]' at 'keySchema' failed to satisfy constraint: Member must have length greater than or equal to 1; Value 'X' at 'attributeDefinitions.2.member.attributeType' failed to satisfy constraint: Member must satisfy enum value set: [B, N, S]; Value '' at 'attributeDefinitions.2.member.attributeName' failed to satisfy constraint: Member must have length greater than or equal to 1
+            {"KeySchema":[{"AttributeName":"","KeyType":"BOGUS"}]} | 2 validation errors detected: Value '' at 'keySchema.1.member.attributeName' failed to satisfy constraint: Member must have length greater than or equal to 1; Value 'BOGUS' at 'keySchema.1.member.keyType' failed to satisfy constraint: Member must satisfy enum value set: [HASH, RANGE]
+            {"AttributeDefinitions":[{"AttributeName":"","AttributeType":"X"}]} | 2 validation errors detected: Value 'X' at 'attributeDefinitions.1.member.attributeType' failed to satisfy constraint: Member must satisfy enum value set: [B, N, S]; Value '' at 'attributeDefinitions.1.member.attributeName' failed to satisfy constraint: Member must have length greater than or equal to 1
+            {"LocalSecondaryIndexes":[{"IndexName":"l1","KeySchema":[{"AttributeName":"pk","KeyType":"HASH"}],"Projection":{},"ProvisionedThroughput":{"ReadCapacityUnits":0,"WriteCapacityUnits":0}}]} | 1 validation error detected: Value 'l1' at 'localSecondaryIndexes.1.member.indexName' failed to satisfy constraint: Member must have length greater than or equal to 3
+            """)
+    void createTableListsItsConstraintErrorsInOrder(String members, String message) {
+        ObjectNode request = (ObjectNode) json("""
+                {"TableName":"Tbl","BillingMode":"PAY_PER_REQUEST","KeySchema":[{"AttributeName":"pk","KeyType":"HASH"}],
+                 "AttributeDefinitions":[{"AttributeName":"pk","AttributeType":"S"}]}
+                """);
+        request.setAll((ObjectNode) json(members));
+
+        assertEquals(message, expectValidationException("CreateTable", request).getMessage());
+    }
+
+    @Test
+    void createTableReportsTheFirstTenConstraintErrors() {
+        ObjectNode request = (ObjectNode) json("""
+                {"TableName":"Tbl","KeySchema":[{"AttributeName":"pk","KeyType":"HASH"}]}
+                """);
+        ArrayNode indexes = request.putArray("GlobalSecondaryIndexes");
+        List<String> violations = new ArrayList<>();
+        for (int i = 1; i <= 11; i++) {
+            String name = "g" + (char) ('a' + i);
+            indexes.add(json("{\"IndexName\":\"" + name + "\",\"KeySchema\":[{\"AttributeName\":\"g\",\"KeyType\":\"HASH\"}],"
+                    + "\"Projection\":{}}"));
+            violations.add(SmithyValidationErrors.lengthTooShort(
+                    "globalSecondaryIndexes." + i + ".member.indexName", name, 3));
+        }
+
+        assertEquals(SmithyValidationErrors.message(violations.subList(0, 10)),
+                expectValidationException("CreateTable", request).getMessage());
+    }
+
+    @ParameterizedTest
+    @CsvSource(delimiter = '|', quoteCharacter = '`', textBlock = """
+            k            | 0    | 2 validation errors detected: Value 'BOGUS' at 'billingMode' failed to satisfy constraint: Member must satisfy enum value set: [PROVISIONED, PAY_PER_REQUEST]; Value '%s' at 'sSESpecification.kMSMasterKeyId' failed to satisfy constraint: Member must have length greater than or equal to 1
+            k            | 2048 | 1 validation error detected: Value 'BOGUS' at 'billingMode' failed to satisfy constraint: Member must satisfy enum value set: [PROVISIONED, PAY_PER_REQUEST]
+            k            | 2049 | 2 validation errors detected: Value 'BOGUS' at 'billingMode' failed to satisfy constraint: Member must satisfy enum value set: [PROVISIONED, PAY_PER_REQUEST]; Value '%s' at 'sSESpecification.kMSMasterKeyId' failed to satisfy constraint: Member must have length less than or equal to 2048
+            😀 | 1025 | 1 validation error detected: Value 'BOGUS' at 'billingMode' failed to satisfy constraint: Member must satisfy enum value set: [PROVISIONED, PAY_PER_REQUEST]
+            """)
+    void createTableChecksTheKmsMasterKeyIdLength(String character, int count, String message) {
+        String key = character.repeat(count);
+        ObjectNode request = (ObjectNode) json("""
+                {"TableName":"Tbl","BillingMode":"BOGUS","KeySchema":[{"AttributeName":"pk","KeyType":"HASH"}],
+                 "AttributeDefinitions":[{"AttributeName":"pk","AttributeType":"S"}]}
+                """);
+        request.putObject("SSESpecification").put("Enabled", true).put("SSEType", "KMS").put("KMSMasterKeyId", key);
+
+        assertEquals(message.formatted(key), expectValidationException("CreateTable", request).getMessage());
+    }
+
     @Test
     void createTableRejectsProvisionedThroughputWithPayPerRequest() {
         AwsException ex = expectValidationException("CreateTable", json("""
@@ -1316,6 +1379,41 @@ class NativeDynamoDbJsonHandlerTest {
         assertEquals("Can not use both expression and non-expression parameters in the same request: "
                 + "Non-expression parameters: {AttributesToGet, ScanFilter, ConditionalOperator} "
                 + "Expression parameters: {ProjectionExpression, FilterExpression}", ex.getMessage());
+    }
+
+    @ParameterizedTest
+    @CsvSource(delimiter = '|', quoteCharacter = '`', textBlock = """
+            Query | {"TableName":"Missing","KeyConditions":{"pk":{"ComparisonOperator":"EQ","AttributeValueList":[{"S":"a"}]}},"QueryFilter":{"b":{"ComparisonOperator":"NULL"},"c":{"ComparisonOperator":"NULL"}},"ConditionalOperator":"XOR","Select":"BOGUS"} | Value 'XOR' at 'conditionalOperator' failed to satisfy constraint: Member must satisfy enum value set: [AND, OR]
+            Query | {"TableName":"Missing","KeyConditions":{"pk":{"ComparisonOperator":"EQ","AttributeValueList":[{"S":"a"}]}},"ConditionalOperator":"AND"} | ConditionalOperator cannot be used without Filter or Expected
+            Query | {"TableName":"Missing","KeyConditions":{"pk":{"ComparisonOperator":"EQ","AttributeValueList":[{"S":"a"}]}},"QueryFilter":null,"ConditionalOperator":"AND"} | ConditionalOperator cannot be used without Filter or Expected
+            Query | {"TableName":"Missing","KeyConditions":{"pk":{"ComparisonOperator":"EQ","AttributeValueList":[{"S":"a"}]}},"QueryFilter":{"b":{"ComparisonOperator":"EQ","AttributeValueList":[{"N":"abc"}]}},"ConditionalOperator":"AND"} | ConditionalOperator can only be used when Filter or Expected has two or more elements
+            Query | {"TableName":"Missing","KeyConditions":{"pk":{"ComparisonOperator":"EQ","AttributeValueList":[{"S":"a"}]}},"QueryFilter":{"b":{"ComparisonOperator":"EQ","AttributeValueList":["DEEP"]}},"ConditionalOperator":"AND"} | ConditionalOperator can only be used when Filter or Expected has two or more elements
+            Query | {"TableName":"Missing","QueryFilter":{"b":{"ComparisonOperator":"NULL"},"c":{"ComparisonOperator":"NULL"}},"ConditionalOperator":"XOR"} | Value 'XOR' at 'conditionalOperator' failed to satisfy constraint: Member must satisfy enum value set: [AND, OR]
+            Query | {"TableName":"Missing","KeyConditions":{"pk":{"ComparisonOperator":"EQ","AttributeValueList":[{"S":"a"}]}},"QueryFilter":{"b":{"ComparisonOperator":"NULL"},"c":{"ComparisonOperator":"NULL"}},"ConditionalOperator":""} | Value '' at 'conditionalOperator' failed to satisfy constraint: Member must satisfy enum value set: [AND, OR]
+            Query | {"TableName":"Missing","KeyConditions":{"pk":{"ComparisonOperator":"EQ","AttributeValueList":[{"S":"a"}]}},"QueryFilter":{"b":{"ComparisonOperator":"NULL"},"c":{"ComparisonOperator":"NULL"}},"ConditionalOperator":"XOR","Limit":0} | 1 validation error detected: Value at 'Limit' failed to satisfy constraint: Member must have value greater than or equal to 1
+            Scan  | {"TableName":"Missing","ScanFilter":{"a":{"ComparisonOperator":"EQ","AttributeValueList":["DEEP"]}},"ConditionalOperator":"AND"} | ConditionalOperator can only be used when Filter or Expected has two or more elements
+            Scan  | {"TableName":"Missing","ScanFilter":{},"ConditionalOperator":"AND"} | ConditionalOperator cannot be used without Filter or Expected
+            Scan  | {"TableName":"Missing","ConditionalOperator":"XOR"} | ConditionalOperator cannot be used without Filter or Expected
+            Scan  | {"TableName":"Missing","ScanFilter":{"b":{"ComparisonOperator":"NULL"}},"ConditionalOperator":"AND","Select":"BOGUS"} | ConditionalOperator can only be used when Filter or Expected has two or more elements
+            Scan  | {"TableName":"Missing","ScanFilter":{"b":{"ComparisonOperator":"NULL"}},"ConditionalOperator":"AND","Segment":1} | ConditionalOperator can only be used when Filter or Expected has two or more elements
+            Scan  | {"TableName":"Missing","ScanFilter":{"b":{"ComparisonOperator":"NULL"},"c":{"ComparisonOperator":"NULL"}},"ConditionalOperator":"XOR","Segment":1} | Value 'XOR' at 'conditionalOperator' failed to satisfy constraint: Member must satisfy enum value set: [AND, OR]
+            Scan  | {"TableName":"Missing","ScanFilter":{"b":{"ComparisonOperator":"NULL"},"c":{"ComparisonOperator":"NULL"}},"ConditionalOperator":"XOR","ReturnConsumedCapacity":"BOGUS"} | 1 validation error detected: Value 'BOGUS' at 'returnConsumedCapacity' failed to satisfy constraint: Member must satisfy enum value set: [INDEXES, TOTAL, NONE]
+            Scan  | {"TableName":"a!","ScanFilter":{"b":{"ComparisonOperator":"NULL"}},"ConditionalOperator":"AND"} | 1 validation error detected: Value 'a!' at 'tableName' failed to satisfy constraint: Member must have length greater than or equal to 3
+            """)
+    void queryAndScanCheckTheConditionalOperatorBeforeTheFilterValues(String operation, String request,
+            String message) throws Exception {
+        JsonNode body = mapper.readTree(request.replace("\"DEEP\"", mapper.writeValueAsString(nestedMaps(40))));
+
+        assertEquals(message, expectValidationException(operation, body).getMessage());
+    }
+
+    @Test
+    void aNullConditionalOperatorIsTreatedAsAbsent() {
+        AwsException ex = assertThrows(AwsException.class, () -> handler.handle("Scan", json("""
+                {"TableName": "Missing", "ScanFilter": {"b": {"ComparisonOperator": "NULL"}},
+                 "ConditionalOperator": null}
+                """), "eu-west-1"));
+        assertEquals("ResourceNotFoundException", ex.getErrorCode());
     }
 
     @Test

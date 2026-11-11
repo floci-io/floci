@@ -7411,4 +7411,91 @@ class CognitoServiceTest {
             assertEquals(holder.getUsername(), svc.adminGetUser(pool.getId(), "alice@example.com").getUsername());
         }
     }
+
+    // --- replaceGroupDescription: a service method that does not exist on main ---
+
+    private UserPool poolWithGroup(String groupName, String description) {
+        UserPool pool = service.createUserPool(Map.of("PoolName", "replace-pool-" + groupName), "us-east-1");
+        service.createGroup(pool.getId(), groupName, description, 7, "arn:aws:iam::000000000000:role/admins");
+        return pool;
+    }
+
+    @Test
+    void replaceGroupDescriptionStoresTheGivenValueAndReturnsTheUpdatedGroup() {
+        UserPool pool = poolWithGroup("set", "old");
+
+        CognitoGroup returned = service.replaceGroupDescription(pool.getId(), "set", "new");
+
+        assertEquals("new", returned.getDescription());
+        assertEquals("new", service.getGroup(pool.getId(), "set").getDescription());
+    }
+
+    @Test
+    void replaceGroupDescriptionWithNullClearsTheStoredValue() {
+        UserPool pool = poolWithGroup("nulled", "old");
+
+        CognitoGroup returned = service.replaceGroupDescription(pool.getId(), "nulled", null);
+
+        assertNull(returned.getDescription());
+        assertNull(service.getGroup(pool.getId(), "nulled").getDescription());
+    }
+
+    @Test
+    void replaceGroupDescriptionStoresTheEmptyStringAsGiven() {
+        UserPool pool = poolWithGroup("blank", "old");
+
+        service.replaceGroupDescription(pool.getId(), "blank", "");
+
+        assertEquals("", service.getGroup(pool.getId(), "blank").getDescription());
+    }
+
+    @Test
+    void replaceGroupDescriptionLeavesPrecedenceAndRoleArnUntouched() {
+        UserPool pool = poolWithGroup("others", "old");
+
+        service.replaceGroupDescription(pool.getId(), "others", null);
+
+        CognitoGroup stored = service.getGroup(pool.getId(), "others");
+        assertEquals(Integer.valueOf(7), stored.getPrecedence());
+        assertEquals("arn:aws:iam::000000000000:role/admins", stored.getRoleArn());
+    }
+
+    @Test
+    void replaceGroupDescriptionOnAnUnknownGroupThrowsWhatUpdateGroupThrows() {
+        UserPool pool = poolWithGroup("known", "old");
+        AwsException fromUpdate = assertThrows(AwsException.class,
+                () -> service.updateGroup(pool.getId(), "absent", "x", null, null));
+
+        AwsException fromReplace = assertThrows(AwsException.class,
+                () -> service.replaceGroupDescription(pool.getId(), "absent", "x"));
+
+        assertEquals(fromUpdate.getErrorCode(), fromReplace.getErrorCode());
+        assertEquals(fromUpdate.getHttpStatus(), fromReplace.getHttpStatus());
+    }
+
+    @Test
+    void replaceGroupDescriptionKeepsTheBookkeepingOfUpdateGroup() {
+        UserPool pool = poolWithGroup("books", "old");
+        long longAgo = 1_000L;
+        service.getGroup(pool.getId(), "books").setLastModifiedDate(longAgo);
+        assertEquals(longAgo, service.getGroup(pool.getId(), "books").getLastModifiedDate());
+
+        CognitoGroup returned = service.replaceGroupDescription(pool.getId(), "books", null);
+
+        assertTrue(returned.getLastModifiedDate() > longAgo);
+        assertTrue(service.getGroup(pool.getId(), "books").getLastModifiedDate() > longAgo);
+    }
+
+    // --- direct UpdateGroup without a description keeps it: unchanged from main ---
+
+    @Test
+    void updateGroupWithoutADescriptionKeepsTheStoredDescription() {
+        UserPool pool = poolWithGroup("update-keeps", "kept");
+
+        service.updateGroup(pool.getId(), "update-keeps", null, 3, null);
+
+        CognitoGroup stored = service.getGroup(pool.getId(), "update-keeps");
+        assertEquals("kept", stored.getDescription());
+        assertEquals(Integer.valueOf(3), stored.getPrecedence());
+    }
 }

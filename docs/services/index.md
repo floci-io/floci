@@ -49,6 +49,7 @@ Operation counts are exact. For dispatch-table services (Query and JSON 1.1) eac
 | [CloudWatch Logs](cloudwatch.md) | `POST /` + `X-Amz-Target: Logs.*` | JSON 1.1 | 17 |
 | [CloudWatch Metrics](cloudwatch.md#metrics) | `POST /` with `Action=` or JSON 1.1 | Query / JSON | 11 |
 | [CloudWatch RUM](rum.md) | `/appmonitor`, `/appmonitor/{name}`, `/appmonitors` | REST JSON | 5 |
+| [X-Ray](xray.md) | `/TraceSegments`, `/Traces`, `/TraceSummaries`, `/ServiceGraph`, `/TraceGraph`, `/GetSamplingRules`, `/CreateSamplingRule`, `/SamplingTargets`, `/TelemetryRecords` | REST JSON | 11 |
 | [GuardDuty](guardduty.md) | `/detector`, `/detector/{detectorId}`, `/detector/{detectorId}/admin`, `/admin/*`, `/tags/*` | REST JSON | 28 |
 | [AWS Account Management](account.md) | `/putAlternateContact`, `/getAlternateContact`, `/deleteAlternateContact` | REST JSON | 3 |
 | [IAM Access Analyzer](access-analyzer.md) | `/analyzer`, `/analyzer/{name}`, `/policy/validation` | REST JSON | 5 |

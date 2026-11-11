@@ -151,6 +151,9 @@ public class LambdaVersionAliasCfnProvisioner implements CfnResourceProvisioner 
             // LambdaService#updateAlias while null keeps what is there.
             alias = lambdaService.updateAlias(ctx.region(), functionName, aliasName,
                     functionVersion, description, routingConfig != null ? routingConfig : Map.of());
+            if (description == null && ctx.droppedProperties(props).contains("Description")) {
+                alias = lambdaService.replaceAliasDescription(ctx.region(), functionName, aliasName, null);
+            }
         }
 
         r.setPhysicalId(alias.getAliasArn());

@@ -70,6 +70,9 @@ public class CloudTrailCfnProvisioner implements CfnResourceProvisioner {
             trail = trailService.updateTrail(ctx.region(), previousPhysicalId, s3BucketName, s3KeyPrefix,
                     snsTopicName, includeGlobalServiceEvents, isMultiRegionTrail, enableLogFileValidation,
                     isOrganizationTrail);
+            if (s3KeyPrefix == null && ctx.droppedProperties(props).contains("S3KeyPrefix")) {
+                trail = trailService.replaceTrailS3KeyPrefix(ctx.region(), previousPhysicalId, null);
+            }
             applySelectors(resolved, ctx.region(), previousPhysicalId);
             if (resolved.has("IsLogging")) {
                 if (resolved.path("IsLogging").asBoolean()) {

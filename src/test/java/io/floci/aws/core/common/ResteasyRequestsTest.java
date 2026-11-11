@@ -4,6 +4,7 @@ import jakarta.ws.rs.container.ContainerRequestContext;
 import jakarta.ws.rs.core.MultivaluedHashMap;
 import jakarta.ws.rs.core.MultivaluedMap;
 import jakarta.ws.rs.core.UriInfo;
+import org.jboss.resteasy.reactive.server.core.CurrentRequestManager;
 import org.jboss.resteasy.reactive.server.core.ResteasyReactiveRequestContext;
 import org.jboss.resteasy.reactive.server.spi.ResteasyReactiveContainerRequestContext;
 import org.jboss.resteasy.reactive.server.spi.ServerHttpRequest;
@@ -30,12 +31,17 @@ class ResteasyRequestsTest {
 
     private static ResteasyReactiveContainerRequestContext reactiveContext(String query) {
         ResteasyReactiveContainerRequestContext ctx = mock(ResteasyReactiveContainerRequestContext.class);
+        ResteasyReactiveRequestContext request = requestContext(query);
+        when(ctx.getServerRequestContext()).thenReturn(request);
+        return ctx;
+    }
+
+    private static ResteasyReactiveRequestContext requestContext(String query) {
         ResteasyReactiveRequestContext request = mock(ResteasyReactiveRequestContext.class);
         ServerHttpRequest serverRequest = mock(ServerHttpRequest.class);
         when(serverRequest.query()).thenReturn(query);
         when(request.serverRequest()).thenReturn(serverRequest);
-        when(ctx.getServerRequestContext()).thenReturn(request);
-        return ctx;
+        return request;
     }
 
     @Test
@@ -61,5 +67,31 @@ class ResteasyRequestsTest {
         MultivaluedMap<String, String> map = uriInfoMap(ctx);
 
         assertSame(map, ResteasyRequests.queryParameters(ctx));
+    }
+
+    @Test
+    void injectedUriInfoWithoutQueryStringSkipsTheMap() {
+        UriInfo uriInfo = mock(UriInfo.class);
+        CurrentRequestManager.set(requestContext(null));
+        try {
+            assertTrue(ResteasyRequests.queryParameters(uriInfo).isEmpty());
+            verify(uriInfo, never()).getQueryParameters();
+        } finally {
+            CurrentRequestManager.set(null);
+        }
+    }
+
+    @Test
+    void injectedUriInfoWithQueryStringReadsTheMap() {
+        MultivaluedMap<String, String> map = new MultivaluedHashMap<>();
+        map.add("a", "b");
+        UriInfo uriInfo = mock(UriInfo.class);
+        when(uriInfo.getQueryParameters()).thenReturn(map);
+        CurrentRequestManager.set(requestContext("a=b"));
+        try {
+            assertSame(map, ResteasyRequests.queryParameters(uriInfo));
+        } finally {
+            CurrentRequestManager.set(null);
+        }
     }
 }

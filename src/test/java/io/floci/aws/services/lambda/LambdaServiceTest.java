@@ -3393,4 +3393,106 @@ class LambdaServiceTest {
         assertEquals(new LambdaService.LoggingSettings("Text", null, null, "/shared/app"),
                 LambdaService.loggingSettings(fn));
     }
+
+    private LambdaAlias aliasWithDescription(String functionName, String description) {
+        service.createFunction(REGION, baseRequest(functionName));
+        return service.createAlias(REGION, functionName, "live", "1", description, Map.of("2", 0.1));
+    }
+
+    // --- replaceAliasDescription: service methods that do not exist on main ---
+
+    @Test
+    void replaceAliasDescriptionStoresTheGivenValueAndReturnsTheUpdatedAlias() {
+        aliasWithDescription("alias-replace-set-fn", "old");
+
+        LambdaAlias returned = service.replaceAliasDescription(REGION, "alias-replace-set-fn", "live", "new");
+
+        assertEquals("new", returned.getDescription());
+        assertEquals("new", service.getAlias(REGION, "alias-replace-set-fn", "live").getDescription());
+    }
+
+    @Test
+    void replaceAliasDescriptionWithNullClearsTheStoredValue() {
+        aliasWithDescription("alias-replace-null-fn", "old");
+
+        LambdaAlias returned = service.replaceAliasDescription(REGION, "alias-replace-null-fn", "live", null);
+
+        assertNull(returned.getDescription());
+        assertNull(service.getAlias(REGION, "alias-replace-null-fn", "live").getDescription());
+    }
+
+    @Test
+    void replaceAliasDescriptionStoresTheEmptyStringAsGiven() {
+        aliasWithDescription("alias-replace-empty-fn", "old");
+
+        service.replaceAliasDescription(REGION, "alias-replace-empty-fn", "live", "");
+
+        assertEquals("", service.getAlias(REGION, "alias-replace-empty-fn", "live").getDescription());
+    }
+
+    @Test
+    void replaceAliasDescriptionLeavesVersionAndRoutingUntouched() {
+        aliasWithDescription("alias-replace-others-fn", "old");
+
+        service.replaceAliasDescription(REGION, "alias-replace-others-fn", "live", null);
+
+        LambdaAlias stored = service.getAlias(REGION, "alias-replace-others-fn", "live");
+        assertEquals("1", stored.getFunctionVersion());
+        assertEquals(Map.of("2", 0.1), stored.getRoutingConfig());
+    }
+
+    @Test
+    void replaceAliasDescriptionOnAnUnknownAliasThrowsWhatUpdateAliasThrows() {
+        service.createFunction(REGION, baseRequest("alias-replace-missing-fn"));
+        AwsException fromUpdate = assertThrows(AwsException.class, () -> service.updateAlias(REGION,
+                "alias-replace-missing-fn", "absent", null, "x", null));
+
+        AwsException fromReplace = assertThrows(AwsException.class, () -> service.replaceAliasDescription(REGION,
+                "alias-replace-missing-fn", "absent", "x"));
+
+        assertEquals(fromUpdate.getErrorCode(), fromReplace.getErrorCode());
+        assertEquals(fromUpdate.getHttpStatus(), fromReplace.getHttpStatus());
+    }
+
+    @Test
+    void replaceAliasDescriptionOnAnUnknownFunctionThrowsWhatUpdateAliasThrows() {
+        AwsException fromUpdate = assertThrows(AwsException.class, () -> service.updateAlias(REGION,
+                "alias-replace-no-such-fn", "live", null, "x", null));
+
+        AwsException fromReplace = assertThrows(AwsException.class, () -> service.replaceAliasDescription(REGION,
+                "alias-replace-no-such-fn", "live", "x"));
+
+        assertEquals(fromUpdate.getErrorCode(), fromReplace.getErrorCode());
+        assertEquals(fromUpdate.getHttpStatus(), fromReplace.getHttpStatus());
+    }
+
+    @Test
+    void replaceAliasDescriptionKeepsTheBookkeepingOfUpdateAlias() {
+        aliasWithDescription("alias-replace-books-fn", "old");
+        LambdaAlias stored = service.getAlias(REGION, "alias-replace-books-fn", "live");
+        long longAgo = 1_000L;
+        stored.setLastModifiedDate(longAgo);
+        assertEquals(longAgo, service.getAlias(REGION, "alias-replace-books-fn", "live").getLastModifiedDate());
+        String revisionBefore = stored.getRevisionId();
+
+        LambdaAlias returned = service.replaceAliasDescription(REGION, "alias-replace-books-fn", "live", null);
+
+        assertNotEquals(revisionBefore, returned.getRevisionId());
+        assertTrue(returned.getLastModifiedDate() > longAgo);
+        assertTrue(service.getAlias(REGION, "alias-replace-books-fn", "live").getLastModifiedDate() > longAgo);
+        assertNotEquals(revisionBefore, service.getAlias(REGION, "alias-replace-books-fn", "live").getRevisionId());
+    }
+
+    // --- direct UpdateAlias without a description keeps it: unchanged from main ---
+
+    @Test
+    void updateAliasWithoutADescriptionKeepsTheStoredDescription() {
+        aliasWithDescription("alias-update-keeps-fn", "kept");
+
+        service.updateAlias(REGION, "alias-update-keeps-fn", "live", "3", null, null);
+
+        LambdaAlias stored = service.getAlias(REGION, "alias-update-keeps-fn", "live");
+        assertEquals("kept", stored.getDescription());
+        assertEquals("3", stored.getFunctionVersion());
+    }
 }

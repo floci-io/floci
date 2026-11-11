@@ -48,6 +48,7 @@ import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.function.BiConsumer;
 import java.util.function.Consumer;
 import java.util.function.Supplier;
 import java.util.regex.Pattern;
@@ -73,6 +74,12 @@ public class NativeDynamoDbJsonHandler {
     private static final List<String> CONTRIBUTOR_INSIGHTS_ACTIONS = List.of("ENABLE", "DISABLE");
     // The order AWS prints the enum constraint in.
     private static final List<String> CONTRIBUTOR_INSIGHTS_MODES = List.of("THROTTLED_KEYS", "ACCESSED_AND_THROTTLED_KEYS");
+    // The orders AWS prints the enum constraints in.
+    private static final List<String> KEY_TYPES = List.of("HASH", "RANGE");
+    private static final List<String> STREAM_VIEW_TYPES =
+            List.of("OLD_IMAGE", "KEYS_ONLY", "NEW_AND_OLD_IMAGES", "NEW_IMAGE");
+    private static final List<String> ATTRIBUTE_TYPES = List.of("B", "N", "S");
+    private static final List<String> PROJECTION_TYPES = List.of("ALL", "INCLUDE", "KEYS_ONLY");
     // The warm throughput a new on-demand table or index starts with.
     private static final long ON_DEMAND_WARM_READ_UNITS = 12000;
     private static final long ON_DEMAND_WARM_WRITE_UNITS = 4000;
@@ -160,6 +167,8 @@ public class NativeDynamoDbJsonHandler {
     }
 
     private Response handleCreateTable(JsonNode request, String region) {
+        DynamoDbTableNames.requireShortName(textOrNull(request, "TableName"));
+        throwValidationErrors(createTableViolations(request));
         TableDefinition table = createTableFromSpec(request, "", region, "ACTIVE");
 
         ObjectNode response = objectMapper.createObjectNode();
@@ -1261,6 +1270,28 @@ public class NativeDynamoDbJsonHandler {
         }
     }
 
+    private static final List<String> CONDITIONAL_OPERATORS = List.of("AND", "OR");
+
+    private static void requireValidConditionalOperator(JsonNode request, String filterMember) {
+        String conditionalOperator = textOrNull(request, "ConditionalOperator");
+        if (conditionalOperator == null) {
+            return;
+        }
+        int conditions = request.path(filterMember).size();
+        if (conditions == 0) {
+            throw new AwsException("ValidationException",
+                    "ConditionalOperator cannot be used without Filter or Expected", 400);
+        }
+        if (conditions == 1) {
+            throw new AwsException("ValidationException",
+                    "ConditionalOperator can only be used when Filter or Expected has two or more elements", 400);
+        }
+        if (!CONDITIONAL_OPERATORS.contains(conditionalOperator)) {
+            throw new AwsException("ValidationException", SmithyValidationErrors.notInEnum(conditionalOperator,
+                    "conditionalOperator", CONDITIONAL_OPERATORS), 400);
+        }
+    }
+
     private static final Set<String> VALID_SELECT = Set.of(
             "ALL_ATTRIBUTES", "ALL_PROJECTED_ATTRIBUTES", "SPECIFIC_ATTRIBUTES", "COUNT");
 
@@ -1310,6 +1341,7 @@ public class NativeDynamoDbJsonHandler {
                         ? List.of("AttributesToGet", "QueryFilter", "ConditionalOperator")
                         : List.of("AttributesToGet", "QueryFilter", "ConditionalOperator", "KeyConditions"),
                 List.of("ProjectionExpression", "FilterExpression", "KeyConditionExpression"));
+        requireValidConditionalOperator(request, "QueryFilter");
         requireReadableValues(exprAttrValues, "");
         requireReadableValues(exclusiveStartKey, "");
         requireReadableValues(legacyValues(keyConditions), "");
@@ -1477,6 +1509,8 @@ public class NativeDynamoDbJsonHandler {
         rejectMixedParameters(request,
                 List.of("AttributesToGet", "ScanFilter", "ConditionalOperator"),
                 List.of("ProjectionExpression", "FilterExpression"));
+        DynamoDbTableNames.resolve(tableName);
+        requireValidConditionalOperator(request, "ScanFilter");
         requireReadableValues(exprAttrValues, "");
         requireReadableValues(exclusiveStartKey, "");
         requireReadableValues(legacyValues(scanFilter), "");
@@ -2453,12 +2487,125 @@ public class NativeDynamoDbJsonHandler {
             for (JsonNode gsiOverride : gsiOverrides) {
                 position++;
                 String member = "globalSecondaryIndexOverride." + position + ".member";
-                violations.addAll(restoreIndexNameViolations(gsiOverride.path("IndexName"), member + ".indexName"));
+                violations.addAll(indexNameViolations(gsiOverride.path("IndexName"), member + ".indexName"));
                 violations.addAll(throughputViolations(gsiOverride.path("ProvisionedThroughput"),
                         member + ".provisionedThroughput"));
             }
         }
         return violations;
+    }
+
+    // DynamoDB lists the members in this order, whatever order the request gives them, and reports the first 10.
+    private static List<String> createTableViolations(JsonNode request) {
+        List<String> violations = new ArrayList<>();
+        addIndexViolations(request.path("GlobalSecondaryIndexes"), "globalSecondaryIndexes", true, violations);
+        addOlderEnumError(request, "BillingMode", "billingMode", DynamoDbService.BILLING_MODES, violations);
+        JsonNode sse = request.path("SSESpecification");
+        String kmsMasterKeyId = textOrNull(sse, "KMSMasterKeyId");
+        if (kmsMasterKeyId != null) {
+            addIfPresent(violations, SmithyValidationErrors.lengthOutOfRange(
+                    "sSESpecification.kMSMasterKeyId", kmsMasterKeyId, 1, 2048));
+        }
+        addOlderEnumError(sse, "SSEType", "sSESpecification.sSEType", NativeDynamoDbTableService.SSE_TYPES,
+                violations);
+        addKeySchemaViolations(request.path("KeySchema"), "keySchema", violations);
+        violations.addAll(throughputViolations(request.path("ProvisionedThroughput"), "provisionedThroughput"));
+        JsonNode stream = request.path("StreamSpecification");
+        addOlderEnumError(stream, "StreamViewType", "streamSpecification.streamViewType", STREAM_VIEW_TYPES,
+                violations);
+        if (stream.isObject() && !stream.hasNonNull("StreamEnabled")) {
+            violations.add(SmithyValidationErrors.notNull("streamSpecification.streamEnabled"));
+        }
+        forEachMember(request.path("AttributeDefinitions"), "attributeDefinitions", (definition, member) -> {
+            addRequiredEnumError(definition, "AttributeType", member + ".attributeType", ATTRIBUTE_TYPES, violations);
+            addAttributeNameError(definition, member + ".attributeName", violations);
+        });
+        addIndexViolations(request.path("LocalSecondaryIndexes"), "localSecondaryIndexes", false, violations);
+        return violations.subList(0, Math.min(violations.size(), 10));
+    }
+
+    // A local secondary index has no ProvisionedThroughput member, so DynamoDB ignores one there.
+    private static void addIndexViolations(JsonNode indexes, String path, boolean global, List<String> violations) {
+        forEachMember(indexes, path, (index, member) -> {
+            violations.addAll(indexNameViolations(index.path("IndexName"), member + ".indexName"));
+            if (index.hasNonNull("KeySchema")) {
+                addKeySchemaViolations(index.get("KeySchema"), member + ".keySchema", violations);
+            } else {
+                violations.add(SmithyValidationErrors.notNull(member + ".keySchema"));
+            }
+            if (index.hasNonNull("Projection")) {
+                addProjectionViolations(index.get("Projection"), member + ".projection", violations);
+            } else {
+                violations.add(SmithyValidationErrors.notNull(member + ".projection"));
+            }
+            if (global) {
+                violations.addAll(throughputViolations(index.path("ProvisionedThroughput"),
+                        member + ".provisionedThroughput"));
+            }
+        });
+    }
+
+    // A table key schema over two elements is refused later, with its own message.
+    private static void addKeySchemaViolations(JsonNode keySchema, String path, List<String> violations) {
+        if (!keySchema.isArray()) {
+            return;
+        }
+        if (keySchema.isEmpty()) {
+            violations.add(SmithyValidationErrors.lengthTooShort(path, "[]", 1));
+        }
+        forEachMember(keySchema, path, (element, member) -> {
+            addAttributeNameError(element, member + ".attributeName", violations);
+            addRequiredEnumError(element, "KeyType", member + ".keyType", KEY_TYPES, violations);
+        });
+    }
+
+    // DynamoDB quotes the whole NonKeyAttributes list in each of its errors.
+    private static void addProjectionViolations(JsonNode projection, String path, List<String> violations) {
+        JsonNode nonKeyAttributes = projection.path("NonKeyAttributes");
+        if (nonKeyAttributes.isArray()) {
+            List<String> names = new ArrayList<>();
+            nonKeyAttributes.forEach(name -> names.add(name.isNull() ? null : name.asText()));
+            String nonKeyPath = path + ".nonKeyAttributes";
+            String value = names.toString();
+            if (names.isEmpty()) {
+                violations.add(SmithyValidationErrors.lengthTooShort(nonKeyPath, value, 1));
+            } else if (20 < names.size()) {
+                violations.add(SmithyValidationErrors.Violations.QUOTED.constraint(nonKeyPath, value,
+                        "Member must have length less than or equal to 20"));
+            }
+            if (names.stream().anyMatch(name -> name != null
+                    && (name.isEmpty() || 255 < name.codePointCount(0, name.length())))) {
+                violations.add(SmithyValidationErrors.Violations.QUOTED.constraint(nonKeyPath, value,
+                        "Member must satisfy constraint: " + SmithyValidationErrors.constraintSet(1, 255, null, null)));
+            }
+        }
+        addOlderEnumError(projection, "ProjectionType", path + ".projectionType", PROJECTION_TYPES, violations);
+    }
+
+    private static void addAttributeNameError(JsonNode node, String path, List<String> violations) {
+        String name = textOrNull(node, "AttributeName");
+        addIfPresent(violations, name == null
+                ? SmithyValidationErrors.notNull(path)
+                : SmithyValidationErrors.lengthOutOfRange(path, name, 1, 255));
+    }
+
+    private static void addRequiredEnumError(JsonNode node, String member, String path, List<String> allowed,
+            List<String> violations) {
+        if (node.hasNonNull(member)) {
+            addOlderEnumError(node, member, path, allowed, violations);
+        } else {
+            violations.add(SmithyValidationErrors.notNull(path));
+        }
+    }
+
+    // DynamoDB skips a null member here, but still counts it in the positions and in the list length.
+    private static void forEachMember(JsonNode list, String path, BiConsumer<JsonNode, String> check) {
+        for (int i = 0; i < list.size(); i++) {
+            JsonNode member = list.get(i);
+            if (member != null && !member.isNull()) {
+                check.accept(member, path + "." + (i + 1) + ".member");
+            }
+        }
     }
 
     private static RestoreOverrides parseRestoreOverrides(JsonNode request) {
@@ -2557,8 +2704,8 @@ public class NativeDynamoDbJsonHandler {
         return violations;
     }
 
-    /** Unlike CreateTable, a restore lists the length violation of an index name before the pattern. */
-    private static List<String> restoreIndexNameViolations(JsonNode indexName, String memberPath) {
+    /** CreateTable and a restore list the length violation of an index name before the pattern. */
+    private static List<String> indexNameViolations(JsonNode indexName, String memberPath) {
         String constraint = " at '" + memberPath + "' failed to satisfy constraint: ";
         if (indexName.isMissingNode() || indexName.isNull()) {
             return List.of(SmithyValidationErrors.notNull(memberPath));

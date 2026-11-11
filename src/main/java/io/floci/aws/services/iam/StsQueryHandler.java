@@ -14,6 +14,7 @@ import io.floci.aws.core.common.IamEnforcementFilter;
 import io.floci.aws.core.common.OidcIssuerKeyLookup;
 import io.floci.aws.core.common.QueryConstraintCheck;
 import io.floci.aws.core.common.RegionResolver;
+import io.floci.aws.core.common.ResteasyRequests;
 import io.floci.aws.core.common.SmithyValidationErrors;
 import io.floci.aws.core.common.WebIdentityToken;
 import io.floci.aws.core.common.WebIdentityTokenVerifier;
@@ -280,7 +281,7 @@ public class StsQueryHandler {
             token = getParam(params, "X-Amz-Security-Token");
         }
         if (token == null && uriInfo != null) {
-            token = uriInfo.getQueryParameters().getFirst("X-Amz-Security-Token");
+            token = ResteasyRequests.queryParameters(uriInfo).getFirst("X-Amz-Security-Token");
         }
         return token;
     }
@@ -633,7 +634,7 @@ public class StsQueryHandler {
         String authorization = headers == null ? null : headers.getHeaderString("Authorization");
         String auth = IamEnforcementFilter.requestAuthorization(
                 authorization == null || authorization.isBlank() ? null : authorization,
-                uriInfo == null ? null : uriInfo.getQueryParameters());
+                uriInfo == null ? null : ResteasyRequests.queryParameters(uriInfo));
         return auth == null ? null : accountResolver.extractAccessKeyId(auth);
     }
 

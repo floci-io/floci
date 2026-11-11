@@ -42,7 +42,9 @@ import io.floci.aws.services.apigatewayv2.ApiGatewayV2Service;
 import io.floci.aws.services.apigatewayv2.JwtSignatureVerifier;
 import io.floci.aws.services.apigatewayv2.model.Api;
 import io.floci.aws.services.apigatewayv2.model.Authorizer;
+import io.floci.aws.services.apigatewayv2.model.IntegrationSubtype;
 import io.floci.aws.services.apigatewayv2.model.Route;
+import io.floci.aws.services.apigatewayv2.proxy.AwsServiceIntegrationMapper;
 import io.floci.aws.services.apigatewayv2.proxy.CloudMapInstanceResolver;
 import io.floci.aws.services.apigatewayv2.proxy.HttpApiForwardedHeaders;
 import io.floci.aws.services.apigatewayv2.websocket.ConnectionInfo;
@@ -142,6 +144,7 @@ public class ApiGatewayExecuteController {
     private final RestLambdaAuthorizer restLambdaAuthorizer;
     private final AuthorizerPolicyEvaluator authorizerPolicyEvaluator;
     private final CloudMapInstanceResolver cloudMapInstanceResolver;
+    private final AwsServiceIntegrationMapper awsServiceIntegrationMapper;
 
     @Inject
     public ApiGatewayExecuteController(ApiGatewayService apiGatewayService, CognitoUserPoolAuthorizer cognitoAuthorizer,
@@ -170,6 +173,7 @@ public class ApiGatewayExecuteController {
                 .build();
         this.vtlEngine = vtlEngine;
         this.serviceRouter = serviceRouter;
+        this.awsServiceIntegrationMapper = new AwsServiceIntegrationMapper(objectMapper);
         this.webSocketConnectionManager = webSocketConnectionManager;
         this.elbV2Service = elbV2Service;
         this.sqsQueryHandler = sqsQueryHandler;
@@ -762,13 +766,27 @@ public class ApiGatewayExecuteController {
 
     /**
      * The method's own settings, falling back to the stage-wide wildcard entry. Settings are keyed
-     * by the resource path without its leading slash ({@code pets/GET}), matching what AWS reports.
+     * by the patch path as the client sent it, so the method is found under either the JSON Pointer
+     * escaped resource path AWS reports ({@code ~1pets/GET}) or the plain one ({@code pets/GET}).
      */
     private static MethodSetting methodSettingFor(Stage stage, String resourcePath, String httpMethod) {
-        String normalized = resourcePath != null && resourcePath.startsWith("/")
-                ? resourcePath.substring(1) : resourcePath;
-        MethodSetting exact = stage.getMethodSettings().get(normalized + "/" + httpMethod);
-        return exact != null ? exact : stage.getMethodSettings().get("*/*");
+        Map<String, MethodSetting> settings = stage.getMethodSettings();
+        if (resourcePath != null) {
+            MethodSetting escaped = settings.get(escapeJsonPointer(resourcePath) + "/" + httpMethod);
+            if (escaped != null) {
+                return escaped;
+            }
+            String plain = resourcePath.startsWith("/") ? resourcePath.substring(1) : resourcePath;
+            MethodSetting exact = settings.get(plain + "/" + httpMethod);
+            if (exact != null) {
+                return exact;
+            }
+        }
+        return settings.get("*/*");
+    }
+
+    private static String escapeJsonPointer(String segment) {
+        return segment.replace("~", "~0").replace("/", "~1");
     }
 
     private String cacheKeyParameterValue(String param, HttpHeaders headers, UriInfo uriInfo,
@@ -2915,6 +2933,11 @@ public class ApiGatewayExecuteController {
                     apiId, stageName, jwtClaims, lambdaAuthorizerContext, region);
         }
 
+        if (integration.getIntegrationSubtype() != null && !integration.getIntegrationSubtype().isEmpty()) {
+            return dispatchAwsServiceV2(integration, route, httpMethod, path, headers, uriInfo, body,
+                    apiId, stageName, stageVariables, jwtClaims, lambdaAuthorizerContext, region);
+        }
+
         String functionName = functionNameFromUri(integration.getIntegrationUri());
         if (functionName == null) {
             return Response.status(500)
@@ -2946,6 +2969,96 @@ public class ApiGatewayExecuteController {
             boolean throttled = e.getHttpStatus() == 429;
             return throttled ? httpApiError(503, "Service Unavailable") : httpApiError(500, "Internal Server Error");
         }
+    }
+
+    /**
+     * Runs an integration subtype's AWS service action with the request parameters mapped from the
+     * request, and answers 200 with the action's result, or the action's error and status.
+     */
+    private Response dispatchAwsServiceV2(io.floci.aws.services.apigatewayv2.model.Integration integration,
+                                          Route route, String httpMethod, String path,
+                                          HttpHeaders headers, UriInfo uriInfo, byte[] body,
+                                          String apiId, String stageName, Map<String, String> stageVariables,
+                                          Map<String, String> jwtClaims, ObjectNode lambdaAuthorizerContext,
+                                          String region) {
+        IntegrationSubtype subtype = IntegrationSubtype.fromName(integration.getIntegrationSubtype()).orElse(null);
+        if (subtype == null || !subtype.isInvocable()) {
+            LOG.warnv("execute-api v2: integration subtype {0} is not implemented",
+                    integration.getIntegrationSubtype());
+            return httpApiError(500, "Internal Server Error");
+        }
+
+        Map<String, String> requestHeaders = new LinkedHashMap<>();
+        for (Map.Entry<String, List<String>> e : headers.getRequestHeaders().entrySet()) {
+            if (!e.getValue().isEmpty()) {
+                requestHeaders.put(e.getKey(), String.join(",", e.getValue()));
+            }
+        }
+        Map<String, String> queryParams = new LinkedHashMap<>();
+        for (Map.Entry<String, List<String>> e : uriInfo.getQueryParameters().entrySet()) {
+            if (!e.getValue().isEmpty()) {
+                queryParams.put(e.getKey(), String.join(",", e.getValue()));
+            }
+        }
+        Map<String, String> pathParams = extractV2PathParams(route.getRouteKey(), path);
+        Map<String, Object> claims = jwtClaims != null ? Map.copyOf(jwtClaims) : Map.of();
+        Map<String, Object> authorizerContext = lambdaAuthorizerContext == null
+                ? Map.of() : objectMapper.convertValue(lambdaAuthorizerContext, MAP_TYPE);
+        String requestId = routeContext.requestId(headers);
+        io.floci.aws.services.apigatewayv2.proxy.RequestContext ctx =
+                new io.floci.aws.services.apigatewayv2.proxy.RequestContext(
+                        apiId, stageName, httpMethod, path, pathParams.getOrDefault("proxy", ""),
+                        route.getRouteKey(), requestId, routeContext.sourceIp(),
+                        requestHeaders, queryParams, pathParams, body, claims, authorizerContext);
+
+        Instant requestTime = routeContext.requestTime();
+        String hostRegion = region != null ? region : regionResolver.getDefaultRegion();
+        String domain = restDomainName(apiId, hostRegion, headers);
+        Map<String, String> contextVariables = new LinkedHashMap<>();
+        contextVariables.put("accountId", regionResolver.getAccountId());
+        contextVariables.put("apiId", apiId);
+        contextVariables.put("domainName", domain);
+        contextVariables.put("domainPrefix", domain.split("\\.")[0]);
+        contextVariables.put("extendedRequestId", routeContext.extendedRequestId());
+        contextVariables.put("httpMethod", httpMethod);
+        contextVariables.put("path", ("$default".equals(stageName) ? "" : "/" + stageName) + path);
+        contextVariables.put("protocol", "HTTP/1.1");
+        contextVariables.put("requestTime", GATEWAY_REQUEST_TIME.format(requestTime.atZone(ZoneOffset.UTC)));
+        contextVariables.put("requestTimeEpoch", Long.toString(requestTime.toEpochMilli()));
+        contextVariables.put("routeKey", route.getRouteKey());
+        contextVariables.put("stage", stageName);
+
+        LOG.debugv("execute-api v2: {0} {1}/{2}{3} → {4}", httpMethod, apiId, stageName, path,
+                subtype.subtypeName());
+
+        try {
+            Map<String, String> parameters = awsServiceIntegrationMapper.resolveParameters(subtype,
+                    integration.getRequestParameters(), ctx, stageVariables, contextVariables);
+            String serviceRegion = parameters.get(IntegrationSubtype.REGION_PARAMETER);
+            if (serviceRegion == null || serviceRegion.isEmpty()) {
+                serviceRegion = hostRegion;
+            }
+            ObjectNode actionRequest = awsServiceIntegrationMapper.actionRequest(subtype, parameters);
+            Response serviceResponse = serviceRouter.invoke(subtype.service(), subtype.action(), actionRequest,
+                    serviceRegion);
+            Object entity = serviceResponse.getEntity();
+            if (serviceResponse.getStatus() >= 300) {
+                String code = entity instanceof AwsErrorResponse error ? error.type() : "InternalFailure";
+                String message = entity instanceof AwsErrorResponse error ? error.message() : null;
+                return awsServiceErrorV2(code, message, serviceResponse.getStatus(), requestId);
+            }
+            JsonNode result = entity instanceof JsonNode node ? node : objectMapper.valueToTree(entity);
+            return Response.ok(awsServiceIntegrationMapper.actionResponse(subtype, result, requestId).toString())
+                    .type(MediaType.APPLICATION_JSON).build();
+        } catch (AwsException e) {
+            return awsServiceErrorV2(e.getErrorCode(), e.getMessage(), e.getHttpStatus(), requestId);
+        }
+    }
+
+    private Response awsServiceErrorV2(String code, String message, int status, String requestId) {
+        return Response.status(status)
+                .entity(awsServiceIntegrationMapper.actionError(code, message, status, requestId).toString())
+                .type(MediaType.APPLICATION_JSON).build();
     }
 
     private final io.floci.aws.services.apigatewayv2.proxy.HttpProxyInvoker httpProxyInvoker =

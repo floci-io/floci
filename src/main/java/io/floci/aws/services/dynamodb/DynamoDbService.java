@@ -143,9 +143,10 @@ public class DynamoDbService {
     private static final int MAX_VECTOR_INDEXES_PER_TABLE = 5;
     private static final int MAX_VECTOR_DIMENSIONS = 4096;
     private static final int MIN_VECTOR_INDEX_NAME_LENGTH = 3;
+    // The order AWS prints the enum constraint in.
+    static final List<String> BILLING_MODES = List.of("PROVISIONED", "PAY_PER_REQUEST");
     // The order AWS prints the enum constraint in, which is neither alphabetical nor the order
     // the API reference lists.
-    private static final Set<String> VALID_BILLING_MODES = Set.of("PROVISIONED", "PAY_PER_REQUEST");
     private static final List<String> VECTOR_DISTANCE_FUNCTIONS = List.of(
             DynamoDbVectorScoring.DOT_PRODUCT,
             DynamoDbVectorScoring.COSINE,
@@ -3715,6 +3716,7 @@ public class DynamoDbService {
 
     private String applyRemoveClause(ObjectNode item, String clause, JsonNode exprAttrNames,
                                      List<String> touched) {
+        List<String> paths = new ArrayList<>();
         while (!clause.isEmpty()) {
             String upper = clause.toUpperCase();
             if (upper.startsWith("SET ") || upper.startsWith("ADD ") || upper.startsWith("DELETE ")) {
@@ -3740,9 +3742,35 @@ public class DynamoDbService {
             }
 
             touched.add(attrPart);
-            removeValueAtPath(item, attrPart, exprAttrNames);
+            paths.add(attrPart);
+        }
+        // Every action addresses the item as it was before the update, so a list loses its later
+        // indexes first and an earlier removal never shifts the element a later one names.
+        paths.sort(Comparator.comparing((String path) -> parsePath(path, exprAttrNames), DynamoDbService::removalOrder));
+        for (String path : paths) {
+            removeValueAtPath(item, path, exprAttrNames);
         }
         return clause;
+    }
+
+    /** Orders parsed paths so that, within one list, a higher index sorts first. */
+    private static int removalOrder(List<Object> left, List<Object> right) {
+        for (int i = 0; i < Math.min(left.size(), right.size()); i++) {
+            Object a = left.get(i);
+            Object b = right.get(i);
+            int order;
+            if (a instanceof Long x && b instanceof Long y) {
+                order = Long.compare(y, x);
+            } else if (a instanceof String x && b instanceof String y) {
+                order = x.compareTo(y);
+            } else {
+                order = a instanceof Long ? -1 : 1;
+            }
+            if (order != 0) {
+                return order;
+            }
+        }
+        return Integer.compare(right.size(), left.size());
     }
 
     private String applyAddClause(ObjectNode item, String clause,
@@ -5707,11 +5735,9 @@ public class DynamoDbService {
      */
     static void validateBillingMode(JsonNode request, String memberPrefix) {
         JsonNode billingMode = request.path("BillingMode");
-        if (billingMode.isTextual() && !VALID_BILLING_MODES.contains(billingMode.asText())) {
-            throw SmithyValidationErrors.validationException(
-                    "Value '" + billingMode.asText() + "' at '" + memberPrefix
-                    + "billingMode' failed to satisfy constraint: "
-                    + "Member must satisfy enum value set: [PROVISIONED, PAY_PER_REQUEST]");
+        if (billingMode.isTextual() && !BILLING_MODES.contains(billingMode.asText())) {
+            throw SmithyValidationErrors.validationException(SmithyValidationErrors.notInEnum(
+                    billingMode.asText(), memberPrefix + "billingMode", BILLING_MODES));
         }
     }
 

@@ -3,7 +3,9 @@ package io.floci.aws.core.common;
 import jakarta.ws.rs.container.ContainerRequestContext;
 import jakarta.ws.rs.core.MultivaluedHashMap;
 import jakarta.ws.rs.core.MultivaluedMap;
+import jakarta.ws.rs.core.UriInfo;
 import org.jboss.resteasy.reactive.common.util.UnmodifiableMultivaluedMap;
+import org.jboss.resteasy.reactive.server.core.CurrentRequestManager;
 import org.jboss.resteasy.reactive.server.core.ResteasyReactiveRequestContext;
 import org.jboss.resteasy.reactive.server.spi.ResteasyReactiveContainerRequestContext;
 
@@ -32,5 +34,14 @@ public final class ResteasyRequests {
             return NO_QUERY;
         }
         return ctx.getUriInfo().getQueryParameters();
+    }
+
+    /** {@link #queryParameters(ContainerRequestContext)} for a {@link UriInfo} injected into a bean. */
+    public static MultivaluedMap<String, String> queryParameters(UriInfo uriInfo) {
+        ResteasyReactiveRequestContext request = CurrentRequestManager.get();
+        if (request != null && request.serverRequest().query() == null) {
+            return NO_QUERY;
+        }
+        return uriInfo.getQueryParameters();
     }
 }
