@@ -1,6 +1,8 @@
 package io.floci.aws.services.ec2;
 
+import java.nio.charset.StandardCharsets;
 import java.util.concurrent.ThreadLocalRandom;
+import java.util.zip.CRC32;
 
 /** The random parts of the resource ids EC2 mints. */
 final class Ec2Ids {
@@ -18,5 +20,15 @@ final class Ec2Ids {
             sb.append(HEX.charAt(random.nextInt(HEX.length())));
         }
         return sb.toString();
+    }
+
+    /** Deterministic 17-hex-digit suffix from a seed string, stable across restarts. */
+    static String stableHex(String seed) {
+        CRC32 crc1 = new CRC32();
+        crc1.update(seed.getBytes(StandardCharsets.UTF_8));
+        CRC32 crc2 = new CRC32();
+        crc2.update((seed + "|second").getBytes(StandardCharsets.UTF_8));
+        long combined = (crc1.getValue() << 32) ^ crc2.getValue();
+        return String.format("%017x", combined & 0x1FFFFFFFFFFFFFFFL);
     }
 }
