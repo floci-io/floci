@@ -347,7 +347,7 @@ public class CodeDeployService {
 
         if (tags != null && !tags.isEmpty()) {
             String arn = applicationArn(region, name);
-            applyTags(arn, tags);
+            tagResource(arn, tags);
         }
         return app;
     }
@@ -443,7 +443,7 @@ public class CodeDeployService {
         groupStore.put(groupName, group);
         persistRegion(deploymentGroups, region);
         if (tags != null && !tags.isEmpty()) {
-            applyTags(deploymentGroupArn(region, appName, groupName), tags);
+            tagResource(deploymentGroupArn(region, appName, groupName), tags);
         }
         return group;
     }
@@ -773,7 +773,8 @@ public class CodeDeployService {
                                                  List<Map<String, String>> tagFilters) {
         return onPremisesFor(region).values().stream()
                 .filter(i -> registrationStatus == null || registrationStatus.equals(i.getRegistrationStatus()))
-                .filter(i -> tagFilters == null || tagFilters.isEmpty() || matchesTagFilters(i.getTags(), tagFilters))
+                .filter(i -> tagFilters == null || tagFilters.isEmpty()
+                        || matchesTagFilters(i.getTags(), tagFilters, TagFilterMatchMode.ALL))
                 .map(OnPremisesInstance::getInstanceName)
                 .collect(Collectors.toList());
     }
@@ -1115,7 +1116,7 @@ public class CodeDeployService {
         if (onPremFilters != null && !onPremFilters.isEmpty()) {
             onPremisesFor(region).values().stream()
                     .filter(inst -> "Registered".equals(inst.getRegistrationStatus()))
-                    .filter(inst -> matchesTagFilters(inst.getTags(), onPremFilters))
+                    .filter(inst -> matchesTagFilters(inst.getTags(), onPremFilters, TagFilterMatchMode.ANY))
                     .map(OnPremisesInstance::getInstanceName)
                     .forEach(instanceIds::add);
         }
@@ -1132,13 +1133,17 @@ public class CodeDeployService {
         return instanceIds;
     }
 
+    private enum TagFilterMatchMode { ALL, ANY }
+
     private boolean matchesTagFilters(List<Map<String, String>> instanceTags,
-                                       List<Map<String, String>> filters) {
+                                       List<Map<String, String>> filters, TagFilterMatchMode mode) {
+        boolean hasApplicableFilter = false;
         for (Map<String, String> filter : filters) {
             String key = filter.get("Key");
             String value = filter.get("Value");
             String type = filter.get("Type");
             if (key == null && type == null) { continue; }
+            hasApplicableFilter = true;
             boolean found = instanceTags.stream().anyMatch(tag -> {
                 if ("VALUE_ONLY".equals(type)) {
                     return value != null && value.equals(tag.get("Value"));
@@ -1152,9 +1157,10 @@ public class CodeDeployService {
                 return key != null && key.equals(tag.get("Key"))
                         && (value == null || value.equals(tag.get("Value")));
             });
-            if (!found) { return false; }
+            if (mode == TagFilterMatchMode.ANY && found) { return true; }
+            if (mode == TagFilterMatchMode.ALL && !found) { return false; }
         }
-        return true;
+        return mode == TagFilterMatchMode.ALL || !hasApplicableFilter;
     }
 
     private AppSpecInfo parseAppSpec(Map<String, Object> revision) {
@@ -1940,15 +1946,5 @@ public class CodeDeployService {
         if (val instanceof Map<?, ?> m) {
             setter.accept(group, (Map<String, Object>) m);
         }
-    }
-
-    private void applyTags(String arn, List<Map<String, String>> tagList) {
-        Map<String, String> tagMap = tags.computeIfAbsent(arn, k -> new ConcurrentHashMap<>());
-        for (Map<String, String> t : tagList) {
-            String key = t.containsKey("Key") ? t.get("Key") : t.get("key");
-            String value = t.containsKey("Value") ? t.get("Value") : t.get("value");
-            if (key != null) { tagMap.put(key, value != null ? value : ""); }
-        }
-        tags.put(arn, tagMap); // write back the in-place inner-map mutation
     }
 }
