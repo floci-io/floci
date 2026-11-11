@@ -437,3 +437,5 @@ aws glue list-schema-versions \
   --schema-id RegistryName=local-registry,SchemaName=orders \
   --endpoint-url $AWS_ENDPOINT_URL
 ```
+
+Catalog pagination for GetDatabases, GetTables, GetPartitions and GetTableVersions uses opaque continuation cursors ordered by database name, table name, partition values and descending version number respectively. Removing the last returned item or inserting items before its cursor does not invalidate continuation. Table schema references are resolved for the selected page.

@@ -10,6 +10,8 @@ import io.floci.aws.core.common.AwsException;
 import io.floci.aws.core.common.Base64Url;
 import io.floci.aws.core.common.Digests;
 import io.floci.aws.core.common.EpochSeconds;
+import io.floci.aws.core.common.PaginatedResult;
+import io.floci.aws.core.common.Pagination;
 import io.floci.aws.core.common.RegionResolver;
 import io.floci.aws.core.common.SmithyValidationErrors;
 import io.floci.aws.core.storage.StorageBackend;
@@ -62,6 +64,7 @@ import java.time.temporal.ChronoUnit;
 import java.util.ArrayList;
 import java.util.Base64;
 import java.util.Comparator;
+import java.util.HexFormat;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
@@ -69,6 +72,7 @@ import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
 import java.util.Set;
+import java.util.function.Function;
 import java.util.function.Supplier;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
@@ -390,7 +394,8 @@ public class GlueService {
 
     public Page<Database> getDatabases(Integer maxResults, String nextToken) {
         return paginate(() -> getDatabases().stream()
-                .sorted(Comparator.comparing(Database::getName)).toList(), maxResults, nextToken, 100);
+                .sorted(Comparator.comparing(Database::getName)).toList(), maxResults, nextToken, 100,
+                Database::getName, "glue-databases");
     }
 
     /**
@@ -472,7 +477,10 @@ public class GlueService {
     }
 
     public Page<Table> getTables(String databaseName, Integer maxResults, String nextToken) {
-        return paginate(() -> getTables(databaseName), maxResults, nextToken, 100);
+        String prefix = normalizeName(databaseName) + ":";
+        Page<Table> page = paginate(() -> tableStore.scan(key -> key.startsWith(prefix)),
+                maxResults, nextToken, 100, Table::getName, "glue-tables:" + prefix);
+        return new Page<>(page.items().stream().map(this::withResolvedSchemaReference).toList(), page.nextToken());
     }
 
     /**
@@ -709,7 +717,9 @@ public class GlueService {
 
     public Page<Map<String, Object>> getTableVersions(String databaseName, String tableName,
                                                     Integer maxResults, String nextToken) {
-        return paginate(() -> getTableVersions(databaseName, tableName), maxResults, nextToken, 100);
+        return paginate(() -> getTableVersions(databaseName, tableName), maxResults, nextToken, 100,
+                version -> String.format("%019d", Long.MAX_VALUE - versionIdAsLong((Table) version.get("Table"))),
+                "glue-versions:" + tableKey(databaseName, tableName));
     }
 
     /** One archived version, or the current table when no VersionId is given, as AWS answers. */
@@ -970,7 +980,24 @@ public class GlueService {
     public Page<Partition> getPartitions(String databaseName, String tableName, String expression,
                                          Segment segment, Integer maxResults, String nextToken) {
         return paginate(() -> getPartitions(databaseName, tableName, expression, segment),
-                maxResults, nextToken, 1000);
+                maxResults, nextToken, 1000, GlueService::partitionCursor,
+                "glue-partitions:" + tableKey(databaseName, tableName));
+    }
+
+    /** Fixed-width UTF-16 digits and terminators preserve the null-first tuple ordering. */
+    private static String partitionCursor(Partition partition) {
+        StringBuilder cursor = new StringBuilder();
+        List<String> values = partition.getValues() == null ? List.of() : partition.getValues();
+        for (String value : values) {
+            cursor.append(value == null ? '0' : '1');
+            if (value != null) {
+                for (int index = 0; index < value.length(); index++) {
+                    cursor.append(HexFormat.of().toHexDigits(value.charAt(index)));
+                }
+            }
+            cursor.append('/');
+        }
+        return cursor.toString();
     }
 
     private static void validateSegment(Segment segment) {
@@ -3448,6 +3475,17 @@ public class GlueService {
 
     <T> Page<T> paginate(List<T> all, Integer maxResults, String nextToken) {
         return paginate(() -> all, maxResults, nextToken, 1000);
+    }
+
+    private <T> Page<T> paginate(Supplier<List<T>> items, Integer maxResults, String nextToken, int maximum,
+                                  Function<T, String> cursorOf, String namespace) {
+        if (maxResults != null && (maxResults < 1 || maxResults > maximum)) {
+            throw new AwsException("InvalidInputException", "MaxResults must be between 1 and " + maximum, 400);
+        }
+        PaginatedResult<T> page = Pagination.paginate(items.get(), cursorOf,
+                maxResults == null ? 100 : maxResults, nextToken, namespace,
+                token -> new AwsException("InvalidInputException", "Invalid NextToken", 400));
+        return new Page<>(page.items(), page.nextToken());
     }
 
     private <T> Page<T> paginate(Supplier<List<T>> items, Integer maxResults, String nextToken, int maximum) {

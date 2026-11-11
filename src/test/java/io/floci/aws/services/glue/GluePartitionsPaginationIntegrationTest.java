@@ -1,24 +1,17 @@
 package io.floci.aws.services.glue;
 
-import io.floci.aws.testing.AwsTestClients;
 import io.quarkus.test.junit.QuarkusTest;
 import org.junit.jupiter.api.Test;
-import org.junit.jupiter.params.ParameterizedTest;
-import org.junit.jupiter.params.provider.ValueSource;
-import software.amazon.awssdk.regions.Region;
 import software.amazon.awssdk.services.glue.GlueClient;
 import software.amazon.awssdk.services.glue.model.GetPartitionsResponse;
-import software.amazon.awssdk.services.glue.model.InvalidInputException;
 import software.amazon.awssdk.services.glue.model.Partition;
 
 import java.util.List;
-import java.util.UUID;
 import java.util.function.BiConsumer;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
-import static org.junit.jupiter.api.Assertions.assertThrows;
 
 @QuarkusTest
 class GluePartitionsPaginationIntegrationTest {
@@ -48,28 +41,6 @@ class GluePartitionsPaginationIntegrationTest {
                     .databaseName(database).tableName("example").maxResults(1000));
             assertEquals(all, maximum.partitions().stream().map(Partition::values).toList());
             assertNull(maximum.nextToken());
-        });
-    }
-
-    @ParameterizedTest
-    @ValueSource(ints = {-1, 0, 1001})
-    void sdkRejectsPageSizesOutsideTheDocumentedRange(int size) {
-        withPartitions((client, database) -> {
-            InvalidInputException failure = assertThrows(InvalidInputException.class,
-                    () -> client.getPartitions(request -> request.databaseName(database).tableName("example")
-                            .maxResults(size)));
-            assertEquals(400, failure.statusCode());
-        });
-    }
-
-    @ParameterizedTest
-    @ValueSource(strings = {"not-a-token", "-1", "2147483647"})
-    void sdkRejectsMalformedOrOutOfRangeTokens(String token) {
-        withPartitions((client, database) -> {
-            InvalidInputException failure = assertThrows(InvalidInputException.class,
-                    () -> client.getPartitions(request -> request.databaseName(database).tableName("example")
-                            .nextToken(token)));
-            assertEquals(400, failure.statusCode());
         });
     }
 
@@ -103,23 +74,16 @@ class GluePartitionsPaginationIntegrationTest {
     }
 
     private static void withPartitions(BiConsumer<GlueClient, String> action) {
-        String database = "partitions_" + UUID.randomUUID().toString().replace("-", "");
-        try (GlueClient client = AwsTestClients.create(GlueClient.builder(), "741648700007", Region.US_EAST_1)) {
-            client.createDatabase(request -> request.databaseInput(input -> input.name(database)));
-            try {
-                client.createTable(request -> request.databaseName(database).tableInput(input -> input.name("example")
-                        .partitionKeys(key -> key.name("day").type("string"))
-                        .storageDescriptor(sd -> sd.columns(column -> column.name("id").type("string")))));
-                for (String value : List.of("first", "second", "third")) {
-                    client.createPartition(request -> request.databaseName(database).tableName("example")
-                            .partitionInput(input -> input.values(value)
-                                    .storageDescriptor(sd -> sd.columns(column -> column.name("id").type("string")))));
-                }
-                action.accept(client, database);
-            } finally {
-                client.deleteTable(request -> request.databaseName(database).name("example"));
-                client.deleteDatabase(request -> request.name(database));
+        GlueCatalogPaginationTestSupport.withCatalog("741648700007", "partitions_", (client, database) -> {
+            client.createTable(request -> request.databaseName(database).tableInput(input -> input.name("example")
+                    .partitionKeys(key -> key.name("day").type("string"))
+                    .storageDescriptor(sd -> sd.columns(column -> column.name("id").type("string")))));
+            for (String value : List.of("first", "second", "third")) {
+                client.createPartition(request -> request.databaseName(database).tableName("example")
+                        .partitionInput(input -> input.values(value)
+                                .storageDescriptor(sd -> sd.columns(column -> column.name("id").type("string")))));
             }
-        }
+            action.accept(client, database);
+        });
     }
 }

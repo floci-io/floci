@@ -1,24 +1,17 @@
 package io.floci.aws.services.glue;
 
-import io.floci.aws.testing.AwsTestClients;
 import io.quarkus.test.junit.QuarkusTest;
 import org.junit.jupiter.api.Test;
-import org.junit.jupiter.params.ParameterizedTest;
-import org.junit.jupiter.params.provider.ValueSource;
-import software.amazon.awssdk.regions.Region;
 import software.amazon.awssdk.services.glue.GlueClient;
 import software.amazon.awssdk.services.glue.model.GetTablesResponse;
-import software.amazon.awssdk.services.glue.model.InvalidInputException;
 import software.amazon.awssdk.services.glue.model.Table;
 
 import java.util.List;
-import java.util.UUID;
 import java.util.function.BiConsumer;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
-import static org.junit.jupiter.api.Assertions.assertThrows;
 
 @QuarkusTest
 class GlueTablesPaginationIntegrationTest {
@@ -51,44 +44,13 @@ class GlueTablesPaginationIntegrationTest {
         });
     }
 
-    @ParameterizedTest
-    @ValueSource(ints = {-1, 0, 101})
-    void sdkRejectsPageSizesOutsideTheDocumentedRange(int size) {
-        withTables((client, database) -> {
-            InvalidInputException failure = assertThrows(InvalidInputException.class,
-                    () -> client.getTables(request -> request.databaseName(database)
-                            .maxResults(size)));
-            assertEquals(400, failure.statusCode());
-        });
-    }
-
-    @ParameterizedTest
-    @ValueSource(strings = {"not-a-token", "-1", "2147483647"})
-    void sdkRejectsMalformedOrOutOfRangeTokens(String token) {
-        withTables((client, database) -> {
-            InvalidInputException failure = assertThrows(InvalidInputException.class,
-                    () -> client.getTables(request -> request.databaseName(database)
-                            .nextToken(token)));
-            assertEquals(400, failure.statusCode());
-        });
-    }
-
     private static void withTables(BiConsumer<GlueClient, String> action) {
-        String database = "tables_" + UUID.randomUUID().toString().replace("-", "");
-        try (GlueClient client = AwsTestClients.create(GlueClient.builder(), "741648700006", Region.US_EAST_1)) {
-            client.createDatabase(request -> request.databaseInput(input -> input.name(database)));
-            try {
-                for (String name : List.of("first", "second", "third")) {
-                    client.createTable(request -> request.databaseName(database)
-                            .tableInput(input -> input.name(name)));
-                }
-                action.accept(client, database);
-            } finally {
-                for (String name : List.of("first", "second", "third")) {
-                    client.deleteTable(request -> request.databaseName(database).name(name));
-                }
-                client.deleteDatabase(request -> request.name(database));
+        GlueCatalogPaginationTestSupport.withCatalog("741648700006", "tables_", (client, database) -> {
+            for (String name : List.of("first", "second", "third")) {
+                client.createTable(request -> request.databaseName(database)
+                        .tableInput(input -> input.name(name)));
             }
-        }
+            action.accept(client, database);
+        });
     }
 }

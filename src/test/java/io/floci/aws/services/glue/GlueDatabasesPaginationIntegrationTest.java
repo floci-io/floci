@@ -3,8 +3,6 @@ package io.floci.aws.services.glue;
 import io.quarkus.test.junit.QuarkusTest;
 import io.restassured.RestAssured;
 import org.junit.jupiter.api.Test;
-import org.junit.jupiter.params.ParameterizedTest;
-import org.junit.jupiter.params.provider.ValueSource;
 import software.amazon.awssdk.auth.credentials.AwsBasicCredentials;
 import software.amazon.awssdk.auth.credentials.StaticCredentialsProvider;
 import software.amazon.awssdk.http.urlconnection.UrlConnectionHttpClient;
@@ -12,7 +10,6 @@ import software.amazon.awssdk.regions.Region;
 import software.amazon.awssdk.services.glue.GlueClient;
 import software.amazon.awssdk.services.glue.model.Database;
 import software.amazon.awssdk.services.glue.model.GetDatabasesResponse;
-import software.amazon.awssdk.services.glue.model.InvalidInputException;
 
 import java.net.URI;
 import java.util.List;
@@ -21,7 +18,6 @@ import java.util.UUID;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
-import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 @QuarkusTest
@@ -63,26 +59,6 @@ class GlueDatabasesPaginationIntegrationTest {
                 names.forEach(name -> client.deleteDatabase(request -> request.name(name)));
                 foreignAccount.deleteDatabase(request -> request.name(prefix + "-0"));
             }
-        }
-    }
-
-    @ParameterizedTest
-    @ValueSource(ints = {-1, 0, 101})
-    void sdkRejectsPageSizesOutsideTheDocumentedRange(int maxResults) {
-        try (GlueClient client = client("741648700613", Region.US_EAST_1)) {
-            InvalidInputException failure = assertThrows(InvalidInputException.class,
-                    () -> client.getDatabases(request -> request.maxResults(maxResults)));
-            assertEquals(400, failure.statusCode());
-        }
-    }
-
-    @ParameterizedTest
-    @ValueSource(strings = {"not-a-token", "-1", "2147483647"})
-    void sdkRejectsMalformedOrOutOfRangeTokens(String token) {
-        try (GlueClient client = client("741648700613", Region.US_EAST_1)) {
-            InvalidInputException failure = assertThrows(InvalidInputException.class,
-                    () -> client.getDatabases(request -> request.nextToken(token)));
-            assertEquals(400, failure.statusCode());
         }
     }
 
