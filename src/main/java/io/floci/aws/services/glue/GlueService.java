@@ -873,6 +873,9 @@ public class GlueService {
         requireValidSortColumns(sortColumnViolations("partitionInput", partition.getStorageDescriptor()));
         Table table = getTable(databaseName, tableName);
         String key = partitionKey(databaseName, tableName, partition.getValues());
+        if (partitionStore.get(key).isPresent()) {
+            throw new AwsException("AlreadyExistsException", "Partition already exists.", 400);
+        }
         partition.setDatabaseName(table.getDatabaseName());
         partition.setTableName(table.getName());
         if (partition.getCreationTime() == null) {
