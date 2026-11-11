@@ -197,11 +197,6 @@ public class SqsJsonHandler {
         return Response.ok(response).build();
     }
 
-    private static MessageAttributeValue messageAttribute(String name, JsonNode attribute) {
-        return SqsService.messageAttributeValue(name, attribute.path("DataType").asText(null),
-                attribute.path("StringValue").asText(null), attribute.path("BinaryValue").asText(null));
-    }
-
     private Response handleSendMessage(JsonNode request, String region) {
         String queueUrl = request.path("QueueUrl").asText(null);
         String messageBody = request.path("MessageBody").asText(null);
@@ -214,9 +209,17 @@ public class SqsJsonHandler {
         JsonNode attrsNode = request.path("MessageAttributes");
         if (attrsNode.isObject()) {
             attrsNode.fields().forEachRemaining(entry -> {
-                MessageAttributeValue value = messageAttribute(entry.getKey(), entry.getValue());
-                if (value != null) {
-                    messageAttributes.put(entry.getKey(), value);
+                String name = entry.getKey();
+                String dataType = entry.getValue().path("DataType").asText(null);
+                String stringValue = entry.getValue().path("StringValue").asText(null);
+                String binaryValueBase64 = entry.getValue().path("BinaryValue").asText(null);
+                if (dataType != null) {
+                    if (binaryValueBase64 != null) {
+                        byte[] binaryValue = Base64.getDecoder().decode(binaryValueBase64);
+                        messageAttributes.put(name, new MessageAttributeValue(binaryValue, dataType));
+                    } else if (stringValue != null) {
+                        messageAttributes.put(name, new MessageAttributeValue(stringValue, dataType));
+                    }
                 }
             });
         }
@@ -371,8 +374,7 @@ public class SqsJsonHandler {
         ArrayNode failed = objectMapper.createArrayNode();
 
         record ParsedEntry(String id, String body, Integer delay, String groupId, String dedupId,
-                           Map<String, MessageAttributeValue> attributes, String awsTraceHeader,
-                           AwsException attributeError) {}
+                           Map<String, MessageAttributeValue> attributes, String awsTraceHeader) {}
 
         List<ParsedEntry> parsedEntries = new ArrayList<>();
         int totalSize = 0;
@@ -385,30 +387,31 @@ public class SqsJsonHandler {
             String messageDeduplicationId = entry.path("MessageDeduplicationId").asText(null);
 
             Map<String, MessageAttributeValue> messageAttributes = new HashMap<>();
-            AwsException attributeError = null;
             JsonNode attrsNode = entry.path("MessageAttributes");
             if (attrsNode.isObject()) {
-                try {
-                    attrsNode.fields().forEachRemaining(attrEntry -> {
-                        MessageAttributeValue value = messageAttribute(attrEntry.getKey(), attrEntry.getValue());
-                        if (value != null) {
-                            messageAttributes.put(attrEntry.getKey(), value);
+                attrsNode.fields().forEachRemaining(attrEntry -> {
+                    String name = attrEntry.getKey();
+                    String dataType = attrEntry.getValue().path("DataType").asText(null);
+                    String stringValue = attrEntry.getValue().path("StringValue").asText(null);
+                    String binaryValueBase64 = attrEntry.getValue().path("BinaryValue").asText(null);
+                    if (dataType != null) {
+                        if (binaryValueBase64 != null) {
+                            byte[] binaryValue = Base64.getDecoder().decode(binaryValueBase64);
+                            messageAttributes.put(name, new MessageAttributeValue(binaryValue, dataType));
+                        } else if (stringValue != null) {
+                            messageAttributes.put(name, new MessageAttributeValue(stringValue, dataType));
                         }
-                    });
-                } catch (AwsException e) {
-                    attributeError = e;
-                }
+                    }
+                });
             }
 
             String entryAwsTraceHeader = entry.path("MessageSystemAttributes")
                     .path("AWSTraceHeader").path("StringValue").asText(null);
 
-            if (attributeError == null) {
-                totalSize += SqsService.computeMessageSize(messageBody, messageAttributes);
-            }
+            totalSize += SqsService.computeMessageSize(messageBody, messageAttributes);
             parsedEntries.add(new ParsedEntry(id, messageBody, delaySeconds,
                     messageGroupId, messageDeduplicationId, messageAttributes,
-                    entryAwsTraceHeader, attributeError));
+                    entryAwsTraceHeader));
         }
 
         sqsService.validateBatchPayloadSize(queueUrl, region, totalSize);
@@ -417,9 +420,6 @@ public class SqsJsonHandler {
         for (ParsedEntry parsed : parsedEntries) {
             String id = parsed.id();
             try {
-                if (parsed.attributeError() != null) {
-                    throw parsed.attributeError();
-                }
                 Message msg = sqsService.sendMessage(queueUrl, parsed.body(), parsed.delay(),
                         parsed.groupId(), parsed.dedupId(), parsed.attributes(),
                         parsed.awsTraceHeader(), senderId, region);

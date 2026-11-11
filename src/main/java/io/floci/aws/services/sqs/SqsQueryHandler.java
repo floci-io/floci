@@ -234,10 +234,13 @@ public class SqsQueryHandler {
             String dataType = getParam(params, "MessageAttribute." + i + ".Value.DataType");
             String stringValue = getParam(params, "MessageAttribute." + i + ".Value.StringValue");
             String binaryValueBase64 = getParam(params, "MessageAttribute." + i + ".Value.BinaryValue");
-            MessageAttributeValue value = SqsService.messageAttributeValue(name, dataType, stringValue,
-                    binaryValueBase64);
-            if (value != null) {
-                messageAttributes.put(name, value);
+            if (dataType != null) {
+                if (binaryValueBase64 != null) {
+                    byte[] binaryValue = Base64.getDecoder().decode(binaryValueBase64);
+                    messageAttributes.put(name, new MessageAttributeValue(binaryValue, dataType));
+                } else if (stringValue != null) {
+                    messageAttributes.put(name, new MessageAttributeValue(stringValue, dataType));
+                }
             }
         }
 
@@ -367,8 +370,7 @@ public class SqsQueryHandler {
         XmlBuilder xml = new XmlBuilder();
 
         record ParsedEntry(String id, String body, Integer delay, String groupId, String dedupId,
-                           Map<String, MessageAttributeValue> attributes, String awsTraceHeader,
-                           AwsException attributeError) {}
+                           Map<String, MessageAttributeValue> attributes, String awsTraceHeader) {}
 
         List<ParsedEntry> parsedEntries = new ArrayList<>();
         int totalSize = 0;
@@ -381,22 +383,19 @@ public class SqsQueryHandler {
             String messageDeduplicationId = getParam(params, "SendMessageBatchRequestEntry." + i + ".MessageDeduplicationId");
 
             Map<String, MessageAttributeValue> messageAttributes = new HashMap<>();
-            AwsException attributeError = null;
             for (int j = 1; ; j++) {
                 String name = getParam(params, "SendMessageBatchRequestEntry." + i + ".MessageAttribute." + j + ".Name");
                 if (name == null) break;
                 String dataType = getParam(params, "SendMessageBatchRequestEntry." + i + ".MessageAttribute." + j + ".Value.DataType");
                 String stringValue = getParam(params, "SendMessageBatchRequestEntry." + i + ".MessageAttribute." + j + ".Value.StringValue");
                 String binaryValueBase64 = getParam(params, "SendMessageBatchRequestEntry." + i + ".MessageAttribute." + j + ".Value.BinaryValue");
-                try {
-                    MessageAttributeValue value = SqsService.messageAttributeValue(name, dataType, stringValue,
-                            binaryValueBase64);
-                    if (value != null) {
-                        messageAttributes.put(name, value);
+                if (dataType != null) {
+                    if (binaryValueBase64 != null) {
+                        byte[] binaryValue = Base64.getDecoder().decode(binaryValueBase64);
+                        messageAttributes.put(name, new MessageAttributeValue(binaryValue, dataType));
+                    } else if (stringValue != null) {
+                        messageAttributes.put(name, new MessageAttributeValue(stringValue, dataType));
                     }
-                } catch (AwsException e) {
-                    attributeError = e;
-                    break;
                 }
             }
 
@@ -411,11 +410,9 @@ public class SqsQueryHandler {
                 }
             }
 
-            if (attributeError == null) {
-                totalSize += SqsService.computeMessageSize(body, messageAttributes);
-            }
+            totalSize += SqsService.computeMessageSize(body, messageAttributes);
             parsedEntries.add(new ParsedEntry(id, body, delaySeconds, messageGroupId,
-                    messageDeduplicationId, messageAttributes, entryAwsTraceHeader, attributeError));
+                    messageDeduplicationId, messageAttributes, entryAwsTraceHeader));
         }
 
         sqsService.validateBatchPayloadSize(queueUrl, region, totalSize);
@@ -424,9 +421,6 @@ public class SqsQueryHandler {
         for (ParsedEntry parsed : parsedEntries) {
             String id = parsed.id();
             try {
-                if (parsed.attributeError() != null) {
-                    throw parsed.attributeError();
-                }
                 Message msg = sqsService.sendMessage(queueUrl, parsed.body(), parsed.delay(),
                         parsed.groupId(), parsed.dedupId(), parsed.attributes(),
                         parsed.awsTraceHeader(), senderId, region);

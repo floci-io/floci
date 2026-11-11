@@ -42,7 +42,6 @@ import java.time.Clock;
 import java.time.Duration;
 import java.time.Instant;
 import java.util.ArrayList;
-import java.util.Base64;
 import java.util.Collection;
 import java.util.Collections;
 import java.util.Comparator;
@@ -1369,44 +1368,6 @@ public class SqsService implements Resettable, ResourceProvider {
                     "Batch requests cannot be longer than " + max + " bytes. "
                             + "You have sent " + totalBytes + " bytes.", 400);
         }
-    }
-
-    /**
-     * Builds a message (user) attribute from its wire fields, or returns null when the attribute carries no data type
-     * or no value. A BinaryValue takes precedence over a StringValue, as on the wire.
-     *
-     * @throws AwsException InvalidParameterValue when the BinaryValue is not valid base64 or either value is empty
-     */
-    public static MessageAttributeValue messageAttributeValue(String name, String dataType, String stringValue,
-                                                              String binaryValueBase64) {
-        if (dataType == null) {
-            return null;
-        }
-        if (binaryValueBase64 != null) {
-            byte[] binaryValue;
-            try {
-                binaryValue = Base64.getDecoder().decode(binaryValueBase64);
-            } catch (IllegalArgumentException e) {
-                throw new AwsException("InvalidParameterValue",
-                        "Message (user) attribute '" + name + "' has an invalid binary value.", 400);
-            }
-            if (binaryValue.length == 0) {
-                throw emptyAttributeValue(name, dataType);
-            }
-            return new MessageAttributeValue(binaryValue, dataType);
-        }
-        if (stringValue == null) {
-            return null;
-        }
-        if (stringValue.isEmpty()) {
-            throw emptyAttributeValue(name, dataType);
-        }
-        return new MessageAttributeValue(stringValue, dataType);
-    }
-
-    private static AwsException emptyAttributeValue(String name, String dataType) {
-        return new AwsException("InvalidParameterValue", "Message (user) attribute '" + name
-                + "' must contain a non-empty value of type '" + dataType.split("\\.")[0] + "'.", 400);
     }
 
     /**
