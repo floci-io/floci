@@ -249,6 +249,14 @@ def test_a_member_holding_an_account_id_gives_the_account_of_the_types_named_by_
     assert r.with_account([{"type": "thing", "fill": {}}], FORMATS, ["a", "b"]) == [{"type": "thing", "fill": {}}]
 
 
+def test_an_owner_account_member_gives_the_account_of_what_a_request_acts_on_but_not_of_what_it_creates(tmp_path):
+    write_models(tmp_path, {"svc": model({"GetThing": {"ThingName": "String", "ownerAccount": "String"},
+                                          "CreateThing": {"ThingName": "String", "ownerAccount": "String"}})})
+    models = r.load_models(tmp_path, {"svc"})
+    assert r.account_members(models, "GetThing") == ["ownerAccount"]
+    assert r.account_members(models, "CreateThing") == []
+
+
 def test_a_format_whose_account_is_an_account_id_variable_takes_the_account_every_other_format_does():
     documents = [reference("svc", {}, {"agent": "arn:${Partition}:svc:${Region}:${AccountId}:agent/${AgentId}",
                                        "account": "arn:${Partition}:svc:::account/${AccountId}",
@@ -552,8 +560,6 @@ def with_a_create() -> dict:
     (lambda d: d["operations"]["svc:B"]["resources"][0].update(fill={}, find=[]), "beside a fill"),
     (lambda d: d["operations"]["svc:B"]["resources"][0].update(fill={}, find=["Ids[]"]), "beside a fill"),
     (lambda d: d["operations"]["svc:B"]["resources"][0].update(fill={}, find="Namespace"), "beside a fill"),
-    (lambda d: d["operations"]["svc:B"]["resources"][0].update(fill={}, find=["Namespace"], account="registryId"),
-     "beside a fill"),
     (lambda d: d["operations"]["svc:B"]["resources"][0].update(fill={}, find=["Namespace"], absent={"Namespace": "ecs"}),
      "beside a fill"),
     (lambda d: d["operations"]["svc:A"]["resources"][0].update(find=["Namespace"]), "neither an ARN member"),

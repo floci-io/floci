@@ -140,11 +140,14 @@ class RequestResourceMembersTest {
         for (String bad : List.of("\"fill\":{},\"find\":[]", "\"fill\":{},\"find\":[\"Ids[]\"]",
                 "\"fill\":{\"Id\":\"Id\"},\"find\":[\"Namespace\"]", "\"fill\":{},\"find\":\"Namespace\"",
                 "\"fill\":{},\"find\":{\"a\":\"Namespace\"}",
-                "\"fill\":{},\"find\":[\"Namespace\"],\"account\":\"registryId\"",
                 "\"fill\":{},\"find\":[\"Namespace\"],\"absent\":{\"Namespace\":\"ecs\"}")) {
             assertThrows(IllegalStateException.class,
                     () -> parse(document(formats, "{\"type\":\"target\"," + bad + "}")), bad);
         }
+        // The account its member gives is the one it is found in.
+        assertEquals(new Member("registryId", false), parseUnchecked(document(formats,
+                "{\"type\":\"target\",\"fill\":{},\"find\":[\"Namespace\"],\"account\":\"registryId\"}"))
+                .operations().get("a:Op").getFirst().account());
         // Nor beside an ARN member, which names the resource itself.
         assertThrows(IllegalStateException.class, () -> parse(document(formats,
                 "{\"types\":[\"target\"],\"arn\":\"TargetArn\",\"find\":[\"Namespace\"]}")));

@@ -41,7 +41,8 @@ strings, or, for an ARN, a member of a structure or of each element of a list of
 
 A member whose botocore shape is an account id (a string of pattern `[0-9]{12}`) gives the account of
 the types the request names by their variables: ECR's `registryId` selects the registry its handler
-acts in, so `repository/<name>` is that account's. A member whose shape's pattern takes an ARN before
+acts in, so `repository/<name>` is that account's. So is Redshift Serverless's `ownerAccount`, a bare string the reference documents as the owner of the
+snapshot, which names a snapshot another account shares by its name (`ACCOUNT_NAMED_MEMBERS`), but not on a create, where it names the account of a resource the new one is made in. A member whose shape's pattern takes an ARN before
 the name (`(arn:...:event-bus/)?<name>`) may give the ARN of the type of that name instead, whose one
 variable it is then read as, in the ARN's account and Region: EventBridge's `EventBusName`. So may a
 field of each element of a list of structures, each element's resource in the account and Region of
@@ -314,14 +315,6 @@ CORRECTIONS: dict[str, tuple[list[dict], str]] = {
                                    "the user ARN ends in namespace/user-name, which the reference combines as "
                                    "ResourceId; QuickSight resolves it from the account, namespace and user name")
        for operation in ("RegisterUser", "DescribeUser")},
-    **{f"redshift-serverless:{operation}": (
-        [{"types": ["snapshot"], "arn": "snapshotArn"},
-         {"type": "snapshot", "fill": {}, "find": ["snapshotName"], "when": {"ownerAccount": [None]}},
-         {"type": "snapshot", "fill": {}, "find": ["snapshotName", "ownerAccount"]}],
-        "a snapshot another account shares is named by snapshotName and the ownerAccount of that account, and it is "
-        "that account's snapshot the request acts on, so its ARN, with the owner's account, is what the snapshot's "
-        "resource policy is checked against; without ownerAccount the snapshot is the caller's own")
-       for operation in ("GetSnapshot", "RestoreFromSnapshot")},
     "logs:PutDeliverySource": ([{"type": "delivery-source", "fill": {"DeliverySourceName": "name"}}],
                                "resourceArn is the ARN of the resource that sends the logs (an event bus, a load "
                                "balancer), never the delivery source's, which the request names by name"),
@@ -662,6 +655,9 @@ STEM_SUFFIX_RE = re.compile(r"(arns|arn|names|name|identifiers|identifier|ids|id
 BARE = {"name", "names", "id", "ids", "identifier", "identifiers"}
 # The patterns botocore gives a string shape that holds an account id.
 ACCOUNT_ID_PATTERNS = {"[0-9]{12}", "^[0-9]{12}$", r"\d{12}", r"^\d{12}$"}
+# Members whose shape is a bare string, but which the reference documents as the account that owns the resource the
+# request names, as an account id member does (Redshift Serverless's `ownerAccount`).
+ACCOUNT_NAMED_MEMBERS = {"ownerAccount"}
 # The verbs an operation that creates the resource it is named after starts with.
 CREATING_RE = re.compile(r"^(Create|Run|Allocate|Register|Put|Import|Copy|Request|Start|Add|Enable)")
 # An operation's verb: what follows is what it acts on.
@@ -856,7 +852,7 @@ def account_members(models: dict[str, dict], operation: str) -> list[str]:
         for name, member in model["shapes"][spec["input"]["shape"]].get("members", {}).items():
             shape = model["shapes"][member["shape"]]
             if member.get("location") in BODY_LOCATIONS and shape["type"] == "string" \
-                    and shape.get("pattern") in ACCOUNT_ID_PATTERNS:
+                    and (shape.get("pattern") in ACCOUNT_ID_PATTERNS or (name in ACCOUNT_NAMED_MEMBERS and not CREATING_RE.match(operation))):
                 found.add(name)
     return sorted(found)
 
@@ -1430,8 +1426,8 @@ ARN_PATH_RE = re.compile(r"^(?:[A-Za-z][A-Za-z0-9_]*(\[])?(\.[A-Za-z][A-Za-z0-9_
                          r"|[A-Za-z][A-Za-z0-9_]*\{\}(\.[A-Za-z][A-Za-z0-9_]*){1,2})$")
 # A format's resource that is a literal and one variable, at its end.
 ONE_VARIABLE_RE = re.compile(r"^[^$]*\$\{\w+}$")
-# The keys a resource found by members does not take: it is read no other way, in the caller's account.
-FOUND_ONLY = {"absent", "arnOf", "account", "fixed", "before"}
+# The keys a resource found by members does not take: it is read no other way.
+FOUND_ONLY = {"absent", "arnOf", "fixed", "before"}
 
 
 def validate(document: dict) -> list[str]:

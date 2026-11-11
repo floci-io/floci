@@ -52,8 +52,8 @@ final class RequestResourceMembers {
     private static final Pattern LOCATION = Pattern.compile("\\{[A-Za-z0-9_]+}|\\?[A-Za-z0-9_.-]+");
     /** The one id a child type's format appends to its parent's. */
     private static final Pattern APPENDED_ID = Pattern.compile("[/:]\\$\\{\\w+}");
-    /** The keys a resource found by members does not take: it is read no other way, in the caller's account. */
-    private static final List<String> FOUND_ONLY = List.of("absent", "arnOf", "account", "fixed", "before");
+    /** The keys a resource found by members does not take: it is read no other way. */
+    private static final List<String> FOUND_ONLY = List.of("absent", "arnOf", "fixed", "before");
     /** The keys of a resource named through a member naming another of its service's own: it is read no other way. */
     private static final Set<String> THROUGH_KEYS = Set.of("types", "through", "when", "endpoint");
 

@@ -26,6 +26,7 @@ import io.quarkus.runtime.annotations.RegisterForReflection;
 import jakarta.annotation.Priority;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.enterprise.event.Observes;
+import jakarta.enterprise.inject.Instance;
 import jakarta.inject.Inject;
 import jakarta.interceptor.Interceptor;
 import org.jboss.logging.Logger;
@@ -120,6 +121,9 @@ public class RedshiftServerlessService implements Resettable, StoredResourceArns
     private final RedshiftServerlessRuntime runtime;
     private final EmulatorConfig config;
     private final RedshiftServerlessAdminSecrets adminSecrets;
+    /** Looked up lazily: the endpoint service is built on this one. */
+    @Inject
+    Instance<RedshiftServerlessEndpointAccessService> endpointAccess;
 
     public RedshiftServerlessService(StorageFactory storageFactory, RegionResolver regionResolver,
                                      RedshiftServerlessEndpoints endpoints, RedshiftServerlessRuntime runtime,
@@ -951,9 +955,8 @@ public class RedshiftServerlessService implements Resettable, StoredResourceArns
     }
 
     /**
-     * The ARN of the resource the request names by its name: the caller's, or for a snapshot named with the
-     * account that owns it, that account's. These ARNs end in an id Redshift Serverless gives them, which IAM
-     * policies are matched against.
+     * The ARN of the caller's resource the request names by its name. These ARNs end in an id Redshift Serverless
+     * gives them, which IAM policies are matched against.
      */
     @Override
     public Optional<String> find(String type, List<String> names, String region) {
@@ -964,10 +967,20 @@ public class RedshiftServerlessService implements Resettable, StoredResourceArns
         return switch (type) {
             case "namespace" -> findNamespace(name, region).map(Namespace::getNamespaceArn);
             case "workgroup" -> findWorkgroup(name, region).map(Workgroup::getWorkgroupArn);
-            case "snapshot" -> (names.size() > 1 ? findSnapshotOfAccount(names.get(1), name, region)
-                    : findSnapshot(name, region)).map(RedshiftServerlessSnapshot::getSnapshotArn);
+            case "snapshot" -> findSnapshot(name, region).map(RedshiftServerlessSnapshot::getSnapshotArn);
+            case "endpointAccess" -> endpointAccess == null || endpointAccess.isUnsatisfied() ? Optional.empty()
+                    : endpointAccess.get().findEndpointArn(name, region);
             default -> Optional.empty();
         };
+    }
+
+    /** The ARN of the snapshot {@code account} owns under the name the request gives, which its policy may share. */
+    @Override
+    public Optional<String> findInAccount(String type, List<String> names, String account, String region) {
+        if (names.isEmpty() || !"snapshot".equals(type)) {
+            return Optional.empty();
+        }
+        return findSnapshotOfAccount(account, names.getFirst(), region).map(RedshiftServerlessSnapshot::getSnapshotArn);
     }
 
     /** The snapshot {@code snapshotName} of {@code accountId} in {@code region}, whoever is calling. */

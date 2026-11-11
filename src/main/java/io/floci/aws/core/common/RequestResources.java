@@ -467,13 +467,9 @@ public final class RequestResources {
                              JsonNode body, String partition, String region, String accountId,
                              StoredResourceArns stored) {
         RequestResourceMembers.ArnFormat format = formats.get(resource.types().getFirst());
-        String account = accountId;
-        if (resource.account() != null) {
-            List<String> given = isNull(body, resource.account()) ? List.of() : values(form, body, resource.account());
-            if (!given.isEmpty() && !ACCOUNT_ID.matcher(given.getFirst()).matches()) {
-                return;
-            }
-            account = given.isEmpty() ? accountId : given.getFirst();
+        String account = accountOf(resource, form, body, accountId);
+        if (account == null) {
+            return;
         }
         AwsArnUtils.Arn fromRequest = arnGiven(resource, form, body, formats);
         List<Filling> fillings = new ArrayList<>(List.of(new Filling(resource.fixed(), fromRequest)));
@@ -527,10 +523,27 @@ public final class RequestResources {
     }
 
     /**
+     * The account the resource is in: the one its account member gives, the request's without one or with a JSON null
+     * for it; null when that member holds no account id, which its handler refuses.
+     */
+    private static String accountOf(RequestResourceMembers.Resource resource, Map<String, String> form, JsonNode body,
+                                    String accountId) {
+        if (resource.account() == null) {
+            return accountId;
+        }
+        List<String> given = isNull(body, resource.account()) ? List.of() : values(form, body, resource.account());
+        if (given.isEmpty()) {
+            return accountId;
+        }
+        return ACCOUNT_ID.matcher(given.getFirst()).matches() ? given.getFirst() : null;
+    }
+
+    /**
      * The resource of a type whose ARN is all an id its service mints, named by the members the table gives it
      * ({@code find}), when the request gives each one value: the caller's resource {@code stored} finds under those
-     * values in the Region, or else its ARN with that id open, as for a create; none when it leaves one out or gives
-     * it a JSON null, which its handler reads as none.
+     * values in the Region, or else its ARN with that id open, as for a create; in the account its account member gives
+     * when it has one, which {@code stored} finds the resource of as {@code findInAccount}; none when it leaves one out
+     * or gives it a JSON null, which its handler reads as none.
      */
     private static void found(Set<String> arns, RequestResourceMembers.Resource resource,
                               Map<String, RequestResourceMembers.ArnFormat> formats, Map<String, String> form,
@@ -547,9 +560,15 @@ public final class RequestResources {
             }
             names.add(values.getFirst());
         }
+        String account = accountOf(resource, form, body, accountId);
+        if (account == null) {
+            return;
+        }
         String type = resource.types().getFirst();
-        Optional<String> found = stored == null ? Optional.empty() : stored.findByMembers(type, names, region);
-        arns.add(found.orElseGet(() -> render(formats.get(type).format(), Map.of(), partition, region, accountId)));
+        Optional<String> found = stored == null ? Optional.empty()
+                : account.equals(accountId) ? stored.findByMembers(type, names, region)
+                : stored.findInAccount(type, names, account, region);
+        arns.add(found.orElseGet(() -> render(formats.get(type).format(), Map.of(), partition, region, account)));
     }
 
     /**

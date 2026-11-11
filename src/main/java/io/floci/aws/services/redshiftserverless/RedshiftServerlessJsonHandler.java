@@ -284,19 +284,15 @@ public class RedshiftServerlessJsonHandler {
         String ownerAccount = ServerlessSupport.text(request, "ownerAccount");
         boolean shared = service.isOtherAccount(ownerAccount);
         String snapshotName = snapshotNameOf(request, region, shared ? ownerAccount : null);
-        RedshiftServerlessService.RestoreResult result;
-        if (shared) {
-            result = service.restoreFromSharedSnapshot(
-                    ServerlessSupport.text(request, "namespaceName"), ServerlessSupport.text(request, "workgroupName"),
-                    snapshotName, ownerAccount, ServerlessSupport.bool(request, "manageAdminPassword"),
-                    ServerlessSupport.text(request, "adminPasswordSecretKmsKeyId"), region);
-        } else {
-            result = service.restoreFromSnapshot(
-                    ServerlessSupport.text(request, "namespaceName"), ServerlessSupport.text(request, "workgroupName"),
-                    snapshotName, ownerAccount,
-                    ServerlessSupport.bool(request, "manageAdminPassword"),
-                    ServerlessSupport.text(request, "adminPasswordSecretKmsKeyId"), region);
-        }
+        String namespaceName = ServerlessSupport.text(request, "namespaceName");
+        String workgroupName = ServerlessSupport.text(request, "workgroupName");
+        Boolean manageAdminPassword = ServerlessSupport.bool(request, "manageAdminPassword");
+        String kmsKeyId = ServerlessSupport.text(request, "adminPasswordSecretKmsKeyId");
+        RedshiftServerlessService.RestoreResult result = shared
+                ? service.restoreFromSharedSnapshot(namespaceName, workgroupName, snapshotName, ownerAccount,
+                        manageAdminPassword, kmsKeyId, region)
+                : service.restoreFromSnapshot(namespaceName, workgroupName, snapshotName, ownerAccount,
+                        manageAdminPassword, kmsKeyId, region);
         ObjectNode response = objectMapper.createObjectNode();
         response.set("namespace", namespaceNode(result.namespace()));
         response.put("ownerAccount", result.snapshot().getOwnerAccount());

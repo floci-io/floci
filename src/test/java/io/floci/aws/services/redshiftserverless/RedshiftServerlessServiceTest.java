@@ -14,6 +14,7 @@ import io.floci.aws.services.redshiftserverless.model.Namespace;
 import io.floci.aws.services.redshiftserverless.model.PricePerformanceTarget;
 import io.floci.aws.services.redshiftserverless.model.RedshiftServerlessSnapshot;
 import io.floci.aws.services.redshiftserverless.model.Workgroup;
+import jakarta.enterprise.inject.Instance;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
@@ -1093,6 +1094,7 @@ class RedshiftServerlessServiceTest {
     }
 
     @Test
+    @SuppressWarnings("unchecked")
     void findNamesTheArnOfTheSnapshotOfTheAccountThatOwnsIt() {
         String owner = "999999999999";
         create("find-ns");
@@ -1104,13 +1106,21 @@ class RedshiftServerlessServiceTest {
 
         assertEquals(Optional.of(own.getSnapshotArn()), service.find("snapshot", List.of("own-snap"), REGION));
         assertEquals(Optional.of(theirs.getSnapshotArn()),
-                service.find("snapshot", List.of("their-snap", owner), REGION));
+                service.findInAccount("snapshot", List.of("their-snap"), owner, REGION));
         assertEquals(Optional.empty(), service.find("snapshot", List.of("their-snap"), REGION));
-        assertEquals(Optional.empty(), service.find("snapshot", List.of("own-snap", owner), REGION));
+        assertEquals(Optional.empty(), service.findInAccount("snapshot", List.of("own-snap"), owner, REGION));
+        assertEquals(Optional.empty(), service.findInAccount("namespace", List.of("find-ns"), owner, REGION));
         assertEquals(Optional.of(service.getNamespace("find-ns", REGION).getNamespaceArn()),
                 service.find("namespace", List.of("find-ns"), REGION));
         assertEquals(Optional.empty(), service.find("workgroup", List.of("missing"), REGION));
         assertEquals(Optional.empty(), service.find("endpointAccess", List.of("any"), REGION));
+        RedshiftServerlessEndpointAccessService endpointService = mock(RedshiftServerlessEndpointAccessService.class);
+        Instance<RedshiftServerlessEndpointAccessService> endpointInstance = mock(Instance.class);
+        when(endpointInstance.isUnsatisfied()).thenReturn(false);
+        when(endpointInstance.get()).thenReturn(endpointService);
+        when(endpointService.findEndpointArn("my-endpoint", REGION)).thenReturn(Optional.of("arn:endpoint"));
+        service.endpointAccess = endpointInstance;
+        assertEquals(Optional.of("arn:endpoint"), service.find("endpointAccess", List.of("my-endpoint"), REGION));
         assertEquals(Optional.empty(), service.find("snapshot", List.of(), REGION));
     }
 
