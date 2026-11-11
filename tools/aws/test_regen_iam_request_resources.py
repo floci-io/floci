@@ -1142,3 +1142,29 @@ def test_sso_access_scope_does_not_authorize_target_applications():
     derived = r.entry_for(operation, {"action": entry["action"], "types": entry["types"]},
                           document["arnFormats"]["sso"], models)
     assert derived["resources"] == [{"types": ["Application"], "arn": "ApplicationArn"}]
+
+
+def test_a_path_segment_in_ies_names_the_type_in_y():
+    # lever_model's operation stands in for Route 53's ListTrafficPolicyVersions, /trafficpolicies/{Id}/versions.
+    labels = r.path_labels({"route53": lever_model("/2013-04-01/trafficpolicies/{id}/versions")},
+                           "UpdateSafetyLeverState")
+    assert labels == {"id": "trafficpolicy"}
+    formats = {"trafficpolicy": "arn:${Partition}:route53:::trafficpolicy/${Id}"}
+    assert r.resources_for("route53:ListTrafficPolicyVersions", ["trafficpolicy"], formats, members("id"),
+                           labels=labels) == [{"type": "trafficpolicy", "fill": {"Id": "id"}}]
+    assert r.resources_for("route53:ListTrafficPolicyVersions", ["trafficpolicy"], formats, members("id")) == []
+
+
+def test_a_member_whose_enum_lists_two_of_the_actions_types_picks_the_type():
+    formats = {"healthcheck": "arn:${Partition}:route53:::healthcheck/${Id}",
+               "hostedzone": "arn:${Partition}:route53:::hostedzone/${Id}"}
+    members = {"ResourceType": "ResourceType", "ResourceId": "ResourceId"}
+    enums = {"ResourceType": {"healthcheck", "hostedzone"}}
+    assert r.picked_by_enum(["healthcheck", "hostedzone"], formats, members, enums) == [
+        {"type": "healthcheck", "fill": {"Id": "ResourceId"}, "when": {"ResourceType": ["healthcheck"]}},
+        {"type": "hostedzone", "fill": {"Id": "ResourceId"}, "when": {"ResourceType": ["hostedzone"]}}]
+    # An enum listing one of the action's types, or none of them, picks nothing.
+    assert r.picked_by_enum(["hostedzone"], formats, members, enums) is None
+    assert r.picked_by_enum(["healthcheck", "hostedzone"], formats, members, {"ResourceType": {"other"}}) is None
+    # Without a member naming the resource, the request names none of them.
+    assert r.picked_by_enum(["healthcheck", "hostedzone"], formats, {"ResourceType": "ResourceType"}, enums) is None

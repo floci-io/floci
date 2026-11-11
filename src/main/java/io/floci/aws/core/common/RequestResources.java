@@ -461,7 +461,9 @@ public final class RequestResources {
      * handler then acts on the caller's resource of that name, and it is named as an ARN the request gives is; for
      * a member naming one resource for each of a list's structures, each in the account and Region of the ARN its
      * structure gives, the request's for a name (a {@code PutEvents} entry, on the bus it names). Each value is read
-     * up to the resource's {@code before} character, when it has one (a CodeBuild build id's project). A type
+     * up to the resource's {@code before} character, when it has one (a CodeBuild build id's project), and without the
+     * type's own path when it begins with one, as Route 53 returns its ids ({@code /hostedzone/Z1} names hosted zone
+     * {@code Z1}). A type
      * whose service mints an id after its name is the caller's resource {@code stored} finds under that name, or
      * else has that id open.
      */
@@ -479,7 +481,8 @@ public final class RequestResources {
         boolean given = false;
         for (Map.Entry<String, RequestResourceMembers.Member> variable : resource.fill().entrySet()) {
             List<String> values = read(resource, form, body, variable.getValue()).stream()
-                    .map(value -> before(value, resource.before())).toList();
+                    .map(value -> withoutTypePath(before(value, resource.before()), resource.types().getFirst()))
+                    .toList();
             if (values.isEmpty()) {
                 continue;
             }
@@ -523,6 +526,12 @@ public final class RequestResources {
                         region, accountId);
             }
         }
+    }
+
+    /** The value without a leading {@code /<type>/}, the path a service may return an id of that type under. */
+    static String withoutTypePath(String value, String type) {
+        String path = "/" + type + "/";
+        return value.length() > path.length() && value.startsWith(path) ? value.substring(path.length()) : value;
     }
 
     /**

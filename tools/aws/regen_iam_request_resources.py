@@ -176,7 +176,7 @@ NAMESPACES = ("access-analyzer", "account", "acm", "application-autoscaling", "a
               "datasync", "ec2", "ecr", "elasticloadbalancing", "elasticmapreduce", "emr-serverless", "es", "events",
               "firehose", "fis", "globalaccelerator", "inspector2", "kinesisanalytics", "macie2", "oam",
               "payment-cryptography", "quicksight", "ram", "redshift", "redshift-data", "redshift-serverless",
-              "rekognition", "resource-explorer-2", "servicediscovery", "servicequotas", "sso", "states", "textract",
+              "rekognition", "resource-explorer-2", "route53", "servicediscovery", "servicequotas", "sso", "states", "textract",
               "timestream-influxdb", "translate", "signer", "xray", "securityhub", "guardduty")
 
 # SDK clients the reference lists for a namespace's operations whose requests Floci does not serve, and why: their
@@ -267,7 +267,6 @@ NOT_COVERED: dict[str, str] = {
     "organizations": _LATER,
     "rds": _LATER,
     "rds-data": _REST,
-    "route53": _REST,
     "route53resolver": _LATER,
     "rum": _REST,
     "s3tables": _REST,
@@ -769,15 +768,17 @@ def with_absent_account(resources: list[dict], formats: dict[str, str], accounts
 
 def path_labels(models: dict[str, dict], operation: str) -> dict[str, str]:
     """The bare members (`BARE`) the operation's REST request carries as a path label after a segment naming
-    something, each with that segment stemmed: FIS's `id` in `/safetyLevers/{id}/state` is `safetylever`."""
+    something, each with that segment stemmed, a plural in `ies` read as its `y`: FIS's `id` in
+    `/safetyLevers/{id}/state` is `safetylever`, Route 53's `Id` in `/trafficpolicies/{Id}/versions` is
+    `trafficpolicy`."""
     found: dict[str, str] = {}
     for model in models.values():
         spec = model["operations"].get(operation)
         if spec is None or "input" not in spec or "http" not in spec:
             continue
         segments = spec["http"]["requestUri"].split("?", 1)[0].strip("/").split("/")
-        labelled = {match.group(1): stem(segments[index - 1]) for index, segment in enumerate(segments)
-                    if index and "{" not in segments[index - 1]
+        labelled = {match.group(1): stem(re.sub(r"ies$", "y", segments[index - 1]))
+                    for index, segment in enumerate(segments) if index and "{" not in segments[index - 1]
                     and (match := re.fullmatch(r"\{(\w+)\+?}", segment))}
         for name, member in model["shapes"][spec["input"]["shape"]].get("members", {}).items():
             label = member.get("locationName", name)
@@ -832,6 +833,51 @@ def request_members(models: dict[str, dict], operation: str) -> dict[str, str]:
             for path in _nested_arns(model, name, shape):
                 found.setdefault(path.removesuffix("[]"), path)
     return found
+
+
+def enum_members(models: dict[str, dict], operation: str) -> dict[str, set[str]]:
+    """The top-level string members of the operation's request that this file reads, with the values their enum
+    lists; a member with no enum is left out."""
+    found: dict[str, set[str]] = {}
+    for model in models.values():
+        spec = model["operations"].get(operation)
+        reading = _reading(model)
+        if spec is None or "input" not in spec or reading is None:
+            continue
+        for name, member in model["shapes"][spec["input"]["shape"]].get("members", {}).items():
+            if member.get("location") not in BODY_LOCATIONS and _located(member) is None:
+                continue
+            if reading == "located" and member.get("location") in BODY_LOCATIONS:
+                continue
+            values = model["shapes"][member["shape"]].get("enum")
+            if values:
+                found.setdefault(name, set()).update(values)
+    return found
+
+
+def picked_by_enum(types: list[str], formats: dict[str, str], members: dict[str, str],
+                   enums: dict[str, set[str]]) -> list[dict] | None:
+    """The resources of a request a member of which picks the type: one whose enum lists two or more of the action's
+    types (Route 53's tag calls name a `ResourceType` of `healthcheck` or `hostedzone`). Each type it lists is filled
+    from the member naming whatever the action acts on (`ResourceId`) when the request holds that type; None when no
+    member picks a type, or no member names the resource."""
+    for picker, values in sorted(enums.items()):
+        kinds = [kind for kind in types if kind in values and kind in formats]
+        if len(kinds) < 2:
+            continue
+        picked = []
+        for kind in kinds:
+            variables = [v for v in VARIABLE_RE.findall(formats[kind]) if v not in KNOWN_VARIABLES]
+            if len(variables) != 1:
+                return None
+            named = [member for member in members if member != picker and stem(member) == "resource"
+                     and compatible(member, variables[0])]
+            if not named:
+                return None
+            member = min(named, key=lambda m: (members[m].endswith("[]"), len(m), m))
+            picked.append({"type": kind, "fill": {variables[0]: members[member]}, "when": {picker: [kind]}})
+        return picked
+    return None
 
 
 def string_patterns(models: dict[str, dict], operation: str) -> dict[str, set[str | None]]:
@@ -1316,11 +1362,13 @@ def entry_for(operation: str, upstream: dict, formats: dict[str, str], models: d
                              f"it reads ({sorted(endpoints)})")
     else:
         labels = path_labels(models, operation.split(":", 1)[1])
-        resources = with_through(with_found(with_parent_ids(resources_for(operation, types, formats, members, arn_members,
-                                                                          labels),
-                                                            formats, types, members),
-                                            namespace_of(operation), types, members),
-                                 namespace_of(operation), types, members)
+        resources = picked_by_enum(types, formats, members, enum_members(models, operation.split(":", 1)[1]))
+        if resources is None:
+            resources = with_through(with_found(with_parent_ids(resources_for(operation, types, formats, members,
+                                                                              arn_members, labels),
+                                                                formats, types, members),
+                                                namespace_of(operation), types, members),
+                                     namespace_of(operation), types, members)
         optional = optional_members(models, operation.split(":", 1)[1])
         resources = with_absent_arn(resources, formats, optional)
         resources = with_absent_account(resources, formats, account_members(models, operation.split(":", 1)[1]),
