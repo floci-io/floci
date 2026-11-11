@@ -254,6 +254,7 @@ public class CloudWatchLogsHandler {
                 request.path("destinationName").asText(null),
                 request.path("targetArn").asText(null),
                 request.path("roleArn").asText(null),
+                extractTags(request.path("tags")),
                 region);
         ObjectNode response = objectMapper.createObjectNode();
         response.set("destination", buildDestination(destination));
@@ -646,6 +647,11 @@ public class CloudWatchLogsHandler {
             response.set("tags", objectMapper.valueToTree(deliveryService.listTags(resourceArn, region)));
             return Response.ok(response).build();
         }
+        if (CloudWatchLogsCrossAccountService.isCrossAccountDestinationArn(resourceArn)) {
+            ObjectNode response = objectMapper.createObjectNode();
+            response.set("tags", objectMapper.valueToTree(crossAccountService.listDestinationTags(resourceArn, region)));
+            return Response.ok(response).build();
+        }
         String groupName = logsService.resolveTagTarget(resourceArn, region).name();
         Map<String, String> tags = logsService.listTagsLogGroup(groupName, region);
 
@@ -663,6 +669,10 @@ public class CloudWatchLogsHandler {
             deliveryService.tag(resourceArn, tags, region);
             return Response.ok(objectMapper.createObjectNode()).build();
         }
+        if (CloudWatchLogsCrossAccountService.isCrossAccountDestinationArn(resourceArn)) {
+            crossAccountService.tagDestination(resourceArn, tags, region);
+            return Response.ok(objectMapper.createObjectNode()).build();
+        }
         String groupName = logsService.resolveTagTarget(resourceArn, region).name();
         logsService.tagLogGroup(groupName, tags, region);
         return Response.ok(objectMapper.createObjectNode()).build();
@@ -674,6 +684,10 @@ public class CloudWatchLogsHandler {
         request.path("tagKeys").forEach(k -> tagKeys.add(k.asText()));
         if (deliveryService.isDeliveryArn(resourceArn, region)) {
             deliveryService.untag(resourceArn, tagKeys, region);
+            return Response.ok(objectMapper.createObjectNode()).build();
+        }
+        if (CloudWatchLogsCrossAccountService.isCrossAccountDestinationArn(resourceArn)) {
+            crossAccountService.untagDestination(resourceArn, tagKeys, region);
             return Response.ok(objectMapper.createObjectNode()).build();
         }
         String groupName = logsService.resolveTagTarget(resourceArn, region).name();

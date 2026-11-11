@@ -79,6 +79,7 @@ class RequestResourceMembersTest {
                 .map(operation -> "logs:" + operation).collect(Collectors.toSet());
         Set<String> expected = new HashSet<>(logsDelivery);
         expected.add("dynamodb:ListTables");
+        expected.add("logs:PutDestination");
         assertEquals(expected, table.operations().keySet().stream()
                 .filter(operation -> table.handBuilt().contains(operation.substring(0, operation.indexOf(':'))))
                 .collect(Collectors.toSet()),

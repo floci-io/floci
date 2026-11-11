@@ -207,6 +207,9 @@ READ_IN_HAND_BUILT: dict[str, str] = {
                       "DescribeDeliveryDestinations", "CreateDelivery", "GetDelivery", "UpdateDeliveryConfiguration",
                       "DeleteDelivery", "DescribeDeliveries")
 }
+READ_IN_HAND_BUILT["logs:PutDestination"] = (
+    "CloudWatch Logs destination creation names the destination by destinationName, which ResourceArnBuilder "
+    "reads from the generated request-resource table")
 
 _LATER = "not read yet: a later batch, with the tests that show its ARNs are the ones its handlers mint"
 _REST = ("REST: its requests name their resources in the path, which RequestResources reads from the route a request "
