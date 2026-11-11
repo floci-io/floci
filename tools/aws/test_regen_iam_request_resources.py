@@ -249,12 +249,47 @@ def test_a_member_holding_an_account_id_gives_the_account_of_the_types_named_by_
     assert r.with_account([{"type": "thing", "fill": {}}], FORMATS, ["a", "b"]) == [{"type": "thing", "fill": {}}]
 
 
-def test_an_owner_account_member_gives_the_account_of_what_a_request_acts_on_but_not_of_what_it_creates(tmp_path):
-    write_models(tmp_path, {"svc": model({"GetThing": {"ThingName": "String", "ownerAccount": "String"},
-                                          "CreateThing": {"ThingName": "String", "ownerAccount": "String"}})})
+@pytest.mark.parametrize("member", ["ownerAccount", "resourceAccount"])
+@pytest.mark.parametrize("pattern", ["[0-9]{12}", r"(\d{12})"])
+def test_an_account_member_typed_elsewhere_in_the_service_is_inferred_only_for_non_creates(tmp_path, member, pattern):
+    service = model({"GetThing": {member: "String"},
+                     "CreateThing": {member: "String"},
+                     "ListThings": {member: "AccountId"},
+                     "CreateOther": {member: "DirectAccountId"}})
+    service["shapes"]["AccountId"]["pattern"] = pattern
+    service["shapes"]["DirectAccountId"] = {"type": "string", "pattern": "[0-9]{12}"}
+    write_models(tmp_path, {"svc": service})
     models = r.load_models(tmp_path, {"svc"})
-    assert r.account_members(models, "GetThing") == ["ownerAccount"]
+    assert r.account_members(models, "GetThing") == [member]
     assert r.account_members(models, "CreateThing") == []
+    assert r.account_members(models, "ListThings") == [member]
+    assert r.account_members(models, "CreateOther") == [member]
+
+
+def test_account_member_inference_does_not_cross_service_models(tmp_path):
+    write_models(tmp_path, {"svc": model({"GetThing": {"ownerAccount": "String"}}),
+                            "other": model({"ListThings": {"ownerAccount": "AccountId"}})})
+    models = r.load_models(tmp_path, {"svc", "other"})
+    assert r.account_members(models, "GetThing") == []
+
+
+def test_redshift_serverless_account_inference_preserves_the_generated_resources():
+    from regen_partitions import resolve_botocore_data
+
+    document = json.loads(r.OUTPUT.read_text())
+    data, _ = resolve_botocore_data(None)
+    models = r.load_models(data, set(document["namespaces"]["redshift-serverless"]))
+    account_operations = set()
+    for operation, entry in document["operations"].items():
+        if not operation.startswith("redshift-serverless:"):
+            continue
+        derived = r.entry_for(operation, {"action": entry["action"], "types": entry["types"]},
+                              document["arnFormats"]["redshift-serverless"], models)
+        assert derived == entry, operation
+        if r.account_members(models, operation.split(":", 1)[1]) == ["ownerAccount"]:
+            account_operations.add(operation.split(":", 1)[1])
+    assert account_operations == {"GetSnapshot", "ListEndpointAccess", "ListSnapshots", "ListWorkgroups",
+                                  "RestoreFromSnapshot"}
 
 
 def test_a_format_whose_account_is_an_account_id_variable_takes_the_account_every_other_format_does():

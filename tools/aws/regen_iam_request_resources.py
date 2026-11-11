@@ -41,8 +41,10 @@ strings, or, for an ARN, a member of a structure or of each element of a list of
 
 A member whose botocore shape is an account id (a string of pattern `[0-9]{12}`) gives the account of
 the types the request names by their variables: ECR's `registryId` selects the registry its handler
-acts in, so `repository/<name>` is that account's. So is Redshift Serverless's `ownerAccount`, a bare string the reference documents as the owner of the
-snapshot, which names a snapshot another account shares by its name (`ACCOUNT_NAMED_MEMBERS`), but not on a create, where it names the account of a resource the new one is made in. A member whose shape's pattern takes an ARN before
+acts in, so `repository/<name>` is that account's. On a non-create, a bare string member also takes
+that role when the same service types that member as an account id in another request. Redshift
+Serverless's `ownerAccount` names the snapshot's owner this way, but on a create it names the account
+of a resource the new one is made in. A member whose shape's pattern takes an ARN before
 the name (`(arn:...:event-bus/)?<name>`) may give the ARN of the type of that name instead, whose one
 variable it is then read as, in the ARN's account and Region: EventBridge's `EventBusName`. So may a
 field of each element of a list of structures, each element's resource in the account and Region of
@@ -655,9 +657,6 @@ STEM_SUFFIX_RE = re.compile(r"(arns|arn|names|name|identifiers|identifier|ids|id
 BARE = {"name", "names", "id", "ids", "identifier", "identifiers"}
 # The patterns botocore gives a string shape that holds an account id.
 ACCOUNT_ID_PATTERNS = {"[0-9]{12}", "^[0-9]{12}$", r"\d{12}", r"^\d{12}$"}
-# Members whose shape is a bare string, but which the reference documents as the account that owns the resource the
-# request names, as an account id member does (Redshift Serverless's `ownerAccount`).
-ACCOUNT_NAMED_MEMBERS = {"ownerAccount"}
 # The verbs an operation that creates the resource it is named after starts with.
 CREATING_RE = re.compile(r"^(Create|Run|Allocate|Register|Put|Import|Copy|Request|Start|Add|Enable)")
 # An operation's verb: what follows is what it acts on.
@@ -849,10 +848,16 @@ def account_members(models: dict[str, dict], operation: str) -> list[str]:
         spec = model["operations"].get(operation)
         if spec is None or "input" not in spec or not READ_PROTOCOLS & _protocols(model):
             continue
+        account_names = {name for other in model["operations"].values() if "input" in other
+                         for name, member in model["shapes"][other["input"]["shape"]].get("members", {}).items()
+                         if member.get("location") in BODY_LOCATIONS
+                         and model["shapes"][member["shape"]].get("pattern") in ACCOUNT_ID_PATTERNS | {r"(\d{12})"}
+                         and model["shapes"][member["shape"]]["type"] == "string"}
         for name, member in model["shapes"][spec["input"]["shape"]].get("members", {}).items():
             shape = model["shapes"][member["shape"]]
             if member.get("location") in BODY_LOCATIONS and shape["type"] == "string" \
-                    and (shape.get("pattern") in ACCOUNT_ID_PATTERNS or (name in ACCOUNT_NAMED_MEMBERS and not CREATING_RE.match(operation))):
+                    and (shape.get("pattern") in ACCOUNT_ID_PATTERNS
+                         or (name in account_names and not CREATING_RE.match(operation))):
                 found.add(name)
     return sorted(found)
 
