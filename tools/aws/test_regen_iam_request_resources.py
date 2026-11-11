@@ -117,6 +117,22 @@ def test_a_create_of_a_child_of_a_type_its_action_acts_on_names_it_from_the_pare
     assert r.creates_for("svc:CreateListener", ["loadbalancer/app/"], LISTENERS, members("RoleArn")) == []
 
 
+def test_a_rest_xml_request_is_read_for_its_path_and_query_members_alone():
+    # RequestResources reads a path label or a query parameter whatever the protocol, but not a REST-XML body.
+    shapes = {"String": {"type": "string"},
+              "In": {"type": "structure", "members": {
+                  "Id": {"shape": "String", "location": "uri", "locationName": "Id"},
+                  "Marker": {"shape": "String", "location": "querystring", "locationName": "Marker"},
+                  "Comment": {"shape": "String"}}}}
+    for protocol, read in (("rest-xml", {"Id": "Id", "Marker": "Marker"}),
+                           ("rest-json", {"Id": "Id", "Marker": "Marker", "Comment": "Comment"})):
+        models = {"svc": {"metadata": {"protocol": protocol}, "operations": {"GetThing": {"input": {"shape": "In"}}},
+                          "shapes": shapes}}
+        assert r.request_members(models, "GetThing") == read, protocol
+        assert set(r.string_patterns(models, "GetThing")) == set(read), protocol
+        assert r.located_members(models, "GetThing") == {"Id": "{Id}", "Marker": "?Marker"}, protocol
+
+
 def test_an_arn_inside_a_structure_or_a_lists_structures_is_read_by_its_path():
     shapes = {"String": {"type": "string"}, "Strings": {"type": "list", "member": {"shape": "String"}},
               "Priority": {"type": "structure", "members": {"RuleArn": {"shape": "String"}, "Priority": {"shape": "String"},
