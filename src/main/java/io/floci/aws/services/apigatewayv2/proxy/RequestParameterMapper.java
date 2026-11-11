@@ -17,8 +17,9 @@ import java.util.regex.Pattern;
  *   <li>{@code sourceValue} is a literal or expression resolved by {@link ContextValueResolver}</li>
  * </ul>
  *
- * <p>For {@code overwrite:path}, the source value may contain embedded
- * {@code $request.path.X} / {@code $context.X} substrings which are resolved in-place. They land in
+ * <p>For {@code overwrite:path}, the source value may contain embedded expressions such as
+ * {@code $request.path.X}, {@code $request.body.X}, {@code $stageVariables.X} or {@code $context.X},
+ * which are resolved in-place; one that resolves to nothing becomes the empty string. They land in
  * a URL, so a path parameter keeps the caller's encoding and any other value is percent-encoded.
  *
  * <p>When a source resolves to {@code null} (missing claim, missing header, etc.),
