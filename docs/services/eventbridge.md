@@ -167,11 +167,12 @@ with `ValidationException`, since AWS gives a partner bus no resource policy. `P
 partner bus is accepted and fans out to its rules, where AWS reserves that bus for the partner's
 own events; this lets a test publish an event a partner would send.
 
-When upgrading, a rule persisted by an earlier Floci version with a slash in its name is no longer
-listed by `ListRules` or matched by `PutEvents`, but it is still reachable by its exact name on its
-own bus, and it keeps `DeleteEventBus` from deleting that bus. Remove its targets, delete it and
-recreate it under a name without a slash. `DeleteRule`, `EnableRule`, `DisableRule`, `PutTargets`,
-`RemoveTargets` and `ListTargetsByRule` otherwise reject a slashed rule name as `PutRule` does.
+When upgrading, a rule persisted by an earlier Floci version under a name `PutRule` now rejects,
+such as one with a slash or a space or longer than 64 characters, is still reachable by its exact
+name on its own bus, and it keeps `DeleteEventBus` from deleting that bus. One with a slash in its
+name is also no longer listed by `ListRules` or matched by `PutEvents`. Remove its targets, delete
+it and recreate it under a valid name. `DeleteRule`, `EnableRule`, `DisableRule`, `PutTargets`,
+`RemoveTargets` and `ListTargetsByRule` otherwise reject an invalid rule name as `PutRule` does.
 
 ```bash
 aws events create-event-bus \

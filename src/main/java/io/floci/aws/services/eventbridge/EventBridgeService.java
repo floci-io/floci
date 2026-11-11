@@ -435,7 +435,7 @@ public class EventBridgeService implements ResourceProvider, StoredResourceArns 
     }
 
     private void validateRuleReference(String name, String busName, String region) {
-        boolean legacyRuleOfBus = name != null && name.indexOf('/') >= 0
+        boolean legacyRuleOfBus = name != null
                 && ruleStore.get(ruleKey(region, busName, name))
                         .map(rule -> busName.equals(rule.getEventBusName()))
                         .orElse(false);

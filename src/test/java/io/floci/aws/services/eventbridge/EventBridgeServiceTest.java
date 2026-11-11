@@ -683,6 +683,31 @@ class EventBridgeServiceTest {
         assertThrows(AwsException.class, () -> service.describeRule("team/rule-1", null, REGION));
     }
 
+    @ParameterizedTest
+    @MethodSource("legacyRuleNamesOutsideThePattern")
+    void aLegacyRuleNamedOutsideThePatternStaysManageableByItsExactName(String name) {
+        Rule legacy = new Rule();
+        legacy.setName(name);
+        legacy.setArn("arn:aws:events:us-east-1:000000000000:rule/" + name);
+        legacy.setEventBusName("default");
+        legacy.setState(RuleState.ENABLED);
+        ruleStore.put("rule:" + REGION + ":default/" + name, legacy);
+        Target target = new Target("t1", "arn:aws:sqs:us-east-1:000000000000:queue-1", null, null);
+        service.putTargets(name, null, List.of(target), REGION);
+
+        assertEquals(1, service.listTargetsByRule(name, null, REGION).size());
+        assertEquals(1, service.removeTargets(name, null, List.of("t1"), REGION).successfulCount());
+        service.disableRule(name, null, REGION);
+        assertEquals(RuleState.DISABLED, ruleStore.get("rule:" + REGION + ":default/" + name).orElseThrow().getState());
+        service.deleteRule(name, null, REGION);
+
+        assertTrue(ruleStore.get("rule:" + REGION + ":default/" + name).isEmpty());
+    }
+
+    static Stream<String> legacyRuleNamesOutsideThePattern() {
+        return Stream.of("r".repeat(65), "team rule");
+    }
+
     @Test
     void deleteRuleIsIdempotent() {
         service.putRule("my-rule", null, null, "rate(1 minute)", RuleState.ENABLED,
