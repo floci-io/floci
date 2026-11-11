@@ -93,6 +93,8 @@ public class ResourceArnBuilder {
             Set.of("PutResourcePolicy", "GetResourcePolicies", "DeleteResourcePolicy");
     private static final Set<String> SSM_NAMES_OPERATIONS = Set.of("GetParameters", "DeleteParameters");
     private static final Set<String> SSM_SELECTOR_READ_OPERATIONS = Set.of("GetParameter", "GetParameters");
+    private static final Set<String> SSM_TEXT_NAME_OPERATIONS = Set.of("PutParameter", "GetParameter",
+            "DeleteParameter", "GetParameterHistory", "LabelParameterVersion");
 
     private final ObjectMapper objectMapper;
     /**
@@ -1908,13 +1910,15 @@ public class ResourceArnBuilder {
 
     // ── SSM ──────────────────────────────────────────────────────────────────────
     /**
-     * The parameters an SSM request is evaluated against, read from the field its handler acts on: the
-     * {@code ResourceArn} of a resource-policy action, the path {@code GetParametersByPath} gives in {@code Path},
-     * which AWS authorizes it against rather than the parameters it returns, the root path {@code /} being the
-     * empty parameter name {@code parameter/}, each parameter {@code GetParameters} and {@code DeleteParameters}
-     * give in {@code Names}, read as their handlers read it, element by element or value by value, and the
-     * parameter any other action gives in {@code Name}. A version or label selector on a {@code GetParameter} or {@code GetParameters} name is not
-     * part of the parameter's ARN, so it is left out.
+     * The parameters an SSM request is evaluated against, read from the field its handler acts on. A
+     * resource-policy action names its parameter in {@code ResourceArn}. {@code GetParametersByPath} is
+     * authorized against its {@code Path} rather than the parameters it returns; the root path {@code /}, which
+     * a missing or empty {@code Path} also lists from, is the empty parameter name {@code parameter/}.
+     * {@code GetParameters} and {@code DeleteParameters} act on each parameter in {@code Names}, read element by
+     * element or value by value as their handlers read it. Any other action acts on the parameter in
+     * {@code Name}, a null {@code Name} being the text {@code null} where the handler reads it as text. A version
+     * or label selector on a {@code GetParameter} or {@code GetParameters} name is not part of the parameter's
+     * ARN, so it is left out.
      */
     private List<String> buildSsmArns(ContainerRequestContext ctx, String region, String accountId) {
         JsonNode json = readJsonBody(ctx);
@@ -1929,12 +1933,8 @@ public class ResourceArnBuilder {
             }
             boolean selectorRead = operation != null && SSM_SELECTOR_READ_OPERATIONS.contains(operation);
             if ("GetParametersByPath".equals(operation)) {
-                if (json.hasNonNull("Path")) {
-                    String path = json.get("Path").asText().trim();
-                    if (!path.isEmpty()) {
-                        return List.of(ssmParameterArn(path, region, accountId));
-                    }
-                }
+                String path = json.path("Path").asText();
+                return List.of(ssmParameterArn(path.isEmpty() ? "/" : path, region, accountId));
             } else if (operation != null && SSM_NAMES_OPERATIONS.contains(operation)) {
                 List<String> arns = new ArrayList<>();
                 for (JsonNode entry : json.path("Names")) {
@@ -1947,8 +1947,9 @@ public class ResourceArnBuilder {
                 if (!arns.isEmpty()) {
                     return arns;
                 }
-            } else if (json.hasNonNull("Name")) {
-                String name = json.get("Name").asText().trim();
+            } else if (json.hasNonNull("Name")
+                    || operation != null && SSM_TEXT_NAME_OPERATIONS.contains(operation)) {
+                String name = json.path("Name").asText().trim();
                 if (!name.isEmpty()) {
                     return List.of(ssmParameterArn(selectorRead ? withoutSsmSelector(name) : name,
                             region, accountId));

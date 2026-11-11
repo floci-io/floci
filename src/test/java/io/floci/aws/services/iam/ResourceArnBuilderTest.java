@@ -1726,9 +1726,27 @@ class ResourceArnBuilderTest {
                 builder.buildResources("ssm", ctx, "us-east-1", "000000000000"));
 
         setJsonBody("{\"Path\":\"\"}");
-        assertEquals(List.of("arn:aws:ssm:us-east-1:000000000000:parameter/*"),
+        assertEquals(List.of("arn:aws:ssm:us-east-1:000000000000:parameter/"),
                 builder.buildResources("ssm", ctx, "us-east-1", "000000000000"));
         setJsonBody("{\"Recursive\":true}");
+        assertEquals(List.of("arn:aws:ssm:us-east-1:000000000000:parameter/"),
+                builder.buildResources("ssm", ctx, "us-east-1", "000000000000"));
+        setJsonBody("{\"Path\":{\"k\":\"/app\"}}");
+        assertEquals(List.of("arn:aws:ssm:us-east-1:000000000000:parameter/"),
+                builder.buildResources("ssm", ctx, "us-east-1", "000000000000"));
+        setJsonBody("{\"Path\":null}");
+        assertEquals(List.of("arn:aws:ssm:us-east-1:000000000000:parameter/null"),
+                builder.buildResources("ssm", ctx, "us-east-1", "000000000000"));
+    }
+
+    @Test
+    void ssmNullNameActsOnTheParameterTheHandlerReadsItAs() {
+        when(ctx.getHeaderString("X-Amz-Target")).thenReturn("AmazonSSM.GetParameter");
+        setJsonBody("{\"Name\":null}");
+        assertEquals(List.of("arn:aws:ssm:us-east-1:000000000000:parameter/null"),
+                builder.buildResources("ssm", ctx, "us-east-1", "000000000000"));
+
+        when(ctx.getHeaderString("X-Amz-Target")).thenReturn("AmazonSSM.DescribeAssociation");
         assertEquals(List.of("arn:aws:ssm:us-east-1:000000000000:parameter/*"),
                 builder.buildResources("ssm", ctx, "us-east-1", "000000000000"));
     }
