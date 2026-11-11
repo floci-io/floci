@@ -634,6 +634,40 @@ class CloudFormationEventBusIntegrationTest {
         callEventBridge("AWSEvents.DescribeEventBus", "{\"Name\":\"" + busName + "\"}", 400);
     }
 
+    @Test
+    void eventBusPolicyOnAPartnerEventBusFails() {
+        String suffix = Long.toString(System.nanoTime(), 36);
+        String busName = "aws.partner/example.com/cfn-bus-policy-" + suffix;
+        String stackName = "eventbus-partner-bus-policy-" + suffix;
+        String template = """
+                {
+                  "Resources": {
+                    "Bus": {
+                      "Type": "AWS::Events::EventBus",
+                      "Properties": { "Name": "%1$s", "EventSourceName": "%1$s" }
+                    },
+                    "BusPolicy": {
+                      "Type": "AWS::Events::EventBusPolicy",
+                      "Properties": {
+                        "EventBusName": { "Ref": "Bus" },
+                        "StatementId": "AllowAccount",
+                        "Action": "events:PutEvents",
+                        "Principal": "111122223333"
+                      }
+                    }
+                  }
+                }
+                """.formatted(busName);
+
+        createStack(stackName, template);
+        assertStackStatus(stackName, "ROLLBACK_COMPLETE");
+        String events = describeStackEvents(stackName);
+        if (!events.contains("at &apos;eventBusName&apos;")) {
+            throw new AssertionError("partner bus policy statement was not refused: " + events);
+        }
+        callEventBridge("AWSEvents.DescribeEventBus", "{\"Name\":\"" + busName + "\"}", 400);
+    }
+
     private static String partnerEventBusTemplate(String busName, String eventSourceName) {
         return """
                 {

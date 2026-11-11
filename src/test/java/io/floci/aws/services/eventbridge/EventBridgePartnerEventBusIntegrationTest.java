@@ -12,6 +12,7 @@ import static org.hamcrest.Matchers.containsString;
 import static org.hamcrest.Matchers.endsWith;
 import static org.hamcrest.Matchers.equalTo;
 import static org.hamcrest.Matchers.hasSize;
+import static org.hamcrest.Matchers.nullValue;
 
 /**
  * A partner event bus is created from its {@code EventSourceName}, takes that name, and then works
@@ -136,6 +137,41 @@ class EventBridgePartnerEventBusIntegrationTest {
                 .when().post("/")
                 .then().statusCode(200)
                 .body("Rules", hasSize(0));
+
+        given().contentType(EB_CT).header("X-Amz-Target", "AWSEvents.DeleteEventBus")
+                .body("{\"Name\":\"" + bus + "\"}")
+                .when().post("/").then().statusCode(200);
+    }
+
+    @Test
+    void aPartnerBusTakesNoPermission() {
+        String suffix = Long.toString(System.nanoTime(), 36);
+        String bus = "aws.partner/example.com/" + suffix;
+        given().contentType(EB_CT).header("X-Amz-Target", "AWSEvents.CreateEventBus")
+                .body("{\"Name\":\"" + bus + "\",\"EventSourceName\":\"" + bus + "\"}")
+                .when().post("/").then().statusCode(200);
+
+        given().contentType(EB_CT).header("X-Amz-Target", "AWSEvents.PutPermission")
+                .body("{\"EventBusName\":\"" + bus + "\",\"Action\":\"events:PutEvents\","
+                        + "\"Principal\":\"111122223333\",\"StatementId\":\"allow\"}")
+                .when().post("/")
+                .then().statusCode(400)
+                .body("__type", containsString("ValidationException"))
+                .body("message", equalTo("1 validation error detected: Value '" + bus + "' at 'eventBusName' "
+                        + "failed to satisfy constraint: Member must satisfy regular expression pattern: "
+                        + "[\\.\\-_A-Za-z0-9]+"));
+
+        given().contentType(EB_CT).header("X-Amz-Target", "AWSEvents.RemovePermission")
+                .body("{\"EventBusName\":\"" + bus + "\",\"RemoveAllPermissions\":true}")
+                .when().post("/")
+                .then().statusCode(400)
+                .body("__type", containsString("ValidationException"));
+
+        given().contentType(EB_CT).header("X-Amz-Target", "AWSEvents.DescribeEventBus")
+                .body("{\"Name\":\"" + bus + "\"}")
+                .when().post("/")
+                .then().statusCode(200)
+                .body("Policy", nullValue());
 
         given().contentType(EB_CT).header("X-Amz-Target", "AWSEvents.DeleteEventBus")
                 .body("{\"Name\":\"" + bus + "\"}")

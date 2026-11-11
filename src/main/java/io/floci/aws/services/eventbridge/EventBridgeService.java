@@ -842,7 +842,7 @@ public class EventBridgeService implements ResourceProvider, StoredResourceArns 
 
     public void putPermission(String busName, String action, String principal,
                               String statementId, String conditionJson, String policyJson, String region) {
-        String effectiveBus = resolvedBusName(busName);
+        String effectiveBus = resolvedNonPartnerBusName(busName);
         if ("default".equals(effectiveBus)) {
             getOrCreateDefaultBus(region);
         }
@@ -925,7 +925,7 @@ public class EventBridgeService implements ResourceProvider, StoredResourceArns 
     }
 
     public void removePermission(String busName, String statementId, boolean removeAll, String region) {
-        String effectiveBus = resolvedBusName(busName);
+        String effectiveBus = resolvedNonPartnerBusName(busName);
         if ("default".equals(effectiveBus)) {
             getOrCreateDefaultBus(region);
         }
@@ -1600,6 +1600,20 @@ public class EventBridgeService implements ResourceProvider, StoredResourceArns 
         return accountGet(busStore, arn.accountId(), busKey(arn.region(), name))
                 .map(EventBus::getPolicy)
                 .filter(policy -> !policy.isBlank());
+    }
+
+    /**
+     * The bus a permission call addresses. {@code PutPermission} and {@code RemovePermission} model
+     * the name as {@code NonPartnerEventBusName}, so a partner bus, whose name holds a slash, is
+     * refused there as AWS refuses it rather than given a policy nothing would enforce.
+     */
+    private static String resolvedNonPartnerBusName(String busName) {
+        String effectiveBus = resolvedBusName(busName);
+        if (effectiveBus.indexOf('/') >= 0) {
+            throw SmithyValidationErrors.validationException(
+                    SmithyValidationErrors.pattern("eventBusName", busName, NON_PARTNER_NAME.pattern()));
+        }
+        return effectiveBus;
     }
 
     private static String resolvedBusName(String busName) {
