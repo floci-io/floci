@@ -538,6 +538,12 @@ empty list, matching AWS. It is enforced as if it had `ALLOW_REFRESH_TOKEN_AUTH`
 the stored or returned value. A client that signs in with `USER_PASSWORD_AUTH`, `ADMIN_USER_PASSWORD_AUTH` or
 `USER_AUTH` must list the matching `ALLOW_` value.
 
+With the app client's `PreventUserExistenceErrors` set to `ENABLED`, password authentication
+(`USER_PASSWORD_AUTH`, `ADMIN_USER_PASSWORD_AUTH` and the legacy `ADMIN_NO_SRP_AUTH`) returns
+`NotAuthorizedException` with `Incorrect username or password` for both an unknown username and
+an incorrect password. With `LEGACY`, or when the setting is omitted, an unknown username returns
+`UserNotFoundException`. See [AWS's user-existence error behavior](https://docs.aws.amazon.com/cognito/latest/developerguide/cognito-user-pool-managing-errors.html).
+
 ## Custom Message Trigger
 
 `CustomMessage` requests include the `{####}` code placeholder, the `{##Click Here##}`

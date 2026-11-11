@@ -622,6 +622,52 @@ class CognitoServiceTest {
         assertEquals("USER_PASSWORD_AUTH flow not enabled for this client", exception.getMessage());
     }
 
+    @ParameterizedTest
+    @ValueSource(strings = {"USER_PASSWORD_AUTH", "ADMIN_USER_PASSWORD_AUTH", "ADMIN_NO_SRP_AUTH"})
+    void passwordAuthHidesUnknownUsersWhenPreventUserExistenceErrorsIsEnabled(String flow) {
+        UserPool pool = createPoolAndUser();
+        UserPoolClient client = openClient(service, pool.getId(), "hidden-password-client", false);
+        client.setPreventUserExistenceErrors("ENABLED");
+
+        AwsException wrongPassword = assertThrows(AwsException.class, () -> passwordAuth(
+                pool, client, flow, "alice", "wrong"));
+        AwsException unknownUser = assertThrows(AwsException.class, () -> passwordAuth(
+                pool, client, flow, "nobody", "wrong"));
+
+        assertEquals("NotAuthorizedException", wrongPassword.getErrorCode());
+        assertEquals("Incorrect username or password", wrongPassword.getMessage());
+        assertEquals(wrongPassword.getErrorCode(), unknownUser.getErrorCode());
+        assertEquals(wrongPassword.getMessage(), unknownUser.getMessage());
+        assertEquals(wrongPassword.getHttpStatus(), unknownUser.getHttpStatus());
+        assertNotNull(passwordAuth(pool, client, flow, "alice", "Perm1234!").get("AuthenticationResult"));
+    }
+
+    @ParameterizedTest
+    @CsvSource({
+            "USER_PASSWORD_AUTH, LEGACY", "USER_PASSWORD_AUTH,",
+            "ADMIN_USER_PASSWORD_AUTH, LEGACY", "ADMIN_USER_PASSWORD_AUTH,",
+            "ADMIN_NO_SRP_AUTH, LEGACY", "ADMIN_NO_SRP_AUTH,"
+    })
+    void passwordAuthPreservesUnknownUserErrorsForLegacyClients(String flow, String prevention) {
+        UserPool pool = createPoolAndUser();
+        UserPoolClient client = openClient(service, pool.getId(), "legacy-password-client", false);
+        client.setPreventUserExistenceErrors(prevention);
+
+        AwsException unknownUser = assertThrows(AwsException.class, () -> passwordAuth(
+                pool, client, flow, "nobody", "wrong"));
+
+        assertEquals("UserNotFoundException", unknownUser.getErrorCode());
+        assertEquals("User not found", unknownUser.getMessage());
+    }
+
+    private Map<String, Object> passwordAuth(UserPool pool, UserPoolClient client, String flow,
+                                            String username, String password) {
+        Map<String, String> parameters = Map.of("USERNAME", username, "PASSWORD", password);
+        return "USER_PASSWORD_AUTH".equals(flow)
+                ? service.initiateAuth(client.getClientId(), flow, parameters)
+                : service.adminInitiateAuth(pool.getId(), client.getClientId(), flow, parameters);
+    }
+
     private static final List<String> ALL_AUTH_FLOWS = List.of("ALLOW_USER_PASSWORD_AUTH",
             "ALLOW_ADMIN_USER_PASSWORD_AUTH", "ALLOW_USER_AUTH", "ALLOW_USER_SRP_AUTH", "ALLOW_CUSTOM_AUTH",
             "ALLOW_REFRESH_TOKEN_AUTH");
