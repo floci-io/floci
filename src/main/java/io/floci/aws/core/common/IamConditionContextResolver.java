@@ -354,7 +354,18 @@ public class IamConditionContextResolver {
         conditions.putIfAbsent("aws:ViaAWSService", List.of("false"));
         // Enforcement evaluates signed IAM credentials, not direct AWS service principals.
         conditions.put("aws:PrincipalIsAWSService", List.of("false"));
+        putRequestTime(conditions, Instant.now());
         return conditions;
+    }
+
+    /**
+     * The time of the request, which the IAM User Guide says "is always included in the request
+     * context" under two keys: {@code aws:CurrentTime}, a Date, and {@code aws:EpochTime}, "the
+     * date and time of the request in epoch or Unix time", a Date and a Numeric, so whole seconds.
+     */
+    private static void putRequestTime(Map<String, List<String>> conditions, Instant now) {
+        conditions.put("aws:CurrentTime", List.of(now.toString()));
+        conditions.put("aws:EpochTime", List.of(Long.toString(now.getEpochSecond())));
     }
 
     private static void putResourceAccount(Map<String, List<String>> conditions, String resourceArn,
@@ -377,7 +388,8 @@ public class IamConditionContextResolver {
      * {@code true}; {@code aws:PrincipalServiceName} and {@code aws:PrincipalServiceNamesList} name the
      * service; {@code aws:SourceArn} and {@code aws:SourceAccount} name the resource whose
      * configuration triggered the call, when it has them; and {@code aws:ResourceAccount} and
-     * {@code aws:RequestedRegion} describe the target. The keys that describe an IAM principal,
+     * {@code aws:RequestedRegion} describe the target; {@code aws:CurrentTime} and
+     * {@code aws:EpochTime} carry the time of the request, as on every request. The keys that describe an IAM principal,
      * {@code aws:PrincipalArn} and {@code aws:PrincipalAccount} among them, are left out: no IAM
      * principal makes the call. A call to an SNS topic from a service SNS lists as setting it also
      * carries {@code aws:SourceOwner}, the source account, which is what the default topic policy
@@ -405,6 +417,7 @@ public class IamConditionContextResolver {
         }
         putResourceAccount(conditions, resourceArn, resourceOwnerAccountId, action);
         putIfPresent(conditions, "aws:RequestedRegion", AwsArnUtils.regionOrDefault(resourceArn, null));
+        putRequestTime(conditions, Instant.now());
         return conditions;
     }
 

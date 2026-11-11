@@ -2720,7 +2720,8 @@ variable can only resolve to a key floci populates, which is the list under
 
 A role trust policy is the narrower case, because `sts:AssumeRole` is authorized before there is a
 session to describe: its context carries `aws:PrincipalArn`, `aws:PrincipalAccount`,
-`aws:ResourceAccount`, `aws:RequestedRegion`, `aws:PrincipalIsAWSService`, `sts:RoleSessionName`,
+`aws:ResourceAccount`, `aws:RequestedRegion`, `aws:PrincipalIsAWSService`, `aws:CurrentTime`,
+`aws:EpochTime`, `sts:RoleSessionName`, `aws:TokenIssueTime` when the caller is itself a session,
 and `sts:ExternalId` when the request passes one. `aws:username`, `aws:userid` and
 `aws:PrincipalType` are not among them, so a variable naming one of those resolves to nothing in a
 trust policy and the value it sits in matches nothing.
@@ -2899,6 +2900,23 @@ floci populates:
   session, a federated user or the account root it is absent, and a statement that matches on it
   cannot match: an absent key has no equal or like value. That absence is the enforcement rather
   than a gap in it.
+- `aws:TokenIssueTime`: when the temporary credentials the request is signed with were issued, as
+  an ISO 8601 date, for every STS session (`AssumeRole` and its SAML and web identity forms,
+  `GetSessionToken`, `GetFederationToken`, `AssumeRoot`) and every role session floci issues
+  itself (Lambda execution roles, EC2 instance profiles, ECS task roles). The guide says it "is
+  included in the request context only when the principal uses temporary credentials to make the
+  request" and "is not present in AWS CLI, AWS API, or AWS SDK requests that are made using access
+  keys", so it is absent for an IAM user access key and for the account root. It is the key the
+  `AWSRevokeOlderSessions` policy of
+  [revoking role sessions](https://docs.aws.amazon.com/IAM/latest/UserGuide/id_roles_use_revoke-sessions.html)
+  matches: a `Deny` on `DateLessThan` `aws:TokenIssueTime` refuses the sessions issued before that
+  time and leaves later sessions and long-term keys alone. A session stored by an earlier floci
+  version, which did not record its issue time, carries no value for it.
+- `aws:CurrentTime` and `aws:EpochTime`: the time of the request, which the guide says "is always
+  included in the request context": `aws:CurrentTime` as an ISO 8601 date, `aws:EpochTime` as
+  whole seconds since January 1, 1970, so it matches the `Date` and the `Numeric` operators.
+  They are on every request the enforcement filter checks, in a role trust policy's context, and
+  in that of a call an AWS service makes on its own behalf.
 - `aws:TagKeys`: the case-sensitive requested tag keys for all 16 IAM tagging actions
   in the generated table (tag structures or a list of keys), EC2 `RunInstances` and
   `CreateTags`, S3 `PutBucketTagging`, S3 Control `TagResource` (its `Tags` body) and
