@@ -768,7 +768,7 @@ public class EventBridgeService implements ResourceProvider, StoredResourceArns 
 
     private static RuleRef parseRuleResource(String resource) {
         String afterRule = resource.substring("rule/".length());
-        int slashIdx = afterRule.indexOf('/');
+        int slashIdx = afterRule.lastIndexOf('/');
         if (slashIdx >= 0) {
             // Custom bus: rule/{busName}/{ruleName}
             return new RuleRef(afterRule.substring(0, slashIdx), afterRule.substring(slashIdx + 1));
