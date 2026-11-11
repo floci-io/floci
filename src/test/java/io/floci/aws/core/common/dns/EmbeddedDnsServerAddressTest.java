@@ -3,9 +3,7 @@ package io.floci.aws.core.common.dns;
 import io.floci.aws.config.EmulatorConfig;
 import io.floci.aws.core.common.docker.ContainerDetector;
 import io.floci.aws.core.common.docker.CurrentContainerNetworkResolver;
-import io.vertx.core.AsyncResult;
 import io.vertx.core.Future;
-import io.vertx.core.Handler;
 import io.vertx.core.Vertx;
 import io.vertx.core.datagram.DatagramSocket;
 import jakarta.enterprise.inject.Instance;
@@ -17,9 +15,9 @@ import java.util.Optional;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.mockito.ArgumentMatchers.any;
-import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.RETURNS_DEEP_STUBS;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 /** The address the embedded DNS server gives the containers Floci launches. */
@@ -57,14 +55,12 @@ class EmbeddedDnsServerAddressTest {
         Vertx vertx = mock(Vertx.class);
         DatagramSocket socket = mock(DatagramSocket.class);
         when(vertx.createDatagramSocket(any())).thenReturn(socket);
-        when(socket.listen(eq(53), eq("0.0.0.0"), any())).thenAnswer(invocation -> {
-            invocation.<Handler<AsyncResult<DatagramSocket>>>getArgument(2).handle(Future.succeededFuture(socket));
-            return socket;
-        });
+        when(socket.listen(53, "172.19.0.2")).thenReturn(Future.succeededFuture(socket));
 
         EmbeddedDnsServer server = new EmbeddedDnsServer(config, containerDetector, vertx, mock(Instance.class),
                 mock(Instance.class), mock(Instance.class), currentContainer);
 
         assertEquals(Optional.of("172.19.0.2"), server.getServerIp());
+        verify(socket).listen(53, "172.19.0.2");
     }
 }
