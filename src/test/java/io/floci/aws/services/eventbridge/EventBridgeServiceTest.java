@@ -248,6 +248,19 @@ class EventBridgeServiceTest {
     }
 
     @Test
+    void putPermissionOnALongPartnerBusNameReportsBothConstraints() {
+        String name = "aws.partner/example.com/" + "o".repeat(60);
+        service.createEventBus(name, name, null, null, REGION);
+
+        AwsException error = assertThrows(AwsException.class, () ->
+                service.putPermission(name, "events:PutEvents", "111122223333", "allow", null, null, REGION));
+        assertEquals("ValidationException", error.getErrorCode());
+        assertTrue(error.getMessage().startsWith("2 validation errors detected: "), error.getMessage());
+        assertTrue(error.getMessage().contains("at 'eventBusName' failed to satisfy constraint: "
+                + "Member must have length less than or equal to 64"), error.getMessage());
+    }
+
+    @Test
     void putEventsOnAPartnerBusByArnReachesTheRuleOnIt() {
         String name = "aws.partner/example.com/123/orders";
         EventBus bus = service.createEventBus(name, name, null, null, REGION);
