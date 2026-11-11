@@ -1617,6 +1617,7 @@ public class NativeDynamoDbJsonHandler {
     private static final int MAX_VECTOR_SEARCH_TOP_K = 100;
 
     private Response handleSearchVectors(JsonNode request, String region) {
+        DynamoDbRequestShapes.requireSearchVectorsMembers(request);
         String tableName = request.path("TableName").asText();
         String indexName = request.get("IndexName").asText();
         String rccSearchError = returnConsumedCapacityError(request);

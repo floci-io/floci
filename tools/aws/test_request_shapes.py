@@ -41,7 +41,7 @@ DYNAMODB_MODEL = {
         "NoInput": {},
     },
     "shapes": {
-        "ScanInput": {"type": "structure", "members": {
+        "ScanInput": {"type": "structure", "required": ["TableName"], "members": {
             "TableName": {"shape": "TableName"},
             "AttributesToGet": {"shape": "AttributeNameList"},
             "ExclusiveStartKey": {"shape": "Key"},
@@ -99,6 +99,13 @@ def test_keeps_only_input_shapes_and_their_types():
     assert doc["shapes"]["TableName"] == {"type": "string"}
     assert doc["shapes"]["AttributeNameList"] == {"type": "list", "member": "AttributeName"}
     assert doc["shapes"]["Key"] == {"type": "map", "value": "AttributeValue"}
+
+
+def test_keeps_required_members_only_when_asked():
+    doc = r.build(DYNAMODB_MODEL, "botocore test", "tools/aws/regen_dynamodb_shapes.py", required=True)
+
+    assert doc["shapes"]["ScanInput"]["required"] == ["TableName"]
+    assert "required" not in doc["shapes"]["DescribeLimitsInput"]
 
 
 def test_keeps_only_body_members_of_input_shapes():
@@ -204,13 +211,13 @@ def test_load_model_without_a_service_model_exits(tmp_path):
         r.load_model(tmp_path, Path("svc/2020-01-01"))
 
 
-@pytest.mark.parametrize("script, model, output", [
-    (regen_dynamodb_shapes, "dynamodb/2012-08-10", "dynamodb-request-shapes.json"),
-    (regen_sesv2_shapes, "sesv2/2019-09-27", "sesv2-request-shapes.json"),
-    (regen_apigateway_shapes, "apigateway/2015-07-09", "apigateway-request-shapes.json"),
-    (regen_ecs_shapes, "ecs/2014-11-13", "ecs-request-shapes.json"),
+@pytest.mark.parametrize("script, model, output, options", [
+    (regen_dynamodb_shapes, "dynamodb/2012-08-10", "dynamodb-request-shapes.json", {"required": True}),
+    (regen_sesv2_shapes, "sesv2/2019-09-27", "sesv2-request-shapes.json", {}),
+    (regen_apigateway_shapes, "apigateway/2015-07-09", "apigateway-request-shapes.json", {}),
+    (regen_ecs_shapes, "ecs/2014-11-13", "ecs-request-shapes.json", {}),
 ])
-def test_each_script_runs_the_shared_main_with_its_model_and_output(script, model, output, monkeypatch):
+def test_each_script_runs_the_shared_main_with_its_model_and_output(script, model, output, options, monkeypatch):
     calls = []
     monkeypatch.setattr(r, "main", lambda argv, **kwargs: calls.append((argv, kwargs)) or 0)
 
@@ -220,6 +227,7 @@ def test_each_script_runs_the_shared_main_with_its_model_and_output(script, mode
         "model": Path(model),
         "output": r.REPO_ROOT / "src/main/resources/aws" / output,
         "description": script.__doc__,
+        **options,
     })]
 
 

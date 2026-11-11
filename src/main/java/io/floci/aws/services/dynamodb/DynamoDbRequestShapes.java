@@ -9,13 +9,14 @@ import io.floci.aws.core.common.AwsException;
 import io.floci.aws.core.common.RequestShapeCheck;
 import io.floci.aws.core.common.RequestShapeCheck.ByPosition;
 import io.floci.aws.core.common.RequestShapeModel;
+import io.floci.aws.core.common.RequestShapeModel.Shape;
 
 import java.io.IOException;
 import java.io.UncheckedIOException;
 import java.nio.charset.StandardCharsets;
 import java.util.Map;
 import java.util.Set;
-import java.util.TreeMap;
+import java.util.TreeSet;
 
 /**
  * Rejects a DynamoDB request member of the wrong JSON type with the SerializationException
@@ -31,8 +32,9 @@ public final class DynamoDbRequestShapes {
 
     private static final String UNKNOWN_ERROR = "UnknownError";
     private static final String SEARCH_VECTORS = "SearchVectors";
-    private static final Map<String, String> SEARCH_VECTORS_REQUIRED_TYPES = new TreeMap<>(Map.of(
-            "IndexName", "a string", "SearchVector", "a sequence", "TableName", "a string", "TopK", "i32"));
+    // How the SearchVectors frontend names the type a null required member should have had.
+    private static final Map<String, String> SEARCH_VECTORS_TYPE_NAMES = Map.of(
+            "string", "a string", "list", "a sequence", "integer", "i32");
     private static final JsonFactory JSON = new JsonFactory();
     private static final ByPosition SCALAR_FOR_CONTAINER = new ByPosition("Unexpected field type", UNKNOWN_ERROR);
 
@@ -74,40 +76,57 @@ public final class DynamoDbRequestShapes {
      * it stopped reading.
      */
     public static void check(String action, JsonNode request, String body) {
-        if (SEARCH_VECTORS.equals(action) && !hasSearchVectorsMembers(request)) {
-            checkSearchVectors(Holder.MODEL, request, body == null ? "" : body);
+        if (SEARCH_VECTORS.equals(action) && !hasSearchVectorsMembers(Holder.MODEL, request)) {
+            readSearchVectors(Holder.MODEL, request, body == null ? "" : body, true);
         } else {
             check(action, request);
         }
     }
 
-    private static boolean hasSearchVectorsMembers(JsonNode request) {
-        return SEARCH_VECTORS_REQUIRED_TYPES.keySet().stream().allMatch(request::hasNonNull);
+    /**
+     * Refuses a null or omitted required SearchVectors member of a request that reached the operation
+     * without a JSON body, from AppSync, Step Functions or CBOR. The positions are those of the compact
+     * JSON an SDK sends.
+     */
+    public static void requireSearchVectorsMembers(JsonNode request) {
+        if (!hasSearchVectorsMembers(Holder.MODEL, request)) {
+            readSearchVectors(Holder.MODEL, request, request.toString(), false);
+        }
     }
 
-    static void checkSearchVectors(RequestShapeModel model, JsonNode request, String body) {
+    private static boolean hasSearchVectorsMembers(RequestShapeModel model, JsonNode request) {
+        return searchVectorsInput(model).required().stream().allMatch(request::hasNonNull);
+    }
+
+    private static Shape searchVectorsInput(RequestShapeModel model) {
+        return model.shapes().get(model.operations().get(SEARCH_VECTORS));
+    }
+
+    /** Reads {@code body} in order, checking each member's JSON type as well when {@code memberTypes}. */
+    private static void readSearchVectors(RequestShapeModel model, JsonNode request, String body,
+                                          boolean memberTypes) {
         if (body.isBlank()) {
             throw new AwsException("ValidationException", "EOF while parsing a value at line "
                     + (body.chars().filter(c -> c == '\n').count() + 1)
                     + " column " + (body.length() - body.lastIndexOf('\n') - 1), 400);
         }
-        Map<String, String> members = model.shapes().get(model.operations().get(SEARCH_VECTORS)).members();
+        Shape input = searchVectorsInput(model);
         try (JsonParser parser = JSON.createParser(body.getBytes(StandardCharsets.UTF_8))) {
             parser.nextToken();
             while (parser.nextToken() == JsonToken.FIELD_NAME) {
                 String name = parser.currentName();
-                String expected = SEARCH_VECTORS_REQUIRED_TYPES.get(name);
-                if (parser.nextToken() == JsonToken.VALUE_NULL && expected != null) {
-                    throw new AwsException("SerializationException", "invalid type: null, expected " + expected
+                String memberShape = input.members().get(name);
+                if (parser.nextToken() == JsonToken.VALUE_NULL && input.required().contains(name)) {
+                    throw new AwsException("SerializationException", "invalid type: null, expected "
+                            + SEARCH_VECTORS_TYPE_NAMES.get(model.shapes().get(memberShape).type())
                             + " at " + position(parser.currentTokenLocation(), "null".length() - 1), 400);
                 }
                 parser.skipChildren();
-                String memberShape = members.get(name);
-                if (memberShape != null) {
+                if (memberTypes && memberShape != null) {
                     RequestShapeCheck.check(model, memberShape, request.get(name), MESSAGES);
                 }
             }
-            for (String member : SEARCH_VECTORS_REQUIRED_TYPES.keySet()) {
+            for (String member : new TreeSet<>(input.required())) {
                 if (!request.has(member)) {
                     throw new AwsException("ValidationException", "missing field `" + member + "` at "
                             + position(parser.currentTokenLocation(), 0), 400);
