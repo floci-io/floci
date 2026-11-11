@@ -36,15 +36,8 @@ public class AthenaNamedQueryService {
 
     public synchronized String createNamedQuery(String region, String name, String database, String queryString,
                                                  String description, String workGroup, String clientRequestToken) {
-        validateText(name, "Name", 1, 128);
-        validateText(database, "Database", 1, 255);
-        validateText(queryString, "QueryString", 1, 262144);
-        if (description != null) {
-            validateText(description, "Description", 1, 1024);
-        }
-        validateText(clientRequestToken, "ClientRequestToken", 32, 128);
         String group = resolveWorkGroup(workGroup);
-        NamedQuery previous = requests.get(key(region, clientRequestToken)).orElse(null);
+        NamedQuery previous = clientRequestToken == null ? null : requests.get(key(region, clientRequestToken)).orElse(null);
         if (previous != null) {
             if (!previous.name().equals(name) || !previous.database().equals(database)
                     || !previous.queryString().equals(queryString) || !Objects.equals(previous.description(), description)
@@ -57,21 +50,18 @@ public class AthenaNamedQueryService {
         String id = UUID.randomUUID().toString();
         NamedQuery query = new NamedQuery(id, name, database, queryString, description, group);
         queries.put(key(region, id), query);
-        requests.put(key(region, clientRequestToken), query);
+        if (clientRequestToken != null) {
+            requests.put(key(region, clientRequestToken), query);
+        }
         return id;
     }
 
     public NamedQuery getNamedQuery(String region, String id) {
-        validateId(id);
         return queries.get(key(region, id))
                 .orElseThrow(() -> invalid("Named query " + id + " does not exist."));
     }
 
     public Map<String, Object> batchGetNamedQuery(String region, List<String> ids) {
-        if (ids == null || ids.isEmpty() || ids.size() > 50) {
-            throw invalid("NamedQueryIds must contain between 1 and 50 IDs.");
-        }
-        ids.forEach(AthenaNamedQueryService::validateId);
         List<NamedQuery> found = new ArrayList<>();
         List<Map<String, String>> unprocessed = new ArrayList<>();
         for (String id : ids) {
@@ -89,47 +79,29 @@ public class AthenaNamedQueryService {
     public PaginatedResult<NamedQuery> listNamedQueries(String region, String workGroup,
                                                         Integer maxResults, String nextToken) {
         String group = resolveWorkGroup(workGroup);
-        if (maxResults != null && (maxResults < 0 || maxResults > 50)) {
-            throw invalid("MaxResults must be between 0 and 50.");
-        }
-        if (nextToken != null && (nextToken.isEmpty() || nextToken.length() > 1024)) {
-            throw invalid("NextToken must contain 1 to 1024 characters.");
-        }
         athenaService.getWorkGroup(group, region);
-        List<NamedQuery> matching = queries.scan(k -> k.startsWith(region + ":")).stream()
-                .filter(query -> group.equals(query.workGroup())).toList();
         int limit = maxResults == null || maxResults == 0 ? 50 : maxResults;
-        return Pagination.paginate(matching, NamedQuery::namedQueryId, limit, nextToken,
+        return Pagination.paginate(queriesInWorkGroup(region, group), NamedQuery::namedQueryId, limit, nextToken,
                 "ListNamedQueries:" + regionResolver.getAccountId() + ":" + region + ":" + group,
                 token -> invalid("Invalid NextToken."));
     }
 
     public synchronized void updateNamedQuery(String region, String id, String name,
                                                String queryString, String description) {
-        validateText(name, "Name", 1, 128);
-        validateText(queryString, "QueryString", 1, 262144);
-        if (description != null) {
-            validateText(description, "Description", 0, 1024);
-        }
         NamedQuery previous = getNamedQuery(region, id);
         queries.put(key(region, id), new NamedQuery(id, name, previous.database(), queryString,
                 description == null ? previous.description() : description, previous.workGroup()));
     }
 
     public synchronized void deleteNamedQuery(String region, String id) {
-        validateId(id);
         queries.delete(key(region, id));
     }
 
     public synchronized void deleteWorkGroup(String region, String workGroup, boolean recursive) {
-        if (workGroup == null || !workGroup.matches("[a-zA-Z0-9._-]{1,128}")) {
-            throw invalid("WorkGroup is required.");
-        }
         if ("primary".equals(workGroup)) {
             throw invalid("The primary workgroup cannot be deleted.");
         }
-        List<NamedQuery> contents = queries.scan(k -> k.startsWith(region + ":")).stream()
-                .filter(query -> workGroup.equals(query.workGroup())).toList();
+        List<NamedQuery> contents = queriesInWorkGroup(region, workGroup);
         if (!recursive && !contents.isEmpty()) {
             throw invalid("WorkGroup contains named queries. Set RecursiveDeleteOption to true to delete it.");
         }
@@ -145,25 +117,13 @@ public class AthenaNamedQueryService {
         athenaService.removeWorkGroup(workGroup, region);
     }
 
+    private List<NamedQuery> queriesInWorkGroup(String region, String workGroup) {
+        return queries.scan(k -> k.startsWith(region + ":")).stream()
+                .filter(query -> workGroup.equals(query.workGroup())).toList();
+    }
+
     private static String resolveWorkGroup(String workGroup) {
-        String group = workGroup == null ? "primary" : workGroup;
-        if (!group.matches("[a-zA-Z0-9._-]{1,128}")) {
-            throw invalid("Invalid WorkGroup.");
-        }
-        return group;
-    }
-
-    private static void validateId(String id) {
-        validateText(id, "NamedQueryId", 1, 128);
-        if (!id.matches("\\S+")) {
-            throw invalid("Invalid NamedQueryId.");
-        }
-    }
-
-    private static void validateText(String value, String field, int minimum, int maximum) {
-        if (value == null || value.length() < minimum || value.length() > maximum) {
-            throw invalid(field + " must contain between " + minimum + " and " + maximum + " characters.");
-        }
+        return workGroup == null ? "primary" : workGroup;
     }
 
     private static String key(String region, String value) {

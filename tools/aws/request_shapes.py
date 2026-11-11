@@ -151,6 +151,7 @@ def generator_name(script: str) -> str:
 
 def main(argv: list[str] | None, *, script: str, model: Path, output: Path, description: str,
          outputs: bool = False, operations: tuple[str, ...] | None = None,
+         constraints: bool = False,
          prepare: Callable[[dict], dict] | None = None) -> int:
     """Drives one generator: parse the flags, read the model, write or check the vendored file.
 
@@ -159,6 +160,9 @@ def main(argv: list[str] | None, *, script: str, model: Path, output: Path, desc
     `build`. The two vendor different things and are driven the same way, which is why the
     Query-protocol generators share this too rather than each repeating the flags and the
     staleness check.
+
+    `constraints=True` keeps constraints for every operation with an input, without maintaining
+    a separate operation list.
 
     `prepare` is the one thing a generator may do to the model before any of that, for an operation
     it vendors in part: IAM reduces a paged request to its paging members, the rest of it keeping
@@ -173,6 +177,8 @@ def main(argv: list[str] | None, *, script: str, model: Path, output: Path, desc
     loaded = load_model(data, model)
     if prepare is not None:
         loaded = prepare(loaded)
+    if constraints and operations is None:
+        operations = tuple(name for name, operation in sorted(loaded["operations"].items()) if "input" in operation)
     generator = generator_name(script)
     fresh = render(build_constraints(loaded, operations, provenance, generator) if operations is not None
                    else build(loaded, provenance, generator, outputs))

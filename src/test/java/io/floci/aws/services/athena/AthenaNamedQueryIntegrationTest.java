@@ -5,6 +5,7 @@ import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.floci.aws.testing.AwsTestClients;
 import io.floci.aws.testing.RestAssuredJsonUtils;
 import io.quarkus.test.junit.QuarkusTest;
+import io.restassured.response.ValidatableResponse;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.BeforeEach;
@@ -24,6 +25,7 @@ import java.util.Collections;
 import java.util.List;
 import java.util.UUID;
 import java.util.concurrent.atomic.AtomicLong;
+import java.util.function.Consumer;
 
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.equalTo;
@@ -107,6 +109,21 @@ class AthenaNamedQueryIntegrationTest {
                 .clientRequestToken(UUID.randomUUID().toString()).build()).namedQueryId());
     }
 
+    @ParameterizedTest
+    @ValueSource(strings = {"", ",\"ClientRequestToken\":null"})
+    void requestsWithoutClientRequestTokensCreateIndependentQueries(String token) {
+        String body = "{\"Name\":\"untokened\",\"Database\":\"db\",\"QueryString\":\"select 1\"" + token + "}";
+        List<String> ids = new ArrayList<>();
+        for (int i = 0; i < 2; i++) {
+            ids.add(rawRequest("CreateNamedQuery", body).statusCode(200).extract().path("NamedQueryId"));
+        }
+        assertNotEquals(ids.getFirst(), ids.getLast());
+        for (String id : ids) {
+            assertDoesNotThrow(() -> UUID.fromString(id));
+            assertEquals("untokened", client.getNamedQuery(request -> request.namedQueryId(id)).namedQuery().name());
+        }
+    }
+
     @Test
     void batchGetReturnsSavedQueriesAndPerIdErrorsForMissingQueries() {
         String first = create("primary");
@@ -169,9 +186,8 @@ class AthenaNamedQueryIntegrationTest {
         CreateNamedQueryRequest request = CreateNamedQueryRequest.builder().name("isolated").database("db")
                 .queryString("select 1").clientRequestToken(UUID.randomUUID().toString()).build();
         String id = client.createNamedQuery(request).namedQueryId();
-        try (AthenaClient anotherAccount = AwsTestClients.create(AthenaClient.builder(), "741680899999", Region.of(REGION));
-             AthenaClient anotherRegion = AwsTestClients.create(AthenaClient.builder(), account, Region.US_WEST_2)) {
-            for (AthenaClient isolated : List.of(anotherAccount, anotherRegion)) {
+        withIsolatedClients(clients -> {
+            for (AthenaClient isolated : clients) {
                 assertTrue(isolated.listNamedQueries().namedQueryIds().isEmpty());
                 assertThrows(InvalidRequestException.class, () -> isolated.getNamedQuery(get -> get.namedQueryId(id)));
                 assertThrows(InvalidRequestException.class, () -> isolated.updateNamedQuery(update -> update
@@ -179,7 +195,7 @@ class AthenaNamedQueryIntegrationTest {
                 isolated.deleteNamedQuery(delete -> delete.namedQueryId(id));
                 assertNotEquals(id, isolated.createNamedQuery(request).namedQueryId());
             }
-        }
+        });
         assertEquals("isolated", client.getNamedQuery(get -> get.namedQueryId(id)).namedQuery().name());
     }
 
@@ -188,13 +204,12 @@ class AthenaNamedQueryIntegrationTest {
         create("primary");
         create("primary");
         String token = client.listNamedQueries(request -> request.maxResults(1)).nextToken();
-        try (AthenaClient anotherAccount = AwsTestClients.create(AthenaClient.builder(), "741680899998", Region.of(REGION));
-             AthenaClient anotherRegion = AwsTestClients.create(AthenaClient.builder(), account, Region.US_WEST_2)) {
-            for (AthenaClient isolated : List.of(anotherAccount, anotherRegion)) {
+        withIsolatedClients(clients -> {
+            for (AthenaClient isolated : clients) {
                 assertThrows(InvalidRequestException.class,
                         () -> isolated.listNamedQueries(request -> request.nextToken(token)));
             }
-        }
+        });
         assertThrows(InvalidRequestException.class,
                 () -> client.listQueryExecutions(request -> request.nextToken(token)));
     }
@@ -204,6 +219,11 @@ class AthenaNamedQueryIntegrationTest {
         assertThrows(InvalidRequestException.class, () -> create("missing"));
         assertThrows(InvalidRequestException.class,
                 () -> client.listNamedQueries(request -> request.workGroup("missing")));
+    }
+
+    @Test
+    void unknownActionsStillReturnInvalidAction() {
+        rawRequest("UnknownAction", "{}").statusCode(400).body("__type", equalTo("InvalidAction"));
     }
 
     @Test
@@ -247,11 +267,9 @@ class AthenaNamedQueryIntegrationTest {
     void recursiveDeletionIsIsolatedByAccountAndRegion() {
         client.createWorkGroup(request -> request.name("scoped"));
         String removed = create("scoped");
-        try (AthenaClient anotherAccount = AwsTestClients.create(AthenaClient.builder(), "741680899997", Region.of(REGION));
-             AthenaClient anotherRegion = AwsTestClients.create(AthenaClient.builder(), account, Region.US_WEST_2)) {
+        withIsolatedClients(isolatedClients -> {
             CreateNamedQueryRequest original = CreateNamedQueryRequest.builder().name("saved").database("db")
                     .queryString("select 1").workGroup("scoped").clientRequestToken(UUID.randomUUID().toString()).build();
-            List<AthenaClient> isolatedClients = List.of(anotherAccount, anotherRegion);
             List<String> preserved = new ArrayList<>();
             for (AthenaClient isolated : isolatedClients) {
                 isolated.createWorkGroup(request -> request.name("scoped"));
@@ -267,7 +285,7 @@ class AthenaNamedQueryIntegrationTest {
                 assertEquals(id, isolated.getNamedQuery(request -> request.namedQueryId(id)).namedQuery().namedQueryId());
                 assertEquals(id, isolated.createNamedQuery(original).namedQueryId());
             }
-        }
+        });
     }
 
     @Test
@@ -340,10 +358,22 @@ class AthenaNamedQueryIntegrationTest {
     }
 
     private void invalidRequest(String action, String body) {
-        given().header("X-Amz-Target", "AmazonAthena." + action)
+        rawRequest(action, body).statusCode(400).body("__type", equalTo("InvalidRequestException"));
+    }
+
+    private ValidatableResponse rawRequest(String action, String body) {
+        return given().header("X-Amz-Target", "AmazonAthena." + action)
                 .header("Authorization", "AWS4-HMAC-SHA256 Credential=" + account + "/20261111/" + REGION
                         + "/athena/aws4_request, SignedHeaders=host, Signature=test")
                 .contentType("application/x-amz-json-1.1").body(body)
-                .when().post("/").then().statusCode(400).body("__type", equalTo("InvalidRequestException"));
+                .when().post("/").then();
+    }
+
+    private void withIsolatedClients(Consumer<List<AthenaClient>> assertions) {
+        try (AthenaClient anotherAccount = AwsTestClients.create(AthenaClient.builder(),
+                Long.toString(ACCOUNTS.incrementAndGet()), Region.of(REGION));
+             AthenaClient anotherRegion = AwsTestClients.create(AthenaClient.builder(), account, Region.US_WEST_2)) {
+            assertions.accept(List.of(anotherAccount, anotherRegion));
+        }
     }
 }

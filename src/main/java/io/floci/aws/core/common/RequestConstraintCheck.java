@@ -66,6 +66,11 @@ public final class RequestConstraintCheck {
         return new RequestConstraintCheck(model, messages);
     }
 
+    /** Whether the vendored model declares an input for {@code operation}. */
+    public boolean hasOperation(String operation) {
+        return model.path("operations").has(operation);
+    }
+
     /** Checks {@code request}, the body of {@code operation}, against the operation's input shape. */
     public void check(String operation, JsonNode request) {
         checkValue(model.path("operations").path(operation).asText(), request, operation);

@@ -38,33 +38,28 @@ public class AthenaJsonHandler {
     }
 
     public Response handle(String action, JsonNode request, String region) throws Exception {
+        AthenaRequestShapes.check(action, request);
         return switch (action) {
             case "CreateNamedQuery" -> {
-                String id = namedQueryService.createNamedQuery(region, namedQueryText(request, "Name"),
-                        namedQueryText(request, "Database"), namedQueryText(request, "QueryString"),
-                        namedQueryText(request, "Description"), namedQueryText(request, "WorkGroup"),
-                        namedQueryText(request, "ClientRequestToken"));
+                String id = namedQueryService.createNamedQuery(region, text(request, "Name"),
+                        text(request, "Database"), text(request, "QueryString"),
+                        text(request, "Description"), text(request, "WorkGroup"),
+                        text(request, "ClientRequestToken"));
                 yield Response.ok(Map.of("NamedQueryId", id)).build();
             }
             case "GetNamedQuery" -> Response.ok(Map.of("NamedQuery",
-                    namedQueryService.getNamedQuery(region, namedQueryText(request, "NamedQueryId")))).build();
+                    namedQueryService.getNamedQuery(region, text(request, "NamedQueryId")))).build();
             case "BatchGetNamedQuery" -> {
                 JsonNode ids = request.get("NamedQueryIds");
-                if (ids == null || !ids.isArray()) {
-                    throw new AwsException("InvalidRequestException", "NamedQueryIds must be an array.", 400);
-                }
                 List<String> queryIds = new ArrayList<>();
                 for (JsonNode id : ids) {
-                    if (!id.isTextual()) {
-                        throw new AwsException("InvalidRequestException", "NamedQueryIds must contain strings.", 400);
-                    }
                     queryIds.add(id.textValue());
                 }
                 yield Response.ok(namedQueryService.batchGetNamedQuery(region, queryIds)).build();
             }
             case "ListNamedQueries" -> {
                 PaginatedResult<NamedQuery> page = namedQueryService.listNamedQueries(region,
-                        namedQueryText(request, "WorkGroup"),
+                        text(request, "WorkGroup"),
                         Pagination.parseMaxResults(request, "MaxResults", "InvalidRequestException"),
                         Pagination.parseNextToken(request, "NextToken", "InvalidRequestException"));
                 Map<String, Object> response = new LinkedHashMap<>();
@@ -75,13 +70,13 @@ public class AthenaJsonHandler {
                 yield Response.ok(response).build();
             }
             case "UpdateNamedQuery" -> {
-                namedQueryService.updateNamedQuery(region, namedQueryText(request, "NamedQueryId"),
-                        namedQueryText(request, "Name"), namedQueryText(request, "QueryString"),
-                        namedQueryText(request, "Description"));
+                namedQueryService.updateNamedQuery(region, text(request, "NamedQueryId"),
+                        text(request, "Name"), text(request, "QueryString"),
+                        text(request, "Description"));
                 yield Response.ok().build();
             }
             case "DeleteNamedQuery" -> {
-                namedQueryService.deleteNamedQuery(region, namedQueryText(request, "NamedQueryId"));
+                namedQueryService.deleteNamedQuery(region, text(request, "NamedQueryId"));
                 yield Response.ok().build();
             }
             case "StartQueryExecution" -> {
@@ -222,24 +217,12 @@ public class AthenaJsonHandler {
                 yield Response.ok(Map.of("Tags", athenaService.listTagsForResource(resourceArn))).build();
             }
             case "DeleteWorkGroup" -> {
-                String wg = namedQueryText(request, "WorkGroup");
-                JsonNode recursive = request.get("RecursiveDeleteOption");
-                if (recursive != null && !recursive.isNull() && !recursive.isBoolean()) {
-                    throw new AwsException("InvalidRequestException", "RecursiveDeleteOption must be a boolean.", 400);
-                }
-                namedQueryService.deleteWorkGroup(region, wg, recursive != null && recursive.asBoolean());
+                String wg = text(request, "WorkGroup");
+                namedQueryService.deleteWorkGroup(region, wg, request.path("RecursiveDeleteOption").asBoolean(false));
                 yield Response.ok(Map.of()).build();
             }
             default -> throw new AwsException("InvalidAction", "Action " + action + " is not supported", 400);
         };
-    }
-
-    private static String namedQueryText(JsonNode request, String field) {
-        JsonNode node = request.get(field);
-        if (node != null && !node.isNull() && !node.isTextual()) {
-            throw new AwsException("InvalidRequestException", field + " must be a string.", 400);
-        }
-        return text(request, field);
     }
 
     private static String text(JsonNode request, String field) {

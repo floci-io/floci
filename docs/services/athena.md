@@ -41,11 +41,17 @@ Floci emulates Amazon Athena with **real SQL execution** powered by a [floci-duc
 
 Named queries store SQL text without executing it or requiring the database to
 exist. `CreateNamedQuery` defaults to the `primary` workgroup; a named workgroup
-must already exist. The AWS SDK and CLI supply `ClientRequestToken` automatically;
-raw requests must provide 32 to 128 characters. Retrying the same token returns
+must already exist. `ClientRequestToken` is optional; requests without a token
+create a new query each time. The AWS SDK and CLI supply a token automatically.
+When supplied, it must contain 32 to 128 characters. Retrying the same token returns
 the original ID, while changing its creation parameters returns
 `InvalidRequestException`. Saved queries and retry requests use Athena's configured
 storage mode and are isolated by account and region.
+
+Every request is checked by `RequestConstraintCheck` against the types, required
+members, bounds, patterns and enums generated from botocore's Athena service model.
+`tools/aws/regen_athena_shapes.py` vendors every operation's input constraints;
+`make aws-data-sync` regenerates them and `make aws-data-check` checks for drift.
 
 `UpdateNamedQuery` changes the name, SQL text, and optionally the description;
 the database and workgroup stay fixed. Omitting the description preserves it,
@@ -70,8 +76,9 @@ return `InvalidRequestException`.
 `ListDataCatalogs` accepts `MaxResults` from 2 to 50. Floci uses 50 when it is
 omitted, since the API reference does not document a default. The built-in
 `AwsDataCatalog` stays first, followed by registered catalogs in name order.
-`GetDataCatalog`, `ListDatabases`, `ListTableMetadata` and `GetTableMetadata`
-read `AwsDataCatalog` when the request names no catalog or a JSON null.
+`GetDataCatalog` requires `Name`; `ListDatabases`, `ListTableMetadata` and
+`GetTableMetadata` require `CatalogName`. Name `AwsDataCatalog` explicitly to
+read the built-in catalog.
 Pass the opaque `NextToken` to continue; final pages omit it. Tokens are scoped
 to the action, caller account, and request region and remain resumable after a
 cursor catalog is deleted. Malformed tokens, tokens outside the 1-to-1024
