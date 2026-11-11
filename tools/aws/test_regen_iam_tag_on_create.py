@@ -238,6 +238,46 @@ def test_an_operation_reads_its_members_for_its_one_tagging_action(corrections):
                                    "tags": [{"member": "Tags[]", "key": "Key", "value": "Value"}]}
 
 
+def test_a_modeled_operation_without_tag_members_derives_no_tags(corrections):
+    models = {"svc": model({"CreateThing": "In"}, {"In": structure(Name="String")})}
+    assert r.entry_for("svc:CreateThing", upstream("svc:TagResource"), models) == {
+        "tagging": ["svc:TagResource"], "notRead": r.NO_TAGS}
+
+
+def test_an_unreadable_client_does_not_hide_a_same_named_operation(corrections):
+    models = {
+        "svc": model({"CreateThing": "In"}, {"In": structure(Name="String")}),
+        "svc-xml": model({"CreateThing": "In"}, {"In": structure(Tags="TagList"), **TAG_SHAPES},
+                         protocol="rest-xml"),
+    }
+    with pytest.raises(ValueError, match="request cannot be read"):
+        r.entry_for("svc:CreateThing", upstream("svc:TagResource"), models)
+
+
+def test_an_opaque_payload_does_not_derive_no_tags(corrections):
+    opaque = model({"CreateThing": "In"}, {"In": structure(Tags="TagList"), **TAG_SHAPES})
+    opaque["shapes"]["In"]["payload"] = "Tags"
+    with pytest.raises(ValueError, match="request cannot be read"):
+        r.entry_for("svc:CreateThing", upstream("svc:TagResource"), {"svc": opaque})
+
+
+def test_an_operation_absent_from_the_pinned_models_derives_not_in_botocore(corrections):
+    models = {"svc": model({"CreateOther": "In"}, {"In": structure(Tags="TagList"), **TAG_SHAPES})}
+    assert r.entry_for("svc:CreateThing", upstream("svc:TagResource"), models) == {
+        "tagging": ["svc:TagResource"], "notRead": r.NOT_IN_BOTOCORE}
+
+
+@pytest.mark.parametrize("operation, client, member", [
+    ("ecs:CreateGateway", "ecs", {"member": "tags[]", "key": "key", "value": "value"}),
+    ("rds:CreateDBCapacityReservation", "rds", {"member": "Tags[Tag]", "key": "Key", "value": "Value"}),
+])
+def test_a_stale_no_tags_verdict_cannot_hide_modeled_request_tags(operation, client, member):
+    data, _ = r.resolve_botocore_data(None)
+    models = r.load_models(data, {client})
+    assert r.entry_for(operation, upstream(f"{client}:TagResource"), models) == {
+        "tagging": [f"{client}:TagResource"], "tags": [member]}
+
+
 def test_several_tagging_actions_must_be_checked_by_hand(corrections):
     with pytest.raises(ValueError, match="BY_HAND"):
         r.entry_for("svc:CreateThing", upstream("svc:TagResource", "svc:TagThing"), SIMPLE)
@@ -246,23 +286,20 @@ def test_several_tagging_actions_must_be_checked_by_hand(corrections):
         "tagging": ["svc:TagResource", "svc:TagThing"], "byHand": "either action"}
 
 
-def test_an_operation_carrying_no_tags_must_say_why(corrections):
-    models = {"svc": model({"CreateThing": "In"}, {"In": structure(Name="String")})}
-    with pytest.raises(ValueError, match="NOT_READ"):
-        r.entry_for("svc:CreateThing", upstream("svc:TagResource"), models)
-    corrections.setattr(r, "NOT_READ", {"svc:CreateThing": "no member of the request carries tags"})
-    assert r.entry_for("svc:CreateThing", upstream("svc:TagResource"), models) == {
-        "tagging": ["svc:TagResource"], "notRead": "no member of the request carries tags"}
-
-
-def test_an_operation_botocore_does_not_have_yet_is_not_read_until_a_bump_brings_it(corrections):
-    corrections.setattr(r, "NOT_READ", {"svc:CreateThing": r.NOT_IN_BOTOCORE})
+def test_an_operation_absent_from_botocore_is_read_after_a_model_bump(corrections):
     before = {"svc": model({"CreateOther": "In"}, {"In": structure(Name="String")})}
     assert r.entry_for("svc:CreateThing", upstream("svc:TagResource"), before) == {
         "tagging": ["svc:TagResource"], "notRead": r.NOT_IN_BOTOCORE}
     bumped = {"svc": model({"CreateThing": "In"}, {"In": structure(Tags="TagList"), **TAG_SHAPES})}
-    with pytest.raises(ValueError, match="take it out of NOT_READ"):
-        r.entry_for("svc:CreateThing", upstream("svc:TagResource"), bumped)
+    assert r.entry_for("svc:CreateThing", upstream("svc:TagResource"), bumped) == {
+        "tagging": ["svc:TagResource"], "tags": [{"member": "Tags[]", "key": "Key", "value": "Value"}]}
+
+
+def test_an_explicit_exception_keeps_its_reason(corrections):
+    corrections.setattr(r, "NOT_READ", {"svc:CreateThing": "tags nested deeper than this file reads"})
+    models = {"svc": model({"CreateThing": "In"}, {"In": structure(Name="String")})}
+    assert r.entry_for("svc:CreateThing", upstream("svc:TagResource"), models) == {
+        "tagging": ["svc:TagResource"], "notRead": "tags nested deeper than this file reads"}
 
 
 def test_an_exclusion_drops_a_member_and_a_query_name_is_added(corrections):
@@ -304,6 +341,15 @@ def test_a_hand_edited_member_does_not_match_botocore(corrections, tmp_path):
     write_models(tmp_path, SIMPLE)
     document = r.build([reference("svc", {"CreateThing": ["svc:TagResource"]})], "test", tmp_path, "botocore test")
     document["operations"]["svc:CreateThing"]["tags"].append({"member": "Other{}"})
+    assert r.validate(document) == []
+    assert len(r.derive(document, tmp_path)) == 1
+
+
+def test_a_stale_not_read_verdict_does_not_match_botocore(corrections, tmp_path):
+    write_models(tmp_path, SIMPLE)
+    document = r.build([reference("svc", {"CreateThing": ["svc:TagResource"]})], "test", tmp_path, "botocore test")
+    document["operations"]["svc:CreateThing"] = {
+        "tagging": ["svc:TagResource"], "notRead": r.NO_TAGS}
     assert r.validate(document) == []
     assert len(r.derive(document, tmp_path)) == 1
 
@@ -423,6 +469,12 @@ def test_the_vendored_file_is_well_formed():
     assert document["resourceArns"]["ec2"]["instance"] == "arn:${Partition}:ec2:${Region}:${Account}:instance/*"
     assert document["resourceArns"]["ec2"]["image"] == "arn:${Partition}:ec2:${Region}::image/*"
     assert operations["budgets:CreateBudget"]["requestTags"] is True
+    assert operations["ecs:CreateGateway"]["tags"] == [
+        {"member": "tags[]", "key": "key", "value": "value"}]
+    assert operations["rds:CreateDBCapacityReservation"]["tags"] == [
+        {"member": "Tags[Tag]", "key": "Key", "value": "Value"}]
+    assert operations["network-firewall:CreateFirewallPolicyV2"]["notRead"] == r.NOT_IN_BOTOCORE
+    assert operations["ec2:RequestSpotFleet"]["notRead"] == r.NOT_READ["ec2:RequestSpotFleet"]
     # The opensearch client's CreateDomain, which the reference does not list, as es's CreateElasticsearchDomain.
     assert document["namespaces"]["es"] == ["es", "opensearch"]
     for operation in ("es:CreateDomain", "es:CreateElasticsearchDomain"):

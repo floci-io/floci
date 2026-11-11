@@ -42,13 +42,14 @@ that need that action, and is marked `requestTags` when that action takes the re
 `CreateElasticsearchDomain` beside `es:AddTags`, as the OpenSearch Service developer guide's policy for
 creating a domain only with a tag grants `es:CreateDomain` and `es:AddTags`. One with no action of its
 name, or no tagging action going with that action, is left out.
-Each of those operations ends up in exactly one of three places, and generation fails on an operation
-that would end up in none:
+Each of those operations ends up in exactly one of three places:
 
 - `tags`: the members it reads.
 - `byHand`: operations Floci checks itself, because they need one of several tagging actions.
   `TagOnCreateMembersTest` holds the two lists to each other.
-- `notRead`: operations whose request carries no tags this table can read, each with its reason.
+- `notRead`: the model has no tag member, the model lacks the operation, or the operation has an
+  explicit exception because its tags are nested deeper than this file reads.
+  A modeled request with an unreadable protocol or opaque payload instead needs an explicit exception.
 
 An operation whose tagging action takes the namespace's `CreateAction` condition key, as EC2's
 `ec2:CreateTags` does, is marked `createAction`, and Floci gives that key the operation's name. One
@@ -69,8 +70,8 @@ The Service Reference is live rather than a pinned dependency, so a fresh genera
 byte-identical. The two gates split along the sources:
 
 - `--check` is offline and needs the pinned botocore. The file must be well-formed, and every
-  operation's members must be exactly what the rule and the corrections give from botocore for the
-  models the file names, so a hand-edited member fails.
+  operation's members and model-derived `notRead` verdict must be exactly what the rule and the
+  corrections give from botocore for the models the file names, so a stale verdict fails.
 - `--verify` is online and stdlib-only. Every operation the file carries must still list the same
   tagging actions, with the same `createAction` and `requestTags`, for the same SDK clients, and
   every resource type in `resourceArns` must still have its ARN. An operation AWS has added
@@ -160,27 +161,12 @@ BY_HAND = {
 }
 
 NO_TAGS = "no member of the request carries tags"
-# For an operation AWS has shipped since the botocore pin. It lasts until a bump brings the operation in, when
-# entry_for refuses it, so that its tags are read.
+# For an operation AWS has shipped since the botocore pin. A bump bringing the operation in
+# replaces this verdict with its tag members (or NO_TAGS).
 NOT_IN_BOTOCORE = "the pinned botocore does not have the operation yet, so its request cannot be read"
-# Operations the reference lists with a tagging action whose request carries no tags this file reads.
+# Operations whose tags need an operation-specific reason instead of the model-derived verdict.
 NOT_READ = {
-    "athena:CreateSystemTableConfiguration": NOT_IN_BOTOCORE,
-    "cloudformation:ExecuteChangeSet": NO_TAGS,
-    "dynamodb:UpdateTable": NO_TAGS,
     "ec2:RequestSpotFleet": "its tags are in spotFleetRequestConfig, deeper than the members this file reads",
-    "ecr:BatchGetImage": NO_TAGS,
-    "ecs:CreateGateway": NO_TAGS,
-    "iam:AcquireRole": NO_TAGS,
-    "rds:CreateDBCapacityReservation": NO_TAGS,
-    "rds:DeleteDBCluster": NO_TAGS,
-    "rds:DeleteDBInstance": NO_TAGS,
-    "rds:DeleteTenantDatabase": NO_TAGS,
-    "network-firewall:CreateFirewallPolicyV2": NO_TAGS,
-    "events:StartReplay": NO_TAGS,
-    "rds:StopDBInstance": NO_TAGS,
-    "sagemaker:CreateClusterExtension": NOT_IN_BOTOCORE,
-    "ssm:StartExecutionPreview": NO_TAGS,
 }
 
 # Members the rule reads that carry no tags the operation attaches, each with why.
@@ -458,11 +444,16 @@ def entry_for(operation: str, upstream: dict, models: dict[str, dict]) -> dict:
         return {**head, "byHand": BY_HAND[operation]}
     name = operation.split(":", 1)[1]
     if operation in NOT_READ:
-        if NOT_READ[operation] == NOT_IN_BOTOCORE and any(name in model["operations"] for model in models.values()):
-            raise ValueError(f"{operation}: the pinned botocore has it now, so take it out of NOT_READ")
         return {**head, "notRead": NOT_READ[operation]}
     if len(upstream["tagging"]) != 1:
         raise ValueError(f"{operation}: needs one of {upstream['tagging']}; check it by hand (BY_HAND)")
+    for client, model in models.items():
+        spec = model["operations"].get(name)
+        if spec is None or "input" not in spec:
+            continue
+        root = model["shapes"][spec["input"]["shape"]]
+        if not readable(model) or root.get("payload") is not None:
+            raise ValueError(f"{operation}: {client} request cannot be read; add an explicit NOT_READ reason")
     members: dict[str, dict] = {}
     for model in models.values():
         for member in tag_members(model, name):
@@ -474,8 +465,8 @@ def entry_for(operation: str, upstream: dict, models: dict[str, dict]) -> dict:
             raise ValueError(f"{operation}: QUERY_MEMBERS names {path}, which its request does not have")
         members[path] = {**members[path], "query": query}
     if not members:
-        raise ValueError(f"{operation}: no request member carries tags; say why it is not read (NOT_READ) "
-                         f"or check it by hand (BY_HAND)")
+        modeled = any(name in model["operations"] for model in models.values())
+        return {**head, "notRead": NO_TAGS if modeled else NOT_IN_BOTOCORE}
     return {**head, "tags": [members[path] for path in sorted(members)]}
 
 
