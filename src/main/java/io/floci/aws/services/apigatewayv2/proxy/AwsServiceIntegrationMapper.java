@@ -37,6 +37,7 @@ public class AwsServiceIntegrationMapper {
     private static final String BODY = "$request.body";
     private static final String STAGE_VARIABLES = "$stageVariables.";
     private static final String CONTEXT = "$context.";
+    private static final ObjectMapper TEMPLATE_READER = new ObjectMapper();
 
     private final ObjectMapper objectMapper;
     private final Configuration jsonPathConfiguration;
@@ -53,8 +54,10 @@ public class AwsServiceIntegrationMapper {
     /**
      * Resolves every parameter value, keeping null for a source that is absent. A JSON parameter
      * whose value is a JSON object is parsed before anything is resolved, and expressions are
-     * resolved only inside its string values, so a request value cannot add or change members.
-     * {@code contextVariables} holds the {@code $context.<name>} values of this request.
+     * resolved only inside its string values, so a request value cannot add or change members. A
+     * JSON parameter that is neither a whole source expression nor a JSON object is an
+     * {@code InvalidParameterValue} error. {@code contextVariables} holds the
+     * {@code $context.<name>} values of this request.
      */
     public Map<String, String> resolveParameters(IntegrationSubtype subtype, Map<String, String> parameters,
                                                  RequestContext ctx, Map<String, String> stageVariables,
@@ -65,23 +68,39 @@ public class AwsServiceIntegrationMapper {
         }
         Sources sources = new Sources(ctx, stageVariables, contextVariables);
         parameters.forEach((name, value) -> {
-            JsonNode template = subtype.isJsonParameter(name) ? jsonTemplate(value) : null;
-            resolved.put(name, template != null
-                    ? resolveLeaves(template, sources).toString()
-                    : resolveValue(value, sources));
+            if (!subtype.isJsonParameter(name) || value == null || isWholeExpression(value)) {
+                resolved.put(name, resolveValue(value, sources));
+                return;
+            }
+            JsonNode template = jsonTemplate(value);
+            if (template == null) {
+                throw new AwsException("InvalidParameterValue",
+                        "Value for parameter " + name + " is invalid. Reason: Must be a JSON object.", 400);
+            }
+            resolved.put(name, resolveLeaves(template, sources).toString());
         });
         return resolved;
+    }
+
+    /**
+     * Whether a JSON parameter value can be mapped: absent, a whole source expression such as
+     * {@code $request.body.attributes} or {@code ${request.body.attributes}}, or a JSON object.
+     */
+    public static boolean isValidJsonParameter(String value) {
+        return value == null || isWholeExpression(value) || jsonTemplate(value) != null;
+    }
+
+    private static boolean isWholeExpression(String value) {
+        return (value.startsWith("$") && !value.startsWith("${"))
+                || EMBEDDED_EXPRESSION.matcher(value).matches();
     }
 
     private record Sources(RequestContext ctx, Map<String, String> stageVariables,
                            Map<String, String> contextVariables) {}
 
-    private JsonNode jsonTemplate(String value) {
-        if (value == null || value.startsWith("$")) {
-            return null;
-        }
+    private static JsonNode jsonTemplate(String value) {
         try {
-            JsonNode node = objectMapper.readTree(value);
+            JsonNode node = TEMPLATE_READER.readTree(value);
             return node != null && node.isObject() ? node : null;
         } catch (JsonProcessingException e) {
             return null;
