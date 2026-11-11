@@ -236,6 +236,126 @@ class KinesisJsonHandlerTest {
     }
 
     @Test
+    void tagResourceRejectsInvalidCharactersWithoutChangingEitherResource() {
+        createStream("test-stream");
+        String consumerArn = service.registerStreamConsumer(STREAM_ARN, "tagged-consumer", REGION)
+                .getConsumerArn();
+        for (String arn : List.of(STREAM_ARN, consumerArn)) {
+            ObjectNode request = MAPPER.createObjectNode().put("ResourceARN", arn);
+            request.putObject("Tags").put("valid", "initial");
+            assertEquals(200, handler.handle("TagResource", request, REGION).getStatus());
+
+            request.set("Tags", MAPPER.createObjectNode().put("bad*key", "value"));
+            AwsException badKey = assertThrows(AwsException.class,
+                    () -> handler.handle("TagResource", request, REGION));
+            assertEquals("InvalidArgumentException", badKey.getErrorCode());
+
+            request.set("Tags", MAPPER.createObjectNode().put("valid", "bad*value"));
+            AwsException badValue = assertThrows(AwsException.class,
+                    () -> handler.handle("TagResource", request, REGION));
+            assertEquals("InvalidArgumentException", badValue.getErrorCode());
+
+            JsonNode tags = responseEntity(handler.handle("ListTagsForResource",
+                    MAPPER.createObjectNode().put("ResourceARN", arn), REGION)).path("Tags");
+            assertEquals(1, tags.size());
+            assertEquals("initial", tagValue(tags, "valid"));
+        }
+    }
+
+    @Test
+    void tagResourceAcceptsDocumentedUnicodeAndSymbols() {
+        createStream("test-stream");
+        String key = "\u00c9quipe_./=+@-:9";
+        String value = "\u7a7a \u767d";
+        ObjectNode request = MAPPER.createObjectNode().put("ResourceARN", STREAM_ARN);
+        request.putObject("Tags").put(key, value);
+        assertEquals(200, handler.handle("TagResource", request, REGION).getStatus());
+        JsonNode tags = responseEntity(handler.handle("ListTagsForResource",
+                MAPPER.createObjectNode().put("ResourceARN", STREAM_ARN), REGION)).path("Tags");
+        assertEquals(value, tagValue(tags, key));
+    }
+
+    @Test
+    void tagResourceRejectsReservedTagKeyPrefix() {
+        createStream("test-stream");
+        String consumerArn = service.registerStreamConsumer(STREAM_ARN, "tagged-consumer", REGION)
+                .getConsumerArn();
+        for (String arn : List.of(STREAM_ARN, consumerArn)) {
+            ObjectNode request = MAPPER.createObjectNode().put("ResourceARN", arn);
+            request.putObject("Tags").put("AWS:owner", "user");
+            AwsException reserved = assertThrows(AwsException.class,
+                    () -> handler.handle("TagResource", request, REGION));
+            assertEquals("InvalidArgumentException", reserved.getErrorCode());
+            assertEquals(0, responseEntity(handler.handle("ListTagsForResource",
+                    MAPPER.createObjectNode().put("ResourceARN", arn), REGION)).path("Tags").size());
+        }
+    }
+
+    @Test
+    void tagResourceUpdatesLegacyStreamBeyondCapacityWithoutAddingKeys() {
+        createStream("test-stream");
+        ObjectNode add = MAPPER.createObjectNode().put("StreamName", "test-stream");
+        ObjectNode legacyTags = add.putObject("Tags");
+        for (int i = 0; i < 51; i++) {
+            legacyTags.put("key" + i, "old");
+        }
+        assertEquals(200, handler.handle("AddTagsToStream", add, REGION).getStatus());
+
+        ObjectNode request = MAPPER.createObjectNode().put("ResourceARN", STREAM_ARN);
+        request.putObject("Tags").put("key0", "updated");
+        assertEquals(200, handler.handle("TagResource", request, REGION).getStatus());
+
+        request.set("Tags", MAPPER.createObjectNode().put("key1", "would-change").put("new", "value"));
+        AwsException overLimit = assertThrows(AwsException.class,
+                () -> handler.handle("TagResource", request, REGION));
+        assertEquals("LimitExceededException", overLimit.getErrorCode());
+        JsonNode tags = responseEntity(handler.handle("ListTagsForResource",
+                MAPPER.createObjectNode().put("ResourceARN", STREAM_ARN), REGION)).path("Tags");
+        assertEquals(51, tags.size());
+        assertEquals("updated", tagValue(tags, "key0"));
+        assertEquals("old", tagValue(tags, "key1"));
+    }
+
+    @Test
+    void registerStreamConsumerRejectsExplicitlyEmptyTags() {
+        createStream("test-stream");
+        ObjectNode request = MAPPER.createObjectNode()
+                .put("StreamARN", STREAM_ARN)
+                .put("ConsumerName", "tagged-consumer");
+        request.putObject("Tags");
+        AwsException empty = assertThrows(AwsException.class,
+                () -> handler.handle("RegisterStreamConsumer", request, REGION));
+        assertEquals("InvalidArgumentException", empty.getErrorCode());
+        assertTrue(service.listStreamConsumers(STREAM_ARN, REGION).isEmpty());
+    }
+
+    @Test
+    void invalidRegistrationTagCharactersDoNotCreateConsumer() {
+        createStream("test-stream");
+        ObjectNode request = MAPPER.createObjectNode()
+                .put("StreamARN", STREAM_ARN)
+                .put("ConsumerName", "tagged-consumer");
+        request.putObject("Tags").put("bad*key", "value");
+        AwsException badKey = assertThrows(AwsException.class,
+                () -> handler.handle("RegisterStreamConsumer", request, REGION));
+        assertEquals("InvalidArgumentException", badKey.getErrorCode());
+        assertTrue(service.listStreamConsumers(STREAM_ARN, REGION).isEmpty());
+    }
+
+    @Test
+    void registrationRejectsReservedTagKeyPrefix() {
+        createStream("test-stream");
+        ObjectNode request = MAPPER.createObjectNode()
+                .put("StreamARN", STREAM_ARN)
+                .put("ConsumerName", "tagged-consumer");
+        request.putObject("Tags").put("aws:owner", "user");
+        AwsException reserved = assertThrows(AwsException.class,
+                () -> handler.handle("RegisterStreamConsumer", request, REGION));
+        assertEquals("InvalidArgumentException", reserved.getErrorCode());
+        assertTrue(service.listStreamConsumers(STREAM_ARN, REGION).isEmpty());
+    }
+
+    @Test
     void invalidRegistrationTagsDoNotCreateConsumer() {
         createStream("test-stream");
         ObjectNode request = MAPPER.createObjectNode()

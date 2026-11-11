@@ -55,6 +55,8 @@ public class KinesisService implements ResourceProvider {
     private static final int MAX_RECORD_SIZE_KIB = 10240;
     private static final int MAX_RECORDS_PER_REQUEST = 500;
     private static final int MAX_REQUEST_SIZE_BYTES = 10 * 1024 * 1024;
+    private static final Pattern VALID_RESOURCE_TAG_CHARACTERS =
+            Pattern.compile("[\\p{L}\\p{Nd}\\s_.:/=+@-]*", Pattern.UNICODE_CHARACTER_CLASS);
     /**
      * UpdateShardCount's documented default limits: the per-account/region shard-per-stream
      * ceiling, and how many scaling calls a stream may take in a rolling 24-hour window.
@@ -379,13 +381,16 @@ public class KinesisService implements ResourceProvider {
     private void validateResourceTagLimit(Map<String, String> current, Map<String, String> added) {
         for (Map.Entry<String, String> entry : added.entrySet()) {
             if (entry.getKey() == null || entry.getKey().isEmpty() || entry.getKey().length() > 128
-                    || entry.getValue() == null || entry.getValue().length() > 256) {
+                    || !VALID_RESOURCE_TAG_CHARACTERS.matcher(entry.getKey()).matches()
+                    || entry.getKey().regionMatches(true, 0, "aws:", 0, 4)
+                    || entry.getValue() == null || entry.getValue().length() > 256
+                    || !VALID_RESOURCE_TAG_CHARACTERS.matcher(entry.getValue()).matches()) {
                 throw new AwsException("InvalidArgumentException", "Invalid tag key or value", 400);
             }
         }
         Set<String> keys = new HashSet<>(current.keySet());
         keys.addAll(added.keySet());
-        if (keys.size() > 50) {
+        if (keys.size() > 50 && added.keySet().stream().anyMatch(key -> !current.containsKey(key))) {
             throw new AwsException("LimitExceededException", "A Kinesis resource can have at most 50 tags", 400);
         }
     }
