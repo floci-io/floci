@@ -1614,54 +1614,29 @@ public class DynamoDbService {
                     .toList();
         }
 
-        // Sort by the full (possibly composite) sort key, comparing each attribute in key-schema
-        // order. Using only the first sort-key attribute would ignore the remaining components
-        // (e.g. a "requestStateQuery RANGE, createdAt RANGE" index would never order by createdAt),
-        // which in turn breaks ScanIndexForward=false. See floci-io/floci#1675.
-        if (!sortKeyNames.isEmpty()) {
-            List<String> finalSortKeyNames = sortKeyNames;
-            results = new ArrayList<>(results);
-            results.sort((a, b) -> {
-                for (String name : finalSortKeyNames) {
-                    JsonNode aAttr = a.get(name);
-                    JsonNode bAttr = b.get(name);
-                    int cmp;
-                    if (aAttr == null && bAttr == null) cmp = 0;
-                    else if (aAttr == null) cmp = -1;
-                    else if (bAttr == null) cmp = 1;
-                    else cmp = ExpressionEvaluator.compareAttributeValues(aAttr, bAttr);
-                    if (cmp != 0) return cmp;
-                }
-                return 0;
-            });
-            if (Boolean.FALSE.equals(scanIndexForward)) {
-                Collections.reverse(results);
+        // Order by the full (possibly composite) sort key, comparing each attribute in key-schema
+        // order (floci-io/floci#1675), then, on an index, by the table key, which is what
+        // tells apart items whose index keys tie.
+        List<String> orderKeyNames = new ArrayList<>(sortKeyNames);
+        if (accessPath.isIndex()) {
+            orderKeyNames.add(table.getPartitionKeyName());
+            if (table.getSortKeyName() != null) {
+                orderKeyNames.add(table.getSortKeyName());
             }
         }
+        Comparator<JsonNode> keyOrder = (a, b) -> compareKeyAttributes(a, b, orderKeyNames);
+        int direction = Boolean.FALSE.equals(scanIndexForward) ? -1 : 1;
+        if (!orderKeyNames.isEmpty()) {
+            results = new ArrayList<>(results);
+            results.sort((a, b) -> direction * keyOrder.compare(a, b));
+        }
 
-        // Apply ExclusiveStartKey offset
+        // ExclusiveStartKey is a position in key order, not a pointer to an item, so the
+        // query resumes after it even when no item has that key any more.
         if (exclusiveStartKey != null) {
-            String tablePkName = table.getPartitionKeyName();
-            String tableSkName = table.getSortKeyName();
-            boolean hasTableKeys = exclusiveStartKey.has(tablePkName);
-
-            String startItemKey = hasTableKeys
-                    ? buildItemKeyFromNode(exclusiveStartKey, tablePkName, tableSkName)
-                    : buildItemKeyFromNode(exclusiveStartKey, pkName, sortKeyNames);
-
-            int startIdx = -1;
-            for (int i = 0; i < results.size(); i++) {
-                String thisKey = hasTableKeys
-                        ? buildItemKeyFromNode(results.get(i), tablePkName, tableSkName)
-                        : buildItemKeyFromNode(results.get(i), pkName, sortKeyNames);
-                if (thisKey.equals(startItemKey)) {
-                    startIdx = i;
-                    break;
-                }
-            }
-            if (startIdx >= 0) {
-                results = new ArrayList<>(results.subList(startIdx + 1, results.size()));
-            }
+            results = results.stream()
+                    .filter(item -> direction * keyOrder.compare(item, exclusiveStartKey) > 0)
+                    .toList();
         }
 
         List<JsonNode> evaluatedItems = results;
@@ -5002,6 +4977,27 @@ public class DynamoDbService {
             }
             default -> true;
         };
+    }
+
+    private static int compareKeyAttributes(JsonNode a, JsonNode b, List<String> keyNames) {
+        for (String name : keyNames) {
+            JsonNode aAttr = a.get(name);
+            JsonNode bAttr = b.get(name);
+            int cmp;
+            if (aAttr == null && bAttr == null) {
+                cmp = 0;
+            } else if (aAttr == null) {
+                cmp = -1;
+            } else if (bAttr == null) {
+                cmp = 1;
+            } else {
+                cmp = ExpressionEvaluator.compareAttributeValues(aAttr, bAttr);
+            }
+            if (cmp != 0) {
+                return cmp;
+            }
+        }
+        return 0;
     }
 
     private void validateExclusiveStartKeyWithinQuery(JsonNode exclusiveStartKey, TableDefinition table,
