@@ -96,7 +96,7 @@ public class ResourceArnBuilder {
     private static final Set<String> SSM_TEXT_NAME_OPERATIONS = Set.of("PutParameter", "GetParameter",
             "DeleteParameter", "GetParameterHistory", "LabelParameterVersion");
     /** The SSM actions whose handler strips surrounding whitespace from {@code Name} before acting on it. */
-    private static final Set<String> SSM_STRIPPED_NAME_OPERATIONS = Set.of("UnlabelParameterVersion");
+    private static final Set<String> SSM_STRIPPED_NAME_OPERATIONS = Set.of("PutParameter", "UnlabelParameterVersion");
 
     private final ObjectMapper objectMapper;
     /**
