@@ -33,7 +33,7 @@ class EmrTerminatedCapacityIntegrationTest {
             + "\"HadoopJarStep\":{\"Jar\":\"command-runner.jar\"}}";
     private static final String GROUP_REFUSAL =
             "An instance group may only be modified when the cluster is running or waiting.";
-    private static final String FLEET_REFUSAL =
+    private static final String SHUT_DOWN =
             "A job flow that is shutting down, terminated, or finished may not be modified.";
 
     @BeforeAll
@@ -98,7 +98,9 @@ class EmrTerminatedCapacityIntegrationTest {
         assertCannotModifyGroup(id, true);
         emr("AddInstanceGroups", "{\"JobFlowId\":\"" + id + "\",\"InstanceGroups\":["
                 + "{\"InstanceRole\":\"TASK\",\"InstanceType\":\"m5.xlarge\",\"InstanceCount\":1}]}")
-                .then().statusCode(400).body("__type", equalTo("InvalidRequestException"));
+                .then().statusCode(400)
+                .body("__type", equalTo("ValidationException"))
+                .body("message", equalTo(SHUT_DOWN));
         assertTerminatedGroup(id);
     }
 
@@ -119,7 +121,10 @@ class EmrTerminatedCapacityIntegrationTest {
         emr("AddInstanceFleet", "{\"ClusterId\":\"" + id + "\",\"InstanceFleet\":{"
                 + "\"InstanceFleetType\":\"TASK\",\"TargetOnDemandCapacity\":1,"
                 + "\"InstanceTypeConfigs\":[{\"InstanceType\":\"m5.xlarge\"}]}}")
-                .then().statusCode(400).body("__type", equalTo("InvalidRequestException"));
+                .then().statusCode(400)
+                .body("__type", equalTo("InvalidRequestException"))
+                .body("message", equalTo(SHUT_DOWN))
+                .body("ErrorCode", equalTo("INVALID_JOB_SHUT_DOWN"));
         assertTerminatedFleet(id);
     }
 
@@ -191,7 +196,7 @@ class EmrTerminatedCapacityIntegrationTest {
                 + "\"InstanceFleetId\":\"" + fleetId + "\",\"TargetOnDemandCapacity\":4}}")
                 .then().statusCode(400)
                 .body("__type", equalTo("InvalidRequestException"))
-                .body("message", equalTo(FLEET_REFUSAL))
+                .body("message", equalTo(SHUT_DOWN))
                 .body("ErrorCode", equalTo("INVALID_JOB_SHUT_DOWN"));
         assertTerminatedFleet(id);
     }

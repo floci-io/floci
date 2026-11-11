@@ -3,6 +3,7 @@ package io.floci.aws.services.emr;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.floci.aws.config.EmulatorConfig;
+import io.floci.aws.core.common.AwsException;
 import io.floci.aws.core.common.ContainerTeardown;
 import io.floci.aws.core.common.RegionResolver;
 import io.floci.aws.services.emr.model.EmrCluster;
@@ -34,6 +35,7 @@ import static io.floci.aws.services.emr.EmrServiceFixture.cluster;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.RETURNS_DEEP_STUBS;
@@ -215,6 +217,24 @@ class EmrServiceContainerStepsTest {
                 event.path("stateChangeReason").asText());
         assertEquals("Amazon EMR Cluster " + cluster.getId() + " (doomed) has terminated with errors at"
                 + " 2026-01-01 00:00 UTC with a reason of STEP_FAILURE.", event.path("message").asText());
+    }
+
+    @Test
+    void aClusterEndedWithErrorsRefusesChangesAndTagChanges() {
+        String id = service.runJobFlow(cluster("doomed", true, sparkStep("breaks", "TERMINATE_CLUSTER")), REGION)
+                .getId();
+        runner.outcome = SparkJobRunner.Outcome.exitedWith(1);
+        fixture.runStepThread();
+
+        AwsException modifying = assertThrows(AwsException.class, () -> service.modifyCluster(id, 2));
+        AwsException protecting = assertThrows(AwsException.class,
+                () -> service.setTerminationProtection(List.of(id), true));
+        AwsException tagging = assertThrows(AwsException.class, () -> service.addTags(id, Map.of("team", "data")));
+
+        assertEquals("TERMINATED_WITH_ERRORS", service.describeCluster(id).getState());
+        assertEquals(Map.of("ErrorCode", "INVALID_JOB_SHUT_DOWN"), modifying.getExtendedData());
+        assertEquals("ValidationException", protecting.getErrorCode());
+        assertEquals("Tags cannot be modified on terminated clusters.", tagging.getMessage());
     }
 
     @Test
