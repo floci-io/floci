@@ -793,9 +793,66 @@ accepts only one `PermissionsBoundaryPolicyInputList` document, matching AWS's o
 limit; extra documents beyond the first are ignored. Neither simulation action evaluates a
 resource-based policy (`ResourcePolicy`) or `OrderedOrganizationPolicyInputList`, and neither
 returns `MatchedStatements`, `ResourceSpecificResults`, or a `PermissionsBoundaryDecisionDetail`:
-only the top-level `EvalDecision` is populated. `ContextEntries.member.N.ContextKeyType` is
-accepted but not read; the comparison is driven entirely by the policy's own condition operator
-(`Bool`, `NumericEquals`, `DateEquals`, and so on), not by the declared type.
+only the top-level `EvalDecision` is populated. `SimulatePrincipalPolicy` reads neither
+`PolicyInputList` nor `PermissionsBoundaryPolicyInputList`, so a document passed in either one does
+not enter that simulation, and `ResourceHandlingOption` is accepted and read by neither action, so
+none of the EC2 scenarios it names has its required resources enforced.
+`ContextEntries.member.N.ContextKeyType` is accepted but not read; the comparison is driven
+entirely by the policy's own condition operator (`Bool`, `NumericEquals`, `DateEquals`, and so on),
+not by the declared type.
+
+`PolicyExclusionList` on `SimulatePrincipalPolicy` is read. The member asks "what the simulation
+result would be if a policy were removed, without changing which policies are actually attached to
+the principal identified by PolicySourceArn", so an identifier it carries drops a policy from the
+set this one simulation evaluates and from nothing else: the attachment, the listings and every
+other answer are untouched. Each entry is a `PolicyIdentifier`, which the reference marks a union,
+"Specify exactly one of PolicyType, PolicyArn, or InlinePolicyIdentifier", and the member states
+both answers an entry gets: "Syntactically invalid identifiers, such as malformed ARNs or wildcards
+in disallowed positions, cause the request to fail with an InvalidInput error. Syntactically valid
+identifiers that don't match any attached policy are ignored."
+
+The constraints ahead of the operation hold each member of an entry to the shape the model declares
+for it, the type to its value set and the inline identifier to its three required members, so an
+unknown `PolicyType` is a 400 `ValidationError` naming `policyExclusionList.1.member.policyType`
+rather than an identifier that reaches the exclusion at all. What the vendored data does not carry
+is the union marker, so the rule that an entry names exactly one of the three is held where the
+entry is read, with the `InvalidInput` the member asks for. A `PolicyArn` that clears `arnType`'s 20
+characters and still parses as no ARN is refused with "The ARN <value> is not a valid ARN.",
+the wording this package already answers a malformed ARN with, and so is one that leaves out a
+field every ARN carries, its partition, its service or its resource; the region and the account are
+not among those, an AWS managed policy carrying no region, so a field left empty there is an
+identifier that matches no policy rather than a malformed one. Wildcards are admitted only where
+the member admits them, "in the resource name portion of the ARN", with "at most one `*`" and "any
+number of `?`", so one written in the partition, service, region or account field is refused, as is
+a second `*`, and so is one written in the resource type an ARN carries ahead of the resource name:
+a `poli?y/reader` reads like the `policy/reader` it would reach, and matching it would leave a
+policy out of the simulation on an identifier the member refuses. Neither of those two messages is
+published, so both are this emulator's own reading of what to say. A match is then made a field at
+a time, which is what keeps a `*` written in the resource name from reaching across into the
+account.
+
+`PolicyType` reads as the part a policy plays in the evaluation rather than the kind of document it
+is, which is what keeps `permission-boundary` in a value set beside `user-managed`: a boundary is
+itself a customer managed policy, so a type meaning the kind would match it twice and leave
+`permission-boundary` standing for nothing. `inline`, `aws-managed` and `user-managed` therefore
+reach the identity policies, and `permission-boundary` reaches the boundary alone. `scp` matches
+nothing, this simulation carrying no SCP ceiling, which is deliberate and recorded under [Service
+Control Policies](#service-control-policies-scps) below, and `rcp` matches nothing because the
+member says so: "not supported in this release; identifiers that target RCPs are also ignored". An
+ARN names the policy itself, so it reaches that policy in whatever part it plays, the boundary
+included. The account-level grant an account password policy carries is reached by nothing at all:
+it is attached to no entity, where the member names the policies "actually attached to the
+principal", so a simulation that leaves out every part still carries the grant.
+
+`AttachmentName` is published two ways at once. Its own entry documents wildcards, "use at most one
+`*` ... and any number of `?`", and declares the pattern `[\w+=,.@-]+`, which admits neither
+character, while `InlinePolicyIdentifierType` says in prose that wildcard characters in the entity
+name "can match multiple entities". The declared pattern is what a caller is held to here, so a
+wildcard there is a 400 `ValidationError` on the pattern rather than an identifier matching several
+entities, and an inline identifier matches the exact names its entry carries. That is a deliberate
+divergence from the member's prose rather than a reading of what AWS accepts: nothing recorded shows
+which half of its own entry AWS's validation layer runs, and the pattern is vendored from the model
+rather than written by hand, so a recording either way moves it in the generated data.
 
 ### Last-Accessed Reporting
 

@@ -5756,7 +5756,16 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
     }
 
     public CallerContext resolvePrincipalContext(String principalArn) {
-        return principalContext(principalArn, true);
+        return principalContext(principalArn, true, PolicyExclusions.NONE);
+    }
+
+    /**
+     * The same context with a simulation's {@code PolicyExclusionList} applied, which is what
+     * {@code SimulatePrincipalPolicy} evaluates: the policies the principal holds less the ones the
+     * request asked to leave out, and its permissions boundary unless that was left out too.
+     */
+    public CallerContext resolvePrincipalContext(String principalArn, PolicyExclusions exclusions) {
+        return principalContext(principalArn, true, exclusions);
     }
 
     /**
@@ -5768,10 +5777,11 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
      * does, and stays on {@link #resolvePrincipalContext}.
      */
     public CallerContext resolveAttachedPrincipalContext(String principalArn) {
-        return principalContext(principalArn, false);
+        return principalContext(principalArn, false, PolicyExclusions.NONE);
     }
 
-    private CallerContext principalContext(String principalArn, boolean withAccountGrants) {
+    private CallerContext principalContext(String principalArn, boolean withAccountGrants,
+                                           PolicyExclusions exclusions) {
         if (principalArn == null || principalArn.isBlank()) {
             throw new AwsException("ValidationError", "PolicySourceArn is required.", 400);
         }
@@ -5785,38 +5795,50 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
         if (principalArn.contains(":user/")) {
             String userName = principalArn.substring(principalArn.lastIndexOf('/') + 1);
             List<String> identityPolicies = withAccountGrants
-                    ? userIdentityPolicies(principalArn)
-                    : collectUserPolicies(principalArn);
+                    ? userIdentityPolicies(principalArn, exclusions)
+                    : collectUserPolicies(principalArn, exclusions);
             if (identityPolicies == null) {
                 throw new AwsException("NoSuchEntity", "User " + userName + " cannot be found.", 404);
             }
-            return new CallerContext(identityPolicies, null, resolveUserBoundaryDocument(principalArn));
+            return new CallerContext(identityPolicies, null,
+                    resolveUserBoundaryDocument(principalArn, exclusions));
         }
         if (principalArn.contains(":role/")) {
             String roleName = principalArn.substring(principalArn.lastIndexOf('/') + 1);
-            List<String> identityPolicies = collectRolePolicies(principalArn);
+            List<String> identityPolicies = collectRolePolicies(principalArn, exclusions);
             if (identityPolicies == null) {
                 throw new AwsException("NoSuchEntity", "Role " + roleName + " cannot be found.", 404);
             }
-            return new CallerContext(identityPolicies, null, resolveRoleBoundaryDocument(principalArn));
+            return new CallerContext(identityPolicies, null,
+                    resolveRoleBoundaryDocument(principalArn, exclusions));
         }
         throw new AwsException("InvalidInput", "PolicySourceArn must identify an IAM user or role.", 400);
     }
 
     private String resolveUserBoundaryDocument(String userArnOrName) {
+        return resolveUserBoundaryDocument(userArnOrName, PolicyExclusions.NONE);
+    }
+
+    private String resolveUserBoundaryDocument(String userArnOrName, PolicyExclusions exclusions) {
         return userFromArnOrName(userArnOrName)
                 .map(IamUser::getPermissionsBoundaryArn)
+                .filter(boundaryArn -> !exclusions.excludesBoundary(boundaryArn))
                 .flatMap(this::resolvePolicy)
                 .map(IamPolicy::getDefaultDocument)
                 .orElse(null);
     }
 
     private String resolveRoleBoundaryDocument(String roleArn) {
+        return resolveRoleBoundaryDocument(roleArn, PolicyExclusions.NONE);
+    }
+
+    private String resolveRoleBoundaryDocument(String roleArn, PolicyExclusions exclusions) {
         if (roleArn == null) {
             return null;
         }
         return roleFromArnOrName(roleArn)
                 .map(IamRole::getPermissionsBoundaryArn)
+                .filter(boundaryArn -> !exclusions.excludesBoundary(boundaryArn))
                 .flatMap(this::resolvePolicy)
                 .map(IamPolicy::getDefaultDocument)
                 .orElse(null);
@@ -5966,7 +5988,17 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
      * reach adds on top of the attached set.
      */
     private List<String> userIdentityPolicies(String userArnOrName) {
-        List<String> docs = collectUserPolicies(userArnOrName);
+        return userIdentityPolicies(userArnOrName, PolicyExclusions.NONE);
+    }
+
+    /**
+     * The same set with a simulation's exclusions applied to the policies the user holds. The
+     * account-level grant is not one of them: the exclusion list names the policies "actually
+     * attached to the principal" and this grant is attached to nothing, so no identifier reaches
+     * it and a simulation leaving out every attached policy still carries it.
+     */
+    private List<String> userIdentityPolicies(String userArnOrName, PolicyExclusions exclusions) {
+        List<String> docs = collectUserPolicies(userArnOrName, exclusions);
         if (docs == null) {
             return null;
         }
@@ -6029,8 +6061,20 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
         return passwordPolicies.get(ACCOUNT_PASSWORD_POLICY_KEY);
     }
 
-    /** An identity policy as an access denied message names it: a managed one by its ARN, an inline one by none. */
-    public record HeldPolicy(String arn, String document) {}
+    /**
+     * An identity policy as an access denied message names it, a managed one by its ARN and an
+     * inline one by none, and as a simulation's {@code PolicyExclusionList} identifies it: an
+     * inline policy by its own name together with the type and name of the entity it is attached
+     * to, which is the user itself or one of its groups.
+     */
+    public record HeldPolicy(String arn, String document, String policyName,
+                             String attachmentType, String attachmentName) {
+
+        /** Source-compatible constructor for callers predating the exclusion identity. */
+        public HeldPolicy(String arn, String document) {
+            this(arn, document, null, null, null);
+        }
+    }
 
     /** The identity policies of an IAM user or role, in the order they are collected, and its permissions boundary. */
     public record HeldPolicies(List<HeldPolicy> identity, String permissionsBoundaryArn) {}
@@ -6058,33 +6102,56 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
     }
 
     private List<String> collectUserPolicies(String userArnOrName) {
-        return userFromArnOrName(userArnOrName).map(user -> documents(userPolicies(user))).orElse(null);
+        return collectUserPolicies(userArnOrName, PolicyExclusions.NONE);
+    }
+
+    private List<String> collectUserPolicies(String userArnOrName, PolicyExclusions exclusions) {
+        return userFromArnOrName(userArnOrName)
+                .map(user -> documents(exclusions.retained(userPolicies(user))))
+                .orElse(null);
     }
 
     private List<String> collectRolePolicies(String roleArn) {
-        return roleFromArnOrName(roleArn).map(role -> documents(rolePolicies(role))).orElse(null);
+        return collectRolePolicies(roleArn, PolicyExclusions.NONE);
+    }
+
+    private List<String> collectRolePolicies(String roleArn, PolicyExclusions exclusions) {
+        return roleFromArnOrName(roleArn)
+                .map(role -> documents(exclusions.retained(rolePolicies(role))))
+                .orElse(null);
     }
 
     /** The user's inline and managed policies, then each group's. */
     private List<HeldPolicy> userPolicies(IamUser user) {
-        List<HeldPolicy> held = inlineThenManaged(user.getInlinePolicies(), user.getAttachedPolicyArns());
+        List<HeldPolicy> held = inlineThenManaged(user.getInlinePolicies(), user.getAttachedPolicyArns(),
+                "user", user.getUserName());
         for (String groupName : user.getGroupNames()) {
             groups.get(groupName).ifPresent(group ->
-                    held.addAll(inlineThenManaged(group.getInlinePolicies(), group.getAttachedPolicyArns())));
+                    held.addAll(inlineThenManaged(group.getInlinePolicies(), group.getAttachedPolicyArns(),
+                            "group", group.getGroupName())));
         }
         return held;
     }
 
     private List<HeldPolicy> rolePolicies(IamRole role) {
-        return inlineThenManaged(role.getInlinePolicies(), role.getAttachedPolicyArns());
+        return inlineThenManaged(role.getInlinePolicies(), role.getAttachedPolicyArns(),
+                "role", role.getRoleName());
     }
 
-    private List<HeldPolicy> inlineThenManaged(Map<String, String> inline, List<String> attachedArns) {
+    /**
+     * The policies one entity holds, each carrying the entity it came from. The attachment type is
+     * spelled the way {@code AttachmentType} declares its values, {@code user}, {@code group} or
+     * {@code role}, since that is what an exclusion identifier is compared against.
+     */
+    private List<HeldPolicy> inlineThenManaged(Map<String, String> inline, List<String> attachedArns,
+                                               String attachmentType, String attachmentName) {
         List<HeldPolicy> held = new ArrayList<>();
-        inline.values().forEach(document -> held.add(new HeldPolicy(null, document)));
+        inline.forEach((policyName, document) ->
+                held.add(new HeldPolicy(null, document, policyName, attachmentType, attachmentName)));
         for (String arn : attachedArns) {
             resolvePolicy(arn).map(IamPolicy::getDefaultDocument)
-                    .ifPresent(document -> held.add(new HeldPolicy(arn, document)));
+                    .ifPresent(document ->
+                            held.add(new HeldPolicy(arn, document, null, attachmentType, attachmentName)));
         }
         return held;
     }
