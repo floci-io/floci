@@ -3,6 +3,16 @@
 **Protocol:** JSON 1.1 (`X-Amz-Target: AWSCognitoIdentityProviderService.*`)
 **Endpoint:** `POST http://localhost:4566/`
 
+Browser clients can call the Cognito JSON API directly. With an `Origin` header,
+Cognito responses, including errors, carry `Access-Control-Allow-Origin: *` and expose
+the AWS request ID and error headers. A `POST` preflight to `/` requesting `x-amz-target`
+returns 200 and allows the requested headers, including `content-type` and `x-amz-user-agent`.
+Browsers send no target value during preflight, so this preflight is shared with other
+JSON APIs; their actual responses keep their existing CORS policies.
+No extra allowed origin is needed. `FLOCI_SECURITY_DISABLE_CORS_HEADERS=true` or disabling
+the Cognito service turns off this built-in behavior. Configured global CORS preflights
+and service-specific S3 and API Gateway CORS policies retain their existing behavior.
+
 Floci serves pool-specific discovery and JWKS endpoints, plus a relaxed OAuth token endpoint, so local clients can mint and validate Cognito-like access tokens against RS256 signing keys.
 
 When configured, `PreAuthentication`, `PostAuthentication` and `PreTokenGeneration` Lambda triggers
