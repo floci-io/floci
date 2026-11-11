@@ -35,39 +35,42 @@ class EmrSparkStepsTest {
 
         // Options come before the application, so --master after it is the application's own argument.
         assertEquals(List.of("--verbose", "--conf", "spark.executor.cores=2", "--class", "com.example.Report",
-                "s3://bucket/jobs/report.jar", "--master", "kept"), EmrSparkSteps.application(step));
+                "s3://bucket/jobs/report.jar", "--master", "kept"), EmrSparkSteps.application(step, false));
     }
 
     @Test
     void sparkSubmitMayBeNamedByItsPath() {
         assertEquals(List.of("s3://bucket/jobs/report.py"), EmrSparkSteps.application(
-                step("command-runner.jar", null, "/usr/bin/spark-submit", "s3://bucket/jobs/report.py")));
+                step("command-runner.jar", null, "/usr/bin/spark-submit", "s3://bucket/jobs/report.py"), false));
     }
 
     @Test
     void aCustomJarRunsItsMainClassOrElseItsManifests() {
         assertEquals(List.of("--class", "com.example.Report", "s3://bucket/jobs/report.jar", "2026-10-25"),
-                EmrSparkSteps.application(step("s3://bucket/jobs/report.jar", "com.example.Report", "2026-10-25")));
+                EmrSparkSteps.application(step("s3://bucket/jobs/report.jar", "com.example.Report", "2026-10-25"),
+                        false));
         assertEquals(List.of("s3://bucket/jobs/report.jar"),
-                EmrSparkSteps.application(step("s3://bucket/jobs/report.jar", null)));
+                EmrSparkSteps.application(step("s3://bucket/jobs/report.jar", null), false));
     }
 
     @Test
     void aCustomJarAtEmrsStreamingJarPathRunsTheImagesCopy() {
         assertEquals(List.of("/usr/lib/hadoop/hadoop-streaming.jar", "-input", "s3://bucket/in/"),
                 EmrSparkSteps.application(step("/usr/lib/hadoop-mapreduce/hadoop-streaming.jar", null, "-input",
-                        "s3://bucket/in/")));
+                        "s3://bucket/in/"), false));
         assertEquals(List.of("/home/hadoop/hadoop-streaming.jar"),
-                EmrSparkSteps.application(step("/home/hadoop/hadoop-streaming.jar", null)));
+                EmrSparkSteps.application(step("/home/hadoop/hadoop-streaming.jar", null), false));
     }
 
     @Test
     void stepsOtherThanSparkAreNotRun() {
-        assertNull(EmrSparkSteps.application(step("command-runner.jar", null, "hive-script", "--run-hive-script")));
-        assertNull(EmrSparkSteps.application(step("command-runner.jar", null)));
+        assertNull(EmrSparkSteps.application(step("command-runner.jar", null, "hive-script", "--run-hive-script"),
+                false));
+        assertNull(EmrSparkSteps.application(step("command-runner.jar", null), false));
         assertNull(EmrSparkSteps.application(
-                step("s3://us-east-1.elasticmapreduce/libs/script-runner/script-runner.jar", null, "s3://b/x.sh")));
-        assertNull(EmrSparkSteps.application(step(null, null)));
+                step("s3://us-east-1.elasticmapreduce/libs/script-runner/script-runner.jar", null, "s3://b/x.sh"),
+                        false));
+        assertNull(EmrSparkSteps.application(step(null, null), false));
     }
 
     @Test

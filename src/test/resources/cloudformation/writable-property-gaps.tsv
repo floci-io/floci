@@ -157,7 +157,6 @@ AWS::Cognito::UserPoolClient	AuthSessionValidity	accepted and ignored
 AWS::Cognito::UserPoolClient	EnablePropagateAdditionalUserContextData	accepted and ignored
 AWS::Cognito::UserPoolDomain	Routing	accepted and ignored, as the CognitoCfnProvisioner javadoc records
 AWS::Config::ConfigRule	Compliance	accepted and ignored
-AWS::DynamoDB::GlobalTable	BillingMode	accepted and ignored
 AWS::DynamoDB::GlobalTable	GlobalTableSourceArn	accepted and ignored
 AWS::DynamoDB::GlobalTable	GlobalTableWitnesses	accepted and ignored
 AWS::DynamoDB::GlobalTable	MultiRegionConsistency	accepted and ignored
@@ -169,7 +168,6 @@ AWS::DynamoDB::GlobalTable	VectorIndexes	accepted and ignored
 AWS::DynamoDB::GlobalTable	WarmThroughput	accepted and ignored
 AWS::DynamoDB::GlobalTable	WriteOnDemandThroughputSettings	accepted and ignored
 AWS::DynamoDB::GlobalTable	WriteProvisionedThroughputSettings	accepted and ignored
-AWS::DynamoDB::Table	BillingMode	accepted and ignored
 AWS::DynamoDB::Table	ContributorInsightsSpecification	accepted and ignored
 AWS::DynamoDB::Table	DeletionProtectionEnabled	accepted and ignored
 AWS::DynamoDB::Table	ImportSourceSpecification	accepted and ignored
@@ -537,14 +535,12 @@ AWS::RDS::DBInstance	SourceDBInstanceAutomatedBackupsArn	accepted and ignored
 AWS::RDS::DBInstance	SourceDBInstanceIdentifier	accepted and ignored
 AWS::RDS::DBInstance	SourceDbiResourceId	accepted and ignored
 AWS::RDS::DBInstance	SourceRegion	accepted and ignored
-AWS::RDS::DBInstance	StorageEncrypted	accepted and ignored
 AWS::RDS::DBInstance	StorageThroughput	accepted and ignored
 AWS::RDS::DBInstance	StorageType	accepted and ignored
 AWS::RDS::DBInstance	Tags	accepted and ignored
 AWS::RDS::DBInstance	Timezone	accepted and ignored
 AWS::RDS::DBInstance	UseDefaultProcessorFeatures	accepted and ignored
 AWS::RDS::DBInstance	UseLatestRestorableTime	accepted and ignored
-AWS::RDS::DBInstance	VPCSecurityGroups	accepted and ignored
 AWS::RDS::DBParameterGroup	Parameters	accepted and ignored
 AWS::RDS::DBParameterGroup	Tags	accepted and ignored
 AWS::RDS::DBProxyTargetGroup	Tags	accepted and ignored

@@ -3,6 +3,7 @@ package io.floci.aws.core.common;
 import com.fasterxml.jackson.databind.JsonNode;
 import io.floci.aws.config.EmulatorConfig;
 import io.floci.aws.services.cloudtrail.CloudTrailService;
+import io.floci.aws.services.cloudwatch.metrics.OtlpMetricsController;
 import io.floci.aws.services.iam.AccessDeniedMessages;
 import io.floci.aws.services.iam.AccessDeniedMessages.PolicyType;
 import io.floci.aws.services.iam.IamActionRegistry;
@@ -363,6 +364,12 @@ public class IamEnforcementFilter implements ContainerRequestFilter {
         boolean emptyHeader = auth != null && auth.isBlank();
         if (auth == null || emptyHeader) {
             auth = requestAuthorization(null, ctx.getUriInfo().getQueryParameters());
+        }
+        if (resourceInfo != null && resourceInfo.getResourceClass() == OtlpMetricsController.class
+                && (auth == null || !claimsSigV4(auth))) {
+            ctx.abortWith(AwsProtocolClaimFilter.errorResponse(403, "MissingAuthenticationTokenException",
+                    "Request is missing Authentication Token"));
+            return;
         }
         if (auth == null) {
             if (emptyHeader) {

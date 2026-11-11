@@ -508,6 +508,7 @@ class S3VirtualHostFilterTest {
         new S3VirtualHostFilter().filter(ctx);
 
         verify(ctx, never()).setRequestUri(any(URI.class));
+        verify(uriInfo, never()).getRequestUri();
     }
 
     // --- Other services' virtual-host schemes must not be swallowed as dotted buckets ---

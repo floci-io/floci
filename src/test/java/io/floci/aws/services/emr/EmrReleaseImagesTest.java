@@ -26,6 +26,7 @@ import org.apache.commons.compress.archivers.tar.TarArchiveInputStream;
 import org.apache.commons.compress.archivers.tar.TarArchiveOutputStream;
 import org.apache.commons.compress.archivers.tar.TarConstants;
 import org.junit.jupiter.api.Test;
+import org.mockito.ArgumentCaptor;
 
 import java.io.ByteArrayInputStream;
 import java.io.ByteArrayOutputStream;
@@ -44,6 +45,7 @@ import java.util.concurrent.atomic.AtomicReference;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotEquals;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyString;
@@ -108,40 +110,8 @@ class EmrReleaseImagesTest {
 
     @Test
     void anImageThatIsMissingIsMadeInAContainerOfTheSparkImageNeverStartedThenCommitted() {
-        when(lifecycle.getDockerClient()).thenReturn(docker);
-        // The two are pulled as a container's image would be, from the image-registry-base it names.
-        when(containerBuilder.resolveImage(anyString()))
-                .thenAnswer(invocation -> "mirror/" + invocation.getArgument(0));
-        resolves("mirror/" + SPARK, "sha256:spark");
-        resolves("mirror/" + HIVE, "sha256:hive");
         String repository = ContainerStorageHelper.dockerName(config, "emr-release");
-        InspectImageCmd missing = mock(InspectImageCmd.class);
-        when(missing.exec()).thenThrow(new NotFoundException("missing"));
-        when(docker.inspectImageCmd(argThat((String image) -> image.startsWith(repository + ":"))))
-                .thenReturn(missing);
-        InspectImageCmd spark = mock(InspectImageCmd.class);
-        InspectImageResponse sparkImage = mock(InspectImageResponse.class);
-        ContainerConfig sparkConfig = mock(ContainerConfig.class);
-        when(sparkConfig.getUser()).thenReturn("hadoop:hadoop");
-        when(sparkImage.getConfig()).thenReturn(sparkConfig);
-        when(spark.exec()).thenReturn(sparkImage);
-        when(docker.inspectImageCmd("sha256:spark")).thenReturn(spark);
-        container("sha256:spark", "target");
-        container("sha256:hive", "source");
-        List<String> copied = new ArrayList<>();
-        when(docker.copyArchiveFromContainerCmd(eq("source"), anyString())).thenAnswer(invocation -> {
-            copied.add(invocation.getArgument(1));
-            CopyArchiveFromContainerCmd from = mock(CopyArchiveFromContainerCmd.class);
-            when(from.exec()).thenAnswer(read -> new ByteArrayInputStream(new byte[0]));
-            return from;
-        });
-        when(docker.copyArchiveToContainerCmd("target"))
-                .thenReturn(mock(CopyArchiveToContainerCmd.class, RETURNS_SELF));
-        when(lifecycle.commit(eq("target"), eq(repository), anyString(), eq("hadoop:hadoop"), any()))
-                .thenReturn("sha256:made");
-        when(docker.removeContainerCmd(anyString())).thenReturn(mock(RemoveContainerCmd.class, RETURNS_SELF));
-
-        assertEquals("sha256:made", images.image("emr-7.5.0", SPARK, HIVE));
+        List<String> copied = makesMissing(true);
 
         assertEquals(EmrReleaseImages.COPIES.stream().map(EmrReleaseImages.Copy::from).toList(), copied);
         // Named after the release and what it is made of, and labelled as Floci's EMR release image.
@@ -151,6 +121,37 @@ class EmrReleaseImagesTest {
                         "emr-release".equals(labels.get(ContainerStorageHelper.COMPONENT_LABEL))));
         verify(docker).removeContainerCmd("target");
         verify(docker).removeContainerCmd("source");
+    }
+
+    @Test
+    void anImageForAClusterWithoutHiveHasHadoopsServicesAloneAndANameOfItsOwn() {
+        List<String> copied = makesMissing(false);
+
+        // No Hive, so a Hive step there finds no hive, as EMR's hive-script does without it.
+        assertEquals(List.of("/usr/lib/hadoop-hdfs", "/usr/lib/hadoop-mapreduce", "/usr/lib/hadoop-yarn"), copied);
+        assertTrue(EmrReleaseImages.COPIES.containsAll(EmrReleaseImages.HADOOP_COPIES));
+        ArgumentCaptor<String> tags = ArgumentCaptor.forClass(String.class);
+        images.image("emr-7.5.0", SPARK, HIVE, true);
+        verify(lifecycle, times(2)).commit(eq("target"), anyString(), tags.capture(), anyString(), any());
+        assertNotEquals(tags.getAllValues().get(0), tags.getAllValues().get(1));
+    }
+
+    @Test
+    void anImageOfTheAwsRuntimeForSparkKeepsAnotherReleasesWholeHadoopApart() {
+        List<String> copied = makesMissing("emr-spark-8.0.0", false);
+
+        // Another release's services do not run on its newer Hadoop, so Spark's stays where it is.
+        assertEquals(List.of("/usr/lib/hadoop", "/usr/lib/hadoop-hdfs", "/usr/lib/hadoop-mapreduce",
+                "/usr/lib/hadoop-yarn"), copied);
+        assertEquals("/opt", EmrReleaseImages.hadoopFolder("emr-spark-8.0.0"));
+        assertTrue(EmrReleaseImages.HADOOP_APART_COPIES.stream().allMatch(copy -> "/opt".equals(copy.into())));
+        verify(lifecycle).commit(eq("target"), anyString(),
+                argThat(tag -> tag.matches("emr-spark-8\\.0\\.0-[0-9a-f]{12}")), eq("hadoop:hadoop"), any());
+    }
+
+    @Test
+    void anImageOfAReleaseWithAHiveImageRunsItsOwnHadoop() {
+        assertNull(EmrReleaseImages.hadoopFolder("emr-7.5.0"));
     }
 
     @Test
@@ -190,11 +191,11 @@ class EmrReleaseImagesTest {
             made.set(true);
             return "sha256:made";
         });
-        Thread first = Thread.ofPlatform().start(() -> images.image("emr-7.5.0", SPARK, HIVE));
+        Thread first = Thread.ofPlatform().start(() -> images.image("emr-7.5.0", SPARK, HIVE, true));
         assertTrue(committing.await(10, TimeUnit.SECONDS));
 
         AtomicReference<String> found = new AtomicReference<>();
-        Thread second = Thread.ofPlatform().start(() -> found.set(images.image("emr-7.5.0", SPARK, HIVE)));
+        Thread second = Thread.ofPlatform().start(() -> found.set(images.image("emr-7.5.0", SPARK, HIVE, true)));
         ThreadStates.awaitBlockedOrDone(second);
         committed.countDown();
         first.join(10_000);
@@ -217,7 +218,7 @@ class EmrReleaseImagesTest {
         when(docker.inspectImageCmd(anyString())).thenReturn(there);
         resolvesEachToItself();
 
-        assertEquals("sha256:made", images.image("emr-7.5.0", SPARK, HIVE));
+        assertEquals("sha256:made", images.image("emr-7.5.0", SPARK, HIVE, true));
 
         verify(docker, never()).createContainerCmd(anyString());
         verify(lifecycle, never()).commit(any(), anyString(), anyString(), any(), any());
@@ -240,9 +241,9 @@ class EmrReleaseImagesTest {
             return there;
         });
 
-        images.image("emr-7.5.0", SPARK, HIVE);
-        images.image("emr-7.5.0", SPARK, HIVE);
-        images.image("emr-7.5.0", SPARK, HIVE);
+        images.image("emr-7.5.0", SPARK, HIVE, true);
+        images.image("emr-7.5.0", SPARK, HIVE, true);
+        images.image("emr-7.5.0", SPARK, HIVE, true);
 
         assertEquals(asked.get(0), asked.get(1));
         assertNotEquals(asked.get(0), asked.get(2));
@@ -284,15 +285,59 @@ class EmrReleaseImagesTest {
         EmrReleaseImages cached = new EmrReleaseImages(lifecycle, containerBuilder,
                 new ImageCacheService(daemon, cacheConfig), config);
 
-        cached.image("emr-7.5.0", SPARK, HIVE);
+        cached.image("emr-7.5.0", SPARK, HIVE, true);
         tags.put(HIVE, "sha256:newer-hive");
         images.add("sha256:newer-hive");
-        cached.image("emr-7.5.0", SPARK, HIVE);
+        cached.image("emr-7.5.0", SPARK, HIVE, true);
 
         assertNotEquals(asked.get(0), asked.get(1));
     }
 
     // The two images are resolved as a launch would, their names read again each time, pulled only when missing.
+    // Makes a missing image, with Hive or without, from containers whose copies are recorded, and returns the paths
+    // copied from the Hive image's.
+    private List<String> makesMissing(boolean withHive) {
+        return makesMissing("emr-7.5.0", withHive);
+    }
+
+    private List<String> makesMissing(String release, boolean withHive) {
+        when(lifecycle.getDockerClient()).thenReturn(docker);
+        String repository = ContainerStorageHelper.dockerName(config, "emr-release");
+        // The two are pulled as a container's image would be, from the image-registry-base it names.
+        when(containerBuilder.resolveImage(anyString()))
+                .thenAnswer(invocation -> "mirror/" + invocation.getArgument(0));
+        resolves("mirror/" + SPARK, "sha256:spark");
+        resolves("mirror/" + HIVE, "sha256:hive");
+        InspectImageCmd missing = mock(InspectImageCmd.class);
+        when(missing.exec()).thenThrow(new NotFoundException("missing"));
+        when(docker.inspectImageCmd(argThat((String image) -> image.startsWith(repository + ":"))))
+                .thenReturn(missing);
+        InspectImageCmd spark = mock(InspectImageCmd.class);
+        InspectImageResponse sparkImage = mock(InspectImageResponse.class);
+        ContainerConfig sparkConfig = mock(ContainerConfig.class);
+        when(sparkConfig.getUser()).thenReturn("hadoop:hadoop");
+        when(sparkImage.getConfig()).thenReturn(sparkConfig);
+        when(spark.exec()).thenReturn(sparkImage);
+        when(docker.inspectImageCmd("sha256:spark")).thenReturn(spark);
+        container("sha256:spark", "target");
+        container("sha256:hive", "source");
+        List<String> copied = new ArrayList<>();
+        when(docker.copyArchiveFromContainerCmd(eq("source"), anyString())).thenAnswer(invocation -> {
+            copied.add(invocation.getArgument(1));
+            CopyArchiveFromContainerCmd from = mock(CopyArchiveFromContainerCmd.class);
+            when(from.exec()).thenAnswer(read -> new ByteArrayInputStream(new byte[0]));
+            return from;
+        });
+        when(docker.copyArchiveToContainerCmd("target"))
+                .thenReturn(mock(CopyArchiveToContainerCmd.class, RETURNS_SELF));
+        when(lifecycle.commit(eq("target"), eq(repository), anyString(), eq("hadoop:hadoop"), any()))
+                .thenReturn("sha256:made");
+        when(docker.removeContainerCmd(anyString())).thenReturn(mock(RemoveContainerCmd.class, RETURNS_SELF));
+
+        assertEquals("sha256:made", images.image(release, SPARK, HIVE, withHive));
+        return copied;
+    }
+
     private void resolves(String image, String id) {
         when(imageCache.resolveForLaunch(image, ImagePullBehavior.PREFER_CACHED, null))
                 .thenReturn(new LaunchImage(id, null));

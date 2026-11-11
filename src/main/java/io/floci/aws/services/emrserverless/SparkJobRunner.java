@@ -115,7 +115,7 @@ public interface SparkJobRunner {
      * the Hive metastore service on that node, or null.
      */
     record Storage(String home, String mnt, String hdfsHost, String hdfsAddress, String hdfsNetwork,
-                   String hiveMetastore) {
+                   String hiveMetastore, String resourceManager, String flociEndpoint) {
 
         /**
          * The component label of an EMR cluster's HDFS container, which carries its service's labels as a driver
@@ -125,17 +125,25 @@ public interface SparkJobRunner {
 
         /** A cluster's volumes, before its HDFS runs. */
         public Storage(String home, String mnt) {
-            this(home, mnt, null, null, null, null);
+            this(home, mnt, null, null, null, null, null, null);
         }
 
         /** This storage, its HDFS's NameNode on {@code host}, at {@code address} on {@code network}. */
         public Storage withHdfs(String host, String address, String network) {
-            return new Storage(home, mnt, host, address, network, hiveMetastore);
+            return new Storage(home, mnt, host, address, network, hiveMetastore, resourceManager, flociEndpoint);
         }
 
         /** This storage, its Hive metastore service at {@code uri}. */
         public Storage withHiveMetastore(String uri) {
-            return new Storage(home, mnt, hdfsHost, hdfsAddress, hdfsNetwork, uri);
+            return new Storage(home, mnt, hdfsHost, hdfsAddress, hdfsNetwork, uri, resourceManager, flociEndpoint);
+        }
+
+        /**
+         * This storage, YARN's ResourceManager on {@code host}, its executors reaching Floci at {@code flociEndpoint},
+         * Floci's address on the HDFS's network.
+         */
+        public Storage withYarn(String host, String flociEndpoint) {
+            return new Storage(home, mnt, hdfsHost, hdfsAddress, hdfsNetwork, hiveMetastore, host, flociEndpoint);
         }
     }
 

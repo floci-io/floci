@@ -411,6 +411,15 @@ public class DynamoDbLocalBackend implements DynamoDbBackend {
         return table(call(scope, "CreateTable", body).path("TableDescription"));
     }
 
+    @Override
+    public TableDefinition createOnDemandTable(Scope scope, String tableName, List<KeySchemaElement> keySchema,
+                                               List<AttributeDefinition> attributeDefinitions,
+                                               List<GlobalSecondaryIndex> globalSecondaryIndexes,
+                                               List<LocalSecondaryIndex> localSecondaryIndexes) {
+        return createTable(scope, tableName, keySchema, attributeDefinitions, null, null, globalSecondaryIndexes,
+                localSecondaryIndexes);
+    }
+
     private ObjectNode index(ArrayNode indexes, String indexName, List<KeySchemaElement> keySchema,
                              String projectionType, List<String> nonKeyAttributes) {
         ObjectNode index = indexes.addObject().put("IndexName", indexName);

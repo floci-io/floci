@@ -141,6 +141,39 @@ class DynamoDbAccessPathIntegrationTest {
     }
 
     @Test
+    @Order(13)
+    void queryRefusesMoreConditionsThanTheKeySchemaHas() {
+        List<String> conditions = List.of("""
+                "KeyConditionExpression":"pk = :pk AND sk > :a AND x = :b",
+                "ExpressionAttributeValues":{":pk":{"N":"1"},":a":{"S":"a"},":b":{"S":"b"}}
+                """, """
+                "IndexName":"alternate-index",
+                "KeyConditionExpression":"pk = :pk AND alternate = :a AND sk = :b",
+                "ExpressionAttributeValues":{":pk":{"S":"p1"},":a":{"S":"a"},":b":{"S":"b"}}
+                """, """
+                "IndexName":"status-index",
+                "Select":"ALL_ATTRIBUTES",
+                "KeyConditionExpression":"#s = :s AND createdAt > :a AND x = :b",
+                "ExpressionAttributeNames":{"#s":"status"},
+                "ExpressionAttributeValues":{":s":{"S":"open"},":a":{"S":"a"},":b":{"S":"b"}}
+                """, """
+                "KeyConditions":{
+                  "pk":{"ComparisonOperator":"LT","AttributeValueList":[{"S":"p1"}]},
+                  "sk":{"ComparisonOperator":"EQ","AttributeValueList":[{"S":"a"}]},
+                  "x":{"ComparisonOperator":"EQ","AttributeValueList":[{"S":"b"}]}
+                }
+                """);
+        conditions.forEach(condition -> request("DynamoDB_20120810.Query", """
+                {"TableName":"%s",
+                %s}
+                """.formatted(TABLE, condition))
+            .statusCode(400)
+            .body("__type", equalTo("ValidationException"))
+            .body("message", equalTo("The number of query conditions (3) exceeds the number of key attributes "
+                    + "defined in the schema (2)")));
+    }
+
+    @Test
     @Order(4)
     void tableAndLsiUseTheirSelectedKeySchemas() {
         request("DynamoDB_20120810.Query", """

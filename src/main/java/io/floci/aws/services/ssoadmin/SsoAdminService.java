@@ -42,6 +42,7 @@ import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 
 import java.nio.charset.StandardCharsets;
+import java.time.Clock;
 import java.time.Duration;
 import java.time.Instant;
 import java.time.format.DateTimeParseException;
@@ -144,6 +145,8 @@ public class SsoAdminService implements Resettable, StoredResourceArns {
     private final String defaultRegion;
     /** The seeded instance lives in the deployment's home region, so its ARN takes that partition. */
     private final String bootstrapInstanceArn;
+    /** Source of permission-set creation times; the @Inject constructor passes the system clock. */
+    private final Clock clock;
 
     @Inject
     public SsoAdminService(StorageFactory storageFactory, IdentityStoreService identityStoreService,
@@ -179,7 +182,8 @@ public class SsoAdminService implements Resettable, StoredResourceArns {
                 organizationsService,
                 requestContext,
                 config.defaultAccountId(),
-                config.defaultRegion());
+                config.defaultRegion(),
+                Clock.systemUTC());
     }
 
     SsoAdminService(StorageBackend<String, PermissionSet> permissionSets,
@@ -211,7 +215,9 @@ public class SsoAdminService implements Resettable, StoredResourceArns {
                     OrganizationsService organizationsService,
                     SsoAdminRequestContext requestContext,
                     String defaultAccountId,
-                    String defaultRegion) {
+                    String defaultRegion,
+                    Clock clock) {
+        this.clock = clock;
         this.permissionSets = permissionSets;
         this.assignments = assignments;
         this.assignmentOperations = assignmentOperations;
@@ -247,6 +253,19 @@ public class SsoAdminService implements Resettable, StoredResourceArns {
     }
 
     public String getInstanceArn() { return bootstrapInstanceArn; }
+
+    /**
+     * The permission set's CreatedDate. One persisted before the creation time was recorded reports
+     * its instance's creation time instead: it cannot predate the instance, and unlike a time
+     * assigned at load it stays the same across restarts without a write.
+     */
+    public long createdDateEpochMillis(PermissionSet permissionSet) {
+        if (permissionSet.createdDateEpochMillis() != null) {
+            return permissionSet.createdDateEpochMillis();
+        }
+        SsoInstance instance = findInstanceByArn(instanceArnForPermissionSet(permissionSet.arn()));
+        return instance != null ? instance.createdDateEpochMillis() : 0L;
+    }
     public String getIdentityStoreId() { return IDENTITY_STORE_ID; }
 
     public boolean hasIdentityStore(String identityStoreId) {
@@ -1551,7 +1570,7 @@ public class SsoAdminService implements Resettable, StoredResourceArns {
         String arn = globalArn("sso", instance.primaryRegion(), "",
                 "permissionSet/" + instanceId + "/ps-" + shortId());
         PermissionSet permissionSet = new PermissionSet(arn, name, description, sessionDuration,
-                new LinkedHashMap<>(), new LinkedHashMap<>(), null, null, tags);
+                new LinkedHashMap<>(), new LinkedHashMap<>(), null, null, tags, clock.millis());
         permissionSets.put(arn, permissionSet);
         return permissionSet;
     }
@@ -1592,7 +1611,7 @@ public class SsoAdminService implements Resettable, StoredResourceArns {
         PermissionSet updated = new PermissionSet(current.arn(), current.name(), description, session,
                 new LinkedHashMap<>(current.managedPolicies()),
                 new LinkedHashMap<>(current.customerManagedPolicies()), current.inlinePolicy(), current.permissionsBoundary(),
-                new LinkedHashMap<>(current.tags()));
+                new LinkedHashMap<>(current.tags()), current.createdDateEpochMillis());
         permissionSets.put(updated.arn(), updated);
         markPermissionSetProvisioningStale(updated.arn());
         return updated;
@@ -1691,7 +1710,7 @@ public class SsoAdminService implements Resettable, StoredResourceArns {
         permissionSets.put(arn, new PermissionSet(current.arn(), current.name(), current.description(),
                 current.sessionDuration(), new LinkedHashMap<>(current.managedPolicies()),
                 new LinkedHashMap<>(current.customerManagedPolicies()), policy, current.permissionsBoundary(),
-                new LinkedHashMap<>(current.tags())));
+                new LinkedHashMap<>(current.tags()), current.createdDateEpochMillis()));
         markPermissionSetProvisioningStale(arn);
     }
 
@@ -1700,7 +1719,7 @@ public class SsoAdminService implements Resettable, StoredResourceArns {
         permissionSets.put(arn, new PermissionSet(current.arn(), current.name(), current.description(),
                 current.sessionDuration(), new LinkedHashMap<>(current.managedPolicies()),
                 new LinkedHashMap<>(current.customerManagedPolicies()), null, current.permissionsBoundary(),
-                new LinkedHashMap<>(current.tags())));
+                new LinkedHashMap<>(current.tags()), current.createdDateEpochMillis()));
         markPermissionSetProvisioningStale(arn);
     }
 
@@ -1720,7 +1739,7 @@ public class SsoAdminService implements Resettable, StoredResourceArns {
         permissionSets.put(permissionSetArn, new PermissionSet(current.arn(), current.name(), current.description(),
                 current.sessionDuration(), new LinkedHashMap<>(current.managedPolicies()),
                 new LinkedHashMap<>(current.customerManagedPolicies()), current.inlinePolicy(), null,
-                new LinkedHashMap<>(current.tags())));
+                new LinkedHashMap<>(current.tags()), current.createdDateEpochMillis()));
         markPermissionSetProvisioningStale(permissionSetArn);
     }
 
@@ -1764,7 +1783,7 @@ public class SsoAdminService implements Resettable, StoredResourceArns {
         permissionSets.put(permissionSetArn, new PermissionSet(current.arn(), current.name(), current.description(),
                 current.sessionDuration(), new LinkedHashMap<>(current.managedPolicies()),
                 new LinkedHashMap<>(current.customerManagedPolicies()), current.inlinePolicy(), boundary,
-                new LinkedHashMap<>(current.tags())));
+                new LinkedHashMap<>(current.tags()), current.createdDateEpochMillis()));
         markPermissionSetProvisioningStale(permissionSetArn);
     }
 

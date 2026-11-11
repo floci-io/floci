@@ -645,22 +645,19 @@ public class CodePipelineService {
     private ObjectNode stopPipelineExecution(JsonNode request, String region, String account) {
         CodePipelineExecution execution = requireExecution(
                 account, region, text(request, "pipelineName"), text(request, "pipelineExecutionId"));
-        if (isTerminal(execution.getStatus())) {
-            throw new AwsException("PipelineExecutionNotStoppableException",
-                    "Pipeline execution is already in a terminal state", 400);
-        }
-        // Publish the stop mode before the stop signal. The provider polling loop reads
-        // stopRequested first, so observing it also observes the matching abandon value.
-        execution.setAbandon(request.path("abandon").asBoolean(false));
-        execution.setStopRequested(true);
-        execution.setStatus("Stopping");
-        execution.setStatusSummary(request.path("reason").asText("Stop requested."));
-        execution.setLastUpdateTime(now());
-        if (execution.getCurrentStage() != null) {
-            execution.getStageExecutionStatuses().put(execution.getCurrentStage(), "Stopping");
-        }
-        if (execution.isAbandon()) {
-            synchronized (execution) {
+        synchronized (execution) {
+            if (isTerminal(execution.getStatus())) {
+                throw new AwsException("PipelineExecutionNotStoppableException",
+                        "Pipeline execution is already in a terminal state", 400);
+            }
+            execution.setAbandon(request.path("abandon").asBoolean(false));
+            execution.setStatus("Stopping");
+            execution.setStatusSummary(request.path("reason").asText("Stop requested."));
+            execution.setLastUpdateTime(now());
+            if (execution.getCurrentStage() != null) {
+                execution.getStageExecutionStatuses().put(execution.getCurrentStage(), "Stopping");
+            }
+            if (execution.isAbandon()) {
                 execution.getActionExecutions().stream()
                         .filter(a -> "InProgress".equals(a.getStatus()))
                         .forEach(a -> {
@@ -668,8 +665,9 @@ public class CodePipelineService {
                             a.setLastUpdateTime(now());
                         });
             }
+            execution.setStopRequested(true);
+            putExecution(execution);
         }
-        putExecution(execution);
         eventPublisher.pipelineStateChange(execution, "STOPPING");
         return mapper.createObjectNode().put("pipelineExecutionId", execution.getPipelineExecutionId());
     }
@@ -2585,22 +2583,24 @@ public class CodePipelineService {
     }
 
     private boolean finishIfStopped(CodePipelineExecution execution) {
-        if (!execution.isStopRequested()) {
-            return false;
+        synchronized (execution) {
+            if (!execution.isStopRequested()) {
+                return false;
+            }
+            boolean anyRunning = actionExecutionsSnapshot(execution).stream()
+                    .anyMatch(a -> "InProgress".equals(a.getStatus()));
+            if (!execution.isAbandon() && anyRunning) {
+                return false;
+            }
+            execution.setStatus("Stopped");
+            execution.setStatusSummary("Pipeline execution stopped.");
+            execution.setLastUpdateTime(now());
+            if (execution.getCurrentStage() != null) {
+                execution.getStageExecutionStatuses().put(execution.getCurrentStage(), "Stopped");
+            }
+            putExecution(execution);
+            return true;
         }
-        boolean anyRunning = actionExecutionsSnapshot(execution).stream()
-                .anyMatch(a -> "InProgress".equals(a.getStatus()));
-        if (!execution.isAbandon() && anyRunning) {
-            return false;
-        }
-        execution.setStatus("Stopped");
-        execution.setStatusSummary("Pipeline execution stopped.");
-        execution.setLastUpdateTime(now());
-        if (execution.getCurrentStage() != null) {
-            execution.getStageExecutionStatuses().put(execution.getCurrentStage(), "Stopped");
-        }
-        putExecution(execution);
-        return true;
     }
 
     private void initializeTransitions(CodePipelinePipeline pipeline) {

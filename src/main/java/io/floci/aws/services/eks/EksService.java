@@ -856,7 +856,10 @@ public class EksService implements TagHandler, ResourceProvider, Ec2InstanceLaun
     }
 
     public List<String> listClusters() {
+        // Clusters are stored per account; like AWS, a request only sees its own Region's clusters.
+        String region = regionResolver.getRegion();
         return storage.scan(k -> true).stream()
+                .filter(cluster -> region.equals(resolveClusterRegion(cluster)))
                 .map(Cluster::getName)
                 .collect(Collectors.toList());
     }
@@ -864,11 +867,41 @@ public class EksService implements TagHandler, ResourceProvider, Ec2InstanceLaun
     public PaginatedResult<String> listClusters(Integer maxResults, String nextToken) {
         int limit = EksAccessEntryService.pageSize(maxResults);
         List<String> names = listClusters().stream().sorted().toList();
-        return Pagination.paginate(names, name -> name, limit, nextToken, "clusters:" + regionResolver.getAccountId(),
+        return Pagination.paginate(names, name -> name, limit, nextToken, "clusters:" + regionResolver.getAccountId() + ":" + regionResolver.getRegion(),
                 token -> new AwsException("InvalidParameterException", "Invalid nextToken", 400));
     }
 
+    /**
+     * Returns the cluster {@code name} when it is in the request's Region, and answers
+     * ResourceNotFoundException for a cluster in another Region, as AWS does: cluster names
+     * are Regional, so a request must not reach a cluster created in a different Region of the account.
+     * Applied by the API handlers only; Floci's own restore and node-join paths act on any Region.
+     */
+    public Cluster requireClusterInRequestRegion(String name) {
+        return requireInRequestRegion(describeCluster(name), name);
+    }
+
+    private Cluster requireInRequestRegion(Cluster cluster, String name) {
+        if (!regionResolver.getRegion().equals(resolveClusterRegion(cluster))) {
+            throw new AwsException("ResourceNotFoundException", "No cluster found for name: " + name, 404);
+        }
+        return cluster;
+    }
+
     public Cluster deleteCluster(String name) {
+        return deleteCluster(name, false);
+    }
+
+    /**
+     * Deletes the cluster {@code name} only when it is in the request's Region, as the DeleteCluster
+     * API does. The Region is checked on the cluster the delete reads under its lock, so a cluster
+     * deleted and created again under the same name in another Region meanwhile is not removed.
+     */
+    public Cluster deleteClusterInRequestRegion(String name) {
+        return deleteCluster(name, true);
+    }
+
+    private Cluster deleteCluster(String name, boolean inRequestRegion) {
         // A first node group replacing the node holds this lock while the swap runs; deleting
         // meanwhile would find no container to stop and have its cluster written back. Read the
         // cluster only once the lock is held: a delete that waited may find it gone.
@@ -876,6 +909,9 @@ public class EksService implements TagHandler, ResourceProvider, Ec2InstanceLaun
             Cluster cluster = storage.get(name)
                     .orElseThrow(() -> new AwsException("ResourceNotFoundException",
                             "No cluster found for name: " + name, 404));
+            if (inRequestRegion) {
+                requireInRequestRegion(cluster, name);
+            }
             if (cluster.getAccountId() == null) {
                 cluster.setAccountId(regionResolver.getAccountId());
             }

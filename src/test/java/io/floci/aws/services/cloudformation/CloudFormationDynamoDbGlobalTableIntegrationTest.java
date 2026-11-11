@@ -83,6 +83,9 @@ class CloudFormationDynamoDbGlobalTableIntegrationTest {
         assertStackStatus(stackName, "CREATE_COMPLETE");
 
         JsonPath described = describeTable(tableName).jsonPath();
+        assertEquals("PAY_PER_REQUEST", described.getString("Table.BillingModeSummary.BillingMode"));
+        assertEquals(0L, described.getLong("Table.ProvisionedThroughput.ReadCapacityUnits"));
+        assertEquals(0L, described.getLong("Table.ProvisionedThroughput.WriteCapacityUnits"));
         String tableArn = described.getString("Table.TableArn");
         String tableId = described.getString("Table.TableId");
         assertTrue(tableArn != null && tableArn.startsWith("arn:aws:dynamodb:"), "TableArn: " + tableArn);

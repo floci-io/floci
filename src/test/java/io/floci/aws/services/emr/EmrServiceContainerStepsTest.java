@@ -343,6 +343,146 @@ class EmrServiceContainerStepsTest {
     }
 
     @Test
+    void aClusterOnANetworkOfItsOwnRunsYarnOnItsPrimaryNodeInTheImageItsStepsRunIn() {
+        fixture.clusterStorage.ownNetwork = true;
+        EmrCluster cluster = service.runJobFlow(cluster("yarn", true, sparkStep("report", "CONTINUE")), REGION);
+
+        fixture.runStepThread();
+
+        // Its release's image with Hadoop's services, as it has no Hive, made on the step's thread: its steps and its
+        // primary node's HDFS and YARN run in it, the NodeManager offering what Floci gives it.
+        assertEquals(List.of(List.of("emr-7.5.0", "public.ecr.aws/emr-serverless/spark/emr-7.5.0:latest",
+                "public.ecr.aws/emr-serverless/hive/emr-7.5.0:latest", "false")), fixture.releaseImages.asked);
+        SparkJobRunner.Job job = runner.jobs.get(0);
+        assertEquals(EmrServiceFixture.RecordingReleaseImages.IMAGE, job.imageTemplate());
+        assertEquals(EmrServiceFixture.RecordingReleaseImages.IMAGE, fixture.clusterStorage.hdfs.get(0).get(2));
+        assertEquals(List.of(new ClusterStorage.Yarn(4096, 4)), fixture.clusterStorage.yarns);
+        assertEquals(hdfsStorage(cluster).withYarn("ip-10-0-0-1.ec2.internal",
+                EmrServiceFixture.RecordingStorage.FLOCI_ON_NETWORK), job.storage());
+    }
+
+    @Test
+    void aStepOnYarnPutsItsClustersContainerLogsInItsLogUriBeforeItEnds() {
+        fixture.clusterStorage.ownNetwork = true;
+        EmrCluster requested = cluster("yarn", true, sparkStep("report", "CONTINUE"));
+        requested.setLogUri("s3://logs/emr/");
+        EmrCluster cluster = service.runJobFlow(requested, REGION);
+
+        fixture.runStepThread();
+
+        assertEquals(List.of(List.of(cluster.getId(), "s3://logs/emr/" + cluster.getId() + "/containers/")),
+                fixture.clusterStorage.containerLogs);
+    }
+
+    @Test
+    void aStepThatCouldNotStartPutsNoContainerLogs() {
+        fixture.clusterStorage.ownNetwork = true;
+        fixture.clusterStorage.hdfsFailure = new IllegalStateException("The HDFS did not start");
+        EmrCluster requested = cluster("yarn", true, sparkStep("report", "CONTINUE"));
+        requested.setLogUri("s3://logs/emr/");
+        service.runJobFlow(requested, REGION);
+
+        fixture.runStepThread();
+
+        assertEquals(List.of(), fixture.clusterStorage.containerLogs);
+    }
+
+    @Test
+    void aClusterWithoutALogUriOrWithoutYarnPutsNoContainerLogs() {
+        fixture.clusterStorage.ownNetwork = true;
+        EmrCluster noLogUri = cluster("yarn", true, sparkStep("report", "CONTINUE"));
+        noLogUri.setLogUri(null);
+        service.runJobFlow(noLogUri, REGION);
+        fixture.runStepThread();
+        fixture.clusterStorage.ownNetwork = false;
+        EmrCluster noYarn = cluster("local", true, sparkStep("report", "CONTINUE"));
+        noYarn.setLogUri("s3://logs/emr/");
+        service.runJobFlow(noYarn, REGION);
+        fixture.runStepThread();
+
+        assertEquals(List.of(), fixture.clusterStorage.containerLogs);
+    }
+
+    @Test
+    void aClusterBootstrappedOnYarnRunsItsStepsThereFromTheImageItsBootstrapLeft() {
+        EmrServiceFixture bootstrapping = EmrServiceFixture.docker(runner, bootstrap, null);
+        bootstrapping.clusterStorage.ownNetwork = true;
+        bootstrapping.service.runJobFlow(bootstrapped(cluster("on-yarn", true, sparkStep("report", "CONTINUE"))), REGION);
+
+        bootstrapping.runStepThread();
+        bootstrapping.runStepThread();
+
+        assertEquals(1, bootstrapping.clusterStorage.yarns.size());
+        assertEquals(runner.jobs.get(0).imageTemplate(), bootstrapping.clusterStorage.hdfs.get(0).get(2));
+        assertEquals("ip-10-0-0-1.ec2.internal", runner.jobs.get(0).storage().resourceManager());
+    }
+
+    @Test
+    void aClusterBootstrappedByAnEarlierFlociKeepsToLocalModeAndItsHdfsToTheHiveImage() {
+        // As an earlier Floci left it: a bootstrap image with no YARN in it.
+        EmrServiceFixture bootstrapping = EmrServiceFixture.docker(runner, bootstrap, null);
+        bootstrapping.clusterStorage.ownNetwork = false;
+        EmrCluster cluster = bootstrapping.service.runJobFlow(bootstrapped(cluster("from-before", true)), REGION);
+        bootstrapping.runStepThread();
+        bootstrapping.clusterStorage.ownNetwork = true;
+
+        bootstrapping.service.addJobFlowSteps(cluster.getId(), List.of(sparkStep("report", "CONTINUE")));
+        bootstrapping.runStepThread();
+
+        assertEquals(List.of(), bootstrapping.clusterStorage.yarns);
+        assertEquals("public.ecr.aws/emr-serverless/hive/emr-7.5.0:latest",
+                bootstrapping.clusterStorage.hdfs.get(0).get(2));
+        assertEquals(null, runner.jobs.get(0).storage().resourceManager());
+    }
+
+    @Test
+    void aSparkStepOnAClusterThatRunsYarnKeepsItsOwnMasterAndDeployMode() {
+        fixture.clusterStorage.ownNetwork = true;
+        EmrStep step = sparkStep("report", "CONTINUE");
+        step.setArgs(new ArrayList<>(List.of("spark-submit", "--master", "yarn", "--deploy-mode", "cluster", REPORT)));
+        service.runJobFlow(cluster("yarn", true, step), REGION);
+
+        fixture.runStepThread();
+
+        // As EMR's spark-submit takes them: a cluster-mode driver runs on the cluster's YARN.
+        assertEquals(List.of("--master", "yarn", "--deploy-mode", "cluster", REPORT), runner.jobs.get(0).application());
+    }
+
+    @Test
+    void aClusterOfTheAwsRuntimeForSparkRunsYarnFromTheHadoopItsImageKeepsApart() {
+        fixture.clusterStorage.ownNetwork = true;
+        EmrCluster requested = cluster("spark-runtime", true, sparkStep("report", "CONTINUE"));
+        requested.setReleaseLabel("emr-spark-8.1.0");
+        EmrCluster cluster = service.runJobFlow(requested, REGION);
+
+        fixture.runStepThread();
+
+        // Its release has no Hive image, so emr-7.5.0's gives the Hadoop its image holds for the node's daemons.
+        assertEquals(List.of(List.of("emr-spark-8.1.0", "public.ecr.aws/emr-serverless/spark4/emr-spark-8.1.0:latest",
+                "public.ecr.aws/emr-serverless/hive/emr-7.5.0:latest", "false")), fixture.releaseImages.asked);
+        SparkJobRunner.Job job = runner.jobs.get(0);
+        assertEquals(EmrServiceFixture.RecordingReleaseImages.IMAGE, job.imageTemplate());
+        assertEquals(EmrServiceFixture.RecordingReleaseImages.IMAGE, fixture.clusterStorage.hdfs.get(0).get(2));
+        assertEquals(List.of(new ClusterStorage.Yarn(4096, 4, "/opt")), fixture.clusterStorage.yarns);
+        assertEquals(hdfsStorage(cluster).withYarn("ip-10-0-0-1.ec2.internal",
+                EmrServiceFixture.RecordingStorage.FLOCI_ON_NETWORK), job.storage());
+    }
+
+    @Test
+    void aClusterOfTheAwsRuntimeForSparkOnYarnNamingHiveStillRunsNoHive() {
+        fixture.clusterStorage.ownNetwork = true;
+        EmrCluster requested = cluster("spark-runtime-hive", true, sparkStep("report", "CONTINUE"));
+        requested.setReleaseLabel("emr-spark-8.1.0");
+        requested.setApplications("[{\"Name\": \"Hive\"}, {\"Name\": \"Spark\"}]");
+        service.runJobFlow(requested, REGION);
+
+        fixture.runStepThread();
+
+        assertEquals("false", fixture.releaseImages.asked.get(0).get(3));
+        assertEquals("false", fixture.clusterStorage.hdfs.get(0).get(4));
+    }
+
+    @Test
     void aHiveStepOnAClusterWithHCatalogRunsHiveInTheReleasesImageWithHive() {
         EmrCluster requested = cluster("hcatalog", true, hiveStep("report", "-e", "show tables;"));
         requested.setApplications("[{\"Name\": \"HCatalog\"}]");
@@ -354,7 +494,7 @@ class EmrServiceContainerStepsTest {
         SparkJobRunner.Job job = runner.jobs.get(0);
         assertEquals(SparkJobRunner.Engine.HIVE, job.engine());
         assertEquals(List.of(List.of("emr-7.5.0", "public.ecr.aws/emr-serverless/spark/emr-7.5.0:latest",
-                "public.ecr.aws/emr-serverless/hive/emr-7.5.0:latest")), fixture.releaseImages.asked);
+                "public.ecr.aws/emr-serverless/hive/emr-7.5.0:latest", "true")), fixture.releaseImages.asked);
         assertEquals(EmrServiceFixture.RecordingReleaseImages.IMAGE, job.imageTemplate());
         assertEquals(hdfsStorage(cluster).withHiveMetastore("thrift://ip-10-0-0-1.ec2.internal:9083"), job.storage());
     }
@@ -635,6 +775,51 @@ class EmrServiceContainerStepsTest {
     }
 
     @Test
+    void aStepCancelledAsItRunsOnYarnLeavesItsApplicationsLogsInS3() {
+        fixture.clusterStorage.ownNetwork = true;
+        EmrCluster requested = cluster("cancel-logs", true, sparkStep("report", "CONTINUE"));
+        requested.setLogUri("s3://logs/emr/");
+        EmrCluster cluster = service.runJobFlow(requested, REGION);
+        String stepId = cluster.getSteps().get(0).getId();
+        runner.whileRunning = () -> service.cancelSteps(cluster.getId(), List.of(stepId));
+
+        fixture.runStepThread();
+
+        assertEquals("CANCELLED", service.describeStep(cluster.getId(), stepId).getState());
+        assertEquals(List.of(List.of(cluster.getId(), "s3://logs/emr/" + cluster.getId() + "/containers/")),
+                fixture.clusterStorage.containerLogs);
+    }
+
+    @Test
+    void aStepCancelledBeforeItsDriverStartedHasNoLogsToArchive() {
+        fixture.clusterStorage.ownNetwork = true;
+        EmrCluster requested = cluster("cancel-early", true, sparkStep("never", "CONTINUE"));
+        requested.setLogUri("s3://logs/emr/");
+        EmrCluster cluster = service.runJobFlow(requested, REGION);
+
+        service.cancelSteps(cluster.getId(), List.of(cluster.getSteps().get(0).getId()));
+        fixture.runStepThread();
+
+        assertEquals(List.of(), fixture.clusterStorage.containerLogs);
+    }
+
+    @Test
+    void aStepFlociStopsInATeardownLeavesItsApplicationsLogsOnTheNode() {
+        fixture.clusterStorage.ownNetwork = true;
+        EmrCluster requested = cluster("teardown-logs", true, sparkStep("cut", "CONTINUE"));
+        requested.setLogUri("s3://logs/emr/");
+        EmrCluster cluster = service.runJobFlow(requested, REGION);
+        runner.whileRunning = () -> {
+            service.stopManagedContainers();
+            runner.stop(cluster.getSteps().get(0).getId());
+        };
+
+        fixture.runStepThread();
+
+        assertEquals(List.of(), fixture.clusterStorage.containerLogs);
+    }
+
+    @Test
     void aStepCancelledBeforeItsDriverStartsNeverStartsIt() {
         EmrCluster cluster = service.runJobFlow(cluster("early", true, sparkStep("never", "CONTINUE")), REGION);
 
@@ -868,7 +1053,7 @@ class EmrServiceContainerStepsTest {
         assertEquals(stepId, job.runId());
         // The release's EMR Serverless image with its EMR Serverless Hive image's Hive, made on the step's thread.
         assertEquals(List.of(List.of("emr-7.5.0", "public.ecr.aws/emr-serverless/spark/emr-7.5.0:latest",
-                "public.ecr.aws/emr-serverless/hive/emr-7.5.0:latest")), fixture.releaseImages.asked);
+                "public.ecr.aws/emr-serverless/hive/emr-7.5.0:latest", "true")), fixture.releaseImages.asked);
         assertEquals(EmrServiceFixture.RecordingReleaseImages.IMAGE, job.imageTemplate());
         assertNull(job.customImage());
         assertEquals(List.of("hive-script", "--run-hive-script", "--args"), job.command());
@@ -896,7 +1081,7 @@ class EmrServiceContainerStepsTest {
         fixture.runStepThread();
 
         assertEquals(List.of(List.of("emr-7.5.0", "public.ecr.aws/emr-serverless/spark/emr-7.5.0:latest",
-                "registry.internal/emr-serverless/hive/emr-7.5.0:20250425")), fixture.releaseImages.asked);
+                "registry.internal/emr-serverless/hive/emr-7.5.0:20250425", "true")), fixture.releaseImages.asked);
         assertEquals(SparkJobRunner.Engine.SPARK, runner.jobs.get(0).engine());
         assertEquals(EmrServiceFixture.RecordingReleaseImages.IMAGE, runner.jobs.get(0).imageTemplate());
     }

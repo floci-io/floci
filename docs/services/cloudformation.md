@@ -567,6 +567,31 @@ Dynamic-reference expansion is currently scoped to these RDS credential properti
 - On `UpdateStack` (no interruption, as in AWS), a cluster's list is checked first, then the roles the template gained are added, and the roles the previous template declared and the new one drops are removed. A role associated outside the stack is kept while the template leaves it out; declaring it fails the update with `DBClusterRoleAlreadyExists`, as in AWS. If any step of an update is refused, the roles it already added are removed and the ones it removed are put back, so the database matches what the stack still records and a retry starts from there. A rolled-back cluster replacement restores the record of which roles the stack declared.
 - An Aurora cluster member (`AWS::RDS::DBInstance` with `DBClusterIdentifier`) cannot carry `AssociatedRoles`: the schema documents the property as not applicable there, since the cluster manages its roles. The resource fails with a `ValidationError` pointing at the cluster's `AssociatedRoles`.
 
+## RDS DB instance security groups and encryption
+
+`AWS::RDS::DBInstance` creates the instance with its `VPCSecurityGroups` and `StorageEncrypted`, as
+`CreateDBInstance` does, so `DescribeDBInstances` reports the declared groups and the encryption.
+
+- On `UpdateStack`, a changed `VPCSecurityGroups` moves the instance to the new groups in place, as
+  in AWS. A cluster member's groups are its cluster's, so an update whose template changes a
+  member's list fails with `InvalidParameterCombination` before anything changes, as RDS refuses
+  that change for a member. When the previous template declared groups and the new one does not, a
+  standalone instance is put on its VPC's default security group, as AWS's handler does; a cluster
+  member, or an instance whose VPC has no default group, keeps its groups. While the template never
+  declares groups, groups set outside the stack are kept.
+- A failed update puts the groups back. The rollback is complete when the update changed nothing
+  else Floci applies; a change to the password, IAM authentication, subnet group, CA certificate or
+  roles is still reported as not rolled back.
+- `StorageEncrypted` is createOnly, so changing it, including dropping `StorageEncrypted: true`,
+  replaces the instance under a new generated name. The old instance is deleted once the update
+  commits, or kept, with the replacement deleted, when the update rolls back. An instance with a
+  custom `DBInstanceIdentifier` cannot be replaced, so that update fails with a `ValidationError`, as
+  in AWS. An instance created before Floci applied `StorageEncrypted` is unencrypted whatever its
+  template said, and is replaced only by an update that changes the property. Its first update
+  reads the previous value from the previous template, resolved on that update, so a change made
+  only through a parameter, or anything else the update changes, is not seen there.
+- `KmsKeyId` is still accepted and ignored, so an encrypted instance reports no key.
+
 ## S3 ownership controls
 
 `AWS::S3::Bucket` applies `OwnershipControls` through the same S3 call as

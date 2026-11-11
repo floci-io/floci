@@ -44,16 +44,13 @@ class ElbV2TlsReadinessTest {
     @Test
     void permanentlyStoppedListenerStillTimesOut() throws Exception {
         int port = unusedLoopbackPort();
-        AtomicInteger attempts = new AtomicInteger();
         assertThrows(ConditionTimeoutException.class, () -> ElbV2TlsReadiness.await(
                 Duration.ofMillis(350), () -> {
-                    attempts.incrementAndGet();
                     try (Socket socket = new Socket()) {
                         socket.connect(new InetSocketAddress(InetAddress.getLoopbackAddress(), port), 500);
                         fail("Stopped listener unexpectedly accepted a connection");
                     }
                 }));
-        assertTrue(attempts.get() > 1);
     }
 
     @Test

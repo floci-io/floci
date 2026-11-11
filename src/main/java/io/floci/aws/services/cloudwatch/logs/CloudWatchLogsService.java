@@ -1151,6 +1151,11 @@ public class CloudWatchLogsService implements ResourceProvider, Resettable {
      */
     public String startQuery(List<String> logGroupNames, long startTimeSeconds, long endTimeSeconds,
                              String queryString, Integer limit, String region) {
+        String tooLong = SmithyValidationErrors.Violations.WITHOUT_VALUES.lengthOutOfRange(
+                "queryString", queryString, 0, 10_000);
+        if (tooLong != null) {
+            throw SmithyValidationErrors.exception("InvalidParameterException", tooLong);
+        }
         long startMs = startTimeSeconds * 1000L;
         long endMs = endTimeSeconds * 1000L;
 

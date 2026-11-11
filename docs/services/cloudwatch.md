@@ -273,12 +273,13 @@ The bare-colon spelling is a client-compatibility tolerance: the
 documents the canonical ARN, not that spelling. This tolerance does not change other APIs' ARN handling.
 
 `StartQuery` / `GetQueryResults` / `StopQuery` run a **subset** of the Logs Insights
-query language. Supported commands:
+query language. As on AWS, `StartQuery` rejects a `queryString` longer than 10,000 characters
+with `InvalidParameterException`. Supported commands:
 
 | Command | Notes |
 |---|---|
 | `fields a, b, ...` | Projection. Defaults to `@timestamp, @message`. `display` is an alias |
-| `filter <field> = 'v'` | Equality. `!=` and `==` are also accepted; `where` is an alias |
+| `filter <field> = 'v'` | Equality. `!=` and `==` are also accepted; `where` is an alias. An unquoted value must be a number and compares by value, so `n = 2` matches `2` and `2.0`. Comparisons can be joined with `or` (any case) and grouped with parentheses, for example `filter (type = 'A' or type = 'B')` |
 | `sort <field> [asc\|desc]` | `order` is an alias |
 | `dedup <field, ...>` | Keeps the first row per unique tuple, applied after sorting |
 | `limit N` | The effective cap is the smallest of this value, the `StartQuery` `limit` parameter, and `FLOCI_SERVICES_CLOUDWATCHLOGS_MAX_EVENTS_PER_QUERY` |
@@ -296,14 +297,12 @@ degrade silently, so it is worth knowing how each case behaves:
 | Input | Result |
 |---|---|
 | An unsupported command (`stats`, `parse`, ...) | The query fails. Logged as `Unsupported command: stats` |
-| A `filter` whose operator is not `=`, `!=` or `==` — for example `<`, `<=`, `>`, `>=`, `like /ERROR/` or `=~ /ERROR/` | The query fails. Logged as `Unsupported filter expression: ...`. Exception: an unquoted `=` anywhere in the expression, as in `like /a=b/`, is taken as the equality operator, so that query completes with **no** rows and no warning |
-| A `filter` combining conditions with `and` / `or` — for example `filter level = 'ERROR' and status = 200` | Only the leftmost operator is parsed; the rest of the line becomes the compared value. With `=` nothing matches and you get **no** rows; with `!=` everything matches and you get **every** row (up to the limit). `status` is `Complete` and no warning is logged |
+| A `filter` whose operator is not `=`, `!=` or `==`, for example `<`, `<=`, `>`, `>=`, `like /ERROR/` or `=~ /ERROR/` | The query fails. Logged as `Unsupported filter expression: ...` |
+| A `filter` using `and`, `not` or `\|\|`, or with text after the value, as in `filter level = 'ERROR' x` | The query fails. AWS evaluates `and` and `not`, ignores the trailing text, and rejects an unparenthesized `\|\|` at `StartQuery` with `MalformedQueryException` (use `or`) |
+| A blank query, or an empty stage as in a trailing `\|` | The query fails. AWS rejects it at `StartQuery` |
+| A `filter` with a backslash escape, a backtick-quoted field name, an expression such as `1+1` in place of the field, or an unquoted value that is not a number, such as `level = ERROR` or `n = 1+1` | The query fails. AWS interprets them |
 | A projected field that does not exist | Rendered as an empty string. No warning |
 | A `sort` direction other than `asc` / `desc` | Treated as ascending. No warning |
-
-When a `Complete` result set looks narrower or wider than intended, check the query for a
-compound `filter` or a stray `=` first: those cases produce neither a failure nor a warning. The
-only log line is the usual INFO summary, `Logs Insights query <id>: scanned ... -> <n> row(s)`.
 
 For matching events by a pattern, `FilterLogEvents` is the more predictable option today: it
 applies the filter pattern syntax (`?ERROR ?WARN`, `{ $.level = "ERROR" }`, and so on) as AWS does.
@@ -401,7 +400,23 @@ aws logs put-retention-policy \
 
 ## CloudWatch Metrics {#metrics}
 
-**Protocol:** Query (XML) and JSON 1.0 (both supported)
+**Protocol:** Query (XML), JSON 1.0, and OTLP/HTTP.
+
+The OTLP HTTP metrics endpoint accepts `POST /v1/metrics` with `application/json` or
+`application/x-protobuf`, optionally gzip-compressed. Requests are stored separately from classic
+CloudWatch metrics, retaining their OTLP resource, scope and metric data. The uncompressed request
+limit is 5 MiB and a request may contain at most 1,000 data points. Floci checks each datapoint's
+timestamp, the limit of 150 resource, scope and datapoint attributes combined, and the 40,000-byte
+metadata limit. Attribute strings are limited to 1,024 UTF-16 code units. Storage follows the
+`cloudwatchmetrics` storage configuration. Metric querying through PromQL is not yet supported, and
+the endpoint does not yet implement every CloudWatch OTLP validation rule. Invalid requests return OTLP `google.rpc.Status`
+bodies. When only part of a request is invalid, Floci returns an OTLP partial-success response and
+stores only the accepted datapoints. Empty or untyped metrics produce a partial-success message
+without increasing the rejected datapoint count.
+Stored batches expire 14 days after ingestion and are removed on a later ingestion in the same account
+and region. Cleanup runs at most once per minute for each account and region.
+With IAM enforcement enabled, requests require AWS credentials and the `cloudwatch:PutMetricData`
+permission. Bearer-token authentication for this endpoint is not implemented.
 
 CloudWatch Query operations accept form-encoded POST requests and root GET requests with
 URL query parameters. GET uses the existing handlers, signature validation and IAM policy checks. A `monitoring`

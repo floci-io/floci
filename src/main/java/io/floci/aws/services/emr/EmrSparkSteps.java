@@ -38,7 +38,7 @@ final class EmrSparkSteps {
     private static final String COMMAND_RUNNER = "command-runner.jar";
     private static final String SCRIPT_RUNNER = "script-runner.jar";
     private static final String SPARK_SUBMIT = "spark-submit";
-    // Local mode is Floci's, so a step's own master and deploy mode are dropped.
+    // Local mode is Floci's, so a step's own master and deploy mode are dropped, unless its cluster runs YARN.
     private static final Set<String> DROPPED_OPTIONS = Set.of("--master", "--deploy-mode");
     // spark-submit's options that take no value (SparkSubmitOptionParser's switches); every other takes one.
     private static final Set<String> SWITCHES = Set.of("--help", "-h", "--supervise", "--usage-error", "--verbose",
@@ -115,12 +115,13 @@ final class EmrSparkSteps {
     /**
      * What follows Floci's own settings on {@code spark-submit}'s command line for {@code step}, or null for
      * a step Floci does not run. For {@code command-runner.jar spark-submit ...}, the arguments after
-     * {@code spark-submit}, without its {@code --master} and {@code --deploy-mode}: options come before the
-     * application, so one after it is the application's own and kept. For a custom JAR, its main class, if
+     * {@code spark-submit}, without its {@code --master} and {@code --deploy-mode} unless its cluster runs YARN
+     * ({@code onYarn}), where they hold as on EMR: options come before the application, so one after it is the
+     * application's own and kept. For a custom JAR, its main class, if
      * the step names one (otherwise {@code spark-submit} reads the JAR's manifest), the JAR and the step's
      * arguments. A JAR EMR has in {@code /usr/lib/hadoop-mapreduce} is the image's copy of it.
      */
-    static List<String> application(EmrStep step) {
+    static List<String> application(EmrStep step, boolean onYarn) {
         String jar = step.getJar();
         if (jar == null || jar.isBlank() || named(jar, SCRIPT_RUNNER)) {
             return null;
@@ -128,7 +129,8 @@ final class EmrSparkSteps {
         List<String> args = step.getArgs() != null ? step.getArgs() : List.of();
         if (named(jar, COMMAND_RUNNER)) {
             return !args.isEmpty() && named(args.getFirst(), SPARK_SUBMIT)
-                    ? withoutMasterOrDeployMode(args.subList(1, args.size())) : null;
+                    ? onYarn ? List.copyOf(args.subList(1, args.size()))
+                    : withoutMasterOrDeployMode(args.subList(1, args.size())) : null;
         }
         List<String> application = new ArrayList<>();
         if (step.getMainClass() != null && !step.getMainClass().isBlank()) {
@@ -241,6 +243,15 @@ final class EmrSparkSteps {
             }
         }
         return false;
+    }
+
+    /**
+     * The S3 folder its YARN applications' logs go to, or null when a cluster has no {@code LogUri}: the Management
+     * Guide's {@code /cluster-id/containers}, "Application container logs. The logs for each YARN application are
+     * stored in these locations".
+     */
+    static String containerLogFolder(EmrCluster cluster) {
+        return EmrServerlessSparkRunner.logFolder(cluster.getLogUri(), cluster.getId() + "/containers/");
     }
 
     /**
