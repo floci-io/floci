@@ -21,16 +21,32 @@ public interface ClusterStorage {
     void create(String clusterId, String accountId, String region);
 
     /**
+     * Whether a cluster's primary node runs on a Docker network of the cluster's own with its steps on
+     * {@code dockerNetwork}: not on one with no network, nor in a namespace the steps share, where a service on it
+     * would serve every interface of the namespace.
+     */
+    boolean ownNetwork(String dockerNetwork);
+
+    /**
      * Starts {@code clusterId}'s HDFS, a NameNode and a DataNode keeping their data in a volume of their own, and,
-     * unless {@code hiveMetastore} is null, Hive's metastore service, in a container of {@code image} on a Docker
-     * network of the cluster's own, or on the host's when its steps run there, unless it is running, and returns the
-     * cluster's storage with them: its primary node's {@code host} name, which a step's container resolves to the
-     * address given, on the network given, and the metastore's URI, null in a namespace the steps share, where it
-     * does not run. A failure to start them is thrown, and {@link Stopped} once {@code stopped} says the step is past
+     * unless {@code hiveMetastore} is null, Hive's metastore service, and unless {@code yarn} is null, YARN, in a
+     * container of {@code image} on a Docker network of the cluster's own, or on the host's when its steps run there,
+     * unless it is running, and returns the cluster's storage with them: its primary node's {@code host} name, which a
+     * step's container resolves to the address given, on the network given, the metastore's URI, and YARN's
+     * ResourceManager with the address Floci has on that network, the metastore and YARN only on a network of the
+     * cluster's own. A failure to start them is thrown, and {@link Stopped} once {@code stopped} says the step is past
      * starting, or a teardown has stopped the HDFS.
      */
     SparkJobRunner.Storage hdfs(String clusterId, String accountId, String region, String host, String image,
-                                String dockerNetwork, HiveMetastore hiveMetastore, BooleanSupplier stopped);
+                                String dockerNetwork, HiveMetastore hiveMetastore, Yarn yarn, BooleanSupplier stopped);
+
+    /**
+     * Puts the logs of the YARN applications on {@code clusterId}'s primary node in {@code logFolder}, an S3 folder
+     * ending in a slash, each container's files gzipped in {@code <application>/<container>/}, those already there
+     * and unchanged left as they are. Logs that cannot be read or written leave the step as it ended, and are only
+     * logged.
+     */
+    void archiveContainerLogs(String clusterId, String accountId, String region, String logFolder);
 
     /**
      * Hive's metastore service on a cluster's primary node, which reaches S3 as the cluster's EC2 instance profile's
@@ -38,6 +54,23 @@ public interface ClusterStorage {
      * {@code core-site} and {@code hive-site} properties, after its own.
      */
     record HiveMetastore(String role, Map<String, String> settings) {
+    }
+
+    /**
+     * YARN on a cluster's primary node: a ResourceManager, and a NodeManager offering its containers
+     * {@code memoryMb} of memory and {@code vcores} virtual cores, which run its steps' Spark executors, and the folder
+     * of the node's image holding the Hadoop its daemons run from, or null for the image's own.
+     */
+    record Yarn(int memoryMb, int vcores, String hadoopFolder) {
+
+        Yarn(int memoryMb, int vcores) {
+            this(memoryMb, vcores, null);
+        }
+
+        /** This YARN with its daemons run from the Hadoop in {@code folder}. */
+        Yarn withHadoopFolder(String folder) {
+            return new Yarn(memoryMb, vcores, folder);
+        }
     }
 
     /**

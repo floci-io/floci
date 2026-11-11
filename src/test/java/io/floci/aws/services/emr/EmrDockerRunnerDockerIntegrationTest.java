@@ -178,6 +178,31 @@ class EmrDockerRunnerDockerIntegrationTest {
     }
 
     @Test
+    void aSparkStepRunsOnTheClustersYarnInEitherDeployMode() {
+        put("side/where.py", """
+                import socket
+                import sys
+                from pyspark.sql import SparkSession
+                spark = SparkSession.builder.getOrCreate()
+                sc = spark.sparkContext
+                executors = sc.parallelize(range(4), 4).map(lambda _: socket.gethostname()).distinct().collect()
+                where = " ".join([sc.master, sc.getConf().get("spark.submit.deployMode"),
+                                  str(socket.gethostname() in executors)])
+                spark.createDataFrame([(where,)], ["value"]).coalesce(1).write.text(sys.argv[1])
+                """);
+        startCluster("[]");
+
+        // Its driver in the step's container, its executors on the primary node.
+        assertEquals("COMPLETED", runStep("command-runner.jar", "spark-submit",
+                s3Uri("side/where.py"), s3Uri("client/")));
+        assertEquals("yarn client False\n", partFiles("client/"));
+        // Its driver on the primary node too.
+        assertEquals("COMPLETED", runStep("command-runner.jar", "spark-submit", "--deploy-mode", "cluster",
+                s3Uri("side/where.py"), s3Uri("cluster/")));
+        assertEquals("yarn cluster True\n", partFiles("cluster/"));
+    }
+
+    @Test
     void aClustersHdfsWhoseDataNodeExitsStartsAgainOnItsDataForTheNextStep() {
         startCluster("[]");
         assertEquals("COMPLETED", runStep("command-runner.jar", "s3-dist-cp",

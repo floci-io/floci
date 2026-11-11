@@ -87,6 +87,7 @@ class EmrServerlessSparkRunnerTest {
 
     private final EmulatorConfig config = mock(EmulatorConfig.class, RETURNS_DEEP_STUBS);
     private final ContainerLifecycleManager lifecycle = mock(ContainerLifecycleManager.class);
+    private final LaunchedContainerAwsEnv awsEnv = mock(LaunchedContainerAwsEnv.class);
     private final DockerClient docker = mock(DockerClient.class, RETURNS_DEEP_STUBS);
     private final SparkJobRunner.Progress progress = mock(SparkJobRunner.Progress.class);
     private final S3Service s3 = mock(S3Service.class);
@@ -614,6 +615,86 @@ class EmrServerlessSparkRunnerTest {
     }
 
     @Test
+    void aStepOnItsClustersYarnSubmitsToItsResourceManagerWithExecutorsSizedForItsNode() {
+        SparkJobRunner.Job job = stepJob(Map.of("spark.executor.memory", "2g"))
+                .onStorage(STORAGE.withYarn("ip-10-0-0-1.ec2.internal", "http://floci:4566"));
+
+        List<String> arguments = EmrServerlessSparkRunner.sparkSubmitArguments(job, "http://floci:4566",
+                List.of("AWS_ACCESS_KEY_ID=ASIASTEP", "AWS_ENDPOINT_URL=http://floci:4566"));
+
+        assertEquals(List.of("--master", "yarn"), arguments.subList(0, 2));
+        // The ResourceManager on the primary node; Spark's jars from the node's image, which is the step's.
+        assertTrue(arguments.contains("spark.hadoop.yarn.resourcemanager.hostname=ip-10-0-0-1.ec2.internal"));
+        assertTrue(arguments.contains("spark.yarn.jars=local:/usr/lib/spark/jars/*"));
+        // Floci's sizes for the NodeManager, which the cluster's spark-defaults replace.
+        int floci = arguments.indexOf("spark.executor.memory=1g");
+        assertTrue(floci > 0 && arguments.indexOf("spark.executor.memory=2g") > floci, arguments.toString());
+        assertTrue(arguments.contains("spark.executor.cores=1"));
+        assertTrue(arguments.contains("spark.driver.memory=2g"));
+        assertTrue(arguments.contains("spark.driver.cores=1"));
+        // A client-mode driver is reached at its container's name on the cluster's network.
+        assertTrue(arguments.contains("spark.driver.host=s-1a2b3c4d5e6f7"));
+        assertTrue(arguments.contains("spark.driver.bindAddress=0.0.0.0"));
+        // Each executor, and a cluster-mode driver, has the step's AWS environment.
+        assertTrue(arguments.contains("spark.executorEnv.AWS_ACCESS_KEY_ID=ASIASTEP"));
+        assertTrue(arguments.contains("spark.yarn.appMasterEnv.AWS_ACCESS_KEY_ID=ASIASTEP"));
+        assertTrue(arguments.contains("spark.executorEnv.AWS_ENDPOINT_URL=http://floci:4566"));
+        assertTrue(arguments.contains("spark.hadoop.fs.s3a.endpoint=http://floci:4566"));
+        assertTrue(EmrServerlessSparkRunner.sparkDefaultsFile(job, "http://floci:4566", List.of())
+                .startsWith("spark.master yarn\n"));
+    }
+
+    @Test
+    void aStepNotOnYarnRunsInLocalModeWithNoneOfYarnsSettings() {
+        List<String> arguments = EmrServerlessSparkRunner.sparkSubmitArguments(stepJob(Map.of()), ENDPOINT);
+
+        assertEquals(List.of("--master", "local[*]"), arguments.subList(0, 2));
+        assertFalse(arguments.stream().anyMatch(argument -> argument.startsWith("spark.yarn.")
+                || argument.startsWith("spark.executorEnv.") || argument.startsWith("spark.driver.host=")),
+                arguments.toString());
+    }
+
+    @Test
+    void aStepOnItsClustersYarnJoinsItsNetworkByTheNameItsDriverIsReachedAtAndReachesFlociThere() {
+        ContainerBuilder builder = mock(ContainerBuilder.class);
+        ContainerBuilder.Builder spec = mock(ContainerBuilder.Builder.class, RETURNS_SELF);
+        when(builder.newContainer(anyString())).thenReturn(spec);
+        SparkJobRunner.Job job = stepJob(Map.of())
+                .onStorage(STORAGE.withYarn("ip-10-0-0-1.ec2.internal", "http://floci-on-cluster:4566"));
+        when(awsEnv.sdkBaselineEnv("eu-west-1", Optional.empty(), "http://floci-on-cluster:4566", Optional.empty(),
+                "123456789012")).thenReturn(List.of("AWS_ACCESS_KEY_ID=ASIASTEP"));
+
+        runner(builder).run(job, progress);
+
+        InOrder order = inOrder(lifecycle);
+        order.verify(lifecycle).create(any());
+        order.verify(lifecycle).ensureConnected("driver", "floci-aws-emr-j-2AXXXXXXGAPLF-hdfs", "s-1a2b3c4d5e6f7");
+        order.verify(lifecycle).startCreated(eq("driver"), any());
+        verify(lifecycle, never()).connectToNetwork(anyString(), anyString());
+        // Floci's address on the cluster's network, where its executors reach it too, not on Floci's own.
+        verify(spec).withCmd(argThat((List<String> arguments) ->
+                arguments.contains("spark.hadoop.fs.s3a.endpoint=http://floci-on-cluster:4566")
+                        && arguments.contains("spark.executorEnv.AWS_ACCESS_KEY_ID=ASIASTEP")));
+    }
+
+    @Test
+    void aCommandsOwnSparkSubmitOnItsClustersYarnGetsItsSettingsInItsSparkDefaults() {
+        ContainerBuilder builder = mock(ContainerBuilder.class);
+        ContainerBuilder.Builder spec = mock(ContainerBuilder.Builder.class, RETURNS_SELF);
+        when(builder.newContainer(anyString())).thenReturn(spec);
+        SparkJobRunner.Job job = commandJob(List.of("bash", "-c", "spark-submit s3://bucket/app.py"), Map.of())
+                .onStorage(STORAGE.withYarn("ip-10-0-0-1.ec2.internal", "http://floci-on-cluster:4566"));
+        when(awsEnv.sdkBaselineEnv(eq("eu-west-1"), eq(Optional.empty()), eq("http://floci-on-cluster:4566"), any(),
+                anyString())).thenReturn(List.of("AWS_ACCESS_KEY_ID=ASIASTEP"));
+
+        runner(builder).run(job, progress);
+
+        verify(spec).withEnv(eq("FLOCI_SPARK_DEFAULTS"), argThat(file -> file.startsWith("spark.master yarn\n")
+                && file.contains("spark.hadoop.yarn.resourcemanager.hostname ip-10-0-0-1.ec2.internal")
+                && file.contains("spark.executorEnv.AWS_ACCESS_KEY_ID ASIASTEP")));
+    }
+
+    @Test
     void aSparkStepOnAClusterWithHiveUsesItsMetastoreServiceUnlessItsSparkHiveSiteNamesAnother() {
         String glue = "spark.hadoop.hive.metastore.client.factory.class="
                 + "com.amazonaws.glue.catalog.metastore.AWSGlueDataCatalogHiveClientFactory";
@@ -656,7 +737,7 @@ class EmrServerlessSparkRunnerTest {
                 && entrypoint.get(2).contains(String.join("\n",
                         "    if [ -f \"$hadoop_conf/$1\" ]; then",
                         "      mv \"$hadoop_conf/$1\" \"$hadoop_conf/floci-original-$1\"",
-                        "      include=\"<xi:include href=\\\"$hadoop_conf/floci-original-$1\\\"/>\"",
+                        "      include=\"<xi:include href=\\\"floci-original-$1\\\"/>\"",
                         "    fi",
                         "    printf '%s\\n' '<configuration xmlns:xi=\"http://www.w3.org/2001/XInclude\">' \"$include\""
                                 + " \"$2\" '</configuration>' > \"$hadoop_conf/$1\""))
@@ -1362,7 +1443,6 @@ class EmrServerlessSparkRunnerTest {
         when(lifecycle.create(any())).thenReturn("driver");
         when(docker.inspectContainerCmd("driver").exec().getState().getRunning()).thenReturn(false);
         when(docker.inspectContainerCmd("driver").exec().getState().getExitCodeLong()).thenReturn(0L);
-        LaunchedContainerAwsEnv awsEnv = mock(LaunchedContainerAwsEnv.class);
         when(awsEnv.flociEndpoint()).thenReturn(ENDPOINT);
         return new EmrServerlessSparkRunner(builder, lifecycle, logStreamer, awsEnv,
                 mock(LambdaExecutionRoleCredentials.class), s3, ecr, config, new MutableClock(), Duration.ZERO);

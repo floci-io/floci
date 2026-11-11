@@ -69,7 +69,10 @@ duration at its default of 0, a cluster is ready, and its steps complete, before
 them returns.
 
 `CancelSteps` cancels a `PENDING` step, and a `RUNNING` one from release `emr-5.28.0`, as its API
-reference says. A cancelled `RUNNING` step makes room for the next `PENDING` one. On an earlier release
+reference says. A cancelled `RUNNING` step makes room for the next `PENDING` one. Its container stops, and what the
+applications it started on YARN have logged goes to `containers/` (see **Output**), while an application in
+`--deploy-mode cluster` runs on to its end: EMR's cancel signals the step and its descendant processes, and
+"asynchronous processes are not affected", as the Management Guide puts it. On an earlier release
 a `RUNNING` step answers `FAILED` with "Step is not in a cancellable state: RUNNING".
 
 A cluster created with `Instances.KeepJobFlowAliveWhenNoSteps` set to `false` terminates after its
@@ -112,13 +115,13 @@ included; see [Step Functions: Amazon EMR tasks](step-functions.md#amazon-emr-ta
 With `runner-mode` set to `docker` (`FLOCI_SERVICES_EMR_RUNNER_MODE=docker`), a step runs. Floci starts
 one container per step from the cluster's release image, the one EMR Serverless's `docker` mode uses
 (`public.ecr.aws/emr-serverless/spark/<release>`), and runs the step in it: a Spark step's
-`spark-submit` in local mode, the container holding the driver and its executors, or a command or a
-script. The cluster itself gets no container, and goes through its lifecycle as in the `immediate` mode,
-but for its bootstrap actions and its storage.
+`spark-submit` on the YARN its primary node runs (see **YARN**), or in local mode where it runs none, the container
+holding the driver and its executors, or a command or a script. The cluster itself goes through its lifecycle as in the
+`immediate` mode, but for its bootstrap actions and its primary node (see **Storage**).
 
 * **Which steps run**: a `command-runner.jar` step whose first argument is `spark-submit`, the way the
-  Management Guide writes Spark steps, runs the arguments after it, without its `--master` and
-  `--deploy-mode`. A custom JAR step runs its `MainClass`, or else the one its manifest names, through
+  Management Guide writes Spark steps, runs the arguments after it, with its `--master` and `--deploy-mode` as
+  given where the cluster runs YARN (see **YARN**) and without them where it does not. A custom JAR step runs its `MainClass`, or else the one its manifest names, through
   `spark-submit`, with the JAR and the step's `Args`; a MapReduce job it starts, such as the Management
   Guide's `wordcount` of Hadoop's examples JAR, runs in local mode (see **Hadoop streaming and MapReduce**).
   A `Jar` of `/usr/lib/hadoop-mapreduce/hadoop-streaming.jar`, where EMR has it, runs the image's
@@ -139,18 +142,20 @@ but for its bootstrap actions and its storage.
   `script-runner.jar` step's script is fetched from S3 with the AWS CLI and the step's credentials, then
   run with the step's other arguments; a path not in S3 is run as it is, a bare name from `/home/hadoop`
   when a file there has it, one a former step left there included. `hadoop fs` and `hdfs dfs` reach the
-  cluster's HDFS (see **Storage**) and Floci's S3. A `spark-submit` they start runs in local mode on Floci's S3 with the
+  cluster's HDFS (see **Storage**) and Floci's S3. A `spark-submit` they start runs on the cluster's YARN, or in local
+  mode where it runs none, on Floci's S3 with the
   cluster's `spark-defaults`, `core-site`, `spark-hive-site` and `spark-log4j2`, which Floci puts in a Spark
   configuration of its own, a copy of the folder a `spark-env` export of `SPARK_CONF_DIR` names, else of the
-  image's, ahead of the image's EMR Serverless master; its own `--master yarn` or `--deploy-mode cluster`
-  fails, as there is no YARN.
+  image's, ahead of the image's EMR Serverless master; where the cluster runs no YARN, its own `--master yarn` or
+  `--deploy-mode cluster` fails.
 * **Storage**: a cluster's primary node keeps its disks while the cluster lives, and so does Floci: each step's
   container mounts the cluster's two Docker volumes, one at `/home/hadoop` and one at `/mnt`, so what a step leaves
   there is there for the steps after it, and for steps running at the same time. What the bootstrap actions left in
   `/home/hadoop` or `/mnt` comes with the image the steps run in, and Docker copies it into the volumes when the
   first step starts. Every cluster runs HDFS, "best used for caching the results produced by intermediate job-flow
   steps", as the Management Guide puts it: a NameNode and a DataNode on its primary node, which Floci runs in a
-  container of their own, `emr-<cluster-id>-hdfs`, from the release's EMR Serverless Hive image, which has HDFS
+  container of their own, `emr-<cluster-id>-hdfs`, from the image the cluster's steps run in where it runs YARN (see
+  **YARN**), else from the release's EMR Serverless Hive image, which has HDFS
   where the release's image has only its client (`hive-image-template` names another), or, for an `emr-spark-*`
   release, which has no Hive image, from `emr-7.5.0`'s, with their data in a third volume, one copy of each block,
   and permissions off. On a cluster with Hive or HCatalog (see **Which steps run**), the same container runs Hive's
@@ -192,8 +197,32 @@ but for its bootstrap actions and its storage.
   cluster"), on a state reset, and, for clusters that are gone or have ended, when the EMR service starts, unless
   `reconcile-containers-on-startup` is off. A shutdown of Floci removes the HDFS containers of the clusters that are
   still up, and their next step starts them again, on the data their volume keeps. `/tmp` is each container's own.
-* **Hadoop streaming and MapReduce**: a step's `hadoop` command runs MapReduce in local mode, in its own JVM,
-  as there is no YARN: the image has MapReduce only in Spark's shaded Hadoop client, which Floci makes the
+* **YARN**: on a Docker network of the cluster's own, the default, "the primary node runs the YARN ResourceManager
+  service", as the Management Guide puts it, and, as on a
+  cluster of one node, a NodeManager, both in the primary node's container, and the cluster's Spark runs on them. A
+  Spark step or custom JAR step submits to it, with `--master yarn` unless it names another master, and in the deploy
+  mode it asks for, `client` when it names none, and so does a `spark-submit` a command or script starts. In client
+  mode the driver stays in the step's container and its output in the step's logs, and the executors run in YARN's
+  containers on the node; in cluster mode the driver runs on the node too, its output in the application's container
+  logs (see **Output**) and only the client's in the step's.
+  The node needs Spark, Python and what the bootstrap actions installed, as an EMR cluster's nodes hold every
+  application it installs, so it runs from the image the steps run in: the bootstrap's, else the release's EMR
+  Serverless image with the HDFS, MapReduce and YARN of its EMR Serverless Hive image, and Hive on a cluster with
+  Hive, which Floci makes the first time one of the release's clusters needs it (see **Hive steps**), and in which the
+  cluster's bootstrap actions run. An `emr-spark-*` release has no EMR Serverless Hive image, and `emr-7.5.0`'s HDFS and
+  YARN do not run on its newer Hadoop, so its image holds the whole of `emr-7.5.0`'s Hadoop in `/opt`, which only the
+  node's daemons run from (see **Known limitations**). EMR sizes a NodeManager, and the executors' memory and cores ("determined by the
+  core and task instance types"), by the instance type; Floci's node shares the machine it runs on, so its NodeManager
+  offers `yarn-node-memory-mb` and `yarn-node-vcores`, 4096 MB and 4 by default, and an executor is 1 GB and one core
+  and a driver 2 GB and one core, which the cluster's `spark-defaults` and a step's own options replace. A container
+  larger than the NodeManager offers is refused by YARN, and its step fails. Dynamic allocation is on, as it is on
+  EMR, through Spark's shuffle tracking: the images have no external shuffle service. Executors reach Floci's S3 at
+  Floci's address on the cluster's network, which Floci's container joins as for the metastore (see **Storage**), over
+  HTTP, which Floci serves beside HTTPS with TLS on, so no certificate is involved, with the step's AWS credentials,
+  and find the driver at its container's name on that network.
+* **Hadoop streaming and MapReduce**: a step's `hadoop` command runs MapReduce in local mode, in its own JVM, on the
+  YARN clusters too (see **Known limitations**): the image has MapReduce only in Spark's shaded Hadoop client, which
+  Floci makes the
   command's MapReduce home (`HADOOP_MAPRED_HOME`, unless a `spark-env` export names one), so it is on the
   command's class path whatever `HADOOP_CLASSPATH` a command sets, and a copy of its `mapred-site.xml` sets
   `mapreduce.framework.name` to `local`. This has run on the `emr-7.5.0` and `emr-7.10.0` images; on another,
@@ -390,7 +419,11 @@ but for its bootstrap actions and its storage.
   `stdout.gz` and `stderr.gz` under `<LogUri>/<cluster-id>/steps/<step-id>/`, the step log folder of the
   Management Guide's "Log locations" (an `s3n://` or `s3a://` `LogUri` names the same bucket). A
   cancelled step's logs hold what its driver wrote until it was stopped. Logs that cannot be written,
-  to a bucket that does not exist say, leave the step as it ended. The `controller` and `syslog` logs
+  to a bucket that does not exist say, leave the step as it ended. On a cluster that runs YARN, the logs of its
+  applications' containers, a cluster-mode driver's output among them, go gzipped to
+  `<LogUri>/<cluster-id>/containers/<application>/<container>/` when a step ends, "Application container logs. The logs
+  for each YARN application are stored in these locations", but for the `launch_container.sh` that holds a container's
+  credentials. The `controller` and `syslog` logs
   and the other log folders are not written, nothing is copied while a step runs (EMR copies its logs
   every five minutes), and `FailureDetails` has no `LogFile`.
 * **Image**: `image-template` names another image, such as a mirror or a dated tag of the release's
@@ -402,6 +435,16 @@ but for its bootstrap actions and its storage.
 
 ### Known limitations
 
+- **One NodeManager, on the primary node.** A cluster's core and task instance groups get no NodeManager of their own,
+  so its executors all run on the primary node, however many instances the cluster names.
+- **An `emr-spark-*` cluster's HDFS and YARN are `emr-7.5.0`'s.** The Release Guide lists both at Hadoop 3.4.2 for
+  `emr-spark-8.0.0` and `emr-spark-8.1.0`, and EMR Serverless publishes no image holding them, so the primary node runs
+  Hadoop 3.4.0's. Spark and its Hadoop client are the release's own.
+- **No YARN in a network namespace the steps share, or with no network.** With `docker-network` set to `host` or
+  `container:<id>`, YARN's daemons would listen on every interface of the namespace, and with `none` the steps could not
+  reach them, so the cluster's Spark runs in local mode.
+- **MapReduce and Tez in local mode.** On a cluster that runs YARN too, `hadoop-streaming`, a custom JAR's MapReduce and
+  Hive's Tez run in the step's container.
 - **No Hive metastore service in a network namespace the steps share.** With `docker-network` set to `host` or
   `container:<id>`, the primary node runs HDFS but not Hive's metastore service: Hive 3's has no setting for the
   address it listens on, so it would serve its tables, and the files under them, on every interface of the
@@ -459,7 +502,9 @@ its `STARTING` event, has its events sent after the rest of that call's.
 | `FLOCI_SERVICES_EMR_RUNNER_MODE` | `immediate` | `immediate` completes steps by time without running anything; `docker` runs each step in a container, after the cluster's bootstrap actions (see [Running steps](#running-steps)) |
 | `FLOCI_SERVICES_EMR_DOCKER_NETWORK` | the global default | Docker network for step containers |
 | `FLOCI_SERVICES_EMR_IMAGE_TEMPLATE` | `public.ecr.aws/emr-serverless/spark/%s:latest`, or `spark4/` in place of `spark/` for an `emr-spark-*` release | Image for a `docker` step, `%s` standing for the cluster's release label; a mirror sets `FLOCI_SERVICES_EMR_HIVE_IMAGE_TEMPLATE` too |
-| `FLOCI_SERVICES_EMR_HIVE_IMAGE_TEMPLATE` | `public.ecr.aws/emr-serverless/hive/%s:latest` | The EMR Serverless Hive image every `docker` cluster runs its HDFS in, and a cluster with Hive takes Hive from, `%s` standing for the cluster's release label, or `emr-7.5.0` for the HDFS of an `emr-spark-*` release; see [Storage and Hive steps](#running-steps) |
+| `FLOCI_SERVICES_EMR_HIVE_IMAGE_TEMPLATE` | `public.ecr.aws/emr-serverless/hive/%s:latest` | The EMR Serverless Hive image a `docker` cluster takes HDFS and YARN from, and a cluster with Hive takes Hive from, `%s` standing for the cluster's release label, or `emr-7.5.0` for the Hadoop of an `emr-spark-*` release; see [Storage and Hive steps](#running-steps) |
+| `FLOCI_SERVICES_EMR_YARN_NODE_MEMORY_MB` | `4096` | The memory a `docker` cluster's NodeManager offers the YARN containers its Spark executors run in (see [Running steps](#running-steps)) |
+| `FLOCI_SERVICES_EMR_YARN_NODE_VCORES` | `4` | The virtual cores it offers them |
 | `FLOCI_SERVICES_EMR_RECONCILE_CONTAINERS_ON_STARTUP` | `true` | Remove the step drivers and bootstrap containers a previous run of this Floci left on the Docker daemon, and the images bootstrap actions left for clusters that are gone or have ended, when the EMR service starts; turn it off when two Floci instances share a daemon with the same port and no resource namespace |
 
 ## Release catalogue
