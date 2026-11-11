@@ -249,7 +249,8 @@ public class EventBridgeService implements ResourceProvider, StoredResourceArns 
             return;
         }
         String rulePrefix = ruleKeyPrefix(region, effectiveName);
-        boolean hasRules = ruleStore.keys().stream().anyMatch(k -> isRuleKeyOfBus(k, rulePrefix));
+        boolean hasRules = ruleStore.keys().stream()
+                .anyMatch(k -> k.startsWith(rulePrefix) && !isRuleKeyOfNestedBus(k, rulePrefix, effectiveName, region));
         if (hasRules) {
             throw new AwsException("ValidationException",
                     "Cannot delete event bus with existing rules: " + name, 400);
@@ -1663,6 +1664,16 @@ public class EventBridgeService implements ResourceProvider, StoredResourceArns 
 
     private static boolean isRuleKeyOfBus(String key, String rulePrefix) {
         return key.startsWith(rulePrefix) && key.indexOf('/', rulePrefix.length()) < 0;
+    }
+
+    private boolean isRuleKeyOfNestedBus(String key, String rulePrefix, String busName, String region) {
+        String rest = key.substring(rulePrefix.length());
+        for (int slash = rest.indexOf('/'); slash >= 0; slash = rest.indexOf('/', slash + 1)) {
+            if (busStore.get(busKey(region, busName + "/" + rest.substring(0, slash))).isPresent()) {
+                return true;
+            }
+        }
+        return false;
     }
 
     private static String ruleKey(String region, String busName, String ruleName) {

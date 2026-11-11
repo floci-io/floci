@@ -55,17 +55,19 @@ class EventBridgeServiceTest {
 
     private EventBridgeService service;
     private TargetDispatcher dispatcherMock;
+    private StorageBackend<String, Rule> ruleStore;
     private StorageBackend<String, Replay> replayStore;
     private ReplayDispatcher replayDispatcherMock;
 
     @BeforeEach
     void setUp() {
         dispatcherMock = mock(TargetDispatcher.class);
+        ruleStore = new InMemoryStorage<>();
         replayStore = new InMemoryStorage<>();
         replayDispatcherMock = mock(ReplayDispatcher.class);
         service = new EventBridgeService(
                 new InMemoryStorage<>(),
-                new InMemoryStorage<>(),
+                ruleStore,
                 new InMemoryStorage<>(),
                 new InMemoryStorage<>(),
                 new InMemoryStorage<>(),
@@ -381,6 +383,18 @@ class EventBridgeServiceTest {
     void deleteEventBusWithRulesThrows() {
         service.createEventBus("my-bus", null, null, REGION);
         service.putRule("rule-1", "my-bus", null, "rate(1 minute)", RuleState.ENABLED, null, null, null, REGION);
+
+        assertThrows(AwsException.class, () ->
+                service.deleteEventBus("my-bus", REGION));
+    }
+
+    @Test
+    void deleteEventBusWithALegacySlashNamedRuleThrows() {
+        service.createEventBus("my-bus", null, null, REGION);
+        Rule legacy = new Rule();
+        legacy.setName("team/rule-1");
+        legacy.setEventBusName("my-bus");
+        ruleStore.put("rule:" + REGION + ":my-bus/team/rule-1", legacy);
 
         assertThrows(AwsException.class, () ->
                 service.deleteEventBus("my-bus", REGION));
