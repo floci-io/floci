@@ -62,6 +62,11 @@ class RedshiftServerlessAdministrationHandlerTest {
                 .thenAnswer(invocation -> "arn:aws:redshift-serverless:"
                         + invocation.getArgument(1, String.class) + ":" + ACCOUNT_ID + ":"
                         + invocation.getArgument(2, String.class));
+        when(regionResolver.buildArn(eq("redshift-serverless"), any(String.class), any(String.class),
+                any(String.class)))
+                .thenAnswer(invocation -> "arn:aws:redshift-serverless:"
+                        + invocation.getArgument(1, String.class) + ":" + invocation.getArgument(2, String.class)
+                        + ":" + invocation.getArgument(3, String.class));
         RedshiftServerlessEndpoints endpoints = mock(RedshiftServerlessEndpoints.class);
         when(endpoints.allocate()).thenReturn(new Endpoint("localhost", 7100));
         RedshiftServerlessRuntime runtime = mock(RedshiftServerlessRuntime.class);
