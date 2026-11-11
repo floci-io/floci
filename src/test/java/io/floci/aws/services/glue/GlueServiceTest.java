@@ -62,6 +62,12 @@ import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyBoolean;
+import static org.mockito.Mockito.clearInvocations;
+import static org.mockito.Mockito.spy;
+import static org.mockito.Mockito.times;
+import static org.mockito.Mockito.verify;
 
 class GlueServiceTest {
 
@@ -90,7 +96,7 @@ class GlueServiceTest {
     void setUp() {
         RegionResolver regionResolver = new RegionResolver(REGION, ACCOUNT_ID);
         StorageFactory storageFactory = new InMemoryStorageFactory();
-        schemaRegistryService = new GlueSchemaRegistryService(storageFactory, regionResolver);
+        schemaRegistryService = spy(new GlueSchemaRegistryService(storageFactory, regionResolver));
         kmsService = new KmsService(storageFactory, regionResolver);
         databaseStore = new InMemoryStorage<>();
         tableStore = new InMemoryStorage<>();
@@ -223,6 +229,99 @@ class GlueServiceTest {
 
         assertEquals("InvalidInputException", exception.getErrorCode());
         assertEquals("Database cannot be renamed", exception.getMessage());
+    }
+
+    private static Table paginationTable(String name) {
+        Table table = new Table();
+        table.setName(name);
+        return table;
+    }
+
+    @Test
+    void catalogDatabaseCursorSurvivesDeletionAndShrinking() {
+        glueService.createDatabase(new Database("db2"));
+        glueService.createDatabase(new Database("db3"));
+        GlueService.Page<Database> first = glueService.getDatabases(2, null);
+        glueService.deleteDatabase("db1");
+        glueService.deleteDatabase("db2");
+        GlueService.Page<Database> last = glueService.getDatabases(2, first.nextToken());
+        assertEquals(List.of("db3"), last.items().stream().map(Database::getName).toList());
+        assertNull(last.nextToken());
+        glueService.deleteDatabase("db3");
+        assertTrue(glueService.getDatabases(2, first.nextToken()).items().isEmpty());
+    }
+
+    @Test
+    void tableCursorIgnoresInsertionsBeforeAndDeletionOfItsItem() {
+        for (String name : List.of("alpha", "charlie", "echo")) {
+            glueService.createTable("db1", paginationTable(name));
+        }
+        GlueService.Page<Table> first = glueService.getTables("db1", 2, null);
+        assertEquals(List.of("alpha", "charlie"), first.items().stream().map(Table::getName).toList());
+        glueService.deleteTable("db1", "charlie");
+        glueService.createTable("db1", paginationTable("bravo"));
+        glueService.createTable("db1", paginationTable("delta"));
+        GlueService.Page<Table> last = glueService.getTables("db1", 2, first.nextToken());
+        assertEquals(List.of("delta", "echo"), last.items().stream().map(Table::getName).toList());
+        assertNull(last.nextToken());
+    }
+
+    @Test
+    void tableVersionCursorPreservesDescendingOrderAfterAnUpdate() {
+        glueService.createTable("db1", paginationTable("versioned"));
+        glueService.updateTable("db1", paginationTable("versioned"), null, false);
+        glueService.updateTable("db1", paginationTable("versioned"), null, false);
+        GlueService.Page<Map<String, Object>> first = glueService.getTableVersions("db1", "versioned", 1, null);
+        assertEquals("2", first.items().getFirst().get("VersionId"));
+        glueService.updateTable("db1", paginationTable("versioned"), null, false);
+        GlueService.Page<Map<String, Object>> second = glueService.getTableVersions("db1", "versioned", 1,
+                first.nextToken());
+        assertEquals("1", second.items().getFirst().get("VersionId"));
+    }
+
+    @Test
+    void partitionCursorPreservesTupleOrderAfterItsPrefixShrinks() {
+        Table table = paginationTable("partitioned");
+        table.setPartitionKeys(List.of(new Column("group", "string"), new Column("value", "string")));
+        glueService.createTable("db1", table);
+        for (List<String> values : List.of(List.of("a", "first"), List.of("a", "second"),
+                List.of("a0", "x"), List.of("aa", "y"), List.of("é", "z"))) {
+            Partition partition = new Partition();
+            partition.setValues(values);
+            glueService.createPartition("db1", "partitioned", partition);
+        }
+        GlueService.Page<Partition> first = glueService.getPartitions("db1", "partitioned", null, null, 2, null);
+        assertEquals(List.of(List.of("a", "first"), List.of("a", "second")),
+                first.items().stream().map(Partition::getValues).toList());
+        glueService.deletePartition("db1", "partitioned", List.of("a", "first"));
+        glueService.deletePartition("db1", "partitioned", List.of("a", "second"));
+        for (String value : List.of("middle", "third")) {
+            Partition partition = new Partition();
+            partition.setValues(List.of("a", value));
+            glueService.createPartition("db1", "partitioned", partition);
+        }
+        GlueService.Page<Partition> last = glueService.getPartitions("db1", "partitioned", null, null, 100,
+                first.nextToken());
+        assertEquals(List.of(List.of("a", "third"), List.of("a0", "x"), List.of("aa", "y"), List.of("é", "z")),
+                last.items().stream().map(Partition::getValues).toList());
+        assertNull(last.nextToken());
+    }
+
+    @Test
+    void tablePagingResolvesOnlyTheReturnedSchemas() {
+        schemaRegistryService.createRegistry("r1", null, null, REGION);
+        schemaRegistryService.createSchema(new RegistryId("r1", null),
+                "users", "AVRO", "BACKWARD", null, AVRO_V1, null, REGION);
+        for (String name : List.of("alpha", "bravo", "charlie")) {
+            Table table = tableReferencing("r1", "users", null, null);
+            table.setName(name);
+            glueService.createTable("db1", table);
+        }
+        clearInvocations(schemaRegistryService);
+        GlueService.Page<Table> first = glueService.getTables("db1", 1, null);
+        assertEquals("alpha", first.items().getFirst().getName());
+        assertEquals("id", first.items().getFirst().getStorageDescriptor().getColumns().getFirst().getName());
+        verify(schemaRegistryService, times(1)).getSchemaVersion(any(), any(), any(), anyBoolean(), any());
     }
 
     @Test

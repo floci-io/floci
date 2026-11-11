@@ -253,7 +253,7 @@ public class RedshiftServerlessJsonHandler {
      * and Region.
      */
     private Response handleGetSnapshot(JsonNode request, String region) {
-        return snapshotResponse(service.getSnapshot(snapshotNameOf(request, region), region));
+        return snapshotResponse(service.getSnapshot(snapshotNameOf(request, region, null), region));
     }
 
     private Response handleListSnapshots(JsonNode request, String region) {
@@ -281,11 +281,18 @@ public class RedshiftServerlessJsonHandler {
     }
 
     private Response handleRestoreFromSnapshot(JsonNode request, String region) {
-        RedshiftServerlessService.RestoreResult result = service.restoreFromSnapshot(
-                ServerlessSupport.text(request, "namespaceName"), ServerlessSupport.text(request, "workgroupName"),
-                snapshotNameOf(request, region), ServerlessSupport.text(request, "ownerAccount"),
-                ServerlessSupport.bool(request, "manageAdminPassword"),
-                ServerlessSupport.text(request, "adminPasswordSecretKmsKeyId"), region);
+        String ownerAccount = ServerlessSupport.text(request, "ownerAccount");
+        boolean shared = service.isOtherAccount(ownerAccount);
+        String snapshotName = snapshotNameOf(request, region, shared ? ownerAccount : null);
+        String namespaceName = ServerlessSupport.text(request, "namespaceName");
+        String workgroupName = ServerlessSupport.text(request, "workgroupName");
+        Boolean manageAdminPassword = ServerlessSupport.bool(request, "manageAdminPassword");
+        String kmsKeyId = ServerlessSupport.text(request, "adminPasswordSecretKmsKeyId");
+        RedshiftServerlessService.RestoreResult result = shared
+                ? service.restoreFromSharedSnapshot(namespaceName, workgroupName, snapshotName, ownerAccount,
+                        manageAdminPassword, kmsKeyId, region)
+                : service.restoreFromSnapshot(namespaceName, workgroupName, snapshotName, ownerAccount,
+                        manageAdminPassword, kmsKeyId, region);
         ObjectNode response = objectMapper.createObjectNode();
         response.set("namespace", namespaceNode(result.namespace()));
         response.put("ownerAccount", result.snapshot().getOwnerAccount());
@@ -293,14 +300,21 @@ public class RedshiftServerlessJsonHandler {
         return Response.ok(response).build();
     }
 
-    /** The snapshot name from {@code snapshotName}, or recovered from {@code snapshotArn} when absent. */
-    private String snapshotNameOf(JsonNode request, String region) {
+    /**
+     * The snapshot name from {@code snapshotName}, or recovered from {@code snapshotArn} when absent.
+     * {@code ownerAccount} is the account the ARN must name, or null for the caller's own.
+     */
+    private String snapshotNameOf(JsonNode request, String region, String ownerAccount) {
         String snapshotName = ServerlessSupport.text(request, "snapshotName");
         String snapshotArn = ServerlessSupport.text(request, "snapshotArn");
         if (snapshotName != null && snapshotArn != null) {
             throw ServerlessSupport.validation("snapshotName and snapshotArn cannot both be specified.");
         }
-        return snapshotArn == null ? snapshotName : service.snapshotNameFromArn(snapshotArn, region);
+        if (snapshotArn == null) {
+            return snapshotName;
+        }
+        return ownerAccount == null ? service.snapshotNameFromArn(snapshotArn, region)
+                : service.snapshotNameFromArn(snapshotArn, region, ownerAccount, "snapshotArn");
     }
 
     private Response handleCreateUsageLimit(JsonNode request, String region) {

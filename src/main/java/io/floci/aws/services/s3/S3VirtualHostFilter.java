@@ -33,7 +33,7 @@ import java.util.Set;
 @ApplicationScoped
 public class S3VirtualHostFilter implements ContainerRequestFilter {
 
-    static final String ORIGINAL_REQUEST_URI_PROPERTY = S3VirtualHostFilter.class.getName() + ".originalRequestUri";
+    public static final String ORIGINAL_REQUEST_URI_PROPERTY = S3VirtualHostFilter.class.getName() + ".originalRequestUri";
 
     private final String baseHostname;
     private final Instance<S3Service> s3ServiceInstance;

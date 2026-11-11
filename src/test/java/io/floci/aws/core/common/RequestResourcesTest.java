@@ -632,6 +632,48 @@ class RequestResourcesTest {
     }
 
     /**
+     * A snapshot another account shares is named by its name and the {@code ownerAccount} of that account: it is that
+     * account's snapshot the request acts on, the one {@code findInAccount} gives or else the owner's ARN with its id
+     * open, and a request naming no owner acts on the caller's own.
+     */
+    @Test
+    void aResourceFoundByMembersIsInTheAccountItsAccountMemberGives() {
+        String own = "arn:aws:redshift-serverless:us-east-1:000000000000:snapshot/own-id";
+        String theirs = "arn:aws:redshift-serverless:us-east-1:111111111111:snapshot/their-id";
+        StoredResourceArns stored = new StoredResourceArns() {
+            @Override
+            public String namespace() {
+                return "redshift-serverless";
+            }
+
+            @Override
+            public Optional<String> find(String type, List<String> names, String region) {
+                return List.of("snap").equals(names) ? Optional.of(own) : Optional.empty();
+            }
+
+            @Override
+            public Optional<String> findInAccount(String type, List<String> names, String account, String region) {
+                return "111111111111".equals(account) && List.of("snap").equals(names)
+                        ? Optional.of(theirs) : Optional.empty();
+            }
+        };
+        assertEquals(List.of(own), RequestResources.of("redshift-serverless:GetSnapshot",
+                json("{\"snapshotName\":\"snap\"}"), "aws", "us-east-1", "000000000000", stored));
+        assertEquals(List.of(theirs), RequestResources.of("redshift-serverless:GetSnapshot",
+                json("{\"snapshotName\":\"snap\",\"ownerAccount\":\"111111111111\"}"), "aws", "us-east-1",
+                "000000000000", stored));
+        // A snapshot the owner has none of by that name has its id open in the owner's account.
+        assertEquals(List.of("arn:aws:redshift-serverless:us-east-1:222222222222:snapshot/*"),
+                RequestResources.of("redshift-serverless:GetSnapshot",
+                        json("{\"snapshotName\":\"other\",\"ownerAccount\":\"222222222222\"}"), "aws",
+                        "us-east-1", "000000000000", stored));
+        // An owner that is no account id names no resource.
+        assertEquals(List.of(), RequestResources.of("redshift-serverless:GetSnapshot",
+                json("{\"snapshotName\":\"snap\",\"ownerAccount\":\"nope\"}"), "aws", "us-east-1",
+                "000000000000", stored));
+    }
+
+    /**
      * A scalable target's ARN is all the id Application Auto Scaling mints, while its requests name it by its service
      * namespace, resource id and scalable dimension: it is the one stored under those, or else has its id open, as a
      * new one has; a request leaving one out names none, and one naming it by its ARN names it as given.

@@ -41,7 +41,10 @@ strings, or, for an ARN, a member of a structure or of each element of a list of
 
 A member whose botocore shape is an account id (a string of pattern `[0-9]{12}`) gives the account of
 the types the request names by their variables: ECR's `registryId` selects the registry its handler
-acts in, so `repository/<name>` is that account's. A member whose shape's pattern takes an ARN before
+acts in, so `repository/<name>` is that account's. On a non-create, a bare string member also takes
+that role when the same service types that member as an account id in another request. Redshift
+Serverless's `ownerAccount` names the snapshot's owner this way, but on a create it names the account
+of a resource the new one is made in. A member whose shape's pattern takes an ARN before
 the name (`(arn:...:event-bus/)?<name>`) may give the ARN of the type of that name instead, whose one
 variable it is then read as, in the ARN's account and Region: EventBridge's `EventBusName`. So may a
 field of each element of a list of structures, each element's resource in the account and Region of
@@ -167,8 +170,8 @@ NAMESPACES = ("access-analyzer", "acm", "application-autoscaling", "athena", "bc
               "bcm-pricing-calculator", "budgets", "ce", "cloudtrail", "codebuild", "codepipeline", "cognito-identity",
               "cognito-idp", "controltower", "cur", "datasync", "ec2", "ecr", "elasticloadbalancing", "elasticmapreduce", "es", "events",
               "firehose", "globalaccelerator", "inspector2", "kinesisanalytics", "macie2", "payment-cryptography",
-              "quicksight", "redshift", "redshift-data", "rekognition", "servicediscovery", "servicequotas", "sso",
-              "states", "textract", "timestream-influxdb", "translate", "signer", "xray")
+              "quicksight", "redshift", "redshift-data", "redshift-serverless", "rekognition", "servicediscovery",
+              "servicequotas", "sso", "states", "textract", "timestream-influxdb", "translate", "signer", "xray")
 
 # SDK clients the reference lists for a namespace's operations whose requests Floci does not serve, and why: their
 # members are not read.
@@ -266,10 +269,6 @@ NOT_COVERED: dict[str, str] = {
     "ram": _REST,
     "rds": _LATER,
     "rds-data": _REST,
-    "redshift-serverless": "not read yet: its namespace, workgroup, snapshot and managed VPC endpoint ARNs end in an "
-                           "id the service mints, `namespace/<id>`, while its requests name them by namespaceName, "
-                           "workgroupName, snapshotName and endpointName, so reading it needs the stored ARNs those "
-                           "find, as Redshift Data's workgroups are found",
     "resource-explorer-2": _REST,
     "route53": _REST,
     "route53resolver": _LATER,
@@ -620,6 +619,13 @@ FOUND_BY: dict[str, tuple[list[str], str]] = {
         "target', Application Auto Scaling User Guide), which the reference names ${ResourceId}, while its requests "
         "name the target by ServiceNamespace, ResourceId and ScalableDimension; ResourceId is the target's "
         "resource (service/<cluster>/<service>), not that id"),
+    **{f"redshift-serverless:{kind}": ([member], f"a Redshift Serverless {kind}'s ARN ends in the id the service gives "
+                                                  f"it, {path}/<id> ('The unique identifier' of its {kind}), while its "
+                                                  f"requests name it by {member}")
+       for kind, member, path in (("namespace", "namespaceName", "namespace"),
+                                  ("workgroup", "workgroupName", "workgroup"),
+                                  ("snapshot", "snapshotName", "snapshot"),
+                                  ("endpointAccess", "endpointName", "managedvpcendpoint"))},
     "redshift-data:workgroup": (
         ["WorkgroupName"],
         "a serverless workgroup's ARN ends in the id Redshift Serverless gives it, workgroup/<id> (its Workgroup's "
@@ -849,10 +855,16 @@ def account_members(models: dict[str, dict], operation: str) -> list[str]:
         spec = model["operations"].get(operation)
         if spec is None or "input" not in spec or not READ_PROTOCOLS & _protocols(model):
             continue
+        account_names = {name for other in model["operations"].values() if "input" in other
+                         for name, member in model["shapes"][other["input"]["shape"]].get("members", {}).items()
+                         if member.get("location") in BODY_LOCATIONS
+                         and model["shapes"][member["shape"]].get("pattern") in ACCOUNT_ID_PATTERNS | {r"(\d{12})"}
+                         and model["shapes"][member["shape"]]["type"] == "string"}
         for name, member in model["shapes"][spec["input"]["shape"]].get("members", {}).items():
             shape = model["shapes"][member["shape"]]
             if member.get("location") in BODY_LOCATIONS and shape["type"] == "string" \
-                    and shape.get("pattern") in ACCOUNT_ID_PATTERNS:
+                    and (shape.get("pattern") in ACCOUNT_ID_PATTERNS
+                         or (name in account_names and not CREATING_RE.match(operation))):
                 found.add(name)
     return sorted(found)
 
@@ -1426,8 +1438,8 @@ ARN_PATH_RE = re.compile(r"^(?:[A-Za-z][A-Za-z0-9_]*(\[])?(\.[A-Za-z][A-Za-z0-9_
                          r"|[A-Za-z][A-Za-z0-9_]*\{\}(\.[A-Za-z][A-Za-z0-9_]*){1,2})$")
 # A format's resource that is a literal and one variable, at its end.
 ONE_VARIABLE_RE = re.compile(r"^[^$]*\$\{\w+}$")
-# The keys a resource found by members does not take: it is read no other way, in the caller's account.
-FOUND_ONLY = {"absent", "arnOf", "account", "fixed", "before"}
+# The keys a resource found by members does not take: it is read no other way.
+FOUND_ONLY = {"absent", "arnOf", "fixed", "before"}
 
 
 def validate(document: dict) -> list[str]:

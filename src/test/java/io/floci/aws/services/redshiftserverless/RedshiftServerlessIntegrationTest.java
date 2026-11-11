@@ -619,6 +619,46 @@ class RedshiftServerlessIntegrationTest {
     }
 
     @Test
+    void aSnapshotAnotherAccountOwnsIsRestoredFromItsOwnersAccount() {
+        String owner = "111122223333";
+        String caller = "444455556666";
+        String stranger = "777788889999";
+
+        callAs(owner, "CreateNamespace", "{\"namespaceName\":\"share-src\",\"adminUsername\":\"admin\"}").statusCode(200);
+        String snapshotArn = callAs(owner, "CreateSnapshot",
+                "{\"snapshotName\":\"share-snap\",\"namespaceName\":\"share-src\"}")
+                .statusCode(200).extract().path("snapshot.snapshotArn");
+        callAs(caller, "CreateNamespace", "{\"namespaceName\":\"share-dst\",\"adminUsername\":\"admin\"}").statusCode(200);
+        callAs(caller, "CreateWorkgroup", "{\"workgroupName\":\"share-wg\",\"namespaceName\":\"share-dst\"}")
+                .statusCode(200);
+        String restore = "{\"namespaceName\":\"share-dst\",\"workgroupName\":\"share-wg\","
+                + "\"snapshotName\":\"share-snap\",\"ownerAccount\":\"" + owner + "\"}";
+
+        // Whether the snapshot's policy shares it is IAM enforcement's to decide, which this class leaves off.
+        callAs(caller, "RestoreFromSnapshot", restore)
+                .statusCode(200)
+                .body("ownerAccount", equalTo(owner))
+                .body("snapshotName", equalTo("share-snap"))
+                .body("namespace.namespaceName", equalTo("share-dst"));
+
+        // A snapshot that is not the owner's is not found, however it is named.
+        callAs(caller, "RestoreFromSnapshot", restore.replace("share-snap", "no-such-snap")).statusCode(400)
+                .body("__type", equalTo("ResourceNotFoundException"));
+        callAs(caller, "RestoreFromSnapshot", restore.replace(owner, stranger)).statusCode(400)
+                .body("__type", equalTo("ResourceNotFoundException"));
+
+        // The owner's snapshot ARN names the snapshot as well as its name does; one of another account does not.
+        String byArn = "{\"namespaceName\":\"share-dst\",\"workgroupName\":\"share-wg\","
+                + "\"snapshotArn\":\"" + snapshotArn + "\",\"ownerAccount\":\"" + owner + "\"}";
+        callAs(caller, "RestoreFromSnapshot", byArn).statusCode(200)
+                .body("ownerAccount", equalTo(owner))
+                .body("snapshotName", equalTo("share-snap"));
+        callAs(caller, "RestoreFromSnapshot", byArn.replace("\"ownerAccount\":\"" + owner, "\"ownerAccount\":\"" + stranger))
+                .statusCode(400)
+                .body("__type", equalTo("ValidationException"));
+    }
+
+    @Test
     void resourcePolicyIsIsolatedPerAccount() {
         String accountA = "111122223333";
         String accountB = "444455556666";
