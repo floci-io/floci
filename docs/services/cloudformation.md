@@ -312,8 +312,11 @@ the bus is created. Rules that reference the bus are removed before stack deleti
 
 The current implementation supports the `Name`, `EventSourceName`, `Description`, `Tags`, and
 `Policy` properties. With `EventSourceName` the resource creates a
-[partner event bus](eventbridge.md#partner-event-buses), whose `Name` must equal it; a partner
-bus takes no `Policy` and fails with `ValidationError` when one is given.
+[partner event bus](eventbridge.md#partner-event-buses), whose `Name` must equal it, as AWS
+requires; a template with a different `Name` fails with `ValidationError`. A partner bus takes no
+`Policy` and fails with `ValidationError` when one is given; an `AWS::Events::EventBusPolicy`
+on a partner bus fails its stack. On `UpdateStack`, adding, dropping or changing
+`EventSourceName` while `Name` stays the same keeps the bus as it is.
 `KmsKeyIdentifier`, `DeadLetterConfig`, and `LogConfig` are rejected with `ValidationError`
 instead of being silently ignored. AWS models a `Name` change as
 resource replacement; Floci currently rejects that update until generic replacement handling is

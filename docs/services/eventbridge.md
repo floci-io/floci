@@ -162,6 +162,15 @@ like a custom bus: rules, targets, tags and `PutEvents` address it by name or AR
 holds no slash on any bus: `PutRule` rejects a name outside `[\.\-_A-Za-z0-9]+` or longer than 64
 characters with `ValidationException`, as AWS does.
 
+Two calls differ from a custom bus. `PutPermission` and `RemovePermission` reject a partner bus
+with `ValidationException`, since AWS gives a partner bus no resource policy. `PutEvents` to a
+partner bus is accepted and fans out to its rules, where AWS reserves that bus for the partner's
+own events; this lets a test publish an event a partner would send.
+
+When upgrading, a rule persisted by an earlier Floci version with a slash in its name is no longer
+found by `ListRules`, `PutEvents` or `DeleteEventBus`. Delete and recreate such a rule under a name
+without a slash.
+
 ```bash
 aws events create-event-bus \
   --name aws.partner/example.com/123/orders \
