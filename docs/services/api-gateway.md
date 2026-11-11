@@ -869,8 +869,11 @@ expressions are `$request.body`, `$request.body.<JSONPath>`, `$request.header.<n
 `httpMethod`, `path`, `protocol`, `requestTime`, `requestTimeEpoch`, `routeKey`, `stage`,
 `requestId`, `identity.sourceIp`, `authorizer.<key>` and `authorizer.claims.<claim>`. `requestId`
 and `domainName` are the values the rest of the gateway reports for the request, and `path`
-starts with the stage name, as in `/test/send`, except on the `$default` stage. Any other
-expression resolves to nothing, or to an empty string where it is embedded. `MessageAttributes`
+starts with the stage name, as in `/test/send`, except on the `$default` stage. An expression
+with any other source is rejected with `400 BadRequestException` on create, update and import,
+including one embedded as `${...}` or inside a JSON parameter's string values. A `$` inside static
+text without braces, as in `price $5`, stays literal. A `$context` variable outside the list
+resolves to nothing, or to an empty string where it is embedded. `MessageAttributes`
 and `MessageSystemAttributes` are JSON object templates: expressions are resolved only inside
 their string values, so a header holding quotes or braces stays one string value and cannot add
 attributes. This differs from AWS, which substitutes the raw text into the template before
