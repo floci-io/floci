@@ -10,7 +10,6 @@ import org.junit.jupiter.params.provider.ValueSource;
 import java.net.DatagramPacket;
 import java.net.InetAddress;
 import java.nio.ByteBuffer;
-import java.nio.charset.StandardCharsets;
 import java.util.Arrays;
 import java.util.List;
 import java.util.Optional;
@@ -41,7 +40,7 @@ class EmbeddedDnsReplySourceTest {
             if (connectedClient) {
                 client.connect(serverAddress, serverPort);
             }
-            byte[] request = query();
+            byte[] request = DnsTestQuery.query(EmbeddedDnsServer.DEFAULT_SUFFIX, 1, 0x1234);
             client.send(new DatagramPacket(request, request.length, serverAddress, serverPort));
 
             DatagramPacket reply = new DatagramPacket(new byte[512], 512);
@@ -64,17 +63,5 @@ class EmbeddedDnsReplySourceTest {
                 vertx.close().toCompletionStage().toCompletableFuture().get(5, TimeUnit.SECONDS);
             }
         }
-    }
-
-    private static byte[] query() {
-        ByteBuffer query = ByteBuffer.allocate(512);
-        query.putShort((short) 0x1234).putShort((short) 0x0100).putShort((short) 1);
-        query.putShort((short) 0).putShort((short) 0).putShort((short) 0);
-        for (String label : EmbeddedDnsServer.DEFAULT_SUFFIX.split("\\.")) {
-            byte[] encoded = label.getBytes(StandardCharsets.US_ASCII);
-            query.put((byte) encoded.length).put(encoded);
-        }
-        query.put((byte) 0).putShort((short) 1).putShort((short) 1);
-        return Arrays.copyOf(query.array(), query.position());
     }
 }
