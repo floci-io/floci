@@ -45,6 +45,18 @@ class ElastiCacheRegionScopingIntegrationTest {
             send(ACCOUNT, region, "DescribeUsers", "UserId", "default").then().statusCode(200)
                     .body(containsString(arn));
         }
+        // A user group holding it is one of its groups in the group's Region alone.
+        String group = "region-scoped-default-group";
+        send(ACCOUNT, HOME, "CreateUserGroup", "UserGroupId", group, "Engine", "redis",
+                "UserIds.member.1", "default").then().statusCode(200);
+        try {
+            send(ACCOUNT, HOME, "DescribeUsers", "UserId", "default").then().statusCode(200)
+                    .body(containsString("<member>" + group + "</member>"));
+            send(ACCOUNT, OTHER_REGION, "DescribeUsers", "UserId", "default").then().statusCode(200)
+                    .body(not(containsString(group)));
+        } finally {
+            send(ACCOUNT, HOME, "DeleteUserGroup", "UserGroupId", group).then().statusCode(200);
+        }
     }
 
     @Test

@@ -2871,8 +2871,10 @@ public class ElastiCacheService implements ResourceProvider {
                 .toList();
     }
 
+    /** The request Region's user groups the user is a member of, as DescribeUserGroups lists them there. */
     public List<String> userGroupIdsContaining(String userId) {
         return userGroups.scan(k -> true).stream()
+                .filter(g -> inRequestRegion(g.getArn()))
                 .filter(g -> g.getUserIds().contains(userId))
                 .map(ElastiCacheUserGroup::getUserGroupId)
                 .toList();
