@@ -81,6 +81,8 @@ public class SsmService implements ResourceProvider {
     private static final String PARAMETER_NAME_FORMAT_RULE = "If formed as a path, it can consist of sub-paths "
             + "divided by slash symbol; each sub-path can be formed as a mix of letters, numbers and the following "
             + "3 symbols .-_";
+    /** The characters a parameter name may hold: letters, numbers, {@code .-_} and the {@code /} separator. */
+    private static final Pattern PARAMETER_NAME_PATTERN = Pattern.compile("[A-Za-z0-9_./-]+");
     /** A bare name, or a path of non-empty segments; AWS also lets a colon through here. */
     private static final Pattern UNLABEL_NAME_PATTERN = Pattern.compile("[A-Za-z0-9_.:-]+|(/[A-Za-z0-9_.:-]+)+");
 
@@ -263,7 +265,7 @@ public class SsmService implements ResourceProvider {
                             + "Member must satisfy enum value set: [Standard, Advanced, Intelligent-Tiering]");
         }
         validateTagKeys(tags);
-        rejectReservedName(name);
+        rejectInvalidName(name);
 
         if (overwrite && tags != null && !tags.isEmpty()) {
             throw new AwsException("ValidationException",
@@ -536,13 +538,16 @@ public class SsmService implements ResourceProvider {
      * and regardless of case, so an account can never write over a public parameter. The rule
      * keys on the first path segment rather than a bare prefix, so a name such as
      * {@code ssm-auto-stack-Param-ABC}, which CloudFormation generates for a stack whose name
-     * starts with ssm, is still accepted.
+     * starts with ssm, is still accepted. A name holding anything but letters, numbers, {@code .-_} and the
+     * {@code /} separator, such as a space or the colon that starts a read's version or label selector, is
+     * rejected with the same message.
      */
-    private static void rejectReservedName(String name) {
+    private static void rejectInvalidName(String name) {
         String bare = name == null ? "" : name.startsWith("/") ? name.substring(1) : name;
         String lower = bare.toLowerCase(Locale.ROOT);
         if (lower.equals("aws") || lower.equals("ssm") // partition-literal: reserved name prefix
-                || lower.startsWith("aws/") || lower.startsWith("ssm/")) {
+                || lower.startsWith("aws/") || lower.startsWith("ssm/")
+                || name == null || !PARAMETER_NAME_PATTERN.matcher(name).matches()) {
             throw new AwsException("ValidationException",
                     "Parameter name: can't be prefixed with \"aws\" or \"ssm\" (case-insensitive). "
                             + PARAMETER_NAME_FORMAT_RULE, 400);
