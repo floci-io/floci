@@ -1938,7 +1938,7 @@ public class ResourceArnBuilder {
                 return List.of(ssmParameterArn(resourceId, region, accountId));
             } else if ("GetParametersByPath".equals(operation)) {
                 String path = json.path("Path").asText();
-                if (path.length() > 1 && path.endsWith("/")) {
+                if (path.length() > 1 && path.endsWith("/") && !path.endsWith("//")) {
                     path = path.substring(0, path.length() - 1);
                 }
                 return List.of(ssmParameterArn(path.isEmpty() ? "/" : path, region, accountId));
