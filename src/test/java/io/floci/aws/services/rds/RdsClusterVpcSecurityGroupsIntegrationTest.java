@@ -4,9 +4,10 @@ import io.floci.aws.core.common.BackupWindows;
 import io.floci.aws.testing.RdsMockProfile;
 import io.quarkus.test.junit.QuarkusTest;
 import io.quarkus.test.junit.TestProfile;
+import io.restassured.response.ValidatableResponse;
+import io.restassured.specification.RequestSpecification;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
-
 import org.w3c.dom.NodeList;
 
 import javax.xml.parsers.DocumentBuilderFactory;
@@ -17,6 +18,7 @@ import java.util.List;
 
 import static io.restassured.RestAssured.given;
 import static io.restassured.http.ContentType.URLENC;
+import static org.hamcrest.Matchers.containsString;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 
 /**
@@ -30,7 +32,7 @@ class RdsClusterVpcSecurityGroupsIntegrationTest {
 
     private static final String ID = "vpc-sg-cluster";
 
-    private static io.restassured.specification.RequestSpecification rds(String action) {
+    private static RequestSpecification rds(String action) {
         return given().header("Authorization",
                         "AWS4-HMAC-SHA256 Credential=test/20260615/us-east-1/rds/aws4_request, "
                         + "SignedHeaders=content-type;host, Signature=test")
@@ -59,7 +61,7 @@ class RdsClusterVpcSecurityGroupsIntegrationTest {
                 .when().post("/").then().statusCode(200).extract().asString());
     }
 
-    private static io.restassured.specification.RequestSpecification create() {
+    private static RequestSpecification create() {
         return rds("CreateDBCluster")
                 .formParam("DBClusterIdentifier", ID)
                 .formParam("Engine", "aurora-postgresql")
@@ -155,8 +157,8 @@ class RdsClusterVpcSecurityGroupsIntegrationTest {
         create().formParam("DeletionProtection", "true").when().post("/").then().statusCode(200);
         rds("DeleteDBCluster").formParam("DBClusterIdentifier", ID).formParam("SkipFinalSnapshot", "true")
                 .when().post("/").then().statusCode(400)
-                .body(org.hamcrest.Matchers.containsString("<Code>InvalidParameterCombination</Code>"))
-                .body(org.hamcrest.Matchers.containsString(
+                .body(containsString("<Code>InvalidParameterCombination</Code>"))
+                .body(containsString(
                         "Cannot delete protected Cluster, please disable deletion protection and try again."));
         assertEquals(1, clusterCount());
 
@@ -170,12 +172,12 @@ class RdsClusterVpcSecurityGroupsIntegrationTest {
     @Test
     void invalidWindowsAreRefusedAndLeaveNoClusterBehind() {
         create().formParam("PreferredBackupWindow", "garbage").when().post("/").then().statusCode(400)
-                .body(org.hamcrest.Matchers.containsString("<Code>InvalidParameterValue</Code>"));
+                .body(containsString("<Code>InvalidParameterValue</Code>"));
         assertEquals(0, clusterCount());
         create().formParam("PreferredBackupWindow", "05:00-06:00")
                 .formParam("PreferredMaintenanceWindow", "mon:05:30-mon:06:30")
                 .when().post("/").then().statusCode(400)
-                .body(org.hamcrest.Matchers.containsString("<Code>InvalidParameterValue</Code>"));
+                .body(containsString("<Code>InvalidParameterValue</Code>"));
         assertEquals(0, clusterCount());
 
         create().formParam("PreferredBackupWindow", "05:00-06:00").when().post("/").then().statusCode(200);
@@ -184,8 +186,8 @@ class RdsClusterVpcSecurityGroupsIntegrationTest {
         assertEquals("05:00-06:00", described("PreferredBackupWindow"));
     }
 
-    private static void assertOverlapRefused(io.restassured.response.ValidatableResponse r) {
-        r.statusCode(400).body(org.hamcrest.Matchers.containsString("<Code>InvalidParameterValue</Code>"));
+    private static void assertOverlapRefused(ValidatableResponse r) {
+        r.statusCode(400).body(containsString("<Code>InvalidParameterValue</Code>"));
     }
 
     @Test
