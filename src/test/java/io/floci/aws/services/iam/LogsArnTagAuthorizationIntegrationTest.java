@@ -235,6 +235,41 @@ class LogsArnTagAuthorizationIntegrationTest {
                 .body("tags.team", equalTo("green"));
     }
 
+    @Test
+    void taggedDestinationCreationAcceptsResourceScopedTagPermission() {
+        String selected = "logs-destination-tag-" + UUID.randomUUID();
+        String other = "logs-destination-tag-" + UUID.randomUUID();
+        registerDestinationCleanup(selected);
+        registerDestinationCleanup(other);
+        String caller = user(statement("Allow", "PutDestination", "*") + ","
+                + statement("Allow", "TagResource", destinationArn(selected)) + ","
+                + "{\"Effect\":\"Allow\",\"Action\":\"iam:PassRole\",\"Resource\":\"*\"}");
+
+        putTaggedDestination(caller, other).statusCode(400).body(containsString("AccessDeniedException"));
+        putTaggedDestination(caller, selected).statusCode(200);
+        invoke(ACCOUNT, "ListTagsForResource", destinationArn(selected)).statusCode(200)
+                .body("tags.team", equalTo("blue"));
+    }
+
+    @Test
+    void taggedDestinationCreationHonorsResourceScopedExplicitDeny() {
+        String selected = "logs-destination-tag-" + UUID.randomUUID();
+        String other = "logs-destination-tag-" + UUID.randomUUID();
+        registerDestinationCleanup(selected);
+        registerDestinationCleanup(other);
+        String caller = user(statement("Allow", "PutDestination", "*") + ","
+                + statement("Allow", "TagResource", "*") + ","
+                + statement("Deny", "TagResource", destinationArn(selected)) + ","
+                + "{\"Effect\":\"Allow\",\"Action\":\"iam:PassRole\",\"Resource\":\"*\"}");
+
+        putTaggedDestination(caller, selected).statusCode(400).body(containsString("AccessDeniedException"));
+        invoke(ACCOUNT, "ListTagsForResource", destinationArn(selected)).statusCode(400)
+                .body(containsString("ResourceNotFoundException"));
+        putTaggedDestination(caller, other).statusCode(200);
+        invoke(ACCOUNT, "ListTagsForResource", destinationArn(other)).statusCode(200)
+                .body("tags.team", equalTo("blue"));
+    }
+
     private void assertSuccess(ValidatableResponse response, String action) {
         response.statusCode(200);
         if (action.equals("ListTagsForResource")) {
@@ -266,15 +301,31 @@ class LogsArnTagAuthorizationIntegrationTest {
 
     private String destination(String team) {
         String name = "logs-destination-tag-" + UUID.randomUUID();
-        StorageBackend<String, LogDestination> destinations = storageFactory.create("cloudwatchlogs",
-                "cwlogs-destinations.json", new TypeReference<Map<String, LogDestination>>() {});
-        cleanup.register(() -> RequestScopes.runAs(ACCOUNT, REGION,
-                () -> destinations.delete(REGION + "::" + name)));
+        registerDestinationCleanup(name);
         call(endpoint.getPort(), ACCOUNT, "PutDestination", Map.of(
                 "destinationName", name,
                 "targetArn", "arn:aws:kinesis:us-east-1:" + ACCOUNT + ":stream/logs",
                 "roleArn", "arn:aws:iam::" + ACCOUNT + ":role/logs",
                 "tags", Map.of("team", team))).statusCode(200);
+        return destinationArn(name);
+    }
+
+    private void registerDestinationCleanup(String name) {
+        StorageBackend<String, LogDestination> destinations = storageFactory.create("cloudwatchlogs",
+                "cwlogs-destinations.json", new TypeReference<Map<String, LogDestination>>() {});
+        cleanup.register(() -> RequestScopes.runAs(ACCOUNT, REGION,
+                () -> destinations.delete(REGION + "::" + name)));
+    }
+
+    private ValidatableResponse putTaggedDestination(String caller, String name) {
+        return call(endpoint.getPort(), caller, "PutDestination", Map.of(
+                "destinationName", name,
+                "targetArn", "arn:aws:kinesis:us-east-1:" + ACCOUNT + ":stream/logs",
+                "roleArn", "arn:aws:iam::" + ACCOUNT + ":role/logs",
+                "tags", Map.of("team", "blue")));
+    }
+
+    private static String destinationArn(String name) {
         return "arn:aws:logs:" + REGION + ":" + ACCOUNT + ":destination:" + name;
     }
 

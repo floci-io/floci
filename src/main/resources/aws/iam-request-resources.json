@@ -2103,6 +2103,7 @@
     "logs:GetDeliverySource": {"action": "logs:GetDeliverySource", "types": ["delivery-source"], "resources": [{"type": "delivery-source", "fill": {"DeliverySourceName": "name"}}]},
     "logs:PutDeliveryDestination": {"action": "logs:PutDeliveryDestination", "types": ["delivery-destination"], "resources": [{"type": "delivery-destination", "fill": {"DeliveryDestinationName": "name"}}]},
     "logs:PutDeliverySource": {"action": "logs:PutDeliverySource", "types": ["delivery-source"], "resources": [{"type": "delivery-source", "fill": {"DeliverySourceName": "name"}}]},
+    "logs:PutDestination": {"action": "logs:PutDestination", "types": ["destination"], "resources": [{"type": "destination", "fill": {"DestinationName": "destinationName"}}]},
     "logs:UpdateDeliveryConfiguration": {"action": "logs:UpdateDeliveryConfiguration", "types": ["delivery", "delivery-destination", "delivery-source"], "resources": [{"type": "delivery", "fill": {"DeliveryName": "id"}}]},
     "macie2:AcceptInvitation": {"action": "macie2:AcceptInvitation", "types": [], "resources": []},
     "macie2:BatchGetCustomDataIdentifiers": {"action": "macie2:BatchGetCustomDataIdentifiers", "types": ["CustomDataIdentifier"], "resources": [{"type": "CustomDataIdentifier", "fill": {"ResourceId": "ids[]"}}]},

@@ -5,22 +5,18 @@ import io.floci.aws.core.common.RequestScopes;
 import io.floci.aws.core.storage.StorageBackend;
 import io.floci.aws.core.storage.StorageFactory;
 import io.floci.aws.services.cloudwatch.logs.model.LogDestination;
+import io.floci.aws.testing.AwsTestClients;
 import io.floci.aws.testing.PartitionCleanup;
 import io.floci.aws.testing.RestAssuredJsonUtils;
 import io.quarkus.test.junit.QuarkusTest;
-import io.restassured.RestAssured;
 import io.restassured.response.Response;
 import jakarta.inject.Inject;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.RegisterExtension;
-import software.amazon.awssdk.auth.credentials.AwsBasicCredentials;
-import software.amazon.awssdk.auth.credentials.StaticCredentialsProvider;
-import software.amazon.awssdk.http.urlconnection.UrlConnectionHttpClient;
 import software.amazon.awssdk.regions.Region;
 import software.amazon.awssdk.services.cloudwatchlogs.CloudWatchLogsClient;
 
-import java.net.URI;
 import java.util.Map;
 import java.util.UUID;
 
@@ -84,13 +80,7 @@ class CloudWatchLogsCrossAccountIntegrationTest {
     @Test
     void destinationCreationTagsCanBeListedByArn() {
         String name = "tagged-" + UUID.randomUUID().toString().substring(0, 8);
-        registerDestinationCleanup(name);
-        String arn = "arn:aws:logs:us-east-1:000000000000:destination:" + name;
-
-        json("Logs_20140328.PutDestination", """
-                {"destinationName":"%s","targetArn":"arn:aws:kinesis:us-east-1:000000000000:stream/logs",
-                 "roleArn":"arn:aws:iam::000000000000:role/logs","tags":{"team":"red"}}
-                """.formatted(name)).then().statusCode(200);
+        String arn = putTaggedDestination(name);
 
         json("Logs_20140328.ListTagsForResource", "{\"resourceArn\":\"" + arn + "\"}")
                 .then().statusCode(200).body("tags.team", equalTo("red"));
@@ -99,12 +89,7 @@ class CloudWatchLogsCrossAccountIntegrationTest {
     @Test
     void destinationTagsCanBeUpdatedAndRemoved() {
         String name = "updated-" + UUID.randomUUID().toString().substring(0, 8);
-        registerDestinationCleanup(name);
-        String arn = "arn:aws:logs:us-east-1:000000000000:destination:" + name;
-        json("Logs_20140328.PutDestination", """
-                {"destinationName":"%s","targetArn":"arn:aws:kinesis:us-east-1:000000000000:stream/logs",
-                 "roleArn":"arn:aws:iam::000000000000:role/logs","tags":{"team":"red"}}
-                """.formatted(name)).then().statusCode(200);
+        String arn = putTaggedDestination(name);
 
         json("Logs_20140328.TagResource", """
                 {"resourceArn":"%s","tags":{"team":"blue","env":"dev"}}
@@ -121,12 +106,7 @@ class CloudWatchLogsCrossAccountIntegrationTest {
     @Test
     void destinationTagsDoNotCrossAccountRegionOrPartition() {
         String name = "isolated-" + UUID.randomUUID().toString().substring(0, 8);
-        registerDestinationCleanup(name);
-        String arn = "arn:aws:logs:us-east-1:000000000000:destination:" + name;
-        json("Logs_20140328.PutDestination", """
-                {"destinationName":"%s","targetArn":"arn:aws:kinesis:us-east-1:000000000000:stream/logs",
-                 "roleArn":"arn:aws:iam::000000000000:role/logs","tags":{"team":"red"}}
-                """.formatted(name)).then().statusCode(200);
+        String arn = putTaggedDestination(name);
 
         for (String foreignArn : new String[]{
                 arn.replace(":000000000000:", ":111111111111:"),
@@ -147,12 +127,8 @@ class CloudWatchLogsCrossAccountIntegrationTest {
     void destinationTagsRoundTripThroughAwsSdk() {
         String name = "sdk-tagged-" + UUID.randomUUID().toString().substring(0, 8);
         registerDestinationCleanup(name);
-        try (CloudWatchLogsClient client = CloudWatchLogsClient.builder()
-                .endpointOverride(URI.create("http://localhost:" + RestAssured.port))
-                .httpClientBuilder(UrlConnectionHttpClient.builder())
-                .region(Region.US_EAST_1)
-                .credentialsProvider(StaticCredentialsProvider.create(AwsBasicCredentials.create("AKID", "test")))
-                .build()) {
+        try (CloudWatchLogsClient client = AwsTestClients.create(
+                CloudWatchLogsClient.builder(), "AKID", Region.US_EAST_1)) {
             String arn = client.putDestination(request -> request.destinationName(name)
                     .targetArn("arn:aws:kinesis:us-east-1:000000000000:stream/logs")
                     .roleArn("arn:aws:iam::000000000000:role/logs")
@@ -168,6 +144,15 @@ class CloudWatchLogsCrossAccountIntegrationTest {
             assertEquals(Map.of(),
                     client.listTagsForResource(request -> request.resourceArn(arn)).tags());
         }
+    }
+
+    private String putTaggedDestination(String name) {
+        registerDestinationCleanup(name);
+        json("Logs_20140328.PutDestination", """
+                {"destinationName":"%s","targetArn":"arn:aws:kinesis:us-east-1:000000000000:stream/logs",
+                 "roleArn":"arn:aws:iam::000000000000:role/logs","tags":{"team":"red"}}
+                """.formatted(name)).then().statusCode(200);
+        return "arn:aws:logs:us-east-1:000000000000:destination:" + name;
     }
 
     private void registerDestinationCleanup(String name) {

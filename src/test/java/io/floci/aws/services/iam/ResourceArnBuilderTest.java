@@ -898,6 +898,21 @@ class ResourceArnBuilderTest {
         }
     }
 
+    @ParameterizedTest
+    @CsvSource({"aws,us-east-1", "aws-cn,cn-north-1", "aws-us-gov,us-gov-west-1"})
+    void putDestinationTargetsTheDestinationItNames(String partition, String region) {
+        setJsonBody("{\"destinationName\":\"central\"}");
+        assertEquals(List.of("arn:" + partition + ":logs:" + region + ":" + ACCOUNT + ":destination:central"),
+                builder.buildLogResources("logs:PutDestination", ctx, region, ACCOUNT, partition));
+        String otherDestination = "arn:" + partition + ":logs:" + region + ":" + ACCOUNT + ":destination:other";
+        setJsonBody("{\"destinationName\":\"central\",\"targetArn\":\"" + otherDestination
+                + "\",\"roleArn\":\"" + otherDestination + "\"}");
+        assertEquals(List.of("arn:" + partition + ":logs:" + region + ":" + ACCOUNT + ":destination:central"),
+                builder.buildLogResources("logs:PutDestination", ctx, region, ACCOUNT, partition));
+        setJsonBody("{}");
+        assertEquals(List.of("*"), builder.buildLogResources("logs:PutDestination", ctx, region, ACCOUNT, partition));
+    }
+
     @Test
     void deliveryActionsAreAuthorizedOnTheSourceDestinationOrDeliveryTheyName() {
         String prefix = "arn:aws:logs:us-east-1:" + ACCOUNT + ":";

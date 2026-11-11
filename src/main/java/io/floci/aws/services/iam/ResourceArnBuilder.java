@@ -279,7 +279,7 @@ public class ResourceArnBuilder {
     /** Uses the serving operation and the same raw names as the handler. */
     public List<String> buildLogResources(String action, ContainerRequestContext ctx,
                                           String region, String accountId, String partition) {
-        // Operations the vendored table reads (the vended-log delivery family) take their resources from it.
+        // Operations the vendored table reads take their resources from it.
         if (RequestResources.reads(action)) {
             return namedResources("logs", action, ctx, region, accountId, partition);
         }
