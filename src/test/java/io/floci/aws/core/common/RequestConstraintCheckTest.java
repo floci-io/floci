@@ -3,6 +3,8 @@ package io.floci.aws.core.common;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
 
 import java.util.List;
 
@@ -119,5 +121,45 @@ class RequestConstraintCheckTest {
     void aStringIsMeasuredInCodePoints() {
         // One emoji is two UTF-16 units but one code point, so it is under the minimum of 2.
         assertEquals("bounds Put.name string 2..5 1", violation("{\"name\":\"\\uD83D\\uDE00\"}"));
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"InvalidRequestException", "InvalidParameterException", "ValidationException"})
+    void standardMessagesPreserveTheWireFormatForEachServiceCode(String errorCode) {
+        RequestConstraintCheck check = RequestConstraintCheck.of(json(MODEL),
+                RequestConstraintCheck.standardMessages(errorCode));
+        String[][] cases = {
+                {"{}", "Invalid parameter at 'name' failed to satisfy constraint: 'Member must not be null'"},
+                {"{\"name\":7}", "Invalid parameter at 'name' failed to satisfy constraint: 'Member must be a string'"},
+                {"{\"name\":\"a\"}", "Invalid parameter at 'name' failed to satisfy constraint: "
+                        + "'Member must have length greater than or equal to 2'"},
+                {"{\"name\":\"abcdef\"}", "Invalid parameter at 'name' failed to satisfy constraint: "
+                        + "'Member must have length less than or equal to 5'"},
+                {"{\"name\":\"AB\"}", "Invalid parameter at 'name' failed to satisfy constraint: "
+                        + "'must satisfy regular expression '[a-z]+''"},
+                {"{\"name\":\"ab\",\"quoted\":\"AB\"}", "Invalid parameter at 'quoted' failed to satisfy constraint: "
+                        + "'must satisfy regular expression '[a-z]*''"},
+                {"{\"name\":\"ab\",\"count\":0}", "Invalid parameter at 'count' failed to satisfy constraint: "
+                        + "'Member must have value greater than or equal to 1'"},
+                {"{\"name\":\"ab\",\"count\":11}", "Invalid parameter at 'count' failed to satisfy constraint: "
+                        + "'Member must have value less than or equal to 10'"},
+                {"{\"name\":\"ab\",\"kind\":\"C\"}", "Invalid parameter at 'kind' failed to satisfy constraint: "
+                        + "'Member must satisfy enum value set: [A, B]'"},
+                {"{\"name\":\"ab\",\"items\":[{},{},{}]}", "Invalid parameter at 'items' failed to satisfy constraint: "
+                        + "'Member must have length less than or equal to 2'"},
+                {"{\"name\":\"ab\",\"items\":[{}]}", "Invalid parameter at 'items.id' failed to satisfy constraint: "
+                        + "'Member must not be null'"},
+                {"{\"name\":\"ab\",\"items\":[{\"id\":\"A1\"}]}", "Invalid parameter at 'items.id' failed to satisfy constraint: "
+                        + "'must satisfy regular expression '[a-z]+''"},
+                {"{\"name\":\"ab\",\"labels\":{\"K1\":\"ab\"}}", "Invalid parameter at 'labels.key' failed to satisfy constraint: "
+                        + "'must satisfy regular expression '[a-z]+''"},
+                {"[]", "Invalid parameter at '' failed to satisfy constraint: 'Member must be a structure'"}
+        };
+        for (String[] example : cases) {
+            AwsException failure = assertThrows(AwsException.class, () -> check.check("Put", json(example[0])));
+            assertEquals(errorCode, failure.getErrorCode(), example[0]);
+            assertEquals(400, failure.getHttpStatus(), example[0]);
+            assertEquals(example[1], failure.getMessage(), example[0]);
+        }
     }
 }

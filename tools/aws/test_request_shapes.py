@@ -19,6 +19,7 @@ import pytest
 
 import regen_apigateway_documentation_shapes
 import regen_apigateway_shapes
+import regen_athena_shapes
 import regen_dynamodb_shapes
 import regen_ecr_shapes
 import regen_ecs_shapes
@@ -243,6 +244,32 @@ CONSTRAINED_MODEL = {
         "Other": {"type": "string"},
     },
 }
+
+
+def test_athena_generator_keeps_constraints_for_every_operation_and_detects_new_operations(tmp_path, monkeypatch):
+    output = tmp_path / "athena-request-shapes.json"
+    monkeypatch.setattr(r, "resolve_botocore_data", lambda explicit: (tmp_path, "botocore test"))
+    monkeypatch.setattr(r, "load_model", lambda data, model: CONSTRAINED_MODEL)
+    args = ["--output", str(output)]
+
+    assert regen_athena_shapes.MODEL == Path("athena/2017-05-18")
+    assert regen_athena_shapes.main(args) == 0
+    doc = json.loads(output.read_text())
+    assert doc["operations"] == {"Put": "PutRequest", "Unused": "UnusedRequest"}
+    assert doc["shapes"]["Name"]["min"] == 1
+    assert doc["shapes"]["Name"]["pattern"] == "[a-z]+"
+    assert doc["shapes"]["PutRequest"]["required"] == ["name"]
+    assert doc["shapes"]["Kind"]["enum"] == ["A", "B"]
+    assert doc["shapes"]["RuleList"]["max"] == 25
+    assert doc["shapes"]["TagMap"]["key"] == "Name"
+    assert regen_athena_shapes.main(["--check", *args]) == 0
+
+    changed = {**CONSTRAINED_MODEL, "operations": {**CONSTRAINED_MODEL["operations"],
+                                                "NewOperation": {"input": {"shape": "PutRequest"}}}}
+    monkeypatch.setattr(r, "load_model", lambda data, model: changed)
+    assert regen_athena_shapes.main(["--check", *args]) == 1
+    assert regen_athena_shapes.main(args) == 0
+    assert "NewOperation" in json.loads(output.read_text())["operations"]
 
 
 def test_build_constraints_keeps_the_named_operations_with_their_constraints():
