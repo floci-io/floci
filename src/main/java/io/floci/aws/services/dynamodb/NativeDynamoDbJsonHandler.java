@@ -818,6 +818,7 @@ public class NativeDynamoDbJsonHandler {
 
         requireReadableValues(item, VALIDATION_ENVELOPE);
         DynamoDbAttributeValueValidator.requireNestingWithinLimit(item);
+        item.forEach(DynamoDbAttributeValueValidator::validate);
 
         JsonNode expected = request.has("Expected") ? request.get("Expected") : null;
         String conditionalOperator = request.has("ConditionalOperator")
@@ -3102,6 +3103,9 @@ public class NativeDynamoDbJsonHandler {
         DynamoDbAttributeValueValidator.requireNestingWithinLimit(op.get("Key"), false);
         requireReadableValues(values, "");
         DynamoDbAttributeValueValidator.requireNonEmptyMemberNames(values);
+        if ("Put".equals(action.type())) {
+            values.forEach(DynamoDbAttributeValueValidator::validate);
+        }
     }
 
     private void requireValidTransactExpressions(JsonNode op, boolean older) {
