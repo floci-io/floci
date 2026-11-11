@@ -69,7 +69,7 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.RejectedExecutionException;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
-import java.util.function.Consumer;
+import java.util.function.UnaryOperator;
 import java.util.regex.Pattern;
 import java.util.zip.CRC32;
 import java.util.zip.Inflater;
@@ -124,6 +124,9 @@ public class CodePipelineService {
     // monitor for its whole run, so counting under that monitor would block StartPipelineExecution
     // until the running execution finished.
     private final KeyedLockPool startLocks = new KeyedLockPool();
+    // Serializes the create, delete and tag writes of each custom action type, so two creates cannot both
+    // pass the existence check and a tag write cannot bring back a deleted type. Package-private for tests.
+    final KeyedLockPool actionTypeLocks = new KeyedLockPool();
     private final Map<String, byte[]> runtimeArtifacts = new ConcurrentHashMap<>();
     // An execution's status turns Failed as soon as one action fails, while its runner is still waiting
     // on sibling actions. Retries check this set so they never overlap a runner that has not finished.
@@ -1300,26 +1303,29 @@ public class CodePipelineService {
     private ObjectNode createCustomActionType(JsonNode request, String region, String account) {
         String id = actionTypeId(request.path("category").asText(), "Custom",
                 request.path("provider").asText(), request.path("version").asText());
-        if (itemStore.getForAccount(account, itemKey(region, "action", id)).isPresent()) {
-            throw new AwsException("ActionTypeAlreadyExistsException", "Action type already exists", 400);
-        }
-        ObjectNode actionType = mapper.createObjectNode();
-        actionType.setAll((ObjectNode) request.deepCopy());
-        actionType.remove("tags");
-        actionType.putObject("id")
-                .put("category", request.path("category").asText())
-                .put("owner", "Custom")
-                .put("provider", request.path("provider").asText())
-                .put("version", request.path("version").asText());
-        CodePipelineStoredItem item = newItem(account, region, "action", id, "Active", actionType);
-        item.setTags(parseTags(request.path("tags")));
-        putItem(item);
-        ObjectNode response = mapper.createObjectNode();
-        response.set("actionType", actionType);
-        if (!item.getTags().isEmpty()) {
-            response.set("tags", tagsNode(item.getTags()));
-        }
-        return response;
+        String key = itemKey(region, "action", id);
+        return actionTypeLocks.withLock(account + ":" + key, () -> {
+            if (itemStore.getForAccount(account, key).isPresent()) {
+                throw new AwsException("ActionTypeAlreadyExistsException", "Action type already exists", 400);
+            }
+            ObjectNode actionType = mapper.createObjectNode();
+            actionType.setAll((ObjectNode) request.deepCopy());
+            actionType.remove("tags");
+            actionType.putObject("id")
+                    .put("category", request.path("category").asText())
+                    .put("owner", "Custom")
+                    .put("provider", request.path("provider").asText())
+                    .put("version", request.path("version").asText());
+            CodePipelineStoredItem item = newItem(account, region, "action", id, "Active", actionType);
+            item.setTags(parseTags(request.path("tags")));
+            putItem(item);
+            ObjectNode response = mapper.createObjectNode();
+            response.set("actionType", actionType);
+            if (!item.getTags().isEmpty()) {
+                response.set("tags", tagsNode(item.getTags()));
+            }
+            return response;
+        });
     }
 
     private ObjectNode updateActionType(JsonNode request, String region, String account) {
@@ -1344,7 +1350,8 @@ public class CodePipelineService {
     private ObjectNode deleteCustomActionType(JsonNode request, String region, String account) {
         String id = actionTypeId(request.path("category").asText(), "Custom",
                 request.path("provider").asText(), request.path("version").asText());
-        itemStore.deleteForAccount(account, itemKey(region, "action", id));
+        String key = itemKey(region, "action", id);
+        actionTypeLocks.withLock(account + ":" + key, () -> itemStore.deleteForAccount(account, key));
         return mapper.createObjectNode();
     }
 
@@ -1481,45 +1488,63 @@ public class CodePipelineService {
     }
 
     private ObjectNode tagResource(JsonNode request, String region, String account) {
-        updateTags(account, region, text(request, "resourceArn"),
-                tags -> tags.putAll(parseTags(request.path("tags"))));
+        updateTags(account, region, text(request, "resourceArn"), tags -> {
+            tags.putAll(parseTags(request.path("tags")));
+            return requireTagLimit(tags);
+        });
         return mapper.createObjectNode();
     }
 
     private ObjectNode untagResource(JsonNode request, String region, String account) {
-        updateTags(account, region, text(request, "resourceArn"),
-                tags -> request.path("tagKeys").forEach(k -> tags.remove(k.asText())));
+        updateTags(account, region, text(request, "resourceArn"), tags -> {
+            request.path("tagKeys").forEach(k -> tags.remove(k.asText()));
+            return tags;
+        });
         return mapper.createObjectNode();
     }
 
     private ObjectNode listTagsForResource(JsonNode request, String region, String account) {
         String arn = text(request, "resourceArn");
-        Map<String, String> tags = actionTypeByArn(account, region, arn)
+        Map<String, String> tags = actionTypeKey(account, region, arn)
+                .flatMap(key -> itemStore.getForAccount(account, key))
                 .map(CodePipelineStoredItem::getTags)
                 .orElseGet(() -> requirePipelineByArn(account, region, arn).getTags());
         return mapper.createObjectNode().set("tags", tagsNode(tags));
     }
 
-    private void updateTags(String account, String region, String arn, Consumer<Map<String, String>> update) {
-        Optional<CodePipelineStoredItem> actionType = actionTypeByArn(account, region, arn);
-        if (actionType.isPresent()) {
-            update.accept(actionType.get().getTags());
-            putItem(actionType.get());
+    /**
+     * Stores {@code update} applied to a copy of the resource's tags, under the lock its create and
+     * delete take. The map is replaced, never edited, since ListTagsForResource and the stores'
+     * serializers read it without that lock.
+     */
+    private void updateTags(String account, String region, String arn, UnaryOperator<Map<String, String>> update) {
+        Optional<String> actionTypeKey = actionTypeKey(account, region, arn);
+        if (actionTypeKey.isPresent()) {
+            String key = actionTypeKey.get();
+            actionTypeLocks.withLock(account + ":" + key, () -> {
+                CodePipelineStoredItem item = itemStore.getForAccount(account, key)
+                        .orElseThrow(() -> new AwsException("ResourceNotFoundException",
+                                "Resource not found: " + arn, 400));
+                item.setTags(update.apply(new LinkedHashMap<>(item.getTags())));
+                putItem(item);
+            });
             return;
         }
-        CodePipelinePipeline pipeline = requirePipelineByArn(account, region, arn);
-        update.accept(pipeline.getTags());
-        putPipeline(pipeline);
+        String name = requirePipelineByArn(account, region, arn).getName();
+        sourcePollLocks.withLock(pipelineLockKey(account, region, name), () -> {
+            CodePipelinePipeline pipeline = requirePipelineByArn(account, region, arn);
+            pipeline.setTags(update.apply(new LinkedHashMap<>(pipeline.getTags())));
+            putPipeline(pipeline);
+        });
     }
 
-    private Optional<CodePipelineStoredItem> actionTypeByArn(String account, String region, String arn) {
+    private Optional<String> actionTypeKey(String account, String region, String arn) {
         return AwsArnUtils.parseIfArnIn(arn, "codepipeline", region)
                 .filter(parsed -> account.equals(parsed.accountId()) && parsed.resource().startsWith("actiontype:"))
                 // The ARN names the type as Owner/Category/Provider/Version.
                 .map(parsed -> parsed.resource().substring("actiontype:".length()).split("/"))
                 .filter(id -> id.length == 4)
-                .flatMap(id -> itemStore.getForAccount(account,
-                        itemKey(region, "action", actionTypeId(id[1], id[0], id[2], id[3]))));
+                .map(id -> itemKey(region, "action", actionTypeId(id[1], id[0], id[2], id[3])));
     }
 
     /**
@@ -3110,6 +3135,10 @@ public class CodePipelineService {
                 tags.put(tag.path("key").asText(), tag.path("value").asText(""));
             }
         }
+        return requireTagLimit(tags);
+    }
+
+    private static Map<String, String> requireTagLimit(Map<String, String> tags) {
         if (tags.size() > 50) {
             throw new AwsException("TooManyTagsException", "A resource can have at most 50 tags", 400);
         }
