@@ -62,6 +62,16 @@ def test_a_fixed_format_and_a_creates_own_type_are_named_without_members():
         {"type": "pool", "fill": {}}]
 
 
+def test_an_optional_arn_member_of_a_type_without_variables_names_it_when_absent():
+    named = [{"types": ["catalog", "thing"], "arn": "CatalogArn"}]
+    assert r.with_absent_arn(named, FORMATS, {"CatalogArn"}) == named + [
+        {"type": "catalog", "fill": {}, "when": {"CatalogArn": [None]}}]
+    # A required member is always there, and a type with a variable of its own names no one resource without it.
+    assert r.with_absent_arn(named, FORMATS, set()) == named
+    assert r.with_absent_arn([{"types": ["thing"], "arn": "ThingArn"}], FORMATS, {"ThingArn"}) == [
+        {"types": ["thing"], "arn": "ThingArn"}]
+
+
 def test_types_named_only_through_the_same_members_are_alternatives():
     # A classic load balancer's name fills its whole ARN, not an application one's id: the classic one is kept.
     assert r.resources_for("svc:DeleteLoadBalancer", ["lb", "lb/app/"], FORMATS, members("LoadBalancerName")) == [

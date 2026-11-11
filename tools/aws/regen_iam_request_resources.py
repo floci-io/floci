@@ -59,6 +59,10 @@ that names another resource beside the one it makes, the pipeline a webhook conn
 service is made in, marks the one it makes `made`, of a type, or with an ARN format's leading resource word,
 related to its name past the verb, so its tags are checked there alone.
 
+An optional member holding the ARN of a type whose format has no variable of its own, Security Hub's `HubArn` and
+`hub/default`, also names that type when the request leaves it out: there is one such resource in the caller's
+account and Region, the one the service acts on then (`DescribeHub`).
+
 A type nothing names is not checked: an action lists the optional resources its requests may use
 (`RunInstances` lists `elastic-gpu`), and checking one a request does not name would refuse a grant
 that covers what it does name. An operation whose action acts on no resource type, or whose request
@@ -171,7 +175,8 @@ NAMESPACES = ("access-analyzer", "acm", "application-autoscaling", "athena", "bc
               "cognito-idp", "controltower", "cur", "datasync", "ec2", "ecr", "elasticloadbalancing", "elasticmapreduce", "es", "events",
               "firehose", "globalaccelerator", "inspector2", "kinesisanalytics", "macie2", "payment-cryptography",
               "quicksight", "redshift", "redshift-data", "redshift-serverless", "rekognition", "servicediscovery",
-              "servicequotas", "sso", "states", "textract", "timestream-influxdb", "translate", "signer", "xray")
+              "servicequotas", "sso", "states", "textract", "timestream-influxdb", "translate", "signer", "xray",
+              "securityhub", "guardduty")
 
 # SDK clients the reference lists for a namespace's operations whose requests Floci does not serve, and why: their
 # members are not read.
@@ -253,7 +258,6 @@ NOT_COVERED: dict[str, str] = {
     "execute-api": _REST,
     "fis": _REST,
     "glue": _LATER,
-    "guardduty": _REST,
     "identitystore": _LATER,
     "iot": _LATER,
     "kafka": _REST,
@@ -273,7 +277,6 @@ NOT_COVERED: dict[str, str] = {
     "s3tables": _REST,
     "s3vectors": _REST,
     "sagemaker": _LATER,
-    "securityhub": _REST,
     "servicecatalog": "not read yet: CreatePortfolioShare, UpdatePortfolioShare and DeletePortfolioShare give in "
                       "AccountId the account a portfolio is shared with, which the rule reads as the portfolio's; a "
                       "portfolio or product imported from another account keeps its owner's account in its ARN while "
@@ -726,6 +729,39 @@ def arn_formats(documents: list[dict], namespaces: set[str]) -> dict[str, dict[s
 def _protocols(model: dict) -> set[str]:
     metadata = model["metadata"]
     return set(metadata.get("protocols") or [metadata.get("protocol")])
+
+
+def with_absent_arn(resources: list[dict], formats: dict[str, str], optional: set[str]) -> list[dict]:
+    """Adds, for an optional top-level member holding the ARN of a type whose format has no variable of its own
+    (Security Hub's `hub/default`), that type for a request leaving the member out: there is one resource of the
+    type in the caller's account and Region, the one its service acts on then (`DescribeHub` with no `HubArn`)."""
+    named = {resource["type"] for resource in resources if "type" in resource}
+    added = []
+    for resource in resources:
+        member = resource.get("arn")
+        if "types" not in resource or member not in optional:
+            continue
+        for kind in resource["types"]:
+            variables = [v for v in VARIABLE_RE.findall(formats.get(kind, "")) if v not in KNOWN_VARIABLES]
+            if kind in formats and not variables and kind not in named and related(stem(member), stem(kind)):
+                added.append({"type": kind, "fill": {}, "when": {member: [None]}})
+                named.add(kind)
+    return resources + added
+
+
+def optional_members(models: dict[str, dict], operation: str) -> set[str]:
+    """The top-level members of the operation's request that hold a string and that it may leave out."""
+    found: set[str] = set()
+    for model in models.values():
+        spec = model["operations"].get(operation)
+        if spec is None or "input" not in spec or not READ_PROTOCOLS & _protocols(model):
+            continue
+        root = model["shapes"][spec["input"]["shape"]]
+        required = set(root.get("required", []))
+        for name, member in root.get("members", {}).items():
+            if name not in required and model["shapes"][member["shape"]].get("type") == "string":
+                found.add(name)
+    return found
 
 
 def request_members(models: dict[str, dict], operation: str) -> dict[str, str]:
@@ -1212,6 +1248,7 @@ def entry_for(operation: str, upstream: dict, formats: dict[str, str], models: d
                                                             formats, types, members),
                                             namespace_of(operation), types, members),
                                  namespace_of(operation), types, members)
+        resources = with_absent_arn(resources, formats, optional_members(models, operation.split(":", 1)[1]))
     resources = with_account(resources, formats, account_members(models, operation.split(":", 1)[1]))
     resources = with_arn_of(resources, formats, name_or_arn_members(models, operation.split(":", 1)[1]))
     resources = with_made(resources, operation, formats)
