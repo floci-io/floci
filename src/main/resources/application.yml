@@ -1084,6 +1084,8 @@ floci:
       enabled: true
     signer:
       enabled: true
+    xray:
+      enabled: true
     cognitoidentity:
       enabled: true
     globalaccelerator:

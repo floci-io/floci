@@ -113,7 +113,7 @@ NAMESPACES = (
     "payment-cryptography", "pipes", "rds", "redshift", "redshift-serverless", "rekognition", "resource-groups",
     "route53resolver", "sagemaker", "scheduler", "secretsmanager", "servicediscovery", "ses", "signer", "sns", "sqs",
     "ssm", "sso", "states", "sts", "swf", "textract", "timestream-influxdb", "transcribe", "transfer", "translate",
-    "wafv2",
+    "wafv2", "xray",
 )
 
 _NO_ROUTES = "REST routes no rule maps yet"
@@ -175,6 +175,8 @@ NOT_READ = {
     "rds:DeleteDBCluster": NO_TAGS,
     "rds:DeleteDBInstance": NO_TAGS,
     "rds:DeleteTenantDatabase": NO_TAGS,
+    "network-firewall:CreateFirewallPolicyV2": NO_TAGS,
+    "events:StartReplay": NO_TAGS,
     "rds:StopDBInstance": NO_TAGS,
     "sagemaker:CreateClusterExtension": NOT_IN_BOTOCORE,
     "ssm:StartExecutionPreview": NO_TAGS,
