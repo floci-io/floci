@@ -21,13 +21,14 @@ import java.util.concurrent.LinkedBlockingQueue;
 import java.util.concurrent.TimeUnit;
 import java.util.logging.LogRecord;
 
+import static io.floci.aws.testing.LocalHttpsServer.hookUrl;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.Mockito.when;
 
 /**
  * An HTTPS subscription's endpoint is reached through Floci's outbound trust, so a certificate from a CA in
- * floci.tls.extra-ca-path is accepted, with TLS off as in the reported case.
+ * floci.tls.extra-ca-path is accepted, with TLS off.
  */
 class SnsHttpsSubscriptionTrustTest {
 
@@ -106,23 +107,12 @@ class SnsHttpsSubscriptionTrustTest {
                 null, null, null, new ObjectMapper(), SnsMessageSigner.inMemory(BASE_URL));
     }
 
-    private static String hookUrl(HttpsServer server) {
-        return "https://localhost:" + server.getAddress().getPort() + "/hook";
-    }
-
-    // An HTTPS endpoint on localhost serving a certificate the CA issued, queueing the SNS message type of each
-    // request to /hook.
+    // A localhost HTTPS endpoint serving a certificate ca issued, queueing the SNS message type of each request.
     private static HttpsServer httpsEndpoint(FlociCertificateAuthority ca, BlockingQueue<String> received)
             throws Exception {
-        HttpsServer server = LocalHttpsServer.issuedBy(ca);
-        server.createContext("/hook", exchange -> {
-            exchange.getRequestBody().readAllBytes();
+        return LocalHttpsServer.hook(ca, exchange -> {
             List<String> type = exchange.getRequestHeaders().get("x-amz-sns-message-type");
             received.add(type == null ? "" : type.get(0));
-            exchange.sendResponseHeaders(200, -1);
-            exchange.close();
         });
-        server.start();
-        return server;
     }
 }
