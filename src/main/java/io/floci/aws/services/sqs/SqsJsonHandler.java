@@ -198,28 +198,8 @@ public class SqsJsonHandler {
     }
 
     private static MessageAttributeValue messageAttribute(String name, JsonNode attribute) {
-        String dataType = attribute.path("DataType").asText(null);
-        if (dataType == null) {
-            return null;
-        }
-        String binaryValueBase64 = attribute.path("BinaryValue").asText(null);
-        if (binaryValueBase64 != null) {
-            try {
-                return new MessageAttributeValue(Base64.getDecoder().decode(binaryValueBase64), dataType);
-            } catch (IllegalArgumentException e) {
-                throw new AwsException("InvalidParameterValue",
-                        "Message (user) attribute '" + name + "' has an invalid binary value.", 400);
-            }
-        }
-        String stringValue = attribute.path("StringValue").asText(null);
-        if (stringValue == null) {
-            return null;
-        }
-        if (stringValue.isEmpty()) {
-            throw new AwsException("InvalidParameterValue", "Message (user) attribute '" + name
-                    + "' must contain a non-empty value of type '" + dataType.split("\\.")[0] + "'.", 400);
-        }
-        return new MessageAttributeValue(stringValue, dataType);
+        return SqsService.messageAttributeValue(name, attribute.path("DataType").asText(null),
+                attribute.path("StringValue").asText(null), attribute.path("BinaryValue").asText(null));
     }
 
     private Response handleSendMessage(JsonNode request, String region) {
@@ -391,7 +371,8 @@ public class SqsJsonHandler {
         ArrayNode failed = objectMapper.createArrayNode();
 
         record ParsedEntry(String id, String body, Integer delay, String groupId, String dedupId,
-                           Map<String, MessageAttributeValue> attributes, String awsTraceHeader) {}
+                           Map<String, MessageAttributeValue> attributes, String awsTraceHeader,
+                           AwsException attributeError) {}
 
         List<ParsedEntry> parsedEntries = new ArrayList<>();
         int totalSize = 0;
@@ -404,23 +385,30 @@ public class SqsJsonHandler {
             String messageDeduplicationId = entry.path("MessageDeduplicationId").asText(null);
 
             Map<String, MessageAttributeValue> messageAttributes = new HashMap<>();
+            AwsException attributeError = null;
             JsonNode attrsNode = entry.path("MessageAttributes");
             if (attrsNode.isObject()) {
-                attrsNode.fields().forEachRemaining(attrEntry -> {
-                    MessageAttributeValue value = messageAttribute(attrEntry.getKey(), attrEntry.getValue());
-                    if (value != null) {
-                        messageAttributes.put(attrEntry.getKey(), value);
-                    }
-                });
+                try {
+                    attrsNode.fields().forEachRemaining(attrEntry -> {
+                        MessageAttributeValue value = messageAttribute(attrEntry.getKey(), attrEntry.getValue());
+                        if (value != null) {
+                            messageAttributes.put(attrEntry.getKey(), value);
+                        }
+                    });
+                } catch (AwsException e) {
+                    attributeError = e;
+                }
             }
 
             String entryAwsTraceHeader = entry.path("MessageSystemAttributes")
                     .path("AWSTraceHeader").path("StringValue").asText(null);
 
-            totalSize += SqsService.computeMessageSize(messageBody, messageAttributes);
+            if (attributeError == null) {
+                totalSize += SqsService.computeMessageSize(messageBody, messageAttributes);
+            }
             parsedEntries.add(new ParsedEntry(id, messageBody, delaySeconds,
                     messageGroupId, messageDeduplicationId, messageAttributes,
-                    entryAwsTraceHeader));
+                    entryAwsTraceHeader, attributeError));
         }
 
         sqsService.validateBatchPayloadSize(queueUrl, region, totalSize);
@@ -429,6 +417,9 @@ public class SqsJsonHandler {
         for (ParsedEntry parsed : parsedEntries) {
             String id = parsed.id();
             try {
+                if (parsed.attributeError() != null) {
+                    throw parsed.attributeError();
+                }
                 Message msg = sqsService.sendMessage(queueUrl, parsed.body(), parsed.delay(),
                         parsed.groupId(), parsed.dedupId(), parsed.attributes(),
                         parsed.awsTraceHeader(), senderId, region);
