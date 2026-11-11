@@ -1292,8 +1292,9 @@ public class SsmService implements ResourceProvider {
 
     /**
      * The stored name a parameter name or ARN addresses. The ARN carries a leading slash the stored name may
-     * lack, so {@code parameter/foo} falls back to {@code foo} when only {@code foo} is stored. A version or
-     * label selector after the last colon is kept, but the fallback checks the name without it.
+     * lack, so {@code parameter/foo} falls back to {@code foo} when only {@code foo} is stored, but
+     * {@code parameter//foo} names {@code //foo} and never falls back to {@code /foo}. A version or label selector
+     * after the last colon is kept, but the fallback checks the name without it.
      */
     private String parameterName(String nameOrArn, String region) {
         return parameterName(nameOrArn, region, false);
@@ -1318,7 +1319,8 @@ public class SsmService implements ResourceProvider {
                     String name = arn.resource().substring("parameter".length());
                     int separator = name.lastIndexOf(':');
                     String baseName = separator > 0 ? name.substring(0, separator) : name;
-                    if (baseName.startsWith("/") && parameterStore.get(regionKey(region, baseName)).isEmpty()
+                    if (baseName.startsWith("/") && !baseName.startsWith("//")
+                            && parameterStore.get(regionKey(region, baseName)).isEmpty()
                             && parameterStore.get(regionKey(region, baseName.substring(1))).isPresent()) {
                         return name.substring(1);
                     }
