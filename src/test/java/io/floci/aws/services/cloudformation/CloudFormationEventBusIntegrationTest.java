@@ -569,6 +569,39 @@ class CloudFormationEventBusIntegrationTest {
     }
 
     @Test
+    void partnerEventBusUpdateTreatsEventSourceNameAsMetadata() {
+        String suffix = Long.toString(System.nanoTime(), 36);
+        String busName = "aws.partner/example.com/cfn-update-" + suffix;
+        String stackName = "eventbus-partner-update-" + suffix;
+
+        createStack(stackName, partnerEventBusTemplate(busName, busName));
+        assertStackStatus(stackName, "CREATE_COMPLETE");
+        String busArn = callEventBridge("AWSEvents.DescribeEventBus",
+                "{\"Name\":\"" + busName + "\"}", 200).getString("Arn");
+
+        updateStack(stackName, """
+                {
+                  "Resources": {
+                    "Bus": {
+                      "Type": "AWS::Events::EventBus",
+                      "Properties": { "Name": "%s" }
+                    }
+                  }
+                }
+                """.formatted(busName));
+        assertStackStatus(stackName, "UPDATE_COMPLETE");
+
+        updateStack(stackName, partnerEventBusTemplate(busName, "aws.partner/example.com/other-" + suffix));
+        assertStackStatus(stackName, "UPDATE_COMPLETE");
+
+        assertEquals(busArn, callEventBridge("AWSEvents.DescribeEventBus",
+                "{\"Name\":\"" + busName + "\"}", 200).getString("Arn"));
+
+        deleteStack(stackName);
+        CfnStackWaits.awaitStackDeleted(stackName);
+    }
+
+    @Test
     void partnerEventBusNameMustMatchItsEventSourceName() {
         String suffix = Long.toString(System.nanoTime(), 36);
         String stackName = "eventbus-partner-mismatch-" + suffix;

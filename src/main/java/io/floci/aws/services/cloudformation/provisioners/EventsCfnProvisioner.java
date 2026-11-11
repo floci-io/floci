@@ -406,8 +406,13 @@ public class EventsCfnProvisioner implements CfnResourceProvisioner {
         validateEventBusProperties(props);
         String existingBusName = ctx.isUpdate() ? ctx.priorPhysicalId() : null;
         String busName = ctx.resolveOptional(props, "Name");
-        String eventSourceName = ctx.resolveOptional(props, "EventSourceName");
-        validateEventBusName(busName, eventSourceName);
+        String eventSourceName;
+        if (existingBusName != null && existingBusName.equals(busName)) {
+            eventSourceName = busName.indexOf('/') >= 0 ? busName : null;
+        } else {
+            eventSourceName = ctx.resolveOptional(props, "EventSourceName");
+            validateEventBusName(busName, eventSourceName);
+        }
         if (existingBusName != null && !existingBusName.equals(busName)) {
             throw new AwsException("ValidationError",
                     "Updating EventBus Name requires resource replacement, which is not supported.", 400);
