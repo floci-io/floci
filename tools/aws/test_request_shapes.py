@@ -24,6 +24,7 @@ import regen_ecr_shapes
 import regen_ecs_shapes
 import regen_emr_serverless_shapes
 import regen_iam_shapes
+import regen_payment_cryptography_data_shapes
 import regen_payment_cryptography_shapes
 import regen_logs_delivery_shapes
 import regen_resource_groups_shapes
@@ -356,6 +357,30 @@ def test_each_constraints_script_runs_the_shared_main_with_its_operations(script
     })]
 
 
+@pytest.mark.parametrize("script, model, output", [
+    (regen_payment_cryptography_shapes, "payment-cryptography/2021-09-14",
+     "payment-cryptography-request-shapes.json"),
+    (regen_payment_cryptography_data_shapes, "payment-cryptography-data/2022-02-03",
+     "payment-cryptography-data-request-shapes.json"),
+])
+def test_each_payment_cryptography_script_runs_the_shared_main_with_every_operation(script, model, output,
+                                                                                   monkeypatch):
+    # The generator names no operation, so it asks the driver for the model's whole set: an
+    # operation the service serves later is covered without anyone adding it to a list.
+    calls = []
+    monkeypatch.setattr(r, "main", lambda argv, **kwargs: calls.append((argv, kwargs)) or 0)
+
+    assert script.main(["--check"]) == 0
+    assert calls == [(["--check"], {
+        "script": script.__file__,
+        "model": Path(model),
+        "output": r.REPO_ROOT / "src/main/resources/aws" / output,
+        "description": script.__doc__,
+        "all_operations": True,
+        "prepare": r.widen_partition_and_region,
+    })]
+
+
 def vendored(script) -> tuple[str, ...]:
     """The operations a generator's file carries, which is `OPERATIONS` unless it names more."""
     return getattr(script, "VENDORED", None) or script.OPERATIONS
@@ -363,7 +388,6 @@ def vendored(script) -> tuple[str, ...]:
 
 @pytest.mark.parametrize("script", [
     regen_apigateway_documentation_shapes, regen_ecr_shapes, regen_iam_shapes, regen_logs_delivery_shapes,
-    regen_payment_cryptography_shapes,
     regen_resource_groups_shapes, regen_sts_shapes,
     regen_securityhub_shapes,
 ])
@@ -371,6 +395,50 @@ def test_each_vendored_constraints_file_carries_its_operations_and_resolves_its_
     doc = json.loads(script.OUTPUT.read_text(encoding="utf-8"))
 
     assert sorted(doc["operations"]) == sorted(vendored(script))
+    assert_shapes_resolve(doc)
+
+
+@pytest.mark.parametrize("script", [
+    regen_payment_cryptography_shapes, regen_payment_cryptography_data_shapes,
+])
+def test_each_payment_cryptography_file_carries_every_operation_the_model_names(script):
+    # The generator names no operation, so the file carries every operation the model names:
+    # an operation the service serves later is checked without anyone adding it to a list.
+    pytest.importorskip("botocore")
+    try:
+        data, _ = r.resolve_botocore_data(None)
+    except SystemExit:
+        pytest.skip("the botocore data cannot be read here")
+    model = r.load_model(data, script.MODEL)
+
+    doc = json.loads(script.OUTPUT.read_text(encoding="utf-8"))
+
+    # An operation the model names without an input has no request to constrain.
+    named = {name for name, operation in model["operations"].items() if "input" in operation}
+    assert sorted(doc["operations"]) == sorted(named)
+    assert_shapes_resolve(doc)
+
+
+def test_model_operations_names_every_operation_the_model_has():
+    # The list is the model's, so a generator that asks for it covers an operation AWS
+    # publishes without anyone adding it to a list.
+    model = {"operations": {"Put": {}, "Get": {}, "Delete": {}}, "shapes": {}}
+
+    assert r.model_operations(model) == ("Delete", "Get", "Put")
+
+
+def test_build_constraints_leaves_out_an_operation_without_an_input():
+    # An operation the model names without an input has no request to constrain.
+    model = {"operations": {"Put": {"input": {"shape": "PutRequest"}}, "Nothing": {}},
+             "shapes": {"PutRequest": {"type": "structure", "members": {}}}}
+
+    doc = r.build_constraints(model, r.model_operations(model), "botocore test", "tools/aws/regen_x_shapes.py")
+
+    assert doc["operations"] == {"Put": "PutRequest"}
+
+
+def assert_shapes_resolve(doc: dict) -> None:
+    """Every operation's shape is in the file, and every shape's members resolve to shapes in it."""
     for operation, shape in doc["operations"].items():
         assert shape in doc["shapes"], operation
     for name, shape in doc["shapes"].items():
@@ -435,8 +503,11 @@ def test_ecr_shapes_name_the_ecr_model_and_its_registry_setting_actions():
 def test_payment_cryptography_shapes_name_its_model_and_its_control_plane_actions():
     assert regen_payment_cryptography_shapes.MODEL == Path("payment-cryptography/2021-09-14")
     assert regen_payment_cryptography_shapes.OUTPUT.name == "payment-cryptography-request-shapes.json"
-    assert "TagResource" in regen_payment_cryptography_shapes.OPERATIONS
-    assert "UpdateAlias" in regen_payment_cryptography_shapes.OPERATIONS
+    # The generator names no operation, so the file carries the model's whole set.
+    assert not hasattr(regen_payment_cryptography_shapes, "OPERATIONS")
+    operations = json.loads(regen_payment_cryptography_shapes.OUTPUT.read_text(encoding="utf-8"))["operations"]
+    assert "TagResource" in operations
+    assert "UpdateAlias" in operations
 
 
 def test_payment_cryptography_shapes_widen_the_partition_the_model_writes():

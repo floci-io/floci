@@ -24,7 +24,7 @@ MODEL = Path("payment-cryptography/2021-09-14")
 
 def main(argv: list[str] | None = None) -> int:
     return request_shapes.main(argv, script=__file__, model=MODEL, output=OUTPUT,
-                               description=__doc__ or "",
+                               description=__doc__,
                                all_operations=True,
                                prepare=request_shapes.widen_partition_and_region)
 

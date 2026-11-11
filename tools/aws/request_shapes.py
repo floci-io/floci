@@ -83,7 +83,9 @@ def build_constraints(model: dict, operations: tuple[str, ...], provenance: str,
     quotes where that is not the one matched on, and enum, and the shapes of its members, list
     elements or map keys and values. Unlike `build`, it keeps members bound to
     the URI, query string or headers, so it suits the JSON protocols, whose members all travel in
-    the body."""
+    the body.
+
+    An operation the model names without an input has no request to constrain, and is left out."""
     kept: dict[str, dict] = {}
 
     def keep(name: str) -> None:
@@ -105,11 +107,20 @@ def build_constraints(model: dict, operations: tuple[str, ...], provenance: str,
                 entry[side] = shape[side]["shape"]
                 keep(entry[side])
 
-    inputs = {name: model["operations"][name]["input"]["shape"] for name in operations}
+    inputs = {name: model["operations"][name]["input"]["shape"] for name in operations
+              if "input" in model["operations"][name]}
     for name in inputs.values():
         keep(name)
     return {"_source": {"generator": generator, "botocore": provenance},
             "operations": inputs, "shapes": dict(sorted(kept.items()))}
+
+
+def model_operations(model: dict) -> tuple[str, ...]:
+    """Every operation the model names, which is what a generator that names none of them vendors.
+
+    The list is the model's, so an operation AWS publishes is constrained without anyone adding it
+    to a list that would fall behind the model."""
+    return tuple(sorted(model["operations"]))
 
 
 # The partition the model writes in its ARN patterns, and the one the service writes in
@@ -181,8 +192,7 @@ def main(argv: list[str] | None, *, script: str, model: Path, output: Path,
         loaded = prepare(loaded)
     generator = generator_name(script)
     if all_operations:
-        fresh = render(build_constraints(loaded, tuple(sorted(loaded["operations"])),
-                                        provenance, generator))
+        fresh = render(build_constraints(loaded, model_operations(loaded), provenance, generator))
     elif operations is not None:
         fresh = render(build_constraints(loaded, operations, provenance, generator))
     else:
