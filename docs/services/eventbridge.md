@@ -173,7 +173,10 @@ name on its own bus, and it keeps `DeleteEventBus` from deleting that bus. One w
 name is also no longer listed by `ListRules` or matched by `PutEvents`. On a custom bus it can still
 be tagged by its ARN, but on the default bus it cannot: an ARN such as `rule/team/rule-1` reads as
 rule `rule-1` on bus `team`, so that rule is reachable by its exact name for the rule and target
-operations only. A CloudFormation stack holding any of these legacy rules can still be deleted, but
+operations only. On a custom bus named `aws.partner`, a rule such as `example.com/orders/r1` shares
+its storage key and ARN with rule `r1` on partner bus `aws.partner/example.com/orders`. That partner
+bus does not list, match or manage the legacy rule, and `PutRule` of `r1` on it fails with
+`ValidationException` until the legacy rule is deleted. A CloudFormation stack holding any of these legacy rules can still be deleted, but
 an `UpdateStack` that touches the rule fails, since `PutRule` rejects its name. Remove its targets,
 delete it and recreate it under a valid name. `DescribeRule`, `DeleteRule`, `EnableRule`,
 `DisableRule`, `PutTargets`, `RemoveTargets` and `ListTargetsByRule` otherwise reject an invalid

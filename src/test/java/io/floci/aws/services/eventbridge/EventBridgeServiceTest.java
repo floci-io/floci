@@ -787,6 +787,37 @@ class EventBridgeServiceTest {
     }
 
     @Test
+    void aPartnerBusDoesNotTakeOverALegacyRuleStoredUnderTheSameKey() {
+        String partner = "aws.partner/example.com/orders";
+        service.createEventBus("aws.partner", null, null, REGION);
+        Rule legacy = new Rule();
+        legacy.setName("example.com/orders/r1");
+        legacy.setArn("arn:aws:events:us-east-1:000000000000:rule/aws.partner/example.com/orders/r1");
+        legacy.setEventBusName("aws.partner");
+        legacy.setEventPattern("{\"source\":[\"example.com\"]}");
+        legacy.setState(RuleState.ENABLED);
+        ruleStore.put("rule:" + REGION + ":" + partner + "/r1", legacy);
+        Target target = new Target("t1", "arn:aws:sqs:us-east-1:000000000000:queue-1", null, null);
+        service.putTargets("example.com/orders/r1", "aws.partner", List.of(target), REGION);
+        service.createEventBus(partner, partner, null, null, REGION);
+
+        assertTrue(service.listRules(partner, null, REGION).isEmpty());
+        assertEquals("ResourceNotFoundException", assertThrows(AwsException.class,
+                () -> service.describeRule("r1", partner, REGION)).getErrorCode());
+        assertEquals(0, service.removeTargets("r1", partner, List.of("t1"), REGION).successfulCount());
+        assertEquals("ValidationException", assertThrows(AwsException.class,
+                () -> service.putRule("r1", partner, "{\"source\":[\"example.com\"]}", null,
+                        RuleState.ENABLED, null, null, null, REGION)).getErrorCode());
+        service.putEvents(List.of(Map.of("EventBusName", partner, "Source", "example.com",
+                "DetailType", "Order", "Detail", "{}")), REGION);
+
+        verify(dispatcherMock, never()).dispatch(anyString(), any(), anyString(), anyString(), any());
+        assertEquals("aws.partner", service.describeRule("example.com/orders/r1", "aws.partner", REGION)
+                .getEventBusName());
+        assertEquals(1, service.listTargetsByRule("example.com/orders/r1", "aws.partner", REGION).size());
+    }
+
+    @Test
     void aSlashNamedRuleStoredForAnotherBusIsRejected() {
         service.createEventBus("foo", null, null, REGION);
         Rule nested = new Rule();

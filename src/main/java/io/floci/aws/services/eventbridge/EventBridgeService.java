@@ -394,7 +394,14 @@ public class EventBridgeService implements ResourceProvider, StoredResourceArns 
         ensureBusExists(effectiveBus, region);
 
         String key = ruleKey(region, effectiveBus, name);
-        Rule rule = ruleStore.get(key).orElse(new Rule());
+        Optional<Rule> stored = ruleStore.get(key);
+        if (stored.isPresent() && !effectiveBus.equals(stored.get().getEventBusName())) {
+            throw new AwsException("ValidationException",
+                    "Rule " + name + " on event bus " + effectiveBus + " conflicts with rule "
+                            + stored.get().getName() + " on event bus " + stored.get().getEventBusName()
+                            + ". Delete that rule first.", 400);
+        }
+        Rule rule = stored.orElse(new Rule());
         rule.setAccountId(regionResolver.getAccountId());
         rule.setName(name);
         rule.setArn(buildRuleArn(region, effectiveBus, name));
@@ -464,7 +471,7 @@ public class EventBridgeService implements ResourceProvider, StoredResourceArns 
         validateRuleReference("name", name, effectiveBus, region);
         ensureBusExists(effectiveBus, region);
         String key = ruleKey(region, effectiveBus, name);
-        Rule rule = ruleStore.get(key).orElse(null);
+        Rule rule = ruleOfBus(key, effectiveBus).orElse(null);
         if (rule == null) {
             return;
         }
@@ -488,13 +495,14 @@ public class EventBridgeService implements ResourceProvider, StoredResourceArns 
      * caller can tell a rule persisted before name validation from one that is already gone.
      */
     public boolean ruleExists(String name, String busName, String region) {
-        return name != null && ruleStore.get(ruleKey(region, resolvedBusName(busName), name)).isPresent();
+        String effectiveBus = resolvedBusName(busName);
+        return name != null && ruleOfBus(ruleKey(region, effectiveBus, name), effectiveBus).isPresent();
     }
 
     public Rule describeRule(String name, String busName, String region) {
         String effectiveBus = resolvedBusName(busName);
         validateRuleReference("name", name, effectiveBus, region);
-        return ruleStore.get(ruleKey(region, effectiveBus, name))
+        return ruleOfBus(ruleKey(region, effectiveBus, name), effectiveBus)
                 .orElseThrow(() -> new AwsException("ResourceNotFoundException",
                         "Rule not found: " + name, 400));
     }
@@ -507,7 +515,7 @@ public class EventBridgeService implements ResourceProvider, StoredResourceArns 
             if (namePrefix == null || namePrefix.isBlank()) return true;
             String ruleName = k.substring(prefix.length());
             return ruleName.startsWith(namePrefix);
-        });
+        }).stream().filter(rule -> effectiveBus.equals(rule.getEventBusName())).toList();
     }
 
     /**
@@ -544,7 +552,7 @@ public class EventBridgeService implements ResourceProvider, StoredResourceArns 
         String effectiveBus = resolvedBusName(busName);
         validateRuleReference("name", name, effectiveBus, region);
         String key = ruleKey(region, effectiveBus, name);
-        Rule rule = ruleStore.get(key)
+        Rule rule = ruleOfBus(key, effectiveBus)
                 .orElseThrow(() -> new AwsException("ResourceNotFoundException",
                         "Rule not found: " + name, 400));
         rule.setState(RuleState.ENABLED);
@@ -556,7 +564,7 @@ public class EventBridgeService implements ResourceProvider, StoredResourceArns 
         String effectiveBus = resolvedBusName(busName);
         validateRuleReference("name", name, effectiveBus, region);
         String key = ruleKey(region, effectiveBus, name);
-        Rule rule = ruleStore.get(key)
+        Rule rule = ruleOfBus(key, effectiveBus)
                 .orElseThrow(() -> new AwsException("ResourceNotFoundException",
                         "Rule not found: " + name, 400));
         rule.setState(RuleState.DISABLED);
@@ -588,7 +596,7 @@ public class EventBridgeService implements ResourceProvider, StoredResourceArns 
         String effectiveBus = resolvedBusName(busName);
         validateRuleReference("rule", ruleName, effectiveBus, region);
         String key = ruleKey(region, effectiveBus, ruleName);
-        Rule rule = ruleStore.get(key)
+        Rule rule = ruleOfBus(key, effectiveBus)
                 .orElseThrow(() -> new AwsException("ResourceNotFoundException",
                         "Rule not found: " + ruleName, 400));
         List<Target> existing = new ArrayList<>(targetStore.get(key).orElse(new ArrayList<>()));
@@ -699,6 +707,9 @@ public class EventBridgeService implements ResourceProvider, StoredResourceArns 
         String effectiveBus = resolvedBusName(busName);
         validateRuleReference("rule", ruleName, effectiveBus, region);
         String key = ruleKey(region, effectiveBus, ruleName);
+        if (ruleStore.get(key).filter(rule -> !effectiveBus.equals(rule.getEventBusName())).isPresent()) {
+            return new RemoveTargetsResult(0, ids.size());
+        }
         List<Target> existing = new ArrayList<>(targetStore.get(key).orElse(new ArrayList<>()));
         int removed = 0;
         for (String id : ids) {
@@ -715,7 +726,7 @@ public class EventBridgeService implements ResourceProvider, StoredResourceArns 
         String effectiveBus = resolvedBusName(busName);
         validateRuleReference("rule", ruleName, effectiveBus, region);
         String key = ruleKey(region, effectiveBus, ruleName);
-        ruleStore.get(key)
+        ruleOfBus(key, effectiveBus)
                 .orElseThrow(() -> new AwsException("ResourceNotFoundException",
                         "Rule not found: " + ruleName, 400));
         return targetStore.get(key).orElse(List.of());
@@ -1150,7 +1161,7 @@ public class EventBridgeService implements ResourceProvider, StoredResourceArns 
             List<Rule> candidateRules = accountScan(ruleStore, accountId, k -> isRuleKeyOfBus(k, rulePrefix));
 
             for (Rule rule : candidateRules) {
-                if (rule.getState() != RuleState.ENABLED) {
+                if (!effectiveBus.equals(rule.getEventBusName()) || rule.getState() != RuleState.ENABLED) {
                     continue;
                 }
                 // A rule without an event pattern is a schedule rule: it never matches put events.
@@ -1685,6 +1696,10 @@ public class EventBridgeService implements ResourceProvider, StoredResourceArns 
 
     private static String ruleKeyPrefix(String region, String busName) {
         return "rule:" + region + ":" + busName + "/";
+    }
+
+    private Optional<Rule> ruleOfBus(String key, String busName) {
+        return ruleStore.get(key).filter(rule -> busName.equals(rule.getEventBusName()));
     }
 
     private static boolean isRuleKeyOfBus(String key, String rulePrefix) {
