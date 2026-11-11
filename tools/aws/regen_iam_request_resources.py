@@ -203,8 +203,8 @@ READ_IN_HAND_BUILT: dict[str, str] = {
                       "DeleteDelivery", "DescribeDeliveries")
 }
 READ_IN_HAND_BUILT["logs:PutDestination"] = (
-    "CloudWatch Logs destination creation names the destination by destinationName, while ResourceArnBuilder "
-    "keeps building log group and stream ARNs")
+    "CloudWatch Logs destination creation names the destination by destinationName, which ResourceArnBuilder "
+    "reads from the generated request-resource table")
 
 _LATER = "not read yet: a later batch, with the tests that show its ARNs are the ones its handlers mint"
 _REST = ("REST: its requests name their resources in the path, which RequestResources reads from the route a request "
@@ -329,9 +329,6 @@ CORRECTIONS: dict[str, tuple[list[dict], str]] = {
                                     "deliveryDestinationConfiguration.destinationResourceArn is the log group, bucket "
                                     "or stream the logs go to and roleArn a role, neither the delivery destination, "
                                     "which the request names by name"),
-    "logs:PutDestination": ([{"type": "destination", "fill": {"DestinationName": "destinationName"}}],
-                            "targetArn is the stream receiving logs and roleArn a role, neither the destination, "
-                            "which the request names by destinationName"),
     **{f"logs:{operation}": ([{"type": "delivery", "fill": {"DeliveryName": "id"}}],
                              "the delivery format ends in ${DeliveryName}, while a delivery is named by the id "
                              "CreateDelivery mints, which the request gives in id")

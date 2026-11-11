@@ -12888,6 +12888,9 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
     /** The public suffix every endpoint DNS name ends in; it resolves to 127.0.0.1 in public DNS. */
     static final String INSTANCE_CONNECT_ENDPOINT_DNS_SUFFIX = "localhost.floci.io";
     private static final Set<String> INSTANCE_CONNECT_ENDPOINT_IP_TYPES = Set.of("ipv4", "dualstack", "ipv6");
+    /** States the AWS CLI accepts as usable when it looks an endpoint up for a tunnel. */
+    private static final Set<String> USABLE_INSTANCE_CONNECT_ENDPOINT_STATES =
+            Set.of("create-complete", "update-in-progress", "update-complete", "update-failed");
     /**
      * The names matchesInstanceConnectEndpointFilter implements, exactly the DescribeInstanceConnectEndpoints
      * reference's list; tag:&lt;key&gt; is admitted through tag-key.
@@ -13071,6 +13074,49 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
         endpoint.getNetworkInterfaceIds().forEach(eniId -> removeTags(region, eniId));
         endpoint.setState("delete-in-progress");
         return endpoint;
+    }
+
+    /** The usable endpoint a tunnel names, or empty: unknown, or not in a state the CLI would use. */
+    public Optional<InstanceConnectEndpoint> findUsableInstanceConnectEndpoint(String region, String id) {
+        return instanceConnectEndpoints.get(key(region, id))
+                .filter(endpoint -> USABLE_INSTANCE_CONNECT_ENDPOINT_STATES.contains(endpoint.getState()));
+    }
+
+    /** The running instance in {@code vpcId} holding {@code privateIp}: what a tunnel connects to. */
+    public Optional<Instance> findRunningInstanceByPrivateIp(String region, String vpcId, String privateIp) {
+        return instances.scan(k -> true).stream()
+                .filter(instance -> region.equals(instance.getRegion()))
+                .filter(instance -> vpcId.equals(instance.getVpcId()) && privateIp.equals(instance.getPrivateIpAddress()))
+                .filter(instance -> instance.getState() != null && "running".equals(instance.getState().getName()))
+                .findFirst();
+    }
+
+    /**
+     * Whether the endpoint may open {@code port} on {@code instance}: its own groups must allow the
+     * traffic out, and the instance's groups must allow it in from the endpoint, the way AWS
+     * evaluates a tunnel. The source is always the endpoint's own address and groups:
+     * {@code PreserveClientIp} is recorded but not modelled, so a rule that admits only the
+     * client's address does not admit the tunnel here.
+     */
+    public boolean instanceConnectEndpointMayReach(InstanceConnectEndpoint endpoint, Instance instance, int port) {
+        String region = endpoint.getRegion();
+        List<SecurityGroup> endpointGroups = groupsById(region, endpoint.getSecurityGroupIds());
+        List<String> instanceGroupIds = instance.getSecurityGroups() == null ? List.of()
+                : instance.getSecurityGroups().stream().map(GroupIdentifier::getGroupId).toList();
+        List<SecurityGroup> instanceGroups = groupsById(region, instanceGroupIds);
+        SecurityGroupPolicy.Peer target = new SecurityGroupPolicy.Peer(instance.getPrivateIpAddress(),
+                instance.getOwnerId(), instance.getVpcId(), new HashSet<>(instanceGroupIds));
+        SecurityGroupPolicy.Peer source = new SecurityGroupPolicy.Peer(endpoint.getPrivateIpAddress(),
+                endpoint.getOwnerId(), endpoint.getVpcId(), new HashSet<>(endpoint.getSecurityGroupIds()));
+        return SecurityGroupPolicy.allows(endpointGroups, true, "tcp", port, -1, target,
+                policyPrefixLists(region, endpointGroups))
+                && SecurityGroupPolicy.allows(instanceGroups, false, "tcp", port, -1, source,
+                        policyPrefixLists(region, instanceGroups));
+    }
+
+    private List<SecurityGroup> groupsById(String region, List<String> ids) {
+        return ids.stream().map(id -> securityGroups.get(key(region, id)).orElse(null))
+                .filter(Objects::nonNull).toList();
     }
 
     private InstanceConnectEndpoint requireInstanceConnectEndpoint(String region, String id) {

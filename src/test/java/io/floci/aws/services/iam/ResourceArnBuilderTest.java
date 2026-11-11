@@ -907,9 +907,10 @@ class ResourceArnBuilderTest {
         setJsonBody("{\"destinationName\":\"central\"}");
         assertEquals(List.of("arn:" + partition + ":logs:" + region + ":" + ACCOUNT + ":destination:central"),
                 builder.buildLogResources("logs:PutDestination", ctx, region, ACCOUNT, partition));
-        String otherDestination = "arn:" + partition + ":logs:" + region + ":" + ACCOUNT + ":destination:other";
-        setJsonBody("{\"destinationName\":\"central\",\"targetArn\":\"" + otherDestination
-                + "\",\"roleArn\":\"" + otherDestination + "\"}");
+        String targetArn = "arn:" + partition + ":kinesis:" + region + ":" + ACCOUNT + ":stream/central";
+        String roleArn = "arn:" + partition + ":iam::" + ACCOUNT + ":role/logs-delivery";
+        setJsonBody("{\"destinationName\":\"central\",\"targetArn\":\"" + targetArn
+                + "\",\"roleArn\":\"" + roleArn + "\"}");
         assertEquals(List.of("arn:" + partition + ":logs:" + region + ":" + ACCOUNT + ":destination:central"),
                 builder.buildLogResources("logs:PutDestination", ctx, region, ACCOUNT, partition));
         setJsonBody("{}");

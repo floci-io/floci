@@ -42,6 +42,46 @@ public final class RequestConstraintCheck {
         AwsException required(String path);
     }
 
+    /** Standard member-constraint messages, using the service's error code and HTTP 400. */
+    public static Messages standardMessages(String errorCode) {
+        return new Messages() {
+            @Override
+            public AwsException type(String path, String type) {
+                return invalid(path, "Member must be a " + type);
+            }
+
+            @Override
+            public AwsException bounds(String path, String type, Long min, Long max, long size) {
+                String measure = "integer".equals(type) || "long".equals(type) ? "value" : "length";
+                return min != null && size < min
+                        ? invalid(path, "Member must have " + measure + " greater than or equal to " + min)
+                        : invalid(path, "Member must have " + measure + " less than or equal to " + max);
+            }
+
+            @Override
+            public AwsException pattern(String path, String pattern) {
+                return invalid(path, "must satisfy regular expression '" + pattern + "'");
+            }
+
+            @Override
+            public AwsException enumValue(String path, List<String> values) {
+                return invalid(path, "Member must satisfy enum value set: " + values);
+            }
+
+            @Override
+            public AwsException required(String path) {
+                return invalid(path, "Member must not be null");
+            }
+
+            private AwsException invalid(String path, String rule) {
+                int dot = path.indexOf('.');
+                String member = (dot < 0 ? "" : path.substring(dot + 1)).replace("[]", "");
+                return new AwsException(errorCode,
+                        "Invalid parameter at '" + member + "' failed to satisfy constraint: '" + rule + "'", 400);
+            }
+        };
+    }
+
     private final JsonNode model;
     private final Map<String, Pattern> patterns = new HashMap<>();
     private final Messages messages;
@@ -64,6 +104,11 @@ public final class RequestConstraintCheck {
 
     public static RequestConstraintCheck of(JsonNode model, Messages messages) {
         return new RequestConstraintCheck(model, messages);
+    }
+
+    /** Whether the vendored model declares an input for {@code operation}. */
+    public boolean hasOperation(String operation) {
+        return model.path("operations").has(operation);
     }
 
     /** Checks {@code request}, the body of {@code operation}, against the operation's input shape. */

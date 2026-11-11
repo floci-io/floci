@@ -164,7 +164,8 @@ public class IamConditionContextResolver {
             case "iam" -> iamConditionContext(action, ctx);
             case "logs" -> logsConditionContext(action, ctx);
             case "lambda" -> lambdaConditionContext(action, ctx);
-            case "redshift" -> redshiftConditionContext(action, ctx);
+            case "redshift" -> RequestConditionKeys.requestKeys(action).isEmpty() ? null
+                    : requestConditions(action, formParameters(ctx)::get);
             default -> null;
         };
     }
@@ -320,17 +321,16 @@ public class IamConditionContextResolver {
         };
     }
 
-    /** The {@code redshift:} keys a Redshift request carries in its own members, such as its DbUser. */
-    private Map<String, List<String>> redshiftConditionContext(String action, ContainerRequestContext ctx) {
-        List<String> keys = RequestConditionKeys.requestKeys(action);
-        if (keys.isEmpty()) {
-            return null;
-        }
-        Map<String, String> form = formParameters(ctx);
+    /**
+     * The keys a request for {@code action} carries in its own members, such as a Redshift DbUser or an
+     * OpenTunnel remotePort, read through {@code parameter} from the table in
+     * {@code request-condition-keys.json}; null when it carries none.
+     */
+    static Map<String, List<String>> requestConditions(String action, Function<String, String> parameter) {
         Map<String, List<String>> conditions = new LinkedHashMap<>();
-        for (String key : keys) {
+        for (String key : RequestConditionKeys.requestKeys(action)) {
             for (String member : RequestConditionKeys.members(action, key)) {
-                putIfPresent(conditions, key, form.get(member));
+                putIfPresent(conditions, key, parameter.apply(member));
             }
         }
         return conditions.isEmpty() ? null : conditions;

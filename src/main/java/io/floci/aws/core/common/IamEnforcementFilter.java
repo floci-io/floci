@@ -1460,6 +1460,20 @@ public class IamEnforcementFilter implements ContainerRequestFilter {
     }
 
     /**
+     * Authorizes a secondary resource for a request {@link #filter} never sees, such as a WebSocket upgrade,
+     * with the condition keys the request carries in the members {@code request-condition-keys.json} names
+     * for {@code action}, read through {@code parameter}.
+     */
+    public void authorizeRequestParameters(
+            String authorizationHeader,
+            String action,
+            String resource,
+            Function<String, String> parameter) {
+        authorizeAdditionalResource(authorizationHeader, action, resource,
+                IamConditionContextResolver.requestConditions(action, parameter));
+    }
+
+    /**
      * Authorizes a browser POST upload, a PostObject, as {@code s3:PutObject} on {@code resource}.
      * Its credential is only in the form body, so {@link #filter} never sees it, and a denial is
      * recorded in CloudTrail here, under {@code PostObject}, as the denials {@link #filter} refuses
