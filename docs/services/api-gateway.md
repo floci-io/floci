@@ -857,7 +857,10 @@ update that sets only `DelaySeconds` keeps `QueueUrl` and `MessageBody`, and one
 to an empty string is rejected. Import and reimport check every integration in the document before changing anything,
 so a rejected reimport leaves the API as it was. CloudFormation carries `IntegrationSubtype` and
 `RequestParameters` from an `AWS::ApiGatewayV2::Integration` and from the
-`x-amazon-apigateway-integration` extension of an `AWS::ApiGatewayV2::Api` `Body`. A CloudFormation
+`x-amazon-apigateway-integration` extension of an `AWS::ApiGatewayV2::Api` `Body`. OpenAPI import
+and a CloudFormation `Body` read a `requestParameters` value the same way: a number or boolean as
+its text, and an object or array as its JSON text, so an object `MessageAttributes` is accepted and
+an array one is rejected as not a JSON object. A CloudFormation
 update that drops `IntegrationSubtype` removes it from the integration, and a failed update that
 added one rolls back to an integration without it.
 
