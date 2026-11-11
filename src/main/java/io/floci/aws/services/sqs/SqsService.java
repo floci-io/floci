@@ -1372,8 +1372,7 @@ public class SqsService implements Resettable, ResourceProvider {
     }
 
     /**
-     * Builds a message (user) attribute from its wire fields. A BinaryValue takes precedence over a StringValue, as on
-     * the wire.
+     * Builds a message (user) attribute from its wire fields. A BinaryValue takes precedence over a StringValue.
      *
      * @throws AwsException InvalidParameterValue when the DataType is missing or empty, when its base type (the part
      *                      before the first period) is not String, Number or Binary, when the attribute has no
