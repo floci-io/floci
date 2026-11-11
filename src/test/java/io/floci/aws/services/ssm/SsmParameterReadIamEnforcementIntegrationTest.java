@@ -134,6 +134,30 @@ class SsmParameterReadIamEnforcementIntegrationTest {
     }
 
     @Test
+    void aDenyOnAPathRefusesGetParametersByPathOnItWithATrailingSlash() {
+        String path = "/iam-path-slash-" + UUID.randomUUID();
+        try (SsmClient root = AwsTestClients.create(SsmClient.builder(), ACCOUNT, Region.US_EAST_1)) {
+            try {
+                root.putParameter(r -> r.name(path + "/key").type(ParameterType.STRING).value("v"));
+                EnforcementFixtures.UserCredentials credentials = user("""
+                        {"Version":"2012-10-17","Statement":[
+                          {"Effect":"Allow","Action":"ssm:GetParametersByPath",
+                           "Resource":"arn:aws:ssm:us-east-1:000000000000:parameter/*"},
+                          {"Effect":"Deny","Action":"ssm:GetParametersByPath",
+                           "Resource":"arn:aws:ssm:us-east-1:000000000000:parameter%s"}]}""".formatted(path));
+                try (SsmClient user = AwsTestClients.create(SsmClient.builder(), credentials.accessKeyId(),
+                        Region.US_EAST_1)) {
+                    SsmException denied = assertThrows(SsmException.class,
+                            () -> user.getParametersByPath(r -> r.path(path + "/")));
+                    assertEquals("AccessDeniedException", denied.awsErrorDetails().errorCode());
+                }
+            } finally {
+                root.deleteParameter(r -> r.name(path + "/key"));
+            }
+        }
+    }
+
+    @Test
     void aGrantOnAParameterAllowsReadingItsVersionsAndLabels() {
         String name = "/iam-selector-read-" + UUID.randomUUID() + "/db";
         try (SsmClient root = AwsTestClients.create(SsmClient.builder(), ACCOUNT, Region.US_EAST_1)) {

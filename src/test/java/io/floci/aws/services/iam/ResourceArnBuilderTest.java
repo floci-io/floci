@@ -1721,6 +1721,10 @@ class ResourceArnBuilderTest {
         assertEquals(List.of("arn:aws:ssm:us-east-1:000000000000:parameter/app/config"),
                 builder.buildResources("ssm", ctx, "us-east-1", "000000000000"));
 
+        setJsonBody("{\"Path\":\"/app/config/\"}");
+        assertEquals(List.of("arn:aws:ssm:us-east-1:000000000000:parameter/app/config"),
+                builder.buildResources("ssm", ctx, "us-east-1", "000000000000"));
+
         setJsonBody("{\"Path\":\"/\"}");
         assertEquals(List.of("arn:aws:ssm:us-east-1:000000000000:parameter/"),
                 builder.buildResources("ssm", ctx, "us-east-1", "000000000000"));
