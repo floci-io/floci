@@ -1270,6 +1270,28 @@ public class NativeDynamoDbJsonHandler {
         }
     }
 
+    private static final List<String> CONDITIONAL_OPERATORS = List.of("AND", "OR");
+
+    private static void requireValidConditionalOperator(JsonNode request, String filterMember) {
+        String conditionalOperator = textOrNull(request, "ConditionalOperator");
+        if (conditionalOperator == null) {
+            return;
+        }
+        int conditions = request.path(filterMember).size();
+        if (conditions == 0) {
+            throw new AwsException("ValidationException",
+                    "ConditionalOperator cannot be used without Filter or Expected", 400);
+        }
+        if (conditions == 1) {
+            throw new AwsException("ValidationException",
+                    "ConditionalOperator can only be used when Filter or Expected has two or more elements", 400);
+        }
+        if (!CONDITIONAL_OPERATORS.contains(conditionalOperator)) {
+            throw new AwsException("ValidationException", SmithyValidationErrors.notInEnum(conditionalOperator,
+                    "conditionalOperator", CONDITIONAL_OPERATORS), 400);
+        }
+    }
+
     private static final Set<String> VALID_SELECT = Set.of(
             "ALL_ATTRIBUTES", "ALL_PROJECTED_ATTRIBUTES", "SPECIFIC_ATTRIBUTES", "COUNT");
 
@@ -1319,6 +1341,7 @@ public class NativeDynamoDbJsonHandler {
                         ? List.of("AttributesToGet", "QueryFilter", "ConditionalOperator")
                         : List.of("AttributesToGet", "QueryFilter", "ConditionalOperator", "KeyConditions"),
                 List.of("ProjectionExpression", "FilterExpression", "KeyConditionExpression"));
+        requireValidConditionalOperator(request, "QueryFilter");
         requireReadableValues(exprAttrValues, "");
         requireReadableValues(exclusiveStartKey, "");
         requireReadableValues(legacyValues(keyConditions), "");
@@ -1486,6 +1509,8 @@ public class NativeDynamoDbJsonHandler {
         rejectMixedParameters(request,
                 List.of("AttributesToGet", "ScanFilter", "ConditionalOperator"),
                 List.of("ProjectionExpression", "FilterExpression"));
+        DynamoDbTableNames.resolve(tableName);
+        requireValidConditionalOperator(request, "ScanFilter");
         requireReadableValues(exprAttrValues, "");
         requireReadableValues(exclusiveStartKey, "");
         requireReadableValues(legacyValues(scanFilter), "");

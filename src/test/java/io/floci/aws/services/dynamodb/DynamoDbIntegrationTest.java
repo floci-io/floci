@@ -6016,6 +6016,26 @@ given()
             .body("message", equalTo(message));
     }
 
+    @ParameterizedTest
+    @CsvSource(delimiter = '|', quoteCharacter = '`', textBlock = """
+            Query | {"TableName": "Missing", "KeyConditions": {"pk": {"ComparisonOperator": "EQ", "AttributeValueList": [{"S": "a"}]}}, "QueryFilter": {"b": {"ComparisonOperator": "NULL"}, "c": {"ComparisonOperator": "NULL"}}, "ConditionalOperator": "XOR", "Select": "BOGUS"} | Value 'XOR' at 'conditionalOperator' failed to satisfy constraint: Member must satisfy enum value set: [AND, OR]
+            Scan  | {"TableName": "Missing", "ScanFilter": {"a": {"ComparisonOperator": "EQ", "AttributeValueList": ["DEEP"]}}, "ConditionalOperator": "AND"} | ConditionalOperator can only be used when Filter or Expected has two or more elements
+            Scan  | {"TableName": "Missing", "ConditionalOperator": "AND"} | ConditionalOperator cannot be used without Filter or Expected
+            """)
+    void queryAndScanCheckTheConditionalOperatorBeforeTheTableLookup(String operation, String body,
+            String message) {
+        String deep = "{\"M\": {\"n\": ".repeat(40) + "{\"S\": \"leaf\"}" + "}}".repeat(40);
+        given()
+            .header("X-Amz-Target", "DynamoDB_20120810." + operation)
+            .contentType(DYNAMODB_CONTENT_TYPE)
+            .body(body.replace("\"DEEP\"", deep))
+        .when().post("/")
+        .then()
+            .statusCode(400)
+            .body("__type", containsString("ValidationException"))
+            .body("message", equalTo(message));
+    }
+
     private void deleteTable(String tableName) {
         given()
             .header("X-Amz-Target", "DynamoDB_20120810.DeleteTable")

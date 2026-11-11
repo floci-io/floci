@@ -1381,6 +1381,41 @@ class NativeDynamoDbJsonHandlerTest {
                 + "Expression parameters: {ProjectionExpression, FilterExpression}", ex.getMessage());
     }
 
+    @ParameterizedTest
+    @CsvSource(delimiter = '|', quoteCharacter = '`', textBlock = """
+            Query | {"TableName":"Missing","KeyConditions":{"pk":{"ComparisonOperator":"EQ","AttributeValueList":[{"S":"a"}]}},"QueryFilter":{"b":{"ComparisonOperator":"NULL"},"c":{"ComparisonOperator":"NULL"}},"ConditionalOperator":"XOR","Select":"BOGUS"} | Value 'XOR' at 'conditionalOperator' failed to satisfy constraint: Member must satisfy enum value set: [AND, OR]
+            Query | {"TableName":"Missing","KeyConditions":{"pk":{"ComparisonOperator":"EQ","AttributeValueList":[{"S":"a"}]}},"ConditionalOperator":"AND"} | ConditionalOperator cannot be used without Filter or Expected
+            Query | {"TableName":"Missing","KeyConditions":{"pk":{"ComparisonOperator":"EQ","AttributeValueList":[{"S":"a"}]}},"QueryFilter":null,"ConditionalOperator":"AND"} | ConditionalOperator cannot be used without Filter or Expected
+            Query | {"TableName":"Missing","KeyConditions":{"pk":{"ComparisonOperator":"EQ","AttributeValueList":[{"S":"a"}]}},"QueryFilter":{"b":{"ComparisonOperator":"EQ","AttributeValueList":[{"N":"abc"}]}},"ConditionalOperator":"AND"} | ConditionalOperator can only be used when Filter or Expected has two or more elements
+            Query | {"TableName":"Missing","KeyConditions":{"pk":{"ComparisonOperator":"EQ","AttributeValueList":[{"S":"a"}]}},"QueryFilter":{"b":{"ComparisonOperator":"EQ","AttributeValueList":["DEEP"]}},"ConditionalOperator":"AND"} | ConditionalOperator can only be used when Filter or Expected has two or more elements
+            Query | {"TableName":"Missing","QueryFilter":{"b":{"ComparisonOperator":"NULL"},"c":{"ComparisonOperator":"NULL"}},"ConditionalOperator":"XOR"} | Value 'XOR' at 'conditionalOperator' failed to satisfy constraint: Member must satisfy enum value set: [AND, OR]
+            Query | {"TableName":"Missing","KeyConditions":{"pk":{"ComparisonOperator":"EQ","AttributeValueList":[{"S":"a"}]}},"QueryFilter":{"b":{"ComparisonOperator":"NULL"},"c":{"ComparisonOperator":"NULL"}},"ConditionalOperator":""} | Value '' at 'conditionalOperator' failed to satisfy constraint: Member must satisfy enum value set: [AND, OR]
+            Query | {"TableName":"Missing","KeyConditions":{"pk":{"ComparisonOperator":"EQ","AttributeValueList":[{"S":"a"}]}},"QueryFilter":{"b":{"ComparisonOperator":"NULL"},"c":{"ComparisonOperator":"NULL"}},"ConditionalOperator":"XOR","Limit":0} | 1 validation error detected: Value at 'Limit' failed to satisfy constraint: Member must have value greater than or equal to 1
+            Scan  | {"TableName":"Missing","ScanFilter":{"a":{"ComparisonOperator":"EQ","AttributeValueList":["DEEP"]}},"ConditionalOperator":"AND"} | ConditionalOperator can only be used when Filter or Expected has two or more elements
+            Scan  | {"TableName":"Missing","ScanFilter":{},"ConditionalOperator":"AND"} | ConditionalOperator cannot be used without Filter or Expected
+            Scan  | {"TableName":"Missing","ConditionalOperator":"XOR"} | ConditionalOperator cannot be used without Filter or Expected
+            Scan  | {"TableName":"Missing","ScanFilter":{"b":{"ComparisonOperator":"NULL"}},"ConditionalOperator":"AND","Select":"BOGUS"} | ConditionalOperator can only be used when Filter or Expected has two or more elements
+            Scan  | {"TableName":"Missing","ScanFilter":{"b":{"ComparisonOperator":"NULL"}},"ConditionalOperator":"AND","Segment":1} | ConditionalOperator can only be used when Filter or Expected has two or more elements
+            Scan  | {"TableName":"Missing","ScanFilter":{"b":{"ComparisonOperator":"NULL"},"c":{"ComparisonOperator":"NULL"}},"ConditionalOperator":"XOR","Segment":1} | Value 'XOR' at 'conditionalOperator' failed to satisfy constraint: Member must satisfy enum value set: [AND, OR]
+            Scan  | {"TableName":"Missing","ScanFilter":{"b":{"ComparisonOperator":"NULL"},"c":{"ComparisonOperator":"NULL"}},"ConditionalOperator":"XOR","ReturnConsumedCapacity":"BOGUS"} | 1 validation error detected: Value 'BOGUS' at 'returnConsumedCapacity' failed to satisfy constraint: Member must satisfy enum value set: [INDEXES, TOTAL, NONE]
+            Scan  | {"TableName":"a!","ScanFilter":{"b":{"ComparisonOperator":"NULL"}},"ConditionalOperator":"AND"} | 1 validation error detected: Value 'a!' at 'tableName' failed to satisfy constraint: Member must have length greater than or equal to 3
+            """)
+    void queryAndScanCheckTheConditionalOperatorBeforeTheFilterValues(String operation, String request,
+            String message) throws Exception {
+        JsonNode body = mapper.readTree(request.replace("\"DEEP\"", mapper.writeValueAsString(nestedMaps(40))));
+
+        assertEquals(message, expectValidationException(operation, body).getMessage());
+    }
+
+    @Test
+    void aNullConditionalOperatorIsTreatedAsAbsent() {
+        AwsException ex = assertThrows(AwsException.class, () -> handler.handle("Scan", json("""
+                {"TableName": "Missing", "ScanFilter": {"b": {"ComparisonOperator": "NULL"}},
+                 "ConditionalOperator": null}
+                """), "eu-west-1"));
+        assertEquals("ResourceNotFoundException", ex.getErrorCode());
+    }
+
     @Test
     void scanReportsTheLimitBeforeMixedParameters() {
         AwsException ex = expectValidationException("Scan", json("""
