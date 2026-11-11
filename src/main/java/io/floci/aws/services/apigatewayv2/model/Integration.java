@@ -9,6 +9,7 @@ import java.util.Map;
 @JsonIgnoreProperties(ignoreUnknown = true)
 public class Integration {
     private String integrationId;
+    private String description;
     private String integrationType; // AWS_PROXY, HTTP_PROXY
     private String connectionType; // INTERNET, VPC_LINK
     private String integrationUri;
@@ -32,6 +33,7 @@ public class Integration {
     public Integration(Integration src) {
         this.credentialsArn = src.credentialsArn;
         this.integrationId = src.integrationId;
+        this.description = src.description;
         this.integrationType = src.integrationType;
         this.connectionType = src.connectionType;
         this.integrationUri = src.integrationUri;
@@ -47,6 +49,9 @@ public class Integration {
 
     public String getIntegrationId() { return integrationId; }
     public void setIntegrationId(String integrationId) { this.integrationId = integrationId; }
+
+    public String getDescription() { return description; }
+    public void setDescription(String description) { this.description = description; }
 
     public String getIntegrationType() { return integrationType; }
     public void setIntegrationType(String integrationType) { this.integrationType = integrationType; }

@@ -752,6 +752,7 @@ public class ApiGatewayV2Service {
         getApi(region, apiId);
         Integration integration = new Integration();
         integration.setIntegrationId(shortId(8));
+        integration.setDescription((String) request.get("description"));
         integration.setIntegrationType((String) request.get("integrationType"));
         integration.setCredentialsArn((String) request.get("credentialsArn"));
         integration.setIntegrationUri((String) request.get("integrationUri"));
@@ -809,6 +810,9 @@ public class ApiGatewayV2Service {
                                          Map<String, Object> request) {
         Integration integration = getIntegration(region, apiId, integrationId);
 
+        if (request.get("description") != null) {
+            integration.setDescription((String) request.get("description"));
+        }
         if (request.get("credentialsArn") != null) {
             integration.setCredentialsArn((String) request.get("credentialsArn"));
         }
