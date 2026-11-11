@@ -168,9 +168,9 @@ class SsmParameterReadIamEnforcementIntegrationTest {
                 String arn = root.getParameter(r -> r.name(name)).parameter().arn();
                 EnforcementFixtures.UserCredentials credentials = user("""
                         {"Version":"2012-10-17","Statement":[
-                          {"Effect":"Allow","Action":"ssm:GetParameter",
+                          {"Effect":"Allow","Action":["ssm:GetParameter","ssm:GetParameters"],
                            "Resource":"arn:aws:ssm:us-east-1:000000000000:parameter/*"},
-                          {"Effect":"Deny","Action":"ssm:GetParameter",
+                          {"Effect":"Deny","Action":["ssm:GetParameter","ssm:GetParameters"],
                            "Resource":"arn:aws:ssm:us-east-1:000000000000:parameter%s"}]}""".formatted(name));
                 try (SsmClient user = AwsTestClients.create(SsmClient.builder(), credentials.accessKeyId(),
                         Region.US_EAST_1)) {
@@ -178,6 +178,9 @@ class SsmParameterReadIamEnforcementIntegrationTest {
                         SsmException denied = assertThrows(SsmException.class,
                                 () -> user.getParameter(r -> r.name(selected)));
                         assertEquals("AccessDeniedException", denied.awsErrorDetails().errorCode());
+                        SsmException batchDenied = assertThrows(SsmException.class,
+                                () -> user.getParameters(r -> r.names(selected)));
+                        assertEquals("AccessDeniedException", batchDenied.awsErrorDetails().errorCode());
                     }
                 }
             } finally {
