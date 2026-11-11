@@ -2253,6 +2253,14 @@ public class CloudFrontController {
         return xml.end("ActiveTrustedKeyGroups").build();
     }
 
+    /**
+     * A config carrying no viewer certificate reads as the certificate CloudFront serves its own
+     * domain name with, and the security policy that comes with it is
+     * {@code TLSv1}: {@code MinimumProtocolVersion}'s entry says CloudFront "automatically sets the
+     * security policy to TLSv1 regardless of the value that you set here" when
+     * {@code CloudFrontDefaultCertificate} is true, and {@link CloudFrontService} stores that same
+     * value for a request that sets the member itself.
+     */
     private String xmlViewerCertificate(Map<String, String> vc) {
         XmlBuilder xml = new XmlBuilder().start("ViewerCertificate");
         if (vc != null && !vc.isEmpty()) {
@@ -2261,7 +2269,8 @@ public class CloudFrontController {
             }
         } else {
             xml.elem("CloudFrontDefaultCertificate", "true")
-                    .elem("MinimumProtocolVersion", "TLSv1.2_2021");
+                    .elem("MinimumProtocolVersion",
+                            CloudFrontService.DEFAULT_CERTIFICATE_PROTOCOL_VERSION);
         }
         xml.end("ViewerCertificate");
         return xml.build();

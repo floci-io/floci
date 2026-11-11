@@ -327,6 +327,48 @@ PUT, PATCH and DELETE).
 - `ViewerCertificate.ACMCertificateArn` must name an existing ACM certificate: distribution create and
   update reject an unknown one with `InvalidViewerCertificate`. ACM lists the distribution's ARN under
   `InUseBy`, and `DeleteCertificate` returns `ResourceInUseException` while a distribution references it.
+- A `ViewerCertificate` that names a certificate is held to the two rules its own entry states.
+  The location is `ACMCertificateArn` or `IAMCertificateId` and "not both", and a certificate named
+  in either one "must also specify values for MinimumProtocolVersion and SSLSupportMethod". Both
+  refusals are `InvalidViewerCertificate` 400, which is Floci's reading rather than a published
+  answer: `InvalidArgument` and `InvalidMinimumProtocolVersion` are modelled on the distribution
+  writes as well, and no sentence says which one a caller gets, so both cases read as the
+  certificate the request carries not being valid. The Developer Guide page that enumerates what
+  `InvalidViewerCertificate` answers reaches neither case either: it names the certificate's own
+  trust, its chain, its format and the names it covers. A member carried blank counts as no value, the
+  way a blank location member names no certificate, and a distribution on the CloudFront domain
+  name needs neither member. The rules are read before the certificate is looked up, so a request
+  that breaks one is refused for the rule and not for a certificate nothing matches.
+- The viewer certificate's two protocol members are held to the values they admit and to the one
+  pair they cannot carry together. A `MinimumProtocolVersion` outside `SSLv3`, `TLSv1`,
+  `TLSv1_2016`, `TLSv1.1_2016`, `TLSv1.2_2018`, `TLSv1.2_2019`, `TLSv1.2_2021`, `TLSv1.2_2025` and
+  `TLSv1.3_2025` is `InvalidMinimumProtocolVersion` 400, which is published rather than read: that
+  code's own sentence names this case. An `SSLSupportMethod` outside `sni-only`, `vip` and
+  `static-ip` has no code of its own and is `InvalidArgument` 400, what this service already
+  answers a member outside its shape with. `SSLv3` alongside `sni-only` is
+  `InvalidProtocolSettings` 400 on `CreateDistribution`, `CreateDistributionWithTags` and
+  `CopyDistribution`, whose sentence names that pair and nothing else and which is the same rule as
+  the floor the member states for SNI, "you must specify TLSv1 or higher". `UpdateDistribution` has
+  never declared that code and has declared `InvalidMinimumProtocolVersion` since 2015, so the
+  update answers the pair with the code it declares, which is the one a caller's SDK can map, and
+  keeps the pair's published sentence, so the two causes the update answers under one code stay
+  apart. The pair is
+  read for a distribution on a certificate of its own alone, since on the CloudFront certificate
+  the policy is replaced and the value that would make the pair is discarded. Both enumerations are
+  read either way.
+- A distribution on the CloudFront domain name sets `CloudFrontDefaultCertificate` and is told to
+  "leave all other fields empty". The member is declared `boolean`, so it is held to the four forms
+  XML gives a boolean, `true`, `false`, `1` and `0`, and anything else is `InvalidArgument` 400.
+  That refusal is Floci's reading: CloudFront models no error for a malformed document, and reading
+  the member for the word `true` alone would let a request saying `yes` dodge every rule below. A
+  certificate named beside it, in `ACMCertificateArn` or `IAMCertificateId`, contradicts the
+  request's own claim and is `InvalidViewerCertificate` 400, Floci's reading again. A
+  `MinimumProtocolVersion` beside it is not refused: the member's entry says CloudFront
+  "automatically sets the security policy to TLSv1 regardless of the value that you set here", so
+  the policy a request asks for there is replaced and the config reads back `TLSv1`. A distribution
+  created with no `ViewerCertificate` at all reads the same way, the default certificate on `TLSv1`.
+  The `us-east-1` restriction AWS states for ACM certificates is not enforced: a certificate is
+  resolved from whatever region its ARN names, as long as it exists.
 - Up to 20 custom response headers policies can be created, and one policy can be associated with
   up to 100 distributions.
 - The five AWS managed response headers policy IDs are available and can be selected with
