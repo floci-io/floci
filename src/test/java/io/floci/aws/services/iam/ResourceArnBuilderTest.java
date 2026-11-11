@@ -887,6 +887,18 @@ class ResourceArnBuilderTest {
     }
 
     @Test
+    void destinationTagTargetsUseDestinationArn() {
+        for (String action : List.of("logs:TagResource", "logs:UntagResource", "logs:ListTagsForResource")) {
+            for (String region : List.of("us-east-1", "cn-north-1", "us-gov-west-1")) {
+                String partition = AwsRegions.partitionFor(region);
+                String arn = "arn:" + partition + ":logs:" + region + ":" + ACCOUNT + ":destination:central";
+                setJsonBody("{\"resourceArn\":\"" + arn + "\"}");
+                assertEquals(List.of(arn), builder.buildLogResources(action, ctx, region, ACCOUNT, partition));
+            }
+        }
+    }
+
+    @Test
     void deliveryActionsAreAuthorizedOnTheSourceDestinationOrDeliveryTheyName() {
         String prefix = "arn:aws:logs:us-east-1:" + ACCOUNT + ":";
         for (String action : List.of("logs:PutDeliverySource", "logs:GetDeliverySource", "logs:DeleteDeliverySource")) {

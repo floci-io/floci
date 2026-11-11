@@ -30,9 +30,9 @@ Floci supports both CloudWatch Logs and CloudWatch Metrics.
 | `TagLogGroup` | Tag a log group |
 | `UntagLogGroup` | Remove tags |
 | `ListTagsLogGroup` | List tags |
-| `TagResource` | Tag a log group, delivery source, delivery destination or delivery by ARN |
-| `UntagResource` | Remove tags from a log group, delivery source, delivery destination or delivery by ARN |
-| `ListTagsForResource` | List tags for a log group, delivery source, delivery destination or delivery ARN |
+| `TagResource` | Tag a log group, cross-account destination, delivery source, delivery destination or delivery by ARN |
+| `UntagResource` | Remove tags from a log group, cross-account destination, delivery source, delivery destination or delivery by ARN |
+| `ListTagsForResource` | List tags for a log group, cross-account destination, delivery source, delivery destination or delivery ARN |
 | `PutSubscriptionFilter` | Create or update a subscription filter (see [Subscription filters](#subscription-filters)) |
 | `DescribeSubscriptionFilters` | List subscription filters on a log group |
 | `DeleteSubscriptionFilter` | Delete a subscription filter |
@@ -42,7 +42,7 @@ Floci supports both CloudWatch Logs and CloudWatch Metrics.
 | `TestMetricFilter` | Run a filter pattern over sample messages and return the matches with their extracted values |
 | `PutResourcePolicy` | Create or update an account-level resource policy |
 | `DescribeResourcePolicies` | List account-level resource policies |
-| `PutDestination` | Create or update a cross-account subscription destination |
+| `PutDestination` | Create or update a cross-account subscription destination, with optional tags on creation |
 | `PutDestinationPolicy` | Create or update the access policy for a destination |
 | `PutAccountPolicy` | Create or update an account-level Logs policy |
 | `DescribeAccountPolicies` | List account-level Logs policies by type and optional name |

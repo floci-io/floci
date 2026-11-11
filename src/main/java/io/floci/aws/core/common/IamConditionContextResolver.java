@@ -3,6 +3,7 @@ package io.floci.aws.core.common;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.floci.aws.config.EmulatorConfig;
+import io.floci.aws.services.cloudwatch.logs.CloudWatchLogsCrossAccountService;
 import io.floci.aws.services.cloudwatch.logs.CloudWatchLogsDeliveryService;
 import io.floci.aws.services.cloudwatch.logs.CloudWatchLogsService;
 import io.floci.aws.services.cloudwatch.logs.LogGroupTagTarget;
@@ -99,6 +100,7 @@ public class IamConditionContextResolver {
     private final Instance<Ec2Service> ec2Service;
     private final Instance<S3Service> s3Service;
     private final Instance<CloudWatchLogsService> logsService;
+    private final Instance<CloudWatchLogsCrossAccountService> crossAccountService;
     private final Instance<IamService> iamService;
     private final Instance<LambdaWebService> lambdaWebService;
     private final RequestContext requestContext;
@@ -116,13 +118,15 @@ public class IamConditionContextResolver {
                                        Instance<Ec2Service> ec2Service,
                                        Instance<S3Service> s3Service,
                                        Instance<CloudWatchLogsService> logsService,
+                                       Instance<CloudWatchLogsCrossAccountService> crossAccountService,
                                        Instance<IamService> iamService,
                                        Instance<LambdaWebService> lambdaWebService,
                                        RequestContext requestContext,
                                        EmulatorConfig config,
                                        CurrentVertxRequest currentVertxRequest,
                                        ResolvedServiceCatalog serviceCatalog) {
-        this(dynamoDbFacade, ec2Service, s3Service, logsService, iamService, lambdaWebService, requestContext,
+        this(dynamoDbFacade, ec2Service, s3Service, logsService, crossAccountService, iamService,
+                lambdaWebService, requestContext,
                 config, currentVertxRequest, serviceCatalog, Clock.systemUTC());
     }
 
@@ -130,6 +134,7 @@ public class IamConditionContextResolver {
                                 Instance<Ec2Service> ec2Service,
                                 Instance<S3Service> s3Service,
                                 Instance<CloudWatchLogsService> logsService,
+                                Instance<CloudWatchLogsCrossAccountService> crossAccountService,
                                 Instance<IamService> iamService,
                                 Instance<LambdaWebService> lambdaWebService,
                                 RequestContext requestContext,
@@ -140,6 +145,7 @@ public class IamConditionContextResolver {
         this.ec2Service = ec2Service;
         this.s3Service = s3Service;
         this.logsService = logsService;
+        this.crossAccountService = crossAccountService;
         this.iamService = iamService;
         this.lambdaWebService = lambdaWebService;
         this.requestContext = requestContext;
@@ -163,7 +169,7 @@ public class IamConditionContextResolver {
         };
     }
 
-    /** Group mutations and stream access use the handler's group and request scope. */
+    /** Logs tag operations and group mutations use the handler's resource and request scope. */
     private Map<String, List<String>> logsConditionContext(String action, ContainerRequestContext ctx) {
         if (!("logs:CreateLogStream".equals(action) || "logs:DeleteLogStream".equals(action)
                 || LogGroupTagTarget.supports(action) || "logs:CreateLogGroup".equals(action) || "logs:DeleteLogGroup".equals(action)
@@ -188,12 +194,14 @@ public class IamConditionContextResolver {
             conditions.put("aws:TagKeys", keys);
             return conditions;
         }
-        if (!logsService.isResolvable()) {
+        boolean direct = LogGroupTagTarget.supports(action);
+        boolean destination = direct && CloudWatchLogsCrossAccountService.isCrossAccountDestinationArn(
+                body.path("resourceArn").asText());
+        if (destination ? !crossAccountService.isResolvable() : !logsService.isResolvable()) {
             return null;
         }
         String region = requestContext.getRegion() == null ? config.defaultRegion() : requestContext.getRegion();
         Map<String, List<String>> conditions = new LinkedHashMap<>();
-        boolean direct = LogGroupTagTarget.supports(action);
         if ("logs:TagResource".equals(action) && body.path("tags").isObject()) {
             List<String> keys = new ArrayList<>();
             body.path("tags").fields().forEachRemaining(entry -> {
@@ -214,16 +222,20 @@ public class IamConditionContextResolver {
             // A delivery source, destination or delivery: its request tags apply, its own tags are not read.
             return conditions.isEmpty() ? null : conditions;
         }
-        String group = direct ? logsService.get().resolveTagTarget(body.path("resourceArn").asText(), region).name()
-                : body.path("logGroupName").asText();
         Map<String, String> tags;
         try {
-            tags = logsService.get().listTagsLogGroup(group, region);
+            if (destination) {
+                tags = crossAccountService.get().listDestinationTags(body.path("resourceArn").asText(), region);
+            } else {
+                String group = direct ? logsService.get().resolveTagTarget(body.path("resourceArn").asText(), region).name()
+                        : body.path("logGroupName").asText();
+                tags = logsService.get().listTagsLogGroup(group, region);
+            }
         } catch (AwsException e) {
             if (!"ResourceNotFoundException".equals(e.getErrorCode())) {
                 throw e;
             }
-            // Leave the handler to report a missing group; unexpected lookup errors must not hide a deny.
+            // Leave the handler to report a missing resource; unexpected lookup errors must not hide a deny.
             return conditions.isEmpty() ? null : conditions;
         }
         if (tags == null || tags.isEmpty()) {

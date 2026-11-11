@@ -12,6 +12,7 @@ import io.floci.aws.core.common.ServicePrincipals;
 import io.floci.aws.core.common.SigV4CredentialScope;
 import io.floci.aws.core.common.StoredResourceArns;
 import io.floci.aws.core.common.auth.SigV4Canonicalization;
+import io.floci.aws.services.cloudwatch.logs.CloudWatchLogsCrossAccountService;
 import io.floci.aws.services.cloudwatch.logs.CloudWatchLogsDeliveryService;
 import io.floci.aws.services.cloudwatch.logs.LogGroupTagTarget;
 import io.floci.aws.services.eks.EksController;
@@ -299,6 +300,9 @@ public class ResourceArnBuilder {
             String resourceArn = body.path("resourceArn").asText();
             // A delivery source, destination or delivery is tagged through the same operations.
             if (CloudWatchLogsDeliveryService.isDeliveryResourceArn(resourceArn)) {
+                return List.of(resourceArn);
+            }
+            if (CloudWatchLogsCrossAccountService.isCrossAccountDestinationArn(resourceArn)) {
                 return List.of(resourceArn);
             }
             return List.of(LogGroupTagTarget.resolve(resourceArn, region, accountId, partition).arn());
