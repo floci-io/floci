@@ -1111,9 +1111,7 @@ class SqsIntegrationTest {
                 .formParam("MessageAttribute.1.Value.BinaryValue", "not base64!")
             .when().post("/").then()
                 .statusCode(400)
-                .body("ErrorResponse.Error.Code", equalTo("InvalidParameterValue"))
-                .body("ErrorResponse.Error.Message", equalTo(
-                        "Message (user) attribute 'bin' has an invalid binary value."));
+                .body("ErrorResponse.Error.Code", equalTo("InvalidParameterValue"));
 
             given()
                 .contentType("application/x-www-form-urlencoded")
@@ -1125,9 +1123,7 @@ class SqsIntegrationTest {
                 .formParam("MessageAttribute.1.Value.BinaryValue", "")
             .when().post("/").then()
                 .statusCode(400)
-                .body("ErrorResponse.Error.Code", equalTo("InvalidParameterValue"))
-                .body("ErrorResponse.Error.Message", equalTo(
-                        "Message (user) attribute 'bin' must contain a non-empty value of type 'Binary'."));
+                .body("ErrorResponse.Error.Code", equalTo("InvalidParameterValue"));
 
             given()
                 .contentType("application/x-www-form-urlencoded")

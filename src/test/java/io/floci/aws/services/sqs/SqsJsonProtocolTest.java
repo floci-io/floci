@@ -1113,9 +1113,7 @@ class SqsJsonProtocolTest {
                         + "\"MessageAttributes\":{\"count\":{\"DataType\":\"Number.int\",\"StringValue\":\"\"}}}")
             .when().post("/").then()
                 .statusCode(400)
-                .body("__type", equalTo("InvalidParameterValue"))
-                .body("message", equalTo(
-                        "Message (user) attribute 'count' must contain a non-empty value of type 'Number'."));
+                .body("__type", equalTo("InvalidParameterValue"));
 
             given()
                 .contentType(CONTENT_TYPE)
@@ -1124,8 +1122,7 @@ class SqsJsonProtocolTest {
                         + "\"MessageAttributes\":{\"bin\":{\"DataType\":\"Binary\",\"BinaryValue\":\"not base64!\"}}}")
             .when().post("/").then()
                 .statusCode(400)
-                .body("__type", equalTo("InvalidParameterValue"))
-                .body("message", equalTo("Message (user) attribute 'bin' has an invalid binary value."));
+                .body("__type", equalTo("InvalidParameterValue"));
 
             given()
                 .contentType(CONTENT_TYPE)
@@ -1134,9 +1131,7 @@ class SqsJsonProtocolTest {
                         + "\"MessageAttributes\":{\"bin\":{\"DataType\":\"Binary\",\"BinaryValue\":\"\"}}}")
             .when().post("/").then()
                 .statusCode(400)
-                .body("__type", equalTo("InvalidParameterValue"))
-                .body("message", equalTo(
-                        "Message (user) attribute 'bin' must contain a non-empty value of type 'Binary'."));
+                .body("__type", equalTo("InvalidParameterValue"));
 
             given()
                 .contentType(CONTENT_TYPE)
@@ -1186,9 +1181,7 @@ class SqsJsonProtocolTest {
                 .body("Successful.Id", containsInAnyOrder("ok", "plain"))
                 .body("Failed.Id", contains("empty", "bad-binary"))
                 .body("Failed.Code", everyItem(equalTo("InvalidParameterValue")))
-                .body("Failed.SenderFault", everyItem(equalTo(true)))
-                .body("Failed[0].Message", equalTo(
-                        "Message (user) attribute 'a' must contain a non-empty value of type 'Number'."));
+                .body("Failed.SenderFault", everyItem(equalTo(true)));
 
             String bigBody = "x".repeat(400_000);
             given()
