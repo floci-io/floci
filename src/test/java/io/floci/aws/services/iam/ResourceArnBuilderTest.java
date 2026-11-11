@@ -1756,6 +1756,30 @@ class ResourceArnBuilderTest {
     }
 
     @Test
+    void ssmEmptyNameActsOnTheEmptyParameterName() {
+        when(ctx.getHeaderString("X-Amz-Target")).thenReturn("AmazonSSM.GetParameter");
+        setJsonBody("{\"Name\":\"\"}");
+        assertEquals(List.of("arn:aws:ssm:us-east-1:000000000000:parameter/"),
+                builder.buildResources("ssm", ctx, "us-east-1", "000000000000"));
+
+        when(ctx.getHeaderString("X-Amz-Target")).thenReturn("AmazonSSM.PutParameter");
+        setJsonBody("{\"Name\":\"  \",\"Value\":\"v\",\"Type\":\"String\"}");
+        assertEquals(List.of("arn:aws:ssm:us-east-1:000000000000:parameter/"),
+                builder.buildResources("ssm", ctx, "us-east-1", "000000000000"));
+
+        when(ctx.getHeaderString("X-Amz-Target")).thenReturn("AmazonSSM.GetParameters");
+        setJsonBody("{\"Names\":[\"\",\"/prod/db\"]}");
+        assertEquals(List.of("arn:aws:ssm:us-east-1:000000000000:parameter/",
+                        "arn:aws:ssm:us-east-1:000000000000:parameter/prod/db"),
+                builder.buildResources("ssm", ctx, "us-east-1", "000000000000"));
+
+        when(ctx.getHeaderString("X-Amz-Target")).thenReturn("AmazonSSM.DeleteParameters");
+        setJsonBody("{\"Names\":[\"\"]}");
+        assertEquals(List.of("arn:aws:ssm:us-east-1:000000000000:parameter/"),
+                builder.buildResources("ssm", ctx, "us-east-1", "000000000000"));
+    }
+
+    @Test
     void ssmNamesKeepTheWhitespaceTheHandlerKeeps() {
         when(ctx.getHeaderString("X-Amz-Target")).thenReturn("AmazonSSM.GetParameter");
         setJsonBody("{\"Name\":\" /prod/db \"}");
