@@ -95,6 +95,21 @@ class GlobalCorsFilterIntegrationTest {
     }
 
     @Test
+    void cognitoTokenPreflightKeepsThePrivateNetworkGrant() {
+        given()
+            .header("Origin", "http://localhost:3000")
+            .header("Access-Control-Request-Method", "POST")
+            .header("Access-Control-Request-Private-Network", "true")
+        .when()
+            .options("/cognito-idp/oauth2/token")
+        .then()
+            .statusCode(204)
+            .header("Access-Control-Allow-Private-Network", equalTo("true"))
+            .header("Access-Control-Allow-Origin", equalTo("http://localhost:3000"))
+            .header("Access-Control-Allow-Credentials", equalTo("true"));
+    }
+
+    @Test
     void actualRequestFromExtraAllowedOriginGetsCorsHeaders() {
         given()
             .header("Origin", "https://ui.example.test")
