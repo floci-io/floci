@@ -28,6 +28,7 @@ import io.floci.aws.core.common.docker.ContainerSpec;
 import io.floci.aws.core.common.docker.ContainerStorageHelper;
 import io.floci.aws.core.common.docker.CurrentContainerNetworkResolver;
 import io.floci.aws.core.common.docker.LaunchedContainerAwsEnv;
+import io.floci.aws.services.emrserverless.EmrServerlessSparkRunner;
 import io.floci.aws.services.emrserverless.SparkJobRunner;
 import io.floci.aws.services.iam.model.SessionCreds;
 import io.floci.aws.services.lambda.launcher.ImageCacheService;
@@ -545,6 +546,11 @@ class EmrClusterStorageTest {
                 && entrypoint.get(2).contains("until (exec 3<>/dev/tcp/127.0.0.1/9083) 2>/dev/null; do "
                         + "[ \"$(jobs -rp | wc -l)\" = $n ] || exit 1; sleep 0.2; done; "
                         + "fi; if [ -n \"$FLOCI_YARN_MEMORY_MB\" ]; then")));
+
+        // A table's location in S3 is the metastore's to look at, with S3A, so it too leaves Hive one SDK first, as
+        // root, which owns Hive's lib folder.
+        verify(spec).withEntrypoint(argThat(entrypoint -> entrypoint.get(2).contains(
+                "chown hadoop:hadoop /mnt || exit\n" + EmrServerlessSparkRunner.HIVE_ONE_SDK + "\n")));
 
         // The session goes with the container.
         storage.remove("j-1");

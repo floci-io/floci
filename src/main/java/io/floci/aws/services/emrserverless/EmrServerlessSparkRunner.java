@@ -260,6 +260,19 @@ public class EmrServerlessSparkRunner implements SparkJobRunner, ContainerTeardo
      * path, apart from the one its other steps' Hadoop reads; Hive runs with it where an image has it.
      */
     public static final String HIVE_HADOOP_CONF = "/etc/hadoop/conf.hive";
+    private static final String HIVE_LIB = "/usr/lib/hive/lib";
+    /**
+     * Leaves Hive one AWS SDK v2, before Hive starts, as root. An {@code emr-6.x} Hive image's lib folder has the stock
+     * SDK's modules, ahead on Hive's class path of the SDK inside Tez's plug-in, EMR's own build and the only one with
+     * an S3 client. S3A, which {@code s3://} is here, then builds the plug-in's S3 client on the stock {@code sdk-core},
+     * which on {@code emr-6.15.0} fails with {@code NoSuchFieldError: AWS_S3_DISABLE_EXPRESS_SESSION_AUTH}. The modules
+     * the plug-in also holds go, by name, which is all but CloudWatch's two.
+     */
+    public static final String HIVE_ONE_SDK = "for core in " + HIVE_LIB + "/sdk-core-2.*.jar; do"
+            + " [ -e /usr/lib/tez/tez-emr-serverless.jar ] && for module in annotations apache-client auth aws-core"
+            + " aws-json-protocol aws-query-protocol endpoints-spi http-client-spi json-utils metrics-spi"
+            + " netty-nio-client profiles protocol-core regions sdk-core third-party-jackson-core utils;"
+            + " do rm -f \"" + HIVE_LIB + "/$module-${core##*/sdk-core-}\"; done; done";
     private static final String HIVE_SCRATCHDIR = "hive.exec.scratchdir";
     // The user every EMR Serverless image runs as: a custom one sets "the USER back to hadoop:hadoop".
     private static final String IMAGE_USER = "hadoop";
@@ -281,6 +294,7 @@ public class EmrServerlessSparkRunner implements SparkJobRunner, ContainerTeardo
                     + HIVE_SCRATCH_VARIABLE + "\" || exit",
             "fi",
             "if [ -d " + HIVE_HADOOP_CONF + " ]; then export HADOOP_CONF_DIR=" + HIVE_HADOOP_CONF + "; fi",
+            HIVE_ONE_SDK,
             "export HOME=~" + IMAGE_USER,
             "cd \"$HOME\" || exit",
             // The image's user has no other group, as Docker starts it.

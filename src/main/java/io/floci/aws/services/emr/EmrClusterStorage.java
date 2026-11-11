@@ -144,6 +144,7 @@ public class EmrClusterStorage implements ClusterStorage, ContainerTeardown {
             "address=$FLOCI_HDFS_BIND; [ \"$address\" != 0.0.0.0 ] || address=$(hostname -i | awk '{print $1}')",
             "echo \"$address $FLOCI_HDFS_HOST\" >> /etc/hosts || exit",
             "chown hadoop:hadoop /mnt || exit",
+            EmrServerlessSparkRunner.HIVE_ONE_SDK,
             "mkdir -p " + HDFS_CONF + " || exit",
             "printf '%s\\n' '<configuration>'"
                     + " \"<property><name>fs.defaultFS</name><value>hdfs://$FLOCI_HDFS_HOST:8020</value></property>\""
