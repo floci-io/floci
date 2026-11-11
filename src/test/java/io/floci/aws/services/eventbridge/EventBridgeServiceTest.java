@@ -275,6 +275,35 @@ class EventBridgeServiceTest {
     }
 
     @Test
+    void putEventsOnAParentPartnerBusDoesNotFireTheNestedBusRules() {
+        String parent = "aws.partner/example.com/orders";
+        String child = parent + "/eu";
+        service.createEventBus(parent, parent, null, null, REGION);
+        service.createEventBus(child, child, null, null, REGION);
+        service.putRule("child-rule", child, "{\"source\":[\"example.com\"]}", null,
+                RuleState.ENABLED, null, null, null, REGION);
+        Target target = new Target("t1", "arn:aws:sqs:us-east-1:000000000000:queue-1", null, null);
+        service.putTargets("child-rule", child, List.of(target), REGION);
+
+        service.putEvents(List.of(Map.of("EventBusName", parent, "Source", "example.com",
+                "DetailType", "Order", "Detail", "{}")), REGION);
+
+        verify(dispatcherMock, never()).dispatch(anyString(), any(), anyString(), anyString(), any());
+    }
+
+    @Test
+    void ruleOnAPartnerBusIsTaggableByItsArn() {
+        String name = "aws.partner/example.com/123/orders";
+        service.createEventBus(name, name, null, null, REGION);
+        Rule rule = service.putRule("partner-rule", name, "{\"source\":[\"example.com\"]}", null,
+                RuleState.ENABLED, null, null, null, REGION);
+
+        service.tagResource(rule.getArn(), Map.of("team", "orders"), REGION);
+
+        assertEquals(Map.of("team", "orders"), service.listTagsForResource(rule.getArn(), REGION));
+    }
+
+    @Test
     void deletePartnerEventBusByArn() {
         String name = "aws.partner/example.com/123/orders";
         EventBus bus = service.createEventBus(name, name, null, null, REGION);

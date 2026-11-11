@@ -569,6 +569,45 @@ class CloudFormationEventBusIntegrationTest {
     }
 
     @Test
+    void ruleOnAPartnerEventBusIsProvisionedAndRemovedWithTheStack() {
+        String suffix = Long.toString(System.nanoTime(), 36);
+        String busName = "aws.partner/example.com/cfn-rule-" + suffix;
+        String stackName = "eventbus-partner-rule-" + suffix;
+        String template = """
+                {
+                  "Resources": {
+                    "Bus": {
+                      "Type": "AWS::Events::EventBus",
+                      "Properties": { "Name": "%1$s", "EventSourceName": "%1$s" }
+                    },
+                    "Rule": {
+                      "Type": "AWS::Events::Rule",
+                      "DependsOn": "Bus",
+                      "Properties": {
+                        "Name": "partner-rule",
+                        "EventBusName": "%1$s",
+                        "EventPattern": { "source": ["example.com"] }
+                      }
+                    }
+                  }
+                }
+                """.formatted(busName);
+
+        createStack(stackName, template);
+        assertStackStatus(stackName, "CREATE_COMPLETE");
+        JsonPath rule = callEventBridge("AWSEvents.DescribeRule",
+                "{\"Name\":\"partner-rule\",\"EventBusName\":\"" + busName + "\"}", 200);
+        assertEquals(busName, rule.getString("EventBusName"));
+        if (!rule.getString("Arn").endsWith(":rule/" + busName + "/partner-rule")) {
+            throw new AssertionError("unexpected partner rule ARN: " + rule.getString("Arn"));
+        }
+
+        deleteStack(stackName);
+        CfnStackWaits.awaitStackDeleted(stackName);
+        callEventBridge("AWSEvents.DescribeEventBus", "{\"Name\":\"" + busName + "\"}", 400);
+    }
+
+    @Test
     void partnerEventBusUpdateTreatsEventSourceNameAsMetadata() {
         String suffix = Long.toString(System.nanoTime(), 36);
         String busName = "aws.partner/example.com/cfn-update-" + suffix;
