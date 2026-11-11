@@ -971,6 +971,80 @@ class DynamoDbAccessPathIntegrationTest {
     }
 
     @Test
+    @Order(31)
+    void indexFiltersOnlySeeProjectedAttributes() {
+        request("DynamoDB_20120810.PutItem", """
+                {
+                  "TableName":"%s",
+                  "Item":{"pk":{"S":"filter-projection"},"sk":{"S":"s1"},
+                    "status":{"S":"filter-projection"},"createdAt":{"S":"2026-03-01"},
+                    "alternate":{"S":"filter-projection"},"summary":{"S":"filter-projection"},
+                    "details":{"S":"filter-projection"}}
+                }
+                """.formatted(TABLE))
+            .statusCode(200);
+
+        // Query refuses a filter the index cannot evaluate, on GSIs and LSIs alike.
+        request("DynamoDB_20120810.Query", """
+                {
+                  "TableName":"%s",
+                  "IndexName":"status-index",
+                  "KeyConditionExpression":"#status = :v",
+                  "FilterExpression":"#d = :v AND summary = :v",
+                  "ExpressionAttributeNames":{"#status":"status","#d":"details"},
+                  "ExpressionAttributeValues":{":v":{"S":"filter-projection"}}
+                }
+                """.formatted(TABLE))
+            .statusCode(400)
+            .body("__type", equalTo("ValidationException"))
+            .body("message", equalTo("One or more parameter values were invalid: Secondary index "
+                    + "status-index does not project one or more filter attributes: [details]"));
+        request("DynamoDB_20120810.Query", """
+                {
+                  "TableName":"%s",
+                  "IndexName":"alternate-index",
+                  "KeyConditions":{"pk":{"ComparisonOperator":"EQ","AttributeValueList":[{"S":"filter-projection"}]}},
+                  "QueryFilter":{"details":{"ComparisonOperator":"EQ","AttributeValueList":[{"S":"filter-projection"}]}}
+                }
+                """.formatted(TABLE))
+            .statusCode(400)
+            .body("__type", equalTo("ValidationException"))
+            .body("message", equalTo("One or more parameter values were invalid: Secondary index "
+                    + "alternate-index does not project one or more filter attributes: [details]"));
+
+        // Scan evaluates the filter on what the index holds, so a non-projected attribute never matches.
+        request("DynamoDB_20120810.Scan", """
+                {
+                  "TableName":"%s",
+                  "IndexName":"status-index",
+                  "FilterExpression":"details = :v",
+                  "ExpressionAttributeValues":{":v":{"S":"filter-projection"}}
+                }
+                """.formatted(TABLE))
+            .statusCode(200)
+            .body("Count", equalTo(0));
+        request("DynamoDB_20120810.Scan", """
+                {
+                  "TableName":"%s",
+                  "IndexName":"status-index",
+                  "ScanFilter":{"details":{"ComparisonOperator":"EQ","AttributeValueList":[{"S":"filter-projection"}]}}
+                }
+                """.formatted(TABLE))
+            .statusCode(200)
+            .body("Count", equalTo(0));
+        request("DynamoDB_20120810.Scan", """
+                {
+                  "TableName":"%s",
+                  "IndexName":"status-index",
+                  "FilterExpression":"summary = :v",
+                  "ExpressionAttributeValues":{":v":{"S":"filter-projection"}}
+                }
+                """.formatted(TABLE))
+            .statusCode(200)
+            .body("Count", equalTo(1));
+    }
+
+    @Test
     @Order(99)
     void deleteTable() {
         given()
