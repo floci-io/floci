@@ -3,6 +3,8 @@ package io.floci.aws.services.cloudformation;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -61,5 +63,26 @@ class CloudFormationYamlParserTest {
             """);
         assertEquals(longForm, shorthand);
         assertEquals("Producer", shorthand.get("SubnetId").get("Fn::GetStackOutput").get("StackName").asText());
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {
+        "Value: !GetAtt [Vpc, CidrBlock]\n",
+        "Value: !GetAtt\n  - Vpc\n  - CidrBlock\n"
+    })
+    void getAttShorthandAcceptsTheSequenceForm(String yaml) throws Exception {
+        JsonNode shorthand = parse(yaml);
+        JsonNode longForm = parse("""
+            Value:
+              Fn::GetAtt: [Vpc, CidrBlock]
+            """);
+        assertEquals(longForm, shorthand);
+        assertEquals("CidrBlock", shorthand.get("Value").get("Fn::GetAtt").get(1).asText());
+    }
+
+    @Test
+    void getAttSequenceFormPreservesANestedIntrinsic() throws Exception {
+        JsonNode shorthand = parse("Value: !GetAtt [Vpc, !Ref AttributeName]\n");
+        assertEquals("AttributeName", shorthand.get("Value").get("Fn::GetAtt").get(1).get("Ref").asText());
     }
 }

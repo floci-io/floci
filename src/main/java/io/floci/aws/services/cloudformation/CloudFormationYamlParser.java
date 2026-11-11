@@ -99,6 +99,9 @@ public class CloudFormationYamlParser {
         }
 
         private Object fnGetAtt(Node n) {
+            if (n instanceof SequenceNode) {
+                return fnMap("Fn::GetAtt", n);
+            }
             String raw = scalar(n);
             // !GetAtt Resource.Attribute
             int dot = raw.indexOf('.');
