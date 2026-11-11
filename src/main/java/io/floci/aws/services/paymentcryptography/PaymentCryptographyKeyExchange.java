@@ -397,7 +397,7 @@ final class PaymentCryptographyKeyExchange {
             throw validation(tooWeak);
         }
         return new Imported(algorithm, PaymentCryptographyService.usageName(usage),
-                PaymentCryptographyService.modesFor(mode, PaymentCryptographyService.isKeyEncryptionKey(PaymentCryptographyService.usageName(usage))),
+                PaymentCryptographyService.modesFor(mode),
                 exportable, material2, null, null, null, "SYMMETRIC_KEY");
     }
 
@@ -592,9 +592,7 @@ final class PaymentCryptographyKeyExchange {
             throw validation(tooWeak);
         }
         return new Imported(algorithm, PaymentCryptographyService.usageName(usage),
-                PaymentCryptographyService.modesFor(mode,
-                        PaymentCryptographyService.isKeyEncryptionKey(
-                                PaymentCryptographyService.usageName(usage))),
+                PaymentCryptographyService.modesFor(mode),
                 exportable, clear, null, null, null, "SYMMETRIC_KEY");
     }
 
@@ -616,9 +614,15 @@ final class PaymentCryptographyKeyExchange {
         String pem = key.getKeyCertificatePem();
         if (pem == null || pem.isEmpty()) {
             PublicKey publicKey = publicKeyOf(key);
-            PrivateKey privateKey = privateKeyOf(key);
-            if (publicKey == null || privateKey == null) {
+            if (publicKey == null) {
                 throw validation("the key " + key.getKeyId() + " has no public key");
+            }
+            PrivateKey privateKey = privateKeyOf(key);
+            if (privateKey == null) {
+                // The certificate is signed with the key's own private half, and a key that
+                // has only a public half has none to sign it with.
+                throw validation("the key " + key.getKeyId() + " has no private key, so it has no "
+                        + "certificate to sign");
             }
             pem = mintSelfSigned(new KeyPair(publicKey, privateKey), "floci",
                     clock.instant().minusSeconds(3600),
@@ -844,12 +848,16 @@ final class PaymentCryptographyKeyExchange {
      * Drop the tokens that have expired.
      *
      * <p>A token that was issued and never quoted again would otherwise stay for the life of
-     * the process, and it holds a private key.
+     * the process, and it holds a private key. The last parameters issued are swept with the
+     * tokens, because they hold the same key.
      *
      * @param tokens the tokens the service has issued
+     * @param last the last parameters issued, which hold a token of their own
+     * @param now the moment the tokens that have expired are dropped at
      */
-    private static void sweep(Map<String, Issued> tokens, long now) {
+    private static void sweep(Map<String, Issued> tokens, Map<String, Issued> last, long now) {
         tokens.values().removeIf(issued -> issued.validUntilMs < now);
+        last.values().removeIf(issued -> issued.validUntilMs < now);
     }
 
     /**
@@ -903,28 +911,62 @@ final class PaymentCryptographyKeyExchange {
     /**
      * The exportability the block carries.
      *
-     * <p>The request may name one, and the key's own answers when it does not.
+     * <p>The request may name one, and the key's own answers when it does not. The one it
+     * names may only narrow the key's own: a key that is already set to a stricter
+     * exportability may not be exported as a looser one.
      */
     private static String exportabilityCode(PaymentCryptographyKey key, Map<String, Object> headers) {
+        String own = ownExportability(key);
         String named = text(headers, "KeyExportability");
+        String code;
         if ("EXPORTABLE".equals(named)) {
-            return "E";
+            code = "E";
+        } else if ("NON_EXPORTABLE".equals(named)) {
+            code = "N";
+        } else if ("SENSITIVE".equals(named)) {
+            code = "S";
+        } else {
+            return own;
         }
-        if ("NON_EXPORTABLE".equals(named)) {
-            return "N";
+        if (permissiveness(code) > permissiveness(own)) {
+            throw validation("the exportability " + named + " is looser than the exportability "
+                    + own + " the key " + key.getArn() + " has, and a key may only be exported "
+                    + "with a stricter exportability than it has");
         }
-        if ("SENSITIVE".equals(named)) {
-            return "S";
-        }
-        // An initial DUKPT key is sensitive: the receiver may export it, but not as a plain
-        // working key.
+        return code;
+    }
+
+    /**
+     * The exportability the key itself has.
+     *
+     * <p>An initial DUKPT key is sensitive: the receiver may export it, but not as a plain
+     * working key. Every other key is exportable or it is not.
+     */
+    private static String ownExportability(PaymentCryptographyKey key) {
         if (PaymentCryptographyService.isInitialDerivationKey(key)) {
             return "S";
         }
         return key.isExportable() ? "E" : "N";
     }
 
-    /** The mode of use the block carries, as the request asks for it or the key has it. */
+    /**
+     * How loose an exportability is: {@code E} lets a key leave in the clear, {@code S} only
+     * under a key block, and {@code N} not at all.
+     */
+    private static int permissiveness(String exportability) {
+        return switch (exportability) {
+            case "E" -> 2;
+            case "S" -> 1;
+            default -> 0;
+        };
+    }
+
+    /**
+     * The mode of use the block carries, as the request asks for it or the key has it.
+     *
+     * <p>The request may name modes, and they may only narrow the key's own: a key may not be
+     * exported with a permission it does not have.
+     */
     private static String modeCode(PaymentCryptographyKey key, Map<String, Object> headers) {
         Map<String, Object> declared = object(headers, "KeyModesOfUse");
         if (declared == null || declared.isEmpty()) {
@@ -932,10 +974,47 @@ final class PaymentCryptographyKeyExchange {
         }
         Map<String, Boolean> modes = new LinkedHashMap<>();
         declared.forEach((name, value) -> modes.put(name, Boolean.TRUE.equals(value)));
+        for (Map.Entry<String, Boolean> entry : modes.entrySet()) {
+            if (Boolean.TRUE.equals(entry.getValue()) && !allows(key, entry.getKey())) {
+                throw validation("the mode of use " + entry.getKey() + " is not one the key "
+                        + key.getArn() + " has, and a key may only be exported with the modes of "
+                        + "use it has");
+            }
+        }
         // The modes the request names are read the way the key's own are: a key encryption
         // key wraps and unwraps rather than encrypting and decrypting.
         return PaymentCryptographyService.modeCode(modes,
                 PaymentCryptographyService.isKeyEncryptionKey(key.getKeyUsage()));
+    }
+
+    /**
+     * Whether the key has a mode of use, or something that stands for it.
+     *
+     * <p>A key encryption key wraps and unwraps where another key encrypts and decrypts, so
+     * for one the two spellings of a direction are the same permission.
+     */
+    private static boolean allows(PaymentCryptographyKey key, String mode) {
+        Map<String, Boolean> modes = key.getKeyModesOfUse();
+        if (modes == null) {
+            return true;
+        }
+        if (Boolean.TRUE.equals(modes.get("NoRestrictions"))) {
+            return true;
+        }
+        if (Boolean.TRUE.equals(modes.get(mode))) {
+            return true;
+        }
+        boolean kek = PaymentCryptographyService.isKeyEncryptionKey(key.getKeyUsage());
+        if (kek && "Wrap".equals(mode)) {
+            return Boolean.TRUE.equals(modes.get("Encrypt"));
+        }
+        if (kek && "Unwrap".equals(mode)) {
+            return Boolean.TRUE.equals(modes.get("Decrypt"));
+        }
+        if (kek && "Encrypt".equals(mode)) {
+            return Boolean.TRUE.equals(modes.get("Wrap"));
+        }
+        return kek && "Decrypt".equals(mode) && Boolean.TRUE.equals(modes.get("Unwrap"));
     }
 
     /** The version of the key the block carries. */
@@ -998,7 +1077,7 @@ final class PaymentCryptographyKeyExchange {
                 Instant.ofEpochMilli(now).plus(IMPORT_TOKEN_TTL_MS, ChronoUnit.MILLIS));
         Issued issued = new Issued(token(IMPORT_TOKEN_PREFIX), pair.getPrivate(), certificate.der(),
                 wrappingAlgorithm, materialType, now + IMPORT_TOKEN_TTL_MS);
-        sweep(importTokens, now);
+        sweep(importTokens, lastImportParameters, now);
         importTokens.put(issued.token, issued);
         lastImportParameters.put(last, issued);
         return importParameters(issued);
@@ -1055,7 +1134,7 @@ final class PaymentCryptographyKeyExchange {
                 Instant.ofEpochMilli(now).plus(EXPORT_TOKEN_TTL_MS, ChronoUnit.MILLIS));
         Issued issued = new Issued(token(EXPORT_TOKEN_PREFIX), pair.getPrivate(), certificate.der(),
                 algorithm, materialType, now + EXPORT_TOKEN_TTL_MS);
-        sweep(exportTokens, now);
+        sweep(exportTokens, lastExportParameters, now);
         exportTokens.put(issued.token, issued);
         lastExportParameters.put(last, issued);
         return exportParameters(issued);
@@ -1087,10 +1166,8 @@ final class PaymentCryptographyKeyExchange {
         // A trusted certificate is one the named authority signed, so it is checked against
         // that authority. A root certificate stands on its own: it is the authority.
         if (!caIdentifier.isEmpty()) {
-            PaymentCryptographyKey caKey = service.findKey(region, caIdentifier);
-            if (caKey == null) {
-                throw notFound(caIdentifier);
-            }
+            // The authority does work here, so it has to be a key the service does work with.
+            PaymentCryptographyKey caKey = usableKey(caIdentifier, region);
             certificate = verifiedCertificate(certText, caKey, "the public key certificate");
         } else {
             try {

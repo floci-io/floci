@@ -16,6 +16,9 @@ import io.floci.aws.core.common.RequestConstraintCheck;
  * <p>The vendored file holds every operation the model names, so an operation the service serves
  * is checked without anyone listing it. An operation the model does not name is not checked, and
  * the service refuses it as the operation it does not serve.
+ *
+ * <p>Only the operations the service serves are checked: an operation the model names and the
+ * service does not serve is refused as the unknown operation it is, whatever its body says.
  */
 final class PaymentCryptographyRequestShapes {
 

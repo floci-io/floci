@@ -76,6 +76,8 @@
   DUKPT key by its serial number, and the derived key leaves instead of the base derivation
   key. The base derivation key may not be exportable itself and still derive that initial key,
   which the export guide says the standards allow.
+- **The check value of an export:** a key block carries the check value of the key it
+  carries, and a cryptogram carries none, because it carries no key block at all.
 - **The TR-34 and the AS2805 forms are not made.** A request that asks for one of them is
   refused with the error that says so, rather than answered with something of another kind,
   and the refusal names the forms the service serves.
@@ -85,9 +87,24 @@
   the length covers the whole block, the identifier and the length included. The optional
   blocks take up a whole number of cipher blocks, so a block whose optional blocks are not
   aligned carries a padding block that fills the rest.
+- **The block headers may only narrow the key.** A request that names modes of use or an
+  exportability may not give the key a permission it does not have: a key that may only
+  encrypt is refused an export that says it may decrypt, and a key that is already set to a
+  stricter exportability is refused a looser one. A key encryption key wraps and unwraps
+  where another key encrypts and decrypts, so for one the two spellings of a direction are
+  the same permission.
 - **The exportability of a key that comes in:** the exportability of the block says whether
   the key may leave the service again. An exportable or a sensitive key may, and only a
   non-exportable one may not.
+- **The modes of use of a key that comes in:** the mode of use character of the block says
+  what the key may be used for, and both spellings of a direction stand for it. A block
+  that says `B` gives the key all four of `Encrypt`, `Decrypt`, `Wrap` and `Unwrap`,
+  whichever use the key has.
+- **The origin of a key that comes in:** a key that was imported says it came from outside
+  the service, which is `EXTERNAL`, and a key the service made says `AWS_PAYMENT_CRYPTOGRAPHY`.
+- **Only the type B and type D key blocks are read.** The standard also has the type A and
+  the type C block, the key variant ones, and the reference reads them on import; this
+  service refuses them and names the two it reads.
 - **The certificate of a key:** `GetPublicKeyCertificate` answers with the certificate and
   its chain, and a certificate the service mints is valid for ninety days.
 - **The import and export parameters:** `GetParametersForImport` answers with the token an

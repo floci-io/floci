@@ -67,6 +67,12 @@ public class PaymentCryptographyService implements Resettable, StoredResourceArn
     /** The class of a key that is only a public half. */
     private static final String PUBLIC_KEY_CLASS = "PUBLIC_KEY";
 
+    /** The origin of a key the service made itself. */
+    private static final String ORIGIN_SERVICE = "AWS_PAYMENT_CRYPTOGRAPHY";
+
+    /** The origin of a key whose material came in from outside the service. */
+    private static final String ORIGIN_EXTERNAL = "EXTERNAL";
+
     private final StorageBackend<String, PaymentCryptographyKey> keyStore;
     private final StorageBackend<String, PaymentCryptographyAlias> aliasStore;
 
@@ -155,7 +161,7 @@ public class PaymentCryptographyService implements Resettable, StoredResourceArn
                                            boolean enabled, Map<String, String> tags,
                                            String materialHex) {
         return makeKey(region, attributes, modesOfUse, exportable, enabled, tags, materialHex,
-                null, null, null);
+                null, null, null, ORIGIN_SERVICE);
     }
 
     /**
@@ -168,12 +174,14 @@ public class PaymentCryptographyService implements Resettable, StoredResourceArn
      * @param publicKeyBase64 the public half of an asymmetric key, or null
      * @param privateKeyBase64 the private half of an asymmetric key, or null
      * @param certificatePem the certificate an imported public key arrived with, or null
+     * @param origin where the key material came from
      */
     private PaymentCryptographyKey makeKey(String region, Map<String, Object> attributes,
                                            Map<String, Boolean> modesOfUse, boolean exportable,
                                            boolean enabled, Map<String, String> tags,
                                            String materialHex, String publicKeyBase64,
-                                           String privateKeyBase64, String certificatePem) {
+                                           String privateKeyBase64, String certificatePem,
+                                           String origin) {
         String algorithmName = string(attributes, "KeyAlgorithm", "AES_256");
         String keyClass = string(attributes, "KeyClass", "SYMMETRIC_KEY");
         // The material has to be the algorithm's, so a key that says otherwise would be a key
@@ -232,6 +240,7 @@ public class PaymentCryptographyService implements Resettable, StoredResourceArn
         key.setKeyPublicKeyBase64(publicKeyBase64);
         key.setKeyPrivateKeyBase64(privateKeyBase64);
         key.setKeyCertificatePem(certificatePem);
+        key.setKeyOrigin(origin);
         if (algorithm.symmetric()) {
             key.setKeyMaterialHex(materialHex != null
                     ? materialHex
@@ -587,8 +596,12 @@ public class PaymentCryptographyService implements Resettable, StoredResourceArn
         Map<String, Object> wrapped = new LinkedHashMap<>();
         wrapped.put("KeyMaterial", exported.material());
         wrapped.put("WrappedKeyMaterialFormat", exported.format());
-        wrapped.put("KeyCheckValue", leaving.getKeyCheckValue());
-        wrapped.put("KeyCheckValueAlgorithm", leaving.getKeyCheckValueAlgorithm());
+        // The check value belongs to a key block: a cryptogram carries no block, so it has no
+        // check value either, which is what the reference answers.
+        if (!"KEY_CRYPTOGRAM".equals(exported.format())) {
+            wrapped.put("KeyCheckValue", leaving.getKeyCheckValue());
+            wrapped.put("KeyCheckValueAlgorithm", leaving.getKeyCheckValueAlgorithm());
+        }
         if (exported.wrappingKeyArn() != null) {
             wrapped.put("WrappingKeyArn", exported.wrappingKeyArn());
         }
@@ -624,7 +637,8 @@ public class PaymentCryptographyService implements Resettable, StoredResourceArn
         return makeKey(region, attributes, imported.modes(), imported.exportable(), enabled, tags,
                 imported.material() == null ? null
                         : PaymentCryptographyCrypto.toHex(imported.material()),
-                imported.publicKeyBase64(), imported.privateKeyBase64(), imported.certificatePem());
+                imported.publicKeyBase64(), imported.privateKeyBase64(), imported.certificatePem(),
+                ORIGIN_EXTERNAL);
     }
 
     /**
@@ -841,23 +855,20 @@ public class PaymentCryptographyService implements Resettable, StoredResourceArn
     /**
      * The modes of use a mode of use code of a key block stands for.
      *
-     * <p>A key encryption key wraps and unwraps rather than encrypts and decrypts, so the
-     * same character means the other modes for one.
+     * <p>The character says what the key may be used for, and both spellings of a direction
+     * stand for it: a key that may encrypt may also wrap, and a key that may decrypt may also
+     * unwrap. A block that says {@code B} therefore grants all four of them, whichever use the
+     * key has, which is what the reference does.
      *
      * @param mode the mode of use character of the block
-     * @param isKek true when the block carries a key encryption key
+     * @return the modes of use the character stands for
      */
-    static Map<String, Boolean> modesFor(String mode, boolean isKek) {
+    static Map<String, Boolean> modesFor(String mode) {
         return switch (mode) {
-            case "B" -> isKek
-                    ? Map.of("Wrap", Boolean.TRUE, "Unwrap", Boolean.TRUE)
-                    : Map.of("Encrypt", Boolean.TRUE, "Decrypt", Boolean.TRUE);
-            case "E" -> isKek
-                    ? Map.of("Wrap", Boolean.TRUE)
-                    : Map.of("Encrypt", Boolean.TRUE);
-            case "D" -> isKek
-                    ? Map.of("Unwrap", Boolean.TRUE)
-                    : Map.of("Decrypt", Boolean.TRUE);
+            case "B" -> Map.of("Encrypt", Boolean.TRUE, "Decrypt", Boolean.TRUE,
+                    "Wrap", Boolean.TRUE, "Unwrap", Boolean.TRUE);
+            case "E" -> Map.of("Encrypt", Boolean.TRUE, "Wrap", Boolean.TRUE);
+            case "D" -> Map.of("Decrypt", Boolean.TRUE, "Unwrap", Boolean.TRUE);
             case "G" -> Map.of("Generate", Boolean.TRUE);
             case "V" -> Map.of("Verify", Boolean.TRUE);
             case "C" -> Map.of("Generate", Boolean.TRUE, "Verify", Boolean.TRUE);

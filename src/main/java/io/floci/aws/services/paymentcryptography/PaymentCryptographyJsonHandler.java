@@ -44,9 +44,6 @@ public class PaymentCryptographyJsonHandler {
             "DiffieHellmanTr31KeyBlock", "As2805KeyCryptogram");
 
     public Response handle(String action, JsonNode request, String region) {
-        // The vendored model holds every operation it names, so the request is checked against
-        // the model's own rules without this class listing the operations it serves.
-        PaymentCryptographyRequestShapes.check(action, request);
         return switch (action) {
             case "CreateKey" -> Response.ok(createKey(request, region)).build();
             case "GetKey" -> Response.ok(getKey(request, region)).build();
@@ -73,6 +70,7 @@ public class PaymentCryptographyJsonHandler {
     // ---- keys ---------------------------------------------------------------
 
     private Map<String, Object> createKey(JsonNode request, String region) {
+        PaymentCryptographyRequestShapes.check("CreateKey", request);
         JsonNode attributes = request.get("KeyAttributes");
         if (attributes == null || !attributes.isObject()) {
             throw new AwsException("ValidationException", "KeyAttributes is required", 400);
@@ -136,11 +134,13 @@ public class PaymentCryptographyJsonHandler {
             "Sign", "Verify", "DeriveKey", "NoRestrictions");
 
     private Map<String, Object> getKey(JsonNode request, String region) {
+        PaymentCryptographyRequestShapes.check("GetKey", request);
         PaymentCryptographyKey key = requiredKey(request, region, KEY_IDENTIFIER);
         return Map.of("Key", keyObject(key));
     }
 
     private Map<String, Object> listKeys(JsonNode request, String region) {
+        PaymentCryptographyRequestShapes.check("ListKeys", request);
         String state = request.hasNonNull("KeyState") ? request.get("KeyState").asText() : null;
         PaginatedResult<PaymentCryptographyKey> page = service.listKeys(region, state,
                 Pagination.parseMaxResults(request, "MaxResults", PAGINATION_ERROR),
@@ -165,6 +165,7 @@ public class PaymentCryptographyJsonHandler {
      * is asked to.
      */
     private Map<String, Object> deleteKey(JsonNode request, String region) {
+        PaymentCryptographyRequestShapes.check("DeleteKey", request);
         PaymentCryptographyKey key = service.deleteKey(requiredKey(request, region, KEY_IDENTIFIER));
         return Map.of("Key", keyObject(key));
     }
@@ -172,6 +173,7 @@ public class PaymentCryptographyJsonHandler {
     // ---- aliases ------------------------------------------------------------
 
     private Map<String, Object> createAlias(JsonNode request, String region) {
+        PaymentCryptographyRequestShapes.check("CreateAlias", request);
         String aliasName = aliasName(request);
         // The model requires only the name of an alias, but the reference refuses one
         // without a key, so the request is refused the way it refuses it.
@@ -185,6 +187,7 @@ public class PaymentCryptographyJsonHandler {
     }
 
     private Map<String, Object> getAlias(JsonNode request, String region) {
+        PaymentCryptographyRequestShapes.check("GetAlias", request);
         String aliasName = aliasName(request);
         PaymentCryptographyAlias alias = service.findAlias(region, aliasName);
         if (alias == null) {
@@ -195,6 +198,7 @@ public class PaymentCryptographyJsonHandler {
     }
 
     private Map<String, Object> listAliases(JsonNode request, String region) {
+        PaymentCryptographyRequestShapes.check("ListAliases", request);
         String keyArn = request.hasNonNull("KeyArn") ? request.get("KeyArn").asText() : null;
         PaginatedResult<PaymentCryptographyAlias> page = service.listAliases(region,
                 keyArn, Pagination.parseMaxResults(request, "MaxResults", PAGINATION_ERROR),
@@ -216,6 +220,7 @@ public class PaymentCryptographyJsonHandler {
      * names no key, as the reference does: the key of an alias is optional.
      */
     private Map<String, Object> updateAlias(JsonNode request, String region) {
+        PaymentCryptographyRequestShapes.check("UpdateAlias", request);
         String aliasName = aliasName(request);
         if (!request.hasNonNull(KEY_ARN)) {
             return Map.of("Alias", aliasObject(service.detachAlias(region, aliasName)));
@@ -226,6 +231,7 @@ public class PaymentCryptographyJsonHandler {
     }
 
     private Map<String, Object> deleteAlias(JsonNode request, String region) {
+        PaymentCryptographyRequestShapes.check("DeleteAlias", request);
         service.deleteAlias(region, aliasName(request));
         return Map.of();
     }
@@ -233,12 +239,14 @@ public class PaymentCryptographyJsonHandler {
     // ---- tags ---------------------------------------------------------------
 
     private Map<String, Object> tagResource(JsonNode request, String region) {
+        PaymentCryptographyRequestShapes.check("TagResource", request);
         PaymentCryptographyKey key = requiredKey(request, region, RESOURCE_ARN);
         service.tag(key, tagsOf(request));
         return Map.of();
     }
 
     private Map<String, Object> untagResource(JsonNode request, String region) {
+        PaymentCryptographyRequestShapes.check("UntagResource", request);
         PaymentCryptographyKey key = requiredKey(request, region, RESOURCE_ARN);
         List<String> tagKeys = new ArrayList<>();
         JsonNode declared = request.get("TagKeys");
@@ -252,6 +260,7 @@ public class PaymentCryptographyJsonHandler {
     }
 
     private Map<String, Object> listTagsForResource(JsonNode request, String region) {
+        PaymentCryptographyRequestShapes.check("ListTagsForResource", request);
         PaymentCryptographyKey key = requiredKey(request, region, RESOURCE_ARN);
         PaginatedResult<Map.Entry<String, String>> page = service.listTags(key,
                 Pagination.parseMaxResults(request, "MaxResults", PAGINATION_ERROR),
@@ -393,6 +402,7 @@ public class PaymentCryptographyJsonHandler {
      * two parties agreed, or an AS2805 cryptogram.
      */
     private Map<String, Object> exportKey(JsonNode request, String region) {
+        PaymentCryptographyRequestShapes.check("ExportKey", request);
         // The required members are settled by the shape check before the handler runs, so
         // the identifier is read and not checked again.
         String keyIdentifier = request.path("ExportKeyIdentifier").asText();
@@ -407,6 +417,7 @@ public class PaymentCryptographyJsonHandler {
 
     /** The certificate of an asymmetric key. */
     private Map<String, Object> getPublicKeyCertificate(JsonNode request, String region) {
+        PaymentCryptographyRequestShapes.check("GetPublicKeyCertificate", request);
         PaymentCryptographyKey key = requiredKey(request, region, "KeyIdentifier");
         return service.publicKeyCertificate(key);
     }
@@ -416,6 +427,7 @@ public class PaymentCryptographyJsonHandler {
      * import quotes back and the certificate the wrapping key is under.
      */
     private Map<String, Object> getParametersForImport(JsonNode request, String region) {
+        PaymentCryptographyRequestShapes.check("GetParametersForImport", request);
         return service.parametersForImport(request.path("KeyMaterialType").asText(),
                 request.path("WrappingKeyAlgorithm").asText(),
                 request.path("ReuseLastGeneratedToken").asBoolean(false));
@@ -426,6 +438,7 @@ public class PaymentCryptographyJsonHandler {
      * the export quotes back and the certificate the signing key is under.
      */
     private Map<String, Object> getParametersForExport(JsonNode request, String region) {
+        PaymentCryptographyRequestShapes.check("GetParametersForExport", request);
         return service.parametersForExport(request.path("KeyMaterialType").asText(),
                 request.path("SigningKeyAlgorithm").asText(),
                 request.path("ReuseLastGeneratedToken").asBoolean(false));
@@ -435,6 +448,7 @@ public class PaymentCryptographyJsonHandler {
      * The key that comes into the service, in the form the request names.
      */
     private Map<String, Object> importKey(JsonNode request, String region) {
+        PaymentCryptographyRequestShapes.check("ImportKey", request);
         JsonNode material = request.path("KeyMaterial");
         String form = soleForm(material, IMPORT_UNION, PaymentCryptographyKeyExchange.IMPORT_FORMS,
                 "imports");

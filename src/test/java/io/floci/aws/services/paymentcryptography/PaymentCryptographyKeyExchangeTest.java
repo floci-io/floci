@@ -568,6 +568,150 @@ class PaymentCryptographyKeyExchangeTest {
     }
 
     @Test
+    void anImportedKeyGetsEveryModeTheBlockStandsFor() {
+        // The mode of use character of the block says what the key may be used for, and
+        // both spellings of a direction stand for it. A block that says B gives the key all
+        // four of Encrypt, Decrypt, Wrap and Unwrap, whichever use the key has.
+        PaymentCryptographyKey key = createKey("AES_128", "TR31_D0_SYMMETRIC_DATA_ENCRYPTION_KEY");
+        Map<String, Object> answer = service.exportKey("us-east-1", key.getKeyId(), "Tr31KeyBlock",
+                Map.of("WrappingKeyIdentifier", protection.getKeyId()), "", "");
+        String block = (String) ((Map<?, ?>) answer.get("WrappedKey")).get("KeyMaterial");
+        assertEquals("B", block.substring(8, 9), "the mode of use of the block");
+
+        PaymentCryptographyKey imported = service.importKey("us-east-1", "Tr31KeyBlock",
+                Map.of("WrappingKeyIdentifier", protection.getKeyId(), "WrappedKeyBlock", block),
+                "", true, Map.of());
+
+        Map<String, Boolean> modes = imported.getKeyModesOfUse();
+        assertEquals(Boolean.TRUE, modes.get("Encrypt"), "the imported key may encrypt");
+        assertEquals(Boolean.TRUE, modes.get("Decrypt"), "the imported key may decrypt");
+        assertEquals(Boolean.TRUE, modes.get("Wrap"), "the imported key may wrap");
+        assertEquals(Boolean.TRUE, modes.get("Unwrap"), "the imported key may unwrap");
+    }
+
+    @Test
+    void anExportMayNotGiveAKeyAPermissionItDoesNotHave() {
+        // A key that may only encrypt is refused an export that says it may decrypt: the
+        // modes of use a request names may only narrow the ones the key has.
+        PaymentCryptographyKey key = service.createKey("us-east-1",
+                Map.of("KeyAlgorithm", "AES_128", "KeyClass", "SYMMETRIC_KEY",
+                        "KeyUsage", "TR31_D0_SYMMETRIC_DATA_ENCRYPTION_KEY",
+                        "KeyModesOfUse", Map.of("Encrypt", true)),
+                Map.of("Encrypt", true), true, true, Map.of());
+
+        AwsException refused = assertThrows(AwsException.class,
+                () -> service.exportKey("us-east-1", key.getKeyId(), "Tr31KeyBlock",
+                        Map.of("WrappingKeyIdentifier", protection.getKeyId(),
+                                "KeyBlockHeaders", Map.of("KeyModesOfUse",
+                                        Map.of("Encrypt", true, "Decrypt", true))),
+                        "", ""));
+
+        assertEquals("ValidationException", refused.getErrorCode());
+        assertTrue(refused.getMessage().contains("Decrypt"), refused.getMessage());
+    }
+
+    @Test
+    void anExportMayNotLoosenTheExportability() {
+        // The initial key of the DUKPT derivation is sensitive: it may leave, but not as a
+        // plain working key. An export that says it is exportable is looser than that, so
+        // it is refused.
+        Map<String, Object> attributes = new LinkedHashMap<>();
+        attributes.put("KeyAlgorithm", "TDES_2KEY");
+        attributes.put("KeyClass", "SYMMETRIC_KEY");
+        attributes.put("KeyUsage", "TR31_B0_BASE_DERIVATION_KEY");
+        PaymentCryptographyKey base = service.createKey("us-east-1", attributes,
+                Map.of("DeriveKey", Boolean.TRUE), true, true, Map.of());
+
+        AwsException refused = assertThrows(AwsException.class,
+                () -> service.exportKey("us-east-1", base.getKeyId(), "Tr31KeyBlock",
+                        Map.of("WrappingKeyIdentifier", protection.getKeyId(),
+                                "KeyBlockHeaders", Map.of("KeyExportability", "EXPORTABLE")),
+                        "12345678900000000001", ""));
+
+        assertEquals("ValidationException", refused.getErrorCode());
+        assertTrue(refused.getMessage().contains("looser"), refused.getMessage());
+    }
+
+    @Test
+    void aDisabledAuthorityDoesNotVouchForACertificate() {
+        // The authority does work when it vouches for a certificate, and a disabled key does
+        // no work, so a disabled authority is refused.
+        SecureRandom random = new SecureRandom();
+        KeyPair authority = PaymentCryptographyKeyPairs.rsa(2048, random);
+        KeyPair counterparty = PaymentCryptographyKeyPairs.rsa(2048, random);
+        Certificates.Minted caCertificate = CertificatesTest.mint(authority.getPublic(), "floci CA",
+                authority.getPrivate(), "floci CA");
+        Certificates.Minted counterpartyCertificate = CertificatesTest.mint(counterparty.getPublic(),
+                "floci counterparty", authority.getPrivate(), "floci CA");
+        Map<String, Object> attributes = new LinkedHashMap<>();
+        attributes.put("KeyAlgorithm", "RSA_2048");
+        attributes.put("KeyClass", "PUBLIC_KEY");
+        attributes.put("KeyUsage", "TR31_S0_ASYMMETRIC_KEY_FOR_DIGITAL_SIGNATURE");
+        attributes.put("KeyModesOfUse", Map.of("Verify", Boolean.TRUE));
+        PaymentCryptographyKey ca = service.importKey("us-east-1", "TrustedCertificatePublicKey",
+                Map.of("PublicKeyCertificate", caCertificate.pem(), "KeyAttributes", attributes),
+                "", false, Map.of());
+
+        AwsException refused = assertThrows(AwsException.class,
+                () -> service.importKey("us-east-1", "TrustedCertificatePublicKey",
+                        Map.of("PublicKeyCertificate", counterpartyCertificate.pem(),
+                                "CertificateAuthorityPublicKeyIdentifier", ca.getKeyId(),
+                                "KeyAttributes", attributes),
+                        "", true, Map.of()));
+
+        assertEquals("ValidationException", refused.getErrorCode());
+        assertTrue(refused.getMessage().contains("disabled"), refused.getMessage());
+    }
+
+    @Test
+    void anImportedKeySaysItCameFromOutsideTheService() {
+        // A key that came in says its origin is EXTERNAL, and a key the service made says
+        // it is AWS_PAYMENT_CRYPTOGRAPHY.
+        PaymentCryptographyKey imported = service.importKey("us-east-1", "Tr31KeyBlock",
+                Map.of("WrappingKeyIdentifier", protection.getKeyId(),
+                        "WrappedKeyBlock", blockOf(createKey("AES_128",
+                                "TR31_D0_SYMMETRIC_DATA_ENCRYPTION_KEY"))),
+                "", true, Map.of());
+
+        assertEquals("EXTERNAL", imported.getKeyOrigin(), "the origin of an imported key");
+        assertEquals("AWS_PAYMENT_CRYPTOGRAPHY", protection.getKeyOrigin(),
+                "the origin of a key the service made");
+    }
+
+    @Test
+    void aCryptogramCarriesNoCheckValue() {
+        // A key block carries the check value of the key it carries, and a cryptogram
+        // carries no key block at all, so it carries no check value either.
+        SecureRandom random = new SecureRandom();
+        KeyPair authority = PaymentCryptographyKeyPairs.rsa(2048, random);
+        KeyPair counterparty = PaymentCryptographyKeyPairs.rsa(3072, random);
+        Certificates.Minted caCertificate = CertificatesTest.mint(authority.getPublic(), "floci CA",
+                authority.getPrivate(), "floci CA");
+        Certificates.Minted counterpartyCertificate = CertificatesTest.mint(counterparty.getPublic(),
+                "floci counterparty", authority.getPrivate(), "floci CA");
+        PaymentCryptographyKey ca = createAuthority(caCertificate.pem());
+
+        Map<String, Object> answer = service.exportKey("us-east-1",
+                createKey("AES_128", "TR31_D0_SYMMETRIC_DATA_ENCRYPTION_KEY").getKeyId(),
+                "KeyCryptogram",
+                Map.of("WrappingKeyCertificate", counterpartyCertificate.pem(),
+                        "CertificateAuthorityPublicKeyIdentifier", ca.getKeyId()), "", "");
+
+        Map<?, ?> wrapped = (Map<?, ?>) answer.get("WrappedKey");
+        assertEquals("KEY_CRYPTOGRAM", wrapped.get("WrappedKeyMaterialFormat"));
+        assertFalse(wrapped.containsKey("KeyCheckValue"), "the cryptogram carries a check value");
+        assertFalse(wrapped.containsKey("KeyCheckValueAlgorithm"),
+                "the cryptogram carries a check value algorithm");
+    }
+
+    /** The key block a key leaves under the protection key of the test. */
+    private String blockOf(PaymentCryptographyKey key) {
+        Map<String, Object> answer = service.exportKey("us-east-1", key.getKeyId(), "Tr31KeyBlock",
+                Map.of("WrappingKeyIdentifier", protection.getKeyId()), "", "");
+        return (String) ((Map<?, ?>) answer.get("WrappedKey")).get("KeyMaterial");
+    }
+
+    @Test
     void aDataEncryptionKeyMayNotWrapAnExport() {
         // The wrapping key of a key block is a key encryption key, and a data encryption key
         // is not one.

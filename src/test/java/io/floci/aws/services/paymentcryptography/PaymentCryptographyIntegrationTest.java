@@ -351,6 +351,21 @@ class PaymentCryptographyIntegrationTest {
     }
 
     @Test
+    void anOperationTheServiceDoesNotServeIsRefusedWhateverItsBodySays() {
+        // The model names the operation and the service does not serve it, so it is refused
+        // as the unknown operation it is. The body it carries does not change that: a body
+        // that breaks the model's rules is not the answer to an operation that is not
+        // served at all.
+        call("RestoreKey", "{}")
+                .then().statusCode(400)
+                    .body("__type", containsString("UnknownOperationException"));
+        call("RestoreKey", "{\"KeyIdentifier\":\"arn:aws:payment-cryptography:us-east-1:"
+                + "000000000000:key/abcdefghijklmnop\"}")
+                .then().statusCode(400)
+                    .body("__type", containsString("UnknownOperationException"));
+    }
+
+    @Test
     void theCertificateOfAKeyIsServedOverTheWire() {
         // The certificate of an asymmetric key, with the chain that goes with it.
         String arn = call("CreateKey", CREATE_KEY_PAIR)
