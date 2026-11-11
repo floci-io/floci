@@ -782,7 +782,8 @@ template clears it; a failed stabilisation puts the prior values back, and a dep
 the service did not have goes back to none. A `Stage`'s dropped `StageVariables` become empty. A `Route`'s
 dropped `Target` and `AuthorizerId`, and an `Authorizer`'s dropped `AuthorizerUri`,
 `AuthorizerPayloadFormatVersion`, `JwtConfiguration`, `AuthorizerResultTtlInSeconds` and
-`EnableSimpleResponses`, read back absent, as on a create without them. An `Instance`'s dropped `UserData` is
+`EnableSimpleResponses`, read back absent, as on a create without them. A dropped `AuthorizerId` is kept
+while the route's authorization type stays `JWT` or `CUSTOM`. An `Instance`'s dropped `UserData` is
 cleared: a running instance is stopped for the rewrite and started again, and a stopped one stays stopped.
 An `Alias`'s, a `Secret`'s and a `UserPoolGroup`'s dropped `Description` and a `Trail`'s dropped
 `S3KeyPrefix` are cleared. A dropped `RoutingConfig` removes the alias weights. The other members of

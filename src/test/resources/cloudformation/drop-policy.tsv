@@ -10,7 +10,7 @@ AWS::ApiGatewayV2::Authorizer	Name	keep:required by AWS
 AWS::ApiGatewayV2::Route	ApiId	create-only	a drop fails: the route is not found
 AWS::ApiGatewayV2::Route	AuthorizationScopes	clear	an update also clears it when the stack never declared it, so a value set outside the stack is lost
 AWS::ApiGatewayV2::Route	AuthorizationType	default:NONE
-AWS::ApiGatewayV2::Route	AuthorizerId	clear	the field reads back absent
+AWS::ApiGatewayV2::Route	AuthorizerId	clear	the field reads back absent, except that a route that stays JWT or CUSTOM keeps it
 AWS::ApiGatewayV2::Route	RouteKey	keep:required by AWS
 AWS::ApiGatewayV2::Route	Target	clear	the field reads back absent
 AWS::ApiGatewayV2::Stage	ApiId	create-only	a drop fails: the stage is not found

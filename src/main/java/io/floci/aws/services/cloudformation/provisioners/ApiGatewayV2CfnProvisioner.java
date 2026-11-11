@@ -901,8 +901,12 @@ public class ApiGatewayV2CfnProvisioner implements CfnResourceProvisioner {
             if (dropped.contains("AuthorizerId") || dropped.contains("Target")) {
                 // UpdateRoute keeps a field it is not given, so a dropped one is cleared here and the
                 // other keeps what the update left, a value set outside the stack included.
+                // A route that stays JWT or CUSTOM keeps its authorizer: without it the route would be
+                // served without any authorizer.
+                String type = route.getAuthorizationType();
+                boolean protectedRoute = "JWT".equalsIgnoreCase(type) || "CUSTOM".equalsIgnoreCase(type);
                 route = apiGatewayV2Service.replaceRouteLinks(region, apiId, r.getPhysicalId(),
-                        dropped.contains("AuthorizerId") ? null : route.getAuthorizerId(),
+                        dropped.contains("AuthorizerId") && !protectedRoute ? null : route.getAuthorizerId(),
                         dropped.contains("Target") ? null : route.getTarget());
             }
         }
