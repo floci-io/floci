@@ -726,7 +726,7 @@ public class EventBridgeService implements ResourceProvider, StoredResourceArns 
             return describeEventBus(busName, region).getTags();
         }
         if (resource.startsWith("rule/")) {
-            RuleRef ref = parseRuleResource(resource);
+            RuleRef ref = parseRuleResource(resource, region);
             String key = ruleKey(region, ref.busName(), ref.ruleName());
             return ruleStore.get(key)
                     .map(Rule::getTags)
@@ -767,12 +767,21 @@ public class EventBridgeService implements ResourceProvider, StoredResourceArns 
     /** Resolves the bus and rule name from a {@code rule/...} ARN resource segment. */
     private record RuleRef(String busName, String ruleName) {}
 
-    private static RuleRef parseRuleResource(String resource) {
+    private RuleRef parseRuleResource(String resource, String region) {
         String afterRule = resource.substring("rule/".length());
         int slashIdx = afterRule.lastIndexOf('/');
         if (slashIdx >= 0) {
             // Custom bus: rule/{busName}/{ruleName}
-            return new RuleRef(afterRule.substring(0, slashIdx), afterRule.substring(slashIdx + 1));
+            RuleRef lastSplit = new RuleRef(afterRule.substring(0, slashIdx), afterRule.substring(slashIdx + 1));
+            if (ruleStore.get(ruleKey(region, lastSplit.busName(), lastSplit.ruleName())).isPresent()) {
+                return lastSplit;
+            }
+            int firstSlashIdx = afterRule.indexOf('/');
+            RuleRef firstSplit = new RuleRef(afterRule.substring(0, firstSlashIdx), afterRule.substring(firstSlashIdx + 1));
+            boolean legacyRuleOfBus = ruleStore.get(ruleKey(region, firstSplit.busName(), firstSplit.ruleName()))
+                    .map(rule -> firstSplit.busName().equals(rule.getEventBusName()))
+                    .orElse(false);
+            return legacyRuleOfBus ? firstSplit : lastSplit;
         }
         // Default bus: rule/{ruleName}
         return new RuleRef("default", afterRule);
@@ -804,7 +813,7 @@ public class EventBridgeService implements ResourceProvider, StoredResourceArns 
             return;
         }
         if (resource.startsWith("rule/")) {
-            RuleRef ref = parseRuleResource(resource);
+            RuleRef ref = parseRuleResource(resource, region);
             String key = ruleKey(region, ref.busName(), ref.ruleName());
             Rule rule = ruleStore.get(key)
                     .orElseThrow(() -> new AwsException("ResourceNotFoundException",
@@ -843,7 +852,7 @@ public class EventBridgeService implements ResourceProvider, StoredResourceArns 
             return;
         }
         if (resource.startsWith("rule/")) {
-            RuleRef ref = parseRuleResource(resource);
+            RuleRef ref = parseRuleResource(resource, region);
             String key = ruleKey(region, ref.busName(), ref.ruleName());
             Rule rule = ruleStore.get(key)
                     .orElseThrow(() -> new AwsException("ResourceNotFoundException",

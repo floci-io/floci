@@ -719,6 +719,23 @@ class EventBridgeServiceTest {
     }
 
     @Test
+    void aLegacySlashNamedRuleOnACustomBusIsTaggableByItsArn() {
+        service.createEventBus("foo", null, null, REGION);
+        String arn = "arn:aws:events:us-east-1:000000000000:rule/foo/team/r1";
+        Rule legacy = new Rule();
+        legacy.setName("team/r1");
+        legacy.setArn(arn);
+        legacy.setEventBusName("foo");
+        legacy.setState(RuleState.ENABLED);
+        ruleStore.put("rule:" + REGION + ":foo/team/r1", legacy);
+
+        service.tagResource(arn, Map.of("team", "orders", "env", "test"), REGION);
+        service.untagResource(arn, List.of("env"), REGION);
+
+        assertEquals(Map.of("team", "orders"), service.listTagsForResource(arn, REGION));
+    }
+
+    @Test
     void deleteRuleIsIdempotent() {
         service.putRule("my-rule", null, null, "rate(1 minute)", RuleState.ENABLED,
                 null, null, null, REGION);
