@@ -159,13 +159,13 @@ source's name, so `Name` must equal `EventSourceName`, and the name must match
 `aws.partner/<partner>/<source>`. Floci does not model partner event sources, so any well-formed
 source name is accepted without one being created or activated first. Once created, the bus works
 like a custom bus: rules, targets, tags and `PutEvents` address it by name or ARN. A rule name
-holds no slash on any bus: `PutRule` rejects a name outside `[\.\-_A-Za-z0-9]+` or longer than 64
-characters with `ValidationException`, as AWS does.
+can't contain a slash on any bus: `PutRule` rejects a name outside `[\.\-_A-Za-z0-9]+` or longer
+than 64 characters with `ValidationException`, as AWS does.
 
 Two calls differ from a custom bus. `PutPermission` and `RemovePermission` reject a partner bus
-with `ValidationException`, since AWS gives a partner bus no resource policy. `PutEvents` to a
-partner bus is accepted and fans out to its rules, where AWS reserves that bus for the partner's
-own events; this lets a test publish an event a partner would send.
+with `ValidationException`, since the API types their `EventBusName` as a non-partner bus name.
+`PutEvents` to a partner bus is accepted and fans out to its rules, where AWS reserves that bus for
+the partner's own events; this lets a test publish an event a partner would send.
 
 When upgrading, a rule persisted by an earlier Floci version under a name `PutRule` now rejects,
 such as one with a slash or a space or longer than 64 characters, is still reachable by its exact
