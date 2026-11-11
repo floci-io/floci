@@ -132,10 +132,28 @@ public class TableDefinition {
     public ProvisionedThroughput getProvisionedThroughput() { return provisionedThroughput; }
     public void setProvisionedThroughput(ProvisionedThroughput provisionedThroughput) { this.provisionedThroughput = provisionedThroughput; }
 
-    public long getWarmReadUnitsPerSecond() { return warmReadUnitsPerSecond; }
+    public long getWarmReadUnitsPerSecond() {
+        if (warmReadUnitsPerSecond <= 0) {
+            if ("PAY_PER_REQUEST".equals(billingMode)) {
+                return 12000;
+            }
+            long rcu = provisionedThroughput != null ? provisionedThroughput.getReadCapacityUnits() : 5L;
+            return Math.max(rcu, 5L);
+        }
+        return warmReadUnitsPerSecond;
+    }
     public void setWarmReadUnitsPerSecond(long v) { this.warmReadUnitsPerSecond = v; }
 
-    public long getWarmWriteUnitsPerSecond() { return warmWriteUnitsPerSecond; }
+    public long getWarmWriteUnitsPerSecond() {
+        if (warmWriteUnitsPerSecond <= 0) {
+            if ("PAY_PER_REQUEST".equals(billingMode)) {
+                return 4000;
+            }
+            long wcu = provisionedThroughput != null ? provisionedThroughput.getWriteCapacityUnits() : 5L;
+            return Math.max(wcu, 5L);
+        }
+        return warmWriteUnitsPerSecond;
+    }
     public void setWarmWriteUnitsPerSecond(long v) { this.warmWriteUnitsPerSecond = v; }
 
     public String getTableArn() { return tableArn; }
