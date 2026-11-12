@@ -4,6 +4,7 @@ import com.cronutils.model.Cron;
 import com.cronutils.model.time.ExecutionTime;
 import com.cronutils.parser.CronParser;
 import io.floci.aws.core.common.AwsCronDefinitions;
+import io.floci.aws.core.common.AwsRateExpressions;
 
 import java.time.ZoneOffset;
 import java.time.ZonedDateTime;
@@ -40,15 +41,12 @@ public final class ScheduleExpressionParser {
             getNextFireTime(expression, ZonedDateTime.now(ZoneOffset.UTC));
             return;
         }
-        Rate rate = parseRate(expression, false);
-        boolean plural = rate.unit().endsWith("s");
-        if ((rate.value() == 1) == plural) {
-            throw new IllegalArgumentException("Rate unit must be singular for 1 and plural for values greater than 1");
-        }
+        Rate rate = parseRate(expression);
+        AwsRateExpressions.validate(rate.value(), rate.unit());
     }
 
     public static long parseRateToMillis(String expression) {
-        Rate rate = parseRate(expression, true);
+        Rate rate = parseRate(expression);
         int value = rate.value();
         return switch (rate.unit()) {
             case "minute", "minutes" -> value * 60 * 1000L;
@@ -87,7 +85,7 @@ public final class ScheduleExpressionParser {
         return Math.max(millis, 1000);
     }
 
-    private static Rate parseRate(String expression, boolean allowWeeks) {
+    private static Rate parseRate(String expression) {
         if (expression == null || expression.isBlank()) {
             throw new IllegalArgumentException("Schedule expression cannot be null or blank");
         }
@@ -96,13 +94,8 @@ public final class ScheduleExpressionParser {
             throw new IllegalArgumentException("Not a valid rate expression: " + expression);
         }
         int value = Integer.parseInt(matcher.group(1));
-        if (value < 1) {
-            throw new IllegalArgumentException("Rate value must be >= 1, got: " + value);
-        }
+        AwsRateExpressions.requirePositiveValue(value);
         String unit = matcher.group(2).toLowerCase(Locale.ROOT);
-        if (!allowWeeks && unit.startsWith("week")) {
-            throw new IllegalArgumentException("Week-based rates are not supported by EventBridge");
-        }
         return new Rate(value, unit);
     }
 
