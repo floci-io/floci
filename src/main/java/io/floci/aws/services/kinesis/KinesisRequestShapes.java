@@ -18,6 +18,20 @@ final class KinesisRequestShapes {
                         return new AwsException("InvalidArgumentException",
                                 "MaxRecordSizeInKiB must be an integer", 400);
                     }
+                    if ("ListStreams.Limit".equals(path)) {
+                        return new AwsException("InvalidArgumentException",
+                                "Limit must be an integer between 1 and 10000", 400);
+                    }
+                    if ("ListStreams.ExclusiveStartStreamName".equals(path)) {
+                        return new AwsException("InvalidArgumentException",
+                                "ExclusiveStartStreamName must be a valid stream name", 400);
+                    }
+                    if ("ListStreams.NextToken".equals(path)) {
+                        return new AwsException("InvalidArgumentException", "The NextToken is not valid.", 400);
+                    }
+                    if ("UpdateShardCount.TargetShardCount".equals(path)) {
+                        return new AwsException("InvalidArgumentException", "TargetShardCount must be an integer", 400);
+                    }
                     if (path.endsWith(".Tags") || path.contains(".Tags.")) {
                         return new AwsException("SerializationException",
                                 "Tags must be a map of string values.", 400);

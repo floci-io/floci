@@ -108,6 +108,24 @@ class KinesisListStreamsTest {
         assertEquals(400, error.getHttpStatus());
     }
 
+    @Test
+    void nonStringListStreamsMembersKeepTheirExistingErrors() {
+        ObjectNode limit = mapper.createObjectNode().put("Limit", "one");
+        AwsException invalidLimit = assertThrows(AwsException.class, () -> list(limit));
+        assertEquals("InvalidArgumentException", invalidLimit.getErrorCode());
+        assertEquals("Limit must be an integer between 1 and 10000", invalidLimit.getMessage());
+
+        ObjectNode start = mapper.createObjectNode().put("ExclusiveStartStreamName", 123);
+        AwsException invalidStart = assertThrows(AwsException.class, () -> list(start));
+        assertEquals("InvalidArgumentException", invalidStart.getErrorCode());
+        assertEquals("ExclusiveStartStreamName must be a valid stream name", invalidStart.getMessage());
+
+        ObjectNode token = mapper.createObjectNode().put("NextToken", false);
+        AwsException invalidToken = assertThrows(AwsException.class, () -> list(token));
+        assertEquals("InvalidArgumentException", invalidToken.getErrorCode());
+        assertEquals("The NextToken is not valid.", invalidToken.getMessage());
+    }
+
     private void create(String name, String region) {
         try (Response response = handler.handle("CreateStream",
                 mapper.valueToTree(Map.of("StreamName", name, "ShardCount", 1)), region)) {

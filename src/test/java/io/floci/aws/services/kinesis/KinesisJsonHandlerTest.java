@@ -1535,6 +1535,20 @@ class KinesisJsonHandlerTest {
     }
 
     @Test
+    void updateShardCountRejectsNonIntegerTargetWithExistingError() {
+        createStream("test-stream");
+        ObjectNode request = MAPPER.createObjectNode();
+        request.put("StreamName", "test-stream");
+        request.put("TargetShardCount", "two");
+        request.put("ScalingType", "UNIFORM_SCALING");
+
+        AwsException error = assertThrows(AwsException.class,
+                () -> handler.handle("UpdateShardCount", request, REGION));
+        assertEquals("InvalidArgumentException", error.getErrorCode());
+        assertEquals("TargetShardCount must be an integer", error.getMessage());
+    }
+
+    @Test
     void updateShardCountScalesUpAndReturnsExpectedShape() {
         createStream("test-stream", 2);
 
