@@ -380,11 +380,9 @@ public class KinesisService implements ResourceProvider {
 
     private void validateResourceTagLimit(Map<String, String> current, Map<String, String> added) {
         for (Map.Entry<String, String> entry : added.entrySet()) {
-            if (entry.getKey() == null || entry.getKey().isEmpty() || entry.getKey().length() > 128
-                    || !VALID_RESOURCE_TAG_CHARACTERS.matcher(entry.getKey()).matches()
+            if (entry.getKey() == null || !VALID_RESOURCE_TAG_CHARACTERS.matcher(entry.getKey()).matches()
                     || entry.getKey().regionMatches(true, 0, "aws:", 0, 4)
-                    || entry.getValue() == null || entry.getValue().length() > 256
-                    || !VALID_RESOURCE_TAG_CHARACTERS.matcher(entry.getValue()).matches()) {
+                    || entry.getValue() == null || !VALID_RESOURCE_TAG_CHARACTERS.matcher(entry.getValue()).matches()) {
                 throw new AwsException("InvalidArgumentException", "Invalid tag key or value", 400);
             }
         }

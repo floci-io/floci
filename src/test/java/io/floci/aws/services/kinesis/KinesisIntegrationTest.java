@@ -1108,12 +1108,7 @@ class KinesisIntegrationTest {
     @Test
     @Order(59)
     void consumerResourceTagsRoundTripOverJsonProtocol() {
-        given()
-            .header("X-Amz-Target", "Kinesis_20131202.CreateStream")
-            .contentType(KINESIS_CONTENT_TYPE)
-            .body("{\"StreamName\":\"resource-tags-test\",\"ShardCount\":1}")
-        .when().post("/")
-        .then().statusCode(200);
+        createStream("resource-tags-test", 1);
 
         String streamArn = given()
             .header("X-Amz-Target", "Kinesis_20131202.DescribeStreamSummary")

@@ -350,9 +350,6 @@ public class KinesisJsonHandler {
         String streamArn = request.path("StreamARN").asText();
         String consumerName = request.path("ConsumerName").asText();
         Map<String, String> tags = parseTags(request);
-        if (request.has("Tags") && tags.isEmpty()) {
-            throw new AwsException("InvalidArgumentException", "Tags must contain at least one tag", 400);
-        }
         KinesisConsumer consumer = service.registerStreamConsumer(streamArn, consumerName, tags, region);
         ObjectNode response = objectMapper.createObjectNode();
         response.set("Consumer", consumerToNode(consumer));
@@ -497,18 +494,12 @@ public class KinesisJsonHandler {
 
     private Response handleTagResource(JsonNode request, String region) {
         Map<String, String> tags = parseTags(request);
-        if (tags.isEmpty()) {
-            throw new AwsException("InvalidArgumentException", "Tags must contain at least one tag", 400);
-        }
         service.tagResource(request.path("ResourceARN").asText(null), tags, region);
         return Response.ok().build();
     }
 
     private Response handleUntagResource(JsonNode request, String region) {
         List<String> keys = parseTagKeys(request.path("TagKeys"));
-        if (keys.isEmpty() || keys.size() > 50 || keys.stream().anyMatch(key -> key.isEmpty() || key.length() > 128)) {
-            throw new AwsException("InvalidArgumentException", "TagKeys must contain 1 to 50 valid keys", 400);
-        }
         service.untagResource(request.path("ResourceARN").asText(null), keys, region);
         return Response.ok().build();
     }

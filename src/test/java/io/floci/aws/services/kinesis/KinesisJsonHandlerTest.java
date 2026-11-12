@@ -15,6 +15,8 @@ import jakarta.ws.rs.core.Response;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.Arguments;
+import org.junit.jupiter.params.provider.MethodSource;
 import org.junit.jupiter.params.provider.ValueSource;
 
 import java.math.BigDecimal;
@@ -26,6 +28,7 @@ import java.util.ArrayList;
 import java.util.Base64;
 import java.util.List;
 import java.util.Map;
+import java.util.stream.Stream;
 
 import static org.hamcrest.MatcherAssert.assertThat;
 import static org.hamcrest.Matchers.is;
@@ -186,6 +189,14 @@ class KinesisJsonHandlerTest {
         ObjectNode legacyList = MAPPER.createObjectNode().put("StreamName", "test-stream");
         assertEquals("stream", tagValue(responseEntity(handler.handle("ListTagsForStream", legacyList, REGION))
                 .path("Tags"), "owner"));
+
+        streamArnOnly.putArray("TagKeys").add("owner");
+        assertEquals(200, handler.handle("UntagResource", streamArnOnly, REGION).getStatus());
+        streamArnOnly.remove("TagKeys");
+        assertEquals(0, responseEntity(handler.handle("ListTagsForResource", streamArnOnly, REGION))
+                .path("Tags").size());
+        assertEquals(0, responseEntity(handler.handle("ListTagsForResource", consumerArnOnly, REGION))
+                .path("Tags").size());
     }
 
     @Test
@@ -316,58 +327,31 @@ class KinesisJsonHandlerTest {
         assertEquals("old", tagValue(tags, "key1"));
     }
 
-    @Test
-    void registerStreamConsumerRejectsExplicitlyEmptyTags() {
-        createStream("test-stream");
-        ObjectNode request = MAPPER.createObjectNode()
-                .put("StreamARN", STREAM_ARN)
-                .put("ConsumerName", "tagged-consumer");
-        request.putObject("Tags");
-        AwsException empty = assertThrows(AwsException.class,
-                () -> handler.handle("RegisterStreamConsumer", request, REGION));
-        assertEquals("InvalidArgumentException", empty.getErrorCode());
-        assertTrue(service.listStreamConsumers(STREAM_ARN, REGION).isEmpty());
-    }
-
-    @Test
-    void invalidRegistrationTagCharactersDoNotCreateConsumer() {
-        createStream("test-stream");
-        ObjectNode request = MAPPER.createObjectNode()
-                .put("StreamARN", STREAM_ARN)
-                .put("ConsumerName", "tagged-consumer");
-        request.putObject("Tags").put("bad*key", "value");
-        AwsException badKey = assertThrows(AwsException.class,
-                () -> handler.handle("RegisterStreamConsumer", request, REGION));
-        assertEquals("InvalidArgumentException", badKey.getErrorCode());
-        assertTrue(service.listStreamConsumers(STREAM_ARN, REGION).isEmpty());
-    }
-
-    @Test
-    void registrationRejectsReservedTagKeyPrefix() {
-        createStream("test-stream");
-        ObjectNode request = MAPPER.createObjectNode()
-                .put("StreamARN", STREAM_ARN)
-                .put("ConsumerName", "tagged-consumer");
-        request.putObject("Tags").put("aws:owner", "user");
-        AwsException reserved = assertThrows(AwsException.class,
-                () -> handler.handle("RegisterStreamConsumer", request, REGION));
-        assertEquals("InvalidArgumentException", reserved.getErrorCode());
-        assertTrue(service.listStreamConsumers(STREAM_ARN, REGION).isEmpty());
-    }
-
-    @Test
-    void invalidRegistrationTagsDoNotCreateConsumer() {
-        createStream("test-stream");
-        ObjectNode request = MAPPER.createObjectNode()
-                .put("StreamARN", STREAM_ARN)
-                .put("ConsumerName", "tagged-consumer");
-        ObjectNode tags = request.putObject("Tags");
+    private static Stream<Arguments> rejectedRegistrationTags() {
+        ObjectNode tooManyTags = MAPPER.createObjectNode();
         for (int i = 0; i < 51; i++) {
-            tags.put("key" + i, "value");
+            tooManyTags.put("key" + i, "value");
         }
-        AwsException overLimit = assertThrows(AwsException.class,
+        return Stream.of(
+                Arguments.of("empty map", MAPPER.createObjectNode(), "InvalidArgumentException"),
+                Arguments.of("invalid key", MAPPER.createObjectNode().put("bad*key", "value"),
+                        "InvalidArgumentException"),
+                Arguments.of("reserved prefix", MAPPER.createObjectNode().put("aws:owner", "user"),
+                        "InvalidArgumentException"),
+                Arguments.of("over capacity", tooManyTags, "LimitExceededException"));
+    }
+
+    @ParameterizedTest(name = "{0}")
+    @MethodSource("rejectedRegistrationTags")
+    void invalidRegistrationTagsDoNotCreateConsumer(String scenario, JsonNode tags, String errorCode) {
+        createStream("test-stream");
+        ObjectNode request = MAPPER.createObjectNode()
+                .put("StreamARN", STREAM_ARN)
+                .put("ConsumerName", "tagged-consumer");
+        request.set("Tags", tags);
+        AwsException error = assertThrows(AwsException.class,
                 () -> handler.handle("RegisterStreamConsumer", request, REGION));
-        assertEquals("LimitExceededException", overLimit.getErrorCode());
+        assertEquals(errorCode, error.getErrorCode());
         assertTrue(service.listStreamConsumers(STREAM_ARN, REGION).isEmpty());
     }
 
