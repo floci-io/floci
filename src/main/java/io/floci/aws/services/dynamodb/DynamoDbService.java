@@ -24,6 +24,8 @@ import io.floci.aws.core.storage.AccountAwareStorageBackend;
 import io.floci.aws.core.storage.InMemoryStorage;
 import io.floci.aws.core.storage.StorageBackend;
 import io.floci.aws.core.storage.StorageFactory;
+import io.floci.aws.services.dynamodb.DynamoDbCapacityQuotas.Capacity;
+import io.floci.aws.services.dynamodb.NativeDynamoDbTableService.GsiThroughputUpdate;
 import io.floci.aws.services.dynamodb.model.AttributeDefinition;
 import io.floci.aws.services.dynamodb.model.ConditionalCheckFailedException;
 import io.floci.aws.services.dynamodb.model.ContributorInsights;
@@ -131,6 +133,8 @@ public class DynamoDbService {
     // relies on ReentrantLock's re-entrancy so the inner put/update/delete calls do
     // not deadlock after the outer transaction already took each participant's lock.
     private final ConcurrentHashMap<String, ConcurrentHashMap<String, ReentrantLock>> itemLocks = new ConcurrentHashMap<>();
+    // Held from an account quota check until the capacity it allowed is stored.
+    private final Object capacityLock = new Object();
     // ClientRequestToken idempotency for TransactWriteItems. AWS retains tokens for
     // ~10 minutes; floci uses the same window. The cache entry stores a hash of the
     // request body so a replay with the same token but different parameters can be
@@ -685,7 +689,12 @@ public class DynamoDbService {
             table.setVectorIndexes(created);
         }
 
-        tableStore.put(storageKey, table);
+        synchronized (capacityLock) {
+            if (!"PAY_PER_REQUEST".equals(billingMode)) {
+                DynamoDbCapacityQuotas.requireNewTableWithinQuotas(table, reservedCapacity(region), region);
+            }
+            tableStore.put(storageKey, table);
+        }
         itemsByTable.put(scopedItemsKey(storageKey), new ConcurrentSkipListMap<>());
         LOG.infov("Created table: {0} in region {1}", tableName, region);
         return table;
@@ -1039,6 +1048,19 @@ public class DynamoDbService {
         if (kinesisForwarder != null) {
             kinesisForwarder.onDestinationDisabled(regionResolver.getAccountId(), region, tableName, streamArn);
         }
+    }
+
+    Object capacityLock() {
+        return capacityLock;
+    }
+
+    private Capacity reservedCapacity(String region) {
+        String prefix = region + "::";
+        Capacity reserved = Capacity.NONE;
+        for (TableDefinition table : tableStore.scan(k -> k.startsWith(prefix))) {
+            reserved = reserved.plus(Capacity.of(table));
+        }
+        return reserved;
     }
 
     public List<String> listTables(String region) {
@@ -2506,6 +2528,17 @@ public class DynamoDbService {
                                         List<AttributeDefinition> newAttrDefs,
                                         List<VectorIndexCreate> vectorCreates, List<String> vectorDeletes,
                                         String billingMode, String region) {
+        return updateTable(tableName, readCapacity, writeCapacity, gsiCreates, gsiDeletes, List.of(),
+                           newAttrDefs, vectorCreates, vectorDeletes, billingMode, region);
+    }
+
+    /** @param gsiUpdates the index throughput changes, which the caller applies after this returns */
+    public TableDefinition updateTable(String tableName, Long readCapacity, Long writeCapacity,
+                                        List<GlobalSecondaryIndex> gsiCreates, List<String> gsiDeletes,
+                                        List<GsiThroughputUpdate> gsiUpdates,
+                                        List<AttributeDefinition> newAttrDefs,
+                                        List<VectorIndexCreate> vectorCreates, List<String> vectorDeletes,
+                                        String billingMode, String region) {
         String canonicalTableName = canonicalTableName(region, tableName);
         String storageKey = regionKey(region, canonicalTableName);
         TableDefinition table = tableStore.get(storageKey)
@@ -2521,6 +2554,7 @@ public class DynamoDbService {
             throw new AwsException("ValidationException",
                     "The parameter 'ProvisionedThroughput.WriteCapacityUnits' must be greater than 0", 400);
         }
+        DynamoDbCapacityQuotas.requireWithinTableQuota(readCapacity, writeCapacity, region);
         if (readCapacity != null && writeCapacity != null
                 && "PROVISIONED".equals(table.getBillingMode())
                 && readCapacity.equals(table.getProvisionedThroughput().getReadCapacityUnits())
@@ -2566,9 +2600,13 @@ public class DynamoDbService {
         if (newAttrDefs != null) {
             knownAttrDefs.addAll(newAttrDefs);
         }
+        String newBillingMode = billingMode != null ? billingMode : table.getBillingMode();
         validateVectorIndexUpdates(table, vectorIndexCreates, vectorIndexDeletes,
-                gsiCreates.size() + gsiDeletes.size(), knownAttrDefs,
-                billingMode != null ? billingMode : table.getBillingMode());
+                gsiCreates.size() + gsiDeletes.size(), knownAttrDefs, newBillingMode);
+        if (!"PAY_PER_REQUEST".equals(newBillingMode)) {
+            DynamoDbCapacityQuotas.requireUpdateWithinQuotas(table, readCapacity, writeCapacity, gsiCreates,
+                    gsiDeletes, gsiUpdates, reservedCapacity(region), region);
+        }
 
         if (readCapacity != null) {
             table.getProvisionedThroughput().setReadCapacityUnits(readCapacity);
