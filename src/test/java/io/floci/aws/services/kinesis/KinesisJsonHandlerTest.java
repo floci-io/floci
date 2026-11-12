@@ -256,14 +256,14 @@ class KinesisJsonHandlerTest {
             request.putObject("Tags").put("valid", "initial");
             assertEquals(200, handler.handle("TagResource", request, REGION).getStatus());
 
-            for (String key : List.of("bad*key", "bad:key")) {
+            for (String key : List.of("bad*key")) {
                 request.set("Tags", MAPPER.createObjectNode().put(key, "value"));
                 AwsException badKey = assertThrows(AwsException.class,
                         () -> handler.handle("TagResource", request, REGION));
                 assertEquals("InvalidArgumentException", badKey.getErrorCode());
             }
 
-            for (String value : List.of("bad*value", "bad:value")) {
+            for (String value : List.of("bad*value")) {
                 request.set("Tags", MAPPER.createObjectNode().put("valid", value));
                 AwsException badValue = assertThrows(AwsException.class,
                         () -> handler.handle("TagResource", request, REGION));
@@ -280,14 +280,18 @@ class KinesisJsonHandlerTest {
     @Test
     void tagResourceAcceptsDocumentedUnicodeAndSymbols() {
         createStream("test-stream");
-        String key = "\u00c9quipe_./=+@-%9";
-        String value = "\u7a7a \u767d%";
-        ObjectNode request = MAPPER.createObjectNode().put("ResourceARN", STREAM_ARN);
-        request.putObject("Tags").put(key, value);
-        assertEquals(200, handler.handle("TagResource", request, REGION).getStatus());
-        JsonNode tags = responseEntity(handler.handle("ListTagsForResource",
-                MAPPER.createObjectNode().put("ResourceARN", STREAM_ARN), REGION)).path("Tags");
-        assertEquals(value, tagValue(tags, key));
+        String consumerArn = service.registerStreamConsumer(STREAM_ARN, "tagged-consumer", REGION)
+                .getConsumerArn();
+        String key = "\u00c9quipe_./=+@-:%9";
+        String value = "\u7a7a \u767d%:";
+        for (String arn : List.of(STREAM_ARN, consumerArn)) {
+            ObjectNode request = MAPPER.createObjectNode().put("ResourceARN", arn);
+            request.putObject("Tags").put(key, value);
+            assertEquals(200, handler.handle("TagResource", request, REGION).getStatus());
+            JsonNode tags = responseEntity(handler.handle("ListTagsForResource",
+                    MAPPER.createObjectNode().put("ResourceARN", arn), REGION)).path("Tags");
+            assertEquals(value, tagValue(tags, key));
+        }
     }
 
     @Test
