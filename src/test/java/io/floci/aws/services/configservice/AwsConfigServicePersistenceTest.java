@@ -48,7 +48,7 @@ class AwsConfigServicePersistenceTest {
         first.putDeliveryChannel(REGION,
                 new DeliveryChannel("default", "config-bucket", null, null, null, null));
         first.tagResource(REGION, rule.configRuleArn(), List.of(Map.of("Key", "env", "Value", "prod")));
-        String recorderArn = first.describeConfigurationRecorders(REGION, null).getFirst().arn();
+        String recorderArn = first.describeConfigurationRecorders(REGION, null, null).getFirst().arn();
 
         AwsConfigService reloaded = restartedService();
 
@@ -58,8 +58,8 @@ class AwsConfigServicePersistenceTest {
                 reloaded.describeConformancePacks(REGION, null).stream()
                         .map(p -> p.conformancePackName()).toList());
         assertEquals("default",
-                reloaded.describeConfigurationRecorders(REGION, null).getFirst().name());
-        assertEquals(recorderArn, reloaded.describeConfigurationRecorders(REGION, null).getFirst().arn());
+                reloaded.describeConfigurationRecorders(REGION, null, null).getFirst().name());
+        assertEquals(recorderArn, reloaded.describeConfigurationRecorders(REGION, null, null).getFirst().arn());
         assertEquals("config-bucket",
                 reloaded.describeDeliveryChannels(REGION, null).getFirst().s3BucketName());
         assertEquals("prod", reloaded.listTagsForResource(REGION, rule.configRuleArn()).getFirst().get("Value"));
@@ -148,22 +148,22 @@ class AwsConfigServicePersistenceTest {
         first.putDeliveryChannel(REGION,
                 new DeliveryChannel("default", "config-bucket", null, null, null, null));
         first.startConfigurationRecorder(REGION, "default");
-        Long startedAt = first.describeConfigurationRecorderStatus(REGION, null).getFirst().lastStartTime();
+        Long startedAt = first.describeConfigurationRecorderStatus(REGION, null, null).getFirst().lastStartTime();
         assertNotNull(startedAt);
 
         AwsConfigService reloaded = restartedService();
 
         ConfigurationRecorderStatus afterStart =
-                reloaded.describeConfigurationRecorderStatus(REGION, null).getFirst();
+                reloaded.describeConfigurationRecorderStatus(REGION, null, null).getFirst();
         assertTrue(afterStart.recording());
         assertEquals(startedAt, afterStart.lastStartTime());
 
         reloaded.stopConfigurationRecorder(REGION, "default");
-        Long stoppedAt = reloaded.describeConfigurationRecorderStatus(REGION, null).getFirst().lastStopTime();
+        Long stoppedAt = reloaded.describeConfigurationRecorderStatus(REGION, null, null).getFirst().lastStopTime();
         assertNotNull(stoppedAt);
 
         ConfigurationRecorderStatus afterStop =
-                restartedService().describeConfigurationRecorderStatus(REGION, null).getFirst();
+                restartedService().describeConfigurationRecorderStatus(REGION, null, null).getFirst();
         assertFalse(afterStop.recording());
         assertEquals(startedAt, afterStop.lastStartTime());
         assertEquals(stoppedAt, afterStop.lastStopTime());
@@ -184,7 +184,7 @@ class AwsConfigServicePersistenceTest {
         reloaded.putConfigurationRecorder(REGION, recorder, null);
 
         ConfigurationRecorderStatus status =
-                reloaded.describeConfigurationRecorderStatus(REGION, null).getFirst();
+                reloaded.describeConfigurationRecorderStatus(REGION, null, null).getFirst();
         assertFalse(status.recording());
         assertNull(status.lastStartTime());
     }

@@ -2,6 +2,7 @@ package io.floci.aws.services.configservice;
 
 import io.floci.aws.testing.RestAssuredJsonUtils;
 import io.quarkus.test.junit.QuarkusTest;
+import io.restassured.response.Response;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.MethodOrderer;
 import org.junit.jupiter.api.Order;
@@ -535,5 +536,70 @@ class ConfigurationRecorderIntegrationTest {
         .then()
             .statusCode(400)
             .body("__type", equalTo("ResourceNotFoundException"));
+    }
+
+    @Test
+    @Order(21)
+    void bothDescribeCallsReturnAndFilterByTheRecorderArn() {
+        post("PutConfigurationRecorder", """
+            {"ConfigurationRecorder": {"name": "default", "roleARN": "arn:aws:iam::123456789012:role/r"}}
+            """)
+            .then().statusCode(200);
+        String arn = post("DescribeConfigurationRecorders", "{}")
+            .then().statusCode(200)
+            .extract().path("ConfigurationRecorders[0].arn");
+
+        post("DescribeConfigurationRecorderStatus", "{}")
+            .then().statusCode(200)
+            .body("ConfigurationRecordersStatus[0].arn", equalTo(arn));
+        post("DescribeConfigurationRecorders", """
+            {"Arn": "%s"}
+            """.formatted(arn))
+            .then().statusCode(200)
+            .body("ConfigurationRecorders.arn", contains(arn));
+        post("DescribeConfigurationRecorderStatus", """
+            {"Arn": "%s", "ConfigurationRecorderNames": ["default"]}
+            """.formatted(arn))
+            .then().statusCode(200)
+            .body("ConfigurationRecordersStatus.arn", contains(arn));
+    }
+
+    @Test
+    @Order(22)
+    void anArnOrNameThatMissesTheRecorderIsNoSuchConfigurationRecorder() {
+        String arn = post("DescribeConfigurationRecorders", "{}")
+            .then().statusCode(200)
+            .extract().path("ConfigurationRecorders[0].arn");
+        String ghost = "arn:aws:config:us-east-1:000000000000:configuration-recorder/default/ghost";
+
+        post("DescribeConfigurationRecorders", """
+            {"Arn": "%s"}
+            """.formatted(ghost))
+            .then().statusCode(400)
+            .body("__type", equalTo("NoSuchConfigurationRecorderException"));
+        post("DescribeConfigurationRecorderStatus", """
+            {"Arn": "%s"}
+            """.formatted(ghost))
+            .then().statusCode(400)
+            .body("__type", equalTo("NoSuchConfigurationRecorderException"));
+        post("DescribeConfigurationRecorders", """
+            {"Arn": "%s", "ConfigurationRecorderNames": ["other"]}
+            """.formatted(arn))
+            .then().statusCode(400)
+            .body("__type", equalTo("NoSuchConfigurationRecorderException"));
+        post("DescribeConfigurationRecorderStatus", """
+            {"Arn": "%s", "ConfigurationRecorderNames": ["other"]}
+            """.formatted(arn))
+            .then().statusCode(400)
+            .body("__type", equalTo("NoSuchConfigurationRecorderException"));
+    }
+
+    private static Response post(String action, String body) {
+        return given()
+            .header("X-Amz-Target", TARGET_PREFIX + action)
+            .contentType(CONTENT_TYPE)
+            .body(body)
+        .when()
+            .post("/");
     }
 }
