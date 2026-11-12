@@ -127,7 +127,7 @@ def test_models_sharing_a_scope_must_agree_on_the_denial_status():
         r.build({"lambda": first, "lambda-microvms": second}, "botocore test")
 
 
-@pytest.mark.parametrize("name", ["controltower", "signer"])
+@pytest.mark.parametrize("name", ["controltower", "fis", "resource-explorer-2", "signer"])
 @pytest.mark.parametrize("operation,method,source", [
     ("TagResource", "POST", "body"),
     ("UntagResource", "DELETE", "?resourceArn"),
@@ -147,7 +147,8 @@ def test_shared_tag_alternative_collision_is_rejected():
             TagResource=("POST", "/tags/{resourceArn}"), OtherOperation=("POST", "/tags"))}, "test")
 
 
-@pytest.mark.parametrize("name", ["payment-cryptography-data", "signer", "xray", "guardduty"])
+@pytest.mark.parametrize("name", ["payment-cryptography-data", "signer", "xray", "guardduty",
+                                  "resource-explorer-2"])
 def test_a_model_a_route_filter_moves_under_a_prefix_keeps_its_own_paths(name):
     # IAM matches a moved request on its path without the prefix its filter records, so the routes are the model's.
     doc = r.build({name: model("rest-json", "2020-01-01", GetThing=("GET", "/things/{ThingId}"))}, "test")
@@ -186,3 +187,7 @@ def test_an_arn_label_the_controller_lets_span_slashes_is_greedy():
     operations = doc["models"]["apigatewayv2"]["operations"]
     assert operations["TagResource"] == {"method": "POST", "requestUri": "/v2/tags/{resource-arn+}"}
     assert operations["GetApi"] == {"method": "GET", "requestUri": "/v2/apis/{apiId}"}
+    # OAM's tag routes are served the same way, its sink and link ARNs holding a slash.
+    doc = r.build({"oam": model("rest-json", "2022-06-10", TagResource=("PUT", "/tags/{ResourceArn}"),
+                                GetSink=("POST", "/GetSink"))}, "test")
+    assert doc["models"]["oam"]["operations"]["TagResource"] == {"method": "PUT", "requestUri": "/tags/{ResourceArn+}"}

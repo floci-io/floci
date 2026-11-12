@@ -1825,8 +1825,9 @@ Map, ACM, CodePipeline, CodeBuild, Amazon Managed Service for Apache Flink (Kine
 Application Auto Scaling, AWS Budgets, Cost and Usage Reports, Service Quotas, Amazon Textract, Amazon Translate, Amazon Athena,
 AWS Data Exports, AWS Pricing Calculator, Cost Explorer, CloudTrail, Global Accelerator, Amazon
 Timestream for InfluxDB, Amazon Redshift, the Amazon Redshift Data API, AWS Payment Cryptography, AWS DataSync, Amazon EMR,
-Amazon Rekognition, IAM Identity Center, Amazon Inspector, Amazon Macie, Amazon OpenSearch Service, IAM Access Analyzer,
-AWS Security Hub and Amazon GuardDuty they come from a table generated from AWS's Service Reference and botocore, `src/main/resources/aws/iam-request-resources.json`, which gives each
+Amazon Rekognition, IAM Identity Center, Amazon Inspector, Amazon Macie, AWS Fault Injection Service, AWS Resource
+Access Manager, CloudWatch Observability Access Manager, AWS Resource Explorer, AWS Account Management, AWS Control
+Catalog, Amazon OpenSearch Service, IAM Access Analyzer, AWS Security Hub and Amazon GuardDuty they come from a table generated from AWS's Service Reference and botocore, `src/main/resources/aws/iam-request-resources.json`, which gives each
 operation's action, the resource types that action acts on with their ARN formats, and the request
 members that name them: a member holding a resource's ARN, which counts when it matches the format
 of a type the action acts on, or members filling the variables of a type's format. A member holding
@@ -1947,6 +1948,18 @@ inside a parameter cannot make the route's rule miss. A trailing `/` is dropped 
 drops it, so `POST /clusters/` is checked as `POST /clusters`. An S3 path keeps it, since an S3 key
 may end in a slash, as a folder marker's does, and S3's rules already take a bucket's one trailing
 slash.
+
+Every route Floci serves of AWS Fault Injection Service, AWS Resource Access Manager, CloudWatch
+Observability Access Manager, AWS Resource Explorer, AWS Account Management and AWS Control Catalog is
+checked as its operation's action, on the resource its request names. An Account Management request
+naming an `AccountId` is checked on that member account of the caller's organization,
+`arn:aws:account::<management account>:account/<organization>/<AccountId>`, or on
+`arn:aws:account::*:account/o-*/<AccountId>` for an account the caller's organization does not hold, which
+Account Management refuses; one naming none is checked on the caller's own account. The Fault Injection
+Service and Resource Explorer tag routes are checked on `/tags/<arn>` and on the bare `/tags` Floci also
+serves, and OAM's on `/tags/<arn>` whether the ARN's slash is encoded or not. A `CreateLink` that carries
+tags needs `oam:TagResource` on the sink it names, where the operation is checked, since it acts on no
+link.
 
 The REST routes mapped to an action are those of S3, Lambda, API Gateway, SES v2, RDS Data,
 Kinesis, EKS, EventBridge Scheduler, EventBridge Pipes and Aurora DSQL. In EKS that is every route,
@@ -2374,7 +2387,7 @@ its namespace's `CreateAction` key, as `ec2:CreateTags`, `ecs:TagResource`, Clou
 `TagResource` and Elastic Load Balancing's `AddTags` do, the key is the operation's name:
 `ec2:CreateAction` is `RunInstances` for an instance launched with tags. The operation's own action
 is checked with the same `aws:RequestTag/<key>` and `aws:TagKeys`, once for each resource's tags,
-wherever the Service Reference lists those keys for it or for a resource it acts on, which it does for 558 of the operations read, so
+wherever the Service Reference lists those keys for it or for a resource it acts on, which it does for 589 of the operations read, so
 "allow `sqs:CreateQueue` only with `aws:RequestTag/team`" and "deny it when `aws:RequestTag/team` is
 null" hold as on AWS; keys a service's own condition keys already give, as EC2's `RunInstances`
 does, are kept. It is checked once for each reading of the tags and refused if any is denied: the

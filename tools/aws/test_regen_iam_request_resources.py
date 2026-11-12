@@ -62,6 +62,17 @@ def test_a_fixed_format_and_a_creates_own_type_are_named_without_members():
         {"type": "pool", "fill": {}}]
 
 
+def test_a_create_makes_its_own_type_whatever_a_member_holding_the_resources_it_acts_on_names():
+    # CreateResourceShare's resourceArns are what the share it makes holds, never the share itself.
+    assert r.resources_for("svc:CreatePool", ["pool", "thing"], FORMATS, members("resourceArns[]")) == [
+        {"types": ["pool", "thing"], "arn": "resourceArns[]"}, {"type": "pool", "fill": {}}]
+    # A member named after the type it makes still holds it, and a non-create makes nothing.
+    assert r.resources_for("svc:CreatePool", ["pool"], FORMATS, members("PoolArn")) == [
+        {"types": ["pool"], "arn": "PoolArn"}]
+    assert r.resources_for("svc:UpdatePool", ["pool"], FORMATS, members("resourceArns[]")) == [
+        {"types": ["pool"], "arn": "resourceArns[]"}]
+
+
 def test_an_optional_arn_member_of_a_type_without_variables_names_it_when_absent():
     named = [{"types": ["catalog", "thing"], "arn": "CatalogArn"}]
     assert r.with_absent_arn(named, FORMATS, {"CatalogArn"}) == named + [
@@ -209,6 +220,34 @@ def test_a_bare_id_names_the_resource_whose_config_an_operation_reads():
         {"type": "distribution", "fill": {"DistributionId": "Id"}}]
 
 
+def lever_model(request_uri: str, label: str = "id") -> dict:
+    """A rest-json model whose UpdateSafetyLeverState takes `id` from the path label given, and a `state`."""
+    return {"metadata": {"protocol": "rest-json"},
+            "operations": {"UpdateSafetyLeverState": {"http": {"method": "PATCH", "requestUri": request_uri},
+                                                      "input": {"shape": "In"}}},
+            "shapes": {"In": {"type": "structure", "members": {
+                           "id": {"shape": "String", "location": "uri", "locationName": label},
+                           "state": {"shape": "String"}}},
+                       "String": {"type": "string"}}}
+
+
+def test_a_bare_path_label_names_the_type_the_segment_before_it_names():
+    formats = {"safety-lever": "arn:${Partition}:fis:${Region}:${Account}:safety-lever/${Id}",
+               "experiment": "arn:${Partition}:fis:${Region}:${Account}:experiment/${Id}"}
+    labels = r.path_labels({"fis": lever_model("/safetyLevers/{id}/state")}, "UpdateSafetyLeverState")
+    assert labels == {"id": "safetylever"}
+    # The lever's state is the lever's: its path says so where the operation's name goes on past the type.
+    assert r.resources_for("fis:UpdateSafetyLeverState", ["safety-lever"], formats, members("id"), labels=labels) == [
+        {"type": "safety-lever", "fill": {"Id": "id"}}]
+    assert r.resources_for("fis:UpdateSafetyLeverState", ["safety-lever"], formats, members("id")) == []
+    # A segment naming another type, a label after another label and a member that is no bare name name nothing.
+    assert r.resources_for("fis:UpdateSafetyLeverState", ["experiment"], formats, members("id"), labels=labels) == []
+    assert r.path_labels({"fis": lever_model("/{other}/{id}/state")}, "UpdateSafetyLeverState") == {}
+    named = lever_model("/safetyLevers/{leverId}", label="leverId")
+    named["shapes"]["In"]["members"]["leverId"] = named["shapes"]["In"]["members"].pop("id")
+    assert r.path_labels({"fis": named}, "UpdateSafetyLeverState") == {}
+
+
 def test_a_resource_member_taking_only_an_arn_holds_the_resource_the_action_acts_on():
     model = {
         "metadata": {"protocol": "rest-xml", "endpointPrefix": "svc"},
@@ -298,6 +337,34 @@ def test_a_member_holding_an_account_id_gives_the_account_of_the_types_named_by_
                           ["registryId"]) == [{"type": "catalog", "fill": {}}]
     # Two account members, either of which it could be, give none.
     assert r.with_account([{"type": "thing", "fill": {}}], FORMATS, ["a", "b"]) == [{"type": "thing", "fill": {}}]
+
+
+ACCOUNTS = {"account": "arn:${Partition}:account::${Account}:account",
+            "accountInOrganization":
+                "arn:${Partition}:account::${ManagementAccountId}:account/o-${OrganizationId}/${MemberAccountId}"}
+
+
+def test_an_account_member_names_the_account_an_arn_names_before_the_one_it_is_in():
+    # AccountId is the member account; the management account, the ARN's own, and the organization stay open.
+    assert r.resources_for("account:GetAlternateContact", ["accountInOrganization"], ACCOUNTS,
+                           members("AccountId")) == [
+        {"type": "accountInOrganization", "fill": {"MemberAccountId": "AccountId"}}]
+
+
+def test_an_account_alone_applies_to_a_request_leaving_out_the_optional_account_member_naming_another():
+    named = r.resources_for("account:GetAlternateContact", ["account", "accountInOrganization"], ACCOUNTS,
+                            members("AccountId"))
+    assert named == [{"type": "account", "fill": {}},
+                     {"type": "accountInOrganization", "fill": {"MemberAccountId": "AccountId"}}]
+    absent = r.with_absent_account(named, ACCOUNTS, ["AccountId"], {"AccountId"})
+    assert absent == [{"type": "account", "fill": {}, "when": {"AccountId": [None]}}, named[1]]
+    # The account member then gives the account of neither: the caller's own, or the one the member fills.
+    assert r.with_account(absent, ACCOUNTS, ["AccountId"]) == absent
+    # A required member is always there; one naming nothing else gives the account its account.
+    assert r.with_absent_account(named, ACCOUNTS, ["AccountId"], set()) == named
+    alone = [{"type": "account", "fill": {}}]
+    assert r.with_absent_account(alone, ACCOUNTS, ["AccountId"], {"AccountId"}) == alone
+    assert r.with_account(alone, ACCOUNTS, ["AccountId"]) == [{"type": "account", "fill": {}, "account": "AccountId"}]
 
 
 @pytest.mark.parametrize("member", ["ownerAccount", "resourceAccount"])

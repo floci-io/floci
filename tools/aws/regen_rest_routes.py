@@ -49,27 +49,33 @@ HAND_ROUTED: dict[str, str] = {
 # botocore model -> the credential scope Floci authorizes its requests under.
 MODELS: dict[str, str] = {
     "accessanalyzer": "access-analyzer",
+    "account": "account",
     "apigateway": "apigateway",
     "apigatewayv2": "apigateway",
     "cloudfront": "cloudfront",
     "cloudfront-keyvaluestore": "cloudfront-keyvaluestore",
+    "controlcatalog": "controlcatalog",
     "controltower": "controltower",
     "dsql": "dsql",
     "eks": "eks",
     "emr-serverless": "emr-serverless",
     "guardduty": "guardduty",
     "es": "es",
+    "fis": "fis",
     "inspector2": "inspector2",
     "lakeformation": "lakeformation",
     "lambda": "lambda",
     "lambda-core": "lambda",
     "lambda-microvms": "lambda",
     "macie2": "macie2",
+    "oam": "oam",
     "opensearch": "es",
     # The data plane is signed for the service, which is one scope for both of its planes.
     "payment-cryptography-data": "payment-cryptography",
     "pipes": "pipes",
     "quicksight": "quicksight",
+    "ram": "ram",
+    "resource-explorer-2": "resource-explorer-2",
     "s3": "s3",
     "s3control": "s3",
     "scheduler": "scheduler",
@@ -86,15 +92,19 @@ MODELS: dict[str, str] = {
 SHARED_ROUTES: dict[str, frozenset[str]] = {
     "apigateway": frozenset({"TagResource", "UntagResource", "GetTags"}),
     "controltower": frozenset({"TagResource", "UntagResource", "ListTagsForResource"}),
+    "fis": frozenset({"TagResource", "UntagResource", "ListTagsForResource"}),
+    "resource-explorer-2": frozenset({"TagResource", "UntagResource", "ListTagsForResource"}),
     "signer": frozenset({"TagResource", "UntagResource", "ListTagsForResource"}),
 }
 
 # Operations whose ARN label a model gives one segment, where the controller serving them lets it span
 # the slashes the ARN holds: a request may send the ARN unencoded and still reach the operation, so its
 # route has to take that request too or it would go unchecked. API Gateway v2's tag routes are
-# `/v2/tags/{resourceArn: .+}` in its controller.
+# `/v2/tags/{resourceArn: .+}` in its controller, and OAM's `/tags/{resourceArn:.+}` in its own and in the
+# shared tags controller, which takes every `/tags/{arn}` request.
 ARN_SPANNING_ROUTES: dict[str, frozenset[str]] = {
     "apigatewayv2": frozenset({"TagResource", "UntagResource", "GetTags"}),
+    "oam": frozenset({"TagResource", "UntagResource", "ListTagsForResource"}),
 }
 
 
