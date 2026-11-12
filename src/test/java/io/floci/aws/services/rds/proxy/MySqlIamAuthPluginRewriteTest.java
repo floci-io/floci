@@ -71,6 +71,29 @@ class MySqlIamAuthPluginRewriteTest {
     }
 
     @Test
+    void rewritesCompleteQuotedAuthValues() {
+        String prefix = "CREATE USER 'app'@'%' IDENTIFIED WITH AWSAuthenticationPlugin AS ";
+        String expected = "CREATE USER 'app'@'%' IDENTIFIED WITH mysql_native_password AS '" + HASH + "'";
+        assertEquals(expected, rewrite(prefix + "'abc\\'def'"));
+        assertEquals(expected, rewrite(prefix + "'abc''def'"));
+        assertEquals(expected, rewrite(prefix + "\"abc\\\"def\""));
+        assertEquals(expected, rewrite(prefix + "\"abc\"\"def\""));
+    }
+
+    @Test
+    void leavesUnterminatedQuotedAuthValueUntouched() {
+        String prefix = "CREATE USER 'app'@'%' IDENTIFIED WITH AWSAuthenticationPlugin AS ";
+        assertNull(rewrite(prefix + "'abc\\'def"));
+        assertNull(rewrite(prefix + "\"abc\\\"def"));
+    }
+
+    @Test
+    void rewritesAfterBackslashInBacktickIdentifier() {
+        assertEquals("CREATE USER `svc\\`@'%' IDENTIFIED WITH mysql_native_password AS '" + HASH + "'",
+                rewrite("CREATE USER `svc\\`@'%' IDENTIFIED WITH AWSAuthenticationPlugin AS 'RDS'"));
+    }
+
+    @Test
     void findsTheClauseBehindQueryAttributeMetadata() {
         byte[] payload = new byte[]{0x03, 0x00, 0x01};
         byte[] sql = "CREATE USER a IDENTIFIED WITH AWSAuthenticationPlugin as 'RDS'"

@@ -1,8 +1,5 @@
 package io.floci.aws.services.rds.proxy;
 
-import io.airlift.compress.MalformedInputException;
-import io.airlift.compress.zstd.ZstdInputStream;
-
 import java.io.ByteArrayInputStream;
 import java.io.ByteArrayOutputStream;
 import java.io.EOFException;
@@ -36,6 +33,14 @@ final class MySqlCompressedCommandRelay {
 
     static void relay(InputStream from, OutputStream to, boolean zstd, boolean queryAttributes,
                       boolean multiStatements) throws IOException {
+        if (zstd) {
+            byte[] opaqueFrame;
+            while ((opaqueFrame = readFrame(from)) != null) {
+                to.write(opaqueFrame);
+                to.flush();
+            }
+            return;
+        }
         PacketBuffer pending = new PacketBuffer();
         List<byte[]> frames = new ArrayList<>();
         boolean forwardedTail = false;
@@ -56,7 +61,7 @@ final class MySqlCompressedCommandRelay {
             int bypassPrefix = passthroughRemaining;
             passthroughRemaining = 0;
             if (bypassPrefix == 0 && pending.size() == 0 && frameLength >= 4) {
-                int firstPacketLength = firstInnerPacketLength(frame, zstd);
+                int firstPacketLength = firstInnerPacketLength(frame);
                 if (firstPacketLength > MAX_INSPECTION_BYTES && firstPacketLength + 4 >= frameLength) {
                     passthroughRemaining = firstPacketLength + 4 - frameLength;
                     continuingPacket = firstPacketLength == MAX_PACKET_PAYLOAD;
@@ -68,10 +73,7 @@ final class MySqlCompressedCommandRelay {
             int previouslyForwarded = forwardedTail ? pending.size() : 0;
             frames.add(frame);
             bufferedEncodedBytes += frame.length;
-            if (frames.size() > MAX_PENDING_FRAMES) {
-                throw new IOException("Too many compressed MySQL frames for one command");
-            }
-            pending.writeBytes(decode(frame, zstd));
+            pending.writeBytes(decode(frame));
             byte[] input = pending.bytes();
             int available = pending.size();
             int offset = bypassPrefix;
@@ -90,7 +92,8 @@ final class MySqlCompressedCommandRelay {
                         || continuingPacket || length > MAX_INSPECTION_BYTES
                         || length == 0 || (raw[4] & 0xFF) != COM_QUERY
                         || (queryAttributes && (raw.length < 7 || raw[5] != 0 || raw[6] != 1))
-                        || (!multiStatements && !isUserDdl(raw, queryAttributes))
+                        || (!multiStatements && inspectUserDdlPrefix(raw, raw.length, queryAttributes, false)
+                                != PrefixStatus.USER_DDL)
                         ? null : MySqlProtocolHandler.rewriteIamAuthPlugin(
                                 Arrays.copyOfRange(raw, 4, raw.length));
                 continuingPacket = length == MAX_PACKET_PAYLOAD;
@@ -121,7 +124,8 @@ final class MySqlCompressedCommandRelay {
                     PrefixStatus prefix = confirmedUserDdl ? PrefixStatus.USER_DDL
                             : inspectUserDdlPrefix(input, available, queryAttributes, multiStatements);
                     confirmedUserDdl = prefix == PrefixStatus.USER_DDL;
-                    if (forwardedTail || available > MAX_INSPECTION_BYTES
+                    if (forwardedTail || frames.size() > MAX_PENDING_FRAMES
+                            || available > MAX_INSPECTION_BYTES
                             || bufferedEncodedBytes > MAX_INSPECTION_BYTES
                             || (prefix == PrefixStatus.POSSIBLE && available > MAX_UNRESOLVED_PREFIX_BYTES)
                             || prefix == PrefixStatus.OTHER) {
@@ -188,15 +192,16 @@ final class MySqlCompressedCommandRelay {
         }
     }
 
-    private static int firstInnerPacketLength(byte[] frame, boolean zstd) throws IOException {
+    private static int firstInnerPacketLength(byte[] frame) throws IOException {
         if (int24(frame, 4) == 0) {
             return int24(frame, 7);
         }
-        try (InputStream decoder = zstd
-                ? new ZstdInputStream(new ByteArrayInputStream(frame, 7, frame.length - 7))
-                : new InflaterInputStream(new ByteArrayInputStream(frame, 7, frame.length - 7))) {
+        try (InputStream decoder = new InflaterInputStream(
+                new ByteArrayInputStream(frame, 7, frame.length - 7))) {
             byte[] header = decoder.readNBytes(4);
             return header.length == 4 ? int24(header, 0) : -1;
+        } catch (RuntimeException e) {
+            throw new IOException("Invalid compressed MySQL payload", e);
         }
     }
 
@@ -254,8 +259,13 @@ final class MySqlCompressedCommandRelay {
         if (afterUser == available) {
             return PrefixStatus.POSSIBLE;
         }
-        return skipIgnored(bytes, afterUser, available) > afterUser ? PrefixStatus.USER_DDL
+        return isIdentifierQuote(bytes[afterUser]) || skipIgnored(bytes, afterUser, available) > afterUser
+                ? PrefixStatus.USER_DDL
                 : couldStartComment(bytes, afterUser, available) ? PrefixStatus.POSSIBLE : PrefixStatus.OTHER;
+    }
+
+    private static boolean isIdentifierQuote(byte value) {
+        return value == '\'' || value == '"' || value == '`';
     }
 
     private static boolean couldStartComment(byte[] bytes, int offset, int available) {
@@ -271,33 +281,6 @@ final class MySqlCompressedCommandRelay {
             }
         }
         return true;
-    }
-
-    private static boolean isUserDdl(byte[] packet, boolean queryAttributes) {
-        int offset = 5;
-        if (queryAttributes) {
-            // Nonempty attributes have typed values; relay them unchanged without guessing the SQL offset.
-            if (packet.length - offset < 2 || packet[offset] != 0 || packet[offset + 1] != 1) {
-                return false;
-            }
-            offset += 2;
-        }
-        offset = skipIgnored(packet, offset);
-        int verbLength;
-        if (matchesKeyword(packet, offset, "CREATE")) {
-            verbLength = 6;
-        } else if (matchesKeyword(packet, offset, "ALTER")) {
-            verbLength = 5;
-        } else {
-            return false;
-        }
-        int afterVerb = offset + verbLength;
-        offset = skipIgnored(packet, afterVerb);
-        if (offset <= afterVerb) {
-            return false;
-        }
-        return matchesKeyword(packet, offset, "USER")
-                && (offset + 4 == packet.length || skipIgnored(packet, offset + 4) > offset + 4);
     }
 
     private static int skipIgnored(byte[] bytes, int offset) {
@@ -339,18 +322,6 @@ final class MySqlCompressedCommandRelay {
         return value == ' ' || value == '\t' || value == '\r' || value == '\n' || value == '\f';
     }
 
-    private static boolean matchesKeyword(byte[] bytes, int offset, String keyword) {
-        if (bytes.length - offset < keyword.length()) {
-            return false;
-        }
-        for (int i = 0; i < keyword.length(); i++) {
-            if (Character.toUpperCase((char) (bytes[offset + i] & 0xFF)) != keyword.charAt(i)) {
-                return false;
-            }
-        }
-        return true;
-    }
-
     private static byte[] readFrame(InputStream from) throws IOException {
         int first = from.read();
         if (first < 0) {
@@ -372,22 +343,20 @@ final class MySqlCompressedCommandRelay {
         return frame;
     }
 
-    private static byte[] decode(byte[] frame, boolean zstd) throws IOException {
+    private static byte[] decode(byte[] frame) throws IOException {
         int uncompressedLength = int24(frame, 4);
         byte[] payload = Arrays.copyOfRange(frame, 7, frame.length);
         if (uncompressedLength == 0) {
             return payload;
         }
-        try (InputStream decoder = zstd
-                ? new ZstdInputStream(new ByteArrayInputStream(payload))
-                : new InflaterInputStream(new ByteArrayInputStream(payload))) {
+        try (InputStream decoder = new InflaterInputStream(new ByteArrayInputStream(payload))) {
             byte[] decoded = decoder.readNBytes(uncompressedLength + 1);
             if (decoded.length != uncompressedLength) {
                 throw new IOException("Compressed MySQL payload length mismatch");
             }
             return decoded;
-        } catch (MalformedInputException e) {
-            throw new IOException("Invalid compressed MySQL zstd payload", e);
+        } catch (RuntimeException e) {
+            throw new IOException("Invalid compressed MySQL payload", e);
         }
     }
 

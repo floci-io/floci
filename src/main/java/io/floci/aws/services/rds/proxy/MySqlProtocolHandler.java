@@ -86,7 +86,8 @@ public class MySqlProtocolHandler {
 
     private static final Pattern IAM_AUTH_PLUGIN = Pattern.compile(
             "IDENTIFIED\\s+WITH\\s+(?:`AWSAuthenticationPlugin`|AWSAuthenticationPlugin(?![A-Za-z0-9_$]))"
-                    + "(?:\\s+AS\\s+(?:'[^']*'|\"[^\"]*\"|0x[0-9A-Fa-f]+))?",
+                    + "(?:\\s+AS\\s+(?:'(?:\\\\.|''|[^'\\\\])*'|\"(?:\\\\.|\"\"|[^\"\\\\])*\"|0x[0-9A-Fa-f]+))?"
+                    + "(?!\\s+AS\\b)",
             Pattern.CASE_INSENSITIVE);
     private static final String NO_MATCHING_PASSWORD_HASH =
             "*0000000000000000000000000000000000000000";
@@ -994,7 +995,7 @@ public class MySqlProtocolHandler {
                         offset++;
                     }
                 } else if (quote != 0) {
-                    if (current == '\\' && next != 0) {
+                    if (quote != '`' && current == '\\' && next != 0) {
                         offset++;
                     } else if (current == quote) {
                         if (next == quote) {
