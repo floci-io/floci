@@ -106,7 +106,7 @@ class CurReportDefinitionTagsIntegrationTest {
         ValidationException error = assertThrows(ValidationException.class,
                 () -> cur.tagResource(r -> r.reportName(reportName).tags(tag("k".repeat(129), "v"))));
 
-        assertTrue(error.getMessage().contains("tags.1.member.key"), error.getMessage());
+        assertTrue(error.getMessage().contains("'Tags.Key'"), error.getMessage());
         assertTrue(listTags().isEmpty());
     }
 
@@ -119,8 +119,8 @@ class CurReportDefinitionTagsIntegrationTest {
         ValidationException noKeys = assertThrows(ValidationException.class,
                 () -> cur.untagResource(r -> r.reportName(reportName)));
 
-        assertTrue(noTags.getMessage().contains("'tags'"), noTags.getMessage());
-        assertTrue(noKeys.getMessage().contains("'tagKeys'"), noKeys.getMessage());
+        assertTrue(noTags.getMessage().contains("'Tags'"), noTags.getMessage());
+        assertTrue(noKeys.getMessage().contains("'TagKeys'"), noKeys.getMessage());
     }
 
     @Test

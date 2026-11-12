@@ -21,6 +21,7 @@ import pytest
 import regen_apigateway_documentation_shapes
 import regen_apigateway_shapes
 import regen_athena_shapes
+import regen_cur_shapes
 import regen_dynamodb_shapes
 import regen_ecr_shapes
 import regen_ecs_shapes
@@ -412,6 +413,7 @@ def vendored(script) -> tuple[str, ...]:
     regen_securityhub_shapes,
     regen_rekognition_shapes,
     regen_athena_shapes,
+    regen_cur_shapes,
 ])
 def test_each_vendored_constraints_file_carries_its_operations_and_resolves_its_shapes(script):
     doc = json.loads(script.OUTPUT.read_text(encoding="utf-8"))

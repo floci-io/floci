@@ -6,7 +6,6 @@ import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.floci.aws.core.common.AwsErrorResponse;
 import io.floci.aws.core.common.AwsException;
-import io.floci.aws.core.common.SmithyValidationErrors;
 import io.floci.aws.services.cur.model.ReportDefinition;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
@@ -27,7 +26,6 @@ import java.util.Map;
 public class CurJsonHandler {
 
     private static final Logger LOG = Logger.getLogger(CurJsonHandler.class);
-    private static final int MAX_TAGS = 200;
 
     private final CurService service;
     private final ObjectMapper objectMapper;
@@ -42,6 +40,7 @@ public class CurJsonHandler {
 
     public Response handle(String action, JsonNode request, String region) {
         LOG.debugv("CUR action: {0}", action);
+        CurRequestShapes.check(action, request);
         return switch (action) {
             case "PutReportDefinition" -> handlePutReportDefinition(request, region);
             case "ModifyReportDefinition" -> handleModifyReportDefinition(request, region);
@@ -58,6 +57,7 @@ public class CurJsonHandler {
     }
 
     private Response handlePutReportDefinition(JsonNode request, String region) {
+        CurRequestShapes.checkTags(request.get("Tags"));
         ReportDefinition def = parseReportDefinition(request.path("ReportDefinition"));
         def.setTags(parseTags(request.path("Tags")));
         ReportDefinition created = service.putReportDefinition(def, region);
@@ -105,13 +105,11 @@ public class CurJsonHandler {
     }
 
     private Response handleTagResource(JsonNode request, String region) {
-        requireList(request, "Tags", "tags");
         service.tagResource(stringOrNull(request, "ReportName"), parseTags(request.path("Tags")), region);
         return Response.ok(objectMapper.createObjectNode()).build();
     }
 
     private Response handleUntagResource(JsonNode request, String region) {
-        requireList(request, "TagKeys", "tagKeys");
         service.untagResource(stringOrNull(request, "ReportName"), parseTagKeys(request.path("TagKeys")), region);
         return Response.ok(objectMapper.createObjectNode()).build();
     }
@@ -124,86 +122,17 @@ public class CurJsonHandler {
         return Response.ok(response).build();
     }
 
-    /** A {@code TagList}: up to 200 tags, each a key of 1 to 128 characters and a value of up to 256. */
+    /** The tags of a request checked by {@link CurRequestShapes}; none when it has no {@code Tags}. */
     private static Map<String, String> parseTags(JsonNode node) {
         Map<String, String> tags = new LinkedHashMap<>();
-        if (node.isMissingNode() || node.isNull()) {
-            return tags;
-        }
-        if (!node.isArray()) {
-            throw new AwsException("ValidationException", "Tags must be a list of tags.", 400);
-        }
-        List<String> violations = new ArrayList<>();
-        addIfPresent(violations, SmithyValidationErrors.sizeOutOfRange("tags", node.size(), 0, MAX_TAGS));
-        for (int i = 0; i < node.size(); i++) {
-            String path = "tags." + (i + 1) + ".member.";
-            String key = tagString(node.get(i), "Key");
-            String value = tagString(node.get(i), "Value");
-            if (key == null) {
-                violations.add(SmithyValidationErrors.notNull(path + "key"));
-            } else {
-                addIfPresent(violations, SmithyValidationErrors.lengthOutOfRange(path + "key", key, 1, 128));
-            }
-            if (value == null) {
-                violations.add(SmithyValidationErrors.notNull(path + "value"));
-            } else {
-                addIfPresent(violations, SmithyValidationErrors.lengthOutOfRange(path + "value", value, 0, 256));
-            }
-            if (key != null && value != null) {
-                tags.put(key, value);
-            }
-        }
-        if (!violations.isEmpty()) {
-            throw SmithyValidationErrors.validationException(violations);
-        }
+        node.forEach(tag -> tags.put(tag.get("Key").textValue(), tag.get("Value").textValue()));
         return tags;
     }
 
-    /** A {@code TagKeyList}: up to 200 keys of 1 to 128 characters. */
     private static List<String> parseTagKeys(JsonNode node) {
         List<String> keys = new ArrayList<>();
-        if (!node.isArray()) {
-            return keys;
-        }
-        List<String> violations = new ArrayList<>();
-        addIfPresent(violations, SmithyValidationErrors.sizeOutOfRange("tagKeys", node.size(), 0, MAX_TAGS));
-        for (int i = 0; i < node.size(); i++) {
-            if (!node.get(i).isTextual()) {
-                throw new AwsException("ValidationException", "TagKeys must be a list of strings.", 400);
-            }
-            String key = node.get(i).textValue();
-            addIfPresent(violations,
-                    SmithyValidationErrors.lengthOutOfRange("tagKeys." + (i + 1) + ".member", key, 1, 128));
-            keys.add(key);
-        }
-        if (!violations.isEmpty()) {
-            throw SmithyValidationErrors.validationException(violations);
-        }
+        node.forEach(key -> keys.add(key.textValue()));
         return keys;
-    }
-
-    /** A tag's key or value, or {@code null} when absent; any other JSON type than a string is rejected. */
-    private static String tagString(JsonNode tag, String member) {
-        JsonNode value = tag.get(member);
-        if (value == null || value.isNull()) {
-            return null;
-        }
-        if (!value.isTextual()) {
-            throw new AwsException("ValidationException", "Tag " + member + " must be a string.", 400);
-        }
-        return value.textValue();
-    }
-
-    private static void requireList(JsonNode request, String member, String path) {
-        if (!request.path(member).isArray()) {
-            throw SmithyValidationErrors.validationException(SmithyValidationErrors.notNull(path));
-        }
-    }
-
-    private static void addIfPresent(List<String> violations, String violation) {
-        if (violation != null) {
-            violations.add(violation);
-        }
     }
 
     private ReportDefinition parseReportDefinition(JsonNode node) {
