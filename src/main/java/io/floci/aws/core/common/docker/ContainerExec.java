@@ -54,9 +54,15 @@ public final class ContainerExec {
 
     /** Runs {@code cmd}, keeping its stdout and stderr apart. */
     public static Result run(DockerClient dockerClient, String containerId, String[] cmd, int timeoutSeconds) {
+        return run(dockerClient, containerId, cmd, List.of(), timeoutSeconds);
+    }
+
+    /** As {@link #run(DockerClient, String, String[], int)}, with {@code env} for this command alone. */
+    public static Result run(DockerClient dockerClient, String containerId, String[] cmd, List<String> env,
+                             int timeoutSeconds) {
         ByteArrayOutputStream stdout = new ByteArrayOutputStream();
         ByteArrayOutputStream stderr = new ByteArrayOutputStream();
-        Result result = run(dockerClient, containerId, cmd, timeoutSeconds, stdout, stderr);
+        Result result = run(dockerClient, containerId, cmd, env, timeoutSeconds, stdout, stderr);
         return new Result(result.exitCode(), stdout.toString(StandardCharsets.UTF_8),
                 joinLines(stderr.toString(StandardCharsets.UTF_8), result.stderr()), result.timedOut());
     }

@@ -2182,7 +2182,7 @@ public class RdsService implements Resettable, ResourceProvider {
         }
         boolean mysqlFamily = source.getEngine() == DatabaseEngine.MYSQL
                 || source.getEngine() == DatabaseEngine.MARIADB;
-        if (source.getEngine() != DatabaseEngine.POSTGRES && !mysqlFamily) {
+        if (!READ_REPLICA_ENGINES.contains(source.getEngine().name().toLowerCase(Locale.ROOT))) {
             // The copy is dump based: pg_dumpall for PostgreSQL, mysqldump or mariadb-dump for
             // MySQL and MariaDB. No dump path exists for the other engines.
             throw new AwsException("InvalidDBInstanceState",
@@ -6135,6 +6135,9 @@ public class RdsService implements Resettable, ResourceProvider {
     }
 
     // ── Global clusters (Aurora global databases) ─────────────────────────────
+
+    /** Engines CreateDBInstanceReadReplica copies; DescribeDBEngineVersions reports the same set. */
+    static final Set<String> READ_REPLICA_ENGINES = Set.of("postgres", "mysql", "mariadb");
 
     static final Set<String> GLOBAL_CLUSTER_ENGINES = Set.of("aurora-mysql", "aurora-postgresql");
 

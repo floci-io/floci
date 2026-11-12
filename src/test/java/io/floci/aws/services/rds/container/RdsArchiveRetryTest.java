@@ -29,7 +29,9 @@ import org.mockito.InOrder;
 import java.io.ByteArrayInputStream;
 import java.io.IOException;
 import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
 import java.nio.file.Path;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
@@ -210,16 +212,70 @@ class RdsArchiveRetryTest {
     @Test
     void mysqlDumpWaitsForTheServerToAcceptTheMasterUser() {
         DockerArchiveUploadFixture uploads = failingUploads(0, 0);
+        List<List<String>> envs = new ArrayList<>();
         List<List<String>> commands = ContainerExecStubs.completeEveryExec(docker, CONTAINER,
-                List.of(2L, 2L, 0L), "-- dump", "");
+                List.of(2L, 2L, 0L), "-- dump", "", envs);
 
         String dump = manager.createMysqlSnapshot(DatabaseEngine.MYSQL, CONTAINER, "admin", "secret");
 
         assertEquals("-- dump", dump);
         assertEquals(1, uploads.commands.size());
         assertEquals(3, commands.size());
-        assertEquals(List.of("env", "MYSQL_PWD=secret", "sh", "/tmp/floci-mysql-dump.sh", "mysql", "mysqldump",
-                "admin"), commands.getFirst().subList(0, 7));
+        assertEquals(List.of("sh", "/tmp/floci-mysql-dump.sh", "mysql", "mysqldump", "admin"),
+                commands.getFirst().subList(0, 5));
+        // The password reaches the exec as environment, never as a word of the command Docker records.
+        assertEquals(List.of(List.of("MYSQL_PWD=secret"), List.of("MYSQL_PWD=secret"), List.of("MYSQL_PWD=secret")),
+                envs);
+        assertTrue(commands.stream().flatMap(List::stream).noneMatch(word -> word.contains("secret")));
+    }
+
+    @Test
+    void mysqlRestorePassesThePasswordAsEnvironmentAndUploadsTheDumpUnreadableByTheServer() throws IOException {
+        DockerArchiveUploadFixture uploads = failingUploads(0, 0);
+        List<List<String>> envs = new ArrayList<>();
+        List<List<String>> commands = ContainerExecStubs.completeEveryExec(docker, CONTAINER, List.of(0L), "", "",
+                envs);
+
+        manager.restoreMysqlSnapshot(DatabaseEngine.MARIADB, CONTAINER, "admin", "secret", "-- dump");
+
+        assertEquals(List.of(List.of("sh", "/tmp/restore.sh", "mariadb", "admin")), commands);
+        assertEquals(List.of(List.of("MYSQL_PWD=secret")), envs);
+        try (TarArchiveInputStream tar = new TarArchiveInputStream(
+                new ByteArrayInputStream(uploads.completed.getFirst()))) {
+            TarArchiveEntry dump = tar.getNextEntry();
+            assertEquals("dump.sql", dump.getName());
+            // mysqld runs as an unprivileged user and must not be able to LOAD_FILE the dump.
+            assertEquals(0600, dump.getMode());
+        }
+        assertTrue(RdsContainerManager.mysqlRestoreScript().contains("rm -f /tmp/dump.sql"));
+    }
+
+    @Test
+    void mysqlDumpScriptKeepsASchemaNameWithANewlineAsOneArgument(@TempDir Path dir) throws Exception {
+        // Stand-ins for the client and the dump tool. The client answers the schema query the way
+        // mysql -B does without -r: a newline in a name arrives as the two characters \n.
+        Path client = dir.resolve("client");
+        Files.writeString(client, """
+                #!/bin/sh
+                for last; do :; done
+                case "$last" in
+                  *information_schema.schemata*) printf 'a\\\\nb\\nplain\\n' ;;
+                esac
+                """);
+        Path dump = dir.resolve("dump");
+        Files.writeString(dump, "#!/bin/sh\nfor a; do case \"$a\" in -*) ;; *) printf '<%s>' \"$a\" ;; esac; done\n");
+        Path script = dir.resolve("dump.sh");
+        Files.writeString(script, RdsContainerManager.mysqlDumpScript());
+        for (Path p : List.of(client, dump)) {
+            assertTrue(p.toFile().setExecutable(true));
+        }
+
+        Process process = new ProcessBuilder("sh", script.toString(), client.toString(), dump.toString(), "admin",
+                "", "", "FALSE").redirectErrorStream(true).start();
+        String output = new String(process.getInputStream().readAllBytes(), StandardCharsets.UTF_8);
+
+        assertEquals(0, process.waitFor(), output);
+        assertTrue(output.startsWith("<a\nb><plain>"), output);
     }
 
     @Test
@@ -238,7 +294,7 @@ class RdsArchiveRetryTest {
     private static void assertTarEntry(TarArchiveInputStream tar, String name, String content) throws IOException {
         TarArchiveEntry entry = tar.getNextEntry();
         assertEquals(name, entry.getName());
-        assertEquals(0755, entry.getMode());
+        assertEquals(name.endsWith(".sql") ? 0600 : 0755, entry.getMode());
         assertArrayEquals(content.getBytes(StandardCharsets.UTF_8), tar.readAllBytes());
     }
 

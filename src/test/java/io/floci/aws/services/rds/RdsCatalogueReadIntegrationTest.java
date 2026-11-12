@@ -102,6 +102,16 @@ class RdsCatalogueReadIntegrationTest {
                 .body(VERSIONS + ".SupportsReadReplica", equalTo("false"))
                 .body(containsString("<SupportedFeatureNames></SupportedFeatureNames>"))
                 .body(VERSIONS + ".SupportsGlobalDatabases", equalTo("true"));
+        for (String engine : new String[]{"mysql", "mariadb"}) {
+            query("DescribeDBEngineVersions").formParam("Engine", engine).formParam("DefaultOnly", "true")
+            .when().post("/").then()
+                    .statusCode(200)
+                    .body(VERSIONS + ".SupportsReadReplica", equalTo("true"));
+        }
+        query("DescribeDBEngineVersions").formParam("Engine", "sqlserver-se").formParam("DefaultOnly", "true")
+        .when().post("/").then()
+                .statusCode(200)
+                .body(VERSIONS + ".SupportsReadReplica", equalTo("false"));
         query("DescribeDBEngineVersions").formParam("Engine", "aurora-postgresql").formParam("DefaultOnly", "true")
         .when().post("/").then()
                 .statusCode(200)

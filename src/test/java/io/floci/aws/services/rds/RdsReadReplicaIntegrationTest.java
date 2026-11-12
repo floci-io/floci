@@ -1,6 +1,7 @@
 package io.floci.aws.services.rds;
 
 import io.quarkus.test.junit.QuarkusTest;
+import io.restassured.response.ValidatableResponse;
 import io.restassured.specification.RequestSpecification;
 import org.junit.jupiter.api.MethodOrderer;
 import org.junit.jupiter.api.Order;
@@ -36,19 +37,26 @@ class RdsReadReplicaIntegrationTest {
                 .formParam("Version", "2014-10-31");
     }
 
+    /** DBName is left off SQL Server, which refuses it. */
+    private static ValidatableResponse createInstance(String id, String engine, String version, String password) {
+        RequestSpecification request = query("CreateDBInstance")
+                .formParam("DBInstanceIdentifier", id)
+                .formParam("Engine", engine)
+                .formParam("EngineVersion", version)
+                .formParam("MasterUsername", "admin")
+                .formParam("MasterUserPassword", password)
+                .formParam("DBInstanceClass", "db.t3.medium")
+                .formParam("AllocatedStorage", "40");
+        if (!engine.startsWith("sqlserver")) {
+            request.formParam("DBName", "appdb");
+        }
+        return request.when().post("/").then();
+    }
+
     @Test
     @Order(1)
     void createReadReplicaLinksBothEndsInDescribeDbInstances() {
-        query("CreateDBInstance")
-                .formParam("DBInstanceIdentifier", SOURCE)
-                .formParam("Engine", "postgres")
-                .formParam("EngineVersion", "16.3")
-                .formParam("MasterUsername", "admin")
-                .formParam("MasterUserPassword", "password123")
-                .formParam("DBName", "appdb")
-                .formParam("DBInstanceClass", "db.t3.medium")
-                .formParam("AllocatedStorage", "40")
-        .when().post("/").then().statusCode(200)
+        createInstance(SOURCE, "postgres", "16.3", "password123").statusCode(200)
                 .body(containsString("<ReadReplicaDBInstanceIdentifiers></ReadReplicaDBInstanceIdentifiers>"))
                 .body(not(containsString("<StatusInfos>")));
 
@@ -170,16 +178,7 @@ class RdsReadReplicaIntegrationTest {
     @Test
     @Order(6)
     void createReadReplicaAcceptsAMysqlSourceAndRefusesSqlServer() {
-        query("CreateDBInstance")
-                .formParam("DBInstanceIdentifier", "replica-test-mysql")
-                .formParam("Engine", "mysql")
-                .formParam("EngineVersion", "8.0.36")
-                .formParam("MasterUsername", "admin")
-                .formParam("MasterUserPassword", "password123")
-                .formParam("DBName", "appdb")
-                .formParam("DBInstanceClass", "db.t3.medium")
-                .formParam("AllocatedStorage", "20")
-        .when().post("/").then().statusCode(200);
+        createInstance("replica-test-mysql", "mysql", "8.0.36", "password123").statusCode(200);
 
         query("CreateDBInstanceReadReplica")
                 .formParam("DBInstanceIdentifier", "replica-test-mysql-reader")
@@ -191,15 +190,7 @@ class RdsReadReplicaIntegrationTest {
             .body(containsString("<ReadReplicaSourceDBInstanceIdentifier>replica-test-mysql"
                     + "</ReadReplicaSourceDBInstanceIdentifier>"));
 
-        query("CreateDBInstance")
-                .formParam("DBInstanceIdentifier", "replica-test-sqlserver")
-                .formParam("Engine", "sqlserver-se")
-                .formParam("EngineVersion", "15.00")
-                .formParam("MasterUsername", "admin")
-                .formParam("MasterUserPassword", "Password123!")
-                .formParam("DBInstanceClass", "db.t3.medium")
-                .formParam("AllocatedStorage", "20")
-        .when().post("/").then().statusCode(200);
+        createInstance("replica-test-sqlserver", "sqlserver-se", "15.00", "Password123!").statusCode(200);
 
         query("CreateDBInstanceReadReplica")
                 .formParam("DBInstanceIdentifier", "replica-test-sqlserver-reader")
