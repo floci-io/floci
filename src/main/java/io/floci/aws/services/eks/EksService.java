@@ -119,6 +119,8 @@ public class EksService implements TagHandler, ResourceProvider, Ec2InstanceLaun
     // Storage hands every caller the same live Cluster, and Cluster keeps identity equality.
     private final Set<Cluster> clustersBeingDeleted = ConcurrentHashMap.newKeySet();
     private final Set<String> restoringClusters = ConcurrentHashMap.newKeySet();
+    /** {@code <account>/<cluster key>} of each cluster a CreateCluster call is building. */
+    private final Set<String> clustersBeingCreated = ConcurrentHashMap.newKeySet();
 
     @Inject
     public EksService(StorageFactory storageFactory, EmulatorConfig config,
@@ -714,12 +716,25 @@ public class EksService implements TagHandler, ResourceProvider, Ec2InstanceLaun
                             + "satisfy regular expression pattern: ^" + CLUSTER_NAME_REGEX + "$",
                     400);
         }
-        // Cluster names are unique only within a Region of an account (#7966).
-        if (storage.get(requestClusterKey(name)).isPresent()) {
-            throw new AwsException("ResourceInUseException",
-                    "Cluster already exists: " + name, 409);
+        // Cluster names are unique only within a Region of an account (#7966). The key stays reserved
+        // until the cluster is stored, so a concurrent create of the same name is refused, not let
+        // through to overwrite this one.
+        String reservation = regionResolver.getAccountId() + "/" + requestClusterKey(name);
+        if (!clustersBeingCreated.add(reservation)) {
+            throw new AwsException("ResourceInUseException", "Cluster already exists: " + name, 409);
         }
+        try {
+            if (storage.get(requestClusterKey(name)).isPresent()) {
+                throw new AwsException("ResourceInUseException",
+                        "Cluster already exists: " + name, 409);
+            }
+            return createReservedCluster(request, name);
+        } finally {
+            clustersBeingCreated.remove(reservation);
+        }
+    }
 
+    private Cluster createReservedCluster(CreateClusterRequest request, String name) {
         AccessConfig requestedAccess = request.getAccessConfig();
         String authenticationMode = requestedAccess == null || requestedAccess.authenticationMode() == null
                 ? "CONFIG_MAP" : requestedAccess.authenticationMode();
@@ -873,14 +888,45 @@ public class EksService implements TagHandler, ResourceProvider, Ec2InstanceLaun
     }
 
     /**
-     * The cluster a {@code _floci/eks/clusters/<name>/...} route names. Those routes carry no Region
-     * of their own and are often called unsigned, so the request's Region is tried first and then the
-     * account's only cluster of that name, as {@link #findAuthenticationCluster(String, String)} does.
+     * {@code accountId}'s cluster {@code name} that was created before cluster names became Regional,
+     * for a route such a cluster registered without a Region in it. Names were unique within an
+     * account then, and a later cluster sharing the name is always Region-qualified in Docker, so at
+     * most one cluster of the name has no {@link Cluster#getDockerNameRegion()}: the one that
+     * registered the route. Preferring the request's Region instead could pick a newer same-named
+     * cluster in the default Region.
      */
-    public Cluster findClusterForFlociRoute(String name) {
-        return findAuthenticationCluster(regionResolver.getAccountId(), name)
+    public Optional<Cluster> findPreRegionalCluster(String accountId, String name) {
+        String suffix = KEY_SEPARATOR + name;
+        List<Cluster> unqualified = (storage instanceof AccountAwareStorageBackend<Cluster> aware
+                ? aware.scanForAccount(accountId, key -> key.endsWith(suffix))
+                : storage.scan(key -> key.endsWith(suffix))).stream()
+                .filter(cluster -> cluster.getDockerNameRegion() == null)
+                .toList();
+        return unqualified.size() == 1 ? Optional.of(unqualified.getFirst()) : Optional.empty();
+    }
+
+    /**
+     * The cluster a {@code _floci/eks/clusters/<name>/...} route names. Those routes are often called
+     * unsigned, so a {@code region} the route carries wins; without one the request's Region is tried
+     * first and then the account's only cluster of that name, as
+     * {@link #findAuthenticationCluster(String, String)} does.
+     */
+    public Cluster findClusterForFlociRoute(String name, String region) {
+        String accountId = regionResolver.getAccountId();
+        return (region == null || region.isBlank()
+                ? findAuthenticationCluster(accountId, name)
+                : findAuthenticationCluster(accountId, region, name))
                 .orElseThrow(() -> new AwsException("ResourceNotFoundException",
                         "No cluster found for name: " + name, 404));
+    }
+
+    public Cluster findClusterForFlociRoute(String name) {
+        return findClusterForFlociRoute(name, null);
+    }
+
+    /** The Region of {@code cluster}, from its ARN. */
+    public String clusterRegion(Cluster cluster) {
+        return resolveClusterRegion(cluster);
     }
 
     private Optional<Cluster> findClusterForAccount(String accountId, String clusterKey) {

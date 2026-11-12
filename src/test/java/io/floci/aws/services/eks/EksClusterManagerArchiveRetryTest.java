@@ -245,7 +245,7 @@ class EksClusterManagerArchiveRetryTest {
         Cluster cluster = cluster();
         cluster.setLogging(new Logging(List.of(new LogSetup(List.of("audit"), true))));
         ClusterOidcKey key = new ClusterOidcKey("https://test.invalid/issuer", "fixture", "public", "private");
-        when(oidcService.ensureKeyForAccount("000000000000", "demo", key.getIssuer())).thenReturn(key);
+        when(oidcService.ensureKeyForAccount("000000000000", "us-east-1::demo", key.getIssuer())).thenReturn(key);
         when(oidcService.exportSigningKeyPem(key)).thenReturn(new String(PRIVATE_KEY, StandardCharsets.UTF_8));
         when(oidcService.exportPublicKeyPem(key)).thenReturn(new String(PUBLIC_KEY, StandardCharsets.UTF_8));
 

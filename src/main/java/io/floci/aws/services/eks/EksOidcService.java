@@ -138,11 +138,18 @@ public class EksOidcService implements OidcIssuerKeyLookup {
      * Moves the signing key of {@code accountId}'s cluster from {@code legacyKey}, the bare cluster
      * name keys were stored under before cluster names became Regional, to {@code clusterKey}. Only
      * a key minted for {@code issuer} moves, so a same-named cluster's key is never taken over.
-     * Keeping the key, rather than minting a new one, keeps tokens already issued verifiable.
+     * Keeping the key, rather than minting a new one, keeps tokens already issued verifiable. A key
+     * stored before keys were account-prefixed moves too; the issuer, a random URL minted for one
+     * cluster, is what proves it belongs to this one.
      */
     public synchronized void migrateLegacyKey(String accountId, String legacyKey, String clusterKey,
                                               String issuer) {
         if (legacyKey.equals(clusterKey) || issuer == null) {
+            return;
+        }
+        if (accountId != null && keyStore instanceof AccountAwareStorageBackend<ClusterOidcKey> aware) {
+            aware.getForAccountMigratingLegacyKeys(accountId, clusterKey, List.of(legacyKey),
+                    key -> issuer.equals(key.getIssuer()));
             return;
         }
         Optional<ClusterOidcKey> legacy = readKey(accountId, legacyKey);

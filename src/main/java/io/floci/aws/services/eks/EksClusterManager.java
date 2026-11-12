@@ -733,7 +733,7 @@ public class EksClusterManager
             try {
                 String accountId = resolveClusterAccountId(cluster);
                 String issuer = resolveClusterIssuer(cluster);
-                ClusterOidcKey oidcKey = oidcService.ensureKeyForAccount(accountId, cluster.getName(), issuer);
+                ClusterOidcKey oidcKey = oidcService.ensureKeyForAccount(accountId, oidcKeyName(cluster), issuer);
                 signingKeyFiles = writeSigningKeyFiles(cluster, oidcKey);
                 if (signingKeyFiles != null) {
                     serverArgs.addAll(buildIrsaServerArgs(oidcKey.getIssuer()));
@@ -1718,8 +1718,7 @@ public class EksClusterManager
      */
     private String writeWebhookKubeconfig(Cluster cluster) {
         String clusterName = cluster.getName();
-        Path localFile = Paths.get(config.services().eks().dataPath(), "webhook", clusterName, WEBHOOK_CONFIG_FILE)
-                .toAbsolutePath().normalize();
+        Path localFile = localClusterFile(cluster, "webhook", WEBHOOK_CONFIG_FILE);
         try {
             Files.createDirectories(localFile.getParent());
             Files.writeString(localFile, buildWebhookKubeconfig("http://" + dockerHostResolver.resolve() + ":"
@@ -1760,8 +1759,7 @@ public class EksClusterManager
             if (dataPath == null || dataPath.isBlank()) {
                 return null;
             }
-            Path localFile = Paths.get(dataPath, "audit", clusterName, AUDIT_POLICY_FILE)
-                    .toAbsolutePath().normalize();
+            Path localFile = localClusterFile(cluster, "audit", AUDIT_POLICY_FILE);
             Files.createDirectories(localFile.getParent());
             Files.writeString(localFile, buildAuditPolicy());
             return localFile.toString();
@@ -2025,6 +2023,24 @@ public class EksClusterManager
         return "000000000000";
     }
 
+    /**
+     * The key of {@code cluster}'s OIDC signing key in {@link EksOidcService}: the cluster's storage
+     * key, which carries its Region, as {@link EksService} creates, publishes and migrates it.
+     */
+    private String oidcKeyName(Cluster cluster) {
+        return EksService.clusterKey(clusterRegion(cluster), cluster.getName());
+    }
+
+    /**
+     * A file Floci writes for {@code cluster} under {@code <dataPath>/<kind>/<account>/<region>/<name>/},
+     * the layout of {@link #resolveKeysDir}. Cluster names are unique only within a Region of an
+     * account, so a shorter path would let same-named clusters overwrite each other's files.
+     */
+    Path localClusterFile(Cluster cluster, String kind, String fileName) {
+        return Paths.get(config.services().eks().dataPath(), kind, resolveClusterAccountId(cluster),
+                clusterRegion(cluster), cluster.getName(), fileName).toAbsolutePath().normalize();
+    }
+
     Path resolveKeysDir(Cluster cluster) {
         String accountId = resolveClusterAccountId(cluster);
         String region = clusterRegion(cluster);
@@ -2121,7 +2137,7 @@ public class EksClusterManager
         try {
             String accountId = resolveClusterAccountId(cluster);
             String issuer = resolveClusterIssuer(cluster);
-            ClusterOidcKey oidcKey = oidcService.ensureKeyForAccount(accountId, cluster.getName(), issuer);
+            ClusterOidcKey oidcKey = oidcService.ensureKeyForAccount(accountId, oidcKeyName(cluster), issuer);
             SigningKeyFiles keyFiles = writeSigningKeyFiles(cluster, oidcKey);
             if (keyFiles != null) {
                 copySigningKeysIntoContainer(containerId, keyFiles, cluster.getName());
@@ -2159,8 +2175,7 @@ public class EksClusterManager
         boolean tlsUri = config.services().ecr().tlsUri() && config.tls().enabled();
         String content = buildRegistriesYaml(mirrorAccounts(resolveClusterAccountId(cluster), config.defaultAccountId()),
                 mirrorRegions(region), ecrRegistryManager.advertisedPort(), endpoint, tlsUri);
-        writeLocalCopy(Paths.get(config.services().eks().dataPath(), "registries", clusterName,
-                "registries.yaml"), content, clusterName);
+        writeLocalCopy(localClusterFile(cluster, "registries", "registries.yaml"), content, clusterName);
         try {
             RetryingTarCopier.copyBytes(lifecycleManager.getDockerClient(), containerId, "/etc",
                     REGISTRIES_TAR_ENTRY, content.getBytes(StandardCharsets.UTF_8), 0644,
@@ -2248,8 +2263,7 @@ public class EksClusterManager
         String url = "https://" + dockerHostResolver.resolve() + ":" + config.port()
                 + podIdentityWebhookPath(clusterName, resolveClusterAccountId(cluster), clusterRegion(cluster));
         String manifest = buildPodIdentityWebhookConfiguration(url, certificateAuthority.caPem());
-        writeLocalCopy(Paths.get(config.services().eks().dataPath(), "webhook", clusterName,
-                POD_IDENTITY_MANIFEST_FILE), manifest, clusterName);
+        writeLocalCopy(localClusterFile(cluster, "webhook", POD_IDENTITY_MANIFEST_FILE), manifest, clusterName);
         try {
             byte[] tar = tarSingleFile(POD_IDENTITY_MANIFEST_TAR_ENTRY, manifest);
             RetryingTarCopier.copyStreamed(lifecycleManager.getDockerClient(), containerId, K3S_DATA_DIR,

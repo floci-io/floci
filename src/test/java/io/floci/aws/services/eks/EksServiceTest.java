@@ -53,11 +53,13 @@ import java.lang.reflect.Method;
 import java.lang.reflect.Proxy;
 import java.nio.file.Path;
 import java.time.Duration;
+import java.util.ArrayList;
 import java.util.EnumSet;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutorService;
@@ -2910,7 +2912,7 @@ class EksServiceTest {
             }
         };
         EksOidcService oidc = new EksOidcService(shared, new ObjectMapper());
-        List<EksService> services = new java.util.ArrayList<>();
+        List<EksService> services = new ArrayList<>();
         for (String region : regions) {
             services.add(new EksService(shared, testConfig(), new RegionResolver(region, "000000000000"), null,
                     null, oidc, mock(EksAccessEntryService.class), mock(EksPodIdentityAssociationService.class)));
@@ -3026,5 +3028,83 @@ class EksServiceTest {
 
         // The name is now free in every other Region, under a Docker name of its own.
         assertEquals("us-east-1", east.createCluster(clusterRequest("legacy")).getDockerNameRegion());
+    }
+
+    @Test
+    void aRegionlessWebhookRouteResolvesTheClusterThatPredatesRegionalNames() {
+        String account = "000000000000";
+        Map<String, AccountAwareStorageBackend<?>> stores = new HashMap<>();
+        AccountAwareStorageBackend<Cluster> clusters = AccountAwareStorageBackend.inMemory(account);
+        stores.put("eks-clusters.json", clusters);
+        Cluster legacy = new Cluster();
+        legacy.setName("demo");
+        legacy.setArn("arn:aws:eks:eu-west-1:" + account + ":cluster/demo");
+        legacy.setStatus(ClusterStatus.ACTIVE);
+        legacy.setLogging(EksService.defaultLogging());
+        clusters.putForAccount(account, "demo", legacy);
+        EksService east = servicesSharingStores(stores, "us-east-1").getFirst();
+        east.init();
+
+        Cluster newer = east.createCluster(clusterRequest("demo"));
+
+        // The request's Region would pick the newer default-Region cluster; the route was
+        // registered by the pre-upgrade cluster, the only one without a Region in its Docker name.
+        assertSame(newer, east.findAuthenticationCluster(account, "demo").orElseThrow());
+        assertSame(legacy, east.findPreRegionalCluster(account, "demo").orElseThrow());
+    }
+
+    @Test
+    void initMovesASigningKeyStoredBeforeAccountPrefixes() {
+        // Data from before multi-account storage has neither the account prefix nor the Region.
+        String issuer = "https://oidc.eks.eu-west-1.amazonaws.com/id/0123456789ABCDEF0123456789ABCDEF";
+        StorageBackend<String, Cluster> rawClusters = new InMemoryStorage<>();
+        StorageBackend<String, ClusterOidcKey> rawKeys = new InMemoryStorage<>();
+        Cluster legacy = new Cluster();
+        legacy.setName("gen0");
+        legacy.setArn("arn:aws:eks:eu-west-1:000000000000:cluster/gen0");
+        legacy.setStatus(ClusterStatus.ACTIVE);
+        legacy.setLogging(EksService.defaultLogging());
+        legacy.setIdentity(new ClusterIdentity(new OidcIdentity(issuer)));
+        rawClusters.put("gen0", legacy);
+        ClusterOidcKey key = new ClusterOidcKey(issuer, "gen0-kid", "public", "private");
+        rawKeys.put("gen0", key);
+
+        Map<String, AccountAwareStorageBackend<?>> stores = new HashMap<>();
+        stores.put("eks-clusters.json", new AccountAwareStorageBackend<>(rawClusters, null, "000000000000"));
+        stores.put("eks-oidc-keys.json", new AccountAwareStorageBackend<>(rawKeys, null, "000000000000"));
+        EksService west = servicesSharingStores(stores, "eu-west-1").getFirst();
+        west.init();
+
+        assertSame(legacy, west.describeCluster("gen0"));
+        assertTrue(rawKeys.get("gen0").isEmpty());
+        assertEquals("gen0-kid", rawKeys.get("000000000000/eu-west-1::gen0").orElseThrow().getKeyId());
+    }
+
+    @Test
+    void aConcurrentCreateOfTheSameNameInTheSameRegionIsRefused() throws Exception {
+        EksOidcService oidc = mock(EksOidcService.class);
+        CountDownLatch building = new CountDownLatch(1);
+        CountDownLatch release = new CountDownLatch(1);
+        when(oidc.newIssuerUrl(anyString())).thenAnswer(invocation -> {
+            building.countDown();
+            release.await();
+            return "https://oidc.eks.us-east-1.amazonaws.com/id/0123456789ABCDEF0123456789ABCDEF";
+        });
+        EksService service = new EksService(storageFactory, testConfig(), regionResolver, null, null, oidc,
+                mock(EksAccessEntryService.class), mock(EksPodIdentityAssociationService.class));
+
+        CompletableFuture<Cluster> first = CompletableFuture
+                .supplyAsync(() -> service.createCluster(clusterRequest("racing")));
+        assertTrue(building.await(5, TimeUnit.SECONDS));
+        try {
+            AwsException second = assertThrows(AwsException.class, () -> service.createCluster(clusterRequest("racing")));
+            assertEquals("ResourceInUseException", second.getErrorCode());
+        } finally {
+            release.countDown();
+        }
+
+        assertEquals("racing", first.get(5, TimeUnit.SECONDS).getName());
+        AwsException after = assertThrows(AwsException.class, () -> service.createCluster(clusterRequest("racing")));
+        assertEquals("ResourceInUseException", after.getErrorCode());
     }
 }

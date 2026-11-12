@@ -962,6 +962,8 @@ Served for fidelity and debugging, nothing in the IRSA flow dereferences them:
 
 These live under `_floci/…` rather than at the AWS-shaped issuer path, which Floci's embedded DNS does not resolve and which would collide with S3's path-style routing.
 
+Both take an optional `?region=<region>` query parameter. Cluster names are unique only within a Region of an account, so without it the request's Region is used, and then the account's only cluster of that name. The discovery document's `jwks_uri` always names the cluster's Region.
+
 ## ARN Format
 
 ```

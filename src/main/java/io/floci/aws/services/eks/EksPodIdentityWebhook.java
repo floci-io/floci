@@ -100,7 +100,7 @@ public class EksPodIdentityWebhook {
     /**
      * As {@link #review(String, String, Map)}, for the cluster in {@code region}: cluster names are
      * unique only within a Region. A null Region, from a route registered before the Region was
-     * part of it, resolves the account's only cluster of that name.
+     * part of it, resolves the cluster created before Regional names that registered it.
      */
     public Map<String, Object> review(String clusterName, String accountId, String region,
                                       Map<String, Object> admissionReview) {
@@ -130,8 +130,10 @@ public class EksPodIdentityWebhook {
         if (namespace == null) {
             return List.of();
         }
+        // A route without a Region was registered by a cluster created before cluster names became
+        // Regional, so that cluster answers it, not a same-named one created since.
         Optional<Cluster> cluster = region == null
-                ? eks.findAuthenticationCluster(accountId, clusterName)
+                ? eks.findPreRegionalCluster(accountId, clusterName)
                 : eks.findAuthenticationCluster(accountId, region, clusterName);
         if (cluster.isEmpty()) {
             return List.of();

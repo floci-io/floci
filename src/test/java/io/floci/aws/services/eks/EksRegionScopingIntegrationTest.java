@@ -3,6 +3,7 @@ package io.floci.aws.services.eks;
 import io.quarkus.test.junit.QuarkusTest;
 import org.junit.jupiter.api.Test;
 
+import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 
@@ -12,6 +13,8 @@ import static org.hamcrest.Matchers.equalTo;
 import static org.hamcrest.Matchers.hasItem;
 import static org.hamcrest.Matchers.hasKey;
 import static org.hamcrest.Matchers.not;
+import static org.junit.jupiter.api.Assertions.assertNotEquals;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
  * Cluster names are Regional on AWS: a cluster created in one Region is not listed, described or
@@ -54,11 +57,13 @@ class EksRegionScopingIntegrationTest {
     @Test
     void theSameClusterNameCanBeUsedInTwoRegions() {
         String name = "region-shared";
+        Map<String, String> issuers = new HashMap<>();
         for (String region : new String[] {"eu-west-1", "eu-central-1"}) {
-            given().header("Authorization", auth(region)).contentType("application/json")
+            issuers.put(region, given().header("Authorization", auth(region)).contentType("application/json")
                     .body(Map.of("name", name, "roleArn", "arn:aws:iam::" + ACCOUNT + ":role/cluster"))
                     .post("/clusters").then().statusCode(200)
-                    .body("cluster.arn", equalTo("arn:aws:eks:" + region + ":" + ACCOUNT + ":cluster/" + name));
+                    .body("cluster.arn", equalTo("arn:aws:eks:" + region + ":" + ACCOUNT + ":cluster/" + name))
+                    .extract().path("cluster.identity.oidc.issuer"));
         }
 
         try {
@@ -76,6 +81,28 @@ class EksRegionScopingIntegrationTest {
                     .then().statusCode(200).body("nodegroups", hasItem("workers"));
             given().header("Authorization", auth("eu-central-1")).get("/clusters/" + name + "/node-groups")
                     .then().statusCode(200).body("nodegroups", empty());
+
+            // OIDC discovery resolves the Region it is asked for, and advertises a key route that
+            // names it, since a verifier follows that route without the discovery request's context.
+            String westKeyId = null;
+            for (String region : new String[] {"eu-west-1", "eu-central-1"}) {
+                String jwksUri = given().header("Authorization", auth(region))
+                        .queryParam("region", region)
+                        .get("/_floci/eks/clusters/" + name + "/oidc/.well-known/openid-configuration")
+                        .then().statusCode(200)
+                        .body("issuer", equalTo(issuers.get(region)))
+                        .extract().path("jwks_uri");
+                assertTrue(jwksUri.endsWith("/oidc/keys?region=" + region), jwksUri);
+                String keyId = given().header("Authorization", auth(region))
+                        .queryParam("region", region)
+                        .get("/_floci/eks/clusters/" + name + "/oidc/keys")
+                        .then().statusCode(200).extract().path("keys[0].kid");
+                if (westKeyId == null) {
+                    westKeyId = keyId;
+                } else {
+                    assertNotEquals(westKeyId, keyId, "each Region's cluster has its own signing key");
+                }
+            }
 
             given().header("Authorization", auth("eu-west-1")).delete("/clusters/" + name)
                     .then().statusCode(200);

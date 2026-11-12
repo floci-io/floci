@@ -1474,7 +1474,7 @@ class EksClusterManagerTest {
                     clusterWithArn("arn:aws:eks:us-east-1:000000000000:cluster/demo"));
 
             assertEquals(EksClusterManager.buildRegistriesYaml("000000000000", AwsRegions.advertised("aws"),
-                    4566, "http://floci:4566"), Files.readString(tempDir.resolve("registries/demo/registries.yaml")));
+                    4566, "http://floci:4566"), Files.readString(tempDir.resolve("registries/000000000000/us-east-1/demo/registries.yaml")));
         }
 
         @Test
@@ -1482,7 +1482,7 @@ class EksClusterManagerTest {
             manager.injectEcrRegistryMirror("container-1",
                     clusterWithArn("arn:aws-cn:eks:cn-north-1:000000000000:cluster/demo"));
 
-            String yaml = Files.readString(tempDir.resolve("registries/demo/registries.yaml"));
+            String yaml = Files.readString(tempDir.resolve("registries/000000000000/cn-north-1/demo/registries.yaml"));
             assertTrue(yaml.contains("\"000000000000.dkr.ecr.cn-north-1.localhost:4566\":"));
             assertTrue(yaml.contains("\"000000000000.dkr.ecr.cn-northwest-1.localhost:4566\":"));
             assertFalse(yaml.contains(".us-east-1."), "a China cluster pulls from China regions only");
@@ -1495,7 +1495,7 @@ class EksClusterManagerTest {
 
             manager.injectEcrRegistryMirror("container-1", cluster);
 
-            String yaml = Files.readString(tempDir.resolve("registries/demo/registries.yaml"));
+            String yaml = Files.readString(tempDir.resolve("registries/111122223333/eu-west-1/demo/registries.yaml"));
             assertTrue(yaml.contains("\"111122223333.dkr.ecr.eu-west-1.localhost:4566\":"));
             assertTrue(yaml.contains("\"000000000000.dkr.ecr.eu-west-1.localhost:4566\":"));
         }
@@ -1508,7 +1508,7 @@ class EksClusterManagerTest {
             verify(copyCmd).withRemotePath("/etc");
             verify(copyCmd).exec();
             verify(config, never()).tls();
-            String yaml = Files.readString(tempDir.resolve("registries/demo/registries.yaml"));
+            String yaml = Files.readString(manager.localClusterFile(demoCluster(), "registries", "registries.yaml"));
             assertFalse(yaml.contains("localhost.floci.io"));
         }
 
@@ -1520,7 +1520,7 @@ class EksClusterManagerTest {
 
             manager.injectEcrRegistryMirror("container-1", demoCluster());
 
-            String yaml = Files.readString(tempDir.resolve("registries/demo/registries.yaml"));
+            String yaml = Files.readString(manager.localClusterFile(demoCluster(), "registries", "registries.yaml"));
             assertTrue(yaml.contains("\"000000000000.dkr.ecr.us-east-1.localhost:54321\":"));
             assertTrue(yaml.contains("\"localhost:54321\":"));
             assertFalse(yaml.contains("localhost:4566\":"));
@@ -1537,7 +1537,7 @@ class EksClusterManagerTest {
 
             manager.injectEcrRegistryMirror("container-1", demoCluster());
 
-            String yaml = Files.readString(tempDir.resolve("registries/demo/registries.yaml"));
+            String yaml = Files.readString(manager.localClusterFile(demoCluster(), "registries", "registries.yaml"));
             assertTrue(yaml.contains("\"000000000000.dkr.ecr.us-east-1.localhost.floci.io:4566\":"));
             assertTrue(yaml.contains("\"localhost.floci.io:4566\":"));
             assertTrue(yaml.contains("- \"http://floci:4566\""));
@@ -1553,7 +1553,7 @@ class EksClusterManagerTest {
 
             manager.injectEcrRegistryMirror("container-1", demoCluster());
 
-            String yaml = Files.readString(tempDir.resolve("registries/demo/registries.yaml"));
+            String yaml = Files.readString(manager.localClusterFile(demoCluster(), "registries", "registries.yaml"));
             assertFalse(yaml.contains("localhost.floci.io"));
             assertTrue(yaml.contains("\"localhost:4566\":"));
             verify(copyCmd).exec();
@@ -2453,6 +2453,10 @@ class EksClusterManagerTest {
             Path privFile = keysDir.resolve(EksClusterManager.SA_SIGNING_KEY_FILE);
             Path pubFile = keysDir.resolve(EksClusterManager.SA_PUBLIC_KEY_FILE);
             assertEquals(tempDir.resolve("keys").resolve("000000000000").resolve("us-east-1").resolve("my-cluster"), keysDir);
+            // The key k3s signs with is the one EksService creates and JWKS publishes, under the
+            // cluster's Regional key, not a second key minted under the bare name (#7966).
+            verify(oidcService).ensureKeyForAccount("000000000000", "us-east-1::my-cluster", issuer);
+            verify(oidcService, never()).ensureKeyForAccount(anyString(), eq("my-cluster"), anyString());
             assertTrue(Files.exists(privFile));
             assertTrue(Files.exists(pubFile));
 
@@ -3679,10 +3683,25 @@ class EksClusterManagerTest {
 
             verify(copyCmd).withRemotePath("/var/lib/rancher/k3s");
             verify(copyCmd).exec();
-            String written = Files.readString(tempDir.resolve("webhook").resolve("demo")
+            String written = Files.readString(tempDir.resolve("webhook/000000000000/us-east-1/demo")
                     .resolve("floci-eks-pod-identity.yaml"));
             assertTrue(written.contains("https://host.docker.internal:4566"
-                    + "/_floci/eks/clusters/demo/pod-identity-webhook/scope/000000000000"));
+                    + "/_floci/eks/clusters/demo/pod-identity-webhook/scope/000000000000/us-east-1"));
+        }
+
+        @Test
+        void sameNamedClustersInTwoRegionsKeepTheirLocalFilesApart() {
+            // Cluster names are unique only within a Region (#7966); a shared path would let one
+            // cluster's token-webhook kubeconfig be copied into the other's container.
+            Cluster west = cluster();
+            west.setArn("arn:aws:eks:eu-west-1:000000000000:cluster/demo");
+            Cluster central = cluster();
+            central.setArn("arn:aws:eks:eu-central-1:000000000000:cluster/demo");
+
+            assertEquals(tempDir.resolve("webhook/000000000000/eu-west-1/demo/token-webhook.yaml"),
+                    manager.localClusterFile(west, "webhook", "token-webhook.yaml"));
+            assertNotEquals(manager.localClusterFile(west, "webhook", "token-webhook.yaml"),
+                    manager.localClusterFile(central, "webhook", "token-webhook.yaml"));
         }
 
         @Test
