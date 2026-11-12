@@ -1273,6 +1273,7 @@ public class Route53Service implements Resettable {
                 && Objects.equals(a.getRegion(), b.getRegion())
                 && Objects.equals(a.getFailover(), b.getFailover())
                 && Objects.equals(a.getHealthCheckId(), b.getHealthCheckId())
+                && Objects.equals(a.getMultiValueAnswer(), b.getMultiValueAnswer())
                 && aliasTargetsMatch(a.getAliasTarget(), b.getAliasTarget())
                 && recordValuesMatch(a.getRecords(), b.getRecords());
     }
