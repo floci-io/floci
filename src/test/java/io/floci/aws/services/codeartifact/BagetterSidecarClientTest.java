@@ -10,10 +10,13 @@ import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
+import java.io.InputStream;
 import java.lang.reflect.Field;
 import java.net.InetSocketAddress;
 import java.net.http.HttpClient;
 import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
+import java.nio.file.Path;
 import java.time.Instant;
 import java.util.Arrays;
 import java.util.List;
@@ -77,6 +80,63 @@ class BagetterSidecarClientTest {
 
         assertTrue(result.isPresent());
         assertEquals("nupkg bytes", new String(result.get(), StandardCharsets.UTF_8));
+    }
+
+    /**
+     * {@link #fetchPackageVersionAssetGetsTheFlatContainerNupkgPath}'s own streamed sibling: same
+     * wire behavior, but the caller gets an open {@link InputStream} plus the real {@code
+     * Content-Length} instead of an already-resident {@code byte[]}.
+     */
+    @Test
+    void fetchPackageVersionAssetStreamedGetsTheFlatContainerNupkgPath() throws Exception {
+        BagetterSidecarManager manager = manager();
+        seedPooledContainer(manager, "nuget-repo-1", "tracked-bagetter-1", backendUrl);
+        respondWithVersions("demo-pkg", "1.0.0");
+        backend.createContext("/v3/package/demo-pkg/1.0.0/demo-pkg.1.0.0.nupkg", exchange -> {
+            byte[] body = "nupkg bytes".getBytes(StandardCharsets.UTF_8);
+            exchange.sendResponseHeaders(200, body.length);
+            exchange.getResponseBody().write(body);
+            exchange.close();
+        });
+
+        Optional<RepositorySidecarManager.StreamedAsset> result = client(manager).fetchPackageVersionAssetStreamed(
+                "nuget-repo-1", "dom", "repo", null, "demo-pkg", "1.0.0", "demo-pkg.1.0.0.nupkg");
+
+        assertTrue(result.isPresent());
+        try (InputStream in = result.get().content()) {
+            assertEquals("nupkg bytes", new String(in.readAllBytes(), StandardCharsets.UTF_8));
+        }
+        assertEquals(11, result.get().contentLength());
+    }
+
+    /**
+     * {@link BagetterSidecarClient#storePackageVersionAsset(String, String, String, String,
+     * String, String, String, Path, long)}'s own wire contract: the staged file's real content
+     * ends up in the multipart push's {@code package} part, built via {@code BodyPublishers
+     * .concat} rather than one combined array the way the {@code byte[]} overload still needs.
+     */
+    @Test
+    void storePackageVersionAssetStreamedSendsTheStagedFilesRealContent() throws Exception {
+        BagetterSidecarManager manager = manager();
+        seedPooledContainer(manager, "nuget-repo-1", "tracked-bagetter-1", backendUrl);
+        Path staged = Files.createTempFile("bagetter-client-test-", ".tmp");
+        Files.writeString(staged, "staged nupkg bytes");
+        AtomicReference<byte[]> received = new AtomicReference<>();
+        backend.createContext("/api/v2/package", exchange -> {
+            received.set(exchange.getRequestBody().readAllBytes());
+            exchange.sendResponseHeaders(201, -1);
+            exchange.close();
+        });
+
+        try {
+            client(manager).storePackageVersionAsset("nuget-repo-1", "dom", "repo", null, "demo-pkg", "1.0.0",
+                    "demo-pkg.1.0.0.nupkg", staged, Files.size(staged));
+        } finally {
+            Files.deleteIfExists(staged);
+        }
+
+        String body = new String(received.get(), StandardCharsets.UTF_8);
+        assertTrue(body.contains("staged nupkg bytes"));
     }
 
     /**

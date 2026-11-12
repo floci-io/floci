@@ -1,8 +1,9 @@
 package io.floci.aws.services.codeartifact;
 
 import io.floci.aws.core.common.AwsException;
+import io.floci.aws.core.common.StreamingResponses;
 import io.floci.aws.services.codeartifact.CodeArtifactService.AuthorizationTokenScope;
-import io.floci.aws.services.codeartifact.ReposiliteSidecarClient.FetchedArtifact;
+import io.floci.aws.services.codeartifact.ReposiliteSidecarClient.StreamedArtifact;
 import jakarta.inject.Inject;
 import jakarta.ws.rs.Consumes;
 import jakarta.ws.rs.GET;
@@ -18,6 +19,7 @@ import jakarta.ws.rs.core.HttpHeaders;
 import jakarta.ws.rs.core.MediaType;
 import jakarta.ws.rs.core.Response;
 
+import java.io.InputStream;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
@@ -60,14 +62,7 @@ public class CodeArtifactMavenController {
     @Consumes(MediaType.WILDCARD)
     public Response deploy(@Context HttpHeaders headers, @PathParam("domain") String domain,
                             @PathParam("repository") String repository, @PathParam("gav") String gav,
-                            byte[] body) {
-        byte[] content = body != null ? body : new byte[0];
-        // Same 5 GB AWS quota PublishPackageVersion enforces, and just as nominal: RESTEasy
-        // Reactive has already buffered the full body into this byte[] before the method runs, so
-        // this rejects anything that made it this far rather than bounding memory use upfront.
-        if (content.length > CodeArtifactService.MAX_ASSET_FILE_SIZE_BYTES) {
-            return Response.status(413).build();
-        }
+                            InputStream body) {
         MavenRequestScope scope = requireScope(headers, domain, repository);
         Optional<String[]> coordinate = parseNamespaceAndPackageName(gav);
         // A package whose origin configuration sets publish:BLOCK refuses every mvn deploy, the
@@ -118,25 +113,43 @@ public class CodeArtifactMavenController {
         // matters.
         Optional<Long> fenceSnapshot = coordinate.map(c -> service.currentContainerBackedPackageFence(
                 scope.region(), domain, scope.owner(), repository, "maven", c[0], c[1]));
-        ReposiliteSidecarClient.DeployOutcome outcome = reposilite.deployArtifact(scope.repoId(), gav, content);
-        if (outcome.wroteNewContent()) {
-            coordinate.ifPresent(c -> service.recordContainerBackedAssetBytes(scope.region(), domain, scope.owner(),
-                    repository, "maven", c[0], c[1], content.length, fenceSnapshot.get()));
-            // Found by Qodo review: a real mvn deploy to a coordinate updatePackageVersionsStatus/
-            // disposePackageVersions previously archived or disposed would still have its fresh
-            // content blocked by that stale override, since nothing before this cleared it for a
-            // native publish the way copyPackageVersions now does for its own overwrite path. The
-            // version element is null for a bare maven-metadata.xml PUT (see this coordinate's own
-            // javadoc), which never represents a specific version to clear an override for anyway.
-            // By this point the guard above has already refused an Archived/Disposed coordinate,
-            // so the only override left to clear here is Unlisted (or none), and only if it is
-            // still exactly what the guard above saw.
-            String beforeRevisionFinal = beforeRevision;
-            coordinate.filter(c -> c[2] != null).ifPresent(c -> service.forgetContainerBackedStatusOverrideIfUnchanged(
-                    scope.region(), domain, scope.owner(), repository, "maven", c[0], c[1], c[2],
-                    beforeRevisionFinal));
+
+        java.nio.file.Path staged;
+        long contentLength;
+        try {
+            AssetDigestingInputStream digesting = new AssetDigestingInputStream(body,
+                    CodeArtifactService.MAX_ASSET_FILE_SIZE_BYTES);
+            staged = service.stageAssetBody(digesting);
+            contentLength = digesting.size();
+        } catch (AssetDigestingInputStream.AssetTooLargeException e) {
+            // Same 5 GB AWS quota PublishPackageVersion enforces: raised while the upload is still
+            // being staged to disk, not after it has already been buffered whole, so this now
+            // bounds real memory/disk use rather than only rejecting a body already paid for.
+            return Response.status(413).build();
         }
-        return Response.status(outcome.status()).build();
+        try {
+            ReposiliteSidecarClient.DeployOutcome outcome = reposilite.deployArtifact(scope.repoId(), gav, staged);
+            if (outcome.wroteNewContent()) {
+                coordinate.ifPresent(c -> service.recordContainerBackedAssetBytes(scope.region(), domain,
+                        scope.owner(), repository, "maven", c[0], c[1], contentLength, fenceSnapshot.get()));
+                // Found by Qodo review: a real mvn deploy to a coordinate updatePackageVersionsStatus/
+                // disposePackageVersions previously archived or disposed would still have its fresh
+                // content blocked by that stale override, since nothing before this cleared it for a
+                // native publish the way copyPackageVersions now does for its own overwrite path. The
+                // version element is null for a bare maven-metadata.xml PUT (see this coordinate's own
+                // javadoc), which never represents a specific version to clear an override for anyway.
+                // By this point the guard above has already refused an Archived/Disposed coordinate,
+                // so the only override left to clear here is Unlisted (or none), and only if it is
+                // still exactly what the guard above saw.
+                String beforeRevisionFinal = beforeRevision;
+                coordinate.filter(c -> c[2] != null).ifPresent(
+                        c -> service.forgetContainerBackedStatusOverrideIfUnchanged(scope.region(), domain,
+                                scope.owner(), repository, "maven", c[0], c[1], c[2], beforeRevisionFinal));
+            }
+            return Response.status(outcome.status()).build();
+        } finally {
+            service.deleteStagedAssetBody(staged);
+        }
     }
 
     /**
@@ -218,11 +231,12 @@ public class CodeArtifactMavenController {
         if (!isDownloadable(scope, domain, repository, gav)) {
             return Response.status(Response.Status.NOT_FOUND).build();
         }
-        Optional<FetchedArtifact> artifact = reposilite.fetchArtifact(scope.repoId(), gav);
+        Optional<StreamedArtifact> artifact = reposilite.fetchArtifactStreamed(scope.repoId(), gav);
         if ((artifact.isEmpty() || isBareMavenMetadataFile(gav))
                 && externalConnectionImporter.tryImport(scope.region(), domain, scope.owner(), repository,
                         scope.repoId(), gav)) {
-            artifact = reposilite.fetchArtifact(scope.repoId(), gav);
+            artifact.ifPresent(a -> StreamingResponses.closeQuietly(a.content()));
+            artifact = reposilite.fetchArtifactStreamed(scope.repoId(), gav);
         }
         return artifact.map(this::toResponse).orElseGet(() -> Response.status(Response.Status.NOT_FOUND).build());
     }
@@ -281,8 +295,12 @@ public class CodeArtifactMavenController {
         }).orElse(true);
     }
 
-    private Response toResponse(FetchedArtifact artifact) {
-        return Response.ok(artifact.content(), artifact.contentType()).build();
+    private Response toResponse(StreamedArtifact artifact) {
+        Response.ResponseBuilder builder = Response.ok().type(artifact.contentType());
+        if (artifact.contentLength() >= 0) {
+            builder.header("Content-Length", artifact.contentLength());
+        }
+        return StreamingResponses.streamingResponse(artifact.content(), stream -> builder.entity(stream).build());
     }
 
     private record MavenRequestScope(String repoId, String region, String owner) {}
