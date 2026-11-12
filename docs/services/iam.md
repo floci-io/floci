@@ -379,6 +379,20 @@ one edit rather than across the service, and a capture of some other omitted mem
 or split `Status` from the rest in one edit too. The services that do quote their values, STS among
 them, still write `Value null at '<member>'`.
 
+A member the request carries empty is a value rather than a member it left out. An empty value
+arrives on this protocol as the parameter spelled with nothing after it, so what it breaks is the
+shape declared for it, answered ahead of the operation: `RoleName=` breaks its pattern, `Status=`
+its value set, `VersionId=` its pattern, and `PolicyDocument=` both its minimum length and its
+pattern, reported together. Only a member the request never carried reads as absent.
+
+The two members read by hand rather than through the model follow the same split. A blank
+`PolicySourceArn` is held to the 20 characters `arnType` declares, which is the answer
+`GetContextKeysForPrincipalPolicy` gives for the same member through the model, while one left out
+keeps the sentence the simulators answer it with, `PolicySourceArn is required.`. `ServiceName` on
+`CreateServiceSpecificCredential` declares no length, no pattern and no value set, so nothing ahead
+of the operation holds a blank: it reaches the operation, where a service name nothing supports is
+`NoSuchEntity` with the name echoed as the caller sent it.
+
 ### Two answers the model carries since a capture settled them
 
 `statusType` and `CreateServiceLinkedRole`'s `AWSServiceName` were answered by hand here until
