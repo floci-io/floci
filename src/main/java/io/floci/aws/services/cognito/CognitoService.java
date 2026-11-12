@@ -4714,7 +4714,7 @@ public class CognitoService implements ResourceProvider {
         return deliveryDetails;
     }
 
-    private static void validateCustomAttributes(UserPool pool, Map<String, String> attributes) {
+    static void validateCustomAttributes(UserPool pool, Map<String, String> attributes) {
         List<Map<String, Object>> schema = pool.getSchemaAttributes();
         for (String name : attributes.keySet()) {
             if (name != null && name.startsWith("custom:")
