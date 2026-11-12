@@ -252,7 +252,7 @@ public class PreSignedUrlFilter implements ContainerRequestFilter {
     private boolean verifySigV4Signature(ContainerRequestContext requestContext,
                                         String signature, String secretKey) {
         try {
-            MultivaluedMap<String, String> queryParams = requestContext.getUriInfo().getQueryParameters();
+            MultivaluedMap<String, String> queryParams = ResteasyRequests.queryParameters(requestContext);
             String credential = queryParams.getFirst("X-Amz-Credential");
             String amzDate = queryParams.getFirst("X-Amz-Date");
             String signedHeaders = queryParams.getFirst("X-Amz-SignedHeaders");

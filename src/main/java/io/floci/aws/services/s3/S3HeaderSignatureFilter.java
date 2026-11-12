@@ -1,6 +1,7 @@
 package io.floci.aws.services.s3;
 
 import io.floci.aws.core.common.Digests;
+import io.floci.aws.core.common.ResteasyRequests;
 import io.floci.aws.core.common.auth.SigV4RequestValidator;
 import io.floci.aws.core.common.auth.SigV4aSignature;
 import io.floci.aws.services.iam.IamService;
@@ -252,7 +253,7 @@ public class S3HeaderSignatureFilter implements ContainerRequestFilter {
 
         String canonicalRequest = ctx.getMethod() + "\n"
                 + signedPath(currentVertxRequest, requestUri) + "\n"
-                + PreSignedUrlFilter.buildCanonicalQueryString(ctx.getUriInfo().getQueryParameters()) + "\n"
+                + PreSignedUrlFilter.buildCanonicalQueryString(ResteasyRequests.queryParameters(ctx)) + "\n"
                 + canonicalHeaders + "\n"
                 + signedHeaders + "\n"
                 + payloadHash;
