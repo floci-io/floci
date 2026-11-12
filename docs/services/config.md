@@ -204,12 +204,19 @@ aws configservice delete-config-rule --config-rule-name s3-bucket-versioning
       `ResourceNotFoundException` for a config rule, conformance pack, aggregation
       authorization or configuration recorder ARN that does not name an existing resource in the
       caller's account and region. ARNs of resource kinds Floci does not model (configuration
-      aggregators, stored queries, organization rules and packs) are accepted without a check.
+      aggregators, stored queries, organization rules and packs) are accepted without an existence check.
     - `PutConfigRule` applies its `Tags` only when it creates the rule; a later
       `PutConfigRule` for the same rule leaves its tags unchanged, as AWS documents. Use
       `TagResource` and `UntagResource` to change them. `DeleteConfigRule` drops the rule's tags.
       `PutConfigurationRecorder` and `DeleteConfigurationRecorder` do the same for the recorder.
-    - `PutConfigRule` and `PutAggregationAuthorization` reject more than 50 `Tags`, a tag
-      without a 1-128 character `Key`, or a `Value` over 256 characters with
-      `InvalidParameterValueException`, and store nothing. `PutConfigurationRecorder` rejects
-      the same with `ValidationException`. A tag with no `Value` is stored with an empty value.
+    - Every request is checked by `RequestConstraintCheck` against the types, required
+      members, bounds, patterns and enums generated from botocore's AWS Config service model.
+      `tools/aws/regen_config_shapes.py` vendors every operation's input constraints;
+      `make aws-data-sync` regenerates them and `make aws-data-check` checks for drift. A
+      violation answers `ValidationException`, or `InvalidLimitException` for a `Limit` out of
+      range where the operation models that error, in Floci's own wording.
+    - `PutConfigRule`, `PutAggregationAuthorization` and `PutConfigurationRecorder` reject more
+      than 50 `Tags`, a `Key` outside 1-128 characters or a `Value` over 256 characters with
+      `ValidationException`, and a tag without a `Key` with the operation's modelled error
+      (`InvalidParameterValueException` for the first two). They store nothing. A tag with no
+      `Value` is stored with an empty value.
