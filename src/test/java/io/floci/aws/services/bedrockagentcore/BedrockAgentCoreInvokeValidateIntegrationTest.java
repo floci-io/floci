@@ -8,6 +8,8 @@ import io.restassured.path.json.JsonPath;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.RegisterExtension;
 
+import java.util.UUID;
+
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.equalTo;
 
@@ -52,9 +54,40 @@ class BedrockAgentCoreInvokeValidateIntegrationTest {
     @Test
     void invokeUnknownRuntimeReturns404() {
         String unknown =
-                "arn:aws:bedrock-agentcore:us-east-1:000000000000:agent/00000000-0000-0000-0000-000000000000:1";
+                "arn:aws:bedrock-agentcore:us-east-1:000000000000:runtime/missing-AbCdEfGhIj";
         given().contentType("application/json").body("{}")
                 .when().post("/runtimes/" + unknown + "/invocations")
+                .then().statusCode(404);
+    }
+
+    @Test
+    void invokeUnknownLegacyRuntimeReturns404() {
+        given().contentType("application/json").body("{}")
+                .post("/runtimes/arn:aws:bedrock-agentcore:us-east-1:000000000000:agent/unknown:1/invocations")
+                .then().statusCode(404);
+    }
+
+    @Test
+    void harnessRuntimeExistsOnlyWhileItsHarnessIsRegistered() {
+        String name = "invoke" + UUID.randomUUID().toString().replace("-", "");
+        JsonPath harness = given().contentType("application/json").body("""
+                {"harnessName":"%s","executionRoleArn":"arn:aws:iam::000000000000:role/harness",
+                 "model":{"bedrockModelConfig":{"modelId":"test-model"}}}
+                """.formatted(name)).post("/harnesses").then().statusCode(201).extract().jsonPath();
+        String id = harness.getString("harness.harnessId");
+        String arn = harness.getString("harness.environment.agentCoreRuntimeEnvironment.agentRuntimeArn");
+        cleanup.register(() -> given().delete("/harnesses/" + id));
+        given().contentType("application/json").body("{}").post("/runtimes/" + arn + "/invocations")
+                .then().statusCode(200);
+        given().delete("/harnesses/" + id).then().statusCode(200);
+        given().contentType("application/json").body("{}").post("/runtimes/" + arn + "/invocations")
+                .then().statusCode(404);
+    }
+
+    @Test
+    void anInventedHarnessRuntimeDoesNotPassValidation() {
+        given().contentType("application/json").body("{}")
+                .post("/runtimes/arn:aws:bedrock-agentcore:us-east-1:000000000000:runtime/harness_missing-AbCdEfGhIj/invocations")
                 .then().statusCode(404);
     }
 }

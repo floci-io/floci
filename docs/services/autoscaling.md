@@ -235,6 +235,10 @@ imply an atomic transaction spanning Auto Scaling and EC2 after a process crash.
 |---|---|
 | `DescribeScalingActivities` | Returns the activity log for a group; activities recorded on scale-out and scale-in events |
 
+The optional `ActivityIds` filter selects matching activities within the requested group,
+account and region. Matches retain newest-first order, repeated IDs do not duplicate results,
+and unknown IDs are ignored. Omitting the filter returns the full matching activity history.
+
 ### Metadata
 
 | Operation | Notes |

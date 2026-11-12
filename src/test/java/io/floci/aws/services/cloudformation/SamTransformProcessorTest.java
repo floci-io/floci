@@ -1118,6 +1118,57 @@ class SamTransformProcessorTest {
     }
 
     @Test
+    void expandSamTemplate_durableFunctionKeepsDurableAndLoggingConfig() throws Exception {
+        JsonNode template = objectMapper.readTree("""
+            {
+              "Transform": "AWS::Serverless-2016-10-31",
+              "Globals": {
+                "Function": {
+                  "LoggingConfig": {"LogFormat": "JSON", "ApplicationLogLevel": "DEBUG"}
+                }
+              },
+              "Resources": {
+                "DurableFn": {
+                  "Type": "AWS::Serverless::Function",
+                  "Properties": {
+                    "Handler": "index.handler",
+                    "Runtime": "python3.13",
+                    "InlineCode": "def handler(e, c): return e",
+                    "DurableConfig": {"ExecutionTimeout": 60, "RetentionPeriodInDays": 3}
+                  }
+                },
+                "PlainFn": {
+                  "Type": "AWS::Serverless::Function",
+                  "Properties": {
+                    "Handler": "index.handler",
+                    "Runtime": "python3.13",
+                    "InlineCode": "def handler(e, c): return e"
+                  }
+                }
+              }
+            }
+            """);
+
+        JsonNode resources = processor.expandSamTemplate(template).path("Resources");
+
+        JsonNode durableProps = resources.path("DurableFn").path("Properties");
+        assertEquals(objectMapper.readTree("{\"ExecutionTimeout\": 60, \"RetentionPeriodInDays\": 3}"),
+                durableProps.path("DurableConfig"));
+        assertEquals(objectMapper.readTree("{\"LogFormat\": \"JSON\", \"ApplicationLogLevel\": \"DEBUG\"}"),
+                durableProps.path("LoggingConfig"));
+        assertEquals(objectMapper.readTree("""
+                [{"Fn::Sub": "arn:${AWS::Partition}:iam::aws:policy/service-role/AWSLambdaBasicDurableExecutionRolePolicy"}]
+                """), resources.path("DurableFnRole").path("Properties").path("ManagedPolicyArns"));
+
+        JsonNode plainProps = resources.path("PlainFn").path("Properties");
+        assertTrue(plainProps.path("DurableConfig").isMissingNode());
+        assertEquals("JSON", plainProps.path("LoggingConfig").path("LogFormat").asText());
+        assertEquals(objectMapper.readTree("""
+                [{"Fn::Sub": "arn:${AWS::Partition}:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole"}]
+                """), resources.path("PlainFnRole").path("Properties").path("ManagedPolicyArns"));
+    }
+
+    @Test
     void expandSamTemplate_functionWithImageConfig() throws Exception {
         // ImageConfig (EntryPoint/Command/WorkingDirectory overrides for a container-image
         // function) must also be carried through: LambdaCfnProvisioner

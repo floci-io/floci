@@ -3,7 +3,6 @@ package io.floci.aws.services.redshift.spectrum;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.floci.aws.config.EmulatorConfig;
-import io.floci.aws.core.common.AwsArnUtils;
 import io.floci.aws.core.common.AwsException;
 import io.floci.aws.core.common.AwsRegions;
 import io.floci.aws.core.common.Digests;
@@ -18,6 +17,7 @@ import io.floci.aws.services.glue.model.Table;
 import io.floci.aws.services.iam.IamService;
 import io.floci.aws.services.redshift.proxy.RedshiftRoleAccess;
 import io.floci.aws.services.redshift.proxy.S3CopySimulator;
+import io.floci.aws.services.s3.S3ResourceArns;
 import io.floci.aws.services.s3.S3ScratchSpace;
 import io.floci.aws.services.s3.S3Service;
 import io.floci.aws.services.s3.model.S3Object;
@@ -95,16 +95,76 @@ public class ExternalTableMaterializer {
     /** The partitions each partitioned table holds in PostgreSQL, so a query loads only the ones it reads. */
     private final ConcurrentHashMap<String, LoadedPartitions> loadedPartitions = new ConcurrentHashMap<>();
 
+    /** Bumped whenever what a table holds changes, so state staged against an older content is recognized as stale. */
+    private final ConcurrentHashMap<String, Long> generations = new ConcurrentHashMap<>();
+    /** Partitions loaded inside a transaction, per client connection, until that transaction commits or rolls back. */
+    private final Map<Object, Map<String, PendingPartitions>> pendingPartitions = new ConcurrentHashMap<>();
+
     private record PendingLoad(String fingerprint, String definitions) { }
 
     /** What a partitioned table holds: the table it was loaded for, and a fingerprint per loaded partition. */
     private record LoadedPartitions(String identity, Map<List<String>, String> partitions) { }
 
+    /** Partitions an uncommitted transaction loaded, valid only while the table's generation is unchanged. */
+    private record PendingPartitions(LoadedPartitions state, String definitions, long generation) { }
+
     public void finishCycle(BackendSql backend) {
         pendingLoads.remove(backend);
+        discardPendingPartitions(backend);
+    }
+
+    private void discardPendingPartitions(BackendSql backend) {
+        Object connection = backend.connectionKey();
+        if (connection != null) {
+            pendingPartitions.remove(connection);
+        }
+    }
+
+    /** Forgets what the table holds: its content is about to change or can no longer be vouched for. */
+    private void dropHeld(String cacheKey) {
+        loadedPartitions.remove(cacheKey);
+        generations.merge(cacheKey, 1L, Long::sum);
+    }
+
+    private void dropStaged(BackendSql backend, String cacheKey) {
+        Object connection = backend.connectionKey();
+        Map<String, PendingPartitions> staged = connection == null ? null : pendingPartitions.get(connection);
+        if (staged != null) {
+            staged.remove(cacheKey);
+        }
+    }
+
+    private long generation(String cacheKey) {
+        return generations.getOrDefault(cacheKey, 0L);
+    }
+
+    private void publishPendingPartitions(BackendSql backend) {
+        Object connection = backend.connectionKey();
+        Map<String, PendingPartitions> completed = connection == null ? null : pendingPartitions.remove(connection);
+        if (completed == null) {
+            return;
+        }
+        completed.forEach((key, pending) -> {
+            ReentrantLock lock = locks.computeIfAbsent(key, ignored -> new ReentrantLock());
+            lock.lock();
+            try {
+                // another load changed the table since this transaction did, so what it staged no longer describes it
+                if (generation(key) == pending.generation()) {
+                    schemaSignatures.put(key, pending.definitions());
+                    loadedPartitions.put(key, pending.state());
+                }
+            } finally {
+                lock.unlock();
+            }
+        });
     }
 
     public void finishCycle(BackendSql backend, boolean committed) {
+        if (committed) {
+            publishPendingPartitions(backend);
+        } else {
+            discardPendingPartitions(backend);
+        }
         Map<String, PendingLoad> completed = pendingLoads.remove(backend);
         if (committed && completed != null) {
             completed.forEach((key, loaded) -> {
@@ -153,14 +213,26 @@ public class ExternalTableMaterializer {
      */
     public Outcome ensureCurrent(BackendSql backend, SpectrumSession session, ExternalSchemaBinding binding,
                                  String tableName, String sql) {
+        return ensureCurrent(backend, session, binding, tableName, sql, List.of());
+    }
+
+    /**
+     * As {@link #ensureCurrent(BackendSql, SpectrumSession, ExternalSchemaBinding, String, String)} for a query
+     * with bind parameters: {@code parameters} holds the text of each bound value, a null where it is unusable.
+     * Null {@code parameters} means the statement is only being parsed and its values are not known yet; a
+     * partitioned table then loads no partition, enough for PostgreSQL to plan it, and the Bind loads the ones
+     * its values select.
+     */
+    public Outcome ensureCurrent(BackendSql backend, SpectrumSession session, ExternalSchemaBinding binding,
+                                 String tableName, String sql, List<String> parameters) {
         try (ExternalCatalogLocks.Guard ignored = catalogLocks.read(binding,
                 session.inTransaction() || !backend.permitsCachePublication())) {
-            return ensureCurrentLocked(backend, session, binding, tableName, sql);
+            return ensureCurrentLocked(backend, session, binding, tableName, sql, parameters);
         }
     }
 
     private Outcome ensureCurrentLocked(BackendSql backend, SpectrumSession session, ExternalSchemaBinding binding,
-                                        String tableName, String sql) {
+                                        String tableName, String sql, List<String> parameters) {
         Table table;
         try {
             table = RequestScopes.callAs(session.accountId(), () -> glueService.getTable(binding.glueDatabase(), tableName));
@@ -180,7 +252,8 @@ public class ExternalTableMaterializer {
             authorizeIcebergManifests(session.accountId(), binding, roleSession, table, location);
             List<Partition> partitions = partitions(session.accountId(), binding, table);
             if (holdsPartitions(table, session, backend, partitions)) {
-                return ensurePartitions(backend, session, binding, roleSession, table, location, partitions, sql);
+                return ensurePartitions(backend, session, binding, roleSession, table, location, partitions, sql,
+                        parameters);
             }
             List<ReadSource> sources = readSources(session.accountId(), binding, roleSession, table, location, partitions);
             List<S3Object> objects = sources.stream().flatMap(source -> source.objects().stream()).toList();
@@ -209,7 +282,8 @@ public class ExternalTableMaterializer {
                 String previousSignature = local == null ? schemaSignatures.get(cacheKey) : local.definitions();
                 latestLoads.remove(cacheKey);
                 // a load of every partition replaces what the table held, so the partitions it holds are no longer known
-                loadedPartitions.remove(cacheKey);
+                dropHeld(cacheKey);
+                dropStaged(backend, cacheKey);
                 String definitions = load(backend, session, binding, roleSession, table, sources, previousSignature, null);
                 if (!backend.permitsCachePublication()) {
                     fingerprints.remove(cacheKey);
@@ -254,15 +328,20 @@ public class ExternalTableMaterializer {
         }
     }
 
+    /** Whether what a load puts in PostgreSQL may be undone, so it is only known to be there once the transaction commits. */
+    private static boolean loadsMayRollBack(SpectrumSession session, BackendSql backend) {
+        return session.inTransaction() || !backend.permitsCachePublication();
+    }
+
     /**
-     * Whether the table is loaded partition by partition: a partitioned table that has partitions, for a session
-     * whose loads are published at once. A transaction may roll its load back and an Extended Query load is
-     * published only when its cycle commits, so those keep loading every partition.
+     * Whether the table is loaded partition by partition: a partitioned table that has partitions. A load that may
+     * roll back is staged for its connection and published when the transaction commits, which needs a backend that
+     * reports where the transaction ends; without one the table is loaded whole.
      */
     private static boolean holdsPartitions(Table table, SpectrumSession session, BackendSql backend,
                                            List<Partition> partitions) {
-        return hasPartitionKeys(table) && !partitions.isEmpty() && !session.inTransaction()
-                && backend.permitsCachePublication();
+        return hasPartitionKeys(table) && !partitions.isEmpty()
+                && (!loadsMayRollBack(session, backend) || backend.connectionKey() != null);
     }
 
     /**
@@ -273,13 +352,16 @@ public class ExternalTableMaterializer {
      */
     private Outcome ensurePartitions(BackendSql backend, SpectrumSession session, ExternalSchemaBinding binding,
                                      RedshiftRoleAccess.RoleSession roleSession, Table table, Location location,
-                                     List<Partition> partitions, String sql) {
+                                     List<Partition> partitions, String sql, List<String> parameters) {
         String accountId = session.accountId();
         Optional<PartitionPruner.Filter> filter = PartitionPruner.filterFor(sql, binding.schemaName(),
-                table.getName(), table.getPartitionKeys());
+                table.getName(), table.getPartitionKeys(), parameters);
         // partitions that PostgreSQL's casts make equal cannot be told apart by key value, so they are all read
         boolean overlapping = hasOverlappingPartitions(table, partitions);
-        List<Partition> qualified = filter.isEmpty() || overlapping ? partitions
+        // a statement still being parsed has no values to select with, and its Bind loads what it needs
+        boolean awaitingValues = parameters == null && PartitionPruner.hasParameters(sql);
+        List<Partition> qualified = awaitingValues ? List.of()
+                : filter.isEmpty() || overlapping ? partitions
                 : partitions.stream().filter(partition -> filter.get().matches(partition.getValues())).toList();
         List<ReadSource> sources = readSources(accountId, binding, roleSession, table, location, qualified);
         authorizeObjects(accountId, binding, roleSession, sources);
@@ -288,11 +370,29 @@ public class ExternalTableMaterializer {
         String cacheKey = cacheKey(session, binding, table.getName());
         String label = binding.schemaName() + "." + table.getName();
         ReentrantLock lock = locks.computeIfAbsent(cacheKey, ignored -> new ReentrantLock());
-        acquire(lock, label, false);
+        acquire(lock, label, session.inTransaction());
         try {
-            LoadedPartitions state = loadedPartitions.get(cacheKey);
-            String previousSignature = schemaSignatures.get(cacheKey);
+            boolean mayRollBack = loadsMayRollBack(session, backend);
+            Object connection = backend.connectionKey();
+            PendingPartitions staged = !mayRollBack || connection == null ? null
+                    : pendingPartitions.getOrDefault(connection, Map.of()).get(cacheKey);
+            LoadedPartitions state;
+            String previousSignature;
+            if (staged != null) {
+                // this transaction's own loads are in the table it reads; they hold only while nothing else changed it
+                boolean current = staged.generation() == generation(cacheKey);
+                state = current ? staged.state() : null;
+                previousSignature = current ? staged.definitions() : null;
+            } else {
+                state = loadedPartitions.get(cacheKey);
+                previousSignature = schemaSignatures.get(cacheKey);
+            }
             boolean reset = state == null || !state.identity().equals(identity) || !definitions.equals(previousSignature);
+            if (awaitingValues && !reset) {
+                // a statement still being parsed loads nothing; its Bind reconciles the table, because a delete by
+                // key value here could remove rows of partitions that stay recorded as loaded
+                return Outcome.CURRENT;
+            }
             Map<List<String>, String> held = reset ? Map.of() : state.partitions();
             Set<List<String>> existing = partitions.stream().map(Partition::getValues).collect(Collectors.toSet());
             List<List<String>> deletions = new ArrayList<>(held.keySet().stream()
@@ -311,7 +411,7 @@ public class ExternalTableMaterializer {
                     loaded.put(values, fingerprint);
                 }
             }
-            if (overlapping && !reset && (!deletions.isEmpty() || !toLoad.isEmpty())) {
+            if (overlapping && !reset &&(!deletions.isEmpty() || !toLoad.isEmpty())) {
                 // a delete by key value cannot tell overlapping partitions apart, so the whole table is replaced
                 reset = true;
                 toLoad.clear();
@@ -328,10 +428,21 @@ public class ExternalTableMaterializer {
             fingerprints.remove(cacheKey);
             latestLoads.remove(cacheKey);
             pendingLoads.values().forEach(loads -> loads.remove(cacheKey));
-            loadedPartitions.remove(cacheKey);
+            dropHeld(cacheKey);
+            dropStaged(backend, cacheKey);
             load(backend, session, binding, roleSession, table, toLoad, previousSignature, reset ? null : deletions);
-            schemaSignatures.put(cacheKey, definitions);
-            loadedPartitions.put(cacheKey, new LoadedPartitions(identity, Map.copyOf(loaded)));
+            LoadedPartitions loadedState = new LoadedPartitions(identity, Map.copyOf(loaded));
+            if (mayRollBack) {
+                // a rollback restores the committed columns, so a changed signature cannot be trusted afterwards
+                if (!definitions.equals(schemaSignatures.get(cacheKey))) {
+                    schemaSignatures.remove(cacheKey);
+                }
+                pendingPartitions.computeIfAbsent(connection, ignored -> new ConcurrentHashMap<>())
+                        .put(cacheKey, new PendingPartitions(loadedState, definitions, generation(cacheKey)));
+            } else {
+                schemaSignatures.put(cacheKey, definitions);
+                loadedPartitions.put(cacheKey, loadedState);
+            }
             return Outcome.LOADED;
         } finally {
             lock.unlock();
@@ -378,7 +489,7 @@ public class ExternalTableMaterializer {
         lock.lock();
         try {
             fingerprints.remove(key);
-            loadedPartitions.remove(key);
+            dropHeld(key);
             latestLoads.remove(key);
             pendingLoads.values().forEach(loads -> loads.remove(key));
         } finally {
@@ -398,7 +509,7 @@ public class ExternalTableMaterializer {
                 lock.lock();
                 try {
                     fingerprints.remove(key);
-                    loadedPartitions.remove(key);
+                    dropHeld(key);
                     schemaSignatures.remove(key);
                     latestLoads.remove(key);
                     pendingLoads.values().forEach(loads -> loads.remove(key));
@@ -786,8 +897,7 @@ public class ExternalTableMaterializer {
                 scratchKey = SCRATCH_KEY_PREFIX + UUID.randomUUID() + ".csv";
                 if (roleSession != null && roleSession.accessKeyId() != null) {
                     String partition = AwsRegions.partitionFor(config.defaultRegion());
-                    String scratchArn = AwsArnUtils.Arn.global(partition, "s3", "",
-                            SCRATCH_BUCKET + "/" + scratchKey).toString();
+                    String scratchArn = S3ResourceArns.object(partition, SCRATCH_BUCKET, scratchKey);
                     iamService.registerScratchResource(roleSession.accessKeyId(), scratchArn);
                 }
                 readWithDuckDb(session.accountId(), roleSession, table, sources,

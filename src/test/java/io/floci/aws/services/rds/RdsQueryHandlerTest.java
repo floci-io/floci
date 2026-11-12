@@ -25,6 +25,7 @@ import io.floci.aws.services.rds.model.ExportTask;
 import io.floci.aws.services.rds.model.OptionGroup;
 import io.floci.aws.services.rds.model.OptionGroupOption;
 import io.floci.aws.services.rds.model.PointInTimeRestoreRequest;
+import io.floci.aws.services.rds.model.RdsEvent;
 import io.floci.aws.services.rds.model.ReadReplicaRequest;
 import jakarta.ws.rs.core.MultivaluedHashMap;
 import jakarta.ws.rs.core.MultivaluedMap;
@@ -74,6 +75,68 @@ class RdsQueryHandlerTest {
         neptuneHandler = mock(NeptuneQueryHandler.class);
         exportTaskService = mock(RdsExportTaskService.class);
         handler = new RdsQueryHandler(service, exportTaskService, config, docDbHandler, neptuneHandler);
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"DescribeEvents", "DescribeDBClusterParameterGroups", "DescribeExportTasks"})
+    void recordListingsValidatePageSizeBeforeReadingRecords(String action) {
+        for (String invalid : List.of("19", "101", "not-a-number")) {
+            MultivaluedMap<String, String> p = params();
+            p.putSingle("MaxRecords", invalid);
+            p.putSingle("Marker", "invalid-marker");
+            Response response = handler.handle(action, p, "us-east-1");
+            assertEquals(400, response.getStatus());
+            String body = (String) response.getEntity();
+            assertTrue(body.contains("<Code>InvalidParameterValue</Code>"), body);
+            assertFalse(body.contains("Marker"), body);
+            verifyNoInteractions(service, exportTaskService);
+        }
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"DescribeEvents", "DescribeDBClusterParameterGroups", "DescribeExportTasks"})
+    void recordListingsPageAndOmitTheTerminalMarker(String action) {
+        List<RdsEvent> events = new ArrayList<>();
+        List<DbClusterParameterGroup> groups = new ArrayList<>();
+        List<ExportTask> exports = new ArrayList<>();
+        for (int i = 0; i < 25; i++) {
+            String name = "record-" + i;
+            events.add(new RdsEvent(name, name, "db-cluster", "created", List.of("creation"),
+                    Instant.parse("2026-11-01T00:00:00Z"), "arn:aws:rds:us-east-1:000000000000:cluster:" + name));
+            DbClusterParameterGroup group = new DbClusterParameterGroup();
+            group.setDbClusterParameterGroupName(name);
+            groups.add(group);
+            exports.add(exportTask(name, ExportTask.STATUS_COMPLETE));
+        }
+        when(service.describeEvents("us-east-1", null, "db-cluster", null, null, null)).thenReturn(events);
+        when(service.listDbClusterParameterGroups(null, "us-east-1")).thenReturn(groups);
+        when(exportTaskService.describeExportTasks(eq(null), eq(null), eq(null), any(), eq("us-east-1")))
+                .thenReturn(exports);
+        String itemTag = switch (action) {
+            case "DescribeEvents" -> "Event";
+            case "DescribeDBClusterParameterGroups" -> "DBClusterParameterGroup";
+            default -> "ExportTask";
+        };
+        MultivaluedMap<String, String> p = params();
+        p.putSingle("MaxRecords", "20");
+        if ("DescribeEvents".equals(action)) {
+            p.putSingle("SourceType", "db-cluster");
+        }
+        Response first = handler.handle(action, p, "us-east-1");
+        assertEquals(200, first.getStatus());
+        String firstBody = (String) first.getEntity();
+        assertEquals(20, firstBody.split("<" + itemTag + ">", -1).length - 1, firstBody);
+        assertTrue(firstBody.contains("<Marker>20</Marker>"), firstBody);
+        p.putSingle("Marker", "20");
+        Response last = handler.handle(action, p, "us-east-1");
+        assertEquals(200, last.getStatus());
+        String lastBody = (String) last.getEntity();
+        assertEquals(5, lastBody.split("<" + itemTag + ">", -1).length - 1, lastBody);
+        assertFalse(lastBody.contains("<Marker>"), lastBody);
+        p.putSingle("Marker", "999");
+        String emptyBody = (String) handler.handle(action, p, "us-east-1").getEntity();
+        assertEquals(0, emptyBody.split("<" + itemTag + ">", -1).length - 1, emptyBody);
+        assertFalse(emptyBody.contains("<Marker>"), emptyBody);
     }
 
     @ParameterizedTest
@@ -1540,6 +1603,61 @@ class RdsQueryHandlerTest {
         String body = (String) response.getEntity();
         assertTrue(body.contains("<DBClusterParameterGroup>"), "Expected <DBClusterParameterGroup> element in response");
         assertFalse(body.contains("<member><DBClusterParameterGroupName>"), "Did not expect <member> wrapping DBClusterParameterGroup");
+        assertFalse(body.contains("<Marker>"), "Did not expect <Marker> on terminal page");
+    }
+
+    @Test
+    void describeDbClusterParameterGroups_paginatesAndOmitsTerminalMarker() {
+        List<DbClusterParameterGroup> all = new ArrayList<>();
+        for (int i = 0; i < 23; i++) {
+            all.add(new DbClusterParameterGroup(String.format("cpg-%02d", i), "aurora-postgresql16", "desc"));
+        }
+        when(service.listDbClusterParameterGroups(null, null)).thenReturn(all);
+
+        MultivaluedMap<String, String> firstParams = params();
+        firstParams.add("MaxRecords", "20");
+        Response firstResponse = handler.handle("DescribeDBClusterParameterGroups", firstParams);
+        assertEquals(200, firstResponse.getStatus());
+        String firstBody = (String) firstResponse.getEntity();
+        assertTrue(firstBody.contains("<DBClusterParameterGroupName>cpg-00</DBClusterParameterGroupName>"));
+        assertTrue(firstBody.contains("<DBClusterParameterGroupName>cpg-19</DBClusterParameterGroupName>"));
+        assertFalse(firstBody.contains("<DBClusterParameterGroupName>cpg-20</DBClusterParameterGroupName>"));
+        assertTrue(firstBody.contains("<Marker>20</Marker>"));
+
+        MultivaluedMap<String, String> secondParams = params();
+        secondParams.add("MaxRecords", "20");
+        secondParams.add("Marker", "20");
+        Response secondResponse = handler.handle("DescribeDBClusterParameterGroups", secondParams);
+        assertEquals(200, secondResponse.getStatus());
+        String secondBody = (String) secondResponse.getEntity();
+        assertFalse(secondBody.contains("<DBClusterParameterGroupName>cpg-19</DBClusterParameterGroupName>"));
+        assertTrue(secondBody.contains("<DBClusterParameterGroupName>cpg-20</DBClusterParameterGroupName>"));
+        assertTrue(secondBody.contains("<DBClusterParameterGroupName>cpg-22</DBClusterParameterGroupName>"));
+        assertFalse(secondBody.contains("<Marker>"));
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"19", "101", "abc"})
+    void describeDbClusterParameterGroups_rejectsInvalidMaxRecords(String maxRecords) {
+        MultivaluedMap<String, String> queryParams = params();
+        queryParams.add("MaxRecords", maxRecords);
+
+        Response response = handler.handle("DescribeDBClusterParameterGroups", queryParams);
+
+        assertEquals(400, response.getStatus());
+        assertTrue(((String) response.getEntity()).contains("<Code>InvalidParameterValue</Code>"));
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"-1", "abc"})
+    void describeDbClusterParameterGroups_rejectsInvalidMarker(String marker) {
+        MultivaluedMap<String, String> queryParams = params();
+        queryParams.add("Marker", marker);
+
+        Response response = handler.handle("DescribeDBClusterParameterGroups", queryParams);
+
+        assertEquals(400, response.getStatus());
+        assertTrue(((String) response.getEntity()).contains("<Code>InvalidParameterValue</Code>"));
     }
 
     @Test
@@ -3026,7 +3144,7 @@ class RdsQueryHandlerTest {
         assertTrue(body.contains("<OptionGroupsList>"), body);
         assertTrue(body.contains("<OptionGroupsList><OptionGroup>"), body);
         assertTrue(body.contains("</OptionGroup></OptionGroupsList>"), body);
-        assertTrue(body.contains("<Marker></Marker>"), body);
+        assertFalse(body.contains("<Marker"), body);
         assertFalse(body.contains("<member>"), body);
     }
 

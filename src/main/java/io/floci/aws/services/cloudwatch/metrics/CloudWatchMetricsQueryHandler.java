@@ -456,12 +456,12 @@ public class CloudWatchMetricsQueryHandler {
     }
 
     private Response handleListDashboards(MultivaluedMap<String, String> params, String region) {
-        List<Dashboard> dashboards =
-                dashboardsService.listDashboards(params.getFirst("DashboardNamePrefix"), region);
+        PaginatedResult<Dashboard> page = dashboardsService.listDashboardsPage(
+                params.getFirst("DashboardNamePrefix"), params.getFirst("NextToken"), region);
 
         DateTimeFormatter fmt = DateTimeFormatter.ISO_INSTANT;
         XmlBuilder xml = new XmlBuilder().start("DashboardEntries");
-        for (Dashboard d : dashboards) {
+        for (Dashboard d : page.items()) {
             xml.start("member")
                     .elem("DashboardName", d.getDashboardName())
                     .elem("DashboardArn", d.getDashboardArn())
@@ -470,6 +470,9 @@ public class CloudWatchMetricsQueryHandler {
                     .end("member");
         }
         xml.end("DashboardEntries");
+        if (page.nextToken() != null) {
+            xml.elem("NextToken", page.nextToken());
+        }
         return Response.ok(AwsQueryResponse.envelope("ListDashboards", null, xml.build())).build();
     }
 

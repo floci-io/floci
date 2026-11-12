@@ -17,6 +17,22 @@ public final class CfnRequests {
         return stackName == null ? request : request.formParam("StackName", stackName);
     }
 
+    /**
+     * Sends {@code CreateStack} or {@code UpdateStack} with {@code template}, asserts it was accepted, and
+     * waits for {@code expectedStatus}; any other terminal status fails with its reason.
+     */
+    public static void deploy(String action, String stackName, String template, String authorization,
+                              String expectedStatus, String... capabilities) {
+        RequestSpecification request = cfn(action, stackName)
+                .header("Authorization", authorization)
+                .formParam("TemplateBody", template);
+        for (int i = 0; i < capabilities.length; i++) {
+            request.formParam("Capabilities.member." + (i + 1), capabilities[i]);
+        }
+        request.when().post("/").then().statusCode(200);
+        CfnStackWaits.awaitStatus(stackName, expectedStatus, authorization);
+    }
+
     public static String physicalIdUnauthenticated(String stackName, String logicalId) {
         return physicalId(stackName, logicalId, null);
     }

@@ -21,6 +21,7 @@ import org.junit.jupiter.params.provider.CsvSource;
 import org.mockito.ArgumentMatchers;
 import org.mockito.Mockito;
 
+import java.time.Instant;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
@@ -1626,5 +1627,115 @@ class SecretsManagerServiceTest {
 
         assertEquals(1, service.listSecrets(REGION, null, false).size());
         assertEquals(2, service.listSecrets(REGION, null, true).size());
+    }
+
+    // --- replaceSecretDescription: a service method that does not exist on main ---
+
+    @Test
+    void replaceSecretDescriptionStoresTheGivenValueAndReturnsTheUpdatedSecret() {
+        service.createSecret("replace-set", "v1", null, "old", null, null, REGION);
+
+        Secret returned = service.replaceSecretDescription("replace-set", "new", REGION);
+
+        assertEquals("new", returned.getDescription());
+        assertEquals("new", service.describeSecret("replace-set", REGION).getDescription());
+    }
+
+    @Test
+    void replaceSecretDescriptionWithNullClearsTheStoredValue() {
+        service.createSecret("replace-null", "v1", null, "old", null, null, REGION);
+
+        Secret returned = service.replaceSecretDescription("replace-null", null, REGION);
+
+        assertNull(returned.getDescription());
+        assertNull(service.describeSecret("replace-null", REGION).getDescription());
+    }
+
+    @Test
+    void replaceSecretDescriptionStoresTheEmptyStringAsGiven() {
+        service.createSecret("replace-empty", "v1", null, "old", null, null, REGION);
+
+        service.replaceSecretDescription("replace-empty", "", REGION);
+
+        assertEquals("", service.describeSecret("replace-empty", REGION).getDescription());
+    }
+
+    @Test
+    void replaceSecretDescriptionLeavesTheValueAndTheKmsKeyUntouched() {
+        service.createSecret("replace-others", "the-value", null, "old", "alias/app", null, REGION);
+
+        service.replaceSecretDescription("replace-others", null, REGION);
+
+        assertEquals("the-value", service.getSecretValue("replace-others", null, null, REGION).getSecretString());
+        assertEquals("alias/app", service.describeSecret("replace-others", REGION).getKmsKeyId());
+    }
+
+    @Test
+    void replaceSecretDescriptionOnAnUnknownSecretThrowsWhatUpdateSecretThrows() {
+        AwsException fromUpdate = assertThrows(AwsException.class,
+                () -> service.updateSecret("no-such-secret", "x", null, REGION));
+
+        AwsException fromReplace = assertThrows(AwsException.class,
+                () -> service.replaceSecretDescription("no-such-secret", "x", REGION));
+
+        assertEquals(fromUpdate.getErrorCode(), fromReplace.getErrorCode());
+        assertEquals(fromUpdate.getHttpStatus(), fromReplace.getHttpStatus());
+    }
+
+    @Test
+    void replaceSecretDescriptionKeepsTheBookkeepingOfUpdateSecret() {
+        service.createSecret("replace-books", "v1", null, "old", null, null, REGION);
+        Instant longAgo = Instant.parse("2000-01-01T00:00:00Z");
+        service.describeSecret("replace-books", REGION).setLastChangedDate(longAgo);
+        assertEquals(longAgo, service.describeSecret("replace-books", REGION).getLastChangedDate());
+
+        Secret returned = service.replaceSecretDescription("replace-books", null, REGION);
+
+        assertTrue(returned.getLastChangedDate().isAfter(longAgo));
+        assertTrue(service.describeSecret("replace-books", REGION).getLastChangedDate().isAfter(longAgo));
+    }
+
+    @Test
+    void replaceSecretDescriptionRefusesASecretPendingDeletionWhatUpdateSecretRefuses() {
+        service.createSecret("replace-pending", "v1", null, "old", null, null, REGION);
+        service.deleteSecret("replace-pending", 7, false, REGION);
+        AwsException fromUpdate = assertThrows(AwsException.class,
+                () -> service.updateSecret("replace-pending", "x", null, REGION));
+
+        AwsException fromReplace = assertThrows(AwsException.class,
+                () -> service.replaceSecretDescription("replace-pending", null, REGION));
+
+        assertEquals(fromUpdate.getErrorCode(), fromReplace.getErrorCode());
+        assertEquals(fromUpdate.getHttpStatus(), fromReplace.getHttpStatus());
+        assertEquals("InvalidRequestException", fromReplace.getErrorCode());
+    }
+
+    @Test
+    void replaceSecretDescriptionRefusesAReplicaWhatUpdateSecretRefuses() {
+        service.createSecret("replace-replica", "v1", null, "old", null, null, REGION);
+        service.replicateSecretToRegions("replace-replica",
+                List.of(new SecretsManagerService.ReplicaRegion("eu-west-1", null)), false, REGION);
+        AwsException fromUpdate = assertThrows(AwsException.class,
+                () -> service.updateSecret("replace-replica", "x", null, "eu-west-1"));
+
+        AwsException fromReplace = assertThrows(AwsException.class,
+                () -> service.replaceSecretDescription("replace-replica", null, "eu-west-1"));
+
+        assertEquals(fromUpdate.getErrorCode(), fromReplace.getErrorCode());
+        assertEquals(fromUpdate.getHttpStatus(), fromReplace.getHttpStatus());
+        assertEquals("old", service.describeSecret("replace-replica", REGION).getDescription());
+    }
+
+    // --- direct UpdateSecret without a description keeps it: unchanged from main ---
+
+    @Test
+    void updateSecretWithoutADescriptionKeepsTheStoredDescription() {
+        service.createSecret("update-keeps", "v1", null, "kept", null, null, REGION);
+
+        service.updateSecret("update-keeps", null, "alias/app", REGION);
+
+        Secret stored = service.describeSecret("update-keeps", REGION);
+        assertEquals("kept", stored.getDescription());
+        assertEquals("alias/app", stored.getKmsKeyId());
     }
 }

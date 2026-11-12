@@ -21,7 +21,11 @@ The management API shares the RDS Query endpoint (`POST /` with an `Action=` par
 | --- | --- |
 | `CreateDBCluster` | Create a DocumentDB cluster and start a MongoDB container |
 | `DescribeDBClusters` | List clusters and their connection details |
-| `DescribeDBClusterSnapshots` | Return an empty cluster-snapshot list (snapshots are not modeled) |
+| `DescribeDBClusterSnapshots` | List manual cluster snapshots matching every one of `DBClusterSnapshotIdentifier` (an identifier or an ARN), `DBClusterIdentifier` (or the `db-cluster-id` filter) and `SnapshotType`. The list form, without an identifier, answers for the whole RDS family on the RDS and DocumentDB endpoints alike |
+| `CreateDBClusterSnapshot` | Take a manual snapshot: a `mongodump` archive of the cluster's MongoDB container, `available` as soon as the call returns. The identifier is refused when an RDS or DocumentDB cluster snapshot already holds it |
+| `DeleteDBClusterSnapshot` | Delete a manual snapshot, named by identifier or ARN, and its archive |
+| `RestoreDBClusterFromSnapshot` | Create a new cluster holding the snapshot's data and master user, from a snapshot named by identifier or ARN. As on AWS it has no instances; add them with `CreateDBInstance`. It is encrypted when the snapshot is, with the snapshot's key, or under `KmsKeyId` when the request names one, which encrypts an unencrypted snapshot's restore as the restore guide allows. A snapshot whose archive is missing is refused with `InvalidDBClusterSnapshotStateFault` |
+| `RestoreDBClusterToPointInTime` | Create a new cluster holding the source cluster's data as it is now, its latest restorable time, read as `CreateDBClusterSnapshot` reads it. Needs `UseLatestRestorableTime=true`; a `RestoreToTime` is refused. Encryption follows the source; a `KmsKeyId` for an unencrypted source is refused |
 | `DescribeGlobalClusters` | List global clusters — always empty, as none are modeled |
 | `DeleteDBCluster` | Stop and remove a cluster (must have no instances) |
 | `ModifyDBCluster` | Update engine version or IAM auth setting |
@@ -156,6 +160,6 @@ print(cluster["DBCluster"]["Endpoint"])
 
 - IAM database authentication for MongoDB connections (the flag is stored and echoed back, but connections are not SigV4-proxied).
 - TLS / `--tls` enforced connections.
-- Snapshot and restore operations.
+- Automated snapshots, `CopyDBClusterSnapshot`, and restoring to a time other than the latest restorable time.
 - Global clusters, replicas, and read-scaling beyond a single MongoDB container per cluster.
 - Parameter groups, subnet groups, and maintenance windows.

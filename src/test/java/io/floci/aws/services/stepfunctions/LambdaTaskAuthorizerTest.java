@@ -80,8 +80,10 @@ class LambdaTaskAuthorizerTest {
         when(functionPolicies.getResourcePolicies("lambda", OWN_FUNCTION))
                 .thenReturn(List.of(new ResourcePolicy(null, SFN_ACCOUNT)));
         when(functionPolicies.getResourcePolicies(anyString(), anyString(), anyString())).thenCallRealMethod();
+        when(functionPolicies.resolveResourceArn(anyString(), anyString())).thenCallRealMethod();
         bucketPolicies = mock(ResourcePolicyProvider.class);
         when(bucketPolicies.getResourcePolicies(anyString(), anyString(), anyString())).thenReturn(List.of());
+        when(bucketPolicies.resolveResourceArn(anyString(), anyString())).thenCallRealMethod();
         Instance<ResourcePolicyProvider> providers = mock(Instance.class);
         when(providers.iterator()).thenAnswer(call -> List.of(functionPolicies, bucketPolicies).iterator());
         ObjectMapper mapper = new ObjectMapper();
@@ -435,6 +437,23 @@ class LambdaTaskAuthorizerTest {
         assertEquals("Ec2.AccessDeniedException", refused.error);
         assertEquals("User: " + SESSION + " is not authorized to perform: states:DescribeRegions on resource: * "
                 + "because no identity-based policy allows the states:DescribeRegions action", refused.cause);
+    }
+
+    /** The ARN the policies see is the one the resource's provider resolves, as a direct request's is. */
+    @Test
+    void aPermissionIsEvaluatedOnTheArnItsProviderResolves() {
+        String moved = "arn:aws-cn:s3:::orders";
+        when(bucketPolicies.resolveResourceArn("s3", BUCKET)).thenReturn(moved);
+        roleWithPolicies("""
+                {"Version":"2012-10-17","Statement":[
+                  {"Effect":"Allow","Action":"s3:PutObject","Resource":"%s"}]}""".formatted(BUCKET));
+        executionRole(STATES_TRUST);
+
+        AslExecutor.FailStateException refused = assertThrows(AslExecutor.FailStateException.class,
+                () -> authorizer.authorize(machine(), null, "S3.AccessDeniedException", List.of(new Permission("s3:PutObject", BUCKET))));
+
+        assertEquals("S3.AccessDeniedException", refused.error);
+        assertTrue(refused.cause.contains(moved), refused.cause);
     }
 
     /** An S3 ARN has no account segment: with no owner known, it is not another account's resource. */

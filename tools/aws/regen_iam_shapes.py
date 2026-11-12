@@ -163,7 +163,13 @@ def enum_order(model: dict, orders: dict[str, tuple[str, ...]] | None = None) ->
 # account on 2026-10-31, quotes `[\w+=.@-]*` for it, without the comma this model admits and with a
 # `*` where the model sets a minimum of 1. Only AWS's message is in hand rather than its shape, so
 # the member carries a shape of its own here with AWS's text beside the model's: the message is the
-# captured one and a comma is still admitted, which nothing in hand settles either way.
+# captured one and a comma is still admitted.
+#
+# The comma is what AWS publishes for this member, not what aliasing it to a group name's shape
+# brought along: the API Reference entry for the operation, read on 2026-11-03, gives
+# `AWSServiceName` the same `[\w+=,.@-]+` and the same minimum of 1, so the pattern below stays the
+# published one. Why that settles it, and what a capture of a comma refused would move, is in
+# `docs/services/iam.md` rather than repeated here.
 QUOTED_PATTERNS = {
     ("CreateServiceLinkedRole", "AWSServiceName"): ("groupNameType", r"[\w+=,.@-]+", r"[\w+=.@-]*"),
 }

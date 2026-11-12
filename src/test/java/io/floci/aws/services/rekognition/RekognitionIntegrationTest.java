@@ -346,7 +346,7 @@ class RekognitionIntegrationTest {
     void unknownAction_returnsUnknownOperationError() {
         given()
             .contentType(CONTENT_TYPE)
-            .header("X-Amz-Target", "RekognitionService.IndexFaces")
+            .header("X-Amz-Target", "RekognitionService.UnknownAction")
             .header("Authorization", AUTH_HEADER)
             .body("{}")
         .when()

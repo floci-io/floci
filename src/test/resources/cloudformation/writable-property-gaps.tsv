@@ -49,7 +49,6 @@ AWS::ApiGatewayV2::Deployment	StageName	accepted and ignored
 AWS::ApiGatewayV2::Integration	ContentHandlingStrategy	accepted and ignored
 AWS::ApiGatewayV2::Integration	CredentialsArn	accepted and ignored
 AWS::ApiGatewayV2::Integration	Description	accepted and ignored
-AWS::ApiGatewayV2::Integration	IntegrationSubtype	accepted and ignored
 AWS::ApiGatewayV2::Integration	PassthroughBehavior	accepted and ignored
 AWS::ApiGatewayV2::Integration	ResponseParameters	accepted and ignored
 AWS::ApiGatewayV2::Integration	TlsConfig	accepted and ignored
@@ -130,6 +129,10 @@ AWS::BedrockAgentCore::RuntimeEndpoint	Tags	accepted and not stored, a warning i
 AWS::CertificateManager::Certificate	CertificateAuthorityArn	accepted and ignored
 AWS::CertificateManager::Certificate	DomainValidationOptions	accepted and ignored, as the AcmCfnProvisioner javadoc records
 AWS::CloudFormation::CustomResource	ServiceTimeout	accepted and ignored
+AWS::CloudFormation::StackSet	AdministrationRoleARN	accepted and ignored; local StackSets deploy without assuming an administration role
+AWS::CloudFormation::StackSet	CallAs	accepted and ignored; local StackSets do not model delegated administrator authorization
+AWS::CloudFormation::StackSet	ExecutionRoleName	accepted and ignored; local StackSets deploy without assuming an execution role
+AWS::CloudFormation::StackSet	OperationPreferences	accepted and ignored; explicit StackSet deployments execute locally without scheduling preferences
 AWS::CloudFront::Distribution	Tags	accepted and ignored
 AWS::CloudFront::Function	FunctionMetadata	accepted and ignored
 AWS::CloudTrail::Trail	AggregationConfigurations	accepted and ignored
@@ -137,6 +140,7 @@ AWS::CloudTrail::Trail	CloudWatchLogsLogGroupArn	accepted and ignored
 AWS::CloudTrail::Trail	CloudWatchLogsRoleArn	accepted and ignored
 AWS::CloudTrail::Trail	InsightSelectors	accepted and ignored
 AWS::CloudTrail::Trail	KMSKeyId	accepted and ignored
+AWS::CloudTrail::Trail	RecursiveLogging	accepted and ignored
 AWS::CloudTrail::Trail	Tags	accepted and ignored
 AWS::CloudWatch::Alarm	ActionConfiguration	accepted and ignored
 AWS::CloudWatch::Alarm	EvaluateLowSampleCountPercentile	accepted and ignored
@@ -153,7 +157,6 @@ AWS::Cognito::UserPoolClient	AuthSessionValidity	accepted and ignored
 AWS::Cognito::UserPoolClient	EnablePropagateAdditionalUserContextData	accepted and ignored
 AWS::Cognito::UserPoolDomain	Routing	accepted and ignored, as the CognitoCfnProvisioner javadoc records
 AWS::Config::ConfigRule	Compliance	accepted and ignored
-AWS::DynamoDB::GlobalTable	BillingMode	accepted and ignored
 AWS::DynamoDB::GlobalTable	GlobalTableSourceArn	accepted and ignored
 AWS::DynamoDB::GlobalTable	GlobalTableWitnesses	accepted and ignored
 AWS::DynamoDB::GlobalTable	MultiRegionConsistency	accepted and ignored
@@ -165,7 +168,6 @@ AWS::DynamoDB::GlobalTable	VectorIndexes	accepted and ignored
 AWS::DynamoDB::GlobalTable	WarmThroughput	accepted and ignored
 AWS::DynamoDB::GlobalTable	WriteOnDemandThroughputSettings	accepted and ignored
 AWS::DynamoDB::GlobalTable	WriteProvisionedThroughputSettings	accepted and ignored
-AWS::DynamoDB::Table	BillingMode	accepted and ignored
 AWS::DynamoDB::Table	ContributorInsightsSpecification	accepted and ignored
 AWS::DynamoDB::Table	DeletionProtectionEnabled	accepted and ignored
 AWS::DynamoDB::Table	ImportSourceSpecification	accepted and ignored
@@ -262,8 +264,6 @@ AWS::ECS::Cluster	DefaultCapacityProviderStrategy	accepted and ignored
 AWS::ECS::Cluster	ServiceConnectDefaults	accepted and ignored
 AWS::ECS::Cluster	Tags	accepted and ignored
 AWS::ECS::Service	AvailabilityZoneRebalancing	accepted and ignored
-AWS::ECS::Service	CapacityProviderStrategy	accepted and ignored
-AWS::ECS::Service	DeploymentConfiguration	accepted and ignored
 AWS::ECS::Service	DeploymentController	accepted and ignored
 AWS::ECS::Service	EnableECSManagedTags	accepted and ignored
 AWS::ECS::Service	EnableExecuteCommand	accepted and ignored
@@ -278,7 +278,6 @@ AWS::ECS::Service	PropagateTags	accepted and ignored
 AWS::ECS::Service	Role	accepted and ignored
 AWS::ECS::Service	SchedulingStrategy	accepted and ignored
 AWS::ECS::Service	ServiceConnectConfiguration	accepted and ignored
-AWS::ECS::Service	ServiceRegistries	accepted and ignored
 AWS::ECS::Service	Tags	accepted and ignored
 AWS::ECS::Service	VolumeConfigurations	accepted and ignored
 AWS::ECS::Service	VpcLatticeConfigurations	accepted and ignored
@@ -288,7 +287,6 @@ AWS::ECS::TaskDefinition	IpcMode	accepted and ignored
 AWS::ECS::TaskDefinition	PidMode	accepted and ignored
 AWS::ECS::TaskDefinition	PlacementConstraints	accepted and ignored
 AWS::ECS::TaskDefinition	ProxyConfiguration	accepted and ignored
-AWS::ECS::TaskDefinition	RuntimePlatform	accepted and ignored
 AWS::ECS::TaskDefinition	Tags	accepted and ignored
 AWS::ECS::TaskDefinition	Volumes	accepted and ignored
 AWS::EKS::Cluster	AccessConfig	accepted and ignored
@@ -420,6 +418,7 @@ AWS::Lambda::MicrovmImage	CpuConfigurations	accepted and ignored
 AWS::Lambda::MicrovmImage	EgressNetworkConnectors	accepted and ignored
 AWS::Lambda::MicrovmImage	EnvironmentVariables	accepted and ignored
 AWS::Lambda::MicrovmImage	Hooks	accepted and ignored
+AWS::Lambda::MicrovmImage	KmsKeyIdentifier	accepted and ignored; local MicroVM image builds do not model KMS encryption
 AWS::Lambda::MicrovmImage	Logging	accepted and ignored
 AWS::Lambda::MicrovmImage	Resources	accepted and ignored
 AWS::Lambda::MicrovmImage	Tags	accepted and ignored
@@ -536,14 +535,12 @@ AWS::RDS::DBInstance	SourceDBInstanceAutomatedBackupsArn	accepted and ignored
 AWS::RDS::DBInstance	SourceDBInstanceIdentifier	accepted and ignored
 AWS::RDS::DBInstance	SourceDbiResourceId	accepted and ignored
 AWS::RDS::DBInstance	SourceRegion	accepted and ignored
-AWS::RDS::DBInstance	StorageEncrypted	accepted and ignored
 AWS::RDS::DBInstance	StorageThroughput	accepted and ignored
 AWS::RDS::DBInstance	StorageType	accepted and ignored
 AWS::RDS::DBInstance	Tags	accepted and ignored
 AWS::RDS::DBInstance	Timezone	accepted and ignored
 AWS::RDS::DBInstance	UseDefaultProcessorFeatures	accepted and ignored
 AWS::RDS::DBInstance	UseLatestRestorableTime	accepted and ignored
-AWS::RDS::DBInstance	VPCSecurityGroups	accepted and ignored
 AWS::RDS::DBParameterGroup	Parameters	accepted and ignored
 AWS::RDS::DBParameterGroup	Tags	accepted and ignored
 AWS::RDS::DBProxyTargetGroup	Tags	accepted and ignored
@@ -625,7 +622,6 @@ AWS::S3::Bucket	WebsiteConfiguration	silently dropped, as the S3CfnProvisioner j
 AWS::SNS::Subscription	DeliveryPolicy	accepted and ignored
 AWS::SNS::Subscription	Region	accepted and ignored
 AWS::SNS::Subscription	ReplayPolicy	accepted and ignored
-AWS::SNS::Subscription	SubscriptionRoleArn	accepted and ignored
 AWS::SNS::Topic	ArchivePolicy	accepted and ignored
 AWS::SNS::Topic	DataProtectionPolicy	accepted and ignored
 AWS::SNS::Topic	DeliveryStatusLogging	accepted and ignored
@@ -646,7 +642,6 @@ AWS::SecretsManager::Secret	Type	accepted and ignored
 AWS::ServiceDiscovery::PrivateDnsNamespace	Properties	accepted and ignored
 AWS::ServiceDiscovery::PublicDnsNamespace	Properties	accepted and ignored
 AWS::ServiceDiscovery::Service	ServiceAttributes	accepted and ignored
-AWS::Signer::SigningProfile	Tags	accepted and ignored: Floci has no Signer API to tag
 AWS::Transfer::Server	Certificate	rejected with a ValidationError, not supported by Floci
 AWS::Transfer::Server	CreateWithHostKey	rejected with a ValidationError, not supported by Floci
 AWS::Transfer::Server	IpAddressType	rejected with a ValidationError, not supported by Floci

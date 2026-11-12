@@ -2,9 +2,12 @@ package io.floci.aws.services.redshift;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.floci.aws.config.EmulatorConfig;
+import io.floci.aws.core.common.AwsArnUtils;
 import io.floci.aws.core.common.AwsException;
+import io.floci.aws.core.common.AwsRegions;
 import io.floci.aws.core.common.PaginatedResult;
 import io.floci.aws.core.common.RegionResolver;
+import io.floci.aws.core.common.ServiceCallAuthorizer;
 import io.floci.aws.core.common.docker.DockerHostResolver;
 import io.floci.aws.core.storage.AccountAwareStorageBackend;
 import io.floci.aws.core.storage.StorageFactory;
@@ -15,6 +18,7 @@ import io.floci.aws.services.dynamodb.backend.DynamoDbOperations;
 import io.floci.aws.services.dynamodb.backend.DynamoDbStreamReader.CheckpointLifetime;
 import io.floci.aws.services.dynamodb.backend.DynamoDbTableAccess;
 import io.floci.aws.services.dynamodb.model.TableDefinition;
+import io.floci.aws.services.iam.IamPolicyEvaluator.Decision;
 import io.floci.aws.services.rds.proxy.PasswordValidator;
 import io.floci.aws.services.redshift.container.RedshiftContainerHandle;
 import io.floci.aws.services.redshift.container.RedshiftContainerManager;
@@ -31,6 +35,7 @@ import io.floci.aws.services.redshift.model.SnapshotSchedule;
 import io.floci.aws.services.redshift.proxy.RedshiftProxyManager;
 import io.floci.aws.services.redshiftserverless.RedshiftServerlessService;
 import io.floci.aws.services.redshiftserverless.model.Namespace;
+import io.floci.aws.services.s3.S3Service;
 import io.floci.aws.services.secretsmanager.SecretsManagerService;
 import io.floci.aws.services.secretsmanager.model.Secret;
 import jakarta.ws.rs.core.MultivaluedHashMap;
@@ -45,6 +50,7 @@ import org.mockito.InOrder;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
+import java.time.Instant;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.HashMap;
@@ -62,8 +68,11 @@ import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
 import java.util.concurrent.atomic.AtomicReference;
+import java.util.stream.Collectors;
+import java.util.stream.Stream;
 
 import static io.floci.aws.testing.InlineMocks.inlineMock;
+import static io.floci.aws.testing.ThreadStates.awaitBlockedOrDone;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotEquals;
@@ -887,6 +896,9 @@ class RedshiftServiceTest {
     private RedshiftIntegrationEventPublisher integrationEvents;
     private DynamoDbTableAccess zeroEtlTables;
     private RedshiftServerlessService zeroEtlServerless;
+    private EmulatorConfig config;
+    private S3Service zeroEtlS3;
+    private RedshiftS3AutoCopyConsumer autoCopyConsumer;
     private RedshiftService service;
 
     @BeforeEach
@@ -911,7 +923,7 @@ class RedshiftServiceTest {
         dockerHostResolver = mock(DockerHostResolver.class);
         when(dockerHostResolver.resolve()).thenReturn("localhost");
 
-        EmulatorConfig config = mock(EmulatorConfig.class);
+        config = mock(EmulatorConfig.class);
         EmulatorConfig.StorageConfig storageConfig = mock(EmulatorConfig.StorageConfig.class);
         when(config.storage()).thenReturn(storageConfig);
         when(storageConfig.persistentPath()).thenReturn("target/test-data");
@@ -958,10 +970,14 @@ class RedshiftServiceTest {
         zeroEtlTables = mock(DynamoDbTableAccess.class);
         when(zeroEtlDynamoDb.tables()).thenReturn(zeroEtlTables);
         zeroEtlServerless = mock(RedshiftServerlessService.class);
+        zeroEtlS3 = mock(S3Service.class);
+        when(zeroEtlS3.ownsBucket(any())).thenReturn(true);
+        autoCopyConsumer = mock(RedshiftS3AutoCopyConsumer.class);
         service = new RedshiftService(sf, cm, config, regionResolver, proxyManager, dockerHostResolver,
                 credentialBroker, secretsManagerService, mapper,
                 new DynamoDbApiStreamReader(streams, CheckpointLifetime.PROCESS), null, events, integrationEvents,
-                new RedshiftZeroEtlEndpoints(zeroEtlDynamoDb, zeroEtlServerless));
+                new RedshiftZeroEtlEndpoints(zeroEtlDynamoDb, zeroEtlServerless, zeroEtlS3, regionResolver),
+                autoCopyConsumer);
     }
 
     private static final String ORDERS_TABLE_ARN = "arn:aws:dynamodb:us-east-1:111111111111:table/orders";
@@ -1069,6 +1085,277 @@ class RedshiftServiceTest {
         assertEquals("InvalidParameterValue", error.getErrorCode());
         assertEquals("TargetArn must identify a Redshift Serverless namespace or a provisioned Redshift cluster.",
                 error.getMessage());
+    }
+
+    private static final String BUCKET_ARN = "arn:aws:s3:::lake-bucket";
+
+    @ParameterizedTest
+    @ValueSource(strings = {"us-gov-west-1", "cn-north-1"})
+    void anS3EventIntegrationAcceptsTheBucketsRegionalPartition(String region) {
+        String partition = AwsRegions.partitionFor(region);
+        String sourceArn = AwsArnUtils.Arn.global(partition, "s3", "", "lake-bucket").toString();
+        String targetArn = AwsArnUtils.Arn.of("redshift-serverless", region, "111111111111", "namespace/test")
+                .toString();
+        when(zeroEtlS3.getBucketRegion("lake-bucket")).thenReturn(region);
+        when(zeroEtlServerless.findNamespaceByArn(targetArn, region)).thenReturn(Optional.of(new Namespace()));
+        when(integrationBackend.scan(any())).thenReturn(List.of());
+
+        Integration integration = service.createIntegration("partition-source", sourceArn, targetArn,
+                null, null, Map.of(), Map.of(), region);
+
+        assertEquals(sourceArn, integration.getSourceArn());
+        assertEquals(partition, AwsArnUtils.parse(integration.getIntegrationArn()).partition());
+    }
+
+    @Test
+    void anS3EventIntegrationRefusesAnotherAccountsBucket() {
+        when(zeroEtlS3.ownsBucket("lake-bucket")).thenReturn(false);
+        when(zeroEtlS3.getBucketRegion("lake-bucket")).thenReturn("us-east-1");
+
+        AwsException error = assertThrows(AwsException.class,
+                () -> createS3Integration("foreign-bucket", BUCKET_ARN));
+
+        assertEquals("IntegrationSourceNotFoundFault", error.getErrorCode());
+        assertEquals(404, error.getHttpStatus());
+        verify(integrationBackend, never()).put(any(), any());
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {
+            "arn:aws:s3:us-east-1::lake-bucket",
+            "arn:aws:s3::111111111111:lake-bucket",
+            "arn:aws:s3:us-east-1:111111111111:lake-bucket",
+            "arn:aws-cn:s3:::lake-bucket"
+    })
+    void anS3EventIntegrationRefusesAlternateArnsForAnIntegratedBucket(String sourceArn) {
+        when(zeroEtlS3.getBucketRegion("lake-bucket")).thenReturn("us-east-1");
+        Integration existing = new Integration();
+        existing.setIntegrationName("first");
+        existing.setSourceType("s3-event-notifications");
+        existing.setSourceArn(BUCKET_ARN);
+        existing.setTargetArn(NAMESPACE_ARN);
+        when(integrationBackend.scan(any())).thenReturn(List.of(existing));
+
+        AwsException error = assertThrows(AwsException.class,
+                () -> createS3Integration("alternate-source", sourceArn));
+
+        assertEquals("InvalidParameterValue", error.getErrorCode());
+        verify(integrationBackend, never()).put(any(), any());
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {
+            "arn:aws:redshift:us-east-1:222222222222:cluster:warehouse",
+            "arn:aws:redshift:eu-west-1:111111111111:cluster:warehouse",
+            "arn:aws-cn:redshift:us-east-1:111111111111:cluster:warehouse"
+    })
+    void anS3EventIntegrationRefusesForgedClusterTargetArns(String targetArn) {
+        lifecycleCluster("available");
+        when(zeroEtlS3.getBucketRegion("lake-bucket")).thenReturn("us-east-1");
+        when(integrationBackend.scan(any())).thenReturn(List.of());
+
+        AwsException error = assertThrows(AwsException.class, () -> service.createIntegration(
+                "forged-target", BUCKET_ARN, targetArn, null, null, Map.of(), Map.of(), "us-east-1"));
+
+        assertEquals("IntegrationTargetNotFoundFault", error.getErrorCode());
+        verify(integrationBackend, never()).put(any(), any());
+    }
+
+    @Test
+    void anS3EventIntegrationAcceptsTheLocalClustersExactArn() {
+        lifecycleCluster("available");
+        when(zeroEtlS3.getBucketRegion("lake-bucket")).thenReturn("us-east-1");
+        when(integrationBackend.scan(any())).thenReturn(List.of());
+        String targetArn = "arn:aws:redshift:us-east-1:111111111111:cluster:warehouse";
+
+        Integration integration = service.createIntegration("local-target", BUCKET_ARN, targetArn,
+                null, null, Map.of(), Map.of(), "us-east-1");
+
+        assertEquals(targetArn, integration.getTargetArn());
+        assertEquals("warehouse", integration.getTargetClusterIdentifier());
+    }
+
+    @Test
+    void aBucketWithNoStoredRegionCanJoinAnIntegrationInTheDefaultRegion() {
+        when(zeroEtlS3.getBucketRegion("lake-bucket")).thenReturn(null);
+        when(integrationBackend.scan(any())).thenReturn(List.of());
+
+        assertEquals(BUCKET_ARN, createS3Integration("default-region", BUCKET_ARN).getSourceArn());
+    }
+
+    @Test
+    void aBucketWithNoStoredRegionCannotJoinAnIntegrationOutsideTheDefaultRegion() {
+        when(zeroEtlS3.getBucketRegion("lake-bucket")).thenReturn(null);
+        when(integrationBackend.scan(any())).thenReturn(List.of());
+        when(zeroEtlServerless.findNamespaceByArn(NAMESPACE_ARN, "us-east-1"))
+                .thenReturn(Optional.of(new Namespace()));
+
+        AwsException error = assertThrows(AwsException.class, () -> service.createIntegration(
+                "wrong-default-region", BUCKET_ARN, NAMESPACE_ARN, null, null, Map.of(), Map.of(), "eu-west-1"));
+
+        assertEquals("InvalidParameterValue", error.getErrorCode());
+        assertTrue(error.getMessage().contains("same Region"));
+        verify(integrationBackend, never()).put(any(), any());
+    }
+
+    @Test
+    void aBucketWithNoStoredRegionUsesTheConfiguredDefaultRegionWhenNotUsEastOne() {
+        RegionResolver euResolver = new RegionResolver("eu-west-1", "111111111111");
+        RedshiftZeroEtlEndpoints endpoints = new RedshiftZeroEtlEndpoints(null, zeroEtlServerless, zeroEtlS3, euResolver);
+        when(zeroEtlS3.getBucketRegion("lake-bucket")).thenReturn(null);
+
+        assertEquals("eu-west-1", endpoints.sourceBucketRegion("111111111111", "eu-west-1", "lake-bucket"));
+    }
+
+    private Integration createS3Integration(String name, String sourceArn) {
+        when(zeroEtlServerless.findNamespaceByArn(NAMESPACE_ARN, "us-east-1")).thenReturn(Optional.of(new Namespace()));
+        return service.createIntegration(name, sourceArn, NAMESPACE_ARN, null, null, Map.of(), Map.of(), "us-east-1");
+    }
+
+    @Test
+    void createsAnS3EventIntegrationThatReplicatesNothing() {
+        when(zeroEtlS3.getBucketRegion("lake-bucket")).thenReturn("us-east-1");
+        when(integrationBackend.scan(any())).thenReturn(List.of());
+
+        Integration integration = createS3Integration("lake-to-warehouse", BUCKET_ARN);
+
+        assertEquals("s3-event-notifications", integration.getSourceType());
+        assertEquals(BUCKET_ARN, integration.getSourceArn());
+        assertEquals("active", integration.getStatus());
+        assertNull(integration.getSourceStreamArn());
+        assertNull(integration.getLandingTableName());
+        assertFalse(integration.isPollingEnabled());
+        verify(integrationBackend).put(any(), eq(integration));
+        verify(integrationEvents, never()).queue(any(), any(), any(), any());
+    }
+
+    @Test
+    void anS3EventIntegrationSourceThatIsNotAnExistingBucketIsRefused() {
+        when(zeroEtlS3.getBucketRegion("lake-bucket"))
+                .thenThrow(new AwsException("NoSuchBucket", "The specified bucket does not exist.", 404));
+        when(integrationBackend.scan(any())).thenReturn(List.of());
+
+        AwsException error = assertThrows(AwsException.class, () -> createS3Integration("lake-to-warehouse", BUCKET_ARN));
+
+        assertEquals("IntegrationSourceNotFoundFault", error.getErrorCode());
+    }
+
+    @Test
+    void anS3EventIntegrationRefusesABucketWithAPeriodOrAnObjectKey() {
+        when(integrationBackend.scan(any())).thenReturn(List.of());
+
+        AwsException period = assertThrows(AwsException.class,
+                () -> createS3Integration("lake-to-warehouse", "arn:aws:s3:::lake.bucket"));
+        AwsException key = assertThrows(AwsException.class,
+                () -> createS3Integration("lake-to-warehouse", BUCKET_ARN + "/folder"));
+
+        assertEquals("InvalidParameterValue", period.getErrorCode());
+        assertTrue(period.getMessage().contains("period"));
+        assertEquals("InvalidParameterValue", key.getErrorCode());
+        assertTrue(key.getMessage().contains("Amazon S3 bucket"));
+    }
+
+    @Test
+    void anS3EventIntegrationRefusesABucketOfAnotherRegion() {
+        when(zeroEtlS3.getBucketRegion("lake-bucket")).thenReturn("eu-west-1");
+        when(integrationBackend.scan(any())).thenReturn(List.of());
+
+        AwsException error = assertThrows(AwsException.class, () -> createS3Integration("lake-to-warehouse", BUCKET_ARN));
+
+        assertEquals("InvalidParameterValue", error.getErrorCode());
+        assertTrue(error.getMessage().contains("same Region"));
+    }
+
+    @Test
+    void anS3EventIntegrationRefusesABucketFromAnotherPartition() {
+        when(integrationBackend.scan(any())).thenReturn(List.of());
+
+        AwsException error = assertThrows(AwsException.class,
+                () -> createS3Integration("foreign-partition", "arn:aws-cn:s3:::lake-bucket"));
+
+        assertEquals("InvalidParameterValue", error.getErrorCode());
+        assertTrue(error.getMessage().contains("Amazon S3 bucket"));
+    }
+
+    @Test
+    void aBucketJoinsATargetOnlyOnce() {
+        when(zeroEtlS3.getBucketRegion("lake-bucket")).thenReturn("us-east-1");
+        Integration existing = new Integration();
+        existing.setIntegrationName("first");
+        existing.setSourceType("s3-event-notifications");
+        existing.setSourceArn(BUCKET_ARN);
+        existing.setTargetArn(NAMESPACE_ARN);
+        when(integrationBackend.scan(any())).thenReturn(List.of(existing));
+
+        AwsException error = assertThrows(AwsException.class, () -> createS3Integration("second", BUCKET_ARN));
+
+        assertEquals("IntegrationConflictOperationFault", error.getErrorCode());
+    }
+
+    @Test
+    void aTargetTakesAtMostFiftyS3EventIntegrations() {
+        when(zeroEtlS3.getBucketRegion(any())).thenReturn("us-east-1");
+        List<Integration> existing = new ArrayList<>();
+        for (int index = 0; index < 50; index++) {
+            Integration integration = new Integration();
+            integration.setIntegrationName("existing-" + index);
+            integration.setSourceType("s3-event-notifications");
+            integration.setSourceArn("arn:aws:s3:::bucket-" + index);
+            integration.setTargetArn(NAMESPACE_ARN);
+            existing.add(integration);
+        }
+        when(integrationBackend.scan(any())).thenReturn(existing);
+
+        AwsException error = assertThrows(AwsException.class, () -> createS3Integration("one-more", BUCKET_ARN));
+
+        assertEquals("IntegrationQuotaExceededFault", error.getErrorCode());
+    }
+
+    @Test
+    void deletingAnS3EventIntegrationReportsNoZeroEtlEvents() {
+        Integration stored = new Integration();
+        stored.setIntegrationArn("arn:aws:redshift:us-east-1:111111111111:integration:s3-one");
+        stored.setSourceType("s3-event-notifications");
+        when(integrationBackend.keys()).thenReturn(Set.of("s3-one"));
+        when(integrationBackend.get("s3-one")).thenReturn(Optional.of(stored));
+
+        service.deleteIntegration(stored.getIntegrationArn());
+
+        verify(integrationBackend).delete("s3-one");
+        verify(integrationEvents, never()).queue(any(), any(), any(), any());
+    }
+
+    @Test
+    void deletingAnS3IntegrationDisablesJobsBeforeRemovingItsMetadata() {
+        Integration stored = new Integration();
+        stored.setIntegrationArn("arn:aws:redshift:us-east-1:111111111111:integration:s3-one");
+        stored.setSourceType("s3-event-notifications");
+        when(integrationBackend.keys()).thenReturn(Set.of("s3-one"));
+        when(integrationBackend.get("s3-one")).thenReturn(Optional.of(stored));
+        doThrow(new AwsException("InvalidClusterState", "Paused", 400)).when(autoCopyConsumer).disable(stored);
+
+        assertThrows(AwsException.class, () -> service.deleteIntegration(stored.getIntegrationArn()));
+        verify(integrationBackend, never()).delete(any());
+        clearInvocations(autoCopyConsumer, integrationBackend);
+        doNothing().when(autoCopyConsumer).disable(stored);
+        service.deleteIntegration(stored.getIntegrationArn());
+        InOrder order = inOrder(autoCopyConsumer, integrationBackend);
+        order.verify(autoCopyConsumer).disable(stored);
+        order.verify(integrationBackend).delete("s3-one");
+    }
+
+    @Test
+    void sourceTypesFilterMatchesTheSourceTypeOfAnS3EventIntegration() {
+        Integration stored = new Integration();
+        stored.setIntegrationArn("arn:aws:redshift:us-east-1:111111111111:integration:s3-one");
+        stored.setSourceType("s3-event-notifications");
+        stored.setSourceArn(BUCKET_ARN);
+        when(integrationBackend.scan(any())).thenReturn(List.of(stored));
+
+        RedshiftService.IntegrationPage page = service.describeIntegrations(null, null, null,
+                List.of(new RedshiftService.IntegrationFilter("source-types", List.of("s3-event-notifications"))));
+
+        assertEquals(1, page.integrations().size());
     }
 
     @Test
@@ -2130,6 +2417,231 @@ class RedshiftServiceTest {
         verify(snapshotBackend, never()).put(anyString(), any(Snapshot.class));
     }
 
+    private Snapshot automatedSnapshot(String identifier) {
+        Snapshot snapshot = new Snapshot();
+        snapshot.setSnapshotIdentifier(identifier);
+        snapshot.setClusterIdentifier("my-cluster");
+        snapshot.setSnapshotType("automated");
+        snapshot.setStatus("available");
+        snapshot.setMasterUsername("admin");
+        snapshot.setMasterPassword("secret-pw");
+        snapshot.setPort(5439);
+        snapshot.setAutomatedSnapshotRetentionPeriod(7);
+        when(snapshotBackend.get(identifier)).thenReturn(Optional.of(snapshot));
+        return snapshot;
+    }
+
+    private void targetSnapshotIsFree(String identifier) {
+        when(snapshotBackend.get(identifier)).thenReturn(Optional.empty());
+        when(snapshotCopyBackend.get(anyString())).thenReturn(Optional.empty());
+    }
+
+    private void assertCopyFails(String errorCode, int status, String source, String target, String cluster,
+                                 Integer retention) {
+        AwsException ex = assertThrows(AwsException.class, () ->
+                service.copyClusterSnapshot(source, target, cluster, retention));
+        assertEquals(errorCode, ex.getErrorCode());
+        assertEquals(status, ex.getHttpStatus());
+    }
+
+    @Test
+    void copyClusterSnapshotSuccess() {
+        Snapshot source = automatedSnapshot("auto-snap-1");
+        source.setKmsKeyId("orig-key");
+        source.setTags(Map.of("Env", "Test"));
+        source.setCopiedToRegions(new HashSet<>(Set.of("us-west-2")));
+        targetSnapshotIsFree("manual-copy-1");
+
+        Snapshot copy = service.copyClusterSnapshot("auto-snap-1", "manual-copy-1", null, 30);
+
+        assertEquals("manual-copy-1", copy.getSnapshotIdentifier());
+        assertEquals("my-cluster", copy.getClusterIdentifier());
+        assertEquals("manual", copy.getSnapshotType());
+        assertEquals("available", copy.getStatus());
+        assertEquals(30, copy.getManualSnapshotRetentionPeriod());
+        assertNull(copy.getAutomatedSnapshotRetentionPeriod());
+        assertEquals("orig-key", copy.getKmsKeyId());
+        assertEquals(Map.of("Env", "Test"), copy.getTags());
+        assertTrue(copy.getCopiedToRegions().isEmpty());
+        verify(snapshotBackend).putAllAtomically(any());
+        verify(snapshotBackend).flush();
+    }
+
+    @Test
+    void copyClusterSnapshotDefaultsToIndefiniteRetention() {
+        automatedSnapshot("auto-snap-1");
+        targetSnapshotIsFree("manual-copy-1");
+
+        Snapshot copy = service.copyClusterSnapshot("auto-snap-1", "manual-copy-1", "my-cluster", null);
+
+        assertEquals(-1, copy.getManualSnapshotRetentionPeriod());
+    }
+
+    @Test
+    void copyClusterSnapshotSourceNotFound() {
+        targetSnapshotIsFree("missing-snap");
+        targetSnapshotIsFree("manual-copy-1");
+
+        assertCopyFails("ClusterSnapshotNotFound", 404, "missing-snap", "manual-copy-1", null, -1);
+    }
+
+    @Test
+    void copyClusterSnapshotClusterMismatch() {
+        automatedSnapshot("auto-snap-1");
+        targetSnapshotIsFree("manual-copy-1");
+
+        assertCopyFails("ClusterSnapshotNotFound", 404, "auto-snap-1", "manual-copy-1", "wrong-cluster", -1);
+    }
+
+    @Test
+    void copyClusterSnapshotManualSourceRejected() {
+        automatedSnapshot("manual-snap-1").setSnapshotType("manual");
+        targetSnapshotIsFree("manual-copy-1");
+
+        assertCopyFails("InvalidClusterSnapshotState", 400, "manual-snap-1", "manual-copy-1", null, -1);
+    }
+
+    @Test
+    void copyClusterSnapshotSourceNotAvailable() {
+        automatedSnapshot("auto-snap-1").setStatus("creating");
+        targetSnapshotIsFree("manual-copy-1");
+
+        assertCopyFails("InvalidClusterSnapshotState", 400, "auto-snap-1", "manual-copy-1", null, -1);
+    }
+
+    @Test
+    void copyClusterSnapshotTargetAlreadyExists() {
+        when(snapshotBackend.get("manual-copy-1")).thenReturn(Optional.of(new Snapshot()));
+        when(snapshotCopyBackend.get(anyString())).thenReturn(Optional.empty());
+
+        assertCopyFails("ClusterSnapshotAlreadyExists", 400, "auto-snap-1", "manual-copy-1", null, -1);
+    }
+
+    @Test
+    void copyClusterSnapshotInvalidRetentionPeriod() {
+        assertCopyFails("InvalidRetentionPeriodFault", 400, "auto-snap-1", "manual-copy-1", null, 0);
+    }
+
+    @Test
+    void copyClusterSnapshotInvalidTargetIdentifier() {
+        assertCopyFails("InvalidParameterValue", 400, "auto-snap-1", "bad--name", null, -1);
+    }
+
+    @Test
+    void copyClusterSnapshotCopiesDumpAndCleansUpOnPersistenceFailure() throws Exception {
+        Path dumpDir = Paths.get("target/test-data").resolve("redshift-dumps").resolve("111111111111")
+                .toAbsolutePath().normalize();
+        Files.createDirectories(dumpDir);
+        Path sourceDump = dumpDir.resolve("auto-snap-src.sql");
+        Files.writeString(sourceDump, "SELECT 1;");
+        automatedSnapshot("auto-snap-src").setSqlDump(sourceDump.toString());
+        targetSnapshotIsFree("manual-copy-dump");
+        targetSnapshotIsFree("manual-copy-fail");
+
+        Snapshot copy = service.copyClusterSnapshot("auto-snap-src", "manual-copy-dump", null, -1);
+        Path copiedDump = Paths.get(copy.getSqlDump());
+        assertNotEquals(sourceDump, copiedDump);
+        assertEquals(dumpDir, copiedDump.getParent());
+        assertEquals("SELECT 1;", Files.readString(copiedDump));
+
+        try (Stream<Path> before = Files.list(dumpDir)) {
+            Set<Path> existing = before.collect(Collectors.toSet());
+            doThrow(new RuntimeException("Simulated storage write error"))
+                    .when(snapshotBackend).putAllAtomically(any());
+
+            assertThrows(RuntimeException.class, () ->
+                    service.copyClusterSnapshot("auto-snap-src", "manual-copy-fail", null, -1));
+
+            try (Stream<Path> after = Files.list(dumpDir)) {
+                assertEquals(existing, after.collect(Collectors.toSet()));
+            }
+        } finally {
+            Files.deleteIfExists(sourceDump);
+            Files.deleteIfExists(copiedDump);
+        }
+    }
+
+    @Test
+    void modifyClusterSnapshotSuccess() {
+        Snapshot manualSnap = snapshotOf("snap-1", "my-cluster");
+        manualSnap.setStatus("available");
+        manualSnap.setManualSnapshotRetentionPeriod(-1);
+
+        when(snapshotBackend.get("snap-1")).thenReturn(Optional.of(manualSnap));
+        when(snapshotCopyBackend.get(anyString())).thenReturn(Optional.empty());
+
+        Snapshot modified = service.modifyClusterSnapshot("snap-1", 45);
+
+        assertNotNull(modified);
+        assertEquals(45, modified.getManualSnapshotRetentionPeriod());
+        verify(snapshotBackend).putAllAtomically(any());
+        verify(snapshotBackend).flush();
+    }
+
+    @Test
+    void modifyClusterSnapshotNotFound() {
+        when(snapshotBackend.get("missing-snap")).thenReturn(Optional.empty());
+        when(snapshotCopyBackend.get(anyString())).thenReturn(Optional.empty());
+
+        AwsException ex = assertThrows(AwsException.class, () ->
+                service.modifyClusterSnapshot("missing-snap", 30));
+        assertEquals("ClusterSnapshotNotFound", ex.getErrorCode());
+        assertEquals(404, ex.getHttpStatus());
+    }
+
+    @Test
+    void modifyClusterSnapshotAutomatedSnapshotRejected() {
+        automatedSnapshot("auto-snap-1");
+        when(snapshotCopyBackend.get(anyString())).thenReturn(Optional.empty());
+
+        AwsException ex = assertThrows(AwsException.class, () ->
+                service.modifyClusterSnapshot("auto-snap-1", 30));
+        assertEquals("InvalidClusterSnapshotState", ex.getErrorCode());
+        assertEquals(400, ex.getHttpStatus());
+    }
+
+    @Test
+    void modifyClusterSnapshotNotAvailableRejected() {
+        Snapshot manualSnap = snapshotOf("snap-1", "my-cluster");
+        manualSnap.setStatus("creating");
+
+        when(snapshotBackend.get("snap-1")).thenReturn(Optional.of(manualSnap));
+        when(snapshotCopyBackend.get(anyString())).thenReturn(Optional.empty());
+
+        AwsException ex = assertThrows(AwsException.class, () ->
+                service.modifyClusterSnapshot("snap-1", 30));
+        assertEquals("InvalidClusterSnapshotState", ex.getErrorCode());
+        assertEquals(400, ex.getHttpStatus());
+    }
+
+    @Test
+    void modifyClusterSnapshotInvalidRetentionPeriod() {
+        AwsException ex1 = assertThrows(AwsException.class, () ->
+                service.modifyClusterSnapshot("snap-1", 0));
+        assertEquals("InvalidRetentionPeriodFault", ex1.getErrorCode());
+        assertEquals(400, ex1.getHttpStatus());
+
+        AwsException ex2 = assertThrows(AwsException.class, () ->
+                service.modifyClusterSnapshot("snap-1", 3654));
+        assertEquals("InvalidRetentionPeriodFault", ex2.getErrorCode());
+        assertEquals(400, ex2.getHttpStatus());
+    }
+
+    @Test
+    void modifyClusterSnapshotWithoutRetentionPreservesExistingSettings() {
+        Snapshot snapshot = snapshotOf("snap-1", "my-cluster");
+        snapshot.setStatus("available");
+        snapshot.setManualSnapshotRetentionPeriod(7);
+        when(snapshotBackend.get("snap-1")).thenReturn(Optional.of(snapshot));
+
+        Snapshot modified = service.modifyClusterSnapshot("snap-1", null, true);
+
+        assertSame(snapshot, modified);
+        assertEquals(7, modified.getManualSnapshotRetentionPeriod());
+        verify(snapshotBackend, never()).putAllAtomically(any());
+        verify(snapshotBackend, never()).deleteAllAtomically(any());
+    }
+
     @Test
     void modifyClusterUpdatesMetadataAndPassword() {
         Cluster cluster = new Cluster();
@@ -2224,6 +2736,264 @@ class RedshiftServiceTest {
     }
 
     @Test
+    void enableLoggingRejectsPrefixStartingWithSlash() {
+        Cluster cluster = new Cluster();
+        cluster.setClusterIdentifier("my-cluster");
+        when(clusterBackend.get("my-cluster")).thenReturn(Optional.of(cluster));
+
+        AwsException ex = assertThrows(AwsException.class, () ->
+                service.enableLogging("my-cluster", "my-bucket", "/logs", null, null));
+        assertEquals("InvalidS3KeyPrefixFault", ex.getErrorCode());
+    }
+
+    @Test
+    void enableLoggingRejectsNonexistentS3Bucket() {
+        S3Service mockS3 = mock(S3Service.class);
+        when(mockS3.bucketExists("missing-bucket")).thenReturn(false);
+        RedshiftService s3AwareService = s3Service(mockS3, null);
+
+        Cluster cluster = new Cluster();
+        cluster.setClusterIdentifier("my-cluster");
+        when(clusterBackend.get("my-cluster")).thenReturn(Optional.of(cluster));
+
+        AwsException ex = assertThrows(AwsException.class, () ->
+                s3AwareService.enableLogging("my-cluster", "missing-bucket", "logs", null, null));
+        assertEquals("BucketNotFoundFault", ex.getErrorCode());
+    }
+
+    @Test
+    void enableLoggingRejectsInsufficientS3BucketPolicy() {
+        S3Service mockS3 = mock(S3Service.class);
+        when(mockS3.bucketExists("audit-bucket")).thenReturn(true);
+        when(mockS3.bucketPartition("audit-bucket")).thenReturn("aws"); // partition-literal: mock test partition
+        ServiceCallAuthorizer authorizer = mock(ServiceCallAuthorizer.class);
+        when(authorizer.authorize(eq("redshift"), eq("s3:GetBucketAcl"), anyString(), anyString(), anyString(), anyMap()))
+                .thenReturn(Decision.DENY);
+
+        RedshiftService s3AwareService = s3Service(mockS3, authorizer);
+
+        Cluster cluster = new Cluster();
+        cluster.setClusterIdentifier("my-cluster");
+        when(clusterBackend.get("my-cluster")).thenReturn(Optional.of(cluster));
+
+        AwsException ex = assertThrows(AwsException.class, () ->
+                s3AwareService.enableLogging("my-cluster", "audit-bucket", "logs", null, null));
+        assertEquals("InsufficientS3BucketPolicyFault", ex.getErrorCode());
+    }
+
+    @Test
+    void enableLoggingRejectsUnknownLogDestinationType() {
+        Cluster cluster = new Cluster();
+        cluster.setClusterIdentifier("my-cluster");
+        when(clusterBackend.get("my-cluster")).thenReturn(Optional.of(cluster));
+
+        AwsException ex = assertThrows(AwsException.class, () ->
+                service.enableLogging("my-cluster", "my-bucket", "logs", "unsupported-dest", null));
+        assertEquals("InvalidParameterValue", ex.getErrorCode());
+        assertTrue(ex.getMessage().contains("LogDestinationType must be one of"));
+        assertFalse(cluster.isLoggingEnabled());
+        verify(clusterBackend, never()).put(anyString(), any());
+        verify(clusterBackend, never()).putForAccount(anyString(), anyString(), any());
+    }
+
+    @Test
+    @SuppressWarnings("unchecked")
+    void enableLoggingAuthorizesBucketPolicyWithRequestedRegionCondition() {
+        S3Service mockS3 = mock(S3Service.class);
+        when(mockS3.bucketExists("audit-bucket")).thenReturn(true);
+        when(mockS3.bucketPartition("audit-bucket")).thenReturn("aws"); // partition-literal: mock test partition
+        ServiceCallAuthorizer authorizer = mock(ServiceCallAuthorizer.class);
+        when(authorizer.authorize(eq("redshift"), anyString(), anyString(), anyString(), anyString(), anyMap()))
+                .thenAnswer(invocation -> {
+                    Map<String, List<String>> keys = invocation.getArgument(5);
+                    if (keys != null && List.of("us-east-1").equals(keys.get("aws:RequestedRegion"))) {
+                        return Decision.ALLOW;
+                    }
+                    return Decision.DENY;
+                });
+
+        RedshiftService s3AwareService = s3Service(mockS3, authorizer);
+
+        Cluster cluster = new Cluster();
+        cluster.setClusterIdentifier("my-cluster");
+        when(clusterBackend.get("my-cluster")).thenReturn(Optional.of(cluster));
+
+        Cluster result = s3AwareService.enableLogging("my-cluster", "audit-bucket", "cluster-logs", "s3", null);
+        assertTrue(result.isLoggingEnabled());
+    }
+
+    @Test
+    @SuppressWarnings("unchecked")
+    void enableLoggingAuthorizesPutObjectWithRealDeliveryPathAndRequestedRegion() {
+        S3Service mockS3 = mock(S3Service.class);
+        when(mockS3.bucketExists("audit-bucket")).thenReturn(true);
+        when(mockS3.bucketPartition("audit-bucket")).thenReturn("aws"); // partition-literal: mock test partition
+        ServiceCallAuthorizer authorizer = mock(ServiceCallAuthorizer.class);
+        when(authorizer.authorize(anyString(), anyString(), anyString(), anyString(), anyString(), anyMap()))
+                .thenReturn(Decision.ALLOW);
+
+        RedshiftService s3AwareService = s3Service(mockS3, authorizer);
+
+        Cluster cluster = new Cluster();
+        cluster.setClusterIdentifier("my-cluster");
+        when(clusterBackend.get("my-cluster")).thenReturn(Optional.of(cluster));
+
+        s3AwareService.enableLogging("my-cluster", "audit-bucket", "cluster-logs", "s3", null);
+
+        ArgumentCaptor<String> objectArnCaptor = ArgumentCaptor.forClass(String.class);
+        ArgumentCaptor<Map<String, List<String>>> keysCaptor = ArgumentCaptor.forClass(Map.class);
+        verify(authorizer).authorize(eq("redshift"), eq("s3:PutObject"), objectArnCaptor.capture(),
+                anyString(), anyString(), keysCaptor.capture());
+
+        assertTrue(objectArnCaptor.getValue().contains("audit-bucket/cluster-logs/AWSLogs/111111111111/redshift/"));
+        assertEquals(List.of("us-east-1"), keysCaptor.getValue().get("aws:RequestedRegion"));
+    }
+
+    private RedshiftService s3Service(S3Service s3, ServiceCallAuthorizer authorizer) {
+        return new RedshiftService(sf, cm, config, regionResolver, proxyManager,
+                dockerHostResolver, credentialBroker, secretsManagerService, new ObjectMapper(),
+                null, null, events, integrationEvents, null, null, s3, authorizer);
+    }
+
+    @Test
+    void recordAuditDeliveryOutcomeDoesNotUpdateDisabledCluster() {
+        Cluster cluster = new Cluster();
+        cluster.setClusterIdentifier("my-cluster");
+        cluster.setLoggingEnabled(false);
+        when(clusterBackend.getForAccount("111111111111", "my-cluster")).thenReturn(Optional.of(cluster));
+
+        Instant ts = Instant.parse("2026-11-06T15:30:00Z");
+        service.recordAuditDeliveryOutcome("111111111111", "my-cluster", 1L, ts, true, null);
+        assertNull(cluster.getLastSuccessfulDeliveryTime());
+        assertNull(cluster.getLastFailureTime());
+        verify(clusterBackend, never()).putForAccount(anyString(), anyString(), any());
+    }
+
+    @Test
+    void recordAuditDeliveryOutcomeUpdatesClusterStatus() {
+        Cluster cluster = new Cluster();
+        cluster.setClusterIdentifier("my-cluster");
+        cluster.setLoggingEnabled(true);
+        cluster.setLoggingGeneration(1L);
+        when(clusterBackend.getForAccount("111111111111", "my-cluster")).thenReturn(Optional.of(cluster));
+
+        Instant ts = Instant.parse("2026-11-06T15:30:00Z");
+        service.recordAuditDeliveryOutcome("111111111111", "my-cluster", 1L, ts, true, null);
+        assertEquals(ts, cluster.getLastSuccessfulDeliveryTime());
+        assertNull(cluster.getLastFailureTime());
+        assertNull(cluster.getLastFailureMessage());
+
+        Instant failTs = Instant.parse("2026-11-06T15:31:00Z");
+        service.recordAuditDeliveryOutcome("111111111111", "my-cluster", 1L, failTs, false, "timeout");
+        assertEquals(ts, cluster.getLastSuccessfulDeliveryTime());
+        assertEquals(failTs, cluster.getLastFailureTime());
+        assertEquals("timeout", cluster.getLastFailureMessage());
+    }
+
+    @Test
+    void recordAuditDeliveryOutcomeIgnoresStaleGenerationOutcome() {
+        Cluster cluster = new Cluster();
+        cluster.setClusterIdentifier("my-cluster");
+        cluster.setLoggingEnabled(true);
+        cluster.setLoggingGeneration(2L);
+        when(clusterBackend.getForAccount("111111111111", "my-cluster")).thenReturn(Optional.of(cluster));
+
+        Instant ts = Instant.parse("2026-11-06T15:30:00Z");
+        service.recordAuditDeliveryOutcome("111111111111", "my-cluster", 1L, ts, true, null);
+        assertNull(cluster.getLastSuccessfulDeliveryTime());
+        assertNull(cluster.getLastFailureTime());
+        verify(clusterBackend, never()).putForAccount(anyString(), anyString(), any());
+    }
+
+    @Test
+    void recordAuditDeliveryOutcomeSucceedsDuringPasswordRotation() {
+        Cluster cluster = new Cluster();
+        cluster.setClusterIdentifier("my-cluster");
+        cluster.setClusterStatus("available");
+        cluster.setLoggingEnabled(true);
+        cluster.setLoggingGeneration(1L);
+        cluster.setMasterPasswordSecretArn("arn:aws:secretsmanager:us-east-1:111111111111:secret:redshift-pass");
+        when(clusterBackend.scanAllAccountEntries(any())).thenReturn(List.of(
+                new AccountAwareStorageBackend.AccountEntry<>("111111111111", "my-cluster", cluster)));
+        when(clusterBackend.getForAccount("111111111111", "my-cluster")).thenReturn(Optional.of(cluster));
+
+        service.reserve("arn:aws:secretsmanager:us-east-1:111111111111:secret:redshift-pass", "us-east-1");
+
+        Instant ts = Instant.parse("2026-11-06T15:30:00Z");
+        service.recordAuditDeliveryOutcome("111111111111", "my-cluster", 1L, ts, true, null);
+        assertEquals(ts, cluster.getLastSuccessfulDeliveryTime());
+
+        service.release("arn:aws:secretsmanager:us-east-1:111111111111:secret:redshift-pass", "us-east-1");
+    }
+
+    @Test
+    void recordAuditDeliveryOutcomeUsesSuppliedAccountIdRegardlessOfRequestContext() {
+        Cluster cluster = new Cluster();
+        cluster.setClusterIdentifier("my-cluster");
+        cluster.setLoggingEnabled(true);
+        cluster.setLoggingGeneration(1L);
+        when(clusterBackend.getForAccount("999999999999", "my-cluster")).thenReturn(Optional.of(cluster));
+
+        Instant ts = Instant.parse("2026-11-06T15:30:00Z");
+        service.recordAuditDeliveryOutcome("999999999999", "my-cluster", 1L, ts, true, null);
+
+        assertEquals(ts, cluster.getLastSuccessfulDeliveryTime());
+        verify(clusterBackend).putForAccount("999999999999", "my-cluster", cluster);
+        verify(clusterBackend, never()).put(anyString(), any());
+    }
+
+    @Test
+    void recordAuditDeliveryOutcomeSerializesUnderAccountClusterLockWithoutDerivingAccountFromRequestContext() throws Exception {
+        String accountId = "999999999999";
+        String clusterId = "locked-cluster";
+        Cluster cluster = new Cluster();
+        cluster.setClusterIdentifier(clusterId);
+        cluster.setLoggingEnabled(true);
+        cluster.setLoggingGeneration(1L);
+
+        when(clusterBackend.getForAccount(accountId, clusterId)).thenReturn(Optional.of(cluster));
+
+        CountDownLatch inLock = new CountDownLatch(1);
+        CountDownLatch releaseLock = new CountDownLatch(1);
+        CountDownLatch outcomeStarted = new CountDownLatch(1);
+        AtomicReference<Thread> outcomeThread = new AtomicReference<>();
+
+        try (ExecutorService executor = Executors.newFixedThreadPool(2)) {
+            Future<?> holdingLock = executor.submit(() -> {
+                service.withResourceLock(accountId, "cluster", clusterId, () -> {
+                    inLock.countDown();
+                    try {
+                        assertTrue(releaseLock.await(5, TimeUnit.SECONDS));
+                    } catch (InterruptedException e) {
+                        Thread.currentThread().interrupt();
+                    }
+                    return null;
+                });
+            });
+
+            assertTrue(inLock.await(2, TimeUnit.SECONDS));
+
+            Instant ts = Instant.parse("2026-11-06T15:30:00Z");
+            Future<?> outcome = executor.submit(() -> {
+                outcomeThread.set(Thread.currentThread());
+                outcomeStarted.countDown();
+                service.recordAuditDeliveryOutcome(accountId, clusterId, 1L, ts, true, null);
+            });
+
+            assertTrue(outcomeStarted.await(2, TimeUnit.SECONDS));
+            awaitBlockedOrDone(outcomeThread, outcome);
+            assertFalse(outcome.isDone(), "outcome must wait while holding lock owns the cluster");
+
+            releaseLock.countDown();
+            holdingLock.get(2, TimeUnit.SECONDS);
+            outcome.get(2, TimeUnit.SECONDS);
+
+            assertEquals(ts, cluster.getLastSuccessfulDeliveryTime());
+            verify(clusterBackend).putForAccount(accountId, clusterId, cluster);
+        }
+    }
+
+    @Test
     void modifyClusterIamRolesRejectsMalformedRoleArnWithoutChangingTheCluster() {
         Cluster cluster = new Cluster();
         cluster.setClusterIdentifier("c1");
@@ -2279,6 +3049,19 @@ class RedshiftServiceTest {
         assertTrue(result.isLoggingEnabled());
         assertEquals("cloudwatch", result.getLoggingDestinationType());
         assertEquals(List.of("connectionlog"), result.getLoggingExports());
+    }
+
+    @Test
+    void enableLoggingDropsBucketNameWhenDestinationIsCloudWatch() {
+        Cluster cluster = new Cluster();
+        cluster.setClusterIdentifier("my-cluster");
+        when(clusterBackend.get("my-cluster")).thenReturn(Optional.of(cluster));
+
+        Cluster result = service.enableLogging("my-cluster", "my-bucket", "prefix", "cloudwatch", List.of("connectionlog"));
+        assertTrue(result.isLoggingEnabled());
+        assertEquals("cloudwatch", result.getLoggingDestinationType());
+        assertNull(result.getLoggingBucketName());
+        assertNull(result.getLoggingS3KeyPrefix());
     }
 
     @Test
@@ -2379,6 +3162,9 @@ class RedshiftServiceTest {
         cluster.setLoggingEnabled(true);
         cluster.setLoggingBucketName("my-bucket");
         cluster.setLoggingS3KeyPrefix("logs/");
+        cluster.setLastSuccessfulDeliveryTime(Instant.parse("2026-11-06T15:30:00Z"));
+        cluster.setLastFailureTime(Instant.parse("2026-11-06T15:31:00Z"));
+        cluster.setLastFailureMessage("failed");
         when(clusterBackend.get("my-cluster")).thenReturn(Optional.of(cluster));
 
         Cluster result = service.disableLogging("my-cluster");
@@ -2386,6 +3172,9 @@ class RedshiftServiceTest {
         assertFalse(result.isLoggingEnabled());
         assertNull(result.getLoggingBucketName());
         assertNull(result.getLoggingS3KeyPrefix());
+        assertNull(result.getLastSuccessfulDeliveryTime());
+        assertNull(result.getLastFailureTime());
+        assertNull(result.getLastFailureMessage());
         verify(clusterBackend).put(eq("my-cluster"), any(Cluster.class));
         verify(clusterBackend).flush();
     }

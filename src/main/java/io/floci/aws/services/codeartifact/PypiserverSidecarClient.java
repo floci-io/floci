@@ -124,13 +124,16 @@ public class PypiserverSidecarClient implements RepositorySidecarManager {
     }
 
     /**
-     * PEP 503 normalization: lowercase, runs of {@code -_.} collapsed to one {@code -}, same as
-     * {@code CodeArtifactPypiController}'s own pre-upload index check. {@code -} and {@code _}
+     * PEP 503 normalization: lowercase, runs of {@code -_.} collapsed to one {@code -}. Not
+     * {@code private}: {@code CodeArtifactPypiController}'s own pre-upload index check and the
+     * pypi external-connection classes ({@link PypiExternalConnectionClient}, {@link
+     * CodeArtifactPypiExternalConnectionImporter}) all need the exact same normalization, so this
+     * is the one copy all of them call rather than each keeping its own. {@code -} and {@code _}
      * collapsing to the same character here is what lets this match a filename's own escaped
      * name portion (wheels, and modern sdists, replace a name's internal {@code -}/{@code .}
      * with {@code _}) against the caller-supplied, unescaped {@code packageName}.
      */
-    private static String normalizePackageName(String packageName) {
+    static String normalizePackageName(String packageName) {
         return packageName.toLowerCase(Locale.ROOT).replaceAll("[-_.]+", "-");
     }
 

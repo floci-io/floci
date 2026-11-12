@@ -1,15 +1,11 @@
 package io.floci.aws.services.paymentcryptography;
 
 
-import javax.crypto.Cipher;
-import javax.crypto.spec.IvParameterSpec;
-import javax.crypto.spec.SecretKeySpec;
+import io.floci.aws.services.paymentcryptography.crypto.Ciphers;
 
-import java.security.GeneralSecurityException;
 import java.security.SecureRandom;
 import java.util.Arrays;
 import java.util.HexFormat;
-import java.util.Locale;
 
 /**
  * The cryptography a key record needs: its material, its check value, and the operations the
@@ -20,20 +16,29 @@ import java.util.Locale;
  * CMAC check value, and what the reference implementation its samples use
  * computes.
  *
- * <p>The data plane encrypts with AES in CBC mode and the padding the service calls PKCS#5,
- * which is PKCS#7 for a block cipher, and answers with the initialization vector and the
- * ciphertext in one blob. The MAC is the CMAC of the message under the key, cut to the
- * length the caller asks for.
+ * <p>The data plane encrypts with AES or Triple DES in CBC mode and pads no data, so the
+ * caller supplies whole blocks and the ciphertext is as long as the plaintext it holds, and
+ * answers with the initialization vector and the ciphertext in one blob. The MAC is the CMAC of
+ * the message under the key, cut to the length the caller asks for.
  */
 final class PaymentCryptographyCrypto {
 
     private static final byte[] ZERO_BLOCK = new byte[16];
+
+    /** The hexadecimal the key material is written in. */
+    private static final HexFormat HEX = HexFormat.of();
+
+    /** The hexadecimal a check value is written in: the capitals the reference writes it in. */
+    private static final HexFormat HEX_UPPER = HexFormat.of().withUpperCase();
 
     /** The block size of AES, in bytes. */
     private static final int BLOCK = 16;
 
     /** The initialization vector of a CBC encryption, in bytes. */
     private static final int IV_LENGTH = 16;
+
+    /** The initialization vector of a Triple DES CBC encryption, in bytes. */
+    private static final int TDES_IV_LENGTH = 8;
 
     /** The initial value of a key wrap, which the standard gives as it. */
     private static final byte[] INITIAL_VALUE = {
@@ -69,7 +74,7 @@ final class PaymentCryptographyCrypto {
                 : tdesEcbEncrypt(new byte[8], key);
         byte[] value = new byte[3];
         System.arraycopy(mac, 0, value, 0, 3);
-        return toHex(value).toUpperCase(Locale.ROOT);
+        return HEX_UPPER.formatHex(value);
     }
 
     /** The check value of a key of that algorithm, from the key's bytes. */
@@ -79,7 +84,7 @@ final class PaymentCryptographyCrypto {
                 : tdesEcbEncrypt(new byte[8], key);
         byte[] value = new byte[3];
         System.arraycopy(mac, 0, value, 0, 3);
-        return toHex(value).toUpperCase(Locale.ROOT);
+        return HEX_UPPER.formatHex(value);
     }
 
     /** The check value of an AES key: the leftmost three bytes of the CMAC of sixteen zero bytes. */
@@ -87,36 +92,25 @@ final class PaymentCryptographyCrypto {
         byte[] mac = cmac(fromHex(keyHex), ZERO_BLOCK);
         byte[] value = new byte[3];
         System.arraycopy(mac, 0, value, 0, 3);
-        return toHex(value).toUpperCase(Locale.ROOT);
+        return HEX_UPPER.formatHex(value);
     }
 
     /**
-     * The Triple DES encryption of a block under a key, in ECB mode.
+     * The Triple DES encryption of one block under a key, in ECB mode.
      *
      * <p>The check value of a Triple DES key is the leftmost three bytes of the encrypted
      * zeroes, so the block is encrypted and the first three bytes are taken.
      *
-     * @param data the bytes to encrypt
+     * <p>BouncyCastle's cipher is used rather than the JCE's, whose Triple DES is not
+     * registered in the native image: a request that needs it there hangs until the job
+     * is cancelled at its timeout.
+     *
+     * @param block8 the eight-byte block to encrypt
      * @param key the key, sixteen or twenty-four bytes
      * @return the encrypted bytes
      */
-    private static byte[] tdesEcbEncrypt(byte[] data, byte[] key) {
-        try {
-            byte[] key24 = key.length == 24 ? key : widenTdesKey(key);
-            Cipher cipher = Cipher.getInstance("DESede/ECB/NoPadding");
-            cipher.init(Cipher.ENCRYPT_MODE, new SecretKeySpec(key24, "DESede"));
-            return cipher.doFinal(data);
-        } catch (GeneralSecurityException e) {
-            throw new IllegalStateException("the Triple DES key could not be used", e);
-        }
-    }
-
-    /** A two-key Triple DES key widened to the three the cipher takes. */
-    private static byte[] widenTdesKey(byte[] key) {
-        byte[] wide = new byte[24];
-        System.arraycopy(key, 0, wide, 0, 16);
-        System.arraycopy(key, 0, wide, 16, 8);
-        return wide;
+    private static byte[] tdesEcbEncrypt(byte[] block8, byte[] key) {
+        return Ciphers.tdes2Encrypt(block8, key);
     }
 
     /**
@@ -127,30 +121,26 @@ final class PaymentCryptographyCrypto {
      * subkey when it is whole and with the second when it is padded.
      */
     static byte[] cmac(byte[] key, byte[] message) {
-        try {
-            byte[] k1 = subkeyOne(key);
-            byte[] k2 = shiftLeft(k1);
-            int blocks = Math.max(1, (message.length + BLOCK - 1) / BLOCK);
-            byte[] last = new byte[BLOCK];
-            int lastLength = message.length - (blocks - 1) * BLOCK;
-            System.arraycopy(message, (blocks - 1) * BLOCK, last, 0, lastLength);
-            if (lastLength == BLOCK) {
-                last = xor(last, k1);
-            } else {
-                // The padding of a partial block is a one bit and zeroes, as the standard says.
-                last[lastLength] = (byte) 0x80;
-                last = xor(last, k2);
-            }
-            byte[] state = new byte[BLOCK];
-            for (int i = 0; i < blocks - 1; i++) {
-                byte[] block = new byte[BLOCK];
-                System.arraycopy(message, i * BLOCK, block, 0, BLOCK);
-                state = encrypt(xor(state, block), key);
-            }
-            return encrypt(xor(state, last), key);
-        } catch (GeneralSecurityException e) {
-            throw new IllegalStateException("the AES key could not be used", e);
+        byte[] k1 = subkeyOne(key);
+        byte[] k2 = shiftLeft(k1);
+        int blocks = Math.max(1, (message.length + BLOCK - 1) / BLOCK);
+        byte[] last = new byte[BLOCK];
+        int lastLength = message.length - (blocks - 1) * BLOCK;
+        System.arraycopy(message, (blocks - 1) * BLOCK, last, 0, lastLength);
+        if (lastLength == BLOCK) {
+            last = Ciphers.xor(last, k1);
+        } else {
+            // The padding of a partial block is a one bit and zeroes, as the standard says.
+            last[lastLength] = (byte) 0x80;
+            last = Ciphers.xor(last, k2);
         }
+        byte[] state = new byte[BLOCK];
+        for (int i = 0; i < blocks - 1; i++) {
+            byte[] block = new byte[BLOCK];
+            System.arraycopy(message, i * BLOCK, block, 0, BLOCK);
+            state = Ciphers.aesEcbEncrypt(Ciphers.xor(state, block), key);
+        }
+        return Ciphers.aesEcbEncrypt(Ciphers.xor(state, last), key);
     }
 
     /**
@@ -161,11 +151,7 @@ final class PaymentCryptographyCrypto {
      * the top.
      */
     private static byte[] subkeyOne(byte[] key) {
-        try {
-            return shiftLeft(encrypt(ZERO_BLOCK, key));
-        } catch (GeneralSecurityException e) {
-            throw new IllegalStateException("the AES key could not be used", e);
-        }
+        return shiftLeft(Ciphers.aesEcbEncrypt(ZERO_BLOCK, key));
     }
 
     /**
@@ -200,73 +186,77 @@ final class PaymentCryptographyCrypto {
     }
 
     /**
-     * The ciphertext of a plaintext under a key: the initialization vector and the encrypted
-     * bytes in one blob, which is how the service answers.
-     */
-    static byte[] encryptCbc(byte[] key, byte[] plaintext, SecureRandom random) {
-        return encryptCbc(key, plaintext, null, random);
-    }
-
-    /**
      * The ciphertext of a plaintext under a key, with the initialization vector the request
      * names.
      *
      * <p>A request that names a vector gets the ciphertext under it, so two parties that
      * agree on the vector can read each other's ciphertext. A request that names none gets a
-     * fresh one.
+     * zero vector, which is what the reference uses.
      *
      * @param key the key
      * @param plaintext the bytes to encrypt
-     * @param initializationVector the vector to encrypt under, or null for a fresh one
-     * @param random the randomness a fresh vector comes from
-     * @return the vector and the encrypted bytes in one blob
+     * @param initializationVector the vector to encrypt under, or null for the zero vector
+     * @return the encrypted bytes
      */
-    static byte[] encryptCbc(byte[] key, byte[] plaintext, byte[] initializationVector,
-                             SecureRandom random) {
-        try {
-            byte[] iv;
-            if (initializationVector == null) {
-                iv = new byte[IV_LENGTH];
-                random.nextBytes(iv);
-            } else {
-                if (initializationVector.length != IV_LENGTH) {
-                    throw new IllegalArgumentException("the initialization vector is "
-                            + initializationVector.length + " bytes; it is " + IV_LENGTH);
-                }
-                iv = initializationVector.clone();
-            }
-            Cipher cipher = Cipher.getInstance("AES/CBC/PKCS5Padding");
-            cipher.init(Cipher.ENCRYPT_MODE, new SecretKeySpec(key, "AES"), new IvParameterSpec(iv));
-            byte[] encrypted = cipher.doFinal(plaintext);
-            byte[] out = new byte[iv.length + encrypted.length];
-            System.arraycopy(iv, 0, out, 0, iv.length);
-            System.arraycopy(encrypted, 0, out, iv.length, encrypted.length);
-            return out;
-        } catch (GeneralSecurityException e) {
-            throw new IllegalStateException("the AES key could not be used", e);
-        }
+    static byte[] encryptCbc(byte[] key, byte[] plaintext, byte[] initializationVector) {
+        return aesCbcEncrypt(key, vector(initializationVector, IV_LENGTH), plaintext);
     }
 
     /**
-     * The plaintext of a blob the service encrypted.
+     * The plaintext of a ciphertext the service encrypted.
      *
-     * <p>The blob is the initialization vector and the ciphertext, so the vector is read first
-     * and the rest is decrypted under it. A blob that is not the key's does not decrypt, and
-     * the padding does not hold.
+     * <p>The ciphertext is decrypted under the vector the request names. The cipher pads no
+     * data, so a ciphertext that is not a whole number of blocks does not decrypt, and a
+     * ciphertext that is not the key's does not decrypt either.
+     *
+     * @param key the key
+     * @param ciphertext the encrypted bytes
+     * @param initializationVector the vector to decrypt under, or null for the zero vector
+     * @return the plaintext
      */
-    static byte[] decryptCbc(byte[] key, byte[] blob) {
-        if (blob.length <= IV_LENGTH) {
-            throw new IllegalArgumentException("the ciphertext is shorter than the initialization vector");
+    static byte[] decryptCbc(byte[] key, byte[] ciphertext, byte[] initializationVector) {
+        return aesCbcDecrypt(key, vector(initializationVector, IV_LENGTH), ciphertext);
+    }
+
+    /**
+     * The ciphertext of a plaintext under a Triple DES key, with the initialization vector the
+     * request names.
+     *
+     * <p>The cipher pads no data, so the caller supplies whole blocks of eight bytes, and the
+     * ciphertext is as long as the plaintext it holds. A two-key key is used under the three keys
+     * it holds, as the cipher takes them.
+     *
+     * @param key the key
+     * @param plaintext the bytes to encrypt
+     * @param initializationVector the vector to encrypt under, or null for the zero vector
+     * @return the encrypted bytes
+     */
+    static byte[] tdesCbcEncrypt(byte[] key, byte[] plaintext, byte[] initializationVector) {
+        return Ciphers.tdesCbcEncrypt(plaintext, key, vector(initializationVector, TDES_IV_LENGTH));
+    }
+
+    /**
+     * The plaintext of a ciphertext the service encrypted under a Triple DES key.
+     *
+     * @param key the key
+     * @param ciphertext the encrypted bytes
+     * @param initializationVector the vector to decrypt under, or null for the zero vector
+     * @return the plaintext
+     */
+    static byte[] tdesCbcDecrypt(byte[] key, byte[] ciphertext, byte[] initializationVector) {
+        return Ciphers.tdesCbcDecrypt(ciphertext, key, vector(initializationVector, TDES_IV_LENGTH));
+    }
+
+    /** The vector a cipher starts from, the zero vector when the request names none. */
+    private static byte[] vector(byte[] initializationVector, int length) {
+        if (initializationVector == null) {
+            return new byte[length];
         }
-        try {
-            byte[] iv = Arrays.copyOfRange(blob, 0, IV_LENGTH);
-            byte[] encrypted = Arrays.copyOfRange(blob, IV_LENGTH, blob.length);
-            Cipher cipher = Cipher.getInstance("AES/CBC/PKCS5Padding");
-            cipher.init(Cipher.DECRYPT_MODE, new SecretKeySpec(key, "AES"), new IvParameterSpec(iv));
-            return cipher.doFinal(encrypted);
-        } catch (GeneralSecurityException e) {
-            throw new IllegalArgumentException("the ciphertext did not open under the key", e);
+        if (initializationVector.length != length) {
+            throw new IllegalArgumentException("the initialization vector is "
+                    + initializationVector.length + " bytes; it is " + length);
         }
+        return initializationVector.clone();
     }
 
     /**
@@ -274,28 +264,24 @@ final class PaymentCryptographyCrypto {
      * key was the right one.
      */
     static byte[] keyWrap(byte[] key, byte[] plaintext) {
-        try {
-            byte[] a = INITIAL_VALUE.clone();
-            byte[][] r = split(plaintext, 8);
-            int n = r.length;
-            for (int j = 0; j < 6; j++) {
-                for (int i = 0; i < n; i++) {
-                    byte[] block = concat(a, r[i]);
-                    byte[] encrypted = encrypt(block, key);
-                    a = Arrays.copyOfRange(encrypted, 0, 8);
-                    r[i] = Arrays.copyOfRange(encrypted, 8, encrypted.length);
-                    a = xor(a, counter(j, n, i));
-                }
-            }
-            byte[] out = new byte[8 + plaintext.length];
-            System.arraycopy(a, 0, out, 0, 8);
+        byte[] a = INITIAL_VALUE.clone();
+        byte[][] r = split(plaintext, 8);
+        int n = r.length;
+        for (int j = 0; j < 6; j++) {
             for (int i = 0; i < n; i++) {
-                System.arraycopy(r[i], 0, out, 8 + i * 8, 8);
+                byte[] block = concat(a, r[i]);
+                byte[] encrypted = Ciphers.aesEcbEncrypt(block, key);
+                a = Arrays.copyOfRange(encrypted, 0, 8);
+                r[i] = Arrays.copyOfRange(encrypted, 8, encrypted.length);
+                a = Ciphers.xor(a, counter(j, n, i));
             }
-            return out;
-        } catch (GeneralSecurityException e) {
-            throw new IllegalStateException("the AES key could not be used", e);
         }
+        byte[] out = new byte[8 + plaintext.length];
+        System.arraycopy(a, 0, out, 0, 8);
+        for (int i = 0; i < n; i++) {
+            System.arraycopy(r[i], 0, out, 8 + i * 8, 8);
+        }
+        return out;
     }
 
     /**
@@ -305,27 +291,23 @@ final class PaymentCryptographyCrypto {
         if (wrapped.length < 16 || (wrapped.length - 8) % 8 != 0) {
             return null;
         }
-        try {
-            byte[] a = Arrays.copyOfRange(wrapped, 0, 8);
-            byte[][] r = split(Arrays.copyOfRange(wrapped, 8, wrapped.length), 8);
-            int n = r.length;
-            for (int j = 5; j >= 0; j--) {
-                for (int i = n - 1; i >= 0; i--) {
-                    byte[] block = concat(xor(a, counter(j, n, i)), r[i]);
-                    byte[] decrypted = decrypt(block, key);
-                    a = Arrays.copyOfRange(decrypted, 0, 8);
-                    r[i] = Arrays.copyOfRange(decrypted, 8, decrypted.length);
-                }
+        byte[] a = Arrays.copyOfRange(wrapped, 0, 8);
+        byte[][] r = split(Arrays.copyOfRange(wrapped, 8, wrapped.length), 8);
+        int n = r.length;
+        for (int j = 5; j >= 0; j--) {
+            for (int i = n - 1; i >= 0; i--) {
+                byte[] block = concat(Ciphers.xor(a, counter(j, n, i)), r[i]);
+                byte[] decrypted = Ciphers.aesEcbDecrypt(block, key);
+                a = Arrays.copyOfRange(decrypted, 0, 8);
+                r[i] = Arrays.copyOfRange(decrypted, 8, decrypted.length);
             }
-            byte[] check = INITIAL_VALUE;
-            byte[] out = new byte[wrapped.length - 8];
-            for (int i = 0; i < n; i++) {
-                System.arraycopy(r[i], 0, out, i * 8, 8);
-            }
-            return Arrays.equals(a, check) ? out : null;
-        } catch (GeneralSecurityException e) {
-            throw new IllegalStateException("the AES key could not be used", e);
         }
+        byte[] check = INITIAL_VALUE;
+        byte[] out = new byte[wrapped.length - 8];
+        for (int i = 0; i < n; i++) {
+            System.arraycopy(r[i], 0, out, i * 8, 8);
+        }
+        return Arrays.equals(a, check) ? out : null;
     }
 
     /**
@@ -354,72 +336,33 @@ final class PaymentCryptographyCrypto {
         return out;
     }
 
-    private static byte[] xor(byte[] left, byte[] right) {
-        byte[] out = new byte[left.length];
-        for (int i = 0; i < left.length; i++) {
-            out[i] = (byte) (left[i] ^ right[i % right.length]);
-        }
-        return out;
-    }
-
     /**
      * The AES-CBC encryption of data under a key and an initialization vector, without
      * padding: the vector is the length of the data's block size already.
      */
     static byte[] aesCbcEncrypt(byte[] key, byte[] iv, byte[] data) {
-        try {
-            Cipher cipher = Cipher.getInstance("AES/CBC/NoPadding");
-            cipher.init(Cipher.ENCRYPT_MODE, new SecretKeySpec(key, "AES"), new IvParameterSpec(iv));
-            return cipher.doFinal(data);
-        } catch (GeneralSecurityException e) {
-            throw new IllegalStateException("the AES key could not be used", e);
-        }
+        return Ciphers.aesCbcEncrypt(data, key, iv);
     }
 
     /** The AES-CBC decryption of data under a key and an initialization vector, without padding. */
     static byte[] aesCbcDecrypt(byte[] key, byte[] iv, byte[] data) {
         try {
-            Cipher cipher = Cipher.getInstance("AES/CBC/NoPadding");
-            cipher.init(Cipher.DECRYPT_MODE, new SecretKeySpec(key, "AES"), new IvParameterSpec(iv));
-            return cipher.doFinal(data);
-        } catch (GeneralSecurityException e) {
+            return Ciphers.aesCbcDecrypt(data, key, iv);
+        } catch (IllegalArgumentException e) {
             throw new IllegalArgumentException("the data did not decrypt under the key", e);
         }
     }
 
     /** One block of AES in ECB mode. */
     static byte[] aesEcbEncrypt(byte[] input, byte[] key) {
-        try {
-            return encrypt(input, key);
-        } catch (GeneralSecurityException e) {
-            throw new IllegalStateException("the AES key could not be used", e);
-        }
-    }
-
-    /** One block of AES in ECB mode. */
-    private static byte[] encrypt(byte[] input, byte[] key) throws GeneralSecurityException {
-        Cipher cipher = Cipher.getInstance("AES/ECB/NoPadding");
-        cipher.init(Cipher.ENCRYPT_MODE, new SecretKeySpec(key, "AES"));
-        return cipher.doFinal(input);
-    }
-
-    /** One block of AES in ECB mode, the other way round. */
-    private static byte[] decrypt(byte[] input, byte[] key) throws GeneralSecurityException {
-        Cipher cipher = Cipher.getInstance("AES/ECB/NoPadding");
-        cipher.init(Cipher.DECRYPT_MODE, new SecretKeySpec(key, "AES"));
-        return cipher.doFinal(input);
+        return Ciphers.aesEcbEncrypt(input, key);
     }
 
     static String toHex(byte[] bytes) {
-        return HexFormat.of().formatHex(bytes);
+        return HEX.formatHex(bytes);
     }
 
     static byte[] fromHex(String hex) {
-        int length = hex.length() / 2;
-        byte[] out = new byte[length];
-        for (int i = 0; i < length; i++) {
-            out[i] = (byte) Integer.parseInt(hex.substring(i * 2, i * 2 + 2), 16);
-        }
-        return out;
+        return HEX.parseHex(hex);
     }
 }

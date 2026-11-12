@@ -12,6 +12,8 @@ import io.floci.aws.services.cognito.model.UserPoolClient;
 import io.floci.aws.testing.MutableClock;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
 
 import javax.crypto.Mac;
 import javax.crypto.spec.SecretKeySpec;
@@ -21,6 +23,7 @@ import java.security.MessageDigest;
 import java.time.Duration;
 import java.util.Arrays;
 import java.util.Base64;
+import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 
@@ -106,6 +109,43 @@ class CognitoTotpMfaTest {
                 "SOFTWARE_TOKEN_MFA", laterSession,
                 Map.of("USERNAME", USERNAME, "SOFTWARE_TOKEN_MFA_CODE", code));
         assertNotNull(((Map<?, ?>) completed.get("AuthenticationResult")).get("AccessToken"));
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"false", "true", "default"})
+    void totpChallengesRespectUsernameCaseSensitivity(String setting) {
+        if (!"default".equals(setting)) {
+            pool.setUsernameConfiguration(Map.of("CaseSensitive", Boolean.parseBoolean(setting)));
+        }
+        String supplied = "false".equals(setting) ? "ALICE" : USERNAME;
+        String session = (String) service.initiateAuth(client.getClientId(), "USER_PASSWORD_AUTH",
+                Map.of("USERNAME", supplied, "PASSWORD", PASSWORD)).get("Session");
+        Map<String, Object> association = service.associateSoftwareToken(null, session);
+        String secret = (String) association.get("SecretCode");
+        String code = CognitoTotp.code(secret, clock.instant());
+        String verified = (String) service.verifySoftwareToken(null, (String) association.get("Session"), code)
+                .get("Session");
+        assertTotpUsernameMatching(setting, "MFA_SETUP", verified, Map.of());
+        String later = (String) passwordLogin().get("Session");
+        assertTotpUsernameMatching(setting, "SOFTWARE_TOKEN_MFA", later, Map.of("SOFTWARE_TOKEN_MFA_CODE", code));
+    }
+
+    private void assertTotpUsernameMatching(String setting, String challenge, String session,
+                                            Map<String, String> fields) {
+        Map<String, String> responses = new HashMap<>(fields);
+        assertEquals("NotAuthorizedException", assertThrows(AwsException.class,
+                () -> service.respondToAuthChallenge(client.getClientId(), challenge, session, responses)).getErrorCode());
+        responses.put("USERNAME", "other");
+        assertEquals("NotAuthorizedException", assertThrows(AwsException.class,
+                () -> service.respondToAuthChallenge(client.getClientId(), challenge, session, responses)).getErrorCode());
+        responses.put("USERNAME", "ALICE");
+        if (!"false".equals(setting)) {
+            assertEquals("NotAuthorizedException", assertThrows(AwsException.class,
+                    () -> service.respondToAuthChallenge(client.getClientId(), challenge, session, responses)).getErrorCode());
+            responses.put("USERNAME", USERNAME);
+        }
+        assertNotNull(service.respondToAuthChallenge(client.getClientId(), challenge, session, responses)
+                .get("AuthenticationResult"));
     }
 
     @Test

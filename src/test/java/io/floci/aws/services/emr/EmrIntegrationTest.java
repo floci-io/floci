@@ -15,6 +15,7 @@ import org.junit.jupiter.api.TestMethodOrder;
 
 import java.math.BigDecimal;
 import java.time.Instant;
+import java.util.List;
 
 import static io.floci.aws.testing.EmrRequests.emr;
 import static org.hamcrest.Matchers.endsWith;
@@ -37,6 +38,9 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 @QuarkusTest
 @TestMethodOrder(MethodOrderer.OrderAnnotation.class)
 class EmrIntegrationTest {
+
+    private static final String SHUT_DOWN =
+            "A job flow that is shutting down, terminated, or finished may not be modified.";
 
     private static String clusterId;
     private static String stepId;
@@ -430,6 +434,54 @@ class EmrIntegrationTest {
                 .body("Cluster.VisibleToAllUsers", equalTo(true))
                 .body("Cluster.AutoTerminate", equalTo(false));
         emr("TerminateJobFlows", "{" + ids + "}").then().statusCode(200);
+    }
+
+    @Test
+    void anEndedClusterRefusesModifyClusterTheSettersAndTagChanges() {
+        String ended = emr("RunJobFlow", "{\"Name\":\"ended\",\"Tags\":[{\"Key\":\"team\",\"Value\":\"data\"}],"
+                + "\"Instances\":{\"KeepJobFlowAliveWhenNoSteps\":true}}")
+                .then().statusCode(200).extract().path("JobFlowId");
+        String active = emr("RunJobFlow", "{\"Name\":\"active\",\"Instances\":{\"KeepJobFlowAliveWhenNoSteps\":true}}")
+                .then().statusCode(200).extract().path("JobFlowId");
+        emr("TerminateJobFlows", "{\"JobFlowIds\":[\"" + ended + "\"]}").then().statusCode(200);
+        String both = "\"JobFlowIds\":[\"" + active + "\",\"" + ended + "\"]";
+
+        emr("ModifyCluster", "{\"ClusterId\":\"" + ended + "\",\"StepConcurrencyLevel\":5}")
+                .then().statusCode(400)
+                .body("__type", equalTo("InvalidRequestException"))
+                .body("message", equalTo(SHUT_DOWN))
+                .body("ErrorCode", equalTo("INVALID_JOB_SHUT_DOWN"));
+        assertShutDown("SetTerminationProtection", "{" + both + ",\"TerminationProtected\":true}");
+        assertShutDown("SetVisibleToAllUsers", "{" + both + ",\"VisibleToAllUsers\":false}");
+        assertShutDown("SetKeepJobFlowAliveWhenNoSteps", "{" + both + ",\"KeepJobFlowAliveWhenNoSteps\":false}");
+        assertShutDown("SetUnhealthyNodeReplacement", "{" + both + ",\"UnhealthyNodeReplacement\":true}");
+        assertTagsRefused("AddTags", "{\"ResourceId\":\"" + ended + "\",\"Tags\":[{\"Key\":\"env\",\"Value\":\"test\"}]}");
+        assertTagsRefused("RemoveTags", "{\"ResourceId\":\"" + ended + "\",\"TagKeys\":[\"team\"]}");
+
+        for (String id : List.of(active, ended)) {
+            emr("DescribeCluster", "{\"ClusterId\":\"" + id + "\"}").then().statusCode(200)
+                    .body("Cluster.StepConcurrencyLevel", equalTo(1))
+                    .body("Cluster.TerminationProtected", equalTo(false))
+                    .body("Cluster.VisibleToAllUsers", equalTo(true))
+                    .body("Cluster.AutoTerminate", equalTo(false))
+                    .body("Cluster.UnhealthyNodeReplacement", equalTo(false));
+        }
+        emr("DescribeCluster", "{\"ClusterId\":\"" + ended + "\"}").then().statusCode(200)
+                .body("Cluster.Tags", hasSize(1))
+                .body("Cluster.Tags[0].Key", equalTo("team"));
+        emr("TerminateJobFlows", "{\"JobFlowIds\":[\"" + active + "\"]}").then().statusCode(200);
+    }
+
+    private static void assertShutDown(String action, String body) {
+        emr(action, body).then().statusCode(400)
+                .body("__type", equalTo("ValidationException"))
+                .body("message", equalTo(SHUT_DOWN));
+    }
+
+    private static void assertTagsRefused(String action, String body) {
+        emr(action, body).then().statusCode(400)
+                .body("__type", equalTo("InvalidRequestException"))
+                .body("message", equalTo("Tags cannot be modified on terminated clusters."));
     }
 
     private static void assertMissing(String action, String body, String member) {

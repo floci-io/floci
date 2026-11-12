@@ -2,10 +2,12 @@ package io.floci.aws.services.s3;
 
 import io.floci.aws.core.common.AwsCanonicalUserId;
 import io.floci.aws.core.common.AwsException;
+import io.floci.aws.core.common.RegionResolver;
 import io.floci.aws.core.common.RequestContext;
 import io.floci.aws.core.storage.AccountAwareStorageBackend;
 import io.floci.aws.core.storage.InMemoryStorage;
 import io.floci.aws.core.storage.StorageBackend;
+import io.floci.aws.services.redshift.RedshiftZeroEtlEndpoints;
 import io.floci.aws.services.s3.model.Bucket;
 import io.floci.aws.services.s3.model.MultipartUpload;
 import io.floci.aws.services.s3.model.PutObjectOptions;
@@ -46,6 +48,29 @@ class S3GlobalBucketNamespaceTest {
     private static final String ACCOUNT_B = "000000000002";
 
     private final AtomicReference<String> caller = new AtomicReference<>(DEFAULT_ACCT);
+
+    @Test
+    void redshiftS3IntegrationSourceMustBelongToTheCallerEvenWithGlobalNamespace() {
+        Instance<RequestContext> context = mutableContext();
+        AccountAwareStorageBackend<Bucket> buckets =
+                new AccountAwareStorageBackend<>(new InMemoryStorage<>(), context, DEFAULT_ACCT);
+        AccountAwareStorageBackend<S3Object> objects =
+                new AccountAwareStorageBackend<>(new InMemoryStorage<>(), context, DEFAULT_ACCT);
+        S3Service service = new S3Service(buckets, objects, Path.of("s3-gns-redshift-test"), true, true);
+        RedshiftZeroEtlEndpoints endpoints = new RedshiftZeroEtlEndpoints(null, null, service,
+                new RegionResolver("us-east-1", DEFAULT_ACCT));
+        caller.set(ACCOUNT_A);
+        service.createBucket("redshift-source", "us-east-1");
+        assertEquals("us-east-1", endpoints.sourceBucketRegion(ACCOUNT_A, "us-east-1", "redshift-source"));
+
+        caller.set(ACCOUNT_B);
+        assertEquals("us-east-1", service.getBucketRegion("redshift-source"));
+        AwsException error = assertThrows(AwsException.class,
+                () -> endpoints.sourceBucketRegion(ACCOUNT_B, "us-east-1", "redshift-source"));
+
+        assertEquals("IntegrationSourceNotFoundFault", error.getErrorCode());
+        assertEquals(404, error.getHttpStatus());
+    }
 
     @SuppressWarnings("unchecked")
     private Instance<RequestContext> mutableContext() {

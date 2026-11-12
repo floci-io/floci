@@ -14,11 +14,21 @@ final class CopyRecordReader {
     private final boolean removeQuotes;
     private final boolean json;
     private final int delimiter;
+    private final boolean jsonLines;
+    private long nextLine = 1;
+    private long recordLine = 1;
+    private boolean afterCarriageReturn;
+    private byte[] lastRecord = new byte[0];
 
     CopyRecordReader(InputStream input, CopyStatementParser.S3CopyFrom spec) {
+        this(input, spec, false);
+    }
+
+    CopyRecordReader(InputStream input, CopyStatementParser.S3CopyFrom spec, boolean wholeJson) {
         this.input = new PushbackInputStream(input, 1);
         csv = spec.csv();
         json = spec.jsonAuto();
+        jsonLines = !wholeJson;
         removeQuotes = spec.transforms().removeQuotes();
         String separator = spec.delimiter() != null ? spec.delimiter() : (csv ? "," : "|");
         delimiter = separator.getBytes(StandardCharsets.UTF_8)[0] & 0xff;
@@ -30,14 +40,44 @@ final class CopyRecordReader {
 
     byte[] next(IntConsumer memoryTracker) throws IOException {
         ByteArrayOutputStream record = new ByteArrayOutputStream();
+        recordLine = nextLine;
         int quote = 0;
+        int depth = 0;
+        boolean jsonString = false;
+        boolean jsonEscape = false;
         boolean fieldStart = true;
         int value;
         while ((value = input.read()) != -1) {
+            if (json && !jsonLines && record.size() == 0 && Character.isWhitespace(value)) {
+                trackLine(value);
+                recordLine = nextLine;
+                continue;
+            }
             append(record, value, memoryTracker);
             if (json) {
-                if (value == '\n') {
+                if (jsonLines && value == '\n') {
                     return record.toByteArray();
+                }
+                if (!jsonLines) {
+                    if (jsonEscape) {
+                        jsonEscape = false;
+                    } else if (jsonString && value == '\\') {
+                        jsonEscape = true;
+                    } else if (value == '"') {
+                        jsonString = !jsonString;
+                    } else if (!jsonString) {
+                        if (value == '{' || value == '[') {
+                            depth++;
+                        } else if (value == '}' || value == ']') {
+                            depth--;
+                            if (depth == 0) {
+                                record.write('\n');
+                                return record.toByteArray();
+                            }
+                        } else if (value == '\n' && depth == 0) {
+                            return record.toByteArray();
+                        }
+                    }
                 }
                 continue;
             }
@@ -82,6 +122,7 @@ final class CopyRecordReader {
             }
         }
         if (quote != 0) {
+            lastRecord = record.toByteArray();
             throw new S3CopySimulator.S3TransferException("22P04", "COPY quoted field has no closing quote", null);
         }
         if (record.size() == 0) {
@@ -91,7 +132,22 @@ final class CopyRecordReader {
         return record.toByteArray();
     }
 
-    private static void append(ByteArrayOutputStream record, int value, IntConsumer memoryTracker) {
+    long recordLine() {
+        return recordLine;
+    }
+
+    byte[] lastRecord() {
+        return lastRecord;
+    }
+
+    private void trackLine(int value) {
+        if (value == '\r' || (value == '\n' && !afterCarriageReturn)) {
+            nextLine++;
+        }
+        afterCarriageReturn = value == '\r';
+    }
+
+    private void append(ByteArrayOutputStream record, int value, IntConsumer memoryTracker) {
         if (record.size() >= S3CopySimulator.COPY_TRANSFORM_MAX_OBJECT_BYTES) {
             throw new S3CopySimulator.S3TransferException("54000", "COPY record exceeds the transform size limit", null);
         }
@@ -99,5 +155,6 @@ final class CopyRecordReader {
             memoryTracker.accept((record.size() / (1024 * 1024)) + 1);
         }
         record.write(value);
+        trackLine(value);
     }
 }

@@ -37,6 +37,7 @@ import java.nio.file.Path;
 import java.time.Clock;
 import java.time.Duration;
 import java.util.ArrayList;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
@@ -49,7 +50,9 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
 import java.util.concurrent.RejectedExecutionException;
 import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.Semaphore;
 import java.util.concurrent.TimeUnit;
+import java.util.function.Consumer;
 import java.util.regex.Pattern;
 
 /**
@@ -906,6 +909,24 @@ public class RdsContainerManager implements RdsBackendGate, RdsBackendEndpointRe
                 """;
     }
 
+    static final class PostgresStartupSignal implements Consumer<String> {
+        final Semaphore signal = new Semaphore(0);
+        private boolean tcpListener;
+        private boolean signalled;
+
+        @Override
+        public synchronized void accept(String line) {
+            if (line.contains("listening on IPv4 address") || line.contains("listening on IPv6 address")) {
+                tcpListener = true;
+            }
+            if (tcpListener && !signalled && line.contains("database system is ready to accept connections")) {
+                signalled = true;
+                signal.release();
+            }
+        }
+
+    }
+
     /**
      * Connects over TCP loopback on purpose. The official image runs first-boot init against a
      * temporary server that listens only on the Unix socket, so a socket connection can succeed
@@ -921,7 +942,13 @@ public class RdsContainerManager implements RdsBackendGate, RdsBackendEndpointRe
                 "-d", "postgres",
                 "-c", postgresIamRoleInitSql()
         };
-        execUntilSuccess(containerName, containerId, cmd, "PostgreSQL IAM role");
+        PostgresStartupSignal startup = new PostgresStartupSignal();
+        // This path receives a newly created container, so replay cannot include a prior start.
+        try (Closeable observation = logStreamer.observe(containerId, startup)) {
+            execUntilSuccess(containerName, containerId, cmd, "PostgreSQL IAM role", startup.signal);
+        } catch (IOException e) {
+            LOG.warnv(e, "Could not close PostgreSQL startup observation for {0}", containerName);
+        }
     }
 
     /**
@@ -1020,6 +1047,11 @@ public class RdsContainerManager implements RdsBackendGate, RdsBackendEndpointRe
     }
 
     private void execUntilSuccess(String containerName, String containerId, String[] cmd, String description) {
+        execUntilSuccess(containerName, containerId, cmd, description, new Semaphore(0));
+    }
+
+    private void execUntilSuccess(String containerName, String containerId, String[] cmd, String description,
+                                  Semaphore startupSignal) {
         String lastOutput = "";
         for (int attempt = 1; attempt <= 60; attempt++) {
             try {
@@ -1033,7 +1065,7 @@ public class RdsContainerManager implements RdsBackendGate, RdsBackendEndpointRe
                 lastOutput = e.getMessage();
             }
             try {
-                TimeUnit.SECONDS.sleep(1);
+                startupSignal.tryAcquire(1, TimeUnit.SECONDS);
             } catch (InterruptedException e) {
                 Thread.currentThread().interrupt();
                 throw new IllegalStateException("Interrupted initializing " + description + " in " + containerName, e);
@@ -1211,31 +1243,39 @@ public class RdsContainerManager implements RdsBackendGate, RdsBackendEndpointRe
 
     public void restorePostgresSnapshot(String containerId, String masterUsername, String sqlDump) {
         String effectiveUser = (masterUsername != null && !masterUsername.isBlank()) ? masterUsername : "postgres";
+        Map<String, String> files = new LinkedHashMap<>();
+        files.put("dump.sql", sqlDump);
+        files.put("restore.sh", postgresRestoreScript());
+        runSnapshotScript(containerId, "postgres-restore", files,
+                new String[]{"sh", "/tmp/restore.sh", effectiveUser}, 60, 120, "psql restore");
+    }
 
+    /**
+     * Uploads {@code files} into the container's {@code /tmp} and runs {@code cmd}, again every second
+     * while it exits 2, which the snapshot scripts answer while the server does not accept connections
+     * yet: a just-created MySQL or MariaDB container is still initializing its data directory on a
+     * server that does not listen on TCP, and psql exits 2 when it cannot connect. Returns the
+     * command's output; any other failure, or a server still not answering after {@code attempts}
+     * tries, throws with {@code operation} and the command's error output.
+     */
+    private String runSnapshotScript(String containerId, String uploadName, Map<String, String> files,
+                                     String[] cmd, int attempts, int timeoutSeconds, String operation) {
         try (Lease _ = holdContainer(containerId)) {
-            String restoreScript = postgresRestoreScript();
-
             ByteArrayOutputStream bos = new ByteArrayOutputStream();
             try (TarArchiveOutputStream tar = new TarArchiveOutputStream(bos)) {
                 tar.setLongFileMode(TarArchiveOutputStream.LONGFILE_GNU);
-
-                addTarEntry(tar, "dump.sql", sqlDump);
-                addTarEntry(tar, "restore.sh", restoreScript);
+                for (Map.Entry<String, String> file : files.entrySet()) {
+                    addTarEntry(tar, file.getKey(), file.getValue());
+                }
             }
-
             byte[] archive = bos.toByteArray();
             RetryingTarCopier.copyStreamed(lifecycleManager.getDockerClient(), containerId,
-                    "/tmp", "postgres-restore", out -> out.write(archive),
+                    "/tmp", uploadName, out -> out.write(archive),
                     RetryingTarCopier.DEFAULT_MAX_ATTEMPTS, uploadBackoffMillis);
 
-            String[] cmd = { "sh", "/tmp/restore.sh", effectiveUser };
-
             ContainerExec.Result result = null;
-            for (int i = 0; i < 60; i++) {
-                result = execInContainer(containerId, cmd, 120);
-                if (result.exitCode() == 0) {
-                    break;
-                }
+            for (int i = 0; i < attempts; i++) {
+                result = execInContainer(containerId, cmd, timeoutSeconds);
                 if (result.exitCode() != 2) {
                     break;
                 }
@@ -1243,20 +1283,144 @@ public class RdsContainerManager implements RdsBackendGate, RdsBackendEndpointRe
                     Thread.sleep(1000);
                 } catch (InterruptedException ie) {
                     Thread.currentThread().interrupt();
-                    throw new RuntimeException("Interrupted while restoring postgres snapshot", ie);
+                    throw new RuntimeException("Interrupted while waiting to run " + operation, ie);
                 }
             }
 
             if (result == null || result.exitCode() != 0) {
                 String errMsg = result != null ? (result.stderr().isEmpty() ? result.stdout() : result.stderr()) : "";
-                throw new RuntimeException("psql restore failed with exit code "
+                throw new RuntimeException(operation + " failed with exit code "
                         + (result != null ? result.exitCode() : -1) + ": " + errMsg);
             }
+            return result.stdout();
         } catch (RuntimeException e) {
             throw e;
         } catch (Exception e) {
-            throw new RuntimeException("Failed to restore postgres snapshot", e);
+            throw new RuntimeException("Failed to run " + operation, e);
         }
+    }
+
+    /**
+     * A logical copy of a MySQL or MariaDB server, the counterpart of {@link #createPostgresSnapshot}:
+     * every user schema (with its routines, triggers and events), then every role and every account
+     * but root and the image's own system accounts, recreated from {@code SHOW CREATE USER} and
+     * {@code SHOW GRANTS}. The {@code mysql} system schema itself is not copied, since MySQL 8 cannot
+     * load one into a fresh server. It runs as the master user, whom the instance's init script
+     * granted ALL on *.*, once the server accepts that user over TCP: Floci reports an instance
+     * {@code available} while the image is still initializing it.
+     */
+    public String createMysqlSnapshot(DatabaseEngine engine, String containerId,
+                                      String masterUsername, String masterPassword) {
+        MysqlTools tools = MysqlTools.of(engine);
+        String[] cmd = {"env", "MYSQL_PWD=" + (masterPassword == null ? "" : masterPassword),
+                "sh", "/tmp/floci-mysql-dump.sh", tools.client(), tools.dump(), mysqlUser(masterUsername),
+                tools.dumpFlags(), tools.accountClause(), tools.roleFilter()};
+        return runSnapshotScript(containerId, "mysql-dump", Map.of("floci-mysql-dump.sh", mysqlDumpScript()),
+                cmd, 120, 300, tools.dump());
+    }
+
+    /**
+     * Replays a {@link #createMysqlSnapshot} copy into a just-created MySQL or MariaDB instance, once
+     * its server accepts the master user over TCP rather than into the initializing server the
+     * image is about to stop.
+     */
+    public void restoreMysqlSnapshot(DatabaseEngine engine, String containerId,
+                                     String masterUsername, String masterPassword, String sqlDump) {
+        MysqlTools tools = MysqlTools.of(engine);
+        Map<String, String> files = new LinkedHashMap<>();
+        files.put("dump.sql", sqlDump);
+        files.put("restore.sh", mysqlRestoreScript());
+        String[] cmd = {"env", "MYSQL_PWD=" + (masterPassword == null ? "" : masterPassword),
+                "sh", "/tmp/restore.sh", tools.client(), mysqlUser(masterUsername)};
+        runSnapshotScript(containerId, "mysql-restore", files, cmd, 120, 300, tools.client() + " restore");
+    }
+
+    /**
+     * The client binaries and dump flags of an engine, and the end of its account query. MariaDB
+     * images ship only the {@code mariadb-*} names, and list roles in {@code mysql.user} next to
+     * accounts, which {@code SHOW CREATE USER} refuses, so they are recreated with {@code CREATE ROLE}.
+     * A MySQL role is an account, and {@code SHOW CREATE USER} names an account's default roles, so
+     * the accounts used as roles are created first. MySQL's dump leaves out the GTID state, which a
+     * fresh server would refuse to load.
+     */
+    record MysqlTools(String client, String dump, String dumpFlags, String accountClause, String roleFilter) {
+        static MysqlTools of(DatabaseEngine engine) {
+            return engine == DatabaseEngine.MARIADB
+                    ? new MysqlTools("mariadb", "mariadb-dump", "", "AND is_role = 'N'", "is_role = 'Y'")
+                    : new MysqlTools("mysql", "mysqldump", "--set-gtid-purged=OFF",
+                            "ORDER BY (user, host) IN (SELECT FROM_USER, FROM_HOST FROM mysql.role_edges"
+                                    + " UNION SELECT DEFAULT_ROLE_USER, DEFAULT_ROLE_HOST FROM mysql.default_roles) DESC",
+                            "FALSE");
+        }
+    }
+
+    private static String mysqlUser(String masterUsername) {
+        return masterUsername != null && !masterUsername.isBlank() ? masterUsername : "root";
+    }
+
+    static String mysqlDumpScript() {
+        return """
+                #!/bin/sh
+                # usage: floci-mysql-dump.sh <client> <dump> <user> <dump flags> <account clause> <role filter>
+                # The password arrives in MYSQL_PWD. Names are read one per line, so a schema or
+                # account name with spaces stays one argument.
+                set -ef
+                C="$1"; D="$2"; U="$3"; FLAGS="$4"; ACCOUNT_CLAUSE="$5"; ROLE_FILTER="$6"
+                SQL() { "$C" -h127.0.0.1 --protocol=TCP -u"$U" -N -B -r -e "$1"; }
+                # Exit 2: the server does not accept the master user over TCP yet. Past this point a
+                # failure exits 1, even mysqldump's own exit 2, so it is not retried as one.
+                SQL "SELECT 1" >/dev/null 2>&1 || exit 2
+                trap 'rc=$?; if [ "$rc" = 2 ]; then exit 1; fi' EXIT
+                DBS=$(SQL "SELECT schema_name FROM information_schema.schemata WHERE schema_name NOT IN \\
+                  ('mysql','sys','performance_schema','information_schema')")
+                set --
+                while IFS= read -r db; do
+                  if [ -n "$db" ]; then set -- "$@" "$db"; fi
+                done <<EOF
+                $DBS
+                EOF
+                if [ $# -gt 0 ]; then
+                  # shellcheck disable=SC2086
+                  "$D" -h127.0.0.1 --protocol=TCP -u"$U" --routines --events --triggers \\
+                    --single-transaction --hex-blob --no-tablespaces $FLAGS --databases "$@"
+                fi
+                ROLES=$(SQL "SELECT QUOTE(user) FROM mysql.user WHERE $ROLE_FILTER")
+                ACCOUNTS=$(SQL "SELECT CONCAT(QUOTE(user),'@',QUOTE(host)) FROM mysql.user WHERE user NOT IN \\
+                  ('','root','mysql.sys','mysql.session','mysql.infoschema','mariadb.sys','healthcheck','PUBLIC') $ACCOUNT_CLAUSE")
+                # Every role and account is created before any grant, which can name a role.
+                while IFS= read -r role; do
+                  if [ -n "$role" ]; then echo "CREATE ROLE IF NOT EXISTS $role;"; fi
+                done <<EOF
+                $ROLES
+                EOF
+                while IFS= read -r acct; do
+                  if [ -n "$acct" ]; then
+                    # MySQL prints a binary password hash as hex only when asked; MariaDB has no such setting.
+                    stmt=$(SQL "SET SESSION print_identified_with_as_hex = ON; SHOW CREATE USER $acct" 2>/dev/null \\
+                           || SQL "SHOW CREATE USER $acct")
+                    echo "$stmt;" | sed 's/^CREATE USER /CREATE USER IF NOT EXISTS /'
+                  fi
+                done <<EOF
+                $ACCOUNTS
+                EOF
+                while IFS= read -r grantee; do
+                  if [ -n "$grantee" ]; then SQL "SHOW GRANTS FOR $grantee" | sed 's/$/;/'; fi
+                done <<EOF
+                $ROLES
+                $ACCOUNTS
+                EOF
+                echo "FLUSH PRIVILEGES;"
+                """;
+    }
+
+    static String mysqlRestoreScript() {
+        return """
+                #!/bin/sh
+                # usage: restore.sh <client> <user>; the password arrives in MYSQL_PWD.
+                C="$1"; U="$2"
+                "$C" -h127.0.0.1 --protocol=TCP -u"$U" -e "SELECT 1" >/dev/null 2>&1 || exit 2
+                "$C" -h127.0.0.1 --protocol=TCP -u"$U" < /tmp/dump.sql || exit 1
+                """;
     }
 
     /**

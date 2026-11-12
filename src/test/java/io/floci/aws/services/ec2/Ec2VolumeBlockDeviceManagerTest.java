@@ -4,17 +4,30 @@ import com.github.dockerjava.api.DockerClient;
 import com.github.dockerjava.api.command.InspectContainerResponse;
 import com.github.dockerjava.api.exception.NotFoundException;
 import io.floci.aws.config.EmulatorConfig;
+import io.floci.aws.core.common.AwsException;
 import io.floci.aws.core.common.docker.ContainerBuilder;
 import io.floci.aws.core.common.docker.ContainerExecStubs;
 import io.floci.aws.core.common.docker.ContainerLifecycleManager;
+import io.floci.aws.services.ec2.model.Instance;
+import io.floci.aws.services.ec2.model.InstanceState;
+import io.floci.aws.services.ec2.model.Volume;
+import io.floci.aws.services.ec2.model.VolumeAttachment;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.io.TempDir;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
 
+import java.nio.file.Files;
+import java.nio.file.Path;
 import java.util.List;
+import java.util.Map;
+import java.util.Optional;
 
 import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyInt;
@@ -34,6 +47,7 @@ class Ec2VolumeBlockDeviceManagerTest {
 
     private static final String HELPER_ID = "helper-container-id";
 
+    private EmulatorConfig config;
     private DockerClient dockerClient;
     private InspectContainerResponse helper;
     private ContainerLifecycleManager lifecycleManager;
@@ -41,7 +55,7 @@ class Ec2VolumeBlockDeviceManagerTest {
 
     @BeforeEach
     void setUp() {
-        EmulatorConfig config = mock(EmulatorConfig.class, RETURNS_DEEP_STUBS);
+        config = mock(EmulatorConfig.class, RETURNS_DEEP_STUBS);
         when(config.services().ec2().volumeBlockDevices()).thenReturn(true);
         when(config.services().ec2().mock()).thenReturn(false);
 
@@ -54,6 +68,205 @@ class Ec2VolumeBlockDeviceManagerTest {
         lifecycleManager = mock(ContainerLifecycleManager.class);
         manager = new Ec2VolumeBlockDeviceManager(dockerClient, mock(ContainerBuilder.class),
                 lifecycleManager, config);
+    }
+
+    @Test
+    void attachVolumeCreatesTheDeviceBeforeReportingSuccess() {
+        List<List<String>> helperCommands = ContainerExecStubs.completeEveryExec(dockerClient, HELPER_ID,
+                0, "1 /dev/loop3", "");
+        List<List<String>> targetCommands = ContainerExecStubs.completeEveryExec(dockerClient, "guest", 0, "", "");
+
+        assertEquals(Optional.of("/dev/xvdf"), manager.attachVolume(volume(), runningInstance(), "xvdf"));
+        assertEquals(1, helperCommands.size());
+        assertEquals(1, targetCommands.size());
+        assertTrue(targetCommands.getFirst().get(2).endsWith("[ -b \"$dev\" ]"));
+        assertEquals("/dev/xvdf", targetCommands.getFirst().get(4));
+    }
+
+    @Test
+    void loopAllocationFailureReturnsAnAwsErrorWithoutReleasingUnownedLoops() {
+        List<List<String>> commands = ContainerExecStubs.completeEveryExec(dockerClient, HELPER_ID,
+                List.of(1L, 0L), "", "permission denied");
+
+        AwsException error = assertThrows(AwsException.class,
+                () -> manager.attachVolume(volume(), runningInstance(), "/dev/xvdf"));
+
+        assertEquals("InternalError", error.getErrorCode());
+        assertEquals(500, error.getHttpStatus());
+        assertFalse(error.getMessage().contains("permission denied"));
+        assertEquals(1, commands.size());
+        verify(dockerClient, never()).execCreateCmd("guest");
+    }
+
+    @Test
+    void guestDeviceFailureCleansUpAndAllowsRetry() {
+        List<List<String>> helperCommands = ContainerExecStubs.completeEveryExec(dockerClient, HELPER_ID,
+                0, "1 /dev/loop3", "");
+        List<List<String>> targetCommands = ContainerExecStubs.completeEveryExec(dockerClient, "guest",
+                List.of(1L, 0L, 0L), "", "");
+        Instance instance = runningInstance();
+
+        assertThrows(AwsException.class, () -> manager.attachVolume(volume(), instance, "/dev/xvdf"));
+        assertEquals(List.of("rm", "-f", "/dev/xvdf"), targetCommands.getLast());
+        assertEquals(List.of("losetup", "-d", "/dev/loop3"), helperCommands.getLast());
+        assertEquals(Optional.of("/dev/xvdf"), manager.attachVolume(volume(), instance, "/dev/xvdf"));
+    }
+
+    @Test
+    void failedRestoreDoesNotReleaseTheReusedLoopAndCanBeRetried() {
+        List<List<String>> helperCommands = ContainerExecStubs.completeEveryExec(dockerClient, HELPER_ID,
+                0, "0 /dev/loop3", "");
+        ContainerExecStubs.completeEveryExec(dockerClient, "guest", List.of(1L, 0L, 0L), "", "");
+        Volume volume = volume();
+        VolumeAttachment attachment = new VolumeAttachment();
+        attachment.setVolumeId(volume.getVolumeId());
+        attachment.setDevice("/dev/xvdf");
+        attachment.setState("attached");
+        volume.setState("in-use");
+        volume.getAttachments().add(attachment);
+        Instance instance = runningInstance();
+
+        assertDoesNotThrow(() -> manager.restoreInstanceVolumeDevices(instance, List.of(attachment),
+                id -> Optional.of(volume)));
+
+        assertEquals(1, helperCommands.size(), "restoration must not detach a pre-existing loop");
+        assertEquals("in-use", volume.getState());
+        assertEquals("attached", attachment.getState());
+        assertEquals(Optional.of("/dev/xvdf"), manager.attachVolume(volume, instance, "/dev/xvdf"));
+        assertEquals(2, helperCommands.size());
+    }
+
+    @ParameterizedTest
+    @ValueSource(booleans = {true, false})
+    void helperReportsWhetherItAllocatedOrReusedTheLoop(boolean reused, @TempDir Path directory) throws Exception {
+        List<List<String>> helperCommands = ContainerExecStubs.completeEveryExec(dockerClient, HELPER_ID,
+                0, "1 /dev/loop3", "");
+        ContainerExecStubs.completeEveryExec(dockerClient, "guest", 0, "", "");
+        manager.attachVolume(volume(), runningInstance(), "/dev/xvdf");
+        String script = helperCommands.getFirst().get(2);
+        String fakeCommands = "losetup() {\n"
+                + "  case \"$1\" in\n"
+                + "    -j) " + (reused ? "echo \"/dev/loop3: 0 $2\"" : ":") + ";;\n"
+                + "    -f) echo /dev/loop3;;\n"
+                + "    /dev/loop3) :;;\n"
+                + "    *) return 1;;\n"
+                + "  esac\n"
+                + "}\n"
+                + "mknod() { :; }\n";
+        Path rawFile = Files.createFile(directory.resolve("volume.raw"));
+        int exitCode = HelperShellFixture.run(
+                new String[]{"sh", "-c", fakeCommands + script, "helper", rawFile.toString(), "1"}, directory, Map.of());
+        String output = HelperShellFixture.output(directory).trim();
+        assertEquals(0, exitCode, output);
+        assertEquals((reused ? "0" : "1") + " /dev/loop3", output);
+    }
+
+    @Test
+    void cleanupFailureStillReportsTheOriginalAttachmentError() {
+        List<List<String>> helperCommands = ContainerExecStubs.completeEveryExec(dockerClient, HELPER_ID,
+                List.of(0L, 1L), "1 /dev/loop3", "");
+        ContainerExecStubs.completeEveryExec(dockerClient, "guest", 1, "", "permission denied");
+
+        AwsException error = assertThrows(AwsException.class,
+                () -> manager.attachVolume(volume(), runningInstance(), "/dev/xvdf"));
+
+        assertEquals("InternalError", error.getErrorCode());
+        assertEquals(2, helperCommands.size());
+        assertEquals(List.of("losetup", "-d", "/dev/loop3"), helperCommands.getLast());
+    }
+
+    @Test
+    void mockModeRetainsMetadataOnlyTracking() {
+        when(config.services().ec2().mock()).thenReturn(true);
+
+        assertEquals(Optional.empty(), manager.attachVolume(volume(), runningInstance(), "/dev/xvdf"));
+        verify(dockerClient, never()).execCreateCmd(anyString());
+    }
+
+    @Test
+    void unexpectedLoopOutputFailsWithoutCreatingAGuestDevice() {
+        ContainerExecStubs.completeEveryExec(dockerClient, HELPER_ID, 0, "not a loop device", "");
+
+        assertThrows(AwsException.class, () -> manager.attachVolume(volume(), runningInstance(), "/dev/xvdf"));
+        verify(dockerClient, never()).execCreateCmd("guest");
+    }
+
+    @Test
+    void dockerExecExceptionFailsAttachment() {
+        when(dockerClient.execCreateCmd(HELPER_ID)).thenThrow(new IllegalStateException("daemon went away"));
+
+        assertThrows(AwsException.class, () -> manager.attachVolume(volume(), runningInstance(), "/dev/xvdf"));
+    }
+
+    @Test
+    void unavailableHelperFailsAttachment() {
+        when(dockerClient.inspectContainerCmd(anyString()).exec()).thenThrow(new IllegalStateException("unavailable"));
+
+        assertThrows(AwsException.class, () -> manager.attachVolume(volume(), runningInstance(), "/dev/xvdf"));
+    }
+
+    @Test
+    void disabledBlockDevicesRetainMetadataOnlyTracking() {
+        when(config.services().ec2().volumeBlockDevices()).thenReturn(false);
+
+        assertEquals(Optional.empty(), manager.attachVolume(volume(), runningInstance(), "/dev/xvdf"));
+        verify(dockerClient, never()).execCreateCmd(anyString());
+    }
+
+    @Test
+    void unavailableDockerRetainsMetadataOnlyTracking() {
+        when(dockerClient.pingCmd().exec()).thenThrow(new IllegalStateException("unavailable"));
+
+        assertEquals(Optional.empty(), manager.attachVolume(volume(), runningInstance(), "/dev/xvdf"));
+        verify(dockerClient, never()).execCreateCmd(anyString());
+    }
+
+    @Test
+    void stoppedInstanceDefersDeviceCreationEvenWhenContainerIsStillRunning() {
+        Instance instance = runningInstance();
+        instance.setState(InstanceState.stopped());
+
+        assertEquals(Optional.empty(), manager.attachVolume(volume(), instance, "/dev/xvdf"));
+        verify(dockerClient, never()).execCreateCmd(anyString());
+    }
+
+    @Test
+    void missingOrStoppedContainerRetainsMetadataOnlyTracking() {
+        Instance instance = runningInstance();
+        when(lifecycleManager.isContainerRunning("guest")).thenReturn(false);
+        assertEquals(Optional.empty(), manager.attachVolume(volume(), instance, "/dev/xvdf"));
+        instance.setDockerContainerId(null);
+        assertEquals(Optional.empty(), manager.attachVolume(volume(), instance, "/dev/xvdf"));
+        verify(dockerClient, never()).execCreateCmd(anyString());
+    }
+
+    @Test
+    void restorationLogsAttachmentFailureAndKeepsExistingRecords() {
+        ContainerExecStubs.completeEveryExec(dockerClient, HELPER_ID, 1, "", "permission denied");
+        VolumeAttachment attachment = new VolumeAttachment();
+        attachment.setVolumeId("vol-1");
+        attachment.setDevice("/dev/xvdf");
+        attachment.setState("attached");
+
+        assertDoesNotThrow(() -> manager.restoreInstanceVolumeDevices(runningInstance(), List.of(attachment),
+                id -> Optional.of(volume())));
+        assertEquals("attached", attachment.getState());
+    }
+
+    private Instance runningInstance() {
+        Instance instance = new Instance();
+        instance.setInstanceId("i-1");
+        instance.setState(InstanceState.running());
+        instance.setDockerContainerId("guest");
+        when(lifecycleManager.isContainerRunning("guest")).thenReturn(true);
+        return instance;
+    }
+
+    private Volume volume() {
+        Volume volume = new Volume();
+        volume.setVolumeId("vol-1");
+        volume.setSize(1);
+        return volume;
     }
 
     @Test

@@ -411,8 +411,22 @@ model. A comma is therefore still admitted, and an empty principal is still refu
 same split the enum order above takes, the captured rendering over the model's, and one object
 decides which text any violation quotes, so no other member moves with it.
 
-What a second capture would settle is the comma: `CreateServiceLinkedRole` with one in the
-principal, which AWS either refuses as a pattern violation or takes.
+The comma was the half left open, and what settles it is what AWS publishes rather than a second
+capture. The API Reference entry for `CreateServiceLinkedRole`, read on 2026-11-03, gives
+`AWSServiceName` a minimum length of 1 and the pattern `[\w+=,.@-]+`, the comma included, which is
+the pattern botocore declares for the shape it aliases the member to as well. The comma is
+therefore what AWS documents for this member rather than an artifact of that aliasing, and the
+captured message is the only source that drops it: a message is evidence of the text a violation
+carries, not of what a value is held to. The minimum is published there too, so the empty principal
+the message's `*` would admit stays refused for a reason of AWS's own rather than the model's alone.
+A principal carrying a comma clears the shape here and reaches
+the lookup, where a service no recording covers has its role name derived from the principal's
+labels rather than refused, which is this emulator's own decision and the answer any unrecorded
+principal gets. This paragraph is where that reasoning lives: the generator and the test that pins
+the comma point here rather than repeating it. A capture of AWS refusing a comma as a pattern
+violation moves the quoted-pattern entry in `tools/aws/regen_iam_shapes.py`, the
+`src/main/resources/aws/iam-request-shapes.json` a regeneration writes from it, which that
+generator's own test holds the entry to, the test that pins the comma, and this paragraph.
 
 ### Permission Boundaries
 
@@ -761,6 +775,9 @@ key in. A role named as the policy source is not a session, so there is no sessi
 `aws:userid` and no documented `aws:PrincipalType` for it; those keys stay absent and a statement
 matching on one does not match.
 
+`aws:PrincipalTag/<key>` must be supplied in `ContextEntries`, even when the policy source is a
+tagged user or role. The simulator does not populate stored identity tags.
+
 `PolicySourceArn` on `SimulatePrincipalPolicy` and `GetContextKeysForPrincipalPolicy` resolves an
 IAM user or role only, not a group. It is held to the 20 characters `arnType` declares before it
 is resolved, so a value too short to be any ARN is a `ValidationError` with status 400 naming the
@@ -776,9 +793,66 @@ accepts only one `PermissionsBoundaryPolicyInputList` document, matching AWS's o
 limit; extra documents beyond the first are ignored. Neither simulation action evaluates a
 resource-based policy (`ResourcePolicy`) or `OrderedOrganizationPolicyInputList`, and neither
 returns `MatchedStatements`, `ResourceSpecificResults`, or a `PermissionsBoundaryDecisionDetail`:
-only the top-level `EvalDecision` is populated. `ContextEntries.member.N.ContextKeyType` is
-accepted but not read; the comparison is driven entirely by the policy's own condition operator
-(`Bool`, `NumericEquals`, `DateEquals`, and so on), not by the declared type.
+only the top-level `EvalDecision` is populated. `SimulatePrincipalPolicy` reads neither
+`PolicyInputList` nor `PermissionsBoundaryPolicyInputList`, so a document passed in either one does
+not enter that simulation, and `ResourceHandlingOption` is accepted and read by neither action, so
+none of the EC2 scenarios it names has its required resources enforced.
+`ContextEntries.member.N.ContextKeyType` is accepted but not read; the comparison is driven
+entirely by the policy's own condition operator (`Bool`, `NumericEquals`, `DateEquals`, and so on),
+not by the declared type.
+
+`PolicyExclusionList` on `SimulatePrincipalPolicy` is read. The member asks "what the simulation
+result would be if a policy were removed, without changing which policies are actually attached to
+the principal identified by PolicySourceArn", so an identifier it carries drops a policy from the
+set this one simulation evaluates and from nothing else: the attachment, the listings and every
+other answer are untouched. Each entry is a `PolicyIdentifier`, which the reference marks a union,
+"Specify exactly one of PolicyType, PolicyArn, or InlinePolicyIdentifier", and the member states
+both answers an entry gets: "Syntactically invalid identifiers, such as malformed ARNs or wildcards
+in disallowed positions, cause the request to fail with an InvalidInput error. Syntactically valid
+identifiers that don't match any attached policy are ignored."
+
+The constraints ahead of the operation hold each member of an entry to the shape the model declares
+for it, the type to its value set and the inline identifier to its three required members, so an
+unknown `PolicyType` is a 400 `ValidationError` naming `policyExclusionList.1.member.policyType`
+rather than an identifier that reaches the exclusion at all. What the vendored data does not carry
+is the union marker, so the rule that an entry names exactly one of the three is held where the
+entry is read, with the `InvalidInput` the member asks for. A `PolicyArn` that clears `arnType`'s 20
+characters and still parses as no ARN is refused with "The ARN <value> is not a valid ARN.",
+the wording this package already answers a malformed ARN with, and so is one that leaves out a
+field every ARN carries, its partition, its service or its resource; the region and the account are
+not among those, an AWS managed policy carrying no region, so a field left empty there is an
+identifier that matches no policy rather than a malformed one. Wildcards are admitted only where
+the member admits them, "in the resource name portion of the ARN", with "at most one `*`" and "any
+number of `?`", so one written in the partition, service, region or account field is refused, as is
+a second `*`, and so is one written in the resource type an ARN carries ahead of the resource name:
+a `poli?y/reader` reads like the `policy/reader` it would reach, and matching it would leave a
+policy out of the simulation on an identifier the member refuses. Neither of those two messages is
+published, so both are this emulator's own reading of what to say. A match is then made a field at
+a time, which is what keeps a `*` written in the resource name from reaching across into the
+account.
+
+`PolicyType` reads as the part a policy plays in the evaluation rather than the kind of document it
+is, which is what keeps `permission-boundary` in a value set beside `user-managed`: a boundary is
+itself a customer managed policy, so a type meaning the kind would match it twice and leave
+`permission-boundary` standing for nothing. `inline`, `aws-managed` and `user-managed` therefore
+reach the identity policies, and `permission-boundary` reaches the boundary alone. `scp` matches
+nothing, this simulation carrying no SCP ceiling, which is deliberate and recorded under [Service
+Control Policies](#service-control-policies-scps) below, and `rcp` matches nothing because the
+member says so: "not supported in this release; identifiers that target RCPs are also ignored". An
+ARN names the policy itself, so it reaches that policy in whatever part it plays, the boundary
+included. The account-level grant an account password policy carries is reached by nothing at all:
+it is attached to no entity, where the member names the policies "actually attached to the
+principal", so a simulation that leaves out every part still carries the grant.
+
+`AttachmentName` is published two ways at once. Its own entry documents wildcards, "use at most one
+`*` ... and any number of `?`", and declares the pattern `[\w+=,.@-]+`, which admits neither
+character, while `InlinePolicyIdentifierType` says in prose that wildcard characters in the entity
+name "can match multiple entities". The declared pattern is what a caller is held to here, so a
+wildcard there is a 400 `ValidationError` on the pattern rather than an identifier matching several
+entities, and an inline identifier matches the exact names its entry carries. That is a deliberate
+divergence from the member's prose rather than a reading of what AWS accepts: nothing recorded shows
+which half of its own entry AWS's validation layer runs, and the pattern is vendored from the model
+rather than written by hand, so a recording either way moves it in the generated data.
 
 ### Last-Accessed Reporting
 
@@ -1220,6 +1294,40 @@ resource holding a deleted certificate, and making those wait on a certificate d
 them, would buy nothing. The delete reads a snapshot of each load balancer's listeners rather than
 the live list, so an unguarded write cannot end its walk in `ConcurrentModificationException`
 either, which no mapper covers and which would surface as an unmapped 500.
+
+What a distribution's `IAMCertificateId` is held to is the id and nothing else, and two questions
+sat open on that member. The first is the path the certificate was uploaded under, and AWS
+publishes a rule for it in two places. `UploadServerCertificate`'s `Path` carries the note that "If
+you are uploading a server certificate specifically for use with Amazon CloudFront distributions,
+you must specify a path using the path parameter. The path must begin with /cloudfront and must
+include a trailing slash (for example, /cloudfront/test/)", and CloudFront's Developer Guide states
+it flatly in the procedure for uploading a third-party certificate to IAM: the `--path` value "must
+start with /cloudfront/" and "The path must end with a /". So the obligation on a caller is
+documented, and this emulator does not hold callers to it. A certificate uploaded anywhere is
+resolved by id and serves a distribution.
+
+That is a deliberate divergence, not a conclusion that AWS accepts any path, and nothing in hand
+says how AWS answers a distribution naming a certificate stored elsewhere. What is published is the
+obligation on the upload rather than a refusal on the write, and the one source that enumerates the
+write's checks does not reach the path: the Developer Guide's `InvalidViewerCertificate` page lists
+what CloudFront verifies when an alternate domain name is added, in the order it verifies them, and
+names a distribution with no certificate attached, a chain longer than five, chain dates that are
+not current, a certificate no trusted authority signed, a malformed certificate, an internal error
+and a name the certificate does not cover. The certificate's path is none of them. Holding a
+distribution to the path would therefore refuse a write on a rule published for the upload, which
+is why the id alone decides here until something records otherwise. A capture of a write refused
+for a certificate outside `/cloudfront` moves the reader, this paragraph and the test that pins it,
+and the code would be `InvalidViewerCertificate`, 400 and sender fault, the one this service
+already answers for an id nothing matches.
+
+The second question is a blank value, and AWS settles that one outright. `IAMCertificateId` is
+declared with a minimum length of 0, so an empty string breaks no bound the member carries, and the
+`ViewerCertificate` type's own entry tells a caller on the CloudFront domain name to set
+`CloudFrontDefaultCertificate` to true and leave "all other fields empty". An element left empty is
+what that instruction produces on this REST XML protocol, so a blank names no certificate: it is
+not resolved, it is not reported to IAM as a reference, and it does not make the write wait on the
+certificate lock. Reading it as an id instead would refuse with `InvalidViewerCertificate` the very
+request the reference asks for.
 
 ### SSH Public Keys
 
@@ -1717,7 +1825,8 @@ Map, ACM, CodePipeline, CodeBuild, Amazon Managed Service for Apache Flink (Kine
 Application Auto Scaling, AWS Budgets, Cost and Usage Reports, Service Quotas, Amazon Textract, Amazon Translate, Amazon Athena,
 AWS Data Exports, AWS Pricing Calculator, Cost Explorer, CloudTrail, Global Accelerator, Amazon
 Timestream for InfluxDB, Amazon Redshift, the Amazon Redshift Data API, AWS Payment Cryptography, AWS DataSync, Amazon EMR,
-Amazon Rekognition, IAM Identity Center, Amazon OpenSearch Service and IAM Access Analyzer they come from a table generated from AWS's Service Reference and botocore, `src/main/resources/aws/iam-request-resources.json`, which gives each
+Amazon Rekognition, IAM Identity Center, Amazon Inspector, Amazon Macie, Amazon OpenSearch Service, IAM Access Analyzer,
+AWS Security Hub and Amazon GuardDuty they come from a table generated from AWS's Service Reference and botocore, `src/main/resources/aws/iam-request-resources.json`, which gives each
 operation's action, the resource types that action acts on with their ARN formats, and the request
 members that name them: a member holding a resource's ARN, which counts when it matches the format
 of a type the action acts on, or members filling the variables of a type's format. A member holding
@@ -1905,8 +2014,8 @@ it is signed with. The ARN is
 the one after `/tags/` or `/v1/tags/`, the body's `resourceArn` on `POST /tags`, and the
 `resourceArn` query parameter on the other bare routes.
 
-A REST request names its resources in its path and its query as well as its body. For OpenSearch
-Service and IAM Access Analyzer, the REST services the table reads, a member its path carries, the
+A REST request names its resources in its path and its query as well as its body. For the REST
+services the table reads, OpenSearch Service, IAM Access Analyzer, Security Hub and GuardDuty among them, a member its path carries, the
 `DomainName` of `/2021-01-01/opensearch/domain/{DomainName}` or the `analyzerName` of
 `/analyzer/{analyzerName}`, is read from the route the request matches in the vendored routes below,
 and one its query carries, the `arn` of `ListTags`, from the query, as members of the body are:
@@ -1922,6 +2031,16 @@ Floci serves neither. Of Access Analyzer's, Floci serves the analyzer operations
 is checked on the analyzer its body names, and so are its tags, which also need
 `access-analyzer:TagResource` (below), and `GetAnalyzer` and `DeleteAnalyzer` on the one their path
 names.
+Security Hub checks most of its actions on the caller's hub in the Region, `hub/default`, which no
+member names: `EnableSecurityHub`, `DescribeStandards` and the organization and standards operations
+are checked on that hub, and `DescribeHub` on the hub its `HubArn` query names, or on that one when it
+names none: an optional member holding the ARN of a type whose format has no variable of its own names
+that type when it is left out. GuardDuty's detector operations are checked on `detector/<DetectorId>`
+from their path, and a publishing destination on
+`detector/<DetectorId>/publishingdestination/<DestinationId>`; its list, member and organization
+operations act on no resource type and are checked on `*`. An `EnableSecurityHub` or a GuardDuty
+create carrying tags also needs `securityhub:TagResource` on the hub or `guardduty:TagResource` on `*`,
+a detector's id being one GuardDuty mints (below).
 
 A route no rule maps is the operation whose route it matches in botocore's model of its service,
 vendored in `src/main/resources/aws/rest-routes.json` (`make aws-data-sync` regenerates it): of the
@@ -1933,9 +2052,13 @@ when the Service Reference gives the action no resource type, as AWS authorizes 
 The actions of no resource type are vendored in `src/main/resources/aws/iam-authorized-actions.json`
 for each scope whose routes are read (`make iam-authorized-actions-sync` regenerates them). So
 OpenSearch Service's `ListDomainNames`, `ListVersions` and VPC endpoint operations, in both API
-versions, and Access Analyzer's `ListAnalyzers` and `ValidatePolicy` are checked by their routes, and
-so are OpenSearch Service's domain operations and Access Analyzer's analyzer operations, the table of
-request resources reading the domain or the analyzer they name. A route whose action AWS checks on a
+versions, Access Analyzer's `ListAnalyzers` and `ValidatePolicy`, and GuardDuty's operations of no
+resource type are checked by their routes, and so are OpenSearch Service's domain operations, Access
+Analyzer's analyzer operations, Security Hub's hub operations and GuardDuty's detector operations, the
+table of request resources reading the resource they name. Every route Floci serves of AWS Lake
+Formation and Amazon Inspector is one AWS authorizes on no resource type, as is every one of Amazon Macie's but
+`CreateMember`, so those are checked by their routes alone. `CreateMember`, on `POST /members`, is checked on the
+member its `account.accountId` names, and needs `macie2:TagResource` when it carries tags. A route whose action AWS checks on a
 resource Floci neither builds nor reads would not be checked, since checked on `*` a grant scoped to
 the resource would be refused; no vendored route is one now. The routes of
 Lambda, EKS, EventBridge Scheduler, EventBridge Pipes and Aurora DSQL are all mapped by their rules,
@@ -2011,9 +2134,19 @@ An S3 object operation is checked as the action the S3 documentation gives it:
   - Removing a configuration needs its Put action.
   - `DeleteBucketTagging` is checked as `s3:PutBucketTagging`, since AWS has no
     `s3:DeleteBucketTagging` action.
+  - A bucket sub-resource Floci does not serve, such as S3 Metadata's `?metadataTable`, is checked
+    as the action AWS's Service Reference gives the operation the AWS model names for it:
+    `DELETE ?metadataTable` needs `s3:DeleteBucketMetadataTableConfiguration`, not
+    `s3:DeleteBucket`, and `POST ?metadataTable` needs `s3:CreateBucketMetadataTableConfiguration`.
+    S3 answers it `501 NotImplemented`.
 
 A request naming several of these sub-resources is checked as the one S3 runs. `GET ?acl&tagging`
-returns the tags, so it needs `s3:GetObjectTagging`.
+returns the tags, so it needs `s3:GetObjectTagging`. An object key keeps every slash it is sent
+with, and the ARN the request is checked against keeps them too: `PUT /bucket//email.txt` writes the
+key `/email.txt` and needs `s3:PutObject` on `arn:aws:s3:::bucket//email.txt`, which a statement
+naming `bucket/email.txt` does not cover and one naming `bucket//*` does. The same holds inside a
+key, where `a//b.txt` is its own object. A key made only of slashes is an object as well:
+`PUT /bucket//` writes the key `/` and needs `s3:PutObject` on `arn:aws:s3:::bucket//`.
 
 A request that passes a role to a service also needs `iam:PassRole` on that role, as the IAM user
 guide requires: "To pass a role (and its permissions) to an AWS service, a user must have
@@ -2199,7 +2332,11 @@ tags and adds tags (`TagResource`, `CreateTags`, `AddTags`, `AddTagsToResource`,
 IAM's `TagRole`, STS's `TagSession` and the like), in the services Floci serves over the JSON and
 Query protocols and Smithy RPC v2 CBOR and in the REST services whose routes are authorized as
 operations, is checked from a second table generated the same way,
-`src/main/resources/aws/iam-tag-on-create.json`.
+`src/main/resources/aws/iam-tag-on-create.json`. The Service Reference lists OpenSearch Service's
+operations for the `es` client alone, so a REST operation it lists for no client is read as the action
+of its own name, needing the tagging actions of the operations it lists that action for: the
+`opensearch` client's `CreateDomain` needs `es:AddTags`, as `CreateElasticsearchDomain`, listed with
+`es:CreateDomain`, does.
 When the request carries tags, the tagging action is checked for each resource's tags apart, with
 each tag as `aws:RequestTag/<key>` and their keys as `aws:TagKeys`, so a policy that allows tagging
 only with some tags or keys holds at creation too. A tag specification's tags are checked on the
@@ -2210,8 +2347,8 @@ on: Lambda's `CreateFunction` is checked on the function its body names, in the 
 Region, as the Service Reference gives it the `function` resource, so a function's tags are checked
 there too, and a create of a service the table of request resources reads is checked on the resource
 it creates (a target group on `targetgroup/<Name>/*`, an application load balancer on
-`loadbalancer/app/<Name>/*`, an Access Analyzer analyzer on `analyzer/<analyzerName>`). A create of
-a resource under a parent its action acts on tags the new
+`loadbalancer/app/<Name>/*`, an Access Analyzer analyzer on `analyzer/<analyzerName>`, an OpenSearch
+domain on `domain/<DomainName>`, a Security Hub hub on `hub/default`). A create of a resource under a parent its action acts on tags the new
 resource, so its tags are checked on that one, built from the parent's ARN with its own id open:
 `CreateListener` acts on a load balancer and its tags are checked on
 `listener/app/<load balancer name>/<load balancer id>/*`, and `CreateRule`'s on the new
@@ -2226,7 +2363,7 @@ its namespace's `CreateAction` key, as `ec2:CreateTags`, `ecs:TagResource`, Clou
 `TagResource` and Elastic Load Balancing's `AddTags` do, the key is the operation's name:
 `ec2:CreateAction` is `RunInstances` for an instance launched with tags. The operation's own action
 is checked with the same `aws:RequestTag/<key>` and `aws:TagKeys`, once for each resource's tags,
-wherever the Service Reference lists those keys for it or for a resource it acts on, which it does for 546 of the operations read, so
+wherever the Service Reference lists those keys for it or for a resource it acts on, which it does for 558 of the operations read, so
 "allow `sqs:CreateQueue` only with `aws:RequestTag/team`" and "deny it when `aws:RequestTag/team` is
 null" hold as on AWS; keys a service's own condition keys already give, as EC2's `RunInstances`
 does, are kept. It is checked once for each reading of the tags and refused if any is denied: the
@@ -2237,9 +2374,9 @@ As with passed roles, an operation Floci does not serve is in the table too.
 - The tags are read from a top-level request member named `Tags`, `TagList`, `TagSpecifications` or
   the like that holds a tag list or map, as the Floci handler that applies them reads it, so the check
   sees the tags the resource gets. A JSON or CBOR body's member is read under its own name, and an
-  alarm's in CloudWatch's `PutMetricAlarm` and `PutCompositeAlarm` under `tags` too; a CodeDeploy
-  tag's key and value as `Key` and `Value`, or `key` and `value`, as its handler takes either, each as
-  text whatever it holds (a key `123` is the tag `123`). Query form
+  alarm's in CloudWatch's `PutMetricAlarm` and `PutCompositeAlarm` under `tags` too. CodeDeploy
+  accepts tag lists of objects with a textual `Key` and an optional textual `Value`; lowercase
+  member names and numeric keys are rejected by its handler. Query form
   parameters are read under the spelling the SDK sends, from 1 to the first number with no key, and
   under the further spellings the RDS, DocumentDB, Neptune, ElastiCache and Redshift handlers read.
   EC2's are read from every tag specification, under `TagSpecification` or `TagSpecifications`, as EC2
@@ -2247,13 +2384,18 @@ As with passed roles, an operation Floci does not serve is in the table too.
   `Tag.N.Value` over the Query protocol. The tagging action is also checked for tags under any other
   spelling a handler might read, a member or a tag's key and value in any case, every element of a
   tag list and an object's structures, a form's list under any spelling and every number, so none a
-  handler applies goes unchecked. CodeDeploy's handler iterates its tags member whatever it holds,
-  so an object's structures are its tags too.
+  handler applies goes unchecked. An object's members, read as a map's tags, are a set of their own
+  beside its structures, so a member named as a structure's key does not hide the structure's tag
+  from a handler that iterates the object, as KMS's `CreateKey` does. CodeDeploy rejects an
+  object-shaped tag collection at its handler boundary; the wider authorization scan is defensive
+  and does not make that shape valid CodeDeploy input.
 - CloudWatch Logs `CreateLogGroup`, which takes either of two tagging actions, is checked as described
   under CloudWatch Logs groups below.
 - Not read: an operation whose request carries no tags, which the Service Reference lists with a
-  tagging action all the same (RDS `DeleteDBInstance` and DynamoDB `UpdateTable`, among others), and
-  EC2's `RequestSpotFleet`, whose tags are deeper in its configuration. A session's tags also need
+  tagging action all the same (RDS `DeleteDBInstance` and DynamoDB `UpdateTable`, among others),
+  EC2's `RequestSpotFleet`, whose tags are deeper in its configuration, and Athena's
+  `CreateSystemTableConfiguration` and SageMaker's `CreateClusterExtension`, which Floci does not
+  serve and the botocore it is pinned to does not have yet. A session's tags also need
   `sts:TagSession` in the role's trust policy, which is not checked, and service-specific request tag
   keys such as `rds:req-tag/<key>` are not set. S3 checks `s3:PutObjectTagging` for an object it
   creates with tags itself, and the REST services whose routes no rule maps yet are not read.
@@ -2441,6 +2583,27 @@ The resource type is not the parameter the action happens to take. `AddUserToGro
 acting on something that already exists is checked against that resource's stored ARN, path and
 partition included; a create is checked against an ARN minted from the request's own `Path`, since
 reading a stored path would authorize a create into a path the policy does not name.
+
+When a named role is absent and the operation's generated input shape declares `RoleName`
+but no `Path`, the request is checked against `role/<name>` in the request account and partition.
+This lets an authorized `GetRole` probe receive `NoSuchEntity` and proceed with creation, and
+also applies to other role operations such as `DeleteRole` and `ListRolePolicies`. An injected
+`Path` cannot change this ARN. Once the role exists, its stored path and partition apply;
+creation still uses the path the request asks for.
+
+EC2 tagging targets come from `regen_iam_request_resources.py`, with EC2 among its namespaces.
+The Service Reference supplies the resource types and ARN formats, botocore supplies the
+`Resources` list and its EC2 Query spelling (`ResourceId.N`), and a documented generator
+mapping identifies instance IDs. The generated entries select `CreateTags` and `DeleteTags`
+from their input shapes and resource types, without an operation-name branch in Java.
+Each instance ARN is evaluated with that target's existing tags; every target must be authorized
+before the handler changes any tags. Other EC2 resource types retain wildcard authorization
+against every target context, including when mixed with instances. Only instance ARNs narrow
+the context to their own stored tags. Resource resolution reuses the decoded form parameters
+rather than reparsing the body for each target. The readers preserve the handler's parameter
+ordering, first duplicate value and stop at the first missing list index. This staged EC2 read
+covers only instances in heterogeneous target lists; other EC2 operations retain their existing
+wildcard resource resolution.
 
 Which type each action takes is vendored, not written out in Java:
 `src/main/resources/aws/iam-action-resources.json` is generated by
@@ -2709,6 +2872,13 @@ floci populates:
   `assumed-role` session ARN, as AWS reports it ("For IAM roles, the request context returns the
   ARN of the role"); a condition naming the session ARN does not match. It is **absent** only for
   unknown keys, where nothing about the caller can be resolved.
+- `aws:PrincipalTag/<key>`: the stored tags of the IAM user making the request, including a
+  `GetSessionToken` session, or of the role an assumed-role session represents. Tags are read
+  from that identity's account and copied for the request; later requests see tag updates and
+  removals. Identity policies, resource policies and `AssumeRole` trust policies see the same
+  caller tags. A role session uses its role's tags, not those of the user that assumed it.
+  Untagged identities, account-root principals and federated users have no stored principal tags.
+  STS session tags, their overrides and transitive inheritance are not implemented.
 - `aws:PrincipalType` and `aws:userid`: resolved from the same lookup as `aws:PrincipalArn`, so
   they always describe the same credential. The values follow the user guide's principal key
   values list: `Account` with the account id for the account-root principal and for a session

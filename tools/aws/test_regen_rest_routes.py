@@ -125,3 +125,30 @@ def test_models_sharing_a_scope_must_agree_on_the_denial_status():
         service["shapes"] = {"AccessDeniedException": {"error": {"httpStatusCode": status}}}
     with pytest.raises(SystemExit, match="conflicting access-denied HTTP statuses"):
         r.build({"lambda": first, "lambda-microvms": second}, "botocore test")
+
+
+@pytest.mark.parametrize("name", ["controltower", "signer"])
+@pytest.mark.parametrize("operation,method,source", [
+    ("TagResource", "POST", "body"),
+    ("UntagResource", "DELETE", "?resourceArn"),
+    ("ListTagsForResource", "GET", "?resourceArn"),
+])
+def test_shared_tag_alternative_keeps_actual_member_source(name, operation, method, source):
+    doc = r.build({name: model("rest-json", "2020-01-01", **{operation: (method, "/tags/{resourceArn}")})}, "test")
+    route = doc["models"][name]["operations"][operation]
+    assert route["requestUri"] == "/tags/{resourceArn+}"
+    assert route["alternatives"] == [{"requestUri": "/tags", "located": {"resourceArn": source}}]
+    assert json.loads(r.render(doc)) == doc
+
+
+def test_shared_tag_alternative_collision_is_rejected():
+    with pytest.raises(SystemExit, match="one route names more than one operation"):
+        r.build({"controltower": model("rest-json", "2020-01-01",
+            TagResource=("POST", "/tags/{resourceArn}"), OtherOperation=("POST", "/tags"))}, "test")
+
+
+@pytest.mark.parametrize("name", ["payment-cryptography-data", "signer", "xray", "guardduty"])
+def test_a_model_a_route_filter_moves_under_a_prefix_keeps_its_own_paths(name):
+    # IAM matches a moved request on its path without the prefix its filter records, so the routes are the model's.
+    doc = r.build({name: model("rest-json", "2020-01-01", GetThing=("GET", "/things/{ThingId}"))}, "test")
+    assert doc["models"][name]["operations"]["GetThing"]["requestUri"] == "/things/{ThingId}"

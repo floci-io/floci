@@ -64,7 +64,8 @@ quarkus:
       # The Pricing service reads its bundled snapshot, EC2 reads its image
       # catalog (ec2/image-catalog.yaml), SageMaker reads its instance type
       # catalog (sagemaker/instance-type-catalog.yaml), KMS reads its AWS managed
-      # key catalog (kms/aws-managed-keys.yaml), AppSync's GraphQL
+      # key catalog (kms/aws-managed-keys.yaml), Bedrock reads its model catalog
+      # (bedrock/model-catalog.yaml), AppSync's GraphQL
       # parser reads its message bundles, Lambda Web Functions copy their
       # runtime (lambdaweb/index.mjs) into each environment, EMR writes its S3DistCp program
       # (emr/s3-dist-cp.py) into a step's container, EC2 security group enforcement builds
@@ -88,8 +89,10 @@ quarkus:
         - docker/*.Dockerfile
         - sagemaker/*.yaml
         - kms/*.yaml
+        - bedrock/*.yaml
         - eks/*.json
         - aws/*.json
+        - proto/**/*.proto
         - iam/service-linked-roles.tsv
         - cloudformation/*.json
         - redshift/*.sql
@@ -219,6 +222,8 @@ floci:
       # metric datapoints, the S3 object index) fold their .wal file into the store's JSON file.
       compaction-interval-ms: 30000
     services:
+      rekognition:
+        flush-interval-ms: 5000
       ssm:
         flush-interval-ms: 5000
       dynamodb:
@@ -237,6 +242,7 @@ floci:
       lambda:
         flush-interval-ms: 5000
       cloudwatchlogs:
+        # Includes saved Logs Insights query definitions.
         flush-interval-ms: 15000
       cloudwatchmetrics:
         flush-interval-ms: 5000
@@ -361,6 +367,7 @@ floci:
     enabled: false                     # FLOCI_TLS_ENABLED (default: false)
     # cert-path: ""                    # FLOCI_TLS_CERT_PATH (PEM certificate file)
     # key-path: ""                     # FLOCI_TLS_KEY_PATH (PEM private key file)
+    # extra-ca-path: ""                # FLOCI_TLS_EXTRA_CA_PATH (PEM CA certificates Floci's own HTTPS clients also trust; works with TLS on or off)
     self-signed: true                  # FLOCI_TLS_SELF_SIGNED: auto-generate a server cert signed by Floci's local CA if no cert-path provided
     aws-https-port: 443                # FLOCI_TLS_AWS_HTTPS_PORT — also bind 443 so CDK cfn-response/AWS-on-443 callbacks reach Floci (0 disables)
 
@@ -440,6 +447,7 @@ floci:
       enabled: true
     lambda:
       enabled: true
+      reconcile-containers-on-startup: true  # FLOCI_SERVICES_LAMBDA_RECONCILE_CONTAINERS_ON_STARTUP
       ephemeral: false
       # Extra Docker create flags for Lambda containers, for example: --env KEY=VALUE --volume /host:/container:ro
       docker-flags: ""
@@ -624,6 +632,8 @@ floci:
       # docker-network: floci-network
       # image-template: "registry.internal/emr-serverless/spark/%s:20250425"   # %s = the release label
       # hive-image-template: "registry.internal/emr-serverless/hive/%s:20250425"   # every cluster's HDFS, and Hive
+      yarn-node-memory-mb: 4096             # memory a cluster's NodeManager offers its YARN containers
+      yarn-node-vcores: 4                   # virtual cores it offers them
       # Remove the step drivers a previous run of this deployment left on the daemon, and the images
       # bootstrap actions left for clusters that are gone or have ended, when the EMR service starts.
       # Scoped to this deployment's own containers and images.
@@ -851,6 +861,7 @@ floci:
       mock: false
       max-memory-mib: 0        # optional k3s container memory ceiling; 0 follows the node type
       max-vcpus: 0             # optional k3s container CPU ceiling; 0 follows the node type
+      # node-instance-type: t2.2xlarge # optional catalog type to size the k3s node from; the API keeps the node group's type
       provider: k3s
       default-image: "rancher/k3s:latest"
       # image-template: "myregistry.io/k3s:v%s" # optional custom image format template taking cluster version
@@ -888,6 +899,8 @@ floci:
     elbv2:
       enabled: true
       mock: false
+      backend-keep-alive: true
+      backend-keep-alive-timeout-seconds: 60
     codebuild:
       enabled: true
       # docker-network: floci-network
@@ -920,6 +933,7 @@ floci:
       enabled: true
     applicationautoscaling:
       enabled: true
+      scheduled-action-interval-seconds: ${FLOCI_SERVICES_APPLICATIONAUTOSCALING_SCHEDULED_ACTION_INTERVAL_SECONDS:1}
     elasticbeanstalk:
       enabled: true
     backup:
@@ -1013,6 +1027,8 @@ floci:
       enabled: true
     efs:
       enabled: true
+    ec2instanceconnect:
+      enabled: true
     organizations:
       enabled: true
       # management-account-email: ""  # When set, overrides the management-account email reported by DescribeOrganization and account listings.
@@ -1068,6 +1084,10 @@ floci:
     appintegrations:
       enabled: true
     dlm:
+      enabled: true
+    signer:
+      enabled: true
+    xray:
       enabled: true
     cognitoidentity:
       enabled: true

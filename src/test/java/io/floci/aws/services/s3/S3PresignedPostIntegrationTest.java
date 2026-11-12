@@ -7,6 +7,8 @@ import org.junit.jupiter.api.MethodOrderer;
 import org.junit.jupiter.api.Order;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.TestMethodOrder;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
 
 import java.nio.charset.StandardCharsets;
 import java.time.Instant;
@@ -788,6 +790,106 @@ class S3PresignedPostIntegrationTest {
                   ]
                 }
                 """.formatted(expiration, bucket, keyPrefix, contentTypePrefix, minSize, maxSize);
+    }
+
+    @Test
+    @Order(104)
+    void presignedPostAcceptsAes256WithoutKmsKey() {
+        String bucket = "presigned-post-aes256-bucket";
+        String key = "uploads/aes256.txt";
+        String content = "valid AES256 form";
+        given().put("/" + bucket).then().statusCode(200);
+
+        given()
+            .multiPart("key", key)
+            .multiPart("x-amz-server-side-encryption", "AES256")
+            .multiPart("file", "aes256.txt", content.getBytes(StandardCharsets.UTF_8), "text/plain")
+        .when()
+            .post("/" + bucket)
+        .then()
+            .statusCode(204)
+            .header("x-amz-server-side-encryption", equalTo("AES256"))
+            .header("x-amz-server-side-encryption-aws-kms-key-id", nullValue());
+
+        given()
+        .when()
+            .head("/" + bucket + "/" + key)
+        .then()
+            .statusCode(200)
+            .header("x-amz-server-side-encryption", equalTo("AES256"))
+            .header("x-amz-server-side-encryption-aws-kms-key-id", nullValue());
+
+        given()
+        .when()
+            .get("/" + bucket + "/" + key)
+        .then()
+            .statusCode(200)
+            .header("x-amz-server-side-encryption", equalTo("AES256"))
+            .header("x-amz-server-side-encryption-aws-kms-key-id", nullValue())
+            .body(equalTo(content));
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"aws:kms", "aws:kms:dsse"})
+    @Order(105)
+    void presignedPostPreservesKmsEncryptionOnEachVersion(String encryption) {
+        String bucket = "presigned-post-kms-bucket-" + encryption.replace(':', '-');
+        String key = "uploads/encrypted.txt";
+        String[] kmsKeys = {
+                "arn:aws:kms:us-east-1:000000000000:key/11111111-1111-1111-1111-111111111111",
+                "arn:aws:kms:us-east-1:000000000000:key/22222222-2222-2222-2222-222222222222"
+        };
+        String[] versionIds = new String[kmsKeys.length];
+
+        given().put("/" + bucket).then().statusCode(200);
+        given()
+            .body("<VersioningConfiguration><Status>Enabled</Status></VersioningConfiguration>")
+        .when()
+            .put("/" + bucket + "?versioning")
+        .then()
+            .statusCode(200);
+
+        for (int index = 0; index < kmsKeys.length; index++) {
+            versionIds[index] = given()
+                .multiPart("key", key)
+                .multiPart("x-amz-server-side-encryption", encryption)
+                .multiPart("x-amz-server-side-encryption-aws-kms-key-id", kmsKeys[index])
+                .multiPart("file", "encrypted.txt",
+                        ("version-" + index).getBytes(StandardCharsets.UTF_8), "text/plain")
+            .when()
+                .post("/" + bucket)
+            .then()
+                .statusCode(204)
+                .header("x-amz-server-side-encryption", equalTo(encryption))
+                .header("x-amz-server-side-encryption-aws-kms-key-id", equalTo(kmsKeys[index]))
+                .extract().header("x-amz-version-id");
+            assertThat(versionIds[index], notNullValue());
+        }
+        assertThat(versionIds[0], not(equalTo(versionIds[1])));
+
+        for (int index = 0; index < kmsKeys.length; index++) {
+            given()
+                .queryParam("versionId", versionIds[index])
+                .header("x-amz-checksum-mode", "ENABLED")
+            .when()
+                .head("/" + bucket + "/" + key)
+            .then()
+                .statusCode(200)
+                .header("x-amz-version-id", equalTo(versionIds[index]))
+                .header("x-amz-server-side-encryption", equalTo(encryption))
+                .header("x-amz-server-side-encryption-aws-kms-key-id", equalTo(kmsKeys[index]))
+                .header("x-amz-checksum-crc64nvme", notNullValue());
+
+            given()
+                .queryParam("versionId", versionIds[index])
+            .when()
+                .get("/" + bucket + "/" + key)
+            .then()
+                .statusCode(200)
+                .header("x-amz-server-side-encryption", equalTo(encryption))
+                .header("x-amz-server-side-encryption-aws-kms-key-id", equalTo(kmsKeys[index]))
+                .body(equalTo("version-" + index));
+        }
     }
 
     @Test

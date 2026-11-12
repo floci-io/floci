@@ -3,6 +3,7 @@ package io.floci.aws.core.common;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.floci.aws.config.EmulatorConfig;
+import io.floci.aws.services.cloudwatch.logs.CloudWatchLogsCrossAccountService;
 import io.floci.aws.services.cloudwatch.logs.CloudWatchLogsDeliveryService;
 import io.floci.aws.services.cloudwatch.logs.CloudWatchLogsService;
 import io.floci.aws.services.cloudwatch.logs.LogGroupTagTarget;
@@ -18,6 +19,7 @@ import io.floci.aws.services.iam.ResourceArnBuilder;
 import io.floci.aws.services.iam.model.IamRole;
 import io.floci.aws.services.iam.model.IamUser;
 import io.floci.aws.services.lambdaweb.LambdaWebService;
+import io.floci.aws.services.s3.S3ConditionKeys;
 import io.floci.aws.services.s3.S3ControlTagConditionKeys;
 import io.floci.aws.services.s3.S3ObjectActions;
 import io.floci.aws.services.s3.S3ObjectKeys;
@@ -99,6 +101,7 @@ public class IamConditionContextResolver {
     private final Instance<Ec2Service> ec2Service;
     private final Instance<S3Service> s3Service;
     private final Instance<CloudWatchLogsService> logsService;
+    private final Instance<CloudWatchLogsCrossAccountService> crossAccountService;
     private final Instance<IamService> iamService;
     private final Instance<LambdaWebService> lambdaWebService;
     private final RequestContext requestContext;
@@ -116,13 +119,15 @@ public class IamConditionContextResolver {
                                        Instance<Ec2Service> ec2Service,
                                        Instance<S3Service> s3Service,
                                        Instance<CloudWatchLogsService> logsService,
+                                       Instance<CloudWatchLogsCrossAccountService> crossAccountService,
                                        Instance<IamService> iamService,
                                        Instance<LambdaWebService> lambdaWebService,
                                        RequestContext requestContext,
                                        EmulatorConfig config,
                                        CurrentVertxRequest currentVertxRequest,
                                        ResolvedServiceCatalog serviceCatalog) {
-        this(dynamoDbFacade, ec2Service, s3Service, logsService, iamService, lambdaWebService, requestContext,
+        this(dynamoDbFacade, ec2Service, s3Service, logsService, crossAccountService, iamService,
+                lambdaWebService, requestContext,
                 config, currentVertxRequest, serviceCatalog, Clock.systemUTC());
     }
 
@@ -130,6 +135,7 @@ public class IamConditionContextResolver {
                                 Instance<Ec2Service> ec2Service,
                                 Instance<S3Service> s3Service,
                                 Instance<CloudWatchLogsService> logsService,
+                                Instance<CloudWatchLogsCrossAccountService> crossAccountService,
                                 Instance<IamService> iamService,
                                 Instance<LambdaWebService> lambdaWebService,
                                 RequestContext requestContext,
@@ -140,6 +146,7 @@ public class IamConditionContextResolver {
         this.ec2Service = ec2Service;
         this.s3Service = s3Service;
         this.logsService = logsService;
+        this.crossAccountService = crossAccountService;
         this.iamService = iamService;
         this.lambdaWebService = lambdaWebService;
         this.requestContext = requestContext;
@@ -158,12 +165,13 @@ public class IamConditionContextResolver {
             case "iam" -> iamConditionContext(action, ctx);
             case "logs" -> logsConditionContext(action, ctx);
             case "lambda" -> lambdaConditionContext(action, ctx);
-            case "redshift" -> redshiftConditionContext(action, ctx);
+            case "redshift" -> RequestConditionKeys.requestKeys(action).isEmpty() ? null
+                    : requestConditions(action, formParameters(ctx)::get);
             default -> null;
         };
     }
 
-    /** Group mutations and stream access use the handler's group and request scope. */
+    /** Logs tag operations and group mutations use the handler's resource and request scope. */
     private Map<String, List<String>> logsConditionContext(String action, ContainerRequestContext ctx) {
         if (!("logs:CreateLogStream".equals(action) || "logs:DeleteLogStream".equals(action)
                 || LogGroupTagTarget.supports(action) || "logs:CreateLogGroup".equals(action) || "logs:DeleteLogGroup".equals(action)
@@ -188,12 +196,14 @@ public class IamConditionContextResolver {
             conditions.put("aws:TagKeys", keys);
             return conditions;
         }
-        if (!logsService.isResolvable()) {
+        boolean direct = LogGroupTagTarget.supports(action);
+        boolean destination = direct && CloudWatchLogsCrossAccountService.isCrossAccountDestinationArn(
+                body.path("resourceArn").asText());
+        if (destination ? !crossAccountService.isResolvable() : !logsService.isResolvable()) {
             return null;
         }
         String region = requestContext.getRegion() == null ? config.defaultRegion() : requestContext.getRegion();
         Map<String, List<String>> conditions = new LinkedHashMap<>();
-        boolean direct = LogGroupTagTarget.supports(action);
         if ("logs:TagResource".equals(action) && body.path("tags").isObject()) {
             List<String> keys = new ArrayList<>();
             body.path("tags").fields().forEachRemaining(entry -> {
@@ -214,16 +224,20 @@ public class IamConditionContextResolver {
             // A delivery source, destination or delivery: its request tags apply, its own tags are not read.
             return conditions.isEmpty() ? null : conditions;
         }
-        String group = direct ? logsService.get().resolveTagTarget(body.path("resourceArn").asText(), region).name()
-                : body.path("logGroupName").asText();
         Map<String, String> tags;
         try {
-            tags = logsService.get().listTagsLogGroup(group, region);
+            if (destination) {
+                tags = crossAccountService.get().listDestinationTags(body.path("resourceArn").asText(), region);
+            } else {
+                String group = direct ? logsService.get().resolveTagTarget(body.path("resourceArn").asText(), region).name()
+                        : body.path("logGroupName").asText();
+                tags = logsService.get().listTagsLogGroup(group, region);
+            }
         } catch (AwsException e) {
             if (!"ResourceNotFoundException".equals(e.getErrorCode())) {
                 throw e;
             }
-            // Leave the handler to report a missing group; unexpected lookup errors must not hide a deny.
+            // Leave the handler to report a missing resource; unexpected lookup errors must not hide a deny.
             return conditions.isEmpty() ? null : conditions;
         }
         if (tags == null || tags.isEmpty()) {
@@ -308,17 +322,16 @@ public class IamConditionContextResolver {
         };
     }
 
-    /** The {@code redshift:} keys a Redshift request carries in its own members, such as its DbUser. */
-    private Map<String, List<String>> redshiftConditionContext(String action, ContainerRequestContext ctx) {
-        List<String> keys = RequestConditionKeys.requestKeys(action);
-        if (keys.isEmpty()) {
-            return null;
-        }
-        Map<String, String> form = formParameters(ctx);
+    /**
+     * The keys a request for {@code action} carries in its own members, such as a Redshift DbUser or an
+     * OpenTunnel remotePort, read through {@code parameter} from the table in
+     * {@code request-condition-keys.json}; null when it carries none.
+     */
+    static Map<String, List<String>> requestConditions(String action, Function<String, String> parameter) {
         Map<String, List<String>> conditions = new LinkedHashMap<>();
-        for (String key : keys) {
+        for (String key : RequestConditionKeys.requestKeys(action)) {
             for (String member : RequestConditionKeys.members(action, key)) {
-                putIfPresent(conditions, key, form.get(member));
+                putIfPresent(conditions, key, parameter.apply(member));
             }
         }
         return conditions.isEmpty() ? null : conditions;
@@ -650,29 +663,15 @@ public class IamConditionContextResolver {
         }
         URI requestUri = ctx.getUriInfo().getRequestUri();
         RoutingContext current = currentVertxRequest == null ? null : currentVertxRequest.getCurrent();
-        String rawPath = current != null && current.request() != null ? current.request().path()
+        String sentPath = current != null && current.request() != null ? current.request().path()
                 : requestUri == null ? null : requestUri.getRawPath();
-        String key = rawPath == null ? null
-                : S3ObjectKeys.fromRawPath(rawPath, requestUri == null ? null : requestUri.getPath(), bucket);
-        if (key == null) {
-            key = s3PathObjectKey(ctx.getUriInfo().getPath());
-        }
-        return key == null || key.isEmpty() ? null : key;
-    }
-
-    /** The object key of a path-style (or filter-rewritten) S3 path, null for a bucket-level one. */
-    private static String s3PathObjectKey(String path) {
-        String stripped = path.startsWith("/") ? path.substring(1) : path;
-        int slash = stripped.indexOf('/');
-        if (slash < 0 || slash == stripped.length() - 1) {
-            return null;
-        }
-        return stripped.substring(slash + 1);
+        return S3ObjectKeys.objectKey(sentPath, requestUri == null ? null : requestUri.getPath(),
+                ctx.getUriInfo().getPath(), bucket);
     }
 
     Map<String, List<String>> s3BucketListConditionContext(MultivaluedMap<String, String> queryParameters) {
         Map<String, List<String>> conditions = new LinkedHashMap<>();
-        addQueryCondition(conditions, "s3:prefix", queryParameters, "prefix");
+        addQueryCondition(conditions, S3ConditionKeys.PREFIX, queryParameters, "prefix");
         addQueryCondition(conditions, "s3:delimiter", queryParameters, "delimiter");
         addQueryCondition(conditions, "s3:max-keys", queryParameters, "max-keys");
         return conditions.isEmpty() ? null : conditions;

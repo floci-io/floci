@@ -43,6 +43,29 @@ class RequestResourceMembersTest {
     private static final ObjectMapper MAPPER = new ObjectMapper();
 
     @Test
+    void generatedIdTargetsValidateTheirMemberWireNameAndDiscriminators() throws Exception {
+        ObjectMapper mapper = new ObjectMapper();
+        ObjectNode document = (ObjectNode) mapper.readTree("""
+                {"namespaces":{"ec2":["ec2"]},"arnFormats":{"ec2":{
+                "instance":"arn:${Partition}:ec2:${Region}:${Account}:instance/${InstanceId}",
+                "volume":"arn:${Partition}:ec2:${Region}:${Account}:volume/${VolumeId}"}},
+                "operations":{"ec2:Tag":{"types":["instance","volume"],"resources":[],
+                "targets":{"member":"Resources[]","query":"ResourceId","prefixes":{"instance":"i-"}}}}}
+                """);
+        assertEquals("ResourceId", parse(document.toString()).targets().get("ec2:Tag").query());
+        for (String invalid : List.of(
+                "{\"member\":\"Resources\",\"query\":\"ResourceId\",\"prefixes\":{\"instance\":\"i-\"}}",
+                "{\"member\":\"Resources[]\",\"query\":\"ResourceId.member\",\"prefixes\":{\"instance\":\"i-\"}}",
+                "{\"member\":\"Resources[]\",\"query\":\"ResourceId\",\"prefixes\":{\"unknown\":\"i-\"}}",
+                "{\"member\":\"Resources[]\",\"query\":\"ResourceId\",\"prefixes\":{\"instance\":\"\"}}",
+                "{\"member\":\"Resources[]\",\"query\":\"ResourceId\",\"prefixes\":{\"instance\":\"i-\",\"volume\":\"i-\"}}")) {
+            ObjectNode changed = document.deepCopy();
+            ((ObjectNode) changed.path("operations").path("ec2:Tag")).set("targets", mapper.readTree(invalid));
+            assertThrows(IllegalStateException.class, () -> parse(changed.toString()), invalid);
+        }
+    }
+
+    @Test
     void theTableReadsItsNamespacesAndGivesEachTypeItNamesAnArnFormat() {
         RequestResourceMembers.Table table = RequestResourceMembers.table();
         assertTrue(table.namespaces().containsAll(List.of("cognito-idp", "ecr", "elasticloadbalancing", "states")));
@@ -56,6 +79,7 @@ class RequestResourceMembersTest {
                 .map(operation -> "logs:" + operation).collect(Collectors.toSet());
         Set<String> expected = new HashSet<>(logsDelivery);
         expected.add("dynamodb:ListTables");
+        expected.add("logs:PutDestination");
         assertEquals(expected, table.operations().keySet().stream()
                 .filter(operation -> table.handBuilt().contains(operation.substring(0, operation.indexOf(':'))))
                 .collect(Collectors.toSet()),
@@ -117,11 +141,14 @@ class RequestResourceMembersTest {
         for (String bad : List.of("\"fill\":{},\"find\":[]", "\"fill\":{},\"find\":[\"Ids[]\"]",
                 "\"fill\":{\"Id\":\"Id\"},\"find\":[\"Namespace\"]", "\"fill\":{},\"find\":\"Namespace\"",
                 "\"fill\":{},\"find\":{\"a\":\"Namespace\"}",
-                "\"fill\":{},\"find\":[\"Namespace\"],\"account\":\"registryId\"",
                 "\"fill\":{},\"find\":[\"Namespace\"],\"absent\":{\"Namespace\":\"ecs\"}")) {
             assertThrows(IllegalStateException.class,
                     () -> parse(document(formats, "{\"type\":\"target\"," + bad + "}")), bad);
         }
+        // The account its member gives is the one it is found in.
+        assertEquals(new Member("registryId", false), parseUnchecked(document(formats,
+                "{\"type\":\"target\",\"fill\":{},\"find\":[\"Namespace\"],\"account\":\"registryId\"}"))
+                .operations().get("a:Op").getFirst().account());
         // Nor beside an ARN member, which names the resource itself.
         assertThrows(IllegalStateException.class, () -> parse(document(formats,
                 "{\"types\":[\"target\"],\"arn\":\"TargetArn\",\"find\":[\"Namespace\"]}")));
@@ -426,7 +453,8 @@ class RequestResourceMembersTest {
      */
     private static boolean sharesAMember(Resource resource, Map<Member, String> given) {
         if (resource.arn() != null || resource.fill().values().stream()
-                .noneMatch(member -> given.containsKey(member) && !resource.arnOf().containsKey(member.path()))) {
+                .noneMatch(member -> given.containsKey(member) && (!resource.arnOf().containsKey(member.path())
+                        || !AwsArnUtils.isArn(given.get(member))))) {
             return false;
         }
         Map<String, String> values = given.entrySet().stream()

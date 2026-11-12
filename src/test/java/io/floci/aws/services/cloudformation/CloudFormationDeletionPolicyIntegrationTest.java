@@ -837,6 +837,69 @@ class CloudFormationDeletionPolicyIntegrationTest {
         }
     }
 
+    /**
+     * A nested stack whose create fails ends in CREATE_FAILED and is deleted by its parent's rollback.
+     * That delete rolls the child's create back, so a resource marked RetainExceptOnCreate goes, as
+     * it does when a root rolls back, while Retain keeps its resource.
+     */
+    @Test
+    void rollingBackAFailedNestedCreateDeletesRetainExceptOnCreateButKeepsRetain() throws InterruptedException {
+        String suffix = Long.toString(System.nanoTime(), 36);
+        String keptBucket = "cfn-nested-rollback-retain-" + suffix;
+        String rolledBackBucket = "cfn-nested-rollback-reoc-" + suffix;
+        given().when().put("/nested-stack-templates").then().statusCode(200);
+        String childTemplate = """
+            {
+              "Resources": {
+                "KeptBucket": {
+                  "Type": "AWS::S3::Bucket",
+                  "DeletionPolicy": "Retain",
+                  "Properties": { "BucketName": "%s" }
+                },
+                "RolledBackBucket": {
+                  "Type": "AWS::S3::Bucket",
+                  "DeletionPolicy": "RetainExceptOnCreate",
+                  "DependsOn": "KeptBucket",
+                  "Properties": { "BucketName": "%s" }
+                },
+                "BadSecret": {
+                  "Type": "AWS::SecretsManager::Secret",
+                  "DependsOn": "RolledBackBucket",
+                  "Properties": {
+                    "Name": "bad-secret-nested-policy-%s",
+                    "SecretString": "explicit",
+                    "GenerateSecretString": { "PasswordLength": 32 }
+                  }
+                }
+              }
+            }
+            """.formatted(keptBucket, rolledBackBucket, suffix);
+        given().contentType("application/json").body(childTemplate).when()
+                .put("/nested-stack-templates/child-policy-" + suffix + ".json");
+
+        String stackName = "parent-policy-" + suffix;
+        String template = """
+            {
+              "Resources": {
+                "ChildStack": {
+                  "Type": "AWS::CloudFormation::Stack",
+                  "Properties": { "TemplateURL": "http://localhost/nested-stack-templates/child-policy-%s.json" }
+                }
+              }
+            }
+            """.formatted(suffix);
+
+        String parentStackId = createStack(stackName, template);
+        try {
+            awaitStackStatus(parentStackId, "ROLLBACK_COMPLETE");
+            cfnQuery("DescribeStacks", stackName + "-ChildStack").then().statusCode(400);
+            assertBucketExists(keptBucket);
+            assertBucketDeleted(rolledBackBucket);
+        } finally {
+            deleteStack(stackName);
+        }
+    }
+
     @Test
     void createChangeSet_nestedStackPreExistingLogGroup_rollsBackParentStack() throws Exception {
         String suffix = Long.toString(System.nanoTime(), 36);
@@ -919,7 +982,7 @@ class CloudFormationDeletionPolicyIntegrationTest {
             assertThat(events, containsString("<ResourceStatus>CREATE_FAILED</ResourceStatus>"));
             assertThat(events, containsString("<ResourceStatusReason>Nested stack " + stackName
                     + "-ChildStack failed: The following resource(s) failed to create: [MyLogGroup]."
-                    + " Rollback requested by user.</ResourceStatusReason>"));
+                    + "</ResourceStatusReason>"));
         } finally {
             deleteStack(stackName);
         }

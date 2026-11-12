@@ -72,10 +72,9 @@ public class EcsTask {
     }
 
     /**
-     * Shallow copy, used to synthesize a phase ladder of lifecycle events without mutating the
-     * shared task instance held in the live task map — that instance stays visible to concurrent
-     * DescribeTasks/ListTasks calls for the whole synthesis, so events must be built from a
-     * snapshot instead of toggling {@link #lastStatus} back and forth on the original.
+     * Shallow copy, used where a task must be shown as it was at one moment without mutating the
+     * shared task instance held in the live task map: the phases of a lifecycle event ladder, and
+     * the RunTask response, which the launch would otherwise move on while it is written.
      */
     public EcsTask(EcsTask other) {
         this.taskArn = other.taskArn;

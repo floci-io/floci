@@ -452,6 +452,80 @@ public class RedshiftOperationsTest {
             .contentType("application/xml")
             .body(containsString("<SnapshotIdentifier>snap-test-1</SnapshotIdentifier>"));
 
+        // 3b. ModifyClusterSnapshot updates retention period
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .header("Authorization", AUTH_HEADER)
+            .formParam("Action", "ModifyClusterSnapshot")
+            .formParam("SnapshotIdentifier", "snap-test-1")
+            .formParam("ManualSnapshotRetentionPeriod", "45")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .contentType("application/xml")
+            .body(containsString("<ModifyClusterSnapshotResponse>"))
+            .body(containsString("<SnapshotIdentifier>snap-test-1</SnapshotIdentifier>"))
+            .body(containsString("<ManualSnapshotRetentionPeriod>45</ManualSnapshotRetentionPeriod>"));
+
+        // 3c. CopyClusterSnapshot rejects manual snapshot
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .header("Authorization", AUTH_HEADER)
+            .formParam("Action", "CopyClusterSnapshot")
+            .formParam("SourceSnapshotIdentifier", "snap-test-1")
+            .formParam("TargetSnapshotIdentifier", "snap-copy-1")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(400)
+            .contentType("application/xml")
+            .body(containsString("<Code>InvalidClusterSnapshotState</Code>"));
+
+        // 3d. CopyClusterSnapshot succeeds when source is automated
+        service.getSnapshot("snap-test-1").ifPresent(s -> s.setSnapshotType("automated"));
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .header("Authorization", AUTH_HEADER)
+            .formParam("Action", "CopyClusterSnapshot")
+            .formParam("SourceSnapshotIdentifier", "snap-test-1")
+            .formParam("TargetSnapshotIdentifier", "snap-copy-1")
+            .formParam("ManualSnapshotRetentionPeriod", "30")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .contentType("application/xml")
+            .body(containsString("<CopyClusterSnapshotResponse>"))
+            .body(containsString("<SnapshotIdentifier>snap-copy-1</SnapshotIdentifier>"))
+            .body(containsString("<SnapshotType>manual</SnapshotType>"))
+            .body(containsString("<ClusterIdentifier>cluster-src</ClusterIdentifier>"));
+
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .header("Authorization", AUTH_HEADER)
+            .formParam("Action", "DescribeClusterSnapshots")
+            .formParam("SnapshotIdentifier", "snap-copy-1")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .contentType("application/xml")
+            .body(containsString("<SnapshotIdentifier>snap-copy-1</SnapshotIdentifier>"));
+
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .header("Authorization", AUTH_HEADER)
+            .formParam("Action", "DeleteClusterSnapshot")
+            .formParam("SnapshotIdentifier", "snap-copy-1")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200);
+
+        // Restore snap-test-1 type to manual so later step 6 can delete it
+        service.getSnapshot("snap-test-1").ifPresent(s -> s.setSnapshotType("manual"));
+
         // 4. DeleteCluster
         given()
             .contentType("application/x-www-form-urlencoded")
@@ -961,6 +1035,39 @@ public class RedshiftOperationsTest {
             .post("/")
         .then()
             .statusCode(200);
+    }
+
+    @Test
+    @Order(3)
+    void parameterGroupAndSnapshotKeepTheirCreateTags() {
+        when(containerManager.start(any(), eq("cluster-create-tags"), any(), any(), any(), any()))
+                .thenReturn(new RedshiftContainerHandle("c4", "cluster-create-tags", "localhost", 5442));
+        assertEquals(200, redshift("CreateCluster", "ClusterIdentifier", "cluster-create-tags", "NodeType", "dc2.large",
+                "MasterUsername", "admin", "MasterUserPassword", "password123").statusCode());
+        String tag = "<Tag><Key>team</Key><Value>red</Value></Tag>";
+
+        redshift("CreateClusterParameterGroup", "ParameterGroupName", "pg-create-tags",
+                "ParameterGroupFamily", "redshift-1.0", "Description", "d",
+                "Tags.Tag.1.Key", "team", "Tags.Tag.1.Value", "red")
+            .then().statusCode(200).body(containsString("<Tags>" + tag + "</Tags>"));
+        redshift("DescribeClusterParameterGroups", "ParameterGroupName", "pg-create-tags")
+            .then().statusCode(200).body(containsString(tag));
+        redshift("DescribeTags", "ResourceName", "arn:aws:redshift:us-east-1:000000000000:parametergroup:pg-create-tags")
+            .then().statusCode(200).body(containsString(tag));
+
+        redshift("CreateClusterSnapshot", "SnapshotIdentifier", "snap-create-tags",
+                "ClusterIdentifier", "cluster-create-tags", "Tags.Tag.1.Key", "team", "Tags.Tag.1.Value", "red")
+            .then().statusCode(200).body(containsString("<Tags>" + tag + "</Tags>"));
+        redshift("DescribeClusterSnapshots", "SnapshotIdentifier", "snap-create-tags")
+            .then().statusCode(200).body(containsString(tag));
+        redshift("DescribeTags", "ResourceName",
+                "arn:aws:redshift:us-east-1:000000000000:snapshot:cluster-create-tags/snap-create-tags")
+            .then().statusCode(200).body(containsString(tag));
+
+        assertEquals(200, redshift("DeleteClusterSnapshot", "SnapshotIdentifier", "snap-create-tags").statusCode());
+        assertEquals(200, redshift("DeleteClusterParameterGroup", "ParameterGroupName", "pg-create-tags").statusCode());
+        assertEquals(200, redshift("DeleteCluster", "ClusterIdentifier", "cluster-create-tags",
+                "SkipFinalClusterSnapshot", "true").statusCode());
     }
 
     /**

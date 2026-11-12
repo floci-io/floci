@@ -14,6 +14,7 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
+import java.util.OptionalInt;
 import java.util.Set;
 import java.util.function.Function;
 
@@ -62,11 +63,16 @@ final class DynamoDbItemSize {
         return calculateItemSize(item) <= MAX_ITEM_SIZE;
     }
 
-    static boolean updateItemWithinLimit(JsonNode item, int statementSize) {
-        return calculateItemSize(item) <= MAX_ITEM_SIZE && statementSize <= MAX_ITEM_SIZE;
+    static boolean updateStatementWithinLimit(int statementSize) {
+        return statementSize <= MAX_ITEM_SIZE;
     }
 
-    static int updateStatementSize(String expression, Function<String, List<Object>> paths, JsonNode values) {
+    /**
+     * The size of an UpdateExpression statement, or empty when an action lacks the assignment or the
+     * value its clause needs, or leaves a parenthesis open. The update parser refuses such a statement.
+     */
+    static OptionalInt updateStatementSize(String expression, Function<String, List<Object>> paths,
+                                           JsonNode values) {
         int size = UPDATE_COST;
         PathTree targets = new PathTree();
         String remaining = expression.trim().replaceAll("\\s+", " ");
@@ -79,11 +85,38 @@ final class DynamoDbItemSize {
             while (!actions.isBlank()) {
                 int comma = DynamoDbService.findNextComma(actions);
                 String action = (comma < 0 ? actions : actions.substring(0, comma)).trim();
+                if (!readable(keyword, action)) {
+                    return OptionalInt.empty();
+                }
                 size += actionSize(keyword, action, targets, paths, values);
                 actions = comma < 0 ? "" : actions.substring(comma + 1);
             }
         }
-        return size + targets.size();
+        return OptionalInt.of(size + targets.size());
+    }
+
+    private static boolean readable(String clause, String action) {
+        if (leavesParenthesisOpen(action)) {
+            return false;
+        }
+        return switch (clause) {
+            case "SET" -> action.indexOf('=') >= 0;
+            case "ADD" -> action.indexOf(' ') >= 0;
+            default -> true;
+        };
+    }
+
+    private static boolean leavesParenthesisOpen(String action) {
+        int open = 0;
+        for (int i = 0; i < action.length(); i++) {
+            char c = action.charAt(i);
+            if (c == '(') {
+                open++;
+            } else if (c == ')' && open > 0) {
+                open--;
+            }
+        }
+        return open > 0;
     }
 
     private static int actionSize(String clause, String action, PathTree targets,

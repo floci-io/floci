@@ -15,7 +15,9 @@ import org.junit.jupiter.params.provider.ValueSource;
 import java.util.stream.Collectors;
 import java.util.stream.IntStream;
 
+import static io.floci.aws.testing.DynamoDbRequests.nestedMap;
 import static io.restassured.RestAssured.given;
+import static org.hamcrest.Matchers.contains;
 import static org.hamcrest.Matchers.equalTo;
 import static org.hamcrest.Matchers.nullValue;
 
@@ -651,7 +653,7 @@ class DynamoDbPartiQLIntegrationTest {
             [{"S":"a","N":null},{"N":"abc"}]                  | The parameter cannot be converted to a numeric value: abc
             """)
     void aParameterIsRefusedAtTheFirstValueThatCannotBeRead(String parameters, String message) {
-        String deep = "{\"M\":{\"n\":".repeat(40) + "{\"S\":\"leaf\"}" + "}}".repeat(40);
+        String deep = nestedMap(40, "n", "{\"S\":\"leaf\"}");
 
         request("DynamoDB_20120810.ExecuteStatement", """
                 {"Statement":"SELECT * FROM \\"%s\\" WHERE pk = 'x' AND x = ? AND y = ?","Parameters":%s}
@@ -732,6 +734,169 @@ class DynamoDbPartiQLIntegrationTest {
             .statusCode(200)
             .body("Item.v.M.x.S", equalTo("a"))
             .body("Item.v.containsKey('N')", equalTo(false));
+    }
+
+    @Test
+    @Order(34)
+    void aPathRefusesAKeywordAfterADot() {
+        statement("SELECT * FROM \"" + TABLE + "\" WHERE pk = 'x' AND m.inner = 1")
+            .statusCode(400)
+            .body("message", equalTo("Statement wasn't well formed, can't be processed: Invalid path dot component"));
+    }
+
+    @Test
+    @Order(35)
+    void aCallIsRefusedByWhereItStands() {
+        String where = "SELECT * FROM \"" + TABLE + "\" WHERE ";
+        statement(where + "foo(1)")
+            .statusCode(400)
+            .body("message", equalTo("Unrecognized function: foo at 1:" + (where.length() + 1) + ":3"));
+        statement("SELECT foo(1) FROM \"" + TABLE + "\"")
+            .statusCode(400)
+            .body("message", equalTo("Unexpected path component at 1:8:3"));
+        String insert = "INSERT INTO \"" + TABLE + "\" VALUE {'pk': ";
+        statement(insert + "foo(1)}")
+            .statusCode(400)
+            .body("message", equalTo("Unsupported data type: foo under key root at 1:" + (insert.length() + 1) + ":3"));
+    }
+
+    @Test
+    @Order(36)
+    void aConditionFunctionChecksItsOperands() {
+        String where = "SELECT * FROM \"" + TABLE + "\" WHERE ";
+        statement(where + "attribute_exists()")
+            .statusCode(400)
+            .body("message", equalTo("Incorrect number of operands for operator or function; "
+                    + "operator or function: attribute_exists, number of operands: 0"));
+        statement(where + "attribute_exists('a')")
+            .statusCode(400)
+            .body("message", equalTo("Operator or function requires a document path; "
+                    + "operator or function: attribute_exists"));
+        statement(where + "size(1) = 1")
+            .statusCode(400)
+            .body("message", equalTo("Incorrect operand type for operator or function; "
+                    + "operator or function: size, operand type: N"));
+        statement(where + "contains(a, a)")
+            .statusCode(400)
+            .body("message", equalTo("The first operand must be distinct from the remaining operands for this "
+                    + "operator or function; operator: contains, first operand: [a]"));
+    }
+
+    @Test
+    @Order(37)
+    void anUpdateFunctionChecksItsArguments() {
+        putItem("update-function", "\"tags\":{\"SS\":[\"a\"]},\"items\":{\"L\":[{\"S\":\"a\"}]}");
+        String update = "UPDATE \"" + TABLE + "\" SET ";
+        String key = " WHERE pk = 'update-function'";
+        int function = update.length() + "tags = ".length() + 1;
+
+        statement(update + "tags = set_add(tags)" + key)
+            .statusCode(400)
+            .body("message", equalTo("SET_ADD must have exactly two arguments at 1:" + function + ":7"));
+        statement(update + "tags = set_add(<<'a'>>, <<'b'>>)" + key)
+            .statusCode(400)
+            .body("message", equalTo("The first argument to SET_ADD must equal the assignment value at 1:"
+                    + function + ":7"));
+        statement(update + "items = list_append(items)" + key)
+            .statusCode(400)
+            .body("message", equalTo("Incorrect number of operands for operator or function; "
+                    + "operator or function: list_append, number of operands: 1"));
+        statement(update + "items = list_append(items, 1)" + key)
+            .statusCode(400)
+            .body("message", equalTo("Incorrect operand type for operator or function; "
+                    + "operator or function: list_append, operand type: N"));
+
+        statement(update + "tags = set_add(tags, <<'b'>>), items = list_append(items, ['b'])" + key)
+            .statusCode(200);
+        statement("SELECT * FROM \"" + TABLE + "\"" + key)
+            .statusCode(200)
+            .body("Items[0].tags.SS", contains("a", "b"))
+            .body("Items[0].items.L.S", contains("a", "b"));
+    }
+
+    @Test
+    @Order(38)
+    void aStatementRefusesTooFewParametersAndIgnoresExtraOnes() {
+        String mismatch = "Number of parameters in request and statement don't match.";
+        String select = "SELECT * FROM \\\"" + TABLE + "\\\" WHERE pk = ";
+
+        request("DynamoDB_20120810.ExecuteStatement", "{\"Statement\":\"" + select + "?\"}")
+            .statusCode(400)
+            .body("__type", equalTo("ValidationException"))
+            .body("message", equalTo(mismatch));
+        request("DynamoDB_20120810.BatchExecuteStatement", "{\"Statements\":[{\"Statement\":\"" + select + "?\"}]}")
+            .statusCode(200)
+            .body("Responses[0].Error.Code", equalTo("ValidationError"))
+            .body("Responses[0].Error.Message", equalTo(mismatch));
+        request("DynamoDB_20120810.ExecuteTransaction",
+                "{\"TransactStatements\":[{\"Statement\":\"" + select + "?\"}]}")
+            .statusCode(400)
+            .body("message", equalTo("Validation failed in TransactStatements[0]: " + mismatch));
+
+        request("DynamoDB_20120810.ExecuteStatement",
+                "{\"Statement\":\"" + select + "'x'\",\"Parameters\":[{\"S\":\"y\"}]}")
+            .statusCode(200);
+    }
+
+    @Test
+    @Order(39)
+    void existsOutsideATransactionIsRefusedBeforeItsParametersAreCounted() {
+        String exists = "EXISTS(SELECT * FROM \\\"" + TABLE + "\\\" WHERE pk = ?)";
+        String outside = "EXISTS can only be used in ExecuteTransaction write requests.";
+
+        request("DynamoDB_20120810.ExecuteStatement", "{\"Statement\":\"" + exists + "\"}")
+            .statusCode(400)
+            .body("__type", equalTo("ValidationException"))
+            .body("message", equalTo(outside));
+        request("DynamoDB_20120810.BatchExecuteStatement", "{\"Statements\":[{\"Statement\":\"" + exists + "\"}]}")
+            .statusCode(200)
+            .body("Responses[0].Error.Code", equalTo("ValidationError"))
+            .body("Responses[0].Error.Message", equalTo(outside));
+        request("DynamoDB_20120810.ExecuteTransaction",
+                "{\"TransactStatements\":[{\"Statement\":\"" + exists + "\"}]}")
+            .statusCode(400)
+            .body("message", equalTo("Validation failed in TransactStatements[0]: "
+                    + "Number of parameters in request and statement don't match."));
+    }
+
+    @Test
+    @Order(40)
+    void aCallStatementIsRefusedBeforeItsParametersAreCounted() {
+        String outside = "EXISTS can only be used in ExecuteTransaction write requests.";
+
+        statement("foo(?)")
+            .statusCode(400)
+            .body("__type", equalTo("ValidationException"))
+            .body("message", equalTo(outside));
+        request("DynamoDB_20120810.BatchExecuteStatement", """
+                {"Statements":[{"Statement":"foo(1)"}]}
+                """)
+            .statusCode(200)
+            .body("Responses[0].Error.Code", equalTo("ValidationError"))
+            .body("Responses[0].Error.Message", equalTo(outside));
+        request("DynamoDB_20120810.ExecuteTransaction", """
+                {"TransactStatements":[{"Statement":"foo(?)"}]}
+                """)
+            .statusCode(400)
+            .body("message", equalTo("Validation failed in TransactStatements[0]: Unsupported operation in transaction."));
+    }
+
+    @Test
+    @Order(41)
+    void aNestedStatementIsReadAsATerm() {
+        statement("SELECT * FROM \"ttt\" WHERE pk = (SELECT * FROM \"ttt\")")
+            .statusCode(400)
+            .body("__type", equalTo("ValidationException"))
+            .body("message", equalTo("Unsupported token in expression: SELECT at 1:33:6"));
+        statement("foo(DELETE FROM \"ttt\" WHERE pk = 1)")
+            .statusCode(400)
+            .body("message", equalTo("Statement wasn't well formed, can't be processed: "
+                    + "Keyword delete only expected at the top level in the query"));
+        request("DynamoDB_20120810.ExecuteTransaction", """
+                {"TransactStatements":[{"Statement":"EXISTS(SELECT * FROM \\"ttt\\" WHERE pk = 1, 1)"}]}
+                """)
+            .statusCode(400)
+            .body("message", equalTo("Validation failed in TransactStatements[0]: Unsupported operation in transaction."));
     }
 
     private static void putItem(String pk, String attributes) {

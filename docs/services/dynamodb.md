@@ -26,6 +26,8 @@ including batch, transaction and PartiQL table extraction.
 | `DeleteTable` | Delete a table |
 | `DescribeTable` | Get table metadata |
 | `ListTables` | List all tables |
+| `DescribeLimits` | Get the default account and table capacity quotas |
+| `DescribeEndpoints` | Get Floci's own host and port as the endpoint |
 | `UpdateTable` | Update throughput, indexes, streams |
 | `PutItem` | Write an item |
 | `GetItem` | Read an item by primary key |
@@ -101,6 +103,10 @@ attributes returned. An attributes-only condition does not require a projection;
 use a `dynamodb:Select` condition when the policy must require specific attributes.
 
 ## Legacy conditional requests
+
+Legacy `QueryFilter` and `ScanFilter` honor `ConditionalOperator`: `OR` retains an
+item when any condition matches; `AND`, including the omitted default, requires
+every condition. Read limits and scanned counts apply before filtering.
 
 The native backend accepts `KeyConditions` together with `FilterExpression`.
 For legacy `Expected` conditions it also accepts `ComparisonOperator` with a single

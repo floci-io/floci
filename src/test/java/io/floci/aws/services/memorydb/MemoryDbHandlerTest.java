@@ -15,6 +15,7 @@ import org.mockito.ArgumentCaptor;
 
 import java.time.Instant;
 import java.util.List;
+import java.util.Map;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.mockito.ArgumentMatchers.any;
@@ -87,6 +88,26 @@ class MemoryDbHandlerTest {
         ArgumentCaptor<Acl> captor = ArgumentCaptor.forClass(Acl.class);
         verify(service).createAcl(captor.capture(), eq("us-east-1"));
         assertEquals(List.of("app-user"), captor.getValue().getUserNames());
+    }
+
+    @Test
+    void createUserAndAclReadTags() throws Exception {
+        when(service.createUser(any(), any())).thenAnswer(inv -> inv.getArgument(0));
+        when(service.createAcl(any(), any())).thenAnswer(inv -> inv.getArgument(0));
+        String tags = "\"Tags\":[{\"Key\":\"team\",\"Value\":\"red\"}]";
+
+        handler.handle("CreateUser", objectMapper.readTree(
+                "{\"UserName\":\"tag-user\",\"AccessString\":\"on ~* +@all\","
+                        + "\"AuthenticationMode\":{\"Type\":\"iam\"}," + tags + "}"), "us-east-1");
+        handler.handle("CreateACL", objectMapper.readTree(
+                "{\"ACLName\":\"tag-acl\",\"UserNames\":[\"default\"]," + tags + "}"), "us-east-1");
+
+        ArgumentCaptor<User> user = ArgumentCaptor.forClass(User.class);
+        verify(service).createUser(user.capture(), eq("us-east-1"));
+        assertEquals(Map.of("team", "red"), user.getValue().getTags());
+        ArgumentCaptor<Acl> acl = ArgumentCaptor.forClass(Acl.class);
+        verify(service).createAcl(acl.capture(), eq("us-east-1"));
+        assertEquals(Map.of("team", "red"), acl.getValue().getTags());
     }
 
     @Test

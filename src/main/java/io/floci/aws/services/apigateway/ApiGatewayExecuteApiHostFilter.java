@@ -37,6 +37,7 @@ public class ApiGatewayExecuteApiHostFilter implements ContainerRequestFilter {
     private static final Logger LOG = Logger.getLogger(ApiGatewayExecuteApiHostFilter.class);
     public static final String NOT_FOUND_BODY = "{\"message\":\"Not Found\"}";
     private static final String DEFAULT_STAGE = "$default";
+    private static final String EXECUTE_API_LABEL = ".execute-api.";
     private static final Pattern EXECUTE_API_PREFIX = Pattern.compile("^([a-z0-9-]+)\\.execute-api\\.(.+)$",
             Pattern.CASE_INSENSITIVE);
 
@@ -113,10 +114,14 @@ public class ApiGatewayExecuteApiHostFilter implements ContainerRequestFilter {
     @Override
     public void filter(ContainerRequestContext requestContext) {
         String host = RequestHost.of(requestContext);
+        String apiId = extractApiId(host, baseHostname);
+        if (apiId == null) {
+            return;
+        }
         URI originalUri = requestContext.getUriInfo().getRequestUri();
         String originalPath = originalUri.getRawPath();
 
-        RouteDecision decision = decide(host, originalPath, requestContext.getHeaderString("Authorization"));
+        RouteDecision decision = decide(apiId, host, originalPath, requestContext.getHeaderString("Authorization"));
         if (this.requestContext != null) {
             if (decision.owner() != null) {
                 this.requestContext.setAccountId(decision.owner().accountId());
@@ -167,7 +172,10 @@ public class ApiGatewayExecuteApiHostFilter implements ContainerRequestFilter {
      * restored afterwards.
      */
     RouteDecision decide(String host, String originalPath, String authorization) {
-        String apiId = extractApiId(host, baseHostname);
+        return decide(extractApiId(host, baseHostname), host, originalPath, authorization);
+    }
+
+    private RouteDecision decide(String apiId, String host, String originalPath, String authorization) {
         if (apiId == null) {
             return RouteDecision.none(null);
         }
@@ -344,6 +352,11 @@ public class ApiGatewayExecuteApiHostFilter implements ContainerRequestFilter {
      */
     public static String extractApiId(String host, String baseHostname) {
         if (host == null) {
+            return null;
+        }
+
+        int dot = host.indexOf('.');
+        if (dot <= 0 || !host.regionMatches(true, dot, EXECUTE_API_LABEL, 0, EXECUTE_API_LABEL.length())) {
             return null;
         }
 

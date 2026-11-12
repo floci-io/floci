@@ -10,6 +10,8 @@ import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import com.fasterxml.jackson.dataformat.yaml.YAMLMapper;
 import io.floci.aws.core.common.AwsException;
+import io.floci.aws.core.common.PaginatedResult;
+import io.floci.aws.core.common.Pagination;
 import io.floci.aws.core.common.RegionResolver;
 import io.floci.aws.core.common.SmithyValidationErrors;
 import io.floci.aws.services.apigateway.ApiGatewayService.StoredMapping;
@@ -18,6 +20,7 @@ import io.floci.aws.services.apigateway.model.ApiGatewayResource;
 import io.floci.aws.services.apigateway.model.ApiKey;
 import io.floci.aws.services.apigateway.model.BasePathMapping;
 import io.floci.aws.services.apigateway.model.CustomDomain;
+import io.floci.aws.services.apigateway.model.DocumentationPart;
 import io.floci.aws.services.apigateway.model.EndpointConfiguration;
 import io.floci.aws.services.apigateway.model.EndpointType;
 import io.floci.aws.services.apigateway.model.GatewayResponse;
@@ -894,9 +897,9 @@ public class ApiGatewayController {
 
     @GET
     @Path("/usageplans")
-    public Response getUsagePlans(@Context HttpHeaders headers) {
+    public Response getUsagePlans(@Context HttpHeaders headers, @QueryParam("keyId") String keyId) {
         String region = regionResolver.resolveRegion(headers);
-        List<UsagePlan> plans = service.getUsagePlans(region);
+        List<UsagePlan> plans = service.getUsagePlans(region, keyId);
         ObjectNode root = objectMapper.createObjectNode();
         ArrayNode items = root.putArray("item");
         plans.forEach(p -> items.add(toUsagePlanNode(p, false)));
@@ -976,11 +979,8 @@ public class ApiGatewayController {
      *
      * <p>Each pair is {@code [used, remaining]}, not {@code [used, quota]}: measured against real
      * API Gateway, the second element is the quota limit minus the cumulative use so far in the
-     * period. Both elements are {@code 0} here because the emulator does not meter requests per API
-     * key, so there is no use to report or to subtract from a plan's quota. Once the execute path
-     * counts per key, this method is where the count feeds in; until then a caller that sums the
-     * used counts gets the same zero it already gets from an unsupported action, without having to
-     * special-case a missing endpoint.
+     * period. The execute path counts each admitted call per key and UTC day, and a plan without a
+     * quota reports {@code [0, 0]}, as AWS does.
      */
     @GET
     @Path("/usageplans/{usagePlanId}/usage")
@@ -1222,6 +1222,71 @@ public class ApiGatewayController {
         return Response.accepted().build();
     }
 
+    // ──────────────────────────── Documentation Parts (v1) ────────────────────────────
+
+    @POST
+    @Path("/restapis/{apiId}/documentation/parts")
+    public Response createDocumentationPart(@Context HttpHeaders headers, @PathParam("apiId") String apiId,
+                                            String body) {
+        String region = regionResolver.resolveRegion(headers);
+        try {
+            @SuppressWarnings("unchecked")
+            Map<String, Object> request = objectMapper.readValue(body, Map.class);
+            DocumentationPart part = service.createDocumentationPart(region, apiId, request);
+            return Response.status(201).entity(objectMapper.valueToTree(part).toString())
+                    .type(MediaType.APPLICATION_JSON).build();
+        } catch (IOException e) {
+            throw new AwsException("BadRequestException", e.getMessage(), 400);
+        }
+    }
+
+    @GET
+    @Path("/restapis/{apiId}/documentation/parts")
+    public Response getDocumentationParts(@Context HttpHeaders headers, @PathParam("apiId") String apiId,
+                                          @QueryParam("type") String type, @QueryParam("name") String name,
+                                          @QueryParam("path") String path,
+                                          @QueryParam("locationStatus") String locationStatus,
+                                          @QueryParam("limit") Integer limit, @QueryParam("position") String position) {
+        String region = regionResolver.resolveRegion(headers);
+        ApiGatewayService.DocumentationPartPage page = service.getDocumentationParts(region, apiId, type, name,
+                path, locationStatus, limit, position);
+        ObjectNode root = objectMapper.createObjectNode();
+        ArrayNode items = root.putArray("item");
+        page.items().forEach(part -> items.add(objectMapper.valueToTree(part)));
+        if (page.position() != null) {
+            root.put("position", page.position());
+        }
+        return Response.ok(root.toString()).type(MediaType.APPLICATION_JSON).build();
+    }
+
+    @GET
+    @Path("/restapis/{apiId}/documentation/parts/{partId}")
+    public Response getDocumentationPart(@Context HttpHeaders headers, @PathParam("apiId") String apiId,
+                                         @PathParam("partId") String partId) {
+        String region = regionResolver.resolveRegion(headers);
+        DocumentationPart part = service.getDocumentationPart(region, apiId, partId);
+        return Response.ok(objectMapper.valueToTree(part).toString()).type(MediaType.APPLICATION_JSON).build();
+    }
+
+    @PATCH
+    @Path("/restapis/{apiId}/documentation/parts/{partId}")
+    public Response updateDocumentationPart(@Context HttpHeaders headers, @PathParam("apiId") String apiId,
+                                            @PathParam("partId") String partId, String body) {
+        String region = regionResolver.resolveRegion(headers);
+        List<Map<String, String>> operations = parsePatchOperations(body);
+        DocumentationPart part = service.updateDocumentationPart(region, apiId, partId, operations);
+        return Response.ok(objectMapper.valueToTree(part).toString()).type(MediaType.APPLICATION_JSON).build();
+    }
+
+    @DELETE
+    @Path("/restapis/{apiId}/documentation/parts/{partId}")
+    public Response deleteDocumentationPart(@Context HttpHeaders headers, @PathParam("apiId") String apiId,
+                                            @PathParam("partId") String partId) {
+        String region = regionResolver.resolveRegion(headers);
+        service.deleteDocumentationPart(region, apiId, partId);
+        return Response.accepted().build();
+    }
+
     // ──────────────────────────── Custom Domains (v1) ────────────────────────────
 
     @POST
@@ -1355,12 +1420,18 @@ public class ApiGatewayController {
 
     @GET
     @Path("/v2/apis")
-    public Response getApis(@Context HttpHeaders headers) {
+    public Response getApis(@Context HttpHeaders headers,
+                            @QueryParam("maxResults") String maxResults,
+                            @QueryParam("nextToken") String nextToken) {
         String region = regionResolver.resolveRegion(headers);
-        List<Api> apis = v2Service.getApis(region);
+        PaginatedResult<Api> page = v2Service.getApis(region,
+                Pagination.parseMaxResults(maxResults, "BadRequestException"), nextToken);
         ObjectNode root = objectMapper.createObjectNode();
         ArrayNode items = root.putArray("items");
-        apis.forEach(a -> items.add(toV2ApiNode(a)));
+        page.items().forEach(a -> items.add(toV2ApiNode(a)));
+        if (page.nextToken() != null) {
+            root.put("nextToken", page.nextToken());
+        }
         return Response.ok(root.toString()).type(MediaType.APPLICATION_JSON).build();
     }
 
@@ -2795,6 +2866,9 @@ public class ApiGatewayController {
         ObjectNode node = objectMapper.createObjectNode();
         node.put("integrationId", i.getIntegrationId());
         node.put("integrationType", i.getIntegrationType());
+        if (i.getIntegrationSubtype() != null) {
+            node.put("integrationSubtype", i.getIntegrationSubtype());
+        }
         if (i.getConnectionType() != null) node.put("connectionType", i.getConnectionType());
         if (i.getConnectionId() != null) node.put("connectionId", i.getConnectionId());
         node.put("payloadFormatVersion", i.getPayloadFormatVersion());

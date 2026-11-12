@@ -398,6 +398,29 @@ class IamServiceLinkedRoleIntegrationTest {
                             + " pattern: [\\w+=.@-]*"));
     }
 
+    /**
+     * A comma is admitted, which is the half of this member's drift the capture did not settle:
+     * AWS's own message quotes {@code [\w+=.@-]*} without one and the pattern AWS publishes for the
+     * member carries it. Why the published pattern is what a value is held to here is in
+     * {@code docs/services/iam.md} rather than repeated. What this pins is where a comma lands: the
+     * shape takes it and the lookup derives the role name, the answer any service no recording
+     * covers gets, which is what {@link #aServiceTheRecordingsDoNotCoverStillTakesASuffix} pins.
+     */
+    @Test
+    @Order(34)
+    void aPrincipalWithACommaIsHeldToThePatternAwsPublishes() {
+        given()
+            .formParam("Action", "CreateServiceLinkedRole")
+            .formParam("AWSServiceName", "commaprobe,test.amazonaws.com")
+            .header("Authorization", AUTH_HEADER)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("CreateServiceLinkedRoleResponse.CreateServiceLinkedRoleResult.Role.RoleName",
+                    equalTo("AWSServiceRoleForCommaprobe,test"));
+    }
+
     @Test
     @Order(15)
     void aServiceNameLongerThanTheDocumentedMaximumIsRejected() {

@@ -1,0 +1,143 @@
+{{- $hooks := include "floci.initHookEntries" . | fromJsonArray }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "floci.fullname" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "floci.labels" . | nindent 4 }}
+spec:
+  # Floci keeps its state in the pod, so a second replica would be a second, unrelated
+  # emulator behind the same Service. Recreate stops the old pod before the new one starts:
+  # a ReadWriteOnce claim can then move between them, and the new pod's sweep of orphaned
+  # Lambda pods never races a still-running predecessor.
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      {{- include "floci.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      {{- if or $hooks .Values.podAnnotations }}
+      annotations:
+        {{- if $hooks }}
+        checksum/init-hooks: {{ include (print $.Template.BasePath "/init-hooks-configmap.yaml") . | sha256sum }}
+        {{- end }}
+        {{- with .Values.podAnnotations }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+      {{- end }}
+      labels:
+        {{- include "floci.labels" . | nindent 8 }}
+        {{- with .Values.podLabels }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+    spec:
+      serviceAccountName: {{ include "floci.serviceAccountName" . }}
+      # Only the kubernetes Lambda executor talks to the Kubernetes API.
+      automountServiceAccountToken: {{ include "floci.kubernetesExecutor" . | eq "true" }}
+      # Service links would inject <SERVICE>_PORT=tcp://... variables, and for a Service
+      # named "floci" that is FLOCI_PORT, which Floci reads as its own configuration.
+      enableServiceLinks: false
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.priorityClassName }}
+      priorityClassName: {{ . }}
+      {{- end }}
+      {{- with .Values.podSecurityContext }}
+      securityContext:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      terminationGracePeriodSeconds: {{ .Values.terminationGracePeriodSeconds }}
+      containers:
+        - name: floci
+          image: {{ include "floci.image" . | quote }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          {{- with .Values.securityContext }}
+          securityContext:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          ports:
+            - name: http
+              containerPort: 4566
+              protocol: TCP
+          env:
+            {{- include "floci.env" . | trim | nindent 12 }}
+            {{- with .Values.extraEnv }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
+          {{- with .Values.extraEnvFrom }}
+          envFrom:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          {{- with .Values.startupProbe }}
+          startupProbe:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          {{- with .Values.livenessProbe }}
+          livenessProbe:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          {{- with .Values.readinessProbe }}
+          readinessProbe:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          {{- with .Values.resources }}
+          resources:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          volumeMounts:
+            - name: data
+              mountPath: /app/data
+            - name: tmp
+              mountPath: /tmp
+            {{- if $hooks }}
+            - name: init-hooks
+              mountPath: /etc/floci/init
+              readOnly: true
+            {{- end }}
+            {{- with .Values.extraVolumeMounts }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
+      volumes:
+        - name: data
+          {{- if .Values.persistence.enabled }}
+          persistentVolumeClaim:
+            claimName: {{ .Values.persistence.existingClaim | default (printf "%s-data" (include "floci.fullname" .)) }}
+          {{- else if .Values.dataSizeLimit }}
+          emptyDir:
+            sizeLimit: {{ .Values.dataSizeLimit }}
+          {{- else }}
+          emptyDir: {}
+          {{- end }}
+        - name: tmp
+          emptyDir: {}
+        {{- if $hooks }}
+        - name: init-hooks
+          configMap:
+            name: {{ include "floci.fullname" . }}-init-hooks
+            defaultMode: 0555
+            items:
+              {{- range $hooks }}
+              - key: {{ .key }}
+                path: {{ .path }}
+              {{- end }}
+        {{- end }}
+        {{- with .Values.extraVolumes }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}

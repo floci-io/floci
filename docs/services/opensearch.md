@@ -16,6 +16,8 @@ Domain metadata is stored in-process. No Docker containers are started. Domains 
 
 Floci starts an **OpenSearch** Docker container per domain, choosing the image based on the requested `EngineVersion` (e.g. `OpenSearch_3.6` → `opensearchproject/opensearch:3.6.0`, `Elasticsearch_7.10` → `docker.elastic.co/elasticsearch/elasticsearch-oss:7.10.2`). The container is exposed on a host port from the configured range (`9400–9499`). Once `/_cluster/health` returns `green` or `yellow`, the domain transitions to `Created: true` and the `Endpoint` field is populated with the container's address.
 
+The returned `Endpoint` contains the host and port without a scheme. Use `http://` when connecting to the local data plane.
+
 OpenSearch 2.12+ requires an initial admin password even when the security plugin is disabled; Floci sets `OPENSEARCH_INITIAL_ADMIN_PASSWORD=FlociAdmin1!` automatically for those versions. The security plugin itself stays disabled.
 
 !!! note "Docker socket required"
@@ -54,6 +56,8 @@ services:
 | `AddTags` | `POST /2021-01-01/tags` | Add tags to a domain by ARN |
 | `ListTags` | `GET /2021-01-01/tags/?arn=` | List tags for a domain |
 | `RemoveTags` | `POST /2021-01-01/tags-removal` | Remove tag keys from a domain |
+
+Under IAM enforcement, a `CreateDomain` or `CreateElasticsearchDomain` that carries a `TagList` also needs `es:AddTags` on the domain it names, and its own action is checked with the tags as `aws:RequestTag/<key>` and `aws:TagKeys`: the Service Reference lists both keys for it, and the developer guide's policy for creating a domain only with a tag grants `es:CreateDomain` and `es:AddTags`. A `TagList` that is not a list of tags, each with a `Key` of 1 to 128 characters and a `Value` of up to 256, gets a `ValidationException`, on `AddTags` too, as the model requires both.
 
 ### VPC Endpoints
 

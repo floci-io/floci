@@ -253,7 +253,7 @@ public class PreSignedUrlGenerator {
             TemporaryCredential created = new TemporaryCredential(
                     randomAccessKeyId(), randomUrlSafeValue(30), randomUrlSafeValue(48), requiredExpiration);
             String action = presignedAction(method);
-            String resource = S3PublicAccessEvaluator.objectArn(
+            String resource = S3ResourceArns.object(
                     AwsRegions.partitionFor(identity.region()), bucket, key);
             iamService.registerPresignedUrlSession(
                     identity.accountId(),

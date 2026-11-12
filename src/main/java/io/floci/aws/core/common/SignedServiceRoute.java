@@ -5,6 +5,7 @@ import jakarta.ws.rs.core.MediaType;
 import jakarta.ws.rs.core.Response;
 
 import java.util.Optional;
+import java.util.Set;
 import java.util.function.Predicate;
 
 /**
@@ -22,12 +23,20 @@ import java.util.function.Predicate;
  * straight to it that is not signed for the service is refused the way S3 refuses that bucket
  * name, since an S3 bucket name may not begin with an underscore, rather than reaching the
  * service.
+ *
+ * <p>A request routed under the prefix, rewritten onto it or sent to it, records the prefix
+ * ({@link #internalPrefix}), so IAM matches it on the path the service's model gives the
+ * operation: the path it was routed under, without the prefix.
  */
 public final class SignedServiceRoute {
 
+    /** The request property that holds the internal prefix a request was routed under. */
+    public static final String INTERNAL_PREFIX_PROPERTY = SignedServiceRoute.class.getName() + ".internalPrefix";
+
     private final ResolvedServiceCatalog catalog;
-    private final String externalKey;
+    private final Set<String> externalKeys;
     private final String internalPrefix;
+    private final Predicate<String> internalPaths;
     private final Predicate<String> publicPaths;
 
     /**
@@ -37,19 +46,35 @@ public final class SignedServiceRoute {
      */
     public SignedServiceRoute(ResolvedServiceCatalog catalog, String externalKey, String internalPrefix,
                               Predicate<String> publicPaths) {
+        this(catalog, Set.of(externalKey), internalPrefix, publicPaths);
+    }
+
+    /**
+     * A service with more than one plane has one external key per plane, and a request signed for
+     * either of them belongs to the service.
+     *
+     * @param externalKeys   the service's external keys, one per plane
+     * @param internalPrefix one path segment beginning with an underscore, such as {@code /_dlm}
+     * @param publicPaths    which normalized request paths are the service's contested routes
+     */
+    public SignedServiceRoute(ResolvedServiceCatalog catalog, Set<String> externalKeys, String internalPrefix,
+                              Predicate<String> publicPaths) {
         if (!internalPrefix.startsWith("/_") || internalPrefix.indexOf('/', 1) >= 0) {
             throw new IllegalArgumentException("Internal prefix must be one segment starting with '/_': "
                     + internalPrefix);
         }
         this.catalog = catalog;
-        this.externalKey = externalKey;
+        this.externalKeys = Set.copyOf(externalKeys);
         this.internalPrefix = internalPrefix;
+        this.internalPaths = under(internalPrefix);
         this.publicPaths = publicPaths;
     }
 
     /** Matches {@code root} itself and every path beneath it. */
     public static Predicate<String> under(String root) {
-        return path -> path.equals(root) || path.startsWith(root + "/");
+        // Every request of every service runs these tests, so the prefix is built once.
+        String beneath = root + "/";
+        return path -> path.equals(root) || path.startsWith(beneath);
     }
 
     /**
@@ -59,17 +84,28 @@ public final class SignedServiceRoute {
     public static Optional<String> signingService(ContainerRequestContext ctx) {
         return SigV4CredentialScope.serviceName(ctx.getHeaderString("Authorization"))
                 .or(() -> SigV4CredentialScope.serviceNameFromCredential(
-                        ctx.getUriInfo().getQueryParameters().getFirst("X-Amz-Credential")));
+                        ResteasyRequests.queryParameters(ctx).getFirst("X-Amz-Credential")));
+    }
+
+    /**
+     * The internal prefix a request was routed under, as {@link #apply} recorded it: empty for a
+     * request no route moved onto one or sent to one.
+     */
+    public static Optional<String> internalPrefix(ContainerRequestContext ctx) {
+        return ctx.getProperty(INTERNAL_PREFIX_PROPERTY) instanceof String prefix ? Optional.of(prefix)
+                : Optional.empty();
     }
 
     public void apply(ContainerRequestContext ctx) {
         String path = ctx.getUriInfo().getPath();
         String normalizedPath = path.startsWith("/") ? path : "/" + path;
 
-        if (under(internalPrefix).test(normalizedPath)) {
+        if (internalPaths.test(normalizedPath)) {
             if (!signedForService(ctx)) {
                 ctx.abortWith(invalidBucketName());
+                return;
             }
+            ctx.setProperty(INTERNAL_PREFIX_PROPERTY, internalPrefix);
             return;
         }
         if (!publicPaths.test(normalizedPath) || !signedForService(ctx)) {
@@ -78,13 +114,14 @@ public final class SignedServiceRoute {
         ctx.setRequestUri(ctx.getUriInfo().getRequestUriBuilder()
                 .replacePath(internalPrefix + normalizedPath)
                 .build());
+        ctx.setProperty(INTERNAL_PREFIX_PROPERTY, internalPrefix);
     }
 
     private boolean signedForService(ContainerRequestContext ctx) {
         return signingService(ctx)
                 .flatMap(catalog::byCredentialScope)
                 .map(ServiceDescriptor::externalKey)
-                .filter(externalKey::equals)
+                .filter(externalKeys::contains)
                 .isPresent();
     }
 

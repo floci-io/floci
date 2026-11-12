@@ -18,6 +18,7 @@ import io.floci.aws.services.memorydb.proxy.MemoryDbProxyManager;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
@@ -168,6 +169,41 @@ class MemoryDbServiceTest {
 
         service.untagResource(arn, List.of("env"));
         assertFalse(service.listTags(arn).containsKey("env"));
+    }
+
+    @Test
+    void usersAndAclsKeepCreateTagsAndCanBeTagged() {
+        User userSpec = new User();
+        userSpec.setName("tag-user");
+        userSpec.setAuthMode(AuthMode.PASSWORD);
+        userSpec.setPasswords(List.of("passwordpassword1"));
+        userSpec.setAccessString("on ~* +@all");
+        userSpec.setTags(new LinkedHashMap<>(Map.of("team", "red")));
+        String userArn = service.createUser(userSpec, "us-east-1").getArn();
+
+        Acl aclSpec = new Acl();
+        aclSpec.setName("tag-acl");
+        aclSpec.setUserNames(List.of("default", "tag-user"));
+        aclSpec.setTags(new LinkedHashMap<>(Map.of("team", "red")));
+        String aclArn = service.createAcl(aclSpec, "us-east-1").getArn();
+
+        assertEquals(Map.of("team", "red"), service.listTags(userArn));
+        assertEquals(Map.of("team", "red"), service.listTags(aclArn));
+
+        service.tagResource(userArn, Map.of("env", "dev"));
+        service.untagResource(aclArn, List.of("team"));
+        assertEquals(Map.of("team", "red", "env", "dev"), service.listTags(userArn));
+        assertEquals(Map.of(), service.listTags(aclArn));
+    }
+
+    @Test
+    void unknownUserOrAclArnRaisesItsNotFoundFault() {
+        AwsException user = assertThrows(AwsException.class,
+                () -> service.listTags("arn:aws:memorydb:us-east-1:000000000000:user/missing"));
+        assertEquals("UserNotFoundFault", user.jsonType());
+        AwsException acl = assertThrows(AwsException.class,
+                () -> service.tagResource("arn:aws:memorydb:us-east-1:000000000000:acl/missing", Map.of("env", "dev")));
+        assertEquals("ACLNotFoundFault", acl.jsonType());
     }
 
     @Test

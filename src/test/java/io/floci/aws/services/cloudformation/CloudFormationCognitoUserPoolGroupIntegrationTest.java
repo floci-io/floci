@@ -1,6 +1,9 @@
 package io.floci.aws.services.cloudformation;
 
 import io.floci.aws.core.common.XmlParser;
+import io.floci.aws.services.cognito.CognitoService;
+import io.floci.aws.services.cognito.model.CognitoGroup;
+import io.floci.aws.testing.CfnRequests;
 import io.floci.aws.testing.CfnStackWaits;
 import io.quarkus.test.junit.QuarkusTest;
 import io.restassured.RestAssured;
@@ -8,6 +11,7 @@ import io.restassured.config.EncoderConfig;
 import io.restassured.http.ContentType;
 import io.restassured.parsing.Parser;
 import io.restassured.response.ValidatableResponse;
+import jakarta.inject.Inject;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
 
@@ -24,9 +28,13 @@ import static org.hamcrest.Matchers.not;
 import static org.hamcrest.Matchers.nullValue;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotEquals;
+import static org.junit.jupiter.api.Assertions.assertNull;
 
 @QuarkusTest
 class CloudFormationCognitoUserPoolGroupIntegrationTest {
+
+    @Inject
+    CognitoService cognitoService;
 
     private static final String CFN_AUTH =
             "AWS4-HMAC-SHA256 Credential=test/20260205/us-east-1/cloudformation/aws4_request";
@@ -218,17 +226,7 @@ class CloudFormationCognitoUserPoolGroupIntegrationTest {
         CfnStackWaits.StackState state = CfnStackWaits.awaitTerminal(stackName);
         assertEquals("UPDATE_ROLLBACK_COMPLETE", state.status(), state.reason());
         assertEquals(name, output(describeStack(stackName), "GroupRef"));
-        given()
-            .contentType("application/x-www-form-urlencoded")
-            .header("Authorization", CFN_AUTH)
-            .formParam("Action", "DescribeStackResource")
-            .formParam("StackName", stackName)
-            .formParam("LogicalResourceId", "Group")
-        .when()
-            .post("/")
-        .then()
-            .statusCode(200)
-            .body(containsString("<PhysicalResourceId>" + name + "</PhysicalResourceId>"));
+        assertEquals(name, CfnRequests.physicalId(stackName, "Group", CFN_AUTH));
         cognito("GetGroup", "{\"UserPoolId\": \"" + firstPool + "\", \"GroupName\": \"" + name + "\"}")
             .statusCode(200)
             .body("Group.Description", equalTo("d1"))
@@ -277,17 +275,7 @@ class CloudFormationCognitoUserPoolGroupIntegrationTest {
         assertThat(failures, contains(containsString("CloudFormation cannot update a stack when a custom-named"
                 + " resource requires replacing. Rename " + generated + " and update the stack again.")));
         assertEquals(generated, output(describeStack(stackName), "GroupRef"));
-        given()
-            .contentType("application/x-www-form-urlencoded")
-            .header("Authorization", CFN_AUTH)
-            .formParam("Action", "DescribeStackResource")
-            .formParam("StackName", stackName)
-            .formParam("LogicalResourceId", "Group")
-        .when()
-            .post("/")
-        .then()
-            .statusCode(200)
-            .body(containsString("<PhysicalResourceId>" + generated + "</PhysicalResourceId>"));
+        assertEquals(generated, CfnRequests.physicalId(stackName, "Group", CFN_AUTH));
         cognito("GetGroup", "{\"UserPoolId\": \"" + poolId + "\", \"GroupName\": \"" + generated + "\"}")
             .statusCode(200)
             .body("Group.Description", equalTo("d1"))
@@ -321,6 +309,113 @@ class CloudFormationCognitoUserPoolGroupIntegrationTest {
             // custom one, so email stays bare and keeps the Required the template asked for.
             .body("UserPool.SchemaAttributes.find { it.Name == 'email' }.Required", equalTo(true))
             .body("UserPool.SchemaAttributes.find { it.Name == 'custom:email' }", nullValue());
+    }
+
+    @Test
+    void updateStackThatDropsTheGroupDescriptionClearsItAndAReAddSetsItAgain() {
+        String stackName = "cfn-cognito-group-desc-drop-" + Long.toString(System.nanoTime(), 36);
+        String poolId = createStack(stackName, describedGroupTemplate(7, ", \"Description\": \"orig\""));
+        assertEquals("orig", cognitoService.getGroup(poolId, "admin").getDescription());
+
+        updateStack(stackName, describedGroupTemplate(7, ""));
+        CfnStackWaits.awaitStatus(stackName, "UPDATE_COMPLETE", CFN_AUTH);
+        assertNull(cognitoService.getGroup(poolId, "admin").getDescription());
+
+        updateStack(stackName, describedGroupTemplate(7, ", \"Description\": \"back\""));
+        CfnStackWaits.awaitStatus(stackName, "UPDATE_COMPLETE", CFN_AUTH);
+        assertEquals("back", cognitoService.getGroup(poolId, "admin").getDescription());
+        deleteStackAndWait(stackName);
+    }
+
+    @Test
+    void updateStackWhoseGroupDescriptionBecomesNoValueClearsIt() {
+        String stackName = "cfn-cognito-group-desc-novalue-" + Long.toString(System.nanoTime(), 36);
+        String poolId = createStack(stackName, describedGroupTemplate(7, ", \"Description\": \"orig\""));
+
+        updateStack(stackName, describedGroupTemplate(7,
+                ", \"Description\": {\"Fn::If\": [\"Off\", {\"Ref\": \"AWS::NoValue\"}, \"orig\"]}"));
+        CfnStackWaits.awaitStatus(stackName, "UPDATE_COMPLETE", CFN_AUTH);
+
+        assertNull(cognitoService.getGroup(poolId, "admin").getDescription());
+        cognito("GetGroup", "{\"UserPoolId\": \"" + poolId + "\", \"GroupName\": \"admin\"}")
+            .statusCode(200)
+            .body("Group.Description", nullValue());
+        deleteStackAndWait(stackName);
+    }
+
+    @Test
+    void changedGroupDescriptionAppliesAndAnEmptyOneIsStoredAsGivenUntilALaterDropClearsIt() {
+        String stackName = "cfn-cognito-group-desc-empty-" + Long.toString(System.nanoTime(), 36);
+        String poolId = createStack(stackName, describedGroupTemplate(7, ", \"Description\": \"orig\""));
+
+        updateStack(stackName, describedGroupTemplate(7, ", \"Description\": \"changed\""));
+        CfnStackWaits.awaitStatus(stackName, "UPDATE_COMPLETE", CFN_AUTH);
+        assertEquals("changed", cognitoService.getGroup(poolId, "admin").getDescription());
+
+        updateStack(stackName, describedGroupTemplate(7, ", \"Description\": \"\""));
+        CfnStackWaits.awaitStatus(stackName, "UPDATE_COMPLETE", CFN_AUTH);
+        assertEquals("", cognitoService.getGroup(poolId, "admin").getDescription());
+
+        updateStack(stackName, describedGroupTemplate(7, ""));
+        CfnStackWaits.awaitStatus(stackName, "UPDATE_COMPLETE", CFN_AUTH);
+        assertNull(cognitoService.getGroup(poolId, "admin").getDescription());
+        deleteStackAndWait(stackName);
+    }
+
+    @Test
+    void groupDescriptionSetOutsideTheStackSurvivesAnUpdateThatNeverDeclaredIt() {
+        String stackName = "cfn-cognito-group-desc-outside-" + Long.toString(System.nanoTime(), 36);
+        String poolId = createStack(stackName, describedGroupTemplate(7, ""));
+        cognitoService.updateGroup(poolId, "admin", "outside", null, null);
+
+        updateStack(stackName, describedGroupTemplate(9, ""));
+        CfnStackWaits.awaitStatus(stackName, "UPDATE_COMPLETE", CFN_AUTH);
+
+        CognitoGroup stored = cognitoService.getGroup(poolId, "admin");
+        assertEquals("outside", stored.getDescription());
+        assertEquals(Integer.valueOf(9), stored.getPrecedence());
+        deleteStackAndWait(stackName);
+    }
+
+    @Test
+    void droppingTheGroupDescriptionLeavesThePrecedenceAndTheRoleArnAlone() {
+        String stackName = "cfn-cognito-group-desc-others-" + Long.toString(System.nanoTime(), 36);
+        String poolId = createStack(stackName, describedGroupTemplate(7, ", \"Description\": \"orig\""));
+
+        updateStack(stackName, describedGroupTemplate(7, ""));
+        CfnStackWaits.awaitStatus(stackName, "UPDATE_COMPLETE", CFN_AUTH);
+
+        CognitoGroup stored = cognitoService.getGroup(poolId, "admin");
+        assertEquals(Integer.valueOf(7), stored.getPrecedence());
+        assertEquals("arn:aws:iam::000000000000:role/group-admins", stored.getRoleArn());
+        deleteStackAndWait(stackName);
+    }
+
+    /** One pool and an admin group with a fixed role; {@code extraGroupProperties} is appended to its properties. */
+    private static String describedGroupTemplate(int precedence, String extraGroupProperties) {
+        return """
+                {
+                  "Conditions": {"Off": {"Fn::Equals": ["a", "a"]}},
+                  "Resources": {
+                    "UserPool": {
+                      "Type": "AWS::Cognito::UserPool",
+                      "Properties": {"UserPoolName": "cfn-group-desc-pool"}
+                    },
+                    "AdminGroup": {
+                      "Type": "AWS::Cognito::UserPoolGroup",
+                      "Properties": {
+                        "UserPoolId": { "Ref": "UserPool" },
+                        "GroupName": "admin",
+                        "Precedence": %d,
+                        "RoleArn": "arn:aws:iam::000000000000:role/group-admins"%s
+                      }
+                    }
+                  },
+                  "Outputs": {
+                    "PoolId": { "Value": { "Ref": "UserPool" } }
+                  }
+                }
+                """.formatted(precedence, extraGroupProperties);
     }
 
     /** Creates the stack, asserts it completed, and returns the pool id from its outputs. */

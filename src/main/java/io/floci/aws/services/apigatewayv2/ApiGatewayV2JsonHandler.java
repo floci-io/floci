@@ -8,6 +8,8 @@ import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.floci.aws.core.common.AwsException;
 import io.floci.aws.core.common.EpochSeconds;
 import io.floci.aws.core.common.JsonErrorResponseUtils;
+import io.floci.aws.core.common.PaginatedResult;
+import io.floci.aws.core.common.Pagination;
 import io.floci.aws.services.apigatewayv2.model.*;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
@@ -40,7 +42,7 @@ public class ApiGatewayV2JsonHandler {
                 case "CreateApi" -> handleCreateApi(request, region);
                 case "ImportApi" -> handleImportApi(request, region);
                 case "ReimportApi" -> handleReimportApi(request, region);
-                case "GetApis" -> handleGetApis(region);
+                case "GetApis" -> handleGetApis(request, region);
                 case "GetApi" -> handleGetApi(request, region);
                 case "UpdateApi" -> handleUpdateApi(request, region);
                 case "DeleteApi" -> handleDeleteApi(request, region);
@@ -116,11 +118,20 @@ public class ApiGatewayV2JsonHandler {
         return Response.status(201).entity(toApiNode(api).toString()).build();
     }
 
-    private Response handleGetApis(String region) {
-        List<Api> apis = service.getApis(region);
+    private Response handleGetApis(JsonNode request, String region) {
+        JsonNode maxResults = request.path("MaxResults");
+        if (maxResults.isContainerNode()) {
+            throw new AwsException("BadRequestException", "MaxResults must be a string.", 400);
+        }
+        PaginatedResult<Api> page = service.getApis(region,
+                Pagination.parseMaxResults(maxResults.asText(null), "BadRequestException"),
+                Pagination.parseNextToken(request, "NextToken", "BadRequestException"));
         ObjectNode root = objectMapper.createObjectNode();
         ArrayNode items = root.putArray("Items");
-        apis.forEach(a -> items.add(toApiNode(a)));
+        page.items().forEach(a -> items.add(toApiNode(a)));
+        if (page.nextToken() != null) {
+            root.put("NextToken", page.nextToken());
+        }
         return Response.ok(root.toString()).build();
     }
 
@@ -229,9 +240,7 @@ public class ApiGatewayV2JsonHandler {
 
     private Response handleCreateIntegration(JsonNode request, String region) {
         String apiId = request.path("ApiId").asText();
-        @SuppressWarnings("unchecked")
-        Map<String, Object> map = toLowerCamelCase(objectMapper.convertValue(request, Map.class));
-        Integration integration = service.createIntegration(region, apiId, map);
+        Integration integration = service.createIntegration(region, apiId, integrationRequest(request));
         return Response.status(201).entity(toIntegrationNode(integration).toString()).build();
     }
 
@@ -253,10 +262,23 @@ public class ApiGatewayV2JsonHandler {
     private Response handleUpdateIntegration(JsonNode request, String region) {
         String apiId = request.path("ApiId").asText();
         String integrationId = request.path("IntegrationId").asText();
+        Integration integration = service.updateIntegration(region, apiId, integrationId, integrationRequest(request));
+        return Response.ok(toIntegrationNode(integration).toString()).build();
+    }
+
+    /**
+     * The integration request with lower-camel-case member names. RequestParameters keys keep
+     * their case, since an integration subtype's parameters are named by its action's members.
+     */
+    private Map<String, Object> integrationRequest(JsonNode request) {
         @SuppressWarnings("unchecked")
         Map<String, Object> map = toLowerCamelCase(objectMapper.convertValue(request, Map.class));
-        Integration integration = service.updateIntegration(region, apiId, integrationId, map);
-        return Response.ok(toIntegrationNode(integration).toString()).build();
+        JsonNode requestParameters = request.get("RequestParameters");
+        if (requestParameters != null && requestParameters.isObject()) {
+            map.put("requestParameters",
+                    objectMapper.convertValue(requestParameters, new TypeReference<Map<String, Object>>() {}));
+        }
+        return map;
     }
 
     // ──────────────────────────── Stage ────────────────────────────
@@ -629,6 +651,9 @@ public class ApiGatewayV2JsonHandler {
         ObjectNode node = objectMapper.createObjectNode();
         node.put("IntegrationId", i.getIntegrationId());
         node.put("IntegrationType", i.getIntegrationType());
+        if (i.getIntegrationSubtype() != null) {
+            node.put("IntegrationSubtype", i.getIntegrationSubtype());
+        }
         if (i.getConnectionType() != null) node.put("ConnectionType", i.getConnectionType());
         if (i.getConnectionId() != null) node.put("ConnectionId", i.getConnectionId());
         node.put("PayloadFormatVersion", i.getPayloadFormatVersion());

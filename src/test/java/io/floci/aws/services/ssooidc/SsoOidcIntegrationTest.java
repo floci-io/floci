@@ -23,6 +23,7 @@ import static org.hamcrest.Matchers.matchesPattern;
 class SsoOidcIntegrationTest {
     private static final String AUTH_HEADER =
             "AWS4-HMAC-SHA256 Credential=AKID/20260101/us-east-1/sso-oauth/aws4_request";
+    private static final String DEVICE_CODE_GRANT = "urn:ietf:params:oauth:grant-type:device_code";
 
     @Inject
     SsoAdminService ssoAdminService;
@@ -56,7 +57,7 @@ class SsoOidcIntegrationTest {
         Response registration = given()
                 .contentType("application/json")
                 .body("{\"clientName\":\"Device Integration\",\"clientType\":\"public\","
-                        + "\"grantTypes\":[\"urn:ietf:params:oauth:grant-type:device_code\"]}")
+                        + "\"grantTypes\":[\"" + DEVICE_CODE_GRANT + "\"]}")
             .when().post("/client/register")
             .then().statusCode(200)
             .extract().response();
@@ -86,24 +87,10 @@ class SsoOidcIntegrationTest {
 
     @Test
     void deviceAuthorizationRejectsCallerSelectedPrincipal() {
-        Response registration = given()
-                .contentType("application/json")
-                .body("{\"clientName\":\"Principal Guard\",\"clientType\":\"public\","
-                        + "\"grantTypes\":[\"urn:ietf:params:oauth:grant-type:device_code\"]}")
-            .when().post("/client/register")
-            .then().statusCode(200)
-            .extract().response();
-        Response authorization = given()
-                .contentType("application/json")
-                .body("{\"clientId\":\"" + registration.path("clientId") + "\",\"clientSecret\":\""
-                        + registration.path("clientSecret") + "\",\"startUrl\":\"https://example.awsapps.com/start\"}")
-            .when().post("/device_authorization")
-            .then().statusCode(200)
-            .extract().response();
+        DeviceAuthorization authorization = startDeviceAuthorization("Principal Guard", DEVICE_CODE_GRANT);
 
-        String userCode = authorization.path("userCode");
         given()
-                .queryParam("user_code", userCode)
+                .queryParam("user_code", authorization.userCode())
                 .queryParam("principal_id", "11111111-2222-3333-4444-555555555555")
             .when().get("/device")
             .then().statusCode(403)
@@ -112,35 +99,16 @@ class SsoOidcIntegrationTest {
 
     @Test
     void createTokenCompletesDeviceFlowAndRefreshesToken() {
-        Response registration = given()
-                .contentType("application/json")
-                .body("{\"clientName\":\"Token Integration\",\"clientType\":\"public\","
-                        + "\"grantTypes\":[\"urn:ietf:params:oauth:grant-type:device_code\",\"refresh_token\"]}")
-            .when().post("/client/register")
-            .then().statusCode(200)
-            .extract().response();
-        String clientId = registration.path("clientId");
-        String clientSecret = registration.path("clientSecret");
-        Response authorization = given()
-                .contentType("application/json")
-                .body("{\"clientId\":\"" + clientId + "\",\"clientSecret\":\"" + clientSecret
-                        + "\",\"startUrl\":\"https://example.awsapps.com/start\"}")
-            .when().post("/device_authorization")
-            .then().statusCode(200)
-            .extract().response();
-        String deviceCode = authorization.path("deviceCode");
-        String userCode = authorization.path("userCode");
+        DeviceAuthorization authorization =
+                startDeviceAuthorization("Token Integration", DEVICE_CODE_GRANT, "refresh_token");
+        String clientId = authorization.clientId();
+        String clientSecret = authorization.clientSecret();
 
-        given().queryParam("user_code", userCode)
+        given().queryParam("user_code", authorization.userCode())
             .when().get("/device")
             .then().statusCode(200).body("status", equalTo("authorized"));
 
-        Response token = given()
-                .contentType("application/json")
-                .body("{\"clientId\":\"" + clientId + "\",\"clientSecret\":\"" + clientSecret
-                        + "\",\"grantType\":\"urn:ietf:params:oauth:grant-type:device_code\","
-                        + "\"deviceCode\":\"" + deviceCode + "\"}")
-            .when().post("/token")
+        Response token = createDeviceCodeToken(authorization)
             .then().statusCode(200)
                 .body("tokenType", equalTo("Bearer"))
                 .body("accessToken", matchesPattern("[0-9a-f]{64}"))
@@ -213,6 +181,55 @@ class SsoOidcIntegrationTest {
                 .body("{\"clientName\":\"Bad Client\",\"clientType\":\"confidential\"}")
             .when().post("/client/register")
             .then().statusCode(400)
-                .body("error", equalTo("invalid_client_metadata"));
+                .body("error", equalTo("invalid_client_metadata"))
+                .header("x-amzn-ErrorType", "InvalidClientMetadataException");
+    }
+
+    @Test
+    void pendingDeviceAuthorizationNamesTheModeledExceptionForSdkRetries() {
+        // AWS SDKs map OIDC errors from x-amzn-ErrorType; `aws sso login` only keeps polling on
+        // AuthorizationPendingException.
+        DeviceAuthorization authorization = startDeviceAuthorization("Pending Integration", DEVICE_CODE_GRANT);
+
+        createDeviceCodeToken(authorization)
+            .then().statusCode(400)
+                .header("x-amzn-ErrorType", "AuthorizationPendingException")
+                .body("error", equalTo("authorization_pending"));
+    }
+
+    private record DeviceAuthorization(String clientId, String clientSecret, String deviceCode, String userCode) {
+    }
+
+    /** Sends the device-code CreateToken request a polling client sends for {@code authorization}. */
+    private static Response createDeviceCodeToken(DeviceAuthorization authorization) {
+        return given()
+                .contentType("application/json")
+                .body("{\"clientId\":\"" + authorization.clientId() + "\",\"clientSecret\":\""
+                        + authorization.clientSecret() + "\",\"grantType\":\"" + DEVICE_CODE_GRANT
+                        + "\",\"deviceCode\":\"" + authorization.deviceCode() + "\"}")
+            .when().post("/token");
+    }
+
+    /** Registers a public client with the given grant types and starts a device authorization for it. */
+    private static DeviceAuthorization startDeviceAuthorization(String clientName, String... grantTypes) {
+        String grants = String.join("\",\"", grantTypes);
+        Response registration = given()
+                .contentType("application/json")
+                .body("{\"clientName\":\"" + clientName + "\",\"clientType\":\"public\","
+                        + "\"grantTypes\":[\"" + grants + "\"]}")
+            .when().post("/client/register")
+            .then().statusCode(200)
+            .extract().response();
+        String clientId = registration.path("clientId");
+        String clientSecret = registration.path("clientSecret");
+        Response authorization = given()
+                .contentType("application/json")
+                .body("{\"clientId\":\"" + clientId + "\",\"clientSecret\":\"" + clientSecret
+                        + "\",\"startUrl\":\"https://example.awsapps.com/start\"}")
+            .when().post("/device_authorization")
+            .then().statusCode(200)
+            .extract().response();
+        return new DeviceAuthorization(clientId, clientSecret,
+                authorization.path("deviceCode"), authorization.path("userCode"));
     }
 }

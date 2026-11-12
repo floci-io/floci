@@ -6,6 +6,11 @@
     "note": "make request-condition-keys-check re-derives members from botocore; make request-condition-keys-verify checks actions against AWS."
   },
   "actions": {
+    "ec2-instance-connect:OpenTunnel": [
+      "ec2-instance-connect:MaxTunnelDuration",
+      "ec2-instance-connect:privateIpAddress",
+      "ec2-instance-connect:remotePort"
+    ],
     "lambda:CreateWebFunction": [
       "lambda:Request/WebFunctionAuthType"
     ],
@@ -33,6 +38,17 @@
     ]
   },
   "members": {
+    "ec2-instance-connect:OpenTunnel": {
+      "ec2-instance-connect:MaxTunnelDuration": [
+        "maxTunnelDuration"
+      ],
+      "ec2-instance-connect:privateIpAddress": [
+        "privateIpAddress"
+      ],
+      "ec2-instance-connect:remotePort": [
+        "remotePort"
+      ]
+    },
     "lambda:CreateWebFunction": {
       "lambda:Request/WebFunctionAuthType": [
         "endpointConfig.authType"

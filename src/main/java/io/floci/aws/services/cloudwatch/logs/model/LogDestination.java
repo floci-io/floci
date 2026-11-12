@@ -3,6 +3,9 @@ package io.floci.aws.services.cloudwatch.logs.model;
 import com.fasterxml.jackson.annotation.JsonIgnoreProperties;
 import io.quarkus.runtime.annotations.RegisterForReflection;
 
+import java.util.LinkedHashMap;
+import java.util.Map;
+
 @RegisterForReflection
 @JsonIgnoreProperties(ignoreUnknown = true)
 public class LogDestination {
@@ -12,6 +15,7 @@ public class LogDestination {
     private String accessPolicy;
     private String arn;
     private long creationTime;
+    private Map<String, String> tags = new LinkedHashMap<>();
 
     public String getDestinationName() { return destinationName; }
     public void setDestinationName(String destinationName) { this.destinationName = destinationName; }
@@ -25,4 +29,8 @@ public class LogDestination {
     public void setArn(String arn) { this.arn = arn; }
     public long getCreationTime() { return creationTime; }
     public void setCreationTime(long creationTime) { this.creationTime = creationTime; }
+    public Map<String, String> getTags() { return tags; }
+    public void setTags(Map<String, String> tags) {
+        this.tags = tags == null ? new LinkedHashMap<>() : new LinkedHashMap<>(tags);
+    }
 }

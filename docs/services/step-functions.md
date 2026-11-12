@@ -90,10 +90,11 @@ With IAM enforcement enabled, the existing task authorizer checks the execution 
 permission to assume the task role, its trust policy, and the task role's permission to
 start the child. Account routing also works with enforcement disabled. The `.sync`
 polling and cancellation paths retain the task account; their additional IAM permissions
-are not evaluated. Lambda, API Gateway, SQS, SNS and EventBridge tasks evaluate `Credentials`
-themselves ([Lambda](#lambda-tasks-under-iam-enforcement),
-[messaging](#messaging-tasks-under-iam-enforcement)); other integrations retain their existing
-credential handling.
+are not evaluated. Lambda, API Gateway, SQS, SNS, EventBridge, DynamoDB, S3 `putObject`, RDS Data and
+Redshift Data tasks evaluate `Credentials` themselves
+([Lambda](#lambda-tasks-under-iam-enforcement), [messaging](#messaging-tasks-under-iam-enforcement),
+[data](#data-tasks-under-iam-enforcement)); other integrations retain their existing credential
+handling.
 A foreign state-machine ARN without task credentials grants no account access.
 
 A missing or mismatched task role fails with `States.TaskFailed`. A target account
@@ -642,8 +643,73 @@ account. With enforcement off nothing here is evaluated.
 Floci has no `aws-sdk:eventbridge:putEvents` integration: that resource fails with
 `States.TaskFailed` and "Unsupported resource" whether or not enforcement is on.
 
-Integrations other than these, Lambda, API Gateway and nested executions are not evaluated yet: they
-run in the state machine's account whatever the execution role's policies say.
+## Data tasks under IAM enforcement
+
+These tasks and their `.waitForTaskToken` forms are evaluated with
+[IAM enforcement](iam.md#resource-based-policies) on, in the same steps and with the same role errors
+as [messaging tasks](#messaging-tasks-under-iam-enforcement):
+
+| Resource | Action | Resource evaluated | Refused with |
+|---|---|---|---|
+| `arn:aws:states:::dynamodb:putItem`, `getItem`, `deleteItem`, `updateItem`, `scan` | `dynamodb:PutItem` and so on | The table `TableName` names | `DynamoDB.AccessDeniedException` |
+| `arn:aws:states:::aws-sdk:dynamodb:<api>` | See below | See below | `DynamoDb.AccessDeniedException` |
+| `arn:aws:states:::s3:putObject`, `arn:aws:states:::aws-sdk:s3:putObject` | `s3:PutObject` | `arn:<partition>:s3:::<bucket>/<key>` | `S3.AccessDeniedException` |
+| `arn:aws:states:::aws-sdk:rdsdata:executeStatement` | `rds-data:ExecuteStatement`, `secretsmanager:GetSecretValue` | `ResourceArn`, `SecretArn` | `RdsData.AccessDeniedException` |
+| `arn:aws:states:::aws-sdk:redshiftdata:<api>` | `redshift-data:<Action>` and what authenticates the call | See below | `RedshiftData.AccessDeniedException` |
+
+The `aws-sdk:dynamodb` form is checked as a direct DynamoDB request under enforcement is:
+
+- **Most APIs:** `dynamodb:<Api>` on the table, stream or other resource the request names, an ARN as
+  given, or on `*` when it names none, which includes a `putItem` with no `TableName`.
+- **`batchGetItem`, `batchWriteItem`:** the API's action on each table in `RequestItems`.
+- **`transactWriteItems`, `transactGetItems`:** no action of their own. Each item needs its own, one of
+  `dynamodb:PutItem`, `DeleteItem`, `UpdateItem`, `ConditionCheckItem` or `GetItem`, on its table, with
+  `dynamodb:EnclosingOperation` available to the policy. A table named by ARN counts for its name, as
+  execution reads it in the state machine's account.
+- **`listTables`:** its action on the Region's `table/*` collection.
+- **`executeStatement`:** `dynamodb:PartiQLSelect`, `PartiQLInsert`, `PartiQLUpdate` or `PartiQLDelete`,
+  by what the statement does. `batchExecuteStatement` and `executeTransaction` are checked under their
+  own names on each table a statement names, as a direct request is.
+
+Every permission is evaluated before the call, so one refused table in a batch or a transaction writes
+nothing.
+
+The `aws-sdk:redshiftdata` form's statement operations (`describeStatement`, `cancelStatement`,
+`getStatementResult`, `getStatementResultV2`, `listStatements`, `listSessions`) act on no resource in
+the service reference, so they are checked on `*`. The others are checked on the cluster
+`ClusterIdentifier` names, the workgroup `WorkgroupName` names, or the target of the session
+`SessionId` names, with what an [EventBridge target](eventbridge.md) needs to authenticate:
+`secretsmanager:GetSecretValue` on `SecretArn`, `redshift-serverless:GetCredentials` on the workgroup,
+or `redshift:GetClusterCredentials` on the `dbuser` and `dbname` of a `DbUser`. A workgroup Floci does
+not hold is evaluated on `workgroup/*`.
+
+`secretsmanager:GetSecretValue` on an RDS Data `SecretArn` follows AWS's `AmazonRDSDataFullAccess`
+managed policy and the CDK's `grantDataApiAccess`, which grant it along with the Data API actions.
+
+A request whose member names nothing it can reach has only the role checks, and its service answers
+it: no `TableName` in an optimized task or no recognised item in a transaction, a transaction's table
+ARN that is malformed or in another Region, a DynamoDB `ResourceArn` or similar that is not an ARN, no
+`Bucket` or `Key`, an RDS Data `ResourceArn` that is not an ARN, or a Redshift Data request naming no
+target. An API a form does not serve keeps its existing answer: `dynamodb:query` and
+`aws-sdk:rdsdata:beginTransaction` are "Unsupported" whether or not enforcement is on, and
+`aws-sdk:redshiftdata` answers its own `ValidationException` for an operation it does not have.
+
+The S3 bucket is resolved as a direct request resolves it. A bucket name is one namespace across
+partitions, so a task can reach a bucket of another partition, and the object's ARN is evaluated in the
+bucket's partition, not the state machine's. A bucket policy takes part as it does for a direct
+request: it can grant `s3:PutObject` to a role of the bucket's account with no identity policy, and a
+Deny in it refuses a role its identity policy allows. Another account's bucket is `S3.NoSuchBucket` to
+an allowed role unless `floci.services.s3.global-bucket-namespace` is on, and with it on both the
+role's policy and the bucket's have to allow. A DynamoDB table named by an ARN of another account is
+refused, since no table policy can grant it here.
+
+`<prefix>.AccessDeniedException` is Floci's reading for these too and has not been verified against
+AWS. Apart from `dynamodb:EnclosingOperation`, only global condition keys are available to the
+policies: `dynamodb:LeadingKeys`, `dynamodb:Attributes` and the like are absent. Global tables are not
+treated apart. With enforcement off nothing here is evaluated.
+
+Integrations other than these, the messaging tasks, Lambda, API Gateway and nested executions are not
+evaluated yet: they run in the state machine's account whatever the execution role's policies say.
 
 ## Task credentials in history
 
@@ -699,12 +765,18 @@ timestamps. Opaque dictionary keys, including secret version IDs and ECS log
 options, retain their original spelling. `describeSecret` returns metadata without
 the secret value. Disabled services fail with a catchable service exception.
 
+Lambda `updateEventSourceMapping` tasks identify the mapping with `Uuid` in
+JSONPath `Parameters` or JSONata `Arguments`, following the Step Functions SDK
+parameter spelling. The direct Lambda API and existing task-result fields retain
+their `UUID` spelling.
+
 ECS `listServices` supports the same `MaxResults` and opaque `NextToken` as the
 direct ECS API. Lambda mapping tasks currently return an unpaginated list;
 `Marker` and `MaxItems` are rejected with `Lambda.InvalidParameterValueException`
 instead of being silently ignored. These six integrations do not evaluate the
 state-machine execution role's per-action IAM policies; among the task integrations, Lambda, API
-Gateway, nested executions and the [messaging tasks](#messaging-tasks-under-iam-enforcement) do. Name-based lookups use the
+Gateway, nested executions, the [messaging tasks](#messaging-tasks-under-iam-enforcement) and the
+[data tasks](#data-tasks-under-iam-enforcement) do. Name-based lookups use the
 execution scope; explicit ARNs retain the underlying service's cross-account lookup
 behavior. The underlying services' validation still applies. They implement
 request-response calls, without job-completion polling.

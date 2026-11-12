@@ -147,6 +147,7 @@ import static org.mockito.Mockito.atLeast;
 import static org.mockito.Mockito.atLeastOnce;
 import static org.mockito.Mockito.clearInvocations;
 import static org.mockito.Mockito.doAnswer;
+import static org.mockito.Mockito.doReturn;
 import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.inOrder;
 import static org.mockito.Mockito.mock;
@@ -267,6 +268,23 @@ class Ec2ServiceTest {
 
         assertEquals(List.of(service.defaultSecurityGroupOf(region, vpcId).orElseThrow().getGroupId()),
                 eni.getGroups().stream().map(GroupIdentifier::getGroupId).toList());
+    }
+
+    @Test
+    void runInstancesWithoutGroupsGetsItsSubnetVpcsDefaultGroup() {
+        Ec2Service service = mockModeService();
+        String region = "us-east-1";
+        String vpcId = service.createVpc(region, "10.94.0.0/16", false).getVpcId();
+        Subnet subnet = service.createSubnet(region, vpcId, "10.94.1.0/24", region + "a");
+
+        Instance instance = service.runInstances(region, "ami-test", "t3.micro", 1, 1, null,
+                List.of(), subnet.getSubnetId(), null, List.of(), null, null).getInstances().getFirst();
+
+        List<String> expected = List.of(service.defaultSecurityGroupOf(region, vpcId).orElseThrow().getGroupId());
+        assertEquals(vpcId, instance.getVpcId());
+        assertEquals(expected, instance.getSecurityGroups().stream().map(GroupIdentifier::getGroupId).toList());
+        assertEquals(expected, instance.getNetworkInterfaces().getFirst().getGroups().stream()
+                .map(GroupIdentifier::getGroupId).toList());
     }
 
     @Test
@@ -3628,6 +3646,103 @@ class Ec2ServiceTest {
                 "us-east-1", null, "absent-template", List.of()).isEmpty());
     }
 
+    @ParameterizedTest
+    @ValueSource(strings = {"create", "modify"})
+    void launchTemplateMutationCannotRestoreADeletedTemplate(String operation) throws Exception {
+        ParkingStore<LaunchTemplate> parking = new ParkingStore<>();
+        AccountAwareStorageBackend<LaunchTemplate> store =
+                new AccountAwareStorageBackend<>(parking, null, "000000000000");
+        Ec2Service service = tagTestService(
+                new InMemoryStorageFactory(Map.of("ec2-launch-templates.json", store)));
+        LaunchTemplate template = service.createLaunchTemplate(
+                "us-east-1", "deleted-while-resolving", new LaunchTemplateData(), List.of());
+        String id = template.getLaunchTemplateId();
+        parking.parkNextRead();
+        ExecutorService worker = Executors.newSingleThreadExecutor();
+        try {
+            Future<LaunchTemplate> mutation = worker.submit(() -> "create".equals(operation)
+                    ? service.createLaunchTemplateVersion("us-east-1", id, null, "1", new LaunchTemplateData())
+                    : service.modifyLaunchTemplate("us-east-1", id, null, "1"));
+            assertTrue(parking.awaitParked(), "mutation must have read the original template before deletion");
+            service.deleteLaunchTemplate("us-east-1", id, null);
+            assertTrue(service.describeLaunchTemplates("us-east-1", List.of(), List.of(), Map.of()).isEmpty());
+            parking.release();
+            ExecutionException failure = assertThrows(ExecutionException.class,
+                    () -> mutation.get(10, TimeUnit.SECONDS));
+            AwsException missing = assertInstanceOf(AwsException.class, failure.getCause());
+            assertEquals("InvalidLaunchTemplateId.NotFound", missing.getErrorCode());
+            assertEquals(400, missing.getHttpStatus());
+            assertTrue(service.describeLaunchTemplates("us-east-1", List.of(), List.of(), Map.of()).isEmpty(),
+                    "the rejected operation must not resurrect a deleted template");
+            assertEquals("1", template.getLatestVersionNumber(), "rejection must precede object mutation");
+        } finally {
+            parking.release();
+            worker.shutdownNow();
+            assertTrue(worker.awaitTermination(10, TimeUnit.SECONDS));
+        }
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"create", "modify"})
+    void launchTemplateMutationByNameCannotReplaceANewTemplate(String operation) throws Exception {
+        Ec2Service service = sgService();
+        String name = "reused-template-name";
+        LaunchTemplate original = service.createLaunchTemplate(
+                "us-east-1", name, new LaunchTemplateData(), List.of());
+        AtomicReference<Thread> mutationThread = new AtomicReference<>();
+        ExecutorService worker = Executors.newSingleThreadExecutor();
+        try {
+            Future<LaunchTemplate> mutation;
+            LaunchTemplate replacement;
+            synchronized (original) {
+                mutation = worker.submit(() -> {
+                    mutationThread.set(Thread.currentThread());
+                    return "create".equals(operation)
+                            ? service.createLaunchTemplateVersion("us-east-1", null, name, "1", new LaunchTemplateData())
+                            : service.modifyLaunchTemplate("us-east-1", null, name, "1");
+                });
+                Thread owner = Thread.currentThread();
+                String method = "create".equals(operation) ? "createLaunchTemplateVersion" : "modifyLaunchTemplate";
+                Awaitility.await("mutation has resolved the original name and waits for its monitor")
+                        .atMost(Duration.ofSeconds(10))
+                        .until(() -> isBlockedIn(mutationThread.get(), method, owner));
+                service.deleteLaunchTemplate("us-east-1", original.getLaunchTemplateId(), null);
+                replacement = service.createLaunchTemplate("us-east-1", name, new LaunchTemplateData(), List.of());
+            }
+            ExecutionException failure = assertThrows(ExecutionException.class,
+                    () -> mutation.get(10, TimeUnit.SECONDS));
+            AwsException missing = assertInstanceOf(AwsException.class, failure.getCause());
+            assertEquals("InvalidLaunchTemplateName.NotFoundException", missing.getErrorCode());
+            assertEquals(400, missing.getHttpStatus());
+            assertEquals(List.of(replacement.getLaunchTemplateId()), service.describeLaunchTemplates(
+                    "us-east-1", List.of(), List.of(name), Map.of()).stream()
+                    .map(LaunchTemplate::getLaunchTemplateId).toList());
+            assertEquals("1", original.getLatestVersionNumber());
+            assertEquals("1", replacement.getLatestVersionNumber());
+        } finally {
+            worker.shutdownNow();
+            assertTrue(worker.awaitTermination(10, TimeUnit.SECONDS));
+        }
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"create", "modify"})
+    void launchTemplateMutationStillWorksWhileTemplateExists(String operation) {
+        Ec2Service service = sgService();
+        LaunchTemplate template = service.createLaunchTemplate(
+                "us-east-1", "existing-template", new LaunchTemplateData(), List.of());
+        String id = template.getLaunchTemplateId();
+        service.createLaunchTemplateVersion("us-east-1", id, null, "1", new LaunchTemplateData());
+        if ("create".equals(operation)) {
+            assertEquals("3", service.createLaunchTemplateVersion(
+                    "us-east-1", id, null, "2", new LaunchTemplateData()).getLatestVersionNumber());
+        } else {
+            assertEquals("2", service.modifyLaunchTemplate("us-east-1", id, null, "2").getDefaultVersionNumber());
+        }
+
+        assertEquals(1, service.describeLaunchTemplates("us-east-1", List.of(), List.of(), Map.of()).size());
+    }
+
     @Test
     void missingLaunchTemplateIdReportsTheSameCodeWhicheverCallLooksItUp() {
         Ec2Service service = new Ec2Service(mockConfig(true), mock(Ec2ContainerManager.class),
@@ -4125,12 +4240,8 @@ class Ec2ServiceTest {
     }
 
     @Test
-    void resolveDefaultVpcAndSecurityGroupIdFallBackToPreRegionScopingStorage() throws Exception {
-        // #21 follow-up: persistent storage written before default ids were made region-scoped
-        // still carries the old literal "vpc-default"/"sg-default", never the new scoped form, and
-        // nothing re-seeds it (ensureDefaultResources skips a region that already has a VPC on
-        // file). Any lookup that blindly computed the new scoped id instead of resolving against
-        // what's actually stored would silently stop finding the region's real default VPC/SG.
+    void resolveDefaultVpcIdFallsBackToPreRegionScopingStorage() throws Exception {
+        // Existing regions are not re-seeded, so persisted VPCs can still have the old unscoped id.
         Ec2Service service = new Ec2Service(mockConfig(true), mock(Ec2ContainerManager.class),
                 mock(Ec2PortForwardManager.class),
                 mock(AmiImageResolver.class), mock(Ec2ImageCatalog.class), new Ec2InstanceTypeCatalog(),
@@ -4145,29 +4256,16 @@ class Ec2ServiceTest {
         legacyVpc.setRegion("us-east-1");
         putViaReflection(service, "vpcs", "us-east-1::vpc-default", legacyVpc);
 
-        SecurityGroup legacySg = new SecurityGroup();
-        legacySg.setGroupId("sg-default");
-        legacySg.setGroupName("default");
-        legacySg.setDescription("default VPC security group");
-        legacySg.setVpcId("vpc-default");
-        legacySg.setOwnerId("000000000000");
-        legacySg.setRegion("us-east-1");
-        putViaReflection(service, "securityGroups", "us-east-1::sg-default", legacySg);
-
         assertEquals("vpc-default", service.resolveDefaultVpcId("us-east-1"),
                 "must resolve the pre-existing unscoped default VPC, not compute a fresh scoped id");
-        assertEquals("sg-default", service.resolveDefaultSecurityGroupId("us-east-1"),
-                "must resolve the pre-existing unscoped default security group, not compute a fresh scoped id");
 
         SecurityGroup created = service.createSecurityGroup("us-east-1", "app", "app sg", null);
         assertEquals("vpc-default", created.getVpcId(),
                 "a new security group with no explicit VpcId must attach to the real default VPC on file");
 
-        // A genuinely fresh region has neither format on file, so both resolvers fall back to the
+        // A genuinely fresh region has neither format on file, so the resolver falls back to the
         // scoped form ensureDefaultResources would seed.
         assertEquals(Ec2Service.defaultVpcId("eu-west-1"), service.resolveDefaultVpcId("eu-west-1"));
-        assertEquals(Ec2Service.defaultSecurityGroupId("eu-west-1"),
-                service.resolveDefaultSecurityGroupId("eu-west-1"));
     }
 
     @SuppressWarnings("unchecked")
@@ -4779,18 +4877,16 @@ class Ec2ServiceTest {
 
     @Test
     void aRefusedLeaseDoesNotTurnAFreeAddressIntoOneInUse() {
-        // DeleteNetworkInterface does not return its lease, so the lease table can outlive the
-        // resource that took one. With nothing in any account holding the address any more, the
-        // stale lease must not fail the launch.
+        // A failed launch gives its lease back only once its container is detached, so the lease
+        // table can hold an address nothing stored in any account stands behind. That lease must
+        // not fail the launch.
         RequestContext context = new RequestContext();
-        Ec2Service service = realVpcNetworkService(context);
+        RealVpcNetworkFixture fixture = realVpcNetworkFixture(context, Map.of());
+        Ec2Service service = fixture.service();
         String subnetId = Ec2Service.defaultSubnetId("us-east-1", "a");
         context.setAccountId("111122223333");
         service.describeSubnets("us-east-1", List.of(), Map.of());
-        NetworkInterface deleted = service.createNetworkInterface("us-east-1", subnetId, "deleted", null,
-                List.of(), List.of(), List.of());
-        service.deleteNetworkInterface("us-east-1", deleted.getNetworkInterfaceId());
-        String stale = deleted.getPrivateIpAddress();
+        String stale = fixture.vpcNetworks().allocatePrivateIp("us-east-1", subnetId).orElseThrow();
 
         context.setAccountId("000000000000");
 
@@ -4974,13 +5070,23 @@ class Ec2ServiceTest {
 
     @Test
     void anAddressTheWalkSkipsIsGivenBackToTheVpcNetwork() {
-        // Its holder took no lease, and deleting an interface returns none, so a lease the walk
-        // kept would outlive the holder.
+        // Its holder took no lease, so the network must not count one for it.
         MockedNetworkFixture fixture = mockedNetworkFixture("10.50.1.0/24", "10.50.1.10", "10.50.1.11");
         fixture.service().createNetworkInterface("us-east-1", fixture.subnetId(), "holder", "10.50.1.10",
                 List.of(), List.of(), List.of());
 
         assertEquals(List.of("10.50.1.11"), launchAddresses(fixture.service(), fixture.subnetId(), 1));
+        assertEquals(List.of("10.50.1.10"), fixture.released());
+    }
+
+    @Test
+    void deletingAnInterfaceGivesBackTheLeaseOfItsAddress() {
+        MockedNetworkFixture fixture = mockedNetworkFixture("10.50.1.0/24", "10.50.1.10");
+        String eniId = fixture.service().createNetworkInterface("us-east-1", fixture.subnetId(), "task", null,
+                List.of(), List.of(), List.of()).getNetworkInterfaceId();
+
+        fixture.service().deleteNetworkInterface("us-east-1", eniId);
+
         assertEquals(List.of("10.50.1.10"), fixture.released());
     }
 
@@ -5054,6 +5160,69 @@ class Ec2ServiceTest {
     }
 
     @Test
+    void aVpcAddressLeasedOutsideEc2SkipsAnAddressAnInterfaceHolds() {
+        RequestContext context = new RequestContext();
+        VpcNetworkManager vpcNetworks = mock(VpcNetworkManager.class);
+        Ec2Service service = mockedVpcNetworkService(context, Map.of(), vpcNetworks);
+        String subnetId = Ec2Service.defaultSubnetId("us-east-1", "a");
+        service.describeSubnets("us-east-1", List.of(), Map.of());
+        service.createNetworkInterface("us-east-1", subnetId, "holder", "172.31.0.10",
+                List.of(), List.of(), List.of());
+        when(vpcNetworks.allocatePrivateIp("us-east-1", subnetId))
+                .thenReturn(Optional.of("172.31.0.10"), Optional.of("172.31.0.11"));
+
+        assertEquals(Optional.of("172.31.0.11"), service.allocateVpcPrivateIp("us-east-1", subnetId));
+        verify(vpcNetworks).releasePrivateIp("us-east-1", subnetId, "172.31.0.10");
+    }
+
+    @Test
+    void anAddressAContainerLeasedIsInUseUntilItIsGivenBack() {
+        VpcNetworkManager vpcNetworks = mock(VpcNetworkManager.class);
+        Ec2Service service = mockedVpcNetworkService(new RequestContext(), Map.of(), vpcNetworks);
+        String subnetId = Ec2Service.defaultSubnetId("us-east-1", "a");
+        service.describeSubnets("us-east-1", List.of(), Map.of());
+        when(vpcNetworks.allocatePrivateIp("us-east-1", subnetId))
+                .thenReturn(Optional.of("172.31.0.10"), Optional.empty());
+        service.allocateVpcPrivateIp("us-east-1", subnetId);
+
+        AwsException inUse = assertThrows(AwsException.class, () -> service.createNetworkInterface("us-east-1",
+                subnetId, "named", "172.31.0.10", List.of(), List.of(), List.of()));
+        assertEquals("InvalidIPAddress.InUse", inUse.getErrorCode());
+        // The network's range is exhausted, so the address is synthesised.
+        assertEquals("172.31.0.11", service.createNetworkInterface("us-east-1", subnetId, "automatic", null,
+                List.of(), List.of(), List.of()).getPrivateIpAddress());
+
+        service.releaseVpcPrivateIp("us-east-1", subnetId, "172.31.0.10");
+        assertEquals("172.31.0.10", service.createNetworkInterface("us-east-1", subnetId, "named", "172.31.0.10",
+                List.of(), List.of(), List.of()).getPrivateIpAddress());
+    }
+
+    @Test
+    void anInterfaceEndpointCreatedAfterContainerLeasesTakesAnAddressNoContainerHolds() {
+        // Ten of a /28's eleven assignable addresses leased to containers, so whatever the endpoint
+        // id prefers, its interface must land on the one left over.
+        List<String> leased = new ArrayList<>();
+        for (int host = 4; host <= 13; host++) {
+            leased.add("10.50.1." + host);
+        }
+        MockedNetworkFixture fixture = mockedNetworkFixture("10.50.1.0/28", leased.toArray(String[]::new));
+        Ec2Service service = fixture.service();
+        for (int i = 0; i < leased.size(); i++) {
+            service.allocateVpcPrivateIp("us-east-1", fixture.subnetId());
+        }
+        String vpcId = service.describeSubnets("us-east-1", List.of(fixture.subnetId()), Map.of())
+                .getFirst().getVpcId();
+
+        service.createVpcEndpoint("us-east-1", vpcId, "com.amazonaws.us-east-1.ecs", "Interface", List.of(),
+                List.of(fixture.subnetId()), List.of(), null, null, List.of());
+
+        assertEquals("10.50.1.14", endpointAddressesBySubnet(service).get(fixture.subnetId()));
+        AwsException inUse = assertThrows(AwsException.class, () -> service.createNetworkInterface("us-east-1",
+                fixture.subnetId(), "named", "10.50.1.14", List.of(), List.of(), List.of()));
+        assertEquals("InvalidIPAddress.InUse", inUse.getErrorCode());
+    }
+
+    @Test
     void anAddressALaunchNamedWithoutLeasingItIsNotHandedOutAgain() {
         // A failed launch is marked terminated before its container is detached and its lease given
         // back. A launch that names the address in between finds nothing holding it and keeps it
@@ -5124,13 +5293,18 @@ class Ec2ServiceTest {
         return realVpcNetworkService(context, Map.of());
     }
 
+    private static Ec2Service realVpcNetworkService(RequestContext context,
+                                                    Map<String, AccountAwareStorageBackend<?>> stores) {
+        return realVpcNetworkFixture(context, stores).service();
+    }
+
     /**
      * Ec2Service in container mode over a real VpcNetworkManager, whose Docker daemon has no
      * networks yet, with the caller's account taken from {@code context} and {@code stores}
      * standing in for what a previous run persisted.
      */
-    private static Ec2Service realVpcNetworkService(RequestContext context,
-                                                    Map<String, AccountAwareStorageBackend<?>> stores) {
+    private static RealVpcNetworkFixture realVpcNetworkFixture(RequestContext context,
+                                                               Map<String, AccountAwareStorageBackend<?>> stores) {
         EmulatorConfig config = mockConfig(false);
         EmulatorConfig.VpcNetworksConfig networks = mock(EmulatorConfig.VpcNetworksConfig.class);
         when(config.services().ec2().vpcNetworks()).thenReturn(networks);
@@ -5142,9 +5316,14 @@ class Ec2ServiceTest {
         AmiImageResolver images = mock(AmiImageResolver.class);
         when(images.resolveImage(any())).thenReturn(ResolvedAmiImage.minimal("floci/base:latest"));
         jakarta.enterprise.inject.Instance<RequestContext> contexts = requestContexts(context);
-        return new Ec2Service(config, mock(Ec2ContainerManager.class), mock(Ec2PortForwardManager.class), images,
-                mock(Ec2ImageCatalog.class), new Ec2InstanceTypeCatalog(), new InMemoryStorageFactory(stores, contexts),
-                contexts, new VpcNetworkManager(config, docker, null), null, null, null);
+        VpcNetworkManager vpcNetworks = new VpcNetworkManager(config, docker, null);
+        Ec2Service service = new Ec2Service(config, mock(Ec2ContainerManager.class), mock(Ec2PortForwardManager.class),
+                images, mock(Ec2ImageCatalog.class), new Ec2InstanceTypeCatalog(),
+                new InMemoryStorageFactory(stores, contexts), contexts, vpcNetworks, null, null, null);
+        return new RealVpcNetworkFixture(service, vpcNetworks);
+    }
+
+    private record RealVpcNetworkFixture(Ec2Service service, VpcNetworkManager vpcNetworks) {
     }
 
     /**
@@ -6830,6 +7009,145 @@ class Ec2ServiceTest {
         assertEquals("/dev/sdf", attached.getAttachments().getFirst().getDevice());
         assertEquals("attached", attached.getAttachments().getFirst().getState());
         assertFalse(attached.getAttachments().getFirst().isDeleteOnTermination());
+    }
+
+    private static VolumeAttachmentFixture volumeAttachmentFixture() {
+        Ec2VolumeBlockDeviceManager blockDevices = mock(Ec2VolumeBlockDeviceManager.class);
+        Ec2Service service = new Ec2Service(mockConfig(true), mock(Ec2ContainerManager.class),
+                mock(Ec2PortForwardManager.class), mock(AmiImageResolver.class), mock(Ec2ImageCatalog.class),
+                new Ec2InstanceTypeCatalog(), new InMemoryStorageFactory(), null, null, blockDevices);
+        Instance instance = service.runInstances("us-east-1", "ami-1234567890abcdef0", "t3.micro",
+                1, 1, null, List.of(), null, null, List.of(), null, null).getInstances().getFirst();
+        instance.setState(InstanceState.running());
+        Volume volume = service.createVolume("us-east-1", instance.getPlacement().getAvailabilityZone(), "gp3", 1,
+                false, 0, null, null, List.of());
+        return new VolumeAttachmentFixture(blockDevices, service, instance, volume);
+    }
+
+    private record VolumeAttachmentFixture(Ec2VolumeBlockDeviceManager blockDevices, Ec2Service service,
+                                           Instance instance, Volume volume) {
+    }
+
+    @ParameterizedTest
+    @ValueSource(booleans = {true, false})
+    void attachmentExceptionsLeaveStoredVolumeAvailableAndRetryable(boolean awsError) {
+        VolumeAttachmentFixture fixture = volumeAttachmentFixture();
+        Ec2VolumeBlockDeviceManager blockDevices = fixture.blockDevices();
+        Ec2Service service = fixture.service();
+        Instance instance = fixture.instance();
+        Volume volume = fixture.volume();
+        RuntimeException failure = awsError ? new AwsException("InternalError", "attachment failed", 500)
+                : new IllegalStateException("unexpected backend failure");
+        when(blockDevices.attachVolume(any(), any(), anyString())).thenThrow(failure);
+
+        assertThrows(RuntimeException.class, () -> service.attachVolume("us-east-1", volume.getVolumeId(),
+                instance.getInstanceId(), "/dev/xvdf"));
+        Volume stored = service.describeVolumes("us-east-1", List.of(volume.getVolumeId()), Map.of()).getFirst();
+        assertEquals("available", stored.getState());
+        assertTrue(stored.getAttachments().isEmpty());
+
+        doReturn(Optional.of("/dev/xvdf")).when(blockDevices).attachVolume(any(), any(), anyString());
+        assertEquals("attached", service.attachVolume("us-east-1", volume.getVolumeId(),
+                instance.getInstanceId(), "/dev/xvdf").getState());
+        when(blockDevices.attachVolume(any(), any(), anyString()))
+                .thenThrow(new AwsException("InternalError", "restoration failed", 500));
+        assertDoesNotThrow(() -> service.restoreAttachedVolumesForInstance("us-east-1", instance));
+        assertEquals("in-use", stored.getState());
+        assertEquals(1, stored.getAttachments().size());
+    }
+
+    @Test
+    void concurrentAttachmentWaitsForThePhysicalOperation() throws Exception {
+        VolumeAttachmentFixture fixture = volumeAttachmentFixture();
+        Ec2VolumeBlockDeviceManager blockDevices = fixture.blockDevices();
+        Ec2Service service = fixture.service();
+        Instance instance = fixture.instance();
+        Volume volume = fixture.volume();
+        CountDownLatch attaching = new CountDownLatch(1);
+        CountDownLatch release = new CountDownLatch(1);
+        when(blockDevices.attachVolume(any(), any(), anyString())).thenAnswer(invocation -> {
+            attaching.countDown();
+            assertTrue(release.await(10, TimeUnit.SECONDS));
+            return Optional.of("/dev/xvdf");
+        });
+        try (ExecutorService executor = Executors.newVirtualThreadPerTaskExecutor()) {
+            Future<VolumeAttachment> first = executor.submit(() -> service.attachVolume("us-east-1",
+                    volume.getVolumeId(), instance.getInstanceId(), "/dev/xvdf"));
+            try {
+                assertTrue(attaching.await(10, TimeUnit.SECONDS));
+                AtomicReference<Thread> contender = new AtomicReference<>();
+                Future<AwsException> second = executor.submit(() -> {
+                    contender.set(Thread.currentThread());
+                    return assertThrows(AwsException.class, () -> service.attachVolume("us-east-1",
+                            volume.getVolumeId(), instance.getInstanceId(), "/dev/xvdg"));
+                });
+                awaitBlockedOrDone(contender, second);
+                assertFalse(second.isDone(), "second attachment must wait for the physical operation");
+                release.countDown();
+                assertEquals("attached", first.get(10, TimeUnit.SECONDS).getState());
+                assertEquals("VolumeInUse", second.get(10, TimeUnit.SECONDS).getErrorCode());
+                verify(blockDevices).attachVolume(volume, instance, "/dev/xvdf");
+                verify(blockDevices, never()).attachVolume(volume, instance, "/dev/xvdg");
+            } finally {
+                release.countDown();
+            }
+        }
+    }
+
+    @ParameterizedTest
+    @ValueSource(booleans = {true, false})
+    void differentVolumesCannotClaimTheSameDeviceDuringPhysicalAttachment(boolean firstFails) throws Exception {
+        VolumeAttachmentFixture fixture = volumeAttachmentFixture();
+        Ec2VolumeBlockDeviceManager blockDevices = fixture.blockDevices();
+        Ec2Service service = fixture.service();
+        Instance instance = fixture.instance();
+        Volume firstVolume = fixture.volume();
+        String zone = instance.getPlacement().getAvailabilityZone();
+        Volume secondVolume = service.createVolume("us-east-1", zone, "gp3", 1,
+                false, 0, null, null, List.of());
+        CountDownLatch attaching = new CountDownLatch(1);
+        CountDownLatch release = new CountDownLatch(1);
+        when(blockDevices.attachVolume(eq(firstVolume), any(), anyString())).thenAnswer(invocation -> {
+            attaching.countDown();
+            assertTrue(release.await(10, TimeUnit.SECONDS));
+            if (firstFails) {
+                throw new AwsException("InternalError", "attachment failed", 500);
+            }
+            return Optional.of("/dev/xvdf");
+        });
+        try (ExecutorService executor = Executors.newVirtualThreadPerTaskExecutor()) {
+            Future<?> first = executor.submit(() -> {
+                if (firstFails) {
+                    return assertThrows(AwsException.class, () -> service.attachVolume("us-east-1",
+                            firstVolume.getVolumeId(), instance.getInstanceId(), "xvdf"));
+                }
+                return service.attachVolume("us-east-1", firstVolume.getVolumeId(), instance.getInstanceId(), "xvdf");
+            });
+            try {
+                assertTrue(attaching.await(10, TimeUnit.SECONDS));
+                Future<AwsException> second = executor.submit(() -> assertThrows(AwsException.class,
+                        () -> service.attachVolume("us-east-1", secondVolume.getVolumeId(),
+                                instance.getInstanceId(), "/dev/xvdf")));
+                assertEquals("InvalidParameterValue", second.get(5, TimeUnit.SECONDS).getErrorCode());
+                assertEquals("available", secondVolume.getState());
+                assertTrue(secondVolume.getAttachments().isEmpty());
+                verify(blockDevices, never()).attachVolume(eq(secondVolume), any(), anyString());
+                release.countDown();
+                first.get(10, TimeUnit.SECONDS);
+                if (firstFails) {
+                    assertEquals("attached", service.attachVolume("us-east-1", secondVolume.getVolumeId(),
+                            instance.getInstanceId(), "/dev/xvdf").getState());
+                    assertEquals("available", firstVolume.getState());
+                } else {
+                    AwsException error = assertThrows(AwsException.class, () -> service.attachVolume("us-east-1",
+                            secondVolume.getVolumeId(), instance.getInstanceId(), "/dev/xvdf"));
+                    assertEquals("InvalidParameterValue", error.getErrorCode());
+                    verify(blockDevices, never()).attachVolume(eq(secondVolume), any(), anyString());
+                }
+            } finally {
+                release.countDown();
+            }
+        }
     }
 
     @Test
@@ -9284,6 +9602,130 @@ class Ec2ServiceTest {
         when(ec2.mockPublicAddresses()).thenReturn(EmulatorConfig.Ec2ServiceConfig.MockPublicAddresses.DOCUMENTATION);
         when(ec2.mockPublicAddress()).thenReturn(Optional.empty());
         return config;
+    }
+
+    @Test
+    void templateResolutionCopiesVersionBeforeConcurrentDeletion() throws Exception {
+        AccountAwareStorageBackend<LaunchTemplate> templates = AccountAwareStorageBackend.inMemory("000000000000");
+        Ec2Service service = tagTestService(
+                new InMemoryStorageFactory(Map.of("ec2-launch-templates.json", templates)));
+        LaunchTemplateData first = new LaunchTemplateData();
+        first.setImageId("ami-first");
+        LaunchTemplate created = service.createLaunchTemplate("us-east-1", "resolution-race", first, List.of());
+        LaunchTemplateData second = new LaunchTemplateData();
+        second.setImageId("ami-second");
+        service.createLaunchTemplateVersion("us-east-1", created.getLaunchTemplateId(), null, null, second);
+        LaunchTemplate template = spy(created);
+        Map<String, LaunchTemplateData> versions = spy(new LinkedHashMap<>(template.getVersions()));
+        doReturn(versions).when(template).getVersions();
+        templates.put("us-east-1::" + template.getLaunchTemplateId(), template);
+        CountDownLatch checked = new CountDownLatch(1);
+        CountDownLatch release = new CountDownLatch(1);
+        AtomicReference<Thread> reader = new AtomicReference<>();
+        doAnswer(call -> {
+            boolean present = (boolean) call.callRealMethod();
+            if (Thread.currentThread() == reader.get() && checked.getCount() != 0) {
+                checked.countDown();
+                assertTrue(release.await(5, TimeUnit.SECONDS));
+            }
+            return present;
+        }).when(versions).containsKey("2");
+        ExecutorService executor = Executors.newFixedThreadPool(2);
+        try {
+            Future<LaunchTemplateData> resolved = executor.submit(() -> {
+                reader.set(Thread.currentThread());
+                return service.resolveLaunchTemplateData("us-east-1", template.getLaunchTemplateId(), null, "2");
+            });
+            assertTrue(checked.await(5, TimeUnit.SECONDS));
+            AtomicReference<Thread> deletingThread = new AtomicReference<>();
+            Future<List<Ec2Service.LaunchTemplateVersionDeletion>> deleted = executor.submit(() -> {
+                deletingThread.set(Thread.currentThread());
+                return service.deleteLaunchTemplateVersions("us-east-1", template.getLaunchTemplateId(), null,
+                        List.of("2"), false);
+            });
+            awaitBlockedOrDone(deletingThread, deleted);
+            release.countDown();
+            assertEquals("ami-second", assertDoesNotThrow(() -> resolved.get(5, TimeUnit.SECONDS)).getImageId());
+            assertNull(deleted.get(5, TimeUnit.SECONDS).getFirst().errorCode());
+            assertEquals(Set.of("1"), template.getVersions().keySet());
+        } finally {
+            release.countDown();
+            executor.shutdownNow();
+            assertTrue(executor.awaitTermination(5, TimeUnit.SECONDS));
+        }
+    }
+
+    @Test
+    void deletingOnlyReconstructedLegacyVersionPreservesItsData() {
+        Ec2Service service = sgService();
+        LaunchTemplateData data = new LaunchTemplateData();
+        data.setImageId("ami-legacy-latest");
+        LaunchTemplate template = service.createLaunchTemplate("us-east-1", "legacy-singleton", data, List.of());
+        template.setVersions(Map.of());
+        template.setLatestVersionNumber("9");
+        template.setDefaultVersionNumber("1");
+        Ec2Service.LaunchTemplateVersionDeletion result = assertDoesNotThrow(() -> service.deleteLaunchTemplateVersions(
+                "us-east-1", template.getLaunchTemplateId(), null, List.of("9"), false)).getFirst();
+        assertEquals("unexpectedError", result.errorCode());
+        assertEquals(Set.of("9"), template.getVersions().keySet());
+        assertEquals("ami-legacy-latest", template.getVersions().get("9").getImageId());
+        assertEquals("9", template.getLatestVersionNumber());
+        assertEquals("1", template.getDefaultVersionNumber());
+    }
+
+    @Test
+    void templateResolutionAfterVersionDeletionReturnsNotFound() {
+        Ec2Service service = sgService();
+        LaunchTemplate template = service.createLaunchTemplate("us-east-1", "already-deleted-version",
+                new LaunchTemplateData(), List.of());
+        service.createLaunchTemplateVersion("us-east-1", template.getLaunchTemplateId(), null, null,
+                new LaunchTemplateData());
+        service.deleteLaunchTemplateVersions("us-east-1", template.getLaunchTemplateId(), null, List.of("2"), false);
+        AwsException error = assertThrows(AwsException.class, () -> service.resolveLaunchTemplateData(
+                "us-east-1", template.getLaunchTemplateId(), null, "2"));
+        assertEquals("InvalidLaunchTemplateVersion.NotFound", error.getErrorCode());
+        assertNotNull(service.resolveLaunchTemplateData("us-east-1", template.getLaunchTemplateId(), null, "1"));
+    }
+
+    @Test
+    void deletingOnlyDefaultVersionStillReturnsDefaultError() {
+        Ec2Service service = sgService();
+        LaunchTemplate template = service.createLaunchTemplate("us-east-1", "default-singleton",
+                new LaunchTemplateData(), List.of());
+        Ec2Service.LaunchTemplateVersionDeletion result = service.deleteLaunchTemplateVersions(
+                "us-east-1", template.getLaunchTemplateId(), null, List.of("1"), false).getFirst();
+        assertEquals("unexpectedError", result.errorCode());
+        assertEquals("The default version of a launch template cannot be deleted.", result.errorMessage());
+        assertEquals(Set.of("1"), template.getVersions().keySet());
+    }
+
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    void versionDeletionRetainsSelectorErrorAfterTemplateDisappears(boolean byId) {
+        AccountAwareStorageBackend<LaunchTemplate> templates = spy(
+                AccountAwareStorageBackend.<LaunchTemplate>inMemory("000000000000"));
+        Ec2Service service = tagTestService(
+                new InMemoryStorageFactory(Map.of("ec2-launch-templates.json", templates)));
+        LaunchTemplate template = service.createLaunchTemplate("us-east-1", "stale-selector",
+                new LaunchTemplateData(), List.of());
+        String storageKey = "us-east-1::" + template.getLaunchTemplateId();
+        templates.delete(storageKey);
+        if (byId) {
+            doReturn(Optional.of(template), Optional.empty()).when(templates).get(storageKey);
+        } else {
+            doReturn(List.of(template)).when(templates).scan(any());
+        }
+
+        List<Ec2Service.LaunchTemplateVersionDeletion> results = service.deleteLaunchTemplateVersions(
+                "us-east-1", byId ? template.getLaunchTemplateId() : null,
+                byId ? null : template.getLaunchTemplateName(), List.of("1", "2"), false);
+
+        assertEquals(2, results.size());
+        assertTrue(results.stream().allMatch(result -> (byId
+                ? "launchTemplateIdDoesNotExist" : "launchTemplateNameDoesNotExist").equals(result.errorCode())));
+        assertEquals(List.of(1, 2), results.stream()
+                .map(Ec2Service.LaunchTemplateVersionDeletion::versionNumber).toList());
+        assertEquals(Set.of("1"), template.getVersions().keySet());
     }
 
     private static final class InMemoryStorageFactory extends StorageFactory {

@@ -319,7 +319,7 @@ public class EksAccessEntryService {
         }
     }
 
-    private static int pageSize(Integer maxResults) {
+    static int pageSize(Integer maxResults) {
         int limit = maxResults == null ? 100 : maxResults;
         if (limit < 1 || limit > 100) {
             throw invalid("maxResults must be between 1 and 100");

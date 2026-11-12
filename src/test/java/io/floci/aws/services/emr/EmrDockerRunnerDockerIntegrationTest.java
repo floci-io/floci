@@ -43,12 +43,14 @@ import java.util.stream.Stream;
 
 import static io.floci.aws.testing.EmrRequests.awaitStep;
 import static io.floci.aws.testing.EmrRequests.emr;
+import static io.floci.aws.testing.EmrRequests.terminateClusterAndAwaitCleanup;
 import static io.floci.aws.testing.EmrServerlessRequests.awaitJobRun;
 import static io.floci.aws.testing.EmrServerlessRequests.createSparkApplication;
 import static io.floci.aws.testing.EmrServerlessRequests.deleteApplication;
 import static io.floci.aws.testing.EmrServerlessRequests.startJobRun;
 import static org.awaitility.Awaitility.await;
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.junit.jupiter.api.Assumptions.assumeTrue;
 
 /**
@@ -89,6 +91,9 @@ class EmrDockerRunnerDockerIntegrationTest {
 
     @Inject
     EmulatorConfig config;
+
+    @Inject
+    EmrService emrService;
 
     private S3Client s3;
     private String bucket;
@@ -171,6 +176,38 @@ class EmrDockerRunnerDockerIntegrationTest {
         assertEquals("COMPLETED", runStep("command-runner.jar", "hadoop", "fs", "-test", "-e",
                 "/stream/checkpoint/offsets/0"));
         assertEquals("COMPLETED", runStep("command-runner.jar", "hadoop", "fs", "-ls", "/"));
+    }
+
+    @Test
+    void aSparkStepRunsOnTheClustersYarnInEitherDeployMode() {
+        put("side/where.py", """
+                import socket
+                import sys
+                from pyspark.sql import SparkSession
+                spark = SparkSession.builder.getOrCreate()
+                sc = spark.sparkContext
+                executors = sc.parallelize(range(4), 4).map(lambda _: socket.gethostname()).distinct().collect()
+                where = " ".join([sc.master, sc.getConf().get("spark.submit.deployMode"),
+                                  str(socket.gethostname() in executors)])
+                print("driver: " + where, flush=True)
+                spark.createDataFrame([(where,)], ["value"]).coalesce(1).write.text(sys.argv[1])
+                """);
+        startCluster("[]", s3Uri("logs/"));
+
+        // Its driver in the step's container, its executors on the primary node.
+        assertEquals("COMPLETED", runStep("command-runner.jar", "spark-submit",
+                s3Uri("side/where.py"), s3Uri("client/")));
+        assertEquals("yarn client False\n", partFiles("client/"));
+        // Its driver on the primary node too, whose output is in its application's container logs, where a user
+        // reads it, the step's own holding only the client's.
+        assertEquals("COMPLETED", runStep("command-runner.jar", "spark-submit", "--deploy-mode", "cluster",
+                s3Uri("side/where.py"), s3Uri("cluster/")));
+        assertEquals("yarn cluster True\n", partFiles("cluster/"));
+        List<String> driverLogs = containerStdoutsHolding("driver: yarn cluster True");
+        assertEquals(1, driverLogs.size(), () -> "container stdouts with the driver's line: " + driverLogs);
+        String containers = "logs/" + clusterId + "/containers/";
+        assertTrue(driverLogs.get(0).matches(containers + "application_\\d+_\\d+/container_\\w+/stdout\\.gz"),
+                driverLogs.get(0));
     }
 
     @Test
@@ -302,14 +339,19 @@ class EmrDockerRunnerDockerIntegrationTest {
 
     /** A one-primary cluster of the cached release, with {@code configurations} as its Configurations. */
     private void startCluster(String configurations) {
+        startCluster(configurations, null);
+    }
+
+    /** The same, its logs under {@code logUri} when that is not null, as the cluster's {@code LogUri}. */
+    private void startCluster(String configurations, String logUri) {
         clusterId = emr("RunJobFlow", "{\"Name\":\"docker-runner\",\"ReleaseLabel\":\"emr-7.5.0\","
+                + (logUri == null ? "" : "\"LogUri\":\"" + logUri + "\",")
                 + "\"Applications\":[{\"Name\":\"Hadoop\"},{\"Name\":\"Spark\"}],"
                 + "\"Configurations\":" + configurations + ","
                 + "\"Instances\":{\"KeepJobFlowAliveWhenNoSteps\":true,\"InstanceGroups\":[{\"Name\":\"primary\","
                 + "\"InstanceRole\":\"MASTER\",\"InstanceType\":\"m5.xlarge\",\"InstanceCount\":1}]}}")
                 .then().statusCode(200).extract().jsonPath().getString("JobFlowId");
-        cleanup.register(() -> emr("TerminateJobFlows", "{\"JobFlowIds\":[\"" + clusterId + "\"]}")
-                .then().statusCode(200));
+        cleanup.register(() -> terminateClusterAndAwaitCleanup(clusterId, emrService));
     }
 
     /** Adds one step to the cluster and returns the state it ended in. */
@@ -345,6 +387,16 @@ class EmrDockerRunnerDockerIntegrationTest {
             }
         }
         return counts;
+    }
+
+    /** The keys of the cluster's container {@code stdout} logs under {@code logs/} that hold {@code line}. */
+    private List<String> containerStdoutsHolding(String line) {
+        String prefix = "logs/" + clusterId + "/containers/";
+        return s3.listObjectsV2Paginator(request -> request.bucket(bucket).prefix(prefix)).contents().stream()
+                .map(S3Object::key)
+                .filter(key -> key.endsWith("/stdout.gz"))
+                .filter(key -> S3TestClients.gunzipped(s3, bucket, key).contains(line))
+                .toList();
     }
 
     /** What a job wrote under {@code prefix}: its part files, in key order, one after the other. */

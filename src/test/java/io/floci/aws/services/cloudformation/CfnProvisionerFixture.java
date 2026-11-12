@@ -172,6 +172,7 @@ import io.floci.aws.services.secretsmanager.SecretsManagerService;
 import io.floci.aws.services.ses.SesIdentityService;
 import io.floci.aws.services.ses.SesReceiptRuleService;
 import io.floci.aws.services.ses.SesService;
+import io.floci.aws.services.signer.SignerService;
 import io.floci.aws.services.sns.SnsService;
 import io.floci.aws.services.sqs.SqsService;
 import io.floci.aws.services.ssm.SsmService;
@@ -182,6 +183,8 @@ import io.floci.aws.services.wafv2.WafV2Service;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
+import java.util.Map;
+import java.util.function.Function;
 
 /**
  * Builds {@link CfnResourceDispatcher} for tests without a wall of positional nulls.
@@ -202,12 +205,20 @@ final class CfnProvisionerFixture {
     private CfnProvisionerFixture() {
     }
 
+    /** The template engine a provisioner test hands to {@code provision}: fixed account and stack, no outputs. */
+    static CloudFormationTemplateEngine engine(ObjectMapper mapper, String region, Map<String, Boolean> conditions) {
+        return new CloudFormationTemplateEngine("000000000000", region, "test-stack", "stack/id",
+                Map.of(), Map.of(), Map.of(), conditions, Map.of(), mapper,
+                (Function<String, String>) name -> null);
+    }
+
     static Builder builder() {
         return new Builder();
     }
 
     static final class Builder {
 
+        private SignerService signerService;
         private S3Service s3Service;
         private S3VectorsService s3VectorsService;
         private SnsService snsService;
@@ -319,7 +330,9 @@ final class CfnProvisionerFixture {
             ensureDynamicReferences();
             List<CfnResourceProvisioner> discovered = new ArrayList<>();
             discovered.add(new CdkMetadataCfnProvisioner());
-            discovered.add(new SignerCfnProvisioner());
+            if (signerService != null) {
+                discovered.add(new SignerCfnProvisioner(signerService));
+            }
             if (stepFunctionsService != null) {
                 discovered.add(new StepFunctionsCfnProvisioner(stepFunctionsService, s3Service, objectMapper));
             }
@@ -559,6 +572,11 @@ final class CfnProvisionerFixture {
 
         public Builder s3Vectors(S3VectorsService v) {
             this.s3VectorsService = v;
+            return this;
+        }
+
+        public Builder signer(SignerService v) {
+            this.signerService = v;
             return this;
         }
 

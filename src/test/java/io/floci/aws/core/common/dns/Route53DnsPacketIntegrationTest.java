@@ -52,7 +52,7 @@ class Route53DnsPacketIntegrationTest {
         change(id, "CREATE", record(name, "SRV", 17,
                 "20 0 8080 first." + zone + ".", "10 100 65535 second." + zone));
 
-        byte[] request = request(name, 33);
+        byte[] request = DnsTestQuery.query(name, 33, 0x1234);
         byte[] response = query(request);
         assertPrivateHeader(response, 0, 2);
         ByteBuffer packet = ByteBuffer.wrap(response);
@@ -74,9 +74,9 @@ class Route53DnsPacketIntegrationTest {
         assertEquals(List.of("10 100 65535 second." + zone, "20 0 8080 first." + zone),
                 values.stream().sorted().toList());
 
-        assertPrivateHeader(query(request(name, 1)), 0, 0);
-        assertPrivateHeader(query(request("_tcp." + zone, 33)), 0, 0);
-        assertPrivateHeader(query(request("absent." + zone, 33)), 3, 0);
+        assertPrivateHeader(query(DnsTestQuery.query(name, 1, 0x1234)), 0, 0);
+        assertPrivateHeader(query(DnsTestQuery.query("_tcp." + zone, 33, 0x1234)), 0, 0);
+        assertPrivateHeader(query(DnsTestQuery.query("absent." + zone, 33, 0x1234)), 3, 0);
     }
 
     @ParameterizedTest
@@ -92,22 +92,22 @@ class Route53DnsPacketIntegrationTest {
             change(id, "CREATE", record("alias" + hop + "." + name, "CNAME", 30, target + "."));
         }
 
-        assertEquals(3, ByteBuffer.wrap(query(request(missing, type))).getShort(2) & 15);
-        byte[] response = query(request("alias0." + name, type));
+        assertEquals(3, ByteBuffer.wrap(query(DnsTestQuery.query(missing, type, 0x1234))).getShort(2) & 15);
+        byte[] response = query(DnsTestQuery.query("alias0." + name, type, 0x1234));
         assertEquals(3, ByteBuffer.wrap(response).getShort(2) & 15,
                 "A private CNAME must preserve its target's NXDOMAIN response");
         assertEquals(0, ByteBuffer.wrap(response).getShort(6));
 
         ResourceRecordSet text = record(missing, "TXT", 60, "\"present\"");
         change(id, "CREATE", text);
-        byte[] noData = query(request("alias0." + name, type));
+        byte[] noData = query(DnsTestQuery.query("alias0." + name, type, 0x1234));
         assertEquals(0, ByteBuffer.wrap(noData).getShort(2) & 15);
         assertEquals(0, ByteBuffer.wrap(noData).getShort(6));
         change(id, "DELETE", text);
-        assertEquals(3, ByteBuffer.wrap(query(request("alias0." + name, type))).getShort(2) & 15);
+        assertEquals(3, ByteBuffer.wrap(query(DnsTestQuery.query("alias0." + name, type, 0x1234))).getShort(2) & 15);
 
         change(id, "CREATE", record(missing, "A", 600, "192.0.2.17"));
-        byte[] request = request("alias0." + name, 1);
+        byte[] request = DnsTestQuery.query("alias0." + name, 1, 0x1234);
         byte[] restored = query(request);
         assertEquals(0, ByteBuffer.wrap(restored).getShort(2) & 15);
         assertEquals(1, ByteBuffer.wrap(restored).getShort(6));
@@ -146,7 +146,7 @@ class Route53DnsPacketIntegrationTest {
                     </ChangeResourceRecordSetsRequest>
                     """.formatted(endpoint, value))
                     .post("/2013-04-01/hostedzone/" + id + "/rrset").then().statusCode(200);
-            byte[] request = request(endpoint, 16);
+            byte[] request = DnsTestQuery.query(endpoint, 16, 0x1234);
             byte[] response = query(request);
             assertHeader(response, 0, true, 1, 0);
             assertEquals(17, ByteBuffer.wrap(response).getInt(request.length + 6));
@@ -154,7 +154,7 @@ class Route53DnsPacketIntegrationTest {
                     Arrays.copyOfRange(response, request.length + 12, response.length));
         }
         change(id, "DELETE", record(endpoint, "TXT", 17, "\"second\""));
-        assertNegative(query(request(endpoint, 16)), name, 3, 900);
+        assertNegative(query(DnsTestQuery.query(endpoint, 16, 0x1234)), name, 3, 900);
     }
 
     @Test
@@ -162,7 +162,7 @@ class Route53DnsPacketIntegrationTest {
         String name = uniqueName() + ".example";
         String id = createZone(name);
         List<String> expected = route53.getAssignedNameServers(id);
-        byte[] request = request(name, 2);
+        byte[] request = DnsTestQuery.query(name, 2, 0x1234);
         byte[] response = query(request);
         assertHeader(response, 0, true, 4, 0);
         ByteBuffer packet = ByteBuffer.wrap(response);
@@ -179,7 +179,7 @@ class Route53DnsPacketIntegrationTest {
         assertEquals(expected, actual);
         ResourceRecordSet soa = route53.listResourceRecordSets(id, null, null, 100).stream()
                 .filter(record -> "SOA".equals(record.getType())).findFirst().orElseThrow();
-        byte[] soaRequest = request(name, 6);
+        byte[] soaRequest = DnsTestQuery.query(name, 6, 0x1234);
         byte[] soaResponse = query(soaRequest);
         assertHeader(soaResponse, 0, true, 1, 0);
         assertArrayEquals(new DnsRecord.Soa(soa.getRecords().getFirst().getValue()).data(),
@@ -194,12 +194,12 @@ class Route53DnsPacketIntegrationTest {
                 "ns.example. host.example. 1 7200 900 1209600 30"));
         change(id, "CREATE", record("address." + name, "A", 60, "192.0.2.1"));
         change(id, "CREATE", record("leaf.branch." + name, "TXT", 60, "\"leaf\""));
-        assertNegative(query(request("address." + name, 16)), name, 0, 30);
-        assertNegative(query(request("branch." + name, 16)), name, 0, 30);
-        assertNegative(query(request("absent." + name, 16)), name, 3, 30);
+        assertNegative(query(DnsTestQuery.query("address." + name, 16, 0x1234)), name, 0, 30);
+        assertNegative(query(DnsTestQuery.query("branch." + name, 16, 0x1234)), name, 0, 30);
+        assertNegative(query(DnsTestQuery.query("absent." + name, 16, 0x1234)), name, 3, 30);
         change(id, "CREATE", record("*." + name, "TXT", 45, "\"wildcard\""));
-        assertHeader(query(request("other." + name, 16)), 0, true, 1, 0);
-        assertNegative(query(request("missing.branch." + name, 16)), name, 3, 30);
+        assertHeader(query(DnsTestQuery.query("other." + name, 16, 0x1234)), 0, true, 1, 0);
+        assertNegative(query(DnsTestQuery.query("missing.branch." + name, 16, 0x1234)), name, 3, 30);
     }
 
     @Test
@@ -209,9 +209,9 @@ class Route53DnsPacketIntegrationTest {
         String parentId = createZone(parent);
         change(parentId, "CREATE", record("marker." + child, "TXT", 60, "\"parent\""));
         createZone(child);
-        assertNegative(query(request("marker." + child, 16)), child, 3, 900);
+        assertNegative(query(DnsTestQuery.query("marker." + child, 16, 0x1234)), child, 3, 900);
         createZone(child);
-        assertHeader(query(request("marker." + child, 16)), 5, false, 0, 0);
+        assertHeader(query(DnsTestQuery.query("marker." + child, 16, 0x1234)), 5, false, 0, 0);
     }
 
     @Test
@@ -229,11 +229,11 @@ class Route53DnsPacketIntegrationTest {
         }
         String awsName = uniqueName() + ".amazonaws.com";
         createZone(awsName);
-        byte[] address = query(request(awsName, 1));
+        byte[] address = query(DnsTestQuery.query(awsName, 1, 0x1234));
         assertArrayEquals(new byte[]{127, 0, 0, 1},
                 Arrays.copyOfRange(address, address.length - 4, address.length));
         for (String label : List.of("weighted", "alias", "leaf.delegated")) {
-            assertHeader(query(request(label + "." + name, 16)), 5, false, 0, 0);
+            assertHeader(query(DnsTestQuery.query(label + "." + name, 16, 0x1234)), 5, false, 0, 0);
         }
     }
 
@@ -243,7 +243,7 @@ class Route53DnsPacketIntegrationTest {
         String id = createZone(name);
         change(id, "CREATE", record("marker." + name, "TXT", 60, "\"public\""));
         for (int field : List.of(2, 4, -1, -2)) {
-            byte[] request = request("marker." + name, 16);
+            byte[] request = DnsTestQuery.query("marker." + name, 16, 0x1234);
             ByteBuffer packet = ByteBuffer.wrap(request);
             if (field == -2) {
                 packet.putShort(2, (short) 0x0140);
@@ -274,14 +274,14 @@ class Route53DnsPacketIntegrationTest {
                 case "SOA" -> 6;
                 default -> 16;
             };
-            assertHeader(query(request(owner, queryType)), 5, false, 0, 0);
+            assertHeader(query(DnsTestQuery.query(owner, queryType, 0x1234)), 5, false, 0, 0);
         }
         for (long ttl : List.of(-1L, 2147483648L)) {
             change(id, "UPSERT", record("ttl." + name, "TXT", ttl, "\"value\""));
-            assertHeader(query(request("ttl." + name, 16)), 5, false, 0, 0);
+            assertHeader(query(DnsTestQuery.query("ttl." + name, 16, 0x1234)), 5, false, 0, 0);
         }
         change(id, "UPSERT", record(name, "SOA", 60, (String) null));
-        assertHeader(query(request("missing." + name, 16)), 5, false, 0, 0);
+        assertHeader(query(DnsTestQuery.query("missing." + name, 16, 0x1234)), 5, false, 0, 0);
     }
 
     @Test
@@ -290,7 +290,7 @@ class Route53DnsPacketIntegrationTest {
         String id = createZone(name);
         String value = "\"a b\" \"\\\"\\\\\\377\" \"\"";
         change(id, "CREATE", record("text." + name, "TXT", 90, value));
-        byte[] request = request("text." + name, 16);
+        byte[] request = DnsTestQuery.query("text." + name, 16, 0x1234);
         byte[] response = query(request);
         assertArrayEquals(new byte[]{3, 'a', ' ', 'b', 3, '"', '\\', (byte) 255, 0},
                 Arrays.copyOfRange(response, request.length + 12, response.length));
@@ -329,12 +329,6 @@ class Route53DnsPacketIntegrationTest {
         return "dns-" + UUID.randomUUID().toString().substring(0, 8);
     }
 
-    private static byte[] request(String name, int type) {
-        byte[] encoded = DnsRecord.encodeName(name);
-        return ByteBuffer.allocate(16 + encoded.length).putShort((short) 0x1234).putShort((short) 0x0100)
-                .putShort((short) 1).putShort((short) 0).putShort((short) 0).putShort((short) 0)
-                .put(encoded).putShort((short) type).putShort((short) 1).array();
-    }
 
     private static void assertPrivateHeader(byte[] response, int rcode, int answers) {
         ByteBuffer packet = ByteBuffer.wrap(response);

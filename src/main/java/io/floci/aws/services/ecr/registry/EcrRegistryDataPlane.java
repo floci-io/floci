@@ -80,29 +80,61 @@ public class EcrRegistryDataPlane {
             return;
         }
 
-        context.request().pause();
-
-        RegistryRequest registryRequest = request.get();
-        if (!registryRequest.repositoryName().isEmpty()) {
-            registryRequest = registryRequest.withStorageRepositoryName(
-                    ecrService.registryRepositoryName(
-                            registryRequest.repositoryName(), registryRequest.accountId(), registryRequest.region()));
-        }
-        String immutableTag = immutableTag(context, registryRequest);
-        if (immutableTag != null && !ecrService.claimImmutableTag(immutableTag)) {
-            context.request().resume();
-            imageTagAlreadyExists(context, registryRequest);
+        boolean isWrite = isWriteRequest(context.request().method());
+        // Bug #6150: Refuse mutating write requests with HTTP 503 while garbage collection runs
+        if (isWrite && !registryManager.tryAcquireWriteAdmission()) {
+            registryUnavailable(context, "ECR registry is temporarily unavailable while garbage collection is in progress.");
             return;
         }
 
-        Exchange exchange = new Exchange(immutableTag, manifestWriteRepository(context, registryRequest));
-        // A client that goes away, by resetting its HTTP/2 stream or closing the connection, ends
-        // the exchange at any point, the registry check included: otherwise the registry keeps
-        // waiting for the rest of a body with a Content-Length, and the exchange's connection,
-        // client and immutable tag lock stay.
-        context.response().closeHandler(closed -> exchange.end());
-        context.request().exceptionHandler(failure -> exchange.end());
-        lockRepositoryWritesThenCheck(context, registryRequest, exchange);
+        boolean writeAdmissionHeld = isWrite;
+        Exchange activeExchange = null;
+        String immutableTag = null;
+        boolean tagClaimed = false;
+        try {
+            context.request().pause();
+
+            RegistryRequest registryRequest = request.get();
+            if (!registryRequest.repositoryName().isEmpty()) {
+                registryRequest = registryRequest.withStorageRepositoryName(
+                        ecrService.registryRepositoryName(
+                                registryRequest.repositoryName(), registryRequest.accountId(), registryRequest.region()));
+            }
+            immutableTag = immutableTag(context, registryRequest);
+            if (immutableTag != null) {
+                if (!ecrService.claimImmutableTag(immutableTag)) {
+                    context.request().resume();
+                    if (writeAdmissionHeld) {
+                        writeAdmissionHeld = false;
+                        registryManager.releaseWriteAdmission();
+                    }
+                    imageTagAlreadyExists(context, registryRequest);
+                    return;
+                }
+                tagClaimed = true;
+            }
+
+            Exchange exchange = new Exchange(immutableTag, manifestWriteRepository(context, registryRequest), isWrite);
+            activeExchange = exchange;
+            writeAdmissionHeld = false;
+            context.response().closeHandler(closed -> exchange.end());
+            context.request().exceptionHandler(failure -> exchange.end());
+
+            lockRepositoryWritesThenCheck(context, registryRequest, exchange);
+        } catch (Throwable t) {
+            if (activeExchange != null) {
+                activeExchange.end();
+            } else {
+                if (tagClaimed) {
+                    release(immutableTag);
+                }
+                if (writeAdmissionHeld) {
+                    writeAdmissionHeld = false;
+                    registryManager.releaseWriteAdmission();
+                }
+            }
+            throw t;
+        }
     }
 
     /**
@@ -133,6 +165,12 @@ public class EcrRegistryDataPlane {
      */
     private void lockRepositoryWritesThenCheck(RoutingContext context, RegistryRequest request, Exchange exchange) {
         if (exchange.ended() || exchange.holdingWriteLock()) {
+            return;
+        }
+        // Bug #6150: If GC began while polling for the repository write lock, refuse the queued write request
+        if (registryManager.isGarbageCollecting() && isWriteRequest(context.request().method())) {
+            exchange.end();
+            registryUnavailable(context, "ECR registry is temporarily unavailable while garbage collection is in progress.");
             return;
         }
         String repository = exchange.writeLockRepository();
@@ -211,6 +249,12 @@ public class EcrRegistryDataPlane {
                 // registry.
                 return;
             }
+            if (exchange.isWrite() && registryManager.isGarbageCollecting()) {
+                context.request().resume();
+                exchange.end();
+                registryUnavailable(context, "ECR registry is temporarily unavailable while garbage collection is in progress.");
+                return;
+            }
             if (result.failed()) {
                 context.request().resume();
                 exchange.end();
@@ -274,13 +318,23 @@ public class EcrRegistryDataPlane {
     }
 
     private static void registryUnavailable(RoutingContext context) {
+        registryUnavailable(context, "ECR registry is unavailable. Check Docker and registry connectivity. "
+                + "When running Floci in Docker, use a user-defined network shared with the registry "
+                + "(FLOCI_SERVICES_ECR_DOCKER_NETWORK).");
+    }
+
+    private static void registryUnavailable(RoutingContext context, String message) {
         if (!context.response().ended() && !context.response().closed()) {
-            String message = "ECR registry is unavailable. Check Docker and registry connectivity. "
-                    + "When running Floci in Docker, use a user-defined network shared with the registry "
-                    + "(FLOCI_SERVICES_ECR_DOCKER_NETWORK).";
             context.response().putHeader("Docker-Distribution-API-Version", "registry/2.0");
             registryError(context, 503, "UNAVAILABLE", message);
         }
+    }
+
+    private static boolean isWriteRequest(HttpMethod method) {
+        return method == HttpMethod.POST
+                || method == HttpMethod.PUT
+                || method == HttpMethod.PATCH
+                || method == HttpMethod.DELETE;
     }
 
     /** Answers {@code status} unless the response is already written or its client went away. */
@@ -359,15 +413,22 @@ public class EcrRegistryDataPlane {
 
         private final String immutableTag;
         private final String writeLockRepository;
+        private final boolean isWrite;
         private final AtomicBoolean writeLockHeld = new AtomicBoolean();
         private final AtomicBoolean ended = new AtomicBoolean();
+        private final AtomicBoolean admissionReleased = new AtomicBoolean();
         private Buffer waitingBody;
         private boolean waitingBodyRead;
         private HttpClient client;
 
-        private Exchange(String immutableTag, String writeLockRepository) {
+        private Exchange(String immutableTag, String writeLockRepository, boolean isWrite) {
             this.immutableTag = immutableTag;
             this.writeLockRepository = writeLockRepository;
+            this.isWrite = isWrite;
+        }
+
+        private boolean isWrite() {
+            return isWrite;
         }
 
         private boolean ended() {
@@ -430,19 +491,36 @@ public class EcrRegistryDataPlane {
             return registryClient;
         }
 
+        private void releaseAdmission() {
+            if (isWrite && admissionReleased.compareAndSet(false, true)) {
+                registryManager.releaseWriteAdmission();
+            }
+        }
+
         private void end() {
             if (!ended.compareAndSet(false, true)) {
                 return;
             }
             releaseWriteLock();
             if (client == null) {
-                release(immutableTag);
+                try {
+                    releaseAdmission();
+                } finally {
+                    release(immutableTag);
+                }
                 return;
             }
             // Closing the client closes the exchange's registry connection, which the registry
-            // sees and aborts on. The tag is free only once it is closed, so another write of the
-            // tag cannot start its check while this one can still reach the registry.
-            client.close().onComplete(closed -> release(immutableTag));
+            // sees and aborts on. The tag and write admission are free only once it is closed, so
+            // another write of the tag or garbage collection cannot start while this one can still
+            // reach the registry.
+            client.close().onComplete(closed -> {
+                try {
+                    releaseAdmission();
+                } finally {
+                    release(immutableTag);
+                }
+            });
         }
 
         private void releaseWriteLock() {
@@ -473,8 +551,9 @@ public class EcrRegistryDataPlane {
                     storageRepositoryName, repository, backendUri,
                     tag(path)));
         }
-        // A loopback host is the address Floci itself hands the Docker daemon for the ECS, Lambda
-        // and EMR Serverless images it pulls, path style in either URI style (see rewriteImageUri).
+        // A loopback host is the address Floci itself hands a Docker daemon other than Docker Desktop
+        // for the ECS, Lambda and EMR Serverless images it pulls, path style in either URI style
+        // (see rewriteImageUri).
         if (!"path".equalsIgnoreCase(uriStyle) && !isLoopbackHost(host)) {
             return Optional.empty();
         }

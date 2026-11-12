@@ -2,6 +2,7 @@ package io.floci.aws.services.apigateway;
 
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.core.type.TypeReference;
+import com.fasterxml.jackson.databind.DeserializationFeature;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
@@ -16,6 +17,7 @@ import io.floci.aws.core.common.AwsRegions;
 import io.floci.aws.core.common.CloudFrontEdgeDomain;
 import io.floci.aws.core.common.RegionResolver;
 import io.floci.aws.core.common.ReservedTags;
+import io.floci.aws.core.common.Resettable;
 import io.floci.aws.core.common.SmithyValidationErrors;
 import io.floci.aws.core.resource.ExplorerResource;
 import io.floci.aws.core.resource.ResourceProvider;
@@ -23,6 +25,7 @@ import io.floci.aws.core.resource.SupportedResourceType;
 import io.floci.aws.core.storage.AccountAwareStorageBackend;
 import io.floci.aws.core.storage.StorageBackend;
 import io.floci.aws.core.storage.StorageFactory;
+import io.floci.aws.core.storage.WriteProfile;
 import io.floci.aws.services.apigateway.model.Account;
 import io.floci.aws.services.apigateway.model.ApiGatewayResource;
 import io.floci.aws.services.apigateway.model.ApiKey;
@@ -31,6 +34,7 @@ import io.floci.aws.services.apigateway.model.BasePathMapping;
 import io.floci.aws.services.apigateway.model.CustomDomain;
 import io.floci.aws.services.apigateway.model.Deployment;
 import io.floci.aws.services.apigateway.model.DeploymentExportSnapshot;
+import io.floci.aws.services.apigateway.model.DocumentationPart;
 import io.floci.aws.services.apigateway.model.EndpointConfiguration;
 import io.floci.aws.services.apigateway.model.EndpointType;
 import io.floci.aws.services.apigateway.model.GatewayResponse;
@@ -65,10 +69,14 @@ import jakarta.inject.Inject;
 import org.jboss.logging.Logger;
 
 import java.nio.charset.StandardCharsets;
+import java.time.Clock;
+import java.time.DayOfWeek;
+import java.time.Duration;
 import java.time.Instant;
 import java.time.LocalDate;
+import java.time.ZoneOffset;
 import java.time.format.DateTimeParseException;
-import java.time.temporal.ChronoUnit;
+import java.time.temporal.TemporalAdjusters;
 import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.HashMap;
@@ -81,13 +89,14 @@ import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
 import java.util.Set;
+import java.util.StringJoiner;
 import java.util.UUID;
 import java.util.function.Function;
 import java.util.function.Predicate;
 import java.util.regex.Pattern;
 
 @ApplicationScoped
-public class ApiGatewayService implements ResourceProvider {
+public class ApiGatewayService implements ResourceProvider, Resettable {
 
     /** The only partition where API Gateway offers edge-optimized APIs and custom domain names. */
     private static final Set<String> EDGE_OPTIMIZED_PARTITIONS = Set.of("aws");
@@ -124,6 +133,7 @@ public class ApiGatewayService implements ResourceProvider {
     private final StorageBackend<String, RequestValidator> requestValidatorStore;
     private final StorageBackend<String, GatewayResponse> gatewayResponseStore;
     private final StorageBackend<String, Model> modelStore;
+    private final StorageBackend<String, DocumentationPart> documentationPartStore;
     private final StorageBackend<String, VpcLink> vpcLinkStore;
     private final StorageBackend<String, Account> accountStore;
     private final AccountAwareStorageBackend<CustomDomain> domainStore;
@@ -143,6 +153,13 @@ public class ApiGatewayService implements ResourceProvider {
      * be undone.
      */
     private final Object usagePlanLock = new Object();
+    /** Calls admitted per UTC day, keyed region::usagePlanId::keyId::yyyy-MM-dd. */
+    private final AccountAwareStorageBackend<Long> usageStore;
+    /** The usage plan throttles' token buckets, keyed account::region::usagePlanId::keyId; in memory only. */
+    private final Map<String, TokenBucket> throttleBuckets = new HashMap<>();
+    /** Guards the usage counts and the token buckets: metering a call is a read-modify-write of both. */
+    private final Object usageLock = new Object();
+    private final Clock clock;
     private final TlsCertificateManager certificateManager;
     private final EmulatorConfig config;
     private final RegionResolver regionResolver;
@@ -182,17 +199,18 @@ public class ApiGatewayService implements ResourceProvider {
     ApiGatewayService(StorageFactory storageFactory, EmulatorConfig config,
                       TlsCertificateManager certificateManager, RegionResolver regionResolver) {
         this(storageFactory, config, certificateManager, regionResolver,
-                new ApiGatewayV2Service(storageFactory, config, regionResolver));
+                new ApiGatewayV2Service(storageFactory, config, regionResolver), Clock.systemUTC());
     }
 
     @Inject
     public ApiGatewayService(StorageFactory storageFactory, EmulatorConfig config,
                              TlsCertificateManager certificateManager, RegionResolver regionResolver,
-                             ApiGatewayV2Service apiGatewayV2Service) {
+                             ApiGatewayV2Service apiGatewayV2Service, Clock clock) {
         this.certificateManager = certificateManager;
         this.config = config;
         this.regionResolver = regionResolver;
         this.apiGatewayV2Service = apiGatewayV2Service;
+        this.clock = clock;
         this.apiStore = storageFactory.create("apigateway", "apigateway-apis.json",
                 new TypeReference<>() {
                 });
@@ -229,6 +247,9 @@ public class ApiGatewayService implements ResourceProvider {
         this.modelStore = storageFactory.create("apigateway", "apigateway-models.json",
                 new TypeReference<>() {
                 });
+        this.documentationPartStore = storageFactory.create("apigateway", "apigateway-documentation-parts.json",
+                new TypeReference<>() {
+                });
         this.vpcLinkStore = storageFactory.create("apigateway", "apigateway-vpclinks.json",
                 new TypeReference<>() {
                 });
@@ -241,6 +262,9 @@ public class ApiGatewayService implements ResourceProvider {
         this.basePathMappingStore = storageFactory.create("apigateway", "apigateway-mappings.json",
                 new TypeReference<>() {
                 });
+        // Every metered call writes a count, so under persistent mode the store is journaled.
+        this.usageStore = storageFactory.create("apigateway", "apigateway-usage.json",
+                new TypeReference<Map<String, Long>>() {}, WriteProfile.APPEND_HEAVY);
     }
 
     // ──────────────────────────── Account ────────────────────────────
@@ -471,7 +495,7 @@ public class ApiGatewayService implements ResourceProvider {
         return apiStore.scan(k -> k.startsWith(prefix));
     }
 
-    public void deleteRestApi(String region, String apiId) {
+    public synchronized void deleteRestApi(String region, String apiId) {
         getRestApi(region, apiId);
         apiStore.delete(apiKey(region, apiId));
         // Simple cascade: delete resources for this API
@@ -481,6 +505,9 @@ public class ApiGatewayService implements ResourceProvider {
         deploymentModelStore.keys().stream().filter(k -> k.startsWith(prefix)).forEach(deploymentModelStore::delete);
         stageStore.keys().stream().filter(k -> k.startsWith(prefix)).forEach(stageStore::delete);
         modelStore.keys().stream().filter(k -> k.startsWith(prefix)).forEach(modelStore::delete);
+        Set<String> documentationPartKeys = new HashSet<>(documentationPartStore.keys());
+        documentationPartKeys.removeIf(key -> !key.startsWith(prefix));
+        documentationPartStore.deleteAllAtomically(documentationPartKeys);
         requestValidatorStore.keys().stream().filter(k -> k.startsWith(prefix)).forEach(requestValidatorStore::delete);
         gatewayResponseStore.keys().stream().filter(k -> k.startsWith(prefix)).forEach(gatewayResponseStore::delete);
         LOG.infov("Deleted REST API: {0} in {1}", apiId, region);
@@ -1133,16 +1160,10 @@ public class ApiGatewayService implements ResourceProvider {
             String suffix = "/" + settingKey;
             if (!path.endsWith(suffix)) continue;
 
-            String prefix = path.substring(1, path.length() - suffix.length());
-            int lastSlash = prefix.lastIndexOf('/');
-            if (lastSlash < 0) return;
-            // AWS escapes the resource path's slashes as ~1 in the patch path ("/~1pets/GET/...")
-            // but reports the setting keyed by the plain path ("pets/GET"), so normalise both the
-            // escaped and unescaped spellings onto that one key.
-            String resourcePath = unescapeJsonPointer(prefix.substring(0, lastSlash));
-            if (resourcePath.startsWith("/")) resourcePath = resourcePath.substring(1);
-            String httpMethod = prefix.substring(lastSlash + 1);
-            String methodKey = resourcePath + "/" + httpMethod;
+            String methodKey = path.substring(1, path.length() - suffix.length());
+            if (methodKey.lastIndexOf('/') < 0) {
+                return;
+            }
 
             MethodSetting setting = stage.getMethodSettings()
                     .computeIfAbsent(methodKey, k -> new MethodSetting());
@@ -1444,14 +1465,18 @@ public class ApiGatewayService implements ResourceProvider {
     /**
      * Deleting a key detaches it from every usage plan, matching AWS. Usage plan keys hold their own
      * copy of the key value, so leaving the associations behind would keep a deleted key working as a
-     * credential on the data plane and keep it listed by GetUsagePlanKeys.
+     * credential on the data plane and keep it listed by GetUsagePlanKeys. Under the plan lock, so
+     * CreateUsagePlanKey cannot attach the key after the sweep.
      */
     public void deleteApiKey(String region, String apiKeyId) {
-        getApiKey(region, apiKeyId);
-        for (UsagePlan plan : getUsagePlans(region)) {
-            usagePlanKeyStore.delete(usagePlanKeyPathKey(region, plan.getId(), apiKeyId));
+        synchronized (usagePlanLock) {
+            getApiKey(region, apiKeyId);
+            for (UsagePlan plan : getUsagePlans(region)) {
+                usagePlanKeyStore.delete(usagePlanKeyPathKey(region, plan.getId(), apiKeyId));
+            }
+            forgetUsage(meterKey -> meterKey.startsWith(region + "::") && meterKey.endsWith("::" + apiKeyId));
+            apiKeyStore.delete(apiKeyGlobalKey(region, apiKeyId));
         }
-        apiKeyStore.delete(apiKeyGlobalKey(region, apiKeyId));
     }
 
     public ApiKey updateApiKey(String region, String apiKeyId, List<Map<String, String>> patchOperations) {
@@ -1629,10 +1654,29 @@ public class ApiGatewayService implements ResourceProvider {
         return usagePlanStore.scan(k -> k.startsWith(prefix));
     }
 
+    /**
+     * {@code GetUsagePlans} with its {@code keyId} filter, measured on API Gateway: only the plans
+     * the key is added to, an empty list for a key in no plan or no key at all, and every plan for a
+     * blank {@code keyId}.
+     */
+    public List<UsagePlan> getUsagePlans(String region, String keyId) {
+        List<UsagePlan> plans = getUsagePlans(region);
+        if (keyId == null || keyId.isBlank()) {
+            return plans;
+        }
+        return plans.stream()
+                .filter(plan -> usagePlanKeyStore.get(usagePlanKeyPathKey(region, plan.getId(), keyId)).isPresent())
+                .toList();
+    }
+
+    /** Its key associations go with it, or a plan recreated with its id would inherit the old keys. */
     public void deleteUsagePlan(String region, String usagePlanId) {
         synchronized (usagePlanLock) {
             getUsagePlan(region, usagePlanId);
             usagePlanStore.delete(usagePlanKey(region, usagePlanId));
+            String prefix = region + "::" + usagePlanId + "::";
+            usagePlanKeyStore.keys().stream().filter(k -> k.startsWith(prefix)).forEach(usagePlanKeyStore::delete);
+            forgetUsage(meterKey -> meterKey.startsWith(prefix));
         }
     }
 
@@ -1697,22 +1741,25 @@ public class ApiGatewayService implements ResourceProvider {
 
     // ──────────────────────────── Usage Plan Keys ────────────────────────────
 
+    /** Under the plan lock, so a key cannot be written after DeleteUsagePlan or DeleteApiKey swept it. */
     public UsagePlanKey createUsagePlanKey(String region, String usagePlanId, Map<String, Object> request) {
-        getUsagePlan(region, usagePlanId);
-        String keyId = (String) request.get("keyId");
-        String keyType = (String) request.get("keyType");
+        synchronized (usagePlanLock) {
+            getUsagePlan(region, usagePlanId);
+            String keyId = (String) request.get("keyId");
+            String keyType = (String) request.get("keyType");
 
-        ApiKey apiKey = getApiKey(region, keyId);
+            ApiKey apiKey = getApiKey(region, keyId);
 
-        UsagePlanKey usagePlanKey = new UsagePlanKey();
-        usagePlanKey.setId(apiKey.getId());
-        usagePlanKey.setName(apiKey.getName());
-        usagePlanKey.setType(keyType);
-        usagePlanKey.setValue(apiKey.getValue());
+            UsagePlanKey usagePlanKey = new UsagePlanKey();
+            usagePlanKey.setId(apiKey.getId());
+            usagePlanKey.setName(apiKey.getName());
+            usagePlanKey.setType(keyType);
+            usagePlanKey.setValue(apiKey.getValue());
 
-        usagePlanKeyStore.put(usagePlanKeyPathKey(region, usagePlanId, keyId), usagePlanKey);
-        LOG.infov("Created Usage Plan Key {0} for Usage Plan {1}", keyId, usagePlanId);
-        return usagePlanKey;
+            usagePlanKeyStore.put(usagePlanKeyPathKey(region, usagePlanId, keyId), usagePlanKey);
+            LOG.infov("Created Usage Plan Key {0} for Usage Plan {1}", keyId, usagePlanId);
+            return usagePlanKey;
+        }
     }
 
     public UsagePlanKey getUsagePlanKey(String region, String usagePlanId, String keyId) {
@@ -1728,21 +1775,21 @@ public class ApiGatewayService implements ResourceProvider {
      * {@code [used, remaining]} pair per day of the inclusive range. {@code position} is absent
      * when there is no further page, which is what stops a caller's pagination loop.
      *
-     * <p><strong>Both numbers are zero.</strong> Nothing counts requests per API key, so there is no
-     * use to report or to subtract from a plan's quota. Counting on the execute path is the piece
-     * still missing; this method is where it would surface.
+     * <p>{@code used} is what {@link #meterApiKeyCall} admitted that day and {@code remaining} the
+     * quota limit minus the use from the start of that day's quota period through the day, so a day
+     * nothing was called on still reports the limit left. A plan without a quota reports
+     * {@code [0, 0]}, as AWS does.
      */
     public UsageReport getUsage(String region, String usagePlanId, String startDate, String endDate,
                                 String keyId, Integer limit, String position) {
         // Resolving the plan first gives the same NotFoundException an unknown id gets on AWS.
-        getUsagePlan(region, usagePlanId);
+        UsagePlan.Quota quota = getUsagePlan(region, usagePlanId).getQuota();
 
         LocalDate start = parseUsageDate(startDate, "startDate");
         LocalDate end = parseUsageDate(endDate, "endDate");
         if (end.isBefore(start)) {
             throw new AwsException("BadRequestException", "Usage end date must be after start date", 400);
         }
-        int days = (int) ChronoUnit.DAYS.between(start, end) + 1;
         int pageSize = resolveUsageLimit(limit);
 
         List<UsagePlanKey> keys = getUsagePlanKeys(region, usagePlanId).stream()
@@ -1773,17 +1820,31 @@ public class ApiGatewayService implements ResourceProvider {
         boolean more = from + pageSize < keys.size();
 
         Map<String, List<long[]>> items = new LinkedHashMap<>();
-        for (UsagePlanKey key : page) {
-            List<long[]> perDay = new ArrayList<>();
-            for (int day = 0; day < days; day++) {
-                // [used, remaining]: nothing is metered, so there is no use to report or subtract from a quota.
-                perDay.add(new long[] {0L, 0L});
+        // Under the metering lock, so a pair never mixes counts from before and after a call.
+        synchronized (usageLock) {
+            for (UsagePlanKey key : page) {
+                items.put(key.getId(), quota == null
+                        ? start.datesUntil(end.plusDays(1)).map(day -> new long[] {0L, 0L}).toList()
+                        : usagePerDay(usagePlanKeyPathKey(region, usagePlanId, key.getId()), start, end, quota));
             }
-            items.put(key.getId(), perDay);
         }
         // A token only when another page exists; its absence is what ends a caller's loop.
         String next = more && !page.isEmpty() ? page.get(page.size() - 1).getId() : null;
         return new UsageReport(usagePlanId, start.toString(), end.toString(), items, next);
+    }
+
+    /** One pass from the start of {@code start}'s quota period, carrying the period's use from day to day. */
+    private List<long[]> usagePerDay(String meterKey, LocalDate start, LocalDate end, UsagePlan.Quota quota) {
+        List<long[]> perDay = new ArrayList<>();
+        long periodUsed = 0L;
+        for (LocalDate day = quotaPeriodStart(start, quota); !day.isAfter(end); day = day.plusDays(1)) {
+            long used = usageStore.get(meterKey + "::" + day).orElse(0L);
+            periodUsed = (quotaPeriodStart(day, quota).equals(day) ? 0L : periodUsed) + used;
+            if (!day.isBefore(start)) {
+                perDay.add(new long[] {used, Math.max(0L, quota.limit() - periodUsed)});
+            }
+        }
+        return perDay;
     }
 
     /**
@@ -1826,6 +1887,109 @@ public class ApiGatewayService implements ResourceProvider {
         } catch (DateTimeParseException e) {
             throw new AwsException("BadRequestException", field + " must be a date of the form YYYY-MM-DD", 400);
         }
+    }
+
+    /**
+     * Meters one execute-api call made with a key of a usage plan, as measured on a REST API in
+     * eu-west-1: the plan's throttle refuses it first, then its quota, and only an admitted call
+     * counts. Nothing is counted for a plan without a quota, which AWS reports as {@code [0, 0]}.
+     *
+     * @return the gateway response refusing the call, or null when it is admitted
+     */
+    public GatewayResponseType meterApiKeyCall(String region, String usagePlanId, String keyId) {
+        synchronized (usageLock) {
+            UsagePlan plan = usagePlanStore.get(usagePlanKey(region, usagePlanId)).orElse(null);
+            String meterKey = usagePlanKeyPathKey(region, usagePlanId, keyId);
+            // Rechecked here because deletion detaches the key before forgetUsage takes this lock.
+            if (plan == null || usagePlanKeyStore.get(meterKey).isEmpty()) {
+                return null;
+            }
+            // One snapshot, as an update can replace the throttle and quota while this call runs.
+            UsagePlan.Limits limits = plan.limits();
+            Instant now = clock.instant();
+            if (limits.throttle() != null && !takeToken(meterKey, limits.throttle(), now)) {
+                return GatewayResponseType.THROTTLED;
+            }
+            UsagePlan.Quota quota = limits.quota();
+            if (quota == null) {
+                return null;
+            }
+            LocalDate today = LocalDate.ofInstant(now, ZoneOffset.UTC);
+            if (usedBetween(meterKey, quotaPeriodStart(today, quota), today) >= quota.limit()) {
+                return GatewayResponseType.QUOTA_EXCEEDED;
+            }
+            usageStore.put(meterKey + "::" + today, usedBetween(meterKey, today, today) + 1);
+            return null;
+        }
+    }
+
+    /**
+     * A token bucket holding up to {@code burstLimit} calls, starting full and refilled at
+     * {@code rateLimit} a second: measured, burst 0 throttles every call and rate 0 never refills.
+     * ponytail: per-method throttles of the plan's stages are not enforced.
+     */
+    private boolean takeToken(String meterKey, UsagePlan.Throttle throttle, Instant now) {
+        // The usage store is account-scoped by its backend; the buckets are not, so the key carries it.
+        String bucketKey = regionResolver.getAccountId() + "::" + meterKey;
+        TokenBucket bucket = throttleBuckets.get(bucketKey);
+        double tokens = bucket == null ? throttle.burstLimit() : Math.min(throttle.burstLimit(), bucket.tokens()
+                + throttle.rateLimit() * Math.max(0L, Duration.between(bucket.refilledAt(), now).toNanos()) / 1e9);
+        boolean admitted = tokens >= 1;
+        // Never rewound, so a clock stepping back and forth cannot refill the bucket twice.
+        Instant refilledAt = bucket == null || now.isAfter(bucket.refilledAt()) ? now : bucket.refilledAt();
+        throttleBuckets.put(bucketKey, new TokenBucket(admitted ? tokens - 1 : tokens, refilledAt));
+        return admitted;
+    }
+
+    private record TokenBucket(double tokens, Instant refilledAt) {}
+
+    /**
+     * Drops, in one pass, the counts and buckets of each meter key ({@code region::plan::key}) matched,
+     * so a plan or key recreated with its id starts unused.
+     */
+    private void forgetUsage(Predicate<String> meterKey) {
+        synchronized (usageLock) {
+            usageStore.keys().stream().filter(k -> meterKey.test(k.substring(0, k.lastIndexOf("::"))))
+                    .forEach(usageStore::delete);
+            String accountPrefix = regionResolver.getAccountId() + "::";
+            throttleBuckets.keySet().removeIf(k -> k.startsWith(accountPrefix)
+                    && meterKey.test(k.substring(accountPrefix.length())));
+        }
+    }
+
+    /** Storage is wiped before this runs; the in-memory token buckets go with it. */
+    @Override
+    public void clear() {
+        synchronized (usageLock) {
+            throttleBuckets.clear();
+        }
+    }
+
+    private long usedBetween(String meterKey, LocalDate from, LocalDate to) {
+        return from.datesUntil(to.plusDays(1))
+                .mapToLong(day -> usageStore.get(meterKey + "::" + day).orElse(0L))
+                .sum();
+    }
+
+    /**
+     * The first UTC day of the quota period holding {@code day}. Measured, the offset does not
+     * subtract requests as documented, and AWS bounds it below the days of the period (WEEK 0-6,
+     * MONTH 0-27), so it is read as the days the period starts after Sunday or the 1st.
+     * ponytail: that anchor is inferred, as a period boundary cannot be measured within a day.
+     */
+    static LocalDate quotaPeriodStart(LocalDate day, UsagePlan.Quota quota) {
+        return switch (quota.period()) {
+            case "WEEK" -> {
+                LocalDate start = day.with(TemporalAdjusters.previousOrSame(DayOfWeek.SUNDAY))
+                        .plusDays(quota.offset());
+                yield start.isAfter(day) ? start.minusWeeks(1) : start;
+            }
+            case "MONTH" -> {
+                LocalDate start = day.withDayOfMonth(1).plusDays(quota.offset());
+                yield start.isAfter(day) ? day.minusMonths(1).withDayOfMonth(1).plusDays(quota.offset()) : start;
+            }
+            default -> day;
+        };
     }
 
     public List<UsagePlanKey> getUsagePlanKeys(String region, String usagePlanId) {
@@ -2228,6 +2392,184 @@ public class ApiGatewayService implements ResourceProvider {
     public void deleteModel(String region, String apiId, String modelName) {
         getModel(region, apiId, modelName);
         modelStore.delete(modelKey(region, apiId, modelName));
+    }
+
+    // ──────────────────────────── Documentation Parts ────────────────────────────
+
+    private static final Set<String> DOCUMENTATION_PART_NAMED_TYPES = Set.of("AUTHORIZER", "MODEL",
+            "PATH_PARAMETER", "QUERY_PARAMETER", "REQUEST_HEADER", "REQUEST_BODY", "RESPONSE_HEADER");
+    private static final Set<String> DOCUMENTATION_PART_PATH_TYPES = Set.of("RESOURCE", "METHOD", "PATH_PARAMETER",
+            "QUERY_PARAMETER", "REQUEST_HEADER", "REQUEST_BODY", "RESPONSE", "RESPONSE_HEADER", "RESPONSE_BODY");
+    private static final Set<String> DOCUMENTATION_PART_METHOD_TYPES = Set.of("METHOD", "PATH_PARAMETER",
+            "QUERY_PARAMETER", "REQUEST_HEADER", "REQUEST_BODY", "RESPONSE", "RESPONSE_HEADER", "RESPONSE_BODY");
+    private static final Set<String> DOCUMENTATION_PART_STATUS_TYPES = Set.of("RESPONSE", "RESPONSE_HEADER",
+            "RESPONSE_BODY");
+
+    public synchronized DocumentationPart createDocumentationPart(String region, String apiId,
+                                                                   Map<String, Object> request) {
+        getRestApi(region, apiId);
+        if (request == null) {
+            throw new AwsException("BadRequestException", "Documentation part request is required", 400);
+        }
+        ObjectNode modeledRequest = JSON.valueToTree(request);
+        modeledRequest.put("restApiId", apiId);
+        ApiGatewayDocumentationRequestShapes.check("CreateDocumentationPart", modeledRequest);
+        Map<String, String> location = documentationPartLocation(request.get("location"));
+        String properties = documentationPartProperties(request.get("properties"));
+        String prefix = region + "::" + apiId + "::";
+        if (documentationPartStore.scan(key -> key.startsWith(prefix)).stream()
+                .anyMatch(part -> part.getLocation().equals(location))) {
+            StringJoiner fields = new StringJoiner(", ");
+            location.forEach((field, value) -> fields.add(field + " '" + value + "'"));
+            throw new AwsException("ConflictException",
+                    "Documentation part already exists for the specified location: " + fields + ".", 409);
+        }
+
+        DocumentationPart part = new DocumentationPart();
+        String id;
+        do {
+            id = shortId(6);
+        } while (documentationPartStore.get(documentationPartKey(region, apiId, id)).isPresent());
+        part.setId(id);
+        part.setLocation(location);
+        part.setProperties(properties);
+        documentationPartStore.putAllAtomically(Map.of(documentationPartKey(region, apiId, part.getId()), part));
+        return part;
+    }
+
+    public DocumentationPart getDocumentationPart(String region, String apiId, String partId) {
+        getRestApi(region, apiId);
+        return documentationPartStore.get(documentationPartKey(region, apiId, partId))
+                .orElseThrow(() -> new AwsException("NotFoundException", "Invalid documentation part id specified", 404));
+    }
+
+    public record DocumentationPartPage(List<DocumentationPart> items, String position) {}
+
+    public DocumentationPartPage getDocumentationParts(String region, String apiId, String type, String name,
+                                                        String path, String locationStatus, Integer limit,
+                                                        String position) {
+        getRestApi(region, apiId);
+        ObjectNode modeledRequest = JSON.createObjectNode().put("restApiId", apiId);
+        if (type != null) {
+            modeledRequest.put("type", type);
+        }
+        if (name != null) {
+            modeledRequest.put("nameQuery", name);
+        }
+        if (path != null) {
+            modeledRequest.put("path", path);
+        }
+        if (locationStatus != null) {
+            modeledRequest.put("locationStatus", locationStatus);
+        }
+        if (limit != null) {
+            modeledRequest.put("limit", limit);
+        }
+        if (position != null) {
+            modeledRequest.put("position", position);
+        }
+        ApiGatewayDocumentationRequestShapes.check("GetDocumentationParts", modeledRequest);
+        if (limit != null && limit < 1) {
+            throw new AwsException("BadRequestException", "Invalid limit parameter", 400);
+        }
+        int pageSize = limit == null ? 25 : Math.min(limit, 500);
+        String prefix = region + "::" + apiId + "::";
+        List<DocumentationPart> parts = documentationPartStore.scan(key -> key.startsWith(prefix)).stream()
+                .filter(part -> type == null || type.equals(part.getLocation().get("type")))
+                .filter(part -> name == null || name.equals(part.getLocation().get("name")))
+                .filter(part -> path == null || path.equals(part.getLocation().get("path")))
+                .filter(part -> !"UNDOCUMENTED".equals(locationStatus))
+                .sorted(Comparator.comparing(DocumentationPart::getId))
+                .toList();
+
+        int start = 0;
+        if (position != null && !position.isBlank()) {
+            while (start < parts.size() && !position.equals(parts.get(start).getId())) {
+                start++;
+            }
+            if (start == parts.size()) {
+                throw new AwsException("BadRequestException", "Invalid position parameter", 400);
+            }
+            start++;
+        }
+        int end = Math.min(start + pageSize, parts.size());
+        String nextPosition = end < parts.size() ? parts.get(end - 1).getId() : null;
+        return new DocumentationPartPage(List.copyOf(parts.subList(start, end)), nextPosition);
+    }
+
+    public synchronized DocumentationPart updateDocumentationPart(String region, String apiId, String partId,
+                                                                   List<Map<String, String>> patchOperations) {
+        DocumentationPart part = getDocumentationPart(region, apiId, partId);
+        String properties = part.getProperties();
+        if (patchOperations != null) {
+            for (Map<String, String> operation : patchOperations) {
+                if (!"replace".equals(operation.get("op")) || !"/properties".equals(operation.get("path"))) {
+                    throw new AwsException("BadRequestException", "Unsupported documentation part patch operation", 400);
+                }
+                properties = documentationPartProperties(operation.get("value"));
+            }
+        }
+        DocumentationPart updated = new DocumentationPart();
+        updated.setId(part.getId());
+        updated.setLocation(part.getLocation());
+        updated.setProperties(properties);
+        documentationPartStore.putAllAtomically(Map.of(documentationPartKey(region, apiId, partId), updated));
+        return updated;
+    }
+
+    public synchronized void deleteDocumentationPart(String region, String apiId, String partId) {
+        getDocumentationPart(region, apiId, partId);
+        documentationPartStore.deleteAllAtomically(Set.of(documentationPartKey(region, apiId, partId)));
+    }
+
+    private static Map<String, String> documentationPartLocation(Object value) {
+        Map<?, ?> input = (Map<?, ?>) value;
+        String type = (String) input.get("type");
+        Map<String, String> location = new LinkedHashMap<>();
+        for (Map.Entry<?, ?> entry : input.entrySet()) {
+            if (!(entry.getKey() instanceof String key) || !(entry.getValue() instanceof String fieldValue)
+                    || !Set.of("type", "path", "method", "statusCode", "name").contains(key)) {
+                throw new AwsException("BadRequestException", "Invalid documentation part location", 400);
+            }
+            location.put(key, fieldValue);
+        }
+        // AWS REST examples allow REQUEST_BODY without a name despite the model's required marker.
+        if (DOCUMENTATION_PART_NAMED_TYPES.contains(type) && !"REQUEST_BODY".equals(type)
+                && (location.get("name") == null || location.get("name").isBlank())) {
+            throw new AwsException("BadRequestException", "Documentation part location name is required", 400);
+        }
+        if (location.containsKey("name") && !DOCUMENTATION_PART_NAMED_TYPES.contains(type)
+                || location.containsKey("path") && !DOCUMENTATION_PART_PATH_TYPES.contains(type)
+                || location.containsKey("method") && !DOCUMENTATION_PART_METHOD_TYPES.contains(type)
+                || location.containsKey("statusCode") && !DOCUMENTATION_PART_STATUS_TYPES.contains(type)) {
+            throw new AwsException("BadRequestException", "Invalid documentation part location field", 400);
+        }
+        if (DOCUMENTATION_PART_PATH_TYPES.contains(type)) {
+            location.putIfAbsent("path", "/");
+        }
+        if (DOCUMENTATION_PART_METHOD_TYPES.contains(type)) {
+            location.putIfAbsent("method", "*");
+        }
+        if (DOCUMENTATION_PART_STATUS_TYPES.contains(type)) {
+            location.putIfAbsent("statusCode", "*");
+        }
+        return location;
+    }
+
+    private static String documentationPartProperties(Object value) {
+        if (!(value instanceof String properties)) {
+            throw new AwsException("BadRequestException", "Documentation part properties must be a JSON string", 400);
+        }
+        try {
+            JsonNode content = JSON.reader().with(DeserializationFeature.FAIL_ON_TRAILING_TOKENS)
+                    .readTree(properties);
+            if (content == null || !content.isObject()) {
+                throw new AwsException("BadRequestException", "Documentation part properties must be a JSON object", 400);
+            }
+        } catch (JsonProcessingException e) {
+            throw new AwsException("BadRequestException", "Invalid documentation part properties", 400);
+        }
+        return properties;
     }
 
     // ──────────────────────────── Custom Domains ────────────────────────────
@@ -3096,8 +3438,13 @@ public class ApiGatewayService implements ResourceProvider {
      * @return the domain's routing scope if found, or null if no domain matches
      */
     public CustomDomainRoute findDomainByName(String domainName) {
+        String keySuffix = "::" + domainName;
+        // Every request of every service gets here, and scanAllAccountEntries copies every key.
+        if (domainStore.scanRaw(rawKey -> rawKey.endsWith(keySuffix)).isEmpty()) {
+            return null;
+        }
         List<AccountAwareStorageBackend.AccountEntry<CustomDomain>> matches =
-                domainStore.scanAllAccountEntries(key -> key.endsWith("::" + domainName));
+                domainStore.scanAllAccountEntries(key -> key.endsWith(keySuffix));
         if (matches.size() > 1) {
             throw new AwsException("ConflictException",
                     "Custom domain '" + domainName + "' is ambiguous across accounts or regions", 409);
@@ -4731,6 +5078,10 @@ public class ApiGatewayService implements ResourceProvider {
 
     private String modelKey(String region, String apiId, String modelName) {
         return region + "::" + apiId + "::" + modelName;
+    }
+
+    private String documentationPartKey(String region, String apiId, String partId) {
+        return region + "::" + apiId + "::" + partId;
     }
 
     private String accountKey(String region) {

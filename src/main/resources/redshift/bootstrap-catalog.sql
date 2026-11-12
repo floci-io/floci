@@ -103,8 +103,20 @@ FROM pg_catalog.pg_class c
 CROSS JOIN (SELECT oid FROM pg_catalog.pg_database WHERE datname = current_database()) d
 WHERE c.relkind = 'r';
 
--- 6. stl_load_errors: load error log table for COPY commands
-CREATE TABLE IF NOT EXISTS pg_catalog.stl_load_errors (
+-- 6. stl_load_errors: private autonomous writer, with per-session catalog visibility.
+-- Keep raw input outside the public catalog and expose only the filtered view.
+CREATE SCHEMA IF NOT EXISTS floci_internal;
+DO $$
+BEGIN
+    IF EXISTS (SELECT 1 FROM pg_catalog.pg_class
+               WHERE oid = to_regclass('pg_catalog.stl_load_errors') AND relkind = 'r') THEN
+        ALTER TABLE pg_catalog.stl_load_errors SET SCHEMA floci_internal;
+        ALTER TABLE floci_internal.stl_load_errors RENAME TO copy_load_errors;
+        REVOKE ALL ON TABLE floci_internal.copy_load_errors FROM PUBLIC;
+    END IF;
+END;
+$$;
+CREATE TABLE IF NOT EXISTS floci_internal.copy_load_errors (
     userid integer DEFAULT 1,
     slice integer DEFAULT 0,
     tbl integer DEFAULT 0,
@@ -125,6 +137,13 @@ CREATE TABLE IF NOT EXISTS pg_catalog.stl_load_errors (
     start_offset bigint DEFAULT 0,
     copy_job_id bigint DEFAULT 0
 );
+REVOKE ALL ON TABLE floci_internal.copy_load_errors FROM PUBLIC;
+CREATE OR REPLACE VIEW pg_catalog.stl_load_errors WITH (security_barrier = true) AS
+SELECT * FROM floci_internal.copy_load_errors
+WHERE userid = (SELECT oid::integer FROM pg_catalog.pg_roles WHERE rolname = session_user)
+   OR (SELECT rolsuper FROM pg_catalog.pg_roles WHERE rolname = session_user);
+REVOKE ALL ON TABLE pg_catalog.stl_load_errors FROM PUBLIC;
+GRANT SELECT ON TABLE pg_catalog.stl_load_errors TO PUBLIC;
 
 -- 7. svl_qlog: dynamic query execution log view
 DROP VIEW IF EXISTS pg_catalog.svl_qlog CASCADE;
@@ -435,6 +454,94 @@ BEGIN
 END;
 $$;
 
+CREATE TABLE IF NOT EXISTS floci_internal.copy_job_detail (
+    job_id bigint NOT NULL REFERENCES floci_internal.copy_job(job_id) ON DELETE CASCADE,
+    bucket text NOT NULL,
+    key text NOT NULL,
+    etag text,
+    version_id text,
+    file_size bigint NOT NULL DEFAULT 0,
+    modification_time timestamptz NOT NULL DEFAULT clock_timestamp(),
+    status character(1) NOT NULL DEFAULT 'I',
+    loaded_at timestamptz NOT NULL DEFAULT clock_timestamp(),
+    PRIMARY KEY (job_id, bucket, key)
+);
+
+CREATE OR REPLACE FUNCTION floci_internal.copy_job_for_run(name text)
+RETURNS SETOF floci_internal.copy_job
+LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog, pg_temp AS $$
+BEGIN
+    RETURN QUERY SELECT j.* FROM floci_internal.copy_job j
+      WHERE j.job_name = $1 AND (j.owner = session_user OR (SELECT rolsuper FROM pg_roles WHERE rolname = session_user))
+      FOR UPDATE;
+END;
+$$;
+
+CREATE OR REPLACE FUNCTION floci_internal.copy_job_loaded_keys(id bigint)
+RETURNS TABLE(key text, status character(1), etag text, version_id text)
+LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog, pg_temp AS $$
+BEGIN
+    RETURN QUERY SELECT d.key, d.status, d.etag, d.version_id FROM floci_internal.copy_job_detail d
+      JOIN floci_internal.copy_job j ON j.job_id = d.job_id
+      WHERE d.job_id = $1 AND (j.owner = session_user OR (SELECT rolsuper FROM pg_roles WHERE rolname = session_user));
+END;
+$$;
+
+CREATE OR REPLACE FUNCTION floci_internal.reserve_copy_job_file(
+    id bigint, key text, etag text, version_id text, file_size bigint DEFAULT 0, modification_time timestamptz DEFAULT NULL)
+RETURNS boolean
+LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog, pg_temp AS $$
+DECLARE
+    source_bucket text;
+BEGIN
+    SELECT j.bucket INTO source_bucket FROM floci_internal.copy_job j
+      WHERE j.job_id = $1 AND (j.owner = session_user OR (SELECT rolsuper FROM pg_roles WHERE rolname = session_user))
+      FOR UPDATE;
+    IF NOT FOUND THEN
+        RAISE EXCEPTION 'Copy job does not exist' USING ERRCODE = '42704';
+    END IF;
+    INSERT INTO floci_internal.copy_job_detail (job_id, bucket, key, etag, version_id, file_size, modification_time, status, loaded_at)
+      VALUES ($1, source_bucket, $2, $3, $4, COALESCE($5, 0), COALESCE($6, clock_timestamp()), 'I', clock_timestamp())
+      ON CONFLICT ON CONSTRAINT copy_job_detail_pkey DO UPDATE
+        SET etag = EXCLUDED.etag,
+            version_id = EXCLUDED.version_id,
+            file_size = EXCLUDED.file_size,
+            modification_time = EXCLUDED.modification_time,
+            status = 'I',
+            loaded_at = clock_timestamp()
+        WHERE floci_internal.copy_job_detail.status = 'E'
+          AND (floci_internal.copy_job_detail.etag IS DISTINCT FROM EXCLUDED.etag
+               OR floci_internal.copy_job_detail.version_id IS DISTINCT FROM EXCLUDED.version_id);
+    RETURN FOUND;
+END;
+$$;
+
+CREATE OR REPLACE FUNCTION floci_internal.record_copy_job_file_error(
+    id bigint, key text, etag text, version_id text, file_size bigint DEFAULT 0, modification_time timestamptz DEFAULT NULL)
+RETURNS void
+LANGUAGE plpgsql SECURITY DEFINER SET search_path = pg_catalog, pg_temp AS $$
+DECLARE
+    source_bucket text;
+BEGIN
+    SELECT j.bucket INTO source_bucket FROM floci_internal.copy_job j
+      WHERE j.job_id = $1 AND (j.owner = session_user OR (SELECT rolsuper FROM pg_roles WHERE rolname = session_user))
+      FOR UPDATE;
+    IF NOT FOUND THEN
+        RAISE EXCEPTION 'Copy job does not exist' USING ERRCODE = '42704';
+    END IF;
+    INSERT INTO floci_internal.copy_job_detail (job_id, bucket, key, etag, version_id, file_size, modification_time, status, loaded_at)
+      VALUES ($1, source_bucket, $2, $3, $4, COALESCE($5, 0), COALESCE($6, clock_timestamp()), 'E', clock_timestamp())
+      ON CONFLICT ON CONSTRAINT copy_job_detail_pkey DO UPDATE
+        SET etag = EXCLUDED.etag,
+            version_id = EXCLUDED.version_id,
+            file_size = EXCLUDED.file_size,
+            modification_time = EXCLUDED.modification_time,
+            status = 'E',
+            loaded_at = clock_timestamp()
+        WHERE floci_internal.copy_job_detail.status <> 'I';
+END;
+$$;
+
 CREATE OR REPLACE PROCEDURE floci_internal.create_copy_job(
     name text, iam_role text, job_text text, is_auto boolean, target_table text, bucket text, prefix text)
 LANGUAGE plpgsql SECURITY INVOKER AS $$
@@ -503,10 +610,26 @@ SELECT j.job_id::bigint AS job_id,
 FROM floci_internal.copy_job j
 WHERE j.owner = session_user OR (SELECT rolsuper FROM pg_roles WHERE rolname = session_user);
 
+CREATE OR REPLACE VIEW pg_catalog.sys_copy_job_detail AS
+SELECT COALESCE((SELECT u.usesysid::integer FROM pg_catalog.pg_user u WHERE u.usename = j.owner), 0) AS user_id,
+       current_database()::text AS database_name,
+       j.job_id::bigint AS job_id,
+       j.job_name::text AS job_name,
+       ('s3://' || j.bucket || '/' || j.prefix)::text AS file_location,
+       d.key::text AS file_name,
+       d.file_size::bigint AS file_size,
+       COALESCE(d.etag, '')::text AS file_etag,
+       left(j.job_text, 256)::character(256) AS job_text,
+       (d.modification_time AT TIME ZONE 'UTC')::timestamp without time zone AS modification_time,
+       (d.loaded_at AT TIME ZONE 'UTC')::timestamp without time zone AS enqueue_time,
+       d.status::character(1) AS status
+FROM floci_internal.copy_job_detail d
+JOIN floci_internal.copy_job j ON j.job_id = d.job_id
+WHERE j.owner = session_user OR (SELECT rolsuper FROM pg_roles WHERE rolname = session_user);
+
 GRANT USAGE ON SCHEMA pg_catalog TO PUBLIC;
 GRANT USAGE ON SCHEMA floci_internal TO PUBLIC;
 -- Schema access for COPY JOB must not expose the unrelated privileged catalog writers.
 REVOKE EXECUTE ON FUNCTION floci_internal.refresh_external_catalog(text, jsonb) FROM PUBLIC;
 REVOKE EXECUTE ON FUNCTION floci_internal.purge_external_schema(text) FROM PUBLIC;
-GRANT ALL ON TABLE pg_catalog.stl_load_errors TO PUBLIC;
 GRANT SELECT ON ALL TABLES IN SCHEMA pg_catalog TO PUBLIC;

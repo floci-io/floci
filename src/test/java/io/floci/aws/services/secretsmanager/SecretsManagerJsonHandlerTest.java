@@ -297,6 +297,7 @@ class SecretsManagerJsonHandlerTest {
     private void createSecret(String name) {
         ObjectNode req = MAPPER.createObjectNode();
         req.put("Name", name);
+        req.put("SecretString", "value");
         handler.handle("CreateSecret", req, REGION);
     }
 

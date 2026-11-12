@@ -4,7 +4,10 @@
 
 ## Instance Execution Model
 
-`RunInstances` launches a **real Docker container** for each instance. By default, the container is kept alive with `tail -f /dev/null` so any base image works regardless of its default CMD. Catalog entries that opt into the `systemd` guest runtime start `/sbin/init` instead, with the Docker mounts needed for a systemd-based cloud-image guest.
+`RunInstances` launches a **real Docker container** for each instance. By default, the container is kept alive with `tail -f /dev/null` so any base image works regardless of its default CMD. Catalog entries that opt into the `systemd` guest runtime start `/sbin/init` instead, with the Docker mounts needed for a systemd-based cloud-image guest. Those guests also get the Docker host's `/lib/modules/<KernelVersion>` (the running kernel's directory only, so the guest's own package manager keeps a writable `/lib/modules`) read-only, so `modprobe` finds modules the shared kernel already has (for example `br_netfilter`, which Kubernetes node setup loads). The mount is read-only, but it is not a boundary for a privileged guest: one can remount that directory read-write and load any module built for the shared kernel (see the warning below). On Docker Desktop or OrbStack, that directory is the Linux VM's, which may not hold modules matching the kernel that VM is running. If `/lib/modules/<KernelVersion>` does not exist on the Docker daemon's host, Docker creates an empty root-owned directory there and `modprobe` still fails. The bind is read-only, so a guest that installs the `linux-modules` package for the host's exact kernel version cannot write into it.
+
+!!! warning "Systemd guests can load modules into the host kernel"
+    An instance container runs privileged exactly when `FLOCI_NETWORK_SECURITY_GROUP_ENFORCEMENT_ENABLED` is off; with it on, the container joins a Floci-protected network namespace unprivileged, without Docker's `CAP_SYS_MODULE`, and a launch whose namespace cannot be created fails rather than falling back to privileged. A privileged systemd guest with the host's `/lib/modules/<KernelVersion>` mounted can `modprobe` any module that tree holds. The module loads into the **shared** kernel of the Docker host (or Docker Desktop / OrbStack VM), not into the guest. User data or an AMI that loads modules therefore changes the machine Floci runs on. Run systemd catalog images only with user data you would run on that host yourself, and prefer a disposable VM or CI runner for untrusted workloads.
 
 | EC2 state | Docker operation |
 |---|---|
@@ -30,12 +33,23 @@ EBS-only storage, and one network card supporting 3 interfaces and 10 IPv4 addre
 interface, following the [AWS R5 specifications](https://docs.aws.amazon.com/ec2/latest/instancetypes/mo.html).
 `DescribeInstanceTypes` and `DescribeInstanceTypeOfferings` use this same entry.
 
+The catalog also includes `i4i.large`: 2 vCPUs, 16 GiB of memory, Intel x86_64
+processors, 468 GB of local NVMe SSD storage, and one network card supporting
+3 interfaces and 10 IPv4 addresses per interface, following the
+[AWS storage optimized specifications](https://docs.aws.amazon.com/ec2/latest/instancetypes/so.html).
+Both describe APIs and the existing container resource limits use this entry.
+
 ### Processor manufacturer metadata
 
 `DescribeInstanceTypes` includes `ProcessorInfo.Manufacturer` for the bundled
-instance types. The values were captured from AWS in `us-east-1` on 2026-11-04:
-`AWS` for Graviton, `Intel` for the catalog's T2, T3, M5 and R5 types, and `AMD`
-for `t3a.nano`. The catalog stores these values explicitly; architecture alone
+instance types. For Graviton, T2, T3, M5, R5 and `t3a.nano`, the values were
+captured from AWS in `us-east-1` on 2026-11-04: `AWS` for Graviton, `Intel` for
+T2, T3, M5 and R5, and `AMD` for `t3a.nano`.
+
+The `i4i.large` value, `Intel`, comes from the AWS storage optimized specifications
+linked above. It was not part of that API capture.
+
+The catalog stores these values explicitly; architecture alone
 cannot distinguish Intel from AMD. See the AWS
 [ProcessorInfo API](https://docs.aws.amazon.com/AWSEC2/latest/APIReference/API_ProcessorInfo.html).
 
@@ -199,7 +213,9 @@ EC2 containers receive `AWS_EC2_METADATA_SERVICE_ENDPOINT` for IMDS and `AWS_END
 
 CloudFormation `AWS::EC2::VPCEndpoint` resolves `IpAddressType` on create and update, including parameter references. Omission, a selected `AWS::NoValue` branch, or `not-specified` uses the default `ipv4`; an explicitly empty value is rejected. Updates retain the existing replacement behavior; synthetic interfaces remain IPv4-only.
 
-CloudFormation `AWS::EC2::LaunchTemplate` stores `LaunchTemplateData.MetadataOptions`, and `AWS::EC2::Instance` launches with its own `MetadataOptions` over those of the launch template it names, as `RunInstances` merges them, so CDK's `requireImdsv2` sets `HttpTokens=required`. A block or member of the wrong type, such as `HttpTokens: [required]`, fails the resource with CloudFormation's type error, a member given as an empty or padded string fails an instance with `InvalidParameterValue` (a launch template stores it unchecked, as `CreateLaunchTemplate` does, and the instances launched from it fail), and `AWS::NoValue` leaves a member or the whole block out. A stack update checks the options before it changes anything, applies changed ones in place, returns options it no longer declares to their defaults, and puts them back if the stack update rolls back. An update that kept the instance and changed no EC2 setting, such as one that only declares the options the instance already has, rolls back in full. When the same update also changed the instance's type, security groups, user data, profile or tags, which have no in-place rollback, the options still go back but the stack ends `UPDATE_ROLLBACK_FAILED` for the instance ("Rollback is not implemented"). The options handling includes an update that changes or drops the instance's `LaunchTemplate` (another template or version, as `Fn::GetAtt LatestVersionNumber` gives after the template changes): AWS replaces the instance then, as `LaunchTemplate` is a replacement property, but Floci keeps it and applies what the new template declares, unless the `ImageId` or `KeyName` the template supplies changed, which replaces it. A change set still previews a literal `LaunchTemplate` change as a replacement.
+CloudFormation `AWS::EC2::LaunchTemplate` stores `LaunchTemplateData.MetadataOptions`, and `AWS::EC2::Instance` launches with its own `MetadataOptions` over those of the launch template it names, as `RunInstances` merges them, so CDK's `requireImdsv2` sets `HttpTokens=required`. A block or member of the wrong type, such as `HttpTokens: [required]`, fails the resource with CloudFormation's type error, a member given as an empty or padded string fails an instance with `InvalidParameterValue` (a launch template stores it unchecked, as `CreateLaunchTemplate` does, and the instances launched from it fail), and `AWS::NoValue` leaves a member or the whole block out. A stack update checks the options before it changes anything, applies changed ones in place, returns options it no longer declares to their defaults, and puts them back if the stack update rolls back. An update that kept the instance and changed no EC2 setting, such as one that only declares the options the instance already has, rolls back in full. When the same update also changed the instance's type, security groups, user data or tags, which have no in-place rollback, the options still go back but the stack ends `UPDATE_ROLLBACK_FAILED` for the instance ("Rollback is not implemented"). The options handling includes an update that changes or drops the instance's `LaunchTemplate` (another template or version, as `Fn::GetAtt LatestVersionNumber` gives after the template changes): AWS replaces the instance then, as `LaunchTemplate` is a replacement property, but Floci keeps it and applies what the new template declares, unless the `ImageId` or `KeyName` the template supplies changed, which replaces it. A change set still previews a literal `LaunchTemplate` change as a replacement.
+
+An `AWS::EC2::Instance` that declares no `IamInstanceProfile` launches with the profile of the launch template it names, as `RunInstances` does, and its own `IamInstanceProfile` wins when it declares one. A template profile that IAM does not know fails the instance with `InvalidParameterValue`. A stack update that moves the instance to a template version naming another profile, or none, changes or removes the instance's profile in place, the same way it applies the version's `MetadataOptions`, and a stack rollback puts the previous profile back, whether the instance declared it or its launch template did.
 
 ## Instance Metadata Service (IMDS)
 
@@ -311,7 +327,7 @@ naming different VPCs find nothing.
 
 | Action | Description |
 |--------|-------------|
-| RunInstances | Creates one or more local EC2 instances, starting Docker-backed runtime when not in mock mode. Security groups come from `SecurityGroupId.N` or, as Terraform sends them with an interface spec, from the primary interface's `NetworkInterface.1.SecurityGroupId.N`; both in one request is `InvalidParameterCombination`. |
+| RunInstances | Creates one or more local EC2 instances, starting Docker-backed runtime when not in mock mode. Security groups come from `SecurityGroupId.N` or, as Terraform sends them with an interface spec, from the primary interface's `NetworkInterface.1.SecurityGroupId.N`; both in one request is `InvalidParameterCombination`. A launch without groups uses the default security group of its subnet's VPC. |
 | CreateFleet | Creates an instant local fleet from launch-template configurations and on-demand or spot overrides. DryRun returns the AWS-compatible `DryRunOperation` error without launching instances. |
 | DescribeInstances | Lists or returns stored EC2 instances. |
 | TerminateInstances | Terminates instances and updates their stored lifecycle state. |
@@ -822,7 +838,7 @@ back, and a new address that is already held fails the update and leaves the gat
 | DescribeInstanceConnectEndpoints | Lists endpoints; filters `instance-connect-endpoint-id`, `state`, `vpc-id`, `subnet-id`, `tag:<key>`, `tag-key`, `tag-value`. |
 | DeleteInstanceConnectEndpoint | Deletes an endpoint and answers with it in `delete-in-progress`. |
 
-A repeated `ClientToken` returns the endpoint the first call created (`IdempotentParameterMismatch` when reused with another subnet, security group set, `IpAddressType`, `PreserveClientIp` or tag set; tags added later with `CreateTags` do not count). While an endpoint exists, `DeleteSubnet` on its subnet and `DeleteVpc` on its VPC fail with `DependencyViolation`, as on AWS. The interface ID in an endpoint's `networkInterfaceIdSet` resolves in `DescribeNetworkInterfaces` while the endpoint exists: a requester-managed `ec2_instance_connect_endpoint` interface carrying the endpoint's private address, subnet, VPC and security groups. An unknown filter name is `InvalidParameterValue` even when no endpoint exists. `DescribeInstanceConnectEndpoints` pages by `MaxResults`/`NextToken` in endpoint ID order (`MaxResults` outside 1-50 is `InvalidMaxResults`), and `publicDnsNames` carries only the `ipv4` names. The endpoint's tunnel (`openTunnel`) is not served yet.
+A repeated `ClientToken` returns the endpoint the first call created (`IdempotentParameterMismatch` when reused with another subnet, security group set, `IpAddressType`, `PreserveClientIp` or tag set; tags added later with `CreateTags` do not count). While an endpoint exists, `DeleteSubnet` on its subnet and `DeleteVpc` on its VPC fail with `DependencyViolation`, as on AWS. The interface ID in an endpoint's `networkInterfaceIdSet` resolves in `DescribeNetworkInterfaces` while the endpoint exists: a requester-managed `ec2_instance_connect_endpoint` interface carrying the endpoint's private address, subnet, VPC and security groups. An unknown filter name is `InvalidParameterValue` even when no endpoint exists. `DescribeInstanceConnectEndpoints` pages by `MaxResults`/`NextToken` in endpoint ID order (`MaxResults` outside 1-50 is `InvalidMaxResults`), and `publicDnsNames` carries only the `ipv4` names. The endpoint's tunnel is real: see [EC2 Instance Connect](ec2-instance-connect.md#instance-connect-endpoint-tunnels).
 
 ### Capacity Reservations
 
@@ -1006,8 +1022,11 @@ regions, for which AWS publishes no zone id, keep the whole region as the prefix
 | DescribeLaunchTemplateVersions | Lists versions stored for a launch template. |
 | ModifyLaunchTemplate | Updates launch template metadata such as the default version. |
 | DeleteLaunchTemplate | Deletes a launch template and its versions. |
+| DeleteLaunchTemplateVersions | Deletes up to 200 numbered versions by template ID or name, with separate success and error items. The default version is retained, and `DryRun` leaves all versions unchanged. |
 
 Launch templates store versioned launch data. New template versions can be created from an existing source version, and `ModifyLaunchTemplate` updates the default version used by later launches.
+Deleting versions updates `$Latest` to the highest surviving version. New versions receive numbers
+above every previously issued version, including deleted versions, and the counter survives restart.
 
 `ModifyLaunchTemplate` honors `DryRun` for requests by template ID or name. A valid
 dry run returns `DryRunOperation` with HTTP 412 and leaves the default version,
@@ -1219,7 +1238,7 @@ When `floci.services.ec2.volume-block-devices` is enabled (the default), attache
 - **Storage mechanism**: Backing sparse raw image files are allocated in Floci storage under `floci-aws-ec2-volumes` (named volume or host path). A privileged helper container (`floci-aws-ec2-volume-helper`, running `floci.services.ec2.volume-helper-image`, default `alpine:3.21`) manages Linux loop devices via `losetup`. It starts on the first volume operation and is removed when Floci shuts down; the backing files stay in storage.
 - **Target device nodes**: Inside privileged target instance containers, the corresponding device node is created at the requested path (for example `/dev/xvdf` or `/dev/sdf`) using `mknod` or a symlink to the loop device, matching the exact size specified during volume creation. Target containers can format filesystems (such as ext4 or xfs), mount them, and persist data across detach and reattach.
 - **Restart reconciliation**: When an instance container stops and starts, or when Floci restarts, attached volume device nodes are automatically restored inside the target container. Backing raw files remain preserved across reboots in persistent storage.
-- **Graceful degradation**: If Docker is unavailable, the target instance container is not running, or the container is not privileged, volume attachments degrade gracefully to metadata-only tracking without failing the API call.
+- **Metadata-only tracking**: Disabling `floci.services.ec2.volume-block-devices`, EC2 mock mode, unavailable Docker, or a missing or stopped target container retains metadata-only attachment without failing the API call. Stopped instances have their device nodes restored when started. Once physical attachment is attempted, helper, loop-device, or guest device-creation failures return `InternalError` without recording a successful attachment; partial guest devices and loop devices allocated by the failed attempt are cleaned up on a best-effort basis so attachment can be retried. Reused loop devices are retained on failure. Insufficient privileges can cause these failures. Restart reconciliation logs device-restoration failures and keeps the existing attachment records for a later retry.
 - **Platform requirements**: Requires a Linux Docker environment (native Linux Docker daemon, or Colima / Docker Desktop with a Linux virtual machine) and privileged instance containers.
 - **Unmodeled aspects**: Multi-attach is tracked at metadata level only. Automated filesystem formatting (volumes start unformatted like real EBS block devices) and volume encryption at the block layer are not modeled. Root volume backing is logical (container rootfs); `ModifyVolume` updates recorded root volume metadata without modifying container storage, while EBS data volume size increases expand the underlying raw backing file and refresh any attached loop device. Volume type, IOPS, and throughput changes remain recorded metadata without altering device characteristics.
 

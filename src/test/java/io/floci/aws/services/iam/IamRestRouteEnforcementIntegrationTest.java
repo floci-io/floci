@@ -207,20 +207,22 @@ class IamRestRouteEnforcementIntegrationTest {
 
     @Test
     void anEksClusterRouteIsCheckedAgainstTheClusterEksActsOn() {
-        // EKS finds a cluster by its name alone, whatever Region a request is signed for, so a request signed
-        // for another Region is checked against the cluster it acts on.
+        // EKS clusters are Regional: a request signed for the cluster's Region is checked against the cluster it
+        // acts on, and one signed for another Region acts on that Region's cluster of the name, which is not there.
         String user = user("route-eks-region");
         String name = "route-west-" + suffix();
         String cluster = given().header("Authorization", auth(ADMIN, "us-west-2", "eks"))
                 .contentType("application/json")
                 .body("{\"name\":\"" + name + "\",\"roleArn\":\"arn:aws:iam::" + ACCOUNT + ":role/route-cluster\"}")
                 .post("/clusters").then().statusCode(200).extract().path("cluster.arn");
-        cleanup.register(() -> eks().delete("/clusters/" + name));
+        cleanup.register(() -> given().header("Authorization", auth(ADMIN, "us-west-2", "eks"))
+                .delete("/clusters/" + name));
 
         policy(user, allow("eks:DescribeCluster", "*") + "," + deny("eks:DescribeCluster", cluster));
-        refused(as(user, "eks").get("/clusters/" + name).then(), "eks:DescribeCluster");
+        refused(as(user, "us-west-2", "eks").get("/clusters/" + name).then(), "eks:DescribeCluster");
+        as(user, "eks").get("/clusters/" + name).then().statusCode(404);
         policy(user, allow("eks:DescribeCluster", cluster));
-        as(user, "eks").get("/clusters/" + name).then().statusCode(200);
+        as(user, "us-west-2", "eks").get("/clusters/" + name).then().statusCode(200);
     }
 
     @Test
@@ -529,6 +531,75 @@ class IamRestRouteEnforcementIntegrationTest {
     }
 
     /**
+     * A route of Lake Formation, Macie or Inspector that AWS authorizes on no resource type is checked as its vendored
+     * route's operation, with no hand rule, Macie's on the paths it shares with other services among them: refused
+     * without its action, past the check with it.
+     */
+    @Test
+    void lakeFormationMacieAndInspectorAreCheckedByTheirRoutes() {
+        String user = user("route-no-type");
+
+        policy(user, allow("lakeformation:ListLFTags", "*"));
+        refused(as(user, "lakeformation").body("{}").post("/GetDataLakeSettings").then(),
+                "lakeformation:GetDataLakeSettings");
+        refused(as(user, "macie2").get("/admin/configuration").then(), "macie2:DescribeOrganizationConfiguration");
+        refused(as(user, "macie2").get("/members").then(), "macie2:ListMembers");
+        refused(as(user, "macie2").get("/admin").then(), "macie2:ListOrganizationAdminAccounts");
+        refused(as(user, "inspector2").body("{}").post("/status/batch/get").then(),
+                "inspector2:BatchGetAccountStatus");
+        refused(as(user, "inspector2").body("{}").post("/disable").then(), "inspector2:Disable");
+
+        policy(user, allow("lakeformation:GetDataLakeSettings", "*") + ","
+                + allow("macie2:DescribeOrganizationConfiguration", "*") + ","
+                + allow("inspector2:BatchGetAccountStatus", "*"));
+        as(user, "lakeformation").body("{}").post("/GetDataLakeSettings").then().statusCode(200);
+        // Past the check, Macie answers that this account has no session.
+        as(user, "macie2").get("/admin/configuration").then().statusCode(404);
+        as(user, "inspector2").body("{}").post("/status/batch/get").then().statusCode(200);
+    }
+
+    /**
+     * Macie's {@code CreateMember} is checked on the member its {@code account.accountId} names: a grant scoped to the
+     * member lets the request reach Macie, which answers that this account has no session, a request naming another
+     * member is refused, and a deny on the member holds under an allow on everything.
+     */
+    @Test
+    void macieCreateMemberIsCheckedOnTheMemberItNames() {
+        String user = user("route-macie-member");
+        String member = "arn:aws:macie2:us-east-1:" + ACCOUNT + ":member/111122223333";
+
+        policy(user, allow("macie2:CreateMember", member));
+        createMember(user, "111122223333", null).statusCode(404);
+        refused(createMember(user, "444455556666", null), "macie2:CreateMember");
+
+        policy(user, allow("macie2:CreateMember", "*") + "," + deny("macie2:CreateMember", member));
+        refused(createMember(user, "111122223333", null), "macie2:CreateMember");
+        createMember(user, "444455556666", null).statusCode(404);
+    }
+
+    /**
+     * A Macie {@code CreateMember} that carries tags also needs {@code macie2:TagResource} on the member it makes, and
+     * a condition on {@code aws:RequestTag/<key>} sees those tags. One that carries none needs only its own action.
+     */
+    @Test
+    void macieCreateMemberIsCheckedWithTheTagsItCarries() {
+        String user = user("route-macie-tags");
+        String member = "arn:aws:macie2:us-east-1:" + ACCOUNT + ":member/111122223333";
+
+        policy(user, allow("macie2:CreateMember", member));
+        createMember(user, "111122223333", null).statusCode(404);
+        refused(createMember(user, "111122223333", "blue"), "macie2:TagResource");
+
+        policy(user, allow("macie2:CreateMember", member) + "," + allow("macie2:TagResource", member));
+        createMember(user, "111122223333", "blue").statusCode(404);
+
+        policy(user, allow("macie2:*", "*") + ",{\"Effect\":\"Deny\",\"Action\":\"macie2:CreateMember\","
+                + "\"Resource\":\"*\",\"Condition\":{\"StringEquals\":{\"aws:RequestTag/team\":\"red\"}}}");
+        refused(createMember(user, "111122223333", "red"), "macie2:CreateMember");
+        createMember(user, "111122223333", "blue").statusCode(404);
+    }
+
+    /**
      * An OpenSearch request naming its domain in its path, or its ARN in its query, is checked on that domain, in
      * both API versions: a grant scoped to the domain lets the request reach OpenSearch, which has no such domain, a
      * request naming another domain is refused, and a deny on the domain holds under an allow on everything. A domain
@@ -594,6 +665,110 @@ class IamRestRouteEnforcementIntegrationTest {
     }
 
     /**
+     * A Security Hub request is checked on the caller's hub in the Region it is signed for, {@code hub/default}, the
+     * ARN Security Hub gives it, or on the hub its {@code HubArn} names: a caller with no grant is refused, a grant
+     * scoped to the hub lets {@code DescribeStandards} through and {@code DescribeHub} reach Security Hub, which is
+     * not enabled there, with or without the hub's ARN, a request naming or signed for another Region's hub is
+     * refused, and a deny on the hub holds under an allow on everything.
+     */
+    @Test
+    void aSecurityHubRequestIsCheckedOnTheHub() {
+        String user = user("route-hub");
+        String region = "eu-west-3";
+        String hub = "arn:aws:securityhub:" + region + ":" + ACCOUNT + ":hub/default";
+        String otherHub = "arn:aws:securityhub:us-west-2:" + ACCOUNT + ":hub/default";
+        refused(as(user, region, "securityhub").get("/standards").then(), "securityhub:DescribeStandards");
+        refused(as(user, region, "securityhub").body("{}").post("/accounts").then(), "securityhub:EnableSecurityHub");
+
+        policy(user, allow("securityhub:DescribeStandards", hub) + "," + allow("securityhub:DescribeHub", hub));
+        as(user, region, "securityhub").get("/standards").then().statusCode(200);
+        as(user, region, "securityhub").get("/accounts").then().statusCode(404)
+                .body(containsString("ResourceNotFoundException"));
+        as(user, region, "securityhub").queryParam("HubArn", hub).get("/accounts").then().statusCode(404)
+                .body(containsString("ResourceNotFoundException"));
+        refused(as(user, region, "securityhub").queryParam("HubArn", otherHub).get("/accounts").then(),
+                "securityhub:DescribeHub");
+        refused(as(user, "us-west-2", "securityhub").get("/standards").then(), "securityhub:DescribeStandards");
+
+        policy(user, allow("securityhub:*", "*") + "," + deny("securityhub:DescribeStandards", hub));
+        refused(as(user, region, "securityhub").get("/standards").then(), "securityhub:DescribeStandards");
+        as(user, "us-west-2", "securityhub").get("/standards").then().statusCode(200);
+    }
+
+    /**
+     * A GuardDuty request naming its detector in its path is checked on that detector, the ARN GuardDuty gives it,
+     * and one naming none as its action on {@code *}: a caller with no grant is refused, a grant scoped to the
+     * detector lets {@code GetDetector} read it, a request naming another detector is refused, and a deny on the
+     * detector holds under an allow on everything.
+     */
+    @Test
+    void aGuardDutyRequestIsCheckedOnTheDetectorItsPathNames() {
+        String user = user("route-detector");
+        String region = "eu-west-3";
+        refused(as(user, region, "guardduty").get("/detector").then(), "guardduty:ListDetectors");
+        String detector = given().header("Authorization", auth(ADMIN, region, "guardduty"))
+                .contentType("application/json").body("{\"enable\":true}").post("/detector")
+                .then().statusCode(200).extract().path("detectorId");
+        cleanup.register(() -> given().header("Authorization", auth(ADMIN, region, "guardduty"))
+                .delete("/detector/" + detector));
+        String arn = "arn:aws:guardduty:" + region + ":" + ACCOUNT + ":detector/" + detector;
+        refused(as(user, region, "guardduty").get("/detector/" + detector).then(), "guardduty:GetDetector");
+
+        policy(user, allow("guardduty:GetDetector", arn));
+        as(user, region, "guardduty").get("/detector/" + detector).then().statusCode(200)
+                .body("status", equalTo("ENABLED"));
+        refused(as(user, region, "guardduty").get("/detector/other" + detector).then(), "guardduty:GetDetector");
+        refused(as(user, region, "guardduty").get("/detector").then(), "guardduty:ListDetectors");
+
+        policy(user, allow("guardduty:*", "*") + "," + deny("guardduty:GetDetector", arn));
+        refused(as(user, region, "guardduty").get("/detector/" + detector).then(), "guardduty:GetDetector");
+        as(user, region, "guardduty").get("/detector").then().statusCode(200);
+    }
+
+    /**
+     * A GuardDuty malware protection plan request, which GuardDutyRouteFilter moves onto {@code /_guardduty}, is
+     * checked as the model's route for it, on the plan its path names, and so is one sent to {@code /_guardduty}
+     * itself: a caller with no grant is refused before a plan is created, a grant scoped to the plan lets
+     * {@code GetMalwareProtectionPlan} read it and refuses another, and a deny on the plan keeps it from being
+     * deleted under an allow on everything.
+     */
+    @Test
+    void aGuardDutyMalwareProtectionPlanRequestIsCheckedOnThePlanItsPathNames() {
+        String user = user("route-plan");
+        String region = "eu-west-3";
+        String plan = "{\"role\":\"arn:aws:iam::" + ACCOUNT + ":role/malware-scan\","
+                + "\"protectedResource\":{\"s3Bucket\":{\"bucketName\":\"route-plan-" + suffix() + "\"}}}";
+        refused(as(user, region, "guardduty").body(plan).post("/malware-protection-plan").then(),
+                "guardduty:CreateMalwareProtectionPlan");
+        refused(as(user, region, "guardduty").get("/malware-protection-plan").then(),
+                "guardduty:ListMalwareProtectionPlans");
+        // GuardDuty refuses a second plan for one bucket, so this create also shows the refused one made none.
+        String id = given().header("Authorization", auth(ADMIN, region, "guardduty"))
+                .contentType("application/json").body(plan).post("/malware-protection-plan")
+                .then().statusCode(200).extract().path("malwareProtectionPlanId");
+        cleanup.register(() -> given().header("Authorization", auth(ADMIN, region, "guardduty"))
+                .delete("/malware-protection-plan/" + id));
+        String arn = "arn:aws:guardduty:" + region + ":" + ACCOUNT + ":malware-protection-plan/" + id;
+        refused(as(user, region, "guardduty").get("/malware-protection-plan/" + id).then(),
+                "guardduty:GetMalwareProtectionPlan");
+        refused(as(user, region, "guardduty").get("/_guardduty/malware-protection-plan/" + id).then(),
+                "guardduty:GetMalwareProtectionPlan");
+
+        policy(user, allow("guardduty:GetMalwareProtectionPlan", arn));
+        as(user, region, "guardduty").get("/malware-protection-plan/" + id).then().statusCode(200)
+                .body("arn", equalTo(arn));
+        as(user, region, "guardduty").get("/_guardduty/malware-protection-plan/" + id).then().statusCode(200)
+                .body("arn", equalTo(arn));
+        refused(as(user, region, "guardduty").get("/malware-protection-plan/other" + id).then(),
+                "guardduty:GetMalwareProtectionPlan");
+
+        policy(user, allow("guardduty:*", "*") + "," + deny("guardduty:DeleteMalwareProtectionPlan", arn));
+        refused(as(user, region, "guardduty").delete("/malware-protection-plan/" + id).then(),
+                "guardduty:DeleteMalwareProtectionPlan");
+        as(user, region, "guardduty").get("/malware-protection-plan/" + id).then().statusCode(200);
+    }
+
+    /**
      * A segment ending in a matrix parameter, which the router ignores, is checked as the route it reaches, on the
      * resource its path names: the routed path carries no matrix parameter, so the rule matches and the ARN is the
      * named resource's, and a grant scoped to it lets the request through while a caller with none is refused.
@@ -641,6 +816,14 @@ class IamRestRouteEnforcementIntegrationTest {
         return given().header("Authorization", auth(ADMIN, "lambda")).contentType("application/json");
     }
 
+    /** Macie's {@code CreateMember} for {@code accountId}, with a {@code team} tag unless {@code team} is null. */
+    private ValidatableResponse createMember(String user, String accountId, String team) {
+        String tags = team == null ? "" : ",\"tags\":{\"team\":\"" + team + "\"}";
+        return as(user, "macie2")
+                .body("{\"account\":{\"accountId\":\"" + accountId + "\",\"email\":\"m@example.com\"}" + tags + "}")
+                .post("/members").then();
+    }
+
     private static String deny(String action, String resource) {
         return "{\"Effect\":\"Deny\",\"Action\":\"" + action + "\",\"Resource\":\"" + resource + "\"}";
     }
@@ -668,7 +851,11 @@ class IamRestRouteEnforcementIntegrationTest {
     }
 
     private RequestSpecification as(String user, String service) {
-        return given().header("Authorization", auth(keys.get(user), service)).contentType("application/json");
+        return as(user, "us-east-1", service);
+    }
+
+    private RequestSpecification as(String user, String region, String service) {
+        return given().header("Authorization", auth(keys.get(user), region, service)).contentType("application/json");
     }
 
     /** A Lambda request as {@code user}, with an empty JSON body on a write. */

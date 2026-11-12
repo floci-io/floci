@@ -29,6 +29,8 @@ floci:
     wal:
       compaction-interval-ms: 60000
     services:
+      rekognition:
+        flush-interval-ms: 60000
       ssm:
         flush-interval-ms: 60000
       dynamodb:
@@ -38,6 +40,7 @@ floci:
       lambda:
         flush-interval-ms: 60000
       cloudwatchlogs:
+        # Includes saved Logs Insights query definitions.
         flush-interval-ms: 60000
       cloudwatchmetrics:
         flush-interval-ms: 60000
@@ -155,6 +158,7 @@ floci:
       enabled: true
     lambda:
       enabled: true
+      reconcile-containers-on-startup: true
       container-drain-timeout-seconds: 15
       docker-flags: ""
       honour-architectures: false
@@ -400,6 +404,8 @@ floci:
     elbv2:
       enabled: true
       mock: true
+      backend-keep-alive: true
+      backend-keep-alive-timeout-seconds: 60
     codebuild:
       enabled: true
       # docker-network: floci-network
@@ -431,6 +437,7 @@ floci:
       enabled: true
     applicationautoscaling:
       enabled: true
+      scheduled-action-interval-seconds: ${FLOCI_SERVICES_APPLICATIONAUTOSCALING_SCHEDULED_ACTION_INTERVAL_SECONDS:1}
     elasticbeanstalk:
       enabled: true
     transfer:
@@ -505,6 +512,8 @@ floci:
       enabled: true
     efs:
       enabled: true
+    ec2instanceconnect:
+      enabled: true
     organizations:
       enabled: true
     rum:
@@ -553,6 +562,10 @@ floci:
     appintegrations:
       enabled: true
     dlm:
+      enabled: true
+    signer:
+      enabled: true
+    xray:
       enabled: true
     cognitoidentity:
       enabled: true

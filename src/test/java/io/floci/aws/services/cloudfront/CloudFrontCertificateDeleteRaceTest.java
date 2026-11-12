@@ -82,6 +82,7 @@ class CloudFrontCertificateDeleteRaceTest {
         Map<String, String> viewerCertificate = new LinkedHashMap<>();
         viewerCertificate.put("IAMCertificateId", certificateId);
         viewerCertificate.put("SSLSupportMethod", "sni-only");
+        viewerCertificate.put("MinimumProtocolVersion", "TLSv1.2_2021");
         config.setViewerCertificate(viewerCertificate);
 
         Distribution distribution = new Distribution();

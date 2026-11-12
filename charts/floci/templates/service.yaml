@@ -1,0 +1,51 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "floci.fullname" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "floci.labels" . | nindent 4 }}
+    {{- with .Values.service.labels }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+  {{- with .Values.service.annotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+spec:
+  type: {{ .Values.service.type }}
+  {{- if and (has .Values.service.type (list "NodePort" "LoadBalancer")) .Values.service.externalTrafficPolicy }}
+  externalTrafficPolicy: {{ .Values.service.externalTrafficPolicy }}
+  {{- end }}
+  {{- if and (eq .Values.service.type "LoadBalancer") .Values.service.loadBalancerSourceRanges }}
+  loadBalancerSourceRanges:
+    {{- toYaml .Values.service.loadBalancerSourceRanges | nindent 4 }}
+  {{- end }}
+  selector:
+    {{- include "floci.selectorLabels" . | nindent 4 }}
+  ports:
+    - name: http
+      port: {{ .Values.service.port }}
+      targetPort: http
+      protocol: TCP
+      {{- if and (has .Values.service.type (list "NodePort" "LoadBalancer")) .Values.service.nodePort }}
+      nodePort: {{ .Values.service.nodePort }}
+      {{- end }}
+    {{- range .Values.service.portRanges }}
+    {{- if not (and .name .start .end) }}
+    {{- fail "service.portRanges entries need name, start and end" }}
+    {{- end }}
+    {{- if gt (int .start) (int .end) }}
+    {{- fail (printf "service.portRanges %s: start %v is above end %v" .name .start .end) }}
+    {{- end }}
+    {{- $name := .name }}
+    {{- range $port := untilStep (int .start) (int (add1 .end)) 1 }}
+    - name: {{ printf "%s-%d" $name $port }}
+      port: {{ $port }}
+      targetPort: {{ $port }}
+      protocol: TCP
+    {{- end }}
+    {{- end }}
+    {{- with .Values.service.extraPorts }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}

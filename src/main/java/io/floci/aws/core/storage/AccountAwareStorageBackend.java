@@ -1,5 +1,6 @@
 package io.floci.aws.core.storage;
 
+import io.floci.aws.core.common.MemoizedSupplier;
 import io.floci.aws.core.common.RequestContext;
 import jakarta.enterprise.context.ContextNotActiveException;
 import jakarta.enterprise.inject.Instance;
@@ -42,10 +43,10 @@ public class AccountAwareStorageBackend<V> implements StorageBackend<String, V> 
 
     private final StorageBackend<String, V> delegate;
     private final Instance<RequestContext> requestContextInstance;
-    private volatile RequestContext requestContextProxy;
+    private final MemoizedSupplier<RequestContext> requestContextProxy;
     private final String defaultAccountId;
 
-    // Accounts that own keys here, so findAnyAccountEntry does one get per account instead of a scan.
+    // Accounts that own keys here, so a cross-account lookup does one get per account instead of a scan.
     // Tracking starts on the first cross-account lookup, so other stores pay one volatile read per write.
     // Accounts are never removed. A stale one only costs a missed get.
     private final Set<String> ownerAccounts = ConcurrentHashMap.newKeySet();
@@ -57,6 +58,7 @@ public class AccountAwareStorageBackend<V> implements StorageBackend<String, V> 
                                       String defaultAccountId) {
         this.delegate = delegate;
         this.requestContextInstance = requestContextInstance;
+        this.requestContextProxy = new MemoizedSupplier<>(() -> requestContextInstance.get());
         this.defaultAccountId = defaultAccountId;
     }
 
@@ -584,6 +586,27 @@ public class AccountAwareStorageBackend<V> implements StorageBackend<String, V> 
         return Optional.empty();
     }
 
+    /**
+     * Returns what {@code scanAllAccountEntries(key::equals)} returns, in no particular order, with one
+     * get per owning account instead of a scan. Like that scan, this does not migrate legacy entries.
+     */
+    public List<AccountEntry<V>> findAllAccountEntries(String key) {
+        if (!ownersComplete) {
+            startTrackingOwners();
+        }
+        List<AccountEntry<V>> result = new ArrayList<>();
+        if (!hasAccountPrefix(key)) {
+            delegate.get(key).ifPresent(value -> result.add(new AccountEntry<>(defaultAccountId, key, value)));
+        }
+        for (String account : ownerAccounts) {
+            String rawKey = account + "/" + key;
+            if (hasAccountPrefix(rawKey)) {
+                delegate.get(rawKey).ifPresent(value -> result.add(new AccountEntry<>(account, key, value)));
+            }
+        }
+        return result;
+    }
+
     private void trackOwner(String accountId) {
         if (trackingOwners && !ownerAccounts.contains(accountId)) {
             ownerAccounts.add(accountId);
@@ -619,12 +642,7 @@ public class AccountAwareStorageBackend<V> implements StorageBackend<String, V> 
     }
 
     private RequestContext requestContext() {
-        RequestContext proxy = requestContextProxy;
-        if (proxy == null) {
-            proxy = requestContextInstance.get();
-            requestContextProxy = proxy;
-        }
-        return proxy;
+        return requestContextProxy.get();
     }
 
     private String prefix() {

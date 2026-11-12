@@ -4,6 +4,8 @@ import io.floci.aws.testing.RestAssuredJsonUtils;
 import io.quarkus.test.junit.QuarkusTest;
 import org.junit.jupiter.api.*;
 
+import java.util.List;
+
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.*;
 
@@ -12,6 +14,10 @@ import static org.hamcrest.Matchers.*;
 class CodeDeployServerIntegrationTest {
 
     private static final String CT = "application/x-amz-json-1.1";
+    private static final String EC2_AUTH =
+            "AWS4-HMAC-SHA256 Credential=test/20260205/us-east-1/ec2/aws4_request";
+    private static final String CODEDEPLOY_AUTH =
+            "AWS4-HMAC-SHA256 Credential=test/20260205/us-east-1/codedeploy/aws4_request";
 
     private static String deploymentId;
 
@@ -354,5 +360,69 @@ class CodeDeployServerIntegrationTest {
                 .when().post("/")
                 .then().statusCode(200)
                 .body("instanceNames", hasItem("on-prem-test-1"));
+    }
+
+    @Test
+    @Order(16)
+    void ec2DeploymentGroupMatchesAnyTagFilter() {
+        List<String> instanceIds = given().header("Authorization", EC2_AUTH)
+                .formParam("Action", "RunInstances")
+                .formParam("ImageId", "ami-amazonlinux2023")
+                .formParam("InstanceType", "t2.micro")
+                .formParam("MinCount", "4")
+                .formParam("MaxCount", "4")
+                .post("/").then().statusCode(200)
+                .extract().xmlPath().getList("RunInstancesResponse.instancesSet.item.instanceId", String.class);
+
+        tagEc2Instance(instanceIds.get(0), "codedeploy-ec2-team", "red");
+        tagEc2Instance(instanceIds.get(1), "codedeploy-ec2-role", "web");
+        tagEc2Instance(instanceIds.get(2), "codedeploy-ec2-team", "red");
+        tagEc2Instance(instanceIds.get(2), "codedeploy-ec2-role", "web");
+        tagEc2Instance(instanceIds.get(3), "codedeploy-ec2-env", "qa");
+
+        given().contentType(CT).header("Authorization", CODEDEPLOY_AUTH)
+                .header("X-Amz-Target", "CodeDeploy_20141006.CreateApplication")
+                .body("{\"applicationName\":\"ec2-tag-filter-any-app\",\"computePlatform\":\"Server\"}")
+                .post("/").then().statusCode(200);
+        given().contentType(CT).header("Authorization", CODEDEPLOY_AUTH)
+                .header("X-Amz-Target", "CodeDeploy_20141006.CreateDeploymentGroup")
+                .body("""
+                        {
+                          "applicationName": "ec2-tag-filter-any-app",
+                          "deploymentGroupName": "group",
+                          "serviceRoleArn": "arn:aws:iam::000000000000:role/CodeDeployRole",
+                          "ec2TagFilters": [
+                            {"Key": "codedeploy-ec2-team", "Value": "red", "Type": "KEY_AND_VALUE"},
+                            {"Key": "codedeploy-ec2-role", "Value": "web", "Type": "KEY_AND_VALUE"}
+                          ]
+                        }
+                        """)
+                .post("/").then().statusCode(200);
+        String deploymentId = given().contentType(CT).header("Authorization", CODEDEPLOY_AUTH)
+                .header("X-Amz-Target", "CodeDeploy_20141006.CreateDeployment")
+                .body("""
+                        {
+                          "applicationName": "ec2-tag-filter-any-app",
+                          "deploymentGroupName": "group",
+                          "revision": {"revisionType": "AppSpecContent", "appSpecContent": {"content": "os: linux"}}
+                        }
+                        """)
+                .post("/").then().statusCode(200)
+                .extract().jsonPath().getString("deploymentId");
+
+        given().contentType(CT).header("Authorization", CODEDEPLOY_AUTH)
+                .header("X-Amz-Target", "CodeDeploy_20141006.ListDeploymentTargets")
+                .body("{\"deploymentId\":\"" + deploymentId + "\"}")
+                .post("/").then().statusCode(200)
+                .body("targetIds", containsInAnyOrder(instanceIds.get(0), instanceIds.get(1), instanceIds.get(2)));
+    }
+
+    private void tagEc2Instance(String instanceId, String key, String value) {
+        given().header("Authorization", EC2_AUTH)
+                .formParam("Action", "CreateTags")
+                .formParam("ResourceId.1", instanceId)
+                .formParam("Tag.1.Key", key)
+                .formParam("Tag.1.Value", value)
+                .post("/").then().statusCode(200);
     }
 }

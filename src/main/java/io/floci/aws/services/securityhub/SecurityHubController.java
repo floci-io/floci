@@ -10,6 +10,7 @@ import io.floci.aws.core.common.PaginatedResult;
 import io.floci.aws.core.common.Pagination;
 import io.floci.aws.core.common.RegionResolver;
 import io.floci.aws.services.securityhub.model.SecurityHubAssociation;
+import io.floci.aws.services.securityhub.model.SecurityHubMember;
 import io.floci.aws.services.securityhub.model.SecurityHubState;
 import jakarta.inject.Inject;
 import jakarta.ws.rs.Consumes;
@@ -27,6 +28,7 @@ import jakarta.ws.rs.core.MediaType;
 import jakarta.ws.rs.core.Response;
 
 import java.time.Instant;
+import java.util.List;
 import java.util.Map;
 
 @Path("/")
@@ -34,13 +36,15 @@ import java.util.Map;
 @Consumes(MediaType.APPLICATION_JSON)
 public class SecurityHubController {
     private final SecurityHubService securityHubService;
+    private final SecurityHubFindingsService findingsService;
     private final RegionResolver regionResolver;
     private final ObjectMapper objectMapper;
 
     @Inject
-    public SecurityHubController(SecurityHubService securityHubService,
+    public SecurityHubController(SecurityHubService securityHubService, SecurityHubFindingsService findingsService,
                                  RegionResolver regionResolver, ObjectMapper objectMapper) {
         this.securityHubService = securityHubService;
+        this.findingsService = findingsService;
         this.regionResolver = regionResolver;
         this.objectMapper = objectMapper;
     }
@@ -81,6 +85,88 @@ public class SecurityHubController {
         response.put("AdminAccountId", state.getAdminAccountId());
         response.put("Feature", state.getAdminFeature());
         return Response.ok(response).build();
+    }
+
+    @POST
+    @Path("/organization/admin/disable")
+    public Response disableOrganizationAdminAccount(@Context HttpHeaders headers, String body) {
+        JsonNode request = readTree(body);
+        securityHubService.disableOrganizationAdminAccount(
+                region(headers), request.path("AdminAccountId").asText(null), request.path("Feature").asText(null));
+        return empty();
+    }
+
+    /** CreateMembers. Macie serves POST /members too, so SecurityAdminController routes here by signing scope. */
+    public Response createMembers(String region, String body) {
+        List<SecurityHubService.UnprocessedAccount> unprocessed =
+                securityHubService.createMembers(region, readTree(body));
+        ObjectNode response = objectMapper.createObjectNode();
+        unprocessedAccounts(response, unprocessed);
+        return Response.ok(response).build();
+    }
+
+    /** ListMembers. Macie serves GET /members too, so SecurityAdminController routes here by signing scope. */
+    public Response listMembers(String region, String onlyAssociated, String maxResults, String nextToken) {
+        PaginatedResult<SecurityHubMember> page =
+                securityHubService.memberPage(region, onlyAssociated, maxResults, nextToken);
+        ObjectNode response = objectMapper.createObjectNode();
+        ArrayNode members = response.putArray("Members");
+        page.items().forEach(member -> members.add(member(member)));
+        if (page.nextToken() != null) {
+            response.put("NextToken", page.nextToken());
+        }
+        return Response.ok(response).build();
+    }
+
+    @POST
+    @Path("/members/get")
+    public Response getMembers(@Context HttpHeaders headers, String body) {
+        SecurityHubService.MemberLookup lookup = securityHubService.getMembers(region(headers), readTree(body));
+        ObjectNode response = objectMapper.createObjectNode();
+        ArrayNode members = response.putArray("Members");
+        lookup.members().forEach(member -> members.add(member(member)));
+        unprocessedAccounts(response, lookup.unprocessed());
+        return Response.ok(response).build();
+    }
+
+    @POST
+    @Path("/members/disassociate")
+    public Response disassociateMembers(@Context HttpHeaders headers, String body) {
+        securityHubService.disassociateMembers(region(headers), readTree(body));
+        return empty();
+    }
+
+    @POST
+    @Path("/members/delete")
+    public Response deleteMembers(@Context HttpHeaders headers, String body) {
+        List<SecurityHubService.UnprocessedAccount> unprocessed =
+                securityHubService.deleteMembers(region(headers), readTree(body));
+        ObjectNode response = objectMapper.createObjectNode();
+        unprocessedAccounts(response, unprocessed);
+        return Response.ok(response).build();
+    }
+
+    private ObjectNode member(SecurityHubMember member) {
+        ObjectNode node = objectMapper.createObjectNode();
+        node.put("AccountId", member.getAccountId());
+        if (member.getEmail() != null) {
+            node.put("Email", member.getEmail());
+        }
+        node.put("MasterId", member.getAdministratorId());
+        node.put("AdministratorId", member.getAdministratorId());
+        node.put("MemberStatus", member.getMemberStatus());
+        if (member.getInvitedAt() != null) {
+            node.put("InvitedAt", member.getInvitedAt());
+        }
+        node.put("UpdatedAt", member.getUpdatedAt());
+        return node;
+    }
+
+    private static void unprocessedAccounts(ObjectNode response, List<SecurityHubService.UnprocessedAccount> accounts) {
+        ArrayNode items = response.putArray("UnprocessedAccounts");
+        for (SecurityHubService.UnprocessedAccount account : accounts) {
+            items.addObject().put("AccountId", account.accountId()).put("ProcessingResult", account.processingResult());
+        }
     }
 
     @GET
@@ -143,6 +229,35 @@ public class SecurityHubController {
     @Path("/standards/get")
     public Response getEnabledStandards(@Context HttpHeaders headers, String body) {
         return subscriptions(securityHubService.enabledStandards(region(headers), readTree(body)), "READY");
+    }
+
+    @POST
+    @Path("/findings/import")
+    public Response batchImportFindings(@Context HttpHeaders headers, String body) {
+        SecurityHubFindingsService.ImportResult imported = findingsService.batchImportFindings(
+                region(headers), readTree(body));
+        ObjectNode response = objectMapper.createObjectNode();
+        response.put("SuccessCount", imported.successCount());
+        response.put("FailedCount", imported.failedFindings().size());
+        ArrayNode failed = response.putArray("FailedFindings");
+        for (SecurityHubFindingsService.ImportFailure failure : imported.failedFindings()) {
+            failed.addObject().put("Id", failure.id()).put("ErrorCode", failure.errorCode())
+                    .put("ErrorMessage", failure.errorMessage());
+        }
+        return Response.ok(response).build();
+    }
+
+    @POST
+    @Path("/findings")
+    public Response getFindings(@Context HttpHeaders headers, String body) {
+        PaginatedResult<ObjectNode> page = findingsService.getFindings(region(headers), readTree(body));
+        ObjectNode response = objectMapper.createObjectNode();
+        ArrayNode items = response.putArray("Findings");
+        page.items().forEach(items::add);
+        if (page.nextToken() != null) {
+            response.put("NextToken", page.nextToken());
+        }
+        return Response.ok(response).build();
     }
 
     private Response subscriptions(Map<String, String> subscriptions, String status) {

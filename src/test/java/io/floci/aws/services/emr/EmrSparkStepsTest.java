@@ -23,6 +23,7 @@ class EmrSparkStepsTest {
 
     // A cluster's Applications, as RunJobFlow stores them, in a case of their own.
     private static final String HIVE_AND_SPARK = "[{\"Name\": \"Spark\"}, {\"Name\": \"hive\"}]";
+    private static final String RELEASE = "emr-7.5.0";
 
     private final ObjectMapper objectMapper = new ObjectMapper();
 
@@ -34,39 +35,42 @@ class EmrSparkStepsTest {
 
         // Options come before the application, so --master after it is the application's own argument.
         assertEquals(List.of("--verbose", "--conf", "spark.executor.cores=2", "--class", "com.example.Report",
-                "s3://bucket/jobs/report.jar", "--master", "kept"), EmrSparkSteps.application(step));
+                "s3://bucket/jobs/report.jar", "--master", "kept"), EmrSparkSteps.application(step, false));
     }
 
     @Test
     void sparkSubmitMayBeNamedByItsPath() {
         assertEquals(List.of("s3://bucket/jobs/report.py"), EmrSparkSteps.application(
-                step("command-runner.jar", null, "/usr/bin/spark-submit", "s3://bucket/jobs/report.py")));
+                step("command-runner.jar", null, "/usr/bin/spark-submit", "s3://bucket/jobs/report.py"), false));
     }
 
     @Test
     void aCustomJarRunsItsMainClassOrElseItsManifests() {
         assertEquals(List.of("--class", "com.example.Report", "s3://bucket/jobs/report.jar", "2026-10-25"),
-                EmrSparkSteps.application(step("s3://bucket/jobs/report.jar", "com.example.Report", "2026-10-25")));
+                EmrSparkSteps.application(step("s3://bucket/jobs/report.jar", "com.example.Report", "2026-10-25"),
+                        false));
         assertEquals(List.of("s3://bucket/jobs/report.jar"),
-                EmrSparkSteps.application(step("s3://bucket/jobs/report.jar", null)));
+                EmrSparkSteps.application(step("s3://bucket/jobs/report.jar", null), false));
     }
 
     @Test
     void aCustomJarAtEmrsStreamingJarPathRunsTheImagesCopy() {
         assertEquals(List.of("/usr/lib/hadoop/hadoop-streaming.jar", "-input", "s3://bucket/in/"),
                 EmrSparkSteps.application(step("/usr/lib/hadoop-mapreduce/hadoop-streaming.jar", null, "-input",
-                        "s3://bucket/in/")));
+                        "s3://bucket/in/"), false));
         assertEquals(List.of("/home/hadoop/hadoop-streaming.jar"),
-                EmrSparkSteps.application(step("/home/hadoop/hadoop-streaming.jar", null)));
+                EmrSparkSteps.application(step("/home/hadoop/hadoop-streaming.jar", null), false));
     }
 
     @Test
     void stepsOtherThanSparkAreNotRun() {
-        assertNull(EmrSparkSteps.application(step("command-runner.jar", null, "hive-script", "--run-hive-script")));
-        assertNull(EmrSparkSteps.application(step("command-runner.jar", null)));
+        assertNull(EmrSparkSteps.application(step("command-runner.jar", null, "hive-script", "--run-hive-script"),
+                false));
+        assertNull(EmrSparkSteps.application(step("command-runner.jar", null), false));
         assertNull(EmrSparkSteps.application(
-                step("s3://us-east-1.elasticmapreduce/libs/script-runner/script-runner.jar", null, "s3://b/x.sh")));
-        assertNull(EmrSparkSteps.application(step(null, null)));
+                step("s3://us-east-1.elasticmapreduce/libs/script-runner/script-runner.jar", null, "s3://b/x.sh"),
+                        false));
+        assertNull(EmrSparkSteps.application(step(null, null), false));
     }
 
     @Test
@@ -170,7 +174,7 @@ class EmrSparkStepsTest {
                    "com.amazonaws.glue.catalog.metastore.AWSGlueDataCatalogHiveClientFactory"}}]""";
         EmrSparkSteps.HiveCommand hive = EmrSparkSteps.hive(step("command-runner.jar", null, "hive-script",
                 "--run-hive-script", "--args", "-f", "s3://bucket/queries/report.q", "-d", "INPUT=s3://bucket/in/",
-                "--hiveconf", "hive.exec.reducers.max=4"), HIVE_AND_SPARK, configurations, objectMapper);
+                "--hiveconf", "hive.exec.reducers.max=4"), RELEASE, HIVE_AND_SPARK, configurations, objectMapper);
 
         assertEquals(List.of("hive-script", "--run-hive-script", "--args"), hive.runner());
         // core-site, then tez-site, then hive-site, as Hive reads them, and the step's own --hiveconf last.
@@ -186,25 +190,25 @@ class EmrSparkStepsTest {
     @Test
     void aHiveScriptStepWithoutArgsGetsThemAtItsEndAndAStepCanRunHiveItself() {
         EmrSparkSteps.HiveCommand script = EmrSparkSteps.hive(step("command-runner.jar", null, "hive-script",
-                "--run-hive-script"), HIVE_AND_SPARK, null, objectMapper);
+                "--run-hive-script"), RELEASE, HIVE_AND_SPARK, null, objectMapper);
         EmrSparkSteps.HiveCommand hive = EmrSparkSteps.hive(step("command-runner.jar", null, "/usr/bin/hive",
-                "-e", "select 1"), HIVE_AND_SPARK, null, objectMapper);
+                "-e", "select 1"), RELEASE, HIVE_AND_SPARK, null, objectMapper);
 
         assertEquals(List.of("hive-script", "--run-hive-script", "--args"), script.runner());
         assertEquals(List.of(), script.arguments());
         assertEquals(List.of("/usr/bin/hive-script", "--run-hive-script", "--args"), EmrSparkSteps.hive(step(
                 "command-runner.jar", null, "/usr/bin/hive-script", "--run-hive-script", "--args", "-e", "select 1"),
-                HIVE_AND_SPARK, null, objectMapper).runner());
+                RELEASE, HIVE_AND_SPARK, null, objectMapper).runner());
         assertEquals(List.of("/usr/bin/hive"), hive.runner());
         assertEquals(List.of("-e", "select 1"), hive.arguments());
     }
 
     @Test
-    void aStepRunsHiveOnlyWhenItsClustersApplicationsNameHive() {
+    void aStepRunsHiveOnlyWhenItsClusterInstallsHive() {
         EmrStep query = step("command-runner.jar", null, "hive-script", "--run-hive-script", "--args", "-f",
                 "s3://bucket/queries/report.q");
         for (String applications : new String[]{"[{\"Name\": \"Spark\"}]", "[]", null, "[{"}) {
-            assertNull(EmrSparkSteps.hive(query, applications, null, objectMapper));
+            assertNull(EmrSparkSteps.hive(query, RELEASE, applications, null, objectMapper));
         }
         // Where hive-script then runs, it says what EMR's says without Hive: "Hive isn't installed."
         assertEquals(query.getArgs(), EmrSparkSteps.command(query));
@@ -212,7 +216,37 @@ class EmrSparkStepsTest {
                 step("command-runner.jar", null, "hive-scripts"),
                 step("script-runner.jar", null, "s3://bucket/hive.sh"),
                 step("s3://bucket/jars/hive.jar", null, "hive"))) {
-            assertNull(EmrSparkSteps.hive(other, HIVE_AND_SPARK, null, objectMapper));
+            assertNull(EmrSparkSteps.hive(other, RELEASE, HIVE_AND_SPARK, null, objectMapper));
+        }
+    }
+
+    @Test
+    void aClusterInstallsHiveWithHiveOrWithHCatalog() {
+        assertTrue(EmrSparkSteps.installsHive(RELEASE, HIVE_AND_SPARK, objectMapper));
+        // EMR installs Hive's client and metastore service with HCatalog too, in any case.
+        assertTrue(EmrSparkSteps.installsHive(RELEASE, "[{\"Name\": \"HCatalog\"}, {\"Name\": \"Spark\"}]",
+                objectMapper));
+        assertTrue(EmrSparkSteps.installsHive(RELEASE, "[{\"Name\": \"hcatalog\"}]", objectMapper));
+        for (String applications : new String[]{"[{\"Name\": \"Spark\"}]", "[]", null, "[{"}) {
+            assertFalse(EmrSparkSteps.installsHive(RELEASE, applications, objectMapper));
+        }
+        // So a Hive step runs there, EMR's hive-script finding the hive it looks for.
+        EmrStep query = step("command-runner.jar", null, "hive-script", "--run-hive-script", "--args", "-e",
+                "show tables;");
+        assertEquals(List.of("hive-script", "--run-hive-script", "--args"),
+                EmrSparkSteps.hive(query, RELEASE, "[{\"Name\": \"HCatalog\"}]", null, objectMapper).runner());
+    }
+
+    @Test
+    void aReleaseOfTheAwsRuntimeForSparkInstallsNeitherHiveNorHCatalog() {
+        // Each of its releases "includes the following applications: AmazonCloudWatchAgent, Delta, Hudi, Iceberg,
+        // JupyterEnterpriseGateway, Livy, and Spark."
+        EmrStep query = step("command-runner.jar", null, "hive-script", "--run-hive-script", "--args", "-e",
+                "show tables;");
+        for (String release : new String[]{"emr-spark-8.0.0", "emr-spark-8.1.0"}) {
+            assertFalse(EmrSparkSteps.installsHive(release, HIVE_AND_SPARK, objectMapper));
+            assertFalse(EmrSparkSteps.installsHive(release, "[{\"Name\": \"HCatalog\"}]", objectMapper));
+            assertNull(EmrSparkSteps.hive(query, release, HIVE_AND_SPARK, null, objectMapper));
         }
     }
 
@@ -295,6 +329,27 @@ class EmrSparkStepsTest {
         assertEquals(Map.of("hadoop.security.groups.cache.secs", "250", "fs.s3a.connection.maximum", "50",
                 "hive.exec.scratchdir", "/tmp/core"), EmrSparkSteps.coreSite(configurations, objectMapper));
         assertEquals(Map.of(), EmrSparkSteps.coreSite(null, objectMapper));
+    }
+
+    @Test
+    void aClustersHiveMetastoreServiceGetsItsCoreSiteThenItsHiveSiteWhichWins() {
+        String configurations = """
+                [{"Classification": "core-site", "Properties": {"fs.s3a.connection.maximum": "50",
+                  "hive.exec.scratchdir": "/tmp/core"}},
+                 {"Classification": "hive-site", "Properties": {"hive.exec.scratchdir": "/tmp/hive",
+                  "hive.metastore.warehouse.dir": "s3://bucket/warehouse/"}},
+                 {"Classification": "spark-hive-site", "Properties": {"hive.metastore.warehouse.dir": "s3://other/"}},
+                 {"Classification": "tez-site", "Properties": {"tez.am.resource.memory.mb": "2048"}}]
+                """;
+
+        Map<String, String> settings = EmrSparkSteps.hiveMetastoreSettings(configurations, objectMapper);
+
+        // Not spark-hive-site, Spark's own, nor tez-site, which the service does not read.
+        assertEquals(Map.of("fs.s3a.connection.maximum", "50", "hive.exec.scratchdir", "/tmp/hive",
+                "hive.metastore.warehouse.dir", "s3://bucket/warehouse/"), settings);
+        assertEquals(List.of("fs.s3a.connection.maximum", "hive.exec.scratchdir", "hive.metastore.warehouse.dir"),
+                List.copyOf(settings.keySet()));
+        assertEquals(Map.of(), EmrSparkSteps.hiveMetastoreSettings(null, objectMapper));
     }
 
     @Test

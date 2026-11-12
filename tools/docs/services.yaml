@@ -25,6 +25,10 @@ services:
     doc: docs/services/access-analyzer.md
     sources:
       - { path: services/accessanalyzer/AccessAnalyzerController.java, mode: rest }
+  - service: ec2-instance-connect
+    doc: docs/services/ec2-instance-connect.md
+    sources:
+      - { path: services/ec2instanceconnect/InstanceConnectJsonHandler.java, mode: switch }
   - service: acm
     doc: docs/services/acm.md
     sources:
@@ -33,6 +37,14 @@ services:
     doc: docs/services/payment-cryptography.md
     sources:
       - { path: services/paymentcryptography/PaymentCryptographyJsonHandler.java, mode: switch }
+  - service: paymentcryptographydata
+    doc: docs/services/payment-cryptography-data.md
+    sources:
+      - { path: services/paymentcryptography/PaymentCryptographyCryptoController.java, mode: rest }
+      - { path: services/paymentcryptography/PaymentCryptographyPinController.java, mode: rest }
+      - { path: services/paymentcryptography/PaymentCryptographyCardController.java, mode: rest }
+    exclude_actions:
+      - GenerateMacEmvPinChange
   - service: applicationautoscaling
     doc: docs/services/applicationautoscaling.md
     sources:
@@ -174,6 +186,19 @@ services:
       - TagResourceByBody
       - TagResourcePut
       - UntagResourceByQuery
+  - service: signer
+    doc: docs/services/signer.md
+    sources:
+      - { path: services/signer/SignerController.java, mode: rest }
+      - { path: core/common/SharedTagsController.java, mode: rest }
+    rename_actions:
+      ListTags: ListTagsForResource
+      TagResourcePost: TagResource
+    exclude_actions:
+      - ListTagsByQuery
+      - TagResourceByBody
+      - TagResourcePut
+      - UntagResourceByQuery
   - service: dlm
     doc: docs/services/dlm.md
     sources:
@@ -187,6 +212,10 @@ services:
       - TagResourceByBody
       - TagResourcePut
       - UntagResourceByQuery
+  - service: xray
+    doc: docs/services/xray.md
+    sources:
+      - { path: services/xray/XrayController.java, mode: rest }
   - service: connect
     doc: docs/services/connect.md
     sources:
@@ -303,6 +332,7 @@ services:
       - { path: services/securityadmin/SecurityAdminController.java, mode: rest }
     rename_actions:
       ListAdmin: ListOrganizationAdminAccounts
+      CreateMembers: CreateMember
   - service: resource-groups
     doc: docs/services/resource-groups.md
     sources:
@@ -385,12 +415,14 @@ services:
     doc: docs/services/securityhub.md
     sources:
       - { path: services/securityhub/SecurityHubController.java, mode: rest }
+      - { path: services/securityadmin/SecurityAdminController.java, mode: rest }
       - { path: core/common/SharedTagsController.java, mode: rest }
     rename_actions:
       ListTags: ListTagsForResource
       TagResourcePost: TagResource
     exclude_actions:
       - ListTagsByQuery
+      - ListAdmin
       - TagResourceByBody
       - TagResourcePut
       - UntagResourceByQuery
@@ -457,6 +489,7 @@ deferred_handlers:
   - { path: services/cloudwatch/logs/CloudWatchLogsHandler.java }  # multi-table doc (nested handler)
   - { path: services/cloudwatch/logs/CloudWatchLogsMetricFilterHandler.java }  # multi-table doc (nested handler, reached through CloudWatchLogsHandler)
   - { path: services/cloudwatch/logs/CloudWatchLogsDeliveryHandler.java }  # multi-table doc (nested handler, reached through CloudWatchLogsHandler)
+  - { path: services/cloudwatch/logs/CloudWatchLogsQueryDefinitionHandler.java }  # multi-table doc (nested handler, reached through CloudWatchLogsHandler)
   - { path: services/cloudwatch/metrics/CloudWatchMetricsJsonHandler.java }  # multi-table doc (nested handler)
   - { path: services/cloudwatch/metrics/CloudWatchMetricsQueryHandler.java }  # multi-table doc (nested handler)
   - { path: services/codebuild/CodeBuildJsonHandler.java }  # non-tabular doc (grouped/inline)

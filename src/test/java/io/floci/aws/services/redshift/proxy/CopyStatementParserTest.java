@@ -14,6 +14,23 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 class CopyStatementParserTest {
 
     @Test
+    void remainingCopyOptionsAreAcceptedTogether() {
+        assertNotNull(copyFrom("COPY t FROM 's3://b/k' IGNOREBLANKLINES ROUNDEC IGNOREALLERRORS"));
+        assertNotNull(copyFrom("COPY t FROM 's3://b/k' CSV IGNOREBLANKLINES ROUNDEC MAXERROR 2"));
+        assertNotNull(copyFrom("COPY t FROM 's3://b/k' JSON 'auto' IGNOREALLERRORS"));
+    }
+
+    @Test
+    void ignoreAllErrorsCannotBeCombinedWithMaxErrorOrRepeated() {
+        assertNull(copyFrom("COPY t FROM 's3://b/k' IGNOREALLERRORS MAXERROR 0"));
+        assertNull(copyFrom("COPY t FROM 's3://b/k' MAXERROR 2 IGNOREALLERRORS"));
+        for (String option : List.of("IGNOREALLERRORS", "IGNOREBLANKLINES", "ROUNDEC")) {
+            assertNull(copyFrom("COPY t FROM 's3://b/k' " + option + " " + option));
+            assertNull(copyFrom("COPY t FROM 's3://b/k' " + option + "suffix"));
+        }
+    }
+
+    @Test
     void copyAndUnloadAcceptDefaultIamRole() {
         CopyStatementParser.S3CopyFrom copy = assertInstanceOf(CopyStatementParser.S3CopyFrom.class,
                 CopyStatementParser.parse("COPY people FROM 's3://bucket/data' IAM_ROLE default CSV"));
@@ -227,7 +244,7 @@ class CopyStatementParserTest {
         assertNull(CopyStatementParser.parse("COPY t FROM 's3://b/k' JSON 's3://mybucket/jsonpaths.json'"));
         assertNull(CopyStatementParser.parse("COPY t FROM 's3://b/k' FIXEDWIDTH 'a:1,b:2'"));
         assertNull(CopyStatementParser.parse("COPY t FROM 's3://b/k' GZIP ESCAPE"));
-        assertNull(CopyStatementParser.parse("COPY t FROM 's3://b/k' TRIMBLANKS"));
+        assertNull(CopyStatementParser.parse("COPY t FROM 's3://b/k' EXPLICIT_IDS"));
     }
 
 
@@ -781,6 +798,42 @@ class CopyStatementParserTest {
         // Only JSON 'auto' is supported; jsonpaths or bare JSON must be rejected
         assertNull(CopyStatementParser.parse("COPY tbl FROM 's3://b/k' JSON 's3://b/paths.json'"));
         assertNull(CopyStatementParser.parse("COPY tbl FROM 's3://b/k' PARQUET"));
+    }
+
+    @Test
+    void parsesCompupdateAndStatupdateOptions() {
+        for (String comp : List.of("COMPUPDATE", "COMPUPDATE PRESET", "COMPUPDATE ON", "COMPUPDATE OFF", "COMPUPDATE TRUE", "COMPUPDATE FALSE")) {
+            CopyStatementParser.S3CopyFrom c = copyFrom("COPY t FROM 's3://b/k' " + comp);
+            assertNotNull(c);
+            assertEquals("t", c.targetTable());
+        }
+        for (String stat : List.of("STATUPDATE", "STATUPDATE ON", "STATUPDATE OFF", "STATUPDATE TRUE", "STATUPDATE FALSE")) {
+            CopyStatementParser.S3CopyFrom c = copyFrom("COPY t FROM 's3://b/k' " + stat);
+            assertNotNull(c);
+            assertEquals("t", c.targetTable());
+        }
+        CopyStatementParser.S3CopyFrom both = copyFrom(
+                "COPY t FROM 's3://b/k' COMPUPDATE ON STATUPDATE OFF");
+        assertNotNull(both);
+        assertEquals("t", both.targetTable());
+
+        assertNull(CopyStatementParser.parse("COPY t FROM 's3://b/k' COMPUPDATE ON COMPUPDATE OFF"));
+        assertNull(CopyStatementParser.parse("COPY t FROM 's3://b/k' STATUPDATE ON STATUPDATE OFF"));
+    }
+
+    @Test
+    void parsesTrimblanksOption() {
+        CopyStatementParser.S3CopyFrom c = copyFrom("COPY t FROM 's3://b/k' TRIMBLANKS");
+        assertNotNull(c);
+        assertTrue(c.transforms().trimBlanks());
+        assertTrue(c.transforms().fieldLevel());
+        assertTrue(c.transforms().needsColumnTypes());
+
+        CopyStatementParser.S3CopyFrom without = copyFrom("COPY t FROM 's3://b/k'");
+        assertNotNull(without);
+        assertFalse(without.transforms().trimBlanks());
+
+        assertNull(CopyStatementParser.parse("COPY t FROM 's3://b/k' TRIMBLANKS TRIMBLANKS"));
     }
 }
 

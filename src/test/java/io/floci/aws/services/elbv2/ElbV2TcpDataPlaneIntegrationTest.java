@@ -9,6 +9,7 @@ import io.floci.aws.testutil.LogCapture;
 import io.quarkus.test.common.http.TestHTTPResource;
 import io.quarkus.test.junit.QuarkusTest;
 import io.quarkus.test.junit.TestProfile;
+import io.vertx.core.Future;
 import io.vertx.core.Handler;
 import io.vertx.core.Vertx;
 import io.vertx.core.buffer.Buffer;
@@ -66,8 +67,11 @@ import static org.awaitility.Awaitility.await;
 import static org.junit.jupiter.api.Assertions.assertAll;
 import static org.junit.jupiter.api.Assertions.assertArrayEquals;
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.when;
 
 @QuarkusTest
 @TestProfile(RealElbV2DataPlaneProfile.class)
@@ -132,12 +136,7 @@ class ElbV2TcpDataPlaneIntegrationTest {
         client.registerTargets(request -> request.targetGroupArn(targetGroupArn)
                 .targets(TargetDescription.builder().id("127.0.0.1").port(backend.actualPort()).build()));
 
-        completeInitialHealthChecks(1);
-
-        await().atMost(Duration.ofSeconds(15)).untilAsserted(() -> assertEquals(
-                TargetHealthStateEnum.HEALTHY,
-                client.describeTargetHealth(request -> request.targetGroupArn(targetGroupArn))
-                        .targetHealthDescriptions().getFirst().targetHealth().state()));
+        awaitHealthyTarget();
 
         try (ServerSocket reservation = new ServerSocket(0)) {
             listenerPort = reservation.getLocalPort();
@@ -154,6 +153,14 @@ class ElbV2TcpDataPlaneIntegrationTest {
                 assertEquals(listenerPort, socket.getPort());
             }
         });
+    }
+
+    private void awaitHealthyTarget() {
+        completeInitialHealthChecks(1);
+        await().atMost(Duration.ofSeconds(15)).untilAsserted(() -> assertEquals(
+                TargetHealthStateEnum.HEALTHY,
+                client.describeTargetHealth(request -> request.targetGroupArn(targetGroupArn))
+                        .targetHealthDescriptions().getFirst().targetHealth().state()));
     }
 
     private void completeInitialHealthChecks(int expectedTargets) {
@@ -250,13 +257,39 @@ class ElbV2TcpDataPlaneIntegrationTest {
     @Test
     void tcpListenerRelaysServerGreetingBeforeClientSendsBytes() throws Exception {
         byte[] greeting = {0, 5, 42, (byte) 0xff};
-        replaceBackend(new NetServerOptions(), socket -> {
-            socket.write(Buffer.buffer(greeting));
-            socket.handler(socket::write);
-        });
+        replaceBackendWithGreeting(greeting);
         try (Socket socket = connect(listenerPort)) {
-            assertArrayEquals(greeting, socket.getInputStream().readNBytes(greeting.length));
-            assertEcho(socket, new byte[]{1, 2, 3});
+            assertGreetingAndEcho(socket, greeting, new byte[]{1, 2, 3});
+        }
+    }
+
+    @Test
+    void replacingBackendDoesNotRequireItsOccupiedPort() throws Exception {
+        NetServer original = backend;
+        int oldPort = original.actualPort();
+        byte[] greeting = {7, 19, 31, (byte) 0xff};
+        NetServer retainedBackend = mock(NetServer.class);
+        try {
+            backend = retainedBackend;
+            when(backend.actualPort()).thenReturn(oldPort);
+            when(backend.close()).thenReturn(Future.succeededFuture());
+            replaceBackendWithGreeting(greeting);
+            assertEquals(oldPort, original.actualPort());
+            assertNotEquals(oldPort, backend.actualPort());
+            assertEquals(List.of(backend.actualPort()),
+                    client.describeTargetHealth(request -> request.targetGroupArn(targetGroupArn))
+                            .targetHealthDescriptions().stream().map(target -> target.target().port()).toList());
+            try (Socket socket = connect(oldPort)) {
+                assertEcho(socket, new byte[]{1, 2, 3});
+            }
+            try (Socket socket = connect(listenerPort)) {
+                assertGreetingAndEcho(socket, greeting, new byte[]{0, 42, (byte) 0xff});
+            }
+        } finally {
+            if (backend == retainedBackend) {
+                backend = original;
+            }
+            original.close().toCompletionStage().toCompletableFuture().get(5, TimeUnit.SECONDS);
         }
     }
 
@@ -497,10 +530,15 @@ class ElbV2TcpDataPlaneIntegrationTest {
     }
 
     private void replaceBackend(NetServerOptions options, Handler<NetSocket> handler) throws Exception {
-        int port = backend.actualPort();
+        int oldPort = backend.actualPort();
         backend.close().toCompletionStage().toCompletableFuture().get(5, TimeUnit.SECONDS);
-        backend = vertx.createNetServer(options).connectHandler(handler).listen(port, "127.0.0.1")
-                .toCompletionStage().toCompletableFuture().get(5, TimeUnit.SECONDS);
+        backend = vertx.createNetServer(options).connectHandler(handler);
+        backend.listen(0, "127.0.0.1").toCompletionStage().toCompletableFuture().get(5, TimeUnit.SECONDS);
+        client.deregisterTargets(request -> request.targetGroupArn(targetGroupArn)
+                .targets(TargetDescription.builder().id("127.0.0.1").port(oldPort).build()));
+        client.registerTargets(request -> request.targetGroupArn(targetGroupArn)
+                .targets(TargetDescription.builder().id("127.0.0.1").port(backend.actualPort()).build()));
+        awaitHealthyTarget();
     }
 
     private static Socket connect(int port) throws IOException {
@@ -532,6 +570,18 @@ class ElbV2TcpDataPlaneIntegrationTest {
                 assertEquals(port, reservation.getLocalPort());
             }
         });
+    }
+
+    private void replaceBackendWithGreeting(byte[] greeting) throws Exception {
+        replaceBackend(new NetServerOptions(), socket -> {
+            socket.write(Buffer.buffer(greeting));
+            socket.handler(socket::write);
+        });
+    }
+
+    private static void assertGreetingAndEcho(Socket socket, byte[] greeting, byte[] payload) throws IOException {
+        assertArrayEquals(greeting, socket.getInputStream().readNBytes(greeting.length));
+        assertEcho(socket, payload);
     }
 
     private static void assertEcho(Socket socket, byte[] payload) throws IOException {

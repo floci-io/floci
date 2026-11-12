@@ -63,6 +63,7 @@ final class CognitoAuthFlowHandler {
     private static final String CUSTOM_MESSAGE_USERNAME_PARAMETER = "{username}";
     /** The {@code callerContext.clientId} AWS sends for an admin action, which names no app client. */
     private static final String CLIENT_ID_NOT_APPLICABLE = "CLIENT_ID_NOT_APPLICABLE";
+    private static final String CLIENT_CREDENTIALS_TRIGGER_SOURCE = "TokenGeneration_ClientCredentials";
     /** The message of a wrong password, which managed login also shows for an unknown user. */
     static final String INCORRECT_CREDENTIALS = "Incorrect username or password";
     static final int MAX_USER_AUTH_SESSIONS_PER_PARTITION = 4_096;
@@ -443,7 +444,7 @@ final class CognitoAuthFlowHandler {
             throw new AwsException("NotAuthorizedException", "Session does not match client", 400);
         }
         String username = responses.get("USERNAME");
-        if (username == null || !username.equals(state.username())) {
+        if (username == null || !service.signInKey(pool, username).equals(service.signInKey(pool, state.username()))) {
             throw new AwsException("NotAuthorizedException", "Session does not match user", 400);
         }
         validateSecretHash(client, responses, username);
@@ -543,13 +544,14 @@ final class CognitoAuthFlowHandler {
                 CognitoUser user = applyNewPasswordAttributes(pool, responses);
                 return continueCustomSrpAuth(pool, client, user, session, state, clientMetadata);
             }
+            String username = responses.get("USERNAME");
             PasswordChangeSession pending = session == null ? null : passwordChangeSessions.get(session);
             if (pending == null || sessionExpired(pending.expiresAt())
                     || !pool.getId().equals(pending.userPoolId()) || !client.getClientId().equals(pending.clientId())
-                    || !pending.username().equals(responses.get("USERNAME"))) {
+                    || !service.signInKey(pool, pending.username()).equals(service.signInKey(pool, username))) {
                 throw new AwsException("NotAuthorizedException", "Invalid session for the user.", 400);
             }
-            validateSecretHash(client, responses, pending.username());
+            validateSecretHash(client, responses, username);
             synchronized (pending) {
                 if (passwordChangeSessions.get(session) != pending || sessionExpired(pending.expiresAt())) {
                     throw new AwsException("NotAuthorizedException", "Session not found", 400);
@@ -1002,7 +1004,7 @@ final class CognitoAuthFlowHandler {
             throw new AwsException("InvalidParameterException",
                     "USERNAME, PASSWORD_CLAIM_SIGNATURE and TIMESTAMP are required", 400);
         }
-        if (!username.equals(srp.username())) {
+        if (!service.signInKey(pool, username).equals(service.signInKey(pool, srp.username()))) {
             throw new AwsException("NotAuthorizedException", "Session does not match user", 400);
         }
         validateSecretHash(client, responses, username);
@@ -1916,10 +1918,15 @@ final class CognitoAuthFlowHandler {
     private Map<String, Object> triggerEvent(UserPool pool, String clientId, CognitoUser user, String triggerKey,
                                              String triggerSource, Map<String, Object> request) {
         Map<String, Object> event = new HashMap<>();
-        event.put("version", "1");
+        event.put("version", CLIENT_CREDENTIALS_TRIGGER_SOURCE.equals(triggerSource) ? "3" : "1");
         event.put("region", regionForPool(pool));
         event.put("userPoolId", pool.getId());
-        event.put("userName", user == null ? null : user.getUsername());
+        String userName = user == null ? null : user.getUsername();
+        if (CLIENT_CREDENTIALS_TRIGGER_SOURCE.equals(triggerSource)) {
+            // A client-credentials grant has no user; AWS sends this fixed name in its place.
+            userName = "ClientCredentials";
+        }
+        event.put("userName", userName);
         event.put("callerContext", Map.of(
                 "awsSdkVersion", "floci",
                 "clientId", clientId));
@@ -1943,6 +1950,9 @@ final class CognitoAuthFlowHandler {
             response.put("emailMessage", null);
             response.put("emailSubject", null);
             response.put("smsMessage", null);
+        }
+        if (CLIENT_CREDENTIALS_TRIGGER_SOURCE.equals(triggerSource)) {
+            response.put("claimsAndScopeOverrideDetails", null);
         }
         event.put("response", response);
         return event;
@@ -2180,7 +2190,13 @@ final class CognitoAuthFlowHandler {
                                                                   Map<String, String> clientMetadata, String triggerSource,
                                                                   List<String> scopes) {
         Map<String, Object> req = new HashMap<>();
-        req.put("groupConfiguration", buildGroupConfiguration(user));
+        if (user == null) {
+            // A machine identity has neither attributes nor groups.
+            req.put("userAttributes", Map.of());
+            req.put("groupConfiguration", null);
+        } else {
+            req.put("groupConfiguration", buildGroupConfiguration(user));
+        }
         req.put("clientMetadata", clientMetadata == null ? Map.of() : clientMetadata);
         // V2 lambdas (CognitoEventUserPoolsPreTokenGenV2) require `scopes` to deserialize.
         // V1 lambdas tolerate the extra field. Only an OAuth flow has requested scopes to send;
@@ -2529,7 +2545,7 @@ final class CognitoAuthFlowHandler {
             throw new AwsException("NotAuthorizedException", "Session does not match client", 400);
         }
         String username = responses.get("USERNAME");
-        if (username == null || !username.equals(state.username())) {
+        if (username == null || !service.signInKey(pool, username).equals(service.signInKey(pool, state.username()))) {
             throw new AwsException("NotAuthorizedException", "Session does not match user", 400);
         }
         validateSecretHash(client, responses, username);
@@ -2634,6 +2650,32 @@ final class CognitoAuthFlowHandler {
     CognitoService.ClaimsOverride preTokenGenerationForHostedAuth(UserPool pool, UserPoolClient client,
                                                                   CognitoUser user, List<String> scopes) {
         return firePreTokenGeneration(pool, client, user, Map.of(), "TokenGeneration_HostedAuth", scopes);
+    }
+
+    /**
+     * Fires PreTokenGeneration for a client-credentials grant, with triggerSource
+     * {@code TokenGeneration_ClientCredentials}. AWS invokes the trigger for a machine identity only
+     * when the pool's {@code PreTokenGenerationConfig.LambdaVersion} is {@code V3_0}; a V1 or V2
+     * trigger is skipped and the token is issued unchanged. {@code clientMetadata} is the token
+     * request's {@code aws_client_metadata}.
+     */
+    CognitoService.ClaimsOverride preTokenGenerationForClientCredentials(UserPool pool, UserPoolClient client,
+                                                                         List<String> scopes,
+                                                                         Map<String, String> clientMetadata) {
+        if (!"V3_0".equals(preTokenGenerationLambdaVersion(pool))) {
+            return null;
+        }
+        return firePreTokenGeneration(pool, client, null, clientMetadata,
+                CLIENT_CREDENTIALS_TRIGGER_SOURCE, scopes);
+    }
+
+    private static String preTokenGenerationLambdaVersion(UserPool pool) {
+        Map<String, Object> cfg = pool.getLambdaConfig();
+        if (cfg != null && cfg.get("PreTokenGenerationConfig") instanceof Map<?, ?> m
+                && m.get("LambdaVersion") instanceof String version) {
+            return version;
+        }
+        return "V1_0";
     }
 
     private static String resolveTriggerArn(UserPool pool, String triggerKey) {

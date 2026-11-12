@@ -2,6 +2,8 @@ package io.floci.aws.services.ec2;
 
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.node.ArrayNode;
+import com.fasterxml.jackson.databind.node.JsonNodeFactory;
 import io.floci.aws.config.EmulatorConfig;
 import io.floci.aws.core.common.AvailabilityZoneIds;
 import io.floci.aws.core.common.AwsArnUtils;
@@ -11,6 +13,7 @@ import io.floci.aws.core.common.AwsPartitions;
 import io.floci.aws.core.common.AwsRegions;
 import io.floci.aws.core.common.CidrCanonicalizer;
 import io.floci.aws.core.common.ContainerTeardown;
+import io.floci.aws.core.common.Digests;
 import io.floci.aws.core.common.PaginatedResult;
 import io.floci.aws.core.common.Pagination;
 import io.floci.aws.core.common.RequestContext;
@@ -341,6 +344,9 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
     // region::subnetId → offset the next synthesised address is tried at. Only an ordering hint:
     // restart forgets it, and privateIpsInUse is what keeps addresses from being handed out twice.
     private final Map<String, Long> subnetIpCursors = new HashMap<>();
+    // region::subnetId → addresses allocateVpcPrivateIp leased to containers no stored resource
+    // stands behind; guarded by privateIpAllocationLock.
+    private final Map<String, Set<String>> containerPrivateIps = new HashMap<>();
     // Held from a synthesised address being chosen until the resource holding it is persisted, so
     // a concurrent allocation, which reads persisted resources to see what is taken, cannot pick
     // the same address in between. Taken after imageRegistryLock where a caller holds both.
@@ -409,6 +415,43 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
             return vpcNetworkManager.attachContainer(region, vpcId, containerId);
         }
         return false;
+    }
+
+    /** Attaches a container to the VPC's Docker network at {@code address}; empty when it stays off it. */
+    public Optional<String> attachContainerToVpc(String region, String vpcId, String subnetId,
+                                                 String containerId, String address) {
+        if (vpcNetworkManager == null) {
+            return Optional.empty();
+        }
+        return vpcNetworkManager.attach(region, vpcId, subnetId, containerId, address);
+    }
+
+    /**
+     * Leases an address of a Docker-backed subnet that nothing else holds, as an instance's is
+     * chosen; empty when the subnet is not Docker-backed or has none left.
+     */
+    public Optional<String> allocateVpcPrivateIp(String region, String subnetId) {
+        if (vpcNetworkManager == null) {
+            return Optional.empty();
+        }
+        synchronized (privateIpAllocationLock) {
+            Optional<String> allocated = vpcNetworkManager.allocatePrivateIp(region, subnetId)
+                    .flatMap(first -> leaseNotHeld(region, subnetId, first,
+                            privateIpsHeldOnVpcNetwork(region, subnetId)));
+            allocated.ifPresent(address -> containerPrivateIps
+                    .computeIfAbsent(key(region, subnetId), ignored -> new HashSet<>()).add(address));
+            return allocated;
+        }
+    }
+
+    public void releaseVpcPrivateIp(String region, String subnetId, String address) {
+        synchronized (privateIpAllocationLock) {
+            containerPrivateIps.computeIfPresent(key(region, subnetId), (ignored, addresses) -> {
+                addresses.remove(address);
+                return addresses.isEmpty() ? null : addresses;
+            });
+            releasePrivateIps(region, subnetId, List.of(address));
+        }
     }
 
     public boolean isVpcNetworkEnabled() {
@@ -1071,7 +1114,7 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
                 }
                 if (inst.getDockerContainerId() != null
                         && containerManager.isContainerRunning(inst.getDockerContainerId())) {
-                    volumeBlockDeviceManager.attachVolume(vol, inst, att.getDevice());
+                    restoreVolumeDevice(vol, inst, att.getDevice());
                 }
             }
         }
@@ -1102,9 +1145,18 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
             for (VolumeAttachment att : vol.getAttachments()) {
                 if (inst.getInstanceId().equals(att.getInstanceId())
                         && (inst.getRootDeviceName() == null || !att.getDevice().equals(inst.getRootDeviceName()))) {
-                    volumeBlockDeviceManager.attachVolume(vol, inst, att.getDevice());
+                    restoreVolumeDevice(vol, inst, att.getDevice());
                 }
             }
+        }
+    }
+
+    private void restoreVolumeDevice(Volume volume, Instance instance, String device) {
+        try {
+            volumeBlockDeviceManager.attachVolume(volume, instance, device);
+        } catch (AwsException e) {
+            LOG.warnv("Could not restore volume {0} on instance {1}: {2}",
+                    volume.getVolumeId(), instance.getInstanceId(), e.getMessage());
         }
     }
 
@@ -2132,12 +2184,8 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
         return "sg-default-" + region;
     }
 
-    // Resolves the default VPC/security-group id actually on file for a region, falling back to
-    // the pre-lex00/floci#21 unscoped literal ("vpc-default"/"sg-default") when storage was persisted before
-    // ids were made region-scoped. Seeding (ensureDefaultResources) always assigns the new
-    // region-scoped id going forward; these resolvers only cover lookups against what may already
-    // be on disk. Without this, a region seeded under the old scheme would silently lose its
-    // default VPC/security group to every caller that resolves them by computed id.
+    // Persisted default VPCs may retain the unscoped id from before ids became region-scoped.
+    // Resolve against storage so callers still find the existing VPC instead of a computed id.
     public String resolveDefaultVpcId(String region) {
         String scoped = defaultVpcId(region);
         if (vpcs.get(key(region, scoped)).isPresent()) {
@@ -2145,15 +2193,6 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
         }
         String legacy = "vpc-default";
         return vpcs.get(key(region, legacy)).isPresent() ? legacy : scoped;
-    }
-
-    public String resolveDefaultSecurityGroupId(String region) {
-        String scoped = defaultSecurityGroupId(region);
-        if (securityGroups.get(key(region, scoped)).isPresent()) {
-            return scoped;
-        }
-        String legacy = "sg-default";
-        return securityGroups.get(key(region, legacy)).isPresent() ? legacy : scoped;
     }
 
     // Per-resource mutation locks (#1464): storage get() returns the live stored object, so
@@ -4015,11 +4054,8 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
                 sgIdentifiers.add(new GroupIdentifier(sg.getGroupId(), sg.getGroupName()));
             }
         } else {
-            // Use default SG
-            SecurityGroup defaultSg = securityGroups.get(key(region, resolveDefaultSecurityGroupId(region))).orElse(null);
-            if (defaultSg != null) {
-                sgIdentifiers.add(new GroupIdentifier(defaultSg.getGroupId(), defaultSg.getGroupName()));
-            }
+            defaultSecurityGroupOf(region, vpcId).ifPresent(defaultSg ->
+                    sgIdentifiers.add(new GroupIdentifier(defaultSg.getGroupId(), defaultSg.getGroupName())));
         }
 
         String reservationId = "r-" + randomHex(17);
@@ -4545,6 +4581,23 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
     }
 
     /**
+     * Keeps the lease on {@code first}, or on the next address the network offers, unless
+     * {@code held} contains it. Callers must hold {@link #privateIpAllocationLock}.
+     */
+    private Optional<String> leaseNotHeld(String region, String subnetId, String first, Set<String> held) {
+        Optional<String> allocated = Optional.of(first);
+        List<String> skipped = new ArrayList<>();
+        while (allocated.isPresent() && held.contains(allocated.get())) {
+            skipped.add(allocated.get());
+            allocated = vpcNetworkManager.allocatePrivateIp(region, subnetId);
+        }
+        // Given back only once the walk is over, or the network would offer them again. Their
+        // holders took no lease, so the network must not count one for them.
+        releasePrivateIps(region, subnetId, skipped);
+        return allocated;
+    }
+
+    /**
      * Gives back the VPC network's lease on each address, so automatic allocation can offer it
      * again. Callers must hold {@link #privateIpAllocationLock}.
      */
@@ -4577,16 +4630,8 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
             if (allocated.isPresent()) {
                 held = privateIpsHeldOnVpcNetwork(region, subnetId);
                 held.addAll(pending);
+                allocated = leaseNotHeld(region, subnetId, allocated.get(), held);
             }
-            List<String> skipped = new ArrayList<>();
-            while (allocated.isPresent() && held.contains(allocated.get())) {
-                skipped.add(allocated.get());
-                allocated = vpcNetworkManager.allocatePrivateIp(region, subnetId);
-            }
-            // Given back only once the walk is over, or the network would offer them again. Their
-            // holders took no lease, and deleting an interface returns none, so a lease kept here
-            // would outlive the holder.
-            releasePrivateIps(region, subnetId, skipped);
             if (allocated.isPresent()) {
                 return allocated.get();
             }
@@ -4670,10 +4715,10 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
      * lease to show for it: an interface created with its own address never takes one, and a
      * restart re-leases only instances. Any other subnet id belongs to one account, so for it the
      * wider scan finds nothing more. A lease with nothing in any account behind it does not fail
-     * the launch: it is stale (DeleteNetworkInterface never returns its lease), or it belongs to
-     * a launch that failed and has not given the address back yet, which it does once its
-     * container is detached. Either way the instance keeps the address without a lease of its
-     * own, and {@link #assignPrivateIp} still skips it, because the stored instance holds it.
+     * the launch: it belongs to a launch that failed and has not given the address back yet,
+     * which it does once its container is detached, or it outlived a holder that never returned
+     * it. Either way the instance keeps the address without a lease of its own, and
+     * {@link #assignPrivateIp} still skips it, because the stored instance holds it.
      * An address outside a substituted subnet's effective range is never leased at all, in which
      * case the instance keeps it the way it keeps a synthesised address.
      */
@@ -4687,9 +4732,8 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
      * The in-use half of {@link #claimRequestedPrivateIp}, without the lease. CreateNetworkInterface
      * and CreateNatGateway use it alone: neither an interface nor a NAT gateway has a container to
      * hold the address on the VPC network, and {@link #assignPrivateIp} already steps around
-     * addresses stored interfaces and NAT gateways hold. DeleteNetworkInterface returns no lease,
-     * so one taken here would keep the address from automatic allocation after the interface is
-     * gone. Callers must hold {@link #privateIpAllocationLock}.
+     * addresses stored interfaces and NAT gateways hold, so neither needs a lease. Callers must
+     * hold {@link #privateIpAllocationLock}.
      *
      * @return whether the address lies in a Docker-backed range, where a lease could be taken
      */
@@ -4749,7 +4793,7 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
 
     /**
      * Every private address a live instance, network interface, NAT gateway or EC2 Instance Connect
-     * Endpoint holds in the subnet.
+     * Endpoint holds in the subnet, and those {@link #allocateVpcPrivateIp} leased to containers.
      */
     private Set<String> privateIpsInUse(String region, String subnetId) {
         return new HashSet<>(privateIpsBySubnet(region).getOrDefault(subnetId, Set.of()));
@@ -4768,10 +4812,21 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
 
     private Map<String, Set<String>> privateIpsBySubnet(String region) {
         String regionPrefix = region + "::";
-        return privateIpsBySubnet(networkInterfaces.scan(k -> k.startsWith(regionPrefix)),
+        Map<String, Set<String>> bySubnet = privateIpsBySubnet(networkInterfaces.scan(k -> k.startsWith(regionPrefix)),
                 instances.scan(k -> k.startsWith(regionPrefix)),
                 natGateways.scan(k -> k.startsWith(regionPrefix)),
                 instanceConnectEndpoints.scan(k -> k.startsWith(regionPrefix)));
+        // Read here, the one occupancy every allocator and endpoint derivation shares, so a derived
+        // endpoint interface cannot land on a container's address.
+        synchronized (privateIpAllocationLock) {
+            containerPrivateIps.forEach((subnetKey, addresses) -> {
+                if (subnetKey.startsWith(regionPrefix)) {
+                    bySubnet.computeIfAbsent(subnetKey.substring(regionPrefix.length()), ignored -> new HashSet<>())
+                            .addAll(addresses);
+                }
+            });
+        }
+        return bySubnet;
     }
 
     private static Map<String, Set<String>> privateIpsBySubnet(List<NetworkInterface> regionInterfaces,
@@ -5376,9 +5431,7 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
                     }
                 }
                 restoreInstanceFirewall(inst);
-                String accountId = callerAccountId();
-                containerManager.start(inst, () ->
-                        RequestScopes.runAs(accountId, () -> restoreAttachedVolumesForInstance(region, inst)));
+                containerManager.start(inst, () -> restoreAttachedVolumesForInstance(region, inst));
             }
             instances.put(key(region, id), inst);
             Map<String, String> entry = new LinkedHashMap<>();
@@ -7372,8 +7425,8 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
 
     /**
      * {@link #privateIpsInUse} as numeric IPv4 values, for endpoint derivation. Only persisted
-     * resources are read, never another endpoint's derived interfaces, so the derivation cannot
-     * recurse into itself through the allocator.
+     * resources and container leases are read, never another endpoint's derived interfaces, so the
+     * derivation cannot recurse into itself through the allocator.
      */
     private Set<Long> persistedAddressValuesInUse(String region, String subnetId) {
         return addressValues(privateIpsInUse(region, subnetId));
@@ -9595,8 +9648,9 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
         validateLaunchTemplateData(region, data);
         LaunchTemplate launchTemplate = findLaunchTemplate(region, id, name);
         synchronized (launchTemplate) {
+            ensureLaunchTemplatePresent(region, launchTemplate, id);
             ensureLaunchTemplateVersions(launchTemplate);
-            int latestVersion = parseLaunchTemplateVersion(launchTemplate.getLatestVersionNumber()) + 1;
+            int latestVersion = lastIssuedLaunchTemplateVersion(launchTemplate) + 1;
             LaunchTemplateData source;
             if (sourceVersion == null || sourceVersion.isBlank()) {
                 source = new LaunchTemplateData();
@@ -9607,6 +9661,7 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
             LaunchTemplateData merged = source.mergedWith(data != null ? data : new LaunchTemplateData());
             validateLaunchTemplateData(region, merged);
             launchTemplate.setLatestVersionNumber(String.valueOf(latestVersion));
+            launchTemplate.setLastIssuedVersionNumber(latestVersion);
             launchTemplate.getVersions().put(String.valueOf(latestVersion), merged);
             launchTemplate.setData(new LaunchTemplateData(merged));
             if (versionDescription != null && !versionDescription.isBlank()) {
@@ -9677,15 +9732,11 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
     }
 
     public LaunchTemplate modifyLaunchTemplate(String region, String id, String name, String defaultVersion, boolean dryRun) {
-        boolean hasId = id != null && !id.isBlank();
-        boolean hasName = name != null && !name.isBlank();
-        if (hasId == hasName) {
-            throw new AwsException(hasId ? "InvalidParameterCombination" : "MissingParameter",
-                    "Specify either LaunchTemplateId or LaunchTemplateName, but not both.", 400);
-        }
+        validateLaunchTemplateSelector(id, name);
         ensureDefaultResources(region);
         LaunchTemplate launchTemplate = findLaunchTemplate(region, id, name);
         synchronized (launchTemplate) {
+            ensureLaunchTemplatePresent(region, launchTemplate, id);
             ensureLaunchTemplateVersions(launchTemplate);
             String nextDefault = launchTemplate.getDefaultVersionNumber();
             if (defaultVersion != null && !defaultVersion.isBlank()) {
@@ -9815,44 +9866,131 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
                                                         boolean decodeUserData) {
         ensureDefaultResources(region);
         LaunchTemplate launchTemplate = findLaunchTemplate(region, id, name);
-        String resolvedVersion = resolveLaunchTemplateVersion(
-                launchTemplate,
-                version,
-                launchTemplate.getDefaultVersionNumber());
-        LaunchTemplateData data = new LaunchTemplateData(versionData(launchTemplate, resolvedVersion));
-        if (decodeUserData) {
-            data.setUserData(Ec2UserDataDecoder.decodeIfMissing(data.getUserData(), data.getEncodedUserData()));
+        synchronized (launchTemplate) {
+            String resolvedVersion = resolveLaunchTemplateVersion(
+                    launchTemplate,
+                    version,
+                    launchTemplate.getDefaultVersionNumber());
+            LaunchTemplateData data = new LaunchTemplateData(versionData(launchTemplate, resolvedVersion));
+            if (decodeUserData) {
+                data.setUserData(Ec2UserDataDecoder.decodeIfMissing(data.getUserData(), data.getEncodedUserData()));
+            }
+            return data;
         }
-        return data;
     }
 
     public LaunchTemplate deleteLaunchTemplate(String region, String id, String name) {
         ensureDefaultResources(region);
         LaunchTemplate launchTemplate = findLaunchTemplate(region, id, name);
-        launchTemplates.delete(key(region, launchTemplate.getLaunchTemplateId()));
-        removeTags(region, launchTemplate.getLaunchTemplateId());
-        return launchTemplate;
+        synchronized (launchTemplate) {
+            launchTemplates.delete(key(region, launchTemplate.getLaunchTemplateId()));
+            removeTags(region, launchTemplate.getLaunchTemplateId());
+            return launchTemplate;
+        }
     }
 
+    /** CloudFormation rollback uses the same validation and mutation as the public API. */
     public void deleteLaunchTemplateVersion(String region, String id, String version) {
+        LaunchTemplateVersionDeletion result =
+                deleteLaunchTemplateVersions(region, id, null, List.of(version), false).getFirst();
+        if (result.errorCode() != null) {
+            throw new AwsException(result.errorCode(), result.errorMessage(), 400);
+        }
+    }
+
+    public record LaunchTemplateVersionDeletion(String launchTemplateId, String launchTemplateName,
+                                                int versionNumber, String errorCode, String errorMessage) {}
+
+    public List<LaunchTemplateVersionDeletion> deleteLaunchTemplateVersions(
+            String region, String id, String name, List<String> requestedVersions, boolean dryRun) {
+        validateLaunchTemplateSelector(id, name);
+        if (requestedVersions == null || requestedVersions.isEmpty()) {
+            throw new AwsException("MissingParameter", "The request must contain LaunchTemplateVersion.", 400);
+        }
+        if (requestedVersions.size() > 200) {
+            throw new AwsException("InvalidParameterValue", "Specify at most 200 launch template versions.", 400);
+        }
+        List<Integer> versions = requestedVersions.stream().map(this::parseLaunchTemplateVersion).toList();
+        if (versions.stream().anyMatch(version -> version < 1)) {
+            throw new AwsException("InvalidLaunchTemplateVersion.Malformed",
+                    "Launch template version numbers must be positive.", 400);
+        }
         ensureDefaultResources(region);
-        LaunchTemplate launchTemplate = findLaunchTemplate(region, id, null);
-        synchronized (launchTemplate) {
-            ensureLaunchTemplateVersions(launchTemplate);
-            launchTemplate.getVersions().remove(version);
-            launchTemplate.getVersionDescriptions().remove(version);
-            int max = launchTemplate.getVersions().keySet().stream()
-                    .mapToInt(this::parseLaunchTemplateVersion)
-                    .max()
-                    .orElse(1);
-            String maxStr = String.valueOf(max);
-            launchTemplate.setLatestVersionNumber(maxStr);
-            LaunchTemplateData latestData = launchTemplate.getVersions().get(maxStr);
-            if (latestData != null) {
-                launchTemplate.setData(new LaunchTemplateData(latestData));
+        try {
+            LaunchTemplate template = findLaunchTemplate(region, id, name);
+            synchronized (template) {
+                ensureLaunchTemplatePresent(region, template, id);
+                if (dryRun) {
+                    throw new AwsException("DryRunOperation",
+                            "Request would have succeeded, but DryRun flag is set.", 412);
+                }
+                ensureLaunchTemplateVersions(template);
+                int lastIssued = lastIssuedLaunchTemplateVersion(template);
+                List<LaunchTemplateVersionDeletion> results = new ArrayList<>();
+                boolean changed = false;
+                for (int version : versions) {
+                    String number = Integer.toString(version);
+                    String errorCode = null;
+                    String errorMessage = null;
+                    if (number.equals(template.getDefaultVersionNumber())) {
+                        errorCode = "unexpectedError";
+                        errorMessage = "The default version of a launch template cannot be deleted.";
+                    } else if (!template.getVersions().containsKey(number)) {
+                        errorCode = "launchTemplateVersionDoesNotExist";
+                        errorMessage = "The specified launch template version does not exist.";
+                    } else if (template.getVersions().size() == 1) {
+                        errorCode = "unexpectedError";
+                        errorMessage = "The last remaining launch template version cannot be deleted.";
+                    } else {
+                        template.getVersions().remove(number);
+                        template.getVersionDescriptions().remove(number);
+                        changed = true;
+                    }
+                    results.add(new LaunchTemplateVersionDeletion(template.getLaunchTemplateId(),
+                            template.getLaunchTemplateName(), version, errorCode, errorMessage));
+                }
+                if (changed) {
+                    String latest = Integer.toString(template.getVersions().keySet().stream()
+                            .mapToInt(this::parseLaunchTemplateVersion).max().orElseThrow());
+                    template.setLastIssuedVersionNumber(lastIssued);
+                    template.setLatestVersionNumber(latest);
+                    template.setData(new LaunchTemplateData(template.getVersions().get(latest)));
+                    template.setVersionDescription(template.getVersionDescriptions().get(latest));
+                    launchTemplates.put(key(region, template.getLaunchTemplateId()), template);
+                }
+                return results;
             }
-            launchTemplate.setVersionDescription(launchTemplate.getVersionDescriptions().get(maxStr));
-            launchTemplates.put(key(region, launchTemplate.getLaunchTemplateId()), launchTemplate);
+        } catch (AwsException error) {
+            String code = switch (error.getErrorCode()) {
+                case "InvalidLaunchTemplateId.NotFound" -> "launchTemplateIdDoesNotExist";
+                case "InvalidLaunchTemplateName.NotFoundException" -> "launchTemplateNameDoesNotExist";
+                default -> throw error;
+            };
+            return versions.stream().map(version ->
+                    new LaunchTemplateVersionDeletion(id, name, version, code, error.getMessage())).toList();
+        }
+    }
+
+    private int lastIssuedLaunchTemplateVersion(LaunchTemplate template) {
+        // Older records have no counter; preserve their latest version before deleting it.
+        return Math.max(template.getLastIssuedVersionNumber(),
+                parseLaunchTemplateVersion(template.getLatestVersionNumber()));
+    }
+
+    private void validateLaunchTemplateSelector(String id, String name) {
+        boolean hasId = id != null && !id.isBlank();
+        boolean hasName = name != null && !name.isBlank();
+        if (hasId == hasName) {
+            throw new AwsException(hasId ? "InvalidParameterCombination" : "MissingParameter",
+                    "Specify either LaunchTemplateId or LaunchTemplateName, but not both.", 400);
+        }
+    }
+
+    private void ensureLaunchTemplatePresent(String region, LaunchTemplate template, String requestedId) {
+        if (launchTemplates.get(key(region, template.getLaunchTemplateId())).isEmpty()) {
+            String errorCode = isSet(requestedId)
+                    ? "InvalidLaunchTemplateId.NotFound" : "InvalidLaunchTemplateName.NotFoundException";
+            throw new AwsException(errorCode, "The specified launch template does not exist.", 400);
         }
     }
 
@@ -12750,6 +12888,9 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
     /** The public suffix every endpoint DNS name ends in; it resolves to 127.0.0.1 in public DNS. */
     static final String INSTANCE_CONNECT_ENDPOINT_DNS_SUFFIX = "localhost.floci.io";
     private static final Set<String> INSTANCE_CONNECT_ENDPOINT_IP_TYPES = Set.of("ipv4", "dualstack", "ipv6");
+    /** States the AWS CLI accepts as usable when it looks an endpoint up for a tunnel. */
+    private static final Set<String> USABLE_INSTANCE_CONNECT_ENDPOINT_STATES =
+            Set.of("create-complete", "update-in-progress", "update-complete", "update-failed");
     /**
      * The names matchesInstanceConnectEndpointFilter implements, exactly the DescribeInstanceConnectEndpoints
      * reference's list; tag:&lt;key&gt; is admitted through tag-key.
@@ -12935,6 +13076,49 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
         return endpoint;
     }
 
+    /** The usable endpoint a tunnel names, or empty: unknown, or not in a state the CLI would use. */
+    public Optional<InstanceConnectEndpoint> findUsableInstanceConnectEndpoint(String region, String id) {
+        return instanceConnectEndpoints.get(key(region, id))
+                .filter(endpoint -> USABLE_INSTANCE_CONNECT_ENDPOINT_STATES.contains(endpoint.getState()));
+    }
+
+    /** The running instance in {@code vpcId} holding {@code privateIp}: what a tunnel connects to. */
+    public Optional<Instance> findRunningInstanceByPrivateIp(String region, String vpcId, String privateIp) {
+        return instances.scan(k -> true).stream()
+                .filter(instance -> region.equals(instance.getRegion()))
+                .filter(instance -> vpcId.equals(instance.getVpcId()) && privateIp.equals(instance.getPrivateIpAddress()))
+                .filter(instance -> instance.getState() != null && "running".equals(instance.getState().getName()))
+                .findFirst();
+    }
+
+    /**
+     * Whether the endpoint may open {@code port} on {@code instance}: its own groups must allow the
+     * traffic out, and the instance's groups must allow it in from the endpoint, the way AWS
+     * evaluates a tunnel. The source is always the endpoint's own address and groups:
+     * {@code PreserveClientIp} is recorded but not modelled, so a rule that admits only the
+     * client's address does not admit the tunnel here.
+     */
+    public boolean instanceConnectEndpointMayReach(InstanceConnectEndpoint endpoint, Instance instance, int port) {
+        String region = endpoint.getRegion();
+        List<SecurityGroup> endpointGroups = groupsById(region, endpoint.getSecurityGroupIds());
+        List<String> instanceGroupIds = instance.getSecurityGroups() == null ? List.of()
+                : instance.getSecurityGroups().stream().map(GroupIdentifier::getGroupId).toList();
+        List<SecurityGroup> instanceGroups = groupsById(region, instanceGroupIds);
+        SecurityGroupPolicy.Peer target = new SecurityGroupPolicy.Peer(instance.getPrivateIpAddress(),
+                instance.getOwnerId(), instance.getVpcId(), new HashSet<>(instanceGroupIds));
+        SecurityGroupPolicy.Peer source = new SecurityGroupPolicy.Peer(endpoint.getPrivateIpAddress(),
+                endpoint.getOwnerId(), endpoint.getVpcId(), new HashSet<>(endpoint.getSecurityGroupIds()));
+        return SecurityGroupPolicy.allows(endpointGroups, true, "tcp", port, -1, target,
+                policyPrefixLists(region, endpointGroups))
+                && SecurityGroupPolicy.allows(instanceGroups, false, "tcp", port, -1, source,
+                        policyPrefixLists(region, instanceGroups));
+    }
+
+    private List<SecurityGroup> groupsById(String region, List<String> ids) {
+        return ids.stream().map(id -> securityGroups.get(key(region, id)).orElse(null))
+                .filter(Objects::nonNull).toList();
+    }
+
     private InstanceConnectEndpoint requireInstanceConnectEndpoint(String region, String id) {
         return instanceConnectEndpoints.get(key(region, id)).orElseThrow(() -> new AwsException(
                 "InvalidInstanceConnectEndpointId.NotFound",
@@ -12995,9 +13179,9 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
             // A CreateTags write that read the gateway before an earlier delete can store it back
             // marked deleted. That delete gave its addresses back, and the network may have leased
             // them to something else since. A requested address took no lease of its own. The one it
-            // can carry is either a stale lease DeleteNetworkInterface left behind, which should go,
-            // or a failed launch's, given back once its container is detached; giving that back
-            // sooner matters only if the allocator wraps around to it in between.
+            // can carry is either a stale lease, which should go, or a failed launch's, given back
+            // once its container is detached; giving that back sooner matters only if the allocator
+            // wraps around to it in between.
             if (!"deleted".equals(natGateway.getState())) {
                 releasePrivateIps(region, natGateway.getSubnetId(), natGateway.getNatGatewayAddresses().stream()
                         .map(NatGatewayAddress::getPrivateIp).toList());
@@ -13802,15 +13986,21 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
                 .collect(Collectors.toList());
     }
 
-    public List<Map<String, String>> describeInstanceTypeOfferings(String region, List<String> instanceTypeNames,
+    public PaginatedResult<Map<String, String>> describeInstanceTypeOfferings(String region, List<String> instanceTypeNames,
                                                                    String locationType,
-                                                                   Map<String, List<String>> filters) {
-        return describeInstanceTypeOfferings(region, instanceTypeNames, locationType, filterList(filters));
+                                                                   Map<String, List<String>> filters,
+                                                                   Integer maxResults, String nextToken) {
+        return describeInstanceTypeOfferings(region, instanceTypeNames, locationType, filterList(filters),
+                maxResults, nextToken);
     }
 
-    List<Map<String, String>> describeInstanceTypeOfferings(String region, List<String> instanceTypeNames,
+    PaginatedResult<Map<String, String>> describeInstanceTypeOfferings(String region, List<String> instanceTypeNames,
                                                             String locationType,
-                                                            List<Map.Entry<String, List<String>>> filters) {
+                                                            List<Map.Entry<String, List<String>>> filters,
+                                                            Integer maxResults, String nextToken) {
+        if (maxResults != null && (maxResults < 5 || maxResults > 1000)) {
+            throw new AwsException("InvalidMaxResults", "MaxResults must be between 5 and 1000", 400);
+        }
         // The first instance-type filter names the types to look up beside InstanceType.N, as a
         // lone one always has, or the whole catalog when one of its values holds a * or ?
         // wildcard. Every filter must then match a looked-up type, so the answer is InstanceType.N
@@ -13855,7 +14045,31 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
                 offerings.add(offering);
             }
         }
-        return offerings;
+        ArrayNode scope = JsonNodeFactory.instance.arrayNode().add(region).add(effectiveLocationType);
+        ArrayNode names = scope.addArray();
+        for (String name : instanceTypeNames) {
+            names.add(name);
+        }
+        ArrayNode filterScope = scope.addArray();
+        if (filters != null) {
+            for (Map.Entry<String, List<String>> filter : filters) {
+                ArrayNode entry = filterScope.addArray().add(filter.getKey());
+                ArrayNode values = entry.addArray();
+                for (String value : filter.getValue()) {
+                    values.add(value);
+                }
+            }
+        }
+        String namespace = "ec2-instance-type-offerings:" + Digests.sha256Hex(scope.toString());
+        return Pagination.paginate(offerings,
+                offering -> offering.get("instanceType") + ":" + offering.get("locationType")
+                        + ":" + offering.get("location"),
+                maxResults == null ? Integer.MAX_VALUE : maxResults, nextToken, namespace,
+                token -> Pagination.tokenStartsWith(token, "ec2-instance-type-offerings:")
+                        ? new AwsException("InvalidPaginationToken.DataMismatch",
+                                "The supplied request parameters do not match the the original request parameters "
+                                        + "that are being paginated over.", 400)
+                        : new AwsException("InvalidParameterValue", "Invalid NextToken", 400));
     }
 
     // ─── Filter matching ───────────────────────────────────────────────────────
@@ -14510,6 +14724,9 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
     }
 
     private final ConcurrentHashMap<String, RefCountedLock> volumeLocks = new ConcurrentHashMap<>();
+    private final Set<VolumeDevice> pendingVolumeAttachments = ConcurrentHashMap.newKeySet();
+
+    private record VolumeDevice(String accountId, String region, String instanceId, String device) {}
 
     private <T> T withVolumeLock(String volumeId, Supplier<T> action) {
         if (volumeId == null) {
@@ -14788,6 +15005,22 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
             throw new AwsException("InvalidParameterValue",
                     "Value '" + device + "' for parameter device is invalid.", 400);
         }
+        return withVolumeLock(volumeId, () -> {
+            String normalizedDevice = device.startsWith("/") ? device : "/dev/" + device;
+            VolumeDevice target = new VolumeDevice(callerAccountId(), region, instanceId, normalizedDevice);
+            if (!pendingVolumeAttachments.add(target)) {
+                throw new AwsException("InvalidParameterValue",
+                        "The device '" + device + "' is already in use by an attachment in progress", 400);
+            }
+            try {
+                return attachVolumeToInstance(region, volumeId, instanceId, device);
+            } finally {
+                pendingVolumeAttachments.remove(target);
+            }
+        });
+    }
+
+    private VolumeAttachment attachVolumeToInstance(String region, String volumeId, String instanceId, String device) {
         Volume volume = getRequiredVolume(region, volumeId);
         Instance inst = getRequiredInstance(region, instanceId);
         if (!List.of("running", "stopped").contains(inst.getState().getName())) {
@@ -14824,6 +15057,10 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
             }
         }
 
+        if (volumeBlockDeviceManager != null) {
+            volumeBlockDeviceManager.attachVolume(volume, inst, device);
+        }
+
         VolumeAttachment attachment = new VolumeAttachment();
         attachment.setVolumeId(volumeId);
         attachment.setInstanceId(instanceId);
@@ -14835,10 +15072,6 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
         volume.getAttachments().add(attachment);
         volume.setState("in-use");
         volumes.put(key(region, volumeId), volume);
-
-        if (volumeBlockDeviceManager != null) {
-            volumeBlockDeviceManager.attachVolume(volume, inst, device);
-        }
 
         return attachment;
     }
@@ -15265,9 +15498,11 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
     }
 
     /**
-     * Deletes a standalone ENI. AWS refuses while it is still attached, floci-kt9, and equally
-     * while a service holds it: {@link #holdNetworkInterfaceForService} leaves no attachment
-     * behind, so the status is what says the interface is spoken for.
+     * Deletes a standalone ENI and gives the lease its primary address took back to the VPC
+     * network. A requested primary took no lease, so any it carries is a failed launch's, given
+     * back early as a deleted NAT gateway's is. AWS refuses while it is still attached,
+     * floci-kt9, and equally while a service holds it: {@link #holdNetworkInterfaceForService}
+     * leaves no attachment behind, so the status is what says the interface is spoken for.
      */
     public void deleteNetworkInterface(String region, String networkInterfaceId) {
         synchronized (privateIpAllocationLock) {
@@ -15278,6 +15513,7 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
             }
             releaseInterfaceAddresses(region, networkInterfaceId, true);
             networkInterfaces.delete(key(region, networkInterfaceId));
+            releasePrivateIps(region, ni.getSubnetId(), List.of(ni.getPrivateIpAddress()));
         }
     }
 

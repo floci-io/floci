@@ -12,6 +12,7 @@ import org.junit.jupiter.api.Test;
 import java.io.ByteArrayInputStream;
 import java.io.IOException;
 import java.io.UncheckedIOException;
+import java.net.URI;
 import java.nio.charset.StandardCharsets;
 import java.util.List;
 import java.util.Map;
@@ -29,6 +30,108 @@ class RequestResourcesTest {
 
     private static final ObjectMapper CBOR = new ObjectMapper(new CBORFactory());
     private static final String MACHINE = "arn:aws:states:us-east-1:000000000000:stateMachine:orders";
+
+    @Test
+    void inferredLandingZoneIdentifiersKeepRawContextAcrossOperations() {
+        String arn = "arn:aws:controltower:::landingzone/missing";
+        for (String operation : List.of("GetLandingZone", "UpdateLandingZone", "ResetLandingZone", "DeleteLandingZone")) {
+            assertEquals(List.of(arn), of("controltower:" + operation,
+                    json("{\"landingZoneIdentifier\":\"" + arn + "\"}")));
+        }
+    }
+
+    @Test
+    void controlTowerIdentifiersKeepFullArnsAndLandingZoneIds() {
+        String prefix = "arn:aws:controltower:us-east-1:000000000000:";
+        for (String operation : List.of("GetLandingZone", "UpdateLandingZone", "ResetLandingZone", "DeleteLandingZone")) {
+            for (String identifier : List.of("zone-one", prefix + "landingzone/zone-one")) {
+                assertEquals(List.of(prefix + "landingzone/zone-one"), of("controltower:" + operation,
+                        json("{\"landingZoneIdentifier\":\"" + identifier + "\"}")));
+            }
+        }
+        for (String kind : List.of("Baseline", "Control")) {
+            String member = "enabled" + kind + "Identifier";
+            String arn = prefix + "enabled" + kind.toLowerCase() + "/one";
+            for (String verb : List.of("Get", "Update", "Reset")) {
+                assertEquals(List.of(arn), of("controltower:" + verb + "Enabled" + kind,
+                        json("{\"" + member + "\":\"" + arn + "\"}")));
+            }
+        }
+        assertEquals(List.of(prefix + "enabledcontrol/*"), of("controltower:EnableControl",
+                json("{\"controlIdentifier\":\"arn:aws:controlcatalog:::control/catalog-one\"}")));
+        assertTrue(RequestResources.actsOnNoResource("controltower:ListLandingZones"));
+        assertTrue(RequestResources.actsOnNoResource("controltower:CreateLandingZone"));
+        assertEquals(List.of("arn:aws-us-gov:controltower:us-gov-west-1:111122223333:landingzone/zone-one"),
+                RequestResources.of("controltower:GetLandingZone", json("{\"landingZoneIdentifier\":\"zone-one\"}"),
+                        "aws-us-gov", "us-gov-west-1", "111122223333"));
+    }
+
+    @Test
+    void inferredControlArnsIgnoreOtherResourceTypesAndKeepTheCreatedWildcard() {
+        String enabled = "arn:aws:controltower:us-east-1:000000000000:enabledcontrol/one";
+        String references = "\"controlIdentifier\":\"arn:aws:controlcatalog:::control/catalog-one\","
+                + "\"targetIdentifier\":\"arn:aws:organizations::111122223333:ou/o-one/ou-one\"";
+        assertEquals(List.of(enabled), of("controltower:DisableControl",
+                json("{" + references + ",\"enabledControlIdentifier\":\"" + enabled + "\"}")));
+        assertEquals(List.of("arn:aws:controltower:us-east-1:000000000000:enabledcontrol/*"),
+                of("controltower:EnableControl", json("{" + references + "}")));
+    }
+
+    @Test
+    void sharedBareTagsReadTheirActualBodyOrQueryWithoutChangingArnPathPrecedence() {
+        String arn = "arn:aws:controltower:us-east-1:000000000000:landingzone/one";
+        String spoof = arn + "other";
+        for (String method : List.of("POST", "GET", "DELETE")) {
+            String operation = "controltower:" + switch (method) {
+                case "POST" -> "TagResource";
+                case "GET" -> "ListTagsForResource";
+                default -> "UntagResource";
+            };
+            ContainerRequestContext bare = rest(method, "{\"resourceArn\":\"" + (method.equals("POST") ? arn : spoof)
+                    + "\"}", Map.of("resourceArn", arn));
+            when(bare.getUriInfo().getRequestUri()).thenReturn(URI.create("http://localhost/tags///"));
+            when(bare.getUriInfo().getBaseUri()).thenReturn(URI.create("http://localhost/"));
+            assertEquals(List.of(arn), of(operation, bare));
+            ContainerRequestContext path = rest(method, "{\"resourceArn\":\"" + spoof + "\"}", Map.of("resourceArn", spoof));
+            when(path.getUriInfo().getRequestUri()).thenReturn(URI.create("http://localhost/tags/" + arn));
+            when(path.getUriInfo().getBaseUri()).thenReturn(URI.create("http://localhost/"));
+            assertEquals(List.of(arn), RequestResources.of(operation, path, "aws", "us-east-1", "000000000000",
+                    null, Map.of("resourceArn", arn)));
+            assertEquals(List.of(), of(operation, path));
+        }
+        ContainerRequestContext absentQuery = rest("GET", "{\"resourceArn\":\"" + arn + "\"}", Map.of());
+        when(absentQuery.getUriInfo().getRequestUri()).thenReturn(URI.create("http://localhost/tags"));
+        when(absentQuery.getUriInfo().getBaseUri()).thenReturn(URI.create("http://localhost/"));
+        assertEquals(List.of(), of("controltower:ListTagsForResource", absentQuery));
+    }
+
+    @Test
+    void sharedSignerBareTagsUseTheSameLocatedMemberContract() {
+        String arn = "arn:aws:signer:us-east-1:000000000000:/signing-profiles/profile";
+        ContainerRequestContext request = rest("POST", "{\"resourceArn\":\"" + arn + "\"}", Map.of());
+        when(request.getUriInfo().getRequestUri()).thenReturn(URI.create("http://localhost/tags"));
+        when(request.getUriInfo().getBaseUri()).thenReturn(URI.create("http://localhost/"));
+        assertEquals(List.of(arn), of("signer:TagResource", request));
+    }
+
+    @Test
+    void generatedIdTargetsReadModelListsAndSerializedQueryNamesInOrder() throws Exception {
+        String instance = "arn:aws:ec2:us-east-1:000000000000:instance/i-one";
+        for (String operation : List.of("ec2:CreateTags", "ec2:DeleteTags")) {
+            assertTrue(RequestResources.hasIndividualTargets(operation));
+            assertFalse(RequestResources.actsOnNoResource(operation));
+            assertEquals(List.of(instance, "*", instance), of(operation,
+                    json("{\"Resources\":[\"i-one\",\"vpc-one\",\"i-one\"]}")));
+            assertEquals(List.of(instance, "*", instance), RequestResources.ofBody(operation,
+                    new ObjectMapper().readTree("{\"Resources\":[\"i-one\",\"vpc-one\",\"i-one\"]}"),
+                    "aws", "us-east-1", "000000000000", null));
+            assertEquals(List.of(), of(operation, json("{\"Resources\":\"i-one\"}")));
+        }
+        assertFalse(RequestResources.hasIndividualTargets("ec2:DescribeInstances"));
+        assertEquals(List.of(), RequestResources.ofBody("ec2:TerminateInstances",
+                new ObjectMapper().readTree("{\"InstanceIds\":[\"i-one\"]}"), "aws", "us-east-1",
+                "000000000000", null));
+    }
 
     @Test
     void listTablesCorrectionReadsTheCollectionAndLeavesOtherDynamoOperationsHandBuilt() {
@@ -529,6 +632,48 @@ class RequestResourcesTest {
     }
 
     /**
+     * A snapshot another account shares is named by its name and the {@code ownerAccount} of that account: it is that
+     * account's snapshot the request acts on, the one {@code findInAccount} gives or else the owner's ARN with its id
+     * open, and a request naming no owner acts on the caller's own.
+     */
+    @Test
+    void aResourceFoundByMembersIsInTheAccountItsAccountMemberGives() {
+        String own = "arn:aws:redshift-serverless:us-east-1:000000000000:snapshot/own-id";
+        String theirs = "arn:aws:redshift-serverless:us-east-1:111111111111:snapshot/their-id";
+        StoredResourceArns stored = new StoredResourceArns() {
+            @Override
+            public String namespace() {
+                return "redshift-serverless";
+            }
+
+            @Override
+            public Optional<String> find(String type, List<String> names, String region) {
+                return List.of("snap").equals(names) ? Optional.of(own) : Optional.empty();
+            }
+
+            @Override
+            public Optional<String> findInAccount(String type, List<String> names, String account, String region) {
+                return "111111111111".equals(account) && List.of("snap").equals(names)
+                        ? Optional.of(theirs) : Optional.empty();
+            }
+        };
+        assertEquals(List.of(own), RequestResources.of("redshift-serverless:GetSnapshot",
+                json("{\"snapshotName\":\"snap\"}"), "aws", "us-east-1", "000000000000", stored));
+        assertEquals(List.of(theirs), RequestResources.of("redshift-serverless:GetSnapshot",
+                json("{\"snapshotName\":\"snap\",\"ownerAccount\":\"111111111111\"}"), "aws", "us-east-1",
+                "000000000000", stored));
+        // A snapshot the owner has none of by that name has its id open in the owner's account.
+        assertEquals(List.of("arn:aws:redshift-serverless:us-east-1:222222222222:snapshot/*"),
+                RequestResources.of("redshift-serverless:GetSnapshot",
+                        json("{\"snapshotName\":\"other\",\"ownerAccount\":\"222222222222\"}"), "aws",
+                        "us-east-1", "000000000000", stored));
+        // An owner that is no account id names no resource.
+        assertEquals(List.of(), RequestResources.of("redshift-serverless:GetSnapshot",
+                json("{\"snapshotName\":\"snap\",\"ownerAccount\":\"nope\"}"), "aws", "us-east-1",
+                "000000000000", stored));
+    }
+
+    /**
      * A scalable target's ARN is all the id Application Auto Scaling mints, while its requests name it by its service
      * namespace, resource id and scalable dimension: it is the one stored under those, or else has its id open, as a
      * new one has; a request leaving one out names none, and one naming it by its ARN names it as given.
@@ -806,6 +951,28 @@ class RequestResourcesTest {
                 json("{\"names\":[\"a\",\"" + project + "b\"]}")));
         assertEquals(List.of(project + "a", project + "b"), of("codebuild:BatchGetProjects",
                 json("{\"names\":[\"" + project + "a\",\"" + project + "b\"]}")));
+    }
+
+    @Test
+    void identifierInferenceDoesNotAuthorizeUnrelatedArnPatternMembers() {
+        String prefix = "arn:aws:";
+        assertEquals(List.of(prefix + "athena:us-east-1:000000000000:workgroup/team"), of("athena:StartSession",
+                json("{\"WorkGroup\":\"team\",\"ExecutionRole\":\"arn:aws:iam::000000000000:role/runner\"}")));
+        assertEquals(List.of(prefix + "kinesisanalytics:us-east-1:000000000000:application/job"),
+                of("kinesisanalytics:UpdateApplication", json("{\"ApplicationName\":\"job\","
+                        + "\"ServiceExecutionRoleUpdate\":\"arn:aws:iam::000000000000:role/runner\"}")));
+        String subscription = prefix + "ce::000000000000:anomalysubscription/subscription";
+        assertEquals(List.of(subscription), of("ce:UpdateAnomalySubscription",
+                json("{\"SubscriptionArn\":\"" + subscription + "\",\"MonitorArnList\":["
+                        + "\"arn:aws:ce::000000000000:anomalymonitor/monitor\"]}")));
+        assertEquals(List.of(prefix + "quicksight:us-east-1:000000000000:dashboard/dashboard"),
+                RequestResources.of("quicksight:UpdateDashboardLinks", json("{\"LinkEntities\":["
+                        + "\"arn:aws:quicksight:us-east-1:000000000000:analysis/analysis\"]}"),
+                        "aws", "us-east-1", "000000000000", null, Map.of("DashboardId", "dashboard")));
+        String application = prefix + "sso::000000000000:application/ssoins-1234567890123456/apl-1234567890123456";
+        assertEquals(List.of(application), of("sso:PutApplicationAccessScope",
+                json("{\"ApplicationArn\":\"" + application + "\",\"AuthorizedTargets\":["
+                        + "\"arn:aws:sso::000000000000:application/ssoins-1234567890123456/apl-9999999999999999\"]}")));
     }
 
     /**

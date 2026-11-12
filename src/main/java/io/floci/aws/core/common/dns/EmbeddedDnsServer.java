@@ -6,6 +6,7 @@ import io.floci.aws.config.TlsConfigSource;
 import io.floci.aws.core.common.DomainNames;
 import io.floci.aws.core.common.RegionResolver;
 import io.floci.aws.core.common.docker.ContainerDetector;
+import io.floci.aws.core.common.docker.CurrentContainerNetworkResolver;
 import io.quarkus.runtime.Startup;
 import io.vertx.core.Future;
 import io.vertx.core.Vertx;
@@ -22,6 +23,7 @@ import java.io.IOException;
 import java.net.DatagramPacket;
 import java.net.InetAddress;
 import java.net.SocketTimeoutException;
+import java.net.UnknownHostException;
 import java.nio.ByteBuffer;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
@@ -111,6 +113,16 @@ public class EmbeddedDnsServer {
     }
 
     /**
+     * This container's address on the network the containers it launches join, which is how they reach this server.
+     * The host's own lookup takes the first of its networks by name, which after a crash can be one Floci made and
+     * is still on; it answers only when that network cannot be told.
+     */
+    static String ownAddress(CurrentContainerNetworkResolver currentContainer) throws UnknownHostException {
+        Optional<String> address = currentContainer.resolveContainerIp();
+        return address.isPresent() ? address.get() : InetAddress.getLocalHost().getHostAddress();
+    }
+
+    /**
      * The certificate generator cannot read application.yml, so DNS spoofing without AWS SANs on
      * the certificate only happens when the flag and TLS are on but the flag is not visible to it.
      */
@@ -144,7 +156,8 @@ public class EmbeddedDnsServer {
     public EmbeddedDnsServer(EmulatorConfig config, ContainerDetector containerDetector, Vertx vertx,
                              Instance<DnsRecordSource> recordSources,
                              Instance<DnsForwardingRuleSource> forwardingRuleSources,
-                             Instance<DnsClientVpcSource> clientVpcSources) {
+                             Instance<DnsClientVpcSource> clientVpcSources,
+                             CurrentContainerNetworkResolver currentContainer) {
         this.recordSources = recordSources;
         this.forwardingRuleSources = forwardingRuleSources;
         this.clientVpcSources = clientVpcSources;
@@ -152,7 +165,7 @@ public class EmbeddedDnsServer {
             return;
         }
         try {
-            String myIp = InetAddress.getLocalHost().getHostAddress();
+            String myIp = ownAddress(currentContainer);
             upstreamDnsServers = composeUpstreams(readResolvConfNameservers(),
                     config.dns().containerFallbackServers());
 
@@ -167,18 +180,11 @@ public class EmbeddedDnsServer {
                 }
             }
 
-            DatagramSocket socket = vertx.createDatagramSocket(new DatagramSocketOptions().setIpV6(false));
-            socket.listen(DNS_PORT, "0.0.0.0", ar -> {
-                if (ar.succeeded()) {
-                    serverIp = myIp;
-                    LOG.infov("Embedded DNS server started on {0}:53, resolving {1} → {0}", myIp, suffixes);
-                    socket.handler(packet -> handleQuery(
-                            vertx, socket, packet.data().getBytes(),
-                            packet.sender().host(), packet.sender().port(), myIp));
-                } else {
-                    LOG.warnv("Embedded DNS server failed to bind on port 53: {0}", ar.cause().getMessage());
-                }
-            });
+            listen(vertx, myIp, DNS_PORT)
+                    .onSuccess(socket -> LOG.infov(
+                            "Embedded DNS server started on {0}:53, resolving {1} → {0}", myIp, suffixes))
+                    .onFailure(error -> LOG.warnv(
+                            "Embedded DNS server failed to bind on {0}:53: {1}", myIp, error.getMessage()));
         } catch (Exception e) {
             LOG.warnv("Failed to initialize embedded DNS server: {0}", e.getMessage());
         }
@@ -186,6 +192,17 @@ public class EmbeddedDnsServer {
 
     public Optional<String> getServerIp() {
         return Optional.ofNullable(serverIp);
+    }
+
+    Future<DatagramSocket> listen(Vertx vertx, String address, int port) {
+        DatagramSocket socket = vertx.createDatagramSocket(new DatagramSocketOptions().setIpV6(false));
+        // A wildcard bind can reply from a different interface, which DNS clients reject.
+        return socket.listen(port, address).map(bound -> {
+            bound.handler(packet -> handleQuery(vertx, bound, packet.data().getBytes(),
+                    packet.sender().host(), packet.sender().port(), address));
+            serverIp = address;
+            return bound;
+        });
     }
 
     // ── packet handling ───────────────────────────────────────────────────────

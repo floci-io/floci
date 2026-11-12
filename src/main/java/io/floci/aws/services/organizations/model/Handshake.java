@@ -4,7 +4,9 @@ import io.quarkus.runtime.annotations.RegisterForReflection;
 
 import java.time.Instant;
 import java.util.ArrayList;
+import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Map;
 
 /**
  * Domain model for a handshake — the two-party exchange behind
@@ -13,6 +15,8 @@ import java.util.List;
  * <p>{@code targetAccountId} and {@code targetEmail} are Floci bookkeeping, not part of the
  * AWS wire shape: they record which account (or email) the invitation was addressed to so
  * {@code ListHandshakesForAccount} can answer for a caller that has not joined yet.
+ * {@code tags} is bookkeeping too: the invitation's tags, attached to the account when it
+ * accepts.
  */
 @RegisterForReflection
 public class Handshake {
@@ -28,6 +32,7 @@ public class Handshake {
     private String organizationId;
     private String targetAccountId;
     private String targetEmail;
+    private Map<String, String> tags = new LinkedHashMap<>();
 
     public String getId() {
         return id;
@@ -115,5 +120,13 @@ public class Handshake {
 
     public void setTargetEmail(String targetEmail) {
         this.targetEmail = targetEmail;
+    }
+
+    public Map<String, String> getTags() {
+        return tags;
+    }
+
+    public void setTags(Map<String, String> tags) {
+        this.tags = tags;
     }
 }

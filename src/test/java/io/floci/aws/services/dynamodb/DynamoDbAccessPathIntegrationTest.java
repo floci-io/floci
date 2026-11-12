@@ -12,6 +12,7 @@ import org.junit.jupiter.api.TestMethodOrder;
 
 import java.util.HashSet;
 import java.util.List;
+import java.util.Map;
 import java.util.Set;
 
 import static io.restassured.RestAssured.given;
@@ -116,6 +117,60 @@ class DynamoDbAccessPathIntegrationTest {
             .statusCode(400)
             .body("__type", equalTo("ValidationException"))
             .body("message", equalTo("Query key condition not supported"));
+    }
+
+    @Test
+    @Order(12)
+    void queryRefusesANestedOrRepeatedKeyConditionAttributeBeforeTheTableLookup() {
+        Map<String, String> errors = Map.of(
+                "pk = :pk AND sk > :a AND sk < :b", "must only contain one condition per key",
+                "pk = :pk AND (sk > :a AND sk < :b)", "must only contain one condition per key",
+                "pk = :pk AND x.y = :a", "cannot have conditions on nested attributes",
+                "(pk = :pk AND sk > :a) AND x.y = :b", "cannot have conditions on nested attributes");
+        for (String table : List.of(TABLE, "access-path-validation-missing")) {
+            errors.forEach((expression, error) -> request("DynamoDB_20120810.Query", """
+                    {
+                      "TableName":"%s",
+                      "KeyConditionExpression":"%s",
+                      "ExpressionAttributeValues":{":pk":{"S":"p1"},":a":{"S":"a"},":b":{"S":"b"}}
+                    }
+                    """.formatted(table, expression))
+                .statusCode(400)
+                .body("message", equalTo("Invalid KeyConditionExpression: KeyConditionExpressions " + error)));
+        }
+    }
+
+    @Test
+    @Order(13)
+    void queryRefusesMoreConditionsThanTheKeySchemaHas() {
+        List<String> conditions = List.of("""
+                "KeyConditionExpression":"pk = :pk AND sk > :a AND x = :b",
+                "ExpressionAttributeValues":{":pk":{"N":"1"},":a":{"S":"a"},":b":{"S":"b"}}
+                """, """
+                "IndexName":"alternate-index",
+                "KeyConditionExpression":"pk = :pk AND alternate = :a AND sk = :b",
+                "ExpressionAttributeValues":{":pk":{"S":"p1"},":a":{"S":"a"},":b":{"S":"b"}}
+                """, """
+                "IndexName":"status-index",
+                "Select":"ALL_ATTRIBUTES",
+                "KeyConditionExpression":"#s = :s AND createdAt > :a AND x = :b",
+                "ExpressionAttributeNames":{"#s":"status"},
+                "ExpressionAttributeValues":{":s":{"S":"open"},":a":{"S":"a"},":b":{"S":"b"}}
+                """, """
+                "KeyConditions":{
+                  "pk":{"ComparisonOperator":"LT","AttributeValueList":[{"S":"p1"}]},
+                  "sk":{"ComparisonOperator":"EQ","AttributeValueList":[{"S":"a"}]},
+                  "x":{"ComparisonOperator":"EQ","AttributeValueList":[{"S":"b"}]}
+                }
+                """);
+        conditions.forEach(condition -> request("DynamoDB_20120810.Query", """
+                {"TableName":"%s",
+                %s}
+                """.formatted(TABLE, condition))
+            .statusCode(400)
+            .body("__type", equalTo("ValidationException"))
+            .body("message", equalTo("The number of query conditions (3) exceeds the number of key attributes "
+                    + "defined in the schema (2)")));
     }
 
     @Test
@@ -895,6 +950,98 @@ class DynamoDbAccessPathIntegrationTest {
             .then()
                 .statusCode(200);
         }
+    }
+
+    @Test
+    @Order(30)
+    void queryRefusesAnOrderingOperandWithNoOrderingBeforeTheTableLookup() {
+        String operandError = "Invalid KeyConditionExpression: Incorrect operand type for operator or function; "
+                + "operator or function: <, operand type: BOOL";
+        for (String table : List.of(TABLE, "access-path-validation-missing")) {
+            request("DynamoDB_20120810.Query", """
+                    {
+                      "TableName":"%s",
+                      "KeyConditionExpression":"pk = :pk AND sk < :sk",
+                      "ExpressionAttributeValues":{":pk":{"S":"p1"},":sk":{"BOOL":true}}
+                    }
+                    """.formatted(table))
+                .statusCode(400)
+                .body("message", equalTo(operandError));
+        }
+    }
+
+    @Test
+    @Order(31)
+    void indexFiltersOnlySeeProjectedAttributes() {
+        request("DynamoDB_20120810.PutItem", """
+                {
+                  "TableName":"%s",
+                  "Item":{"pk":{"S":"filter-projection"},"sk":{"S":"s1"},
+                    "status":{"S":"filter-projection"},"createdAt":{"S":"2026-03-01"},
+                    "alternate":{"S":"filter-projection"},"summary":{"S":"filter-projection"},
+                    "details":{"S":"filter-projection"}}
+                }
+                """.formatted(TABLE))
+            .statusCode(200);
+
+        // Query refuses a filter the index cannot evaluate, on GSIs and LSIs alike.
+        request("DynamoDB_20120810.Query", """
+                {
+                  "TableName":"%s",
+                  "IndexName":"status-index",
+                  "KeyConditionExpression":"#status = :v",
+                  "FilterExpression":"#d = :v AND summary = :v",
+                  "ExpressionAttributeNames":{"#status":"status","#d":"details"},
+                  "ExpressionAttributeValues":{":v":{"S":"filter-projection"}}
+                }
+                """.formatted(TABLE))
+            .statusCode(400)
+            .body("__type", equalTo("ValidationException"))
+            .body("message", equalTo("One or more parameter values were invalid: Secondary index "
+                    + "status-index does not project one or more filter attributes: [details]"));
+        request("DynamoDB_20120810.Query", """
+                {
+                  "TableName":"%s",
+                  "IndexName":"alternate-index",
+                  "KeyConditions":{"pk":{"ComparisonOperator":"EQ","AttributeValueList":[{"S":"filter-projection"}]}},
+                  "QueryFilter":{"details":{"ComparisonOperator":"EQ","AttributeValueList":[{"S":"filter-projection"}]}}
+                }
+                """.formatted(TABLE))
+            .statusCode(400)
+            .body("__type", equalTo("ValidationException"))
+            .body("message", equalTo("One or more parameter values were invalid: Secondary index "
+                    + "alternate-index does not project one or more filter attributes: [details]"));
+
+        // Scan evaluates the filter on what the index holds, so a non-projected attribute never matches.
+        request("DynamoDB_20120810.Scan", """
+                {
+                  "TableName":"%s",
+                  "IndexName":"status-index",
+                  "FilterExpression":"details = :v",
+                  "ExpressionAttributeValues":{":v":{"S":"filter-projection"}}
+                }
+                """.formatted(TABLE))
+            .statusCode(200)
+            .body("Count", equalTo(0));
+        request("DynamoDB_20120810.Scan", """
+                {
+                  "TableName":"%s",
+                  "IndexName":"status-index",
+                  "ScanFilter":{"details":{"ComparisonOperator":"EQ","AttributeValueList":[{"S":"filter-projection"}]}}
+                }
+                """.formatted(TABLE))
+            .statusCode(200)
+            .body("Count", equalTo(0));
+        request("DynamoDB_20120810.Scan", """
+                {
+                  "TableName":"%s",
+                  "IndexName":"status-index",
+                  "FilterExpression":"summary = :v",
+                  "ExpressionAttributeValues":{":v":{"S":"filter-projection"}}
+                }
+                """.formatted(TABLE))
+            .statusCode(200)
+            .body("Count", equalTo(1));
     }
 
     @Test

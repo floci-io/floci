@@ -7,6 +7,7 @@
 shape of every operation, reduced to the members carried in the JSON body, and for every shape
 reachable from one, its type and the shapes of its members, list elements or map values.
 `regen_emr_serverless_shapes.py` keeps every operation's output shape too, with `outputs=True`.
+`regen_dynamodb_shapes.py` keeps the members each structure requires too, with `required=True`.
 `regen_iam_shapes.py` and `regen_sts_shapes.py` name their operations instead, which switches
 `main()` to `build_constraints()`.
 
@@ -35,7 +36,7 @@ def load_model(data: Path, model: Path) -> dict:
     return load_json_model(source)
 
 
-def build(model: dict, provenance: str, generator: str, outputs: bool = False) -> dict:
+def build(model: dict, provenance: str, generator: str, outputs: bool = False, required: bool = False) -> dict:
     shapes = model["shapes"]
     kept: dict[str, dict] = {}
 
@@ -49,6 +50,8 @@ def build(model: dict, provenance: str, generator: str, outputs: bool = False) -
         if kind == "structure":
             members = {member: spec for member, spec in shape.get("members", {}).items()
                        if not (body_only and "location" in spec)}
+            if required and "required" in shape:
+                entry["required"] = [member for member in shape["required"] if member in members]
             entry["members"] = {member: spec["shape"] for member, spec in members.items()}
             for spec in members.values():
                 keep(spec["shape"])
@@ -112,6 +115,32 @@ def build_constraints(model: dict, operations: tuple[str, ...], provenance: str,
             "operations": inputs, "shapes": dict(sorted(kept.items()))}
 
 
+# The partition the model writes in its ARN patterns, and the one the service writes in
+# every partition it serves.
+COMMERCIAL = "arn:aws:"
+EVERY_PARTITION = "arn:aws[a-z0-9-]*:"
+
+# The region the model writes in its ARN patterns and on `Region`, which fits the commercial
+# partition's two-part prefix alone, and the one that fits every published region: `us-gov-west-1`
+# has a further part and `eusc-de-east-1` a longer prefix.
+COMMERCIAL_REGION = "[a-z]{2}-[a-z]{1,16}-[0-9]+"
+EVERY_REGION = "[a-z]{2,4}(-[a-z]{1,16})+-[0-9]+"
+
+
+def widen_partition_and_region(model: dict) -> dict:
+    """The model's patterns, with the partition and the region they name widened to every partition's.
+
+    The model writes the commercial partition and regions of its shape, as the service's own model
+    need not name the others, but the service mints and takes the ARN of the partition and the
+    region a key is in, so the check must not refuse the ARN of a key outside the commercial one.
+    """
+    for shape in model["shapes"].values():
+        pattern = shape.get("pattern")
+        if pattern:
+            shape["pattern"] = pattern.replace(COMMERCIAL, EVERY_PARTITION).replace(COMMERCIAL_REGION, EVERY_REGION)
+    return model
+
+
 def render(doc: dict) -> str:
     return json.dumps(doc, indent=2, sort_keys=False) + "\n"
 
@@ -123,8 +152,10 @@ def generator_name(script: str) -> str:
     return path.relative_to(REPO_ROOT).as_posix() if path.is_relative_to(REPO_ROOT) else path.name
 
 
-def main(argv: list[str] | None, *, script: str, model: Path, output: Path, description: str,
-         outputs: bool = False, operations: tuple[str, ...] | None = None,
+def main(argv: list[str] | None, *, script: str, model: Path, output: Path,
+         description: str | None = None,
+         outputs: bool = False, required: bool = False, operations: tuple[str, ...] | None = None,
+         constraints: bool = False,
          prepare: Callable[[dict], dict] | None = None) -> int:
     """Drives one generator: parse the flags, read the model, write or check the vendored file.
 
@@ -133,6 +164,9 @@ def main(argv: list[str] | None, *, script: str, model: Path, output: Path, desc
     `build`. The two vendor different things and are driven the same way, which is why the
     Query-protocol generators share this too rather than each repeating the flags and the
     staleness check.
+
+    `constraints=True` keeps constraints for every operation with an input, without maintaining
+    a separate operation list.
 
     `prepare` is the one thing a generator may do to the model before any of that, for an operation
     it vendors in part: IAM reduces a paged request to its paging members, the rest of it keeping
@@ -147,9 +181,11 @@ def main(argv: list[str] | None, *, script: str, model: Path, output: Path, desc
     loaded = load_model(data, model)
     if prepare is not None:
         loaded = prepare(loaded)
+    if constraints and operations is None:
+        operations = tuple(name for name, operation in sorted(loaded["operations"].items()) if "input" in operation)
     generator = generator_name(script)
     fresh = render(build_constraints(loaded, operations, provenance, generator) if operations is not None
-                   else build(loaded, provenance, generator, outputs))
+                   else build(loaded, provenance, generator, outputs, required))
 
     if args.check:
         current = args.output.read_text(encoding="utf-8") if args.output.exists() else ""

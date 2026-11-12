@@ -25,9 +25,14 @@
 # by tools/aws/regen_ecs_shapes.py.
 # src/main/resources/aws/ecr-request-shapes.json, the ECR request constraints, is generated
 # from botocore's ECR model by tools/aws/regen_ecr_shapes.py.
+# Athena request constraints for every operation are generated from botocore's Athena model
+# by tools/aws/regen_athena_shapes.py.
 # src/main/resources/aws/payment-cryptography-request-shapes.json, the Payment Cryptography
 # request constraints, is generated from botocore's model by
 # tools/aws/regen_payment_cryptography_shapes.py.
+# src/main/resources/aws/payment-cryptography-data-request-shapes.json, the Payment Cryptography
+# data plane request constraints, is generated from botocore's data plane model by
+# tools/aws/regen_payment_cryptography_data_shapes.py.
 # src/main/resources/aws/rds-ca-certificates.json, each Region's RDS certificate authorities, is
 # generated from the certificate bundles AWS publishes by tools/aws/regen_rds_ca_certificates.py.
 # src/main/resources/aws/iam-request-shapes.json, the IAM request constraints of the operations
@@ -80,6 +85,7 @@ PREFIX ?= $(HOME)/.local
         iam-action-resources-test iam-authorized-actions-sync iam-authorized-actions-check \
         cfn-property-types-sync cfn-property-types-check cfn-property-types-verify cfn-property-types-test \
         cfn-schema-surface-sync cfn-schema-surface-verify cfn-schema-surface-test \
+        cfn-create-only-sync cfn-create-only-verify cfn-create-only-test \
         iam-authorized-actions-verify iam-authorized-actions-test iam-passed-roles-sync iam-passed-roles-check \
         iam-passed-roles-verify iam-passed-roles-test iam-passed-network-connectors-sync \
         iam-passed-network-connectors-check iam-passed-network-connectors-verify \
@@ -276,12 +282,17 @@ aws-data-sync-botocore: ## Regenerate only the AWS data derived from botocore, s
 	$(PYTHON) tools/aws/regen_resource_groups_shapes.py
 	$(PYTHON) tools/aws/regen_logs_delivery_shapes.py
 	$(PYTHON) tools/aws/regen_ecr_shapes.py
+	$(PYTHON) tools/aws/regen_athena_shapes.py
 	$(PYTHON) tools/aws/regen_payment_cryptography_shapes.py
+	$(PYTHON) tools/aws/regen_payment_cryptography_data_shapes.py
+	$(PYTHON) tools/aws/regen_securityhub_shapes.py
+	$(PYTHON) tools/aws/regen_rekognition_shapes.py
 	$(PYTHON) tools/aws/regen_iam_shapes.py
 	$(PYTHON) tools/aws/regen_sts_shapes.py
 	$(PYTHON) tools/aws/regen_apigateway_types.py
 	$(PYTHON) tools/aws/regen_sesv2_shapes.py
 	$(PYTHON) tools/aws/regen_apigateway_shapes.py
+	$(PYTHON) tools/aws/regen_apigateway_documentation_shapes.py
 	$(PYTHON) tools/aws/regen_ecs_shapes.py
 	$(PYTHON) tools/aws/regen_emr_serverless_shapes.py
 	$(PYTHON) tools/aws/regen_query_services.py
@@ -365,10 +376,28 @@ aws-data-check-botocore: ## The AWS data derived from botocore must match a fres
 		echo "       Run 'make aws-data-sync' and commit the result."; \
 		exit 1; \
 	}
+	@$(PYTHON) tools/aws/regen_athena_shapes.py --check || { \
+		echo "error: Athena request shapes are out of date; run 'make aws-data-sync'."; \
+		exit 1; \
+	}
 	@$(PYTHON) tools/aws/regen_payment_cryptography_shapes.py --check || { \
 		echo ""; \
 		echo "error: src/main/resources/aws/payment-cryptography-request-shapes.json is out of date."; \
 		echo "       Run 'make aws-data-sync' and commit the result."; \
+		exit 1; \
+	}
+	@$(PYTHON) tools/aws/regen_payment_cryptography_data_shapes.py --check || { \
+		echo ""; \
+		echo "error: src/main/resources/aws/payment-cryptography-data-request-shapes.json is out of date."; \
+		echo "       Run 'make aws-data-sync' and commit the result."; \
+		exit 1; \
+	}
+	@$(PYTHON) tools/aws/regen_securityhub_shapes.py --check || { \
+		echo "error: Security Hub request shapes are out of date; run 'make aws-data-sync'."; \
+		exit 1; \
+	}
+	@$(PYTHON) tools/aws/regen_rekognition_shapes.py --check || { \
+		echo "error: Rekognition request shapes are out of date; run 'make aws-data-sync'."; \
 		exit 1; \
 	}
 	@$(PYTHON) tools/aws/regen_apigateway_types.py --check || { \
@@ -384,6 +413,12 @@ aws-data-check-botocore: ## The AWS data derived from botocore must match a fres
 	@$(PYTHON) tools/aws/regen_apigateway_shapes.py --check || { \
 		echo ""; \
 		echo "error: src/main/resources/aws/apigateway-request-shapes.json is out of date."; \
+		echo "       Run 'make aws-data-sync' and commit the result."; \
+		exit 1; \
+	}
+	@$(PYTHON) tools/aws/regen_apigateway_documentation_shapes.py --check || { \
+		echo ""; \
+		echo "error: src/main/resources/aws/apigateway-documentation-request-shapes.json is out of date."; \
 		echo "       Run 'make aws-data-sync' and commit the result."; \
 		exit 1; \
 	}
@@ -778,6 +813,25 @@ cfn-schema-surface-verify: ## CI gate (online): the committed CloudFormation sch
 
 cfn-schema-surface-test: ## Run the CloudFormation schema surface generator's unit tests
 	$(PYTHON) -m pytest tools/aws/test_regen_cfn_schema_surface.py -q
+
+cfn-create-only-sync: ## Regenerate src/main/resources/cloudformation/create-only-properties.json from AWS's resource schemas (commit the result)
+	$(PYTHON) tools/aws/regen_cfn_create_only.py
+
+cfn-create-only-verify: ## CI gate (online): the committed CloudFormation create-only properties must still match AWS's schemas
+	@$(PYTHON) tools/aws/regen_cfn_create_only.py --verify; status=$$?; \
+	if [ $$status -eq 2 ]; then \
+		echo ""; \
+		echo "error: could not read AWS's CloudFormation resource schemas, so nothing was verified."; \
+		exit 1; \
+	elif [ $$status -ne 0 ]; then \
+		echo ""; \
+		echo "error: AWS has changed a resource schema the CloudFormation create-only properties come from."; \
+		echo "       Run 'make cfn-create-only-sync' and commit the result."; \
+		exit 1; \
+	fi
+
+cfn-create-only-test: ## Run the CloudFormation create-only generator's unit tests
+	$(PYTHON) -m pytest tools/aws/test_regen_cfn_create_only.py -q
 
 .PHONY: dynamodb-condition-keys-sync dynamodb-condition-keys-check dynamodb-condition-keys-verify
 dynamodb-condition-keys-sync: ## Regenerate DynamoDB IAM condition keys from AWS and botocore

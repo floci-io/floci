@@ -40,6 +40,8 @@ import java.util.UUID;
 public class OpenSearchController {
 
     private static final Logger LOG = Logger.getLogger(OpenSearchController.class);
+    private static final int TAG_KEY_MAX_LENGTH = 128;
+    private static final int TAG_VALUE_MAX_LENGTH = 256;
 
     private final OpenSearchService service;
     private final OpenSearchVpcEndpointService vpcEndpoints;
@@ -634,7 +636,8 @@ public class OpenSearchController {
         node.put("Created", !domain.isProcessing());
         node.put("Processing", domain.isProcessing());
         node.put("Deleted", domain.isDeleted());
-        String endpoint = domain.getEndpoint() != null ? domain.getEndpoint() : "";
+        String endpoint = domain.getEndpoint() != null
+                ? domain.getEndpoint().replaceFirst("(?i)^https?://", "") : "";
         if (domain.getVpcOptions() == null) {
             node.put("Endpoint", endpoint);
         } else if (!endpoint.isEmpty()) {
@@ -1041,18 +1044,28 @@ public class OpenSearchController {
         return opts;
     }
 
+    /**
+     * The tags a request carries, refused unless as the model has them: a list of structures, each with a {@code Key}
+     * and a {@code Value} of text within their lengths. What the IAM check reads as tags is then what a domain gets.
+     */
     private Map<String, String> parseTags(JsonNode node) {
         Map<String, String> tags = new HashMap<>();
         if (node == null || node.isMissingNode() || node.isNull()) {
             return tags;
         }
-        node.forEach(tag -> {
-            String key = tag.path("Key").asText(null);
-            String value = tag.path("Value").asText(null);
-            if (key != null && value != null) {
-                tags.put(key, value);
+        if (!node.isArray()) {
+            throw new AwsException("ValidationException", "TagList must be a list of tags.", 400);
+        }
+        for (JsonNode tag : node) {
+            JsonNode key = tag.path("Key");
+            JsonNode value = tag.path("Value");
+            if (!key.isTextual() || key.asText().isEmpty() || key.asText().length() > TAG_KEY_MAX_LENGTH
+                    || !value.isTextual() || value.asText().length() > TAG_VALUE_MAX_LENGTH) {
+                throw new AwsException("ValidationException", "Each tag needs a Key of 1 to " + TAG_KEY_MAX_LENGTH
+                        + " characters and a Value of up to " + TAG_VALUE_MAX_LENGTH + " characters.", 400);
             }
-        });
+            tags.put(key.asText(), value.asText());
+        }
         return tags;
     }
 }

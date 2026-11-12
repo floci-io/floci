@@ -10,6 +10,8 @@ import io.floci.aws.services.iam.IamService;
 import io.floci.aws.services.iam.IamService.CallerArns;
 import io.floci.aws.services.iam.model.CallerContext;
 import io.floci.aws.services.iam.model.IamRole;
+import io.floci.aws.services.s3.S3ConditionKeys;
+import io.floci.aws.services.s3.S3ResourceArns;
 import io.floci.aws.services.s3.S3Service;
 
 import java.nio.charset.StandardCharsets;
@@ -272,7 +274,7 @@ public final class RedshiftRoleAccess {
     public static void authorizeRoleList(S3Service s3, IamService iamService, RoleSession roleSession,
                                          String roleArn, String bucket, String prefix) {
         authorizeRoleAction(s3, iamService, roleArn, "s3:ListBucket", bucketArn(roleArn, bucket),
-                Map.of("s3:prefix", List.of(prefix == null ? "" : prefix)));
+                S3ConditionKeys.listing(prefix));
         try {
             s3.authorizeSignedListBucket(roleSession.accessKeyId(), roleSession.sessionToken(), bucket, prefix);
         } catch (AwsException e) {
@@ -303,11 +305,11 @@ public final class RedshiftRoleAccess {
 
     /** The bucket and object ARNs live in the role's partition: a China role authorizes China buckets. */
     public static String bucketArn(String roleArn, String bucket) {
-        return AwsArnUtils.Arn.global(AwsArnUtils.parse(roleArn).partition(), "s3", "", bucket).toString();
+        return S3ResourceArns.bucket(AwsArnUtils.parse(roleArn).partition(), bucket);
     }
 
     public static String objectArn(String roleArn, String bucket, String key) {
-        return bucketArn(roleArn, bucket) + "/" + key;
+        return S3ResourceArns.object(AwsArnUtils.parse(roleArn).partition(), bucket, key);
     }
 
     private static String randomString(String characters, int length) {

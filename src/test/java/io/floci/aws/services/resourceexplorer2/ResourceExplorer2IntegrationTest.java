@@ -2148,11 +2148,14 @@ class ResourceExplorer2IntegrationTest {
 
         @Test
         void freeFormKeywordsAreOredNotAnded() {
-            // "s3" and "dynamodb" share no resource, so an AND reading would return nothing.
+            // The two fixture names share no resource, so an AND reading would return nothing. They
+            // are this class's own, so the page holds its bucket and table whatever else the shared
+            // application has indexed: a broad pair such as "s3 dynamodb" also matches other
+            // classes' resources, which can fill the first page ahead of either.
             given()
                 .header("Authorization", AUTH)
                 .contentType("application/json")
-                .body("{\"QueryString\": \"s3 dynamodb\"}")
+                .body("{\"QueryString\": \"re2-test-bucket re2-test-table\"}")
             .when()
                 .post("/Search")
             .then()

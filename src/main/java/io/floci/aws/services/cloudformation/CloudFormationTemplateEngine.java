@@ -329,7 +329,11 @@ public class CloudFormationTemplateEngine {
                 return attribute.isTextual() ? resolveDynamicReferences(attribute.textValue()) : attribute;
             }
             if (node.has("Fn::Select")) {
-                return resolveNode(selectedElement(node.get("Fn::Select")));
+                // The chosen element becomes the value, so AWS::NoValue inside it is left out as it is
+                // from a value written in place. A directly chosen AWS::NoValue keeps resolving to "".
+                JsonNode selected = selectedElement(node.get("Fn::Select"));
+                JsonNode omitted = omitNoValue(selected);
+                return resolveNode(omitted.isMissingNode() ? selected : omitted);
             }
             if (node.has("Fn::FindInMap")) {
                 return resolveNode(findMappedValue(node.get("Fn::FindInMap")));

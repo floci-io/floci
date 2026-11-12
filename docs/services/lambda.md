@@ -75,6 +75,22 @@ Floci Lambda runs your function code locally inside real Docker containers - clo
 supported ranges before changing any stored settings. A rejected value returns
 `InvalidParameterValueException` and leaves the function configuration unchanged.
 
+`CreateFunction` and `UpdateFunctionConfiguration` enforce the 4 KB environment-variable
+limit. The compact JSON `Variables` object must fit within 4,096 UTF-8 bytes, including
+keys, values, punctuation, and JSON escaping, as described in the
+[AWS deployment guidance](https://docs.aws.amazon.com/lambda/latest/dg/troubleshooting-deployment.html).
+An oversized environment returns HTTP 400 with `InvalidParameterValueException` before
+creating a function or changing any stored configuration. Omitting `Environment` on an
+update preserves the existing variables; an empty `Variables` object clears them.
+Validation stops serializing oversized input without allocating full JSON and UTF-8 copies.
+Quota errors include AWS's `String measured:` detail. The diagnostic retains up to 5,120
+UTF-8 bytes of compact variables JSON; larger inputs end with `...`, dropping any incomplete
+trailing UTF-8 character. This keeps diagnostic allocation and serialization bounded.
+CloudFormation omits unchanged environment variables during in-place configuration updates,
+so a function persisted before quota enforcement can retain an oversized environment when
+another property changes. Changing or removing its variables still updates the environment
+and enforces the quota.
+
 The event invoke configuration is stored and returned as AWS does, and `AWS::Lambda::EventInvokeConfig`
 provisions it from a stack. A SAM function's `EventInvokeConfig` expands into that resource as
 `sam deploy` does: on `$LATEST`, or on the `AutoPublishAlias` alias, with the inline role policy for
@@ -429,6 +445,8 @@ disabled fails with Lambda's error as the resource status reason.
 
 Function URLs are also reachable directly on `/{proxy:.*}` under the Lambda URL controller, which routes the request into the normal `Invoke` path.
 
+A function URL with `InvokeMode: RESPONSE_STREAM` streams the response: each chunk the handler writes reaches the caller as it is written. When the handler uses `awslambda.HttpResponseStream.from`, the status code, headers and cookies come from its prelude. Otherwise the response is a `200` with the content type the handler set, `application/octet-stream` by default. A function that fails before its stream starts, in its init or by timing out, answers `502`. An error the handler throws ends the body where it stopped, an empty `200` if it wrote nothing: the runtime reports it in HTTP trailers, which Floci's runtime API does not read. A handler that does not stream is answered as with `BUFFERED`.
+
 Function URLs are not available in AWS GovCloud (US) or in the China Regions
 ([GovCloud guide](https://docs.aws.amazon.com/govcloud-us/latest/UserGuide/govcloud-lambda.html),
 [China guide](https://docs.amazonaws.cn/en_us/aws/latest/userguide/lambda.html)), so
@@ -614,6 +632,7 @@ Configuration resource reads and `ListFunctionsByCodeSigningConfig` return
 |---|---|---|
 | `FLOCI_SERVICES_LAMBDA_ENABLED` | `true` | Enable or disable the service |
 | `FLOCI_SERVICES_LAMBDA_EPHEMERAL` | `false` | Remove containers after each invocation |
+| `FLOCI_SERVICES_LAMBDA_RECONCILE_CONTAINERS_ON_STARTUP` | `true` | Reclaim owned Docker containers from previous runs at startup and retry incomplete cleanup on cold starts; disable when deployments share the same owner identity |
 | `FLOCI_SERVICES_LAMBDA_HONOUR_ARCHITECTURES` | `false` | Select each function's declared architecture for Docker image pulls and containers |
 | `FLOCI_SERVICES_LAMBDA_DEFAULT_MEMORY_MB` | `128` | Default function memory (MB) |
 | `FLOCI_SERVICES_LAMBDA_DEFAULT_TIMEOUT_SECONDS` | `3` | Default function timeout (seconds) |
@@ -681,6 +700,21 @@ Configuration resource reads and `ListFunctionsByCodeSigningConfig` return
     The temporary copy helper is removed without a stop grace period once copying
     finishes or fails. It runs no Lambda code; actual execution environments retain
     their normal shutdown and extension-drain behavior.
+
+!!! note "Cleanup after an unclean Docker shutdown"
+    At startup, Floci removes running and exited Lambda containers left by a previous run,
+    including temporary code-copy helpers. Cleanup is scoped to the Docker resource namespace
+    and Floci API port, and preserves containers from the current run and named code volumes.
+    If Docker is unavailable or removal fails, the next cold start retries cleanup.
+
+    This applies to containers created with ownership and run labels. Containers from older
+    versions without those labels are left alone because their deployment cannot be identified
+    safely. Use distinct `FLOCI_DOCKER_RESOURCE_NAMESPACE` values for deployments sharing a daemon.
+
+    If two deployments must share the same namespace and API port, set
+    `FLOCI_SERVICES_LAMBDA_RECONCILE_CONTAINERS_ON_STARTUP=false` to disable both startup cleanup
+    and cold-start retries. Cleanup is enabled by default. Each distinct Docker listing or removal
+    failure warns once; repeated failures log at DEBUG until cleanup recovers.
 
 !!! note "Bounding warm containers"
     After an invocation the container stays warm so the next call skips the cold start, and is
@@ -853,7 +887,9 @@ subjects:
 
 #### Running Floci in-cluster
 
-A minimal Deployment (namespace `floci` assumed, RBAC from above bound to the
+The Helm chart in `charts/floci` sets all of this up, with the RBAC above, a Lambda
+namespace of your choice and `helm test` checks: see
+[Kubernetes (Helm)](../getting-started/kubernetes.md). Without Helm, a minimal Deployment (namespace `floci` assumed, RBAC from above bound to the
 `floci` ServiceAccount):
 
 ```yaml
@@ -949,7 +985,9 @@ invocation to time out.
 
 **Floci solves this automatically** by running an embedded DNS server (UDP/53)
 on its container IP. All Lambda containers launched by Floci are configured to
-use it as their DNS resolver. The embedded DNS server:
+use it as their DNS resolver. It binds that advertised IP so replies retain the
+queried source address even when the container has multiple network interfaces.
+The embedded DNS server:
 
 - Resolves `*.localhost.floci.io` → Floci's Docker network IP
 - Forwards all other queries to the upstream resolver(s) from `/etc/resolv.conf`,
@@ -1020,8 +1058,12 @@ group lists detach the function, and the response then omits `VpcConfig`. Publis
 versions retain their network configuration when `$LATEST` changes.
 
 These checks validate the declaration. Function containers still use the configured
-Docker network; `VpcConfig` does not yet enforce VPC packet routing, security-group
-rules, or NAT egress.
+Docker network. With Docker-backed VPC networks (`FLOCI_SERVICES_EC2_VPC_NETWORKS_ENABLED=true`
+and `FLOCI_SERVICES_EC2_MOCK=false`) and a known `VpcId`, the container also joins that VPC's
+Docker network at an address leased from the first subnet in `SubnetIds`, so it reaches EC2
+instances and `awsvpc` ECS tasks in the VPC at the private addresses they report. The address is
+returned once the container is removed. `VpcConfig` does not yet enforce security-group rules or
+NAT egress, and the other subnets are not used.
 
 `RuntimeVersionConfig.RuntimeVersionArn` is returned for managed (non-image)
 runtimes. Its value is derived from the runtime name, so it is stable across
@@ -1156,6 +1198,10 @@ A container image function whose `ImageUri` names an image already present on th
 ### Private registry authentication
 
 Container image functions (`"PackageType": "Image"`) that pull from private registries need Docker credentials. See [Docker Configuration → Private Registry Authentication](../configuration/docker.md#private-registry-authentication) for the full guide.
+
+### Image user and working directory
+
+AWS runs a container image function as its own least-privileged user, not the image's `USER`. Floci keeps running the container as the image's user, but before it starts the container it checks that Lambda's user could enter the working directory (`ImageConfig.WorkingDirectory`, or the image's `WORKDIR`). Lambda's user owns nothing in the image, so a directory on that path must be executable by other users. Symlinks on the path are followed, and the check stops at a file system the function mounts from EFS, which Lambda enters as the access point's user. When a directory is not executable by other users, such as a `0700` home directory owned by the image's user, the invocation fails with `Runtime.InvalidEntrypoint`, as on AWS. Set `WORKDIR` to a directory everyone can enter, such as `/`.
 
 ## Examples
 

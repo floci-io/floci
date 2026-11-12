@@ -2750,6 +2750,11 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
             // profile deleted and recreated takes its history with it.
             checkPasswordPolicy(password, null);
             profile = new LoginProfile(userName, password, passwordResetRequired);
+            // Stamped from the service's clock, as every later password change is, so the
+            // credential report compares times read from one timeline.
+            Instant now = clock.instant();
+            profile.setCreateDate(now);
+            profile.setPasswordLastChanged(now);
             loginProfiles.put(userName, profile);
         }
         LOG.infov("Created IAM login profile for user: {0}", userName);
@@ -2778,7 +2783,7 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
                 checkPasswordPolicy(password, profile);
                 recordSupersededPassword(profile);
                 profile.setPassword(password);
-                profile.setPasswordLastChanged(Instant.now());
+                profile.setPasswordLastChanged(clock.instant());
             }
             if (passwordResetRequired != null) {
                 profile.setPasswordResetRequired(passwordResetRequired);
@@ -2840,7 +2845,7 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
             checkPasswordPolicy(newPassword, profile);
             recordSupersededPassword(profile);
             profile.setPassword(newPassword);
-            profile.setPasswordLastChanged(Instant.now());
+            profile.setPasswordLastChanged(clock.instant());
             profile.setPasswordResetRequired(false);
             loginProfiles.put(userName, profile);
         }
@@ -4599,7 +4604,7 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
                 || !(accessKeys instanceof AccountAwareStorageBackend<AccessKey> aware)) {
             return List.of();
         }
-        return aware.scanAllAccountEntries(accessKeyId::equals);
+        return aware.findAllAccountEntries(accessKeyId);
     }
 
     private Optional<String> activeAccessKeySecret(String accessKeyId) {
@@ -5194,7 +5199,7 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
         }
         return delegatedApproverRole(approverArn)
                 .map(role -> new CallerArns(approverArn, role.getArn(), CallerArns.TYPE_ASSUMED_ROLE,
-                        null, null, role.getPermissionsBoundaryArn() != null));
+                        null, null, role.getPermissionsBoundaryArn() != null, role.getTags()));
     }
 
     /** The {@code aws:userid} of delegated credentials: the approver's, in the approver's shape. */
@@ -5445,9 +5450,22 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
      * @param userName      the request's {@code aws:username}, which only an IAM user has
      * @param permissionsBoundary whether a permissions boundary is attached to the user, or to the
      *                      role a session assumed, which a Deny's {@code NotPrincipal} never spares
+     * @param principalTags the stored user's or assumed role's tags, snapshotted for this request;
+     *                      STS session tags are not yet recorded
      */
     public record CallerArns(String callerArn, String principalArn, String principalType,
-                             String userId, String userName, boolean permissionsBoundary) {
+                             String userId, String userName, boolean permissionsBoundary,
+                             Map<String, String> principalTags) {
+
+        public CallerArns {
+            principalTags = Map.copyOf(principalTags);
+        }
+
+        /** A caller without stored principal tags, including account-root and federated identities. */
+        public CallerArns(String callerArn, String principalArn, String principalType, String userId,
+                          String userName, boolean permissionsBoundary) {
+            this(callerArn, principalArn, principalType, userId, userName, permissionsBoundary, Map.of());
+        }
 
         /**
          * The {@code aws:PrincipalType} values, from the IAM User Guide's principal key values
@@ -5508,6 +5526,7 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
             if (userName != null) {
                 context.put("aws:username", List.of(userName));
             }
+            principalTags.forEach((key, value) -> context.put("aws:PrincipalTag/" + key, List.of(value)));
         }
     }
 
@@ -5518,8 +5537,13 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
      * anything derivable from the ARN.
      */
     private static CallerArns callerForUser(IamUser user) {
+        return callerForUser(user, true);
+    }
+
+    private static CallerArns callerForUser(IamUser user, boolean includeTags) {
         return new CallerArns(user.getArn(), user.getArn(), CallerArns.TYPE_USER,
-                user.getUserId(), user.getUserName(), user.getPermissionsBoundaryArn() != null);
+                user.getUserId(), user.getUserName(), user.getPermissionsBoundaryArn() != null,
+                includeTags ? user.getTags() : Map.of());
     }
 
 
@@ -5547,7 +5571,8 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
         if (principalArn == null || !principalArn.contains(":user/")) {
             return Optional.empty();
         }
-        return userFromArnOrName(principalArn).map(IamService::callerForUser);
+        // The simulator requires callers to supply tag context explicitly, even for a tagged user.
+        return userFromArnOrName(principalArn).map(user -> callerForUser(user, false));
     }
 
     /**
@@ -5614,9 +5639,11 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
             String partition = AwsArnUtils.partitionOrDefault(roleArn, regionResolver.getPartition());
             String sessionArn = AwsArnUtils.Arn.global(partition, "sts", accountId,
                     "assumed-role/" + roleName + "/" + sessionName).toString();
+            Optional<IamRole> role = roleFromArnOrName(roleArn);
             return Optional.of(new CallerArns(sessionArn, roleArn, CallerArns.TYPE_ASSUMED_ROLE,
                     sessionUserId(session).orElse(null), null,
-                    roleFromArnOrName(roleArn).map(IamRole::getPermissionsBoundaryArn).isPresent()));
+                    role.map(IamRole::getPermissionsBoundaryArn).isPresent(),
+                    role.map(IamRole::getTags).orElse(Map.of())));
         }
 
         return Optional.empty();
@@ -5734,7 +5761,16 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
     }
 
     public CallerContext resolvePrincipalContext(String principalArn) {
-        return principalContext(principalArn, true);
+        return principalContext(principalArn, true, PolicyExclusions.NONE);
+    }
+
+    /**
+     * The same context with a simulation's {@code PolicyExclusionList} applied, which is what
+     * {@code SimulatePrincipalPolicy} evaluates: the policies the principal holds less the ones the
+     * request asked to leave out, and its permissions boundary unless that was left out too.
+     */
+    public CallerContext resolvePrincipalContext(String principalArn, PolicyExclusions exclusions) {
+        return principalContext(principalArn, true, exclusions);
     }
 
     /**
@@ -5746,10 +5782,11 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
      * does, and stays on {@link #resolvePrincipalContext}.
      */
     public CallerContext resolveAttachedPrincipalContext(String principalArn) {
-        return principalContext(principalArn, false);
+        return principalContext(principalArn, false, PolicyExclusions.NONE);
     }
 
-    private CallerContext principalContext(String principalArn, boolean withAccountGrants) {
+    private CallerContext principalContext(String principalArn, boolean withAccountGrants,
+                                           PolicyExclusions exclusions) {
         if (principalArn == null || principalArn.isBlank()) {
             throw new AwsException("ValidationError", "PolicySourceArn is required.", 400);
         }
@@ -5763,38 +5800,50 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
         if (principalArn.contains(":user/")) {
             String userName = principalArn.substring(principalArn.lastIndexOf('/') + 1);
             List<String> identityPolicies = withAccountGrants
-                    ? userIdentityPolicies(principalArn)
-                    : collectUserPolicies(principalArn);
+                    ? userIdentityPolicies(principalArn, exclusions)
+                    : collectUserPolicies(principalArn, exclusions);
             if (identityPolicies == null) {
                 throw new AwsException("NoSuchEntity", "User " + userName + " cannot be found.", 404);
             }
-            return new CallerContext(identityPolicies, null, resolveUserBoundaryDocument(principalArn));
+            return new CallerContext(identityPolicies, null,
+                    resolveUserBoundaryDocument(principalArn, exclusions));
         }
         if (principalArn.contains(":role/")) {
             String roleName = principalArn.substring(principalArn.lastIndexOf('/') + 1);
-            List<String> identityPolicies = collectRolePolicies(principalArn);
+            List<String> identityPolicies = collectRolePolicies(principalArn, exclusions);
             if (identityPolicies == null) {
                 throw new AwsException("NoSuchEntity", "Role " + roleName + " cannot be found.", 404);
             }
-            return new CallerContext(identityPolicies, null, resolveRoleBoundaryDocument(principalArn));
+            return new CallerContext(identityPolicies, null,
+                    resolveRoleBoundaryDocument(principalArn, exclusions));
         }
         throw new AwsException("InvalidInput", "PolicySourceArn must identify an IAM user or role.", 400);
     }
 
     private String resolveUserBoundaryDocument(String userArnOrName) {
+        return resolveUserBoundaryDocument(userArnOrName, PolicyExclusions.NONE);
+    }
+
+    private String resolveUserBoundaryDocument(String userArnOrName, PolicyExclusions exclusions) {
         return userFromArnOrName(userArnOrName)
                 .map(IamUser::getPermissionsBoundaryArn)
+                .filter(boundaryArn -> !exclusions.excludesBoundary(boundaryArn))
                 .flatMap(this::resolvePolicy)
                 .map(IamPolicy::getDefaultDocument)
                 .orElse(null);
     }
 
     private String resolveRoleBoundaryDocument(String roleArn) {
+        return resolveRoleBoundaryDocument(roleArn, PolicyExclusions.NONE);
+    }
+
+    private String resolveRoleBoundaryDocument(String roleArn, PolicyExclusions exclusions) {
         if (roleArn == null) {
             return null;
         }
         return roleFromArnOrName(roleArn)
                 .map(IamRole::getPermissionsBoundaryArn)
+                .filter(boundaryArn -> !exclusions.excludesBoundary(boundaryArn))
                 .flatMap(this::resolvePolicy)
                 .map(IamPolicy::getDefaultDocument)
                 .orElse(null);
@@ -5944,7 +5993,17 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
      * reach adds on top of the attached set.
      */
     private List<String> userIdentityPolicies(String userArnOrName) {
-        List<String> docs = collectUserPolicies(userArnOrName);
+        return userIdentityPolicies(userArnOrName, PolicyExclusions.NONE);
+    }
+
+    /**
+     * The same set with a simulation's exclusions applied to the policies the user holds. The
+     * account-level grant is not one of them: the exclusion list names the policies "actually
+     * attached to the principal" and this grant is attached to nothing, so no identifier reaches
+     * it and a simulation leaving out every attached policy still carries it.
+     */
+    private List<String> userIdentityPolicies(String userArnOrName, PolicyExclusions exclusions) {
+        List<String> docs = collectUserPolicies(userArnOrName, exclusions);
         if (docs == null) {
             return null;
         }
@@ -6007,8 +6066,20 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
         return passwordPolicies.get(ACCOUNT_PASSWORD_POLICY_KEY);
     }
 
-    /** An identity policy as an access denied message names it: a managed one by its ARN, an inline one by none. */
-    public record HeldPolicy(String arn, String document) {}
+    /**
+     * An identity policy as an access denied message names it, a managed one by its ARN and an
+     * inline one by none, and as a simulation's {@code PolicyExclusionList} identifies it: an
+     * inline policy by its own name together with the type and name of the entity it is attached
+     * to, which is the user itself or one of its groups.
+     */
+    public record HeldPolicy(String arn, String document, String policyName,
+                             String attachmentType, String attachmentName) {
+
+        /** Source-compatible constructor for callers predating the exclusion identity. */
+        public HeldPolicy(String arn, String document) {
+            this(arn, document, null, null, null);
+        }
+    }
 
     /** The identity policies of an IAM user or role, in the order they are collected, and its permissions boundary. */
     public record HeldPolicies(List<HeldPolicy> identity, String permissionsBoundaryArn) {}
@@ -6036,33 +6107,56 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
     }
 
     private List<String> collectUserPolicies(String userArnOrName) {
-        return userFromArnOrName(userArnOrName).map(user -> documents(userPolicies(user))).orElse(null);
+        return collectUserPolicies(userArnOrName, PolicyExclusions.NONE);
+    }
+
+    private List<String> collectUserPolicies(String userArnOrName, PolicyExclusions exclusions) {
+        return userFromArnOrName(userArnOrName)
+                .map(user -> documents(exclusions.retained(userPolicies(user))))
+                .orElse(null);
     }
 
     private List<String> collectRolePolicies(String roleArn) {
-        return roleFromArnOrName(roleArn).map(role -> documents(rolePolicies(role))).orElse(null);
+        return collectRolePolicies(roleArn, PolicyExclusions.NONE);
+    }
+
+    private List<String> collectRolePolicies(String roleArn, PolicyExclusions exclusions) {
+        return roleFromArnOrName(roleArn)
+                .map(role -> documents(exclusions.retained(rolePolicies(role))))
+                .orElse(null);
     }
 
     /** The user's inline and managed policies, then each group's. */
     private List<HeldPolicy> userPolicies(IamUser user) {
-        List<HeldPolicy> held = inlineThenManaged(user.getInlinePolicies(), user.getAttachedPolicyArns());
+        List<HeldPolicy> held = inlineThenManaged(user.getInlinePolicies(), user.getAttachedPolicyArns(),
+                "user", user.getUserName());
         for (String groupName : user.getGroupNames()) {
             groups.get(groupName).ifPresent(group ->
-                    held.addAll(inlineThenManaged(group.getInlinePolicies(), group.getAttachedPolicyArns())));
+                    held.addAll(inlineThenManaged(group.getInlinePolicies(), group.getAttachedPolicyArns(),
+                            "group", group.getGroupName())));
         }
         return held;
     }
 
     private List<HeldPolicy> rolePolicies(IamRole role) {
-        return inlineThenManaged(role.getInlinePolicies(), role.getAttachedPolicyArns());
+        return inlineThenManaged(role.getInlinePolicies(), role.getAttachedPolicyArns(),
+                "role", role.getRoleName());
     }
 
-    private List<HeldPolicy> inlineThenManaged(Map<String, String> inline, List<String> attachedArns) {
+    /**
+     * The policies one entity holds, each carrying the entity it came from. The attachment type is
+     * spelled the way {@code AttachmentType} declares its values, {@code user}, {@code group} or
+     * {@code role}, since that is what an exclusion identifier is compared against.
+     */
+    private List<HeldPolicy> inlineThenManaged(Map<String, String> inline, List<String> attachedArns,
+                                               String attachmentType, String attachmentName) {
         List<HeldPolicy> held = new ArrayList<>();
-        inline.values().forEach(document -> held.add(new HeldPolicy(null, document)));
+        inline.forEach((policyName, document) ->
+                held.add(new HeldPolicy(null, document, policyName, attachmentType, attachmentName)));
         for (String arn : attachedArns) {
             resolvePolicy(arn).map(IamPolicy::getDefaultDocument)
-                    .ifPresent(document -> held.add(new HeldPolicy(arn, document)));
+                    .ifPresent(document ->
+                            held.add(new HeldPolicy(arn, document, null, attachmentType, attachmentName)));
         }
         return held;
     }
@@ -6302,7 +6396,7 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
      * AWS's own documented example response for the no-report-exists case.
      */
     public CredentialReportGeneration generateCredentialReport() {
-        Instant now = Instant.now();
+        Instant now = clock.instant();
         Optional<CredentialReport> existing = credentialReports.get(credentialReportKey());
         if (existing.isPresent() && now.isBefore(existing.get().getGeneratedTime().plus(CREDENTIAL_REPORT_MAX_AGE))) {
             return new CredentialReportGeneration("COMPLETE",
@@ -6326,7 +6420,7 @@ public class IamService implements SessionAccountLookup, ResourceProvider {
                 .orElseThrow(() -> new AwsException("ReportNotPresent",
                         "The request was rejected because the credential report does not exist. "
                                 + "To generate a credential report, use GenerateCredentialReport.", 410));
-        if (Instant.now().isAfter(report.getGeneratedTime().plus(CREDENTIAL_REPORT_MAX_AGE))) {
+        if (clock.instant().isAfter(report.getGeneratedTime().plus(CREDENTIAL_REPORT_MAX_AGE))) {
             throw new AwsException("ReportExpired",
                     "The request was rejected because the most recent credential report has expired. "
                             + "To generate a new credential report, use GenerateCredentialReport.", 410);

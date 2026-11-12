@@ -10,6 +10,7 @@ import io.floci.aws.services.redshift.RedshiftAuditLogPublisher;
 import io.floci.aws.services.redshift.spectrum.SpectrumInterceptor;
 import io.floci.aws.services.s3.S3Service;
 import org.jboss.logging.Logger;
+import org.postgresql.ds.PGSimpleDataSource;
 
 import java.io.IOException;
 import java.net.BindException;
@@ -279,9 +280,24 @@ public class RedshiftAuthProxy {
                 RoleConfiguration roles = roleConfiguration;
                 RedshiftAuditLogPublisher bridgeAudit = login.dataApi ? null : auditLogPublisher;
                 SpectrumInterceptor bridgeSpectrum = login.dataApi ? null : spectrumInterceptor;
-                new RedshiftInterceptingBridge(session.client(), session.backend(), s3Service, iamService,
+                RedshiftInterceptingBridge bridge = new RedshiftInterceptingBridge(session.client(), session.backend(), s3Service, iamService,
                         clusterAccountId, roles.iamRoleArns(), bridgeSpectrum, clusterKey, login.database,
-                        roles.defaultIamRoleArn(), bridgeAudit, login.username, parquetWriter).run();
+                        roles.defaultIamRoleArn(), bridgeAudit, login.username, parquetWriter);
+                try (CopyLoadErrorLog loadErrors = new CopyLoadErrorLog(() -> {
+                    PGSimpleDataSource source = new PGSimpleDataSource();
+                    source.setServerNames(new String[]{backendHost});
+                    source.setPortNumbers(new int[]{backendPort});
+                    source.setDatabaseName(login.database);
+                    source.setUser(masterUsername);
+                    source.setPassword(masterPassword);
+                    source.setConnectTimeout(Math.max(1, backendConnectTimeoutMillis / 1000));
+                    source.setSocketTimeout(10);
+                    source.setSslMode("disable");
+                    return source.getConnection();
+                })) {
+                    bridge.loadErrorSink(loadErrors);
+                    bridge.run();
+                }
                 publishConnection(client, login, "disconnection");
             } else {
                 publishConnection(client, login, login.backendUnavailable ? "connection_error" : "authentication failure");

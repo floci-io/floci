@@ -2142,9 +2142,16 @@ public class IamQueryHandler {
         return Response.ok(AwsQueryResponse.envelope("DeleteRolePermissionsBoundary", AwsNamespaces.IAM, "")).build();
     }
 
+    /**
+     * The principal's own policies, less whatever {@code PolicyExclusionList} asked to leave out.
+     * The identifiers are request inputs, so they are read and refused ahead of the lookup, which
+     * is where this package answers an input; a simulation that excludes nothing resolves the
+     * context it always did.
+     */
     private Response handleSimulatePrincipalPolicy(MultivaluedMap<String, String> params) {
         String policySourceArn = validatedPolicySourceArn(params);
-        CallerContext caller = iamService.resolvePrincipalContext(policySourceArn);
+        PolicyExclusions exclusions = PolicyExclusions.from(params);
+        CallerContext caller = iamService.resolvePrincipalContext(policySourceArn, exclusions);
         List<String> actionNames = requireActionNames(params);
         List<String> resourceArns = extractResourceArnsOrWildcard(params);
         // Keyed without regard to case, as the evaluator compares condition key names: a value

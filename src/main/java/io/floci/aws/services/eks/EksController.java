@@ -1,5 +1,6 @@
 package io.floci.aws.services.eks;
 
+import io.floci.aws.core.common.PaginatedResult;
 import io.floci.aws.core.common.Pagination;
 import io.floci.aws.services.eks.model.Addon;
 import io.floci.aws.services.eks.model.AssociateAccessPolicyRequest;
@@ -78,22 +79,25 @@ public class EksController {
 
     @GET
     @Path("/clusters")
-    public Response listClusters() {
-        List<String> clusterNames = eksService.listClusters();
-        return Response.ok(Map.of("clusters", clusterNames)).build();
+    public Response listClusters(@QueryParam("maxResults") String maxResults,
+                                 @QueryParam("nextToken") String nextToken) {
+        PaginatedResult<String> page = eksService.listClusters(
+                Pagination.parseMaxResults(maxResults, "InvalidParameterException"), nextToken);
+        return Response.ok(page.nextToken() == null ? Map.of("clusters", page.items())
+                : Map.of("clusters", page.items(), "nextToken", page.nextToken())).build();
     }
 
     @GET
     @Path("/clusters/{name}")
     public Response describeCluster(@PathParam("name") String name) {
-        Cluster cluster = eksService.describeCluster(name);
+        Cluster cluster = eksService.requireClusterInRequestRegion(name);
         return Response.ok(Map.of("cluster", toClusterResponse(cluster))).build();
     }
 
     @DELETE
     @Path("/clusters/{name}")
     public Response deleteCluster(@PathParam("name") String name) {
-        Cluster cluster = eksService.deleteCluster(name);
+        Cluster cluster = eksService.deleteClusterInRequestRegion(name);
         return Response.ok(Map.of("cluster", toClusterResponse(cluster))).build();
     }
 
@@ -123,6 +127,7 @@ public class EksController {
     @POST
     @Path("/clusters/{name}/node-groups")
     public Response createNodeGroup(@PathParam("name") String name, CreateNodeGroupRequest request) {
+        eksService.requireClusterInRequestRegion(name);
         Nodegroup nodeGroup = eksService.createNodeGroup(name, request);
         return Response.ok(Map.of("nodegroup", nodeGroup)).build();
     }
@@ -130,6 +135,7 @@ public class EksController {
     @GET
     @Path("/clusters/{name}/node-groups")
     public Response listNodeGroups(@PathParam("name") String name) {
+        eksService.requireClusterInRequestRegion(name);
         List<String> nodeGroupNames = eksService.listNodeGroups(name);
         return Response.ok(Map.of("nodegroups", nodeGroupNames)).build();
     }
@@ -138,6 +144,7 @@ public class EksController {
     @Path("/clusters/{name}/node-groups/{nodegroupName}")
     public Response describeNodeGroup(@PathParam("name") String name,
             @PathParam("nodegroupName") String nodegroupName) {
+        eksService.requireClusterInRequestRegion(name);
         Nodegroup nodeGroup = eksService.describeNodeGroup(name, nodegroupName);
         return Response.ok(Map.of("nodegroup", nodeGroup)).build();
     }
@@ -146,6 +153,7 @@ public class EksController {
     @Path("/clusters/{name}/node-groups/{nodegroupName}")
     public Response deleteNodeGroup(@PathParam("name") String name,
             @PathParam("nodegroupName") String nodegroupName) {
+        eksService.requireClusterInRequestRegion(name);
         Nodegroup nodeGroup = eksService.deleteNodeGroup(name, nodegroupName);
         return Response.ok(Map.of("nodegroup", nodeGroup)).build();
     }
@@ -153,6 +161,7 @@ public class EksController {
     @POST
     @Path("/clusters/{name}/fargate-profiles")
     public Response createFargateProfile(@PathParam("name") String name, CreateFargateProfileRequest request) {
+        eksService.requireClusterInRequestRegion(name);
         FargateProfile profile = eksService.createFargateProfile(name, request);
         return Response.ok(Map.of("fargateProfile", profile)).build();
     }
@@ -160,6 +169,7 @@ public class EksController {
     @GET
     @Path("/clusters/{name}/fargate-profiles")
     public Response listFargateProfiles(@PathParam("name") String name) {
+        eksService.requireClusterInRequestRegion(name);
         List<String> profileNames = eksService.listFargateProfiles(name);
         return Response.ok(Map.of("fargateProfileNames", profileNames)).build();
     }
@@ -168,6 +178,7 @@ public class EksController {
     @Path("/clusters/{name}/fargate-profiles/{fargateProfileName}")
     public Response describeFargateProfile(@PathParam("name") String name,
             @PathParam("fargateProfileName") String fargateProfileName) {
+        eksService.requireClusterInRequestRegion(name);
         FargateProfile profile = eksService.describeFargateProfile(name, fargateProfileName);
         return Response.ok(Map.of("fargateProfile", profile)).build();
     }
@@ -176,6 +187,7 @@ public class EksController {
     @Path("/clusters/{name}/fargate-profiles/{fargateProfileName}")
     public Response deleteFargateProfile(@PathParam("name") String name,
             @PathParam("fargateProfileName") String fargateProfileName) {
+        eksService.requireClusterInRequestRegion(name);
         FargateProfile profile = eksService.deleteFargateProfile(name, fargateProfileName);
         return Response.ok(Map.of("fargateProfile", profile)).build();
     }
@@ -188,7 +200,7 @@ public class EksController {
     @POST
     @Path("/clusters/{name}/access-entries")
     public Response createAccessEntry(@PathParam("name") String name, CreateAccessEntryRequest request) {
-        return Response.ok(Map.of("accessEntry", accessEntries.create(eksService.describeCluster(name), request))).build();
+        return Response.ok(Map.of("accessEntry", accessEntries.create(eksService.requireClusterInRequestRegion(name), request))).build();
     }
 
     @GET
@@ -197,7 +209,7 @@ public class EksController {
                                      @QueryParam("maxResults") String maxResults,
                                      @QueryParam("nextToken") String nextToken,
                                      @QueryParam("associatedPolicyArn") String associatedPolicyArn) {
-        EksAccessEntryService.Page page = accessEntries.list(eksService.describeCluster(name),
+        EksAccessEntryService.Page page = accessEntries.list(eksService.requireClusterInRequestRegion(name),
                 Pagination.parseMaxResults(maxResults, "InvalidParameterException"), nextToken, associatedPolicyArn);
         return Response.ok(page.nextToken() == null ? Map.of("accessEntries", page.accessEntries())
                 : Map.of("accessEntries", page.accessEntries(), "nextToken", page.nextToken())).build();
@@ -206,13 +218,13 @@ public class EksController {
     @GET
     @Path("/clusters/{name}/access-entries/{principalArn: .+}")
     public Response describeAccessEntry(@PathParam("name") String name, @PathParam("principalArn") String principalArn) {
-        return Response.ok(Map.of("accessEntry", accessEntries.describe(eksService.describeCluster(name), principalArn))).build();
+        return Response.ok(Map.of("accessEntry", accessEntries.describe(eksService.requireClusterInRequestRegion(name), principalArn))).build();
     }
 
     @DELETE
     @Path("/clusters/{name}/access-entries/{principalArn: .+}")
     public Response deleteAccessEntry(@PathParam("name") String name, @PathParam("principalArn") String principalArn) {
-        accessEntries.delete(eksService.describeCluster(name), principalArn);
+        accessEntries.delete(eksService.requireClusterInRequestRegion(name), principalArn);
         return Response.ok(Map.of()).build();
     }
 
@@ -220,7 +232,7 @@ public class EksController {
     @Path("/clusters/{name}/access-entries/{principalArn: .+}/access-policies")
     public Response associateAccessPolicy(@PathParam("name") String name, @PathParam("principalArn") String principalArn,
                                           AssociateAccessPolicyRequest request) {
-        AssociatedAccessPolicy policy = accessEntries.associate(eksService.describeCluster(name), principalArn, request);
+        AssociatedAccessPolicy policy = accessEntries.associate(eksService.requireClusterInRequestRegion(name), principalArn, request);
         return Response.ok(Map.of("clusterName", name, "principalArn", principalArn,
                 "associatedAccessPolicy", policy)).build();
     }
@@ -231,7 +243,7 @@ public class EksController {
                                                  @PathParam("principalArn") String principalArn,
                                                  @QueryParam("maxResults") String maxResults,
                                                  @QueryParam("nextToken") String nextToken) {
-        EksAccessEntryService.PolicyPage page = accessEntries.listAccessPolicies(eksService.describeCluster(name),
+        EksAccessEntryService.PolicyPage page = accessEntries.listAccessPolicies(eksService.requireClusterInRequestRegion(name),
                 principalArn, Pagination.parseMaxResults(maxResults, "InvalidParameterException"), nextToken);
         Map<String, Object> body = new LinkedHashMap<>();
         body.put("clusterName", name);
@@ -248,14 +260,14 @@ public class EksController {
     public Response disassociateAccessPolicy(@PathParam("name") String name,
                                              @PathParam("principalArn") String principalArn,
                                              @PathParam("policyArn") String policyArn) {
-        accessEntries.disassociate(eksService.describeCluster(name), principalArn, policyArn);
+        accessEntries.disassociate(eksService.requireClusterInRequestRegion(name), principalArn, policyArn);
         return Response.ok(Map.of()).build();
     }
 
     @POST
     @Path("/clusters/{name}/addons")
     public Response createAddon(@PathParam("name") String name, CreateAddonRequest request) {
-        Cluster cluster = eksService.describeCluster(name);
+        Cluster cluster = eksService.requireClusterInRequestRegion(name);
         Addon addon = addons.create(cluster, request);
         return Response.ok(Map.of("addon", addon)).build();
     }
@@ -265,7 +277,7 @@ public class EksController {
     public Response listAddons(@PathParam("name") String name,
                                @QueryParam("maxResults") String maxResults,
                                @QueryParam("nextToken") String nextToken) {
-        Cluster cluster = eksService.describeCluster(name);
+        Cluster cluster = eksService.requireClusterInRequestRegion(name);
         EksAddonService.AddonNamesPage page = addons.list(cluster,
                 Pagination.parseMaxResults(maxResults, "InvalidParameterException"), nextToken);
         return Response.ok(page.nextToken() == null
@@ -277,7 +289,7 @@ public class EksController {
     @Path("/clusters/{name}/addons/{addonName}")
     public Response describeAddon(@PathParam("name") String name,
                                   @PathParam("addonName") String addonName) {
-        Cluster cluster = eksService.describeCluster(name);
+        Cluster cluster = eksService.requireClusterInRequestRegion(name);
         Addon addon = addons.describe(cluster, addonName);
         return Response.ok(Map.of("addon", addon)).build();
     }
@@ -287,7 +299,7 @@ public class EksController {
     public Response updateAddon(@PathParam("name") String name,
                                 @PathParam("addonName") String addonName,
                                 UpdateAddonRequest request) {
-        Cluster cluster = eksService.describeCluster(name);
+        Cluster cluster = eksService.requireClusterInRequestRegion(name);
         Update update = addons.update(cluster, addonName, request);
         return Response.ok(Map.of("update", update)).build();
     }
@@ -298,7 +310,7 @@ public class EksController {
                                    @PathParam("updateId") String updateId,
                                    @QueryParam("addonName") String addonName,
                                    @QueryParam("nodegroupName") String nodegroupName) {
-        Cluster cluster = eksService.describeCluster(name);
+        Cluster cluster = eksService.requireClusterInRequestRegion(name);
         Update update = addons.describeUpdate(cluster, updateId, addonName);
         return Response.ok(Map.of("update", update)).build();
     }
@@ -308,7 +320,7 @@ public class EksController {
     public Response deleteAddon(@PathParam("name") String name,
                                 @PathParam("addonName") String addonName,
                                 @QueryParam("preserve") Boolean preserve) {
-        Cluster cluster = eksService.describeCluster(name);
+        Cluster cluster = eksService.requireClusterInRequestRegion(name);
         Addon addon = addons.delete(cluster, addonName, Boolean.TRUE.equals(preserve));
         return Response.ok(Map.of("addon", addon)).build();
     }
@@ -339,7 +351,7 @@ public class EksController {
     @GET
     @Path("/clusters/{name}/identity-provider-configs")
     public Response listIdentityProviderConfigs(@PathParam("name") String name) {
-        eksService.describeCluster(name);
+        eksService.requireClusterInRequestRegion(name);
         return Response.ok(Map.of("identityProviderConfigs", List.of())).build();
     }
 
@@ -347,7 +359,7 @@ public class EksController {
     @Path("/clusters/{name}/pod-identity-associations")
     public Response createPodIdentityAssociation(@PathParam("name") String name,
                                                  CreatePodIdentityAssociationRequest request) {
-        Cluster cluster = eksService.describeCluster(name);
+        Cluster cluster = eksService.requireClusterInRequestRegion(name);
         PodIdentityAssociation association = podIdentityAssociations.create(cluster, request);
         return Response.ok(Map.of("association", association)).build();
     }
@@ -359,7 +371,7 @@ public class EksController {
                                                 @QueryParam("serviceAccount") String serviceAccount,
                                                 @QueryParam("maxResults") String maxResults,
                                                 @QueryParam("nextToken") String nextToken) {
-        Cluster cluster = eksService.describeCluster(name);
+        Cluster cluster = eksService.requireClusterInRequestRegion(name);
         EksPodIdentityAssociationService.Page page = podIdentityAssociations.list(cluster, namespace, serviceAccount,
                 Pagination.parseMaxResults(maxResults, "InvalidParameterException"), nextToken);
         return Response.ok(page.nextToken() == null
@@ -371,7 +383,7 @@ public class EksController {
     @Path("/clusters/{name}/pod-identity-associations/{associationId}")
     public Response describePodIdentityAssociation(@PathParam("name") String name,
                                                    @PathParam("associationId") String associationId) {
-        Cluster cluster = eksService.describeCluster(name);
+        Cluster cluster = eksService.requireClusterInRequestRegion(name);
         PodIdentityAssociation association = podIdentityAssociations.describe(cluster, associationId);
         return Response.ok(Map.of("association", association)).build();
     }
@@ -381,7 +393,7 @@ public class EksController {
     public Response updatePodIdentityAssociation(@PathParam("name") String name,
                                                  @PathParam("associationId") String associationId,
                                                  UpdatePodIdentityAssociationRequest request) {
-        Cluster cluster = eksService.describeCluster(name);
+        Cluster cluster = eksService.requireClusterInRequestRegion(name);
         PodIdentityAssociation association = podIdentityAssociations.update(cluster, associationId, request);
         return Response.ok(Map.of("association", association)).build();
     }
@@ -390,7 +402,7 @@ public class EksController {
     @Path("/clusters/{name}/pod-identity-associations/{associationId}")
     public Response deletePodIdentityAssociation(@PathParam("name") String name,
                                                  @PathParam("associationId") String associationId) {
-        Cluster cluster = eksService.describeCluster(name);
+        Cluster cluster = eksService.requireClusterInRequestRegion(name);
         PodIdentityAssociation association = podIdentityAssociations.delete(cluster, associationId);
         return Response.ok(Map.of("association", association)).build();
     }

@@ -38,12 +38,33 @@ class DynamoDbPartiQLHandler {
             case Stmt.Insert s -> executeInsert(s, region);
             case Stmt.Update s -> executeUpdate(s, ctx.returnValuesOnConditionCheckFailure(), region);
             case Stmt.Delete s -> executeDelete(s, ctx.returnValuesOnConditionCheckFailure(), region);
-            case Stmt.Exists ignored -> throw new AwsException("ValidationException",
-                    "EXISTS can only be used in ExecuteTransaction write requests.", 400);
+            case Stmt.Exists ignored -> throw new IllegalStateException("EXISTS is parsed only in a transaction");
         };
     }
 
     // --- SELECT ---
+
+    // DynamoDB refuses a read of an index whose key has more than one HASH or RANGE attribute before it
+    // checks any term. The message names tables, but a read of the table itself runs.
+    void requireReadableIndex(Stmt stmt, String region) {
+        if (!(stmt instanceof Stmt.Select select) || select.index() == null) {
+            return;
+        }
+        Optional<TableDefinition> table;
+        try {
+            table = service.findTableForItemCall(select.table(), region);
+        } catch (AwsException ignored) {
+            // The read reports a table name it cannot resolve once the terms pass.
+            return;
+        }
+        boolean multiAttributeKey = table.filter(found -> found.findGsi(select.index()).isPresent())
+                .map(found -> DynamoDbAccessPath.resolve(found, select.index()).hasMultiAttributeKey())
+                .orElse(false);
+        if (multiAttributeKey) {
+            throw new AwsException("ValidationException", "PartiQL statements cannot be executed on tables with "
+                    + "multi-attribute HASH keys or multi-attribute RANGE keys.", 400);
+        }
+    }
 
     private Result executeSelect(Stmt.Select stmt, PartiQLExecuteContext ctx, String region) {
         TableDefinition table = service.requireTableForItemCall(stmt.table(), region);
@@ -476,11 +497,7 @@ class DynamoDbPartiQLHandler {
         }
         List<String> unprojected = keys.unprojectedFilterAttributes(accessPath.projectedAttributeNames(table));
         if (!unprojected.isEmpty()) {
-            throw new AwsException("ValidationException",
-                    "One or more parameter values were invalid: Secondary index "
-                            + accessPath.indexName()
-                            + " does not project one or more filter attributes: ["
-                            + String.join(", ", unprojected) + "]", 400);
+            throw DynamoDbAccessPathValidator.unprojectedFilterAttributes(accessPath.indexName(), unprojected);
         }
     }
 

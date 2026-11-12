@@ -12,6 +12,8 @@ import io.floci.aws.services.dynamodb.model.LocalSecondaryIndex;
 import io.floci.aws.services.dynamodb.model.TableDefinition;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.CsvSource;
 
 import java.util.List;
 import java.util.regex.MatchResult;
@@ -76,6 +78,14 @@ class DynamoDbAccessPathValidatorTest {
                 "tenantId = :t AND region = :r"));
         assertDoesNotThrow(() -> validateExpression(compositePkGsiPath,
                 "region = :r AND tenantId = :t"));
+    }
+
+    @Test
+    void acceptsKeyConditionsGroupedInParentheses() {
+        assertDoesNotThrow(() -> validateExpression(compositePkGsiPath,
+                "tenantId = :t AND (region = :r AND createdAt > :c)"));
+        assertDoesNotThrow(() -> validateExpression(compositePkGsiPath,
+                "(tenantId = :t AND region = :r) AND (createdAt > :c)"));
     }
 
     @Test
@@ -184,14 +194,6 @@ class DynamoDbAccessPathValidatorTest {
                 () -> validateExpression(tablePath, "pk > :pk"));
         assertThrows(AwsException.class,
                 () -> validateExpression(tablePath, "pk = :pk AND sk <> :sk"));
-    }
-
-    @Test
-    void rejectsDuplicateAndNestedKeyConditions() {
-        assertThrows(AwsException.class, () -> validateExpression(
-                tablePath, "pk = :pk AND sk > :start AND sk < :end"));
-        assertThrows(AwsException.class, () -> validateExpression(
-                tablePath, "pk.value = :pk"));
     }
 
     @Test
@@ -350,6 +352,31 @@ class DynamoDbAccessPathValidatorTest {
     }
 
     @Test
+    void queryRejectsIndexFilterOnNonProjectedAttributes() {
+        ObjectNode names = mapper.createObjectNode();
+        names.put("#z", "zeta");
+        ObjectNode queryFilter = mapper.createObjectNode();
+        queryFilter.putObject("details");
+
+        assertDoesNotThrow(() -> queryWithFilter(gsiPath, "status = :status", "summary = :s", null, null));
+        AwsException expressionError = assertThrows(AwsException.class, () -> queryWithFilter(gsiPath,
+                "status = :status", "#z.a = :v OR summary = :s OR size(#z) > :n", null, names));
+        assertEquals("One or more parameter values were invalid: Secondary index status-index "
+                + "does not project one or more filter attributes: [zeta]", expressionError.getMessage());
+        AwsException legacyError = assertThrows(AwsException.class,
+                () -> queryWithFilter(lsiPath, "pk = :pk", null, queryFilter, null));
+        assertEquals("One or more parameter values were invalid: Secondary index alternate-index "
+                + "does not project one or more filter attributes: [details]", legacyError.getMessage());
+        assertDoesNotThrow(() -> queryWithFilter(tablePath, "pk = :pk", "details = :d", queryFilter, null));
+    }
+
+    private void queryWithFilter(DynamoDbAccessPath accessPath, String keyCondition, String filter,
+                                 ObjectNode queryFilter, ObjectNode names) {
+        DynamoDbAccessPathValidator.validateQuery(table, accessPath, null, keyCondition, filter,
+                queryFilter, names, expressionValues(extractPlaceholders(keyCondition)));
+    }
+
+    @Test
     void listsTheUnprojectedGsiAttributesOnceInRequestOrder() {
         ObjectNode names = mapper.createObjectNode();
         names.put("#q", "qq");
@@ -375,19 +402,41 @@ class DynamoDbAccessPathValidatorTest {
         assertDoesNotThrow(() -> validateExpression(tablePath, "pk = :pk AND :hi > sk"));
     }
 
-    @Test
-    void rejectsANestedPathOnAKeyAttribute() {
+    @ParameterizedTest
+    @CsvSource(delimiter = '|', textBlock = """
+            pk.value = :pk                                 | cannot have conditions on nested attributes
+            pk = :pk AND #sk.foo = :v                      | cannot have conditions on nested attributes
+            pk = :pk AND x[0] = :v                         | cannot have conditions on nested attributes
+            pk = :pk AND x.y BETWEEN :a AND :b             | cannot have conditions on nested attributes
+            pk = :pk AND begins_with(x.y, :v)              | cannot have conditions on nested attributes
+            pk = :pk AND x.y = :v AND sk > :a AND sk < :b  | cannot have conditions on nested attributes
+            pk = :pk AND sk > :a AND sk < :b AND x.y = :v  | must only contain one condition per key
+            pk = :pk AND #sk > :a AND sk < :b              | must only contain one condition per key
+            pk = :pk AND :a < sk AND sk < :b               | must only contain one condition per key
+            x = :a AND x = :b AND pk = :pk                 | must only contain one condition per key
+            pk = :pk AND pk = :pk                          | must only contain one condition per key
+            pk = :pk AND (sk > :a AND x.y = :v)            | cannot have conditions on nested attributes
+            pk = :pk AND (sk > :a AND sk < :b)             | must only contain one condition per key
+            (pk = :pk AND sk > :a) AND sk < :b             | must only contain one condition per key
+            pk = :pk AND (sk > :a AND (sk < :b))           | must only contain one condition per key
+            """)
+    void refusesANestedOrRepeatedAttributeInAKeyCondition(String expression, String error) {
         ObjectNode names = mapper.createObjectNode();
         names.put("#sk", "sk");
-        ObjectNode values = expressionValues(":pk", ":v");
 
-        AwsException error = assertThrows(AwsException.class,
-                () -> DynamoDbAccessPathValidator.validateQuery(
-                        table, tablePath, null, "pk = :pk AND #sk.foo = :v",
-                        null, null, names, values));
+        AwsException thrown = assertThrows(AwsException.class,
+                () -> DynamoDbAccessPathValidator.validateKeyConditionAttributes(expression, names));
 
-        assertEquals("KeyConditionExpressions cannot have conditions on nested attributes",
-                error.getMessage());
+        assertEquals("Invalid KeyConditionExpression: KeyConditionExpressions " + error, thrown.getMessage());
+    }
+
+    @Test
+    void acceptsANameThatHoldsADotInAKeyCondition() {
+        ObjectNode names = mapper.createObjectNode();
+        names.put("#a", "x.y");
+
+        assertDoesNotThrow(() -> DynamoDbAccessPathValidator.validateKeyConditionAttributes(
+                "pk = :pk AND #a = :v", names));
     }
 
     @Test
@@ -396,6 +445,47 @@ class DynamoDbAccessPathValidatorTest {
                 () -> validateExpression(tablePath, "attr1 = :v"));
 
         assertEquals("Query condition missed key schema element: pk", error.getMessage());
+    }
+
+    @ParameterizedTest
+    @CsvSource(delimiter = '|', textBlock = """
+                                 | pk = :pk AND sk > :a AND x = :b                             | 3 | 2
+                                 | x = :a AND y = :b AND z = :c                                | 3 | 2
+                                 | pk > :pk AND sk > :a AND x = :b                             | 3 | 2
+                                 | pk = :pk AND (sk > :a AND x = :b)                           | 3 | 2
+            alternate-index      | pk = :pk AND alternate = :a AND sk = :b                     | 3 | 2
+            tenant-region-index  | tenantId = :t AND region = :r AND createdAt = :c AND x = :x | 4 | 3
+            """)
+    void refusesMoreKeyConditionsThanTheKeySchemaHas(String indexName, String expression,
+                                                     int conditions, int keyAttributes) {
+        AwsException error = assertThrows(AwsException.class,
+                () -> validateExpression(DynamoDbAccessPath.resolve(table, indexName), expression));
+
+        assertEquals("The number of query conditions (" + conditions + ") exceeds the number of key attributes "
+                + "defined in the schema (" + keyAttributes + ")", error.getMessage());
+    }
+
+    @Test
+    void countsKeyConditionsBeforeCheckingTheirValueTypes() {
+        ObjectNode values = expressionValues(":pk", ":sk", ":v");
+        values.set(":pk", numberValue("1"));
+        AwsException expressionError = assertThrows(AwsException.class,
+                () -> DynamoDbAccessPathValidator.validateQuery(
+                        table, tablePath, null, "pk = :pk AND sk > :sk AND status = :v",
+                        null, null, null, values));
+
+        ObjectNode legacy = mapper.createObjectNode();
+        legacy.set("pk", legacyCondition("EQ", attributeValues("p1")));
+        legacy.set("sk", legacyCondition("EQ", mapper.createArrayNode().add(numberValue("1"))));
+        legacy.set("status", legacyCondition("EQ", attributeValues("open")));
+        AwsException legacyError = assertThrows(AwsException.class,
+                () -> DynamoDbAccessPathValidator.validateQuery(
+                        table, tablePath, legacy, null, null, null, null, null));
+
+        String message = "The number of query conditions (3) exceeds the number of key attributes "
+                + "defined in the schema (2)";
+        assertEquals(message, expressionError.getMessage());
+        assertEquals(message, legacyError.getMessage());
     }
 
     @Test

@@ -15,6 +15,7 @@ import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
 import java.util.function.Predicate;
+import java.util.stream.Collectors;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
@@ -466,6 +467,62 @@ class AccountAwareStorageBackendTest {
         assertEquals("222222222222", storage.findAnyAccountEntry("ASIAKEY").orElseThrow().account());
         assertEquals("222222222222", storage.findAnyAccountEntry("ASIAKEY").orElseThrow().account());
 
+        verify(raw, times(1)).keys();
+    }
+
+    @Test
+    void findAllAccountEntriesReturnsWhatTheScanReturns() {
+        InMemoryStorage<String, String> raw = new InMemoryStorage<>();
+        raw.put("111111111111/AKIAKEY", "first");
+        raw.put("222222222222/AKIAKEY", "second");
+        raw.put("AKIAKEY", "legacy");
+        raw.put("333333333333/OTHER", "other");
+        raw.put("notanaccount/AKIAKEY", "malformed");
+        AccountAwareStorageBackend<String> storage =
+                new AccountAwareStorageBackend<>(raw, null, "000000000000");
+
+        List<AccountAwareStorageBackend.AccountEntry<String>> found = storage.findAllAccountEntries("AKIAKEY");
+
+        assertEquals(Set.of("111111111111", "222222222222", "000000000000"),
+                found.stream().map(AccountAwareStorageBackend.AccountEntry::accountId).collect(Collectors.toSet()));
+        assertEquals(3, found.size());
+        assertEquals(Set.copyOf(storage.scanAllAccountEntries("AKIAKEY"::equals)), Set.copyOf(found));
+    }
+
+    @Test
+    void findAllAccountEntriesDoesNotReadAnAccountPrefixedIdAsALegacyKey() {
+        InMemoryStorage<String, String> raw = new InMemoryStorage<>();
+        raw.put("222222222222/AKIAKEY", "owned");
+        AccountAwareStorageBackend<String> storage =
+                new AccountAwareStorageBackend<>(raw, null, "000000000000");
+
+        assertTrue(storage.findAllAccountEntries("222222222222/AKIAKEY").isEmpty());
+        assertTrue(storage.scanAllAccountEntries("222222222222/AKIAKEY"::equals).isEmpty());
+    }
+
+    @Test
+    void findAllAccountEntriesDoesNotMigrateLegacyEntries() {
+        InMemoryStorage<String, String> raw = new InMemoryStorage<>();
+        raw.put("AKIAKEY", "legacy");
+        AccountAwareStorageBackend<String> storage =
+                new AccountAwareStorageBackend<>(raw, null, "000000000000");
+
+        assertEquals(1, storage.findAllAccountEntries("AKIAKEY").size());
+
+        assertTrue(raw.get("AKIAKEY").isPresent());
+        assertEquals(Set.of("AKIAKEY"), raw.keys());
+    }
+
+    @Test
+    void findAllAccountEntriesScansOnceAndSeesLaterWrites() {
+        InMemoryStorage<String, String> raw = spy(new InMemoryStorage<String, String>());
+        AccountAwareStorageBackend<String> storage =
+                new AccountAwareStorageBackend<>(raw, null, "000000000000");
+
+        assertTrue(storage.findAllAccountEntries("AKIAKEY").isEmpty());
+        storage.putForAccount("222222222222", "AKIAKEY", "value");
+
+        assertEquals("222222222222", storage.findAllAccountEntries("AKIAKEY").get(0).accountId());
         verify(raw, times(1)).keys();
     }
 

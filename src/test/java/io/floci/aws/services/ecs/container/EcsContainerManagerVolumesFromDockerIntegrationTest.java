@@ -14,6 +14,7 @@ import com.github.dockerjava.core.command.WaitContainerResultCallback;
 import io.floci.aws.config.EmulatorConfig;
 import io.floci.aws.core.common.AwsException;
 import io.floci.aws.core.common.docker.ContainerStorageHelper;
+import io.floci.aws.core.common.docker.DockerBuildContext;
 import io.floci.aws.services.ecs.model.Container;
 import io.floci.aws.services.ecs.model.ContainerDefinition;
 import io.floci.aws.services.ecs.model.ContainerDependency;
@@ -23,15 +24,12 @@ import io.floci.aws.services.ecs.model.VolumeFrom;
 import io.floci.aws.testing.TestImages;
 import io.quarkus.test.junit.QuarkusTest;
 import jakarta.inject.Inject;
-import org.apache.commons.compress.archivers.tar.TarArchiveEntry;
-import org.apache.commons.compress.archivers.tar.TarArchiveOutputStream;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Assumptions;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
 import java.io.ByteArrayInputStream;
-import java.io.ByteArrayOutputStream;
 import java.io.IOException;
 import java.nio.charset.StandardCharsets;
 import java.time.Instant;
@@ -365,18 +363,9 @@ class EcsContainerManagerVolumesFromDockerIntegrationTest {
                 VOLUME ["/shared"]
                 """.formatted(TestImages.BUSYBOX);
 
-        byte[] dockerfileBytes = dockerfile.getBytes(StandardCharsets.UTF_8);
-        ByteArrayOutputStream context = new ByteArrayOutputStream();
-        try (TarArchiveOutputStream tar = new TarArchiveOutputStream(context)) {
-            TarArchiveEntry entry = new TarArchiveEntry("Dockerfile");
-            entry.setSize(dockerfileBytes.length);
-            tar.putArchiveEntry(entry);
-            tar.write(dockerfileBytes);
-            tar.closeArchiveEntry();
-        }
-
+        byte[] context = DockerBuildContext.ofDockerfile(dockerfile.getBytes(StandardCharsets.UTF_8));
         try (BuildImageResultCallback callback = new BuildImageResultCallback()) {
-            String imageId = dockerClient.buildImageCmd(new ByteArrayInputStream(context.toByteArray()))
+            String imageId = dockerClient.buildImageCmd(new ByteArrayInputStream(context))
                     .withTags(Set.of(tag))
                     .withRemove(true)
                     .exec(callback)

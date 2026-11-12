@@ -457,11 +457,17 @@ public class BackupController {
     public Response listBackupJobs(@QueryParam("byBackupVaultName") String byVaultName,
                                     @QueryParam("byState") String byState,
                                     @QueryParam("byResourceArn") String byResourceArn,
-                                    @QueryParam("byResourceType") String byResourceType) {
-        List<BackupJob> jobs = service.listBackupJobs(byVaultName, byState, byResourceArn, byResourceType);
+                                    @QueryParam("byResourceType") String byResourceType,
+                                    @QueryParam("maxResults") String maxResults,
+                                    @QueryParam("nextToken") String nextToken) {
+        PaginatedResult<BackupJob> page = service.listBackupJobs(byVaultName, byState, byResourceArn, byResourceType,
+                Pagination.parseMaxResults(maxResults, "InvalidParameterValueException"), nextToken);
         ObjectNode out = objectMapper.createObjectNode();
         ArrayNode list = out.putArray("BackupJobs");
-        jobs.forEach(job -> list.add(jobJson(job)));
+        page.items().forEach(job -> list.add(jobJson(job)));
+        if (page.nextToken() != null) {
+            out.put("NextToken", page.nextToken());
+        }
         return Response.ok(out).build();
     }
 
@@ -485,12 +491,18 @@ public class BackupController {
     @GET
     @Path("/backup-vaults/{backupVaultName}/recovery-points/")
     public Response listRecoveryPointsByBackupVault(@Context HttpHeaders headers,
-                                                     @PathParam("backupVaultName") String vaultName) {
+                                                     @PathParam("backupVaultName") String vaultName,
+                                                     @QueryParam("maxResults") String maxResults,
+                                                     @QueryParam("nextToken") String nextToken) {
         String region = regionResolver.resolveRegion(headers);
-        List<RecoveryPoint> points = service.listRecoveryPointsByBackupVault(vaultName, region);
+        PaginatedResult<RecoveryPoint> page = service.listRecoveryPointsByBackupVault(vaultName, region,
+                Pagination.parseMaxResults(maxResults, "InvalidParameterValueException"), nextToken);
         ObjectNode out = objectMapper.createObjectNode();
         ArrayNode list = out.putArray("RecoveryPoints");
-        points.forEach(list::addPOJO);
+        page.items().forEach(list::addPOJO);
+        if (page.nextToken() != null) {
+            out.put("NextToken", page.nextToken());
+        }
         return Response.ok(out).build();
     }
 

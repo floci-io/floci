@@ -185,7 +185,7 @@ public class RedshiftQueryHandler {
         case "CreateClusterSnapshot" -> {
             String snapshotIdentifier = params.getFirst("SnapshotIdentifier");
             String clusterIdentifier = params.getFirst("ClusterIdentifier");
-            Snapshot snapshot = service.createSnapshot(snapshotIdentifier, clusterIdentifier);
+            Snapshot snapshot = service.createSnapshot(snapshotIdentifier, clusterIdentifier, parseTags(params));
             String xml = new XmlBuilder()
                     .start("CreateClusterSnapshotResponse")
                       .start("CreateClusterSnapshotResult")
@@ -241,6 +241,44 @@ public class RedshiftQueryHandler {
                     .build();
             return Response.ok(xml).type(MediaType.APPLICATION_XML).build();
         }
+        case "ModifyClusterSnapshot" -> {
+            String snapshotIdentifier = requireParam(params, "SnapshotIdentifier");
+            Integer manualRetention = parseOptionalInteger(params, "ManualSnapshotRetentionPeriod");
+            Boolean force = booleanParam(params, "Force");
+            Snapshot snapshot = service.modifyClusterSnapshot(snapshotIdentifier, manualRetention, force);
+            String xml = new XmlBuilder()
+                    .start("ModifyClusterSnapshotResponse")
+                      .start("ModifyClusterSnapshotResult")
+                        .raw(buildSnapshotXml(snapshot))
+                      .end("ModifyClusterSnapshotResult")
+                      .start("ResponseMetadata")
+                        .elem("RequestId", "test-req-id")
+                      .end("ResponseMetadata")
+                    .end("ModifyClusterSnapshotResponse")
+                    .build();
+            return Response.ok(xml).type(MediaType.APPLICATION_XML).build();
+        }
+        case "CopyClusterSnapshot" -> {
+            String sourceSnapshotId = requireParam(params, "SourceSnapshotIdentifier");
+            String targetSnapshotId = requireParam(params, "TargetSnapshotIdentifier");
+            String sourceClusterId = params.getFirst("SourceSnapshotClusterIdentifier");
+            Integer manualRetention = parseOptionalInteger(params, "ManualSnapshotRetentionPeriod");
+
+            Snapshot snapshot = service.copyClusterSnapshot(sourceSnapshotId, targetSnapshotId,
+                    sourceClusterId, manualRetention);
+
+            String xml = new XmlBuilder()
+                    .start("CopyClusterSnapshotResponse")
+                      .start("CopyClusterSnapshotResult")
+                        .raw(buildSnapshotXml(snapshot))
+                      .end("CopyClusterSnapshotResult")
+                      .start("ResponseMetadata")
+                        .elem("RequestId", "test-req-id")
+                      .end("ResponseMetadata")
+                    .end("CopyClusterSnapshotResponse")
+                    .build();
+            return Response.ok(xml).type(MediaType.APPLICATION_XML).build();
+        }
         case "RestoreFromClusterSnapshot" -> {
             String clusterIdentifier = params.getFirst("ClusterIdentifier");
             String snapshotIdentifier = params.getFirst("SnapshotIdentifier");
@@ -266,7 +304,8 @@ public class RedshiftQueryHandler {
             String parameterGroupName = params.getFirst("ParameterGroupName");
             String parameterGroupFamily = params.getFirst("ParameterGroupFamily");
             String description = params.getFirst("Description");
-            ClusterParameterGroup group = service.createClusterParameterGroup(parameterGroupName, parameterGroupFamily, description);
+            ClusterParameterGroup group = service.createClusterParameterGroup(parameterGroupName, parameterGroupFamily,
+                    description, parseTags(params));
             String xml = new XmlBuilder()
                     .start("CreateClusterParameterGroupResponse")
                       .start("CreateClusterParameterGroupResult")
@@ -467,7 +506,7 @@ public class RedshiftQueryHandler {
                     encryptionContextMap(params),
                     tagMap(params),
                     regionResolver.resolveRegionFromAuth(authorizationHeader));
-            if (zeroEtlConsumer != null) {
+            if (zeroEtlConsumer != null && integration.isPollingEnabled()) {
                 zeroEtlConsumer.startPolling(integration);
             }
             String xml = new XmlBuilder()
@@ -493,7 +532,9 @@ public class RedshiftQueryHandler {
                       .start("DescribeIntegrationsResult")
                         .start("Integrations");
             for (Integration integration : found.integrations()) {
-                xmlBuilder.raw(buildIntegrationXml(integration, true));
+                xmlBuilder.start("Integration")
+                        .raw(buildIntegrationXml(integration, true))
+                        .end("Integration");
             }
             xmlBuilder.end("Integrations");
             // Marker only when a further page exists: real Redshift omits it on the terminal page,
@@ -1170,14 +1211,7 @@ public class RedshiftQueryHandler {
           .end("ClusterParameterGroups");
 
         if (cluster.getTags() != null && !cluster.getTags().isEmpty()) {
-            builder.start("Tags");
-            for (Map.Entry<String, String> tag : cluster.getTags().entrySet()) {
-                builder.start("Tag")
-                    .elem("Key", tag.getKey())
-                    .elem("Value", tag.getValue())
-                  .end("Tag");
-            }
-            builder.end("Tags");
+            builder.raw(tagsXml(cluster.getTags()));
         }
 
         if (cluster.getSnapshotCopyDestinationRegion() != null) {
@@ -1287,8 +1321,7 @@ public class RedshiftQueryHandler {
         if (snapshot.getKmsKeyId() != null) {
             builder.elem("Encrypted", "true").elem("KmsKeyId", snapshot.getKmsKeyId());
         }
-
-        return builder.end("Snapshot").build();
+        return builder.raw(tagsXml(snapshot.getTags())).end("Snapshot").build();
     }
 
     private Response clusterResponse(String operation, Cluster cluster) {
@@ -1340,15 +1373,8 @@ public class RedshiftQueryHandler {
         }
         builder.end("ScheduleDefinitions")
             .elem("ScheduleIdentifier", schedule.getScheduleIdentifier())
-            .elem("ScheduleDescription", schedule.getScheduleDescription());
-        builder.start("Tags");
-        for (Map.Entry<String, String> tag : schedule.getTags().entrySet()) {
-            builder.start("Tag")
-                .elem("Key", tag.getKey())
-                .elem("Value", tag.getValue())
-              .end("Tag");
-        }
-        builder.end("Tags");
+            .elem("ScheduleDescription", schedule.getScheduleDescription())
+            .raw(tagsXml(schedule.getTags()));
         List<String> associated = service.clustersUsingSnapshotSchedule(schedule.getScheduleIdentifier());
         builder.elem("AssociatedClusterCount", associated.size()).start("AssociatedClusters");
         for (String clusterIdentifier : associated) {
@@ -1374,12 +1400,20 @@ public class RedshiftQueryHandler {
         return Response.ok(xml).type(MediaType.APPLICATION_XML).build();
     }
 
-    // No log delivery is emulated, so delivery timestamps and failure fields are omitted.
     private String buildLoggingStatusXml(Cluster cluster) {
+        String lastSuccessful = cluster.getLastSuccessfulDeliveryTime() != null
+                ? DateTimeFormatter.ISO_INSTANT.format(cluster.getLastSuccessfulDeliveryTime())
+                : null;
+        String lastFailure = cluster.getLastFailureTime() != null
+                ? DateTimeFormatter.ISO_INSTANT.format(cluster.getLastFailureTime())
+                : null;
         XmlBuilder builder = new XmlBuilder()
             .elem("LoggingEnabled", cluster.isLoggingEnabled())
             .elem("BucketName", cluster.getLoggingBucketName())
             .elem("S3KeyPrefix", cluster.getLoggingS3KeyPrefix())
+            .elem("LastSuccessfulDeliveryTime", lastSuccessful)
+            .elem("LastFailureTime", lastFailure)
+            .elem("LastFailureMessage", cluster.getLastFailureMessage())
             .elem("LogDestinationType", cluster.getLoggingDestinationType());
         if (cluster.getLoggingExports() != null) {
             builder.start("LogExports");
@@ -1408,13 +1442,13 @@ public class RedshiftQueryHandler {
     }
 
     private String buildClusterParameterGroupXml(ClusterParameterGroup group) {
-        XmlBuilder builder = new XmlBuilder()
+        return new XmlBuilder()
             .start("ClusterParameterGroup")
             .elem("ParameterGroupName", group.getParameterGroupName())
             .elem("ParameterGroupFamily", group.getParameterGroupFamily())
-            .elem("Description", group.getDescription());
-        
-        return builder.end("ClusterParameterGroup").build();
+            .elem("Description", group.getDescription())
+            .raw(tagsXml(group.getTags()))
+            .end("ClusterParameterGroup").build();
     }
 
     private String buildClusterSubnetGroupXml(ClusterSubnetGroup group) {
@@ -1433,11 +1467,7 @@ public class RedshiftQueryHandler {
             }
             builder.elem("SubnetStatus", "Active").end("Subnet");
         }
-        builder.end("Subnets").start("Tags");
-        for (Map.Entry<String, String> tag : group.getTags().entrySet()) {
-            builder.start("Tag").elem("Key", tag.getKey()).elem("Value", tag.getValue()).end("Tag");
-        }
-        return builder.end("Tags").end("ClusterSubnetGroup").build();
+        return builder.end("Subnets").raw(tagsXml(group.getTags())).end("ClusterSubnetGroup").build();
     }
 
     private Response eventSubscriptionResponse(String operation, EventSubscription subscription) {
@@ -1471,14 +1501,10 @@ public class RedshiftQueryHandler {
         for (String category : subscription.getEventCategoriesList()) {
             builder.elem("EventCategory", category);
         }
-        builder.end("EventCategoriesList")
+        return builder.end("EventCategoriesList")
                 .elem("SubscriptionCreationTime", EVENT_TIMESTAMP.format(subscription.getSubscriptionCreationTime()))
                 .elem("Enabled", String.valueOf(subscription.isEnabled()))
-                .start("Tags");
-        for (Map.Entry<String, String> tag : subscription.getTags().entrySet()) {
-            builder.start("Tag").elem("Key", tag.getKey()).elem("Value", tag.getValue()).end("Tag");
-        }
-        return builder.end("Tags")
+                .raw(tagsXml(subscription.getTags()))
                 .elem("Status", subscription.getStatus())
                 .elem("CustomerAwsId", subscription.getCustomerAwsId())
                 .end("EventSubscription").build();
@@ -1542,14 +1568,7 @@ public class RedshiftQueryHandler {
             .elem("KmsKeyId", grant.getKmsKeyId());
 
         if (grant.getTags() != null && !grant.getTags().isEmpty()) {
-            builder.start("Tags");
-            for (Map.Entry<String, String> tag : grant.getTags().entrySet()) {
-                builder.start("Tag")
-                    .elem("Key", tag.getKey())
-                    .elem("Value", tag.getValue())
-                  .end("Tag");
-            }
-            builder.end("Tags");
+            builder.raw(tagsXml(grant.getTags()));
         }
 
         return builder.end("SnapshotCopyGrant").build();
@@ -1578,13 +1597,15 @@ public class RedshiftQueryHandler {
      */
     private String buildIntegrationXml(Integration integration, boolean includeErrors) {
         XmlBuilder builder = new XmlBuilder()
-                .start("Integration")
-                  .elem("IntegrationArn", integration.getIntegrationArn())
-                  .elem("IntegrationName", integration.getIntegrationName())
-                  .elem("SourceArn", integration.getSourceArn())
-                  .elem("TargetArn", integration.getTargetArn())
-                  .elem("Status", integration.getStatus())
-                  .elem("CreateTime", integration.getCreateTime());
+                .elem("IntegrationArn", integration.getIntegrationArn())
+                .elem("IntegrationName", integration.getIntegrationName())
+                .elem("SourceArn", integration.getSourceArn())
+                .elem("TargetArn", integration.getTargetArn())
+                .elem("Status", integration.getStatus())
+                .elem("CreateTime", integration.getCreateTime());
+        if (integration.getSourceType() != null) {
+            builder.elem("SourceType", integration.getSourceType());
+        }
         if (integration.getDescription() != null) {
             builder.elem("Description", integration.getDescription());
         }
@@ -1606,16 +1627,17 @@ public class RedshiftQueryHandler {
             builder.start("Errors").end("Errors");
         }
         if (integration.getTags() != null && !integration.getTags().isEmpty()) {
-            builder.start("Tags");
-            for (Map.Entry<String, String> tag : integration.getTags().entrySet()) {
-                builder.start("Tag")
-                    .elem("Key", tag.getKey())
-                    .elem("Value", tag.getValue())
-                  .end("Tag");
-            }
-            builder.end("Tags");
+            builder.raw(tagsXml(integration.getTags()));
         }
-        return builder.end("Integration").build();
+        return builder.build();
+    }
+
+    private static String tagsXml(Map<String, String> tags) {
+        XmlBuilder builder = new XmlBuilder().start("Tags");
+        for (Map.Entry<String, String> tag : tags.entrySet()) {
+            builder.start("Tag").elem("Key", tag.getKey()).elem("Value", tag.getValue()).end("Tag");
+        }
+        return builder.end("Tags").build();
     }
 
     /**

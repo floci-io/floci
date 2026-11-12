@@ -357,6 +357,7 @@ public interface EmulatorConfig {
     }
 
     interface ServiceStorageOverrides {
+        RekognitionStorageConfig rekognition();
         SsmStorageConfig ssm();
         SqsStorageConfig sqs();
         S3StorageConfig s3();
@@ -407,6 +408,13 @@ public interface EmulatorConfig {
         LakeFormationStorageConfig lakeformation();
         EfsStorageConfig efs();
         SageMakerStorageConfig sagemaker();
+    }
+
+    interface RekognitionStorageConfig {
+        Optional<String> mode();
+
+        @WithDefault("5000")
+        long flushIntervalMs();
     }
 
     interface ApsStorageConfig {
@@ -468,6 +476,7 @@ public interface EmulatorConfig {
     }
 
     interface CloudWatchLogsStorageConfig {
+        // Saved query definitions share the Logs storage mode and flush interval.
         Optional<String> mode();
 
         // Log events are the largest and most write-heavy store, so they flush less often than the rest.
@@ -874,6 +883,8 @@ public interface EmulatorConfig {
         ConnectServiceConfig connect();
         AppIntegrationsServiceConfig appintegrations();
         DlmServiceConfig dlm();
+        SignerServiceConfig signer();
+        XrayServiceConfig xray();
         CognitoIdentityServiceConfig cognitoidentity();
         GlobalAcceleratorServiceConfig globalaccelerator();
         DataSyncServiceConfig datasync();
@@ -882,6 +893,7 @@ public interface EmulatorConfig {
 
         LakeFormationServiceConfig lakeformation();
         EfsServiceConfig efs();
+        Ec2InstanceConnectServiceConfig ec2instanceconnect();
         CodeGuruReviewerServiceConfig codegurureviewer();
         CodeArtifactServiceConfig codeartifact();
         QuickSightServiceConfig quicksight();
@@ -946,6 +958,24 @@ public interface EmulatorConfig {
     }
 
     interface DlmServiceConfig {
+        @WithDefault("true")
+        boolean enabled();
+    }
+
+    interface SignerServiceConfig {
+        @WithDefault("true")
+        boolean enabled();
+
+        /**
+         * Records signing jobs as succeeded without producing an artifact, for callers that only
+         * read job metadata. Off by default: a job that reports success must have something to
+         * download, and Floci does not sign code.
+         */
+        @WithDefault("false")
+        boolean mockSigningJobs();
+    }
+
+    interface XrayServiceConfig {
         @WithDefault("true")
         boolean enabled();
     }
@@ -1207,6 +1237,11 @@ public interface EmulatorConfig {
         boolean enabled();
     }
 
+    interface Ec2InstanceConnectServiceConfig {
+        @WithDefault("true")
+        boolean enabled();
+    }
+
     interface EfsServiceConfig {
         @WithDefault("true")
         boolean enabled();
@@ -1313,6 +1348,9 @@ public interface EmulatorConfig {
     interface ApplicationAutoScalingServiceConfig {
         @WithDefault("true")
         boolean enabled();
+
+        @WithDefault("1")
+        long scheduledActionIntervalSeconds();
     }
 
     interface ElasticBeanstalkServiceConfig {
@@ -2082,6 +2120,23 @@ public interface EmulatorConfig {
          * clusters run their HDFS in emr-7.5.0's.
          */
         Optional<String> hiveImageTemplate();
+
+        /**
+         * The memory, in MB, a {@code docker} cluster's NodeManager offers the YARN containers its steps' Spark
+         * executors run in. EMR sizes it by the instance type; Floci's node shares the machine it runs on.
+         *
+         * Env var: FLOCI_SERVICES_EMR_YARN_NODE_MEMORY_MB
+         */
+        @WithDefault("4096")
+        int yarnNodeMemoryMb();
+
+        /**
+         * The virtual cores a {@code docker} cluster's NodeManager offers YARN's containers.
+         *
+         * Env var: FLOCI_SERVICES_EMR_YARN_NODE_VCORES
+         */
+        @WithDefault("4")
+        int yarnNodeVcores();
 
         /**
          * When true, Floci removes, in the {@code docker} runner mode, every EMR step driver and bootstrap
@@ -3092,6 +3147,15 @@ public interface EmulatorConfig {
         boolean enabled();
 
         /**
+         * Remove previous-run Docker Lambda containers at startup and retry incomplete cleanup
+         * on cold starts. Disable when deployments share a daemon and the same owner identity.
+         *
+         * Env var: FLOCI_SERVICES_LAMBDA_RECONCILE_CONTAINERS_ON_STARTUP
+         */
+        @WithDefault("true")
+        boolean reconcileContainersOnStartup();
+
+        /**
          * Registry host (optionally with a path prefix) that Lambda runtime images are pulled
          * from, e.g. {@code public.ecr.aws} produces {@code public.ecr.aws/lambda/python:3.12}.
          * Point it at a private mirror to avoid depending on ECR Public.
@@ -3700,6 +3764,14 @@ public interface EmulatorConfig {
 
         @WithDefault("false")
         boolean mock();
+
+        /** Reuse backend HTTP/1.x connections between ordinary forwarded requests. */
+        @WithDefault("true")
+        boolean backendKeepAlive();
+
+        /** Default idle-pool timeout in seconds; zero disables expiry. Target Keep-Alive may override it. */
+        @WithDefault("60")
+        int backendKeepAliveTimeoutSeconds();
     }
 
     interface EksServiceConfig {
@@ -3717,6 +3789,14 @@ public interface EmulatorConfig {
         /** Optional vCPU ceiling for the single k3s node container. Zero uses its instance type. */
         @WithDefault("0")
         int maxVcpus();
+
+        /**
+         * Optional EC2 catalog instance type the k3s node container is sized from, in place of its
+         * first node group's type. The node group, the node's {@code node.kubernetes.io/instance-type}
+         * label and the synthesized EC2 instance keep the requested type. A type absent from the
+         * catalog is ignored with a warning; {@link #maxMemoryMib()} and {@link #maxVcpus()} still apply.
+         */
+        Optional<String> nodeInstanceType();
 
         @WithDefault("k3s")
         String provider();
@@ -3948,6 +4028,13 @@ public interface EmulatorConfig {
 
         /** Path to PEM private key file. Env: FLOCI_TLS_KEY_PATH */
         Optional<String> keyPath();
+
+        /**
+         * PEM file of extra CA certificates that Floci's own outbound HTTPS clients trust, on top of
+         * the JVM's default roots (and Floci's CA when TLS is on). Applies whether or not TLS is enabled.
+         * Containers Floci launches are not affected. Env: FLOCI_TLS_EXTRA_CA_PATH
+         */
+        Optional<String> extraCaPath();
 
         /**
          * Auto-generate a server certificate when no cert-path/key-path is provided. The leaf is

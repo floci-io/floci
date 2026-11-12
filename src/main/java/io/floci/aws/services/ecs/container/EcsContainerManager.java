@@ -24,6 +24,7 @@ import io.floci.aws.core.common.docker.ContainerDetector;
 import io.floci.aws.core.common.docker.ContainerLifecycleManager;
 import io.floci.aws.core.common.docker.ContainerLifecycleManager.ContainerInfo;
 import io.floci.aws.core.common.docker.ContainerLogStreamer;
+import io.floci.aws.core.common.docker.ContainerReconciler;
 import io.floci.aws.core.common.docker.ContainerSpec;
 import io.floci.aws.core.common.docker.ContainerStorageHelper;
 import io.floci.aws.core.common.docker.LaunchedContainerAwsEnv;
@@ -150,9 +151,7 @@ public class EcsContainerManager {
     private final EfsService efsService;
     // Stamped as RUN_LABEL on every container this process creates, so a sweep can tell its own apart.
     private final String runId = UUID.randomUUID().toString();
-    // A sweep failure is retried before each task launch; each distinct failure is a WARN once.
-    private volatile boolean leftoverListFailureReported;
-    private final Set<String> leftoverRemovalFailuresReported = ConcurrentHashMap.newKeySet();
+    private final ContainerReconciler containerReconciler;
     private volatile boolean leftoverTaskVolumeListFailureReported;
     private final Set<String> leftoverTaskVolumeRemovalFailuresReported = ConcurrentHashMap.newKeySet();
 
@@ -193,6 +192,7 @@ public class EcsContainerManager {
         this.credentialsProxy = credentialsProxy;
         this.linkLocalAddresses = linkLocalAddresses;
         this.efsService = efsService;
+        this.containerReconciler = new ContainerReconciler(lifecycleManager, LOG);
     }
 
     public EcsContainerManager(ContainerBuilder containerBuilder,
@@ -623,6 +623,9 @@ public class EcsContainerManager {
             }
             throw e;
         }
+        if (task.getNetworkInterfaceId() != null && protectedNetwork == null) {
+            joinTaskVpcNetwork(task, taskDef, containerIds, region);
+        }
 
         Map<String, Container> runtimeContainersByName = new LinkedHashMap<>();
         for (Container container : runtimeContainers) {
@@ -648,9 +651,6 @@ public class EcsContainerManager {
             containersInDefinitionOrder.forEach(container -> container.setManagedAgents(agents));
         }
         task.setContainers(containersInDefinitionOrder);
-        task.setLastStatus(TaskStatus.RUNNING.name());
-        task.setDesiredStatus(TaskStatus.RUNNING.name());
-        task.setStartedAt(Instant.now());
 
         return new EcsTaskHandle(task.getTaskArn(), containerIds, logStreamsByContainerId,
                 firelensVolumeName,
@@ -736,8 +736,8 @@ public class EcsContainerManager {
      *
      * <p>The wait is bounded by the dependent container's {@code startTimeout}, defaulting to
      * {@value #DEPENDENCY_WAIT_SECONDS} seconds rather than AWS's longer agent default, because
-     * RunTask here is synchronous and a caller is holding the request open. A dependency that does
-     * not get there in time fails the task.
+     * the service scheduler starts a service's tasks on its own thread, which a long wait holds up.
+     * A dependency that does not get there in time fails the task.
      */
     private void awaitDependencies(ContainerDefinition definition, Map<String, String> startedContainerIds) {
         if (definition.getDependsOn() == null || definition.getDependsOn().isEmpty()) {
@@ -1151,6 +1151,30 @@ public class EcsContainerManager {
     }
 
     /**
+     * Puts one container of an awsvpc task on its VPC's Docker network at the task ENI address, so
+     * the address DescribeTasks reports answers. AWS gives the whole task that one address; here it
+     * goes to the first container that maps a port, else to the first container. Without
+     * Docker-backed VPC networks, or for an ENI address outside the subnet's planned range, the
+     * containers keep only the network they were created on. Removing the container disconnects
+     * it, before {@link #releaseTaskNetwork} returns the address.
+     */
+    private void joinTaskVpcNetwork(EcsTask task, TaskDefinition taskDef, Map<String, String> containerIds,
+                                    String region) {
+        String vpcId = taskVpcId(task, region);
+        if (vpcId == null) {
+            return;
+        }
+        List<ContainerDefinition> definitions = taskDef.getContainerDefinitions();
+        ContainerDefinition holder = definitions.stream()
+                .filter(def -> def.getPortMappings() != null && !def.getPortMappings().isEmpty())
+                .findFirst()
+                .orElse(definitions.getFirst());
+        ec2Service.attachContainerToVpc(region, vpcId,
+                task.getNetworkConfiguration().getAwsvpcConfiguration().getSubnets().getFirst(),
+                containerIds.get(holder.getName()), task.getPrivateIpAddress());
+    }
+
+    /**
      * Restates an EC2 lookup failure as the error RunTask declares. A caller naming a subnet or a
      * security group that is not there asked for something the task cannot have, and
      * {@code InvalidSubnetID.NotFound} is not in RunTask's error list, so an SDK sees it as an
@@ -1219,51 +1243,11 @@ public class EcsContainerManager {
 
     /** {@link #removeLeftoverContainers()} keeping only the containers of run {@code currentRunId}. */
     public boolean removeLeftoverContainers(String currentRunId) {
-        String owner = ContainerStorageHelper.ownerIdentity(config);
-        ContainerStorageHelper.LabelAliases aliases = ContainerStorageHelper.CONTAINER_LABEL_ALIASES;
-        List<com.github.dockerjava.api.model.Container> containers;
-        try {
-            // Docker's container summary, not the ECS model Container this class imports.
-            containers = aliases.listByLabels(
-                    Map.of(ContainerStorageHelper.SERVICE_LABEL, "ecs", ContainerStorageHelper.OWNER_LABEL, owner),
-                    filter -> lifecycleManager.getDockerClient()
-                            .listContainersCmd()
-                            .withShowAll(true)
-                            .withLabelFilter(filter)
-                            .exec(),
-                    com.github.dockerjava.api.model.Container::getId);
-        } catch (Exception e) {
-            LOG.logv(leftoverListFailureReported ? Logger.Level.DEBUG : Logger.Level.WARN,
-                    "Could not list the ECS containers a previous run left behind: {0}", e.getMessage());
-            leftoverListFailureReported = true;
-            return false;
-        }
-        leftoverListFailureReported = false;
-        boolean allRemoved = true;
-        for (com.github.dockerjava.api.model.Container container : containers) {
-            Map<String, String> labels = container.getLabels();
-            if (!aliases.consistent(container.getId(), labels)
-                    || !aliases.matches(labels, ContainerStorageHelper.OWNER_LABEL, owner)
-                    || currentRunId.equals(aliases.labelValue(labels, RUN_LABEL))) {
-                continue;
-            }
-            try {
-                lifecycleManager.removeIfExistsStrict(container.getId(), true);
-                leftoverRemovalFailuresReported.remove(container.getId());
-                LOG.infov("Removed ECS container {0} ({1}) left by a previous run", container.getId(),
-                        container.getNames() == null ? "" : String.join(",", container.getNames()));
-            } catch (Exception e) {
-                allRemoved = false;
-                Logger.Level level = leftoverRemovalFailuresReported.add(container.getId())
-                        ? Logger.Level.WARN : Logger.Level.DEBUG;
-                LOG.logv(level, "Could not remove ECS container {0} left by a previous run: {1}",
-                        container.getId(), e.getMessage());
-            }
-        }
-        if (allRemoved) {
-            leftoverRemovalFailuresReported.clear();
-        }
-        return allRemoved;
+        return containerReconciler.reconcile(
+                Map.of(ContainerStorageHelper.SERVICE_LABEL, "ecs",
+                        ContainerStorageHelper.OWNER_LABEL, ContainerStorageHelper.ownerIdentity(config)),
+                container -> !currentRunId.equals(ContainerStorageHelper.CONTAINER_LABEL_ALIASES
+                        .labelValue(container.getLabels(), RUN_LABEL)));
     }
 
     /** Removes previous-run task volumes independently of the container launch gate. */
@@ -2168,8 +2152,9 @@ public class EcsContainerManager {
      * protected namespace has no network of its own, so the namespace holder's address is the one
      * it answers on.
      *
-     * <p>This is deliberately not the task ENI address. ECS containers never join the subnet's
-     * VPC network, so the ENI address is control-plane state that no peer can connect to.
+     * <p>This is deliberately not the task ENI address. One task container holds that address on
+     * the VPC's Docker network, when VPC networks are enabled, but peers outside that VPC reach the
+     * task on the network its container was created on, so that address is the one returned.
      *
      * @return the address, or empty when the container has not started or Docker cannot say
      */
@@ -2196,16 +2181,24 @@ public class EcsContainerManager {
 
             // A container can be on multiple networks; getNetworks() is unordered.
             // Pick an IP that the Floci/ELBv2 process can actually route to:
-            // 1. the explicitly-configured ECS Docker network, if set;
-            // 2. otherwise any user-defined network (Floci joins one when in Docker)
-            //    in preference to the default bridge;
-            // 3. otherwise the first non-blank IP.
-            String configured = config.services().ecs().dockerNetwork().orElse(null);
+            // 1. the network ECS containers join: the configured one, or the one Floci runs on;
+            // 2. otherwise the network the container was created on, rather than the VPC
+            //    network an awsvpc task also joins at its ENI address;
+            // 3. otherwise any user-defined network in preference to the default bridge;
+            // 4. otherwise the first non-blank IP.
+            String configured = containerBuilder.resolveDockerNetwork(config.services().ecs().dockerNetwork())
+                    .orElse(null);
             if (configured != null && !configured.isBlank()) {
                 ContainerNetwork net = networks.get(configured);
                 if (net != null && isUsableIp(net.getIpAddress())) {
                     return Optional.of(net.getIpAddress());
                 }
+            }
+            String ownNetwork = inspect.getHostConfig() == null ? null : inspect.getHostConfig().getNetworkMode();
+            ContainerNetwork own = ownNetwork == null ? null
+                    : networks.get("default".equals(ownNetwork) ? "bridge" : ownNetwork);
+            if (own != null && isUsableIp(own.getIpAddress())) {
+                return Optional.of(own.getIpAddress());
             }
             for (Map.Entry<String, ContainerNetwork> entry : networks.entrySet()) {
                 if (!isDefaultDockerNetwork(entry.getKey())
@@ -2490,7 +2483,4 @@ public class EcsContainerManager {
             hostVolumePolicy.validate(hostPath, HostVolumePolicy.DEVICE_HOST_PATH);
         }
     }
-
-    // Inner enum to avoid import cycle — mirrors model.TaskStatus for readability
-    private enum TaskStatus {RUNNING}
 }

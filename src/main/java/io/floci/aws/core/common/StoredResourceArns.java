@@ -48,6 +48,16 @@ public interface StoredResourceArns {
     }
 
     /**
+     * As {@link #findByMembers}, for a resource another account owns that the request names by that account, which its
+     * service lets the caller reach when the resource's policy allows it (a Redshift Serverless snapshot shared by its
+     * owner): the ARN that account's resource is stored under; empty when there is none, or the service finds none
+     * of another account.
+     */
+    default Optional<String> findInAccount(String type, List<String> names, String account, String region) {
+        return Optional.empty();
+    }
+
+    /**
      * Resolves an explicit {@code find} selector. An empty list indicates an incomplete selector, which a service
      * may reject before IAM evaluation. This is distinct from an ordinary name filling an ARN's variables:
      * callback tokens require validation, but state-machine names do not name callback tokens.

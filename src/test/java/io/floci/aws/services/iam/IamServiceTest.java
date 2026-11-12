@@ -24,6 +24,7 @@ import io.floci.aws.services.iam.model.OrganizationRootFeatures;
 import io.floci.aws.services.iam.model.PolicyVersion;
 import io.floci.aws.services.iam.model.SessionCredential;
 import io.floci.aws.services.iam.model.VirtualMfaDevice;
+import io.floci.aws.testing.ManualClock;
 import io.floci.aws.testing.MutableClock;
 import jakarta.enterprise.inject.Instance;
 import org.junit.jupiter.api.BeforeEach;
@@ -94,6 +95,12 @@ class IamServiceTest {
                 regionResolver,
                 seedDeployerPrincipal
         );
+    }
+
+    private static IamService iamServiceOn(Clock clock) {
+        return new IamService(new InMemoryStorage<>(), new InMemoryStorage<>(), new InMemoryStorage<>(),
+                new InMemoryStorage<>(), new InMemoryStorage<>(), new InMemoryStorage<>(), new InMemoryStorage<>(),
+                new RegionResolver("us-east-1", "000000000000"), false, clock);
     }
 
     @Test
@@ -512,6 +519,73 @@ class IamServiceTest {
         assertEquals("alice", arns.userName());
         assertEquals(user.getUserId(), arns.userId());
         assertEquals(user.getArn(), arns.callerArn());
+    }
+
+    @Test
+    void userPrincipalTagsAreSnapshottedAndRefreshedForEachRequest() {
+        IamUser user = iamService.createUser("tagged", "/team/");
+        user.setTags(new LinkedHashMap<>(Map.of("Team", "platform", "Empty", "")));
+        String key = iamService.createAccessKey("tagged").getAccessKeyId();
+        IamService.CallerArns caller = iamService.resolveCallerArns(key).orElseThrow();
+        user.getTags().put("Team", "other");
+        Map<String, List<String>> context = new LinkedHashMap<>();
+        caller.putPrincipalKeys(context);
+        assertEquals(List.of("platform"), context.get("aws:PrincipalTag/Team"));
+        assertEquals(List.of(""), context.get("aws:PrincipalTag/Empty"));
+        context.clear();
+        iamService.resolveCallerArns(key).orElseThrow().putPrincipalKeys(context);
+        assertEquals(List.of("other"), context.get("aws:PrincipalTag/Team"));
+        user.getTags().clear();
+        context.clear();
+        iamService.resolveCallerArns(key).orElseThrow().putPrincipalKeys(context);
+        assertTrue(context.keySet().stream().noneMatch(k -> k.startsWith("aws:PrincipalTag/")));
+    }
+
+    @Test
+    void userSessionTokensCarryUserTagsButFederatedAndRootSessionsDoNot() {
+        IamUser user = iamService.createUser("tagged", "/");
+        user.setTags(Map.of("Team", "platform"));
+        String key = iamService.createAccessKey("tagged").getAccessKeyId();
+        Instant expiration = Instant.now().plusSeconds(3600);
+        iamService.registerIssuedSession("ASIAUSER", "secret", "token", null, expiration,
+                null, "000000000000", key);
+        iamService.registerIssuedSession("ASIAFEDERATED", "secret", "token",
+                "arn:aws:sts::000000000000:federated-user/tagged", expiration, null, "000000000000", key);
+        iamService.registerIssuedSession("ASIAROOT", "secret", "token", null, expiration,
+                null, "000000000000", "test");
+        Map<String, List<String>> context = new LinkedHashMap<>();
+        iamService.resolveCallerArns("ASIAUSER").orElseThrow().putPrincipalKeys(context);
+        assertEquals(List.of("platform"), context.get("aws:PrincipalTag/Team"));
+        for (String session : List.of("ASIAFEDERATED", "ASIAROOT")) {
+            context.clear();
+            iamService.resolveCallerArns(session).orElseThrow().putPrincipalKeys(context);
+            assertFalse(context.containsKey("aws:PrincipalTag/Team"));
+        }
+    }
+
+    @Test
+    void roleSessionPrincipalTagsComeFromTheStoredRoleWithItsPath() {
+        IamRole role = iamService.createRole("Worker", "/teams/platform/", "{}", null, 3600, null);
+        role.setTags(Map.of("Team", "platform"));
+        iamService.registerSession("ASIATAGGEDROLE", "secret", "token", role.getArn(),
+                Instant.now().plusSeconds(3600), null, "000000000000", "worker", "AROAWORKER:worker");
+        Map<String, List<String>> context = new LinkedHashMap<>();
+        iamService.resolveCallerArns("ASIATAGGEDROLE").orElseThrow().putPrincipalKeys(context);
+        assertEquals(List.of("platform"), context.get("aws:PrincipalTag/Team"));
+        role.setTags(Map.of());
+        context.clear();
+        iamService.resolveCallerArns("ASIATAGGEDROLE").orElseThrow().putPrincipalKeys(context);
+        assertFalse(context.containsKey("aws:PrincipalTag/Team"));
+    }
+
+    @Test
+    void simulationStillRequiresCallerSuppliedPrincipalTags() {
+        IamUser user = iamService.createUser("tagged", "/");
+        user.setTags(Map.of("Team", "platform"));
+        Map<String, List<String>> context = new LinkedHashMap<>();
+        iamService.simulationPrincipalKeys(user.getArn()).orElseThrow().putPrincipalKeys(context);
+        assertFalse(context.containsKey("aws:PrincipalTag/Team"));
+        assertEquals(List.of("tagged"), context.get("aws:username"));
     }
 
     @Test
@@ -2382,6 +2456,42 @@ class IamServiceTest {
     }
 
     @Test
+    void theActiveCopyOfADuplicateAccessKeyIdPicksTheAccount() {
+        AccountAwareStorageBackend<AccessKey> accessKeys = new AccountAwareStorageBackend<>(
+                new InMemoryStorage<>(), null, "000000000000");
+        putDuplicateKey(accessKeys, "AKIADUPFIRSTACTIVE", "111122223333", "Active");
+        putDuplicateKey(accessKeys, "AKIADUPFIRSTACTIVE", "444455556666", "Inactive");
+        putDuplicateKey(accessKeys, "AKIADUPSECONDACTIVE", "111122223333", "Inactive");
+        putDuplicateKey(accessKeys, "AKIADUPSECONDACTIVE", "444455556666", "Active");
+
+        IamService service = iamService(false, accessKeys, new InMemoryStorage<>());
+
+        assertEquals(Optional.of("111122223333"), service.resolveAccountId("AKIADUPFIRSTACTIVE"));
+        assertEquals(Optional.of("444455556666"), service.resolveAccountId("AKIADUPSECONDACTIVE"));
+    }
+
+    private static void putDuplicateKey(AccountAwareStorageBackend<AccessKey> accessKeys, String id,
+                                        String account, String status) {
+        AccessKey accessKey = new AccessKey(id, "secret", "dev");
+        accessKey.setStatus(status);
+        accessKeys.putForAccount(account, id, accessKey);
+    }
+
+    @Test
+    void resolvingAnAccountDoesNotScanTheAccessKeys() {
+        AccountAwareStorageBackend<AccessKey> accessKeys = Mockito.spy(new AccountAwareStorageBackend<>(
+                new InMemoryStorage<>(), null, "000000000000"));
+        AccessKey other = new AccessKey("AKIAOTHERACCOUNTKEY", "secret", "dev");
+        accessKeys.putForAccount("111122223333", other.getAccessKeyId(), other);
+
+        IamService service = iamService(false, accessKeys, new InMemoryStorage<>());
+
+        assertEquals(Optional.of("111122223333"), service.resolveAccountId(other.getAccessKeyId()));
+        assertTrue(service.resolveAccountId("test").isEmpty());
+        Mockito.verify(accessKeys, Mockito.never()).scanAllAccountEntries(Mockito.any());
+    }
+
+    @Test
     void findSecretKeyDoesNotResolveAnotherAccountsKey() {
         // The ElastiCache, MemoryDB and RDS IAM-auth proxies verify through findSecretKey and do
         // not compare the key's account with the cluster's, so another account's key must stay unknown.
@@ -3559,17 +3669,21 @@ class IamServiceTest {
      * changes: otherwise a changed password would still report the original creation time.
      */
     @Test
-    void updateLoginProfilePasswordChangeMovesPasswordLastChanged() throws InterruptedException {
-        iamService.createUser("cred-report-changed-user", "/");
-        iamService.createLoginProfile("cred-report-changed-user", "Original-P4ss!", false);
-        Instant createdAt = iamService.getLoginProfile("cred-report-changed-user").getPasswordLastChanged();
+    void updateLoginProfilePasswordChangeMovesPasswordLastChanged() {
+        ManualClock clock = new ManualClock(Instant.parse("2026-03-01T00:00:00Z"));
+        IamService service = iamServiceOn(clock);
+        service.createUser("cred-report-changed-user", "/");
+        service.createLoginProfile("cred-report-changed-user", "Original-P4ss!", false);
+        LoginProfile created = service.getLoginProfile("cred-report-changed-user");
+        assertEquals(clock.instant(), created.getCreateDate());
+        assertEquals(clock.instant(), created.getPasswordLastChanged());
 
-        Thread.sleep(20);
-        iamService.updateLoginProfile("cred-report-changed-user", "Updated-P4ss!", null);
-        Instant changedAt = iamService.getLoginProfile("cred-report-changed-user").getPasswordLastChanged();
+        clock.advance(Duration.ofDays(30));
+        service.updateLoginProfile("cred-report-changed-user", "Updated-P4ss!", null);
 
-        assertTrue(changedAt.isAfter(createdAt),
-                "expected password_last_changed to move: created=" + createdAt + " changed=" + changedAt);
+        LoginProfile changed = service.getLoginProfile("cred-report-changed-user");
+        assertEquals(Instant.parse("2026-03-31T00:00:00Z"), changed.getPasswordLastChanged());
+        assertEquals(Instant.parse("2026-03-01T00:00:00Z"), changed.getCreateDate());
     }
 
     /** Toggling only passwordResetRequired is not a password change, so the timestamp must not move. */
@@ -3585,33 +3699,60 @@ class IamServiceTest {
     }
 
     @Test
-    void getCredentialReportOnAnExpiredReportThrowsReportExpired() {
-        StorageBackend<String, CredentialReport> credentialReports = new InMemoryStorage<>();
-        credentialReports.put("credential-report/aws",
-                new CredentialReport("dGVzdA==", Instant.now().minus(Duration.ofHours(5))));
-        IamService withExpiredReport = new IamService(
-                new InMemoryStorage<>(), new InMemoryStorage<>(), new InMemoryStorage<>(),
-                new InMemoryStorage<>(), new InMemoryStorage<>(), new InMemoryStorage<>(),
-                new InMemoryStorage<>(), new InMemoryStorage<>(), new InMemoryStorage<>(),
-                new InMemoryStorage<>(), new InMemoryStorage<>(), new InMemoryStorage<>(),
-                new InMemoryStorage<>(), credentialReports, new InMemoryStorage<>(),
-                new InMemoryStorage<>(),
-                new InMemoryStorage<>(),
-                new InMemoryStorage<>(),
-                new InMemoryStorage<>(),
-                new InMemoryStorage<>(), new InMemoryStorage<>(), new InMemoryStorage<>(),
-                new RegionResolver("us-east-1", "000000000000"), false, null);
+    void getCredentialReportServesAReportUntilItIsOlderThanFourHours() {
+        ManualClock clock = new ManualClock(Instant.parse("2026-03-01T00:00:00Z"));
+        IamService service = iamServiceOn(clock);
+        service.generateCredentialReport();
 
-        AwsException ex = assertThrows(AwsException.class, withExpiredReport::getCredentialReport);
+        clock.advance(Duration.ofHours(4));
+        assertEquals(Instant.parse("2026-03-01T00:00:00Z"), service.getCredentialReport().generatedTime());
+
+        clock.advance(Duration.ofMillis(1));
+        AwsException ex = assertThrows(AwsException.class, service::getCredentialReport);
         assertEquals("ReportExpired", ex.getErrorCode());
     }
 
     @Test
-    void generateCredentialReportOnAnExpiredReportStartsANewOne() {
+    void generateCredentialReportReusesAReportUntilItIsFourHoursOld() {
+        ManualClock clock = new ManualClock(Instant.parse("2026-03-01T00:00:00Z"));
+        IamService service = iamServiceOn(clock);
+        service.generateCredentialReport();
+
+        clock.advance(Duration.ofHours(4).minusMillis(1));
+        IamService.CredentialReportGeneration reused = service.generateCredentialReport();
+        assertEquals("COMPLETE", reused.state());
+        assertEquals(Instant.parse("2026-03-01T00:00:00Z"), service.getCredentialReport().generatedTime());
+
+        clock.advance(Duration.ofMillis(1));
+        IamService.CredentialReportGeneration regenerated = service.generateCredentialReport();
+        assertEquals("STARTED", regenerated.state());
+        assertEquals("The previous report has expired. Starting a new report generation task",
+                regenerated.description());
+        assertEquals(Instant.parse("2026-03-01T04:00:00Z"), service.getCredentialReport().generatedTime());
+    }
+
+    @Test
+    void generateCredentialReportOnAnExpiredReportMakesItReadableAgain() {
+        ManualClock clock = new ManualClock(Instant.parse("2026-03-01T00:00:00Z"));
+        IamService service = iamServiceOn(clock);
+        service.generateCredentialReport();
+        clock.advance(Duration.ofHours(4).plusMillis(1));
+        assertThrows(AwsException.class, service::getCredentialReport);
+
+        IamService.CredentialReportGeneration generation = service.generateCredentialReport();
+
+        assertEquals("STARTED", generation.state());
+        assertEquals(clock.instant(), service.getCredentialReport().generatedTime());
+    }
+
+    /** A report read back from storage ages on the service's clock like one it generated itself. */
+    @Test
+    void aStoredCredentialReportExpiresOnTheServicesClock() {
+        Instant start = Instant.parse("2026-03-01T00:00:00Z");
         StorageBackend<String, CredentialReport> credentialReports = new InMemoryStorage<>();
-        credentialReports.put("credential-report/aws",
-                new CredentialReport("dGVzdA==", Instant.now().minus(Duration.ofHours(5))));
-        IamService withExpiredReport = new IamService(
+        credentialReports.put("credential-report/aws", new CredentialReport("dGVzdA==", start));
+        ManualClock clock = new ManualClock(start.plus(Duration.ofHours(4)));
+        IamService withStoredReport = new IamService(
                 new InMemoryStorage<>(), new InMemoryStorage<>(), new InMemoryStorage<>(),
                 new InMemoryStorage<>(), new InMemoryStorage<>(), new InMemoryStorage<>(),
                 new InMemoryStorage<>(), new InMemoryStorage<>(), new InMemoryStorage<>(),
@@ -3622,14 +3763,13 @@ class IamServiceTest {
                 new InMemoryStorage<>(),
                 new InMemoryStorage<>(),
                 new InMemoryStorage<>(), new InMemoryStorage<>(), new InMemoryStorage<>(),
-                new RegionResolver("us-east-1", "000000000000"), false, null);
+                new RegionResolver("us-east-1", "000000000000"), false, null, clock);
 
-        IamService.CredentialReportGeneration generation = withExpiredReport.generateCredentialReport();
+        assertEquals(start, withStoredReport.getCredentialReport().generatedTime());
 
-        assertEquals("STARTED", generation.state());
-        assertEquals("The previous report has expired. Starting a new report generation task",
-                generation.description());
-        assertDoesNotThrow(withExpiredReport::getCredentialReport);
+        clock.advance(Duration.ofMillis(1));
+        AwsException ex = assertThrows(AwsException.class, withStoredReport::getCredentialReport);
+        assertEquals("ReportExpired", ex.getErrorCode());
     }
 
     @Test

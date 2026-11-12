@@ -23,6 +23,7 @@ import java.util.zip.CRC32;
 
 import static io.floci.aws.testing.DynamoDbRequests.assertEpochMillisBetween;
 import static io.floci.aws.testing.DynamoDbRequests.decimalAt;
+import static io.floci.aws.testing.DynamoDbRequests.nestedMap;
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.*;
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -649,6 +650,56 @@ class DynamoDbIntegrationTest {
     }
 
     @Test
+    void createTableListsTheGsiErrorsBeforeTheBillingModeAndLsiErrors() {
+        assertIndexNameRejected("CreateTable", """
+                {
+                    "TableName": "IndexNameListTable",
+                    "KeySchema": [
+                        {"AttributeName": "pk", "KeyType": "HASH"},
+                        {"AttributeName": "sk", "KeyType": "RANGE"}
+                    ],
+                    "AttributeDefinitions": [
+                        {"AttributeName": "pk", "AttributeType": "S"},
+                        {"AttributeName": "sk", "AttributeType": "S"},
+                        {"AttributeName": "l", "AttributeType": "S"},
+                        {"AttributeName": "g", "AttributeType": "S"}
+                    ],
+                    "LocalSecondaryIndexes": [{
+                        "IndexName": "aa",
+                        "KeySchema": [
+                            {"AttributeName": "pk", "KeyType": "HASH"},
+                            {"AttributeName": "l", "KeyType": "RANGE"}
+                        ],
+                        "Projection": {"ProjectionType": "ALL"}
+                    }],
+                    "BillingMode": "BOGUS",
+                    "GlobalSecondaryIndexes": [
+                        {
+                            "IndexName": "zz",
+                            "KeySchema": [{"AttributeName": "g", "KeyType": "HASH"}],
+                            "Projection": {"ProjectionType": "ALL"}
+                        },
+                        {
+                            "IndexName": "g2",
+                            "KeySchema": [{"AttributeName": "g", "KeyType": "HASH"}],
+                            "Projection": {"ProjectionType": "BOGUS"}
+                        }
+                    ]
+                }
+                """, "5 validation errors detected: "
+                + "Value 'zz' at 'globalSecondaryIndexes.1.member.indexName' failed to satisfy constraint: "
+                + "Member must have length greater than or equal to 3; "
+                + "Value 'g2' at 'globalSecondaryIndexes.2.member.indexName' failed to satisfy constraint: "
+                + "Member must have length greater than or equal to 3; "
+                + "Value 'BOGUS' at 'globalSecondaryIndexes.2.member.projection.projectionType' failed to satisfy "
+                + "constraint: Member must satisfy enum value set: [ALL, INCLUDE, KEYS_ONLY]; "
+                + "Value 'BOGUS' at 'billingMode' failed to satisfy constraint: "
+                + "Member must satisfy enum value set: [PROVISIONED, PAY_PER_REQUEST]; "
+                + "Value 'aa' at 'localSecondaryIndexes.1.member.indexName' failed to satisfy constraint: "
+                + "Member must have length greater than or equal to 3");
+    }
+
+    @Test
     void updateTableRejectsAnInvalidIndexNameBeforeTheTableLookup() {
         assertIndexNameRejected("UpdateTable", """
                 {
@@ -825,6 +876,36 @@ class DynamoDbIntegrationTest {
         .then()
             .statusCode(200)
             .body("TableNames", hasItem("TestTable"));
+    }
+
+    @Test
+    void describeLimitsReportsTheDefaultQuotas() {
+        given()
+            .header("X-Amz-Target", "DynamoDB_20120810.DescribeLimits")
+            .contentType(DYNAMODB_CONTENT_TYPE)
+            .body("{}")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("AccountMaxReadCapacityUnits", equalTo(80000))
+            .body("AccountMaxWriteCapacityUnits", equalTo(80000))
+            .body("TableMaxReadCapacityUnits", equalTo(40000))
+            .body("TableMaxWriteCapacityUnits", equalTo(40000));
+    }
+
+    @Test
+    void describeEndpointsNamesFloci() {
+        given()
+            .header("X-Amz-Target", "DynamoDB_20120810.DescribeEndpoints")
+            .contentType(DYNAMODB_CONTENT_TYPE)
+            .body("{}")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("Endpoints.Address", contains("localhost:4566"))
+            .body("Endpoints.CachePeriodInMinutes", contains(1440));
     }
 
     @Test
@@ -5179,7 +5260,7 @@ given()
         .then()
             .statusCode(400)
             .body("__type", containsString("ValidationException"))
-            .body("message", equalTo("Invalid ConditionExpression: An expression attribute value "
+            .body("message", equalTo("1 validation error detected: Invalid ConditionExpression: An expression attribute value "
                     + "used in expression is not defined; attribute value: :v"));
 
         // UpdateItem: ConditionExpression references an undefined #name.
@@ -5199,7 +5280,7 @@ given()
         .then()
             .statusCode(400)
             .body("__type", containsString("ValidationException"))
-            .body("message", equalTo("Invalid ConditionExpression: An expression attribute name "
+            .body("message", equalTo("1 validation error detected: Invalid ConditionExpression: An expression attribute name "
                     + "used in the document path is not defined; attribute name: #n"));
 
         // Undefined :v must win over the unused-EAV check for the stray :z.
@@ -5219,7 +5300,7 @@ given()
         .then()
             .statusCode(400)
             .body("__type", containsString("ValidationException"))
-            .body("message", equalTo("Invalid ConditionExpression: An expression attribute value "
+            .body("message", equalTo("1 validation error detected: Invalid ConditionExpression: An expression attribute value "
                     + "used in expression is not defined; attribute value: :v"));
 
         // contains()'s distinct-operand error must win over the unused-EAN check for the stray #z.
@@ -5240,7 +5321,7 @@ given()
         .then()
             .statusCode(400)
             .body("__type", containsString("ValidationException"))
-            .body("message", equalTo("Invalid ConditionExpression: The first operand must be distinct "
+            .body("message", equalTo("1 validation error detected: Invalid ConditionExpression: The first operand must be distinct "
                     + "from the remaining operands for this operator or function; operator: contains, "
                     + "first operand: [sk]"));
 
@@ -5490,7 +5571,7 @@ given()
         .then()
             .statusCode(400)
             .body("__type", containsString("ValidationException"))
-            .body("message", equalTo("Invalid UpdateExpression: An expression attribute value "
+            .body("message", equalTo("1 validation error detected: Invalid UpdateExpression: An expression attribute value "
                     + "used in expression is not defined; attribute value: :d"));
 
         // Previously this silently stored an attribute literally named "#n".
@@ -5509,7 +5590,7 @@ given()
         .then()
             .statusCode(400)
             .body("__type", containsString("ValidationException"))
-            .body("message", equalTo("Invalid UpdateExpression: An expression attribute name "
+            .body("message", equalTo("1 validation error detected: Invalid UpdateExpression: An expression attribute name "
                     + "used in the document path is not defined; attribute name: #n"));
 
         // Both undefined; #n comes first in the text and is reported.
@@ -5527,7 +5608,7 @@ given()
         .then()
             .statusCode(400)
             .body("__type", containsString("ValidationException"))
-            .body("message", equalTo("Invalid UpdateExpression: An expression attribute name "
+            .body("message", equalTo("1 validation error detected: Invalid UpdateExpression: An expression attribute name "
                     + "used in the document path is not defined; attribute name: #n"));
 
         // :d is inside list_append's args but still comes before #n in the text.
@@ -5545,7 +5626,7 @@ given()
         .then()
             .statusCode(400)
             .body("__type", containsString("ValidationException"))
-            .body("message", equalTo("Invalid UpdateExpression: An expression attribute value "
+            .body("message", equalTo("1 validation error detected: Invalid UpdateExpression: An expression attribute value "
                     + "used in expression is not defined; attribute value: :d"));
 
         // Control: a fully-defined UpdateExpression #name is still accepted (no regression).
@@ -5844,6 +5925,59 @@ given()
 
     @ParameterizedTest
     @CsvSource(delimiter = '|', quoteCharacter = '`', textBlock = """
+            Query              | {"TableName": "ConditionOrderTable", "KeyConditionExpression": "begins_with(sk, :n) AND pk = :missing", "ExpressionAttributeValues": {":n": {"N": "1"}}} | Invalid KeyConditionExpression: Incorrect operand type for operator or function; operator or function: begins_with, operand type: N
+            Scan               | {"TableName": "ConditionOrderTable", "FilterExpression": "(x < :v OR y = :missing) AND z = :w", "ExpressionAttributeValues": {":v": {"BOOL": true}, ":w": {"S": "w"}}} | Invalid FilterExpression: Incorrect operand type for operator or function; operator or function: <, operand type: BOOL
+            PutItem            | {"TableName": "ConditionOrderTable", "Item": {"pk": {"S": "a"}}, "ConditionExpression": "contains(x, x) AND y = :missing"} | 1 validation error detected: Invalid ConditionExpression: The first operand must be distinct from the remaining operands for this operator or function; operator: contains, first operand: [x]
+            DeleteItem         | {"TableName": "ConditionOrderTable", "Key": {"pk": {"S": "a"}}, "ConditionExpression": "x BETWEEN :b AND :a AND y = :missing", "ExpressionAttributeValues": {":a": {"N": "1"}, ":b": {"N": "2"}}} | 1 validation error detected: Invalid ConditionExpression: The BETWEEN operator requires upper bound to be greater than or equal to lower bound; lower bound operand: AttributeValue: {N:2}, upper bound operand: AttributeValue: {N:1}
+            TransactWriteItems | {"TransactItems": [{"ConditionCheck": {"TableName": "ConditionOrderTable", "Key": {"pk": {"S": "a"}}, "ConditionExpression": "contains(x, x) AND y = :missing"}}]} | Invalid ConditionExpression: The first operand must be distinct from the remaining operands for this operator or function; operator: contains, first operand: [x]
+            """)
+    void expressionErrorsComeFromTheFirstFailingConditionInWrittenOrder(String operation, String body, String message) {
+        createOnDemandTableForGsiUpdates("ConditionOrderTable");
+
+        given()
+            .header("X-Amz-Target", "DynamoDB_20120810." + operation)
+            .contentType(DYNAMODB_CONTENT_TYPE)
+            .body(body)
+        .when().post("/")
+        .then()
+            .statusCode(400)
+            .body("__type", containsString("ValidationException"))
+            .body("message", equalTo(message));
+
+        deleteTable("ConditionOrderTable");
+    }
+
+    @ParameterizedTest
+    @CsvSource(delimiter = '|', quoteCharacter = '`', textBlock = """
+            "UpdateExpression": "SET q = :w", "ConditionExpression": "a = = b", "ExpressionAttributeValues": {":w": {"S": "w"}}                      | Invalid ConditionExpression: Syntax error; token: "=", near: "= = b"
+            "UpdateExpression": "SET q = :w", "ConditionExpression": "((a = :w))", "ExpressionAttributeValues": {":w": {"S": "w"}}                   | Invalid ConditionExpression: The expression has redundant parentheses;
+            "UpdateExpression": "SET q = :w", "ConditionExpression": "x < :v", "ExpressionAttributeValues": {":w": {"S": "w"}, ":v": {"BOOL": true}} | Invalid ConditionExpression: Incorrect operand type for operator or function; operator or function: <, operand type: BOOL
+            "ConditionExpression": "contains(x, x)"                                                                                                  | Invalid ConditionExpression: The first operand must be distinct from the remaining operands for this operator or function; operator: contains, first operand: [x]
+            "UpdateExpression": "FOO q = :w", "ExpressionAttributeValues": {":w": {"S": "w"}}                                                        | Invalid UpdateExpression: Syntax error; token: "FOO", near: "FOO q"
+            "UpdateExpression": "SET q = :w", "ExpressionAttributeValues": {":w": {"S": "w"}, ":z": {"S": "z"}}                                      | Value provided in ExpressionAttributeValues unused in expressions: keys: {:z}
+            "UpdateExpression": ""                                                                                                                   | Invalid UpdateExpression: The expression can not be empty;
+            "UpdateExpression": "", "ConditionExpression": "a = :missing"                                                                            | Invalid ConditionExpression: An expression attribute value used in expression is not defined; attribute value: :missing
+            "UpdateExpression": "SET name = :w", "ExpressionAttributeValues": {":w": {"S": "w"}}                                                     | Invalid UpdateExpression: Attribute name is a reserved keyword; reserved word: name
+            "UpdateExpression": "SET q = :w", "AttributeUpdates": {"q": {"Action": "PUT", "Value": {"S": "w"}}}                                      | Can not use both expression and non-expression parameters in the same request: Non-expression parameters: {AttributeUpdates} Expression parameters: {UpdateExpression}
+            """)
+    void updateItemPutsExpressionErrorsInTheValidationEnvelope(String members, String message) {
+        createOnDemandTableForGsiUpdates("UpdateEnvelopeTable");
+
+        given()
+            .header("X-Amz-Target", "DynamoDB_20120810.UpdateItem")
+            .contentType(DYNAMODB_CONTENT_TYPE)
+            .body("{\"TableName\": \"UpdateEnvelopeTable\", \"Key\": {\"pk\": {\"S\": \"a\"}}, " + members + "}")
+        .when().post("/")
+        .then()
+            .statusCode(400)
+            .body("__type", containsString("ValidationException"))
+            .body("message", equalTo("1 validation error detected: " + message));
+
+        deleteTable("UpdateEnvelopeTable");
+    }
+
+    @ParameterizedTest
+    @CsvSource(delimiter = '|', quoteCharacter = '`', textBlock = """
             {"Put": {"TableName": "EmptyNameTable", "Item": {"pk": {"S": "a"}, "": {"S": "x"}}}}
             {"Put": {"TableName": "EmptyNameTable", "Item": {"pk": {"S": "a"}, "l": {"L": [{"M": {"": {"S": "x"}}}]}}}}
             {"ConditionCheck": {"TableName": "EmptyNameTable", "Key": {"pk": {"S": "a"}}, "ConditionExpression": "m = :m", "ExpressionAttributeValues": {":m": {"M": {"": {"S": "x"}}}}}}
@@ -5901,7 +6035,27 @@ given()
             """)
     void itemWritesGetTheOlderChecksWhenTheNewerValidatorGivesUp(String operation, String body,
             String message) {
-        String deep = "{\"M\": {\"n\": ".repeat(63) + "{\"S\": \"leaf\"}" + "}}".repeat(63);
+        String deep = nestedMap(63, "n", "{\"S\": \"leaf\"}");
+        given()
+            .header("X-Amz-Target", "DynamoDB_20120810." + operation)
+            .contentType(DYNAMODB_CONTENT_TYPE)
+            .body(body.replace("\"DEEP\"", deep))
+        .when().post("/")
+        .then()
+            .statusCode(400)
+            .body("__type", containsString("ValidationException"))
+            .body("message", equalTo(message));
+    }
+
+    @ParameterizedTest
+    @CsvSource(delimiter = '|', quoteCharacter = '`', textBlock = """
+            Query | {"TableName": "Missing", "KeyConditions": {"pk": {"ComparisonOperator": "EQ", "AttributeValueList": [{"S": "a"}]}}, "QueryFilter": {"b": {"ComparisonOperator": "NULL"}, "c": {"ComparisonOperator": "NULL"}}, "ConditionalOperator": "XOR", "Select": "BOGUS"} | Value 'XOR' at 'conditionalOperator' failed to satisfy constraint: Member must satisfy enum value set: [AND, OR]
+            Scan  | {"TableName": "Missing", "ScanFilter": {"a": {"ComparisonOperator": "EQ", "AttributeValueList": ["DEEP"]}}, "ConditionalOperator": "AND"} | ConditionalOperator can only be used when Filter or Expected has two or more elements
+            Scan  | {"TableName": "Missing", "ConditionalOperator": "AND"} | ConditionalOperator cannot be used without Filter or Expected
+            """)
+    void queryAndScanCheckTheConditionalOperatorBeforeTheTableLookup(String operation, String body,
+            String message) {
+        String deep = nestedMap(40, "n", "{\"S\": \"leaf\"}");
         given()
             .header("X-Amz-Target", "DynamoDB_20120810." + operation)
             .contentType(DYNAMODB_CONTENT_TYPE)

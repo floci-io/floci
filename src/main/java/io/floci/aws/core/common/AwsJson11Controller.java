@@ -27,6 +27,7 @@ import io.floci.aws.services.configservice.ConfigServiceJsonHandler;
 import io.floci.aws.services.cur.CurJsonHandler;
 import io.floci.aws.services.datasync.DataSyncJsonHandler;
 import io.floci.aws.services.dms.DmsJsonHandler;
+import io.floci.aws.services.ec2instanceconnect.InstanceConnectJsonHandler;
 import io.floci.aws.services.ecr.EcrJsonHandler;
 import io.floci.aws.services.ecs.EcsJsonHandler;
 import io.floci.aws.services.emr.EmrHandler;
@@ -115,6 +116,7 @@ public class AwsJson11Controller {
     private final CodeDeployJsonHandler codeDeployJsonHandler;
     private final CodePipelineJsonHandler codePipelineJsonHandler;
     private final Ec2MessagesJsonHandler ec2MessagesJsonHandler;
+    private final InstanceConnectJsonHandler instanceConnectJsonHandler;
     private final TransferHandler transferHandler;
     private final TextractJsonHandler textractJsonHandler;
     private final ComprehendJsonHandler comprehendJsonHandler;
@@ -172,6 +174,7 @@ public class AwsJson11Controller {
                                CodeDeployJsonHandler codeDeployJsonHandler,
                                CodePipelineJsonHandler codePipelineJsonHandler,
                                Ec2MessagesJsonHandler ec2MessagesJsonHandler,
+                               InstanceConnectJsonHandler instanceConnectJsonHandler,
                                TransferHandler transferHandler,
                                TextractJsonHandler textractJsonHandler,
                                ComprehendJsonHandler comprehendJsonHandler,
@@ -233,6 +236,7 @@ public class AwsJson11Controller {
         this.codeDeployJsonHandler = codeDeployJsonHandler;
         this.codePipelineJsonHandler = codePipelineJsonHandler;
         this.ec2MessagesJsonHandler = ec2MessagesJsonHandler;
+        this.instanceConnectJsonHandler = instanceConnectJsonHandler;
         this.transferHandler = transferHandler;
         this.textractJsonHandler = textractJsonHandler;
         this.comprehendJsonHandler = comprehendJsonHandler;
@@ -340,6 +344,7 @@ public class AwsJson11Controller {
                 case "codepipeline" -> codePipelineJsonHandler.handle(
                         action, request, region, regionResolver.getAccountId());
                 case "ec2messages" -> ec2MessagesJsonHandler.handle(action, request, region);
+                case "ec2-instance-connect" -> instanceConnectJsonHandler.handle(action, request, region);
                 case "transfer" -> transferHandler.handle(action, request, region);
                 case "textract" -> textractJsonHandler.handle(action, request, region);
                 case "comprehend" -> comprehendJsonHandler.handle(action, request, region);

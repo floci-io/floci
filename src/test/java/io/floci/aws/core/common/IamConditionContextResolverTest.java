@@ -3,6 +3,7 @@ package io.floci.aws.core.common;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.floci.aws.config.EmulatorConfig;
+import io.floci.aws.services.cloudwatch.logs.CloudWatchLogsCrossAccountService;
 import io.floci.aws.services.cloudwatch.logs.CloudWatchLogsService;
 import io.floci.aws.services.dynamodb.DynamoDbFacade;
 import io.floci.aws.services.dynamodb.DynamoDbService;
@@ -67,6 +68,7 @@ class IamConditionContextResolverTest {
     private Ec2Service ec2Service;
     private S3Service s3Service;
     private CloudWatchLogsService logsService;
+    private CloudWatchLogsCrossAccountService crossAccountService;
     private IamService iamService;
     private LambdaWebService lambdaWebService;
     private RequestContext requestContext;
@@ -95,6 +97,10 @@ class IamConditionContextResolverTest {
         Instance<CloudWatchLogsService> logsServiceInstance = mock(Instance.class);
         when(logsServiceInstance.isResolvable()).thenReturn(true);
         when(logsServiceInstance.get()).thenReturn(logsService);
+        crossAccountService = mock(CloudWatchLogsCrossAccountService.class);
+        Instance<CloudWatchLogsCrossAccountService> crossAccountServiceInstance = mock(Instance.class);
+        when(crossAccountServiceInstance.isResolvable()).thenReturn(true);
+        when(crossAccountServiceInstance.get()).thenReturn(crossAccountService);
         iamService = mock(IamService.class);
         Instance<IamService> iamServiceInstance = mock(Instance.class);
         when(iamServiceInstance.isResolvable()).thenReturn(true);
@@ -116,7 +122,8 @@ class IamConditionContextResolverTest {
         ServiceCatalog catalog = new ServiceCatalog(List.of(dynamo));
         when(serviceCatalog.matchTarget(any())).thenAnswer(call -> catalog.matchTarget(call.getArgument(0)));
         resolver = new IamConditionContextResolver(
-                dynamoDbFacadeInstance, ec2ServiceInstance, s3ServiceInstance, logsServiceInstance, iamServiceInstance,
+                dynamoDbFacadeInstance, ec2ServiceInstance, s3ServiceInstance, logsServiceInstance,
+                crossAccountServiceInstance, iamServiceInstance,
                 lambdaWebServiceInstance,
                 requestContext, config,
                 null, serviceCatalog);
@@ -710,7 +717,8 @@ class IamConditionContextResolverTest {
     @SuppressWarnings("unchecked")
     private IamConditionContextResolver resolverAt(Instant now) {
         return new IamConditionContextResolver(mock(Instance.class), mock(Instance.class), mock(Instance.class),
-                mock(Instance.class), mock(Instance.class), mock(Instance.class), requestContext, config, null,
+                mock(Instance.class), mock(Instance.class), mock(Instance.class), mock(Instance.class),
+                requestContext, config, null,
                 serviceCatalog, Clock.fixed(now, ZoneOffset.UTC));
     }
 

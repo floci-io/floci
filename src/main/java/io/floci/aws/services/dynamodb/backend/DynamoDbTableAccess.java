@@ -24,6 +24,11 @@ public interface DynamoDbTableAccess {
                                 Long writeCapacity, List<GlobalSecondaryIndex> globalSecondaryIndexes,
                                 List<LocalSecondaryIndex> localSecondaryIndexes);
 
+    TableDefinition createOnDemandTable(Scope scope, String tableName, List<KeySchemaElement> keySchema,
+                                        List<AttributeDefinition> attributeDefinitions,
+                                        List<GlobalSecondaryIndex> globalSecondaryIndexes,
+                                        List<LocalSecondaryIndex> localSecondaryIndexes);
+
     TableDefinition describeTable(Scope scope, String tableName);
 
     Optional<TableDefinition> findTable(Scope scope, String tableName);

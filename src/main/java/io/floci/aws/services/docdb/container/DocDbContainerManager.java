@@ -5,12 +5,14 @@ import io.floci.aws.config.EmulatorConfig;
 import io.floci.aws.core.common.RegionResolver;
 import io.floci.aws.core.common.docker.ContainerBuilder;
 import io.floci.aws.core.common.docker.ContainerDetector;
+import io.floci.aws.core.common.docker.ContainerExec;
 import io.floci.aws.core.common.docker.ContainerLifecycleManager;
 import io.floci.aws.core.common.docker.ContainerLifecycleManager.ContainerInfo;
 import io.floci.aws.core.common.docker.ContainerLifecycleManager.EndpointInfo;
 import io.floci.aws.core.common.docker.ContainerLogStreamer;
 import io.floci.aws.core.common.docker.ContainerSpec;
 import io.floci.aws.core.common.docker.ContainerStorageHelper;
+import io.floci.aws.core.common.docker.RetryingTarCopier;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 import org.jboss.logging.Logger;
@@ -20,6 +22,7 @@ import java.io.IOException;
 import java.net.InetSocketAddress;
 import java.net.Socket;
 import java.util.ArrayList;
+import java.util.Base64;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
@@ -168,6 +171,79 @@ public class DocDbContainerManager {
         }
         for (DocDbContainerHandle handle : handles) {
             stop(handle);
+        }
+    }
+
+    /**
+     * The master password the container was started with. A restore replays the source's users,
+     * so the restored cluster's container must start with the same password for later dumps of
+     * it to authenticate.
+     */
+    public String masterPassword(String containerId) {
+        String[] env = lifecycleManager.getDockerClient().inspectContainerCmd(containerId).exec().getConfig().getEnv();
+        if (env != null) {
+            for (String entry : env) {
+                if (entry.startsWith("MONGO_INITDB_ROOT_PASSWORD=")) {
+                    return entry.substring("MONGO_INITDB_ROOT_PASSWORD=".length());
+                }
+            }
+        }
+        return null;
+    }
+
+    /**
+     * A snapshot of the cluster's data: a gzipped {@code mongodump} archive of every database,
+     * users and roles included, base64 encoded so it travels through the exec's text output.
+     * The container's own MONGO_INITDB credentials authenticate the dump.
+     */
+    public String dumpCluster(String containerId) {
+        String[] cmd = {"bash", "-o", "pipefail", "-c",
+                "mongodump --quiet --host 127.0.0.1 --port " + MONGO_PORT
+                + " \"--username=$MONGO_INITDB_ROOT_USERNAME\" \"--password=$MONGO_INITDB_ROOT_PASSWORD\""
+                + " --authenticationDatabase admin --archive --gzip | base64 -w0"};
+        ContainerExec.Result result = ContainerExec.run(lifecycleManager.getDockerClient(), containerId, cmd, 600);
+        if (result.exitCode() != 0) {
+            throw new RuntimeException("mongodump failed with exit code " + result.exitCode() + ": " + result.stderr());
+        }
+        return result.stdout().trim();
+    }
+
+    /**
+     * Loads a {@link #dumpCluster} archive into a cluster's container, replacing what it holds. The
+     * archive carries the source's users, so the restored cluster keeps the snapshot's master
+     * credentials, as a restore does on AWS. Waits for the server to accept writes first: a new
+     * container may still be initializing or electing its replica-set primary.
+     */
+    public void restoreCluster(String containerId, String archiveBase64) {
+        byte[] archive = Base64.getDecoder().decode(archiveBase64);
+        RetryingTarCopier.copyBytes(lifecycleManager.getDockerClient(), containerId, "/tmp",
+                "floci-docdb-restore.archive.gz", archive, 0644, RetryingTarCopier.DEFAULT_MAX_ATTEMPTS, 500);
+        String auth = " \"--username=$MONGO_INITDB_ROOT_USERNAME\" \"--password=$MONGO_INITDB_ROOT_PASSWORD\" --authenticationDatabase admin";
+        String[] ready = {"bash", "-c", "mongosh --quiet --host 127.0.0.1 --port " + MONGO_PORT + auth
+                + " --eval 'quit(db.hello().isWritablePrimary ? 0 : 3)'"};
+        ContainerExec.Result probe = null;
+        for (int i = 0; i < 120; i++) {
+            probe = ContainerExec.run(lifecycleManager.getDockerClient(), containerId, ready, 30);
+            if (probe.exitCode() == 0) {
+                break;
+            }
+            try {
+                Thread.sleep(1000);
+            } catch (InterruptedException ie) {
+                Thread.currentThread().interrupt();
+                throw new RuntimeException("Interrupted waiting for MongoDB to accept writes", ie);
+            }
+        }
+        if (probe == null || probe.exitCode() != 0) {
+            throw new RuntimeException("MongoDB did not accept writes before the restore: "
+                    + (probe != null ? probe.stderr() : ""));
+        }
+        String[] cmd = {"bash", "-c", "mongorestore --quiet --host 127.0.0.1 --port " + MONGO_PORT + auth
+                + " --drop --nsExclude='config.*' --archive=/tmp/floci-docdb-restore.archive.gz --gzip"
+                + " && rm -f /tmp/floci-docdb-restore.archive.gz"};
+        ContainerExec.Result result = ContainerExec.run(lifecycleManager.getDockerClient(), containerId, cmd, 600);
+        if (result.exitCode() != 0) {
+            throw new RuntimeException("mongorestore failed with exit code " + result.exitCode() + ": " + result.stderr());
         }
     }
 

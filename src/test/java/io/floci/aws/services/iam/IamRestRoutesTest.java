@@ -13,6 +13,7 @@ import java.net.URL;
 import java.net.URLClassLoader;
 import java.nio.charset.StandardCharsets;
 import java.util.List;
+import java.util.Map;
 import java.util.Optional;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -42,6 +43,32 @@ class IamRestRoutesTest {
                  "Ping": {"method": "GET", "requestUri": "/ping"}
                }}
              }}""";
+
+    @ParameterizedTest
+    @ValueSource(strings = {"controltower", "signer"})
+    void sharedTagAlternativesCarryMemberLocations(String scope) {
+        IamRestRoutes vendored = IamRestRoutes.vendored();
+        Map<String, String> operations = Map.of("POST", "TagResource", "GET", "ListTagsForResource",
+                "DELETE", "UntagResource");
+        operations.forEach((method, operation) -> {
+            IamRestRoutes.Match bare = vendored.match(scope, method, "/tags/", null).orElseThrow();
+            assertEquals(operation, bare.operation());
+            assertEquals(Map.of(), bare.labels());
+            assertEquals(Map.of("resourceArn", "POST".equals(method) ? "body" : "?resourceArn"), bare.located());
+            IamRestRoutes.Match path = vendored.match(scope, method, "/tags/arn%3Aresource%2Fitem", null).orElseThrow();
+            assertEquals(operation, path.operation());
+            assertEquals(Map.of("resourceArn", "arn:resource/item"), path.labels());
+            assertEquals(Map.of(), path.located());
+        });
+    }
+
+    @Test
+    void malformedAlternativeMemberSourceIsRejected() {
+        String alternative = ROUTES.replace("\"requestUri\": \"/things/\"",
+                "\"requestUri\": \"/things/\", \"alternatives\": [{\"requestUri\": \"/other\", "
+                        + "\"located\": {\"member\": \"header\"}}]");
+        assertThrows(IllegalStateException.class, () -> routes(alternative));
+    }
 
     private final IamRestRoutes routes = routes(ROUTES);
 
@@ -88,6 +115,22 @@ class IamRestRoutesTest {
         assertEquals(Optional.of("GetThingVersion"), get("/things/web:3"));
     }
 
+    /**
+     * The values the path holds are read under the names the route gives its labels, so that a
+     * service which names a resource in the path reads the resource from it. A label holding an
+     * ARN spans the slashes the ARN holds, so the route names it with a {@code +}.
+     */
+    @Test
+    void theValuesThePathHoldsAreReadUnderTheNamesItsLabelsCarry() {
+        IamRestRoutes table = routes(ROUTES.replace("\"/things/{ThingName}\"", "\"/keys/{KeyIdentifier+}\"")
+                .replace("\"GetThing\"", "\"GetKey\""));
+        assertEquals(Map.of("KeyIdentifier", "arn:aws:service:region:account:key/abc"),
+                table.match("svc", "GET", "/keys/arn:aws:service:region:account:key/abc", null)
+                        .map(IamRestRoutes.Match::labels).orElse(Map.of()));
+        assertEquals(Map.of(), table.match("svc", "GET", "/things/web", null)
+                .map(IamRestRoutes.Match::labels).orElse(Map.of()));
+    }
+
     /** A greedy label takes the rest of the path, one segment or more, and ranks below a literal there. */
     @Test
     void aGreedyLabelTakesTheRestOfThePath() {
@@ -116,6 +159,22 @@ class IamRestRoutesTest {
         assertEquals(Optional.of("ListThings"), get("/things/"));
         assertEquals(Optional.of("GetThing"), get("/things/web%2Fpart"));
         assertEquals(Optional.of("GetRoot"), get("/"));
+    }
+
+    /**
+     * A path a route filter moved under an internal prefix, given without it, was matched decoded, so a label's value
+     * may hold the slashes its encoding hid: when the path matches no route with each label taking one segment, its
+     * labels take the segments their values span. A route that matches with one segment a label still wins, and an
+     * ordinary path's labels never span.
+     */
+    @Test
+    void aPathMovedUnderAPrefixMayHoldTheSlashesItsLabelsWereDecodedTo() {
+        assertEquals(Optional.of("GetThing"), routes.operation("svc", "GET", "/things/web/part", null, true));
+        assertEquals(Optional.empty(), routes.operation("svc", "GET", "/things/web/part", null, false));
+        assertEquals(Map.of("ThingName", "a/b", "PartPath", "c"),
+                routes.match("svc", "GET", "/things/a/b/parts/c", null, true)
+                        .map(IamRestRoutes.Match::labels).orElse(Map.of()));
+        assertEquals(Optional.of("ListParts"), routes.operation("svc", "GET", "/things/web/parts/list", null, true));
     }
 
     /**

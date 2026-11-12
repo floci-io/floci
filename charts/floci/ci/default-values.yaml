@@ -1,0 +1,5 @@
+# ct install: chart defaults, plus a Python Lambda invocation in `helm test`, which runs
+# the function as a pod through the kubernetes executor and the chart's RBAC.
+tests:
+  lambda:
+    enabled: true

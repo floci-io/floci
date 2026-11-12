@@ -7,6 +7,7 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
+import io.floci.aws.config.ContainerCaBundle;
 import io.floci.aws.config.EmulatorConfig;
 import io.floci.aws.core.common.AwsArnUtils;
 import io.floci.aws.core.common.AwsException;
@@ -43,6 +44,7 @@ import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 import org.jboss.logging.Logger;
 
+import javax.net.ssl.SSLContext;
 import java.io.IOException;
 import java.math.BigDecimal;
 import java.net.InetAddress;
@@ -215,7 +217,8 @@ public class SnsService implements Resettable, ResourceProvider {
                 firehoseService,
                 config.effectiveBaseUrl(),
                 objectMapper,
-                messageSigner
+                messageSigner,
+                ContainerCaBundle.sslContext(config).orElse(null)
         );
     }
 
@@ -336,6 +339,22 @@ public class SnsService implements Resettable, ResourceProvider {
                RegionResolver regionResolver, SqsService sqsService,
                LambdaService lambdaService, FirehoseService firehoseService,
                String baseUrl, ObjectMapper objectMapper, SnsMessageSigner messageSigner) {
+        this(topicStore, subscriptionStore, platformAppStore, platformEndpointStore, smsStore,
+                smsAttributesStore, smsSandboxStore, regionResolver, sqsService, lambdaService,
+                firehoseService, baseUrl, objectMapper, messageSigner, null);
+    }
+
+    private SnsService(StorageBackend<String, Topic> topicStore,
+                       StorageBackend<String, Subscription> subscriptionStore,
+                       StorageBackend<String, PlatformApplication> platformAppStore,
+                       StorageBackend<String, PlatformEndpoint> platformEndpointStore,
+                       StorageBackend<String, SentSms> smsStore,
+                       StorageBackend<String, Map<String, String>> smsAttributesStore,
+                       StorageBackend<String, SmsSandboxPhoneNumber> smsSandboxStore,
+                       RegionResolver regionResolver, SqsService sqsService,
+                       LambdaService lambdaService, FirehoseService firehoseService,
+                       String baseUrl, ObjectMapper objectMapper, SnsMessageSigner messageSigner,
+                       SSLContext sslContext) {
         this.topicStore = topicStore;
         this.subscriptionStore = subscriptionStore;
         this.platformAppStore = platformAppStore;
@@ -349,12 +368,21 @@ public class SnsService implements Resettable, ResourceProvider {
         this.firehoseService = firehoseService;
         this.baseUrl = baseUrl;
         this.objectMapper = objectMapper;
-        // Pin to HTTP/1.1 like AWS SNS: the default HTTP_2 sends an h2c upgrade to http:// endpoints.
-        this.httpClient = HttpClient.newBuilder()
-                .version(HttpClient.Version.HTTP_1_1)
-                .connectTimeout(Duration.ofSeconds(5))
-                .build();
+        this.httpClient = deliveryClient(sslContext);
         this.messageSigner = messageSigner;
+    }
+
+    // The client HTTP and HTTPS subscriptions are posted to. Pin to HTTP/1.1 like AWS SNS: the default
+    // HTTP_2 sends an h2c upgrade to http:// endpoints. sslContext, when given, adds the extra CAs in
+    // floci.tls.extra-ca-path, and Floci's CA when TLS is on, to the JVM's roots
+    private static HttpClient deliveryClient(SSLContext sslContext) {
+        HttpClient.Builder builder = HttpClient.newBuilder()
+                .version(HttpClient.Version.HTTP_1_1)
+                .connectTimeout(Duration.ofSeconds(5));
+        if (sslContext != null) {
+            builder.sslContext(sslContext);
+        }
+        return builder.build();
     }
 
     public void clear() {
@@ -960,6 +988,7 @@ public class SnsService implements Resettable, ResourceProvider {
             for (Subscription existing : subscriptionsByTopic(topicArn, region)) {
                 if (protocol.equals(existing.getProtocol())
                         && Objects.equals(endpoint, existing.getEndpoint())) {
+                    requireMatchingSubscriptionAttributes(existing, attributes);
                     return new SubscriptionCreation(existing, false);
                 }
             }
@@ -1484,6 +1513,28 @@ public class SnsService implements Resettable, ResourceProvider {
 
     private static String endpointKey(String region, String arn) {
         return "endpoint::" + region + "::" + arn;
+    }
+
+    private static void requireMatchingSubscriptionAttributes(Subscription existing, Map<String, String> requested) {
+        if (requested == null) {
+            return;
+        }
+        for (String attribute : List.of("RawMessageDelivery", "FilterPolicy")) {
+            if (!requested.containsKey(attribute)) {
+                continue;
+            }
+            String defaultValue = "RawMessageDelivery".equals(attribute) ? "false" : "{}";
+            String current = existing.getAttributes().getOrDefault(attribute, defaultValue);
+            String desired = requested.get(attribute);
+            if ("FilterPolicy".equals(attribute)) {
+                current = current == null || current.isEmpty() ? defaultValue : current;
+                desired = desired != null && desired.isEmpty() ? defaultValue : desired;
+            }
+            if (!Objects.equals(current, desired)) {
+                throw new AwsException("InvalidParameter",
+                        "Invalid parameter: Attributes Reason: Subscription already exists with different attributes", 400);
+            }
+        }
     }
 
     public Map<String, String> getSubscriptionAttributes(String subscriptionArn, String region) {

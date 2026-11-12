@@ -25,10 +25,13 @@ import io.floci.aws.services.ssoadmin.model.RegionMetadata;
 import io.floci.aws.services.ssoadmin.model.SsoApplication;
 import io.floci.aws.services.ssoadmin.model.SsoInstance;
 import io.floci.aws.services.ssoadmin.model.TrustedTokenIssuer;
+import io.floci.aws.testing.MutableClock;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.mockito.Mockito;
 
+import java.time.Clock;
+import java.time.Duration;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -47,6 +50,7 @@ class SsoAdminServiceTest {
 
     private final ObjectMapper mapper = new ObjectMapper();
     private SsoAdminService service;
+    private final MutableClock clock = new MutableClock();
     private IdentityStoreService identityStoreService;
     private OrganizationsService organizationsService;
     private InMemoryStorage<String, ApplicationAccessScope> applicationAccessScopes;
@@ -92,7 +96,8 @@ class SsoAdminServiceTest {
                 organizationsService,
                 new SsoAdminRequestContext(),
                 ACCOUNT_ID,
-                "us-east-1");
+                "us-east-1",
+                clock);
         service.ensureBootstrapInstance(ACCOUNT_ID, "us-east-1");
     }
 
@@ -1959,7 +1964,8 @@ class SsoAdminServiceTest {
                 organizationsService,
                 new SsoAdminRequestContext(),
                 "999999999999",
-                defaultRegion);
+                defaultRegion,
+                Clock.systemUTC());
     }
 
     private ObjectNode trustedTokenIssuerRequest(String name, String clientToken) {
@@ -1986,6 +1992,39 @@ class SsoAdminServiceTest {
         request.put("Name", name);
         request.put("ClientToken", clientToken);
         return service.createApplication(request, ACCOUNT_ID, "us-east-1");
+    }
+
+    @Test
+    void permissionSetKeepsItsExactCreationTimeAcrossUpdates() {
+        PermissionSet permissionSet = createPermissionSet("ClockedAdmins");
+        long created = service.createdDateEpochMillis(permissionSet);
+
+        // Advance well past float precision at epoch-second scale (128 s) so a reset would show.
+        clock.advance(Duration.ofMinutes(5));
+        ObjectNode update = mapper.createObjectNode();
+        update.put("InstanceArn", service.getInstanceArn());
+        update.put("PermissionSetArn", permissionSet.arn());
+        update.put("Description", "updated");
+        update.put("SessionDuration", "PT2H");
+        service.updatePermissionSet(update);
+
+        PermissionSet updated = service.getPermissionSet(service.getInstanceArn(), permissionSet.arn());
+        assertEquals(created, service.createdDateEpochMillis(updated));
+    }
+
+    @Test
+    void permissionSetPersistedWithoutCreationTimeReportsItsInstanceCreationTime() {
+        PermissionSet stored = createPermissionSet("LegacyAdmins");
+        PermissionSet legacy = new PermissionSet(stored.arn(), stored.name(), stored.description(),
+                stored.sessionDuration(), stored.managedPolicies(), stored.customerManagedPolicies(),
+                stored.inlinePolicy(), stored.permissionsBoundary(), stored.tags(), null);
+        long instanceCreated = instances.scan(key -> true).stream()
+                .filter(instance -> instance.instanceArn().equals(service.getInstanceArn()))
+                .findFirst().orElseThrow().createdDateEpochMillis();
+
+        assertEquals(instanceCreated, service.createdDateEpochMillis(legacy));
+        // Stable: the same value on every read, unlike a time assigned when the record is loaded.
+        assertEquals(service.createdDateEpochMillis(legacy), service.createdDateEpochMillis(legacy));
     }
 
     private PermissionSet createPermissionSet(String name) {

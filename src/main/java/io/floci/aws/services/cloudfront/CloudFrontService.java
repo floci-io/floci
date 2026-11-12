@@ -77,6 +77,30 @@ public class CloudFrontService implements ServerCertificateReferenceProvider {
             List.of("always-amz-auth", "never", "always", "no-override");
     private static final Set<String> FUNCTION_RUNTIMES = Set.of("cloudfront-js-1.0", "cloudfront-js-2.0");
     private static final int MAX_FUNCTIONS_PER_KEY_VALUE_STORE = 100;
+    /**
+     * The security policies {@code MinimumProtocolVersion} admits, the enumeration its shape
+     * declares. {@code SSLv3} is the only one below {@code TLSv1}, which is why the floor the
+     * member states for {@code sni-only} and the pair {@code InvalidProtocolSettings} names are
+     * the same rule.
+     */
+    private static final Set<String> MINIMUM_PROTOCOL_VERSIONS = Set.of("SSLv3", "TLSv1",
+            "TLSv1_2016", "TLSv1.1_2016", "TLSv1.2_2018", "TLSv1.2_2019", "TLSv1.2_2021",
+            "TLSv1.2_2025", "TLSv1.3_2025");
+    /** The values {@code SSLSupportMethod} admits, the enumeration its shape declares. */
+    private static final Set<String> SSL_SUPPORT_METHODS = Set.of("sni-only", "vip", "static-ip");
+    /**
+     * The forms a member declared {@code boolean} can carry, XML giving such a value as
+     * {@code true}, {@code false}, {@code 1} or {@code 0}.
+     */
+    private static final Map<String, Boolean> XML_BOOLEANS =
+            Map.of("true", true, "1", true, "false", false, "0", false);
+    /**
+     * The security policy a distribution on the CloudFront domain name ends up on, whatever it
+     * asked for: {@code MinimumProtocolVersion}'s own entry says that when
+     * {@code CloudFrontDefaultCertificate} is true CloudFront "automatically sets the security
+     * policy to TLSv1 regardless of the value that you set here".
+     */
+    static final String DEFAULT_CERTIFICATE_PROTOCOL_VERSION = "TLSv1";
     private static final int MAX_ORIGIN_CUSTOM_HEADERS = 30;
     private static final int MAX_CUSTOM_HEADER_NAME_LENGTH = 256;
     private static final int MAX_CUSTOM_HEADER_VALUE_LENGTH = 1_783;
@@ -219,6 +243,8 @@ public class CloudFrontService implements ServerCertificateReferenceProvider {
         validateResponseHeadersPolicyReferences(dist.getConfig(), null);
         validateTrustedKeyGroups(dist.getConfig());
         validateOriginAccessControls(dist.getConfig());
+        validateViewerCertificateSettings(dist.getConfig(), DistributionWrite.CREATE);
+        applyDefaultCertificateProtocolVersion(dist.getConfig());
         return whileCertificatesHeld(dist.getConfig(), () -> {
             validateViewerCertificate(dist.getConfig());
             String id = generateDistributionId();
@@ -254,6 +280,8 @@ public class CloudFrontService implements ServerCertificateReferenceProvider {
         validateResponseHeadersPolicyReferences(updated.getConfig(), id);
         validateTrustedKeyGroups(updated.getConfig());
         validateOriginAccessControls(updated.getConfig());
+        validateViewerCertificateSettings(updated.getConfig(), DistributionWrite.UPDATE);
+        applyDefaultCertificateProtocolVersion(updated.getConfig());
         return whileCertificatesHeld(updated.getConfig(), () -> {
             validateViewerCertificate(updated.getConfig());
             updated.setId(id);
@@ -297,19 +325,178 @@ public class CloudFrontService implements ServerCertificateReferenceProvider {
     }
 
     private static String acmCertificateArn(DistributionConfig config) {
-        if (config == null || config.getViewerCertificate() == null) {
-            return null;
-        }
-        String certificateArn = config.getViewerCertificate().get("ACMCertificateArn");
-        return certificateArn == null || certificateArn.isBlank() ? null : certificateArn;
+        return viewerCertificateMember(config, "ACMCertificateArn");
     }
 
-    private static String iamCertificateId(DistributionConfig config) {
+    /**
+     * A member of the viewer certificate, or null when it is absent or blank. An element left empty
+     * reaches this protocol as a blank value, so a member carried blank carries no value.
+     */
+    private static String viewerCertificateMember(DistributionConfig config, String member) {
         if (config == null || config.getViewerCertificate() == null) {
             return null;
         }
-        String certificateId = config.getViewerCertificate().get("IAMCertificateId");
-        return certificateId == null || certificateId.isBlank() ? null : certificateId;
+        String value = config.getViewerCertificate().get(member);
+        return value == null || value.isBlank() ? null : value;
+    }
+
+    /**
+     * The IAM certificate a distribution names, or null when the member is absent or blank. A
+     * blank is what a distribution on the CloudFront domain name sends, so it names no certificate
+     * rather than one that cannot be found. The {@code /cloudfront} upload path AWS documents for a
+     * certificate meant for CloudFront is deliberately not enforced here. Both are set out under
+     * Server Certificates in {@code docs/services/iam.md}.
+     */
+    private static String iamCertificateId(DistributionConfig config) {
+        return viewerCertificateMember(config, "IAMCertificateId");
+    }
+
+    /**
+     * Whether the request claims the certificate CloudFront serves its own domain name with. The
+     * member is declared {@code boolean} in the model and reaches this protocol as text, so it is
+     * held to the four forms XML gives a boolean, {@code true}, {@code false}, {@code 1} and
+     * {@code 0}, rather than read for the word {@code true} alone. Anything else answers the
+     * {@code InvalidArgument} this service answers a member outside its shape with, which is
+     * Floci's reading: CloudFront models no error for a malformed document, and taking the value
+     * for false instead would let a request dodge every rule this member governs, the refusals
+     * beside a named certificate and the security policy it is overridden to alike. An absent
+     * member, or one carried blank, leaves the distribution on a certificate of its own.
+     */
+    private static boolean cloudFrontDefaultCertificate(DistributionConfig config) {
+        String claimed = viewerCertificateMember(config, "CloudFrontDefaultCertificate");
+        if (claimed == null) {
+            return false;
+        }
+        Boolean parsed = XML_BOOLEANS.get(claimed.strip().toLowerCase(Locale.ROOT));
+        if (parsed == null) {
+            throw new AwsException("InvalidArgument",
+                    "The CloudFrontDefaultCertificate specified is not valid.", 400);
+        }
+        return parsed;
+    }
+
+    /**
+     * Which distribution write is being validated. The two differ in one answer, the code the
+     * {@code SSLv3} with {@code sni-only} pair is refused with, which is the code the operation
+     * declares: {@code CreateDistribution}, {@code CreateDistributionWithTags} and
+     * {@code CopyDistribution} declare {@code InvalidProtocolSettings}, where
+     * {@code UpdateDistribution} has never declared it in any version of this API and has declared
+     * {@code InvalidMinimumProtocolVersion} since 2015. Where no sentence settles which a caller
+     * gets, the declared code is what a typed SDK can map: an undeclared one reaches such a caller
+     * as a generic error, its deserializer carrying no case for it.
+     */
+    private enum DistributionWrite {
+        CREATE("InvalidProtocolSettings"),
+        UPDATE("InvalidMinimumProtocolVersion");
+
+        private final String protocolPairCode;
+
+        DistributionWrite(String protocolPairCode) {
+            this.protocolPairCode = protocolPairCode;
+        }
+    }
+
+    /**
+     * The two enumerations the viewer certificate declares, and the one pair it admits apart but
+     * not together. A {@code MinimumProtocolVersion} outside its set is published:
+     * {@code InvalidMinimumProtocolVersion}, "The minimum protocol version specified is not
+     * valid.", is modelled on both distribution writes and its own sentence names this case. An
+     * {@code SSLSupportMethod} outside its set has no code of its own, so it reads here as the
+     * {@code InvalidArgument} this service already answers a member outside its shape with.
+     * {@code SSLv3} alongside {@code sni-only} is published as well, by
+     * {@code InvalidProtocolSettings}, whose sentence names that pair and nothing else, and it is
+     * the same rule as the floor {@code MinimumProtocolVersion} states for SNI, "you must specify
+     * TLSv1 or higher". That code is declared on the two creates and the copy and never on the
+     * update, so the code this refusal answers is the write's own, as {@link DistributionWrite}
+     * sets out. The sentence stays the pair's published one either way, which keeps the two causes
+     * the update answers under one code apart. The pair is read for a distribution on a certificate
+     * of its own alone: on the CloudFront certificate the security policy is replaced with
+     * {@code TLSv1} "regardless of the value that you set here", so the value that would make the
+     * pair is discarded and refusing the request for it would contradict the override. Both
+     * enumerations are read either way, a member outside the set its shape declares being outside
+     * its shape whatever the distribution is on.
+     */
+    private static void validateViewerCertificateProtocols(DistributionConfig config,
+                                                           boolean defaultCertificate,
+                                                           DistributionWrite write) {
+        String protocolVersion = viewerCertificateMember(config, "MinimumProtocolVersion");
+        if (protocolVersion != null && !MINIMUM_PROTOCOL_VERSIONS.contains(protocolVersion)) {
+            throw new AwsException("InvalidMinimumProtocolVersion",
+                    "The minimum protocol version specified is not valid.", 400);
+        }
+        String sslSupportMethod = viewerCertificateMember(config, "SSLSupportMethod");
+        if (sslSupportMethod != null && !SSL_SUPPORT_METHODS.contains(sslSupportMethod)) {
+            throw new AwsException("InvalidArgument",
+                    "The SSLSupportMethod specified is not valid.", 400);
+        }
+        if (!defaultCertificate && "SSLv3".equals(protocolVersion)
+                && "sni-only".equals(sslSupportMethod)) {
+            throw new AwsException(write.protocolPairCode,
+                    "You cannot specify SSLv3 as the minimum protocol version if you only want to "
+                            + "support only clients that support Server Name Indication (SNI).", 400);
+        }
+    }
+
+    /**
+     * The rules the viewer certificate's own entry states about the certificate it names, and
+     * nothing else here holds a caller to. Its location is set "in one of the following fields
+     * (not both)", {@code ACMCertificateArn} or {@code IAMCertificateId}; a certificate named in
+     * either one "must also specify values for MinimumProtocolVersion and SSLSupportMethod"; and a
+     * request that sets {@code CloudFrontDefaultCertificate} is told to "leave all other fields
+     * empty", so a certificate named beside it contradicts the request's own claim. None of the
+     * three refusals has a published code: {@code InvalidArgument} and
+     * {@code InvalidMinimumProtocolVersion} are modelled on the distribution writes as well and no
+     * sentence says which a caller gets, and the Developer Guide page enumerating what
+     * {@code InvalidViewerCertificate} answers reaches none of these cases. So all three read here
+     * as the certificate the request carries not being valid, which is what
+     * {@code InvalidViewerCertificate} is documented for. The readings are set out in
+     * {@code docs/services/cloudfront.md}. The members are held to their shape first, the claim
+     * itself and then the protocol members, and all of it runs before the certificate is looked
+     * up, so a request breaking a rule is refused for the rule rather than for a certificate
+     * nothing matches.
+     */
+    private static void validateViewerCertificateSettings(DistributionConfig config,
+                                                          DistributionWrite write) {
+        boolean defaultCertificate = cloudFrontDefaultCertificate(config);
+        validateViewerCertificateProtocols(config, defaultCertificate, write);
+        String certificateArn = acmCertificateArn(config);
+        String certificateId = iamCertificateId(config);
+        if (certificateArn != null && certificateId != null) {
+            throw new AwsException("InvalidViewerCertificate",
+                    "You must specify a value for ACMCertificateArn or IAMCertificateId, not both.", 400);
+        }
+        if (certificateArn == null && certificateId == null) {
+            return;
+        }
+        if (defaultCertificate) {
+            throw new AwsException("InvalidViewerCertificate",
+                    "You cannot specify ACMCertificateArn or IAMCertificateId when "
+                            + "CloudFrontDefaultCertificate is true.", 400);
+        }
+        if (viewerCertificateMember(config, "MinimumProtocolVersion") == null
+                || viewerCertificateMember(config, "SSLSupportMethod") == null) {
+            throw new AwsException("InvalidViewerCertificate",
+                    "You must specify values for MinimumProtocolVersion and SSLSupportMethod.", 400);
+        }
+    }
+
+    /**
+     * The one rule in this group that replaces a value instead of refusing the request.
+     * {@code MinimumProtocolVersion}'s entry says that when {@code CloudFrontDefaultCertificate} is
+     * true CloudFront "automatically sets the security policy to TLSv1 regardless of the value that
+     * you set here", so the policy a request asks for there is overwritten and the config reads
+     * back the one the distribution is really on. The parsed map is replaced rather than written
+     * to, a caller inside this JVM being free to hand in one that cannot be.
+     */
+    private static void applyDefaultCertificateProtocolVersion(DistributionConfig config) {
+        if (config == null || !cloudFrontDefaultCertificate(config)
+                || DEFAULT_CERTIFICATE_PROTOCOL_VERSION.equals(
+                        config.getViewerCertificate().get("MinimumProtocolVersion"))) {
+            return;
+        }
+        Map<String, String> viewerCertificate = new LinkedHashMap<>(config.getViewerCertificate());
+        viewerCertificate.put("MinimumProtocolVersion", DEFAULT_CERTIFICATE_PROTOCOL_VERSION);
+        config.setViewerCertificate(viewerCertificate);
     }
 
     private void validateViewerCertificate(DistributionConfig config) {
@@ -584,7 +771,9 @@ public class CloudFrontService implements ServerCertificateReferenceProvider {
             return null;
         }
         String hostname = stripPort(host);
-        List<Distribution> distributions = distStore.scan(k -> true);
+        // Every request gets here once a distribution exists, so this lookup avoids copying strings.
+        String rawPrefix = AccountAwareStorageBackend.rawKey(distStore.accountId(), "");
+        List<Distribution> distributions = distStore.scanRaw(rawKey -> rawKey.startsWith(rawPrefix));
         for (Distribution dist : distributions) {
             if (hostname.equalsIgnoreCase(dist.getDomainName())) {
                 return dist;
@@ -646,8 +835,11 @@ public class CloudFrontService implements ServerCertificateReferenceProvider {
 
     /** True when {@code hostname} is the local delivery host of the distribution with this id. */
     private boolean matchesLocalDeliveryHost(String hostname, String id) {
+        int idLength = id.length();
         for (String suffix : localDeliverySuffixes) {
-            if (hostname.equalsIgnoreCase(id + suffix)) {
+            if (hostname.length() == idLength + suffix.length()
+                    && hostname.regionMatches(true, 0, id, 0, idLength)
+                    && hostname.regionMatches(true, idLength, suffix, 0, suffix.length())) {
                 return true;
             }
         }

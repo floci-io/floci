@@ -691,6 +691,13 @@ plain, so branding is stored and returned rather than rendered. Two divergences 
 | `POST /cognito-idp/oauth2/revoke`                    | OAuth refresh token revocation endpoint                          |
 | `GET`, `POST /cognito-idp/oauth2/userInfo`           | OIDC userInfo endpoint, for a user's access token                |
 
+`token`, `revoke` and `userInfo` answer CORS as AWS does, so a browser app can call them with
+`fetch` from any origin, on Floci's host and on a custom domain alike: a response to a request
+with an `Origin` echoes it in `Access-Control-Allow-Origin`, with
+`Access-Control-Allow-Credentials: true`, on success and on error. A preflight is answered with
+200, the requested method and headers, and `Access-Control-Max-Age: 1800`. As on AWS,
+`authorize` and `logout`, which the browser navigates to, carry no CORS headers.
+
 The OAuth endpoints support browser-style authorization-code sign-in, for the pool's own
 users and through a federated OIDC provider, as well as the emulator-friendly
 client-credentials flow:
@@ -881,6 +888,20 @@ curl -s -b jar -o /dev/null -w '%{http_code} %{redirect_url}\n' \
 - Authorization-code redemption validates the client, callback URI and one-time code binding.
 - It requires `AllowedOAuthFlowsUserPoolClient=true` and `AllowedOAuthFlows=["client_credentials"]`.
 - It doesn't require a Cognito domain.
+- Client-credentials invokes the pre token generation trigger with triggerSource
+  `TokenGeneration_ClientCredentials` when, as on AWS, the pool's
+  `PreTokenGenerationConfig.LambdaVersion` is `V3_0`; a `V1_0` or `V2_0` trigger is not invoked.
+  The event carries `version` `3`, `userName` `ClientCredentials`, the granted `scopes`, empty `userAttributes`, a
+  null `groupConfiguration`, the request's `aws_client_metadata` (a URL-encoded JSON object of
+  strings) as `clientMetadata`, and `response.claimsAndScopeOverrideDetails` set to null, so a
+  function must build the response object rather than write into it. Metadata that is not a JSON
+  object, or a value that is not a JSON string (a number, boolean, null, object or array), refuses
+  the request with `invalid_request`.
+  Only `accessTokenGeneration` applies: its claims and scope changes reach the access token, while
+  `idTokenGeneration` and `groupOverrideDetails` are ignored. The trigger cannot add, change or
+  suppress `sub`, `client_id`, `token_use`, `version`, `username`, `iss`, `exp`, `iat`, `jti` or any
+  `cognito:` claim, and an `aud` it adds must equal the client ID. It changes `scope` only through
+  `scopesToAdd` and `scopesToSuppress`.
 - Client-credentials returns only `access_token`, `token_type`, and `expires_in`; authorization-code
   redemption returns the Cognito access and refresh tokens, and an ID token when the granted scopes
   include `openid`; a refresh returns the same tokens without a refresh token.
@@ -913,6 +934,13 @@ Floci follows real Cognito semantics for pools created with `UsernameAttributes`
 
 Pools **without** `UsernameAttributes` (classic pools, and pools using `AliasAttributes`) keep the
 literal `Username` you supply, unchanged.
+
+With `UsernameConfiguration.CaseSensitive=false`, username, email and `preferred_username`
+lookups and duplicate checks ignore case. An omitted setting or `CaseSensitive=true` keeps
+exact matching. Email sign-in still resolves to the same canonical UUID, and `SECRET_HASH`
+uses the exact `USERNAME` sent in each request. Challenge responses follow the pool's case-sensitivity
+setting too. Floci preserves stored casing in returned usernames, email addresses and
+`preferred_username` values. AWS lowercases these values in case-insensitive pools.
 
 ### Token claims
 

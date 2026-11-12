@@ -184,6 +184,7 @@ Broker scope:
 - Support MQTT v3 and MQTT 5 CONNECT handling used by local compatibility tests.
 - Support QoS 0 and QoS 1 publish/subscribe behavior for the local AWS IoT slice. A publish, over MQTT or through IoT Data `Publish`, reaches each matching subscriber at the lower of its own and the subscription's QoS, with RETAIN 0, as on AWS. A retained message sent on subscribe carries RETAIN 1 at the lower of its stored and the subscription's QoS.
 - Accept PUBLISH payloads up to 128 KB on 1883, 8883 and `/mqtt`, the AWS IoT Core quota (packets up to 146 KB including the variable header). A larger publish disconnects the client without acknowledgement, delivery or rule evaluation, as on AWS.
+- Forward an MQTT 5 publish's user properties to each MQTT 5 subscriber unchanged and in the order sent, a repeated name included, as AWS does. An MQTT 3.1.1 subscriber gets the message without them. The publish's other MQTT 5 properties, and those of a retained message, are not forwarded.
 - Serve MQTT over TLS on 8883 next to plaintext 1883 when TLS is enabled, and verify the device certificate and its `iot:Connect` permission there.
 - Keep the plaintext listener permissive except for a `CONNECT` that names a [custom authorizer](#authorizers); topic-level authorization (`Publish`, `Subscribe`, `Receive`) is follow-up scope.
 - Keep MQTT broker logging minimal.
