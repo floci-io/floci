@@ -2,7 +2,6 @@ package io.floci.aws.services.configservice;
 
 import io.floci.aws.testing.RestAssuredJsonUtils;
 import io.quarkus.test.junit.QuarkusTest;
-import io.restassured.response.Response;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.MethodOrderer;
 import org.junit.jupiter.api.Order;
@@ -541,23 +540,23 @@ class ConfigurationRecorderIntegrationTest {
     @Test
     @Order(21)
     void bothDescribeCallsReturnAndFilterByTheRecorderArn() {
-        post("PutConfigurationRecorder", """
+        RestAssuredJsonUtils.awsAction("StarlingDoveService", "PutConfigurationRecorder", """
             {"ConfigurationRecorder": {"name": "default", "roleARN": "arn:aws:iam::123456789012:role/r"}}
             """)
             .then().statusCode(200);
-        String arn = post("DescribeConfigurationRecorders", "{}")
+        String arn = RestAssuredJsonUtils.awsAction("StarlingDoveService", "DescribeConfigurationRecorders", "{}")
             .then().statusCode(200)
             .extract().path("ConfigurationRecorders[0].arn");
 
-        post("DescribeConfigurationRecorderStatus", "{}")
+        RestAssuredJsonUtils.awsAction("StarlingDoveService", "DescribeConfigurationRecorderStatus", "{}")
             .then().statusCode(200)
             .body("ConfigurationRecordersStatus[0].arn", equalTo(arn));
-        post("DescribeConfigurationRecorders", """
+        RestAssuredJsonUtils.awsAction("StarlingDoveService", "DescribeConfigurationRecorders", """
             {"Arn": "%s"}
             """.formatted(arn))
             .then().statusCode(200)
             .body("ConfigurationRecorders.arn", contains(arn));
-        post("DescribeConfigurationRecorderStatus", """
+        RestAssuredJsonUtils.awsAction("StarlingDoveService", "DescribeConfigurationRecorderStatus", """
             {"Arn": "%s", "ConfigurationRecorderNames": ["default"]}
             """.formatted(arn))
             .then().statusCode(200)
@@ -567,39 +566,30 @@ class ConfigurationRecorderIntegrationTest {
     @Test
     @Order(22)
     void anArnOrNameThatMissesTheRecorderIsNoSuchConfigurationRecorder() {
-        String arn = post("DescribeConfigurationRecorders", "{}")
+        String arn = RestAssuredJsonUtils.awsAction("StarlingDoveService", "DescribeConfigurationRecorders", "{}")
             .then().statusCode(200)
             .extract().path("ConfigurationRecorders[0].arn");
         String ghost = "arn:aws:config:us-east-1:000000000000:configuration-recorder/default/ghost";
 
-        post("DescribeConfigurationRecorders", """
+        RestAssuredJsonUtils.awsAction("StarlingDoveService", "DescribeConfigurationRecorders", """
             {"Arn": "%s"}
             """.formatted(ghost))
             .then().statusCode(400)
             .body("__type", equalTo("NoSuchConfigurationRecorderException"));
-        post("DescribeConfigurationRecorderStatus", """
+        RestAssuredJsonUtils.awsAction("StarlingDoveService", "DescribeConfigurationRecorderStatus", """
             {"Arn": "%s"}
             """.formatted(ghost))
             .then().statusCode(400)
             .body("__type", equalTo("NoSuchConfigurationRecorderException"));
-        post("DescribeConfigurationRecorders", """
+        RestAssuredJsonUtils.awsAction("StarlingDoveService", "DescribeConfigurationRecorders", """
             {"Arn": "%s", "ConfigurationRecorderNames": ["other"]}
             """.formatted(arn))
             .then().statusCode(400)
             .body("__type", equalTo("NoSuchConfigurationRecorderException"));
-        post("DescribeConfigurationRecorderStatus", """
+        RestAssuredJsonUtils.awsAction("StarlingDoveService", "DescribeConfigurationRecorderStatus", """
             {"Arn": "%s", "ConfigurationRecorderNames": ["other"]}
             """.formatted(arn))
             .then().statusCode(400)
             .body("__type", equalTo("NoSuchConfigurationRecorderException"));
-    }
-
-    private static Response post(String action, String body) {
-        return given()
-            .header("X-Amz-Target", TARGET_PREFIX + action)
-            .contentType(CONTENT_TYPE)
-            .body(body)
-        .when()
-            .post("/");
     }
 }
