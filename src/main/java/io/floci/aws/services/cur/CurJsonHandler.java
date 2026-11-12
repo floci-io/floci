@@ -13,7 +13,9 @@ import jakarta.ws.rs.core.Response;
 import org.jboss.logging.Logger;
 
 import java.util.ArrayList;
+import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Map;
 
 /**
  * JSON 1.1 handler for AWS CUR operations.
@@ -38,19 +40,15 @@ public class CurJsonHandler {
 
     public Response handle(String action, JsonNode request, String region) {
         LOG.debugv("CUR action: {0}", action);
+        CurRequestShapes.check(action, request);
         return switch (action) {
             case "PutReportDefinition" -> handlePutReportDefinition(request, region);
             case "ModifyReportDefinition" -> handleModifyReportDefinition(request, region);
             case "DescribeReportDefinitions" -> handleDescribeReportDefinitions();
             case "DeleteReportDefinition" -> handleDeleteReportDefinition(request, region);
-            // Tag endpoints are not yet emulated; respond with empty bodies so SDK
-            // clients that probe for them don't trip on UnknownOperationException.
-            case "TagResource", "UntagResource" -> Response.ok(objectMapper.createObjectNode()).build();
-            case "ListTagsForResource" -> {
-                ObjectNode body = objectMapper.createObjectNode();
-                body.putArray("Tags");
-                yield Response.ok(body).build();
-            }
+            case "TagResource" -> handleTagResource(request, region);
+            case "UntagResource" -> handleUntagResource(request, region);
+            case "ListTagsForResource" -> handleListTagsForResource(request, region);
             default -> Response.status(400)
                     .entity(new AwsErrorResponse("UnknownOperationException",
                             "Unknown operation: AWSOrigamiServiceGatewayService." + action))
@@ -59,7 +57,9 @@ public class CurJsonHandler {
     }
 
     private Response handlePutReportDefinition(JsonNode request, String region) {
+        CurRequestShapes.checkTags(request.get("Tags"));
         ReportDefinition def = parseReportDefinition(request.path("ReportDefinition"));
+        def.setTags(parseTags(request.path("Tags")));
         ReportDefinition created = service.putReportDefinition(def, region);
         // Emission failures must not roll back the management mutation — match AWS
         // semantics where the definition is created even if the first run errors.
@@ -102,6 +102,37 @@ public class CurJsonHandler {
             response.put("ResponseMessage", "Report " + reportName + " has been deleted.");
         }
         return Response.ok(response).build();
+    }
+
+    private Response handleTagResource(JsonNode request, String region) {
+        service.tagResource(stringOrNull(request, "ReportName"), parseTags(request.path("Tags")), region);
+        return Response.ok(objectMapper.createObjectNode()).build();
+    }
+
+    private Response handleUntagResource(JsonNode request, String region) {
+        service.untagResource(stringOrNull(request, "ReportName"), parseTagKeys(request.path("TagKeys")), region);
+        return Response.ok(objectMapper.createObjectNode()).build();
+    }
+
+    private Response handleListTagsForResource(JsonNode request, String region) {
+        Map<String, String> tags = service.listTags(stringOrNull(request, "ReportName"), region);
+        ObjectNode response = objectMapper.createObjectNode();
+        ArrayNode list = response.putArray("Tags");
+        tags.forEach((key, value) -> list.addObject().put("Key", key).put("Value", value));
+        return Response.ok(response).build();
+    }
+
+    /** The tags of a request checked by {@link CurRequestShapes}; none when it has no {@code Tags}. */
+    private static Map<String, String> parseTags(JsonNode node) {
+        Map<String, String> tags = new LinkedHashMap<>();
+        node.forEach(tag -> tags.put(tag.get("Key").textValue(), tag.get("Value").textValue()));
+        return tags;
+    }
+
+    private static List<String> parseTagKeys(JsonNode node) {
+        List<String> keys = new ArrayList<>();
+        node.forEach(key -> keys.add(key.textValue()));
+        return keys;
     }
 
     private ReportDefinition parseReportDefinition(JsonNode node) {
