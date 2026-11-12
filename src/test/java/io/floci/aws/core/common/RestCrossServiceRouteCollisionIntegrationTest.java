@@ -100,7 +100,7 @@ class RestCrossServiceRouteCollisionIntegrationTest {
         given()
             .header("Authorization", PartitionMatrix.sigV4Auth("us-east-1", "appconfig"))
             .contentType("application/json")
-            .body("{\"Name\":\"test-app\"}")
+            .body("{\"Name\":\"route-collision-app\"}")
         .when()
             .post("/applications")
         .then()
