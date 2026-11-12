@@ -861,22 +861,24 @@ public class CodePipelineService {
             throw new AwsException("InvalidApprovalTokenException", "Approval token is invalid", 400);
         }
 
-        if (!"InProgress".equals(approval.getStatus())) {
-            throw new AwsException("ApprovalAlreadyCompletedException",
-                    "The approval action has already been approved or rejected.", 400);
-        }
+        synchronized (execution) {
+            if (!"InProgress".equals(approval.getStatus())) {
+                throw new AwsException("ApprovalAlreadyCompletedException",
+                        "The approval action has already been approved or rejected.", 400);
+            }
 
-        boolean approved = "Approved".equals(status);
-        approval.setStatus(approved ? "Succeeded" : "Failed");
-        approval.setSummary(summary);
-        approval.setLastUpdateTime(now());
-        if (!approved) {
-            execution.setStatus("Failed");
-            execution.setStatusSummary("Action " + actionName + " failed: " + summary);
-            execution.getStageExecutionStatuses().put(stageName, "Failed");
-            execution.setLastUpdateTime(now());
+            boolean approved = "Approved".equals(status);
+            approval.setStatus(approved ? "Succeeded" : "Failed");
+            approval.setSummary(summary);
+            approval.setLastUpdateTime(now());
+            if (!approved) {
+                execution.setStatus("Failed");
+                execution.setStatusSummary("Action " + actionName + " failed: " + summary);
+                execution.getStageExecutionStatuses().put(stageName, "Failed");
+                execution.setLastUpdateTime(now());
+            }
+            putExecution(execution);
         }
-        putExecution(execution);
         return mapper.createObjectNode().put("approvedAt", now());
     }
 

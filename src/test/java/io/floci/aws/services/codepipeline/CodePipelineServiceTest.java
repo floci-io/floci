@@ -1259,6 +1259,7 @@ class CodePipelineServiceTest {
     void workerCompletionCannotBeOverwrittenByStopPublication(boolean abandon) throws Exception {
         String pipeline = "stop-publication";
         String executionId = "stopping-execution";
+        CountDownLatch approvalPolling = new CountDownLatch(1);
         CountDownLatch stopPublished = new CountDownLatch(1);
         CountDownLatch releaseStop = new CountDownLatch(1);
         AtomicReference<Thread> requester = new AtomicReference<>();
@@ -1273,6 +1274,12 @@ class CodePipelineServiceTest {
                 boolean requested = (boolean) invocation.callRealMethod();
                 if (requested && Thread.currentThread() != requester.get()) {
                     worker.compareAndSet(null, Thread.currentThread());
+                } else if (!requested && approvalPolling.getCount() > 0) {
+                    synchronized (execution) {
+                        if (execution.getActionExecutions().stream().anyMatch(action -> action.getToken() != null)) {
+                            approvalPolling.countDown();
+                        }
+                    }
                 }
                 return requested;
             }).when(execution).isStopRequested();
@@ -1286,10 +1293,8 @@ class CodePipelineServiceTest {
             }).when(execution).setStopRequested(anyBoolean());
             storage.executionStore.putForAccount(ACCOUNT, REGION + ":" + pipeline + ":" + executionId, execution);
             service.resumePersistedExecutions();
-            await().atMost(Duration.ofSeconds(3)).untilAsserted(() ->
-                    assertFalse(handle("ListActionExecutions", """
-                            {"pipelineName":"%s","filter":{"pipelineExecutionId":"%s"}}
-                            """.formatted(pipeline, executionId)).path("actionExecutionDetails").isEmpty()));
+            assertTrue(approvalPolling.await(5, TimeUnit.SECONDS),
+                    "Approval worker must enter polling before stop holds the execution monitor");
             Future<?> stopped = requests.submit(() -> {
                 requester.set(Thread.currentThread());
                 stopExecution(service, pipeline, executionId, abandon);
@@ -1327,20 +1332,9 @@ class CodePipelineServiceTest {
             execution.getActionExecutions().add(completed);
             ActionExecution registering = new ActionExecution();
             registering.setStatus("InProgress");
-            AtomicReference<Thread> stoppingThread = new AtomicReference<>();
             Future<JsonNode> stopped;
             synchronized (execution) {
-                stopped = requests.submit(() -> {
-                    stoppingThread.set(Thread.currentThread());
-                    return handle("StopPipelineExecution", """
-                            {
-                              "pipelineName": "%s",
-                              "pipelineExecutionId": "%s",
-                              "abandon": true
-                            }
-                            """.formatted(pipeline, executionId));
-                });
-                ThreadStates.awaitBlockedOrDone(stoppingThread, stopped);
+                stopped = stopWaitingForExecutionMonitor(requests, execution, true);
                 // The worker registers actions under this monitor before the stop can traverse them.
                 execution.getActionExecutions().add(registering);
             }
@@ -1452,20 +1446,9 @@ class CodePipelineServiceTest {
                     }
                     """);
             CodePipelineExecution execution = waitingExecution(storage, pipeline, executionId, 1, "External");
-            AtomicReference<Thread> stoppingThread = new AtomicReference<>();
             Future<JsonNode> stopped;
             synchronized (execution) {
-                stopped = requests.submit(() -> {
-                    stoppingThread.set(Thread.currentThread());
-                    return handle("StopPipelineExecution", """
-                            {
-                              "pipelineName": "%s",
-                              "pipelineExecutionId": "%s",
-                              "abandon": true
-                            }
-                            """.formatted(pipeline, executionId));
-                });
-                ThreadStates.awaitBlockedOrDone(stoppingThread, stopped);
+                stopped = stopWaitingForExecutionMonitor(requests, execution, true);
                 assertFalse(execution.isStopRequested());
                 assertEquals("InProgress", execution.getStatus());
                 // The run ends here, as it does under this monitor.
@@ -1478,6 +1461,64 @@ class CodePipelineServiceTest {
             assertEquals("Succeeded", execution.getStatus());
             assertFalse(execution.isStopRequested());
         } finally {
+            service.shutdown();
+        }
+    }
+
+    @Test
+    void rejectedApprovalCompletesBeforeAStopWaitingOnItsMonitor() throws Exception {
+        String pipeline = "rejection-during-stop";
+        CountDownLatch approvalChecked = new CountDownLatch(1);
+        CountDownLatch releaseApproval = new CountDownLatch(1);
+        AtomicReference<Thread> approvalThread = new AtomicReference<>();
+        try (ExecutorService requests = Executors.newFixedThreadPool(2)) {
+            CodePipelineExecution execution = createWaitingApprovalExecution(pipeline);
+            ActionExecution approval = spy(approvalAction());
+            doAnswer(invocation -> {
+                String status = (String) invocation.callRealMethod();
+                if (Thread.currentThread() == approvalThread.get()) {
+                    approvalChecked.countDown();
+                    assertTrue(releaseApproval.await(5, TimeUnit.SECONDS));
+                }
+                return status;
+            }).when(approval).getStatus();
+            execution.getActionExecutions().add(approval);
+            Future<JsonNode> rejected = requests.submit(() -> {
+                approvalThread.set(Thread.currentThread());
+                return handle("PutApprovalResult", """
+                        {
+                          "pipelineName": "%s",
+                          "stageName": "External",
+                          "actionName": "Approve",
+                          "token": "%s",
+                          "result": {
+                            "status": "Rejected",
+                            "summary": "rejected by test"
+                          }
+                        }
+                        """.formatted(pipeline, approval.getToken()));
+            });
+            Future<JsonNode> stopped;
+            try {
+                assertTrue(approvalChecked.await(5, TimeUnit.SECONDS));
+                stopped = stopWaitingForExecutionMonitor(requests, execution, false);
+                assertFalse(execution.isStopRequested(), "Stop must wait for the approval result to be written");
+                assertEquals("InProgress", execution.getStatus());
+            } finally {
+                releaseApproval.countDown();
+            }
+            assertTrue(rejected.get(5, TimeUnit.SECONDS).path("approvedAt").isNumber());
+            ExecutionException refused = assertThrows(ExecutionException.class,
+                    () -> stopped.get(5, TimeUnit.SECONDS));
+            AwsException cause = (AwsException) refused.getCause();
+            assertEquals("PipelineExecutionNotStoppableException", cause.getErrorCode());
+            assertEquals("Failed", approval.getStatus());
+            assertEquals("Failed", execution.getStatus());
+            assertEquals("Failed", execution.getStageExecutionStatuses().get("External"));
+            assertEquals("Action Approve failed: rejected by test", execution.getStatusSummary());
+            assertFalse(execution.isStopRequested());
+        } finally {
+            releaseApproval.countDown();
             service.shutdown();
         }
     }
@@ -1561,6 +1602,24 @@ class CodePipelineServiceTest {
         } finally {
             service.shutdown();
         }
+    }
+
+    private Future<JsonNode> stopWaitingForExecutionMonitor(ExecutorService requests,
+                                                            CodePipelineExecution execution,
+                                                            boolean abandon) throws Exception {
+        AtomicReference<Thread> stoppingThread = new AtomicReference<>();
+        Future<JsonNode> stopped = requests.submit(() -> {
+            stoppingThread.set(Thread.currentThread());
+            return handle("StopPipelineExecution", """
+                    {
+                      "pipelineName": "%s",
+                      "pipelineExecutionId": "%s",
+                      "abandon": %s
+                    }
+                    """.formatted(execution.getPipelineName(), execution.getPipelineExecutionId(), abandon));
+        });
+        ThreadStates.awaitBlockedOrDone(stoppingThread, stopped);
+        return stopped;
     }
 
     private CodePipelineExecution createWaitingApprovalExecution(String pipeline) throws Exception {
