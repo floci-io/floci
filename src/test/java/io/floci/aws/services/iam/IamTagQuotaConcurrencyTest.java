@@ -19,6 +19,7 @@ import java.util.function.Consumer;
 import java.util.function.ToIntFunction;
 import java.util.stream.Stream;
 
+import static io.floci.aws.testing.IamTestPolicies.EMPTY_POLICY_DOCUMENT;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -57,7 +58,7 @@ class IamTagQuotaConcurrencyTest {
         List<Scenario> scenarios = List.of(
                 new Scenario("user", iam -> iam.createUser("u", "/"),
                         (iam, tags) -> iam.tagUser("u", tags), iam -> iam.getUser("u").getTags().size()),
-                new Scenario("role", iam -> iam.createRole("r", "/", "{}", null, 3600, null),
+                new Scenario("role", iam -> iam.createRole("r", "/", EMPTY_POLICY_DOCUMENT, null, 3600, null),
                         (iam, tags) -> iam.tagRole("r", tags), iam -> iam.getRole("r").getTags().size()),
                 new Scenario("policy", iam -> iam.createPolicy("p", "/", null, POLICY_DOCUMENT, null),
                         (iam, tags) -> iam.tagPolicy(POLICY_ARN, tags), iam -> iam.getPolicy(POLICY_ARN).getTags().size()),

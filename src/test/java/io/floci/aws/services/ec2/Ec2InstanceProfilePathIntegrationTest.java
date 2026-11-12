@@ -11,6 +11,7 @@ import org.junit.jupiter.params.provider.ValueSource;
 import java.time.Instant;
 import java.util.UUID;
 
+import static io.floci.aws.testing.IamTestPolicies.EMPTY_POLICY_DOCUMENT;
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.equalTo;
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -32,7 +33,7 @@ class Ec2InstanceProfilePathIntegrationTest {
         String template = null;
         String instanceId = null;
         request(account, "iam", "CreateRole").formParam("RoleName", name)
-                .formParam("AssumeRolePolicyDocument", "{}").post("/").then().statusCode(200);
+                .formParam("AssumeRolePolicyDocument", EMPTY_POLICY_DOCUMENT).post("/").then().statusCode(200);
         request(account, "iam", "CreateInstanceProfile").formParam("InstanceProfileName", name)
                 .formParam("Path", "/workers/nested/").post("/").then().statusCode(200);
         request(other, "iam", "CreateInstanceProfile").formParam("InstanceProfileName", name)
