@@ -7,6 +7,7 @@ import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.floci.aws.core.common.AwsErrorResponse;
 import io.floci.aws.core.common.AwsException;
+import io.floci.aws.core.common.Pagination;
 import io.floci.aws.services.cloudfront.model.KeyValueStore;
 import jakarta.inject.Inject;
 import jakarta.ws.rs.Consumes;
@@ -77,9 +78,10 @@ public class CloudFrontKeyValueStoreController {
     @Path("/{kvsArn}/keys")
     public Response listKeys(@PathParam("kvsArn") String kvsArn,
                              @QueryParam("NextToken") String nextToken,
-                             @QueryParam("MaxResults") Integer maxResults) {
+                             @QueryParam("MaxResults") String maxResults) {
         return handle(() -> {
-            CloudFrontKeyValueStoreService.KeyPage page = service.listKeys(kvsArn, nextToken, maxResults);
+            CloudFrontKeyValueStoreService.KeyPage page = service.listKeys(kvsArn, nextToken,
+                    Pagination.parseMaxResults(maxResults, "ValidationException"));
             ObjectNode body = objectMapper.createObjectNode();
             ArrayNode items = body.putArray("Items");
             for (Map.Entry<String, String> entry : page.items()) {
@@ -103,6 +105,8 @@ public class CloudFrontKeyValueStoreController {
                 throw new AwsException("ValidationException", "The request payload is too large.", 400);
             }
             JsonNode request = readBody(requestBody);
+            requireArrayWhenPresent(request, "Puts");
+            requireArrayWhenPresent(request, "Deletes");
             if (request.path("Puts").size() + request.path("Deletes").size()
                     > CloudFrontKeyValueStoreService.MAX_KEY_UPDATES) {
                 throw new AwsException("ValidationException",
@@ -144,10 +148,7 @@ public class CloudFrontKeyValueStoreController {
                            String requestBody) {
         return handle(() -> {
             JsonNode request = readBody(requestBody);
-            if (!request.hasNonNull(VALUE)) {
-                throw new AwsException("ValidationException", "Value is required.", 400);
-            }
-            return sizeResponse(service.putKey(kvsArn, ifMatch, key, request.get(VALUE).asText()));
+            return sizeResponse(service.putKey(kvsArn, ifMatch, key, requiredText(request, VALUE)));
         });
     }
 
@@ -168,9 +169,13 @@ public class CloudFrontKeyValueStoreController {
 
     private JsonNode readBody(String requestBody) {
         try {
-            return requestBody == null || requestBody.isBlank()
+            JsonNode body = requestBody == null || requestBody.isBlank()
                     ? objectMapper.createObjectNode()
                     : objectMapper.readTree(requestBody);
+            if (!body.isObject()) {
+                throw new AwsException("ValidationException", "The request body must be a JSON object.", 400);
+            }
+            return body;
         } catch (JsonProcessingException e) {
             throw new AwsException("ValidationException", "Malformed JSON request body.", 400);
         }
@@ -180,7 +185,16 @@ public class CloudFrontKeyValueStoreController {
         if (!node.hasNonNull(field)) {
             throw new AwsException("ValidationException", field + " is required.", 400);
         }
-        return node.get(field).asText();
+        if (!node.isObject() || !node.get(field).isTextual()) {
+            throw new AwsException("ValidationException", field + " must be a string.", 400);
+        }
+        return node.get(field).textValue();
+    }
+
+    private static void requireArrayWhenPresent(JsonNode request, String field) {
+        if (request.hasNonNull(field) && !request.get(field).isArray()) {
+            throw new AwsException("ValidationException", field + " must be a list.", 400);
+        }
     }
 
     private static BigDecimal epochSeconds(Instant instant) {

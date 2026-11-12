@@ -309,6 +309,10 @@ CORRECTIONS: dict[str, tuple[list[dict], str]] = {
                                  for kind in ("S3Source", "RelationalTable", "CustomSql", "SaaSTable", "FileSource")],
                                 "CreateDataSet acts on each data source named by its physical tables; "
                                 "FolderArns and RowLevelPermissionDataSet.Arn name other resource types"),
+    **{f"cloudfront:{operation}": ([{"type": "key-value-store", "fill": {}, "find": ["Name"]}],
+                                   "the store ARN ends in an id CloudFront mints, key-value-store/<uuid>, which its "
+                                   "name-addressed requests do not carry; the store resolves it from the name")
+       for operation in ("DescribeKeyValueStore", "UpdateKeyValueStore", "DeleteKeyValueStore")},
     "quicksight:CreateDashboard": ([{"type": "dashboard", "fill": {"ResourceId": "DashboardId"}}],
                                    "DashboardId names the created dashboard; FolderArns and ThemeArn name "
                                    "other resource types and are not dashboard ARN selectors"),

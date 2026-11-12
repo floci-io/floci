@@ -1008,7 +1008,7 @@ public class CloudFrontController {
         try {
             String name = XmlParser.extractFirst(body, "Name", null);
             String comment = XmlParser.extractFirst(body, "Comment", null);
-            boolean hasImportSource = XmlParser.extractFirst(body, "SourceARN", null) != null;
+            boolean hasImportSource = XmlParser.extractElementTree(body, "ImportSource") != null;
             KeyValueStore kvs = service.createKeyValueStore(name, comment, hasImportSource);
             Map<String, String> tags = parseTags(body);
             if (!tags.isEmpty()) {

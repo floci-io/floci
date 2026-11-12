@@ -298,4 +298,38 @@ class CloudFrontKeyValueStoreServiceTest {
         assertError("ValidationException", 400, () -> service.listKeys(created.getArn(), "!!not base64!!", 10));
         assertEquals(10, CloudFrontKeyValueStoreService.DEFAULT_LIST_KEYS);
     }
-}
+
+    @Test
+    void listResumesAfterAMarkerStoreThatWasDeleted() {
+        CloudFrontKeyValueStoreService service = newService();
+        service.create("a", null);
+        KeyValueStore b = service.create("b", null);
+        service.create("c", null);
+        service.delete("b", b.getEtag());
+
+        List<KeyValueStore> page = service.list("b", 10);
+
+        assertEquals(List.of("c"), page.stream().map(KeyValueStore::getName).toList());
+    }
+
+    @Test
+    void updateWithoutACommentIsRejectedAndKeepsTheStore() {
+        CloudFrontKeyValueStoreService service = newService();
+        KeyValueStore created = service.create("tenants", "keep me");
+
+        assertError("InvalidArgument", 400, () -> service.update("tenants", created.getEtag(), null));
+
+        KeyValueStore unchanged = service.describe("tenants");
+        assertEquals("keep me", unchanged.getComment());
+        assertEquals(created.getEtag(), unchanged.getEtag());
+    }
+
+    @Test
+    void findResolvesAStoreNameToItsStoredArn() {
+        CloudFrontKeyValueStoreService service = newService();
+        KeyValueStore created = service.create("tenants", null);
+
+        assertEquals(created.getArn(), service.find("key-value-store", List.of("tenants"), "us-east-1").orElseThrow());
+        assertTrue(service.find("key-value-store", List.of("missing"), "us-east-1").isEmpty());
+        assertTrue(service.find("distribution", List.of("tenants"), "us-east-1").isEmpty());
+    }}

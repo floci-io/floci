@@ -289,6 +289,61 @@ class CloudFrontKeyValueStoreIntegrationTest {
                 .then().statusCode(200).body(not(containsString("team")));
     }
     @Test
+    void malformedKeyWritesAreValidationErrorsAndChangeNothing() {
+        Store store = createStore(uniqueName(), "shapes");
+        Response seeded = putKey(store, store.dataEtag(), "a", "1");
+        seeded.then().statusCode(200);
+        String etag = seeded.header("ETag");
+
+        String[] bodies = {"{\"Value\":{}}", "{\"Value\":5}"};
+        for (String body : bodies) {
+            dataPlane().header("If-Match", etag).contentType("application/json").body(body)
+                    .when().put(storePath(store) + "/keys/a")
+                    .then().statusCode(400).header("X-Amzn-Errortype", equalTo("ValidationException"));
+        }
+        String[] batches = {"{\"Puts\":[{\"Key\":\"a\",\"Value\":5}]}", "{\"Puts\":[{\"Key\":7,\"Value\":\"v\"}]}",
+                "{\"Deletes\":\"a\"}", "{\"Puts\":{\"Key\":\"a\",\"Value\":\"v\"}}", "[]"};
+        for (String body : batches) {
+            dataPlane().header("If-Match", etag).contentType("application/json").body(body)
+                    .when().post(storePath(store) + "/keys")
+                    .then().statusCode(400).header("X-Amzn-Errortype", equalTo("ValidationException"));
+        }
+
+        dataPlane().when().get(storePath(store) + "/keys/a").then().statusCode(200).body("Value", equalTo("1"));
+        dataPlane().when().get(storePath(store)).then().statusCode(200).header("ETag", equalTo(etag));
+    }
+
+    @Test
+    void aMalformedMaxResultsIsAValidationError() {
+        Store store = createStore(uniqueName(), "page");
+
+        dataPlane().queryParam("MaxResults", "abc").when().get(storePath(store) + "/keys")
+                .then().statusCode(400).header("X-Amzn-Errortype", equalTo("ValidationException"));
+    }
+
+    @Test
+    void anImportSourceWithoutASourceArnIsRejectedToo() {
+        String name = uniqueName();
+        given().contentType(XML)
+                .body(("<CreateKeyValueStoreRequest xmlns=\"%s\"><Name>%s</Name><ImportSource><SourceType>S3"
+                        + "</SourceType></ImportSource></CreateKeyValueStoreRequest>").formatted(NS, name))
+                .when().post(CLOUDFRONT + "key-value-store")
+                .then().statusCode(400).body(hasXPath("//*[local-name()='Code']", equalTo("InvalidArgument")));
+        given().when().get(CLOUDFRONT + "key-value-store/" + name).then().statusCode(404);
+    }
+
+    @Test
+    void updateKeyValueStoreWithoutACommentIsRejected() {
+        Store store = createStore(uniqueName(), "kept");
+
+        given().contentType(XML).header("If-Match", store.etag())
+                .body("<UpdateKeyValueStoreRequest xmlns=\"%s\"></UpdateKeyValueStoreRequest>".formatted(NS))
+                .when().put(CLOUDFRONT + "key-value-store/" + store.name())
+                .then().statusCode(400);
+        given().when().get(CLOUDFRONT + "key-value-store/" + store.name())
+                .then().statusCode(200).body(hasXPath("//*[local-name()='Comment']", equalTo("kept")));
+    }
+    @Test
     void updateKeysAppliesPutsAndDeletesAtOnce() {
         Store store = createStore(uniqueName(), "batch");
         Response seeded = dataPlane().header("If-Match", store.dataEtag()).contentType("application/json")

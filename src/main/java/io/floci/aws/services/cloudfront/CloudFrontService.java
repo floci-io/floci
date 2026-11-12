@@ -1897,6 +1897,7 @@ public class CloudFrontService implements ServerCertificateReferenceProvider {
     public synchronized CloudFrontFunction updateFunction(String name, String ifMatch,
                                                           CloudFrontFunction updated) {
         validateFunctionRuntime(updated.getRuntime());
+        updated.setName(name);
         validateKeyValueStoreAssociations(updated);
         CloudFrontFunction existing = describeFunction(name, null);
         if (!existing.getEtag().equals(ifMatch)) {

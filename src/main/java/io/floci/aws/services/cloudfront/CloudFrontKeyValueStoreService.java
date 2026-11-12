@@ -5,6 +5,7 @@ import io.floci.aws.core.common.AwsException;
 import io.floci.aws.core.common.PaginatedResult;
 import io.floci.aws.core.common.Pagination;
 import io.floci.aws.core.common.RegionResolver;
+import io.floci.aws.core.common.StoredResourceArns;
 import io.floci.aws.core.storage.StorageBackend;
 import io.floci.aws.core.storage.StorageFactory;
 import io.floci.aws.services.cloudfront.model.KeyValueStore;
@@ -30,7 +31,7 @@ import java.util.regex.Pattern;
  * data plane ETag.
  */
 @ApplicationScoped
-public class CloudFrontKeyValueStoreService {
+public class CloudFrontKeyValueStoreService implements StoredResourceArns {
 
     static final int MAX_KEY_BYTES = 512;
     static final int MAX_VALUE_BYTES = 1024;
@@ -92,14 +93,7 @@ public class CloudFrontKeyValueStoreService {
         List<KeyValueStore> all = new ArrayList<>(store.scan(key -> true));
         all.sort(Comparator.comparing(KeyValueStore::getName));
         if (marker != null && !marker.isEmpty()) {
-            int start = 0;
-            for (int i = 0; i < all.size(); i++) {
-                if (marker.equals(all.get(i).getName())) {
-                    start = i + 1;
-                    break;
-                }
-            }
-            all = new ArrayList<>(all.subList(start, all.size()));
+            all = new ArrayList<>(all.stream().filter(kvs -> kvs.getName().compareTo(marker) > 0).toList());
         }
         if (maxItems > 0 && all.size() > maxItems) {
             return new ArrayList<>(all.subList(0, maxItems));
@@ -110,7 +104,10 @@ public class CloudFrontKeyValueStoreService {
     public synchronized KeyValueStore update(String name, String ifMatch, String comment) {
         KeyValueStore existing = describe(name);
         requireControlPlaneEtag(existing, ifMatch);
-        String effectiveComment = comment == null ? "" : comment;
+        if (comment == null) {
+            throw new AwsException("InvalidArgument", "The Comment is required.", 400);
+        }
+        String effectiveComment = comment;
         validateComment(effectiveComment);
         KeyValueStore updated = copyOf(existing);
         updated.setComment(effectiveComment);
@@ -130,6 +127,19 @@ public class CloudFrontKeyValueStoreService {
         store.delete(name);
     }
 
+    @Override
+    public String namespace() {
+        return "cloudfront";
+    }
+
+    /** The ARN a store named by the request is stored under, which ends in the id CloudFront minted for it. */
+    @Override
+    public Optional<String> find(String type, List<String> names, String region) {
+        if (!"key-value-store".equals(type) || names.size() != 1) {
+            return Optional.empty();
+        }
+        return store.get(names.getFirst()).map(KeyValueStore::getArn);
+    }
     public Optional<KeyValueStore> findByArn(String arn) {
         if (arn == null) {
             return Optional.empty();
