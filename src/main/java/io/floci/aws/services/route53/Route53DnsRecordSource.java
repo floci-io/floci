@@ -29,7 +29,7 @@ import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
 /**
- * Resolves private IPv4/SRV records and public TXT/NS/SOA records for the embedded DNS server.
+ * Resolves private IPv4/SRV records and public A/AAAA/TXT/NS/SOA records for the embedded DNS server.
  *
  * <p>Discovered via CDI as a {@link DnsRecordSource} implementation, keeping
  * the embedded DNS server decoupled from Route 53 service classes.
@@ -75,7 +75,7 @@ public class Route53DnsRecordSource implements DnsRecordSource {
 
     @Override
     public Optional<DnsAnswer> resolveAuthoritative(String name, int type) {
-        if (name == null || name.isBlank() || (type != 2 && type != 6 && type != 16)) {
+        if (name == null || name.isBlank() || (type != 1 && type != 2 && type != 6 && type != 16 && type != 28)) {
             return Optional.empty();
         }
         if (route53Service.isCoveredByPrivateZone(name)) {
@@ -107,11 +107,14 @@ public class Route53DnsRecordSource implements DnsRecordSource {
             return Optional.of(DnsAnswer.refused());
         }
         String recordType = switch (type) {
+            case 1 -> "A";
+            case 28 -> "AAAA";
             case 2 -> "NS";
             case 6 -> "SOA";
             default -> "TXT";
         };
         Function<String, DnsRecord> recordFactory = switch (type) {
+            case 1, 28 -> value -> new DnsRecord.Address(type, value);
             case 2 -> DnsRecord.Ns::new;
             case 6 -> DnsRecord.Soa::new;
             default -> DnsRecord.Txt::new;
