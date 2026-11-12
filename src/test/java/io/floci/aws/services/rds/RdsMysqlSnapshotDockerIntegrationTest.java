@@ -143,7 +143,7 @@ class RdsMysqlSnapshotDockerIntegrationTest {
      */
     private static <T> T whenConnected(int port, String user, String password, SqlWork<T> work) {
         AtomicReference<T> result = new AtomicReference<>();
-        await().atMost(Duration.ofSeconds(90)).pollInterval(Duration.ofSeconds(1))
+        await().atMost(Duration.ofSeconds(90)).pollDelay(Duration.ZERO).pollInterval(Duration.ofSeconds(1))
                 .ignoreExceptionsInstanceOf(SQLException.class)
                 .until(() -> {
                     try (Connection connection = connect(port, user, password)) {
