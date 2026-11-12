@@ -108,4 +108,28 @@ class LambdaMicrovmsServiceTest {
         assertEquals("ValidationException", refused.getErrorCode());
         assertEquals(Map.of(), service.listTags(REGION, created.arn));
     }
+
+    @Test
+    void anUpdateKeepsEachVersionOnItsOwnBuildSpec() {
+        RegionResolver regionResolver = mock(RegionResolver.class);
+        when(regionResolver.getAccountId()).thenReturn(ACCOUNT_ID);
+        LambdaMicrovmsService service = new LambdaMicrovmsService(regionResolver, mock(StorageFactory.class));
+        service.createImage(REGION, ACCOUNT_ID, "two-version-image",
+                "arn:aws:lambda:us-east-1:aws:microvm-image:al2023-1",
+                "arn:aws:iam::000000000000:role/microvm-build",
+                "s3://artifacts/app.zip", "first");
+        service.updateImage(REGION, "two-version-image",
+                "arn:aws:lambda:us-east-1:aws:microvm-image:al2023-1",
+                "arn:aws:iam::000000000000:role/microvm-build-v2",
+                "s3://artifacts/app-v2.zip", "second");
+
+        LambdaMicrovmsService.MicrovmImageVersion first = service.getVersion(REGION, "two-version-image", "1.0");
+        LambdaMicrovmsService.MicrovmImageVersion second = service.getVersion(REGION, "two-version-image", "2.0");
+        assertEquals("s3://artifacts/app.zip", first.codeArtifactUri);
+        assertEquals("arn:aws:iam::000000000000:role/microvm-build", first.buildRoleArn);
+        assertEquals("s3://artifacts/app-v2.zip", second.codeArtifactUri);
+        assertEquals("arn:aws:iam::000000000000:role/microvm-build-v2", second.buildRoleArn);
+        assertEquals("1.0", first.baseImageVersion);
+        assertEquals("1.0", second.baseImageVersion);
+    }
 }

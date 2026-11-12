@@ -86,6 +86,11 @@ class LambdaMicrovmsServicePersistenceTest {
         assertEquals("updated", image.description);
         assertEquals("s3://bucket/next.zip", image.codeArtifactUri);
         assertEquals("2.0", image.latestActiveImageVersion);
+        assertEquals("s3://bucket/artifact.zip", image.versions.get(0).codeArtifactUri,
+                "the first version keeps the build spec it was minted from, not the update's");
+        assertEquals("s3://bucket/next.zip", image.versions.get(1).codeArtifactUri);
+        assertEquals("arn:aws:iam::000000000000:role/build", image.versions.get(0).buildRoleArn);
+        assertEquals("arn:aws:iam::000000000000:role/other", image.versions.get(1).buildRoleArn);
     }
 
     @Test
