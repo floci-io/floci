@@ -12,6 +12,7 @@ import software.amazon.awssdk.awscore.exception.AwsServiceException;
 import software.amazon.awssdk.regions.Region;
 import software.amazon.awssdk.services.paymentcryptography.PaymentCryptographyClient;
 import software.amazon.awssdk.services.paymentcryptography.model.Alias;
+import software.amazon.awssdk.services.paymentcryptography.model.As2805KeyVariant;
 import software.amazon.awssdk.services.paymentcryptography.model.DeriveKeyUsage;
 import software.amazon.awssdk.services.paymentcryptography.model.ExportKeyResponse;
 import software.amazon.awssdk.services.paymentcryptography.model.GetParametersForExportResponse;
@@ -141,11 +142,16 @@ class PaymentCryptographyTest {
 
     /** A key of the given algorithm, for the data the cipher protects. */
     private static Key createKey(KeyAlgorithm algorithm) {
+        return createKey(algorithm, KeyUsage.TR31_D0_SYMMETRIC_DATA_ENCRYPTION_KEY);
+    }
+
+    /** A key of the given algorithm and usage, for a variant that binds a purpose. */
+    private static Key createKey(KeyAlgorithm algorithm, KeyUsage usage) {
         Key key = client.createKey(r -> r
                 .keyAttributes(a -> a
                         .keyAlgorithm(algorithm)
                         .keyClass(KeyClass.SYMMETRIC_KEY)
-                        .keyUsage(KeyUsage.TR31_D0_SYMMETRIC_DATA_ENCRYPTION_KEY)
+                        .keyUsage(usage)
                         .keyModesOfUse(m -> m.encrypt(true).decrypt(true)))
                 .exportable(true))
                 .key();
@@ -250,6 +256,202 @@ class PaymentCryptographyTest {
         assertThat(imported.key().keyArn()).isNotBlank();
         assertThat(imported.key().keyAttributes().keyUsage())
                 .isEqualTo(KeyUsage.TR31_D0_SYMMETRIC_DATA_ENCRYPTION_KEY);
+    }
+
+    @Test
+    void anExportSigningKeyThatIsNotRsa2048IsRefused() {
+        // The block is signed with the key the export parameters issue, and the block's
+        // signature is an RSA one, so a signing key that is not an RSA_2048 one cannot
+        // sign it.
+        assertThatThrownBy(() -> client.getParametersForExport(r -> r
+                .keyMaterialType(KeyMaterialType.TR34_KEY_BLOCK)
+                .signingKeyAlgorithm(KeyAlgorithm.ECC_NIST_P256)))
+                .isInstanceOf(AwsServiceException.class)
+                .satisfies(thrown -> assertThat(((AwsServiceException) thrown).awsErrorDetails()
+                        .errorCode()).isEqualTo("ValidationException"));
+    }
+
+    @Test
+    void aKeyLeavesTheServiceAndComesBackThroughATr34KeyBlock() {
+        // The parameters of the import name the certificate the block is wrapped under, and
+        // the parameters of the export name the certificate the block is signed with.
+        GetParametersForImportResponse importParameters = client.getParametersForImport(r -> r
+                .keyMaterialType(KeyMaterialType.TR34_KEY_BLOCK)
+                .wrappingKeyAlgorithm(KeyAlgorithm.RSA_2048));
+        GetParametersForExportResponse exportParameters = client.getParametersForExport(r -> r
+                .keyMaterialType(KeyMaterialType.TR34_KEY_BLOCK)
+                .signingKeyAlgorithm(KeyAlgorithm.RSA_2048));
+
+        // Each certificate is the authority of the party it belongs to.
+        Key receiver = importPublicKey(importParameters.wrappingKeyCertificate());
+        Key sender = importPublicKey(exportParameters.signingKeyCertificate());
+
+        Key key = createTdesKey();
+
+        ExportKeyResponse exported = client.exportKey(r -> r
+                .exportKeyIdentifier(key.keyArn())
+                .keyMaterial(m -> m.tr34KeyBlock(b -> b
+                        .certificateAuthorityPublicKeyIdentifier(receiver.keyArn())
+                        .wrappingKeyCertificate(importParameters.wrappingKeyCertificate())
+                        .exportToken(exportParameters.exportToken())
+                        .keyBlockFormat(Tr34KeyBlockFormat.X9_TR34_2012)
+                        .randomNonce("A1B2C3D4E5F60718"))));
+
+        assertThat(exported.wrappedKey().wrappedKeyMaterialFormat())
+                .isEqualTo(WrappedKeyMaterialFormat.TR34_KEY_BLOCK);
+        assertThat(exported.wrappedKey().keyMaterial()).isNotBlank();
+
+        ImportKeyResponse imported = client.importKey(r -> r
+                .keyMaterial(m -> m.tr34KeyBlock(b -> b
+                        .certificateAuthorityPublicKeyIdentifier(sender.keyArn())
+                        .signingKeyCertificate(exportParameters.signingKeyCertificate())
+                        .importToken(importParameters.importToken())
+                        .wrappedKeyBlock(exported.wrappedKey().keyMaterial())
+                        .keyBlockFormat(Tr34KeyBlockFormat.X9_TR34_2012)
+                        .randomNonce("A1B2C3D4E5F60718"))));
+
+        assertThat(imported.key().keyArn()).isNotBlank();
+        assertThat(imported.key().keyAttributes().keyUsage())
+                .isEqualTo(KeyUsage.TR31_D0_SYMMETRIC_DATA_ENCRYPTION_KEY);
+    }
+
+    @Test
+    void aKeyLeavesTheServiceAndComesBackThroughAnAs2805Cryptogram() {
+        Key encryptionKey = client.createKey(r -> r
+                .keyAttributes(a -> a
+                        .keyAlgorithm(KeyAlgorithm.AES_256)
+                        .keyClass(KeyClass.SYMMETRIC_KEY)
+                        .keyUsage(KeyUsage.TR31_K0_KEY_ENCRYPTION_KEY)
+                        .keyModesOfUse(modes -> modes.wrap(true).unwrap(true)))
+                .exportable(true))
+                .key();
+        keyArns.add(encryptionKey.keyArn());
+        Key key = createKey(KeyAlgorithm.AES_256, KeyUsage.TR31_P0_PIN_ENCRYPTION_KEY);
+
+        ExportKeyResponse exported = client.exportKey(r -> r
+                .exportKeyIdentifier(key.keyArn())
+                .keyMaterial(m -> m.as2805KeyCryptogram(b -> b
+                        .as2805KeyVariant(As2805KeyVariant.PIN_ENCRYPTION_KEY_VARIANT_28)
+                        .wrappingKeyIdentifier(encryptionKey.keyArn()))));
+
+        assertThat(exported.wrappedKey().wrappedKeyMaterialFormat())
+                .isEqualTo(WrappedKeyMaterialFormat.KEY_CRYPTOGRAM);
+        assertThat(exported.wrappedKey().keyMaterial()).isNotBlank();
+
+        ImportKeyResponse imported = client.importKey(r -> r
+                .keyMaterial(m -> m.as2805KeyCryptogram(b -> b
+                        .as2805KeyVariant(As2805KeyVariant.PIN_ENCRYPTION_KEY_VARIANT_28)
+                        .wrappingKeyIdentifier(encryptionKey.keyArn())
+                        .wrappedKeyCryptogram(exported.wrappedKey().keyMaterial())
+                        .keyAlgorithm(KeyAlgorithm.AES_256)
+                        .keyModesOfUse(modes -> modes.encrypt(true).decrypt(true))
+                        .exportable(true))));
+
+        assertThat(imported.key().keyArn()).isNotBlank();
+        assertThat(imported.key().keyAttributes().keyUsage())
+                .isEqualTo(KeyUsage.TR31_P0_PIN_ENCRYPTION_KEY);
+    }
+
+    @Test
+    void anAs2805ImportKeepsTheExportabilityTheRequestNamed() {
+        // The model carries the exportability at the top level of the AS2805 import, so a
+        // key imported as one that may not leave is one that may not leave.
+        Key encryptionKey = client.createKey(r -> r
+                .keyAttributes(a -> a
+                        .keyAlgorithm(KeyAlgorithm.AES_256)
+                        .keyClass(KeyClass.SYMMETRIC_KEY)
+                        .keyUsage(KeyUsage.TR31_K0_KEY_ENCRYPTION_KEY)
+                        .keyModesOfUse(modes -> modes.wrap(true).unwrap(true)))
+                .exportable(true))
+                .key();
+        keyArns.add(encryptionKey.keyArn());
+        Key key = createKey(KeyAlgorithm.AES_256, KeyUsage.TR31_P0_PIN_ENCRYPTION_KEY);
+
+        ExportKeyResponse exported = client.exportKey(r -> r
+                .exportKeyIdentifier(key.keyArn())
+                .keyMaterial(m -> m.as2805KeyCryptogram(b -> b
+                        .as2805KeyVariant(As2805KeyVariant.PIN_ENCRYPTION_KEY_VARIANT_28)
+                        .wrappingKeyIdentifier(encryptionKey.keyArn()))));
+
+        ImportKeyResponse imported = client.importKey(r -> r
+                .keyMaterial(m -> m.as2805KeyCryptogram(b -> b
+                        .as2805KeyVariant(As2805KeyVariant.PIN_ENCRYPTION_KEY_VARIANT_28)
+                        .wrappingKeyIdentifier(encryptionKey.keyArn())
+                        .wrappedKeyCryptogram(exported.wrappedKey().keyMaterial())
+                        .keyAlgorithm(KeyAlgorithm.AES_256)
+                        .keyModesOfUse(modes -> modes.encrypt(true).decrypt(true))
+                        .exportable(false))));
+
+        assertThat(imported.key().exportable()).isFalse();
+    }
+
+    @Test
+    void aCryptogramUnderEachSupportedVariantIsServed() {
+        // The model names four variants, and the service serves every one of them. A
+        // variant says what the key is for, so the key that leaves under it is a key of
+        // that purpose.
+        Key encryptionKey = client.createKey(r -> r
+                .keyAttributes(a -> a
+                        .keyAlgorithm(KeyAlgorithm.AES_256)
+                        .keyClass(KeyClass.SYMMETRIC_KEY)
+                        .keyUsage(KeyUsage.TR31_K0_KEY_ENCRYPTION_KEY)
+                        .keyModesOfUse(modes -> modes.wrap(true).unwrap(true)))
+                .exportable(true))
+                .key();
+        keyArns.add(encryptionKey.keyArn());
+
+        Map<As2805KeyVariant, KeyUsage> usages = Map.of(
+                As2805KeyVariant.TERMINAL_MAJOR_KEY_VARIANT_00,
+                        KeyUsage.TR31_K0_KEY_ENCRYPTION_KEY,
+                As2805KeyVariant.DATA_ENCRYPTION_KEY_VARIANT_22,
+                        KeyUsage.TR31_D0_SYMMETRIC_DATA_ENCRYPTION_KEY,
+                As2805KeyVariant.MESSAGE_AUTHENTICATION_KEY_VARIANT_24,
+                        KeyUsage.TR31_M0_ISO_16609_MAC_KEY,
+                As2805KeyVariant.PIN_ENCRYPTION_KEY_VARIANT_28,
+                        KeyUsage.TR31_P0_PIN_ENCRYPTION_KEY);
+
+        for (Map.Entry<As2805KeyVariant, KeyUsage> entry : usages.entrySet()) {
+            As2805KeyVariant variant = entry.getKey();
+            // The MAC usages are defined over Triple DES, so the key of that variant is a
+            // Triple DES one and not an AES one.
+            Key key = "TR31_M0_ISO_16609_MAC_KEY".equals(entry.getValue().toString())
+                    ? createKey(KeyAlgorithm.TDES_2_KEY, entry.getValue())
+                    : createKey(KeyAlgorithm.AES_256, entry.getValue());
+
+            ExportKeyResponse exported = client.exportKey(r -> r
+                    .exportKeyIdentifier(key.keyArn())
+                    .keyMaterial(m -> m.as2805KeyCryptogram(b -> b
+                            .as2805KeyVariant(variant)
+                            .wrappingKeyIdentifier(encryptionKey.keyArn()))));
+
+            assertThat(exported.wrappedKey().wrappedKeyMaterialFormat())
+                    .as(variant.toString())
+                    .isEqualTo(WrappedKeyMaterialFormat.KEY_CRYPTOGRAM);
+            assertThat(exported.wrappedKey().keyMaterial()).isNotBlank();
+        }
+    }
+    @Test
+    void aCryptogramUnderAKeyThatIsNotAKeyEncryptionKeyIsRefused() {
+        // A key that is neither a key encryption key nor a key block protection key cannot
+        // be the one a cryptogram is wrapped under.
+        Key dataKey = client.createKey(r -> r
+                .keyAttributes(a -> a
+                        .keyAlgorithm(KeyAlgorithm.AES_256)
+                        .keyClass(KeyClass.SYMMETRIC_KEY)
+                        .keyUsage(KeyUsage.TR31_D0_SYMMETRIC_DATA_ENCRYPTION_KEY)
+                        .keyModesOfUse(modes -> modes.encrypt(true).decrypt(true)))
+                .exportable(true))
+                .key();
+        keyArns.add(dataKey.keyArn());
+        Key key = createKey(KeyAlgorithm.AES_256, KeyUsage.TR31_P0_PIN_ENCRYPTION_KEY);
+
+        assertThatThrownBy(() -> client.exportKey(r -> r
+                .exportKeyIdentifier(key.keyArn())
+                .keyMaterial(m -> m.as2805KeyCryptogram(b -> b
+                        .as2805KeyVariant(As2805KeyVariant.PIN_ENCRYPTION_KEY_VARIANT_28)
+                        .wrappingKeyIdentifier(dataKey.keyArn())))))
+                .isInstanceOf(AwsServiceException.class)
+                .hasMessageContaining("key encryption key");
     }
 
     @Test
@@ -589,62 +791,4 @@ class PaymentCryptographyTest {
         return new JcaX509CertificateConverter().getCertificate(builder.build(
                 new JcaContentSignerBuilder("SHA256withRSA").build(issuer.getPrivate())));
     }
-
-    @Test
-    void anExportSigningKeyThatIsNotRsa2048IsRefused() {
-        // The block is signed with the key the export parameters issue, and the block's
-        // signature is an RSA one, so a signing key that is not an RSA_2048 one cannot
-        // sign it.
-        assertThatThrownBy(() -> client.getParametersForExport(r -> r
-                .keyMaterialType(KeyMaterialType.TR34_KEY_BLOCK)
-                .signingKeyAlgorithm(KeyAlgorithm.ECC_NIST_P256)))
-                .isInstanceOf(AwsServiceException.class)
-                .satisfies(thrown -> assertThat(((AwsServiceException) thrown).awsErrorDetails()
-                        .errorCode()).isEqualTo("ValidationException"));
-    }
-
-    @Test
-    void aKeyLeavesTheServiceAndComesBackThroughATr34KeyBlock() {
-        // The parameters of the import name the certificate the block is wrapped under, and
-        // the parameters of the export name the certificate the block is signed with.
-        GetParametersForImportResponse importParameters = client.getParametersForImport(r -> r
-                .keyMaterialType(KeyMaterialType.TR34_KEY_BLOCK)
-                .wrappingKeyAlgorithm(KeyAlgorithm.RSA_2048));
-        GetParametersForExportResponse exportParameters = client.getParametersForExport(r -> r
-                .keyMaterialType(KeyMaterialType.TR34_KEY_BLOCK)
-                .signingKeyAlgorithm(KeyAlgorithm.RSA_2048));
-
-        // Each certificate is the authority of the party it belongs to.
-        Key receiver = importPublicKey(importParameters.wrappingKeyCertificate());
-        Key sender = importPublicKey(exportParameters.signingKeyCertificate());
-
-        Key key = createTdesKey();
-
-        ExportKeyResponse exported = client.exportKey(r -> r
-                .exportKeyIdentifier(key.keyArn())
-                .keyMaterial(m -> m.tr34KeyBlock(b -> b
-                        .certificateAuthorityPublicKeyIdentifier(receiver.keyArn())
-                        .wrappingKeyCertificate(importParameters.wrappingKeyCertificate())
-                        .exportToken(exportParameters.exportToken())
-                        .keyBlockFormat(Tr34KeyBlockFormat.X9_TR34_2012)
-                        .randomNonce("A1B2C3D4E5F60718"))));
-
-        assertThat(exported.wrappedKey().wrappedKeyMaterialFormat())
-                .isEqualTo(WrappedKeyMaterialFormat.TR34_KEY_BLOCK);
-        assertThat(exported.wrappedKey().keyMaterial()).isNotBlank();
-
-        ImportKeyResponse imported = client.importKey(r -> r
-                .keyMaterial(m -> m.tr34KeyBlock(b -> b
-                        .certificateAuthorityPublicKeyIdentifier(sender.keyArn())
-                        .signingKeyCertificate(exportParameters.signingKeyCertificate())
-                        .importToken(importParameters.importToken())
-                        .wrappedKeyBlock(exported.wrappedKey().keyMaterial())
-                        .keyBlockFormat(Tr34KeyBlockFormat.X9_TR34_2012)
-                        .randomNonce("A1B2C3D4E5F60718"))));
-
-        assertThat(imported.key().keyArn()).isNotBlank();
-        assertThat(imported.key().keyAttributes().keyUsage())
-                .isEqualTo(KeyUsage.TR31_D0_SYMMETRIC_DATA_ENCRYPTION_KEY);
-    }
-
 }

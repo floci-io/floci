@@ -247,18 +247,34 @@ class PaymentCryptographyIntegrationTest {
     }
 
     @Test
-    void aRequestNamingAFormTheServiceDoesNotServeIsRefused() {
-        // The AS2805 form is one the model has and this service does not make yet.
+    void theAs2805FormIsServed() {
+        // The AS2805 form is one the service makes now, so a request that names one is
+        // refused for what it is missing and not for naming an unserved form.
         String arn = call("CreateKey", CREATE_KEY)
                 .then().statusCode(200)
                     .extract().path("Key.KeyArn");
 
         call("ExportKey", "{\"ExportKeyIdentifier\":\"" + arn + "\",\"KeyMaterial\":{"
                 + "\"As2805KeyCryptogram\":{\"As2805KeyVariant\":"
-                + "\"PIN_ENCRYPTION_KEY_VARIANT_28\",\"WrappingKeyIdentifier\":\"" + arn + "\"}}}")
+                + "\"PIN_ENCRYPTION_KEY_VARIANT_28\"}}}")
                 .then().statusCode(400)
                     .body("__type", equalTo("ValidationException"))
-                    .body("message", containsString("not a form the service exports"));
+                    .body("message", containsString("WrappingKeyIdentifier"));
+    }
+
+
+    @Test
+    void aRequestNamingNoFormIsRefused() {
+        // Every form the model names is one the service makes now, so a request that
+        // names none of them names no form at all.
+        String arn = call("CreateKey", CREATE_KEY)
+                .then().statusCode(200)
+                    .extract().path("Key.KeyArn");
+
+        call("ExportKey", "{\"ExportKeyIdentifier\":\"" + arn + "\",\"KeyMaterial\":{}}")
+                .then().statusCode(400)
+                    .body("__type", equalTo("ValidationException"))
+                    .body("message", containsString("must specify exactly one variant"));
     }
 
     /**
@@ -426,6 +442,37 @@ class PaymentCryptographyIntegrationTest {
                 + "\"KeyBlockFormat\":\"X9_TR34_2012\"}}}");
 
         assertTheModelRefused(answer, "WrappedKeyBlock");
+    }
+
+    @Test
+    void theModelCheckRefusesAnAs2805ExportWithoutItsWrappingKey() {
+        Response answer = call("ExportKey", "{\"ExportKeyIdentifier\":\"" + keyArn() + "\","
+                + "\"KeyMaterial\":{\"As2805KeyCryptogram\":{"
+                + "\"As2805KeyVariant\":\"PIN_ENCRYPTION_KEY_VARIANT_28\"}}}");
+
+        assertTheModelRefused(answer, "WrappingKeyIdentifier");
+    }
+
+    @Test
+    void theModelCheckRefusesAnAs2805ExportUnderAVariantItDoesNotName() {
+        Response answer = call("ExportKey", "{\"ExportKeyIdentifier\":\"" + keyArn() + "\","
+                + "\"KeyMaterial\":{\"As2805KeyCryptogram\":{"
+                + "\"As2805KeyVariant\":\"TERMINAL_MINOR_KEY_VARIANT_01\","
+                + "\"WrappingKeyIdentifier\":\"" + keyArn() + "\"}}}");
+
+        assertTheModelRefused(answer, "As2805KeyVariant");
+    }
+
+    @Test
+    void theModelCheckRefusesAnAs2805ImportWithoutItsWrappedKeyCryptogram() {
+        Response answer = call("ImportKey", "{\"KeyMaterial\":{\"As2805KeyCryptogram\":{"
+                + "\"As2805KeyVariant\":\"PIN_ENCRYPTION_KEY_VARIANT_28\","
+                + "\"KeyModesOfUse\":{\"Encrypt\":true,\"Decrypt\":true},"
+                + "\"KeyAlgorithm\":\"AES_256\","
+                + "\"Exportable\":true,"
+                + "\"WrappingKeyIdentifier\":\"" + keyArn() + "\"}}}");
+
+        assertTheModelRefused(answer, "WrappedKeyCryptogram");
     }
 
     private static void assertTheModelRefused(Response answer, String member) {

@@ -416,6 +416,7 @@ class PaymentCryptographyKeyExchangeTest {
                 () -> service.exportKey("us-east-1", key.getKeyId(), "Nonsense", Map.of(), "", ""));
         assertEquals("ValidationException", refused.getErrorCode());
     }
+
     @Test
     void aKeyThatLeavesUnderACertificateComesBack() {
         // The service that exports mints the parameters; the service that imports holds the
@@ -504,6 +505,84 @@ class PaymentCryptographyKeyExchangeTest {
                 () -> service.importKey("us-east-1", "Tr34KeyBlock", incoming, "", true, Map.of()));
         assertEquals("ValidationException", refused.getErrorCode());
     }
+
+    @Test
+    void aKeyThatLeavesUnderAnAs2805CryptogramComesBack() {
+        PaymentCryptographyKey kek = createKey("AES_256", "TR31_K0_KEY_ENCRYPTION_KEY");
+        PaymentCryptographyKey key = createKey("AES_256", "TR31_P0_PIN_ENCRYPTION_KEY");
+
+        Map<String, Object> material = Map.of(
+                "As2805KeyVariant", "PIN_ENCRYPTION_KEY_VARIANT_28",
+                "WrappingKeyIdentifier", kek.getKeyId());
+
+        Map<String, Object> answer = service.exportKey("us-east-1", key.getKeyId(),
+                "As2805KeyCryptogram", material, "", "");
+        Map<?, ?> wrapped = (Map<?, ?>) answer.get("WrappedKey");
+        assertEquals("KEY_CRYPTOGRAM", wrapped.get("WrappedKeyMaterialFormat"));
+
+        Map<String, Object> incoming = Map.of(
+                "As2805KeyVariant", "PIN_ENCRYPTION_KEY_VARIANT_28",
+                "WrappingKeyIdentifier", kek.getKeyId(),
+                "WrappedKeyCryptogram", wrapped.get("KeyMaterial"),
+                "KeyAlgorithm", "AES_256",
+                "KeyAttributes", Map.of(
+                        "KeyAlgorithm", "AES_256",
+                        "KeyClass", "SYMMETRIC_KEY",
+                        "KeyUsage", "TR31_P0_PIN_ENCRYPTION_KEY",
+                        "KeyModesOfUse", Map.of("Encrypt", true, "Decrypt", true)),
+                "Exportable", true);
+
+        PaymentCryptographyKey imported = service.importKey("us-east-1", "As2805KeyCryptogram",
+                incoming, "", true, Map.of());
+
+        assertEquals(key.getKeyMaterialHex(), imported.getKeyMaterialHex());
+        assertEquals("TR31_P0_PIN_ENCRYPTION_KEY", imported.getKeyUsage());
+    }
+
+    @Test
+    void aCryptogramUnderAVariantTheServiceDoesNotServeIsRefused() {
+        // The model's union names four variants, and the service serves every one of them,
+        // so a variant outside the four names no variant at all.
+        PaymentCryptographyKey kek = createKey("AES_256", "TR31_K0_KEY_ENCRYPTION_KEY");
+        PaymentCryptographyKey key = createKey("AES_256", "TR31_P0_PIN_ENCRYPTION_KEY");
+
+        AwsException refused = assertThrows(AwsException.class,
+                () -> service.exportKey("us-east-1", key.getKeyId(), "As2805KeyCryptogram",
+                        Map.of(
+                                "As2805KeyVariant", "TERMINAL_MINOR_KEY_VARIANT_01",
+                                "WrappingKeyIdentifier", kek.getKeyId()), "", ""));
+        assertEquals("ValidationException", refused.getErrorCode());
+    }
+
+    @Test
+    void aCryptogramThatIsWrappedUnderTheWrongVariantDoesNotOpen() {
+        PaymentCryptographyKey kek = createKey("AES_256", "TR31_K0_KEY_ENCRYPTION_KEY");
+        PaymentCryptographyKey key = createKey("AES_256", "TR31_P0_PIN_ENCRYPTION_KEY");
+
+        Map<String, Object> answer = service.exportKey("us-east-1", key.getKeyId(),
+                "As2805KeyCryptogram", Map.of(
+                        "As2805KeyVariant", "PIN_ENCRYPTION_KEY_VARIANT_28",
+                        "WrappingKeyIdentifier", kek.getKeyId()), "", "");
+        Map<?, ?> wrapped = (Map<?, ?>) answer.get("WrappedKey");
+
+        Map<String, Object> incoming = Map.of(
+                "As2805KeyVariant", "DATA_ENCRYPTION_KEY_VARIANT_22",
+                "WrappingKeyIdentifier", kek.getKeyId(),
+                "WrappedKeyCryptogram", wrapped.get("KeyMaterial"),
+                "KeyAlgorithm", "AES_256",
+                "KeyAttributes", Map.of(
+                        "KeyAlgorithm", "AES_256",
+                        "KeyClass", "SYMMETRIC_KEY",
+                        "KeyUsage", "TR31_D0_SYMMETRIC_DATA_ENCRYPTION_KEY",
+                        "KeyModesOfUse", Map.of("Encrypt", true, "Decrypt", true)),
+                "Exportable", true);
+
+        AwsException refused = assertThrows(AwsException.class,
+                () -> service.importKey("us-east-1", "As2805KeyCryptogram", incoming, "", true,
+                        Map.of()));
+        assertEquals("ValidationException", refused.getErrorCode());
+    }
+
     @ParameterizedTest
     @ValueSource(strings = {"RSA_3072", "RSA_4096", "ECC_NIST_P256", "ECC_NIST_P384", "ECC_NIST_P521"})
     void anExportSigningKeyThatIsNotRsa2048IsRefused(String algorithm) {

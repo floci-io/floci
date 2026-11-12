@@ -49,6 +49,8 @@ import java.util.concurrent.ConcurrentHashMap;
  *       receiver under their certificate.
  *   <li>{@code DiffieHellmanTr31KeyBlock}: a TR-31 key block under a key the two parties
  *       agreed with ECDH.
+ *   <li>{@code As2805KeyCryptogram}: the key material under a key encryption key, bound to
+ *       its purpose by the AS2805 variant.
  * </ul>
  *
  * <p>The import takes the same forms and two more: a root or trusted public key may arrive
@@ -65,7 +67,8 @@ final class PaymentCryptographyKeyExchange {
             "Tr31KeyBlock",
             "KeyCryptogram",
             "Tr34KeyBlock",
-            "DiffieHellmanTr31KeyBlock");
+            "DiffieHellmanTr31KeyBlock",
+            "As2805KeyCryptogram");
 
     /** The forms the import takes, in the order the service lists them. */
     static final List<String> IMPORT_FORMS = List.of(
@@ -74,7 +77,8 @@ final class PaymentCryptographyKeyExchange {
             "Tr34KeyBlock",
             "RootCertificatePublicKey",
             "TrustedCertificatePublicKey",
-            "DiffieHellmanTr31KeyBlock");
+            "DiffieHellmanTr31KeyBlock",
+            "As2805KeyCryptogram");
 
     /** The key material types that take import parameters. */
     private static final List<String> IMPORT_PARAMETER_TYPES =
@@ -232,6 +236,7 @@ final class PaymentCryptographyKeyExchange {
             case "Tr31KeyBlock" -> exportTr31(region, key, clear, material);
             case "KeyCryptogram" -> exportCryptogram(region, key, clear, material);
             case "Tr34KeyBlock" -> exportTr34(region, key, clear, material);
+            case "As2805KeyCryptogram" -> exportAs2805(region, key, clear, material);
             case "DiffieHellmanTr31KeyBlock" -> exportEcdh(region, key, clear, material);
             default -> throw validation("KeyMaterial." + form + " is not a form the service exports ("
                     + String.join(", ", EXPORT_FORMS) + ")");
@@ -345,6 +350,7 @@ final class PaymentCryptographyKeyExchange {
             case "Tr31KeyBlock" -> importTr31(region, material);
             case "KeyCryptogram" -> importCryptogram(material);
             case "Tr34KeyBlock" -> importTr34(region, material);
+            case "As2805KeyCryptogram" -> importAs2805(region, material);
             case "RootCertificatePublicKey" -> importPublicKey(region, material, "");
             case "TrustedCertificatePublicKey" -> importPublicKey(region, material,
                     text(material, "CertificateAuthorityPublicKeyIdentifier"));
@@ -1249,8 +1255,49 @@ final class PaymentCryptographyKeyExchange {
         return new Exported(HEX_UPPER.formatHex(block), "TR34_KEY_BLOCK", null);
     }
 
-
-
+    /** An AS2805 cryptogram, under a key encryption key. */
+    private Exported exportAs2805(String region, PaymentCryptographyKey key, byte[] clear,
+                                  Map<String, Object> material) {
+        // The shape check settles the members the model requires and the values it names,
+        // so the variant is one of the four and the wrapping key is named. The rule stays
+        // because the variant also says what the key is for, so a call that goes past the
+        // shape check is refused by the service's own rules instead of carrying a variant
+        // that names nothing.
+        String variantName = text(material, "As2805KeyVariant");
+        PaymentCryptographyAs2805Variant variant =
+                PaymentCryptographyAs2805Variant.from(variantName);
+        if (variant == null) {
+            throw validation("KeyMaterial.As2805KeyCryptogram.As2805KeyVariant '" + variantName
+                    + "' not supported (TERMINAL_MAJOR_KEY_VARIANT_00, "
+                    + "DATA_ENCRYPTION_KEY_VARIANT_22, MESSAGE_AUTHENTICATION_KEY_VARIANT_24, "
+                    + "PIN_ENCRYPTION_KEY_VARIANT_28)");
+        }
+        String wrappingKeyIdentifier = text(material, "WrappingKeyIdentifier");
+        PaymentCryptographyKey kek = usableKey(wrappingKeyIdentifier, region);
+        if (!PaymentCryptographyService.mayWrap(kek)) {
+            throw validation("the key " + kek.getArn() + " does not have the mode of use Wrap, "
+                    + "which it needs to wrap a key cryptogram");
+        }
+        if (!"TR31_K0_KEY_ENCRYPTION_KEY".equals(kek.getKeyUsage())
+                && !"TR31_K1_KEY_BLOCK_PROTECTION_KEY".equals(kek.getKeyUsage())) {
+            // The import insists on a key encryption key, so an export that accepted any other
+            // key would produce something its own import rejects.
+            throw validation("an AS2805 cryptogram is wrapped under a key encryption key, but "
+                    + kek.getArn() + " is " + kek.getKeyUsage());
+        }
+        PaymentCryptographyKeyAlgorithm kekAlgorithm =
+                PaymentCryptographyKeyAlgorithm.from(kek.getKeyAlgorithm());
+        PaymentCryptographyKeyAlgorithm algorithm =
+                PaymentCryptographyKeyAlgorithm.from(key.getKeyAlgorithm());
+        String tooWeak = PaymentCryptographyKeyStrength.refusal(kek.getKeyAlgorithm(),
+                key.getKeyAlgorithm());
+        if (tooWeak != null) {
+            throw validation(tooWeak);
+        }
+        String cryptogram = PaymentCryptographyAs2805Cryptogram.wrap(clear, variant.variantByte(),
+                algorithm, PaymentCryptographyCrypto.fromHex(kek.getKeyMaterialHex()), kekAlgorithm);
+        return new Exported(cryptogram, "KEY_CRYPTOGRAM", kek.getArn());
+    }
 
     /** A key out of a TR-34 key block. */
     private Imported importTr34(String region, Map<String, Object> material) {
@@ -1303,5 +1350,61 @@ final class PaymentCryptographyKeyExchange {
                 exportableOnImport(exportability), clear, null, null, null, "SYMMETRIC_KEY");
     }
 
+    /** A key out of an AS2805 cryptogram. */
+    private Imported importAs2805(String region, Map<String, Object> material) {
+        // The shape check settles the members the model requires and the values it names,
+        // so the variant is one of the four and the wrapping key is named. The rule stays
+        // because the variant also says what the key is for, so a call that goes past the
+        // shape check is refused by the service's own rules instead of carrying a variant
+        // that names nothing.
+        String variantName = text(material, "As2805KeyVariant");
+        PaymentCryptographyAs2805Variant variant =
+                PaymentCryptographyAs2805Variant.from(variantName);
+        if (variant == null) {
+            throw validation("KeyMaterial.As2805KeyCryptogram.As2805KeyVariant '" + variantName
+                    + "' not supported (TERMINAL_MAJOR_KEY_VARIANT_00, "
+                    + "DATA_ENCRYPTION_KEY_VARIANT_22, MESSAGE_AUTHENTICATION_KEY_VARIANT_24, "
+                    + "PIN_ENCRYPTION_KEY_VARIANT_28)");
+        }
+        String wrappingKeyIdentifier = text(material, "WrappingKeyIdentifier");
+        PaymentCryptographyKey kek = usableKey(wrappingKeyIdentifier, region);
+        if (!"TR31_K0_KEY_ENCRYPTION_KEY".equals(kek.getKeyUsage())
+                && !"TR31_K1_KEY_BLOCK_PROTECTION_KEY".equals(kek.getKeyUsage())) {
+            throw validation("an AS2805 cryptogram is wrapped under a key encryption key, but "
+                    + kek.getArn() + " is " + kek.getKeyUsage());
+        }
+        // The wrapping key opens an incoming cryptogram, so it has to be allowed to unwrap.
+        // The model names no error code of its own for this, so it is a validation error,
+        // as the rest of the refusals about a key's modes of use are.
+        if (!PaymentCryptographyService.mayUnwrap(kek)) {
+            throw validation("the key " + kek.getArn() + " does not have the mode of use Unwrap, "
+                    + "which it needs to unwrap a key");
+        }
+        String cryptogram = text(material, "WrappedKeyCryptogram");
+        String algorithmName = text(material, "KeyAlgorithm");
+        PaymentCryptographyKeyAlgorithm algorithm =
+                PaymentCryptographyKeyAlgorithm.from(algorithmName);
+        if (algorithm == null || !algorithm.symmetric()) {
+            throw validation("KeyAlgorithm '" + algorithmName + "' is not a symmetric algorithm this "
+                    + "service imports (TDES_2KEY, TDES_3KEY, AES_128, AES_192, AES_256)");
+        }
+        PaymentCryptographyKeyAlgorithm kekAlgorithm =
+                PaymentCryptographyKeyAlgorithm.from(kek.getKeyAlgorithm());
+        byte[] clear;
+        try {
+            clear = PaymentCryptographyAs2805Cryptogram.unwrap(cryptogram, variant.variantByte(),
+                    algorithm, PaymentCryptographyCrypto.fromHex(kek.getKeyMaterialHex()),
+                    kekAlgorithm);
+        } catch (RuntimeException e) {
+            throw validation("the AS2805 cryptogram did not open: " + e.getMessage());
+        }
+        // The model carries the modes of use and the exportability at the top level of the
+        // AS2805 import, and it names no usage: the variant says what the key is for.
+        Map<String, Boolean> modes = modesOf(material);
+        String usage = variant.usage();
+        boolean exportable = Boolean.TRUE.equals(material.get("Exportable"));
+        return new Imported(algorithmName, usage, modes, exportable, clear, null, null, null,
+                "SYMMETRIC_KEY");
+    }
 
 }
