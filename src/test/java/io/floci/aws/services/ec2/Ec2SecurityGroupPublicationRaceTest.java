@@ -2,6 +2,7 @@ package io.floci.aws.services.ec2;
 
 import io.floci.aws.config.EmulatorConfig;
 import io.floci.aws.core.common.AwsException;
+import io.floci.aws.core.storage.InMemoryStorage;
 import io.floci.aws.services.ec2.model.Instance;
 import io.floci.aws.services.ec2.model.InstanceState;
 import io.floci.aws.services.ec2.model.NetworkInterface;
@@ -14,6 +15,8 @@ import io.floci.aws.services.ec2.portforward.Ec2PortForwardManager;
 import io.floci.aws.testing.InMemoryStorageFactory;
 import io.floci.aws.testing.ParkingStore;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.CsvSource;
 
 import java.util.List;
 import java.util.Map;
@@ -32,6 +35,73 @@ import static org.junit.jupiter.api.Assertions.*;
 import static org.mockito.Mockito.*;
 
 class Ec2SecurityGroupPublicationRaceTest {
+    @ParameterizedTest
+    @CsvSource({"group,false", "group,true", "rule,false", "rule,true"})
+    void failedCreationRemovesOnlyItsOwnGroupAndDefaultRule(String failingStore, boolean afterWrite) {
+        TestStores factory = new TestStores();
+        InMemoryStorage<String, SecurityGroup> groups = spy(new InMemoryStorage<>());
+        InMemoryStorage<String, SecurityGroupRule> rules = spy(new InMemoryStorage<>());
+        factory.storage.withStore("ec2-security-groups.json", groups)
+                .withStore("ec2-security-group-rules.json", rules);
+        Ec2Service service = service(factory);
+        String region = "us-east-1";
+        String vpc = service.createVpc(region, "10.0.0.0/16", false).getVpcId();
+        SecurityGroup existing = service.createSecurityGroup(region, "existing", "existing", vpc);
+        List<String> beforeGroups = service.describeSecurityGroups(region, List.of(), List.of(), Map.of())
+                .stream().map(SecurityGroup::getGroupId).sorted().toList();
+        List<String> beforeRules = service.describeSecurityGroupRules(region, List.of(), List.of())
+                .stream().map(SecurityGroupRule::getSecurityGroupRuleId).sorted().toList();
+        IllegalStateException failure = new IllegalStateException("injected publication failure");
+        if ("group".equals(failingStore)) {
+            doAnswer(call -> {
+                if (afterWrite) {
+                    call.callRealMethod();
+                }
+                throw failure;
+            }).when(groups).put(anyString(), any(SecurityGroup.class));
+        } else {
+            doAnswer(call -> {
+                if (afterWrite) {
+                    call.callRealMethod();
+                }
+                throw failure;
+            }).when(rules).put(anyString(), any(SecurityGroupRule.class));
+        }
+        assertSame(failure, assertThrows(IllegalStateException.class,
+                () -> service.createSecurityGroup(region, "failed", "failed", vpc)));
+        assertEquals(beforeGroups, service.describeSecurityGroups(region, List.of(), List.of(), Map.of())
+                .stream().map(SecurityGroup::getGroupId).sorted().toList());
+        assertEquals(beforeRules, service.describeSecurityGroupRules(region, List.of(), List.of())
+                .stream().map(SecurityGroupRule::getSecurityGroupRuleId).sorted().toList());
+        reset(groups, rules);
+        SecurityGroup retry = service.createSecurityGroup(region, "failed", "retry", vpc);
+        assertNotEquals(existing.getGroupId(), retry.getGroupId());
+        assertEquals(1, service.describeSecurityGroupRules(region, List.of(retry.getGroupId()), List.of()).size());
+    }
+
+    @Test
+    void failedCreationRetainsOriginalFailureAndAttemptsBothCleanupWrites() {
+        TestStores factory = new TestStores();
+        InMemoryStorage<String, SecurityGroup> groups = spy(new InMemoryStorage<>());
+        InMemoryStorage<String, SecurityGroupRule> rules = spy(new InMemoryStorage<>());
+        factory.storage.withStore("ec2-security-groups.json", groups)
+                .withStore("ec2-security-group-rules.json", rules);
+        Ec2Service service = service(factory);
+        String region = "us-east-1";
+        String vpc = service.createVpc(region, "10.0.0.0/16", false).getVpcId();
+        IllegalStateException failure = new IllegalStateException("rule publication failed");
+        IllegalStateException ruleCleanup = new IllegalStateException("rule cleanup failed");
+        IllegalStateException groupCleanup = new IllegalStateException("group cleanup failed");
+        doThrow(failure).when(rules).put(anyString(), any(SecurityGroupRule.class));
+        doThrow(ruleCleanup).when(rules).delete(anyString());
+        doThrow(groupCleanup).when(groups).delete(anyString());
+        assertSame(failure, assertThrows(IllegalStateException.class,
+                () -> service.createSecurityGroup(region, "failed", "failed", vpc)));
+        assertArrayEquals(new Throwable[]{ruleCleanup, groupCleanup}, failure.getSuppressed());
+        verify(rules).delete(anyString());
+        verify(groups).delete(anyString());
+    }
+
     @Test
     void concurrentSameNameCreationRejectsTheSecondPublication() throws Exception {
         TestStores factory = new TestStores();

@@ -7892,11 +7892,36 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
                 throw new AwsException("InvalidGroup.Duplicate",
                         "The security group '" + groupName + "' already exists", 400);
             }
-            securityGroups.put(key(region, sgId), sg);
-            // Publish the default rule before a concurrent delete can remove this group.
-            createRules(region, sgId, egressAll, true);
+            SecurityGroupRule defaultRule = newRule(sgId, egressAll, true);
+            defaultRule.setCidrIpv4("0.0.0.0/0");
+            try {
+                securityGroups.put(key(region, sgId), sg);
+                // Publish the default rule before a concurrent delete can remove this group.
+                securityGroupRules.put(key(region, defaultRule.getSecurityGroupRuleId()), defaultRule);
+            } catch (RuntimeException failure) {
+                rollbackSecurityGroupCreation(region, sgId, defaultRule.getSecurityGroupRuleId(), failure);
+                throw failure;
+            }
         }
         return sg;
+    }
+
+    private void rollbackSecurityGroupCreation(String region, String groupId, String ruleId,
+                                               RuntimeException failure) {
+        try {
+            securityGroupRules.delete(key(region, ruleId));
+        } catch (RuntimeException cleanupFailure) {
+            failure.addSuppressed(cleanupFailure);
+            LOG.errorv(cleanupFailure, "Failed to remove default rule {0} after group creation failed in {1}",
+                    ruleId, region);
+        }
+        try {
+            securityGroups.delete(key(region, groupId));
+        } catch (RuntimeException cleanupFailure) {
+            failure.addSuppressed(cleanupFailure);
+            LOG.errorv(cleanupFailure, "Failed to remove security group {0} after creation failed in {1}",
+                    groupId, region);
+        }
     }
 
     public List<SecurityGroup> describeSecurityGroups(String region, List<String> groupIds,
