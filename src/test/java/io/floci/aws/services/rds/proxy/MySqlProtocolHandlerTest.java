@@ -54,6 +54,7 @@ class MySqlProtocolHandlerTest {
     private static final int CLIENT_SECURE_CONNECTION = 0x8000;
     private static final int CLIENT_SSL = 0x0800;
     private static final int CLIENT_COMPRESS = 0x0020;
+    private static final int CLIENT_MULTI_STATEMENTS = 0x0001_0000;
     private static final int CLIENT_PLUGIN_AUTH = 0x0008_0000;
     private static final String MYSQL_NATIVE_PASSWORD = "mysql_native_password";
     private static final String MYSQL_CLEAR_PASSWORD = "mysql_clear_password";
@@ -667,6 +668,97 @@ class MySqlProtocolHandlerTest {
             byte[] payload = decodeCompressedFrame(forwarded, "zstd".equals(compression));
             assertArrayEquals(expectedRewrittenIamCommand(operation), payload);
         });
+    }
+
+    @ParameterizedTest
+    @CsvSource({"plain,false", "plain,true", "zlib,false", "zlib,true", "zstd,false", "zstd,true"})
+    void rewritesIamUserDdlAfterStatementInCompressedQuery(String compression, boolean split) throws Exception {
+        String sql = "SET @x=1; CREATE USER 'app'@'%' IDENTIFIED WITH AWSAuthenticationPlugin AS 'RDS'";
+        byte[] query = new byte[sql.length() + 1];
+        query[0] = 0x03;
+        System.arraycopy(sql.getBytes(StandardCharsets.US_ASCII), 0, query, 1, sql.length());
+        byte[] command = wrapPacket(0, query);
+        int splitAt = 5 + "SET @x=1; ".length();
+        byte[] firstFrame = wrapCompressedCommand(
+                split ? Arrays.copyOf(command, splitAt) : command, compression, 0);
+        byte[] secondFrame = split ? wrapCompressedCommand(
+                Arrays.copyOfRange(command, splitAt, command.length), compression, 1) : null;
+        int compressionCapability = "zstd".equals(compression)
+                ? CLIENT_ZSTD_COMPRESSION_ALGORITHM : CLIENT_COMPRESS;
+        int capabilities = CLIENT_COMPRESS | compressionCapability | CLIENT_MULTI_STATEMENTS;
+        withLoggedInClient(capabilities, capabilities, false, streams -> {
+            assertTrue((streams.backendClientCapabilities() & CLIENT_MULTI_STATEMENTS) != 0);
+            streams.clientOut().write(firstFrame);
+            if (secondFrame != null) {
+                streams.clientOut().write(secondFrame);
+            }
+            streams.clientOut().flush();
+            ByteArrayOutputStream forwarded = new ByteArrayOutputStream();
+            forwarded.writeBytes(decodeCompressedFrame(
+                    readCompressedFrame(streams.backendIn()), "zstd".equals(compression)));
+            if (secondFrame != null) {
+                forwarded.writeBytes(decodeCompressedFrame(
+                        readCompressedFrame(streams.backendIn()), "zstd".equals(compression)));
+            }
+            String expectedSql = "SET @x=1; CREATE USER 'app'@'%' IDENTIFIED WITH mysql_native_password AS "
+                    + "'*0000000000000000000000000000000000000000'";
+            byte[] expected = new byte[expectedSql.length() + 1];
+            expected[0] = 0x03;
+            System.arraycopy(expectedSql.getBytes(StandardCharsets.US_ASCII), 0,
+                    expected, 1, expectedSql.length());
+            assertArrayEquals(wrapPacket(0, expected), forwarded.toByteArray());
+            byte[] response = wrapCompressedPacket(wrapPacket(1, OK_PAYLOAD), split ? 2 : 1);
+            streams.backendOut().write(response);
+            streams.backendOut().flush();
+            assertArrayEquals(response, readCompressedFrame(streams.clientIn()));
+        });
+    }
+
+    @Test
+    void leavesDifferentPluginIdentifierUnchangedInCompressedUserDdl() throws Exception {
+        String sql = "CREATE USER a IDENTIFIED WITH AWSAuthenticationPluginSuffix AS 'x'";
+        byte[] query = new byte[sql.length() + 1];
+        query[0] = 0x03;
+        System.arraycopy(sql.getBytes(StandardCharsets.US_ASCII), 0, query, 1, sql.length());
+        byte[] frame = wrapCompressedPacket(wrapPacket(0, query));
+        ByteArrayOutputStream output = new ByteArrayOutputStream();
+        MySqlCompressedCommandRelay.relay(new ByteArrayInputStream(frame), output, false);
+        assertArrayEquals(frame, output.toByteArray());
+    }
+
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    void rewritesCompressedIamUserDdlInExecutableVersionComment(boolean split) throws Exception {
+        String sql = "/*!50000 CREATE USER 'app'@'%' IDENTIFIED WITH AWSAuthenticationPlugin AS 'RDS' */";
+        byte[] query = new byte[sql.length() + 1];
+        query[0] = 0x03;
+        System.arraycopy(sql.getBytes(StandardCharsets.US_ASCII), 0, query, 1, sql.length());
+        byte[] command = wrapPacket(0, query);
+        int splitAt = 7;
+        byte[] firstFrame = wrapCompressedPacket(split ? Arrays.copyOf(command, splitAt) : command, 0);
+        byte[] secondFrame = split
+                ? wrapCompressedPacket(Arrays.copyOfRange(command, splitAt, command.length), 1) : null;
+        ByteArrayOutputStream input = new ByteArrayOutputStream();
+        input.writeBytes(firstFrame);
+        if (secondFrame != null) {
+            input.writeBytes(secondFrame);
+        }
+        ByteArrayOutputStream output = new ByteArrayOutputStream();
+        MySqlCompressedCommandRelay.relay(new ByteArrayInputStream(input.toByteArray()), output, false);
+        ByteArrayInputStream forwarded = new ByteArrayInputStream(output.toByteArray());
+        ByteArrayOutputStream decoded = new ByteArrayOutputStream();
+        decoded.writeBytes(decodeCompressedFrame(readCompressedFrame(forwarded), false));
+        if (secondFrame != null) {
+            decoded.writeBytes(decodeCompressedFrame(readCompressedFrame(forwarded), false));
+        }
+        String expectedSql = "/*!50000 CREATE USER 'app'@'%' IDENTIFIED WITH mysql_native_password AS "
+                + "'*0000000000000000000000000000000000000000' */";
+        byte[] expected = new byte[expectedSql.length() + 1];
+        expected[0] = 0x03;
+        System.arraycopy(expectedSql.getBytes(StandardCharsets.US_ASCII), 0,
+                expected, 1, expectedSql.length());
+        assertArrayEquals(wrapPacket(0, expected), decoded.toByteArray());
+        assertEquals(-1, forwarded.read());
     }
 
     @ParameterizedTest

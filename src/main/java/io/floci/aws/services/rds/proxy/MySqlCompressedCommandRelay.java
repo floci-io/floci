@@ -31,6 +31,11 @@ final class MySqlCompressedCommandRelay {
 
     static void relay(InputStream from, OutputStream to, boolean zstd, boolean queryAttributes)
             throws IOException {
+        relay(from, to, zstd, queryAttributes, false);
+    }
+
+    static void relay(InputStream from, OutputStream to, boolean zstd, boolean queryAttributes,
+                      boolean multiStatements) throws IOException {
         PacketBuffer pending = new PacketBuffer();
         List<byte[]> frames = new ArrayList<>();
         boolean forwardedTail = false;
@@ -83,7 +88,9 @@ final class MySqlCompressedCommandRelay {
                 byte[] raw = Arrays.copyOfRange(input, offset, offset + 4 + length);
                 byte[] replacement = (forwardedTail && offset < previouslyForwarded)
                         || continuingPacket || length > MAX_INSPECTION_BYTES
-                        || length == 0 || (raw[4] & 0xFF) != COM_QUERY || !isUserDdl(raw, queryAttributes)
+                        || length == 0 || (raw[4] & 0xFF) != COM_QUERY
+                        || (queryAttributes && (raw.length < 7 || raw[5] != 0 || raw[6] != 1))
+                        || (!multiStatements && !isUserDdl(raw, queryAttributes))
                         ? null : MySqlProtocolHandler.rewriteIamAuthPlugin(
                                 Arrays.copyOfRange(raw, 4, raw.length));
                 continuingPacket = length == MAX_PACKET_PAYLOAD;
@@ -112,7 +119,7 @@ final class MySqlCompressedCommandRelay {
                 }
                 if (available >= 4) {
                     PrefixStatus prefix = confirmedUserDdl ? PrefixStatus.USER_DDL
-                            : inspectUserDdlPrefix(input, available, queryAttributes);
+                            : inspectUserDdlPrefix(input, available, queryAttributes, multiStatements);
                     confirmedUserDdl = prefix == PrefixStatus.USER_DDL;
                     if (forwardedTail || available > MAX_INSPECTION_BYTES
                             || bufferedEncodedBytes > MAX_INSPECTION_BYTES
@@ -193,7 +200,8 @@ final class MySqlCompressedCommandRelay {
         }
     }
 
-    private static PrefixStatus inspectUserDdlPrefix(byte[] bytes, int available, boolean queryAttributes) {
+    private static PrefixStatus inspectUserDdlPrefix(byte[] bytes, int available, boolean queryAttributes,
+                                                     boolean multiStatements) {
         if (available < 5) {
             return PrefixStatus.POSSIBLE;
         }
@@ -209,6 +217,9 @@ final class MySqlCompressedCommandRelay {
                 return PrefixStatus.OTHER;
             }
             offset += 2;
+        }
+        if (multiStatements) {
+            return PrefixStatus.USER_DDL;
         }
         offset = skipIgnored(bytes, offset, available);
         if (offset == available || couldStartComment(bytes, offset, available)) {
@@ -297,6 +308,12 @@ final class MySqlCompressedCommandRelay {
         while (offset < limit) {
             if (isSqlSpace(bytes[offset])) {
                 offset++;
+            } else if (bytes[offset] == '/' && offset + 2 < limit
+                    && bytes[offset + 1] == '*' && bytes[offset + 2] == '!') {
+                offset += 3;
+                while (offset < limit && bytes[offset] >= '0' && bytes[offset] <= '9') {
+                    offset++;
+                }
             } else if (bytes[offset] == '/' && offset + 1 < limit && bytes[offset + 1] == '*') {
                 offset += 2;
                 while (offset + 1 < limit && !(bytes[offset] == '*' && bytes[offset + 1] == '/')) {

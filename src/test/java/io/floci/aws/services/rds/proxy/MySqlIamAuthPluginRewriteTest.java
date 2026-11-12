@@ -51,6 +51,18 @@ class MySqlIamAuthPluginRewriteTest {
     }
 
     @Test
+    void leavesLongerPluginIdentifierUntouched() {
+        assertNull(rewrite("CREATE USER a IDENTIFIED WITH AWSAuthenticationPluginSuffix AS 'x'"));
+        assertNull(rewrite("CREATE USER a IDENTIFIED WITH `AWSAuthenticationPluginSuffix` AS 'x'"));
+    }
+
+    @Test
+    void rewritesUserDdlInsideExecutableVersionComment() {
+        assertEquals("/*!50000 CREATE USER a IDENTIFIED WITH mysql_native_password AS '" + HASH + "' */",
+                rewrite("/*!50000 CREATE USER a IDENTIFIED WITH AWSAuthenticationPlugin AS 'RDS' */"));
+    }
+
+    @Test
     void rewritesActualClauseAfterPluginNameInComment() {
         assertEquals("CREATE USER 'app'@'%' /* IDENTIFIED WITH AWSAuthenticationPlugin */"
                         + " IDENTIFIED WITH mysql_native_password AS '" + HASH + "'",

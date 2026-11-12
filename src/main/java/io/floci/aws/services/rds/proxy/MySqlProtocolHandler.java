@@ -82,9 +82,10 @@ public class MySqlProtocolHandler {
     private static final int COM_QUERY = 0x03;
     private static final int MAX_PACKET_PAYLOAD = 0xFFFFFF;
     private static final int CLIENT_QUERY_ATTRIBUTES = 0x0800_0000;
+    private static final int CLIENT_MULTI_STATEMENTS = 0x0001_0000;
 
     private static final Pattern IAM_AUTH_PLUGIN = Pattern.compile(
-            "IDENTIFIED\\s+WITH\\s+`?AWSAuthenticationPlugin`?"
+            "IDENTIFIED\\s+WITH\\s+(?:`AWSAuthenticationPlugin`|AWSAuthenticationPlugin(?![A-Za-z0-9_$]))"
                     + "(?:\\s+AS\\s+(?:'[^']*'|\"[^\"]*\"|0x[0-9A-Fa-f]+))?",
             Pattern.CASE_INSENSITIVE);
     private static final String NO_MATCHING_PASSWORD_HASH =
@@ -924,7 +925,8 @@ public class MySqlProtocolHandler {
             try {
                 MySqlCompressedCommandRelay.relay(from, to,
                         (capabilities & CLIENT_ZSTD_COMPRESSION_ALGORITHM) != 0,
-                        (capabilities & CLIENT_QUERY_ATTRIBUTES) != 0);
+                        (capabilities & CLIENT_QUERY_ATTRIBUTES) != 0,
+                        (capabilities & CLIENT_MULTI_STATEMENTS) != 0);
             } catch (IOException e) {
                 LOG.debugv(e, "Compressed MySQL command relay ended");
             }
@@ -1007,7 +1009,8 @@ public class MySqlProtocolHandler {
                         || (current == '-' && next == '-'
                         && offset + 2 < sql.length() && Character.isWhitespace(sql.charAt(offset + 2)))) {
                     lineComment = true;
-                } else if (current == '/' && next == '*') {
+                } else if (current == '/' && next == '*'
+                        && (offset + 2 >= sql.length() || sql.charAt(offset + 2) != '!')) {
                     blockComment = true;
                     offset++;
                 }
