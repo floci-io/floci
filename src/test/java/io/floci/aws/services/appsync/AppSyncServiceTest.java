@@ -16,6 +16,7 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.CsvSource;
+import org.junit.jupiter.params.provider.ValueSource;
 
 import java.time.Clock;
 import java.time.Duration;
@@ -717,6 +718,30 @@ class AppSyncServiceTest {
 
         assertEquals("BadRequestException", refused.getErrorCode());
         assertEquals("type Item { id: ID }", service.getType(api.getApiId(), "Item").getDefinition());
+        assertEquals("SDL", service.getType(api.getApiId(), "Item").getFormat().name());
+    }
+
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    void missingTypeFormatLeavesTheStoredTypeUnchanged(boolean explicitNull) {
+        GraphqlApi api = service.createGraphqlApi(
+                Map.of("name", "types", "authenticationType", "API_KEY"), "us-east-1");
+        service.createType(api.getApiId(), Map.of("name", "Item", "definition", "type Item { id: ID }",
+                "description", "original", "format", "SDL"));
+        Map<String, Object> request = new HashMap<>();
+        request.put("definition", "type Item { changed: ID }");
+        request.put("description", "replacement");
+        if (explicitNull) {
+            request.put("format", null);
+        }
+
+        AwsException refused = assertThrows(AwsException.class,
+                () -> service.updateType(api.getApiId(), "Item", request));
+
+        assertEquals("BadRequestException", refused.getErrorCode());
+        assertTrue(refused.getMessage().contains("format"));
+        assertEquals("type Item { id: ID }", service.getType(api.getApiId(), "Item").getDefinition());
+        assertEquals("original", service.getType(api.getApiId(), "Item").getDescription());
         assertEquals("SDL", service.getType(api.getApiId(), "Item").getFormat().name());
     }
 }
