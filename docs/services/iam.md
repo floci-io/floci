@@ -2915,8 +2915,9 @@ floci populates:
 - `aws:CurrentTime` and `aws:EpochTime`: the time of the request, which the guide says "is always
   included in the request context": `aws:CurrentTime` as an ISO 8601 date, `aws:EpochTime` as
   whole seconds since January 1, 1970, so it matches the `Date` and the `Numeric` operators.
-  They are on every request the enforcement filter checks, in a role trust policy's context, and
-  in that of a call an AWS service makes on its own behalf.
+  They are on every request the enforcement filter checks, its `iam:PassRole` checks included,
+  in the context S3 builds when it evaluates a bucket policy itself under `s3.enforce-auth`, in a
+  role trust policy's context, and in that of a call an AWS service makes on its own behalf.
 - `aws:TagKeys`: the case-sensitive requested tag keys for all 16 IAM tagging actions
   in the generated table (tag structures or a list of keys), EC2 `RunInstances` and
   `CreateTags`, S3 `PutBucketTagging`, S3 Control `TagResource` (its `Tags` body) and

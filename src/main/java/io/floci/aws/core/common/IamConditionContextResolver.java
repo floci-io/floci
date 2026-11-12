@@ -354,7 +354,7 @@ public class IamConditionContextResolver {
         conditions.putIfAbsent("aws:ViaAWSService", List.of("false"));
         // Enforcement evaluates signed IAM credentials, not direct AWS service principals.
         conditions.put("aws:PrincipalIsAWSService", List.of("false"));
-        putRequestTime(conditions, Instant.now());
+        putRequestTime(conditions);
         return conditions;
     }
 
@@ -362,8 +362,11 @@ public class IamConditionContextResolver {
      * The time of the request, which the IAM User Guide says "is always included in the request
      * context" under two keys: {@code aws:CurrentTime}, a Date, and {@code aws:EpochTime}, "the
      * date and time of the request in epoch or Unix time", a Date and a Numeric, so whole seconds.
+     * Every context a request is evaluated against carries them, including those built outside
+     * {@link #withGlobalContext}, such as S3's own bucket-policy check.
      */
-    private static void putRequestTime(Map<String, List<String>> conditions, Instant now) {
+    public static void putRequestTime(Map<String, List<String>> conditions) {
+        Instant now = Instant.now();
         conditions.put("aws:CurrentTime", List.of(now.toString()));
         conditions.put("aws:EpochTime", List.of(Long.toString(now.getEpochSecond())));
     }
@@ -417,7 +420,7 @@ public class IamConditionContextResolver {
         }
         putResourceAccount(conditions, resourceArn, resourceOwnerAccountId, action);
         putIfPresent(conditions, "aws:RequestedRegion", AwsArnUtils.regionOrDefault(resourceArn, null));
-        putRequestTime(conditions, Instant.now());
+        putRequestTime(conditions);
         return conditions;
     }
 

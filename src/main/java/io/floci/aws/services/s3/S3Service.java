@@ -15,6 +15,7 @@ import io.floci.aws.core.common.AwsRegions;
 import io.floci.aws.core.common.Base64Url;
 import io.floci.aws.core.common.Digests;
 import io.floci.aws.core.common.FileTrees;
+import io.floci.aws.core.common.IamConditionContextResolver;
 import io.floci.aws.core.common.PaginatedResult;
 import io.floci.aws.core.common.Pagination;
 import io.floci.aws.core.common.RegionResolver;
@@ -1661,6 +1662,7 @@ public class S3Service implements Resettable, ResourceProvider {
      * whether S3 evaluates it or the enforcement filter does. For a role session
      * {@code aws:PrincipalArn} is the role's ARN. {@code requestConditions}, when present, are the keys
      * the request itself offers, such as an object creation's tags and Object Lock settings.
+     * {@code aws:CurrentTime} and {@code aws:EpochTime} are there as on every request.
      */
     private static Map<String, List<String>> bucketPolicyContext(CallerArns caller,
                                                                  Map<String, List<String>> requestConditions) {
@@ -1669,6 +1671,7 @@ public class S3Service implements Resettable, ResourceProvider {
             context.putAll(requestConditions);
         }
         context.put("aws:PrincipalIsAWSService", List.of("false"));
+        IamConditionContextResolver.putRequestTime(context);
         if (caller != null) {
             caller.putPrincipalKeys(context);
         }
