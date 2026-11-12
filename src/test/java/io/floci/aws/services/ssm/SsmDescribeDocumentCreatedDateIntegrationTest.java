@@ -10,6 +10,7 @@ import software.amazon.awssdk.services.ssm.model.DocumentType;
 
 import java.time.Duration;
 import java.time.Instant;
+import java.util.UUID;
 
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -21,14 +22,19 @@ class SsmDescribeDocumentCreatedDateIntegrationTest {
 
     @Test
     void theSdkReadsTheCreationDateOfADescribedDocument() {
+        String name = "created-date-" + UUID.randomUUID();
         try (SsmClient ssm = AwsTestClients.create(SsmClient.builder(), "100000008138", Region.US_EAST_1)) {
             Instant before = Instant.now().minusSeconds(1);
-            ssm.createDocument(r -> r.name("created-date-doc").documentType(DocumentType.COMMAND).content(CONTENT));
+            ssm.createDocument(r -> r.name(name).documentType(DocumentType.COMMAND).content(CONTENT));
+            try {
+                DocumentDescription document = ssm.describeDocument(r -> r.name(name)).document();
 
-            DocumentDescription document = ssm.describeDocument(r -> r.name("created-date-doc")).document();
-
-            Duration age = Duration.between(before, document.createdDate());
-            assertTrue(!age.isNegative() && age.compareTo(Duration.ofMinutes(1)) < 0, document.createdDate().toString());
+                Duration age = Duration.between(before, document.createdDate());
+                assertTrue(!age.isNegative() && age.compareTo(Duration.ofMinutes(1)) < 0,
+                        document.createdDate().toString());
+            } finally {
+                ssm.deleteDocument(r -> r.name(name));
+            }
         }
     }
 }
