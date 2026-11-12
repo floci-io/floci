@@ -1224,14 +1224,25 @@ public class CloudFormationService implements ResourceProvider {
                             boolean createOnlyReferencesReplaced = false;
                             JsonNode props = newDef.path("Properties");
                             if (props != null && props.isObject()) {
-                                for (Iterator<String> it = props.fieldNames(); it.hasNext(); ) {
-                                    String field = it.next();
-                                    if (CfnCreateOnlyProperties.isCreateOnly(resourceType, field)) {
+                                if (CfnCreateOnlyProperties.hasSchema(resourceType)) {
+                                    for (JsonNode subtree : CfnCreateOnlyProperties.createOnlySubtrees(resourceType, props)) {
                                         Set<String> fieldDeps = new LinkedHashSet<>();
-                                        collectDependencies(props.get(field), allResourceIds, fieldDeps, newConditions);
+                                        collectDependencies(subtree, allResourceIds, fieldDeps, newConditions);
                                         if (fieldDeps.stream().anyMatch(replacedResourceIds::contains)) {
                                             createOnlyReferencesReplaced = true;
                                             break;
+                                        }
+                                    }
+                                } else {
+                                    for (Iterator<String> it = props.fieldNames(); it.hasNext(); ) {
+                                        String field = it.next();
+                                        if (CfnCreateOnlyProperties.isCreateOnly(resourceType, field)) {
+                                            Set<String> fieldDeps = new LinkedHashSet<>();
+                                            collectDependencies(props.get(field), allResourceIds, fieldDeps, newConditions);
+                                            if (fieldDeps.stream().anyMatch(replacedResourceIds::contains)) {
+                                                createOnlyReferencesReplaced = true;
+                                                break;
+                                            }
                                         }
                                     }
                                 }
@@ -1301,6 +1312,18 @@ public class CloudFormationService implements ResourceProvider {
     private boolean requiresReplacement(String resourceType, JsonNode oldProps, JsonNode newProps,
                                         Set<String> changedParams, Set<String> changedConditions) {
         if (oldProps == null || newProps == null || oldProps.isMissingNode() || newProps.isMissingNode()) {
+            return false;
+        }
+        if (CfnCreateOnlyProperties.hasSchema(resourceType)) {
+            // The registry table names the exact pointers; only a value at one of them replaces.
+            if (CfnCreateOnlyProperties.createOnlyValueChanged(resourceType, oldProps, newProps)) {
+                return true;
+            }
+            for (JsonNode subtree : CfnCreateOnlyProperties.createOnlySubtrees(resourceType, newProps)) {
+                if (referencesAnyParameter(subtree, changedParams) || referencesAnyCondition(subtree, changedConditions)) {
+                    return true;
+                }
+            }
             return false;
         }
         for (Iterator<String> it = newProps.fieldNames(); it.hasNext(); ) {
