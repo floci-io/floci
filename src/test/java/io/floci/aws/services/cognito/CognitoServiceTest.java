@@ -79,6 +79,19 @@ import static org.mockito.Mockito.*;
 @Execution(ExecutionMode.CONCURRENT)
 class CognitoServiceTest {
 
+    @Test
+    void adminUpdateUserAttributesRejectsUndeclaredCustomAttribute() {
+        UserPool pool = service.createUserPool(Map.of("PoolName", "CustomAttributeValidation"), "us-east-1");
+        service.adminCreateUser(pool.getId(), "alice", Map.of(), "TempPass1!");
+
+        AwsException error = assertThrows(AwsException.class, () -> service.adminUpdateUserAttributes(
+                pool.getId(), "alice", Map.of("custom:undeclared", "x")));
+
+        assertEquals("InvalidParameterException", error.getErrorCode());
+        assertTrue(error.getMessage().contains("Attribute does not exist in the schema"));
+        assertFalse(service.adminGetUser(pool.getId(), "alice").getAttributes().containsKey("custom:undeclared"));
+    }
+
     private static final ObjectMapper MAPPER = new ObjectMapper();
     /** What AWS's DescribeUserPool reports for a pool created without a SignInPolicy. */
     private static final Map<String, Object> DEFAULT_SIGN_IN_POLICY =
@@ -2750,6 +2763,7 @@ class CognitoServiceTest {
                 mock(TlsCertificateManager.class));
         UserPool pool = serviceWithVerification.createUserPool(Map.of(
                 "PoolName", "AdminPendingContactPool",
+                "Schema", List.of(Map.of("Name", "note", "AttributeDataType", "String", "Mutable", true)),
                 "AutoVerifiedAttributes", List.of("email", "phone_number"),
                 "UserAttributeUpdateSettings", Map.of(
                         "AttributesRequireVerificationBeforeUpdate", List.of("email", "phone_number"))),
