@@ -618,6 +618,23 @@ class EmrServerlessSparkRunnerTest {
     }
 
     @Test
+    void aStepWritesTheCopiesOfABlockItsCoreNodesKeep() {
+        SparkJobRunner.Job job = stepJob(Map.of()).onStorage(STORAGE.withReplication(2));
+
+        assertTrue(EmrServerlessSparkRunner.sparkSubmitArguments(job, "http://floci:4566", List.of())
+                .contains("spark.hadoop.dfs.replication=2"));
+        assertTrue(EmrServerlessSparkRunner.hiveArguments(job, "http://floci:4566").contains("dfs.replication=2"));
+    }
+
+    @Test
+    void aStepOnAClusterWhoseHdfsIsOnItsPrimaryNodeLeavesTheCopiesOfABlockAlone() {
+        SparkJobRunner.Job job = stepJob(Map.of()).onStorage(STORAGE);
+
+        assertFalse(EmrServerlessSparkRunner.sparkSubmitArguments(job, "http://floci:4566", List.of()).toString()
+                .contains("dfs.replication"));
+    }
+
+    @Test
     void aStepOnItsClustersYarnSubmitsToItsResourceManagerWithExecutorsSizedForItsNode() {
         SparkJobRunner.Job job = stepJob(Map.of("spark.executor.memory", "2g"))
                 .onStorage(STORAGE.withYarn("ip-10-0-0-1.ec2.internal", "http://floci:4566"));
@@ -712,6 +729,34 @@ class EmrServerlessSparkRunnerTest {
         assertEquals("--conf", arguments.get(metastore - 1));
         // Floci's, before the cluster's spark-defaults and spark-hive-site, which win.
         assertTrue(arguments.indexOf(glue) > metastore, arguments.toString());
+    }
+
+    @Test
+    void aHadoopCommandOnAClusterWhoseCoreNodesHoldItsHdfsWritesTheirCopies() {
+        ContainerBuilder builder = mock(ContainerBuilder.class);
+        ContainerBuilder.Builder spec = mock(ContainerBuilder.Builder.class, RETURNS_SELF);
+        when(builder.newContainer(anyString())).thenReturn(spec);
+        List<String> command = List.of("bash", "-c", "hadoop fs -put data.csv /input/");
+
+        runner(builder).run(commandJob(command, Map.of(), STORAGE.withReplication(2)), progress);
+
+        // In hdfs-site.xml, as a client reads it after core-site.xml and the image's says two.
+        verify(spec).withEnv("FLOCI_HDFS_SITE", "<property><name>dfs.replication</name><value>2</value></property>");
+        verify(spec).withEntrypoint(argThat(entrypoint -> entrypoint.get(2).contains(String.join("\n",
+                "  if [ -n \"${FLOCI_HDFS_SITE:-}\" ]; then",
+                "    site hdfs-site.xml \"$FLOCI_HDFS_SITE\"",
+                "  fi"))));
+    }
+
+    @Test
+    void aHadoopCommandOnAClusterWhosePrimaryNodeHoldsItsHdfsLeavesTheImagesCopies() {
+        ContainerBuilder builder = mock(ContainerBuilder.class);
+        ContainerBuilder.Builder spec = mock(ContainerBuilder.Builder.class, RETURNS_SELF);
+        when(builder.newContainer(anyString())).thenReturn(spec);
+
+        runner(builder).run(commandJob(List.of("bash", "-c", "true"), Map.of(), STORAGE), progress);
+
+        verify(spec, never()).withEnv(eq("FLOCI_HDFS_SITE"), anyString());
     }
 
     @Test
@@ -1463,6 +1508,21 @@ class EmrServerlessSparkRunnerTest {
 
         verify(lifecycle).removeIfExists("left-behind");
         verify(lifecycle, never()).removeIfExists("another-deployments");
+    }
+
+    @Test
+    void aNodeOfALiveClusterIsNoDriverTheSweepRemoves() {
+        EmrServerlessSparkRunner runner = runner();
+        when(config.port()).thenReturn(4566);
+        Container node = mock(Container.class);
+        when(node.getId()).thenReturn("node");
+        when(node.getLabels()).thenReturn(Map.of(ContainerStorageHelper.SERVICE_LABEL, "emr",
+                ContainerStorageHelper.OWNER_LABEL, "4566", ContainerStorageHelper.COMPONENT_LABEL, "emr-node"));
+        when(docker.listContainersCmd().withShowAll(true).withLabelFilter(anyMap()).exec()).thenReturn(List.of(node));
+
+        runner.removeLeftoverDrivers("emr");
+
+        verify(lifecycle, never()).removeIfExists("node");
     }
 
     @Test
