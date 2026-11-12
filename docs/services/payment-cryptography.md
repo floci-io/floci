@@ -73,9 +73,10 @@
   and `NextToken`, and answer with one page and the token that asks for the next.
 - **The key exchange:** `ExportKey` and `ImportKey` take the form of the key material the
   request names, one form per request. A key leaves under a TR-31 block the service wraps
-  with a key it holds, under an RSA-OAEP cryptogram the receiver's certificate protects, or
-  under a key the two parties agreed with ECDH; it comes back under the same protections, and
-  a public key comes back under the certificate that carries it. A key that is not exportable
+  with a key it holds, under an RSA-OAEP cryptogram the receiver's certificate protects, under
+  a TR-34 key block the service signs and wraps for the receiver, or under a key the two
+  parties agreed with ECDH; it comes back under the same protections, and a public key comes
+  back under the certificate that carries it. A key that is not exportable
   does not leave, a key pair has no material a key block could carry, and a counterparty's
   certificate that the named authority did not sign is refused. An export may name an initial
   DUKPT key by its serial number, and the derived key leaves instead of the base derivation
@@ -95,9 +96,20 @@
   is capped by the curve's strength, so P-256 carries no AES-192.
 - **The check value of an export:** a key block carries the check value of the key it
   carries, and a cryptogram carries none, because it carries no key block at all.
-- **The TR-34 and the AS2805 forms are not made.** A request that asks for one of them is
-  refused with the error that says so, rather than answered with something of another kind,
-  and the refusal names the forms the service serves.
+- **The TR-34 key block:** a key leaves under a TR-31 block the service signs with its signing
+  key and wraps for the receiver under the receiver's certificate, in the `X9_TR34_2012`
+  format, and comes back the same way. The block carries the TR-31 header in the clear, the
+  nonce the two passes agree on, and the digest of the envelope it wraps, all under the
+  signature of the signing certificate, which has to chain to the named authority and be
+  inside its validity window. The block names its recipient by the receiver's certificate,
+  so the receiver can tell which of its keys the block is for. A block whose signature does
+  not verify, whose digest does not match, whose nonce is not the one the request quotes,
+  or that carries no header to say what it holds is refused. The signing key the export
+  parameters issue is an RSA one, because the block's signature is an RSA signature, so
+  `GetParametersForExport` takes `RSA_2048` and refuses the other algorithms.
+- **The AS2805 form is not made.** A request that asks for it is refused with the error that
+  says so, rather than answered with something of another kind, and the refusal names the
+  forms the service serves.
 - **The block headers a request names:** an export may name the modes of use, the
   exportability, the version and the optional blocks of the TR-31 block it produces, and
   the block carries them. An optional block is written with its length in hexadecimal, and
