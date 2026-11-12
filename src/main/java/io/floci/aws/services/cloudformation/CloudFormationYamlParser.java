@@ -12,9 +12,7 @@ import org.yaml.snakeyaml.nodes.ScalarNode;
 import org.yaml.snakeyaml.nodes.SequenceNode;
 import org.yaml.snakeyaml.nodes.Tag;
 
-import java.util.ArrayList;
 import java.util.LinkedHashMap;
-import java.util.List;
 import java.util.Map;
 
 /**
@@ -99,19 +97,10 @@ public class CloudFormationYamlParser {
         }
 
         private Object fnGetAtt(Node n) {
-            String raw = scalar(n);
-            // !GetAtt Resource.Attribute
-            int dot = raw.indexOf('.');
-            List<String> parts = new ArrayList<>();
-            if (dot > 0) {
-                parts.add(raw.substring(0, dot));
-                parts.add(raw.substring(dot + 1));
-            } else {
-                parts.add(raw);
+            if (n instanceof SequenceNode) {
+                return fnMap("Fn::GetAtt", n);
             }
-            Map<String, Object> map = new LinkedHashMap<>();
-            map.put("Fn::GetAtt", parts);
-            return map;
+            return scalarMap("Fn::GetAtt", scalar(n));
         }
 
         private Object construct(Node n) {
