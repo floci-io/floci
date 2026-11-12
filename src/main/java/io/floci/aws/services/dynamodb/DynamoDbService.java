@@ -36,6 +36,7 @@ import io.floci.aws.services.dynamodb.model.IncrementalExportSpecification;
 import io.floci.aws.services.dynamodb.model.KeySchemaElement;
 import io.floci.aws.services.dynamodb.model.LocalSecondaryIndex;
 import io.floci.aws.services.dynamodb.model.PointInTimeChange;
+import io.floci.aws.services.dynamodb.model.ProvisionedThroughput;
 import io.floci.aws.services.dynamodb.model.StreamDescription;
 import io.floci.aws.services.dynamodb.model.TableBackup;
 import io.floci.aws.services.dynamodb.model.TableDefinition;
@@ -644,15 +645,10 @@ public class DynamoDbService {
             table.getProvisionedThroughput().setWriteCapacityUnits(writeCapacity);
         }
         // Track warm throughput: on-demand uses fixed values, provisioned uses the capacity.
-        if ("PAY_PER_REQUEST".equals(billingMode)) {
-            table.setWarmReadUnitsPerSecond(12000);
-            table.setWarmWriteUnitsPerSecond(4000);
-        } else {
-            long rcu = readCapacity != null ? readCapacity : 5L;
-            long wcu = writeCapacity != null ? writeCapacity : 5L;
-            table.setWarmReadUnitsPerSecond(rcu);
-            table.setWarmWriteUnitsPerSecond(wcu);
-        }
+        ProvisionedThroughput tp = readCapacity != null && writeCapacity != null
+                ? new ProvisionedThroughput(readCapacity, writeCapacity) : null;
+        table.setWarmReadUnitsPerSecond(TableDefinition.defaultWarmReadUnits(billingMode, tp));
+        table.setWarmWriteUnitsPerSecond(TableDefinition.defaultWarmWriteUnits(billingMode, tp));
 
         if (gsis != null && !gsis.isEmpty()) {
             for (GlobalSecondaryIndex gsi : gsis) {
@@ -2605,11 +2601,13 @@ public class DynamoDbService {
             if ("PAY_PER_REQUEST".equals(billingMode)) {
                 table.getProvisionedThroughput().setReadCapacityUnits(0L);
                 table.getProvisionedThroughput().setWriteCapacityUnits(0L);
-                if (12000 > table.getWarmReadUnitsPerSecond()) {
-                    table.setWarmReadUnitsPerSecond(12000);
+                long wru = TableDefinition.defaultWarmReadUnits("PAY_PER_REQUEST", null);
+                long wwu = TableDefinition.defaultWarmWriteUnits("PAY_PER_REQUEST", null);
+                if (wru > table.getWarmReadUnitsPerSecond()) {
+                    table.setWarmReadUnitsPerSecond(wru);
                 }
-                if (4000 > table.getWarmWriteUnitsPerSecond()) {
-                    table.setWarmWriteUnitsPerSecond(4000);
+                if (wwu > table.getWarmWriteUnitsPerSecond()) {
+                    table.setWarmWriteUnitsPerSecond(wwu);
                 }
             }
         }

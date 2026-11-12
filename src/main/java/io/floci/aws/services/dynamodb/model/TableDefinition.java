@@ -108,6 +108,24 @@ public class TableDefinition {
         this.replicaRegions = new ArrayList<>();
     }
 
+    /** Baseline warm read units for a table given its billing mode and provisioned capacity. */
+    public static long defaultWarmReadUnits(String billingMode, ProvisionedThroughput pt) {
+        if ("PAY_PER_REQUEST".equals(billingMode)) {
+            return 12000;
+        }
+        long rcu = pt != null ? pt.getReadCapacityUnits() : 0;
+        return rcu > 0 ? rcu : 5;
+    }
+
+    /** Baseline warm write units for a table given its billing mode and provisioned capacity. */
+    public static long defaultWarmWriteUnits(String billingMode, ProvisionedThroughput pt) {
+        if ("PAY_PER_REQUEST".equals(billingMode)) {
+            return 4000;
+        }
+        long wcu = pt != null ? pt.getWriteCapacityUnits() : 0;
+        return wcu > 0 ? wcu : 5;
+    }
+
     public String getTableName() { return tableName; }
     public void setTableName(String tableName) { this.tableName = tableName; }
 
@@ -134,11 +152,7 @@ public class TableDefinition {
 
     public long getWarmReadUnitsPerSecond() {
         if (warmReadUnitsPerSecond <= 0) {
-            if ("PAY_PER_REQUEST".equals(billingMode)) {
-                return 12000;
-            }
-            long rcu = provisionedThroughput != null ? provisionedThroughput.getReadCapacityUnits() : 0L;
-            return rcu > 0 ? rcu : 5L;
+            return defaultWarmReadUnits(billingMode, provisionedThroughput);
         }
         return warmReadUnitsPerSecond;
     }
@@ -146,11 +160,7 @@ public class TableDefinition {
 
     public long getWarmWriteUnitsPerSecond() {
         if (warmWriteUnitsPerSecond <= 0) {
-            if ("PAY_PER_REQUEST".equals(billingMode)) {
-                return 4000;
-            }
-            long wcu = provisionedThroughput != null ? provisionedThroughput.getWriteCapacityUnits() : 0L;
-            return wcu > 0 ? wcu : 5L;
+            return defaultWarmWriteUnits(billingMode, provisionedThroughput);
         }
         return warmWriteUnitsPerSecond;
     }
