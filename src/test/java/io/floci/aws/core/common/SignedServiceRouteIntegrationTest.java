@@ -11,8 +11,8 @@ import static org.hamcrest.Matchers.equalTo;
 import static org.hamcrest.Matchers.notNullValue;
 
 /**
- * The services whose REST routes another controller also claims (DLM, GuardDuty Malware
- * Protection plans and Resource Explorer 2) are reached through {@link SignedServiceRoute}: by the
+ * The services whose REST routes another controller also claims (DLM, EMR Serverless, GuardDuty
+ * Malware Protection plans and Resource Explorer 2) are reached through {@link SignedServiceRoute}: by the
  * signing service, from the header or the query string, and never by calling the internal prefix
  * the routes are registered under.
  */
@@ -24,7 +24,8 @@ class SignedServiceRouteIntegrationTest {
             + "/20260215/us-east-1/s3/aws4_request";
 
     @ParameterizedTest
-    @ValueSource(strings = {"/_guardduty/malware-protection-plan", "/_dlm/policies", "/_re2/CreateIndex"})
+    @ValueSource(strings = {"/_guardduty/malware-protection-plan", "/_dlm/policies", "/_re2/CreateIndex",
+            "/_emrserverless/applications"})
     void aRequestStraightToAnInternalPrefixIsRefusedAsAnInvalidBucket(String path) {
         given().header("Authorization", S3_AUTH)
                 .when().get(path)

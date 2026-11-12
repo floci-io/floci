@@ -56,6 +56,7 @@ MODELS: dict[str, str] = {
     "controltower": "controltower",
     "dsql": "dsql",
     "eks": "eks",
+    "emr-serverless": "emr-serverless",
     "guardduty": "guardduty",
     "es": "es",
     "inspector2": "inspector2",
