@@ -612,6 +612,34 @@
         "UpdatePodIdentityAssociation": {"method": "POST", "requestUri": "/clusters/{name}/pod-identity-associations/{associationId}"}
       }
     },
+    "emr-serverless": {
+      "credentialScope": "emr-serverless",
+      "apiVersion": "2021-07-13",
+      "operations": {
+        "CancelJobRun": {"method": "DELETE", "requestUri": "/applications/{applicationId}/jobruns/{jobRunId}"},
+        "CreateApplication": {"method": "POST", "requestUri": "/applications"},
+        "DeleteApplication": {"method": "DELETE", "requestUri": "/applications/{applicationId}"},
+        "GetApplication": {"method": "GET", "requestUri": "/applications/{applicationId}"},
+        "GetDashboardForJobRun": {"method": "GET", "requestUri": "/applications/{applicationId}/jobruns/{jobRunId}/dashboard"},
+        "GetJobRun": {"method": "GET", "requestUri": "/applications/{applicationId}/jobruns/{jobRunId}"},
+        "GetResourceDashboard": {"method": "GET", "requestUri": "/applications/{applicationId}/dashboard"},
+        "GetSession": {"method": "GET", "requestUri": "/applications/{applicationId}/sessions/{sessionId}"},
+        "GetSessionEndpoint": {"method": "GET", "requestUri": "/applications/{applicationId}/sessions/{sessionId}/endpoint"},
+        "ListApplications": {"method": "GET", "requestUri": "/applications"},
+        "ListJobRunAttempts": {"method": "GET", "requestUri": "/applications/{applicationId}/jobruns/{jobRunId}/attempts"},
+        "ListJobRuns": {"method": "GET", "requestUri": "/applications/{applicationId}/jobruns"},
+        "ListSessions": {"method": "GET", "requestUri": "/applications/{applicationId}/sessions"},
+        "ListTagsForResource": {"method": "GET", "requestUri": "/tags/{resourceArn}"},
+        "StartApplication": {"method": "POST", "requestUri": "/applications/{applicationId}/start"},
+        "StartJobRun": {"method": "POST", "requestUri": "/applications/{applicationId}/jobruns"},
+        "StartSession": {"method": "POST", "requestUri": "/applications/{applicationId}/sessions"},
+        "StopApplication": {"method": "POST", "requestUri": "/applications/{applicationId}/stop"},
+        "TagResource": {"method": "POST", "requestUri": "/tags/{resourceArn}"},
+        "TerminateSession": {"method": "DELETE", "requestUri": "/applications/{applicationId}/sessions/{sessionId}"},
+        "UntagResource": {"method": "DELETE", "requestUri": "/tags/{resourceArn}"},
+        "UpdateApplication": {"method": "PATCH", "requestUri": "/applications/{applicationId}"}
+      }
+    },
     "es": {
       "credentialScope": "es",
       "apiVersion": "2015-01-01",

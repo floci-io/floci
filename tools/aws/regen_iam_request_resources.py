@@ -172,7 +172,7 @@ OUTPUT = REPO_ROOT / "src/main/resources/aws/iam-request-resources.json"
 # are the ones its handlers mint.
 NAMESPACES = ("access-analyzer", "acm", "application-autoscaling", "athena", "bcm-data-exports",
               "bcm-pricing-calculator", "budgets", "ce", "cloudfront", "cloudfront-keyvaluestore", "cloudtrail", "codebuild", "codepipeline", "cognito-identity",
-              "cognito-idp", "controltower", "cur", "datasync", "ec2", "ecr", "elasticloadbalancing", "elasticmapreduce", "es", "events",
+              "cognito-idp", "controltower", "cur", "datasync", "ec2", "ecr", "elasticloadbalancing", "elasticmapreduce", "emr-serverless", "es", "events",
               "firehose", "globalaccelerator", "inspector2", "kinesisanalytics", "macie2", "payment-cryptography",
               "quicksight", "redshift", "redshift-data", "redshift-serverless", "rekognition", "servicediscovery",
               "servicequotas", "sso", "states", "textract", "timestream-influxdb", "translate", "signer", "xray",
@@ -256,7 +256,6 @@ NOT_COVERED: dict[str, str] = {
                         "`environment/<application>/<name>`, while most of its requests name it by EnvironmentName "
                         "or EnvironmentId alone, so reading it needs the stored environment those find",
     "elasticfilesystem": _REST,
-    "emr-serverless": _REST,
     "execute-api": _REST,
     "fis": _REST,
     "glue": _LATER,

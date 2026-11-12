@@ -2,7 +2,7 @@
   "_source": {
     "generator": "tools/aws/regen_iam_authorized_actions.py",
     "reference": "https://servicereference.us-east-1.amazonaws.com/",
-    "retrieved": "2026-11-11",
+    "retrieved": "2026-11-12",
     "note": "make iam-authorized-actions-verify checks every entry against AWS."
   },
   "authorizedActions": {
@@ -494,6 +494,10 @@
       "ListClusters",
       "ListEksAnywhereSubscriptions",
       "RegisterCluster"
+    ],
+    "emr-serverless": [
+      "CreateApplication",
+      "ListApplications"
     ],
     "es": [
       "AcceptInboundConnection",
