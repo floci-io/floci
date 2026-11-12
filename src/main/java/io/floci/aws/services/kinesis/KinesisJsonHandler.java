@@ -28,6 +28,7 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.function.Supplier;
 
 @ApplicationScoped
 public class KinesisJsonHandler {
@@ -52,40 +53,45 @@ public class KinesisJsonHandler {
     }
 
     public Response handle(String action, JsonNode request, String region) {
-        return switch (action) {
-            case "CreateStream" -> handleCreateStream(request, region);
-            case "DeleteStream" -> handleDeleteStream(request, region);
-            case "ListStreams" -> handleListStreams(request, region);
-            case "DescribeStream" -> handleDescribeStream(request, region);
-            case "DescribeStreamSummary" -> handleDescribeStreamSummary(request, region);
-            case "RegisterStreamConsumer" -> handleRegisterStreamConsumer(request, region);
-            case "DeregisterStreamConsumer" -> handleDeregisterStreamConsumer(request, region);
-            case "DescribeStreamConsumer" -> handleDescribeStreamConsumer(request, region);
-            case "ListStreamConsumers" -> handleListStreamConsumers(request, region);
-            case "SubscribeToShard" -> handleSubscribeToShard(request, region);
-            case "AddTagsToStream" -> handleAddTagsToStream(request, region);
-            case "RemoveTagsFromStream" -> handleRemoveTagsFromStream(request, region);
-            case "ListTagsForStream" -> handleListTagsForStream(request, region);
-            case "StartStreamEncryption" -> handleStartStreamEncryption(request, region);
-            case "StopStreamEncryption" -> handleStopStreamEncryption(request, region);
-            case "SplitShard" -> handleSplitShard(request, region);
-            case "MergeShards" -> handleMergeShards(request, region);
-            case "PutRecord" -> handlePutRecord(request, region);
-            case "PutRecords" -> handlePutRecords(request, region);
-            case "GetShardIterator" -> handleGetShardIterator(request, region);
-            case "GetRecords" -> handleGetRecords(request, region);
-            case "ListShards" -> handleListShards(request, region);
-            case "IncreaseStreamRetentionPeriod" -> handleIncreaseStreamRetentionPeriod(request, region);
-            case "DecreaseStreamRetentionPeriod" -> handleDecreaseStreamRetentionPeriod(request, region);
-            case "EnableEnhancedMonitoring" -> handleEnableEnhancedMonitoring(request, region);
-            case "DisableEnhancedMonitoring" -> handleDisableEnhancedMonitoring(request, region);
-            case "UpdateStreamMode" -> handleUpdateStreamMode(request, region);
-            case "UpdateMaxRecordSize" -> handleUpdateMaxRecordSize(request, region);
-            case "UpdateShardCount" -> handleUpdateShardCount(request, region);
-            default -> Response.status(400)
+        Supplier<Response> operation = switch (action) {
+            case "CreateStream" -> () -> handleCreateStream(request, region);
+            case "DeleteStream" -> () -> handleDeleteStream(request, region);
+            case "ListStreams" -> () -> handleListStreams(request, region);
+            case "DescribeStream" -> () -> handleDescribeStream(request, region);
+            case "DescribeStreamSummary" -> () -> handleDescribeStreamSummary(request, region);
+            case "RegisterStreamConsumer" -> () -> handleRegisterStreamConsumer(request, region);
+            case "DeregisterStreamConsumer" -> () -> handleDeregisterStreamConsumer(request, region);
+            case "DescribeStreamConsumer" -> () -> handleDescribeStreamConsumer(request, region);
+            case "ListStreamConsumers" -> () -> handleListStreamConsumers(request, region);
+            case "SubscribeToShard" -> () -> handleSubscribeToShard(request, region);
+            case "AddTagsToStream" -> () -> handleAddTagsToStream(request, region);
+            case "RemoveTagsFromStream" -> () -> handleRemoveTagsFromStream(request, region);
+            case "ListTagsForStream" -> () -> handleListTagsForStream(request, region);
+            case "StartStreamEncryption" -> () -> handleStartStreamEncryption(request, region);
+            case "StopStreamEncryption" -> () -> handleStopStreamEncryption(request, region);
+            case "SplitShard" -> () -> handleSplitShard(request, region);
+            case "MergeShards" -> () -> handleMergeShards(request, region);
+            case "PutRecord" -> () -> handlePutRecord(request, region);
+            case "PutRecords" -> () -> handlePutRecords(request, region);
+            case "GetShardIterator" -> () -> handleGetShardIterator(request, region);
+            case "GetRecords" -> () -> handleGetRecords(request, region);
+            case "ListShards" -> () -> handleListShards(request, region);
+            case "IncreaseStreamRetentionPeriod" -> () -> handleIncreaseStreamRetentionPeriod(request, region);
+            case "DecreaseStreamRetentionPeriod" -> () -> handleDecreaseStreamRetentionPeriod(request, region);
+            case "EnableEnhancedMonitoring" -> () -> handleEnableEnhancedMonitoring(request, region);
+            case "DisableEnhancedMonitoring" -> () -> handleDisableEnhancedMonitoring(request, region);
+            case "UpdateStreamMode" -> () -> handleUpdateStreamMode(request, region);
+            case "UpdateMaxRecordSize" -> () -> handleUpdateMaxRecordSize(request, region);
+            case "UpdateShardCount" -> () -> handleUpdateShardCount(request, region);
+            default -> null;
+        };
+        if (operation == null) {
+            return Response.status(400)
                     .entity(new AwsErrorResponse("UnsupportedOperation", "Operation " + action + " is not supported."))
                     .build();
-        };
+        }
+        KinesisRequestShapes.check(action, request);
+        return operation.get();
     }
 
     private String resolveStreamName(JsonNode request) {

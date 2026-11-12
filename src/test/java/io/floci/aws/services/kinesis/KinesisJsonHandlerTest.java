@@ -5,6 +5,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.BinaryNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
+import io.floci.aws.core.common.AwsErrorResponse;
 import io.floci.aws.core.common.AwsException;
 import io.floci.aws.core.common.RegionResolver;
 import io.floci.aws.core.storage.InMemoryStorage;
@@ -265,29 +266,27 @@ class KinesisJsonHandlerTest {
     }
 
     @Test
-    void arnFallbackWhenNameIsEmpty() {
+    void explicitEmptyStreamNameDoesNotFallBackToArn() {
         createStream("test-stream");
 
         ObjectNode req = MAPPER.createObjectNode();
         req.put("StreamName", "");
         req.put("StreamARN", STREAM_ARN);
-        Response resp = handler.handle("DescribeStream", req, REGION);
-        assertThat(resp.getStatus(), is(200));
-        assertEquals("test-stream",
-                responseEntity(resp).get("StreamDescription").get("StreamName").asText());
+        AwsException error = assertThrows(AwsException.class,
+                () -> handler.handle("DescribeStream", req, REGION));
+        assertEquals("InvalidArgumentException", error.getErrorCode());
     }
 
     @Test
-    void arnFallbackWhenNameIsWhitespace() {
+    void explicitWhitespaceStreamNameDoesNotFallBackToArn() {
         createStream("test-stream");
 
         ObjectNode req = MAPPER.createObjectNode();
         req.put("StreamName", "   ");
         req.put("StreamARN", STREAM_ARN);
-        Response resp = handler.handle("DescribeStream", req, REGION);
-        assertThat(resp.getStatus(), is(200));
-        assertEquals("test-stream",
-                responseEntity(resp).get("StreamDescription").get("StreamName").asText());
+        AwsException error = assertThrows(AwsException.class,
+                () -> handler.handle("DescribeStream", req, REGION));
+        assertEquals("InvalidArgumentException", error.getErrorCode());
     }
 
     @Test
@@ -428,6 +427,105 @@ class KinesisJsonHandlerTest {
         assertThat(resp.getStatus(), is(200));
         assertEquals("by-name",
                 responseEntity(resp).get("StreamDescription").get("StreamName").asText());
+    }
+
+    @Test
+    void describeStreamRejectsInvalidModeledNameBeforeLookup() {
+        ObjectNode request = MAPPER.createObjectNode().put("StreamName", "bad*name");
+
+        AwsException error = assertThrows(AwsException.class,
+                () -> handler.handle("DescribeStream", request, REGION));
+        assertEquals("InvalidArgumentException", error.getErrorCode());
+    }
+
+    @Test
+    void addTagsToStreamRejectsEmptyModeledTagMap() {
+        createStream("test-stream");
+        ObjectNode request = MAPPER.createObjectNode().put("StreamName", "test-stream");
+        request.putObject("Tags");
+
+        AwsException error = assertThrows(AwsException.class,
+                () -> handler.handle("AddTagsToStream", request, REGION));
+        assertEquals("InvalidArgumentException", error.getErrorCode());
+        assertTrue(service.listTagsForStream("test-stream", REGION).isEmpty());
+    }
+
+    @Test
+    void addTagsToStreamRejectsAnOverlongModeledTagKey() {
+        createStream("test-stream");
+        ObjectNode request = MAPPER.createObjectNode().put("StreamName", "test-stream");
+        request.putObject("Tags").put("K".repeat(129), "value");
+
+        AwsException error = assertThrows(AwsException.class,
+                () -> handler.handle("AddTagsToStream", request, REGION));
+        assertEquals("InvalidArgumentException", error.getErrorCode());
+        assertTrue(service.listTagsForStream("test-stream", REGION).isEmpty());
+    }
+
+    @Test
+    void addTagsToStreamRejectsAnOverlongModeledTagValue() {
+        createStream("test-stream");
+        ObjectNode request = MAPPER.createObjectNode().put("StreamName", "test-stream");
+        request.putObject("Tags").put("Key", "V".repeat(257));
+
+        AwsException error = assertThrows(AwsException.class,
+                () -> handler.handle("AddTagsToStream", request, REGION));
+        assertEquals("InvalidArgumentException", error.getErrorCode());
+        assertTrue(service.listTagsForStream("test-stream", REGION).isEmpty());
+    }
+
+    @Test
+    void createStreamKeepsTheNonMapTagsSerializationError() {
+        ObjectNode request = MAPPER.createObjectNode().put("StreamName", "test-stream");
+        request.putArray("Tags").add("not-a-map");
+
+        AwsException error = assertThrows(AwsException.class,
+                () -> handler.handle("CreateStream", request, REGION));
+        assertEquals("SerializationException", error.getErrorCode());
+        assertEquals("Tags must be a map of string values.", error.getMessage());
+        assertTrue(service.listStreamDetails(REGION).isEmpty());
+    }
+
+    @ParameterizedTest
+    @ValueSource(ints = {0, 51})
+    void removeTagsFromStreamRejectsModeledTagKeyCounts(int count) {
+        createStream("test-stream");
+        ObjectNode add = MAPPER.createObjectNode().put("StreamName", "test-stream");
+        add.putObject("Tags").put("Key", "value");
+        handler.handle("AddTagsToStream", add, REGION);
+        ObjectNode request = MAPPER.createObjectNode().put("StreamName", "test-stream");
+        ArrayNode keys = request.putArray("TagKeys");
+        for (int i = 0; i < count; i++) {
+            keys.add("Key");
+        }
+
+        AwsException error = assertThrows(AwsException.class,
+                () -> handler.handle("RemoveTagsFromStream", request, REGION));
+        assertEquals("InvalidArgumentException", error.getErrorCode());
+        assertEquals(Map.of("Key", "value"), service.listTagsForStream("test-stream", REGION));
+    }
+
+    @Test
+    void unknownOperationKeepsItsExistingResponseBeforeShapeValidation() {
+        try (Response response = handler.handle("UnknownOperation", MAPPER.createArrayNode(), REGION)) {
+            assertEquals(400, response.getStatus());
+            assertEquals("UnsupportedOperation", ((AwsErrorResponse) response.getEntity()).type());
+        }
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"CreateStream", "DeleteStream", "ListStreams", "DescribeStream",
+            "DescribeStreamSummary", "RegisterStreamConsumer", "DeregisterStreamConsumer",
+            "DescribeStreamConsumer", "ListStreamConsumers", "SubscribeToShard", "AddTagsToStream",
+            "RemoveTagsFromStream", "ListTagsForStream", "StartStreamEncryption", "StopStreamEncryption",
+            "SplitShard", "MergeShards", "PutRecord", "PutRecords", "GetShardIterator", "GetRecords",
+            "ListShards", "IncreaseStreamRetentionPeriod", "DecreaseStreamRetentionPeriod",
+            "EnableEnhancedMonitoring", "DisableEnhancedMonitoring", "UpdateStreamMode",
+            "UpdateMaxRecordSize", "UpdateShardCount"})
+    void everyServedOperationChecksItsModeledInputBeforeDispatch(String action) {
+        AwsException error = assertThrows(AwsException.class,
+                () -> handler.handle(action, MAPPER.createArrayNode(), REGION));
+        assertEquals("SerializationException", error.getErrorCode());
     }
 
     @Test
@@ -797,36 +895,53 @@ class KinesisJsonHandlerTest {
         ArrayNode records = req.putArray("Records");
         records.addObject().put("Data", "dGVzdA==").put("PartitionKey", "pk1");
         records.addObject().put("Data", "").put("PartitionKey", "pk2");
-        records.addObject().put("PartitionKey", "pk3");
-        records.addObject().putNull("Data").put("PartitionKey", "pk4");
-        records.addObject().put("Data", true).put("PartitionKey", "pk5");
-        records.addObject().put("Data", 1234).put("PartitionKey", "pk6");
+        records.addObject().put("Data", true).put("PartitionKey", "pk3");
+        records.addObject().put("Data", 1234).put("PartitionKey", "pk4");
         ObjectNode containerRow = records.addObject();
         containerRow.putObject("Data");
-        containerRow.put("PartitionKey", "pk7");
+        containerRow.put("PartitionKey", "pk5");
         ObjectNode binaryRow = records.addObject();
         binaryRow.set("Data", BinaryNode.valueOf(new byte[] {1, 2, 3}));
-        binaryRow.put("PartitionKey", "pk8");
+        binaryRow.put("PartitionKey", "pk6");
 
         Response resp = handler.handle("PutRecords", req, REGION);
         assertThat(resp.getStatus(), is(200));
         ObjectNode body = responseEntity(resp);
-        assertEquals(5, body.get("FailedRecordCount").asInt());
+        assertEquals(3, body.get("FailedRecordCount").asInt());
 
         ArrayNode results = (ArrayNode) body.get("Records");
         assertTrue(results.get(0).has("SequenceNumber"));
         assertTrue(results.get(1).has("SequenceNumber"));
-        for (int i = 2; i <= 6; i++) {
+        for (int i = 2; i <= 4; i++) {
             assertEquals("InternalFailure", results.get(i).get("ErrorCode").asText());
             assertEquals("Data must be a base64-encoded string.", results.get(i).get("ErrorMessage").asText());
         }
-        assertTrue(results.get(7).has("SequenceNumber"));
+        assertTrue(results.get(5).has("SequenceNumber"));
 
         ArrayNode landed = readAllRecords("test-stream");
         assertEquals(3, landed.size());
         assertEquals("dGVzdA==", landed.get(0).get("Data").asText());
         assertEquals("", landed.get(1).get("Data").asText());
         assertEquals("AQID", landed.get(2).get("Data").asText());
+    }
+
+    @Test
+    void putRecordsRejectsMissingOrNullDataBeforeWritingAnyRecord() {
+        createStream("test-stream");
+        for (boolean nullData : new boolean[] {false, true}) {
+            ObjectNode request = MAPPER.createObjectNode().put("StreamName", "test-stream");
+            ArrayNode records = request.putArray("Records");
+            records.addObject().put("Data", "dGVzdA==").put("PartitionKey", "valid");
+            ObjectNode invalid = records.addObject().put("PartitionKey", "invalid");
+            if (nullData) {
+                invalid.putNull("Data");
+            }
+
+            AwsException error = assertThrows(AwsException.class,
+                    () -> handler.handle("PutRecords", request, REGION));
+            assertEquals("InvalidArgumentException", error.getErrorCode());
+            assertEquals(0, readAllRecords("test-stream").size());
+        }
     }
 
     @Test
@@ -1287,15 +1402,15 @@ class KinesisJsonHandlerTest {
         assertEquals("InvalidArgumentException", ex.getErrorCode());
     }
 
-    /** The preflight runs first, so an empty batch on an unknown stream is still a 404. */
+    /** The modeled batch size is checked before looking up the stream. */
     @Test
-    void putRecordsResolvesTheStreamBeforeValidatingTheRecordCount() {
+    void putRecordsRejectsAnEmptyBatchBeforeLookingUpTheStream() {
         ObjectNode req = MAPPER.createObjectNode();
         req.put("StreamName", "missing-stream");
         req.putArray("Records");
         AwsException ex = assertThrows(AwsException.class,
                 () -> handler.handle("PutRecords", req, REGION));
-        assertEquals("ResourceNotFoundException", ex.getErrorCode());
+        assertEquals("InvalidArgumentException", ex.getErrorCode());
     }
 
     /** Pins the cap's value: ten near-limit records sit just under 10 MiB and must be accepted. */
@@ -1400,15 +1515,15 @@ class KinesisJsonHandlerTest {
         assertEquals("ValidationException", updateMaxRecordSize("test-stream", 1023).getErrorCode());
     }
 
-    /** Resolve before validate, the same ordering PutRecord follows. */
+    /** Modeled bounds reject an invalid size before looking up the stream. */
     @Test
-    void updateMaxRecordSizeResolvesTheStreamBeforeValidatingTheSize() {
+    void updateMaxRecordSizeRejectsAnInvalidSizeBeforeLookingUpTheStream() {
         ObjectNode update = MAPPER.createObjectNode();
         update.put("StreamARN", "arn:aws:kinesis:us-east-1:123456789012:stream/missing-stream");
         update.put("MaxRecordSizeInKiB", 10241);
         AwsException ex = assertThrows(AwsException.class,
                 () -> handler.handle("UpdateMaxRecordSize", update, REGION));
-        assertEquals("ResourceNotFoundException", ex.getErrorCode());
+        assertEquals("ValidationException", ex.getErrorCode());
     }
 
     private ObjectNode updateShardCount(String streamName, int targetShardCount, String scalingType) {
@@ -1551,16 +1666,18 @@ class KinesisJsonHandlerTest {
         assertTrue(service.listTagsForStream("test-stream", REGION).isEmpty());
     }
 
-    /** An empty Tags object is not an error; it simply leaves the stream untagged. */
+    /** A present Tags map must meet the model's minimum size before stream creation. */
     @Test
-    void createStreamWithAnEmptyTagsObjectLeavesTheStreamUntagged() {
+    void createStreamRejectsAnExplicitlyEmptyTagsObject() {
         ObjectNode create = MAPPER.createObjectNode();
         create.put("StreamName", "empty-tags-stream");
         create.put("ShardCount", 1);
         create.putObject("Tags");
-        assertThat(handler.handle("CreateStream", create, REGION).getStatus(), is(200));
-
-        assertTrue(service.listTagsForStream("empty-tags-stream", REGION).isEmpty());
+        AwsException error = assertThrows(AwsException.class,
+                () -> handler.handle("CreateStream", create, REGION));
+        assertEquals("InvalidArgumentException", error.getErrorCode());
+        assertTrue(service.listStreamDetails(REGION).stream()
+                .noneMatch(stream -> "empty-tags-stream".equals(stream.getStreamName())));
     }
 
     /** CreateStream and AddTagsToStream share one parser, so the same map has to land either way. */
@@ -1685,7 +1802,7 @@ class KinesisJsonHandlerTest {
     }
 
     @Test
-    void removeTagsFromStreamWithANullOrMissingTagKeysLeavesTagsUntouched() {
+    void removeTagsFromStreamRejectsNullOrMissingTagKeys() {
         createStream("test-stream");
         ObjectNode add = MAPPER.createObjectNode();
         add.put("StreamName", "test-stream");
@@ -1695,10 +1812,14 @@ class KinesisJsonHandlerTest {
         ObjectNode nullKeys = MAPPER.createObjectNode();
         nullKeys.put("StreamName", "test-stream");
         nullKeys.putNull("TagKeys");
-        assertThat(handler.handle("RemoveTagsFromStream", nullKeys, REGION).getStatus(), is(200));
+        AwsException nullError = assertThrows(AwsException.class,
+                () -> handler.handle("RemoveTagsFromStream", nullKeys, REGION));
+        assertEquals("InvalidArgumentException", nullError.getErrorCode());
         ObjectNode missingKeys = MAPPER.createObjectNode();
         missingKeys.put("StreamName", "test-stream");
-        assertThat(handler.handle("RemoveTagsFromStream", missingKeys, REGION).getStatus(), is(200));
+        AwsException missingError = assertThrows(AwsException.class,
+                () -> handler.handle("RemoveTagsFromStream", missingKeys, REGION));
+        assertEquals("InvalidArgumentException", missingError.getErrorCode());
 
         assertEquals(Map.of("Foo", "Bar"), service.listTagsForStream("test-stream", REGION));
     }
