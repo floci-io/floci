@@ -180,6 +180,65 @@ class CloudFormationTemplateEngineTest {
 
     @ParameterizedTest
     @ValueSource(strings = {
+        "Value: !GetAtt [Vpc, !Ref AttributeName]\n",
+        "Value: !GetAtt\n  - Vpc\n  - !Ref AttributeName\n",
+        "Value:\n  Fn::GetAtt: [Vpc, {Ref: AttributeName}]\n"
+    })
+    void getAttSequenceResolvesAttributeNameRef(String yaml) {
+        CloudFormationTemplateEngine e = new CloudFormationTemplateEngine("000000000000", "us-east-1", "my-stack",
+                "stack/id", Map.of("AttributeName", "CidrBlock"), Map.of(),
+                Map.of("Vpc", Map.of("CidrBlock", "10.0.0.0/16")), Map.of(), Map.of(), mapper, name -> null);
+        JsonNode value = new CloudFormationYamlParser(mapper).parse(yaml).get("Value");
+
+        assertEquals("10.0.0.0/16", e.resolve(value));
+        assertEquals("10.0.0.0/16", e.resolveNode(value).asText());
+    }
+
+    @Test
+    void getAttAttributeNameRefRetainsTypedList() {
+        CloudFormationTemplateEngine e = new CloudFormationTemplateEngine("000000000000", "us-east-1", "my-stack",
+                "stack/id", Map.of("AttributeName", "SourceIdsList"), Map.of(),
+                Map.of("Watcher", Map.of("SourceIdsList", "stored")), Map.of(), Map.of(), mapper,
+                null, UnaryOperator.identity(), null, Map.of(),
+                (logicalId, attribute, value) -> mapper.createArrayNode().add("first,with-comma").add("second"));
+        JsonNode value = new CloudFormationYamlParser(mapper).parse(
+                "Value: !GetAtt [Watcher, !Ref AttributeName]").get("Value");
+
+        assertEquals(json("[\"first,with-comma\", \"second\"]"), e.resolveNode(value));
+        assertEquals("first,with-comma|second", e.resolve(json("""
+                {
+                  "Fn::Join": [
+                    "|",
+                    {
+                      "Fn::GetAtt": ["Watcher", {"Ref": "AttributeName"}]
+                    }
+                  ]
+                }
+                """)));
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"[]", "[Vpc]", "[Vpc, CidrBlock, Extra]"})
+    void getAttRejectsWrongNumberOfOperands(String operands) {
+        CloudFormationTemplateEngine e = engineWithAttributes(Map.of("Vpc", Map.of("CidrBlock", "10.0.0.0/16")));
+        CloudFormationYamlParser parser = new CloudFormationYamlParser(mapper);
+        for (JsonNode value : List.of(parser.parse("!GetAtt " + operands),
+                parser.parse("Fn::GetAtt: " + operands))) {
+            AwsException scalarFailure = assertThrows(AwsException.class, () -> e.resolve(value));
+            AwsException nodeFailure = assertThrows(AwsException.class, () -> e.resolveNode(value));
+
+            assertEquals("ValidationError", scalarFailure.getErrorCode());
+            assertEquals("ValidationError", nodeFailure.getErrorCode());
+            assertEquals(400, scalarFailure.getHttpStatus());
+            assertEquals(400, nodeFailure.getHttpStatus());
+            assertEquals("Template error: Fn::GetAtt requires exactly two parameters.",
+                    scalarFailure.getMessage());
+            assertEquals(scalarFailure.getMessage(), nodeFailure.getMessage());
+        }
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {
         "{\"Fn::Sub\":\"${Bucket.Missing}/*\"}",
         "{\"Fn::Join\":[\"\",[{\"Fn::GetAtt\":[\"Bucket\",\"Missing\"]},\"/*\"]]}",
         "{\"Fn::Sub\":[\"${Value}/*\",{\"Value\":{\"Fn::GetAtt\":\"Bucket.Missing\"}}]}",

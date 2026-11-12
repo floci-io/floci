@@ -22,6 +22,10 @@ class CloudFormationGetAttYamlIntegrationTest {
     void getAttSequenceAndScalarFormsReturnTheProvisionedQueueArn() {
         String name = "cfn-getatt-yaml-" + Long.toString(System.nanoTime(), 36);
         String template = """
+                Parameters:
+                  AttributeName:
+                    Type: String
+                    Default: Arn
                 Resources:
                   Queue:
                     Type: AWS::SQS::Queue
@@ -36,6 +40,13 @@ class CloudFormationGetAttYamlIntegrationTest {
                       - Arn
                   Scalar:
                     Value: !GetAtt Queue.Arn
+                  Referenced:
+                    Value: !GetAtt [Queue, !Ref AttributeName]
+                  LongReferenced:
+                    Value:
+                      Fn::GetAtt:
+                        - Queue
+                        - Ref: AttributeName
                 """.formatted(name);
 
         try (CloudFormationClient cloudFormation = AwsTestClients.create(
@@ -50,7 +61,7 @@ class CloudFormationGetAttYamlIntegrationTest {
                         .attributes().get(QueueAttributeName.QUEUE_ARN);
                 assertNotNull(queueArn);
 
-                for (String output : List.of("Flow", "Block", "Scalar")) {
+                for (String output : List.of("Flow", "Block", "Scalar", "Referenced", "LongReferenced")) {
                     assertEquals(queueArn, CfnStackWaits.output(stack, output), output);
                 }
             } finally {

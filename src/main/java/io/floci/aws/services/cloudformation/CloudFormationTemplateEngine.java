@@ -933,9 +933,16 @@ public class CloudFormationTemplateEngine {
         return parts == null ? TextNode.valueOf("") : resolveGetAttNodeParts(parts[0], parts[1]);
     }
 
-    private static String[] getAttParts(JsonNode getAtt) {
-        if (getAtt.isArray() && getAtt.size() == 2) {
-            return new String[] {getAtt.get(0).asText(), getAtt.get(1).asText()};
+    private String[] getAttParts(JsonNode getAtt) {
+        if (getAtt.isArray()) {
+            if (getAtt.size() != 2) {
+                throw new AwsException("ValidationError",
+                        "Template error: Fn::GetAtt requires exactly two parameters.", 400);
+            }
+            JsonNode attribute = getAtt.get(1);
+            String attributeName = attribute.has("Ref")
+                    ? resolveRef(attribute.get("Ref").asText()) : attribute.asText();
+            return new String[] {getAtt.get(0).asText(), attributeName};
         }
         if (getAtt.isTextual()) {
             String[] parts = getAtt.textValue().split("\\.", 2);
