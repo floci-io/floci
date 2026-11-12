@@ -535,7 +535,7 @@ class RedshiftQueryHandlerTest {
         params.putSingle("ClusterIdentifier", "test-cluster");
 
         Snapshot snapshot = new Snapshot("test-snapshot", "test-cluster", "available", 5439, "admin");
-        when(service.createSnapshot("test-snapshot", "test-cluster")).thenReturn(snapshot);
+        when(service.createSnapshot("test-snapshot", "test-cluster", Map.of())).thenReturn(snapshot);
 
         Response response = handler.handle("CreateClusterSnapshot", params);
         assertEquals(200, response.getStatus());
@@ -762,7 +762,8 @@ class RedshiftQueryHandlerTest {
         params.putSingle("Description", "custom redshift param group");
 
         ClusterParameterGroup group = new ClusterParameterGroup("test-pg", "redshift-1.0", "custom redshift param group");
-        when(service.createClusterParameterGroup("test-pg", "redshift-1.0", "custom redshift param group")).thenReturn(group);
+        when(service.createClusterParameterGroup("test-pg", "redshift-1.0", "custom redshift param group", Map.of()))
+                .thenReturn(group);
 
         Response response = handler.handle("CreateClusterParameterGroup", params);
         assertEquals(200, response.getStatus());

@@ -1196,7 +1196,7 @@ public class RedshiftService implements ManagedSecretRotator {
             if (!"available".equals(cluster.getClusterStatus())) {
                 throw new AwsException("InvalidClusterState", "Cluster must be available to create a final snapshot", 400);
             }
-            createSnapshot(finalSnapshotIdentifier, identifier, retentionPeriod);
+            createSnapshot(finalSnapshotIdentifier, identifier, retentionPeriod, null);
         }
 
         Cluster removed = mutate(() -> {
@@ -1950,22 +1950,28 @@ public class RedshiftService implements ManagedSecretRotator {
     }
 
     public Snapshot createSnapshot(String snapshotIdentifier, String clusterIdentifier) {
-        return withResourceLock("cluster", clusterIdentifier, () -> withResourceLock("snapshot", snapshotIdentifier,
-                () -> createSnapshot(snapshotIdentifier, clusterIdentifier, null)));
+        return createSnapshot(snapshotIdentifier, clusterIdentifier, null);
     }
 
-    private Snapshot createSnapshot(String snapshotIdentifier, String clusterIdentifier, Integer retentionPeriod) {
+    public Snapshot createSnapshot(String snapshotIdentifier, String clusterIdentifier, Map<String, String> tags) {
+        return withResourceLock("cluster", clusterIdentifier, () -> withResourceLock("snapshot", snapshotIdentifier,
+                () -> createSnapshot(snapshotIdentifier, clusterIdentifier, null, tags)));
+    }
+
+    private Snapshot createSnapshot(String snapshotIdentifier, String clusterIdentifier, Integer retentionPeriod,
+                                    Map<String, String> tags) {
         validateSnapshotIdentifier(snapshotIdentifier);
         Optional<Cluster> clusterOpt = clusters.get(clusterIdentifier);
         if (clusterOpt.isEmpty()) {
             throw new AwsException("ClusterNotFound", "Cluster " + clusterIdentifier + " not found", 404);
         }
         return createSnapshot(clusters.accountId(), snapshotIdentifier, clusterOpt.get(), retentionPeriod,
-                Instant.now(), null);
+                Instant.now(), null, tags);
     }
 
     private Snapshot createSnapshot(String accountId, String snapshotIdentifier, Cluster cluster,
-                                     Integer retentionPeriod, Instant now, Instant scheduledTime) {
+                                     Integer retentionPeriod, Instant now, Instant scheduledTime,
+                                     Map<String, String> tags) {
         rejectPausedCluster(cluster);
         validateSnapshotIdentifier(snapshotIdentifier);
         String clusterIdentifier = cluster.getClusterIdentifier();
@@ -1990,6 +1996,9 @@ public class RedshiftService implements ManagedSecretRotator {
         snapshot.setSnapshotType(scheduledTime == null ? "manual" : "automated");
         snapshot.setScheduledTime(scheduledTime);
         snapshot.setClusterGeneration(cluster.getSnapshotGeneration());
+        if (tags != null) {
+            snapshot.setTags(new LinkedHashMap<>(tags));
+        }
         if (scheduledTime != null) {
             snapshot.setAutomatedSnapshotRetentionPeriod(cluster.getAutomatedSnapshotRetentionPeriod());
         }
@@ -2444,6 +2453,11 @@ public class RedshiftService implements ManagedSecretRotator {
     // ── Parameter Group Operations ───────────────────────────────────────────
 
     public ClusterParameterGroup createClusterParameterGroup(String parameterGroupName, String parameterGroupFamily, String description) {
+        return createClusterParameterGroup(parameterGroupName, parameterGroupFamily, description, null);
+    }
+
+    public ClusterParameterGroup createClusterParameterGroup(String parameterGroupName, String parameterGroupFamily,
+                                                             String description, Map<String, String> tags) {
         if (DEFAULT_PARAMETER_GROUP_NAME.equals(parameterGroupName)) {
             throw new AwsException("InvalidParameterValue", "The default parameter group name is reserved.", 400);
         }
@@ -2452,6 +2466,9 @@ public class RedshiftService implements ManagedSecretRotator {
         }
 
         ClusterParameterGroup group = new ClusterParameterGroup(parameterGroupName, parameterGroupFamily, description);
+        if (tags != null) {
+            group.setTags(new LinkedHashMap<>(tags));
+        }
         parameterGroups.put(parameterGroupName, group);
         parameterGroups.flush();
         emitEvent(RedshiftEventCatalog.PARAMETER_GROUP_CREATED, parameterGroupName,
@@ -3176,7 +3193,7 @@ public class RedshiftService implements ManagedSecretRotator {
                 if (tooSoon) {
                     return false;
                 }
-                createSnapshot(accountId, snapshotId, cluster, null, now, scheduled);
+                createSnapshot(accountId, snapshotId, cluster, null, now, scheduled, null);
             } else if (!"automated".equals(existing.getSnapshotType())
                     || !clusterId.equals(existing.getClusterIdentifier()) || !scheduled.equals(existing.getScheduledTime())) {
                 throw new AwsException("ClusterSnapshotAlreadyExists", "Snapshot identifier is already in use", 400);
