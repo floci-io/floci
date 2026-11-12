@@ -15,6 +15,7 @@ import java.util.stream.Stream;
 
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.contains;
+import static org.hamcrest.Matchers.containsInAnyOrder;
 import static org.hamcrest.Matchers.equalTo;
 import static org.hamcrest.Matchers.nullValue;
 
@@ -46,6 +47,17 @@ class LambdaMicrovmRunRequestFieldsIntegrationTest {
                 .when().post(ROOT + "/microvm-images").then().statusCode(201);
         cleanup.register(() -> given().when().delete(ROOT + "/microvm-images/" + name).then().statusCode(200));
         return name;
+    }
+
+    private String createImageWithTwoVersions() {
+        String image = createImage();
+        given().contentType("application/json").body("""
+                {"baseImageArn":"arn:aws:lambda:us-east-1:aws:microvm-image:al2023-1",
+                 "buildRoleArn":"arn:aws:iam::000000000000:role/microvm-build",
+                 "codeArtifact":{"uri":"s3://bucket/code-v2.zip"}}
+                """)
+                .when().put(ROOT + "/microvm-images/" + image).then().statusCode(200);
+        return image;
     }
 
     private Response run(String image, String fields) {
@@ -82,21 +94,33 @@ class LambdaMicrovmRunRequestFieldsIntegrationTest {
                 .body("idlePolicy.autoResumeEnabled", equalTo(autoResume))
                 .body("idlePolicy.maxIdleDurationSeconds", equalTo(900))
                 .body("idlePolicy.suspendedDurationSeconds", equalTo(suspendedSeconds));
+        assertListSummary(response, "1.0");
     }
 
     @Test
     void requestedImageVersionRunsEvenWhenANewerVersionIsActive() {
-        String image = createImage();
-        given().contentType("application/json").body("""
-                {"baseImageArn":"arn:aws:lambda:us-east-1:aws:microvm-image:al2023-1",
-                 "buildRoleArn":"arn:aws:iam::000000000000:role/microvm-build",
-                 "codeArtifact":{"uri":"s3://bucket/code-v2.zip"}}
-                """)
-                .when().put(ROOT + "/microvm-images/" + image).then().statusCode(200);
+        String image = createImageWithTwoVersions();
         Response response = run(image, ",\"imageVersion\":\"1.0\"");
         response.then().body("imageVersion", equalTo("1.0"));
         given().when().get(ROOT + "/microvms/" + response.path("microvmId")).then().statusCode(200)
                 .body("imageVersion", equalTo("1.0"));
+        assertListSummary(response, "1.0");
+    }
+
+    @ParameterizedTest
+    @CsvSource({"1.0,1.0", ",2.0"})
+    void listReportsTheSelectedImageVersion(String requestedVersion, String expectedVersion) {
+        String fields = requestedVersion == null ? "" : ",\"imageVersion\":\"" + requestedVersion + "\"";
+        Response response = run(createImageWithTwoVersions(), fields);
+        assertListSummary(response, expectedVersion);
+    }
+
+    private void assertListSummary(Response response, String imageVersion) {
+        String entry = "items.find { it.microvmId == '" + response.path("microvmId") + "' }";
+        given().when().get(ROOT + "/microvms").then().statusCode(200)
+                .body(entry + ".imageVersion", equalTo(imageVersion))
+                .body(entry + ".keySet()", containsInAnyOrder(
+                        "microvmId", "state", "imageArn", "imageVersion", "startedAt"));
     }
 
     @ParameterizedTest

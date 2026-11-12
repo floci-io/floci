@@ -65,15 +65,6 @@ public class LambdaMicrovmsController {
     private static final long DISK_SNAPSHOT_SIZE_BYTES = 25600000L;
     private static final long MEMORY_SNAPSHOT_SIZE_BYTES = 609087488L;
 
-    /**
-     * Every image carries a managed default egress connector, attached by the
-     * service rather than by the caller. The account segment is the literal
-     * {@code aws} because the connector is AWS-owned, not the caller's.
-     */
-    private static String managedEgressConnector(String region) {
-        return AwsArnUtils.Arn.of("lambda", region, "aws", "network-connector:aws-network-connector:INTERNET_EGRESS").toString();
-    }
-
     private final LambdaMicrovmsService service;
     private final RegionResolver regionResolver;
     private final ObjectMapper objectMapper;
@@ -461,12 +452,8 @@ public class LambdaMicrovmsController {
     }
 
     private void putRuntimeSettings(ObjectNode node, String region, RuntimeSettings settings) {
-        ArrayNode egress = node.putArray("egressNetworkConnectors");
-        if (settings.egressNetworkConnectors() == null || settings.egressNetworkConnectors().isEmpty()) {
-            egress.add(managedEgressConnector(region));
-        } else {
-            settings.egressNetworkConnectors().forEach(egress::add);
-        }
+        putConnectors(node.putArray("egressNetworkConnectors"), settings.egressNetworkConnectors(), region,
+                "INTERNET_EGRESS");
         if (settings.loggingDisabled()) {
             node.putObject("logging").putObject("disabled");
         } else if (settings.logGroup() != null) {
@@ -555,7 +542,7 @@ public class LambdaMicrovmsController {
     }
 
     private static void putConnectors(ArrayNode node, List<String> connectors, String region, String defaultName) {
-        if (connectors.isEmpty()) {
+        if (connectors == null || connectors.isEmpty()) {
             node.add(AwsArnUtils.Arn.of("lambda", region, "aws",
                     "network-connector:aws-network-connector:" + defaultName).toString());
         } else {
