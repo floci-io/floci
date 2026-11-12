@@ -486,6 +486,70 @@ class CloudFormationChangeSetDiffIntegrationTest {
             .body(containsString("<Replacement>True</Replacement>"));
     }
 
+    /**
+     * Registry schema aws-cognito-userpooluser.json (CloudformationSchema.zip, us-east-1) lists
+     * /properties/UserPoolId in createOnlyProperties; the resource page
+     * aws-resource-cognito-userpooluser says "Update requires: Replacement" for UserPoolId.
+     */
+    @Test
+    void createOnlyPropertyChange_reportsReplacementTrue() {
+        String stackName = "cs-diff-create-only-stack";
+        stacksToDelete.add(stackName);
+
+        String initialTemplate = userPoolUserTemplate("PoolA");
+        String changedTemplate = userPoolUserTemplate("PoolB");
+
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "CreateStack")
+            .formParam("StackName", stackName)
+            .formParam("TemplateBody", initialTemplate)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200);
+
+        CfnStackWaits.awaitStatus(stackName, "CREATE_COMPLETE");
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "CreateChangeSet")
+            .formParam("StackName", stackName)
+            .formParam("ChangeSetName", "create-only-cs")
+            .formParam("ChangeSetType", "UPDATE")
+            .formParam("TemplateBody", changedTemplate)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200);
+
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "DescribeChangeSet")
+            .formParam("StackName", stackName)
+            .formParam("ChangeSetName", "create-only-cs")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body(containsString("<LogicalResourceId>U</LogicalResourceId>"))
+            .body(containsString("<Replacement>True</Replacement>"));
+    }
+
+    private static String userPoolUserTemplate(String poolLogicalId) {
+        return """
+            {
+              "Resources": {
+                "PoolA": {"Type": "AWS::Cognito::UserPool", "Properties": {"UserPoolName": "cs-diff-pool-a"}},
+                "PoolB": {"Type": "AWS::Cognito::UserPool", "Properties": {"UserPoolName": "cs-diff-pool-b"}},
+                "U": {
+                  "Type": "AWS::Cognito::UserPoolUser",
+                  "Properties": {"UserPoolId": {"Ref": "%s"}, "Username": "cs-diff-user"}
+                }
+              }
+            }
+            """.formatted(poolLogicalId);
+    }
+
     @Test
     void ssmParameterValueDrift_isReportedAsAChange() {
         String stackName = "cs-diff-ssm-drift-stack";
