@@ -26,6 +26,7 @@ import java.util.Optional;
 import java.util.UUID;
 import java.util.concurrent.ThreadLocalRandom;
 import java.util.function.Consumer;
+import java.util.function.Predicate;
 import java.util.regex.Pattern;
 
 /**
@@ -54,6 +55,7 @@ public class BedrockAgentCoreControlService {
     private final RegionResolver regionResolver;
     private final StripedLocks runtimeLocks = new StripedLocks(RUNTIME_LOCK_STRIPES);
     private final BedrockAgentCoreIdentityService identityService;
+    private final BedrockAgentCoreHarnessRegistry harnessRegistry;
     // clientToken idempotency: tokens of completed deletes, so a replayed delete succeeds
     // instead of 404ing. In-memory only (reset on restart), and each entry expires after
     // DeletedTokenLedger.TTL, after which a replay 404s like an unknown token.
@@ -62,9 +64,10 @@ public class BedrockAgentCoreControlService {
 
     @Inject
     public BedrockAgentCoreControlService(StorageFactory storageFactory, RegionResolver regionResolver,
-                                          BedrockAgentCoreIdentityService identityService, Clock clock) {
+                                          BedrockAgentCoreIdentityService identityService, Clock clock,
+                                          BedrockAgentCoreHarnessRegistry harnessRegistry) {
         this(storageFactory.create("bedrockagentcore", "bedrock-agentcore-runtimes.json",
-                new TypeReference<Map<String, AgentRuntime>>() {}), regionResolver, identityService, clock);
+                new TypeReference<Map<String, AgentRuntime>>() {}), regionResolver, identityService, clock, harnessRegistry);
     }
 
     BedrockAgentCoreControlService(StorageBackend<String, AgentRuntime> storage, RegionResolver regionResolver) {
@@ -78,9 +81,16 @@ public class BedrockAgentCoreControlService {
 
     BedrockAgentCoreControlService(StorageBackend<String, AgentRuntime> storage, RegionResolver regionResolver,
                                    BedrockAgentCoreIdentityService identityService, Clock clock) {
+        this(storage, regionResolver, identityService, clock, null);
+    }
+
+    BedrockAgentCoreControlService(StorageBackend<String, AgentRuntime> storage, RegionResolver regionResolver,
+                                   BedrockAgentCoreIdentityService identityService, Clock clock,
+                                   BedrockAgentCoreHarnessRegistry harnessRegistry) {
         this.storage = storage;
         this.regionResolver = regionResolver;
         this.identityService = identityService;
+        this.harnessRegistry = harnessRegistry;
         this.deletedRuntimeTokens = new DeletedTokenLedger(clock);
         this.deletedEndpointTokens = new DeletedTokenLedger(clock);
     }
@@ -300,13 +310,19 @@ public class BedrockAgentCoreControlService {
      */
     public boolean runtimeArnExists(String region, String arn) {
         String resource = BedrockAgentCoreArns.resource(arn);
-        if (resource == null || !resource.startsWith("runtime/")) {
+        if (resource == null || (!resource.startsWith("runtime/") && !resource.startsWith("agent/"))) {
             return true;
         }
-        String runtimeId = resource.substring("runtime/".length());
-        String prefix = keyPrefix(region);
-        return storage.scan(k -> k.startsWith(prefix)).stream()
-                .anyMatch(r -> runtimeId.equals(r.getAgentRuntimeId()));
+        return findRuntimeByResource(region, resource).isPresent()
+                || (harnessRegistry != null && harnessRegistry.runtimeArnExists(region, arn));
+    }
+
+    private Optional<AgentRuntime> findRuntimeByResource(String region, String resource) {
+        boolean legacy = resource.startsWith("agent/");
+        String id = resource.substring(legacy ? "agent/".length() : "runtime/".length());
+        return storage.scan(k -> k.startsWith(keyPrefix(region))).stream()
+                .filter(runtime -> id.equals(legacy ? runtime.getUuid() : runtime.getAgentRuntimeId()))
+                .findFirst();
     }
 
     public String endpointArn(String runtimeId, AgentRuntimeEndpoint endpoint, String region) {
@@ -344,11 +360,7 @@ public class BedrockAgentCoreControlService {
 
     /** The runtime a runtime ARN names; ResourceNotFoundException when none does. */
     public AgentRuntime getAgentRuntimeByArn(String region, String arn) {
-        String runtimeId = runtimeIdFromArn(arn);
-        String prefix = keyPrefix(region);
-        return storage.scan(k -> k.startsWith(prefix)).stream()
-                .filter(r -> runtimeId.equals(r.getAgentRuntimeId()))
-                .findFirst()
+        return findRuntimeByResource(region, runtimeResourceFromArn(arn))
                 .orElseThrow(() -> new AwsException("ResourceNotFoundException",
                         "AgentCore resource not found: " + arn, 404));
     }
@@ -391,12 +403,12 @@ public class BedrockAgentCoreControlService {
                         "AgentCore resource not found: " + arn, 404));
     }
 
-    private static String runtimeIdFromArn(String arn) {
+    private static String runtimeResourceFromArn(String arn) {
         String resource = BedrockAgentCoreArns.resource(arn);
-        if (resource == null || !resource.startsWith("runtime/")) {
+        if (resource == null || (!resource.startsWith("runtime/") && !resource.startsWith("agent/"))) {
             throw new AwsException("ValidationException", "Unsupported resource ARN: " + arn, 400);
         }
-        return resource.substring("runtime/".length());
+        return resource;
     }
 
     // ──────────────────────────── Endpoints (Phase 2) ────────────────────────────
@@ -536,23 +548,34 @@ public class BedrockAgentCoreControlService {
     /** The endpoint and parent runtime named by a runtime endpoint ARN, or empty when absent. */
     public Optional<EndpointLocation> findEndpointByArn(String region, String arn) {
         String resource = BedrockAgentCoreArns.resource(arn);
-        if (resource == null || !resource.startsWith("runtime/")) {
+        if (resource == null) {
+            return Optional.empty();
+        }
+        if (resource.startsWith("agentEndpoint/")) {
+            String uuid = resource.substring("agentEndpoint/".length());
+            for (AgentRuntime candidate : storage.scan(k -> k.startsWith(keyPrefix(region)))) {
+                Optional<EndpointLocation> found = findEndpoint(region, candidate.getAgentRuntimeId(),
+                        endpoint -> uuid.equals(endpoint.getUuid()));
+                if (found.isPresent()) {
+                    return found;
+                }
+            }
             return Optional.empty();
         }
         String[] parts = resource.split("/", -1);
-        if (parts.length != 4 || !"runtime-endpoint".equals(parts[2])) {
+        if (parts.length != 4 || !"runtime".equals(parts[0]) || !"runtime-endpoint".equals(parts[2])) {
             return Optional.empty();
         }
-        String runtimeId = parts[1];
+        return findEndpoint(region, parts[1], endpoint -> parts[3].equals(endpoint.getName()));
+    }
+
+    private Optional<EndpointLocation> findEndpoint(String region, String runtimeId,
+                                                    Predicate<AgentRuntimeEndpoint> matches) {
         synchronized (runtimeLock(region, runtimeId)) {
-            Optional<AgentRuntime> runtime = storage.get(key(region, runtimeId));
-            if (runtime.isEmpty()) {
-                return Optional.empty();
-            }
-            return runtime.get().getEndpoints().stream()
-                    .filter(endpoint -> parts[3].equals(endpoint.getName()))
-                    .map(endpoint -> new EndpointLocation(runtime.get(), endpoint))
-                    .findFirst();
+            return storage.get(key(region, runtimeId)).flatMap(runtime -> runtime.getEndpoints().stream()
+                    .filter(matches)
+                    .map(endpoint -> new EndpointLocation(runtime, endpoint))
+                    .findFirst());
         }
     }
 
