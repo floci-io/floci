@@ -3882,12 +3882,8 @@ public class RdsService implements Resettable, ResourceProvider {
         // Resolved before the first setter runs, since the checks it carries read the instance's
         // current size and engine version: a refusal here must leave the whole request unapplied.
         DbInstanceScalingChanges resolvedScaling = scaling.resolveFor(instance);
-        if (!config.services().rds().mock() && !instance.isBackendNeverStarted()
-                && !isBlank(resolvedScaling.engineVersion())
-                && !resolvedScaling.engineVersion().equals(instance.getEngineVersion())) {
-            throw new AwsException("InvalidParameterCombination",
-                    "EngineVersion changes are not supported for container-backed DB instances.", 400);
-        }
+        String previousEngineVersion = instance.getEngineVersion();
+        boolean restartForUpgrade = requiresMinorEngineRestart(instance, resolvedScaling.engineVersion());
         DbInstanceSettings effective = withEffectiveWindows(settings, instance);
         if (isBlank(instance.getDbClusterIdentifier()) && !isAuroraEngine(engineName(instance))) {
             effective.validateStorageType();
@@ -3950,6 +3946,9 @@ public class RdsService implements Resettable, ResourceProvider {
             instance.setAutoMinorVersionUpgrade(autoMinorVersionUpgrade);
         }
         effective.applyTo(instance);
+        if (restartForUpgrade) {
+            instance.setStatus(DbInstanceStatus.MODIFYING);
+        }
         resolvedScaling.applyTo(instance);
         if (publiclyAccessible != null) {
             instance.setPubliclyAccessible(publiclyAccessible);
@@ -3971,8 +3970,80 @@ public class RdsService implements Resettable, ResourceProvider {
                     rdsResourceRelayKey(instance.getDbInstanceArn(), id), iamEnabled);
         }
 
+        if (restartForUpgrade) {
+            restartForMinorEngineUpgrade(instance, previousEngineVersion, effectiveRegion);
+        }
+
         LOG.infov("DB instance {0} modified", id);
         return instance;
+    }
+
+    private boolean requiresMinorEngineRestart(DbInstance instance, String requestedVersion) {
+        if (config.services().rds().mock()
+                || isBlank(requestedVersion) || requestedVersion.equals(instance.getEngineVersion())) {
+            return false;
+        }
+        String currentVersion = instance.getEngineVersion();
+        boolean imageChanges = !imageForEngine(instance.getEngine(), currentVersion)
+                .equals(imageForEngine(instance.getEngine(), requestedVersion));
+        if (instance.isBackendNeverStarted() && imageChanges) {
+            return false;
+        }
+        boolean numericVersions = currentVersion != null
+                && currentVersion.matches("[0-9]{1,9}(\\.[0-9]{1,9})*")
+                && requestedVersion.matches("[0-9]{1,9}(\\.[0-9]{1,9})*");
+        if (!isBlank(instance.getDbClusterIdentifier()) || isAuroraEngine(engineName(instance))
+                || !numericVersions
+                || !engineVersionFamily(instance.getEngine(), currentVersion)
+                        .equals(engineVersionFamily(instance.getEngine(), requestedVersion))
+                || RdsEngineCatalog.compareVersions(requestedVersion, currentVersion) <= 0
+                || !imageChanges) {
+            throw new AwsException("InvalidParameterCombination",
+                    "Only minor engine upgrades with version-specific images are supported for "
+                            + "standalone container-backed DB instances.", 400);
+        }
+        return true;
+    }
+
+    private static String engineVersionFamily(DatabaseEngine engine, String version) {
+        String[] parts = version.split("\\.");
+        if (parts.length == 1 || engine == DatabaseEngine.POSTGRES && parts[0].length() > 1) {
+            return parts[0];
+        }
+        return parts[0] + "." + parts[1];
+    }
+
+    private void restartForMinorEngineUpgrade(DbInstance instance, String previousVersion, String region) {
+        String id = instance.getDbInstanceIdentifier();
+        String previousContainerId = instance.getContainerId();
+        try {
+            proxyManager.stopProxy(rdsResourceRelayKey(instance.getDbInstanceArn(), id));
+            if (previousContainerId != null) {
+                containerManager.stop(buildHandle(instance));
+            }
+            instance.setContainerId(null);
+            instance.setContainerHost(null);
+            instance.setContainerPort(0);
+            startStandaloneInstanceBackend(instance, id, region);
+            if (!hasBackend(instance.getContainerHost(), instance.getContainerPort())) {
+                throw new AwsException("InvalidDBInstanceState",
+                        "The database backend could not be started for the engine version upgrade.", 400);
+            }
+            instance.setStatus(DbInstanceStatus.AVAILABLE);
+            putInstanceForScope(currentAccountId(), region, id, instance);
+        } catch (RuntimeException | Error failure) {
+            if (!hasBackend(instance.getContainerHost(), instance.getContainerPort())
+                    || Objects.equals(previousContainerId, instance.getContainerId())) {
+                instance.setEngineVersion(previousVersion);
+            }
+            instance.setStatus(DbInstanceStatus.FAILED);
+            try {
+                putInstanceForScope(currentAccountId(), region, id, instance);
+            } catch (RuntimeException persistFailure) {
+                failure.addSuppressed(persistFailure);
+            }
+            throw failure;
+        }
     }
 
     /**

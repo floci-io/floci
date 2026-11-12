@@ -2588,15 +2588,114 @@ class RdsServiceTest {
         assertEquals(1, stored.getBackupRetentionPeriod());
     }
 
+    @Test
+    void modifyDbInstanceRestartsAMinorUpgradeOnTheSameStorageAndEndpoint() {
+        createScalingInstance("minor-upgrade", "postgres", "16.4", 20);
+        DbInstance original = rdsService.getDbInstance("minor-upgrade");
+        DbEndpoint endpoint = original.getEndpoint();
+        String volume = original.getDockerVolumeName();
+        String storageId = original.getContainerStorageResourceId();
+        clearInvocations(containerManager, proxyManager);
+        when(containerManager.tryStart(any(), any(), any(), any(), any(), any(), any(), any(), any(), any()))
+                .thenReturn(new RdsContainerHandle("upgraded-container", "minor-upgrade", "localhost", 15432));
+
+        DbInstance modified = rdsService.modifyDbInstance("minor-upgrade", null, null, null,
+                null, null, null, null, DbInstanceSettings.unchanged(), null,
+                new DbInstanceScalingChanges("db.t3.large", 100, "16.5", null));
+
+        assertEquals("16.5", modified.getEngineVersion());
+        assertEquals("upgraded-container", modified.getContainerId());
+        assertEquals("db.t3.large", modified.getDbInstanceClass());
+        assertEquals(100, modified.getAllocatedStorage());
+        assertEquals(endpoint, modified.getEndpoint());
+        assertEquals(volume, modified.getDockerVolumeName());
+        assertEquals(storageId, modified.getContainerStorageResourceId());
+        verify(containerManager).stop(any());
+        verify(containerManager).tryStart(eq(original.getDbInstanceArn()), eq("minor-upgrade"),
+                eq(storageId), eq(volume), eq(DatabaseEngine.POSTGRES), eq("postgres:16.5-alpine"),
+                eq("admin"), eq("Password123!"), eq("dbname"), any());
+        verify(proxyManager).stopProxy(any());
+    }
+
     @ParameterizedTest
-    @ValueSource(strings = {"17.2", "16.5"})
-    void modifyDbInstanceRejectsContainerBackedEngineVersionChanges(String targetVersion) {
+    @CsvSource({"mysql,8.0.36,8.0.37,mysql:8.0.37", "mariadb,10.11.11,10.11.12,mariadb:10.11.12",
+            "postgres,9.5.1,9.5.2,postgres:9.5.2-alpine"})
+    void minorUpgradeUsesTheEnginesVersionedImage(String engine, String current, String target, String image) {
+        createScalingInstance("minor-image", engine, current, 20);
+        clearInvocations(containerManager);
+
+        DbInstance modified = rdsService.modifyDbInstance("minor-image", null, null, null,
+                null, null, null, null, DbInstanceSettings.unchanged(), null,
+                new DbInstanceScalingChanges(null, null, target, null));
+
+        assertEquals(target, modified.getEngineVersion());
+        assertEquals(DbInstanceStatus.AVAILABLE, modified.getStatus());
+        verify(containerManager).tryStart(any(), eq("minor-image"), any(), any(), eq(modified.getEngine()),
+                eq(image), any(), any(), any(), any());
+    }
+
+    @ParameterizedTest
+    @ValueSource(booleans = {true, false})
+    void minorUpgradeRefusesAPinnedImageWithoutChangingTheInstance(boolean offline) {
+        when(rdsConfig.defaultPostgresImage()).thenReturn(Optional.of("postgres:16.4-alpine"));
+        if (offline) {
+            when(containerManager.tryStart(any(), any(), any(), any(), any(), any(), any(), any(), any(), any()))
+                    .thenReturn(null);
+        }
+        createScalingInstance("pinned-upgrade", "postgres", "16.4", 20);
+        clearInvocations(containerManager, proxyManager);
+
+        AwsException error = assertThrows(AwsException.class, () ->
+                rdsService.modifyDbInstance("pinned-upgrade", null, null, null,
+                        null, null, null, null, DbInstanceSettings.unchanged(), null,
+                        new DbInstanceScalingChanges("db.t3.large", 100, "16.5", null)));
+
+        assertEquals("InvalidParameterCombination", error.getErrorCode());
+        assertEquals("16.4", rdsService.getDbInstance("pinned-upgrade").getEngineVersion());
+        assertEquals("db.t3.micro", rdsService.getDbInstance("pinned-upgrade").getDbInstanceClass());
+        assertEquals(20, rdsService.getDbInstance("pinned-upgrade").getAllocatedStorage());
+        verifyNoInteractions(containerManager, proxyManager);
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"stop", "start", "unavailable", "proxy"})
+    void failedMinorUpgradeDoesNotReportAnAvailableDatabase(String failurePhase) {
+        createScalingInstance("failed-minor", "postgres", "16.4", 20);
+        if ("stop".equals(failurePhase)) {
+            doThrow(new IllegalStateException("stop failed")).when(containerManager).stop(any());
+        } else if ("start".equals(failurePhase)) {
+            when(containerManager.tryStart(any(), any(), any(), any(), any(), any(), any(), any(), any(), any()))
+                    .thenThrow(new IllegalStateException("start failed"));
+        } else if ("unavailable".equals(failurePhase)) {
+            when(containerManager.tryStart(any(), any(), any(), any(), any(), any(), any(), any(), any(), any()))
+                    .thenReturn(null);
+        } else {
+            when(containerManager.tryStart(any(), any(), any(), any(), any(), any(), any(), any(), any(), any()))
+                    .thenReturn(new RdsContainerHandle("new-container", "failed-minor", "localhost", 15432));
+            doThrow(new IllegalStateException("proxy failed")).when(proxyManager).startProxy(
+                    any(), any(), any(), anyBoolean(), anyInt(), any(), anyInt(),
+                    any(), any(), any(), any(), any(), any());
+        }
+
+        assertThrows(RuntimeException.class, () ->
+                rdsService.modifyDbInstance("failed-minor", null, null, null,
+                        null, null, null, null, DbInstanceSettings.unchanged(), null,
+                        new DbInstanceScalingChanges(null, null, "16.5", null)));
+
+        DbInstance failed = rdsService.getDbInstance("failed-minor");
+        assertEquals(DbInstanceStatus.FAILED, failed.getStatus());
+        assertEquals("proxy".equals(failurePhase) ? "16.5" : "16.4", failed.getEngineVersion());
+        verify(containerManager, never()).removeVolume(any(), any(), any());
+    }
+
+    @Test
+    void modifyDbInstanceRejectsContainerBackedMajorEngineVersionChanges() {
         createScalingInstance("real-engine", "postgres", "16.4", 20);
 
         AwsException error = assertThrows(AwsException.class, () ->
                 rdsService.modifyDbInstance("real-engine", null, null, null,
                         null, null, null, null, DbInstanceSettings.unchanged(), null,
-                        new DbInstanceScalingChanges(null, null, targetVersion, true)));
+                        new DbInstanceScalingChanges(null, null, "17.2", true)));
 
         assertEquals("InvalidParameterCombination", error.getErrorCode());
         assertEquals(400, error.getHttpStatus());
@@ -2695,8 +2794,8 @@ class RdsServiceTest {
     }
 
     @ParameterizedTest
-    @CsvSource({"mysql,8.0,8.4", "mariadb,10.11,11.4", "sqlserver-se,15.00,16.00",
-            "postgres,16.4,16.3"})
+    @CsvSource({"mysql,8.0,8.4", "mariadb,10.11,11.4", "mariadb,10.11,10.12", "sqlserver-se,15.00,16.00",
+            "sqlserver-se,15.00,15.00.2000", "postgres,16.4,16.3", "postgres,9.5.1,9.6.1"})
     void modifyDbInstanceRejectsOtherContainerBackedVersionChanges(
             String engine, String currentVersion, String targetVersion) {
         createScalingInstance("other-engine", engine, currentVersion, 20);

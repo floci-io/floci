@@ -467,17 +467,26 @@ value, so a partial modify does not reset anything.
   rather than refused, which is what AWS does. SQL Server takes the size it is given.
 - The same size is not a change and is left alone.
 
-In container-backed mode, changing `EngineVersion` fails with `InvalidParameterCombination`.
-Floci cannot upgrade the backing database container, so it refuses both major and minor version
-changes rather than reporting a version the server is not running. `AllowMajorVersionUpgrade`
-and `ApplyImmediately` do not bypass this limitation. Repeating the current version is allowed,
-including alongside changes to other settings.
+Standalone container-backed instances support minor `EngineVersion` upgrades when the default
+image follows the requested version. Floci stops the proxy and database container, starts the new
+engine image on the same storage volume, and rebinds the existing endpoint. It reports `available`
+only after both the new backend and proxy have started. A failed restart reports `failed` and
+retains the storage volume.
+
+Major upgrades and downgrades fail with `InvalidParameterCombination` before any settings change.
+PostgreSQL 10 and later use the leading component as the major version; older PostgreSQL releases,
+MySQL, and MariaDB use the first two components. Existing databases need a migration for a major
+upgrade, which Floci does not perform. `AllowMajorVersionUpgrade` does not bypass this limitation.
+Custom image overrides and SQL Server do not map `EngineVersion` to a new image, so their version
+changes are also refused. Cluster members must use cluster-level engine management. Repeating the
+current version is allowed alongside other changes without restarting the database.
 
 A standalone instance created while Docker is unavailable may change its version before its first
-backend startup. Its eventual container uses the updated version. Floci persists this never-started
+backend startup when its image follows the requested version. Its eventual container uses the
+updated version. Floci persists this never-started
 state, and protects the version before attempting to initialize the database, including when a later
-proxy startup fails. Existing databases remain protected after a reboot, storage reload, or lost
-container. Older records without this state are protected conservatively.
+proxy startup fails. Existing databases remain protected against major changes after a reboot,
+storage reload, or lost container. Older records without this state are treated as existing databases.
 
 In mock mode (`FLOCI_SERVICES_RDS_MOCK=true`), `EngineVersion` updates the instance metadata.
 A minor upgrade is accepted on its own. A different major version needs

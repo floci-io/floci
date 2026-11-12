@@ -34,7 +34,7 @@ class RdsEngineVersionDockerIntegrationTest {
     }
 
     @Test
-    void unsupportedVersionChangesKeepTheControlPlaneAndPostgresInAgreement() throws SQLException {
+    void minorUpgradePreservesDataAndMajorUpgradeIsRefused() throws SQLException {
         String id = "engine-version-" + Long.toString(System.nanoTime(), 36);
         try (RdsClient client = rdsClient("us-east-1", "000000000000")) {
             client.createDBInstance(b -> b.dbInstanceIdentifier(id).engine("postgres").engineVersion("16.4")
@@ -50,7 +50,7 @@ class RdsEngineVersionDockerIntegrationTest {
                     statement.execute("INSERT INTO upgrade_probe VALUES ('preserved')");
                 }
 
-                for (String target : new String[] {"17.2", "16.5"}) {
+                for (String target : new String[] {"17.2"}) {
                     for (boolean immediately : new boolean[] {true, false}) {
                         RdsException error = assertThrows(RdsException.class, () ->
                                 client.modifyDBInstance(b -> b.dbInstanceIdentifier(id).engineVersion(target)
@@ -76,6 +76,15 @@ class RdsEngineVersionDockerIntegrationTest {
                         .engineVersion("16.4").dbInstanceClass("db.t3.large").applyImmediately(true)).dbInstance();
                 assertEquals("16.4", sameVersion.engineVersion());
                 assertEquals("db.t3.large", sameVersion.dbInstanceClass());
+                assertEquals("preserved", query(port, "SELECT value FROM upgrade_probe"));
+
+                DBInstance upgraded = client.modifyDBInstance(b -> b.dbInstanceIdentifier(id)
+                        .engineVersion("16.5").allocatedStorage(100).applyImmediately(true)).dbInstance();
+                assertEquals("16.5", upgraded.engineVersion());
+                assertEquals("available", upgraded.dbInstanceStatus());
+                assertEquals(original.endpoint(), upgraded.endpoint());
+                assertEquals("16.5", describe(client, id).engineVersion());
+                assertTrue(query(port, "SHOW server_version").startsWith("16.5"));
                 assertEquals("preserved", query(port, "SELECT value FROM upgrade_probe"));
             } finally {
                 client.deleteDBInstance(b -> b.dbInstanceIdentifier(id).skipFinalSnapshot(true));
