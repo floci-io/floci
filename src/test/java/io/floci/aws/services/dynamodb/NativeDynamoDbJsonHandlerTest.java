@@ -611,11 +611,7 @@ class NativeDynamoDbJsonHandlerTest {
                 List.of(new AttributeDefinition("id", "S")),
                 3L, 7L, List.of(), "eu-west-1");
 
-        Response response = handler.handle("DescribeTable",
-                mapper.createObjectNode().put("TableName", "table-warm-provisioned"), "eu-west-1");
-        assertEquals(200, response.getStatus());
-        JsonNode body = mapper.convertValue(response.getEntity(), JsonNode.class);
-        JsonNode warmThroughput = body.get("Table").get("WarmThroughput");
+        JsonNode warmThroughput = warmThroughputOf(describedTable("table-warm-provisioned"));
 
         assertNotNull(warmThroughput);
         assertEquals(3, warmThroughput.get("ReadUnitsPerSecond").asLong());
@@ -634,11 +630,7 @@ class NativeDynamoDbJsonHandlerTest {
                 }
                 """), "eu-west-1");
 
-        Response response = handler.handle("DescribeTable",
-                mapper.createObjectNode().put("TableName", "table-warm-on-demand"), "eu-west-1");
-        assertEquals(200, response.getStatus());
-        JsonNode body = mapper.convertValue(response.getEntity(), JsonNode.class);
-        JsonNode warmThroughput = body.get("Table").get("WarmThroughput");
+        JsonNode warmThroughput = warmThroughputOf(describedTable("table-warm-on-demand"));
 
         assertNotNull(warmThroughput);
         assertEquals(12000, warmThroughput.get("ReadUnitsPerSecond").asLong());
@@ -664,11 +656,7 @@ class NativeDynamoDbJsonHandlerTest {
                     "ProvisionedThroughput": {"ReadCapacityUnits": 5, "WriteCapacityUnits": 8}
                 }
                 """), "eu-west-1");
-        JsonNode body = mapper.convertValue(
-                handler.handle("DescribeTable",
-                        mapper.createObjectNode().put("TableName", "table-warm-walk"), "eu-west-1").getEntity(),
-                JsonNode.class);
-        JsonNode warm = body.get("Table").get("WarmThroughput");
+        JsonNode warm = warmThroughputOf(describedTable("table-warm-walk"));
         assertEquals(10, warm.get("ReadUnitsPerSecond").asLong());
         assertEquals(20, warm.get("WriteUnitsPerSecond").asLong());
 
@@ -679,11 +667,7 @@ class NativeDynamoDbJsonHandlerTest {
                     "ProvisionedThroughput": {"ReadCapacityUnits": 15, "WriteCapacityUnits": 25}
                 }
                 """), "eu-west-1");
-        body = mapper.convertValue(
-                handler.handle("DescribeTable",
-                        mapper.createObjectNode().put("TableName", "table-warm-walk"), "eu-west-1").getEntity(),
-                JsonNode.class);
-        warm = body.get("Table").get("WarmThroughput");
+        warm = warmThroughputOf(describedTable("table-warm-walk"));
         assertEquals(15, warm.get("ReadUnitsPerSecond").asLong());
         assertEquals(25, warm.get("WriteUnitsPerSecond").asLong());
 
@@ -694,11 +678,7 @@ class NativeDynamoDbJsonHandlerTest {
                     "BillingMode": "PAY_PER_REQUEST"
                 }
                 """), "eu-west-1");
-        body = mapper.convertValue(
-                handler.handle("DescribeTable",
-                        mapper.createObjectNode().put("TableName", "table-warm-walk"), "eu-west-1").getEntity(),
-                JsonNode.class);
-        warm = body.get("Table").get("WarmThroughput");
+        warm = warmThroughputOf(describedTable("table-warm-walk"));
         assertEquals(12000, warm.get("ReadUnitsPerSecond").asLong());
         assertEquals(4000, warm.get("WriteUnitsPerSecond").asLong());
     }
@@ -716,11 +696,7 @@ class NativeDynamoDbJsonHandlerTest {
         table.setWarmWriteUnitsPerSecond(0);
         service.persistTable("table-warm-legacy", table, "eu-west-1");
 
-        Response response = handler.handle("DescribeTable",
-                mapper.createObjectNode().put("TableName", "table-warm-legacy"), "eu-west-1");
-        assertEquals(200, response.getStatus());
-        JsonNode body = mapper.convertValue(response.getEntity(), JsonNode.class);
-        JsonNode warmThroughput = body.get("Table").get("WarmThroughput");
+        JsonNode warmThroughput = warmThroughputOf(describedTable("table-warm-legacy"));
 
         assertNotNull(warmThroughput);
         assertEquals(3, warmThroughput.get("ReadUnitsPerSecond").asLong());
@@ -804,6 +780,14 @@ class NativeDynamoDbJsonHandlerTest {
         assertEquals(2, describedWarmThroughput.get("ReadUnitsPerSecond").asLong());
         assertEquals(3, describedWarmThroughput.get("WriteUnitsPerSecond").asLong());
         assertEquals("ACTIVE", describedWarmThroughput.get("Status").asText());
+    }
+
+    private JsonNode describedTable(String tableName) throws Exception {
+        Response response = handler.handle("DescribeTable",
+                mapper.createObjectNode().put("TableName", tableName), "eu-west-1");
+        assertEquals(200, response.getStatus());
+        JsonNode body = mapper.convertValue(response.getEntity(), JsonNode.class);
+        return body.get("Table");
     }
 
     private JsonNode describedGsi(String tableName, String indexName) throws Exception {
