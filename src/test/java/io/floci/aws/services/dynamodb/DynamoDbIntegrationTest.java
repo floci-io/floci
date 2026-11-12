@@ -879,6 +879,36 @@ class DynamoDbIntegrationTest {
     }
 
     @Test
+    void describeLimitsReportsTheDefaultQuotas() {
+        given()
+            .header("X-Amz-Target", "DynamoDB_20120810.DescribeLimits")
+            .contentType(DYNAMODB_CONTENT_TYPE)
+            .body("{}")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("AccountMaxReadCapacityUnits", equalTo(80000))
+            .body("AccountMaxWriteCapacityUnits", equalTo(80000))
+            .body("TableMaxReadCapacityUnits", equalTo(40000))
+            .body("TableMaxWriteCapacityUnits", equalTo(40000));
+    }
+
+    @Test
+    void describeEndpointsNamesTheRegionalEndpoint() {
+        given()
+            .header("X-Amz-Target", "DynamoDB_20120810.DescribeEndpoints")
+            .contentType(DYNAMODB_CONTENT_TYPE)
+            .body("{}")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("Endpoints.Address", contains("dynamodb.us-east-1.amazonaws.com"))
+            .body("Endpoints.CachePeriodInMinutes", contains(1440));
+    }
+
+    @Test
     @Order(5)
     void putItem() {
         given()

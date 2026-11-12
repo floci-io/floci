@@ -5,6 +5,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.floci.aws.core.common.AwsArnUtils;
+import io.floci.aws.core.common.AwsEndpoints;
 import io.floci.aws.core.common.AwsErrorResponse;
 import io.floci.aws.core.common.AwsException;
 import io.floci.aws.core.common.SmithyValidationErrors;
@@ -112,6 +113,8 @@ public class NativeDynamoDbJsonHandler {
             case "DeleteTable" -> handleDeleteTable(request, region);
             case "DescribeTable" -> handleDescribeTable(request, region);
             case "ListTables" -> handleListTables(request, region);
+            case "DescribeLimits" -> handleDescribeLimits();
+            case "DescribeEndpoints" -> handleDescribeEndpoints(region);
             case "PutItem" -> handlePutItem(request, region);
             case "GetItem" -> handleGetItem(request, region);
             case "DeleteItem" -> handleDeleteItem(request, region);
@@ -164,6 +167,28 @@ public class NativeDynamoDbJsonHandler {
                     .build();
 
         };
+    }
+
+    // The default account quotas, the same in every Region measured.
+    private static final long ACCOUNT_MAX_CAPACITY_UNITS = 80_000;
+    private static final long TABLE_MAX_CAPACITY_UNITS = 40_000;
+    private static final int ENDPOINT_CACHE_PERIOD_IN_MINUTES = 1440;
+
+    private Response handleDescribeLimits() {
+        ObjectNode response = objectMapper.createObjectNode();
+        response.put("AccountMaxReadCapacityUnits", ACCOUNT_MAX_CAPACITY_UNITS);
+        response.put("AccountMaxWriteCapacityUnits", ACCOUNT_MAX_CAPACITY_UNITS);
+        response.put("TableMaxReadCapacityUnits", TABLE_MAX_CAPACITY_UNITS);
+        response.put("TableMaxWriteCapacityUnits", TABLE_MAX_CAPACITY_UNITS);
+        return Response.ok(response).build();
+    }
+
+    private Response handleDescribeEndpoints(String region) {
+        ObjectNode response = objectMapper.createObjectNode();
+        response.putArray("Endpoints").addObject()
+                .put("Address", AwsEndpoints.host("dynamodb", region))
+                .put("CachePeriodInMinutes", ENDPOINT_CACHE_PERIOD_IN_MINUTES);
+        return Response.ok(response).build();
     }
 
     private Response handleCreateTable(JsonNode request, String region) {
