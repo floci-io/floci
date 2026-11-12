@@ -54,6 +54,8 @@ Running Floci directly on a Linux host (not in a container) with services that s
 The [Cognito JSON API](../services/cognito.md) supports browser calls with wildcard
 CORS without an extra allowed origin. The disable-CORS switch above also turns off
 that built-in behavior. Other services keep their existing CORS policies.
+For Cognito responses, extra exposed headers are added when the request's origin matches
+the global allow-list; Cognito's default exposed headers are preserved.
 
 ---
 

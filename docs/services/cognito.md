@@ -12,6 +12,8 @@ JSON APIs; their actual responses keep their existing CORS policies.
 No extra allowed origin is needed. `FLOCI_SECURITY_DISABLE_CORS_HEADERS=true` or disabling
 the Cognito service turns off this built-in behavior. Configured global CORS preflights
 and service-specific S3 and API Gateway CORS policies retain their existing behavior.
+For origins on the global allow-list, configured extra exposed headers are merged with
+Cognito's defaults and existing response headers. Header names are deduplicated without regard to case.
 
 Floci serves pool-specific discovery and JWKS endpoints, plus a relaxed OAuth token endpoint, so local clients can mint and validate Cognito-like access tokens against RS256 signing keys.
 
