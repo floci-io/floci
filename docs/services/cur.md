@@ -21,7 +21,7 @@ real Parquet artifacts in Floci's S3 service via the `floci-duck` sidecar.
 ## Validation rules
 
 - `ReportName`: alphanumerics + `-_`, max 256 chars
-- `Tags`: up to 200, each a `Key` of 1 to 128 characters and a `Value` of up to 256
+- `Tags`: up to 200 in one request, each a `Key` of 1 to 128 characters and a `Value` of up to 256. A report holds at most 50 tags, so a `PutReportDefinition` or `TagResource` that would leave it with more fails with `ValidationException`
 - `TimeUnit`: `HOURLY` / `DAILY` / `MONTHLY`
 - `Format`: `Parquet` (CSV emission not yet implemented; `textORcsv` returns `ValidationException`)
 - `Compression`: `Parquet` (`ZIP` / `GZIP` not yet implemented)

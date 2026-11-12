@@ -127,15 +127,18 @@ public class CurJsonHandler {
     /** A {@code TagList}: up to 200 tags, each a key of 1 to 128 characters and a value of up to 256. */
     private static Map<String, String> parseTags(JsonNode node) {
         Map<String, String> tags = new LinkedHashMap<>();
-        if (!node.isArray()) {
+        if (node.isMissingNode() || node.isNull()) {
             return tags;
+        }
+        if (!node.isArray()) {
+            throw new AwsException("ValidationException", "Tags must be a list of tags.", 400);
         }
         List<String> violations = new ArrayList<>();
         addIfPresent(violations, SmithyValidationErrors.sizeOutOfRange("tags", node.size(), 0, MAX_TAGS));
         for (int i = 0; i < node.size(); i++) {
             String path = "tags." + (i + 1) + ".member.";
-            String key = stringOrNull(node.get(i), "Key");
-            String value = stringOrNull(node.get(i), "Value");
+            String key = tagString(node.get(i), "Key");
+            String value = tagString(node.get(i), "Value");
             if (key == null) {
                 violations.add(SmithyValidationErrors.notNull(path + "key"));
             } else {
@@ -165,7 +168,10 @@ public class CurJsonHandler {
         List<String> violations = new ArrayList<>();
         addIfPresent(violations, SmithyValidationErrors.sizeOutOfRange("tagKeys", node.size(), 0, MAX_TAGS));
         for (int i = 0; i < node.size(); i++) {
-            String key = node.get(i).asText();
+            if (!node.get(i).isTextual()) {
+                throw new AwsException("ValidationException", "TagKeys must be a list of strings.", 400);
+            }
+            String key = node.get(i).textValue();
             addIfPresent(violations,
                     SmithyValidationErrors.lengthOutOfRange("tagKeys." + (i + 1) + ".member", key, 1, 128));
             keys.add(key);
@@ -174,6 +180,18 @@ public class CurJsonHandler {
             throw SmithyValidationErrors.validationException(violations);
         }
         return keys;
+    }
+
+    /** A tag's key or value, or {@code null} when absent; any other JSON type than a string is rejected. */
+    private static String tagString(JsonNode tag, String member) {
+        JsonNode value = tag.get(member);
+        if (value == null || value.isNull()) {
+            return null;
+        }
+        if (!value.isTextual()) {
+            throw new AwsException("ValidationException", "Tag " + member + " must be a string.", 400);
+        }
+        return value.textValue();
     }
 
     private static void requireList(JsonNode request, String member, String path) {

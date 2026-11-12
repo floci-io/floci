@@ -42,6 +42,7 @@ public class CurService {
 
     /** AWS hard limit per account: 5 report definitions. */
     private static final int MAX_REPORTS_PER_ACCOUNT = 5;
+    private static final int MAX_TAGS_PER_REPORT = 50;
     /** AWS allows the report name to contain alphanumerics, hyphens, and underscores. */
     private static final Pattern REPORT_NAME_PATTERN =
             Pattern.compile("[A-Za-z0-9_-]+");
@@ -78,6 +79,7 @@ public class CurService {
     /** {@code PutReportDefinition} — creates a new report. Fails if one already exists. */
     public synchronized ReportDefinition putReportDefinition(ReportDefinition definition, String region) {
         validateReportDefinition(definition);
+        requireTagLimit(definition.getTags());
         String key = compositeKey(region, definition.getReportName());
 
         if (store.get(key).isPresent()) {
@@ -227,6 +229,7 @@ public class CurService {
         ReportDefinition report = existingReport(reportName, region);
         Map<String, String> merged = new LinkedHashMap<>(report.getTags());
         merged.putAll(tags);
+        requireTagLimit(merged);
         report.setTags(merged);
         store.put(compositeKey(region, reportName), report);
     }
@@ -238,6 +241,13 @@ public class CurService {
         tagKeys.forEach(remaining::remove);
         report.setTags(remaining);
         store.put(compositeKey(region, reportName), report);
+    }
+
+    private static void requireTagLimit(Map<String, String> tags) {
+        if (tags.size() > MAX_TAGS_PER_REPORT) {
+            throw new AwsException("ValidationException",
+                    "A report definition can have up to " + MAX_TAGS_PER_REPORT + " tags.", 400);
+        }
     }
 
     private ReportDefinition existingReport(String reportName, String region) {

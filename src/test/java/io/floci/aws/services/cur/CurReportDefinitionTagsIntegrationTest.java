@@ -18,9 +18,14 @@ import software.amazon.awssdk.services.costandusagereport.model.Tag;
 import software.amazon.awssdk.services.costandusagereport.model.TimeUnit;
 import software.amazon.awssdk.services.costandusagereport.model.ValidationException;
 
+import java.nio.charset.StandardCharsets;
 import java.util.List;
 import java.util.UUID;
+import java.util.stream.IntStream;
 
+import static io.restassured.RestAssured.given;
+import static org.hamcrest.Matchers.containsString;
+import static org.hamcrest.Matchers.not;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -41,8 +46,11 @@ class CurReportDefinitionTagsIntegrationTest {
 
     @AfterEach
     void deleteReportAndCloseClient() {
-        cur.deleteReportDefinition(r -> r.reportName(reportName));
-        cur.close();
+        try {
+            cur.deleteReportDefinition(r -> r.reportName(reportName));
+        } finally {
+            cur.close();
+        }
     }
 
     @Test
@@ -113,6 +121,61 @@ class CurReportDefinitionTagsIntegrationTest {
 
         assertTrue(noTags.getMessage().contains("'tags'"), noTags.getMessage());
         assertTrue(noKeys.getMessage().contains("'tagKeys'"), noKeys.getMessage());
+    }
+
+    @Test
+    void aReportCannotHoldMoreThan50Tags() {
+        assertThrows(ValidationException.class, () -> putReport(tags(51)));
+
+        putReport(tags(50));
+        assertThrows(ValidationException.class,
+                () -> cur.tagResource(r -> r.reportName(reportName).tags(tag("one-more", "v"))));
+        assertEquals(50, listTags().size());
+
+        cur.tagResource(r -> r.reportName(reportName).tags(tag("key-1", "replaced")));
+        assertEquals(50, listTags().size());
+    }
+
+    @Test
+    void tagsThatAreNotAListAreRejectedOnCreate() {
+        String definition = "{\"ReportName\":\"" + reportName + "\",\"TimeUnit\":\"DAILY\","
+                + "\"Format\":\"Parquet\",\"Compression\":\"Parquet\",\"AdditionalSchemaElements\":[\"RESOURCES\"],"
+                + "\"S3Bucket\":\"tag-report-bucket\",\"S3Prefix\":\"reports\",\"S3Region\":\"us-east-1\","
+                + "\"AdditionalArtifacts\":[\"ATHENA\"],\"RefreshClosedReports\":true,"
+                + "\"ReportVersioning\":\"OVERWRITE_REPORT\"}";
+
+        call("PutReportDefinition", "{\"ReportDefinition\":" + definition
+                + ",\"Tags\":{\"Key\":\"team\",\"Value\":\"red\"}}", 400);
+        call("PutReportDefinition", "{\"ReportDefinition\":" + definition + "}", 200);
+    }
+
+    @Test
+    void tagKeysAndValuesThatAreNotStringsAreRejected() {
+        putReport(List.of(tag("1", "kept")));
+
+        call("TagResource", "{\"ReportName\":\"" + reportName + "\",\"Tags\":[{\"Key\":2,\"Value\":\"v\"}]}", 400);
+        call("TagResource", "{\"ReportName\":\"" + reportName + "\",\"Tags\":[{\"Key\":\"k\",\"Value\":3}]}", 400);
+        call("UntagResource", "{\"ReportName\":\"" + reportName + "\",\"TagKeys\":[1]}", 400);
+
+        assertEquals(List.of(tag("1", "kept")), listTags());
+    }
+
+    private static void call(String action, String body, int status) {
+        given()
+                .contentType("application/x-amz-json-1.1")
+                .header("X-Amz-Target", "AWSOrigamiServiceGatewayService." + action)
+                .header("Authorization",
+                        "AWS4-HMAC-SHA256 Credential=" + ACCOUNT + "/20260101/us-east-1/cur/aws4_request")
+                .body(body.getBytes(StandardCharsets.UTF_8))
+        .when()
+                .post("/")
+        .then()
+                .statusCode(status)
+                .body(status == 200 ? not(containsString("__type")) : containsString("ValidationException"));
+    }
+
+    private static List<Tag> tags(int count) {
+        return IntStream.rangeClosed(1, count).mapToObj(i -> tag("key-" + i, "v")).toList();
     }
 
     private void putReport(List<Tag> tags) {
