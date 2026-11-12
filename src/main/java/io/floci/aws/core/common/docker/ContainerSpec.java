@@ -51,6 +51,8 @@ import java.util.regex.Pattern;
  *        ({@link LinuxOptions#NONE} = daemon defaults)
  * @param javaTrustStore Whether, with TLS on, the container's JVMs trust Floci's CA: the CA bundle's Java trust
  *        store goes in beside the bundle, and {@code JAVA_TOOL_OPTIONS} points at it
+ * @param dnsName The container's host name, and its alias on the user-defined network it joins at creation, so other
+ *        containers there reach it by that name (null = Docker's own)
  */
 public record ContainerSpec(
         String image,
@@ -83,7 +85,8 @@ public record ContainerSpec(
         Map<Integer, String> portBindingHostIps,
         boolean init,
         LinuxOptions linuxOptions,
-        boolean javaTrustStore
+        boolean javaTrustStore,
+        String dnsName
 ) {
     private static final Pattern LINK_LOCAL_IPV4 = Pattern.compile("^169\\.254\\.(\\d{1,3})\\.(\\d{1,3})$");
     private static final Set<String> NETWORKS_WITHOUT_ENDPOINT_IPAM = Set.of("bridge", "default", "host", "none");
@@ -107,7 +110,51 @@ public record ContainerSpec(
         this(image, null, List.of(), null, null, null, Map.of(), List.of(), List.of(), null,
                 List.of(), List.of(), List.of(), List.of(), Map.of(), null, false, null, List.of(),
                 null, null, List.of(), List.of(), null, null, false, List.of(), Map.of(), false, LinuxOptions.NONE,
-                false);
+                false, null);
+    }
+
+    /**
+     * Backward-compatible constructor that leaves the container's name on its network to Docker, so callers that
+     * predate {@code dnsName} keep their existing behaviour.
+     */
+    public ContainerSpec(
+            String image,
+            String name,
+            List<String> env,
+            List<String> cmd,
+            List<String> entrypoint,
+            Long memoryBytes,
+            Map<Integer, Integer> portBindings,
+            List<Integer> loopbackPortBindings,
+            List<Integer> exposedPorts,
+            String networkMode,
+            List<Mount> mounts,
+            List<Bind> binds,
+            List<VolumesFrom> volumesFrom,
+            List<String> extraHosts,
+            Map<String, String> labels,
+            LogConfig logConfig,
+            boolean privileged,
+            String cgroupnsMode,
+            List<String> dnsServers,
+            String workingDir,
+            String user,
+            List<String> groupAdd,
+            List<DeviceRequest> deviceRequests,
+            Long nanoCpus,
+            Integer cpuShares,
+            boolean readonlyRootfs,
+            List<String> linkLocalIps,
+            Map<Integer, String> portBindingHostIps,
+            boolean init,
+            LinuxOptions linuxOptions,
+            boolean javaTrustStore
+    ) {
+        this(image, name, env, cmd, entrypoint, memoryBytes, portBindings, loopbackPortBindings,
+                exposedPorts, networkMode, mounts, binds, volumesFrom, extraHosts, labels, logConfig,
+                privileged, cgroupnsMode, dnsServers, workingDir, user, groupAdd, deviceRequests,
+                nanoCpus, cpuShares, readonlyRootfs, linkLocalIps, portBindingHostIps, init, linuxOptions,
+                javaTrustStore, null);
     }
 
     /**
@@ -149,7 +196,8 @@ public record ContainerSpec(
         this(image, name, env, cmd, entrypoint, memoryBytes, portBindings, loopbackPortBindings,
                 exposedPorts, networkMode, mounts, binds, volumesFrom, extraHosts, labels, logConfig,
                 privileged, cgroupnsMode, dnsServers, workingDir, user, groupAdd, deviceRequests,
-                nanoCpus, cpuShares, readonlyRootfs, linkLocalIps, portBindingHostIps, init, linuxOptions, false);
+                nanoCpus, cpuShares, readonlyRootfs, linkLocalIps, portBindingHostIps, init, linuxOptions, false,
+                null);
     }
 
     /**

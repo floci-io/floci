@@ -51,6 +51,11 @@ Running Floci directly on a Linux host (not in a container) with services that s
 | `FLOCI_SECURITY_DISABLE_CORS_HEADERS` | `false` | Disable Floci's global CORS response headers. Alias: `DISABLE_CORS_HEADERS` |
 | `FLOCI_SECURITY_CORS_ALLOW_PRIVATE_NETWORK` | `false` | Answer Private Network Access preflights with `Access-Control-Allow-Private-Network: true`, letting a page on a public/secure origin reach this loopback backend. Only applies after the origin passes the allow-list above. |
 
+The [Cognito JSON API](../services/cognito.md) follows this same origin allow-list,
+including its empty default, for both preflights and actual responses. For allowed
+origins, Cognito's request ID and error headers are exposed alongside configured extra
+exposed headers. The disable-CORS switch above also disables this behavior.
+
 ---
 
 ## TLS / HTTPS

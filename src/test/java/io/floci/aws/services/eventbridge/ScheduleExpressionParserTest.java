@@ -1,6 +1,8 @@
 package io.floci.aws.services.eventbridge;
 
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
 
 import java.time.DayOfWeek;
 import java.time.ZonedDateTime;
@@ -63,6 +65,15 @@ class ScheduleExpressionParserTest {
         assertEquals(60000, ScheduleExpressionParser.parseRateToMillis("rate(1 minutes)"));
         assertEquals(120000, ScheduleExpressionParser.parseRateToMillis("rate(2 minute)"));
         assertEquals(120000, ScheduleExpressionParser.parseRateToMillis("rate(2 minutes)"));
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"rate(1 minutes)", "rate(2 minute)", "rate(1 hours)",
+            "rate(2 hour)", "rate(1 days)", "rate(2 day)", "rate(1 week)",
+            "rate(2 weeks)", "RATE(1 HOURS)", "RATE(2 WEEK)"})
+    void apiValidationIsStrictWhileStoredRateParsingRemainsTolerant(String expression) {
+        assertThrows(IllegalArgumentException.class, () -> ScheduleExpressionParser.validate(expression));
+        assertTrue(ScheduleExpressionParser.parseRateToMillis(expression) > 0);
     }
 
     @Test

@@ -2139,6 +2139,16 @@ public interface EmulatorConfig {
         int yarnNodeVcores();
 
         /**
+         * The most core and task nodes a {@code docker} cluster runs as containers of their own, core nodes first; each
+         * costs 300 to 800 MB while idle. With 0 the primary node holds its DataNode and NodeManager, as a cluster of one
+         * node does.
+         *
+         * Env var: FLOCI_SERVICES_EMR_YARN_MAX_WORKER_NODES
+         */
+        @WithDefault("4")
+        int yarnMaxWorkerNodes();
+
+        /**
          * When true, Floci removes, in the {@code docker} runner mode, every EMR step driver and bootstrap
          * container a previous run of <em>this same</em> Floci left on the daemon (matched by the
          * {@code io.floci.owner} label), and the images bootstrap actions left for clusters that are gone or

@@ -450,6 +450,20 @@ class EventBridgeServiceTest {
         assertEquals("rate(10 minutes)", rules.getFirst().getScheduleExpression());
     }
 
+    @ParameterizedTest
+    @ValueSource(strings = {"rate(1 minutes)", "rate(2 minute)", "rate(1 hours)",
+            "rate(2 hour)", "rate(1 days)", "rate(2 day)"})
+    void putRuleRejectsMismatchedRateUnits(String expression) {
+        AwsException error = assertThrows(AwsException.class, () ->
+                service.putRule("invalid-rate", null, null, expression, RuleState.ENABLED,
+                        null, null, null, REGION));
+
+        assertEquals("ValidationException", error.getErrorCode());
+        assertEquals("Parameter ScheduleExpression is not valid.", error.getMessage());
+        assertEquals(400, error.getHttpStatus());
+        assertTrue(service.listRules(null, null, REGION).isEmpty());
+    }
+
     @Test
     void putRuleForNonExistentBusThrows() {
         assertThrows(AwsException.class, () ->

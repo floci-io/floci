@@ -572,21 +572,27 @@ final class CognitoAuthFlowHandler {
         if (username == null || newPassword == null) {
             throw new AwsException("InvalidParameterException", "USERNAME and NEW_PASSWORD are required", 400);
         }
+        CognitoService.validateCustomAttributes(pool, newPasswordAttributes(responses));
         service.adminSetUserPassword(pool.getId(), username, newPassword, true);
     }
 
     private CognitoUser applyNewPasswordAttributes(UserPool pool, Map<String, String> responses) {
         String username = responses.get("USERNAME");
+        Map<String, String> attrUpdates = newPasswordAttributes(responses);
+        if (!attrUpdates.isEmpty()) {
+            service.adminUpdateUserAttributes(pool.getId(), username, attrUpdates);
+        }
+        return service.adminGetUser(pool.getId(), username);
+    }
+
+    private static Map<String, String> newPasswordAttributes(Map<String, String> responses) {
         Map<String, String> attrUpdates = new HashMap<>();
         for (Map.Entry<String, String> entry : responses.entrySet()) {
             if (entry.getKey() != null && entry.getKey().startsWith("userAttributes.")) {
                 attrUpdates.put(entry.getKey().substring("userAttributes.".length()), entry.getValue());
             }
         }
-        if (!attrUpdates.isEmpty()) {
-            service.adminUpdateUserAttributes(pool.getId(), username, attrUpdates);
-        }
-        return service.adminGetUser(pool.getId(), username);
+        return attrUpdates;
     }
 
     // ──────────────────────────── USER_PASSWORD / REFRESH ────────────────────────────

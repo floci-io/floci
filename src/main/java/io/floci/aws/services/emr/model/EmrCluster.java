@@ -56,6 +56,9 @@ public class EmrCluster {
     // Whether the docker runner mode has made the cluster's storage, which goes once the cluster has ended; Floci's
     // own, as the API has none.
     private boolean storageCreated;
+    // The core nodes the cluster was created with, which its HDFS's copies of a block follow; Floci's own, as the API
+    // has none.
+    private int provisionedCoreNodes;
     // The cluster's ManagedScalingPolicy and AutoTerminationPolicy as given, raw JSON; null when none.
     private String managedScalingPolicy;
     private String autoTerminationPolicy;
@@ -189,6 +192,9 @@ public class EmrCluster {
 
     public boolean isStorageCreated() { return storageCreated; }
     public void setStorageCreated(boolean storageCreated) { this.storageCreated = storageCreated; }
+
+    public int getProvisionedCoreNodes() { return provisionedCoreNodes; }
+    public void setProvisionedCoreNodes(int provisionedCoreNodes) { this.provisionedCoreNodes = provisionedCoreNodes; }
 
     public String getManagedScalingPolicy() { return managedScalingPolicy; }
     public void setManagedScalingPolicy(String managedScalingPolicy) { this.managedScalingPolicy = managedScalingPolicy; }
