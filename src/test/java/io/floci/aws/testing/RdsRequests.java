@@ -6,9 +6,12 @@ import software.amazon.awssdk.auth.credentials.AwsBasicCredentials;
 import software.amazon.awssdk.auth.credentials.StaticCredentialsProvider;
 import software.amazon.awssdk.http.urlconnection.UrlConnectionHttpClient;
 import software.amazon.awssdk.regions.Region;
+import software.amazon.awssdk.retries.StandardRetryStrategy;
 import software.amazon.awssdk.services.rds.RdsClient;
+import software.amazon.awssdk.services.rds.RdsClientBuilder;
 
 import java.net.URI;
+import java.time.Duration;
 
 import static io.restassured.RestAssured.given;
 import static io.restassured.http.ContentType.URLENC;
@@ -24,12 +27,25 @@ public final class RdsRequests {
     }
 
     public static RdsClient rdsClient(String region, String account) {
+        return rdsClientBuilder(region, account).build();
+    }
+
+    /** Keeps synchronous Docker startup within one bounded request, without replaying a create. */
+    public static RdsClient rdsDockerClient(String region, String account) {
+        Duration requestBudget = Duration.ofSeconds(90);
+        return rdsClientBuilder(region, account)
+                .httpClientBuilder(UrlConnectionHttpClient.builder().socketTimeout(requestBudget))
+                .overrideConfiguration(c -> c.apiCallTimeout(requestBudget)
+                        .retryStrategy(StandardRetryStrategy.builder().maxAttempts(1).build()))
+                .build();
+    }
+
+    private static RdsClientBuilder rdsClientBuilder(String region, String account) {
         return RdsClient.builder()
                 .endpointOverride(URI.create("http://localhost:" + RestAssured.port))
                 .httpClientBuilder(UrlConnectionHttpClient.builder())
                 .region(Region.of(region))
-                .credentialsProvider(StaticCredentialsProvider.create(AwsBasicCredentials.create(account, "test-secret-key")))
-                .build();
+                .credentialsProvider(StaticCredentialsProvider.create(AwsBasicCredentials.create(account, "test-secret-key")));
     }
 
     /** Skips the test when no Docker daemon answers, which a real PostgreSQL instance needs. */
