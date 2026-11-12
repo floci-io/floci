@@ -2504,6 +2504,7 @@ public class CognitoService implements ResourceProvider {
             resolvedAttributes.put("sub", canonicalUsername);
         }
 
+        validateCustomAttributes(pool, resolvedAttributes);
         validateEmailAttribute(resolvedAttributes, false);
 
         CognitoUser user = new CognitoUser();
@@ -2821,6 +2822,7 @@ public class CognitoService implements ResourceProvider {
             Map<String, String> clientMetadata, List<AttributeCodeMessage> messages) {
         CognitoUser currentUser = adminGetUser(userPoolId, username);
         UserPool pool = describeUserPool(userPoolId);
+        validateCustomAttributes(pool, attributes);
         boolean stagesContactUpdate = attributes.entrySet().stream()
                 .anyMatch(attribute -> isVerifiableContactAttribute(attribute.getKey())
                         && shouldVerifyAttribute(pool, attribute.getKey())
@@ -3547,6 +3549,7 @@ public class CognitoService implements ResourceProvider {
             resolvedAttributes.put("sub", canonicalUsername);
         }
 
+        validateCustomAttributes(pool, resolvedAttributes);
         validateEmailAttribute(resolvedAttributes, false);
 
         String key = userKey(userPoolId, canonicalUsername);
@@ -4611,6 +4614,7 @@ public class CognitoService implements ResourceProvider {
             Map<String, String> clientMetadata, List<AttributeCodeMessage> messages) {
         UserPool pool = describeUserPool(poolId);
         CognitoUser currentUser = adminGetUser(poolId, username);
+        validateCustomAttributes(pool, attributes);
         validateEmailAttribute(attributes, true);
 
         // Validate every entry (alias availability) before mutating the user or issuing any
@@ -4708,6 +4712,17 @@ public class CognitoService implements ResourceProvider {
         updatedUser.setLastModifiedDate(System.currentTimeMillis() / 1000L);
         userStore.put(userKey(poolId, updatedUser.getUsername()), updatedUser);
         return deliveryDetails;
+    }
+
+    private static void validateCustomAttributes(UserPool pool, Map<String, String> attributes) {
+        List<Map<String, Object>> schema = pool.getSchemaAttributes();
+        for (String name : attributes.keySet()) {
+            if (name != null && name.startsWith("custom:")
+                    && (schema == null || schema.stream().noneMatch(attribute -> name.equals(attribute.get("Name"))))) {
+                throw new AwsException("InvalidParameterException", "Attributes did not conform to the schema: "
+                        + name + ": Attribute does not exist in the schema.", 400);
+            }
+        }
     }
 
     private static void validateEmailAttribute(Map<String, String> attributes, boolean allowDeletion) {

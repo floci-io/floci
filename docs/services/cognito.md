@@ -14,6 +14,12 @@ where `errorMessage` is taken verbatim from the function's error payload, as on 
 
 Sign-in by a disabled user fails with `NotAuthorizedException` (`User is disabled.`), as on AWS.
 
+`AdminCreateUser`, `SignUp`, `AdminUpdateUserAttributes` and `UpdateUserAttributes` reject
+`custom:` attributes that the user pool's schema does not declare with `InvalidParameterException`
+and `Attribute does not exist in the schema.`. Declare custom attributes with `CreateUserPool`
+or `AddCustomAttributes` before writing them. Validation runs before creating a user or changing
+any attributes, so a rejected request does not save partial changes.
+
 `CreateUserPool` supports overriding several values using user-pool tags **only** at creation time:
 * `floci:override-id`, to pin the resulting `UserPool.Id`. Because a pinned id is caller-chosen it can be reused, which AWS never does. `DeleteUserPool` therefore deletes everything the pool owns (users, groups, app clients, resource servers, revoked token records and outstanding verification codes) so a pool recreated on the same id starts empty rather than inheriting the deleted pool's password hashes and client secrets.
 * `floci:override-cognito-client-id`

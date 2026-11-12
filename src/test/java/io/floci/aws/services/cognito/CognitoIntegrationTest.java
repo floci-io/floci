@@ -2506,6 +2506,16 @@ class CognitoIntegrationTest {
                 """);
         String delPoolId = poolResponse.path("UserPool").path("Id").asText();
 
+        cognitoAction("AddCustomAttributes", """
+                {
+                  "UserPoolId": "%s",
+                  "CustomAttributes": [
+                    { "Name": "age", "AttributeDataType": "String", "Mutable": true },
+                    { "Name": "gender", "AttributeDataType": "String", "Mutable": true }
+                  ]
+                }
+                """.formatted(delPoolId)).then().statusCode(200);
+
         JsonNode clientResponse = cognitoJson("CreateUserPoolClient", """
                 {
                   "UserPoolId": "%s",
