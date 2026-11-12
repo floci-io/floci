@@ -137,8 +137,8 @@ public class TableDefinition {
             if ("PAY_PER_REQUEST".equals(billingMode)) {
                 return 12000;
             }
-            long rcu = provisionedThroughput != null ? provisionedThroughput.getReadCapacityUnits() : 5L;
-            return Math.max(rcu, 5L);
+            long rcu = provisionedThroughput != null ? provisionedThroughput.getReadCapacityUnits() : 0L;
+            return rcu > 0 ? rcu : 5L;
         }
         return warmReadUnitsPerSecond;
     }
@@ -149,8 +149,8 @@ public class TableDefinition {
             if ("PAY_PER_REQUEST".equals(billingMode)) {
                 return 4000;
             }
-            long wcu = provisionedThroughput != null ? provisionedThroughput.getWriteCapacityUnits() : 5L;
-            return Math.max(wcu, 5L);
+            long wcu = provisionedThroughput != null ? provisionedThroughput.getWriteCapacityUnits() : 0L;
+            return wcu > 0 ? wcu : 5L;
         }
         return warmWriteUnitsPerSecond;
     }

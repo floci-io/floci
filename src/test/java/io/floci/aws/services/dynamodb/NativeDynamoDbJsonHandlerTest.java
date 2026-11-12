@@ -676,7 +676,7 @@ class NativeDynamoDbJsonHandlerTest {
         handler.handle("UpdateTable", json("""
                 {
                     "TableName": "table-warm-walk",
-                    "ProvisionedThroughput": {"ReadCapacityUnits": 15000, "WriteCapacityUnits": 25000}
+                    "ProvisionedThroughput": {"ReadCapacityUnits": 15, "WriteCapacityUnits": 25}
                 }
                 """), "eu-west-1");
         body = mapper.convertValue(
@@ -684,8 +684,8 @@ class NativeDynamoDbJsonHandlerTest {
                         mapper.createObjectNode().put("TableName", "table-warm-walk"), "eu-west-1").getEntity(),
                 JsonNode.class);
         warm = body.get("Table").get("WarmThroughput");
-        assertEquals(15000, warm.get("ReadUnitsPerSecond").asLong());
-        assertEquals(25000, warm.get("WriteUnitsPerSecond").asLong());
+        assertEquals(15, warm.get("ReadUnitsPerSecond").asLong());
+        assertEquals(25, warm.get("WriteUnitsPerSecond").asLong());
 
         // on-demand switch: warm only rises to the baseline, never drops the peak
         handler.handle("UpdateTable", json("""
@@ -699,8 +699,32 @@ class NativeDynamoDbJsonHandlerTest {
                         mapper.createObjectNode().put("TableName", "table-warm-walk"), "eu-west-1").getEntity(),
                 JsonNode.class);
         warm = body.get("Table").get("WarmThroughput");
-        assertEquals(15000, warm.get("ReadUnitsPerSecond").asLong());
-        assertEquals(25000, warm.get("WriteUnitsPerSecond").asLong());
+        assertEquals(12000, warm.get("ReadUnitsPerSecond").asLong());
+        assertEquals(4000, warm.get("WriteUnitsPerSecond").asLong());
+    }
+
+    @Test
+    void describeTableFallsBackForLegacyZeroWarmThroughput() throws Exception {
+        service.createTable("table-warm-legacy",
+                List.of(new KeySchemaElement("id", "HASH")),
+                List.of(new AttributeDefinition("id", "S")),
+                3L, 7L, List.of(), "eu-west-1");
+
+        // Simulate a persisted table from before warm throughput was tracked.
+        TableDefinition table = service.describeTable("table-warm-legacy", "eu-west-1");
+        table.setWarmReadUnitsPerSecond(0);
+        table.setWarmWriteUnitsPerSecond(0);
+        service.persistTable("table-warm-legacy", table, "eu-west-1");
+
+        Response response = handler.handle("DescribeTable",
+                mapper.createObjectNode().put("TableName", "table-warm-legacy"), "eu-west-1");
+        assertEquals(200, response.getStatus());
+        JsonNode body = mapper.convertValue(response.getEntity(), JsonNode.class);
+        JsonNode warmThroughput = body.get("Table").get("WarmThroughput");
+
+        assertNotNull(warmThroughput);
+        assertEquals(3, warmThroughput.get("ReadUnitsPerSecond").asLong());
+        assertEquals(7, warmThroughput.get("WriteUnitsPerSecond").asLong());
     }
 
     @Test
