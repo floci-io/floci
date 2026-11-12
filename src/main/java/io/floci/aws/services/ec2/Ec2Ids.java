@@ -1,6 +1,7 @@
 package io.floci.aws.services.ec2;
 
 import java.nio.charset.StandardCharsets;
+import java.util.UUID;
 import java.util.concurrent.ThreadLocalRandom;
 import java.util.zip.CRC32;
 
@@ -30,5 +31,12 @@ final class Ec2Ids {
         crc2.update((seed + "|second").getBytes(StandardCharsets.UTF_8));
         long combined = (crc1.getValue() << 32) ^ crc2.getValue();
         return String.format("%017x", combined & 0x1FFFFFFFFFFFFFFFL);
+    }
+
+    /** Deterministic ENI id from a seed string, stable across restarts. */
+    static String eniIdFromSeed(String seed) {
+        String hex = UUID.nameUUIDFromBytes(seed.getBytes(StandardCharsets.UTF_8))
+                .toString().replace("-", "");
+        return "eni-" + hex.substring(0, 17);
     }
 }
