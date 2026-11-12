@@ -1553,6 +1553,10 @@ public interface EmulatorConfig {
         @WithDefault("false")
         boolean globalBucketNamespace();
 
+        /** Seconds before RestoreObject reports a completed temporary copy. */
+        @WithDefault("0")
+        long restoreCompletionDelaySeconds();
+
         /**
          * Run the background sweep that applies bucket lifecycle expiration rules: Expiration,
          * NoncurrentVersionExpiration and AbortIncompleteMultipartUpload. When off, rules are

@@ -775,6 +775,10 @@ public class S3Controller {
             List<S3Object> objects = result.objects();
             List<String> commonPrefixes = result.commonPrefixes();
             boolean v2 = "2".equals(listType);
+            String optionalAttributes = httpHeaders.getHeaderString("x-amz-optional-object-attributes");
+            boolean includeRestoreStatus = v2 && optionalAttributes != null
+                    && Arrays.stream(optionalAttributes.split(","))
+                            .map(String::trim).anyMatch("RestoreStatus"::equals);
             String bucketOwnerAccount = (v1 || Boolean.parseBoolean(params.first("fetch-owner")))
                     ? s3Service.getBucketOwnerAccountId(bucket) : null;
             boolean ownershipEnforced = bucketOwnerAccount != null && s3Service.bucketOwnershipIsEnforced(bucket);
@@ -804,6 +808,17 @@ public class S3Controller {
                    .elem("ETag", obj.getETag())
                    .elem("Size", obj.getSize())
                    .elem("StorageClass", obj.getStorageClass());
+                if (includeRestoreStatus) {
+                    S3Service.RestoreStatus restore = s3Service.restoreStatus(obj);
+                    if (restore != null) {
+                        xml.start("RestoreStatus")
+                           .elem("IsRestoreInProgress", restore.inProgress());
+                        if (restore.expiryDate() != null) {
+                            xml.elem("RestoreExpiryDate", DateTimeFormatter.ISO_INSTANT.format(restore.expiryDate()));
+                        }
+                        xml.end("RestoreStatus");
+                    }
+                }
                 if (bucketOwnerAccount != null) {
                     xml.start("Owner")
                        .elem("ID", AwsCanonicalUserId.forAccount(S3Service.effectiveObjectOwnerAccount(
@@ -1746,8 +1761,9 @@ public class S3Controller {
             if (hasQueryParam(uriInfo, "restore")) {
                 checkVersionId(bucket, ResteasyRequests.queryParameters(uriInfo).getFirst("versionId"));
                 s3Service.authorizeObjectWrite(bucket, key, "s3:RestoreObject", authorization);
-                s3Service.restoreObject(bucket, key, versionId, new String(body, StandardCharsets.UTF_8));
-                return Response.accepted().build();
+                boolean started = s3Service.restoreObject(bucket, key, versionId,
+                        new String(body, StandardCharsets.UTF_8));
+                return started ? Response.accepted().build() : Response.ok().build();
             }
 
             if (hasQueryParam(uriInfo, "select")) {
@@ -3192,6 +3208,15 @@ public class S3Controller {
                                      boolean includeChecksum) {
         if (obj.getStorageClass() != null) {
             resp.header("x-amz-storage-class", obj.getStorageClass());
+        }
+        S3Service.RestoreStatus restore = s3Service.restoreStatus(obj);
+        if (restore != null) {
+            String header = "ongoing-request=\"" + restore.inProgress() + "\"";
+            if (restore.expiryDate() != null) {
+                header += ", expiry-date=\"" + DateTimeFormatter.RFC_1123_DATE_TIME
+                        .withZone(ZoneOffset.UTC).format(restore.expiryDate()) + "\"";
+            }
+            resp.header("x-amz-restore", header);
         }
         String contentEncoding = overrides.contentEncoding() != null ? overrides.contentEncoding() : obj.getContentEncoding();
         if (contentEncoding != null) {

@@ -433,6 +433,7 @@ floci:
       enforce-auth: false
       default-presign-expiry-seconds: 3600
       global-bucket-namespace: false
+      restore-completion-delay-seconds: 0   # FLOCI_SERVICES_S3_RESTORE_COMPLETION_DELAY_SECONDS
       lifecycle-sweep-enabled: true          # FLOCI_SERVICES_S3_LIFECYCLE_SWEEP_ENABLED - apply lifecycle expiration rules in the background
       lifecycle-sweep-interval-seconds: 60   # FLOCI_SERVICES_S3_LIFECYCLE_SWEEP_INTERVAL_SECONDS
     dynamodb:
