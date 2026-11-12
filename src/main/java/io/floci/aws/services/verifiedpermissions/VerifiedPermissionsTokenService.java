@@ -4,6 +4,9 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
+import io.floci.aws.core.common.AwsException;
+import io.floci.aws.services.cognito.CognitoService;
+import io.floci.aws.services.cognito.model.UserPool;
 import io.floci.aws.services.verifiedpermissions.model.EntityIdentifier;
 import io.floci.aws.services.verifiedpermissions.model.IdentitySource;
 import jakarta.enterprise.context.ApplicationScoped;
@@ -11,6 +14,10 @@ import jakarta.inject.Inject;
 
 import java.io.IOException;
 import java.nio.charset.StandardCharsets;
+import java.security.KeyFactory;
+import java.security.PublicKey;
+import java.security.Signature;
+import java.security.spec.X509EncodedKeySpec;
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.Base64;
@@ -24,16 +31,19 @@ public class VerifiedPermissionsTokenService {
     private final CedarAuthorizationEvaluator evaluator;
     private final VerifiedPermissionsOidcSignatureVerifier signatureVerifier;
     private final ObjectMapper objectMapper;
+    private final CognitoService cognitoService;
 
     @Inject
     public VerifiedPermissionsTokenService(VerifiedPermissionsService service,
                                            CedarAuthorizationEvaluator evaluator,
                                            VerifiedPermissionsOidcSignatureVerifier signatureVerifier,
-                                           ObjectMapper objectMapper) {
+                                           ObjectMapper objectMapper,
+                                           CognitoService cognitoService) {
         this.service = service;
         this.evaluator = evaluator;
         this.signatureVerifier = signatureVerifier;
         this.objectMapper = objectMapper;
+        this.cognitoService = cognitoService;
     }
 
     public PreparedTokenRequest prepare(JsonNode request, String region) {
@@ -72,13 +82,25 @@ public class VerifiedPermissionsTokenService {
         if (issuer == null || issuer.isBlank()) {
             throw VerifiedPermissionsService.validation("Token has no issuer claim.");
         }
-        IdentitySource source = service.identitySourcesForStore(store, region).stream()
+        List<IdentitySource> sources = service.identitySourcesForStore(store, region);
+        // A Cognito identity source names a pool. When that pool is one of Floci's own, its
+        // tokens carry Floci's issuer (CognitoService#getIssuer), not the AWS host stored in the
+        // source's configuration, and are verified against the pool's signing key here: the OIDC
+        // verifier only fetches public HTTPS JWKS, which an emulated pool never has.
+        IdentitySource local = sources.stream()
+                .filter(candidate -> issuer.equals(emulatedCognitoIssuer(candidate.configuration())))
+                .findFirst().orElse(null);
+        IdentitySource source = local != null ? local : sources.stream()
                 .filter(candidate -> issuer.equals(VerifiedPermissionsService.identityIssuer(candidate.configuration())))
                 .findFirst().orElseThrow(() -> VerifiedPermissionsService.validation("No identity source matches the token issuer."));
-        try {
-            signatureVerifier.verify(token, issuer);
-        } catch (VerifiedPermissionsOidcSignatureVerifier.VerificationException e) {
-            throw VerifiedPermissionsService.validation("Token signature validation failed: " + e.getMessage());
+        if (local != null) {
+            verifyEmulatedCognitoSignature(token, cognitoPoolId(local.configuration()));
+        } else {
+            try {
+                signatureVerifier.verify(token, issuer);
+            } catch (VerifiedPermissionsOidcSignatureVerifier.VerificationException e) {
+                throw VerifiedPermissionsService.validation("Token signature validation failed: " + e.getMessage());
+            }
         }
         validateTimes(claims);
         JsonNode configuration = source.configuration();
@@ -215,6 +237,59 @@ public class VerifiedPermissionsTokenService {
             case "record" -> contextMapToRaw(entry.getValue());
             default -> throw VerifiedPermissionsService.validation("Token context merge doesn't support attribute type " + entry.getKey() + ".");
         };
+    }
+
+    /** The pool id of a Cognito identity source, or null for an OIDC one. */
+    private static String cognitoPoolId(JsonNode configuration) {
+        JsonNode cognito = configuration.get("cognitoUserPoolConfiguration");
+        if (cognito == null) {
+            return null;
+        }
+        String arn = cognito.path("userPoolArn").asText("");
+        int slash = arn.indexOf("userpool/");
+        return slash < 0 ? null : arn.substring(slash + "userpool/".length());
+    }
+
+    /** The issuer Floci's Cognito signs with for this source's pool, or null when the pool is not Floci's. */
+    private String emulatedCognitoIssuer(JsonNode configuration) {
+        String poolId = cognitoPoolId(configuration);
+        if (poolId == null) {
+            return null;
+        }
+        try {
+            cognitoService.describeUserPool(poolId);
+        } catch (AwsException e) {
+            return null;
+        }
+        return cognitoService.getIssuer(poolId);
+    }
+
+    /** Fails closed: an unknown alg, a kid that is not the pool's signing key, or a bad signature. */
+    private void verifyEmulatedCognitoSignature(String token, String poolId) {
+        UserPool pool = cognitoService.describeUserPool(poolId);
+        String[] parts = token.split("\\.", -1);
+        JsonNode header;
+        try {
+            header = objectMapper.readTree(new String(Base64.getUrlDecoder().decode(pad(parts[0])), StandardCharsets.UTF_8));
+        } catch (IllegalArgumentException | IOException e) {
+            throw VerifiedPermissionsService.validation("Token signature validation failed: malformed header.");
+        }
+        if (!"RS256".equals(header.path("alg").asText()) || !header.path("kid").asText("").equals(pool.getSigningKeyId())) {
+            throw VerifiedPermissionsService.validation("Token signature validation failed: unknown signing key.");
+        }
+        try {
+            PublicKey key = KeyFactory.getInstance("RSA")
+                    .generatePublic(new X509EncodedKeySpec(Base64.getDecoder().decode(pool.getSigningPublicKey())));
+            Signature verifier = Signature.getInstance("SHA256withRSA");
+            verifier.initVerify(key);
+            verifier.update((parts[0] + "." + parts[1]).getBytes(StandardCharsets.UTF_8));
+            if (verifier.verify(Base64.getUrlDecoder().decode(pad(parts[2])))) {
+                return;
+            }
+        } catch (Exception e) {
+            // fall through: any failure to verify is a refusal
+        }
+        throw VerifiedPermissionsService.validation("Token signature validation failed: signature does not verify.");
     }
 
     private JsonNode decodeClaims(String token) {
