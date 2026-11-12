@@ -191,7 +191,8 @@ class PaymentCryptographyServiceTest {
     }
 
     @Test
-    void everyAsymmetricUsageTakesAKeyPair() {        // The usages the model names for a key pair, each of which is made.
+    void everyAsymmetricUsageTakesAKeyPair() {
+        // The usages the model names for a key pair, each of which is made.
         for (String usage : List.of("TR31_D1_ASYMMETRIC_KEY_FOR_DATA_ENCRYPTION",
                 "TR31_K2_TR34_ASYMMETRIC_KEY",
                 "TR31_K3_ASYMMETRIC_KEY_FOR_KEY_AGREEMENT",
