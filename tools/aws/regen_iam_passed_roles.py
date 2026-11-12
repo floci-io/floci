@@ -478,8 +478,6 @@ def _takes_name(name: str, member: dict, model: dict) -> bool:
     """Whether the member takes a role by name: it is named for one, or its documentation says it takes
     one, unless its pattern only admits an ARN."""
     shape = _leaf(model, member["shape"])
-    if shape is None:
-        return False
     if shape.get("pattern", "").lstrip("^").startswith("arn:"):
         return False
     return bool(ROLE_NAME_MEMBER_RE.search(name) or BY_NAME_DOC_RE.search(_documentation(member, shape)))

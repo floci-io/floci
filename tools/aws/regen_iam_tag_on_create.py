@@ -93,15 +93,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from regen_iam_authorized_actions import fetch_references
-from regen_iam_passed_roles import (
-    BODY_LOCATIONS,
-    MEMBER_PATH_RE,
-    NAMESPACE_RE,
-    OPERATION_RE,
-    _shown,
-    load_models,
-    namespace_of,
-)
+from regen_iam_passed_roles import (BODY_LOCATIONS, MEMBER_PATH_RE, NAMESPACE_RE, OPERATION_RE, _shown, load_models,
+                                    namespace_of)
 from regen_partitions import resolve_botocore_data
 from regen_rest_routes import MODELS as REST_MODELS
 
@@ -624,9 +617,7 @@ def validate(document: dict) -> list[str]:
 
 
 def _member_problems(operation: str, member: object) -> list[str]:
-    if not isinstance(member, dict):
-        return [f"{operation} reads {member!r}, which is no path to a tag list or map"]
-    path = member.get("member")
+    path = member.get("member") if isinstance(member, dict) else None
     if not isinstance(path, str) or not MEMBER_PATH_RE.match(path) or not re.search(r"(\[\w*]|\{})$", path):
         return [f"{operation} reads {member!r}, which is no path to a tag list or map"]
     problems = []

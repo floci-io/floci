@@ -800,8 +800,8 @@ def test_list_tables_correction_names_the_literal_collection_without_selectors()
     assert resources == [{"type": "table", "fill": {}}]
     assert "table/?" in reason
     formats = {"table": "arn:${Partition}:dynamodb:${Region}:${Account}:table/${TableName}"}
-    assert not r._resource_problems("dynamodb:ListTables", resources[0], set(), formats)
-    assert r._resource_problems("dynamodb:OtherOperation", resources[0], set(), formats)
+    assert not r._resource_problems("dynamodb:ListTables", resources[0], [], formats)
+    assert r._resource_problems("dynamodb:OtherOperation", resources[0], [], formats)
     assert r.reads("dynamodb:ListTables")
     assert not r.reads("dynamodb:BatchWriteItem")
     assert not r.reads("dynamodb:ExecuteStatement")
@@ -851,10 +851,10 @@ def test_measured_callback_correction_retains_action_metadata_and_rejects_unlist
     formats = {"activity": "arn:${Partition}:states:${Region}:${Account}:activity:${ActivityName}",
                "statemachine": "arn:${Partition}:states:${Region}:${Account}:stateMachine:${StateMachineName}"}
     resource = {"type": "activity", "fill": {}, "find": ["taskToken"]}
-    assert not r._resource_problems("states:SendTaskSuccess", resource, set(), formats)
-    assert r._resource_problems("states:SendTaskSuccess", {**resource, "find": ["otherToken"]}, set(), formats)
-    assert r._resource_problems("states:OtherOperation", resource, set(), formats)
-    assert r._resource_problems("states:SendTaskSuccess", resource, set(), {})
+    assert not r._resource_problems("states:SendTaskSuccess", resource, [], formats)
+    assert r._resource_problems("states:SendTaskSuccess", {**resource, "find": ["otherToken"]}, [], formats)
+    assert r._resource_problems("states:OtherOperation", resource, [], formats)
+    assert r._resource_problems("states:SendTaskSuccess", resource, [], {})
 
 
 # --------------------------------------------------------------------------- #

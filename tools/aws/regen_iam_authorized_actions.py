@@ -186,16 +186,9 @@ def authorized_actions_from(documents: list[dict]) -> dict[str, dict[str, str]]:
                         and name.lower() not in own_actions and not TAGGING_ACTION_RE.match(action)):
                     mapped = f"{namespace}:{action}"
             answers.setdefault(namespace, {}).setdefault(name, set()).add(mapped)
-    found: dict[str, dict[str, str]] = {}
-    for namespace, operations in sorted(answers.items()):
-        resolved: dict[str, str] = {}
-        for name, mapped in sorted(operations.items()):
-            if len(mapped) != 1 or None in mapped:
-                continue
-            (action,) = mapped
-            if isinstance(action, str):
-                resolved[name] = action
-        found[namespace] = resolved
+    found = {namespace: {name: next(iter(mapped)) for name, mapped in sorted(operations.items())
+                         if len(mapped) == 1 and None not in mapped}
+             for namespace, operations in sorted(answers.items())}
     return {namespace: operations for namespace, operations in found.items() if operations}
 
 
