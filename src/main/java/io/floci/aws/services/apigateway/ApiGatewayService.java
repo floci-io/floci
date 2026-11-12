@@ -1160,16 +1160,10 @@ public class ApiGatewayService implements ResourceProvider, Resettable {
             String suffix = "/" + settingKey;
             if (!path.endsWith(suffix)) continue;
 
-            String prefix = path.substring(1, path.length() - suffix.length());
-            int lastSlash = prefix.lastIndexOf('/');
-            if (lastSlash < 0) return;
-            // AWS escapes the resource path's slashes as ~1 in the patch path ("/~1pets/GET/...")
-            // but reports the setting keyed by the plain path ("pets/GET"), so normalise both the
-            // escaped and unescaped spellings onto that one key.
-            String resourcePath = unescapeJsonPointer(prefix.substring(0, lastSlash));
-            if (resourcePath.startsWith("/")) resourcePath = resourcePath.substring(1);
-            String httpMethod = prefix.substring(lastSlash + 1);
-            String methodKey = resourcePath + "/" + httpMethod;
+            String methodKey = path.substring(1, path.length() - suffix.length());
+            if (methodKey.lastIndexOf('/') < 0) {
+                return;
+            }
 
             MethodSetting setting = stage.getMethodSettings()
                     .computeIfAbsent(methodKey, k -> new MethodSetting());

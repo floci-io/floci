@@ -370,6 +370,25 @@ public class EmrServerlessJobRunService implements Resettable {
     }
 
     /**
+     * Stops the application once none of its runs is still going, as StopApplication's reference has it: "All
+     * scheduled and running jobs must be completed or cancelled before stopping an application." AWS's answer
+     * otherwise is not recorded, so the refusal is the one error the model declares for it, carrying that
+     * sentence. Under this service's lock, as StartJobRun's admission is, so no run starts between the two.
+     */
+    public synchronized void stopApplication(String applicationId) {
+        applications.getApplication(applicationId);
+        for (JobRunRecord record : store.scan(key -> true)) {
+            JobRun run = record.getJobRun();
+            if (applicationId.equals(run.getApplicationId()) && inRequestRegion(run)
+                    && !isTerminal(settle(record).getJobRun())) {
+                throw new AwsException("ValidationException", "All scheduled and running jobs must be completed "
+                        + "or cancelled before stopping an application.", 400);
+            }
+        }
+        applications.stopApplication(applicationId);
+    }
+
+    /**
      * Cancels a run that has not finished. A finished run is refused, with AWS's wording. A container
      * run is CANCELLING until its driver has stopped.
      */

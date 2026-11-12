@@ -123,7 +123,7 @@ public class EmrServerlessController {
     @POST
     @Path("/{applicationId}/stop")
     public StopApplicationResponse stopApplication(@PathParam("applicationId") String applicationId) {
-        service.stopApplication(applicationId);
+        jobRuns.stopApplication(applicationId);
         StopApplicationResponse response = new StopApplicationResponse();
         return response;
     }

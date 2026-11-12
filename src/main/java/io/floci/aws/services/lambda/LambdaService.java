@@ -38,6 +38,7 @@ import io.floci.aws.services.lambda.model.LambdaAlias;
 import io.floci.aws.services.lambda.model.LambdaFileSystemConfig;
 import io.floci.aws.services.lambda.model.LambdaFunction;
 import io.floci.aws.services.lambda.model.LambdaUrlConfig;
+import io.floci.aws.services.lambda.model.ResponseStreamListener;
 import io.floci.aws.services.lambda.model.ScalingConfig;
 import io.floci.aws.services.lambda.zip.CodeStore;
 import io.floci.aws.services.lambda.zip.DeploymentPackage;
@@ -77,6 +78,7 @@ import java.util.concurrent.ExecutionException;
 import java.util.concurrent.Executor;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
+import java.util.function.BiConsumer;
 import java.util.function.Consumer;
 import java.util.regex.Pattern;
 import java.util.stream.Collectors;
@@ -1560,7 +1562,21 @@ public class LambdaService implements ResourceProvider {
         return invokeArn(functionArn, payload, InvocationType.Event, chainDepth);
     }
 
+    /**
+     * Invokes a Lambda target ARN synchronously, handing a response the runtime streams to
+     * {@code listener} as it arrives.
+     */
+    public InvokeResult invokeArnStreaming(String functionArn, byte[] payload, ResponseStreamListener listener) {
+        return invokeArn(functionArn, payload, InvocationType.RequestResponse,
+                LambdaInvocationChain.currentDepth(), listener);
+    }
+
     private InvokeResult invokeArn(String functionArn, byte[] payload, InvocationType type, int chainDepth) {
+        return invokeArn(functionArn, payload, type, chainDepth, null);
+    }
+
+    private InvokeResult invokeArn(String functionArn, byte[] payload, InvocationType type, int chainDepth,
+                                   ResponseStreamListener listener) {
         AwsArnUtils.Arn arn = AwsArnUtils.parse(functionArn);
         LambdaArnUtils.ResolvedFunctionRef ref = LambdaArnUtils.resolve(functionArn);
         LambdaFunction fn = targetResolver.resolveInvokeTargetForAccount(
@@ -1569,7 +1585,9 @@ public class LambdaService implements ResourceProvider {
         if (durable != null) {
             return durable;
         }
-        InvokeResult result = executorService.invoke(fn, payload, type, chainDepth, ref.qualifier());
+        InvokeResult result = listener == null
+                ? executorService.invoke(fn, payload, type, chainDepth, ref.qualifier())
+                : executorService.invokeStreaming(fn, payload, chainDepth, ref.qualifier(), listener);
         result.setExecutedVersion(fn.getVersion());
         return result;
     }
@@ -3289,15 +3307,34 @@ public class LambdaService implements ResourceProvider {
     public LambdaAlias updateAlias(String region, String functionName, String aliasName,
                                    String functionVersion, String description,
                                    Map<String, Double> routingConfig) {
+        return rewriteAlias(region, functionName, aliasName, functionVersion, description, (fn, alias) -> {
+            warmPool.validateProvisionedAliasUpdate(fn, aliasName, functionVersion);
+            if (functionVersion != null) alias.setFunctionVersion(functionVersion);
+            if (description != null) alias.setDescription(description);
+            if (routingConfig != null) alias.setRoutingConfig(routingConfig.isEmpty() ? null : routingConfig);
+        });
+    }
+
+    /**
+     * Writes the alias description exactly as given, null included, which {@link #updateAlias} reads
+     * as "keep". Only a CloudFormation update that drops the description calls it.
+     */
+    public LambdaAlias replaceAliasDescription(String region, String functionName, String aliasName,
+                                               String description) {
+        return rewriteAlias(region, functionName, aliasName, null, description,
+                (fn, alias) -> alias.setDescription(description));
+    }
+
+    /** Validates the alias members, then under the function's lock applies {@code change} to the stored alias and saves it. */
+    private LambdaAlias rewriteAlias(String region, String functionName, String aliasName,
+                                     String functionVersion, String description,
+                                     BiConsumer<LambdaFunction, LambdaAlias> change) {
         validateAliasName(aliasName);
         validateAliasMembers(functionVersion, description);
         LambdaFunction fn = getFunction(region, functionName);
         synchronized (lockForConcurrencyOp(fn.getFunctionArn())) {
             LambdaAlias alias = getAlias(region, functionName, aliasName);
-            warmPool.validateProvisionedAliasUpdate(fn, aliasName, functionVersion);
-            if (functionVersion != null) alias.setFunctionVersion(functionVersion);
-            if (description != null) alias.setDescription(description);
-            if (routingConfig != null) alias.setRoutingConfig(routingConfig.isEmpty() ? null : routingConfig);
+            change.accept(fn, alias);
             alias.setLastModifiedDate(System.currentTimeMillis() / 1000L);
             alias.setRevisionId(UUID.randomUUID().toString());
             if (aliasStore != null) aliasStore.save(region, alias);

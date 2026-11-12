@@ -21,6 +21,7 @@ import software.amazon.awssdk.services.apigatewayv2.ApiGatewayV2Client;
 import software.amazon.awssdk.services.appconfig.AppConfigClient;
 import software.amazon.awssdk.services.appconfigdata.AppConfigDataClient;
 import software.amazon.awssdk.services.appintegrations.AppIntegrationsClient;
+import software.amazon.awssdk.services.applicationautoscaling.ApplicationAutoScalingClient;
 import software.amazon.awssdk.services.appsync.AppSyncClient;
 import software.amazon.awssdk.services.athena.AthenaClient;
 import software.amazon.awssdk.services.athena.model.GetQueryExecutionRequest;
@@ -175,6 +176,7 @@ import software.amazon.awssdk.services.timestreaminfluxdb.TimestreamInfluxDbClie
 import software.amazon.awssdk.services.transfer.TransferClient;
 import software.amazon.awssdk.services.verifiedpermissions.VerifiedPermissionsClient;
 import software.amazon.awssdk.services.wafv2.Wafv2Client;
+import software.amazon.awssdk.services.xray.XRayClient;
 
 import javax.net.ssl.SSLContext;
 import javax.net.ssl.TrustManager;
@@ -1589,6 +1591,14 @@ public final class TestFixtures {
                 .build();
     }
 
+    public static ApplicationAutoScalingClient applicationAutoScalingClient() {
+        return ApplicationAutoScalingClient.builder()
+                .endpointOverride(ENDPOINT)
+                .region(REGION)
+                .credentialsProvider(CREDENTIALS)
+                .build();
+    }
+
     public static AutoScalingClient autoScalingClient() {
         return AutoScalingClient.builder()
                 .endpointOverride(ENDPOINT)
@@ -1615,6 +1625,14 @@ public final class TestFixtures {
 
     public static AppIntegrationsClient appIntegrationsClient() {
         return AppIntegrationsClient.builder()
+                .endpointOverride(ENDPOINT)
+                .region(REGION)
+                .credentialsProvider(CREDENTIALS)
+                .build();
+    }
+
+    public static XRayClient xrayClient() {
+        return XRayClient.builder()
                 .endpointOverride(ENDPOINT)
                 .region(REGION)
                 .credentialsProvider(CREDENTIALS)

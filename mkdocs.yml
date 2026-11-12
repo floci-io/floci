@@ -166,6 +166,7 @@ nav:
     - CloudWatch Metric Filter Verification: services/cloudwatch-metric-filters-verification.md
     - CloudWatch OAM: services/oam.md
     - CloudWatch RUM: services/rum.md
+    - X-Ray: services/xray.md
     - Managed Prometheus (AMP): services/managed-prometheus.md
     - GuardDuty: services/guardduty.md
     - Connect: services/connect.md

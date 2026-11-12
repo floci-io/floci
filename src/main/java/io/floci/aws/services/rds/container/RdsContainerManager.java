@@ -50,7 +50,9 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
 import java.util.concurrent.RejectedExecutionException;
 import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.Semaphore;
 import java.util.concurrent.TimeUnit;
+import java.util.function.Consumer;
 import java.util.regex.Pattern;
 
 /**
@@ -907,6 +909,24 @@ public class RdsContainerManager implements RdsBackendGate, RdsBackendEndpointRe
                 """;
     }
 
+    static final class PostgresStartupSignal implements Consumer<String> {
+        final Semaphore signal = new Semaphore(0);
+        private boolean tcpListener;
+        private boolean signalled;
+
+        @Override
+        public synchronized void accept(String line) {
+            if (line.contains("listening on IPv4 address") || line.contains("listening on IPv6 address")) {
+                tcpListener = true;
+            }
+            if (tcpListener && !signalled && line.contains("database system is ready to accept connections")) {
+                signalled = true;
+                signal.release();
+            }
+        }
+
+    }
+
     /**
      * Connects over TCP loopback on purpose. The official image runs first-boot init against a
      * temporary server that listens only on the Unix socket, so a socket connection can succeed
@@ -922,7 +942,13 @@ public class RdsContainerManager implements RdsBackendGate, RdsBackendEndpointRe
                 "-d", "postgres",
                 "-c", postgresIamRoleInitSql()
         };
-        execUntilSuccess(containerName, containerId, cmd, "PostgreSQL IAM role");
+        PostgresStartupSignal startup = new PostgresStartupSignal();
+        // This path receives a newly created container, so replay cannot include a prior start.
+        try (Closeable observation = logStreamer.observe(containerId, startup)) {
+            execUntilSuccess(containerName, containerId, cmd, "PostgreSQL IAM role", startup.signal);
+        } catch (IOException e) {
+            LOG.warnv(e, "Could not close PostgreSQL startup observation for {0}", containerName);
+        }
     }
 
     /**
@@ -1021,6 +1047,11 @@ public class RdsContainerManager implements RdsBackendGate, RdsBackendEndpointRe
     }
 
     private void execUntilSuccess(String containerName, String containerId, String[] cmd, String description) {
+        execUntilSuccess(containerName, containerId, cmd, description, new Semaphore(0));
+    }
+
+    private void execUntilSuccess(String containerName, String containerId, String[] cmd, String description,
+                                  Semaphore startupSignal) {
         String lastOutput = "";
         for (int attempt = 1; attempt <= 60; attempt++) {
             try {
@@ -1034,7 +1065,7 @@ public class RdsContainerManager implements RdsBackendGate, RdsBackendEndpointRe
                 lastOutput = e.getMessage();
             }
             try {
-                TimeUnit.SECONDS.sleep(1);
+                startupSignal.tryAcquire(1, TimeUnit.SECONDS);
             } catch (InterruptedException e) {
                 Thread.currentThread().interrupt();
                 throw new IllegalStateException("Interrupted initializing " + description + " in " + containerName, e);

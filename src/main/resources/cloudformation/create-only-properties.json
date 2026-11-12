@@ -168,6 +168,10 @@
   "AWS::CloudFormation::CustomResource": [
     "ServiceToken"
   ],
+  "AWS::CloudFormation::StackSet": [
+    "PermissionModel",
+    "StackSetName"
+  ],
   "AWS::CloudFront::CachePolicy": [],
   "AWS::CloudFront::Distribution": [],
   "AWS::CloudFront::Function": [

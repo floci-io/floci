@@ -129,6 +129,7 @@ The attributes follow the [CloudFormation resource schema](https://docs.aws.amaz
 | `CreateClusterSnapshot` | Back up a cluster to a SQL dump via `pg_dump` |
 | `DescribeClusterSnapshots` | List snapshots, optionally filtered by snapshot or cluster identifier and SnapshotType (manual or automated) |
 | `DeleteClusterSnapshot` | Remove a snapshot and its stored dump |
+| `ModifyClusterSnapshot` | Update the retention period of a manual cluster snapshot |
 | `CopyClusterSnapshot` | Copy an automated cluster snapshot to a manual snapshot with a new identifier and retention period |
 | `RestoreFromClusterSnapshot` | Create a new cluster and load a snapshot's dump into it via `psql`; accepts `SnapshotIdentifier` or a same-account, same-region `SnapshotArn` |
 | `CreateClusterParameterGroup` | Register a parameter group (metadata only) |
@@ -207,9 +208,13 @@ committed is removed on failure; if the commit succeeded and a later flush repor
 the dump is retained for the committed snapshot.
 
 `FinalClusterSnapshotRetentionPeriod` defaults to `-1` and accepts `-1` or 1 to 3,653 days.
-It is persisted and returned as the snapshot's `ManualSnapshotRetentionPeriod`; automatic
-expiration is not implemented. Manual snapshots created by `CreateClusterSnapshot`, and older
-snapshots without stored retention metadata, also return the default `-1`. Snapshot metadata
+It is persisted and returned as the snapshot's `ManualSnapshotRetentionPeriod`. The background
+retention sweep expires finite-retention manual snapshots, including final snapshots and
+`CopyClusterSnapshot` targets, and removes their stored dumps. `ModifyClusterSnapshot` can change
+this period; omitting `ManualSnapshotRetentionPeriod` preserves the current setting. An elapsed
+new retention period requires `Force=true` to delete the snapshot immediately.
+Manual snapshots created by `CreateClusterSnapshot`, and older snapshots without stored
+retention metadata, return the default `-1` and are retained indefinitely. Snapshot metadata
 uses the configured storage mode. Persistent and WAL metadata commit failures are reported
 before teardown; hybrid retains its existing
 write-behind durability and logged flush failures.
@@ -307,6 +312,7 @@ JOB CREATE my_copy_job AUTO ON;
 COPY JOB LIST;
 COPY JOB SHOW my_copy_job;
 COPY JOB ALTER my_copy_job AUTO OFF;
+COPY JOB RUN my_copy_job;
 COPY JOB DROP my_copy_job;
 ```
 
@@ -321,8 +327,24 @@ and see their own rows in `sys_copy_job`; superusers can see all rows.
 COPY options are stored for execution time, including formats the ordinary COPY simulator does not yet
 implement. The COPY JOB restrictions above are checked at creation time.
 
-Jobs only record the COPY for now: nothing loads files automatically, and `COPY JOB RUN` is refused. The
-SQLSTATEs and messages of the refusals are Floci's own, not captured from AWS.
+`COPY JOB RUN` scans the job's S3 prefix and loads files not yet committed by that job, including with
+`AUTO OFF`. An active S3 event integration runs matching `AUTO ON` jobs in provisioned clusters and
+Serverless workgroups. Each object uses the stored COPY options and IAM role, with the same role association,
+trust and S3 authorization checks as an ordinary COPY.
+
+Files older than the job are skipped. Successfully ingested filenames (`status = 'I'`) are loaded once per job,
+even after an overwrite or notification redelivery. A file whose load fails is rolled back to its own savepoint
+and recorded with `status = 'E'` so later files in the same run continue; overwriting a failed file with a new
+ETag or version ID lets a subsequent run retry it. Checkpoints record bucket, key, ETag, version ID, file size,
+modification time, enqueue time and status in `floci_internal.copy_job_detail` and expose them through
+`sys_copy_job_detail`, in the same PostgreSQL transaction as the target rows. They survive Floci restarts with
+the target database. Dropping a job removes its checkpoints.
+
+The background sweep scheduler reconciles on startup and when S3 uploads mark a bucket. If a target is
+temporarily unavailable or a job run fails, the scheduler marks the bucket again for the next sweep. Deleting an
+integration switches its bucket's jobs to `AUTO OFF`, retaining their definitions and checkpoints. Resume a
+paused cluster before deleting its integration.
+The SQLSTATEs and messages of job validation errors are Floci's own, not captured from AWS.
 
 See AWS's [COPY JOB](https://docs.aws.amazon.com/redshift/latest/dg/r_COPY-JOB.html) and
 [auto-copy](https://docs.aws.amazon.com/redshift/latest/dg/loading-data-copy-job.html) references.
@@ -473,9 +495,10 @@ A bucket joins a target once (`IntegrationConflictOperationFault`), and a
 target takes at most 50 S3 event integrations (`IntegrationQuotaExceededFault`). Those two fault names are
 Floci's reading of the AWS API's fault list; their messages are not captured from AWS.
 
-The integration is `active` as soon as it is created, where AWS reports `creating` first. It does not load
-anything yet, and the bucket policy, the namespace resource policy and the existing notifications of the bucket
-are not checked. [COPY JOB](#copy-job) statements work independently of the integration.
+The integration is `active` as soon as it is created, where AWS reports `creating` first. It enables
+automatic ingestion for matching [COPY JOB](#copy-job) definitions. Integration creation does not check
+the bucket notification policy, namespace resource policy or existing bucket notifications. Loading still
+checks the job's IAM role and S3 access. Manual `COPY JOB RUN` works independently of the integration.
 
 ### Resource policies
 
@@ -790,9 +813,25 @@ needs, reloads the ones whose objects or Glue entry changed and drops the ones G
 When two partitions hold key values that PostgreSQL casts to the same value, such as integer `1` and `01`,
 rows can no longer be told apart by partition, so a query on that table loads every partition and replaces
 the whole table when any of them changes.
-Pruning applies to the simple query protocol and the Data API. A session in a transaction block, and a client
-on the extended query protocol (the default of the PostgreSQL JDBC driver, unless `preferQueryMode=simple`),
-load every partition.
+Pruning applies to the simple query protocol, the extended query protocol (the default of the PostgreSQL JDBC
+driver, unless `preferQueryMode=simple`), statements inside a transaction block, and the Data API outside a
+transaction block. A Data API statement inside a transaction block, which includes a batch, loads every
+partition, because that backend cannot report where its transaction ends.
+A bind parameter (`$1`, `$2`) in a predicate is read as the value the client binds, so a prepared statement
+prunes like the same query written with literals. When the statement is parsed its values are not yet known, so
+it loads no partition at that point, only enough for PostgreSQL to plan it, and each Bind loads the partitions
+its values select. Text values and binary PostgreSQL `int2`, `int4` and `int8` values support pruning, including
+pgjdbc's default `setInt` transfer. Binary integers use the type OIDs declared in Parse or returned by the
+backend's ParameterDescription when it infers the types. A parameter that is NULL, has an unknown or unsupported
+binary type, has an invalid binary width, or is compared in a form Floci does not read (for example `$1::int`)
+leaves its predicate out, and the query loads every partition. The original Bind frame is forwarded unchanged.
+The partitions loaded inside a transaction block, or by an extended query cycle, are staged for their connection
+and recorded as loaded only when the transaction (or the cycle) commits. A rollback, an error or a
+`ROLLBACK TO SAVEPOINT` discards them, so nothing is left behind that a later query would trust. Staged
+partitions also stop being trusted when another load changes the table in the meantime, and the next query then
+reloads it. While a connection holds staged partitions, other connections reload the table on their next query.
+A session inside a transaction block waits at most 30 seconds for another connection that is loading the same
+table, then fails with SQLSTATE `58030`; a session outside a transaction block waits for the load to finish.
 
 Materialized relations are cached in the cluster database. Each new query checks the associated
 role, trust policy and S3 access before using cached data, following the existing S3 enforcement

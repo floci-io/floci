@@ -8,18 +8,25 @@ import io.floci.aws.services.lambda.model.InvocationType;
 import io.floci.aws.services.lambda.model.InvokeResult;
 import io.floci.aws.services.lambda.model.LambdaAlias;
 import io.floci.aws.services.lambda.model.LambdaFunction;
+import io.floci.aws.services.lambda.model.LambdaUrlConfig;
+import io.floci.aws.services.lambda.model.ResponseStreamListener;
+import jakarta.ws.rs.core.GenericEntity;
 import jakarta.ws.rs.core.HttpHeaders;
 import jakarta.ws.rs.core.MultivaluedHashMap;
 import jakarta.ws.rs.core.Response;
+import jakarta.ws.rs.core.StreamingOutput;
 import jakarta.ws.rs.core.UriInfo;
 import org.junit.jupiter.api.Test;
 import org.mockito.ArgumentCaptor;
 
+import java.io.ByteArrayOutputStream;
+import java.io.IOException;
 import java.net.URI;
 import java.nio.charset.StandardCharsets;
 import java.util.Base64;
 import java.util.List;
 import java.util.Locale;
+import java.util.concurrent.CountDownLatch;
 import java.util.function.Function;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -366,6 +373,116 @@ class LambdaUrlInvocationControllerTest {
                 uriInfoFor("http://localhost/lambda-url/url-id/")));
 
         assertFalse(eventNode.has("cookies"));
+    }
+
+    @Test
+    void responseStreamUrlAnswersWithThePreludeAndStreamsTheBodyAfterIt() throws Exception {
+        Response response = invokeResponseStreamUrl(listener -> {
+            listener.onStart("application/vnd.awslambda.http-integration-response");
+            listener.onChunk(bytes("{\"statusCode\":201,\"headers\":{\"content-type\":\"text/event-stream\"},"
+                    + "\"cookies\":[\"a=1\"]}\0\0\0\0"));
+            listener.onChunk(bytes("\0\0\0\0data: 1\n\n"));
+            listener.onChunk(bytes("data: [DONE]\n\n"));
+            return streamedResult();
+        });
+
+        assertEquals(201, response.getStatus());
+        assertEquals("text/event-stream", response.getHeaderString("content-type"));
+        assertEquals("a=1", response.getHeaderString("Set-Cookie"));
+        assertEquals("data: 1\n\ndata: [DONE]\n\n", body(response));
+    }
+
+    @Test
+    void responseStreamUrlAnswersBeforeTheFunctionFinishes() throws Exception {
+        CountDownLatch finish = new CountDownLatch(1);
+        Response response = invokeResponseStreamUrl(listener -> {
+            listener.onStart("text/plain");
+            listener.onChunk(bytes("first "));
+            finish.await();
+            listener.onChunk(bytes("last"));
+            return streamedResult();
+        });
+
+        assertEquals(200, response.getStatus());
+        finish.countDown();
+        assertEquals("first last", body(response));
+    }
+
+    @Test
+    void responseStreamUrlWithoutAPreludeKeepsTheStreamsContentType() throws Exception {
+        Response response = invokeResponseStreamUrl(listener -> {
+            listener.onStart("text/plain");
+            listener.onChunk(bytes("{\"statusCode\":418}\0\0\0\0\0\0\0\0hello"));
+            return streamedResult();
+        });
+
+        assertEquals(200, response.getStatus());
+        assertEquals("text/plain", response.getHeaderString("content-type"));
+        assertEquals("{\"statusCode\":418}\0\0\0\0\0\0\0\0hello", body(response));
+    }
+
+    @Test
+    void responseStreamUrlAnswers502WhenTheFunctionFailsBeforeStreaming() throws Exception {
+        Response response = invokeResponseStreamUrl(listener -> {
+            InvokeResult failed = streamedResult();
+            failed.setFunctionError("Unhandled");
+            return failed;
+        });
+
+        assertEquals(502, response.getStatus());
+    }
+
+    @Test
+    void responseStreamUrlAnswers502ForAnUnreadablePrelude() throws Exception {
+        Response response = invokeResponseStreamUrl(listener -> {
+            listener.onStart("application/vnd.awslambda.http-integration-response");
+            listener.onChunk(bytes("not json\0\0\0\0\0\0\0\0body"));
+            return streamedResult();
+        });
+
+        assertEquals(502, response.getStatus());
+    }
+
+    private interface StreamingFunction {
+        InvokeResult run(ResponseStreamListener listener) throws Exception;
+    }
+
+    private Response invokeResponseStreamUrl(StreamingFunction function) {
+        LambdaUrlConfig urlConfig = new LambdaUrlConfig();
+        urlConfig.setInvokeMode("RESPONSE_STREAM");
+        LambdaFunction fn = new LambdaFunction();
+        fn.setFunctionName("my-function");
+        fn.setFunctionArn(FUNCTION_ARN);
+        fn.setAccountId("100000000012");
+        fn.setUrlConfig(urlConfig);
+
+        LambdaService lambdaService = mock(LambdaService.class);
+        when(lambdaService.getTargetByUrlId("url-id")).thenReturn(fn);
+        when(lambdaService.invokeArnStreaming(eq(FUNCTION_ARN), any(byte[].class), any(ResponseStreamListener.class)))
+                .thenAnswer(invocation -> function.run(invocation.getArgument(2)));
+
+        return newController(lambdaService).handleGet("url-id", "", headersWith(null),
+                uriInfoFor("http://localhost/lambda-url/url-id/"));
+    }
+
+    private static InvokeResult streamedResult() {
+        InvokeResult result = new InvokeResult();
+        result.setStatusCode(200);
+        result.setPayload(new byte[0]);
+        return result;
+    }
+
+    private static byte[] bytes(String text) {
+        return text.getBytes(StandardCharsets.UTF_8);
+    }
+
+    private static String body(Response response) throws IOException {
+        ByteArrayOutputStream out = new ByteArrayOutputStream();
+        Object entity = response.getEntity();
+        StreamingOutput stream = entity instanceof GenericEntity<?> generic
+                ? (StreamingOutput) generic.getEntity() : (StreamingOutput) entity;
+        stream.write(out);
+        return out.toString(StandardCharsets.UTF_8);
     }
 
     private JsonNode readTree(byte[] json) {

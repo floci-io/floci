@@ -4,11 +4,14 @@ import io.floci.aws.core.common.XmlParser;
 import io.floci.aws.testing.CfnStackWaits;
 import io.floci.aws.testing.RestAssuredJsonUtils;
 import io.quarkus.test.junit.QuarkusTest;
+import io.restassured.path.json.JsonPath;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.ValueSource;
 
+import java.util.HashMap;
+import java.util.List;
 import java.util.Map;
 
 import static io.restassured.RestAssured.given;
@@ -148,6 +151,10 @@ class CloudFormationEventBusIntegrationTest {
     }
 
     private static String eventBusWithTagsTemplate(String busName, String tags) {
+        return eventBusWithTagsTemplate(busName, tags, "");
+    }
+
+    private static String eventBusWithTagsTemplate(String busName, String tags, String moreResources) {
         return """
                 {
                   "Resources": {
@@ -159,9 +166,10 @@ class CloudFormationEventBusIntegrationTest {
                         "Tags": %s
                       }
                     }
+                    %s
                   }
                 }
-                """.formatted(busName, tags);
+                """.formatted(busName, tags, moreResources);
     }
 
     private static String eventBusWithPolicyTemplate(String busName, String statementId) {
@@ -189,8 +197,8 @@ class CloudFormationEventBusIntegrationTest {
                 """.formatted(busName, statementId);
     }
 
-    private void callEventBridge(String target, String body, int expectedStatus) {
-        given()
+    private JsonPath callEventBridge(String target, String body, int expectedStatus) {
+        return given()
             .contentType("application/x-amz-json-1.1")
             .header("Authorization", EVENTS_AUTH)
             .header("X-Amz-Target", target)
@@ -198,7 +206,8 @@ class CloudFormationEventBusIntegrationTest {
         .when()
             .post("/")
         .then()
-            .statusCode(expectedStatus);
+            .statusCode(expectedStatus)
+            .extract().jsonPath();
     }
 
     private static String eventBusAndRuleTemplate(String busName) {
@@ -570,47 +579,93 @@ class CloudFormationEventBusIntegrationTest {
         }
     }
 
+    /**
+     * A tag-only update changes the tags of the bus the stack already has, as measured on AWS
+     * (eu-west-1, 2026-11-09): same ARN and creation time, UPDATE_COMPLETE, a tag the template
+     * dropped removed and a tag added outside the stack kept.
+     */
     @Test
-    void mutableEventBusTagUpdateRollsBackWithoutChangingTags() {
+    void tagOnlyEventBusUpdateRetagsTheSameBus() {
         String suffix = Long.toString(System.nanoTime(), 36);
         String busName = "tagged-bus-" + suffix;
         String stackName = "eventbus-tags-" + suffix;
 
         createStack(stackName, eventBusWithTagsTemplate(busName, """
+                [{"Key":"keep","Value":"before"},{"Key":"remove","Value":"old"},{"Key":"version","Value":"0.1.5"}]
+                """));
+        assertStackStatus(stackName, "CREATE_COMPLETE");
+        String busArn = "arn:aws:events:us-east-1:000000000000:event-bus/" + busName;
+        callEventBridge("AWSEvents.TagResource", """
+                {"ResourceARN":"%s","Tags":[{"Key":"external","Value":"preserve"}]}
+                """.formatted(busArn), 200);
+        Map<String, Object> busBefore = describeBus(busName);
+
+        updateStack(stackName, eventBusWithTagsTemplate(busName, """
+                [{"Key":"keep","Value":"after"},{"Key":"add","Value":"new"},{"Key":"version","Value":"0.1.6"}]
+                """));
+        assertStackStatus(stackName, "UPDATE_COMPLETE");
+
+        assertEquals(busBefore, describeBus(busName));
+        assertEquals(Map.of("keep", "after", "add", "new", "version", "0.1.6", "external", "preserve"),
+                busTags(busArn));
+        if (!describeStackResources(stackName).contains("<PhysicalResourceId>" + busName + "</PhysicalResourceId>")) {
+            throw new AssertionError("tag update changed the bus physical id");
+        }
+
+        deleteStack(stackName);
+        CfnStackWaits.awaitStackDeleted(stackName);
+    }
+
+    /**
+     * When a later resource fails the update, the tags the bus took go back, and the stack manages
+     * the tag keys of the template it kept: the next update still removes a key that template set.
+     */
+    @Test
+    void eventBusTagUpdateRollsBackWhenALaterResourceFails() {
+        String suffix = Long.toString(System.nanoTime(), 36);
+        String busName = "rollback-tags-bus-" + suffix;
+        String stackName = "eventbus-tag-rollback-" + suffix;
+
+        createStack(stackName, eventBusWithTagsTemplate(busName, """
                 [{"Key":"keep","Value":"before"},{"Key":"remove","Value":"old"}]
                 """));
         assertStackStatus(stackName, "CREATE_COMPLETE");
-
         String busArn = "arn:aws:events:us-east-1:000000000000:event-bus/" + busName;
         callEventBridge("AWSEvents.TagResource", """
                 {"ResourceARN":"%s","Tags":[{"Key":"external","Value":"preserve"}]}
                 """.formatted(busArn), 200);
 
-        updateStack(stackName, eventBusWithTagsTemplate(busName, """
+        String newTags = """
                 [{"Key":"keep","Value":"after"},{"Key":"add","Value":"new"}]
+                """;
+        updateStack(stackName, eventBusWithTagsTemplate(busName, newTags, """
+                ,"Bad": {"Type": "AWS::Events::EventBus", "DependsOn": "Bus",
+                         "Properties": {"Description": "no name"}}
                 """));
         assertStackStatus(stackName, "UPDATE_ROLLBACK_COMPLETE");
 
-        String tags = given()
-            .contentType("application/x-amz-json-1.1")
-            .header("Authorization", EVENTS_AUTH)
-            .header("X-Amz-Target", "AWSEvents.ListTagsForResource")
-            .body("{\"ResourceARN\":\"" + busArn + "\"}")
-        .when()
-            .post("/")
-        .then()
-            .statusCode(200)
-            .extract().asString();
-        if (!tags.contains("\"Key\":\"keep\",\"Value\":\"before\"")
-                || !tags.contains("\"Key\":\"remove\",\"Value\":\"old\"")
-                || !tags.contains("\"Key\":\"external\",\"Value\":\"preserve\"")
-                || tags.contains("\"Key\":\"add\"")
-                || tags.contains("\"Value\":\"after\"")) {
-            throw new AssertionError("failed update changed event bus tags: " + tags);
-        }
+        assertEquals(Map.of("keep", "before", "remove", "old", "external", "preserve"), busTags(busArn));
+
+        updateStack(stackName, eventBusWithTagsTemplate(busName, newTags));
+        assertStackStatus(stackName, "UPDATE_COMPLETE");
+        assertEquals(Map.of("keep", "after", "add", "new", "external", "preserve"), busTags(busArn));
 
         deleteStack(stackName);
         CfnStackWaits.awaitStackDeleted(stackName);
+    }
+
+    private Map<String, String> busTags(String busArn) {
+        List<Map<String, String>> tags = callEventBridge("AWSEvents.ListTagsForResource",
+                "{\"ResourceARN\":\"" + busArn + "\"}", 200).getList("Tags");
+        Map<String, String> byKey = new HashMap<>();
+        for (Map<String, String> tag : tags) {
+            byKey.put(tag.get("Key"), tag.get("Value"));
+        }
+        return byKey;
+    }
+
+    private Map<String, Object> describeBus(String busName) {
+        return callEventBridge("AWSEvents.DescribeEventBus", "{\"Name\":\"" + busName + "\"}", 200).getMap("");
     }
 
     @Test

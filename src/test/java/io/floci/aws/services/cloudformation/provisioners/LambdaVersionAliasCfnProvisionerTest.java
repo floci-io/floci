@@ -1,23 +1,34 @@
 package io.floci.aws.services.cloudformation.provisioners;
 
-import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.floci.aws.core.common.AwsException;
-import io.floci.aws.services.cloudformation.CloudFormationTemplateEngine;
+import io.floci.aws.core.common.RegionResolver;
+import io.floci.aws.core.storage.AccountAwareStorageBackend;
+import io.floci.aws.core.storage.StorageFactory;
 import io.floci.aws.services.cloudformation.model.StackResource;
+import io.floci.aws.services.lambda.LambdaAliasStore;
+import io.floci.aws.services.lambda.LambdaConcurrencyLimiter;
+import io.floci.aws.services.lambda.LambdaFunctionStore;
 import io.floci.aws.services.lambda.LambdaService;
+import io.floci.aws.services.lambda.LambdaTargetResolver;
+import io.floci.aws.services.lambda.WarmPool;
 import io.floci.aws.services.lambda.model.LambdaAlias;
 import io.floci.aws.services.lambda.model.LambdaFunction;
+import io.floci.aws.services.lambda.zip.CodeStore;
+import io.floci.aws.services.lambda.zip.ZipExtractor;
 import org.junit.jupiter.api.Test;
 import org.mockito.Mockito;
 
+import java.nio.file.Path;
 import java.util.HashMap;
 import java.util.Map;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.ArgumentMatchers.isNull;
 import static org.mockito.Mockito.mock;
@@ -39,14 +50,7 @@ class LambdaVersionAliasCfnProvisionerTest {
     private final ObjectMapper mapper = new ObjectMapper();
 
     private ProvisionContext ctx() {
-        // Scalar properties only: intrinsic resolution (Ref/GetAtt) is the engine's job and is
-        // covered by its own tests, so a passthrough keeps this a true isolated unit test.
-        CloudFormationTemplateEngine engine = mock(CloudFormationTemplateEngine.class);
-        when(engine.resolve(any())).thenAnswer(inv -> {
-            JsonNode node = inv.getArgument(0);
-            return node == null ? null : node.asText();
-        });
-        return new ProvisionContext(engine, "us-east-1", "000000000000", "my-stack");
+        return new ProvisionContext(ProvisionContexts.passthroughEngine(), "us-east-1", "000000000000", "my-stack");
     }
 
     private StackResource resource(String type, String logicalId) {
@@ -187,5 +191,119 @@ class LambdaVersionAliasCfnProvisionerTest {
         // stack after upgrading must not fail on an unparseable id.
         provisioner.delete("AWS::Lambda::Alias", "MyFuncAliasproduction-1a2b3c4d", "us-east-1");
         verifyNoInteractions(lambda);
+    }
+
+    // --- dropped Description, against a real in-memory LambdaService ---
+
+    private static final String WITH_DESCRIPTION = """
+            {"FunctionName":"my-fn","Name":"production","FunctionVersion":"1","Description":"orig",
+             "RoutingConfig":{"AdditionalVersionWeights":[{"FunctionVersion":"2","FunctionWeight":0.1}]}}
+            """;
+    private static final String WITHOUT_DESCRIPTION = """
+            {"FunctionName":"my-fn","Name":"production","FunctionVersion":"1",
+             "RoutingConfig":{"AdditionalVersionWeights":[{"FunctionVersion":"2","FunctionWeight":0.1}]}}
+            """;
+
+    private LambdaService realLambda() {
+        StorageFactory storageFactory = mock(StorageFactory.class);
+        when(storageFactory.create(anyString(), anyString(), any()))
+                .thenAnswer(inv -> AccountAwareStorageBackend.inMemory("000000000000"));
+        LambdaFunctionStore functionStore = new LambdaFunctionStore(storageFactory);
+        LambdaAliasStore aliasStore = new LambdaAliasStore(storageFactory);
+        LambdaService real = new LambdaService(functionStore, null, mock(LambdaConcurrencyLimiter.class),
+                mock(WarmPool.class), new CodeStore(Path.of("target/test-data/lambda-code")), new ZipExtractor(),
+                null, new RegionResolver("us-east-1", "000000000000"), null, aliasStore,
+                new LambdaTargetResolver(functionStore, aliasStore), null, null, null, null, null,
+                storageFactory, null, null, null, null, new ObjectMapper(), null);
+        real.createFunction("us-east-1", new HashMap<>(Map.of("FunctionName", "my-fn", "Runtime", "nodejs20.x",
+                "Role", "arn:aws:iam::000000000000:role/test-role", "Handler", "index.handler",
+                "Timeout", 10, "MemorySize", 256)));
+        return real;
+    }
+
+    private StackResource deployAlias(LambdaService real, String properties) throws Exception {
+        StackResource r = resource("AWS::Lambda::Alias", "MyFuncAliasproduction");
+        new LambdaVersionAliasCfnProvisioner(real).provision(r, mapper.readTree(properties), ctx());
+        return r;
+    }
+
+    private void updateAlias(LambdaService real, StackResource r, String previous, String current) throws Exception {
+        new LambdaVersionAliasCfnProvisioner(real).provision(r, mapper.readTree(current),
+                ProvisionContexts.update("us-east-1", "000000000000", "my-stack",
+                        r.getPhysicalId(), previous));
+    }
+
+    @Test
+    void aliasDescriptionDroppedFromTheTemplateIsClearedOnUpdate() throws Exception {
+        LambdaService real = realLambda();
+        StackResource r = deployAlias(real, WITH_DESCRIPTION);
+        assertEquals("orig", real.getAlias("us-east-1", "my-fn", "production").getDescription());
+
+        updateAlias(real, r, WITH_DESCRIPTION, WITHOUT_DESCRIPTION);
+
+        assertNull(real.getAlias("us-east-1", "my-fn", "production").getDescription());
+    }
+
+    @Test
+    void changedAliasDescriptionStillApplies() throws Exception {
+        LambdaService real = realLambda();
+        StackResource r = deployAlias(real, WITH_DESCRIPTION);
+
+        updateAlias(real, r, WITH_DESCRIPTION, WITH_DESCRIPTION.replace("orig", "changed"));
+
+        assertEquals("changed", real.getAlias("us-east-1", "my-fn", "production").getDescription());
+    }
+
+    @Test
+    void emptyAliasDescriptionIsStoredAsGivenAndALaterDropClearsIt() throws Exception {
+        LambdaService real = realLambda();
+        StackResource r = deployAlias(real, WITH_DESCRIPTION);
+        String empty = WITH_DESCRIPTION.replace("\"orig\"", "\"\"");
+
+        updateAlias(real, r, WITH_DESCRIPTION, empty);
+        assertEquals("", real.getAlias("us-east-1", "my-fn", "production").getDescription());
+
+        updateAlias(real, r, empty, WITHOUT_DESCRIPTION);
+        assertNull(real.getAlias("us-east-1", "my-fn", "production").getDescription());
+    }
+
+    @Test
+    void aliasDescriptionSetOutsideTheStackSurvivesAnUpdateThatNeverDeclaredIt() throws Exception {
+        LambdaService real = realLambda();
+        StackResource r = deployAlias(real, WITHOUT_DESCRIPTION);
+        real.updateAlias("us-east-1", "my-fn", "production", null, "outside", null);
+
+        updateAlias(real, r, WITHOUT_DESCRIPTION, WITHOUT_DESCRIPTION.replace("\"1\"", "\"3\""));
+
+        LambdaAlias stored = real.getAlias("us-east-1", "my-fn", "production");
+        assertEquals("outside", stored.getDescription());
+        assertEquals("3", stored.getFunctionVersion());
+    }
+
+    @Test
+    void aliasDescriptionDroppedThenSetOutsideTheStackSurvivesALaterUpdateThatStillDoesNotDeclareIt()
+            throws Exception {
+        LambdaService real = realLambda();
+        StackResource r = deployAlias(real, WITH_DESCRIPTION);
+        updateAlias(real, r, WITH_DESCRIPTION, WITHOUT_DESCRIPTION);
+        real.updateAlias("us-east-1", "my-fn", "production", null, "outside", null);
+
+        updateAlias(real, r, WITHOUT_DESCRIPTION, WITHOUT_DESCRIPTION.replace("\"1\"", "\"3\""));
+
+        LambdaAlias stored = real.getAlias("us-east-1", "my-fn", "production");
+        assertEquals("outside", stored.getDescription());
+        assertEquals("3", stored.getFunctionVersion());
+    }
+
+    @Test
+    void droppingTheAliasDescriptionKeepsTheVersionAndTheRoutingConfig() throws Exception {
+        LambdaService real = realLambda();
+        StackResource r = deployAlias(real, WITH_DESCRIPTION);
+
+        updateAlias(real, r, WITH_DESCRIPTION, WITHOUT_DESCRIPTION);
+
+        LambdaAlias stored = real.getAlias("us-east-1", "my-fn", "production");
+        assertEquals("1", stored.getFunctionVersion());
+        assertEquals(Map.of("2", 0.1), stored.getRoutingConfig());
     }
 }

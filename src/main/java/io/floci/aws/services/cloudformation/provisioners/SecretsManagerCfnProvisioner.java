@@ -184,6 +184,9 @@ public class SecretsManagerCfnProvisioner implements CfnResourceProvisioner {
         String region = ctx.region();
         String arn = prior.getArn();
         Secret secret = secretsManagerService.updateSecret(arn, description, kmsKeyId, region);
+        if (description == null && ctx.droppedProperties(props).contains("Description")) {
+            secret = secretsManagerService.replaceSecretDescription(arn, null, region);
+        }
         String secretString = ctx.resolveOptional(props, "SecretString");
         if (secretString != null && !secretString.equals(currentValue(arn, region))) {
             secretsManagerService.putSecretValue(arn, secretString, null, null, region, null);

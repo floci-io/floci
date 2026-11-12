@@ -879,6 +879,62 @@ class DynamoDbServiceTest {
                 .toList());
     }
 
+    @Test
+    void queryResumesAfterTheStartKeyOfAnItemDeletedSinceThePreviousPage() {
+        createPagingTable();
+        service.deleteItem("Paging", item("PK", "p", "SK", "s2"), "us-east-1");
+
+        assertEquals(List.of("s3", "s4", "s5"),
+                pagingQuery(null, true, item("PK", "p", "SK", "s2")));
+    }
+
+    @Test
+    void queryResumesAfterAStartKeyThatNeverExisted() {
+        createPagingTable();
+
+        assertEquals(List.of("s4", "s5"), pagingQuery(null, true, item("PK", "p", "SK", "s3x")));
+    }
+
+    @Test
+    void descendingQueryResumesBeforeAStartKeyThatNeverExisted() {
+        createPagingTable();
+
+        assertEquals(List.of("s3", "s2", "s1"), pagingQuery(null, false, item("PK", "p", "SK", "s3x")));
+    }
+
+    @Test
+    void indexQueryResumesAfterTheStartKeyOfAnItemReKeyedSinceThePreviousPage() {
+        createPagingTable();
+        service.putItem("Paging", item("PK", "p", "SK", "s3", "G", "live", "GS", "t9"), "us-east-1");
+
+        assertEquals(List.of("s4", "s5", "s3"),
+                pagingQuery("gsi1", true, item("PK", "p", "SK", "s3", "G", "live", "GS", "t3")));
+    }
+
+    private void createPagingTable() {
+        GlobalSecondaryIndex gsi = new GlobalSecondaryIndex("gsi1",
+                List.of(new KeySchemaElement("G", "HASH"), new KeySchemaElement("GS", "RANGE")),
+                null, "ALL", null);
+        service.createTable("Paging",
+                List.of(new KeySchemaElement("PK", "HASH"), new KeySchemaElement("SK", "RANGE")),
+                List.of(new AttributeDefinition("PK", "S"), new AttributeDefinition("SK", "S"),
+                        new AttributeDefinition("G", "S"), new AttributeDefinition("GS", "S")),
+                5L, 5L, List.of(gsi), "us-east-1");
+        for (int i = 1; i <= 5; i++) {
+            service.putItem("Paging", item("PK", "p", "SK", "s" + i, "G", "live", "GS", "t" + i), "us-east-1");
+        }
+    }
+
+    private List<String> pagingQuery(String indexName, boolean forward, ObjectNode exclusiveStartKey) {
+        ObjectNode exprValues = mapper.createObjectNode();
+        exprValues.set(":v", attributeValue("S", indexName == null ? "p" : "live"));
+        String keyCondition = indexName == null ? "PK = :v" : "G = :v";
+        return service.query("Paging", null, exprValues, keyCondition, null, null, forward, indexName,
+                        exclusiveStartKey, null, "us-east-1").items().stream()
+                .map(result -> result.get("SK").get("S").asText())
+                .toList();
+    }
+
     private void createRequestsTableWithCompositeSortKeyGsi(String region) {
         GlobalSecondaryIndex gsi = new GlobalSecondaryIndex(
                 "memberIndex",
@@ -2064,6 +2120,56 @@ class DynamoDbServiceTest {
         assertTrue(exception.getMessage().contains("List index is not within the allowable range"));
         assertTrue(exception.getMessage().contains("4294967295"));
     }
+    @Test
+    void removeOfSeveralListIndexesAddressesTheOriginalList() {
+        assertEquals(List.of("one"), listAfter("REMOVE tags[0], tags[2]", "zero", "one", "two"));
+    }
+
+    @Test
+    void removeOfAnIndexInsideAnElementAddressesTheOriginalElement() {
+        String region = "us-east-1";
+        createUsersTable(region);
+        ObjectNode item = mapper.createObjectNode();
+        item.set("userId", attributeValue("S", "user-1"));
+        ArrayNode inner = mapper.createArrayNode().add(attributeValue("S", "a")).add(attributeValue("S", "b"));
+        ArrayNode outer = mapper.createArrayNode()
+                .add(attributeValue("S", "first"))
+                .add(mapper.createObjectNode().set("L", inner));
+        item.set("nested", mapper.createObjectNode().set("L", outer));
+        service.putItem("Users", item, region);
+        ObjectNode key = mapper.createObjectNode();
+        key.set("userId", attributeValue("S", "user-1"));
+
+        JsonNode updated = service.updateItem("Users", key, null,
+                "REMOVE nested[0], nested[1][0]", null, null, "ALL_NEW", region).newItem();
+
+        JsonNode remaining = updated.get("nested").get("L");
+        assertEquals(1, remaining.size());
+        assertEquals("b", remaining.get(0).get("L").get(0).get("S").asText());
+        assertEquals(1, remaining.get(0).get("L").size());
+    }
+
+    private List<String> listAfter(String updateExpression, String... values) {
+        String region = "us-east-1";
+        createUsersTable(region);
+        ObjectNode item = mapper.createObjectNode();
+        item.set("userId", attributeValue("S", "user-1"));
+        ArrayNode list = mapper.createArrayNode();
+        for (String value : values) {
+            list.add(attributeValue("S", value));
+        }
+        item.set("tags", mapper.createObjectNode().set("L", list));
+        service.putItem("Users", item, region);
+        ObjectNode key = mapper.createObjectNode();
+        key.set("userId", attributeValue("S", "user-1"));
+
+        JsonNode updated = service.updateItem("Users", key, null, updateExpression,
+                null, null, "ALL_NEW", region).newItem();
+        List<String> remaining = new ArrayList<>();
+        updated.get("tags").get("L").forEach(element -> remaining.add(element.get("S").asText()));
+        return remaining;
+    }
+
     /**
      * Test REMOVE with nested map paths (e.g. "ratings.foo").
      * Reproduces GitHub issue #402: REMOVE on a map key succeeds but data is unchanged.

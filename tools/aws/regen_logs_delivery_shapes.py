@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Vendor CloudWatch Logs vended-log delivery request constraints from botocore's Apache-2.0 service model."""
+"""Vendor CloudWatch Logs delivery and saved-query constraints from botocore's Apache-2.0 service model."""
 from __future__ import annotations
 
 import argparse
@@ -14,7 +14,8 @@ MODEL = Path("logs/2014-03-28")
 OPERATIONS = ("PutDeliverySource", "GetDeliverySource", "DeleteDeliverySource", "DescribeDeliverySources",
               "PutDeliveryDestination", "GetDeliveryDestination", "DeleteDeliveryDestination",
               "DescribeDeliveryDestinations", "CreateDelivery", "GetDelivery", "UpdateDeliveryConfiguration",
-              "DeleteDelivery", "DescribeDeliveries")
+              "DeleteDelivery", "DescribeDeliveries", "PutQueryDefinition", "DescribeQueryDefinitions",
+              "DeleteQueryDefinition")
 
 
 def main() -> int:

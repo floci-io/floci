@@ -964,7 +964,7 @@ public class AutoScalingReconciler {
                     asg.getRegion(),
                     launchTemplate.getLaunchTemplateId(),
                     null,
-                    asg.getLaunchTemplateVersion() == null ? List.of() : List.of(asg.getLaunchTemplateVersion()))
+                    AutoScalingService.launchTemplateVersionSelector(asg.getLaunchTemplateVersion()))
                     .getFirst();
             String resolvedVersion = version.getLatestVersionNumber() != null
                     ? version.getLatestVersionNumber()
@@ -997,7 +997,7 @@ public class AutoScalingReconciler {
                         asg.getRegion(),
                         mixedLaunchTemplate.getLaunchTemplateId(),
                         null,
-                        specification.getVersion() == null ? List.of() : List.of(specification.getVersion()))
+                        AutoScalingService.launchTemplateVersionSelector(specification.getVersion()))
                         .getFirst();
                 String resolvedVersion = version.getLatestVersionNumber() != null
                         ? version.getLatestVersionNumber()

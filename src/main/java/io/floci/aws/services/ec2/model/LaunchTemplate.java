@@ -25,6 +25,7 @@ public class LaunchTemplate {
     private String launchTemplateName;
     private String defaultVersionNumber = "1";
     private String latestVersionNumber = "1";
+    private int lastIssuedVersionNumber = 1;
     private Instant createTime;
     private String createdBy;
     private String region;
@@ -47,6 +48,11 @@ public class LaunchTemplate {
 
     public String getLatestVersionNumber() { return latestVersionNumber; }
     public void setLatestVersionNumber(String latestVersionNumber) { this.latestVersionNumber = latestVersionNumber; }
+
+    public int getLastIssuedVersionNumber() { return lastIssuedVersionNumber; }
+    public void setLastIssuedVersionNumber(int lastIssuedVersionNumber) {
+        this.lastIssuedVersionNumber = lastIssuedVersionNumber;
+    }
 
     public Instant getCreateTime() { return createTime; }
     public void setCreateTime(Instant createTime) { this.createTime = createTime; }

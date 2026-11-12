@@ -125,7 +125,8 @@ public class CloudFormationQueryHandler {
                 templateBody, templateUrl, parameters, capabilities, tags, region,
                 terminationProtection, stackPolicy);
         try {
-            cfnService.executeChangeSet(initial.getStackId(), initial.getChangeSetId(), region);
+            cfnService.executeChangeSetWithToken(initial.getStackId(), initial.getChangeSetId(), region,
+                    params.getFirst("ClientRequestToken"));
         } catch (AwsException e) {
             if (terminationProtection) {
                 cfnService.clearProtectionAfterRejectedCreate(stackName, initial, region);
@@ -171,7 +172,8 @@ public class CloudFormationQueryHandler {
             cfnService.deleteChangeSet(stackName, cs.getChangeSetName(), region);
             return xmlError("ValidationError", "No updates are to be performed.", 400);
         }
-        cfnService.executeChangeSet(cs.getStackId(), cs.getChangeSetId(), region);
+        cfnService.executeChangeSetWithToken(cs.getStackId(), cs.getChangeSetId(), region,
+                params.getFirst("ClientRequestToken"));
 
         String xml = new XmlBuilder()
                 .start("UpdateStackResponse", CF_NS)
@@ -190,7 +192,7 @@ public class CloudFormationQueryHandler {
         String stackName = params.getFirst("StackName");
         List<String> retainResources = extractList(params, "RetainResources.member.");
         try {
-            cfnService.deleteStack(stackName, retainResources, region);
+            cfnService.deleteStackForRequest(stackName, retainResources, region, params.getFirst("ClientRequestToken"));
             String xml = new XmlBuilder()
                     .start("DeleteStackResponse", CF_NS)
                     .raw(AwsQueryResponse.responseMetadata())
@@ -208,10 +210,12 @@ public class CloudFormationQueryHandler {
         String stackName = params.getFirst("StackName");
         List<String> resourcesToSkip = extractList(params, "ResourcesToSkip.member.");
         boolean forceRollback = Boolean.parseBoolean(params.getFirst("ForceRollback"));
-        // RoleARN and ClientRequestToken are accepted and have no effect: Floci assumes no role
-        // for stack operations and does not deduplicate retried requests.
+        // RoleARN is accepted and has no effect: Floci assumes no role for stack operations.
+        // ClientRequestToken goes on the status events the operation sends; a repeated one is not
+        // refused, as Floci does not deduplicate retried requests.
         try {
-            cfnService.continueUpdateRollback(stackName, resourcesToSkip, forceRollback, region);
+            cfnService.continueUpdateRollback(stackName, resourcesToSkip, forceRollback, region,
+                    params.getFirst("ClientRequestToken"));
         } catch (AwsException e) {
             return xmlError(e.getErrorCode(), e.getMessage(), e.getHttpStatus());
         }
@@ -362,7 +366,8 @@ public class CloudFormationQueryHandler {
         String stackName = params.getFirst("StackName");
         String changeSetName = params.getFirst("ChangeSetName");
         try {
-            cfnService.executeChangeSetForRequest(stackName, changeSetName, region);
+            cfnService.executeChangeSetForRequest(stackName, changeSetName, region,
+                    params.getFirst("ClientRequestToken"));
         } catch (AwsException e) {
             return xmlError(e.getErrorCode(), e.getMessage(), e.getHttpStatus());
         }

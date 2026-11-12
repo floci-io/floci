@@ -183,6 +183,8 @@ import io.floci.aws.services.wafv2.WafV2Service;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
+import java.util.Map;
+import java.util.function.Function;
 
 /**
  * Builds {@link CfnResourceDispatcher} for tests without a wall of positional nulls.
@@ -201,6 +203,13 @@ import java.util.List;
 final class CfnProvisionerFixture {
 
     private CfnProvisionerFixture() {
+    }
+
+    /** The template engine a provisioner test hands to {@code provision}: fixed account and stack, no outputs. */
+    static CloudFormationTemplateEngine engine(ObjectMapper mapper, String region, Map<String, Boolean> conditions) {
+        return new CloudFormationTemplateEngine("000000000000", region, "test-stack", "stack/id",
+                Map.of(), Map.of(), Map.of(), conditions, Map.of(), mapper,
+                (Function<String, String>) name -> null);
     }
 
     static Builder builder() {

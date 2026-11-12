@@ -73,6 +73,51 @@ class Ec2ServicePersistenceTest {
     private static final String REGION = "us-east-1";
 
     @Test
+    void deletedLatestLaunchTemplateVersionIsNotReusedAfterRestart(@TempDir Path dir) {
+        Ec2Service original = newService(dir);
+        String id = original.createLaunchTemplate(
+                REGION, "persisted-version-counter", new LaunchTemplateData(), List.of()).getLaunchTemplateId();
+        original.createLaunchTemplateVersion(REGION, id, null, "1", new LaunchTemplateData());
+        original.createLaunchTemplateVersion(REGION, id, null, "1", new LaunchTemplateData());
+        original.deleteLaunchTemplateVersions(REGION, id, null, List.of("3"), false);
+
+        Ec2Service restarted = newService(dir);
+        assertEquals("2", restarted.describeLaunchTemplates(
+                REGION, List.of(id), List.of(), Map.of()).getFirst().getLatestVersionNumber());
+        assertEquals("4", restarted.createLaunchTemplateVersion(
+                REGION, id, null, "1", new LaunchTemplateData()).getLatestVersionNumber());
+        restarted.deleteLaunchTemplateVersion(REGION, id, "4");
+        assertEquals("5", newService(dir).createLaunchTemplateVersion(
+                REGION, id, null, "1", new LaunchTemplateData()).getLatestVersionNumber());
+    }
+
+    @Test
+    void legacyLaunchTemplateRetainsItsHighestIssuedVersionBeforeDeletion(@TempDir Path dir) throws IOException {
+        Files.writeString(dir.resolve("ec2-launch-templates.json"), """
+                {
+                  "us-east-1::lt-legacy-counter": {
+                    "launchTemplateId": "lt-legacy-counter",
+                    "launchTemplateName": "legacy-counter",
+                    "defaultVersionNumber": "1",
+                    "latestVersionNumber": "9",
+                    "region": "us-east-1",
+                    "versions": {
+                      "1": {"imageId": "ami-original"},
+                      "9": {"imageId": "ami-later"}
+                    }
+                  }
+                }
+                """);
+        Ec2Service restored = newService(dir);
+        restored.deleteLaunchTemplateVersions(REGION, "lt-legacy-counter", null, List.of("9"), false);
+        LaunchTemplate created = newService(dir).createLaunchTemplateVersion(
+                REGION, "lt-legacy-counter", null, "1", new LaunchTemplateData());
+        assertEquals("10", created.getLatestVersionNumber());
+        assertEquals("1", created.getDefaultVersionNumber());
+        assertEquals("ami-original", created.getData().getImageId());
+    }
+
+    @Test
     void dhcpOptionsSurviveRestart(@TempDir Path dir) {
         Ec2Service original = newService(dir);
         String id = original.createDhcpOptions(REGION,

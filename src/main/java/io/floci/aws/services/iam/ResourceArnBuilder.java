@@ -12,6 +12,7 @@ import io.floci.aws.core.common.ServicePrincipals;
 import io.floci.aws.core.common.SigV4CredentialScope;
 import io.floci.aws.core.common.StoredResourceArns;
 import io.floci.aws.core.common.auth.SigV4Canonicalization;
+import io.floci.aws.services.cloudwatch.logs.CloudWatchLogsCrossAccountService;
 import io.floci.aws.services.cloudwatch.logs.CloudWatchLogsDeliveryService;
 import io.floci.aws.services.cloudwatch.logs.LogGroupTagTarget;
 import io.floci.aws.services.eks.EksController;
@@ -21,8 +22,11 @@ import io.floci.aws.services.lambda.LambdaArnUtils;
 import io.floci.aws.services.lambda.durable.DurableTokens;
 import io.floci.aws.services.lambdamicrovms.LambdaMicrovmsService;
 import io.floci.aws.services.s3.S3ControlArnUtils;
+import io.floci.aws.services.s3.S3ObjectKeys;
 import io.floci.aws.services.secretsmanager.SecretsManagerService;
 import io.floci.aws.services.sqs.SqsService;
+import io.quarkus.vertx.http.runtime.CurrentVertxRequest;
+import io.vertx.ext.web.RoutingContext;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.enterprise.inject.Instance;
 import jakarta.inject.Inject;
@@ -31,6 +35,7 @@ import jakarta.ws.rs.container.ContainerRequestContext;
 import java.io.ByteArrayInputStream;
 import java.io.IOException;
 import java.io.InputStream;
+import java.net.URI;
 import java.net.URLDecoder;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
@@ -106,6 +111,12 @@ public class ResourceArnBuilder {
      * its service follows with a minted id, or by members its minted ARN does not hold, is stored under.
      */
     private final Instance<StoredResourceArns> storedResourceArns;
+    /**
+     * The current request, for the path as the client sent it: an S3 key keeps its own slashes,
+     * which JAX-RS has collapsed out of {@code UriInfo} by the time this runs. Null outside a
+     * request, as in a unit test, where the request URI's raw path stands in.
+     */
+    private final CurrentVertxRequest currentVertxRequest;
 
     @Inject
     public ResourceArnBuilder(ObjectMapper objectMapper, Instance<IamService> iamService,
@@ -113,7 +124,8 @@ public class ResourceArnBuilder {
                               Instance<LambdaMicrovmsService> microvmsService,
                               Instance<EksService> eksService,
                               Instance<KmsService> kmsService,
-                              Instance<StoredResourceArns> storedResourceArns) {
+                              Instance<StoredResourceArns> storedResourceArns,
+                              CurrentVertxRequest currentVertxRequest) {
         this.objectMapper = objectMapper;
         this.iamService = iamService;
         this.secretsManagerService = secretsManagerService;
@@ -121,6 +133,17 @@ public class ResourceArnBuilder {
         this.eksService = eksService;
         this.kmsService = kmsService;
         this.storedResourceArns = storedResourceArns;
+        this.currentVertxRequest = currentVertxRequest;
+    }
+
+    public ResourceArnBuilder(ObjectMapper objectMapper, Instance<IamService> iamService,
+                              Instance<SecretsManagerService> secretsManagerService,
+                              Instance<LambdaMicrovmsService> microvmsService,
+                              Instance<EksService> eksService,
+                              Instance<KmsService> kmsService,
+                              Instance<StoredResourceArns> storedResourceArns) {
+        this(objectMapper, iamService, secretsManagerService, microvmsService, eksService, kmsService,
+                storedResourceArns, null);
     }
 
     public ResourceArnBuilder(ObjectMapper objectMapper, Instance<IamService> iamService,
@@ -161,6 +184,10 @@ public class ResourceArnBuilder {
         this(objectMapper, null, null);
     }
 
+    ResourceArnBuilder(ObjectMapper objectMapper, CurrentVertxRequest currentVertxRequest) {
+        this(objectMapper, null, null, null, null, null, null, currentVertxRequest);
+    }
+
     public String build(String credentialScope, ContainerRequestContext ctx,
                         String region, String accountId) {
         List<String> list = buildResources(credentialScope, ctx, region, accountId);
@@ -198,7 +225,7 @@ public class ResourceArnBuilder {
         String path = "s3".equals(credentialScope) ? ctx.getUriInfo().getPath()
                 : IamActionRegistry.decodedPath(ctx);
         return switch (credentialScope) {
-            case "s3"             -> buildS3Resources(operation, path, region);
+            case "s3"             -> buildS3Resources(operation, path, ctx, region);
             case "lambda"         -> List.of(buildLambdaArn(path, ctx, region, accountId));
             case "sqs"            -> List.of(buildSqsArn(ctx, region, accountId));
             case "sns"            -> List.of(buildSnsArn(ctx, region, accountId));
@@ -278,7 +305,7 @@ public class ResourceArnBuilder {
     /** Uses the serving operation and the same raw names as the handler. */
     public List<String> buildLogResources(String action, ContainerRequestContext ctx,
                                           String region, String accountId, String partition) {
-        // Operations the vendored table reads (the vended-log delivery family) take their resources from it.
+        // Operations the vendored table reads take their resources from it.
         if (RequestResources.reads(action)) {
             return namedResources("logs", action, ctx, region, accountId, partition);
         }
@@ -299,6 +326,9 @@ public class ResourceArnBuilder {
             String resourceArn = body.path("resourceArn").asText();
             // A delivery source, destination or delivery is tagged through the same operations.
             if (CloudWatchLogsDeliveryService.isDeliveryResourceArn(resourceArn)) {
+                return List.of(resourceArn);
+            }
+            if (CloudWatchLogsCrossAccountService.isCrossAccountDestinationArn(resourceArn)) {
                 return List.of(resourceArn);
             }
             return List.of(LogGroupTagTarget.resolve(resourceArn, region, accountId, partition).arn());
@@ -555,6 +585,12 @@ public class ResourceArnBuilder {
         // resource has and leave a deny on the real one unmatched.
         Optional<StoredEntity> stored = storedIamEntity(resourceType, name, accountId);
         if (stored.isEmpty()) {
+            // Without a stored role or a modelled Path member, the request names only the root path.
+            if ("role".equals(resourceType) && IamRequestShapes.hasMember(action, "RoleName")
+                    && !IamRequestShapes.hasMember(action, "Path")) {
+                return List.of(AwsArnUtils.Arn.global(AwsRegions.partitionFor(region), "iam", accountId,
+                        "role/" + name).toString());
+            }
             return List.of("*");
         }
         String storedArn = stored.get().arn();
@@ -834,6 +870,46 @@ public class ResourceArnBuilder {
     }
 
     // ── S3 ──────────────────────────────────────────────────────────────────────
+
+    /**
+     * The path of an S3 data-plane request, {@code path} as JAX-RS matched it, with its object key
+     * read from the path as the client sent it. {@code UriInfo} carries JAX-RS's collapsing of
+     * consecutive slashes, which drops a key's own leading slash and so names another object:
+     * {@code PUT /bucket//email.txt} stores the key {@code /email.txt} but would be checked on
+     * {@code arn:aws:s3:::bucket/email.txt}, so a grant on that object would cover this one and a
+     * statement naming {@code bucket//*} would match nothing it names. {@code S3Controller} stores
+     * the object under the key read here and the IAM condition resolver describes that same key,
+     * so all three agree on which object the request is about. The bucket comes from the matched
+     * path, which {@code S3VirtualHostFilter} has put it into for a virtual-hosted request.
+     */
+    private String s3Path(String path, ContainerRequestContext ctx) {
+        String bucket = s3Bucket(path);
+        if (bucket == null) {
+            return path;
+        }
+        URI requestUri = ctx.getUriInfo().getRequestUri();
+        RoutingContext current = currentVertxRequest == null ? null : currentVertxRequest.getCurrent();
+        String sentPath = current != null && current.request() != null ? current.request().path()
+                : requestUri == null ? null : requestUri.getRawPath();
+        String key = S3ObjectKeys.objectKey(sentPath, requestUri == null ? null : requestUri.getPath(),
+                path, bucket);
+        return key == null ? path : "/" + bucket + "/" + key;
+    }
+
+    /**
+     * The bucket an S3 data-plane path names an object in, or null when the path names no object to
+     * read a key for: the root, and a bucket on its own or with one trailing slash, which the ARN
+     * reads as the bucket itself.
+     */
+    private static String s3Bucket(String path) {
+        if (path == null) {
+            return null;
+        }
+        String stripped = path.startsWith("/") ? path.substring(1) : path;
+        int slash = stripped.indexOf('/');
+        return slash <= 0 || slash == stripped.length() - 1 ? null : stripped.substring(0, slash);
+    }
+
     // Minted in the request's partition; IamEnforcementFilter re-mints an existing bucket's ARN
     // in the bucket's own partition through S3ResourcePolicyProvider before any policy sees it.
     private String buildS3Arn(String path, String region) {
@@ -866,18 +942,19 @@ public class ResourceArnBuilder {
      * those are checked against the wildcard alone, as the no-resource actions of other
      * namespaces are (the KMS list operations), and a bucket-scoped statement grants them
      * nothing. Any other operation is the data plane, checked against the bucket or object its
-     * path names.
+     * path names, even in a bucket named like the S3 Control prefix, {@code v20180820}.
      */
-    private List<String> buildS3Resources(String operation, String path, String region) {
+    private List<String> buildS3Resources(String operation, String path, ContainerRequestContext ctx,
+                                          String region) {
         if (operation == null) {
-            return List.of(buildS3Arn(path, region));
+            return List.of(buildS3Arn(s3Path(path, ctx), region));
         }
         return switch (operation) {
             case "s3:ListTagsForResource", "s3:TagResource", "s3:UntagResource" ->
                     List.of(taggedS3ControlArn(path));
             case "s3:ListAccessPoints", "s3:PutAccountPublicAccessBlock",
                     "s3:GetAccountPublicAccessBlock" -> List.of("*");
-            default -> List.of(buildS3Arn(path, region));
+            default -> List.of(buildS3Arn(s3Path(path, ctx), region));
         };
     }
 
@@ -1287,8 +1364,9 @@ public class ResourceArnBuilder {
      * looks everything up. A cluster is the ARN EKS holds it under, or for one it holds none of, the ARN a
      * create mints in the request's Region; {@code CreateCluster} is checked against the cluster its body
      * names, as the EKS user guide's example policy for creating a cluster grants it. A node group, Fargate
-     * profile, add-on, access entry or Pod Identity association is the ARN EKS holds it under, which ends
-     * in an id the request does not carry, or {@code *} when EKS holds none to act on; listing or creating
+     * profile, add-on, access entry or Pod Identity association is the ARN EKS holds it under in the request's
+     * Region (clusters are Regional), which ends in an id the request does not carry, or {@code *} when EKS
+     * holds none to act on; listing or creating
      * them, and every other route under a cluster, act on the cluster. The path is split as the router
      * splits it, before decoding, so an encoded {@code /} stays inside a name, and an access entry's
      * principal is the rest of the path, as EKS takes it. {@code DescribeUpdate} acts on the add-on its
@@ -1335,14 +1413,15 @@ public class ResourceArnBuilder {
         String collection = segments[2];
         return switch (collection) {
             case "node-groups", "fargate-profiles", "addons", "pod-identity-associations" ->
-                    eksHeldArn(cluster, collection, pathSegment(segments[3]));
+                    eksHeldArn(cluster, collection, pathSegment(segments[3]), region);
             case "access-entries" -> eksHeldArn(cluster, collection,
-                    pathSegment(String.join("/", List.of(segments).subList(3, accessEntryEnd(segments, method)))));
+                    pathSegment(String.join("/", List.of(segments).subList(3, accessEntryEnd(segments, method)))),
+                    region);
             case "updates" -> {
                 // The updates Floci keeps are its add-ons', and EKS returns one whether or not the request names
                 // its add-on, so the update is checked against the add-on it was made to.
-                Optional<String> addon = segments.length == 4 && eksService != null
-                        ? eksService.get().findResourceArn(cluster, collection, pathSegment(segments[3]))
+                Optional<String> addon = segments.length == 4
+                        ? eksHeld(cluster, collection, pathSegment(segments[3]), region)
                         : Optional.empty();
                 yield addon.orElseGet(() -> eksClusterArn(cluster, region, accountId));
             }
@@ -1377,14 +1456,25 @@ public class ResourceArnBuilder {
 
     /** The ARN EKS holds the cluster {@code name} under, or else the one a create mints in {@code region}. */
     private String eksClusterArn(String name, String region, String accountId) {
-        Optional<String> held = eksService == null ? Optional.empty()
-                : eksService.get().findResourceArn(name, null, null);
-        return held.orElseGet(() -> AwsArnUtils.Arn.of("eks", region, accountId, "cluster/" + name).toString());
+        return eksHeld(name, null, null, region)
+                .orElseGet(() -> AwsArnUtils.Arn.of("eks", region, accountId, "cluster/" + name).toString());
     }
 
     /** The ARN EKS holds {@code name} of {@code collection} in the cluster under, or {@code *} when it holds none. */
-    private String eksHeldArn(String cluster, String collection, String name) {
-        return eksService == null ? "*" : eksService.get().findResourceArn(cluster, collection, name).orElse("*");
+    private String eksHeldArn(String cluster, String collection, String name, String region) {
+        return eksHeld(cluster, collection, name, region).orElse("*");
+    }
+
+    /**
+     * The ARN EKS holds the resource under, when the cluster is in {@code region}. EKS clusters are Regional, so a
+     * request signed for another Region does not reach them, and is checked as acting on a resource of its own Region.
+     */
+    private Optional<String> eksHeld(String cluster, String collection, String name, String region) {
+        if (eksService == null) {
+            return Optional.empty();
+        }
+        return eksService.get().findResourceArn(cluster, collection, name)
+                .filter(arn -> region.equals(AwsArnUtils.regionOrDefault(arn, null)));
     }
 
     /** The ARN a shared tagging route names, or {@code *} for any other route. */

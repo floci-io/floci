@@ -12,7 +12,9 @@ request on each route and compares the action the registry gives with that one.
 The credential scopes in `HAND_ROUTED` are authorized by the registry's rules alone, each for its
 reason, and their routes are vendored for the coverage test only. Within any other scope, two
 operations on one route would leave a request matching it no single operation, so the generation
-fails on them.
+fails on them. Supported shared-controller alternatives are generated beside the modeled URI, with
+member-location overrides for the bare route. These alternatives describe existing Floci compatibility
+paths, not additional botocore operations.
 
 The models are botocore's `<model>/<apiVersion>/service-2.json` (Apache-2.0,
 https://github.com/boto/botocore), the latest API version of each, located as
@@ -52,12 +54,17 @@ MODELS: dict[str, str] = {
     "accessanalyzer": "access-analyzer",
     "apigateway": "apigateway",
     "apigatewayv2": "apigateway",
+    "controltower": "controltower",
     "dsql": "dsql",
     "eks": "eks",
+    "guardduty": "guardduty",
     "es": "es",
+    "inspector2": "inspector2",
+    "lakeformation": "lakeformation",
     "lambda": "lambda",
     "lambda-core": "lambda",
     "lambda-microvms": "lambda",
+    "macie2": "macie2",
     "opensearch": "es",
     # The data plane is signed for the service, which is one scope for both of its planes.
     "payment-cryptography-data": "payment-cryptography",
@@ -66,7 +73,9 @@ MODELS: dict[str, str] = {
     "s3": "s3",
     "s3control": "s3",
     "scheduler": "scheduler",
+    "securityhub": "securityhub",
     "signer": "signer",
+    "xray": "xray",
 }
 
 # The models whose routes are rewritten onto an internal prefix, and the prefix they are rewritten
@@ -81,14 +90,17 @@ INTERNAL_ROUTES: dict[str, tuple[str, bool]] = {
     # filter owns, so its routes are vendored as the rewritten path: the action and the request's
     # resource labels both resolve from it.
     "signer": ("/_signer", False),
+    # X-Ray's routes collide with S3's path-style ones too, for the same reason and with the same
+    # fix: the vendored route is the path its filter rewrites the request onto.
+    "xray": ("/_xray", False),
 }
-
 
 # Operations a model does not serve itself, so their path is not rewritten onto its internal prefix.
 # The shared tags controller serves /tags/{resourceArn} for every service that is a TagHandler, and
 # the service's route filter leaves that path alone; prefixing it here would advertise a route no
 # request ever arrives on, and the IAM check would find no rule for it.
 SHARED_ROUTES: dict[str, frozenset[str]] = {
+    "controltower": frozenset({"TagResource", "UntagResource", "ListTagsForResource"}),
     "signer": frozenset({"TagResource", "UntagResource", "ListTagsForResource"}),
 }
 
@@ -134,7 +146,13 @@ def build(models: dict[str, dict], provenance: str) -> dict:
                 # A label holding an ARN spans the slashes the ARN holds, which the rewritten path
                 # holds as they are.
                 request_uri = re.sub(r"\{([^}]+)\}", r"{\1+}", request_uri)
-            operations[operation] = {"method": http["method"], "requestUri": request_uri}
+            route = {"method": http["method"], "requestUri": request_uri}
+            if operation in shared:
+                # SharedTagsController also serves the bare path, reading POST's body and
+                # GET/DELETE's query. Keep that compatibility route and its member source together.
+                route["alternatives"] = [{"requestUri": "/tags", "located": {
+                    "resourceArn": "body" if http["method"] == "POST" else "?resourceArn"}}]
+            operations[operation] = route
         routes[name] = {
             "credentialScope": MODELS[name],
             "apiVersion": model["metadata"]["apiVersion"],
@@ -147,6 +165,7 @@ def build(models: dict[str, dict], provenance: str) -> dict:
                 raise SystemExit(f"error: REST models of {scope} have conflicting access-denied HTTP statuses")
             denial_statuses[scope] = status
             routes[name]["accessDeniedStatus"] = status
+    routes = dict(sorted(routes.items()))
     shared = shared_routes(routes)
     if shared:
         raise SystemExit("error: one route names more than one operation in a scope the rules do not route alone: "
@@ -176,8 +195,9 @@ def shared_routes(routes: dict[str, dict]) -> list[str]:
         if model["credentialScope"] in HAND_ROUTED:
             continue
         for operation, route in model["operations"].items():
-            key = (model["credentialScope"],) + route_key(route["method"], route["requestUri"])
-            named.setdefault(key, set()).add(operation)
+            for variant in [route, *route.get("alternatives", [])]:
+                key = (model["credentialScope"],) + route_key(route["method"], variant["requestUri"])
+                named.setdefault(key, set()).add(operation)
     return [f"{key[0]} {key[1]} {'/'.join(key[2])}: {', '.join(sorted(operations))}"
             for key, operations in sorted(named.items()) if len(operations) > 1]
 

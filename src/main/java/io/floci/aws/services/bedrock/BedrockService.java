@@ -557,7 +557,7 @@ public class BedrockService implements ResourceProvider {
         ObjectNode details = objectMapper.createObjectNode();
         details.put("guardrailProfileId", profileId);
         details.put("guardrailProfileArn",
-                regionResolver.buildArn("bedrock", region, "guardrail-profile/" + profileId));
+                regionResolver.buildArn("bedrock", region, GUARDRAIL_PROFILE_RESOURCE_PREFIX + profileId));
         return details;
     }
 

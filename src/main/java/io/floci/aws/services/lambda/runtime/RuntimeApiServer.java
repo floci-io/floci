@@ -4,6 +4,7 @@ import io.floci.aws.services.lambda.model.ExtensionEvent;
 import io.floci.aws.services.lambda.model.InvokeResult;
 import io.floci.aws.services.lambda.model.PendingInvocation;
 import io.floci.aws.services.lambda.model.RegisteredExtension;
+import io.floci.aws.services.lambda.model.ResponseStreamListener;
 import io.vertx.core.Future;
 import io.vertx.core.Vertx;
 import io.vertx.core.http.HttpServer;
@@ -81,6 +82,8 @@ public class RuntimeApiServer {
     private static final String RESPONSE_PATH = "/" + RUNTIME_API_VERSION + "/runtime/invocation/:requestId/response";
     private static final String ERROR_PATH = "/" + RUNTIME_API_VERSION + "/runtime/invocation/:requestId/error";
     private static final String INIT_ERROR_PATH = "/" + RUNTIME_API_VERSION + "/runtime/init/error";
+
+    private static final String RESPONSE_MODE_HEADER = "Lambda-Runtime-Function-Response-Mode";
 
     private static final String EXTENSIONS_API_VERSION = "2020-01-01";
     private static final String EXTENSION_REGISTER_PATH = "/" + EXTENSIONS_API_VERSION + "/extension/register";
@@ -406,6 +409,8 @@ public class RuntimeApiServer {
         CompletableFuture<Void> started = new CompletableFuture<>();
 
         Router router = Router.router(vertx);
+        // Registered ahead of the BodyHandler so that a streamed response is read as it arrives.
+        router.post(RESPONSE_PATH).handler(this::handleStreamedResponse);
         router.route().handler(BodyHandler.create());
 
         // GET /runtime/invocation/next — AWS Runtime API contract: blocks until an invocation
@@ -1002,6 +1007,39 @@ public class RuntimeApiServer {
                     new InvokeResult(200, "Unhandled", payload, null, invocation.getRequestId()));
         }
         sendStatusOk(ctx);
+    }
+
+    /**
+     * Hands a streamed response to the invocation's {@link ResponseStreamListener} chunk by chunk and
+     * completes the invocation only when the stream ends, so the function's timeout and its
+     * container stay held for the whole stream. A response that is not streamed, or one for an
+     * invocation without a listener, goes on to the buffered handler.
+     */
+    private void handleStreamedResponse(RoutingContext ctx) {
+        String requestId = ctx.pathParam("requestId");
+        PendingInvocation invocation = inFlight.get(requestId);
+        ResponseStreamListener listener = invocation == null ? null : invocation.getResponseStreamListener();
+        if (listener == null || !"streaming".equalsIgnoreCase(ctx.request().getHeader(RESPONSE_MODE_HEADER))) {
+            ctx.next();
+            return;
+        }
+        listener.onStart(ctx.request().getHeader("Content-Type"));
+        ctx.request().handler(chunk -> listener.onChunk(chunk.getBytes()));
+        ctx.request().exceptionHandler(e -> {
+            LOG.warnv("Streamed response of invocation {0} broke off: {1}", requestId, e.getMessage());
+            completeStreamedResponse(requestId);
+        });
+        ctx.request().endHandler(v -> {
+            completeStreamedResponse(requestId);
+            sendStatusOk(ctx);
+        });
+    }
+
+    private void completeStreamedResponse(String requestId) {
+        PendingInvocation invocation = inFlight.remove(requestId);
+        if (invocation != null) {
+            invocation.getResultFuture().complete(new InvokeResult(200, null, new byte[0], null, requestId));
+        }
     }
 
     private void sendStatusOk(RoutingContext ctx) {

@@ -67,13 +67,7 @@ class CloudWatchLogsInsightsTest {
     @Test
     @DisplayName("GetQueryResults filters by JSON field, drops TRACE, sorts desc and dedups")
     void getQueryResultsFiltersSortsDedups() {
-        // On real AWS, events are not queryable for several seconds after ingestion; retry the
-        // full start+poll cycle until rows appear or the ~60s deadline elapses.
-        GetQueryResultsResponse res = pollUntilComplete(startTestQuery().queryId());
-        long deadline = System.currentTimeMillis() + 60_000;
-        while (res.results().isEmpty() && System.currentTimeMillis() < deadline) {
-            res = pollUntilComplete(startTestQuery().queryId());
-        }
+        GetQueryResultsResponse res = resultsOf(query());
 
         assertThat(res.status()).isEqualTo(QueryStatus.COMPLETE);
 
@@ -95,6 +89,19 @@ class CloudWatchLogsInsightsTest {
                 .map(CloudWatchLogsInsightsTest::messageOf)
                 .toList();
         assertThat(messages).noneMatch(m -> m.contains("verbose noise") || m.contains("unrelated"));
+    }
+
+    @Test
+    @DisplayName("GetQueryResults keeps rows matching either side of an or filter")
+    void getQueryResultsOrFilter() {
+        GetQueryResultsResponse res = resultsOf("fields @timestamp, @message"
+                + " | filter params.job_id = 'other-job' or level = 'ERROR'"
+                + " | sort @timestamp desc");
+
+        assertThat(res.status()).isEqualTo(QueryStatus.COMPLETE);
+        assertThat(res.results()).hasSize(2);
+        assertThat(messageOf(res.results().get(0))).contains("job boom");
+        assertThat(messageOf(res.results().get(1))).contains("unrelated");
     }
 
     @Test
@@ -138,12 +145,27 @@ class CloudWatchLogsInsightsTest {
     // ──────────────────────────── helpers ────────────────────────────
 
     private static StartQueryResponse startTestQuery() {
+        return startTestQuery(query());
+    }
+
+    private static StartQueryResponse startTestQuery(String queryString) {
         long nowSec = baseMs / 1000;
         return logs.startQuery(b -> b
                 .logGroupNames(GROUP)
                 .startTime(nowSec - 300)
                 .endTime(nowSec + 300)
-                .queryString(query()));
+                .queryString(queryString));
+    }
+
+    private static GetQueryResultsResponse resultsOf(String queryString) {
+        // On real AWS, events are not queryable for several seconds after ingestion; retry the
+        // full start+poll cycle until rows appear or the ~60s deadline elapses.
+        GetQueryResultsResponse res = pollUntilComplete(startTestQuery(queryString).queryId());
+        long deadline = System.currentTimeMillis() + 60_000;
+        while (res.results().isEmpty() && System.currentTimeMillis() < deadline) {
+            res = pollUntilComplete(startTestQuery(queryString).queryId());
+        }
+        return res;
     }
 
     private static String query() {

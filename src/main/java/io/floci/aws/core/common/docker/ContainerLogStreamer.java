@@ -154,6 +154,11 @@ public class ContainerLogStreamer {
         return follow(containerId, null, line -> logToConsole(logPrefix, line));
     }
 
+    /** Observes reassembled lines from a newly created container without forwarding or logging them. */
+    public Closeable observe(String containerId, Consumer<String> observer) {
+        return follow(containerId, null, new LogReassemblyCallback(observer, 0));
+    }
+
     /**
      * A stream that logs each line written to it to the console logger as it arrives, as the attach methods
      * log a container's: for the output of a command run in a container. A line is held only until its
@@ -448,11 +453,11 @@ public class ContainerLogStreamer {
             }
         }
 
-        // Called only once ContainerLifecycleManager has stopped (or confirmed the absence of) the Docker
-        // container. Give its follow-log reader a bounded chance to deliver any queued frames and terminal
-        // callback without blocking lifecycle teardown. If no terminal arrives, close that reader before
+        // Close after container shutdown or when an observation ends while the container still runs.
+        // Give the follow-log reader a bounded chance to deliver queued frames and a terminal callback
+        // without blocking the caller. If no terminal arrives, close that reader before
         // flushing so frames cannot continue after the fallback finalization boundary.
-        void closeAfterContainerStopped() {
+        void closeWithDrainGrace() {
             synchronized (emissionLock) {
                 synchronized (buffers) {
                     if (terminated || fallbackFinalization != null) {
@@ -546,9 +551,10 @@ public class ContainerLogStreamer {
     }
 
     /**
-     * The lifecycle-facing log handle. Closing it is valid only after the owning container has stopped;
-     * it gives Docker a bounded chance to deliver its terminal callback before a non-blocking fallback
-     * closes the reader and finalizes any tail.
+     * A log-stream handle for lifecycle forwarding or temporary observation. It can close after the
+     * container stops or end an observation while the container continues running. Closing gives Docker
+     * a bounded chance to deliver its terminal callback before a non-blocking fallback closes only the
+     * log reader and finalizes any tail.
      */
     static final class ContainerLogHandle implements Closeable {
 
@@ -560,7 +566,7 @@ public class ContainerLogStreamer {
 
         @Override
         public void close() throws IOException {
-            callback.closeAfterContainerStopped();
+            callback.closeWithDrainGrace();
         }
     }
 

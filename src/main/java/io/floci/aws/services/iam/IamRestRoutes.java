@@ -54,15 +54,16 @@ final class IamRestRoutes {
     private static final int ONE_SEGMENT = 1;
     private static final int REST_OF_PATH = 0;
 
-    /** A route a request matched: its operation, and the value its path gives each of the route's labels, decoded. */
-    record Match(String operation, Map<String, String> labels) {
+    /** A matched operation, decoded path labels, and generated alternative member locations. */
+    record Match(String operation, Map<String, String> labels, Map<String, String> located) {
     }
 
     /**
      * A route: its operation, its path as a pattern capturing each label in turn, the labels' names, each segment's
      * rank, and the query it names.
      */
-    private record Route(String operation, Pattern path, List<String> labels, int[] ranks, Map<String, String> query) {
+    private record Route(String operation, Pattern path, List<String> labels, int[] ranks, Map<String, String> query,
+                         Map<String, String> located) {
 
         boolean matches(String requestPath, MultivaluedMap<String, String> parameters) {
             if (!path.matcher(requestPath).matches()) {
@@ -134,7 +135,7 @@ final class IamRestRoutes {
                 best = route;
             }
         }
-        return best == null ? Optional.empty() : Optional.of(new Match(best.operation(), best.labelValues(requestPath)));
+        return best == null ? Optional.empty() : Optional.of(new Match(best.operation(), best.labelValues(requestPath), best.located()));
     }
 
     /** The modelled denial status, or the existing protocol default when the model declares none. */
@@ -188,7 +189,31 @@ final class IamRestRoutes {
                 }
                 routes.computeIfAbsent(scope, ignored -> new HashMap<>())
                         .computeIfAbsent(method, ignored -> new ArrayList<>())
-                        .add(route(operation.getKey(), requestUri));
+                        .add(route(operation.getKey(), requestUri, Map.of()));
+                JsonNode alternatives = operation.getValue().path("alternatives");
+                if (!alternatives.isMissingNode() && !alternatives.isArray()) {
+                    throw new IllegalStateException(RESOURCE_NAME + " gives " + operation.getKey()
+                            + " invalid alternative routes");
+                }
+                alternatives.forEach(alternative -> {
+                    String uri = alternative.path("requestUri").asText("");
+                    JsonNode members = alternative.path("located");
+                    if (!uri.startsWith("/") || !members.isObject()) {
+                        throw new IllegalStateException(RESOURCE_NAME + " gives " + operation.getKey()
+                                + " an invalid alternative route");
+                    }
+                    Map<String, String> located = new HashMap<>();
+                    members.properties().forEach(member -> {
+                        String source = member.getValue().asText("");
+                        if (!member.getValue().isTextual() || member.getKey().isEmpty()
+                                || !("body".equals(source) || source.startsWith("?") && source.length() > 1)) {
+                            throw new IllegalStateException(RESOURCE_NAME + " gives " + operation.getKey()
+                                    + " an invalid alternative member location");
+                        }
+                        located.put(member.getKey(), source);
+                    });
+                    routes.get(scope).get(method).add(route(operation.getKey(), uri, Map.copyOf(located)));
+                });
             });
         });
         Map<String, Map<String, List<Route>>> copied = new HashMap<>();
@@ -201,7 +226,7 @@ final class IamRestRoutes {
     }
 
     /** A route of the operation from its request URI, its path's segments and the query after its {@code ?}. */
-    private static Route route(String operation, String requestUri) {
+    private static Route route(String operation, String requestUri, Map<String, String> located) {
         int question = requestUri.indexOf('?');
         String path = IamActionRegistry.withoutTrailingSlash(question < 0 ? requestUri : requestUri.substring(0, question));
         List<String> segments = path.equals("/") ? List.of() : List.of(path.substring(1).split("/", -1));
@@ -238,6 +263,6 @@ final class IamRestRoutes {
             }
         }
         return new Route(operation, Pattern.compile(pattern.isEmpty() ? "/" : pattern.toString()), List.copyOf(labels),
-                ranks, Map.copyOf(query));
+                ranks, Map.copyOf(query), located);
     }
 }

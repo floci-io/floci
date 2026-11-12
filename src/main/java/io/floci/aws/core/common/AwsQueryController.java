@@ -145,8 +145,10 @@ public class AwsQueryController {
             @HeaderParam("Authorization") String authorization,
             @Context UriInfo uriInfo,
             MultivaluedMap<String, String> formParams) {
-        return dispatch(IamEnforcementFilter.requestAuthorization(authorization, uriInfo.getQueryParameters()),
-                formParams);
+        // Reading the query parameters builds a map, so only a request without the header does it.
+        String auth = authorization != null
+                ? authorization : IamEnforcementFilter.requestAuthorization(null, uriInfo.getQueryParameters());
+        return dispatch(auth, formParams);
     }
 
     private Response dispatch(String authorization, MultivaluedMap<String, String> formParams) {

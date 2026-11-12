@@ -180,18 +180,11 @@ public class EmbeddedDnsServer {
                 }
             }
 
-            DatagramSocket socket = vertx.createDatagramSocket(new DatagramSocketOptions().setIpV6(false));
-            socket.listen(DNS_PORT, "0.0.0.0", ar -> {
-                if (ar.succeeded()) {
-                    serverIp = myIp;
-                    LOG.infov("Embedded DNS server started on {0}:53, resolving {1} → {0}", myIp, suffixes);
-                    socket.handler(packet -> handleQuery(
-                            vertx, socket, packet.data().getBytes(),
-                            packet.sender().host(), packet.sender().port(), myIp));
-                } else {
-                    LOG.warnv("Embedded DNS server failed to bind on port 53: {0}", ar.cause().getMessage());
-                }
-            });
+            listen(vertx, myIp, DNS_PORT)
+                    .onSuccess(socket -> LOG.infov(
+                            "Embedded DNS server started on {0}:53, resolving {1} → {0}", myIp, suffixes))
+                    .onFailure(error -> LOG.warnv(
+                            "Embedded DNS server failed to bind on {0}:53: {1}", myIp, error.getMessage()));
         } catch (Exception e) {
             LOG.warnv("Failed to initialize embedded DNS server: {0}", e.getMessage());
         }
@@ -199,6 +192,17 @@ public class EmbeddedDnsServer {
 
     public Optional<String> getServerIp() {
         return Optional.ofNullable(serverIp);
+    }
+
+    Future<DatagramSocket> listen(Vertx vertx, String address, int port) {
+        DatagramSocket socket = vertx.createDatagramSocket(new DatagramSocketOptions().setIpV6(false));
+        // A wildcard bind can reply from a different interface, which DNS clients reject.
+        return socket.listen(port, address).map(bound -> {
+            bound.handler(packet -> handleQuery(vertx, bound, packet.data().getBytes(),
+                    packet.sender().host(), packet.sender().port(), address));
+            serverIp = address;
+            return bound;
+        });
     }
 
     // ── packet handling ───────────────────────────────────────────────────────

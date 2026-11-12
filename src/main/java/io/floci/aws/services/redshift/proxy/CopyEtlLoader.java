@@ -30,7 +30,7 @@ final class CopyEtlLoader {
     private CopyEtlLoader() {
     }
 
-    static boolean runSimple(Socket client, Socket socket, CopyStatementParser.S3CopyFrom spec,
+    static boolean runSimple(Socket client, Socket socket, CopyStatementParser.S3Statement spec,
                               S3Service s3, IamService iam, String account, List<String> roles,
                               char status, IntConsumer onStatusChange) throws IOException {
         CopyBackendSession backend = new CopyBackendSession(socket, response -> {
@@ -73,14 +73,18 @@ final class CopyEtlLoader {
         return true;
     }
 
-    static long execute(CopyBackendSession backend, CopyStatementParser.S3CopyFrom spec,
+    static long execute(CopyBackendSession backend, CopyStatementParser.S3Statement spec,
                         S3Service s3, IamService iam, String account, List<String> roles,
                         boolean callerTransaction) throws IOException {
         backend.begin(callerTransaction);
         String savepoint = "floci_load_" + UUID.randomUUID().toString().replace("-", "");
         backend.execute("SAVEPOINT " + savepoint);
         try {
-            long rows = load(backend, spec, s3, iam, account, roles);
+            long rows = switch (spec) {
+                case CopyStatementParser.S3CopyFrom copy -> load(backend, copy, null, null, s3, iam, account, roles, false);
+                case CopyStatementParser.S3CopyJobRun run -> CopyJobRunner.load(backend, run.name(), s3, iam, account, roles);
+                default -> throw new IllegalArgumentException("Expected COPY statement");
+            };
             backend.execute("RELEASE SAVEPOINT " + savepoint);
             return rows;
         } catch (IOException | RuntimeException exception) {
@@ -98,15 +102,25 @@ final class CopyEtlLoader {
         }
     }
 
+    static long executeObject(CopyBackendSession backend, CopyStatementParser.S3CopyFrom spec,
+                              String expectedETag, String versionId,
+                              S3Service s3, IamService iam, String account, List<String> roles) throws IOException {
+        return load(backend, spec, expectedETag, versionId, s3, iam, account, roles, true);
+    }
+
     private static long load(CopyBackendSession backend, CopyStatementParser.S3CopyFrom spec,
-                             S3Service s3, IamService iam, String account, List<String> roles) throws IOException {
+                             String expectedETag, String versionId,
+                             S3Service s3, IamService iam, String account, List<String> roles,
+                             boolean exactObject) throws IOException {
         List<ColumnInfo> catalog = columns(backend, spec);
         List<String> discovered = spec.jsonAuto() && (spec.columns() == null || spec.columns().isEmpty())
                 ? catalog.stream().map(ColumnInfo::name).toList() : null;
         List<Integer> widths = spec.transforms().truncateColumns() ? S3CopySimulator.alignMaxBytes(spec, catalog) : null;
         List<CopyRecordTransformer.ColumnKind> kinds = spec.transforms().needsColumnTypes()
                 ? S3CopySimulator.alignKinds(spec, catalog) : null;
-        CopyInput input = S3CopySimulator.prepareCopy(spec, s3, iam, account, roles);
+        CopyInput input = exactObject
+                ? S3CopySimulator.prepareObjectCopy(spec, s3, iam, account, roles, expectedETag, versionId)
+                : S3CopySimulator.prepareCopy(spec, s3, iam, account, roles);
         try {
             if (!spec.transforms().toleratesErrors()) {
                 return backend.copy(S3CopySimulator.copyBackendSql(spec, discovered),
@@ -157,7 +171,7 @@ final class CopyEtlLoader {
         int rejected = 0;
         for (String key : input.keys()) {
             S3CopySimulator.authorizeCopyObject(spec, input.s3(), input.iamService(), input.roleSession(), key);
-            S3Object object = input.s3().getObject(spec.bucket(), key);
+            S3Object object = input.readObject(key);
             byte[] data = object != null && object.getData() != null ? object.getData() : new byte[0];
             try (InputStream raw = new ByteArrayInputStream(data);
                     InputStream source = CopySourceInputStream.open(raw, spec.gzip())) {

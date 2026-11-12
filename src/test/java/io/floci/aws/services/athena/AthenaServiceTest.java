@@ -5,24 +5,30 @@ import io.floci.aws.core.common.RegionResolver;
 import io.floci.aws.core.storage.AccountAwareStorageBackend;
 import io.floci.aws.core.storage.StorageFactory;
 import io.floci.aws.services.athena.model.QueryExecutionState;
+import io.floci.aws.services.athena.model.ResultConfiguration;
+import io.floci.aws.services.athena.model.ResultSet;
 import io.floci.aws.services.floci.duck.FlociDuckClient;
 import io.floci.aws.services.glue.GlueService;
 import io.floci.aws.services.s3.S3Service;
+import io.floci.aws.services.s3.model.S3Object;
 import io.vertx.core.Vertx;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
+import java.nio.charset.StandardCharsets;
 import java.util.List;
+import java.util.Map;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.doAnswer;
-import static org.mockito.Mockito.doReturn;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
 
@@ -35,6 +41,7 @@ class AthenaServiceTest {
 
     private Vertx vertx;
     private FlociDuckClient duckClient;
+    private S3Service s3Service;
     private AthenaService service;
 
     @BeforeEach
@@ -43,12 +50,12 @@ class AthenaServiceTest {
         duckClient = mock(FlociDuckClient.class);
 
         StorageFactory storageFactory = mock(StorageFactory.class);
-        doReturn(AccountAwareStorageBackend.inMemory("000000000000"))
+        doAnswer(invocation -> AccountAwareStorageBackend.inMemory("000000000000"))
                 .when(storageFactory).create(anyString(), anyString(), any());
 
         GlueService glueService = mock(GlueService.class);
         when(glueService.getTables(anyString())).thenReturn(List.of());
-        S3Service s3Service = mock(S3Service.class);
+        s3Service = mock(S3Service.class);
         GlueViewDdlBuilder ddlBuilder = mock(GlueViewDdlBuilder.class);
 
         EmulatorConfig config = mock(EmulatorConfig.class);
@@ -137,6 +144,74 @@ class AthenaServiceTest {
 
         assertEquals(QueryExecutionState.FAILED, service.getQueryExecution(id).getStatus().getState(),
                 "a late stop must not cancel a failed query");
+    }
+
+    @Test
+    void getQueryResultsReportsTheSqlTypeOfEachColumn() throws Exception {
+        String query = "SELECT CAST(1 AS BIGINT) AS n, CAST(1.5 AS DOUBLE) AS d, true AS b, "
+                + "DATE '2026-01-01' AS dt, CAST(2.50 AS DECIMAL(10,2)) AS p, 'x' AS s";
+        when(duckClient.query(eq("DESCRIBE " + query), any())).thenReturn(List.of(
+                Map.of("column_name", "n", "column_type", "BIGINT"),
+                Map.of("column_name", "d", "column_type", "DOUBLE"),
+                Map.of("column_name", "b", "column_type", "BOOLEAN"),
+                Map.of("column_name", "dt", "column_type", "DATE"),
+                Map.of("column_name", "p", "column_type", "DECIMAL(10,2)"),
+                Map.of("column_name", "s", "column_type", "VARCHAR")));
+
+        assertEquals(List.of("bigint", "double", "boolean", "date", "decimal", "varchar"),
+                columnInfo(query, "n,d,b,dt,p,s\n1,1.5,true,2026-01-01,2.50,x\n").stream()
+                        .map(ResultSet.ColumnInfo::getType).toList());
+    }
+
+    @Test
+    void getQueryResultsReportsThePrecisionAndScaleOfADecimalColumn() throws Exception {
+        String query = "SELECT CAST(2.50 AS DECIMAL(10,2)) AS p";
+        when(duckClient.query(eq("DESCRIBE " + query), any())).thenReturn(List.of(
+                Map.of("column_name", "p", "column_type", "DECIMAL(10,2)")));
+
+        ResultSet.ColumnInfo column = columnInfo(query, "p\n2.50\n").get(0);
+
+        assertEquals("decimal", column.getType());
+        assertEquals(10, column.getPrecision());
+        assertEquals(2, column.getScale());
+    }
+
+    @Test
+    void getQueryResultsReportsTimeAndTimestampVariantsByTheirAthenaNames() throws Exception {
+        String query = "SELECT t, ts_s, ts_ms, ts_ns, ts_tz, t_tz FROM times";
+        when(duckClient.query(eq("DESCRIBE " + query), any())).thenReturn(List.of(
+                Map.of("column_name", "t", "column_type", "TIME"),
+                Map.of("column_name", "ts_s", "column_type", "TIMESTAMP_S"),
+                Map.of("column_name", "ts_ms", "column_type", "TIMESTAMP_MS"),
+                Map.of("column_name", "ts_ns", "column_type", "TIMESTAMP_NS"),
+                Map.of("column_name", "ts_tz", "column_type", "TIMESTAMP WITH TIME ZONE"),
+                Map.of("column_name", "t_tz", "column_type", "TIME WITH TIME ZONE")));
+
+        assertEquals(List.of("time", "timestamp", "timestamp", "timestamp", "timestamp with time zone",
+                        "time with time zone"),
+                columnInfo(query, "t,ts_s,ts_ms,ts_ns,ts_tz,t_tz\n,,,,,\n").stream()
+                        .map(ResultSet.ColumnInfo::getType).toList());
+    }
+
+    @Test
+    void getQueryResultsReportsVarcharWhenTheTypesCannotBeDescribed() throws Exception {
+        when(duckClient.query(anyString(), any())).thenThrow(new IllegalStateException("not describable"));
+
+        assertEquals(List.of("varchar", "varchar"), columnInfo("SELECT 1 AS a, 2 AS b", "a,b\n1,2\n").stream()
+                .map(ResultSet.ColumnInfo::getType).toList());
+    }
+
+    private List<ResultSet.ColumnInfo> columnInfo(String query, String csv) throws Exception {
+        String id = service.startQueryExecution(query, "primary", null,
+                new ResultConfiguration("s3://athena-results/"));
+        awaitState(id, QueryExecutionState.SUCCEEDED);
+        String outputLocation = service.getQueryExecution(id).getResultConfiguration().getOutputLocation();
+        String key = outputLocation.substring("s3://athena-results/".length());
+        S3Object result = new S3Object("athena-results", key, csv.getBytes(StandardCharsets.UTF_8), "text/csv");
+        when(s3Service.listObjects(eq("athena-results"), anyString(), any(), anyInt())).thenReturn(List.of(result));
+        when(s3Service.getObject("athena-results", key)).thenReturn(result);
+
+        return service.getQueryResults(id).getMetadata().getColumnInfo();
     }
 
     private void awaitState(String id, QueryExecutionState expected) throws InterruptedException {

@@ -24,6 +24,7 @@ import io.floci.aws.services.sns.SnsService;
 import io.floci.aws.services.sqs.SqsService;
 import io.floci.aws.testing.ThreadStates;
 import io.floci.aws.testutil.FreePorts;
+import io.netty.handler.codec.mqtt.MqttProperties;
 import io.netty.handler.codec.mqtt.MqttQoS;
 import io.quarkus.tls.CertificateUpdatedEvent;
 import io.quarkus.tls.TlsConfiguration;
@@ -496,7 +497,7 @@ class IotMqttBrokerServiceTest {
             subscribeHandler.set(invocation.getArgument(0));
             return closing;
         });
-        when(closing.publish(anyString(), any(), any(), anyBoolean(), anyBoolean(), anyInt()))
+        when(closing.publish(anyString(), any(), any(), anyBoolean(), anyBoolean(), anyInt(), any(MqttProperties.class)))
                 .thenThrow(new IllegalStateException("the connection closed"));
         MqttTopicSubscription requested = mock(MqttTopicSubscription.class);
         when(requested.topicName()).thenReturn("devices/+/metrics");
@@ -514,7 +515,7 @@ class IotMqttBrokerServiceTest {
 
             broker.publish("devices/d1/metrics", "{\"t\":1}".getBytes(StandardCharsets.UTF_8));
 
-            verify(closing).publish(eq("devices/d1/metrics"), any(), any(), anyBoolean(), anyBoolean(), anyInt());
+            verify(closing).publish(eq("devices/d1/metrics"), any(), any(), anyBoolean(), anyBoolean(), anyInt(), any(MqttProperties.class));
             assertEquals("{\"t\":1}", fannedOut.poll(10, TimeUnit.SECONDS), "the other subscriber got its copy");
         } finally {
             disconnect(subscriber);
@@ -1123,7 +1124,7 @@ class IotMqttBrokerServiceTest {
         });
         broker.handleEndpoint(departing, false);
         verify(subscriber, timeout(10_000))
-                .publish(eq("$aws/events/presence/connected/departing"), any(), any(), anyBoolean(), anyBoolean(), anyInt());
+                .publish(eq("$aws/events/presence/connected/departing"), any(), any(), anyBoolean(), anyBoolean(), anyInt(), any(MqttProperties.class));
 
         ExecutorService departingEventLoop = Executors.newSingleThreadExecutor();
         subscriberMonitor.lock();
@@ -1137,7 +1138,7 @@ class IotMqttBrokerServiceTest {
             departingEventLoop.shutdown();
         }
         verify(subscriber, timeout(10_000))
-                .publish(eq("$aws/events/presence/disconnected/departing"), any(), any(), anyBoolean(), anyBoolean(), anyInt());
+                .publish(eq("$aws/events/presence/disconnected/departing"), any(), any(), anyBoolean(), anyBoolean(), anyInt(), any(MqttProperties.class));
     }
 
     /** A PUBLISH, SUBSCRIBE, UNSUBSCRIBE or PUBACK counts as traffic for the keep-alive, as a PINGREQ does. */
@@ -1156,6 +1157,7 @@ class IotMqttBrokerServiceTest {
         when(message.payload()).thenReturn(Buffer.buffer("{}"));
         when(message.qosLevel()).thenReturn(MqttQoS.AT_MOST_ONCE);
         when(message.topicName()).thenReturn("keepalive/publishing");
+        when(message.properties()).thenReturn(MqttProperties.NO_PROPERTIES);
         publish.getValue().handle(message);
         ArgumentCaptor<Handler<MqttSubscribeMessage>> subscribe = handlerCaptor();
         verify(subscribing).subscribeHandler(subscribe.capture());
@@ -1261,8 +1263,8 @@ class IotMqttBrokerServiceTest {
         broker.publish("stale/topic", "{}".getBytes(StandardCharsets.UTF_8));
         broker.publish("kept/topic", "{}".getBytes(StandardCharsets.UTF_8));
 
-        verify(current, timeout(10_000)).publish(eq("kept/topic"), any(), any(), anyBoolean(), anyBoolean(), anyInt());
-        verify(current, never()).publish(eq("stale/topic"), any(), any(), anyBoolean(), anyBoolean(), anyInt());
+        verify(current, timeout(10_000)).publish(eq("kept/topic"), any(), any(), anyBoolean(), anyBoolean(), anyInt(), any(MqttProperties.class));
+        verify(current, never()).publish(eq("stale/topic"), any(), any(), anyBoolean(), anyBoolean(), anyInt(), any(MqttProperties.class));
     }
 
     /**

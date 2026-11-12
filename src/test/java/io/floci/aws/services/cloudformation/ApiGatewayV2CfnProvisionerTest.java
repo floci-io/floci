@@ -26,7 +26,6 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.atomic.AtomicInteger;
-import java.util.function.Function;
 
 import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -362,6 +361,36 @@ class ApiGatewayV2CfnProvisionerTest {
             verify(apiGatewayV2Service).createAuthorizer(eq(REGION), eq(API_ID), argThat(request ->
                     "arn:aws:iam::000000000000:role/authorizer".equals(request.get("authorizerCredentialsArn"))));
         }
+    }
+
+    @Test
+    void bodyMapsIntegrationSubtypeAndRequestParameters() throws Exception {
+        Integration integration = new Integration();
+        integration.setIntegrationId("body-integration");
+        when(apiGatewayV2Service.createIntegration(eq(REGION), eq(API_ID), anyMap())).thenReturn(integration);
+        when(apiGatewayV2Service.createRoute(eq(REGION), eq(API_ID), anyMap()))
+                .thenReturn(route("body-route", "POST /send"));
+
+        StackResource resource = provision(body("""
+                {"paths":{"/send":{"post":{
+                  "x-amazon-apigateway-integration":{"type":"aws_proxy",
+                    "integrationSubtype":"SQS-SendMessage",
+                    "credentials":"arn:aws:iam::000000000000:role/integration",
+                    "payloadFormatVersion":"1.0",
+                    "requestParameters":{"QueueUrl":"http://localhost/000000000000/q",
+                      "MessageBody":"$request.body","DelaySeconds":5,
+                      "MessageAttributes":{"Authorization":{"DataType":"String",
+                        "StringValue":"${request.header.Authorization}"}}}}}}}}
+                """), null, Map.of());
+
+        assertEquals("CREATE_COMPLETE", resource.getStatus());
+        verify(apiGatewayV2Service).createIntegration(eq(REGION), eq(API_ID), argThat(request ->
+                "SQS-SendMessage".equals(request.get("integrationSubtype"))
+                        && Map.of("QueueUrl", "http://localhost/000000000000/q", "MessageBody", "$request.body",
+                                "DelaySeconds", "5",
+                                "MessageAttributes", "{\"Authorization\":{\"DataType\":\"String\","
+                                        + "\"StringValue\":\"${request.header.Authorization}\"}}")
+                        .equals(request.get("requestParameters"))));
     }
 
     @Test
@@ -1194,9 +1223,7 @@ class ApiGatewayV2CfnProvisionerTest {
     }
 
     private CloudFormationTemplateEngine engine(Map<String, Boolean> conditions) {
-        return new CloudFormationTemplateEngine("000000000000", REGION, "test-stack", "stack/id",
-                Map.of(), Map.of(), Map.of(), conditions, Map.of(), mapper,
-                (Function<String, String>) name -> null);
+        return CfnProvisionerFixture.engine(mapper, REGION, conditions);
     }
 
     private static Route route(String id, String routeKey) {

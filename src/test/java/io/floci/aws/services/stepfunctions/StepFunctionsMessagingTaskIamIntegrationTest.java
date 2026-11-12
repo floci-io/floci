@@ -31,6 +31,7 @@ import java.util.UUID;
 import static io.floci.aws.testing.EnforcementFixtures.auth;
 import static io.floci.aws.testing.StepFunctionsTestClient.LAMBDA_TRUST;
 import static io.floci.aws.testing.StepFunctionsTestClient.STATES_TRUST;
+import static io.floci.aws.testing.StepFunctionsTestClient.allow;
 import static io.floci.aws.testing.StepFunctionsTestClient.trusting;
 import static io.restassured.RestAssured.given;
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -304,8 +305,7 @@ class StepFunctionsMessagingTaskIamIntegrationTest {
     void aForeignCredentialsRoleNeedsTheTopicPolicyToo() throws Exception {
         Target target = target("sns:publish");
         String executionRole = role(STATES_TRUST, ASSUME);
-        String foreignRole = EnforcementFixtures.createRole(cleanup, baseUri.getPort(), OTHER_ACCOUNT, "/",
-                "sfn-msg-" + UUID.randomUUID(), trusting(executionRole), PUBLISH_ANY);
+        String foreignRole = sfn().role(OTHER_ACCOUNT, "sfn-msg-", trusting(executionRole), PUBLISH_ANY);
         String machine = machine(jsonPathTask(target, foreignRole), executionRole);
 
         Response refused = terminal(start(machine, "{}"));
@@ -327,8 +327,7 @@ class StepFunctionsMessagingTaskIamIntegrationTest {
     void aForeignCredentialsRoleNeedsItsIdentityPolicyToo() throws Exception {
         Target target = target("sns:publish");
         String executionRole = role(STATES_TRUST, ASSUME);
-        String foreignRole = EnforcementFixtures.createRole(cleanup, baseUri.getPort(), OTHER_ACCOUNT, "/",
-                "sfn-msg-" + UUID.randomUUID(), trusting(executionRole), READ_ONLY);
+        String foreignRole = sfn().role(OTHER_ACCOUNT, "sfn-msg-", trusting(executionRole), READ_ONLY);
         setTopicPolicy(target.resourceArn(), topicStatement("Allow", foreignRole, target.resourceArn()));
 
         Response completed = terminal(start(machine(jsonPathTask(target, foreignRole), executionRole), "{}"));
@@ -425,8 +424,7 @@ class StepFunctionsMessagingTaskIamIntegrationTest {
     void aForeignCredentialsRoleNeedsTheBusPolicyToo() throws Exception {
         Target target = target("events:putEvents");
         String executionRole = role(STATES_TRUST, ASSUME);
-        String foreignRole = EnforcementFixtures.createRole(cleanup, baseUri.getPort(), OTHER_ACCOUNT, "/",
-                "sfn-msg-" + UUID.randomUUID(), trusting(executionRole), PUBLISH_ANY);
+        String foreignRole = sfn().role(OTHER_ACCOUNT, "sfn-msg-", trusting(executionRole), PUBLISH_ANY);
         String machine = machine(jsonPathTask(target, foreignRole), executionRole);
 
         Response refused = terminal(start(machine, "{}"));
@@ -448,8 +446,7 @@ class StepFunctionsMessagingTaskIamIntegrationTest {
     void aForeignCredentialsRoleNeedsItsIdentityPolicyOnABusToo() throws Exception {
         Target target = target("events:putEvents");
         String executionRole = role(STATES_TRUST, ASSUME);
-        String foreignRole = EnforcementFixtures.createRole(cleanup, baseUri.getPort(), OTHER_ACCOUNT, "/",
-                "sfn-msg-" + UUID.randomUUID(), trusting(executionRole), READ_ONLY);
+        String foreignRole = sfn().role(OTHER_ACCOUNT, "sfn-msg-", trusting(executionRole), READ_ONLY);
         events("PutPermission", Map.of("EventBusName", busName(target.resourceArn()), "StatementId", "s",
                 "Action", "events:PutEvents", "Principal", OTHER_ACCOUNT));
 
@@ -579,15 +576,6 @@ class StepFunctionsMessagingTaskIamIntegrationTest {
         Response completed = terminal(start(machine(task, role(STATES_TRUST, READ_ONLY)), "{}"));
 
         assertEquals("SUCCEEDED", completed.jsonPath().getString("status"), completed.asString());
-    }
-
-    private static String allow(String resource, String... actions) {
-        try {
-            return MAPPER.writeValueAsString(Map.of("Version", "2012-10-17", "Statement", List.of(
-                    Map.of("Effect", "Allow", "Action", List.of(actions), "Resource", resource))));
-        } catch (Exception e) {
-            throw new IllegalStateException(e);
-        }
     }
 
     private static String topicStatement(String effect, String principal, String topicArn) {
@@ -728,23 +716,19 @@ class StepFunctionsMessagingTaskIamIntegrationTest {
     }
 
     private SqsTestQueue queue() {
-        SqsTestQueue queue = SqsTestQueue.create(sqsService, ACCOUNT, REGION, "sfn-msg-iam-");
-        cleanup.register(queue::delete);
-        return queue;
+        return sfn().queue(sqsService, ACCOUNT, REGION, "sfn-msg-iam-");
     }
 
     private String role(String trust, String policy) {
-        return EnforcementFixtures.createRole(cleanup, baseUri.getPort(), ACCOUNT, "/",
-                "sfn-msg-" + UUID.randomUUID(), trust, policy);
+        return sfn().role(ACCOUNT, "sfn-msg-", trust, policy);
     }
 
     private String machine(Map<String, Object> task, String role) throws Exception {
-        return machineWithDefinition(MAPPER.writeValueAsString(
-                Map.of("StartAt", "Send", "States", Map.of("Send", task))), role);
+        return sfn().machine(ACCOUNT, "sfn-msg-iam-", task, role);
     }
 
     private String machineWithDefinition(String definition, String role) {
-        return sfn().createMachine(ACCOUNT, "sfn-msg-iam-", definition, "STANDARD", role);
+        return sfn().machineWithDefinition(ACCOUNT, "sfn-msg-iam-", definition, role);
     }
 
     private String start(String machine, String input) {

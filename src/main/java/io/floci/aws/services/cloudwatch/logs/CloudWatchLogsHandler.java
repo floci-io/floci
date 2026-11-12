@@ -20,6 +20,7 @@ import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 import jakarta.ws.rs.core.Response;
 
+import java.time.Clock;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.LinkedHashMap;
@@ -40,6 +41,7 @@ public class CloudWatchLogsHandler {
     private final CloudWatchLogsMetricFilterHandler metricFilterHandler;
     private final CloudWatchLogsDeliveryService deliveryService;
     private final CloudWatchLogsDeliveryHandler deliveryHandler;
+    private final CloudWatchLogsQueryDefinitionHandler queryDefinitionHandler;
     private final ObjectMapper objectMapper;
 
     @Inject
@@ -47,13 +49,24 @@ public class CloudWatchLogsHandler {
                                  CloudWatchLogsCrossAccountService crossAccountService,
                                  CloudWatchLogsMetricFilterService metricFilterService,
                                  CloudWatchLogsDeliveryService deliveryService,
+                                 CloudWatchLogsQueryDefinitionService queryDefinitionService,
                                  ObjectMapper objectMapper) {
         this.logsService = logsService;
         this.crossAccountService = crossAccountService;
         this.metricFilterHandler = new CloudWatchLogsMetricFilterHandler(metricFilterService, objectMapper);
         this.deliveryService = deliveryService;
         this.deliveryHandler = new CloudWatchLogsDeliveryHandler(deliveryService, objectMapper);
+        this.queryDefinitionHandler = new CloudWatchLogsQueryDefinitionHandler(queryDefinitionService, objectMapper);
         this.objectMapper = objectMapper;
+    }
+
+    CloudWatchLogsHandler(CloudWatchLogsService logsService, CloudWatchLogsCrossAccountService crossAccountService,
+                          CloudWatchLogsMetricFilterService metricFilterService,
+                          CloudWatchLogsDeliveryService deliveryService, ObjectMapper objectMapper) {
+        this(logsService, crossAccountService, metricFilterService, deliveryService,
+                new CloudWatchLogsQueryDefinitionService(new InMemoryStorage<>(), new InMemoryStorage<>(),
+                        logsService.regionResolver(),
+                        Clock.systemUTC()), objectMapper);
     }
 
     /** For unit tests that exercise log groups only: deliveries live in memory. */
@@ -106,6 +119,8 @@ public class CloudWatchLogsHandler {
             case "StartQuery" -> handleStartQuery(request, region);
             case "GetQueryResults" -> handleGetQueryResults(request, region);
             case "StopQuery" -> handleStopQuery(request, region);
+            case "PutQueryDefinition", "DescribeQueryDefinitions", "DeleteQueryDefinition" ->
+                    queryDefinitionHandler.handle(action, request, region);
             default -> Response.status(400)
                     .entity(new AwsErrorResponse("UnsupportedOperation", "Operation " + action + " is not supported."))
                     .build();
@@ -239,6 +254,7 @@ public class CloudWatchLogsHandler {
                 request.path("destinationName").asText(null),
                 request.path("targetArn").asText(null),
                 request.path("roleArn").asText(null),
+                extractTags(request.path("tags")),
                 region);
         ObjectNode response = objectMapper.createObjectNode();
         response.set("destination", buildDestination(destination));
@@ -631,6 +647,11 @@ public class CloudWatchLogsHandler {
             response.set("tags", objectMapper.valueToTree(deliveryService.listTags(resourceArn, region)));
             return Response.ok(response).build();
         }
+        if (CloudWatchLogsCrossAccountService.isCrossAccountDestinationArn(resourceArn)) {
+            ObjectNode response = objectMapper.createObjectNode();
+            response.set("tags", objectMapper.valueToTree(crossAccountService.listDestinationTags(resourceArn, region)));
+            return Response.ok(response).build();
+        }
         String groupName = logsService.resolveTagTarget(resourceArn, region).name();
         Map<String, String> tags = logsService.listTagsLogGroup(groupName, region);
 
@@ -648,6 +669,10 @@ public class CloudWatchLogsHandler {
             deliveryService.tag(resourceArn, tags, region);
             return Response.ok(objectMapper.createObjectNode()).build();
         }
+        if (CloudWatchLogsCrossAccountService.isCrossAccountDestinationArn(resourceArn)) {
+            crossAccountService.tagDestination(resourceArn, tags, region);
+            return Response.ok(objectMapper.createObjectNode()).build();
+        }
         String groupName = logsService.resolveTagTarget(resourceArn, region).name();
         logsService.tagLogGroup(groupName, tags, region);
         return Response.ok(objectMapper.createObjectNode()).build();
@@ -659,6 +684,10 @@ public class CloudWatchLogsHandler {
         request.path("tagKeys").forEach(k -> tagKeys.add(k.asText()));
         if (deliveryService.isDeliveryArn(resourceArn, region)) {
             deliveryService.untag(resourceArn, tagKeys, region);
+            return Response.ok(objectMapper.createObjectNode()).build();
+        }
+        if (CloudWatchLogsCrossAccountService.isCrossAccountDestinationArn(resourceArn)) {
+            crossAccountService.untagDestination(resourceArn, tagKeys, region);
             return Response.ok(objectMapper.createObjectNode()).build();
         }
         String groupName = logsService.resolveTagTarget(resourceArn, region).name();

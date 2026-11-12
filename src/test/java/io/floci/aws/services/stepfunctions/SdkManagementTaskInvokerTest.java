@@ -9,6 +9,8 @@ import io.floci.aws.services.lambda.LambdaController;
 import io.floci.aws.services.secretsmanager.SecretsManagerJsonHandler;
 import jakarta.ws.rs.core.Response;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
 import org.mockito.ArgumentCaptor;
 
 import static org.junit.jupiter.api.Assertions.*;
@@ -25,20 +27,35 @@ class SdkManagementTaskInvokerTest {
             lambda, mock(SecretsManagerJsonHandler.class), registry, mapper);
 
     @Test
-    void usesSdkUuidWithoutChangingTheLambdaRequestBodyOrInput() throws Exception {
+    void lambdaMappingUpdateUsesSdkUuidWithoutMutatingTheTaskInput() throws Exception {
         when(registry.isServiceEnabled("lambda")).thenReturn(true);
         when(lambda.updateEventSourceMapping(eq("mapping-id"), anyString()))
                 .thenReturn(Response.ok(mapper.readTree("{\"UUID\":\"mapping-id\",\"State\":\"Disabled\"}")).build());
-        JsonNode input = mapper.readTree("{\"Uuid\":\"mapping-id\",\"Enabled\":false,\"BatchSize\":3}");
+        JsonNode request = mapper.readTree("{\"Uuid\":\"mapping-id\",\"Enabled\":false,\"BatchSize\":3}");
 
-        JsonNode result = invoker.invoke(StatesIntegration.parse(
-                "arn:aws:states:::aws-sdk:lambda:updateEventSourceMapping").orElseThrow(), input, "eu-west-2");
+        JsonNode result = invoker.invoke(lambdaMappingIntegration(), request, "eu-west-2");
 
         ArgumentCaptor<String> body = ArgumentCaptor.forClass(String.class);
         verify(lambda).updateEventSourceMapping(eq("mapping-id"), body.capture());
         assertEquals(mapper.readTree("{\"Enabled\":false,\"BatchSize\":3}"), mapper.readTree(body.getValue()));
-        assertEquals("mapping-id", input.path("Uuid").asText());
+        assertEquals("mapping-id", request.path("Uuid").asText());
         assertEquals("mapping-id", result.path("UUID").asText());
+        assertEquals("Disabled", result.path("State").asText());
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"{}", "{\"Uuid\":null}", "{\"Uuid\":\"\"}", "{\"Uuid\":\" \"}",
+            "{\"UUID\":\"mapping-id\"}"})
+    void lambdaMappingUpdateRejectsInvalidSdkUuidRequests(String requestJson) throws Exception {
+        when(registry.isServiceEnabled("lambda")).thenReturn(true);
+        JsonNode request = mapper.readTree(requestJson);
+
+        AslExecutor.FailStateException error = assertThrows(AslExecutor.FailStateException.class,
+                () -> invoker.invoke(lambdaMappingIntegration(), request, "eu-west-2"));
+
+        assertEquals("Lambda.InvalidParameterValueException", error.error);
+        assertEquals("Uuid is required.", error.cause);
+        verifyNoInteractions(lambda);
     }
 
     @Test
@@ -105,5 +122,9 @@ class SdkManagementTaskInvokerTest {
 
     private static StatesIntegration integration() {
         return StatesIntegration.parse("arn:aws:states:::aws-sdk:ecs:updateService").orElseThrow();
+    }
+
+    private static StatesIntegration lambdaMappingIntegration() {
+        return StatesIntegration.parse("arn:aws:states:::aws-sdk:lambda:updateEventSourceMapping").orElseThrow();
     }
 }

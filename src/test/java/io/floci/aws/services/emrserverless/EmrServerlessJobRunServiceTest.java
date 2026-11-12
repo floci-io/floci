@@ -138,6 +138,24 @@ class EmrServerlessJobRunServiceTest {
     }
 
     @Test
+    void anApplicationStopsOnlyOnceNoneOfItsRunsIsStillGoing() {
+        EmrServerlessJobRunService service = service(30);
+        String other = application("other", "emr-7.5.0", null);
+        service.startJobRun(applicationId, request(null, null));
+        service.startJobRun(other, request("STREAMING", null));
+
+        AwsException running = assertThrows(AwsException.class, () -> service.stopApplication(applicationId));
+        clock.advance(Duration.ofSeconds(30));
+        service.stopApplication(applicationId);
+
+        assertEquals("ValidationException", running.getErrorCode());
+        assertEquals("All scheduled and running jobs must be completed or cancelled before stopping an application.",
+                running.getMessage());
+        assertEquals("STOPPED", applications.getApplication(applicationId).getState());
+        assertEquals("STARTED", applications.getApplication(other).getState());
+    }
+
+    @Test
     void runIsCancelledAtItsExecutionTimeoutWhenItWouldRunLonger() {
         EmrServerlessJobRunService service = service(600);
         JobRun started = service.startJobRun(applicationId, request(null, 5L));

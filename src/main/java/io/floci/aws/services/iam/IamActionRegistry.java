@@ -3,12 +3,15 @@ package io.floci.aws.services.iam;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.floci.aws.core.common.AwsProtocolClaimFilter;
 import io.floci.aws.core.common.AwsQueryServiceResolver;
+import io.floci.aws.core.common.IamOperation;
 import io.floci.aws.core.common.ProtocolClaim;
 import io.floci.aws.core.common.RequestResources;
+import io.floci.aws.core.common.ResteasyRequests;
 import io.floci.aws.core.common.WireProtocol;
 import io.floci.aws.services.dynamodb.DynamoDbPartiQLParser;
 import io.floci.aws.services.eks.EksController;
 import io.floci.aws.services.route53.Route53Controller;
+import io.floci.aws.services.s3.S3BucketSubresources;
 import io.floci.aws.services.s3.S3ObjectActions;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.ws.rs.container.ContainerRequestContext;
@@ -18,7 +21,6 @@ import jakarta.ws.rs.core.MultivaluedMap;
 import jakarta.ws.rs.core.UriInfo;
 import org.jboss.logging.Logger;
 import org.jboss.resteasy.reactive.server.core.ResteasyReactiveRequestContext;
-import org.jboss.resteasy.reactive.server.spi.ResteasyReactiveContainerRequestContext;
 
 import java.net.URLDecoder;
 import java.nio.charset.StandardCharsets;
@@ -287,9 +289,6 @@ public class IamActionRegistry {
         rule("rds-data", "POST", "^/CommitTransaction/?$",    "rds-data:CommitTransaction"),
         rule("rds-data", "POST", "^/RollbackTransaction/?$",  "rds-data:RollbackTransaction"),
 
-        // ── Amazon Inspector ───────────────────────────────────────────────────
-        rule("inspector2", "POST", "^/disable/?$", "inspector2:Disable"),
-
         // ── API Gateway ────────────────────────────────────────────────────────
         // The management API, v1 and v2, is authorized by HTTP method on the resource path:
         // apigateway:GET, POST, PUT, PATCH or DELETE. Two operations have an action of their own. The
@@ -433,11 +432,6 @@ public class IamActionRegistry {
         rule("eks", "GET",    "^/tags(/.+)?$",                                           "eks:ListTagsForResource"),
         rule("eks", "POST",   "^/tags(/.+)?$",                                           "eks:TagResource"),
         rule("eks", "DELETE", "^/tags(/.+)?$",                                           "eks:UntagResource"),
-
-        // ── Control Tower ──────────────────────────────────────────────────────
-        rule("controltower", "GET",    "^/tags(/.+)?$", "controltower:ListTagsForResource"),
-        rule("controltower", "POST",   "^/tags(/.+)?$", "controltower:TagResource"),
-        rule("controltower", "DELETE", "^/tags(/.+)?$", "controltower:UntagResource"),
 
         // ── Bedrock ────────────────────────────────────────────────────────────
         rule("bedrock", "POST",   "^/resource-policy$",   "bedrock:PutResourcePolicy"),
@@ -679,7 +673,14 @@ public class IamActionRegistry {
                 && resourceInfo.getResourceMethod() != null) {
             return ROUTE53_DELEGATION_ACTIONS.get(resourceInfo.getResourceMethod().getName());
         }
-        return null;
+        if (resourceInfo == null || resourceInfo.getResourceClass() == null) {
+            return null;
+        }
+        IamOperation iamOperation = resourceInfo.getResourceClass().getAnnotation(IamOperation.class);
+        if (iamOperation == null || !credentialScope.equals(iamOperation.namespace())) {
+            return null;
+        }
+        return IamAuthorizedActions.actionFor(iamOperation.namespace(), iamOperation.operation());
     }
 
     /**
@@ -763,6 +764,19 @@ public class IamActionRegistry {
                 .map(IamRestRoutes.Match::labels).orElse(Map.of());
     }
 
+    /** Member locations of a generated alternative route; absent entries keep the operation's model locations. */
+    public static Map<String, String> routeMemberLocations(String operation, ContainerRequestContext ctx) {
+        int separator = operation.indexOf(':');
+        if (separator < 0 || ctx.getMethod() == null || ctx.getUriInfo() == null
+                || ctx.getUriInfo().getRequestUri() == null) {
+            return Map.of();
+        }
+        return IamRestRoutes.vendored().match(operation.substring(0, separator), ctx.getMethod().toUpperCase(),
+                        routedPath(ctx), ctx.getUriInfo().getQueryParameters())
+                .filter(match -> match.operation().equals(operation.substring(separator + 1)))
+                .map(IamRestRoutes.Match::located).orElse(Map.of());
+    }
+
     /**
      * Whether a request of the operation is checked on the resources AWS checks its action on: those its request
      * names, which the vendored request resources read for the operation ({@link RequestResources#reads}) or
@@ -783,7 +797,7 @@ public class IamActionRegistry {
      * a filter rewrote is matched on its new path, decoded. {@link #sentPath} for a synthetic context.
      */
     static String rawPath(ContainerRequestContext ctx) {
-        ResteasyReactiveRequestContext request = routingContext(ctx);
+        ResteasyReactiveRequestContext request = ResteasyRequests.of(ctx);
         return request == null ? sentPath(ctx.getUriInfo()) : rooted(request.getPathWithoutPrefix());
     }
 
@@ -805,19 +819,13 @@ public class IamActionRegistry {
      * matched. {@link UriInfo#getPath()} itself for a synthetic context.
      */
     public static String decodedPath(ContainerRequestContext ctx) {
-        ResteasyReactiveRequestContext request = routingContext(ctx);
+        ResteasyReactiveRequestContext request = ResteasyRequests.of(ctx);
         if (request == null) {
             return ctx.getUriInfo().getPath();
         }
         String path = request.getPathWithoutPrefix();
         boolean rewritten = !request.getPath().equals(request.serverRequest().getRequestNormalisedPath());
         return rooted(rewritten ? path : URLDecoder.decode(path.replace("+", "%2B"), StandardCharsets.UTF_8));
-    }
-
-    private static ResteasyReactiveRequestContext routingContext(ContainerRequestContext ctx) {
-        return ctx instanceof ResteasyReactiveContainerRequestContext container
-                && container.getServerRequestContext() instanceof ResteasyReactiveRequestContext request
-                ? request : null;
     }
 
     private static String rooted(String path) {
@@ -882,6 +890,12 @@ public class IamActionRegistry {
                 && mediaType != null
                 && "application".equalsIgnoreCase(mediaType.getType())
                 && "x-www-form-urlencoded".equalsIgnoreCase(mediaType.getSubtype());
+    }
+
+    private static boolean isFormUpload(MediaType mediaType) {
+        return mediaType != null
+                && "multipart".equalsIgnoreCase(mediaType.getType())
+                && "form-data".equalsIgnoreCase(mediaType.getSubtype());
     }
 
     /** One bucket sub-resource operation: the query parameter that selects it, and the IAM action. */
@@ -969,6 +983,13 @@ public class IamActionRegistry {
         if (!isBucketLevel) {
             return objectSubResourceAction(method, params);
         }
+        if ("POST".equals(method)) {
+            // S3Controller runs DeleteObjects and a browser-form PostObject ahead of any other sub-resource and
+            // checks them per key; another sub-resource S3 defines for POST, such as ?metadataTable, it answers
+            // NotImplemented, so that request is checked as the operation it names.
+            return params.containsKey("delete") || isFormUpload(ctx.getMediaType())
+                    ? null : unservedSubresourceAction(method, params);
+        }
         List<SubResourceAction> chain = switch (method) {
             case "GET" -> GET_BUCKET_SUBRESOURCES;
             case "PUT" -> PUT_BUCKET_SUBRESOURCES;
@@ -978,6 +999,23 @@ public class IamActionRegistry {
         for (SubResourceAction entry : chain) {
             if (params.containsKey(entry.queryParameter())) {
                 return entry.action();
+            }
+        }
+        return chain.isEmpty() ? null : unservedSubresourceAction(method, params);
+    }
+
+    /**
+     * A sub-resource S3 defines for the method that the lists above, or POST's DeleteObjects, do not hold is one
+     * S3Controller does not serve: it answers the request NotImplemented rather than run the bucket's operation, so
+     * the request is checked as the operation it names, as AWS checks it. Null when it names none, or one S3 defines
+     * for other methods only, which S3Controller refuses as not allowed.
+     */
+    private static String unservedSubresourceAction(String method, MultivaluedMap<String, String> params) {
+        S3BucketSubresources subresources = S3BucketSubresources.vendored();
+        for (String name : subresources.names()) {
+            List<String> operations = subresources.operations(method, name);
+            if (params.containsKey(name) && operations.size() == 1) {
+                return IamAuthorizedActions.actionFor("s3", operations.get(0));
             }
         }
         return null;

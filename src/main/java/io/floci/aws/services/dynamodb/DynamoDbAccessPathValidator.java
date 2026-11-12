@@ -53,6 +53,7 @@ final class DynamoDbAccessPathValidator {
         }
         validateFilterExpression(accessPath, filterExpression, expressionAttributeNames);
         validateLegacyQueryFilter(accessPath, queryFilter);
+        validateFilterProjection(table, accessPath, filterExpression, queryFilter, expressionAttributeNames);
         return partitionKeyValuePlaceholder;
     }
 
@@ -103,6 +104,33 @@ final class DynamoDbAccessPathValidator {
         }
     }
 
+    // Query refuses a filter on attributes the index does not project, for GSIs and LSIs alike.
+    private static void validateFilterProjection(TableDefinition table, DynamoDbAccessPath accessPath,
+                                                 String filterExpression, JsonNode legacyFilter,
+                                                 JsonNode expressionAttributeNames) {
+        if (!accessPath.isIndex() || "ALL".equals(accessPath.projectionType())) {
+            return;
+        }
+        Set<String> filterAttributes = new LinkedHashSet<>();
+        if (filterExpression != null) {
+            collectAttributes(parseExpression(filterExpression, "FilterExpression"),
+                    expressionAttributeNames, filterAttributes);
+        }
+        if (legacyFilter != null) {
+            legacyFilter.fieldNames().forEachRemaining(filterAttributes::add);
+        }
+        filterAttributes.removeAll(accessPath.projectedAttributeNames(table));
+        if (!filterAttributes.isEmpty()) {
+            throw unprojectedFilterAttributes(accessPath.indexName(), filterAttributes);
+        }
+    }
+
+    static AwsException unprojectedFilterAttributes(String indexName, Collection<String> attributes) {
+        return validationException("One or more parameter values were invalid: Secondary index "
+                + indexName + " does not project one or more filter attributes: ["
+                + String.join(", ", attributes) + "]");
+    }
+
     static AwsException unprojectedGsiAttributes(String indexName, Collection<String> attributes) {
         return validationException("One or more parameter values were invalid: Global secondary index "
                 + indexName + " does not project [" + String.join(", ", attributes) + "]");
@@ -116,35 +144,48 @@ final class DynamoDbAccessPathValidator {
         }
     }
 
+    // DynamoDB checks these before it looks up the table.
+    static void validateKeyConditionAttributes(String expression, JsonNode names) {
+        if (expression == null) {
+            return;
+        }
+        Set<String> conditionedAttributes = new HashSet<>();
+        for (Expr rawCondition : keyConditions(expression)) {
+            Expr condition = normalizeOperandOrder(rawCondition);
+            if (conditionOperand(condition) instanceof PathOperand(List<String> segments) && segments.size() > 1) {
+                throw validationException("Invalid KeyConditionExpression: "
+                        + "KeyConditionExpressions cannot have conditions on nested attributes");
+            }
+            String attribute = conditionAttribute(condition, names);
+            if (attribute != null && !conditionedAttributes.add(attribute)) {
+                throw validationException("Invalid KeyConditionExpression: "
+                        + "KeyConditionExpressions must only contain one condition per key");
+            }
+        }
+    }
+
+    private static List<Expr> keyConditions(String expression) {
+        return DynamoDbKeyConditionParser.conditions(parseExpression(expression, "KeyConditionExpression"));
+    }
+
     private static String validateKeyConditionExpression(TableDefinition table,
                                                          DynamoDbAccessPath accessPath,
                                                          String expression, JsonNode names,
                                                          JsonNode values) {
-        Expr root = parseExpression(expression, "KeyConditionExpression");
-
-        List<Expr> conditions = root instanceof AndExpr and
-                ? and.operands() : List.of(root);
         List<String> partitionKeys = accessPath.partitionKeyNames();
         Set<String> partitionKeySet = Set.copyOf(partitionKeys);
         List<String> sortKeys = accessPath.sortKeyNames();
         Set<String> conditionedPartitionKeys = new HashSet<>();
         String partitionKeyValuePlaceholder = null;
-        Set<String> conditionedAttributes = new HashSet<>();
         Map<String, Boolean> sortKeyEqualities = new HashMap<>();
 
         boolean conditionOnNonKeyAttribute = false;
 
+        List<Expr> conditions = keyConditions(expression);
+        requireConditionCountWithinKeySchema(conditions.size(), accessPath);
         for (Expr rawCondition : conditions) {
             Expr condition = normalizeOperandOrder(rawCondition);
-            if (conditionOperand(condition) instanceof PathOperand(List<String> segments) && segments.size() > 1) {
-                throw new AwsException("ValidationException",
-                        "KeyConditionExpressions cannot have conditions on nested attributes", 400);
-            }
             String attribute = conditionAttribute(condition, names);
-            if (attribute != null && !conditionedAttributes.add(attribute)) {
-                throw new AwsException("ValidationException",
-                        "KeyConditionExpressions must only contain one condition per key", 400);
-            }
             if (attribute != null && partitionKeySet.contains(attribute)) {
                 if (!isPartitionKeyEquality(condition)) {
                     throw new AwsException("ValidationException", "Query key condition not supported", 400);
@@ -177,6 +218,14 @@ final class DynamoDbAccessPathValidator {
         }
         validateCompositeSortKeyConditions(sortKeys, sortKeyEqualities);
         return partitionKeyValuePlaceholder;
+    }
+
+    private static void requireConditionCountWithinKeySchema(int conditions, DynamoDbAccessPath accessPath) {
+        int keyAttributes = accessPath.keySchema().size();
+        if (keyAttributes < conditions) {
+            throw validationException("The number of query conditions (" + conditions
+                    + ") exceeds the number of key attributes defined in the schema (" + keyAttributes + ")");
+        }
     }
 
     private static void validateCompositeSortKeyConditions(List<String> sortKeys,
@@ -295,6 +344,7 @@ final class DynamoDbAccessPathValidator {
     private static void validateLegacyKeyConditions(TableDefinition table,
                                                     DynamoDbAccessPath accessPath,
                                                     JsonNode keyConditions) {
+        requireConditionCountWithinKeySchema(keyConditions == null ? 0 : keyConditions.size(), accessPath);
         List<String> partitionKeys = accessPath.partitionKeyNames();
         for (String partitionKey : partitionKeys) {
             if (keyConditions == null || !keyConditions.has(partitionKey)) {

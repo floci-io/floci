@@ -7,6 +7,7 @@
 shape of every operation, reduced to the members carried in the JSON body, and for every shape
 reachable from one, its type and the shapes of its members, list elements or map values.
 `regen_emr_serverless_shapes.py` keeps every operation's output shape too, with `outputs=True`.
+`regen_dynamodb_shapes.py` keeps the members each structure requires too, with `required=True`.
 `regen_iam_shapes.py` and `regen_sts_shapes.py` name their operations instead, which switches
 `main()` to `build_constraints()`.
 
@@ -35,7 +36,7 @@ def load_model(data: Path, model: Path) -> dict:
     return load_json_model(source)
 
 
-def build(model: dict, provenance: str, generator: str, outputs: bool = False) -> dict:
+def build(model: dict, provenance: str, generator: str, outputs: bool = False, required: bool = False) -> dict:
     shapes = model["shapes"]
     kept: dict[str, dict] = {}
 
@@ -49,6 +50,8 @@ def build(model: dict, provenance: str, generator: str, outputs: bool = False) -
         if kind == "structure":
             members = {member: spec for member, spec in shape.get("members", {}).items()
                        if not (body_only and "location" in spec)}
+            if required and "required" in shape:
+                entry["required"] = [member for member in shape["required"] if member in members]
             entry["members"] = {member: spec["shape"] for member, spec in members.items()}
             for spec in members.values():
                 keep(spec["shape"])
@@ -83,9 +86,7 @@ def build_constraints(model: dict, operations: tuple[str, ...], provenance: str,
     quotes where that is not the one matched on, and enum, and the shapes of its members, list
     elements or map keys and values. Unlike `build`, it keeps members bound to
     the URI, query string or headers, so it suits the JSON protocols, whose members all travel in
-    the body.
-
-    An operation the model names without an input has no request to constrain, and is left out."""
+    the body."""
     kept: dict[str, dict] = {}
 
     def keep(name: str) -> None:
@@ -107,20 +108,11 @@ def build_constraints(model: dict, operations: tuple[str, ...], provenance: str,
                 entry[side] = shape[side]["shape"]
                 keep(entry[side])
 
-    inputs = {name: model["operations"][name]["input"]["shape"] for name in operations
-              if "input" in model["operations"][name]}
+    inputs = {name: model["operations"][name]["input"]["shape"] for name in operations}
     for name in inputs.values():
         keep(name)
     return {"_source": {"generator": generator, "botocore": provenance},
             "operations": inputs, "shapes": dict(sorted(kept.items()))}
-
-
-def model_operations(model: dict) -> tuple[str, ...]:
-    """Every operation the model names, which is what a generator that names none of them vendors.
-
-    The list is the model's, so an operation AWS publishes is constrained without anyone adding it
-    to a list that would fall behind the model."""
-    return tuple(sorted(model["operations"]))
 
 
 # The partition the model writes in its ARN patterns, and the one the service writes in
@@ -162,8 +154,8 @@ def generator_name(script: str) -> str:
 
 def main(argv: list[str] | None, *, script: str, model: Path, output: Path,
          description: str | None = None,
-         outputs: bool = False, operations: tuple[str, ...] | None = None,
-         all_operations: bool = False,
+         outputs: bool = False, required: bool = False, operations: tuple[str, ...] | None = None,
+         constraints: bool = False,
          prepare: Callable[[dict], dict] | None = None) -> int:
     """Drives one generator: parse the flags, read the model, write or check the vendored file.
 
@@ -173,9 +165,8 @@ def main(argv: list[str] | None, *, script: str, model: Path, output: Path,
     Query-protocol generators share this too rather than each repeating the flags and the
     staleness check.
 
-    `all_operations` keeps every operation's constraints, so a service that serves an operation
-    the model names has its rules vendored without the generator naming it, and an operation
-    served later is covered without anyone adding it to a list.
+    `constraints=True` keeps constraints for every operation with an input, without maintaining
+    a separate operation list.
 
     `prepare` is the one thing a generator may do to the model before any of that, for an operation
     it vendors in part: IAM reduces a paged request to its paging members, the rest of it keeping
@@ -190,13 +181,11 @@ def main(argv: list[str] | None, *, script: str, model: Path, output: Path,
     loaded = load_model(data, model)
     if prepare is not None:
         loaded = prepare(loaded)
+    if constraints and operations is None:
+        operations = tuple(name for name, operation in sorted(loaded["operations"].items()) if "input" in operation)
     generator = generator_name(script)
-    if all_operations:
-        fresh = render(build_constraints(loaded, model_operations(loaded), provenance, generator))
-    elif operations is not None:
-        fresh = render(build_constraints(loaded, operations, provenance, generator))
-    else:
-        fresh = render(build(loaded, provenance, generator, outputs))
+    fresh = render(build_constraints(loaded, operations, provenance, generator) if operations is not None
+                   else build(loaded, provenance, generator, outputs, required))
 
     if args.check:
         current = args.output.read_text(encoding="utf-8") if args.output.exists() else ""

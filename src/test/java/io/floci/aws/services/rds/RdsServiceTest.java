@@ -1562,7 +1562,7 @@ class RdsServiceTest {
     }
 
     @Test
-    void createAndModifyDbInstancePersistVpcSecurityGroups() {
+    void vpcSecurityGroupsPersistThroughCreateModifyAndCloudFormationsExactSet() {
         DbInstance instance = rdsService.createDbInstance("mydb", "postgres", "13",
                 "admin", "password", "dbname", "db.t3.micro",
                 20, false, null, null, null, null, false, false, null,
@@ -1575,6 +1575,17 @@ class RdsServiceTest {
 
         assertEquals(List.of("sg-updated-a", "sg-updated-b"), modified.getVpcSecurityGroupIds());
         assertEquals(List.of("sg-updated-a", "sg-updated-b"), rdsService.getDbInstance("mydb").getVpcSecurityGroupIds());
+
+        // ModifyDBInstance cannot leave an instance without groups; CloudFormation's rollback can.
+        assertEquals(List.of(), rdsService.setDbInstanceVpcSecurityGroups("us-east-1", "mydb", List.of())
+                .getVpcSecurityGroupIds());
+        assertEquals(List.of(), rdsService.getDbInstance("mydb").getVpcSecurityGroupIds());
+
+        SecurityGroup defaultGroup = new SecurityGroup();
+        defaultGroup.setGroupId("sg-default");
+        when(ec2Service.defaultSecurityGroupOf("us-east-1", rdsService.getDbInstance("mydb").getVpcId()))
+                .thenReturn(Optional.of(defaultGroup));
+        assertEquals(List.of("sg-default"), rdsService.defaultVpcSecurityGroupIds("us-east-1", "mydb"));
     }
 
     @Test

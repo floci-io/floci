@@ -78,7 +78,7 @@ public class RedshiftInterceptingBridge {
     private final String databaseUser;
     private final UserChanges auditUserChanges = new UserChanges();
     private final PostgresExtendedBackendSession relationalBackend;
-    private final Map<String, PostgresWireDecoder.ParseMessage> relationalStatements = new HashMap<>();
+    private final Map<String, RelationalStatement> relationalStatements = new HashMap<>();
     private final ExtendedQuerySession session = new ExtendedQuerySession();
     private final Map<String, SpectrumInterceptor.Plan> spectrumStatements = new HashMap<>();
     private final Map<String, SpectrumInterceptor.Plan> spectrumPortals = new HashMap<>();
@@ -316,6 +316,9 @@ public class RedshiftInterceptingBridge {
         if (parsed != null) {
             CopyStatementParser.S3Statement statement = parsed;
             boolean intercepted = runWithBackendOwned(() -> switch (statement) {
+                case CopyStatementParser.S3CopyJobRun run -> CopyEtlLoader.runSimple(
+                        client, backend, run, s3Service, iamService, clusterAccountId, iamRoleArns,
+                        coordinator.lastReadyStatus(), status -> coordinator.onBackendFrame('Z', new byte[]{(byte) status}));
                 case CopyStatementParser.S3CopyFrom copy -> S3CopySimulator.runCopyFrom(
                         client, backend, copy, s3Service, iamService, clusterAccountId, iamRoleArns, coordinator.lastReadyStatus(),
                         status -> coordinator.onBackendFrame('Z', new byte[]{(byte) status}));
@@ -374,13 +377,14 @@ public class RedshiftInterceptingBridge {
             try {
                 write(backendOut, new byte[]{'H', 0, 0, 0, 4});
                 boolean prepared = runWithBackendOwned(() -> {
-                    spectrumInterceptor.preparation().prepare(parse.sql(), spectrumSession(), relationalBackend);
+                    // no values yet: a parameterized statement is only planned here, the Bind loads its partitions
+                    spectrumInterceptor.preparation().prepare(parse.sql(), spectrumSession(), relationalBackend, null);
                     return true;
                 });
                 if (!prepared) {
                     throw new SpectrumReadException("58030", "Unable to prepare external query");
                 }
-                relationalStatements.put(parse.statementName(), parse);
+                relationalStatements.put(parse.statementName(), new RelationalStatement(parse));
             } catch (RuntimeException exception) {
                 spectrumInterceptor.preparation().finishCycle(relationalBackend);
                 writeParseSpectrumError(exception);
@@ -393,7 +397,7 @@ public class RedshiftInterceptingBridge {
         coordinator.register(BackendResponseCoordinator.Operation.PARSE, mutation);
 
         String rewritten = parse.sql();
-        if (statement instanceof CopyStatementParser.S3CopyFrom copy) {
+        if (statement instanceof CopyStatementParser.S3CopyFrom || statement instanceof CopyStatementParser.S3CopyJobRun) {
             rewritten = "DO $$BEGIN NULL; END$$";
         } else if (statement instanceof CopyStatementParser.S3Unload unload) {
             rewritten = S3CopySimulator.unloadBackendSql(unload);
@@ -412,13 +416,15 @@ public class RedshiftInterceptingBridge {
     private void handleBind(PostgresWireDecoder decoder, PostgresWireDecoder.FrontendMessage message,
             OutputStream backendOut) throws IOException {
         PostgresWireDecoder.BindMessage bind = decoder.decodeBind(message);
-        PostgresWireDecoder.ParseMessage relational = relationalStatements.get(bind.statementName());
+        RelationalStatement relational = relationalStatements.get(bind.statementName());
         if (relational != null && !coordinator.isDiscardingUntilSync()) {
             try {
                 // Parse/Describe responses may be buffered until Flush or Sync; drain them before taking ownership.
                 write(backendOut, new byte[]{'H', 0, 0, 0, 4});
                 boolean prepared = runWithBackendOwned(() -> {
-                    spectrumInterceptor.preparation().prepare(relational.sql(), spectrumSession(), relationalBackend);
+                    List<String> parameterValues = decoder.decodeBindParameters(message, relational.parameterTypeOids);
+                    spectrumInterceptor.preparation().prepare(relational.parse.sql(), spectrumSession(), relationalBackend,
+                            parameterValues);
                     return true;
                 });
                 if (!prepared) {
@@ -469,7 +475,17 @@ public class RedshiftInterceptingBridge {
         BackendResponseCoordinator.Operation operation = describe.targetType() == 'S'
                 ? BackendResponseCoordinator.Operation.DESCRIBE_STATEMENT
                 : BackendResponseCoordinator.Operation.DESCRIBE_PORTAL;
-        coordinator.register(operation, null);
+        RelationalStatement relational = describe.targetType() == 'S' ? relationalStatements.get(describe.name()) : null;
+        coordinator.register(operation, null, relational == null ? null : (type, body) -> {
+            if (type == 't') {
+                try {
+                    relational.parameterTypeOids = PostgresWireDecoder.decodeParameterDescription(body);
+                } catch (IOException expected) {
+                    relational.parameterTypeOids = List.of();
+                    LOG.debugv(expected, "Cannot read backend parameter types for statement {0}", describe.name());
+                }
+            }
+        });
         write(backendOut, message.toPacketBytes());
     }
 
@@ -657,7 +673,7 @@ public class RedshiftInterceptingBridge {
     }
 
     private CopyStatementParser.S3Statement parseS3Statement(String sql) {
-        if (CopyJobSql.matches(sql)) {
+        if (CopyJobSql.matches(sql) && CopyJobSql.runName(sql) == null) {
             return null;
         }
         try {
@@ -1083,13 +1099,19 @@ public class RedshiftInterceptingBridge {
         }
     }
 
-    /**
-     * Tracks PostgreSQL wire-message boundaries in a byte stream without buffering it. Each backend
-     * message is {@code type(1) . length(int32, includes itself) . body}. {@link #betweenMessages()}
-     * is true exactly when the next byte would begin a new message. The callback fires after every
-     * complete frame and retains only the one-byte {@code ReadyForQuery} status payload.
-     */
+    private static final class RelationalStatement {
+        private final PostgresWireDecoder.ParseMessage parse;
+        private volatile List<Integer> parameterTypeOids;
+
+        private RelationalStatement(PostgresWireDecoder.ParseMessage parse) {
+            this.parse = parse;
+            this.parameterTypeOids = parse.parameterTypeOids();
+        }
+    }
+
+    /** Tracks frames while retaining bounded command tags, parameter types and ReadyForQuery status. */
     static final class WireFrameTracker {
+        private static final int MAX_PARAMETER_DESCRIPTION_BYTES = 2 + 4 * 0xFFFF;
         private final FrameCompletion onFrame;
         private int headerBytesSeen = 0;
         private final byte[] header = new byte[5];
@@ -1097,7 +1119,7 @@ public class RedshiftInterceptingBridge {
         private long declaredBodyLength = 0;
         private char pendingType = 0;
         private byte readyStatus;
-        private byte[] commandTag = EMPTY_BODY;
+        private byte[] retainedBody = EMPTY_BODY;
 
         WireFrameTracker(FrameCompletion onFrame) {
             this.onFrame = onFrame;
@@ -1114,8 +1136,8 @@ public class RedshiftInterceptingBridge {
                     if (pendingType == 'Z' && declaredBodyLength == 1) {
                         readyStatus = (byte) current;
                     }
-                    if (pendingType == 'C' && commandTag.length > 0) {
-                        commandTag[(int) (declaredBodyLength - bodyRemaining)] = (byte) current;
+                    if (retainedBody.length > 0) {
+                        retainedBody[(int) (declaredBodyLength - bodyRemaining)] = (byte) current;
                     }
                     bodyRemaining--;
                     if (bodyRemaining == 0) {
@@ -1130,7 +1152,9 @@ public class RedshiftInterceptingBridge {
                     pendingType = (char) (header[0] & 0xFF);
                     bodyRemaining = Math.max(0, msgLen - 4);
                     declaredBodyLength = bodyRemaining;
-                    commandTag = pendingType == 'C' && bodyRemaining <= 128 ? new byte[(int) bodyRemaining] : EMPTY_BODY;
+                    boolean retain = pendingType == 'C' && bodyRemaining <= 128
+                            || pendingType == 't' && bodyRemaining <= MAX_PARAMETER_DESCRIPTION_BYTES;
+                    retainedBody = retain ? new byte[(int) bodyRemaining] : EMPTY_BODY;
                     headerBytesSeen = 0;
                     if (bodyRemaining == 0) {
                         publishCompletion();
@@ -1141,7 +1165,7 @@ public class RedshiftInterceptingBridge {
 
         private void publishCompletion() {
             byte[] body = pendingType == 'Z' && declaredBodyLength == 1
-                    ? new byte[]{readyStatus} : pendingType == 'C' ? commandTag : EMPTY_BODY;
+                    ? new byte[]{readyStatus} : retainedBody;
             onFrame.accept(pendingType, body);
         }
     }

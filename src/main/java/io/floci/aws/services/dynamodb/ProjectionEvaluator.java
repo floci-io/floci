@@ -262,9 +262,7 @@ final class ProjectionEvaluator {
             return resolved.asText();
         }
         if (requireDefinedNames) {
-            throw new AwsException("ValidationException",
-                    "Invalid ProjectionExpression: An expression attribute name used in the document path "
-                    + "is not defined; attribute name: " + seg, 400);
+            throw ExpressionEvaluator.undefinedName("ProjectionExpression", seg);
         }
         return seg;
     }

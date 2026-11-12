@@ -1,3 +1,18 @@
+AWS::ApiGatewayV2::Authorizer	ApiId	create-only	a drop fails: the authorizer is not found
+AWS::ApiGatewayV2::Authorizer	AuthorizerPayloadFormatVersion	clear	a create without it accepts the authorizer
+AWS::ApiGatewayV2::Authorizer	AuthorizerResultTtlInSeconds	clear	the field reads back absent
+AWS::ApiGatewayV2::Authorizer	AuthorizerType	keep:required by AWS
+AWS::ApiGatewayV2::Authorizer	AuthorizerUri	clear	a create without it accepts the authorizer
+AWS::ApiGatewayV2::Authorizer	EnableSimpleResponses	clear	the field reads back absent
+AWS::ApiGatewayV2::Authorizer	IdentitySource	clear	an update also clears it when the stack never declared it, so a value set outside the stack is lost
+AWS::ApiGatewayV2::Authorizer	JwtConfiguration	clear	a create without it accepts the authorizer
+AWS::ApiGatewayV2::Authorizer	Name	keep:required by AWS
+AWS::ApiGatewayV2::Route	ApiId	create-only	a drop fails: the route is not found
+AWS::ApiGatewayV2::Route	AuthorizationScopes	clear	an update also clears it when the stack never declared it, so a value set outside the stack is lost
+AWS::ApiGatewayV2::Route	AuthorizationType	default:NONE
+AWS::ApiGatewayV2::Route	AuthorizerId	clear	the field reads back absent, except that a route that stays JWT or CUSTOM keeps it
+AWS::ApiGatewayV2::Route	RouteKey	keep:required by AWS
+AWS::ApiGatewayV2::Route	Target	clear	the field reads back absent
 AWS::ApiGatewayV2::Stage	ApiId	create-only	a drop fails: the stage is not found
 AWS::ApiGatewayV2::Stage	AutoDeploy	default:false
 AWS::ApiGatewayV2::Stage	StageName	keep:the stage is found by its physical id
@@ -66,6 +81,22 @@ AWS::AppSync::Resolver	ResponseMappingTemplateS3Location	clear	not stored by the
 AWS::AppSync::Resolver	Runtime	clear
 AWS::AppSync::Resolver	SyncConfig	clear
 AWS::AppSync::Resolver	TypeName	create-only
+AWS::CloudTrail::Trail	AdvancedEventSelectors	keep:the selectors are only put when the template declares them
+AWS::CloudTrail::Trail	EnableLogFileValidation	keep:the update skips an absent flag, so the stored value stays
+AWS::CloudTrail::Trail	EventSelectors	keep:the selectors are only put when the template declares them
+AWS::CloudTrail::Trail	IncludeGlobalServiceEvents	keep:the update skips an absent flag, so the stored value stays
+AWS::CloudTrail::Trail	IsLogging	keep:logging is only started or stopped when the template declares it
+AWS::CloudTrail::Trail	IsMultiRegionTrail	keep:the update skips an absent flag, so the stored value stays
+AWS::CloudTrail::Trail	IsOrganizationTrail	keep:the update skips an absent flag, so the stored value stays
+AWS::CloudTrail::Trail	S3BucketName	keep:the update skips a null, so the stored bucket stays
+AWS::CloudTrail::Trail	S3KeyPrefix	clear
+AWS::CloudTrail::Trail	SnsTopicName	keep:the update skips a null, so the stored topic stays
+AWS::CloudTrail::Trail	TrailName	keep:the update finds the trail by its physical id
+AWS::Cognito::UserPoolGroup	Description	clear
+AWS::Cognito::UserPoolGroup	GroupName	create-only	a drop gives the group a generated name, so the group is replaced
+AWS::Cognito::UserPoolGroup	Precedence	keep:the update skips a null, so the stored value stays
+AWS::Cognito::UserPoolGroup	RoleArn	keep:the update skips a null, so the stored value stays
+AWS::Cognito::UserPoolGroup	UserPoolId	create-only	a drop fails: the provisioner requires it
 AWS::EC2::EIP	Tags	clear
 AWS::EC2::Instance	AvailabilityZone	create-only	a drop differs from the declared value, so the instance is replaced
 AWS::EC2::Instance	IamInstanceProfile	clear	the profile is disassociated, unless a launch template still supplies one, which takes its place
@@ -112,3 +143,14 @@ AWS::ECS::Service	NetworkConfiguration	keep:the update leaves a missing network 
 AWS::ECS::Service	ServiceName	keep:the prior name is reused
 AWS::ECS::Service	ServiceRegistries	keep:AWS removes registries only through a declared empty list
 AWS::ECS::Service	TaskDefinition	keep:required for the ECS controller
+AWS::Lambda::Alias	Description	clear
+AWS::Lambda::Alias	FunctionName	create-only	a drop fails: the provisioner requires it
+AWS::Lambda::Alias	FunctionVersion	keep:the update skips a null, so the stored version stays
+AWS::Lambda::Alias	Name	create-only	a drop fails: the provisioner requires it
+AWS::Lambda::Alias	RoutingConfig	clear	an empty map removes the weights, also when the template never declared it, so weights set outside the stack go
+AWS::SecretsManager::Secret	Description	clear
+AWS::SecretsManager::Secret	GenerateSecretString	keep:a dropped configuration adds no version, so the stored value stays
+AWS::SecretsManager::Secret	KmsKeyId	keep:the update skips a null, so the stored key stays
+AWS::SecretsManager::Secret	Name	create-only	a drop of an explicit name replaces the secret with one under a generated name
+AWS::SecretsManager::Secret	SecretString	keep:a dropped value adds no version, so the stored value stays, unless the template now generates one
+AWS::SecretsManager::Secret	Tags	clear	every update drives the tags to the template, also when the template never declared them

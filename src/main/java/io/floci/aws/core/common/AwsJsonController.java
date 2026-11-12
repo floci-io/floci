@@ -177,7 +177,7 @@ public class AwsJsonController {
                     if (targetMatch.jsonOnly()) {
                         yield dynamoDbJsonHandler.handleLegacy(action, request, region);
                     }
-                    DynamoDbRequestShapes.check(action, request);
+                    DynamoDbRequestShapes.check(action, request, body);
                     yield dynamoDbJsonHandler.handle(action, request, region);
                 }
                 case "sqs" -> sqsJsonHandler.handle(action, request, region);

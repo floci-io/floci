@@ -12,6 +12,7 @@ import io.floci.aws.services.applicationautoscaling.model.PredefinedMetricSpecif
 import io.floci.aws.services.applicationautoscaling.model.ScalableTarget;
 import io.floci.aws.services.applicationautoscaling.model.ScalingActivity;
 import io.floci.aws.services.applicationautoscaling.model.ScalingPolicy;
+import io.floci.aws.services.applicationautoscaling.model.ScheduledAction;
 import io.floci.aws.services.applicationautoscaling.model.StepAdjustment;
 import io.floci.aws.services.applicationautoscaling.model.StepScalingConfiguration;
 import io.floci.aws.services.applicationautoscaling.model.SuspendedState;
@@ -54,6 +55,9 @@ public class ApplicationAutoScalingJsonHandler {
             case "RegisterScalableTarget" -> handleRegisterScalableTarget(request, region);
             case "DescribeScalableTargets" -> handleDescribeScalableTargets(request, region);
             case "DeregisterScalableTarget" -> handleDeregisterScalableTarget(request, region);
+            case "PutScheduledAction" -> handlePutScheduledAction(request, region);
+            case "DescribeScheduledActions" -> handleDescribeScheduledActions(request, region);
+            case "DeleteScheduledAction" -> handleDeleteScheduledAction(request, region);
             case "PutScalingPolicy" -> handlePutScalingPolicy(request, region);
             case "DescribeScalingPolicies" -> handleDescribeScalingPolicies(request, region);
             case "DeleteScalingPolicy" -> handleDeleteScalingPolicy(request, region);
@@ -112,6 +116,101 @@ public class ApplicationAutoScalingJsonHandler {
                 text(request, "ScalableDimension"),
                 region);
         return Response.ok(objectMapper.createObjectNode()).build();
+    }
+
+    private Response handlePutScheduledAction(JsonNode request, String region) {
+        for (String unsupported : List.of("StartTime", "EndTime")) {
+            if (request.has(unsupported)) {
+                throw new AwsException("ValidationException", unsupported + " is not supported for one-off UTC schedules.", 400);
+            }
+        }
+        JsonNode action = request.get("ScalableTargetAction");
+        if (action != null && !action.isObject()) {
+            throw new AwsException("ValidationException", "ScalableTargetAction must be an object.", 400);
+        }
+        service.putScheduledAction(text(request, "ServiceNamespace"), text(request, "ResourceId"),
+                text(request, "ScalableDimension"), text(request, "ScheduledActionName"),
+                strictText(request, "Schedule"), action != null,
+                strictInteger(action, "MinCapacity"), strictInteger(action, "MaxCapacity"),
+                strictText(request, "Timezone"), region);
+        return Response.ok(objectMapper.createObjectNode()).build();
+    }
+
+    private Response handleDeleteScheduledAction(JsonNode request, String region) {
+        service.deleteScheduledAction(text(request, "ServiceNamespace"), text(request, "ResourceId"),
+                text(request, "ScalableDimension"), text(request, "ScheduledActionName"), region);
+        return Response.ok(objectMapper.createObjectNode()).build();
+    }
+
+    private Response handleDescribeScheduledActions(JsonNode request, String region) {
+        PaginatedResult<ScheduledAction> result = service.describeScheduledActions(text(request, "ServiceNamespace"),
+                text(request, "ResourceId"), text(request, "ScalableDimension"),
+                scheduledActionNames(request.get("ScheduledActionNames")), optionalMaxResults(request), text(request, "NextToken"), region);
+        ObjectNode response = objectMapper.createObjectNode();
+        ArrayNode actions = response.putArray("ScheduledActions");
+        for (ScheduledAction action : result.items()) {
+            ObjectNode node = actions.addObject();
+            node.put("ServiceNamespace", action.getServiceNamespace());
+            node.put("ResourceId", action.getResourceId());
+            node.put("ScalableDimension", action.getScalableDimension());
+            node.put("ScheduledActionName", action.getScheduledActionName());
+            node.put("ScheduledActionARN", action.getScheduledActionArn());
+            node.put("Schedule", action.getSchedule());
+            node.put("CreationTime", action.getCreationTime());
+            if (action.getTimezone() != null) {
+                node.put("Timezone", action.getTimezone());
+            }
+            ObjectNode bounds = node.putObject("ScalableTargetAction");
+            if (action.getMinCapacity() != null) {
+                bounds.put("MinCapacity", action.getMinCapacity());
+            }
+            if (action.getMaxCapacity() != null) {
+                bounds.put("MaxCapacity", action.getMaxCapacity());
+            }
+        }
+        if (result.nextToken() != null) {
+            response.put("NextToken", result.nextToken());
+        }
+        return Response.ok(response).build();
+    }
+
+    private static List<String> scheduledActionNames(JsonNode value) {
+        if (value == null || value.isNull()) {
+            return List.of();
+        }
+        if (!value.isArray()) {
+            throw new AwsException("ValidationException", "ScheduledActionNames must be an array of strings.", 400);
+        }
+        List<String> names = new ArrayList<>();
+        for (JsonNode name : value) {
+            if (!name.isTextual()) {
+                throw new AwsException("ValidationException", "ScheduledActionNames must contain only strings.", 400);
+            }
+            names.add(name.textValue());
+        }
+        return names;
+    }
+
+    private static String strictText(JsonNode request, String field) {
+        JsonNode value = request.get(field);
+        if (value == null) {
+            return null;
+        }
+        if (!value.isTextual()) {
+            throw new AwsException("ValidationException", field + " must be a string.", 400);
+        }
+        return value.textValue();
+    }
+
+    private static Integer strictInteger(JsonNode request, String field) {
+        JsonNode value = request == null ? null : request.get(field);
+        if (value == null) {
+            return null;
+        }
+        if (!value.isIntegralNumber() || !value.canConvertToInt()) {
+            throw new AwsException("ValidationException", field + " must be an integer.", 400);
+        }
+        return value.intValue();
     }
 
     // ---------------------------------------------------------------- scaling policies

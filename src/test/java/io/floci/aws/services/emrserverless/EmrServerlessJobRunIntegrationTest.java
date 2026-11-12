@@ -363,6 +363,27 @@ class EmrServerlessJobRunIntegrationTest {
     }
 
     @Test
+    void anApplicationWithARunStillGoingIsNotStopped() {
+        String applicationId = createApplication("");
+        String application = "/applications/" + applicationId;
+        startedRunId(applicationId, sparkRun(UUID.randomUUID().toString(), ""));
+        String streaming = startedRunId(applicationId,
+                sparkRun(UUID.randomUUID().toString(), ", \"mode\": \"STREAMING\""));
+
+        givenReq().when().post(application + "/stop").then().statusCode(400)
+                .body("__type", equalTo("ValidationException"))
+                .body("message", equalTo("All scheduled and running jobs must be completed or cancelled "
+                        + "before stopping an application."));
+        givenReq().when().get(application).then().statusCode(200)
+                .body("application.state", equalTo("STARTED"));
+
+        givenReq().when().delete(application + "/jobruns/" + streaming).then().statusCode(200);
+        givenReq().when().post(application + "/stop").then().statusCode(200);
+        givenReq().when().get(application).then().statusCode(200)
+                .body("application.state", equalTo("STOPPED"));
+    }
+
+    @Test
     void listJobRunsReturnsTheNewestFirst() {
         String applicationId = createApplication("");
         String older = startedRunId(applicationId, sparkRun(UUID.randomUUID().toString(), ""));

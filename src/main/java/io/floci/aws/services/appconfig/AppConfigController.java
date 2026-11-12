@@ -3,6 +3,7 @@ package io.floci.aws.services.appconfig;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
+import io.floci.aws.core.common.AwsException;
 import io.floci.aws.core.common.PaginatedResult;
 import io.floci.aws.core.common.Pagination;
 import io.floci.aws.services.appconfig.AppConfigDataService.LegacyConfiguration;
@@ -79,17 +80,9 @@ public class AppConfigController {
     public Response listApplications(@QueryParam("max_results") String maxResults,
                                      @QueryParam("next_token") String nextToken,
                                      @Context UriInfo uriInfo) {
-        String token = nextToken == null && uriInfo.getQueryParameters().containsKey("next_token")
-                ? "" : nextToken;
         PaginatedResult<Application> page = service.listApplicationsPage(
-                Pagination.parseMaxResults(maxResults, "BadRequestException"), token);
-        ObjectNode root = objectMapper.createObjectNode();
-        ArrayNode items = root.putArray("Items");
-        page.items().forEach(items::addPOJO);
-        if (page.nextToken() != null) {
-            root.put("NextToken", page.nextToken());
-        }
-        return Response.ok(root).build();
+                Pagination.parseMaxResults(maxResults, "BadRequestException"), rawNextToken(nextToken, uriInfo));
+        return listResponse(page.items(), page.nextToken());
     }
 
     @DELETE
@@ -125,12 +118,13 @@ public class AppConfigController {
 
     @GET
     @Path("/applications/{appId}/environments")
-    public Response listEnvironments(@PathParam("appId") String appId) {
-        List<Environment> envs = service.listEnvironments(appId);
-        ObjectNode root = objectMapper.createObjectNode();
-        ArrayNode items = root.putArray("Items");
-        envs.forEach(items::addPOJO);
-        return Response.ok(root).build();
+    public Response listEnvironments(@PathParam("appId") String appId,
+                                     @QueryParam("max_results") String maxResults,
+                                     @QueryParam("next_token") String nextToken,
+                                     @Context UriInfo uriInfo) {
+        PaginatedResult<Environment> page = service.listEnvironmentsPage(appId,
+                parseListMaxResults(maxResults, uriInfo), rawNextToken(nextToken, uriInfo));
+        return listResponse(page.items(), page.nextToken());
     }
 
     // ──────────────────────────── Configuration Profile ────────────────────────────
@@ -152,12 +146,13 @@ public class AppConfigController {
 
     @GET
     @Path("/applications/{appId}/configurationprofiles")
-    public Response listConfigurationProfiles(@PathParam("appId") String appId) {
-        List<ConfigurationProfile> profiles = service.listConfigurationProfiles(appId);
-        ObjectNode root = objectMapper.createObjectNode();
-        ArrayNode items = root.putArray("Items");
-        profiles.forEach(items::addPOJO);
-        return Response.ok(root).build();
+    public Response listConfigurationProfiles(@PathParam("appId") String appId,
+                                              @QueryParam("max_results") String maxResults,
+                                              @QueryParam("next_token") String nextToken,
+                                              @Context UriInfo uriInfo) {
+        PaginatedResult<ConfigurationProfile> page = service.listConfigurationProfilesPage(appId,
+                parseListMaxResults(maxResults, uriInfo), rawNextToken(nextToken, uriInfo));
+        return listResponse(page.items(), page.nextToken());
     }
 
     @DELETE
@@ -172,12 +167,14 @@ public class AppConfigController {
     @GET
     @Path("/applications/{appId}/configurationprofiles/{profileId}/hostedconfigurationversions")
     public Response listHostedConfigurationVersions(@PathParam("appId") String appId,
-                                                    @PathParam("profileId") String profileId) {
-        List<HostedConfigurationVersionSummary> items = service.listHostedConfigurationVersions(appId, profileId);
-        ObjectNode root = objectMapper.createObjectNode();
-        ArrayNode arr = root.putArray("Items");
-        items.forEach(arr::addPOJO);
-        return Response.ok(root).build();
+                                                    @PathParam("profileId") String profileId,
+                                                    @QueryParam("max_results") String maxResults,
+                                                    @QueryParam("next_token") String nextToken,
+                                                    @Context UriInfo uriInfo) {
+        PaginatedResult<HostedConfigurationVersionSummary> page = service.listHostedConfigurationVersionsPage(
+                appId, profileId, parseListMaxResults(maxResults, uriInfo),
+                rawNextToken(nextToken, uriInfo));
+        return listResponse(page.items(), page.nextToken());
     }
 
     @POST
@@ -239,12 +236,12 @@ public class AppConfigController {
 
     @GET
     @Path("/deploymentstrategies")
-    public Response listDeploymentStrategies() {
-        List<DeploymentStrategy> items = service.listDeploymentStrategies();
-        ObjectNode root = objectMapper.createObjectNode();
-        ArrayNode arr = root.putArray("Items");
-        items.forEach(arr::addPOJO);
-        return Response.ok(root).build();
+    public Response listDeploymentStrategies(@QueryParam("max_results") String maxResults,
+                                             @QueryParam("next_token") String nextToken,
+                                             @Context UriInfo uriInfo) {
+        PaginatedResult<DeploymentStrategy> page = service.listDeploymentStrategiesPage(
+                parseListMaxResults(maxResults, uriInfo), rawNextToken(nextToken, uriInfo));
+        return listResponse(page.items(), page.nextToken());
     }
 
     // AWS's own API model spells this path "deployementstrategies" (extra "e") - every other
@@ -278,11 +275,15 @@ public class AppConfigController {
                                      @QueryParam("next_token") String nextToken) {
         AppConfigService.DeploymentPage page = service.listDeployments(appId, envId,
                 Pagination.parseMaxResults(maxResults, "BadRequestException"), nextToken);
+        return listResponse(page.items(), page.nextToken());
+    }
+
+    private Response listResponse(List<?> items, String nextToken) {
         ObjectNode root = objectMapper.createObjectNode();
-        ArrayNode items = root.putArray("Items");
-        page.items().forEach(items::addPOJO);
-        if (page.nextToken() != null) {
-            root.put("NextToken", page.nextToken());
+        ArrayNode itemArray = root.putArray("Items");
+        items.forEach(itemArray::addPOJO);
+        if (nextToken != null) {
+            root.put("NextToken", nextToken);
         }
         return Response.ok(root).build();
     }
@@ -330,5 +331,18 @@ public class AppConfigController {
                 .header("Content-Type", contentType)
                 .header("Configuration-Version", data.configurationVersion())
                 .build();
+    }
+
+    private static String rawNextToken(String nextToken, UriInfo uriInfo) {
+        return nextToken == null && uriInfo.getQueryParameters().containsKey("next_token")
+                ? "" : nextToken;
+    }
+
+    private static Integer parseListMaxResults(String maxResults, UriInfo uriInfo) {
+        if (uriInfo.getQueryParameters().containsKey("max_results")
+                && (maxResults == null || maxResults.isBlank())) {
+            throw new AwsException("BadRequestException", "max_results must be an integer.", 400);
+        }
+        return Pagination.parseMaxResults(maxResults, "BadRequestException");
     }
 }

@@ -65,6 +65,14 @@ final class EmrServiceFixture {
         final List<List<String>> hdfs = new ArrayList<>();
         // Each HDFS's metastore service asked for.
         final List<HiveMetastore> metastores = new ArrayList<>();
+        // Each HDFS's YARN asked for.
+        final List<Yarn> yarns = new ArrayList<>();
+        // Each cluster and S3 folder its YARN applications' logs were put in.
+        final List<List<String>> containerLogs = new ArrayList<>();
+        // Floci's address on a cluster's network, which a node running YARN gives its executors.
+        static final String FLOCI_ON_NETWORK = "http://floci:4566";
+        // Whether a cluster's primary node has a network of its own, as with a docker-network that is not shared.
+        boolean ownNetwork;
         RuntimeException hdfsFailure;
         // Runs as each HDFS starts, with what tells it the step is past starting.
         Consumer<BooleanSupplier> whileStartingHdfs = stopped -> { };
@@ -85,20 +93,36 @@ final class EmrServiceFixture {
         }
 
         @Override
+        public boolean ownNetwork(String dockerNetwork) {
+            return ownNetwork;
+        }
+
+        @Override
+        public void archiveContainerLogs(String clusterId, String accountId, String region, String logFolder) {
+            containerLogs.add(List.of(clusterId, logFolder));
+        }
+
+        @Override
         public SparkJobRunner.Storage hdfs(String clusterId, String accountId, String region, String host,
-                                           String image, String dockerNetwork, HiveMetastore hiveMetastore,
+                                           String image, String dockerNetwork, HiveMetastore hiveMetastore, Yarn yarn,
                                            BooleanSupplier stopped) {
             hdfs.add(Arrays.asList(clusterId, host, image, dockerNetwork, String.valueOf(hiveMetastore != null),
                     hiveMetastore != null ? hiveMetastore.role() : null));
             if (hiveMetastore != null) {
                 metastores.add(hiveMetastore);
             }
+            if (yarn != null) {
+                yarns.add(yarn);
+            }
             whileStartingHdfs.accept(stopped);
             if (hdfsFailure != null) {
                 throw hdfsFailure;
             }
             SparkJobRunner.Storage storage = volumes(clusterId).withHdfs(host, HDFS_ADDRESS, HDFS_NETWORK);
-            return hiveMetastore != null ? storage.withHiveMetastore("thrift://" + host + ":9083") : storage;
+            if (hiveMetastore != null) {
+                storage = storage.withHiveMetastore("thrift://" + host + ":9083");
+            }
+            return yarn != null ? storage.withYarn(host, FLOCI_ON_NETWORK) : storage;
         }
 
         @Override
@@ -116,13 +140,13 @@ final class EmrServiceFixture {
     /** Makes no image: answers {@link #IMAGE} for each, or throws {@link #failure} when it is set. */
     static final class RecordingReleaseImages implements ReleaseImages {
         static final String IMAGE = "sha256:" + "3".repeat(64);
-        // Each image asked for: its release, then the two it is made of.
+        // Each image asked for: its release, then the two it is made of, then whether it has Hive.
         final List<List<String>> asked = new ArrayList<>();
         RuntimeException failure;
 
         @Override
-        public String image(String releaseLabel, String sparkImage, String hiveImage) {
-            asked.add(List.of(releaseLabel, sparkImage, hiveImage));
+        public String image(String releaseLabel, String sparkImage, String hiveImage, boolean withHive) {
+            asked.add(List.of(releaseLabel, sparkImage, hiveImage, String.valueOf(withHive)));
             if (failure != null) {
                 throw failure;
             }
@@ -245,6 +269,8 @@ final class EmrServiceFixture {
         when(config.services().emr().imageTemplate()).thenReturn(Optional.empty());
         when(config.services().emr().hiveImageTemplate()).thenReturn(Optional.empty());
         when(config.services().emr().dockerNetwork()).thenReturn(Optional.empty());
+        when(config.services().emr().yarnNodeMemoryMb()).thenReturn(4096);
+        when(config.services().emr().yarnNodeVcores()).thenReturn(4);
         when(config.services().emr().reconcileContainersOnStartup()).thenReturn(reconcile);
         return config;
     }

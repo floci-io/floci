@@ -241,6 +241,23 @@ public class RedshiftQueryHandler {
                     .build();
             return Response.ok(xml).type(MediaType.APPLICATION_XML).build();
         }
+        case "ModifyClusterSnapshot" -> {
+            String snapshotIdentifier = requireParam(params, "SnapshotIdentifier");
+            Integer manualRetention = parseOptionalInteger(params, "ManualSnapshotRetentionPeriod");
+            Boolean force = booleanParam(params, "Force");
+            Snapshot snapshot = service.modifyClusterSnapshot(snapshotIdentifier, manualRetention, force);
+            String xml = new XmlBuilder()
+                    .start("ModifyClusterSnapshotResponse")
+                      .start("ModifyClusterSnapshotResult")
+                        .raw(buildSnapshotXml(snapshot))
+                      .end("ModifyClusterSnapshotResult")
+                      .start("ResponseMetadata")
+                        .elem("RequestId", "test-req-id")
+                      .end("ResponseMetadata")
+                    .end("ModifyClusterSnapshotResponse")
+                    .build();
+            return Response.ok(xml).type(MediaType.APPLICATION_XML).build();
+        }
         case "CopyClusterSnapshot" -> {
             String sourceSnapshotId = requireParam(params, "SourceSnapshotIdentifier");
             String targetSnapshotId = requireParam(params, "TargetSnapshotIdentifier");
@@ -514,7 +531,9 @@ public class RedshiftQueryHandler {
                       .start("DescribeIntegrationsResult")
                         .start("Integrations");
             for (Integration integration : found.integrations()) {
-                xmlBuilder.raw(buildIntegrationXml(integration, true));
+                xmlBuilder.start("Integration")
+                        .raw(buildIntegrationXml(integration, true))
+                        .end("Integration");
             }
             xmlBuilder.end("Integrations");
             // Marker only when a further page exists: real Redshift omits it on the terminal page,
@@ -1607,13 +1626,12 @@ public class RedshiftQueryHandler {
      */
     private String buildIntegrationXml(Integration integration, boolean includeErrors) {
         XmlBuilder builder = new XmlBuilder()
-                .start("Integration")
-                  .elem("IntegrationArn", integration.getIntegrationArn())
-                  .elem("IntegrationName", integration.getIntegrationName())
-                  .elem("SourceArn", integration.getSourceArn())
-                  .elem("TargetArn", integration.getTargetArn())
-                  .elem("Status", integration.getStatus())
-                  .elem("CreateTime", integration.getCreateTime());
+                .elem("IntegrationArn", integration.getIntegrationArn())
+                .elem("IntegrationName", integration.getIntegrationName())
+                .elem("SourceArn", integration.getSourceArn())
+                .elem("TargetArn", integration.getTargetArn())
+                .elem("Status", integration.getStatus())
+                .elem("CreateTime", integration.getCreateTime());
         if (integration.getSourceType() != null) {
             builder.elem("SourceType", integration.getSourceType());
         }
@@ -1647,7 +1665,7 @@ public class RedshiftQueryHandler {
             }
             builder.end("Tags");
         }
-        return builder.end("Integration").build();
+        return builder.build();
     }
 
     /**

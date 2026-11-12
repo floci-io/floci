@@ -52,8 +52,8 @@ final class RequestResourceMembers {
     private static final Pattern LOCATION = Pattern.compile("\\{[A-Za-z0-9_]+}|\\?[A-Za-z0-9_.-]+");
     /** The one id a child type's format appends to its parent's. */
     private static final Pattern APPENDED_ID = Pattern.compile("[/:]\\$\\{\\w+}");
-    /** The keys a resource found by members does not take: it is read no other way, in the caller's account. */
-    private static final List<String> FOUND_ONLY = List.of("absent", "arnOf", "account", "fixed", "before");
+    /** The keys a resource found by members does not take: it is read no other way. */
+    private static final List<String> FOUND_ONLY = List.of("absent", "arnOf", "fixed", "before");
     /** The keys of a resource named through a member naming another of its service's own: it is read no other way. */
     private static final Set<String> THROUGH_KEYS = Set.of("types", "through", "when", "endpoint");
 
@@ -176,6 +176,10 @@ final class RequestResourceMembers {
     record Created(String type, String parent, Member arn, String parentWord, String childWord, String separator) {
     }
 
+    /** An ordered heterogeneous id list; unsupported ids retain wildcard authorization. */
+    record Targets(Member member, String query, Map<String, String> prefixes) {
+    }
+
     /**
      * The file: each operation's resources and the resources it creates under a parent, as
      * {@code <namespace>:<Operation>}, the members a REST operation's request carries outside its body, each
@@ -184,6 +188,7 @@ final class RequestResourceMembers {
      * query, {@code ?name}, by the member's name.
      */
     record Table(Map<String, List<Resource>> operations, Map<String, List<Created>> creates,
+                 Map<String, Targets> targets,
                  Map<String, Map<String, String>> located, Map<String, Map<String, ArnFormat>> formats,
                  Set<String> namespaces, Set<String> handBuilt, Set<String> notCovered, Set<String> otherNamespaces) {
     }
@@ -240,6 +245,7 @@ final class RequestResourceMembers {
         });
         Map<String, List<Resource>> entries = new LinkedHashMap<>();
         Map<String, List<Created>> creates = new LinkedHashMap<>();
+        Map<String, Targets> targets = new LinkedHashMap<>();
         Map<String, Map<String, String>> located = new LinkedHashMap<>();
         operations.properties().forEach(operation -> {
             String namespace = operation.getKey().substring(0, Math.max(0, operation.getKey().indexOf(':')));
@@ -252,6 +258,33 @@ final class RequestResourceMembers {
                 resources.add(resource(operation.getKey(), resource, formats.getOrDefault(namespace, Map.of())));
             }
             entries.put(operation.getKey(), List.copyOf(resources));
+            JsonNode target = operation.getValue().path("targets");
+            if (!target.isMissingNode()) {
+                String member = target.path("member").asText("");
+                String query = target.path("query").asText("");
+                if (!member.matches("[A-Za-z][A-Za-z0-9_]*\\[\\]")
+                        || !LOCATED_MEMBER.matcher(query).matches()
+                        || !target.path("prefixes").isObject() || target.path("prefixes").isEmpty()) {
+                    throw new IllegalStateException(RESOURCE_NAME + " has malformed id targets for " + operation.getKey());
+                }
+                Map<String, String> prefixes = new LinkedHashMap<>();
+                Set<String> allowed = names(operation.getValue().path("types"));
+                target.path("prefixes").properties().forEach(entry -> {
+                    ArnFormat format = formats.getOrDefault(namespace, Map.of()).get(entry.getKey());
+                    String prefix = entry.getValue().asText("");
+                    if (!allowed.contains(entry.getKey()) || format == null || prefix.isEmpty()
+                            || VARIABLE.matcher(format.format()).results().map(match -> match.group(1))
+                                    .filter(variable -> !Set.of("Partition", "Region", "Account").contains(variable))
+                                    .distinct().count() != 1
+                            || prefixes.values().stream().anyMatch(other ->
+                                    prefix.startsWith(other) || other.startsWith(prefix))) {
+                        throw new IllegalStateException(RESOURCE_NAME + " has an invalid id target for " + operation.getKey());
+                    }
+                    prefixes.put(entry.getKey(), prefix);
+                });
+                targets.put(operation.getKey(), new Targets(new Member(member.substring(0, member.length() - 2), true),
+                        query, Map.copyOf(prefixes)));
+            }
             List<Created> made = new ArrayList<>();
             for (JsonNode created : operation.getValue().path("creates")) {
                 made.add(created(operation.getKey(), created, formats.getOrDefault(namespace, Map.of())));
@@ -272,7 +305,7 @@ final class RequestResourceMembers {
                 located.put(operation.getKey(), Map.copyOf(where));
             }
         });
-        return new Table(Map.copyOf(entries), Map.copyOf(creates), Map.copyOf(located), Map.copyOf(formats), namespaces,
+        return new Table(Map.copyOf(entries), Map.copyOf(creates), Map.copyOf(targets), Map.copyOf(located), Map.copyOf(formats), namespaces,
                 names(document.path("handBuilt")),
                 Set.copyOf(document.path("notCovered").propertyStream().map(Map.Entry::getKey).toList()),
                 names(document.path("otherNamespaces")));

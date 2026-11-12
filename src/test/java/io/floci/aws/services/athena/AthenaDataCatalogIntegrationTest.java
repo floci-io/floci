@@ -489,7 +489,7 @@ class AthenaDataCatalogIntegrationTest {
 
     @Test
     @Order(19)
-    void getDataCatalogNamingNullServesTheBuiltInGlueCatalog() {
+    void getDataCatalogRejectsNullRequiredName() {
         given()
             .header("X-Amz-Target", "AmazonAthena.GetDataCatalog")
             .contentType(CONTENT_TYPE)
@@ -497,8 +497,7 @@ class AthenaDataCatalogIntegrationTest {
         .when()
             .post("/")
         .then()
-            .statusCode(200)
-            .body("DataCatalog.Name", equalTo("AwsDataCatalog"))
-            .body("DataCatalog.Type", equalTo("GLUE"));
+            .statusCode(400)
+            .body("__type", equalTo("InvalidRequestException"));
     }
 }

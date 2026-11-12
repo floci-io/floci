@@ -1,5 +1,6 @@
 package io.floci.aws.services.controltower;
 
+import io.floci.aws.core.common.AwsArnUtils;
 import io.floci.aws.services.organizations.OrganizationsService;
 import io.floci.aws.services.organizations.model.Organization;
 import io.floci.aws.services.organizations.model.OrganizationalUnit;
@@ -130,7 +131,9 @@ class ControlTowerControllerIntegrationTest {
         given()
                 .header("Authorization", authorization)
                 .when()
-                .get("/tags/" + arn.substring(0, arn.lastIndexOf('/') + 1) + "UNKNOWNLZ")
+                .get("/tags/" + new AwsArnUtils.Arn(AwsArnUtils.parse(arn).partition(), "controltower",
+                        AwsArnUtils.parse(arn).region(), AwsArnUtils.parse(arn).accountId(),
+                        "landingzone/UNKNOWNLZ"))
                 .then()
                 .statusCode(404)
                 .body("__type", containsString("ResourceNotFoundException"));
@@ -180,7 +183,7 @@ class ControlTowerControllerIntegrationTest {
     void getLandingZoneAcceptsLandingZoneIdLikeTheTerraformProvider() {
         String authorization = auth("000000000250", EAST);
         String arn = listLandingZonesArn(authorization);
-        String id = arn.substring(arn.lastIndexOf('/') + 1);
+        String id = AwsArnUtils.parse(arn).resource().substring("landingzone/".length());
 
         given()
                 .contentType("application/json")

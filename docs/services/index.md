@@ -14,7 +14,7 @@ Operation counts are exact. For dispatch-table services (Query and JSON 1.1) eac
 | [SQS](sqs.md) | `POST /` with `Action=` param | Query / JSON | 23 |
 | [SNS](sns.md) | `POST /` with `Action=` param | Query / JSON | 39 |
 | [S3](s3.md) | `/{bucket}/{key}` | REST XML | 58 |
-| [S3 Vectors](s3vectors.md) | `POST /{OperationName}` | REST JSON | 12 |
+| [S3 Vectors](s3vectors.md) | `POST /{OperationName}` | REST JSON | 16 |
 | [S3 Tables](s3tables.md) | `/buckets`, `/namespaces/*`, `/tables/*` | REST JSON | 25 |
 | [DynamoDB](dynamodb.md) | `POST /` + `X-Amz-Target: DynamoDB_20120810.*` | JSON 1.1 | 28 |
 | [DynamoDB Streams](dynamodb.md#streams) | `POST /` + `X-Amz-Target: DynamoDBStreams_20120810.*` | JSON 1.1 | 4 |
@@ -49,6 +49,7 @@ Operation counts are exact. For dispatch-table services (Query and JSON 1.1) eac
 | [CloudWatch Logs](cloudwatch.md) | `POST /` + `X-Amz-Target: Logs.*` | JSON 1.1 | 17 |
 | [CloudWatch Metrics](cloudwatch.md#metrics) | `POST /` with `Action=` or JSON 1.1 | Query / JSON | 11 |
 | [CloudWatch RUM](rum.md) | `/appmonitor`, `/appmonitor/{name}`, `/appmonitors` | REST JSON | 5 |
+| [X-Ray](xray.md) | `/TraceSegments`, `/Traces`, `/TraceSummaries`, `/ServiceGraph`, `/TraceGraph`, `/GetSamplingRules`, `/CreateSamplingRule`, `/SamplingTargets`, `/TelemetryRecords` | REST JSON | 11 |
 | [GuardDuty](guardduty.md) | `/detector`, `/detector/{detectorId}`, `/detector/{detectorId}/admin`, `/admin/*`, `/tags/*` | REST JSON | 28 |
 | [AWS Account Management](account.md) | `/putAlternateContact`, `/getAlternateContact`, `/deleteAlternateContact` | REST JSON | 3 |
 | [IAM Access Analyzer](access-analyzer.md) | `/analyzer`, `/analyzer/{name}`, `/policy/validation` | REST JSON | 5 |
@@ -73,14 +74,14 @@ Operation counts are exact. For dispatch-table services (Query and JSON 1.1) eac
 | [MSK](msk.md) | `/v1/clusters/...`, `/api/v2/clusters/...` + Redpanda broker | REST JSON + Kafka | 8 |
 | [Amazon MQ](amazonmq.md) | `/v1/brokers/...` + RabbitMQ broker | REST JSON + AMQP | 5 |
 | [MWAA](mwaa.md) | `/` REST paths for environments + CLI/web proxy | REST JSON | 10 |
-| [Athena](athena.md) | `POST /` + `X-Amz-Target: AmazonAthena.*` | JSON 1.1 | 21 |
+| [Athena](athena.md) | `POST /` + `X-Amz-Target: AmazonAthena.*` | JSON 1.1 | 27 |
 | [Glue](glue.md) | `POST /` + `X-Amz-Target: AWSGlue.*` | JSON 1.1 | 135 |
 | [Lake Formation](lakeformation.md) | `POST /<Action>` | REST JSON | 16 |
 | [Neptune](neptune.md) | `POST /` with `Action=` param + Gremlin TCP proxy | Query + WebSocket | 14 |
 | [DocumentDB](docdb.md) | `POST /` with `Action=` param + MongoDB container | Query + MongoDB wire | 17 |
 | [DMS](dms.md) | `POST /` + `X-Amz-Target: AmazonDMSv20160101.*` | JSON 1.1 | 20 |
 | [QuickSight](quicksight.md) | `/accounts/{AwsAccountId}/...` | REST JSON, metadata only | 16 |
-| [Redshift](redshift.md) | `POST /` with `Action=` param + PostgreSQL container | Query + PostgreSQL wire (+ CFN) | 56 |
+| [Redshift](redshift.md) | `POST /` with `Action=` param + PostgreSQL container | Query + PostgreSQL wire (+ CFN) | 57 |
 | [Redshift Data API](redshift-data.md) | `POST /` + `X-Amz-Target: RedshiftData.*` | JSON 1.1 | 12 |
 | [Redshift Serverless](redshift-serverless.md) | `POST /` + `X-Amz-Target: RedshiftServerless.*` | JSON 1.1 | 55 |
 | [EMR](emr.md) | `POST /` + `X-Amz-Target: ElasticMapReduce.*` | JSON 1.1 | 40 |
@@ -88,7 +89,7 @@ Operation counts are exact. For dispatch-table services (Query and JSON 1.1) eac
 | [Data Firehose](firehose.md) | `POST /` + `X-Amz-Target: Firehose_20150804.*` | JSON 1.1 | 12 |
 | [ECS](ecs.md) | `POST /` + `X-Amz-Target: AmazonEC2ContainerServiceV20141113.*` | JSON 1.1 | 59 |
 | [EFS](efs.md) | `/2015-02-01/...` | REST JSON | 26 |
-| [EC2](ec2.md) | `POST /` with `Action=` param | EC2 Query | 224 |
+| [EC2](ec2.md) | `POST /` with `Action=` param | EC2 Query | 225 |
 | [EC2 Instance Connect](ec2-instance-connect.md) | `POST /` + `X-Amz-Target: AWSEC2InstanceConnectService.*` | JSON 1.1 | 2 |
 | [Lightsail](lightsail.md) | `POST /` + `X-Amz-Target: Lightsail_20161128.*` | JSON 1.1 | 79 local responses; 161 recognized actions |
 | [ACM](acm.md) | `POST /` + `X-Amz-Target: CertificateManager.*` | JSON 1.1 | 16 |
@@ -111,7 +112,7 @@ Operation counts are exact. For dispatch-table services (Query and JSON 1.1) eac
 | [ELB Classic (v1)](elb-classic.md) | `POST /` with `Action=` and `Version=2012-06-01` | Query | 20 |
 | [WAF v2](wafv2.md) | `POST /` + `X-Amz-Target: AWSWAF_20190729.*` | JSON 1.1 | 35 |
 | [Auto Scaling](autoscaling.md) | `POST /` with `Action=` param | Query | 55 |
-| [Application Auto Scaling](applicationautoscaling.md) | `POST /` + `X-Amz-Target: AnyScaleFrontendService.*` | JSON 1.1 | 10 |
+| [Application Auto Scaling](applicationautoscaling.md) | `POST /` + `X-Amz-Target: AnyScaleFrontendService.*` | JSON 1.1 | 13 |
 | [Elastic Beanstalk](elastic-beanstalk.md) | `POST /` with `Action=` or `Operation=` param | Query | 14 |
 | [CodeBuild](codebuild.md) | `POST /` + `X-Amz-Target: CodeBuild_20161006.*` | JSON 1.1 | 20 |
 | [AWS Batch](batch.md) | `/v1/...` | REST JSON | 10 |
@@ -170,5 +171,3 @@ export AWS_SECRET_ACCESS_KEY=test
 ```
 
 `AWS_ENDPOINT_URL` is the standard env var recognised by the AWS CLI v2 and AWS SDKs v2+, so no `--endpoint-url` flag is needed on each command.
-
-- [SageMaker](sagemaker.md) - model, endpoint, runtime, and training emulation with Docker execution.

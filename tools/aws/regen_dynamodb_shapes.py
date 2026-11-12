@@ -5,7 +5,8 @@ DynamoDB rejects a request member of the wrong JSON type with a SerializationExc
 it runs the operation. The Java side (`DynamoDbRequestShapes`) needs each operation's input
 shapes to do the same, so this script keeps only what that check reads: the input shape of
 every operation, and for every shape reachable from one, its type and the shapes of its
-members, list elements or map values.
+members, list elements or map values. It also keeps the members each structure requires,
+which SearchVectors refuses when null or omitted.
 
 The model is botocore's `dynamodb/2012-08-10/service-2.json` (Apache-2.0,
 https://github.com/boto/botocore). It is located, in order, at `--botocore-data`, the
@@ -28,7 +29,8 @@ MODEL = Path("dynamodb/2012-08-10")
 
 
 def main(argv: list[str] | None = None) -> int:
-    return request_shapes.main(argv, script=__file__, model=MODEL, output=OUTPUT, description=__doc__)
+    return request_shapes.main(argv, script=__file__, model=MODEL, output=OUTPUT, description=__doc__,
+                               required=True)
 
 
 if __name__ == "__main__":

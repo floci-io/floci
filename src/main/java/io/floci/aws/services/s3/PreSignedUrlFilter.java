@@ -1,5 +1,6 @@
 package io.floci.aws.services.s3;
 
+import io.floci.aws.core.common.ResteasyRequests;
 import io.floci.aws.core.common.XmlBuilder;
 import io.floci.aws.core.common.auth.SigV4Canonicalization;
 import io.floci.aws.core.common.auth.SigV4RequestValidator;
@@ -92,7 +93,7 @@ public class PreSignedUrlFilter implements ContainerRequestFilter {
             return;
         }
 
-        MultivaluedMap<String, String> queryParams = requestContext.getUriInfo().getQueryParameters();
+        MultivaluedMap<String, String> queryParams = ResteasyRequests.queryParameters(requestContext);
 
         boolean hasPresignedAuthSignal = false;
         for (String param : PRESIGNED_AUTH_SIGNALS) {

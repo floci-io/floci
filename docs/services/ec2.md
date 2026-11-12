@@ -33,12 +33,23 @@ EBS-only storage, and one network card supporting 3 interfaces and 10 IPv4 addre
 interface, following the [AWS R5 specifications](https://docs.aws.amazon.com/ec2/latest/instancetypes/mo.html).
 `DescribeInstanceTypes` and `DescribeInstanceTypeOfferings` use this same entry.
 
+The catalog also includes `i4i.large`: 2 vCPUs, 16 GiB of memory, Intel x86_64
+processors, 468 GB of local NVMe SSD storage, and one network card supporting
+3 interfaces and 10 IPv4 addresses per interface, following the
+[AWS storage optimized specifications](https://docs.aws.amazon.com/ec2/latest/instancetypes/so.html).
+Both describe APIs and the existing container resource limits use this entry.
+
 ### Processor manufacturer metadata
 
 `DescribeInstanceTypes` includes `ProcessorInfo.Manufacturer` for the bundled
-instance types. The values were captured from AWS in `us-east-1` on 2026-11-04:
-`AWS` for Graviton, `Intel` for the catalog's T2, T3, M5 and R5 types, and `AMD`
-for `t3a.nano`. The catalog stores these values explicitly; architecture alone
+instance types. For Graviton, T2, T3, M5, R5 and `t3a.nano`, the values were
+captured from AWS in `us-east-1` on 2026-11-04: `AWS` for Graviton, `Intel` for
+T2, T3, M5 and R5, and `AMD` for `t3a.nano`.
+
+The `i4i.large` value, `Intel`, comes from the AWS storage optimized specifications
+linked above. It was not part of that API capture.
+
+The catalog stores these values explicitly; architecture alone
 cannot distinguish Intel from AMD. See the AWS
 [ProcessorInfo API](https://docs.aws.amazon.com/AWSEC2/latest/APIReference/API_ProcessorInfo.html).
 
@@ -316,7 +327,7 @@ naming different VPCs find nothing.
 
 | Action | Description |
 |--------|-------------|
-| RunInstances | Creates one or more local EC2 instances, starting Docker-backed runtime when not in mock mode. Security groups come from `SecurityGroupId.N` or, as Terraform sends them with an interface spec, from the primary interface's `NetworkInterface.1.SecurityGroupId.N`; both in one request is `InvalidParameterCombination`. |
+| RunInstances | Creates one or more local EC2 instances, starting Docker-backed runtime when not in mock mode. Security groups come from `SecurityGroupId.N` or, as Terraform sends them with an interface spec, from the primary interface's `NetworkInterface.1.SecurityGroupId.N`; both in one request is `InvalidParameterCombination`. A launch without groups uses the default security group of its subnet's VPC. |
 | CreateFleet | Creates an instant local fleet from launch-template configurations and on-demand or spot overrides. DryRun returns the AWS-compatible `DryRunOperation` error without launching instances. |
 | DescribeInstances | Lists or returns stored EC2 instances. |
 | TerminateInstances | Terminates instances and updates their stored lifecycle state. |
@@ -827,7 +838,7 @@ back, and a new address that is already held fails the update and leaves the gat
 | DescribeInstanceConnectEndpoints | Lists endpoints; filters `instance-connect-endpoint-id`, `state`, `vpc-id`, `subnet-id`, `tag:<key>`, `tag-key`, `tag-value`. |
 | DeleteInstanceConnectEndpoint | Deletes an endpoint and answers with it in `delete-in-progress`. |
 
-A repeated `ClientToken` returns the endpoint the first call created (`IdempotentParameterMismatch` when reused with another subnet, security group set, `IpAddressType`, `PreserveClientIp` or tag set; tags added later with `CreateTags` do not count). While an endpoint exists, `DeleteSubnet` on its subnet and `DeleteVpc` on its VPC fail with `DependencyViolation`, as on AWS. The interface ID in an endpoint's `networkInterfaceIdSet` resolves in `DescribeNetworkInterfaces` while the endpoint exists: a requester-managed `ec2_instance_connect_endpoint` interface carrying the endpoint's private address, subnet, VPC and security groups. An unknown filter name is `InvalidParameterValue` even when no endpoint exists. `DescribeInstanceConnectEndpoints` pages by `MaxResults`/`NextToken` in endpoint ID order (`MaxResults` outside 1-50 is `InvalidMaxResults`), and `publicDnsNames` carries only the `ipv4` names. The endpoint's tunnel (`openTunnel`) is not served yet.
+A repeated `ClientToken` returns the endpoint the first call created (`IdempotentParameterMismatch` when reused with another subnet, security group set, `IpAddressType`, `PreserveClientIp` or tag set; tags added later with `CreateTags` do not count). While an endpoint exists, `DeleteSubnet` on its subnet and `DeleteVpc` on its VPC fail with `DependencyViolation`, as on AWS. The interface ID in an endpoint's `networkInterfaceIdSet` resolves in `DescribeNetworkInterfaces` while the endpoint exists: a requester-managed `ec2_instance_connect_endpoint` interface carrying the endpoint's private address, subnet, VPC and security groups. An unknown filter name is `InvalidParameterValue` even when no endpoint exists. `DescribeInstanceConnectEndpoints` pages by `MaxResults`/`NextToken` in endpoint ID order (`MaxResults` outside 1-50 is `InvalidMaxResults`), and `publicDnsNames` carries only the `ipv4` names. The endpoint's tunnel is real: see [EC2 Instance Connect](ec2-instance-connect.md#instance-connect-endpoint-tunnels).
 
 ### Capacity Reservations
 
@@ -1011,8 +1022,11 @@ regions, for which AWS publishes no zone id, keep the whole region as the prefix
 | DescribeLaunchTemplateVersions | Lists versions stored for a launch template. |
 | ModifyLaunchTemplate | Updates launch template metadata such as the default version. |
 | DeleteLaunchTemplate | Deletes a launch template and its versions. |
+| DeleteLaunchTemplateVersions | Deletes up to 200 numbered versions by template ID or name, with separate success and error items. The default version is retained, and `DryRun` leaves all versions unchanged. |
 
 Launch templates store versioned launch data. New template versions can be created from an existing source version, and `ModifyLaunchTemplate` updates the default version used by later launches.
+Deleting versions updates `$Latest` to the highest surviving version. New versions receive numbers
+above every previously issued version, including deleted versions, and the counter survives restart.
 
 `ModifyLaunchTemplate` honors `DryRun` for requests by template ID or name. A valid
 dry run returns `DryRunOperation` with HTTP 412 and leaves the default version,

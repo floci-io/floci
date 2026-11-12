@@ -19,6 +19,7 @@ class LambdaWebDataPlaneTest {
         assertFalse(LambdaWebDataPlane.isLambdaWebHost("my.lambda-web.archive.localhost:4566"));
         assertFalse(LambdaWebDataPlane.isLambdaWebHost("abcdefghijklmnop.lambda-url.us-east-1.localhost:4566"));
         assertFalse(LambdaWebDataPlane.isLambdaWebHost("localhost:4566"));
+        assertFalse(LambdaWebDataPlane.isLambdaWebHost("abcdefghijklmnop"));
     }
 
     @Test

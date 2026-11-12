@@ -9,15 +9,12 @@ import jakarta.inject.Inject;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
 
-import javax.crypto.Mac;
-import javax.crypto.spec.SecretKeySpec;
-import java.nio.charset.StandardCharsets;
 import java.time.Clock;
-import java.util.Base64;
 import java.util.UUID;
 
 import static io.floci.aws.services.cognito.CognitoRestAssuredUtils.cognitoAction;
 import static io.floci.aws.services.cognito.CognitoRestAssuredUtils.cognitoJson;
+import static io.floci.aws.services.cognito.CognitoSecretHashTestHelper.secretHash;
 import static org.hamcrest.Matchers.contains;
 import static org.hamcrest.Matchers.equalTo;
 import static org.hamcrest.Matchers.hasKey;
@@ -359,12 +356,5 @@ class CognitoOptionalTotpMfaIntegrationTest {
         return """
                 {"AccessToken":"%s"}
                 """.formatted(accessToken);
-    }
-
-    private static String secretHash(String clientId, String clientSecret, String username) throws Exception {
-        Mac mac = Mac.getInstance("HmacSHA256");
-        mac.init(new SecretKeySpec(clientSecret.getBytes(StandardCharsets.UTF_8), "HmacSHA256"));
-        return Base64.getEncoder().encodeToString(
-                mac.doFinal((username + clientId).getBytes(StandardCharsets.UTF_8)));
     }
 }

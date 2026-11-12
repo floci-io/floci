@@ -1,7 +1,11 @@
 package io.floci.aws.services.iam;
 
+import com.fasterxml.jackson.core.type.TypeReference;
 import io.floci.aws.core.common.RequestScopes;
+import io.floci.aws.core.storage.StorageBackend;
+import io.floci.aws.core.storage.StorageFactory;
 import io.floci.aws.services.cloudwatch.logs.CloudWatchLogsService;
+import io.floci.aws.services.cloudwatch.logs.model.LogDestination;
 import io.floci.aws.testing.IamEnforcementProfile;
 import io.floci.aws.testing.LogsAuthorizationFixtures;
 import io.floci.aws.testing.PartitionCleanup;
@@ -45,6 +49,9 @@ class LogsArnTagAuthorizationIntegrationTest {
 
     @Inject
     CloudWatchLogsService logsService;
+
+    @Inject
+    StorageFactory storageFactory;
 
     @BeforeAll
     static void configureContentTypes() {
@@ -202,6 +209,85 @@ class LogsArnTagAuthorizationIntegrationTest {
         assertTags(selected, Map.of("protected", "retained"));
     }
 
+    @Test
+    void destinationTagReadUsesItsExactArn() {
+        String selected = destination("blue");
+        String other = destination("green");
+        String caller = user(statement("Allow", "ListTagsForResource", selected));
+
+        invoke(caller, "ListTagsForResource", other).statusCode(400)
+                .body(containsString("AccessDeniedException"));
+        invoke(caller, "ListTagsForResource", selected).statusCode(200)
+                .body("tags.team", equalTo("blue"));
+    }
+
+    @Test
+    void destinationResourceTagsControlConditionalAccess() {
+        String selected = destination("blue");
+        String other = destination("green");
+        String caller = user(statement("Allow", "ListTagsForResource", "*") + ","
+                + "{\"Effect\":\"Deny\",\"Action\":\"logs:ListTagsForResource\",\"Resource\":\"*\","
+                + "\"Condition\":{\"StringEquals\":{\"aws:ResourceTag/team\":\"blue\"}}}");
+
+        invoke(caller, "ListTagsForResource", selected).statusCode(400)
+                .body(containsString("AccessDeniedException"));
+        invoke(caller, "ListTagsForResource", other).statusCode(200)
+                .body("tags.team", equalTo("green"));
+    }
+
+    @Test
+    void destinationCreationChecksTheNamedResourceArn() {
+        String selected = "logs-destination-tag-" + UUID.randomUUID();
+        String other = "logs-destination-tag-" + UUID.randomUUID();
+        registerDestinationCleanup(selected);
+        registerDestinationCleanup(other);
+        String caller = user(statement("Allow", "PutDestination", destinationArn(selected)) + ","
+                + statement("Allow", "TagResource", "*") + ","
+                + "{\"Effect\":\"Allow\",\"Action\":\"iam:PassRole\",\"Resource\":\"*\"}");
+
+        putTaggedDestination(caller, other).statusCode(400).body(containsString("AccessDeniedException"));
+        invoke(ACCOUNT, "ListTagsForResource", destinationArn(other)).statusCode(400)
+                .body(containsString("ResourceNotFoundException"));
+        putTaggedDestination(caller, selected).statusCode(200);
+        invoke(ACCOUNT, "ListTagsForResource", destinationArn(selected)).statusCode(200)
+                .body("tags.team", equalTo("blue"));
+    }
+
+    @Test
+    void taggedDestinationCreationAcceptsResourceScopedTagPermission() {
+        String selected = "logs-destination-tag-" + UUID.randomUUID();
+        String other = "logs-destination-tag-" + UUID.randomUUID();
+        registerDestinationCleanup(selected);
+        registerDestinationCleanup(other);
+        String caller = user(statement("Allow", "PutDestination", "*") + ","
+                + statement("Allow", "TagResource", destinationArn(selected)) + ","
+                + "{\"Effect\":\"Allow\",\"Action\":\"iam:PassRole\",\"Resource\":\"*\"}");
+
+        putTaggedDestination(caller, other).statusCode(400).body(containsString("AccessDeniedException"));
+        putTaggedDestination(caller, selected).statusCode(200);
+        invoke(ACCOUNT, "ListTagsForResource", destinationArn(selected)).statusCode(200)
+                .body("tags.team", equalTo("blue"));
+    }
+
+    @Test
+    void taggedDestinationCreationHonorsResourceScopedExplicitDeny() {
+        String selected = "logs-destination-tag-" + UUID.randomUUID();
+        String other = "logs-destination-tag-" + UUID.randomUUID();
+        registerDestinationCleanup(selected);
+        registerDestinationCleanup(other);
+        String caller = user(statement("Allow", "PutDestination", "*") + ","
+                + statement("Allow", "TagResource", "*") + ","
+                + statement("Deny", "TagResource", destinationArn(selected)) + ","
+                + "{\"Effect\":\"Allow\",\"Action\":\"iam:PassRole\",\"Resource\":\"*\"}");
+
+        putTaggedDestination(caller, selected).statusCode(400).body(containsString("AccessDeniedException"));
+        invoke(ACCOUNT, "ListTagsForResource", destinationArn(selected)).statusCode(400)
+                .body(containsString("ResourceNotFoundException"));
+        putTaggedDestination(caller, other).statusCode(200);
+        invoke(ACCOUNT, "ListTagsForResource", destinationArn(other)).statusCode(200)
+                .body("tags.team", equalTo("blue"));
+    }
+
     private void assertSuccess(ValidatableResponse response, String action) {
         response.statusCode(200);
         if (action.equals("ListTagsForResource")) {
@@ -229,6 +315,36 @@ class LogsArnTagAuthorizationIntegrationTest {
         cleanup.register(() -> RequestScopes.runAs(ACCOUNT, REGION, () -> logsService.deleteLogGroup(name, REGION)));
         logsService.createLogGroupForAccount(ACCOUNT, name, null, tags, REGION);
         return name;
+    }
+
+    private String destination(String team) {
+        String name = "logs-destination-tag-" + UUID.randomUUID();
+        registerDestinationCleanup(name);
+        call(endpoint.getPort(), ACCOUNT, "PutDestination", Map.of(
+                "destinationName", name,
+                "targetArn", "arn:aws:kinesis:us-east-1:" + ACCOUNT + ":stream/logs",
+                "roleArn", "arn:aws:iam::" + ACCOUNT + ":role/logs",
+                "tags", Map.of("team", team))).statusCode(200);
+        return destinationArn(name);
+    }
+
+    private void registerDestinationCleanup(String name) {
+        StorageBackend<String, LogDestination> destinations = storageFactory.create("cloudwatchlogs",
+                "cwlogs-destinations.json", new TypeReference<Map<String, LogDestination>>() {});
+        cleanup.register(() -> RequestScopes.runAs(ACCOUNT, REGION,
+                () -> destinations.delete(REGION + "::" + name)));
+    }
+
+    private ValidatableResponse putTaggedDestination(String caller, String name) {
+        return call(endpoint.getPort(), caller, "PutDestination", Map.of(
+                "destinationName", name,
+                "targetArn", "arn:aws:kinesis:us-east-1:" + ACCOUNT + ":stream/logs",
+                "roleArn", "arn:aws:iam::" + ACCOUNT + ":role/logs",
+                "tags", Map.of("team", "blue")));
+    }
+
+    private static String destinationArn(String name) {
+        return "arn:aws:logs:" + REGION + ":" + ACCOUNT + ":destination:" + name;
     }
 
     private String user(String statements) {

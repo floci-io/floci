@@ -102,6 +102,7 @@ import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicLong;
+import java.util.function.Consumer;
 import java.util.regex.Pattern;
 
 import static io.floci.aws.core.common.ReservedTags.rejectUnknownReservedTags;
@@ -156,6 +157,12 @@ public class CognitoService implements ResourceProvider {
     // knowable from a registered IdP, which floci does not model, so they stay null.
     private static final Set<String> NAMED_PROVIDER_TYPES =
             Set.of("Facebook", "Google", "LoginWithAmazon", "SignInWithApple");
+
+    // scope is included because AWS changes it only through scopesToAdd and scopesToSuppress.
+    private static final Set<String> MACHINE_TOKEN_PROTECTED_CLAIMS = Set.of(
+            "sub", "client_id", "event_id", "version", "acr", "amr", "auth_time", "azp", "exp", "iat",
+            "iss", "jti", "nbf", "nonce", "origin_jti", "token_use", "username", "device_key", "at_hash",
+            "scope");
 
 
     /**
@@ -216,7 +223,8 @@ public class CognitoService implements ResourceProvider {
     }
 
     private Object userLock(String poolId, String username) {
-        String key = userKey(poolId, username);
+        UserPool pool = poolStore.get(poolId).orElse(null);
+        String key = userKey(poolId, pool == null ? username : signInKey(pool, username));
         return userLocks[Math.floorMod(key.hashCode(), USER_LOCK_STRIPES)];
     }
 
@@ -2318,7 +2326,7 @@ public class CognitoService implements ResourceProvider {
         // Claimed before the username is checked, so an overlapping request for it is refused here
         // rather than passing the check while this one is in its trigger and invoking the trigger
         // again. That includes a function calling back for the username it was given.
-        String inFlightKey = regionResolver.getAccountId() + "::" + userKey(userPoolId, username);
+        String inFlightKey = regionResolver.getAccountId() + "::" + userKey(userPoolId, signInKey(pool, username));
         if (!userCreatesInFlight.add(inFlightKey)) {
             throw new AwsException("UsernameExistsException", "User already exists", 400);
         }
@@ -2400,7 +2408,7 @@ public class CognitoService implements ResourceProvider {
 
     /** The user a RESEND for {@code username} names, refused unless it awaits its first sign-in. */
     private CognitoUser resendTarget(UserPool pool, String username) {
-        CognitoUser existing = userStore.get(userKey(pool.getId(), username)).orElse(null);
+        CognitoUser existing = findUserByUsername(pool, username);
         if (usesAliasUsernames(pool) && existing == null) {
             existing = findUserByAlias(pool.getId(), aliasAttributeForValue(pool, username), username);
         }
@@ -2423,7 +2431,7 @@ public class CognitoService implements ResourceProvider {
      * {@code AliasExistsException} for a verified alias without ForceAliasCreation.
      */
     private CognitoUser aliasHolderToMove(UserPool pool, String username, boolean forceAliasCreation) {
-        CognitoUser existing = userStore.get(userKey(pool.getId(), username)).orElse(null);
+        CognitoUser existing = findUserByUsername(pool, username);
         String aliasAttribute = null;
         if (usesAliasUsernames(pool) && existing == null) {
             aliasAttribute = aliasAttributeForValue(pool, username);
@@ -2637,8 +2645,8 @@ public class CognitoService implements ResourceProvider {
             canonicalUsername = existing != null ? existing.getUsername() : UUID.randomUUID().toString();
             resolvedAttributes.put("sub", canonicalUsername);
         } else {
-            canonicalUsername = username;
-            existing = userStore.get(userKey(userPoolId, username)).orElse(null);
+            existing = findUserByUsername(pool, username);
+            canonicalUsername = existing == null ? username : existing.getUsername();
         }
         String key = userKey(userPoolId, canonicalUsername);
 
@@ -3434,13 +3442,31 @@ public class CognitoService implements ResourceProvider {
 
     public CognitoGroup updateGroup(String userPoolId, String groupName, String description,
                                      Integer precedence, String roleArn) {
+        CognitoGroup group = rewriteGroup(userPoolId, groupName, stored -> {
+            if (description != null) stored.setDescription(description);
+            if (precedence != null) stored.setPrecedence(precedence);
+            if (roleArn != null) stored.setRoleArn(roleArn);
+        });
+        LOG.infov("Updated Cognito group: {0} in pool {1}", groupName, userPoolId);
+        return group;
+    }
+
+    /**
+     * Writes the group description exactly as given, null included, which {@link #updateGroup} reads
+     * as "keep". Only a CloudFormation update that drops the description calls it.
+     */
+    public CognitoGroup replaceGroupDescription(String userPoolId, String groupName, String description) {
+        CognitoGroup group = rewriteGroup(userPoolId, groupName, stored -> stored.setDescription(description));
+        LOG.infov("Replaced Cognito group description: {0} in pool {1}", groupName, userPoolId);
+        return group;
+    }
+
+    /** Reads the stored group, applies {@code change} to it, stamps the modification date and stores it. */
+    private CognitoGroup rewriteGroup(String userPoolId, String groupName, Consumer<CognitoGroup> change) {
         CognitoGroup group = getGroup(userPoolId, groupName);
-        if (description != null) group.setDescription(description);
-        if (precedence != null) group.setPrecedence(precedence);
-        if (roleArn != null) group.setRoleArn(roleArn);
+        change.accept(group);
         group.setLastModifiedDate(System.currentTimeMillis() / 1000L);
         groupStore.put(groupKey(userPoolId, groupName), group);
-        LOG.infov("Updated Cognito group: {0} in pool {1}", groupName, userPoolId);
         return group;
     }
 
@@ -3510,7 +3536,8 @@ public class CognitoService implements ResourceProvider {
                 .orElseThrow(() -> new AwsException("ResourceNotFoundException", "Client not found",
                         400));
         String userPoolId = client.getUserPoolId();
-        String inFlightKey = regionResolver.getAccountId() + "::" + userKey(userPoolId, username);
+        UserPool pool = describeUserPool(userPoolId);
+        String inFlightKey = regionResolver.getAccountId() + "::" + userKey(userPoolId, signInKey(pool, username));
         if (!userCreatesInFlight.add(inFlightKey)) {
             throw new AwsException("UsernameExistsException", "User already exists", 400);
         }
@@ -3632,7 +3659,7 @@ public class CognitoService implements ResourceProvider {
     private void requireAvailableSignUpUsername(UserPool pool, String username) {
         boolean exists = usesAliasUsernames(pool)
                 ? findUserByAlias(pool.getId(), aliasAttributeForValue(pool, username), username) != null
-                : userStore.get(userKey(pool.getId(), username)).isPresent();
+                : findUserByUsername(pool, username) != null;
         if (exists) {
             throw new AwsException("UsernameExistsException", "User already exists", 400);
         }
@@ -4748,6 +4775,16 @@ public class CognitoService implements ResourceProvider {
      */
     public Map<String, Object> issueClientCredentialsToken(String clientId, String clientSecret, String scope,
                                                            String requiredPoolId) {
+        return issueClientCredentialsToken(clientId, clientSecret, scope, requiredPoolId, Map.of());
+    }
+
+    /**
+     * @param clientMetadata the token request's {@code aws_client_metadata}, passed to a V3_0 pre
+     *                       token generation trigger
+     */
+    public Map<String, Object> issueClientCredentialsToken(String clientId, String clientSecret, String scope,
+                                                           String requiredPoolId,
+                                                           Map<String, String> clientMetadata) {
         UserPoolClient client = clientStore.get(clientId)
                 .filter(c -> requiredPoolId == null || requiredPoolId.equals(c.getUserPoolId()))
                 .orElseThrow(() -> new AwsException("ResourceNotFoundException", "Client not found", 400));
@@ -4755,9 +4792,11 @@ public class CognitoService implements ResourceProvider {
         validateClientAllowsClientCredentials(client);
         validateClientSecret(client, clientSecret);
         String normalizedScope = resolveAuthorizedScopes(client, pool.getId(), scope);
+        ClaimsOverride override = authFlowHandler.preTokenGenerationForClientCredentials(pool, client,
+                List.of(normalizedScope.split(" ")), clientMetadata);
 
         Map<String, Object> response = new LinkedHashMap<>();
-        response.put("access_token", generateClientAccessToken(client, pool, normalizedScope));
+        response.put("access_token", generateClientAccessToken(client, pool, normalizedScope, override));
         response.put("token_type", "Bearer");
         response.put("expires_in", resolveAccessTokenLifetimeSeconds(client));
         return response;
@@ -5217,8 +5256,14 @@ public class CognitoService implements ResourceProvider {
         if (override.preferredRole() != null) {
             claims.put("cognito:preferred_role", override.preferredRole());
         }
-        // V2 access-token scope mutations.
-        if (isAccess && (override.scopesToAdd() != null || override.scopesToSuppress() != null)) {
+        if (isAccess) {
+            applyScopeOverride(claims, override);
+        }
+    }
+
+    /** V2/V3 access-token scope mutations. */
+    private static void applyScopeOverride(Map<String, Object> claims, ClaimsOverride override) {
+        if (override.scopesToAdd() != null || override.scopesToSuppress() != null) {
             Object existing = claims.get("scope");
             List<String> current = new ArrayList<>();
             if (existing instanceof String s && !s.isBlank()) {
@@ -5282,31 +5327,62 @@ public class CognitoService implements ResourceProvider {
         return signJwt(header, payload, getSigningPrivateKey(pool));
     }
 
-    private String generateClientAccessToken(UserPoolClient client, UserPool pool, String scope) {
-        String headerJson = String.format(
-                "{\"alg\":\"RS256\",\"typ\":\"JWT\",\"kid\":\"%s\"}",
-                escapeJson(getSigningKeyId(pool)));
-        String header = Base64Url.encode(headerJson);
-
+    private String generateClientAccessToken(UserPoolClient client, UserPool pool, String scope,
+                                             ClaimsOverride override) {
         long now = System.currentTimeMillis() / 1000L;
         long lifetimeSeconds = resolveAccessTokenLifetimeSeconds(client);
-        StringBuilder payloadJson = new StringBuilder();
-        payloadJson.append("{")
-                .append("\"iss\":\"").append(escapeJson(getIssuer(pool.getId()))).append("\",")
-                .append("\"version\":2,")
-                .append("\"sub\":\"").append(escapeJson(client.getClientId())).append("\",")
-                .append("\"client_id\":\"").append(escapeJson(client.getClientId())).append("\",")
-                .append("\"token_use\":\"access\",")
-                .append("\"exp\":").append(now + lifetimeSeconds).append(",")
-                .append("\"iat\":").append(now).append(",")
-                .append("\"jti\":\"").append(UUID.randomUUID()).append("\"");
+        Map<String, Object> claims = new LinkedHashMap<>();
+        claims.put("iss", getIssuer(pool.getId()));
+        claims.put("version", 2);
+        claims.put("sub", client.getClientId());
+        claims.put("client_id", client.getClientId());
+        claims.put("token_use", "access");
+        claims.put("exp", now + lifetimeSeconds);
+        claims.put("iat", now);
+        claims.put("jti", UUID.randomUUID().toString());
         if (scope != null && !scope.isBlank()) {
-            payloadJson.append(",\"scope\":\"").append(escapeJson(scope)).append("\"");
+            claims.put("scope", scope);
         }
-        payloadJson.append("}");
+        applyClientCredentialsOverride(claims, override, client.getClientId());
+        return signJwt(encodeJwtHeader(pool), encodeJsonBase64Url(claims), getSigningPrivateKey(pool));
+    }
 
-        String payload = Base64Url.encode(payloadJson.toString());
-        return signJwt(header, payload, getSigningPrivateKey(pool));
+    /**
+     * Applies a V3_0 pre token generation response to a client-credentials access token. Only
+     * {@code accessTokenGeneration} reaches a machine identity: it has no ID token and no groups, so
+     * {@code idTokenGeneration} and {@code groupOverrideDetails} are ignored, as on AWS.
+     */
+    private static void applyClientCredentialsOverride(Map<String, Object> claims, ClaimsOverride override,
+                                                       String clientId) {
+        if (override == null) {
+            return;
+        }
+        if (override.accessClaimsToSuppress() != null) {
+            override.accessClaimsToSuppress().stream()
+                    .filter(claim -> !isMachineTokenProtectedClaim(claim))
+                    .forEach(claims::remove);
+        }
+        if (override.accessClaimsToAddOrOverride() != null) {
+            override.accessClaimsToAddOrOverride().forEach((claim, value) -> {
+                if (isMachineTokenProtectedClaim(claim)) {
+                    return;
+                }
+                // AWS accepts an aud claim only when it names the client the token is issued to.
+                if ("aud".equals(claim) && !clientId.equals(value)) {
+                    return;
+                }
+                claims.put(claim, value);
+            });
+        }
+        applyScopeOverride(claims, override);
+    }
+
+    /**
+     * The claims AWS lets no pre token generation trigger add, modify or suppress in an access token
+     * issued to a machine identity, and any claim in the reserved {@code cognito:} namespace.
+     */
+    private static boolean isMachineTokenProtectedClaim(String claim) {
+        return MACHINE_TOKEN_PROTECTED_CLAIMS.contains(claim) || claim.startsWith("cognito:");
     }
 
     private void validateClientSecret(UserPoolClient client, String clientSecret) {
@@ -6578,7 +6654,8 @@ public class CognitoService implements ResourceProvider {
         String prefix = pool.getId() + "::";
         boolean conflict = userStore.scan(key -> key.startsWith(prefix)).stream()
                 .filter(candidate -> !candidate.getUsername().equals(currentUser.getUsername()))
-                .filter(candidate -> value.equals(candidate.getAttributes().get(attributeName)))
+                .filter(candidate -> matchesSignInAttribute(pool, attributeName, value,
+                        candidate.getAttributes().get(attributeName)))
                 .anyMatch(candidate -> !aliasAttribute
                         || isActiveAliasAttribute(candidate, attributeName));
         if (conflict) {
@@ -6735,19 +6812,21 @@ public class CognitoService implements ResourceProvider {
 
     private boolean matchesAliasOrUsernameAttribute(UserPool pool, CognitoUser user,
             String username) {
-        if (username.equals(user.getAttributes().get("sub"))) {
+        if ((!usesAliasUsernames(pool)
+                && signInKey(pool, username).equals(signInKey(pool, user.getUsername())))
+                || username.equals(user.getAttributes().get("sub"))) {
             return true;
         }
 
         for (String attribute : pool.getAliasAttributes()) {
-            if (username.equals(user.getAttributes().get(attribute))
+            if (matchesSignInAttribute(pool, attribute, username, user.getAttributes().get(attribute))
                     && isActiveAliasAttribute(user, attribute)) {
                 return true;
             }
         }
 
         for (String attribute : pool.getUsernameAttributes()) {
-            if (username.equals(user.getAttributes().get(attribute))) {
+            if (matchesSignInAttribute(pool, attribute, username, user.getAttributes().get(attribute))) {
                 return true;
             }
         }
@@ -6805,11 +6884,40 @@ public class CognitoService implements ResourceProvider {
         throw new AwsException("InvalidParameterException", expected, 400);
     }
 
+    private boolean isCaseInsensitive(UserPool pool) {
+        return pool.getUsernameConfiguration() != null
+                && Boolean.FALSE.equals(pool.getUsernameConfiguration().get("CaseSensitive"));
+    }
+
+    String signInKey(UserPool pool, String value) {
+        return value != null && isCaseInsensitive(pool) ? value.toLowerCase(Locale.ROOT) : value;
+    }
+
+    private boolean matchesSignInAttribute(UserPool pool, String attribute, String supplied, String stored) {
+        return switch (attribute) {
+            case "email", "preferred_username" -> signInKey(pool, supplied).equals(signInKey(pool, stored));
+            default -> supplied.equals(stored);
+        };
+    }
+
+    private CognitoUser findUserByUsername(UserPool pool, String username) {
+        CognitoUser exact = userStore.get(userKey(pool.getId(), username)).orElse(null);
+        if (exact != null || usesAliasUsernames(pool) || !isCaseInsensitive(pool)) {
+            return exact;
+        }
+        String prefix = pool.getId() + "::";
+        String key = signInKey(pool, username);
+        return userStore.scan(k -> k.startsWith(prefix)).stream()
+                .filter(user -> key.equals(signInKey(pool, user.getUsername())))
+                .findFirst().orElse(null);
+    }
+
     /** Finds the single user in a pool whose {@code aliasAttr} equals {@code aliasValue}, or null. */
     private CognitoUser findUserByAlias(String poolId, String aliasAttr, String aliasValue) {
+        UserPool pool = describeUserPool(poolId);
         String prefix = poolId + "::";
         return userStore.scan(k -> k.startsWith(prefix)).stream()
-                .filter(u -> aliasValue.equals(u.getAttributes().get(aliasAttr)))
+                .filter(u -> matchesSignInAttribute(pool, aliasAttr, aliasValue, u.getAttributes().get(aliasAttr)))
                 .findFirst()
                 .orElse(null);
     }

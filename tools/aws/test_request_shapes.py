@@ -19,6 +19,7 @@ import pytest
 
 import regen_apigateway_documentation_shapes
 import regen_apigateway_shapes
+import regen_athena_shapes
 import regen_dynamodb_shapes
 import regen_ecr_shapes
 import regen_ecs_shapes
@@ -41,7 +42,7 @@ DYNAMODB_MODEL = {
         "NoInput": {},
     },
     "shapes": {
-        "ScanInput": {"type": "structure", "members": {
+        "ScanInput": {"type": "structure", "required": ["TableName"], "members": {
             "TableName": {"shape": "TableName"},
             "AttributesToGet": {"shape": "AttributeNameList"},
             "ExclusiveStartKey": {"shape": "Key"},
@@ -99,6 +100,13 @@ def test_keeps_only_input_shapes_and_their_types():
     assert doc["shapes"]["TableName"] == {"type": "string"}
     assert doc["shapes"]["AttributeNameList"] == {"type": "list", "member": "AttributeName"}
     assert doc["shapes"]["Key"] == {"type": "map", "value": "AttributeValue"}
+
+
+def test_keeps_required_members_only_when_asked():
+    doc = r.build(DYNAMODB_MODEL, "botocore test", "tools/aws/regen_dynamodb_shapes.py", required=True)
+
+    assert doc["shapes"]["ScanInput"]["required"] == ["TableName"]
+    assert "required" not in doc["shapes"]["DescribeLimitsInput"]
 
 
 def test_keeps_only_body_members_of_input_shapes():
@@ -204,13 +212,13 @@ def test_load_model_without_a_service_model_exits(tmp_path):
         r.load_model(tmp_path, Path("svc/2020-01-01"))
 
 
-@pytest.mark.parametrize("script, model, output", [
-    (regen_dynamodb_shapes, "dynamodb/2012-08-10", "dynamodb-request-shapes.json"),
-    (regen_sesv2_shapes, "sesv2/2019-09-27", "sesv2-request-shapes.json"),
-    (regen_apigateway_shapes, "apigateway/2015-07-09", "apigateway-request-shapes.json"),
-    (regen_ecs_shapes, "ecs/2014-11-13", "ecs-request-shapes.json"),
+@pytest.mark.parametrize("script, model, output, options", [
+    (regen_dynamodb_shapes, "dynamodb/2012-08-10", "dynamodb-request-shapes.json", {"required": True}),
+    (regen_sesv2_shapes, "sesv2/2019-09-27", "sesv2-request-shapes.json", {}),
+    (regen_apigateway_shapes, "apigateway/2015-07-09", "apigateway-request-shapes.json", {}),
+    (regen_ecs_shapes, "ecs/2014-11-13", "ecs-request-shapes.json", {}),
 ])
-def test_each_script_runs_the_shared_main_with_its_model_and_output(script, model, output, monkeypatch):
+def test_each_script_runs_the_shared_main_with_its_model_and_output(script, model, output, options, monkeypatch):
     calls = []
     monkeypatch.setattr(r, "main", lambda argv, **kwargs: calls.append((argv, kwargs)) or 0)
 
@@ -220,6 +228,7 @@ def test_each_script_runs_the_shared_main_with_its_model_and_output(script, mode
         "model": Path(model),
         "output": r.REPO_ROOT / "src/main/resources/aws" / output,
         "description": script.__doc__,
+        **options,
     })]
 
 
@@ -244,6 +253,32 @@ CONSTRAINED_MODEL = {
         "Other": {"type": "string"},
     },
 }
+
+
+def test_athena_generator_keeps_constraints_for_every_operation_and_detects_new_operations(tmp_path, monkeypatch):
+    output = tmp_path / "athena-request-shapes.json"
+    monkeypatch.setattr(r, "resolve_botocore_data", lambda explicit: (tmp_path, "botocore test"))
+    monkeypatch.setattr(r, "load_model", lambda data, model: CONSTRAINED_MODEL)
+    args = ["--output", str(output)]
+
+    assert regen_athena_shapes.MODEL == Path("athena/2017-05-18")
+    assert regen_athena_shapes.main(args) == 0
+    doc = json.loads(output.read_text())
+    assert doc["operations"] == {"Put": "PutRequest", "Unused": "UnusedRequest"}
+    assert doc["shapes"]["Name"]["min"] == 1
+    assert doc["shapes"]["Name"]["pattern"] == "[a-z]+"
+    assert doc["shapes"]["PutRequest"]["required"] == ["name"]
+    assert doc["shapes"]["Kind"]["enum"] == ["A", "B"]
+    assert doc["shapes"]["RuleList"]["max"] == 25
+    assert doc["shapes"]["TagMap"]["key"] == "Name"
+    assert regen_athena_shapes.main(["--check", *args]) == 0
+
+    changed = {**CONSTRAINED_MODEL, "operations": {**CONSTRAINED_MODEL["operations"],
+                                                "NewOperation": {"input": {"shape": "PutRequest"}}}}
+    monkeypatch.setattr(r, "load_model", lambda data, model: changed)
+    assert regen_athena_shapes.main(["--check", *args]) == 1
+    assert regen_athena_shapes.main(args) == 0
+    assert "NewOperation" in json.loads(output.read_text())["operations"]
 
 
 def test_build_constraints_keeps_the_named_operations_with_their_constraints():
@@ -375,8 +410,8 @@ def test_each_payment_cryptography_script_runs_the_shared_main_with_every_operat
         "script": script.__file__,
         "model": Path(model),
         "output": r.REPO_ROOT / "src/main/resources/aws" / output,
-        "description": script.__doc__,
-        "all_operations": True,
+        "description": script.__doc__ or "",
+        "constraints": True,
         "prepare": r.widen_partition_and_region,
     })]
 
@@ -419,21 +454,19 @@ def test_each_payment_cryptography_file_carries_every_operation_the_model_names(
     assert_shapes_resolve(doc)
 
 
-def test_model_operations_names_every_operation_the_model_has():
-    # The list is the model's, so a generator that asks for it covers an operation AWS
-    # publishes without anyone adding it to a list.
-    model = {"operations": {"Put": {}, "Get": {}, "Delete": {}}, "shapes": {}}
-
-    assert r.model_operations(model) == ("Delete", "Get", "Put")
-
-
-def test_build_constraints_leaves_out_an_operation_without_an_input():
-    # An operation the model names without an input has no request to constrain.
+def test_main_leaves_out_an_operation_without_an_input(tmp_path, monkeypatch):
+    # An operation the model names without an input has no request to constrain, and the
+    # generator that asks for every operation leaves it out.
     model = {"operations": {"Put": {"input": {"shape": "PutRequest"}}, "Nothing": {}},
              "shapes": {"PutRequest": {"type": "structure", "members": {}}}}
+    output = tmp_path / "shapes.json"
+    monkeypatch.setattr(r, "resolve_botocore_data", lambda explicit: (tmp_path, "botocore test"))
+    monkeypatch.setattr(r, "load_model", lambda data, path: model)
 
-    doc = r.build_constraints(model, r.model_operations(model), "botocore test", "tools/aws/regen_x_shapes.py")
+    assert r.main(["--output", str(output)], script=__file__, model=Path("x"), output=output,
+                  description="test", constraints=True) == 0
 
+    doc = json.loads(output.read_text())
     assert doc["operations"] == {"Put": "PutRequest"}
 
 

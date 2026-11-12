@@ -429,6 +429,8 @@ disabled fails with Lambda's error as the resource status reason.
 
 Function URLs are also reachable directly on `/{proxy:.*}` under the Lambda URL controller, which routes the request into the normal `Invoke` path.
 
+A function URL with `InvokeMode: RESPONSE_STREAM` streams the response: each chunk the handler writes reaches the caller as it is written. When the handler uses `awslambda.HttpResponseStream.from`, the status code, headers and cookies come from its prelude. Otherwise the response is a `200` with the content type the handler set, `application/octet-stream` by default. A function that fails before its stream starts, in its init or by timing out, answers `502`. An error the handler throws ends the body where it stopped, an empty `200` if it wrote nothing: the runtime reports it in HTTP trailers, which Floci's runtime API does not read. A handler that does not stream is answered as with `BUFFERED`.
+
 Function URLs are not available in AWS GovCloud (US) or in the China Regions
 ([GovCloud guide](https://docs.aws.amazon.com/govcloud-us/latest/UserGuide/govcloud-lambda.html),
 [China guide](https://docs.amazonaws.cn/en_us/aws/latest/userguide/lambda.html)), so
@@ -967,7 +969,9 @@ invocation to time out.
 
 **Floci solves this automatically** by running an embedded DNS server (UDP/53)
 on its container IP. All Lambda containers launched by Floci are configured to
-use it as their DNS resolver. The embedded DNS server:
+use it as their DNS resolver. It binds that advertised IP so replies retain the
+queried source address even when the container has multiple network interfaces.
+The embedded DNS server:
 
 - Resolves `*.localhost.floci.io` → Floci's Docker network IP
 - Forwards all other queries to the upstream resolver(s) from `/etc/resolv.conf`,

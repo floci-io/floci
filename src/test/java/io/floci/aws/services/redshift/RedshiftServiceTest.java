@@ -898,6 +898,7 @@ class RedshiftServiceTest {
     private RedshiftServerlessService zeroEtlServerless;
     private EmulatorConfig config;
     private S3Service zeroEtlS3;
+    private RedshiftS3AutoCopyConsumer autoCopyConsumer;
     private RedshiftService service;
 
     @BeforeEach
@@ -971,10 +972,12 @@ class RedshiftServiceTest {
         zeroEtlServerless = mock(RedshiftServerlessService.class);
         zeroEtlS3 = mock(S3Service.class);
         when(zeroEtlS3.ownsBucket(any())).thenReturn(true);
+        autoCopyConsumer = mock(RedshiftS3AutoCopyConsumer.class);
         service = new RedshiftService(sf, cm, config, regionResolver, proxyManager, dockerHostResolver,
                 credentialBroker, secretsManagerService, mapper,
                 new DynamoDbApiStreamReader(streams, CheckpointLifetime.PROCESS), null, events, integrationEvents,
-                new RedshiftZeroEtlEndpoints(zeroEtlDynamoDb, zeroEtlServerless, zeroEtlS3, regionResolver));
+                new RedshiftZeroEtlEndpoints(zeroEtlDynamoDb, zeroEtlServerless, zeroEtlS3, regionResolver),
+                autoCopyConsumer);
     }
 
     private static final String ORDERS_TABLE_ARN = "arn:aws:dynamodb:us-east-1:111111111111:table/orders";
@@ -1320,6 +1323,25 @@ class RedshiftServiceTest {
 
         verify(integrationBackend).delete("s3-one");
         verify(integrationEvents, never()).queue(any(), any(), any(), any());
+    }
+
+    @Test
+    void deletingAnS3IntegrationDisablesJobsBeforeRemovingItsMetadata() {
+        Integration stored = new Integration();
+        stored.setIntegrationArn("arn:aws:redshift:us-east-1:111111111111:integration:s3-one");
+        stored.setSourceType("s3-event-notifications");
+        when(integrationBackend.keys()).thenReturn(Set.of("s3-one"));
+        when(integrationBackend.get("s3-one")).thenReturn(Optional.of(stored));
+        doThrow(new AwsException("InvalidClusterState", "Paused", 400)).when(autoCopyConsumer).disable(stored);
+
+        assertThrows(AwsException.class, () -> service.deleteIntegration(stored.getIntegrationArn()));
+        verify(integrationBackend, never()).delete(any());
+        clearInvocations(autoCopyConsumer, integrationBackend);
+        doNothing().when(autoCopyConsumer).disable(stored);
+        service.deleteIntegration(stored.getIntegrationArn());
+        InOrder order = inOrder(autoCopyConsumer, integrationBackend);
+        order.verify(autoCopyConsumer).disable(stored);
+        order.verify(integrationBackend).delete("s3-one");
     }
 
     @Test
@@ -2537,6 +2559,87 @@ class RedshiftServiceTest {
             Files.deleteIfExists(sourceDump);
             Files.deleteIfExists(copiedDump);
         }
+    }
+
+    @Test
+    void modifyClusterSnapshotSuccess() {
+        Snapshot manualSnap = snapshotOf("snap-1", "my-cluster");
+        manualSnap.setStatus("available");
+        manualSnap.setManualSnapshotRetentionPeriod(-1);
+
+        when(snapshotBackend.get("snap-1")).thenReturn(Optional.of(manualSnap));
+        when(snapshotCopyBackend.get(anyString())).thenReturn(Optional.empty());
+
+        Snapshot modified = service.modifyClusterSnapshot("snap-1", 45);
+
+        assertNotNull(modified);
+        assertEquals(45, modified.getManualSnapshotRetentionPeriod());
+        verify(snapshotBackend).putAllAtomically(any());
+        verify(snapshotBackend).flush();
+    }
+
+    @Test
+    void modifyClusterSnapshotNotFound() {
+        when(snapshotBackend.get("missing-snap")).thenReturn(Optional.empty());
+        when(snapshotCopyBackend.get(anyString())).thenReturn(Optional.empty());
+
+        AwsException ex = assertThrows(AwsException.class, () ->
+                service.modifyClusterSnapshot("missing-snap", 30));
+        assertEquals("ClusterSnapshotNotFound", ex.getErrorCode());
+        assertEquals(404, ex.getHttpStatus());
+    }
+
+    @Test
+    void modifyClusterSnapshotAutomatedSnapshotRejected() {
+        automatedSnapshot("auto-snap-1");
+        when(snapshotCopyBackend.get(anyString())).thenReturn(Optional.empty());
+
+        AwsException ex = assertThrows(AwsException.class, () ->
+                service.modifyClusterSnapshot("auto-snap-1", 30));
+        assertEquals("InvalidClusterSnapshotState", ex.getErrorCode());
+        assertEquals(400, ex.getHttpStatus());
+    }
+
+    @Test
+    void modifyClusterSnapshotNotAvailableRejected() {
+        Snapshot manualSnap = snapshotOf("snap-1", "my-cluster");
+        manualSnap.setStatus("creating");
+
+        when(snapshotBackend.get("snap-1")).thenReturn(Optional.of(manualSnap));
+        when(snapshotCopyBackend.get(anyString())).thenReturn(Optional.empty());
+
+        AwsException ex = assertThrows(AwsException.class, () ->
+                service.modifyClusterSnapshot("snap-1", 30));
+        assertEquals("InvalidClusterSnapshotState", ex.getErrorCode());
+        assertEquals(400, ex.getHttpStatus());
+    }
+
+    @Test
+    void modifyClusterSnapshotInvalidRetentionPeriod() {
+        AwsException ex1 = assertThrows(AwsException.class, () ->
+                service.modifyClusterSnapshot("snap-1", 0));
+        assertEquals("InvalidRetentionPeriodFault", ex1.getErrorCode());
+        assertEquals(400, ex1.getHttpStatus());
+
+        AwsException ex2 = assertThrows(AwsException.class, () ->
+                service.modifyClusterSnapshot("snap-1", 3654));
+        assertEquals("InvalidRetentionPeriodFault", ex2.getErrorCode());
+        assertEquals(400, ex2.getHttpStatus());
+    }
+
+    @Test
+    void modifyClusterSnapshotWithoutRetentionPreservesExistingSettings() {
+        Snapshot snapshot = snapshotOf("snap-1", "my-cluster");
+        snapshot.setStatus("available");
+        snapshot.setManualSnapshotRetentionPeriod(7);
+        when(snapshotBackend.get("snap-1")).thenReturn(Optional.of(snapshot));
+
+        Snapshot modified = service.modifyClusterSnapshot("snap-1", null, true);
+
+        assertSame(snapshot, modified);
+        assertEquals(7, modified.getManualSnapshotRetentionPeriod());
+        verify(snapshotBackend, never()).putAllAtomically(any());
+        verify(snapshotBackend, never()).deleteAllAtomically(any());
     }
 
     @Test

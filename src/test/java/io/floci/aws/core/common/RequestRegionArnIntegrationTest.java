@@ -161,9 +161,17 @@ class RequestRegionArnIntegrationTest {
                 .statusCode(200)
                 .body("CreateUserResponse.CreateUserResult.ARN", startsWith("arn:aws:elasticache:" + REGION + ":"));
 
-        // Users are not stored per region, so another region can read this one; its ARN must not change.
+        // A user is Regional: another Region does not find it, and its own Region reads it with the ARN minted there.
         given()
                 .header("Authorization", auth(OTHER_REGION, "elasticache"))
+                .formParam("Action", "DescribeUsers")
+                .formParam("UserId", "region-arn-user")
+            .when()
+                .post("/")
+            .then()
+                .statusCode(404);
+        given()
+                .header("Authorization", auth("elasticache"))
                 .formParam("Action", "DescribeUsers")
                 .formParam("UserId", "region-arn-user")
             .when()

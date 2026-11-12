@@ -3,6 +3,7 @@ package io.floci.aws.core.common;
 import com.fasterxml.jackson.databind.JsonNode;
 import io.floci.aws.config.EmulatorConfig;
 import io.floci.aws.services.cloudtrail.CloudTrailService;
+import io.floci.aws.services.cloudwatch.metrics.OtlpMetricsController;
 import io.floci.aws.services.iam.AccessDeniedMessages;
 import io.floci.aws.services.iam.AccessDeniedMessages.PolicyType;
 import io.floci.aws.services.iam.IamActionRegistry;
@@ -363,6 +364,12 @@ public class IamEnforcementFilter implements ContainerRequestFilter {
         boolean emptyHeader = auth != null && auth.isBlank();
         if (auth == null || emptyHeader) {
             auth = requestAuthorization(null, ctx.getUriInfo().getQueryParameters());
+        }
+        if (resourceInfo != null && resourceInfo.getResourceClass() == OtlpMetricsController.class
+                && (auth == null || !claimsSigV4(auth))) {
+            ctx.abortWith(AwsProtocolClaimFilter.errorResponse(403, "MissingAuthenticationTokenException",
+                    "Request is missing Authentication Token"));
+            return;
         }
         if (auth == null) {
             if (emptyHeader) {
@@ -1241,7 +1248,8 @@ public class IamEnforcementFilter implements ContainerRequestFilter {
                                   String action, String operationAction, String credentialScope,
                                   List<String> resources, List<Map<String, List<String>>> targetContexts,
                                   String region, String accountId, String akid) {
-        for (String resource : resources) {
+        for (int resourceIndex = 0; resourceIndex < resources.size(); resourceIndex++) {
+            String resource = resources.get(resourceIndex);
             List<ResourcePolicyProvider.ResourcePolicy> resourcePolicies =
                     resolveResourcePolicies(credentialScope, operationAction, resource);
             String resourceOwnerAccountId = resourcePolicies.isEmpty() ? null : resourcePolicies.getFirst().ownerAccountId();
@@ -1259,6 +1267,11 @@ public class IamEnforcementFilter implements ContainerRequestFilter {
             List<Map<String, List<String>>> batchContexts = "dynamodb".equals(credentialScope)
                     ? conditionContextResolver.dynamoDbBatchConditionContexts(action, ctx, resource) : null;
             List<Map<String, List<String>>> resourceContexts = targetContexts;
+            if (RequestResources.hasIndividualTargets(operationAction) && !"*".equals(resource)
+                    && resources.size() == targetContexts.size()) {
+                // Generated target lists preserve request order; wildcard targets retain every context.
+                resourceContexts = targetContexts.subList(resourceIndex, resourceIndex + 1);
+            }
             if (batchContexts != null && !batchContexts.isEmpty()) {
                 resourceContexts = new ArrayList<>();
                 for (Map<String, List<String>> targetContext : targetContexts) {
@@ -1444,6 +1457,20 @@ public class IamEnforcementFilter implements ContainerRequestFilter {
             String resource,
             Map<String, List<String>> requestConditions) {
         authorizeAdditionalResource(authorizationHeader, action, resource, null, null, null, requestConditions);
+    }
+
+    /**
+     * Authorizes a secondary resource for a request {@link #filter} never sees, such as a WebSocket upgrade,
+     * with the condition keys the request carries in the members {@code request-condition-keys.json} names
+     * for {@code action}, read through {@code parameter}.
+     */
+    public void authorizeRequestParameters(
+            String authorizationHeader,
+            String action,
+            String resource,
+            Function<String, String> parameter) {
+        authorizeAdditionalResource(authorizationHeader, action, resource,
+                IamConditionContextResolver.requestConditions(action, parameter));
     }
 
     /**

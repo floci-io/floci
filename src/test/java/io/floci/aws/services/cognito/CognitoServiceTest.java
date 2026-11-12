@@ -39,9 +39,6 @@ import org.junit.jupiter.params.provider.CsvSource;
 import org.junit.jupiter.params.provider.ValueSource;
 import org.mockito.ArgumentCaptor;
 
-import javax.crypto.Mac;
-import javax.crypto.spec.SecretKeySpec;
-
 import java.lang.management.ManagementFactory;
 import java.lang.management.ThreadInfo;
 import java.lang.management.ThreadMXBean;
@@ -70,6 +67,7 @@ import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.Function;
 
+import static io.floci.aws.services.cognito.CognitoSecretHashTestHelper.secretHash;
 import static io.floci.aws.testing.InlineMocks.inlineMock;
 import static org.junit.jupiter.api.Assertions.*;
 import static org.mockito.ArgumentMatchers.any;
@@ -5491,11 +5489,7 @@ class CognitoServiceTest {
         UserPool pool = createPoolAndUser();
         UserPoolClient client = openClient(service, pool.getId(), "c", true);
 
-        Mac mac = Mac.getInstance("HmacSHA256");
-        mac.init(new SecretKeySpec(
-                client.getClientSecret().getBytes(StandardCharsets.UTF_8), "HmacSHA256"));
-        String secretHash = Base64.getEncoder().encodeToString(
-                mac.doFinal(("alice" + client.getClientId()).getBytes(StandardCharsets.UTF_8)));
+        String secretHash = secretHash(client.getClientId(), client.getClientSecret(), "alice");
 
         Map<String, Object> result = service.initiateAuth(client.getClientId(), "USER_PASSWORD_AUTH",
                 Map.of("USERNAME", "alice",
@@ -5975,6 +5969,224 @@ class CognitoServiceTest {
         req.put("PoolName", "EmailAliasPool");
         req.put("UsernameAttributes", List.of("email"));
         return service.createUserPool(req, "us-east-1");
+    }
+
+    @Nested
+    class CaseInsensitiveSignIn {
+        private UserPool pool() {
+            return service.createUserPool(Map.of("PoolName", "case-insensitive",
+                    "UsernameAttributes", List.of("email"),
+                    "UsernameConfiguration", Map.of("CaseSensitive", false)), "us-east-1");
+        }
+
+        @ParameterizedTest
+        @ValueSource(booleans = {false, true})
+        void emailLookupRespectsExplicitCaseSensitivity(boolean caseSensitive) {
+            UserPool pool = pool();
+            pool.setUsernameConfiguration(Map.of("CaseSensitive", caseSensitive));
+            CognitoUser user = service.adminCreateUser(pool.getId(), "Fixture@Example.com", Map.of(), null);
+            assertEquals(user.getUsername(), service.adminGetUser(pool.getId(), "Fixture@Example.com").getUsername());
+            if (caseSensitive) {
+                AwsException error = assertThrows(AwsException.class,
+                        () -> service.adminGetUser(pool.getId(), "fixture@example.com"));
+                assertEquals("UserNotFoundException", error.getErrorCode());
+            } else {
+                assertEquals(user.getUsername(), service.adminGetUser(pool.getId(), "fixture@example.com").getUsername());
+            }
+        }
+
+        @Test
+        void omittedCaseSensitivityKeepsExactEmailMatching() {
+            UserPool pool = createEmailAliasPool();
+            service.adminCreateUser(pool.getId(), "fixture@example.com", Map.of(), null);
+            AwsException error = assertThrows(AwsException.class,
+                    () -> service.adminGetUser(pool.getId(), "Fixture@Example.com"));
+            assertEquals("UserNotFoundException", error.getErrorCode());
+        }
+
+        @ParameterizedTest
+        @ValueSource(booleans = {false, true})
+        void passwordAndSrpAuthKeepCanonicalIdentity(boolean admin) throws Exception {
+            UserPool pool = pool();
+            String password = "Valid-password123!";
+            CognitoUser user = service.adminCreateUser(pool.getId(), "fixture@example.com", Map.of(), null);
+            service.adminSetUserPassword(pool.getId(), user.getUsername(), password, true);
+            UserPoolClient client = service.createUserPoolClient(pool.getId(), "client", true, false, List.of(), List.of());
+            client.setExplicitAuthFlows(List.of("ALLOW_USER_PASSWORD_AUTH", "ALLOW_ADMIN_USER_PASSWORD_AUTH",
+                    "ALLOW_USER_SRP_AUTH"));
+            String supplied = "Fixture@Example.com";
+            String secretHash = secretHash(client.getClientId(), client.getClientSecret(), supplied);
+            Map<String, String> params = Map.of("USERNAME", supplied, "PASSWORD", password, "SECRET_HASH", secretHash);
+            Map<String, Object> authenticated = initiateAuth(admin, pool, client, "USER_PASSWORD_AUTH", params);
+            Map<?, ?> tokens = (Map<?, ?>) authenticated.get("AuthenticationResult");
+            String accessToken = (String) tokens.get("AccessToken");
+            JsonNode claims = new ObjectMapper().readTree(Base64.getUrlDecoder().decode(accessToken.split("\\.")[1]));
+            assertEquals(user.getUsername(), claims.path("sub").asText());
+            assertEquals(user.getUsername(), claims.path("username").asText());
+
+            Map<String, String> srpParams = Map.of("USERNAME", supplied,
+                    "SRP_A", CognitoSrpTestClient.publicA(), "SECRET_HASH", secretHash);
+            Map<String, Object> started = initiateAuth(admin, pool, client, "USER_SRP_AUTH", srpParams);
+            Map<?, ?> challenge = (Map<?, ?>) started.get("ChallengeParameters");
+            assertEquals(user.getUsername(), challenge.get("USER_ID_FOR_SRP"));
+            Map<String, String> proof = new HashMap<>(CognitoSrpTestClient.proof(
+                    pool.getId(), user.getUsername(), password, challenge));
+            proof.put("SECRET_HASH", secretHash(client.getClientId(), client.getClientSecret(), user.getUsername()));
+            Map<String, Object> completed = respondToChallenge(admin, pool, client, "PASSWORD_VERIFIER", (String) started.get("Session"), proof);
+            assertNotNull(completed.get("AuthenticationResult"));
+        }
+
+        private Map<String, Object> initiateAuth(boolean admin, UserPool pool, UserPoolClient client,
+                                                 String flow, Map<String, String> params) {
+            return admin ? service.adminInitiateAuth(pool.getId(), client.getClientId(),
+                    "USER_PASSWORD_AUTH".equals(flow) ? "ADMIN_USER_PASSWORD_AUTH" : flow, params)
+                    : service.initiateAuth(client.getClientId(), flow, params);
+        }
+
+        private Map<String, Object> respondToChallenge(boolean admin, UserPool pool, UserPoolClient client,
+                                                      String challenge, String session, Map<String, String> responses) {
+            return admin ? service.adminRespondToAuthChallenge(pool.getId(), client.getClientId(),
+                    challenge, session, responses)
+                    : service.respondToAuthChallenge(client.getClientId(), challenge, session, responses);
+        }
+
+        @ParameterizedTest
+        @CsvSource({"false,false", "true,false", "false,true", "true,true", "false,default", "true,default"})
+        void srpChallengeRespectsUsernameCaseSensitivity(boolean admin, String setting) throws Exception {
+            UserPool pool = service.createUserPool(Map.of("PoolName", "classic-srp-case"), "us-east-1");
+            if (!"default".equals(setting)) {
+                pool.setUsernameConfiguration(Map.of("CaseSensitive", Boolean.parseBoolean(setting)));
+            }
+            String password = "Valid-password123!";
+            CognitoUser user = service.adminCreateUser(pool.getId(), "Fixture", Map.of(), null);
+            service.adminSetUserPassword(pool.getId(), user.getUsername(), password, true);
+            UserPoolClient client = service.createUserPoolClient(pool.getId(), "client", true, false, List.of(), List.of());
+            client.setExplicitAuthFlows(List.of("ALLOW_USER_SRP_AUTH"));
+            String supplied = "false".equals(setting) ? "fixture" : user.getUsername();
+            Map<String, Object> started = initiateAuth(admin, pool, client, "USER_SRP_AUTH",
+                    Map.of("USERNAME", supplied, "SRP_A", CognitoSrpTestClient.publicA(),
+                            "SECRET_HASH", secretHash(client.getClientId(), client.getClientSecret(), supplied)));
+            Map<?, ?> challenge = (Map<?, ?>) started.get("ChallengeParameters");
+            assertEquals("Fixture", challenge.get("USER_ID_FOR_SRP"));
+            String session = (String) started.get("Session");
+            Map<String, String> proof = new HashMap<>(CognitoSrpTestClient.proof(
+                    pool.getId(), user.getUsername(), password, challenge));
+            proof.remove("USERNAME");
+            assertEquals("InvalidParameterException", assertThrows(AwsException.class,
+                    () -> respondToChallenge(admin, pool, client, "PASSWORD_VERIFIER", session, proof)).getErrorCode());
+            proof.put("USERNAME", "other");
+            proof.put("SECRET_HASH", secretHash(client.getClientId(), client.getClientSecret(), "other"));
+            assertEquals("NotAuthorizedException", assertThrows(AwsException.class,
+                    () -> respondToChallenge(admin, pool, client, "PASSWORD_VERIFIER", session, proof)).getErrorCode());
+            proof.put("USERNAME", "fixture");
+            proof.put("SECRET_HASH", secretHash(client.getClientId(), client.getClientSecret(), "fixture"));
+            if (!"false".equals(setting)) {
+                assertEquals("NotAuthorizedException", assertThrows(AwsException.class,
+                        () -> respondToChallenge(admin, pool, client, "PASSWORD_VERIFIER", session, proof)).getErrorCode());
+                proof.put("USERNAME", user.getUsername());
+                proof.put("SECRET_HASH", secretHash(client.getClientId(), client.getClientSecret(), user.getUsername()));
+            }
+            Map<?, ?> tokens = (Map<?, ?>) respondToChallenge(admin, pool, client, "PASSWORD_VERIFIER", session, proof).get("AuthenticationResult");
+            String accessToken = (String) tokens.get("AccessToken");
+            JsonNode claims = new ObjectMapper().readTree(Base64.getUrlDecoder().decode(accessToken.split("\\.")[1]));
+            assertEquals("Fixture", claims.path("username").asText());
+            assertEquals(user.getAttributes().get("sub"), claims.path("sub").asText());
+        }
+
+        @ParameterizedTest
+        @CsvSource({"false,false", "true,false", "false,true", "true,true", "false,default", "true,default"})
+        void newPasswordChallengeRespectsUsernameCaseSensitivity(boolean admin, String setting) throws Exception {
+            UserPool pool = service.createUserPool(Map.of("PoolName", "classic-password-case"), "us-east-1");
+            if (!"default".equals(setting)) {
+                pool.setUsernameConfiguration(Map.of("CaseSensitive", Boolean.parseBoolean(setting)));
+            }
+            String temporaryPassword = "Temporary-password123!";
+            CognitoUser user = service.adminCreateUser(pool.getId(), "Fixture", Map.of(), temporaryPassword);
+            UserPoolClient client = service.createUserPoolClient(pool.getId(), "client", true, false, List.of(), List.of());
+            client.setExplicitAuthFlows(List.of("ALLOW_USER_PASSWORD_AUTH", "ALLOW_ADMIN_USER_PASSWORD_AUTH"));
+            String supplied = "false".equals(setting) ? "fixture" : user.getUsername();
+            Map<String, Object> started = initiateAuth(admin, pool, client, "USER_PASSWORD_AUTH",
+                    Map.of("USERNAME", supplied, "PASSWORD", temporaryPassword,
+                            "SECRET_HASH", secretHash(client.getClientId(), client.getClientSecret(), supplied)));
+            assertEquals("NEW_PASSWORD_REQUIRED", started.get("ChallengeName"));
+            String session = (String) started.get("Session");
+            String newPassword = "Permanent-password123!";
+            Map<String, String> responses = new HashMap<>(Map.of("NEW_PASSWORD", newPassword));
+            assertEquals("NotAuthorizedException", assertThrows(AwsException.class,
+                    () -> respondToChallenge(admin, pool, client, "NEW_PASSWORD_REQUIRED", session, responses))
+                    .getErrorCode());
+            responses.put("USERNAME", "other");
+            responses.put("SECRET_HASH", secretHash(client.getClientId(), client.getClientSecret(), "other"));
+            assertEquals("NotAuthorizedException", assertThrows(AwsException.class,
+                    () -> respondToChallenge(admin, pool, client, "NEW_PASSWORD_REQUIRED", session, responses))
+                    .getErrorCode());
+            responses.put("USERNAME", "fixture");
+            responses.put("SECRET_HASH", secretHash(client.getClientId(), client.getClientSecret(), "fixture"));
+            if (!"false".equals(setting)) {
+                assertEquals("NotAuthorizedException", assertThrows(AwsException.class,
+                        () -> respondToChallenge(admin, pool, client, "NEW_PASSWORD_REQUIRED", session, responses))
+                        .getErrorCode());
+                responses.put("USERNAME", user.getUsername());
+                responses.put("SECRET_HASH", secretHash(client.getClientId(), client.getClientSecret(), user.getUsername()));
+            }
+            Map<?, ?> tokens = (Map<?, ?>) respondToChallenge(admin, pool, client, "NEW_PASSWORD_REQUIRED",
+                    session, responses).get("AuthenticationResult");
+            assertNotNull(tokens.get("AccessToken"));
+            assertEquals("Fixture", service.adminGetUser(pool.getId(), supplied).getUsername());
+            assertNotNull(initiateAuth(admin, pool, client, "USER_PASSWORD_AUTH",
+                    Map.of("USERNAME", supplied, "PASSWORD", newPassword, "SECRET_HASH",
+                            secretHash(client.getClientId(), client.getClientSecret(), supplied)))
+                    .get("AuthenticationResult"));
+        }
+
+        @Test
+        void duplicateEmailCreationAndUpdatesUseTheSameComparison() {
+            UserPool pool = pool();
+            CognitoUser user = service.adminCreateUser(pool.getId(), "fixture@example.com",
+                    Map.of("email_verified", "true"), null);
+            AwsException duplicate = assertThrows(AwsException.class,
+                    () -> service.adminCreateUser(pool.getId(), "Fixture@Example.com", Map.of(), null));
+            assertEquals("AliasExistsException", duplicate.getErrorCode());
+            UserPoolClient client = service.createUserPoolClient(pool.getId(), "client", false, false, List.of(), List.of());
+            AwsException signup = assertThrows(AwsException.class, () -> service.signUp(client.getClientId(),
+                    "Fixture@Example.com", "Valid-password123!", Map.of(), Map.of(), Map.of()));
+            assertEquals("UsernameExistsException", signup.getErrorCode());
+
+            CognitoUser other = service.adminCreateUser(pool.getId(), "other@example.com", Map.of(), null);
+            AwsException update = assertThrows(AwsException.class, () -> service.adminUpdateUserAttributes(
+                    pool.getId(), other.getUsername(), Map.of("email", "Fixture@Example.com")));
+            assertEquals("AliasExistsException", update.getErrorCode());
+            service.adminSetUserPassword(pool.getId(), other.getUsername(), "Valid-password123!", true);
+            client.setExplicitAuthFlows(List.of("ALLOW_USER_PASSWORD_AUTH"));
+            Map<?, ?> tokens = (Map<?, ?>) service.initiateAuth(client.getClientId(), "USER_PASSWORD_AUTH",
+                    Map.of("USERNAME", other.getUsername(), "PASSWORD", "Valid-password123!"))
+                    .get("AuthenticationResult");
+            AwsException selfUpdate = assertThrows(AwsException.class, () -> service.updateUserAttributes(
+                    (String) tokens.get("AccessToken"), Map.of("email", "Fixture@Example.com")));
+            assertEquals("AliasExistsException", selfUpdate.getErrorCode());
+            service.adminUpdateUserAttributes(pool.getId(), user.getUsername(), Map.of("email", "Changed@Example.com"));
+            assertEquals(user.getUsername(), service.adminGetUser(pool.getId(), "changed@example.com").getUsername());
+            assertThrows(AwsException.class, () -> service.adminGetUser(pool.getId(), "fixture@example.com"));
+            assertEquals(user.getUsername(), service.adminGetUser(pool.getId(), user.getUsername()).getAttributes().get("sub"));
+        }
+
+        @Test
+        void classicUsernameAndPreferredUsernameAliasRespectTheSetting() {
+            UserPool pool = service.createUserPool(Map.of("PoolName", "classic-case-insensitive",
+                    "AliasAttributes", List.of("preferred_username"),
+                    "UsernameConfiguration", Map.of("CaseSensitive", false)), "us-east-1");
+            CognitoUser user = service.adminCreateUser(pool.getId(), "Fixture",
+                    Map.of("preferred_username", "Nickname"), null);
+            assertEquals(user.getUsername(), service.adminGetUser(pool.getId(), "fixture").getUsername());
+            assertEquals(user.getUsername(), service.adminGetUser(pool.getId(), "NICKNAME").getUsername());
+            AwsException duplicate = assertThrows(AwsException.class,
+                    () -> service.adminCreateUser(pool.getId(), "FIXTURE", Map.of(), null));
+            assertEquals("UsernameExistsException", duplicate.getErrorCode());
+            UserPoolClient client = service.createUserPoolClient(pool.getId(), "client", false, false, List.of(), List.of());
+            AwsException signup = assertThrows(AwsException.class, () -> service.signUp(client.getClientId(),
+                    "FIXTURE", "Valid-password123!", Map.of(), Map.of(), Map.of()));
+            assertEquals("UsernameExistsException", signup.getErrorCode());
+        }
     }
 
     private static boolean isUuid(String value) {
@@ -7198,5 +7410,92 @@ class CognitoServiceTest {
             assertEquals("true", after.getAttributes().get("email_verified"));
             assertEquals(holder.getUsername(), svc.adminGetUser(pool.getId(), "alice@example.com").getUsername());
         }
+    }
+
+    // --- replaceGroupDescription: a service method that does not exist on main ---
+
+    private UserPool poolWithGroup(String groupName, String description) {
+        UserPool pool = service.createUserPool(Map.of("PoolName", "replace-pool-" + groupName), "us-east-1");
+        service.createGroup(pool.getId(), groupName, description, 7, "arn:aws:iam::000000000000:role/admins");
+        return pool;
+    }
+
+    @Test
+    void replaceGroupDescriptionStoresTheGivenValueAndReturnsTheUpdatedGroup() {
+        UserPool pool = poolWithGroup("set", "old");
+
+        CognitoGroup returned = service.replaceGroupDescription(pool.getId(), "set", "new");
+
+        assertEquals("new", returned.getDescription());
+        assertEquals("new", service.getGroup(pool.getId(), "set").getDescription());
+    }
+
+    @Test
+    void replaceGroupDescriptionWithNullClearsTheStoredValue() {
+        UserPool pool = poolWithGroup("nulled", "old");
+
+        CognitoGroup returned = service.replaceGroupDescription(pool.getId(), "nulled", null);
+
+        assertNull(returned.getDescription());
+        assertNull(service.getGroup(pool.getId(), "nulled").getDescription());
+    }
+
+    @Test
+    void replaceGroupDescriptionStoresTheEmptyStringAsGiven() {
+        UserPool pool = poolWithGroup("blank", "old");
+
+        service.replaceGroupDescription(pool.getId(), "blank", "");
+
+        assertEquals("", service.getGroup(pool.getId(), "blank").getDescription());
+    }
+
+    @Test
+    void replaceGroupDescriptionLeavesPrecedenceAndRoleArnUntouched() {
+        UserPool pool = poolWithGroup("others", "old");
+
+        service.replaceGroupDescription(pool.getId(), "others", null);
+
+        CognitoGroup stored = service.getGroup(pool.getId(), "others");
+        assertEquals(Integer.valueOf(7), stored.getPrecedence());
+        assertEquals("arn:aws:iam::000000000000:role/admins", stored.getRoleArn());
+    }
+
+    @Test
+    void replaceGroupDescriptionOnAnUnknownGroupThrowsWhatUpdateGroupThrows() {
+        UserPool pool = poolWithGroup("known", "old");
+        AwsException fromUpdate = assertThrows(AwsException.class,
+                () -> service.updateGroup(pool.getId(), "absent", "x", null, null));
+
+        AwsException fromReplace = assertThrows(AwsException.class,
+                () -> service.replaceGroupDescription(pool.getId(), "absent", "x"));
+
+        assertEquals(fromUpdate.getErrorCode(), fromReplace.getErrorCode());
+        assertEquals(fromUpdate.getHttpStatus(), fromReplace.getHttpStatus());
+    }
+
+    @Test
+    void replaceGroupDescriptionKeepsTheBookkeepingOfUpdateGroup() {
+        UserPool pool = poolWithGroup("books", "old");
+        long longAgo = 1_000L;
+        service.getGroup(pool.getId(), "books").setLastModifiedDate(longAgo);
+        assertEquals(longAgo, service.getGroup(pool.getId(), "books").getLastModifiedDate());
+
+        CognitoGroup returned = service.replaceGroupDescription(pool.getId(), "books", null);
+
+        assertTrue(returned.getLastModifiedDate() > longAgo);
+        assertTrue(service.getGroup(pool.getId(), "books").getLastModifiedDate() > longAgo);
+    }
+
+    // --- direct UpdateGroup without a description keeps it: unchanged from main ---
+
+    @Test
+    void updateGroupWithoutADescriptionKeepsTheStoredDescription() {
+        UserPool pool = poolWithGroup("update-keeps", "kept");
+
+        service.updateGroup(pool.getId(), "update-keeps", null, 3, null);
+
+        CognitoGroup stored = service.getGroup(pool.getId(), "update-keeps");
+        assertEquals("kept", stored.getDescription());
+        assertEquals(Integer.valueOf(3), stored.getPrecedence());
     }
 }
