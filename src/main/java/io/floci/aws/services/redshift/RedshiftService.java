@@ -36,6 +36,7 @@ import io.floci.aws.services.redshift.model.Snapshot;
 import io.floci.aws.services.redshift.model.SnapshotCopyGrant;
 import io.floci.aws.services.redshift.model.SnapshotSchedule;
 import io.floci.aws.services.redshift.proxy.RedshiftProxyManager;
+import io.floci.aws.services.s3.S3ResourceArns;
 import io.floci.aws.services.s3.S3Service;
 import io.floci.aws.services.secretsmanager.ManagedSecretRotator;
 import io.floci.aws.services.secretsmanager.RandomPasswordGenerator;
@@ -1615,8 +1616,8 @@ public class RedshiftService implements ManagedSecretRotator {
             String partition = s3Service.bucketPartition(bucketName);
             String sampleKey = RedshiftAuditLogPublisher.s3DeliveryKey(s3KeyPrefix, accountId, region,
                     cluster.getClusterIdentifier(), "connectionlog", Instant.now());
-            String bucketArn = AwsArnUtils.Arn.global(partition, "s3", "", bucketName).toString();
-            String objectArn = AwsArnUtils.Arn.global(partition, "s3", "", bucketName + "/" + sampleKey).toString();
+            String bucketArn = S3ResourceArns.bucket(partition, bucketName);
+            String objectArn = S3ResourceArns.object(partition, bucketName, sampleKey);
             String clusterArn = AwsArnUtils.Arn.of("redshift", region, accountId,
                     "cluster:" + cluster.getClusterIdentifier()).toString();
             Map<String, List<String>> requestKeys = Map.of("aws:RequestedRegion", List.of(region));

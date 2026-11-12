@@ -19,6 +19,7 @@ import io.floci.aws.services.iam.ResourceArnBuilder;
 import io.floci.aws.services.iam.model.IamRole;
 import io.floci.aws.services.iam.model.IamUser;
 import io.floci.aws.services.lambdaweb.LambdaWebService;
+import io.floci.aws.services.s3.S3ConditionKeys;
 import io.floci.aws.services.s3.S3ControlTagConditionKeys;
 import io.floci.aws.services.s3.S3ObjectActions;
 import io.floci.aws.services.s3.S3ObjectKeys;
@@ -670,7 +671,7 @@ public class IamConditionContextResolver {
 
     Map<String, List<String>> s3BucketListConditionContext(MultivaluedMap<String, String> queryParameters) {
         Map<String, List<String>> conditions = new LinkedHashMap<>();
-        addQueryCondition(conditions, "s3:prefix", queryParameters, "prefix");
+        addQueryCondition(conditions, S3ConditionKeys.PREFIX, queryParameters, "prefix");
         addQueryCondition(conditions, "s3:delimiter", queryParameters, "delimiter");
         addQueryCondition(conditions, "s3:max-keys", queryParameters, "max-keys");
         return conditions.isEmpty() ? null : conditions;

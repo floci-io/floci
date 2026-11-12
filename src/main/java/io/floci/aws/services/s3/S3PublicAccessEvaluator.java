@@ -263,14 +263,6 @@ final class S3PublicAccessEvaluator {
         return false;
     }
 
-    static String bucketArn(String partition, String bucketName) {
-        return AwsArnUtils.Arn.global(partition, "s3", "", bucketName).toString();
-    }
-
-    static String objectArn(String partition, String bucketName, String key) {
-        return bucketArn(partition, bucketName) + "/" + key;
-    }
-
     private static boolean statementMatchesPublicPrincipalActionResource(JsonNode statement, String action, String resourceArn) {
         return principalMatchesPublic(statement)
                 && actionMatches(statement, action)
