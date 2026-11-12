@@ -194,6 +194,13 @@ public class BedrockAgentCoreHarnessRegistry {
         return new HarnessView(harness, harness.getCurrentVersion());
     }
 
+    public synchronized boolean runtimeArnExists(String region, String arn) {
+        return storage.scan(key -> key.startsWith(keyPrefix(region))).stream()
+                .flatMap(harness -> harness.getVersions().stream())
+                .anyMatch(version -> arn.equals(version.getConfiguration().path("environment")
+                        .path(RUNTIME_ENVIRONMENT).path("agentRuntimeArn").asText(null)));
+    }
+
     public PaginatedResult<Harness> list(Integer maxResults, String nextToken, String region) {
         List<Harness> all = storage.scan(key -> key.startsWith(keyPrefix(region)));
         return Pagination.paginate(all, Harness::getHarnessId, maxResults, nextToken, MAX_PAGE, "ValidationException");

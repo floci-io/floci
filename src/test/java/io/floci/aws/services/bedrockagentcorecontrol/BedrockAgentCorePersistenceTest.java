@@ -56,7 +56,7 @@ class BedrockAgentCorePersistenceTest {
                 "arn:aws:iam::000000000000:role/agent", "v2", Map.of("K", "V"), authorizer, null, REGION);
         svc.createEndpoint(id, "prod", "1", "prod ep", Map.of("stage", "live"), null, REGION);
         AgentRuntime before = svc.getAgentRuntime(id, REGION);
-        svc.tagByArn(REGION, svc.arn(before, "1", REGION), Map.of("env", "prod"));
+        svc.tagByArn(REGION, svc.arn(before, REGION), Map.of("env", "prod"));
         before = svc.getAgentRuntime(id, REGION);
 
         // Write to disk, then reload into a brand-new backend (simulated restart).

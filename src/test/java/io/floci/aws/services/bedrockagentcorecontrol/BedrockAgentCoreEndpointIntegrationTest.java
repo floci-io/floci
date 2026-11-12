@@ -51,7 +51,7 @@ class BedrockAgentCoreEndpointIntegrationTest {
                 .body("endpointName", equalTo("prod"))
                 .body("targetVersion", equalTo("1"))
                 .body("status", equalTo("READY"))
-                .body("agentRuntimeEndpointArn", containsString(":agentEndpoint/"));
+                .body("agentRuntimeEndpointArn", containsString("/runtime-endpoint/prod"));
     }
 
     @Test
@@ -199,8 +199,8 @@ class BedrockAgentCoreEndpointIntegrationTest {
             given().when().delete("/tags/" + endpointArn + "?tagKeys=a")
                     .then().statusCode(404).body("__type", equalTo("ResourceNotFoundException"));
 
-            String missingRuntimeArn = endpointArn.replaceAll("agentEndpoint/.*", "agent/missing0000-AbCdEfGhIj");
-            String existingRuntimeArn = endpointArn.replaceAll("agentEndpoint/.*", "agent/" + id);
+            String missingRuntimeArn = endpointArn.replaceAll("runtime/.*", "runtime/missing0000-AbCdEfGhIj");
+            String existingRuntimeArn = endpointArn.replaceAll("runtime/.*", "runtime/" + id);
             for (String runtimeTarget : new String[] {missingRuntimeArn,
                     existingRuntimeArn.replace(":000000000000:", ":222222222222:"),
                     existingRuntimeArn.replace(":us-east-1:", ":eu-west-1:"),

@@ -152,7 +152,7 @@ public class BedrockAgentCoreCfnProvisioner implements CfnResourceProvisioner {
                     && Objects.equals(authorizer, prior.getAuthorizerConfiguration())
                     && Objects.equals(protocolConfiguration, prior.getProtocolConfiguration())
                     && environment.equals(prior.getEnvironmentVariables()));
-            String arn = runtimeService.arn(prior, String.valueOf(prior.getLatestVersion()), region);
+            String arn = runtimeService.arn(prior, region);
             Map<String, String> priorTags = runtimeService.getTagsByArn(region, arn);
             if (configurationChanged || !priorTags.equals(tags)) {
                 ObjectNode snapshot = inPlacePrior(prior.getAgentRuntimeId(), region);
@@ -205,7 +205,7 @@ public class BedrockAgentCoreCfnProvisioner implements CfnResourceProvisioner {
     private void publishRuntime(StackResource r, AgentRuntime runtime, String region) {
         String version = String.valueOf(runtime.getLatestVersion());
         r.setPhysicalId(runtime.getAgentRuntimeId());
-        r.getAttributes().put("AgentRuntimeArn", runtimeService.arn(runtime, version, region));
+        r.getAttributes().put("AgentRuntimeArn", runtimeService.arn(runtime, region));
         r.getAttributes().put("AgentRuntimeId", runtime.getAgentRuntimeId());
         r.getAttributes().put("AgentRuntimeVersion", version);
         r.getAttributes().put("Status", runtime.getStatus());
@@ -263,7 +263,7 @@ public class BedrockAgentCoreCfnProvisioner implements CfnResourceProvisioner {
         } else {
             AgentRuntimeEndpoint endpoint = runtimeService.createEndpoint(runtimeId, name, version, description,
                     null, region);
-            r.setPhysicalId(runtimeService.endpointArn(endpoint, region));
+            r.setPhysicalId(runtimeService.endpointArn(runtimeId, endpoint, region));
             CfnRollback.guarded(r, ctx, true, () -> runtimeService.deleteEndpoint(runtimeId, name, null, region),
                     () -> undoInPlace(r),
                     () -> publishRuntimeEndpoint(r, runtimeService.getAgentRuntime(runtimeId, region), endpoint, region));
@@ -272,10 +272,10 @@ public class BedrockAgentCoreCfnProvisioner implements CfnResourceProvisioner {
 
     private void publishRuntimeEndpoint(StackResource r, AgentRuntime runtime, AgentRuntimeEndpoint endpoint,
                                         String region) {
-        String endpointArn = runtimeService.endpointArn(endpoint, region);
+        String endpointArn = runtimeService.endpointArn(runtime.getAgentRuntimeId(), endpoint, region);
         r.setPhysicalId(endpointArn);
         r.getAttributes().put("AgentRuntimeEndpointArn", endpointArn);
-        r.getAttributes().put("AgentRuntimeArn", runtimeService.arn(runtime, endpoint.getTargetVersion(), region));
+        r.getAttributes().put("AgentRuntimeArn", runtimeService.arn(runtime, region));
         r.getAttributes().put("Id", endpoint.getUuid());
         r.getAttributes().put("Status", endpoint.getStatus());
         r.getAttributes().put("TargetVersion", endpoint.getTargetVersion());
@@ -478,7 +478,7 @@ public class BedrockAgentCoreCfnProvisioner implements CfnResourceProvisioner {
                             node(configuration, "authorizer"), node(configuration, "protocol"), region);
                 }
                 if (prior.has("tags")) {
-                    reconcileRuntimeTags(runtimeService.arn(runtime, String.valueOf(runtime.getLatestVersion()), region),
+                    reconcileRuntimeTags(runtimeService.arn(runtime, region),
                             stringMap(prior.get("tags")), region);
                 }
                 publishRuntime(resource, runtime, region);
