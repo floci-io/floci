@@ -1648,7 +1648,7 @@ public class EventBridgeService implements ResourceProvider, StoredResourceArns 
         String effectiveBus = resolvedBusName(busName);
         if (effectiveBus.indexOf('/') >= 0) {
             throw SmithyValidationErrors.validationException(
-                    nameViolations("eventBusName", busName, 64, NON_PARTNER_NAME));
+                    nameViolations("eventBusName", busName, 256, NON_PARTNER_NAME));
         }
         return effectiveBus;
     }

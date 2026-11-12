@@ -248,16 +248,28 @@ class EventBridgeServiceTest {
     }
 
     @Test
-    void putPermissionOnALongPartnerBusNameReportsBothConstraints() {
-        String name = "aws.partner/example.com/" + "o".repeat(60);
+    void putPermissionOnALongPartnerBusNameReportsOnlyThePattern() {
+        String name = "aws.partner/example.com/" + "o".repeat(200);
         service.createEventBus(name, name, null, null, REGION);
+
+        AwsException error = assertThrows(AwsException.class, () ->
+                service.putPermission(name, "events:PutEvents", "111122223333", "allow", null, null, REGION));
+        assertEquals("ValidationException", error.getErrorCode());
+        assertEquals("1 validation error detected: Value '" + name + "' at 'eventBusName' failed to satisfy "
+                + "constraint: Member must satisfy regular expression pattern: [\\.\\-_A-Za-z0-9]+",
+                error.getMessage());
+    }
+
+    @Test
+    void putPermissionOnAPartnerBusNameBeyondTheModeledLengthReportsBothConstraints() {
+        String name = "aws.partner/example.com/" + "o".repeat(240);
 
         AwsException error = assertThrows(AwsException.class, () ->
                 service.putPermission(name, "events:PutEvents", "111122223333", "allow", null, null, REGION));
         assertEquals("ValidationException", error.getErrorCode());
         assertTrue(error.getMessage().startsWith("2 validation errors detected: "), error.getMessage());
         assertTrue(error.getMessage().contains("at 'eventBusName' failed to satisfy constraint: "
-                + "Member must have length less than or equal to 64"), error.getMessage());
+                + "Member must have length less than or equal to 256"), error.getMessage());
     }
 
     @Test
