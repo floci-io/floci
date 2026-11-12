@@ -1,5 +1,8 @@
 package io.floci.aws.services.paymentcryptography;
 
+import java.util.Arrays;
+import java.util.stream.Collectors;
+
 /**
  * The AS2805 key variants, and the key usage each one carries.
  *
@@ -64,5 +67,14 @@ public enum PaymentCryptographyAs2805Variant {
             }
         }
         return null;
+    }
+
+    /**
+     * The names of the variants the service serves, for a message that lists them.
+     *
+     * @return the names, comma-separated
+     */
+    public static String names() {
+        return Arrays.stream(values()).map(Enum::name).collect(Collectors.joining(", "));
     }
 }

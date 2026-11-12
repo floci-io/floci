@@ -1288,15 +1288,7 @@ final class PaymentCryptographyKeyExchange {
         // because the variant also says what the key is for, so a call that goes past the
         // shape check is refused by the service's own rules instead of carrying a variant
         // that names nothing.
-        String variantName = text(material, "As2805KeyVariant");
-        PaymentCryptographyAs2805Variant variant =
-                PaymentCryptographyAs2805Variant.from(variantName);
-        if (variant == null) {
-            throw validation("KeyMaterial.As2805KeyCryptogram.As2805KeyVariant '" + variantName
-                    + "' not supported (TERMINAL_MAJOR_KEY_VARIANT_00, "
-                    + "DATA_ENCRYPTION_KEY_VARIANT_22, MESSAGE_AUTHENTICATION_KEY_VARIANT_24, "
-                    + "PIN_ENCRYPTION_KEY_VARIANT_28)");
-        }
+        PaymentCryptographyAs2805Variant variant = as2805Variant(material);
         // The variant says what the key is for, so it has to be the variant the key's own
         // usage calls for. A key exported under another variant would come back with the
         // other variant's usage, so the export would change what the key is for.
@@ -1311,13 +1303,7 @@ final class PaymentCryptographyKeyExchange {
             throw validation("the key " + kek.getArn() + " does not have the mode of use Wrap, "
                     + "which it needs to wrap a key cryptogram");
         }
-        if (!"TR31_K0_KEY_ENCRYPTION_KEY".equals(kek.getKeyUsage())
-                && !"TR31_K1_KEY_BLOCK_PROTECTION_KEY".equals(kek.getKeyUsage())) {
-            // The import insists on a key encryption key, so an export that accepted any other
-            // key would produce something its own import rejects.
-            throw validation("an AS2805 cryptogram is wrapped under a key encryption key, but "
-                    + kek.getArn() + " is " + kek.getKeyUsage());
-        }
+        requireKeyEncryptionKey(kek);
         PaymentCryptographyKeyAlgorithm kekAlgorithm =
                 PaymentCryptographyKeyAlgorithm.from(kek.getKeyAlgorithm());
         PaymentCryptographyKeyAlgorithm algorithm =
@@ -1330,6 +1316,41 @@ final class PaymentCryptographyKeyExchange {
         String cryptogram = PaymentCryptographyAs2805Cryptogram.wrap(clear, variant.variantByte(),
                 algorithm, PaymentCryptographyCrypto.fromHex(kek.getKeyMaterialHex()), kekAlgorithm);
         return new Exported(cryptogram, "KEY_CRYPTOGRAM", kek.getArn());
+    }
+
+    /**
+     * The AS2805 variant a request names.
+     *
+     * <p>The lookup and the refusal live here, so the export and the import refuse the
+     * same variants in the same words.
+     *
+     * @param material the request's key material
+     * @return the variant
+     */
+    private static PaymentCryptographyAs2805Variant as2805Variant(Map<String, Object> material) {
+        String name = text(material, "As2805KeyVariant");
+        PaymentCryptographyAs2805Variant variant = PaymentCryptographyAs2805Variant.from(name);
+        if (variant == null) {
+            throw validation("KeyMaterial.As2805KeyCryptogram.As2805KeyVariant '" + name
+                    + "' not supported (" + PaymentCryptographyAs2805Variant.names() + ")");
+        }
+        return variant;
+    }
+
+    /**
+     * The key a cryptogram is wrapped under has to be a key encryption key.
+     *
+     * <p>The import insists on it, so an export that accepted any other key would produce
+     * something its own import rejects.
+     *
+     * @param kek the wrapping key
+     */
+    private static void requireKeyEncryptionKey(PaymentCryptographyKey kek) {
+        if (!"TR31_K0_KEY_ENCRYPTION_KEY".equals(kek.getKeyUsage())
+                && !"TR31_K1_KEY_BLOCK_PROTECTION_KEY".equals(kek.getKeyUsage())) {
+            throw validation("an AS2805 cryptogram is wrapped under a key encryption key, but "
+                    + kek.getArn() + " is " + kek.getKeyUsage());
+        }
     }
 
     /** A key out of a TR-34 key block. */
@@ -1413,22 +1434,10 @@ final class PaymentCryptographyKeyExchange {
         // because the variant also says what the key is for, so a call that goes past the
         // shape check is refused by the service's own rules instead of carrying a variant
         // that names nothing.
-        String variantName = text(material, "As2805KeyVariant");
-        PaymentCryptographyAs2805Variant variant =
-                PaymentCryptographyAs2805Variant.from(variantName);
-        if (variant == null) {
-            throw validation("KeyMaterial.As2805KeyCryptogram.As2805KeyVariant '" + variantName
-                    + "' not supported (TERMINAL_MAJOR_KEY_VARIANT_00, "
-                    + "DATA_ENCRYPTION_KEY_VARIANT_22, MESSAGE_AUTHENTICATION_KEY_VARIANT_24, "
-                    + "PIN_ENCRYPTION_KEY_VARIANT_28)");
-        }
+        PaymentCryptographyAs2805Variant variant = as2805Variant(material);
         String wrappingKeyIdentifier = text(material, "WrappingKeyIdentifier");
         PaymentCryptographyKey kek = usableKey(wrappingKeyIdentifier, region);
-        if (!"TR31_K0_KEY_ENCRYPTION_KEY".equals(kek.getKeyUsage())
-                && !"TR31_K1_KEY_BLOCK_PROTECTION_KEY".equals(kek.getKeyUsage())) {
-            throw validation("an AS2805 cryptogram is wrapped under a key encryption key, but "
-                    + kek.getArn() + " is " + kek.getKeyUsage());
-        }
+        requireKeyEncryptionKey(kek);
         // The wrapping key opens an incoming cryptogram, so it has to be allowed to unwrap.
         // The model names no error code of its own for this, so it is a validation error,
         // as the rest of the refusals about a key's modes of use are.
