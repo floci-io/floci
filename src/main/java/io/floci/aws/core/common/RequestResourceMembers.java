@@ -53,7 +53,7 @@ final class RequestResourceMembers {
     /** The one id a child type's format appends to its parent's. */
     private static final Pattern APPENDED_ID = Pattern.compile("[/:]\\$\\{\\w+}");
     /** The keys a resource found by members does not take: it is read no other way. */
-    private static final List<String> FOUND_ONLY = List.of("absent", "arnOf", "fixed", "before");
+    private static final List<String> FOUND_ONLY = List.of("absent", "arnOf", "fixed", "before", "stripped", "trailing");
     /** The keys of a resource named through a member naming another of its service's own: it is read no other way. */
     private static final Set<String> THROUGH_KEYS = Set.of("types", "through", "when", "endpoint");
     /** The keys of a resource its service acts on for a request naming none of it: it is read no other way. */
@@ -145,7 +145,11 @@ final class RequestResourceMembers {
      * variable no member gives may be {@code fixed} to the one value its handler uses (a CodePipeline custom action
      * type's owner, {@code Custom}). A member's value, an ARN or a variable's, is read up to the character
      * {@code before}, when there is one: Step Functions Local's handler drops a test case after {@code #}, and a
-     * CodeBuild build id is {@code <project>:<id>}, a build being checked on its project. A create naming other
+     * CodeBuild build id is {@code <project>:<id>}, a build being checked on its project. A value filling a variable
+     * is read {@code stripped} of the whitespace around it when its handler drops that (Parameter Store's
+     * {@code PutParameter} name), and without one {@code trailing} character its handler adds when the value lacks
+     * it, unless the value is only that character or still ends in it without the one (a Parameter Store path,
+     * {@code /a/} and {@code /a} naming the same hierarchy). A create naming other
      * resources beside the one it makes marks that one {@code made}, where its tags go (a webhook, not the pipeline
      * it connects to). A type whose ARN is all an id its service mints is named instead by the members its service
      * finds it by, {@code find}, each one value, in the order its service reads them, filling none of its variables
@@ -162,15 +166,15 @@ final class RequestResourceMembers {
      */
     record Resource(List<String> types, Member arn, Map<String, Member> fill, Map<String, List<String>> when,
                     Map<String, List<String>> unless, Map<String, String> absent, Map<String, String> arnOf,
-                    Member account, String before, Map<String, String> fixed, boolean made, List<Member> find,
-                    String endpoint, Member through, boolean byDefault) {
+                    Member account, String before, boolean stripped, String trailing, Map<String, String> fixed,
+                    boolean made, List<Member> find, String endpoint, Member through, boolean byDefault) {
 
         Resource(List<String> types, Member arn, Map<String, Member> fill, Map<String, List<String>> when,
                  Map<String, List<String>> unless, Map<String, String> absent, Map<String, String> arnOf,
                  Member account, String before, Map<String, String> fixed, boolean made, List<Member> find,
                  String endpoint, Member through) {
-            this(types, arn, fill, when, unless, absent, arnOf, account, before, fixed, made, find, endpoint, through,
-                    false);
+            this(types, arn, fill, when, unless, absent, arnOf, account, before, false, null, fixed, made, find,
+                    endpoint, through, false);
         }
 
         Resource(List<String> types, Member arn, Map<String, Member> fill, Map<String, List<String>> when,
@@ -389,6 +393,21 @@ final class RequestResourceMembers {
             throw new IllegalStateException(RESOURCE_NAME + " reads a member for " + operation
                     + " before " + before + ", no one character");
         }
+        if (resource.has("stripped") && !(resource.path("stripped").isBoolean()
+                && resource.path("stripped").booleanValue())) {
+            throw new IllegalStateException(RESOURCE_NAME + " reads a member for " + operation + " stripped by "
+                    + resource.path("stripped") + ", which is not true");
+        }
+        boolean stripped = resource.has("stripped");
+        String trailing = resource.has("trailing") ? resource.path("trailing").asText("") : null;
+        if (trailing != null && trailing.length() != 1) {
+            throw new IllegalStateException(RESOURCE_NAME + " reads a member for " + operation
+                    + " without a trailing " + trailing + ", no one character");
+        }
+        if ((stripped || trailing != null) && !resource.has("fill")) {
+            throw new IllegalStateException(RESOURCE_NAME + " reads a member for " + operation
+                    + " stripped or without a trailing character, which only a member filling a variable is");
+        }
         if (resource.has("through")) {
             List<String> types = resource.path("types").valueStream().map(JsonNode::asText).toList();
             Member through = fillMember(operation, resource.path("through").asText(""));
@@ -486,7 +505,8 @@ final class RequestResourceMembers {
                     + " from " + account.name() + ", no member of one account or a type of none");
         }
         return new Resource(List.of(type), null, Map.copyOf(fill), when, unless, Map.copyOf(absent), Map.copyOf(arnOf),
-                account, before, Map.copyOf(fixed), made, List.copyOf(find), endpoint, null, byDefault);
+                account, before, stripped, trailing, Map.copyOf(fixed), made, List.copyOf(find), endpoint, null,
+                byDefault);
     }
 
     /** The values each member named in {@code when} or {@code unless} may have, an empty one for the member absent. */

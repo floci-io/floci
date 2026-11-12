@@ -103,7 +103,9 @@ resource there may apply only `when` a member has one of some values (`Type` pic
 v2 `CreateLoadBalancer` creates), or `unless` it has, a member given a JSON null counting as absent
 (Cloud Map's handler then reads `DnsConfig.NamespaceId`), and a member read as a value when it is
 `absent` (an EventBridge request naming no event bus names the default one), a member filling a variable may be
-read up to a character `before` (a CodeBuild build id, `<project>:<id>`, names its project), a variable may be
+read up to a character `before` (a CodeBuild build id, `<project>:<id>`, names its project), `stripped` of the
+whitespace around it its handler drops (Parameter Store's `PutParameter` name), or without one `trailing` character
+its handler adds when it is missing (a Parameter Store path, `/a/` and `/a` both naming `/a/`), a variable may be
 filled from a field of each element of a list of structures, one resource for each element and the `absent` value
 for an
 element lacking it (`PutEvents` publishes each entry to its bus), or from a structure's field (`pipeline.name`),
@@ -119,7 +121,9 @@ request, never from a member a caller could add. `CLIENTS_NOT_READ` are SDK clie
 namespace's operations whose requests Floci does not serve, each with its reason.
 `UNQUALIFIED` are the resource types whose ARN a request may give with a qualifier, one more `:<name>`
 past its format, and whose service checks it without one: Step Functions checks a version or an alias
-on its state machine's ARN. `MINTED_IDS` are the resource types whose service follows the name their
+on its state machine's ARN, and Parameter Store a version or a label on its parameter's. A value filling a variable
+named `...WithoutLeadingSlash` is read without one leading `/`: a parameter's ARN is `parameter/<name>`, whether or
+not its name starts with a slash. `MINTED_IDS` are the resource types whose service follows the name their
 format ends in with an id it mints, `/<id>`, which the format leaves out and a request naming one by
 its name does not give: EventBridge's connections and API destinations, whose stored ARN the reader
 asks the service for, or else checks with that id open. `FOUND_BY` are the resource types whose ARN is
@@ -185,8 +189,8 @@ NAMESPACES = ("access-analyzer", "account", "acm", "application-autoscaling", "a
               "datasync", "ec2", "ecr", "elasticloadbalancing", "elasticmapreduce", "emr-serverless", "es", "events",
               "firehose", "fis", "globalaccelerator", "inspector2", "kinesisanalytics", "macie2", "oam",
               "payment-cryptography", "quicksight", "ram", "redshift", "redshift-data", "redshift-serverless",
-              "rekognition", "resource-explorer-2", "route53", "servicediscovery", "servicequotas", "sso", "states", "textract",
-              "timestream-influxdb", "translate", "signer", "xray", "securityhub", "guardduty")
+              "rekognition", "resource-explorer-2", "route53", "servicediscovery", "servicequotas", "ssm", "sso",
+              "states", "textract", "timestream-influxdb", "translate", "signer", "xray", "securityhub", "guardduty")
 
 # SDK clients the reference lists for a namespace's operations whose requests Floci does not serve, and why: their
 # members are not read.
@@ -205,7 +209,7 @@ QUALIFIED_MEMBERS = ("payment-cryptography",)
 
 # The namespaces whose resources ResourceArnBuilder builds itself.
 HAND_BUILT = ("apigateway", "bedrock", "dsql", "dynamodb", "eks", "iam", "kinesis", "kms", "lambda", "logs", "pipes",
-              "resource-groups", "s3", "scheduler", "secretsmanager", "sns", "sqs", "ssm", "sts")
+              "resource-groups", "s3", "scheduler", "secretsmanager", "sns", "sqs", "sts")
 
 # Operations of a namespace in `HAND_BUILT` read from the reference all the same, each with its reason.
 _LOGS_DELIVERY = ("CloudWatch Logs vended-log delivery: its requests name a delivery source, destination or delivery "
@@ -586,6 +590,25 @@ CORRECTIONS: dict[str, tuple[list[dict], str]] = {
     "macie2:CreateMember": ([{"type": "Member", "fill": {"ResourceId": "account.accountId"}}],
                             "the member ARN ends in the account the request associates, which it names as "
                             "account.accountId, nested where the rule does not look for the member's id"),
+    **{f"ssm:{operation}": ([{"type": "parameter", "fill": {"ParameterNameWithoutLeadingSlash": "Name"}}],
+                            f"{operation} names its parameter by Name, a bare name the rule reads only for an "
+                            "operation named after the type past its verb, which this one's is not")
+       for operation in ("GetParameterHistory", "LabelParameterVersion")},
+    **{f"ssm:{operation}": ([{"type": "parameter", "fill": {"ParameterNameWithoutLeadingSlash": "Name"},
+                              "stripped": True}],
+                            f"Floci's {operation} handler drops the spaces around the Name it acts on, so the "
+                            "parameter checked is the one named without them")
+       for operation in ("PutParameter", "UnlabelParameterVersion")},
+    "ssm:GetParametersByPath": ([{"type": "parameter", "fill": {"ParameterNameWithoutLeadingSlash": "Path"},
+                                  "absent": {"Path": "/"}, "trailing": "/"}],
+                                "the request names the hierarchy it reads by Path, which the rule does not relate "
+                                "to a parameter; the handler reads /a and /a/ alike and an empty Path as the root, "
+                                "so a path is checked without the slash it may end in, as parameter/a"),
+    **{f"ssm:{operation}": ([{"type": "parameter", "fill": {"ParameterNameWithoutLeadingSlash": "ResourceId"}}],
+                            "Floci's tagging handlers act on the parameter the ResourceId names, its name or its "
+                            "ARN, whatever ResourceType the request gives, so it is that parameter checked; the "
+                            "rule reads no ResourceId")
+       for operation in ("AddTagsToResource", "ListTagsForResource", "RemoveTagsFromResource")},
 }
 
 # Resource types whose ARN a request may give with a qualifier, one more `:<name>` past its format, which their
@@ -594,6 +617,10 @@ UNQUALIFIED: dict[str, str] = {
     "states:statemachine": "Step Functions authorizes a version or an alias on its state machine's ARN, not on the "
                            "version's or the alias's ('To authorize a version or an alias to invoke an API action, "
                            "Step Functions uses the state machine's ARN instead of using the version ARN or alias ARN')",
+    "ssm:parameter": "Parameter Store reads a version or a label after a parameter's name ('To query by parameter "
+                     "label, use \"Name\": \"name:label\". To query by parameter version, use \"Name\": "
+                     "\"name:version\"', GetParameter's Name) and checks the read on the parameter, whose name "
+                     "holds no colon",
 }
 
 # Resource types whose service follows the one variable their format ends in with an id it mints, `/<id>`,
@@ -1730,7 +1757,7 @@ ARN_PATH_RE = re.compile(r"^(?:[A-Za-z][A-Za-z0-9_]*(\[])?(\.[A-Za-z][A-Za-z0-9_
 # A format's resource that is a literal and one variable, at its end.
 ONE_VARIABLE_RE = re.compile(r"^[^$]*\$\{\w+}$")
 # The keys a resource found by members does not take: it is read no other way.
-FOUND_ONLY = {"absent", "arnOf", "fixed", "before"}
+FOUND_ONLY = {"absent", "arnOf", "fixed", "before", "stripped", "trailing"}
 
 
 def validate(document: dict) -> list[str]:
@@ -1835,7 +1862,7 @@ def _resource_problems(operation: str, resource: object, types: set[str], format
                                                                                             "endpoint"}
                                               or {"type", "fill"} <= set(resource) <= {"type", "fill", "when", "unless", "absent", "arnOf", "account",
                                                                                        "fixed", "made", "before", "find", "endpoint",
-                                                                                       "default"}):
+                                                                                       "default", "stripped", "trailing"}):
         return [f"{operation} names {resource!r}, which is neither an ARN member nor a type's variables"]
     if "default" in resource and (resource["default"] is not True or resource["fill"] or not resource.get("when")
                                   or set(resource) - {"type", "fill", "when", "default", "endpoint"}):
@@ -1847,6 +1874,11 @@ def _resource_problems(operation: str, resource: object, types: set[str], format
     before = resource.get("before", "#")
     if not isinstance(before, str) or len(before) != 1:
         return [f"{operation} reads its members before {before!r}, which is no one character"]
+    trailing = resource.get("trailing", "/")
+    if not isinstance(trailing, str) or len(trailing) != 1:
+        return [f"{operation} reads its members without a trailing {trailing!r}, which is no one character"]
+    if resource.get("stripped", True) is not True:
+        return [f"{operation} reads its members stripped by {resource['stripped']!r}, which is not true"]
     named = resource.get("types") or [resource.get("type")]
     kinds = _kinds(resource)
     corrected = resource in CORRECTIONS.get(operation, ([], ""))[0]

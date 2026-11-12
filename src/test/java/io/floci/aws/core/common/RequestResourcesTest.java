@@ -1065,6 +1065,59 @@ class RequestResourcesTest {
         assertEquals(List.of(project + "a"), of("codebuild:RetryBuild", form("Action=RetryBuild&id=a:1")));
     }
 
+    /**
+     * A Parameter Store parameter is {@code parameter/<name>} whether its name starts with a slash or not, a name of
+     * two leading slashes keeping the second; a version or a label after its name, or after its ARN, is checked on
+     * the parameter; a path is checked without the slash it may end in, the root for none; a put is checked on the
+     * name its handler stores, without the spaces around it; and the tagging operations act on the parameter their
+     * {@code ResourceId} names, by its name or its ARN, a legacy {@code parameter<name>} ARN being the one the
+     * service finds for it.
+     */
+    @Test
+    void aParameterIsNamedWithOrWithoutItsLeadingSlash() {
+        String parameter = "arn:aws:ssm:us-east-1:000000000000:parameter/";
+        for (String name : List.of("/a", "a")) {
+            assertEquals(List.of(parameter + "a"), of("ssm:GetParameter", json("{\"Name\":\"" + name + "\"}")), name);
+            assertEquals(List.of(parameter + "a"), of("ssm:GetParameterHistory", json("{\"Name\":\"" + name + "\"}")));
+            assertEquals(List.of(parameter + "a"), of("ssm:LabelParameterVersion",
+                    json("{\"Name\":\"" + name + "\",\"Labels\":[\"l\"]}")));
+        }
+        assertEquals(List.of(parameter + "/x"), of("ssm:GetParameter", json("{\"Name\":\"//x\"}")));
+        assertEquals(List.of(parameter + "x"), of("ssm:GetParameter", json("{\"Name\":\"x:1\"}")));
+        assertEquals(List.of(parameter + "x"), of("ssm:GetParameter", json("{\"Name\":\"/x:prod\"}")));
+        assertEquals(List.of(parameter + "x"), of("ssm:GetParameter", json("{\"Name\":\"" + parameter + "x:1\"}")));
+        assertEquals(List.of(parameter + "a", parameter + "b"), of("ssm:GetParameters",
+                json("{\"Names\":[\"/a\",\"b:2\"]}")));
+        assertEquals(List.of(parameter + "a"), of("ssm:GetParametersByPath", json("{\"Path\":\"/a/\"}")));
+        assertEquals(List.of(parameter + "a"), of("ssm:GetParametersByPath", json("{\"Path\":\"/a\"}")));
+        assertEquals(List.of(parameter), of("ssm:GetParametersByPath", json("{\"Path\":\"/\"}")));
+        assertEquals(List.of(parameter), of("ssm:GetParametersByPath", json("{}")));
+        assertEquals(List.of(parameter + "x"), of("ssm:PutParameter", json("{\"Name\":\" x \",\"Value\":\"v\"}")));
+        assertEquals(List.of(parameter + "x"), of("ssm:UnlabelParameterVersion",
+                json("{\"Name\":\" /x \",\"Labels\":[\"l\"]}")));
+        assertEquals(List.of(parameter + " x "), of("ssm:GetParameter", json("{\"Name\":\" x \"}")));
+        assertEquals(List.of(parameter + "x"), of("ssm:AddTagsToResource",
+                json("{\"ResourceType\":\"Parameter\",\"ResourceId\":\"/x\",\"Tags\":[]}")));
+        assertEquals(List.of(parameter + "x"), of("ssm:ListTagsForResource",
+                json("{\"ResourceType\":\"Document\",\"ResourceId\":\"" + parameter + "x\"}")));
+
+        String legacy = "arn:aws:ssm:us-east-1:000000000000:parameterx";
+        StoredResourceArns stored = new StoredResourceArns() {
+            @Override
+            public String namespace() {
+                return "ssm";
+            }
+
+            @Override
+            public Optional<String> find(String type, List<String> names, String region) {
+                return List.of(legacy).equals(names) ? Optional.of(parameter + "x") : Optional.empty();
+            }
+        };
+        assertEquals(List.of(parameter + "x"), RequestResources.of("ssm:RemoveTagsFromResource",
+                json("{\"ResourceType\":\"Parameter\",\"ResourceId\":\"" + legacy + "\",\"TagKeys\":[\"k\"]}"), "aws",
+                "us-east-1", "000000000000", stored));
+    }
+
     /** A list taking a name or an ARN for each value names each value's resource, whichever it gives. */
     @Test
     void aListMixingNamesAndArnsNamesEachValuesResource() {
