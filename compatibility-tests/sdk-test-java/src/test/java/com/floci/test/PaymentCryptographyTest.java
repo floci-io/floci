@@ -335,6 +335,39 @@ class PaymentCryptographyTest {
     }
 
     @Test
+    void anAs2805ImportKeepsTheExportabilityTheRequestNamed() {
+        // The model carries the exportability at the top level of the AS2805 import, so a
+        // key imported as one that may not leave is one that may not leave.
+        Key encryptionKey = client.createKey(r -> r
+                .keyAttributes(a -> a
+                        .keyAlgorithm(KeyAlgorithm.AES_256)
+                        .keyClass(KeyClass.SYMMETRIC_KEY)
+                        .keyUsage(KeyUsage.TR31_K0_KEY_ENCRYPTION_KEY)
+                        .keyModesOfUse(modes -> modes.wrap(true).unwrap(true)))
+                .exportable(true))
+                .key();
+        keyArns.add(encryptionKey.keyArn());
+        Key key = createAesKey();
+
+        ExportKeyResponse exported = client.exportKey(r -> r
+                .exportKeyIdentifier(key.keyArn())
+                .keyMaterial(m -> m.as2805KeyCryptogram(b -> b
+                        .as2805KeyVariant(As2805KeyVariant.PIN_ENCRYPTION_KEY_VARIANT_28)
+                        .wrappingKeyIdentifier(encryptionKey.keyArn()))));
+
+        ImportKeyResponse imported = client.importKey(r -> r
+                .keyMaterial(m -> m.as2805KeyCryptogram(b -> b
+                        .as2805KeyVariant(As2805KeyVariant.PIN_ENCRYPTION_KEY_VARIANT_28)
+                        .wrappingKeyIdentifier(encryptionKey.keyArn())
+                        .wrappedKeyCryptogram(exported.wrappedKey().keyMaterial())
+                        .keyAlgorithm(KeyAlgorithm.AES_256)
+                        .keyModesOfUse(modes -> modes.encrypt(true).decrypt(true))
+                        .exportable(false))));
+
+        assertThat(imported.key().exportable()).isFalse();
+    }
+
+    @Test
     void aCryptogramUnderEachSupportedVariantIsServed() {
         // The model names four variants, and the service serves every one of them.
         Key encryptionKey = client.createKey(r -> r

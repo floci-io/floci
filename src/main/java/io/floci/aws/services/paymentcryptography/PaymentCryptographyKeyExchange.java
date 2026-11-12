@@ -1388,13 +1388,11 @@ final class PaymentCryptographyKeyExchange {
         } catch (RuntimeException e) {
             throw validation("the AS2805 cryptogram did not open: " + e.getMessage());
         }
-        Map<String, Object> attributes = object(material, "KeyAttributes");
-        Map<String, Boolean> modes = attributes == null
-                ? Map.of("Encrypt", Boolean.TRUE, "Decrypt", Boolean.TRUE)
-                : modesOf(attributes);
-        String usage = attributes == null ? variant.usage()
-                : String.valueOf(attributes.get("KeyUsage"));
-        boolean exportable = attributes == null || Boolean.TRUE.equals(attributes.get("Exportable"));
+        // The model carries the modes of use and the exportability at the top level of the
+        // AS2805 import, and it names no usage: the variant says what the key is for.
+        Map<String, Boolean> modes = modesOf(material);
+        String usage = variant.usage();
+        boolean exportable = Boolean.TRUE.equals(material.get("Exportable"));
         return new Imported(algorithmName, usage, modes, exportable, clear, null, null, null,
                 "SYMMETRIC_KEY");
     }
