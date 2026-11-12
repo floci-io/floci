@@ -869,10 +869,13 @@ public class GlueService {
         columnStatisticsStore.delete(columnStatisticsKey(databaseName, tableName, columnName));
     }
 
-    public void createPartition(String databaseName, String tableName, Partition partition) {
+    public synchronized void createPartition(String databaseName, String tableName, Partition partition) {
         requireValidSortColumns(sortColumnViolations("partitionInput", partition.getStorageDescriptor()));
         Table table = getTable(databaseName, tableName);
         String key = partitionKey(databaseName, tableName, partition.getValues());
+        if (partitionStore.get(key).isPresent()) {
+            throw new AwsException("AlreadyExistsException", "Partition already exists.", 400);
+        }
         partition.setDatabaseName(table.getDatabaseName());
         partition.setTableName(table.getName());
         if (partition.getCreationTime() == null) {
@@ -881,7 +884,7 @@ public class GlueService {
         partitionStore.put(key, partition);
     }
 
-    public List<BatchCreatePartitionError> batchCreatePartitions(
+    public synchronized List<BatchCreatePartitionError> batchCreatePartitions(
             String databaseName,
             String tableName,
             List<Partition> partitions) {
