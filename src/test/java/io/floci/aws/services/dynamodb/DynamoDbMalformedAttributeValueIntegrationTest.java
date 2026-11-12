@@ -83,6 +83,92 @@ class DynamoDbMalformedAttributeValueIntegrationTest {
         }
     }
 
+    @Test
+    void updateExpressionRejectsMalformedNestedValueWithoutChangingStoredItem() throws Exception {
+        String table = createTable();
+        try {
+            ObjectNode original = item("existing", true);
+            put(table, original, 200);
+            ObjectNode update = JSON.createObjectNode().put("TableName", table)
+                    .put("UpdateExpression", "SET m = :m");
+            update.set("Key", key("existing"));
+            ObjectNode values = update.putObject("ExpressionAttributeValues");
+            values.set(":m", nestedValue(false));
+
+            assertValidation(call("UpdateItem", update, 400));
+            assertEquals(original, get(table, "existing").path("Item"));
+
+            ObjectNode replacement = updatedValue();
+            values.set(":m", replacement);
+            call("UpdateItem", update, 200);
+            original.set("m", replacement);
+            assertEquals(original, get(table, "existing").path("Item"));
+        } finally {
+            deleteTable(table);
+        }
+    }
+
+    @Test
+    void legacyAttributeUpdateRejectsMalformedNestedValueAndAllowsDeleteWithoutValue() throws Exception {
+        String table = createTable();
+        try {
+            ObjectNode original = item("existing", true);
+            original.putObject("remove").put("S", "old");
+            put(table, original, 200);
+            ObjectNode update = JSON.createObjectNode().put("TableName", table);
+            update.set("Key", key("existing"));
+            ObjectNode change = update.putObject("AttributeUpdates").putObject("m").put("Action", "PUT");
+            change.set("Value", nestedValue(false));
+
+            assertValidation(call("UpdateItem", update, 400));
+            assertEquals(original, get(table, "existing").path("Item"));
+
+            ObjectNode replacement = updatedValue();
+            change.set("Value", replacement);
+            call("UpdateItem", update, 200);
+            original.set("m", replacement);
+            assertEquals(original, get(table, "existing").path("Item"));
+
+            update.with("AttributeUpdates").remove("m");
+            update.with("AttributeUpdates").putObject("remove").put("Action", "DELETE");
+            call("UpdateItem", update, 200);
+            original.remove("remove");
+            assertEquals(original, get(table, "existing").path("Item"));
+        } finally {
+            deleteTable(table);
+        }
+    }
+
+    @Test
+    void transactUpdateRejectsMalformedNestedValueWithoutApplyingOtherWrites() throws Exception {
+        String table = createTable();
+        try {
+            ObjectNode original = item("existing", true);
+            put(table, original, 200);
+            ObjectNode request = JSON.createObjectNode();
+            ArrayNode writes = request.putArray("TransactItems");
+            writes.addObject().putObject("Put").put("TableName", table).set("Item", item("new", true));
+            ObjectNode update = writes.addObject().putObject("Update").put("TableName", table)
+                    .put("UpdateExpression", "SET m = :m");
+            update.set("Key", key("existing"));
+            ObjectNode values = update.putObject("ExpressionAttributeValues");
+            values.set(":m", nestedValue(false));
+
+            assertValidation(call("TransactWriteItems", request, 400));
+            assertEquals(original, get(table, "existing").path("Item"));
+            assertTrue(get(table, "new").path("Item").isMissingNode());
+
+            ObjectNode replacement = updatedValue();
+            values.set(":m", replacement);
+            call("TransactWriteItems", request, 200);
+            original.set("m", replacement);
+            assertEquals(original, get(table, "existing").path("Item"));
+            assertEquals(item("new", true), get(table, "new").path("Item"));
+        } finally {
+            deleteTable(table);
+        }
+    }
+
     private static String createTable() throws Exception {
         String table = "malformed-" + UUID.randomUUID();
         ObjectNode request = JSON.createObjectNode().put("TableName", table).put("BillingMode", "PAY_PER_REQUEST");
@@ -104,19 +190,35 @@ class DynamoDbMalformedAttributeValueIntegrationTest {
 
     private static JsonNode get(String table, String key) throws Exception {
         ObjectNode request = JSON.createObjectNode().put("TableName", table);
-        request.set("Key", JSON.createObjectNode().set("pk", JSON.createObjectNode().put("S", key)));
+        request.set("Key", key(key));
         return call("GetItem", request, 200);
+    }
+
+    private static ObjectNode key(String value) {
+        return JSON.createObjectNode().set("pk", JSON.createObjectNode().put("S", value));
     }
 
     private static ObjectNode item(String key, boolean valid) {
         ObjectNode item = JSON.createObjectNode();
         item.putObject("pk").put("S", key);
-        ObjectNode map = item.putObject("m").putObject("M");
+        item.set("m", nestedValue(valid));
+        return item;
+    }
+
+    private static ObjectNode nestedValue(boolean valid) {
+        ObjectNode value = JSON.createObjectNode();
+        ObjectNode map = value.putObject("M");
         map.putObject("S").put(valid ? "S" : "0", "v");
         if (valid) {
             map.putObject("list").putArray("L").addObject().putObject("M").putObject("leaf").put("S", "v");
         }
-        return item;
+        return value;
+    }
+
+    private static ObjectNode updatedValue() {
+        ObjectNode value = nestedValue(true);
+        ((ObjectNode) value.path("M").path("S")).put("S", "updated");
+        return value;
     }
 
     private static void assertValidation(JsonNode response) {
