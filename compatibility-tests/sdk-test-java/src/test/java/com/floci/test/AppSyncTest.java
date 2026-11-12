@@ -588,6 +588,7 @@ class AppSyncTest {
                 .apiId(apiId)
                 .typeName("Item")
                 .definition("type Item { id: ID!, name: String, description: String }")
+                .format(TypeDefinitionFormat.SDL)
                 .build());
 
         assertThat(resp.type()).isNotNull();
