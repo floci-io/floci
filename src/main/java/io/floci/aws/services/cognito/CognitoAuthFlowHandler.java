@@ -732,7 +732,12 @@ final class CognitoAuthFlowHandler {
             if (!"UserNotFoundException".equals(ae.getErrorCode())) throw ae;
             user = tryUserMigration(pool, client, username, password, null, clientMetadata,
                     "UserMigration_Authentication");
-            if (user == null) throw ae;
+            if (user == null) {
+                if ("ENABLED".equals(client.getPreventUserExistenceErrors())) {
+                    throw new AwsException("NotAuthorizedException", INCORRECT_CREDENTIALS, 400);
+                }
+                throw ae;
+            }
         }
 
         firePreAuthentication(pool, client, user, null, clientMetadata, false);
