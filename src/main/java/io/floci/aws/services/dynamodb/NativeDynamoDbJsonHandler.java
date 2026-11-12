@@ -172,17 +172,14 @@ public class NativeDynamoDbJsonHandler {
         };
     }
 
-    // The default account quotas, the same in every Region measured.
-    private static final long ACCOUNT_MAX_CAPACITY_UNITS = 80_000;
-    private static final long TABLE_MAX_CAPACITY_UNITS = 40_000;
     private static final int ENDPOINT_CACHE_PERIOD_IN_MINUTES = 1440;
 
     private Response handleDescribeLimits() {
         ObjectNode response = objectMapper.createObjectNode();
-        response.put("AccountMaxReadCapacityUnits", ACCOUNT_MAX_CAPACITY_UNITS);
-        response.put("AccountMaxWriteCapacityUnits", ACCOUNT_MAX_CAPACITY_UNITS);
-        response.put("TableMaxReadCapacityUnits", TABLE_MAX_CAPACITY_UNITS);
-        response.put("TableMaxWriteCapacityUnits", TABLE_MAX_CAPACITY_UNITS);
+        response.put("AccountMaxReadCapacityUnits", DynamoDbCapacityQuotas.ACCOUNT_MAX_CAPACITY_UNITS);
+        response.put("AccountMaxWriteCapacityUnits", DynamoDbCapacityQuotas.ACCOUNT_MAX_CAPACITY_UNITS);
+        response.put("TableMaxReadCapacityUnits", DynamoDbCapacityQuotas.TABLE_MAX_CAPACITY_UNITS);
+        response.put("TableMaxWriteCapacityUnits", DynamoDbCapacityQuotas.TABLE_MAX_CAPACITY_UNITS);
         return Response.ok(response).build();
     }
 
@@ -2047,6 +2044,17 @@ public class NativeDynamoDbJsonHandler {
 
         if (!gsiThroughputUpdates.isEmpty()) {
             TableDefinition currentTable = dynamoDbService.describeTable(tableName, region);
+            if (throughput != null) {
+                DynamoDbCapacityQuotas.requireWithinTableQuota(
+                        throughput.readCapacityUnits(), throughput.writeCapacityUnits(), region);
+            }
+            for (GsiThroughputUpdate gsiUpdate : gsiThroughputUpdates) {
+                Throughput gsiThroughput = gsiUpdate.provisionedThroughput();
+                if (gsiThroughput != null) {
+                    DynamoDbCapacityQuotas.requireWithinIndexQuota(gsiUpdate.indexName(),
+                            gsiThroughput.readCapacityUnits(), gsiThroughput.writeCapacityUnits(), region);
+                }
+            }
             for (GsiThroughputUpdate gsiUpdate : gsiThroughputUpdates) {
                 String indexName = gsiUpdate.indexName();
                 if (gsiDeletes.contains(indexName)) {

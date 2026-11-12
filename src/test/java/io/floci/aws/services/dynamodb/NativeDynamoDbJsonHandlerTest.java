@@ -715,6 +715,165 @@ class NativeDynamoDbJsonHandlerTest {
                 () -> assertEquals(1, describedIndexes.size()));
     }
 
+    private static final String SEE_GUIDE =
+            " Refer to the Amazon DynamoDB Developer Guide for current limits and how to request higher limits.";
+
+    private JsonNode quotaTableRequest(String tableName, long read, long write, long gsiRead, long gsiWrite) {
+        return json("""
+                {
+                    "TableName": "%s",
+                    "KeySchema": [{"AttributeName": "pk", "KeyType": "HASH"}],
+                    "AttributeDefinitions": [
+                        {"AttributeName": "pk", "AttributeType": "S"},
+                        {"AttributeName": "g", "AttributeType": "S"}
+                    ],
+                    "ProvisionedThroughput": {"ReadCapacityUnits": %d, "WriteCapacityUnits": %d},
+                    "GlobalSecondaryIndexes": [{
+                        "IndexName": "gsi1",
+                        "KeySchema": [{"AttributeName": "g", "KeyType": "HASH"}],
+                        "Projection": {"ProjectionType": "KEYS_ONLY"},
+                        "ProvisionedThroughput": {"ReadCapacityUnits": %d, "WriteCapacityUnits": %d}
+                    }]
+                }
+                """.formatted(tableName, read, write, gsiRead, gsiWrite));
+    }
+
+    private JsonNode throughputUpdate(String tableName, long read, long write) {
+        return json("""
+                {"TableName": "%s", "ProvisionedThroughput": {"ReadCapacityUnits": %d, "WriteCapacityUnits": %d}}
+                """.formatted(tableName, read, write));
+    }
+
+    private AwsException expectLimitExceeded(String action, JsonNode request) {
+        AwsException ex = assertThrows(AwsException.class, () -> handler.handle(action, request, "eu-west-2"));
+        assertEquals("LimitExceededException", ex.getErrorCode());
+        return ex;
+    }
+
+    @ParameterizedTest
+    @CsvSource(delimiter = '|', textBlock = """
+            40001 | 1     | 1     | 1     | The requested ReadCapacityUnits, 40001, is above the per table maximum for the account in eu-west-2. Per table maximum: 40000.
+            1     | 40001 | 1     | 1     | The requested WriteCapacityUnits, 40001, is above the per table maximum for the account in eu-west-2. Per table maximum: 40000.
+            1     | 1     | 40001 | 1     | The requested ReadCapacityUnits for index gsi1, 40001, is above the per index maximum for the account in eu-west-2. Per table maximum: 40000.
+            1     | 1     | 1     | 40001 | The requested WriteCapacityUnits for index gsi1, 40001, is above the per index maximum for the account in eu-west-2. Per table maximum: 40000.
+            1     | 40001 | 40001 | 1     | The requested WriteCapacityUnits, 40001, is above the per table maximum for the account in eu-west-2. Per table maximum: 40000.
+            79984 | 1     | 1     | 1     | The requested ReadCapacityUnits, 79984, is above the per table maximum for the account in eu-west-2. Per table maximum: 40000.
+            79985 | 1     | 1     | 1     | This request would have caused the ReadCapacityUnits limit to be exceeded for the account in eu-west-2. Current ReadCapacityUnits reserved by the account: 15. Limit: 80000. Requested: 79986.
+            1     | 1     | 79985 | 1     | This request would have caused the ReadCapacityUnits limit to be exceeded for the account in eu-west-2. Current ReadCapacityUnits reserved by the account: 15. Limit: 80000. Requested: 79986.
+            40001 | 80001 | 1     | 1     | This request would have caused the WriteCapacityUnits limit to be exceeded for the account in eu-west-2. Current WriteCapacityUnits reserved by the account: 15. Limit: 80000. Requested: 80002.
+            """)
+    void createTableRefusesCapacityAboveTheQuotas(long read, long write, long gsiRead, long gsiWrite, String message) throws Exception {
+        handler.handle("CreateTable", quotaTableRequest("held", 10, 10, 5, 5), "eu-west-2");
+        handler.handle("CreateTable", quotaTableRequest("elsewhere", 30000, 30000, 30000, 30000), "us-east-1");
+
+        AwsException ex = expectLimitExceeded("CreateTable", quotaTableRequest("quota", read, write, gsiRead, gsiWrite));
+
+        assertEquals(message + SEE_GUIDE, ex.getMessage());
+        assertEquals(List.of("held"), service.listTables("eu-west-2"));
+    }
+
+    @Test
+    void createTableChecksTheQuotasAfterTheOtherErrors() throws Exception {
+        handler.handle("CreateTable", quotaTableRequest("held", 10, 10, 5, 5), "eu-west-2");
+        ObjectNode unusedAttribute = (ObjectNode) quotaTableRequest("quota", 40001, 1, 1, 1);
+        ((ArrayNode) unusedAttribute.get("AttributeDefinitions")).addObject()
+                .put("AttributeName", "unused").put("AttributeType", "S");
+
+        AwsException taken = assertThrows(AwsException.class, () -> handler.handle("CreateTable",
+                quotaTableRequest("held", 40001, 1, 1, 1), "eu-west-2"));
+        AwsException invalid = assertThrows(AwsException.class,
+                () -> handler.handle("CreateTable", unusedAttribute, "eu-west-2"));
+
+        assertEquals("ResourceInUseException", taken.getErrorCode());
+        assertEquals("ValidationException", invalid.getErrorCode());
+    }
+
+    @ParameterizedTest
+    @CsvSource(delimiter = '|', quoteCharacter = '`', textBlock = """
+            {"TableName":"quota","ProvisionedThroughput":{"ReadCapacityUnits":40001,"WriteCapacityUnits":10}} | The requested ReadCapacityUnits, 40001, is above the per table maximum for the account in eu-west-2. Per table maximum: 40000.
+            {"TableName":"quota","ProvisionedThroughput":{"ReadCapacityUnits":10,"WriteCapacityUnits":40001}} | The requested WriteCapacityUnits, 40001, is above the per table maximum for the account in eu-west-2. Per table maximum: 40000.
+            {"TableName":"quota","GlobalSecondaryIndexUpdates":[{"Update":{"IndexName":"gsi1","ProvisionedThroughput":{"ReadCapacityUnits":40001,"WriteCapacityUnits":5}}}],"ProvisionedThroughput":{"ReadCapacityUnits":40001,"WriteCapacityUnits":10}} | The requested ReadCapacityUnits, 40001, is above the per table maximum for the account in eu-west-2. Per table maximum: 40000.
+            {"TableName":"quota","GlobalSecondaryIndexUpdates":[{"Update":{"IndexName":"gsi1","ProvisionedThroughput":{"ReadCapacityUnits":6,"WriteCapacityUnits":5}}},{"Update":{"IndexName":"nope","ProvisionedThroughput":{"ReadCapacityUnits":1,"WriteCapacityUnits":40001}}}]} | The requested WriteCapacityUnits for index nope, 40001, is above the per index maximum for the account in eu-west-2. Per table maximum: 40000.
+            {"TableName":"quota","AttributeDefinitions":[{"AttributeName":"g","AttributeType":"S"}],"GlobalSecondaryIndexUpdates":[{"Create":{"IndexName":"gsi2","KeySchema":[{"AttributeName":"g","KeyType":"HASH"}],"Projection":{"ProjectionType":"KEYS_ONLY"},"ProvisionedThroughput":{"ReadCapacityUnits":40001,"WriteCapacityUnits":1}}}]} | The requested ReadCapacityUnits for index gsi2, 40001, is above the per index maximum for the account in eu-west-2. Per table maximum: 40000.
+            {"TableName":"quota","AttributeDefinitions":[{"AttributeName":"g","AttributeType":"S"}],"GlobalSecondaryIndexUpdates":[{"Create":{"IndexName":"gsi2","KeySchema":[{"AttributeName":"g","KeyType":"HASH"}],"Projection":{"ProjectionType":"KEYS_ONLY"},"ProvisionedThroughput":{"ReadCapacityUnits":79971,"WriteCapacityUnits":1}}}]} | This request would have caused the ReadCapacityUnits limit to be exceeded for the account in eu-west-2. Current ReadCapacityUnits reserved by the account: 30. Limit: 80000. Current ReadCapacityUnits provisioned for the table and indexes: 15. Requested: 79986.
+            """)
+    void updateTableRefusesCapacityAboveTheQuotas(String request, String message) throws Exception {
+        handler.handle("CreateTable", quotaTableRequest("held", 10, 10, 5, 5), "eu-west-2");
+        handler.handle("CreateTable", quotaTableRequest("quota", 10, 10, 5, 5), "eu-west-2");
+
+        AwsException ex = expectLimitExceeded("UpdateTable", json(request));
+
+        assertEquals(message + SEE_GUIDE, ex.getMessage());
+        TableDefinition table = service.describeTable("quota", "eu-west-2");
+        assertEquals(10, table.getProvisionedThroughput().getReadCapacityUnits());
+        assertEquals(1, table.getGlobalSecondaryIndexes().size());
+    }
+
+    @ParameterizedTest
+    @CsvSource(delimiter = '|', quoteCharacter = '`', textBlock = """
+            {"TableName":"quota","ProvisionedThroughput":{"ReadCapacityUnits":39996,"WriteCapacityUnits":10}} | ReadCapacityUnits | 40015 | 15 | 40001
+            {"TableName":"quota","ProvisionedThroughput":{"ReadCapacityUnits":10,"WriteCapacityUnits":39996}} | WriteCapacityUnits | 40015 | 15 | 40001
+            {"TableName":"quota","GlobalSecondaryIndexUpdates":[{"Update":{"IndexName":"gsi1","ProvisionedThroughput":{"ReadCapacityUnits":39991,"WriteCapacityUnits":5}}}]} | ReadCapacityUnits | 40015 | 15 | 40001
+            {"TableName":"quota","AttributeDefinitions":[{"AttributeName":"g","AttributeType":"S"}],"GlobalSecondaryIndexUpdates":[{"Create":{"IndexName":"gsi2","KeySchema":[{"AttributeName":"g","KeyType":"HASH"}],"Projection":{"ProjectionType":"KEYS_ONLY"},"ProvisionedThroughput":{"ReadCapacityUnits":39986,"WriteCapacityUnits":1}}}]} | ReadCapacityUnits | 40015 | 15 | 40001
+            {"TableName":"onDemand","BillingMode":"PROVISIONED","ProvisionedThroughput":{"ReadCapacityUnits":39986,"WriteCapacityUnits":1}} | ReadCapacityUnits | 40015 | 0 | 39986
+            """)
+    void updateTableRefusesATotalAboveTheAccountQuota(String request, String unit, long reserved, long current,
+                                                      long requested) throws Exception {
+        handler.handle("CreateTable", quotaTableRequest("held", 39990, 39990, 10, 10), "eu-west-2");
+        handler.handle("CreateTable", quotaTableRequest("quota", 10, 10, 5, 5), "eu-west-2");
+        handler.handle("CreateTable", json("""
+                {
+                    "TableName": "onDemand",
+                    "BillingMode": "PAY_PER_REQUEST",
+                    "KeySchema": [{"AttributeName": "pk", "KeyType": "HASH"}],
+                    "AttributeDefinitions": [{"AttributeName": "pk", "AttributeType": "S"}]
+                }
+                """), "eu-west-2");
+
+        AwsException ex = expectLimitExceeded("UpdateTable", json(request));
+
+        assertEquals("This request would have caused the " + unit + " limit to be exceeded for the account in "
+                + "eu-west-2. Current " + unit + " reserved by the account: " + reserved + ". Limit: 80000. Current "
+                + unit + " provisioned for the table and indexes: " + current + ". Requested: " + requested + "."
+                + SEE_GUIDE, ex.getMessage());
+    }
+
+    @Test
+    void updateTableAcceptsATotalAtTheAccountQuotaAndAnyDecrease() throws Exception {
+        handler.handle("CreateTable", quotaTableRequest("held", 39990, 39990, 10, 10), "eu-west-2");
+        handler.handle("CreateTable", quotaTableRequest("quota", 10, 10, 5, 5), "eu-west-2");
+
+        handler.handle("UpdateTable", throughputUpdate("quota", 39995, 10), "eu-west-2");
+        handler.handle("UpdateTable", throughputUpdate("quota", 39994, 9), "eu-west-2");
+
+        assertEquals(39994, service.describeTable("quota", "eu-west-2").getProvisionedThroughput().getReadCapacityUnits());
+    }
+
+    @Test
+    void updateTableChecksTheQuotasAfterTheLookups() throws Exception {
+        handler.handle("CreateTable", quotaTableRequest("quota", 10, 10, 5, 5), "eu-west-2");
+        JsonNode existingIndexCreate = json("""
+                {
+                    "TableName": "quota",
+                    "AttributeDefinitions": [{"AttributeName": "g", "AttributeType": "S"}],
+                    "GlobalSecondaryIndexUpdates": [{"Create": {
+                        "IndexName": "gsi1",
+                        "KeySchema": [{"AttributeName": "g", "KeyType": "HASH"}],
+                        "Projection": {"ProjectionType": "KEYS_ONLY"},
+                        "ProvisionedThroughput": {"ReadCapacityUnits": 80001, "WriteCapacityUnits": 1}
+                    }}]
+                }
+                """);
+
+        AwsException missingTable = assertThrows(AwsException.class,
+                () -> handler.handle("UpdateTable", throughputUpdate("missing", 40001, 10), "eu-west-2"));
+        AwsException existingIndex = assertThrows(AwsException.class,
+                () -> handler.handle("UpdateTable", existingIndexCreate, "eu-west-2"));
+
+        assertEquals("ResourceNotFoundException", missingTable.getErrorCode());
+        assertEquals("ValidationException", existingIndex.getErrorCode());
+    }
+
     // Request validation for AWS parity: real DynamoDB rejects each of these with a
     // ValidationException (paritysuite dynamodb-conformance tier1).
 

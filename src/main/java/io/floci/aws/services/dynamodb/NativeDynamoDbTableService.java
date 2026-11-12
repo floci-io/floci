@@ -430,7 +430,7 @@ public class NativeDynamoDbTableService {
         TableDefinition table = dynamoDbService.updateTable(tableName,
                 throughput != null ? throughput.readCapacityUnits() : null,
                 throughput != null ? throughput.writeCapacityUnits() : null,
-                request.gsiCreates(), request.gsiDeletes(), request.attributeDefinitions(),
+                request.gsiCreates(), request.gsiDeletes(), request.gsiUpdates(), request.attributeDefinitions(),
                 request.vectorCreates(), request.vectorDeletes(),
                 settings.billingMode(), region);
 
