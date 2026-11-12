@@ -38,6 +38,7 @@ import java.nio.charset.StandardCharsets;
 import java.time.Clock;
 import java.time.Instant;
 import java.time.ZoneOffset;
+import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
@@ -50,6 +51,7 @@ import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
@@ -1292,6 +1294,12 @@ class IamConditionContextResolverTest {
                 "ses.amazonaws.com", "arn:aws:sns:eu-west-2:111122223333:events", "111122223333",
                 "arn:aws:ses:eu-west-2:444455556666:configuration-set/my-set", "444455556666");
 
+        // The time of the request is on a service call as on every request; the rest is exact.
+        assertTrue(conditions.containsKey("aws:CurrentTime"));
+        assertTrue(conditions.containsKey("aws:EpochTime"));
+        Map<String, List<String>> rest = new HashMap<>(conditions);
+        rest.remove("aws:CurrentTime");
+        rest.remove("aws:EpochTime");
         assertEquals(Map.of(
                 "aws:PrincipalIsAWSService", List.of("true"),
                 "aws:ViaAWSService", List.of("false"),
@@ -1301,7 +1309,7 @@ class IamConditionContextResolverTest {
                 "aws:SourceAccount", List.of("444455556666"),
                 "aws:SourceOwner", List.of("444455556666"),
                 "aws:ResourceAccount", List.of("111122223333"),
-                "aws:RequestedRegion", List.of("eu-west-2")), conditions);
+                "aws:RequestedRegion", List.of("eu-west-2")), rest);
     }
 
     @Test
