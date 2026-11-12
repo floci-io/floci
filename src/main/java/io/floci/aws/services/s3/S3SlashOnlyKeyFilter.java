@@ -1,6 +1,7 @@
 package io.floci.aws.services.s3;
 
 import io.floci.aws.core.common.RequestUriRewrite;
+import io.floci.aws.core.common.ResteasyRequests;
 import io.quarkus.vertx.http.runtime.CurrentVertxRequest;
 import io.vertx.ext.web.RoutingContext;
 import jakarta.annotation.Priority;
@@ -84,7 +85,7 @@ public class S3SlashOnlyKeyFilter implements ContainerRequestFilter {
         if (authorization != null && authorization.contains("Credential=")) {
             return !authorization.contains("/s3/aws4_request");
         }
-        String credential = requestContext.getUriInfo().getQueryParameters().getFirst("X-Amz-Credential");
+        String credential = ResteasyRequests.queryParameters(requestContext).getFirst("X-Amz-Credential");
         return credential != null && !credential.contains("/s3/aws4_request");
     }
 }

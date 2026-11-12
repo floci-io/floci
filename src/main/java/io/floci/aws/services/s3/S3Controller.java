@@ -16,6 +16,7 @@ import io.floci.aws.core.common.PaginatedResult;
 import io.floci.aws.core.common.Pagination;
 import io.floci.aws.core.common.RegionResolver;
 import io.floci.aws.core.common.RequestContext;
+import io.floci.aws.core.common.ResteasyRequests;
 import io.floci.aws.core.common.XmlBuilder;
 import io.floci.aws.core.common.XmlParser;
 import io.floci.aws.core.common.auth.SigV4Canonicalization;
@@ -239,7 +240,7 @@ public class S3Controller {
         if (target != null) {
             return null;
         }
-        MultivaluedMap<String, String> queryParams = uriInfo.getQueryParameters();
+        MultivaluedMap<String, String> queryParams = ResteasyRequests.queryParameters(uriInfo);
         String action = queryParams.getFirst("Action");
         // SNS emits SubscribeURL/UnsubscribeURL as plain GET links against the
         // service root, which collides with the S3 ListBuckets endpoint. Delegate
@@ -442,6 +443,7 @@ public class S3Controller {
                 String actualBucket = resolveActualBucket(httpHeaders, uriInfo);
                 if (actualBucket != null && !actualBucket.equalsIgnoreCase(bucket)) {
                     LOG.infov("Rerouting misplaced virtual-hosted PutObject to bucket {0}, key {1}", actualBucket, bucket);
+                    MultivaluedMap<String, String> queryParams = ResteasyRequests.queryParameters(uriInfo);
                     return putObject(actualBucket, bucket,
                             httpHeaders.getHeaderString("Content-Type"),
                             httpHeaders.getHeaderString("Content-Encoding"),
@@ -450,8 +452,8 @@ public class S3Controller {
                             httpHeaders.getHeaderString("x-amz-tagging"),
                             httpHeaders.getHeaderString("If-Match"),
                             httpHeaders.getHeaderString("If-None-Match"),
-                            uriInfo.getQueryParameters().getFirst("uploadId"),
-                            uriInfo.getQueryParameters().getFirst("partNumber"),
+                            queryParams.getFirst("uploadId"),
+                            queryParams.getFirst("partNumber"),
                             uriInfo,
                             httpHeaders,
                             body != null ? new ByteArrayInputStream(body) : null);
@@ -1653,9 +1655,10 @@ public class S3Controller {
                 String actualBucket = resolveActualBucket(httpHeaders, uriInfo);
                 if (actualBucket != null && !actualBucket.equalsIgnoreCase(bucket)) {
                     LOG.infov("Rerouting misplaced virtual-hosted multipart POST to bucket {0}, key {1}", actualBucket, bucket);
+                    MultivaluedMap<String, String> queryParams = ResteasyRequests.queryParameters(uriInfo);
                     return handleMultipartPost(actualBucket, bucket,
-                            uriInfo.getQueryParameters().getFirst("uploadId"),
-                            uriInfo.getQueryParameters().getFirst("versionId"),
+                            queryParams.getFirst("uploadId"),
+                            queryParams.getFirst("versionId"),
                             contentType,
                             httpHeaders.getHeaderString("If-Match"),
                             httpHeaders.getHeaderString("If-None-Match"),
@@ -1741,7 +1744,7 @@ public class S3Controller {
             }
 
             if (hasQueryParam(uriInfo, "restore")) {
-                checkVersionId(bucket, uriInfo.getQueryParameters().getFirst("versionId"));
+                checkVersionId(bucket, ResteasyRequests.queryParameters(uriInfo).getFirst("versionId"));
                 s3Service.authorizeObjectWrite(bucket, key, "s3:RestoreObject", authorization);
                 s3Service.restoreObject(bucket, key, versionId, new String(body, StandardCharsets.UTF_8));
                 return Response.accepted().build();
@@ -2063,7 +2066,7 @@ public class S3Controller {
     }
 
     private Response handleListMultipartUploads(String bucket, UriInfo uriInfo) {
-        MultivaluedMap<String, String> params = uriInfo.getQueryParameters();
+        MultivaluedMap<String, String> params = ResteasyRequests.queryParameters(uriInfo);
         String prefix = params.getFirst("prefix");
         String delimiter = params.getFirst("delimiter");
         String keyMarker = params.getFirst("key-marker");
@@ -2530,8 +2533,10 @@ public class S3Controller {
     private static Long multipartObjectSize(HttpHeaders httpHeaders, UriInfo uriInfo) {
         String name = "x-amz-mp-object-size";
         String value = httpHeaders != null ? httpHeaders.getHeaderString(name) : null;
-        if (value == null && uriInfo != null && uriInfo.getQueryParameters() != null) {
-            for (Map.Entry<String, List<String>> entry : uriInfo.getQueryParameters().entrySet()) {
+        MultivaluedMap<String, String> queryParams = value == null && uriInfo != null
+                ? ResteasyRequests.queryParameters(uriInfo) : null;
+        if (queryParams != null) {
+            for (Map.Entry<String, List<String>> entry : queryParams.entrySet()) {
                 if (entry.getKey().equalsIgnoreCase(name) && !entry.getValue().isEmpty()) {
                     value = entry.getValue().getFirst();
                     break;
@@ -2736,7 +2741,7 @@ public class S3Controller {
      * at. AWS's own answer here was not verified, so floci gives one rejection for both verbs.
      */
     private String requireMetricsId(UriInfo uriInfo) {
-        String id = uriInfo.getQueryParameters().getFirst("id");
+        String id = ResteasyRequests.queryParameters(uriInfo).getFirst("id");
         if (id == null) {
             throw new AwsException("InvalidArgument", "The metrics id must be specified.", 400);
         }
@@ -2766,7 +2771,7 @@ public class S3Controller {
      * at, mirroring the metrics subresource.
      */
     private String requireIntelligentTieringId(UriInfo uriInfo) {
-        String id = uriInfo.getQueryParameters().getFirst("id");
+        String id = ResteasyRequests.queryParameters(uriInfo).getFirst("id");
         if (id == null) {
             throw new AwsException("InvalidArgument",
                     "The intelligent-tiering configuration id must be specified.", 400);
@@ -2795,7 +2800,7 @@ public class S3Controller {
      * at, mirroring the metrics subresource.
      */
     private String requireAnalyticsId(UriInfo uriInfo) {
-        String id = uriInfo.getQueryParameters().getFirst("id");
+        String id = ResteasyRequests.queryParameters(uriInfo).getFirst("id");
         if (id == null) {
             throw new AwsException("InvalidArgument",
                     "The analytics configuration id must be specified.", 400);
@@ -2824,7 +2829,7 @@ public class S3Controller {
      * at, mirroring the metrics subresource.
      */
     private String requireInventoryId(UriInfo uriInfo) {
-        String id = uriInfo.getQueryParameters().getFirst("id");
+        String id = ResteasyRequests.queryParameters(uriInfo).getFirst("id");
         if (id == null) {
             throw new AwsException("InvalidArgument",
                     "The inventory configuration id must be specified.", 400);
@@ -2877,8 +2882,9 @@ public class S3Controller {
             byte[] payload = decodeAwsChunked(body != null ? body : new byte[0],
                     httpHeaders.getHeaderString("Content-Encoding"),
                     httpHeaders.getHeaderString("x-amz-content-sha256"));
-            String annotationName = uriInfo.getQueryParameters().getFirst("annotationName");
-            String versionId = uriInfo.getQueryParameters().getFirst("versionId");
+            MultivaluedMap<String, String> queryParams = ResteasyRequests.queryParameters(uriInfo);
+            String annotationName = queryParams.getFirst("annotationName");
+            String versionId = queryParams.getFirst("versionId");
             String algorithmHeader = getChecksumAlgorithm(httpHeaders);
             ChecksumAlgorithm algorithm = ChecksumAlgorithm.fromWireValue(algorithmHeader);
             validateChecksumHeaders(httpHeaders, uriInfo, payload);
@@ -2903,8 +2909,9 @@ public class S3Controller {
     private Response handleGetObjectAnnotation(String bucket, String key,
                                                UriInfo uriInfo, HttpHeaders httpHeaders) {
         try {
-            String annotationName = uriInfo.getQueryParameters().getFirst("annotationName");
-            String versionId = uriInfo.getQueryParameters().getFirst("versionId");
+            MultivaluedMap<String, String> queryParams = ResteasyRequests.queryParameters(uriInfo);
+            String annotationName = queryParams.getFirst("annotationName");
+            String versionId = queryParams.getFirst("versionId");
             ObjectAnnotation annotation = s3Service.getObjectAnnotation(bucket, key, annotationName, versionId);
             byte[] payload = s3Service.readObjectAnnotationPayload(annotation);
             Response.ResponseBuilder response = Response.ok((Object) payload)
@@ -2930,10 +2937,11 @@ public class S3Controller {
 
     private Response handleListObjectAnnotations(String bucket, String key, UriInfo uriInfo) {
         try {
-            String versionId = uriInfo.getQueryParameters().getFirst("versionId");
-            String prefix = uriInfo.getQueryParameters().getFirst("annotation-prefix");
-            String token = uriInfo.getQueryParameters().getFirst("continuation-token");
-            String maxRaw = uriInfo.getQueryParameters().getFirst("max-annotation-results");
+            MultivaluedMap<String, String> queryParams = ResteasyRequests.queryParameters(uriInfo);
+            String versionId = queryParams.getFirst("versionId");
+            String prefix = queryParams.getFirst("annotation-prefix");
+            String token = queryParams.getFirst("continuation-token");
+            String maxRaw = queryParams.getFirst("max-annotation-results");
             Integer max = null;
             if (maxRaw != null && !maxRaw.isBlank()) {
                 try {
@@ -2992,8 +3000,9 @@ public class S3Controller {
                                                   UriInfo uriInfo, HttpHeaders httpHeaders,
                                                   boolean bypassGovernance) {
         try {
-            String annotationName = uriInfo.getQueryParameters().getFirst("annotationName");
-            String versionId = uriInfo.getQueryParameters().getFirst("versionId");
+            MultivaluedMap<String, String> queryParams = ResteasyRequests.queryParameters(uriInfo);
+            String annotationName = queryParams.getFirst("annotationName");
+            String versionId = queryParams.getFirst("versionId");
             String parentVersionId = s3Service.deleteObjectAnnotation(bucket, key, annotationName, versionId,
                     httpHeaders.getHeaderString("x-amz-object-if-match"), bypassGovernance);
             Response.ResponseBuilder response = Response.noContent();
@@ -3529,7 +3538,7 @@ public class S3Controller {
      * with the same key, because the presigned URL signature covers the query value.
      */
     private Map<String, String> extractUserMetadata(HttpHeaders httpHeaders, UriInfo uriInfo) {
-        return extractUserMetadata(httpHeaders, uriInfo != null ? uriInfo.getQueryParameters() : null);
+        return extractUserMetadata(httpHeaders, uriInfo != null ? ResteasyRequests.queryParameters(uriInfo) : null);
     }
 
     private Map<String, String> extractUserMetadata(HttpHeaders httpHeaders, MultivaluedMap<String, String> query) {
@@ -3555,7 +3564,7 @@ public class S3Controller {
 
     static String resolveHeaderOrQueryParam(HttpHeaders httpHeaders, UriInfo uriInfo, String name) {
         String headerVal = httpHeaders != null ? httpHeaders.getHeaderString(name) : null;
-        return resolveHeaderOrQueryParam(headerVal, uriInfo != null ? uriInfo.getQueryParameters() : null, name);
+        return resolveHeaderOrQueryParam(headerVal, uriInfo != null ? ResteasyRequests.queryParameters(uriInfo) : null, name);
     }
 
     static String resolveHeaderOrQueryParam(String headerValue, MultivaluedMap<String, String> query, String name) {
@@ -4476,7 +4485,7 @@ public class S3Controller {
      * {@link #parseInlineTaggingHeader(String)} unchanged. Real S3 honors both forms.
      */
     private static String resolveInlineTaggingSource(String taggingHeader, UriInfo uriInfo) {
-        return resolveInlineTaggingSource(taggingHeader, uriInfo.getQueryParameters());
+        return resolveInlineTaggingSource(taggingHeader, ResteasyRequests.queryParameters(uriInfo));
     }
 
     private static String resolveInlineTaggingSource(String taggingHeader, MultivaluedMap<String, String> query) {
@@ -4589,7 +4598,7 @@ public class S3Controller {
      */
     private static void rejectUnservedSubresource(String method, UriInfo uriInfo) {
         S3BucketSubresources subresources = S3BucketSubresources.vendored();
-        MultivaluedMap<String, String> params = uriInfo.getQueryParameters();
+        MultivaluedMap<String, String> params = ResteasyRequests.queryParameters(uriInfo);
         boolean named = false;
         for (String name : subresources.names()) {
             if (params.containsKey(name)) {
@@ -4791,7 +4800,7 @@ public class S3Controller {
         if (authorizationHeader != null && authorizationHeader.isBlank()) {
             authorizationHeader = null;
         }
-        return IamEnforcementFilter.requestAuthorization(authorizationHeader, uriInfo.getQueryParameters());
+        return IamEnforcementFilter.requestAuthorization(authorizationHeader, ResteasyRequests.queryParameters(uriInfo));
     }
 
     /**
