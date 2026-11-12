@@ -8,6 +8,7 @@ import io.floci.aws.core.common.AwsArnUtils;
 import io.floci.aws.core.common.AwsException;
 import io.floci.aws.core.common.RegionResolver;
 import io.floci.aws.core.common.SmithyValidationErrors;
+import io.floci.aws.services.cognito.model.CognitoGroup;
 import io.floci.aws.services.cognito.model.CognitoUser;
 import io.floci.aws.services.cognito.model.UserPool;
 import io.floci.aws.services.cognito.model.UserPoolClient;
@@ -34,6 +35,7 @@ import java.util.Iterator;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
 import java.util.OptionalLong;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
@@ -2200,7 +2202,7 @@ final class CognitoAuthFlowHandler {
             req.put("userAttributes", Map.of());
             req.put("groupConfiguration", null);
         } else {
-            req.put("groupConfiguration", buildGroupConfiguration(user));
+            req.put("groupConfiguration", buildGroupConfiguration(pool, user));
         }
         req.put("clientMetadata", clientMetadata == null ? Map.of() : clientMetadata);
         // V2 lambdas (CognitoEventUserPoolsPreTokenGenV2) require `scopes` to deserialize.
@@ -2305,12 +2307,44 @@ final class CognitoAuthFlowHandler {
         return out;
     }
 
-    private static Map<String, Object> buildGroupConfiguration(CognitoUser user) {
+    /**
+     * The groupConfiguration AWS hands the pre token generation trigger: the user's groups, the
+     * IAM roles of those groups, and the preferred role Cognito would put in the token.
+     */
+    private Map<String, Object> buildGroupConfiguration(UserPool pool, CognitoUser user) {
+        List<String> names = user.getGroupNames() == null ? List.of() : new ArrayList<>(user.getGroupNames());
+        List<CognitoGroup> groups = new ArrayList<>();
+        for (String name : names) {
+            try {
+                groups.add(service.getGroup(pool.getId(), name));
+            } catch (AwsException ignored) {
+                // A membership whose group is gone carries no role.
+            }
+        }
         Map<String, Object> cfg = new HashMap<>();
-        cfg.put("groupsToOverride", user.getGroupNames() == null ? List.of() : new ArrayList<>(user.getGroupNames()));
-        cfg.put("iamRolesToOverride", List.of());
-        cfg.put("preferredRole", null);
+        cfg.put("groupsToOverride", names);
+        cfg.put("iamRolesToOverride", groups.stream().map(CognitoGroup::getRoleArn)
+                .filter(role -> role != null && !role.isBlank()).distinct().toList());
+        cfg.put("preferredRole", preferredRole(groups));
         return cfg;
+    }
+
+    /**
+     * The role of the group with the lowest Precedence among the groups that have a role; a group
+     * without a Precedence ranks after every group with one. When the groups tied at that rank
+     * name different roles, AWS sets no preferred role.
+     */
+    static String preferredRole(List<CognitoGroup> groups) {
+        List<CognitoGroup> withRole = groups.stream()
+                .filter(group -> group.getRoleArn() != null && !group.getRoleArn().isBlank()).toList();
+        if (withRole.isEmpty()) {
+            return null;
+        }
+        Integer best = withRole.stream().map(CognitoGroup::getPrecedence).filter(Objects::nonNull)
+                .min(Integer::compare).orElse(null);
+        List<String> roles = withRole.stream().filter(group -> Objects.equals(group.getPrecedence(), best))
+                .map(CognitoGroup::getRoleArn).distinct().toList();
+        return roles.size() == 1 ? roles.get(0) : null;
     }
 
     private CognitoUser tryUserMigration(UserPool pool, UserPoolClient client, String username, String password,
