@@ -8,6 +8,7 @@ import io.floci.aws.services.ecs.container.EcsTaskRoleCredentialsServer;
 import io.floci.aws.services.iam.model.SessionCredential;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
+import org.jboss.logging.Logger;
 
 import java.time.Instant;
 import java.util.LinkedHashMap;
@@ -33,12 +34,18 @@ import java.util.concurrent.TimeoutException;
  * session is handed as keys instead, and the build still runs as its role.
  *
  * <p>The role's trust policy is not evaluated: like an ECS task's, the session is minted for any
- * role that exists.
+ * role that exists. A role that does not exist mints nothing, and the build runs as builds ran
+ * before they had a role, with the placeholder keys, as an ECS task whose role cannot be resolved
+ * starts without credentials; a network whose endpoint cannot be served hands the session as keys.
  */
 @ApplicationScoped
 public class CodeBuildRoleCredentials {
 
     static final String RELATIVE_URI = "AWS_CONTAINER_CREDENTIALS_RELATIVE_URI";
+    /** What a build was handed before it had a role of its own, and still is when its role does not exist. */
+    static final Map<String, String> PLACEHOLDER_KEYS = Map.of(
+            "AWS_ACCESS_KEY_ID", "test", "AWS_SECRET_ACCESS_KEY", "test");
+    private static final Logger LOG = Logger.getLogger(CodeBuildRoleCredentials.class);
     private static final String SESSION_PREFIX = "AWSCodeBuild-";
     private static final long SERVER_START_SECONDS = 30;
 
@@ -60,33 +67,38 @@ public class CodeBuildRoleCredentials {
      * Mints the build's session and readies what serves it on the build's network, before the
      * build's container is made.
      *
-     * @param buildArn the build's ARN, which owns the session and its address until {@link #release}
+     * @param buildArn the build's ARN, which owns the session and its address until {@link #releaseAddress}
      * @param network  the Docker network the build's container joins, empty for the default bridge
-     * @throws RoleNotFoundException when the role names no role in the account; nothing is minted
-     * @throws IllegalStateException when the credentials endpoint cannot be served on the network
      */
     public BuildCredentials provision(String buildArn, String buildId, String roleArn, String accountId,
                                       Optional<String> network) {
         String sessionName = SESSION_PREFIX + buildId.substring(buildId.indexOf(':') + 1);
         Optional<String> path = sessions.issue(buildArn, roleArn, accountId, sessionName, Instant.now());
         if (path.isEmpty()) {
-            throw new RoleNotFoundException("The project's service role " + roleArn
-                    + " was not found in account " + accountId + ", so the build ran none of its commands");
+            LOG.warnv("Build {0}: its project's service role {1} was not found in account {2}, so the build "
+                    + "runs with the placeholder keys and no role", buildId, roleArn, accountId);
+            return new BuildCredentials(PLACEHOLDER_KEYS, null);
         }
         Optional<String> endpointNetwork = network.filter(ContainerSpec::acceptsLinkLocalIps);
-        if (endpointNetwork.isEmpty()) {
-            SessionCredential session = sessions.resolveByPath(path.get(), Instant.now()).orElseThrow(() ->
-                    new IllegalStateException("The session of " + roleArn + " was revoked as it was minted"));
-            Map<String, String> env = new LinkedHashMap<>();
-            env.put("AWS_ACCESS_KEY_ID", session.getAccessKeyId());
-            env.put("AWS_SECRET_ACCESS_KEY", session.getSecretAccessKey());
-            env.put("AWS_SESSION_TOKEN", session.getSessionToken());
-            return new BuildCredentials(env, null);
+        if (endpointNetwork.isPresent()) {
+            try {
+                startServer();
+                proxy.ensureProxyOn(endpointNetwork.get());
+                String address = addresses.allocate(endpointNetwork.get(), buildArn);
+                return new BuildCredentials(Map.of(RELATIVE_URI, path.get()), address);
+            } catch (IllegalStateException e) {
+                LOG.warnv("Build {0}: the container credentials endpoint cannot be served on network {1} ({2}), "
+                        + "so the build's session is handed as keys instead", buildId, endpointNetwork.get(),
+                        e.getMessage());
+            }
         }
-        startServer();
-        proxy.ensureProxyOn(endpointNetwork.get());
-        String address = addresses.allocate(endpointNetwork.get(), buildArn);
-        return new BuildCredentials(Map.of(RELATIVE_URI, path.get()), address);
+        SessionCredential session = sessions.resolveByPath(path.get(), Instant.now()).orElseThrow(() ->
+                new IllegalStateException("The session of " + roleArn + " was revoked as it was minted"));
+        Map<String, String> env = new LinkedHashMap<>();
+        env.put("AWS_ACCESS_KEY_ID", session.getAccessKeyId());
+        env.put("AWS_SECRET_ACCESS_KEY", session.getSecretAccessKey());
+        env.put("AWS_SESSION_TOKEN", session.getSessionToken());
+        return new BuildCredentials(env, null);
     }
 
     /** Revokes every generation of the build's session, however the build ended. */
@@ -116,12 +128,5 @@ public class CodeBuildRoleCredentials {
      * link-local address on the network, null on the default bridge.
      */
     public record BuildCredentials(Map<String, String> env, String linkLocalAddress) {
-    }
-
-    /** A project's service role that names no role in the project's account. */
-    public static final class RoleNotFoundException extends RuntimeException {
-        RoleNotFoundException(String message) {
-            super(message);
-        }
     }
 }

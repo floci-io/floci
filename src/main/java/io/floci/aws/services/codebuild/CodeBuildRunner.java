@@ -182,10 +182,6 @@ public class CodeBuildRunner implements ContainerTeardown {
             try {
                 credentials = roleCredentials.provision(executionId, buildId, project.getServiceRole(),
                         accountOf(project), network);
-            } catch (CodeBuildRoleCredentials.RoleNotFoundException e) {
-                completePhaseWithError(build, "PROVISIONING", "FAILED", "CLIENT_ERROR", e.getMessage());
-                finishFailed(build);
-                return;
             } catch (RuntimeException e) {
                 completePhaseWithError(build, "PROVISIONING", "FAILED", "FAULT_ERROR", e.getMessage());
                 throw e;
@@ -414,12 +410,17 @@ public class CodeBuildRunner implements ContainerTeardown {
             stopFlags.remove(executionId);
             // However the build ended, its session ends with it.
             roleCredentials.revoke(executionId);
+            boolean containerGone = true;
             if (containerId != null && runningContainers.remove(executionId, containerId)) {
-                lifecycleManager.stopAndRemove(containerId, logHandle);
+                containerGone = stopAndConfirmRemoved(containerId, logHandle);
             } else if (logHandle != null) {
                 try { logHandle.close(); } catch (Exception ignored) {}
             }
-            roleCredentials.releaseAddress(executionId);
+            // The address goes back to its network's pool only once no container holds it, as an
+            // ECS task's does; a container that survived removal keeps it reserved.
+            if (containerGone) {
+                roleCredentials.releaseAddress(executionId);
+            }
             if (workspace != null) {
                 deleteDirectory(workspace);
             }
@@ -465,11 +466,31 @@ public class CodeBuildRunner implements ContainerTeardown {
         throw new AwsException("InvalidInputException", "No buildspec found in source or request", 400);
     }
 
+    /**
+     * Stops and removes the build's container, reporting whether it is really gone. The strict
+     * teardown keeps the log stream open for a retry there is none of here, so it is closed either way.
+     */
+    private boolean stopAndConfirmRemoved(String containerId, Closeable logHandle) {
+        try {
+            lifecycleManager.stopAndRemoveStrict(containerId, logHandle);
+            return true;
+        } catch (RuntimeException e) {
+            LOG.warnv("Build container {0} was not removed: {1}; its link-local address stays reserved",
+                    containerId, e.getMessage());
+            if (logHandle != null) {
+                try { logHandle.close(); } catch (Exception ignored) {}
+            }
+            return false;
+        }
+    }
+
     /** The account the project is in, which its role is looked up and its session minted in. */
     private String accountOf(Project project) {
         try {
             return AwsArnUtils.parse(project.getArn()).accountId();
-        } catch (RuntimeException e) {
+        } catch (IllegalArgumentException e) {
+            LOG.warnv("Project {0} has no parsable ARN ({1}), so its service role is looked up in the default "
+                    + "account {2}", project.getName(), project.getArn(), regionResolver.getAccountId());
             return regionResolver.getAccountId();
         }
     }

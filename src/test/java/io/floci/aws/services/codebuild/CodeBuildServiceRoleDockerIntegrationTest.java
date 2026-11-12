@@ -3,6 +3,7 @@ package io.floci.aws.services.codebuild;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.github.dockerjava.api.DockerClient;
+import io.floci.aws.config.EmulatorConfig;
 import io.floci.aws.core.common.docker.ContainerDetector;
 import io.floci.aws.core.common.docker.CurrentContainerNetworkResolver;
 import io.floci.aws.services.ecs.container.EcsCredentialsProxy;
@@ -32,8 +33,10 @@ import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
 import java.nio.charset.StandardCharsets;
 import java.time.Duration;
+import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.HashMap;
+import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
@@ -94,6 +97,9 @@ class CodeBuildServiceRoleDockerIntegrationTest {
     @Inject
     S3Service s3Service;
 
+    @Inject
+    EmulatorConfig config;
+
     private final String suffix = UUID.randomUUID().toString().substring(0, 8);
     private final String roleName = "codebuild-service-role-" + suffix;
     private final String projectName = "service-role-" + suffix;
@@ -101,11 +107,14 @@ class CodeBuildServiceRoleDockerIntegrationTest {
     private final String otherBucket = "other-" + suffix;
     private final String resultsBucket = "results-" + suffix;
     private String createdNetworkId;
+    /** Whether the test ran, so that its cleanup has something to remove and a client set up to do it. */
+    private boolean ran;
 
     @BeforeEach
     void requireANetworkABuildCanReachTheEndpointOn() throws Exception {
         Assumptions.assumeTrue(DockerAvailability.answers(dockerClient), "Docker daemon must be available");
         RestAssuredJsonUtils.configureAwsContentTypes();
+        ran = true;
         if (containerDetector.isRunningInContainer()) {
             Optional<String> own = currentContainerNetworkResolver.resolveNetworkName();
             Assumptions.assumeTrue(own.filter(Profile::userDefined).isPresent(),
@@ -118,27 +127,43 @@ class CodeBuildServiceRoleDockerIntegrationTest {
     }
 
     @AfterEach
-    void removeWhatTheTestMade() {
+    void removeWhatTheTestMade() throws InterruptedException {
+        if (!ran) {
+            return;
+        }
         codeBuild("DeleteProject")
                 .body(Map.of("name", projectName)).post("/");
         for (String bucket : List.of(grantedBucket, otherBucket, resultsBucket)) {
-            try {
+            if (s3Service.bucketExists(bucket)) {
                 s3Service.listObjects(bucket, null, null, 1000).forEach(o -> s3Service.deleteObject(bucket, o.getKey()));
                 s3Service.deleteBucket(bucket);
-            } catch (RuntimeException ignored) {
-                // A bucket the test never got to make.
             }
         }
-        try {
+        if (iamService.findRole(ACCOUNT, roleName).isPresent()) {
             iamService.deleteRolePolicy(roleName, "ListOneBucket");
             iamService.deleteRole(roleName);
-        } catch (RuntimeException ignored) {
-            // A role the test never got to make.
         }
         if (createdNetworkId != null) {
             // The proxy lives for the process; it has to go before the network it holds an address on.
             credentialsProxy.stopManagedContainers();
+            awaitNoContainerOn(createdNetworkId);
             dockerClient.removeNetworkCmd(createdNetworkId).exec();
+        }
+    }
+
+    /**
+     * The runner removes the build's container after it has reported the build complete, so a
+     * network removed at once still has that endpoint.
+     */
+    private void awaitNoContainerOn(String networkId) throws InterruptedException {
+        long deadline = System.nanoTime() + Duration.ofSeconds(30).toNanos();
+        while (System.nanoTime() < deadline) {
+            Map<String, ?> containers =
+                    dockerClient.inspectNetworkCmd().withNetworkId(networkId).exec().getContainers();
+            if (containers == null || containers.isEmpty()) {
+                return;
+            }
+            Thread.sleep(200);
         }
     }
 
@@ -258,11 +283,17 @@ class CodeBuildServiceRoleDockerIntegrationTest {
         }
     }
 
-    /** Polls the credentials server from Floci's side, as the build would through the proxy. */
+    /**
+     * Polls the credentials server from Floci's side, as the build would through the proxy, at the
+     * port the running app has, not the one this class picked: the test profile's class is
+     * initialised again in the app's class loader, where its pick differs. The runner revokes the
+     * session after it has reported the build complete, hence the window.
+     */
     private boolean answersNothingWithin(String relativeUri, Duration window) throws InterruptedException {
         HttpClient client = HttpClient.newHttpClient();
+        int port = config.services().ecs().taskRoleCredentials().port();
         HttpRequest request = HttpRequest.newBuilder(
-                URI.create("http://localhost:" + Profile.CREDENTIALS_PORT + relativeUri)).GET().build();
+                URI.create("http://127.0.0.1:" + port + relativeUri)).GET().build();
         long deadline = System.nanoTime() + window.toNanos();
         while (System.nanoTime() < deadline) {
             try {
@@ -277,24 +308,26 @@ class CodeBuildServiceRoleDockerIntegrationTest {
         return false;
     }
 
-    private static <T> List<T> iterableToList(java.util.Iterator<T> iterator) {
-        java.util.ArrayList<T> list = new java.util.ArrayList<>();
+    private static <T> List<T> iterableToList(Iterator<T> iterator) {
+        ArrayList<T> list = new ArrayList<>();
         iterator.forEachRemaining(list::add);
         return list;
     }
 
     public static final class Profile implements QuarkusTestProfile {
         static final String NETWORK = "floci-codebuild-service-role-test";
-        static final int CREDENTIALS_PORT = freePort();
-        static final int PORT = freePort();
+        /** Two distinct ports, picked together so neither pick can repeat the other. */
+        private static final int[] PORTS = freePorts(2);
+        static final int CREDENTIALS_PORT = PORTS[0];
+        static final int PORT = PORTS[1];
 
         static boolean userDefined(String network) {
             return !Set.of("bridge", "default", "host", "none").contains(network);
         }
 
-        private static int freePort() {
+        private static int[] freePorts(int count) {
             try {
-                return FreePorts.anyInterfacePort();
+                return FreePorts.anyInterfacePorts(count);
             } catch (IOException e) {
                 throw new UncheckedIOException(e);
             }

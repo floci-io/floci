@@ -8,9 +8,11 @@ import io.vertx.core.Context;
 import io.vertx.core.Vertx;
 import io.vertx.core.json.JsonObject;
 import jakarta.inject.Inject;
+import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.ValueSource;
 
+import java.net.ServerSocket;
 import java.net.URI;
 import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
@@ -18,12 +20,15 @@ import java.net.http.HttpResponse;
 import java.time.Duration;
 import java.time.Instant;
 import java.util.UUID;
+import java.util.concurrent.ExecutionException;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 
 import static io.restassured.RestAssured.given;
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotEquals;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyString;
@@ -105,6 +110,34 @@ class EcsTaskRoleCredentialsServerIntegrationTest {
             given().header("Authorization", auth).contentType("application/x-www-form-urlencoded")
                     .formParam("Action", "DeleteRole").formParam("RoleName", role)
                     .post("/").then().statusCode(200);
+        }
+    }
+
+    @Test
+    void aBindThatFailsLeavesTheNextStartToBindAgain() throws Exception {
+        EmulatorConfig config = mock(EmulatorConfig.class, RETURNS_DEEP_STUBS);
+        int port = FreePorts.anyInterfacePort();
+        when(config.services().ecs().taskRoleCredentials().port()).thenReturn(port);
+        Vertx vertx = Vertx.vertx();
+        EcsTaskRoleCredentialsServer server =
+                new EcsTaskRoleCredentialsServer(vertx, config, mock(EcsTaskRoleCredentials.class));
+        try (HttpClient client = HttpClient.newHttpClient()) {
+            try (ServerSocket taken = new ServerSocket(port)) {
+                ExecutionException refused = assertThrows(ExecutionException.class,
+                        () -> server.start().get(10, TimeUnit.SECONDS));
+                assertTrue(refused.getCause().getMessage().contains("in use"), refused.getCause().toString());
+                assertFalse(server.isRunning(), "a failed bind counts as no server");
+                assertTrue(taken.isBound());
+            }
+
+            server.start().get(10, TimeUnit.SECONDS);
+
+            assertTrue(server.isRunning());
+            assertEquals(404, get(client, "http://127.0.0.1:" + port + "/v2/credentials/" + UUID.randomUUID())
+                    .statusCode());
+        } finally {
+            server.stop();
+            vertx.close().toCompletionStage().toCompletableFuture().get(10, TimeUnit.SECONDS);
         }
     }
 

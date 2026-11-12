@@ -85,7 +85,7 @@ class CodeBuildRunnerSourceFailureTest {
         when(lifecycle.createAndStart(any())).thenReturn(new ContainerLifecycleManager.ContainerInfo("container", Map.of()));
         CountDownLatch finished = new CountDownLatch(1);
         doAnswer(invocation -> { finished.countDown(); return null; })
-                .when(lifecycle).stopAndRemove(eq("container"), nullable(Closeable.class));
+                .when(lifecycle).stopAndRemoveStrict(eq("container"), nullable(Closeable.class));
 
         ContainerLogStreamer logStreamer = mock(ContainerLogStreamer.class);
         when(logStreamer.attach(eq("container"), anyString(), anyString(), anyString(), anyString()))

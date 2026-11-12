@@ -10,7 +10,6 @@ import io.floci.aws.core.common.docker.ContainerLogStreamer;
 import io.floci.aws.core.common.docker.ContainerReachableEndpoint;
 import io.floci.aws.core.common.docker.ContainerSpec;
 import io.floci.aws.services.codebuild.model.Build;
-import io.floci.aws.services.codebuild.model.BuildPhase;
 import io.floci.aws.services.codebuild.model.Project;
 import io.floci.aws.services.codebuild.model.ProjectEnvironment;
 import io.floci.aws.services.codebuild.model.ProjectSource;
@@ -122,21 +121,20 @@ class CodeBuildRunnerServiceRoleTest {
     }
 
     @Test
-    void aBuildWhoseRoleIsNotFoundFailsBeforeItsFirstCommand() throws Exception {
+    void aBuildWhoseRoleIsNotFoundRunsWithThePlaceholderKeysAsBefore() throws Exception {
         Fixture fixture = fixture(Optional.of(NETWORK), false, List.of());
 
         fixture.run();
 
         Build build = fixture.build();
-        assertEquals("FAILED", build.getBuildStatus());
-        BuildPhase failed = build.getPhases().stream()
-                .filter(phase -> "FAILED".equals(phase.getPhaseStatus()))
-                .findFirst().orElseThrow(() -> new AssertionError("no failed phase in " + phases(build)));
-        assertTrue(String.valueOf(failed.getContexts().getFirst().get("message")).contains(ROLE_ARN),
-                () -> failed.getPhaseType() + " " + failed.getContexts());
-        verify(fixture.lifecycle(), never()).createAndStart(any());
-        verify(fixture.runner(), never())
-                .runPhase(anyString(), anyString(), anyList(), anyList(), anyInt(), any(AtomicBoolean.class));
+        assertEquals("SUCCEEDED", build.getBuildStatus(), () -> phases(build).toString());
+        List<String> env = fixture.env();
+        assertEquals(Optional.of("test"), value(env, "AWS_ACCESS_KEY_ID"));
+        assertEquals(Optional.of("test"), value(env, "AWS_SECRET_ACCESS_KEY"));
+        assertEquals(Optional.empty(), value(env, "AWS_SESSION_TOKEN"));
+        assertEquals(Optional.empty(), value(env, "AWS_CONTAINER_CREDENTIALS_RELATIVE_URI"));
+        verify(fixture.iam(), never()).registerEcsTaskRoleSession(any());
+        verify(fixture.specBuilder(), never()).withLinkLocalIp(anyString());
     }
 
     private static List<String> phases(Build build) {

@@ -13,13 +13,15 @@ import org.junit.jupiter.api.Test;
 
 import java.time.Clock;
 import java.time.Instant;
+import java.util.Map;
 import java.util.Optional;
 import java.util.concurrent.CompletableFuture;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
-import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.Mockito.RETURNS_DEEP_STUBS;
+import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
@@ -97,14 +99,29 @@ class CodeBuildRoleCredentialsTest {
     }
 
     @Test
-    void aRoleNotFoundMintsNothing() {
+    void aRoleNotFoundMintsNothingAndHandsThePlaceholderKeys() {
         String missing = "arn:aws:iam::" + ACCOUNT + ":role/missing";
 
-        CodeBuildRoleCredentials.RoleNotFoundException refused = assertThrows(
-                CodeBuildRoleCredentials.RoleNotFoundException.class,
-                () -> credentials.provision(BUILD_ARN, "project:7", missing, ACCOUNT, Optional.of("builds")));
+        CodeBuildRoleCredentials.BuildCredentials handed =
+                credentials.provision(BUILD_ARN, "project:7", missing, ACCOUNT, Optional.of("builds"));
 
-        assertTrue(refused.getMessage().contains(missing), refused.getMessage());
+        assertEquals(Map.of("AWS_ACCESS_KEY_ID", "test", "AWS_SECRET_ACCESS_KEY", "test"), handed.env());
+        assertNull(handed.linkLocalAddress());
+        assertTrue(iamService.resolveCallerArn("test").isEmpty(), "no session was minted");
         verify(proxy, never()).ensureProxyOn("builds");
+    }
+
+    @Test
+    void anEndpointThatCannotBeServedOnTheNetworkHandsTheSessionAsKeys() {
+        doThrow(new IllegalStateException("the runtime does not honour link-local addresses"))
+                .when(proxy).ensureProxyOn("builds");
+
+        CodeBuildRoleCredentials.BuildCredentials handed =
+                credentials.provision(BUILD_ARN, "project:7", roleArn, ACCOUNT, Optional.of("builds"));
+
+        assertEquals(Optional.of("arn:aws:sts::" + ACCOUNT + ":assumed-role/build-role/AWSCodeBuild-7"),
+                iamService.resolveCallerArn(handed.env().get("AWS_ACCESS_KEY_ID")));
+        assertNull(handed.env().get(RELATIVE_URI));
+        assertNull(handed.linkLocalAddress());
     }
 }
