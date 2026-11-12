@@ -128,20 +128,17 @@ final class CopyEtlLoader {
                 ? S3CopySimulator.alignKinds(spec, catalog) : null;
         List<Integer> scales = S3CopySimulator.alignScales(spec, catalog);
         CopyLoadError.Context context = backend.loadErrorSink() == null ? null : CopyLoadError.Context.create(
-                backend.query("SELECT (SELECT oid FROM pg_roles WHERE rolname = current_user), pg_backend_pid(), "
+                backend.query("SELECT (SELECT oid FROM pg_roles WHERE rolname = session_user), pg_backend_pid(), "
                         + "to_regclass(" + PostgresWire.quoteLiteral(spec.targetTable()) + ")::oid"));
         CopyInput input = exactObject
                 ? S3CopySimulator.prepareObjectCopy(spec, s3, iam, account, roles, expectedETag, versionId)
                 : S3CopySimulator.prepareCopy(spec, s3, iam, account, roles);
         try {
-            if (!spec.transforms().toleratesErrors() && backend.loadErrorSink() == null
-                    && scales.stream().allMatch(value -> value == null)) {
-                return backend.copy(S3CopySimulator.copyBackendSql(spec, discovered),
-                        output -> S3CopySimulator.streamCopyInput(input, discovered, widths, kinds, output));
-            }
             try {
                 return RequestScopes.callAsChecked(S3CopySimulator.keyAccount(spec, s3, iam),
-                        () -> loadRecords(backend, input, discovered, widths, kinds, scales, catalog, context));
+                        () -> spec.transforms().toleratesErrors()
+                                ? loadRecords(backend, input, discovered, widths, kinds, scales, catalog, context)
+                                : CopyBulkLoader.load(backend, input, discovered, widths, kinds, scales, catalog, context));
             } catch (IOException | RuntimeException exception) {
                 throw exception;
             } catch (Exception exception) {
@@ -164,7 +161,7 @@ final class CopyEtlLoader {
         return catalog;
     }
 
-    private static void acquireTransformHeap(int[] heldMib, int wantedMib) {
+    static void acquireTransformHeap(int[] heldMib, int wantedMib) {
         while (heldMib[0] < wantedMib) {
             if (!S3CopySimulator.COPY_TRANSFORM_HEAP_MIB.tryAcquire(1)) {
                 throw new S3TransferException("53400", "COPY memory budget exhausted; retry shortly", null);
@@ -251,7 +248,7 @@ final class CopyEtlLoader {
         return accepted;
     }
 
-    private static byte[] transform(CopyStatementParser.S3CopyFrom spec, byte[] record, List<String> jsonColumns,
+    static byte[] transform(CopyStatementParser.S3CopyFrom spec, byte[] record, List<String> jsonColumns,
                                     List<Integer> widths, List<CopyRecordTransformer.ColumnKind> kinds,
                                     List<Integer> scales, int[] heldMib) throws IOException {
         if (!spec.jsonAuto() && isBlankLine(record)) {
@@ -307,12 +304,16 @@ final class CopyEtlLoader {
         }
     }
 
-    private static boolean isBlankLine(byte[] record) {
+    static boolean isBlankLine(byte[] record) {
         return record.length == 1 && (record[0] == '\n' || record[0] == '\r')
                 || record.length == 2 && record[0] == '\r' && record[1] == '\n';
     }
 
-    private static void recordError(CopyBackendSession backend, CopyLoadError.Context context,
+    static boolean isRecordError(S3TransferException exception) {
+        return RECORD_ERRORS.contains(exception.sqlState());
+    }
+
+    static void recordError(CopyBackendSession backend, CopyLoadError.Context context,
                                      CopyStatementParser.S3CopyFrom spec, String key, long line, byte[] record,
                                      List<ColumnInfo> catalog, S3TransferException exception) {
         if (context != null && RECORD_ERRORS.contains(exception.sqlState())) {

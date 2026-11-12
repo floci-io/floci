@@ -103,8 +103,20 @@ FROM pg_catalog.pg_class c
 CROSS JOIN (SELECT oid FROM pg_catalog.pg_database WHERE datname = current_database()) d
 WHERE c.relkind = 'r';
 
--- 6. stl_load_errors: load error log table for COPY commands
-CREATE TABLE IF NOT EXISTS pg_catalog.stl_load_errors (
+-- 6. stl_load_errors: private autonomous writer, with per-session catalog visibility.
+-- Keep raw input outside the public catalog and expose only the filtered view.
+CREATE SCHEMA IF NOT EXISTS floci_internal;
+DO $$
+BEGIN
+    IF EXISTS (SELECT 1 FROM pg_catalog.pg_class
+               WHERE oid = to_regclass('pg_catalog.stl_load_errors') AND relkind = 'r') THEN
+        ALTER TABLE pg_catalog.stl_load_errors SET SCHEMA floci_internal;
+        ALTER TABLE floci_internal.stl_load_errors RENAME TO copy_load_errors;
+        REVOKE ALL ON TABLE floci_internal.copy_load_errors FROM PUBLIC;
+    END IF;
+END;
+$$;
+CREATE TABLE IF NOT EXISTS floci_internal.copy_load_errors (
     userid integer DEFAULT 1,
     slice integer DEFAULT 0,
     tbl integer DEFAULT 0,
@@ -125,6 +137,13 @@ CREATE TABLE IF NOT EXISTS pg_catalog.stl_load_errors (
     start_offset bigint DEFAULT 0,
     copy_job_id bigint DEFAULT 0
 );
+REVOKE ALL ON TABLE floci_internal.copy_load_errors FROM PUBLIC;
+CREATE OR REPLACE VIEW pg_catalog.stl_load_errors WITH (security_barrier = true) AS
+SELECT * FROM floci_internal.copy_load_errors
+WHERE userid = (SELECT oid::integer FROM pg_catalog.pg_roles WHERE rolname = session_user)
+   OR (SELECT rolsuper FROM pg_catalog.pg_roles WHERE rolname = session_user);
+REVOKE ALL ON TABLE pg_catalog.stl_load_errors FROM PUBLIC;
+GRANT SELECT ON TABLE pg_catalog.stl_load_errors TO PUBLIC;
 
 -- 7. svl_qlog: dynamic query execution log view
 DROP VIEW IF EXISTS pg_catalog.svl_qlog CASCADE;
@@ -613,5 +632,4 @@ GRANT USAGE ON SCHEMA floci_internal TO PUBLIC;
 -- Schema access for COPY JOB must not expose the unrelated privileged catalog writers.
 REVOKE EXECUTE ON FUNCTION floci_internal.refresh_external_catalog(text, jsonb) FROM PUBLIC;
 REVOKE EXECUTE ON FUNCTION floci_internal.purge_external_schema(text) FROM PUBLIC;
-GRANT ALL ON TABLE pg_catalog.stl_load_errors TO PUBLIC;
 GRANT SELECT ON ALL TABLES IN SCHEMA pg_catalog TO PUBLIC;

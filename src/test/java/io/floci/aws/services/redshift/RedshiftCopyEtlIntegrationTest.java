@@ -87,6 +87,26 @@ class RedshiftCopyEtlIntegrationTest {
 
     @ParameterizedTest
     @ValueSource(strings = {"simple", "extended"})
+    void escapedDecimalsConvertInBothBulkAndTolerantLoads(String mode) throws Exception {
+        String table = table();
+        put(table, "12\\.345\n\\0612.345\n12\\056345\n");
+        try (Connection connection = connect(mode); Statement statement = connection.createStatement()) {
+            statement.execute("CREATE TABLE " + table + " (amount decimal(8,2))");
+            for (String options : List.of("", "ROUNDEC", "IGNOREALLERRORS", "ROUNDEC IGNOREALLERRORS")) {
+                assertEquals(3, statement.executeUpdate(copy(table, table, options)));
+                try (ResultSet rows = statement.executeQuery("SELECT min(amount), max(amount) FROM " + table)) {
+                    assertTrue(rows.next());
+                    String expected = options.contains("ROUNDEC") ? "12.35" : "12.34";
+                    assertEquals(expected, rows.getString(1));
+                    assertEquals(expected, rows.getString(2));
+                }
+                statement.execute("TRUNCATE " + table);
+            }
+        }
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"simple", "extended"})
     void decimalCopyTruncatesByDefaultAndRoundsOnlyWithRoundec(String mode) throws Exception {
         String table = table();
         put(table, "20.259|text\n-20.255|negative\n");

@@ -326,6 +326,9 @@ and see their own rows in `sys_copy_job`; superusers can see all rows.
 
 COPY options are stored for execution time, including formats the ordinary COPY simulator does not yet
 implement. The COPY JOB restrictions above are checked at creation time.
+The `MAXERROR` and `IGNOREALLERRORS` restrictions follow the
+[AWS COPY JOB parameter rules](https://docs.aws.amazon.com/redshift/latest/dg/r_COPY-JOB.html),
+which explicitly exclude both options. Ordinary COPY supports them; COPY JOB intentionally does not.
 
 `COPY JOB RUN` scans the job's S3 prefix and loads files not yet committed by that job, including with
 `AUTO OFF`. An active S3 event integration runs matching `AUTO ON` jobs in provisioned clusters and
@@ -1014,12 +1017,16 @@ order) through its own S3 service and streams the rows into the backing PostgreS
   in an explicit transaction remain subject to the caller's transaction and savepoints. Access denied,
   cancellation, storage and unexpected internal errors are never ignored. An unterminated quoted record
   consumes the remainder of its object and counts as one rejected record; unreadable compressed objects abort the load.
-  The returned `COPY` count includes accepted rows only. Floci deviations: loads use one COPY
+  The returned `COPY` count includes accepted rows only. Floci deviations: tolerant loads use one COPY
   per record, which costs more round trips and runs PostgreSQL statement triggers per record; PostgreSQL
   deferred-constraint timing is not promised as Redshift behavior. Records are buffered within
   the transform size and shared memory limits. No Redshift load-summary message is written.
+  Non-tolerant loads stream each S3 object through one backend COPY, including when diagnostics or
+  decimal conversion are enabled. A failed object's input is replayed locally to map PostgreSQL's
+  error line back to its original physical line; successful loads need no replay.
 - `IGNOREALLERRORS` skips all record conversion errors without an error-count limit. It cannot be
-  combined with `MAXERROR`, including `MAXERROR 0`, and COPY JOB still rejects both options.
+  combined with `MAXERROR`, including `MAXERROR 0`. COPY JOB rejects both options, matching the AWS
+  restriction linked above rather than extending the ordinary COPY option to jobs.
   Unsupported columnar formats remain unsupported; authorization, missing targets and infrastructure
   failures still fail the COPY.
 - Record failures write `stl_load_errors`, including failures skipped by `MAXERROR` or `IGNOREALLERRORS`.
@@ -1027,9 +1034,13 @@ order) through its own S3 service and streams the rows into the backing PostgreS
   raw record and field value, Redshift error code and a bounded reason. Each load receives a local
   diagnostic query ID; it is not linked to `svl_qlog`. JSON diagnostics use the last physical line
   of the object. A separate autocommit backend connection retains diagnostics when COPY fails or the
-  caller rolls back. Diagnostic writes that fail are logged without replacing the original load error.
-  Floci deviations: `position` and `copy_job_id` are zero, unknown error categories use code 1200,
-  and the catalog table retains its existing local-user visibility rather than AWS per-user filtering.
+  caller rolls back. The connection and prepared statement are opened lazily and reused for the client
+  connection, with a 250 ms lock timeout and 1 second statement timeout. A failed diagnostic write is
+  logged without replacing the original load error, and disables further diagnostic writes for that
+  client connection to avoid repeated waits. The read-only catalog view shows ordinary users their own
+  session user's records and superusers all records; raw rows live in a private backing table. Existing
+  catalog rows are retained when an older cluster's catalog is bootstrapped again.
+  Floci deviations: `position` and `copy_job_id` are zero, and unknown error categories use code 1200.
 - Any other clause (`FIXEDWIDTH`, `PARQUET`, `AVRO`, `ORC`,
   `ENCODING`, `ESCAPE`, `ENCRYPTED`, `MASTER_SYMMETRIC_KEY`,
   `KMS_KEY_ID`, and so on) is not recognized: the statement is forwarded unchanged and PostgreSQL

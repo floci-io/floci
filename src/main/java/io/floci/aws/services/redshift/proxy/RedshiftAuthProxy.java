@@ -283,7 +283,7 @@ public class RedshiftAuthProxy {
                 RedshiftInterceptingBridge bridge = new RedshiftInterceptingBridge(session.client(), session.backend(), s3Service, iamService,
                         clusterAccountId, roles.iamRoleArns(), bridgeSpectrum, clusterKey, login.database,
                         roles.defaultIamRoleArn(), bridgeAudit, login.username, parquetWriter);
-                bridge.loadErrorSink(new CopyLoadErrorLog(() -> {
+                try (CopyLoadErrorLog loadErrors = new CopyLoadErrorLog(() -> {
                     PGSimpleDataSource source = new PGSimpleDataSource();
                     source.setServerNames(new String[]{backendHost});
                     source.setPortNumbers(new int[]{backendPort});
@@ -294,8 +294,10 @@ public class RedshiftAuthProxy {
                     source.setSocketTimeout(10);
                     source.setSslMode("disable");
                     return source.getConnection();
-                }));
-                bridge.run();
+                })) {
+                    bridge.loadErrorSink(loadErrors);
+                    bridge.run();
+                }
                 publishConnection(client, login, "disconnection");
             } else {
                 publishConnection(client, login, login.backendUnavailable ? "connection_error" : "authentication failure");

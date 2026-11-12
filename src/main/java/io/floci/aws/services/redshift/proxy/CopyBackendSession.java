@@ -164,6 +164,11 @@ final class CopyBackendSession {
                     // CopyFail must be consumed before recovery can issue an internal Sync.
                 }
             } catch (S3TransferException expected) {
+                if (!"57014".equals(expected.sqlState())) {
+                    // A server failure may already be queued before the producer fails on a later record.
+                    expected.addSuppressed(exception);
+                    throw expected;
+                }
                 exception.addSuppressed(expected);
             }
             throw exception;
