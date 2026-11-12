@@ -45,6 +45,17 @@ class MySqlIamAuthPluginRewriteTest {
         assertNull(rewrite("SELECT 1"));
         assertNull(rewrite("CREATE USER 'app'@'%' IDENTIFIED BY 'secret'"));
         assertNull(rewrite("CREATE USER 'app'@'%' IDENTIFIED WITH caching_sha2_password BY 'x'"));
+        assertNull(rewrite("CREATE USER 'app'@'%' IDENTIFIED BY 'IDENTIFIED WITH AWSAuthenticationPlugin'"));
+        assertNull(rewrite("CREATE USER 'app'@'%' /* IDENTIFIED WITH AWSAuthenticationPlugin */"
+                + " IDENTIFIED BY 'secret'"));
+    }
+
+    @Test
+    void rewritesActualClauseAfterPluginNameInComment() {
+        assertEquals("CREATE USER 'app'@'%' /* IDENTIFIED WITH AWSAuthenticationPlugin */"
+                        + " IDENTIFIED WITH mysql_native_password AS '" + HASH + "'",
+                rewrite("CREATE USER 'app'@'%' /* IDENTIFIED WITH AWSAuthenticationPlugin */"
+                        + " IDENTIFIED WITH AWSAuthenticationPlugin AS 'RDS'"));
     }
 
     @Test
