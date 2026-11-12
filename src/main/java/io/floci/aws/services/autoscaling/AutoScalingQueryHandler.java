@@ -1753,7 +1753,7 @@ public class AutoScalingQueryHandler {
             String value = p.getFirst("Tags.member." + i + ".Value");
             tags.put(key, value != null ? value : "");
             String flag = p.getFirst("Tags.member." + i + ".PropagateAtLaunch");
-            propagateAtLaunch.put(key, flag == null || Boolean.parseBoolean(flag));
+            propagateAtLaunch.put(key, flag == null || parseTagPropagation(flag, i));
         }
         return new ParsedTags(tags, propagateAtLaunch);
     }
@@ -1767,10 +1767,21 @@ public class AutoScalingQueryHandler {
             String resourceType = p.getFirst("Tags.member." + i + ".ResourceType");
             String value = p.getFirst("Tags.member." + i + ".Value");
             String flag = p.getFirst("Tags.member." + i + ".PropagateAtLaunch");
-            Boolean propagateAtLaunch = flag == null ? null : Boolean.parseBoolean(flag);
+            Boolean propagateAtLaunch = flag == null ? null : parseTagPropagation(flag, i);
             result.add(new TagRequest(resourceId, resourceType, key, value != null ? value : "", propagateAtLaunch));
         }
         return result;
+    }
+
+    private static boolean parseTagPropagation(String value, int index) {
+        if ("true".equalsIgnoreCase(value)) {
+            return true;
+        }
+        if ("false".equalsIgnoreCase(value)) {
+            return false;
+        }
+        throw new AwsException("MalformedInput",
+                "Tags.member." + index + ".PropagateAtLaunch '" + value + "' is not a valid boolean.", 400);
     }
 
     private record TagRequest(String resourceId, String resourceType, String key, String value, Boolean propagateAtLaunch) {}

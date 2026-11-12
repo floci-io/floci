@@ -9,13 +9,16 @@ import jakarta.ws.rs.core.MultivaluedHashMap;
 import jakarta.ws.rs.core.Response;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.Arguments;
 import org.junit.jupiter.params.provider.CsvSource;
+import org.junit.jupiter.params.provider.MethodSource;
 import org.junit.jupiter.params.provider.ValueSource;
 import org.w3c.dom.Element;
 import org.w3c.dom.NodeList;
 
 import java.util.List;
 import java.util.Map;
+import java.util.stream.Stream;
 
 import static io.floci.aws.services.autoscaling.AutoScalingXmlAssertions.XML_NAMESPACE;
 import static io.floci.aws.services.autoscaling.AutoScalingXmlAssertions.assertModeledNamespace;
@@ -27,6 +30,33 @@ import static org.mockito.Mockito.*;
 class AutoScalingQueryHandlerTest {
 
     private static final String REGION = "us-east-1";
+
+    @ParameterizedTest
+    @MethodSource("malformedTagPropagationValues")
+    void malformedTagPropagationIsRejectedBeforeServiceCalls(String action, String flag) {
+        AutoScalingService service = mock(AutoScalingService.class);
+        MultivaluedHashMap<String, String> params = new MultivaluedHashMap<>();
+        params.add("AutoScalingGroupName", "missing");
+        params.add("Tags.member.1.Key", "valid");
+        params.add("Tags.member.1.ResourceId", "missing");
+        params.add("Tags.member.1.PropagateAtLaunch", "true");
+        params.add("Tags.member.2.Key", "invalid");
+        params.add("Tags.member.2.ResourceId", "missing");
+        params.add("Tags.member.2.PropagateAtLaunch", flag);
+
+        Response response = new AutoScalingQueryHandler(service).handle(action, params, REGION);
+
+        assertEquals(400, response.getStatus(), action);
+        assertTrue(response.getEntity().toString().contains("<Code>MalformedInput</Code>"), action);
+        assertTrue(response.getEntity().toString().contains("Tags.member.2.PropagateAtLaunch"), action);
+        verifyNoInteractions(service);
+    }
+
+    private static Stream<Arguments> malformedTagPropagationValues() {
+        return Stream.of("CreateAutoScalingGroup", "CreateOrUpdateTags", "DeleteTags")
+                .flatMap(action -> Stream.of("", " ", "yes", "1", "true ", " false")
+                        .map(flag -> Arguments.of(action, flag)));
+    }
 
     @ParameterizedTest
     @ValueSource(booleans = {false, true})

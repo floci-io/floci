@@ -4,6 +4,7 @@ import io.floci.aws.core.common.RequestScopes;
 import io.floci.aws.testing.AwsTestClients;
 import io.quarkus.test.junit.QuarkusTest;
 import io.restassured.path.xml.XmlPath;
+import io.restassured.response.Response;
 import io.restassured.specification.RequestSpecification;
 import jakarta.inject.Inject;
 import org.junit.jupiter.api.Test;
@@ -29,6 +30,7 @@ import java.util.function.BiConsumer;
 import java.util.stream.Collectors;
 
 import static io.floci.aws.testing.QueryRequests.request;
+import static org.hamcrest.Matchers.equalTo;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -96,6 +98,55 @@ class AutoScalingTagPropagationIntegrationTest {
                     .contains("Tags.member." + (invalidFirst ? 1 : 3) + ".PropagateAtLaunch"));
             assertEquals(before, describeGroupTags(client, name));
         });
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"", " ", "yes", "1", "true ", " false"})
+    void malformedPropagationLeavesExistingTagsUnchanged(String flag) {
+        withAutoScalingGroup(List.of(Tag.builder().key("existing").value("before")
+                .propagateAtLaunch(true).build()), (client, name) -> {
+                    Map<String, TagDescription> before = describeGroupTags(client, name);
+                    for (String action : List.of("CreateOrUpdateTags", "DeleteTags")) {
+                        request(ACCOUNT, "autoscaling", action)
+                                .formParam("Tags.member.1.ResourceId", name)
+                                .formParam("Tags.member.1.ResourceType", "auto-scaling-group")
+                                .formParam("Tags.member.1.Key", "existing")
+                                .formParam("Tags.member.1.Value", "changed")
+                                .formParam("Tags.member.1.PropagateAtLaunch", "false")
+                                .formParam("Tags.member.2.ResourceId", "missing-group")
+                                .formParam("Tags.member.2.ResourceType", "auto-scaling-group")
+                                .formParam("Tags.member.2.Key", "invalid")
+                                .formParam("Tags.member.2.PropagateAtLaunch", flag)
+                                .post("/").then().statusCode(400)
+                                .body("ErrorResponse.Error.Code", equalTo("MalformedInput"));
+                        assertEquals(before, describeGroupTags(client, name));
+                    }
+                });
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"", " ", "yes", "1", "true ", " false"})
+    void malformedPropagationCannotCreateGroup(String flag) {
+        String name = "tag-malformed-" + UUID.randomUUID();
+        try (AutoScalingClient client = AwsTestClients.create(AutoScalingClient.builder(), ACCOUNT, Region.of(REGION))) {
+            try {
+                Response response = request(ACCOUNT, "autoscaling", "CreateAutoScalingGroup")
+                        .formParam("AutoScalingGroupName", name)
+                        .formParam("LaunchConfigurationName", "missing-configuration")
+                        .formParam("MinSize", 0).formParam("MaxSize", 1).formParam("DesiredCapacity", 0)
+                        .formParam("AvailabilityZones.member.1", REGION + "a")
+                        .formParam("Tags.member.1.Key", "invalid")
+                        .formParam("Tags.member.1.PropagateAtLaunch", flag)
+                        .post("/");
+                assertTrue(client.describeAutoScalingGroups(r -> r.autoScalingGroupNames(name))
+                        .autoScalingGroups().isEmpty());
+                response.then().statusCode(400).body("ErrorResponse.Error.Code", equalTo("MalformedInput"));
+            } finally {
+                if (!client.describeAutoScalingGroups(r -> r.autoScalingGroupNames(name)).autoScalingGroups().isEmpty()) {
+                    client.deleteAutoScalingGroup(r -> r.autoScalingGroupName(name).forceDelete(true));
+                }
+            }
+        }
     }
 
     @Test
