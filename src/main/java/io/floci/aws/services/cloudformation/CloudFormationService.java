@@ -1189,6 +1189,15 @@ public class CloudFormationService implements ResourceProvider {
             if (!replacedResourceIds.isEmpty() || !inPlaceChangedAttributes.isEmpty()) {
                 Set<String> allResourceIds = new LinkedHashSet<>();
                 newResources.fieldNames().forEachRemaining(allResourceIds::add);
+                Map<String, String> physicalIds = new HashMap<>();
+                for (StackResource resource : stack.resourcesSnapshot().values()) {
+                    if (resource.getPhysicalId() != null) {
+                        physicalIds.put(resource.getLogicalId(), resource.getPhysicalId());
+                    }
+                }
+                CloudFormationTemplateEngine dependencyEngine = new CloudFormationTemplateEngine(
+                        ownerAccount(stack), region, stack.getStackName(), stack.getStackId(),
+                        newResolvedParams, physicalIds, Map.of(), newConditions, Map.of(), objectMapper, null);
 
                 List<String> sortedLogicalIds = topologicalSort(newResources, newConditions);
                 boolean anyNewChange = true;
@@ -1209,7 +1218,8 @@ public class CloudFormationService implements ResourceProvider {
                         boolean referencesChangedAttr = false;
                         if (!dependsOnReplaced) {
                             for (Map.Entry<String, Set<String>> entry : inPlaceChangedAttributes.entrySet()) {
-                                if (referencesAnyAttribute(newDef.path("Properties"), entry.getKey(), entry.getValue(), newConditions)) {
+                                if (referencesAnyAttribute(newDef.path("Properties"), entry.getKey(), entry.getValue(),
+                                        newConditions, dependencyEngine)) {
                                     referencesChangedAttr = true;
                                     break;
                                 }
@@ -2539,7 +2549,7 @@ public class CloudFormationService implements ResourceProvider {
                                 for (String candidateId : sortedLogicalIds) {
                                     if (!changedResourceIds.contains(candidateId)) {
                                         if (referencesAnyAttribute(resources.path(candidateId).path("Properties"),
-                                                logicalId, changedAttrNames, conditions)) {
+                                                logicalId, changedAttrNames, conditions, engine)) {
                                             changedResourceIds.add(candidateId);
                                         }
                                     }
@@ -5612,61 +5622,41 @@ public class CloudFormationService implements ResourceProvider {
      * is updated in-place with modified attributes (e.g. LatestVersionNumber of LaunchTemplate).
      */
     private boolean referencesAnyAttribute(JsonNode node, String targetLogicalId, Set<String> targetAttrNames,
-                                           Map<String, Boolean> conditions) {
+                                           Map<String, Boolean> conditions, CloudFormationTemplateEngine engine) {
         if (node == null || node.isNull() || node.isMissingNode()) {
             return false;
         }
         if (node.isObject()) {
-            if (node.has("Fn::GetAtt")) {
-                JsonNode getAtt = node.get("Fn::GetAtt");
-                String logicalId = null;
-                if (getAtt.isArray() && getAtt.size() >= 2) {
-                    logicalId = getAtt.get(0).asText();
-                    StringBuilder sb = new StringBuilder();
-                    for (int i = 1; i < getAtt.size(); i++) {
-                        if (i > 1) {
-                            sb.append('.');
-                        }
-                        sb.append(getAtt.get(i).asText());
-                    }
-                    if (targetLogicalId.equals(logicalId)
-                            && (targetAttrNames.contains(sb.toString()) || targetAttrNames.contains(getAtt.get(1).asText()))) {
-                        return true;
-                    }
-                } else if (getAtt.isTextual()) {
-                    String[] parts = getAtt.textValue().split("\\.", 2);
-                    logicalId = parts[0];
-                    String attrName = parts.length > 1 ? parts[1] : null;
-                    if (targetLogicalId.equals(logicalId) && attrName != null && targetAttrNames.contains(attrName)) {
-                        return true;
-                    }
-                }
+            if (node.has("Fn::GetAtt")
+                    && engine.referencesGetAttAttribute(node.get("Fn::GetAtt"), targetLogicalId, targetAttrNames)) {
+                return true;
             }
             if (node.has("Fn::If")) {
                 JsonNode fnIf = node.get("Fn::If");
                 if (fnIf.isArray() && fnIf.size() == 3) {
                     if (conditions != null && conditions.containsKey(fnIf.get(0).asText())) {
                         boolean condition = conditions.get(fnIf.get(0).asText());
-                        return referencesAnyAttribute(fnIf.get(condition ? 1 : 2), targetLogicalId, targetAttrNames, conditions);
+                        return referencesAnyAttribute(fnIf.get(condition ? 1 : 2), targetLogicalId, targetAttrNames,
+                                conditions, engine);
                     }
-                    return referencesAnyAttribute(fnIf.get(1), targetLogicalId, targetAttrNames, conditions)
-                            || referencesAnyAttribute(fnIf.get(2), targetLogicalId, targetAttrNames, conditions);
+                    return referencesAnyAttribute(fnIf.get(1), targetLogicalId, targetAttrNames, conditions, engine)
+                            || referencesAnyAttribute(fnIf.get(2), targetLogicalId, targetAttrNames, conditions, engine);
                 }
             }
             if (node.has("Fn::Sub")) {
-                if (subReferencesAttribute(node.get("Fn::Sub"), targetLogicalId, targetAttrNames, conditions)) {
+                if (subReferencesAttribute(node.get("Fn::Sub"), targetLogicalId, targetAttrNames, conditions, engine)) {
                     return true;
                 }
             }
             for (Iterator<JsonNode> it = node.elements(); it.hasNext(); ) {
-                if (referencesAnyAttribute(it.next(), targetLogicalId, targetAttrNames, conditions)) {
+                if (referencesAnyAttribute(it.next(), targetLogicalId, targetAttrNames, conditions, engine)) {
                     return true;
                 }
             }
             return false;
         } else if (node.isArray()) {
             for (JsonNode item : node) {
-                if (referencesAnyAttribute(item, targetLogicalId, targetAttrNames, conditions)) {
+                if (referencesAnyAttribute(item, targetLogicalId, targetAttrNames, conditions, engine)) {
                     return true;
                 }
             }
@@ -5675,7 +5665,7 @@ public class CloudFormationService implements ResourceProvider {
     }
 
     private boolean subReferencesAttribute(JsonNode sub, String targetLogicalId, Set<String> targetAttrNames,
-                                           Map<String, Boolean> conditions) {
+                                           Map<String, Boolean> conditions, CloudFormationTemplateEngine engine) {
         String template;
         Set<String> explicitVars = new HashSet<>();
 
@@ -5685,7 +5675,7 @@ public class CloudFormationService implements ResourceProvider {
             template = sub.get(0).asText();
             if (sub.size() >= 2 && sub.get(1).isObject()) {
                 sub.get(1).fieldNames().forEachRemaining(explicitVars::add);
-                if (referencesAnyAttribute(sub.get(1), targetLogicalId, targetAttrNames, conditions)) {
+                if (referencesAnyAttribute(sub.get(1), targetLogicalId, targetAttrNames, conditions, engine)) {
                     return true;
                 }
             }

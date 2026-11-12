@@ -684,11 +684,31 @@ public class AwsConfigService {
 
     // --- Configuration Recorder ---
 
-    public void putConfigurationRecorder(String region, ConfigurationRecorder recorder) {
+    /** Put is an upsert, and request tags are applied at creation only, as for config rules: the
+     *  PutConfigurationRecorder model says a later Put with different Tags leaves them unchanged.
+     *  A Put under another name replaces the recorder, so it gets a new ARN and the old one's tags
+     *  go. A recorder saved before recorders had an ARN gets one on its next Put. */
+    public void putConfigurationRecorder(String region, ConfigurationRecorder recorder,
+                                         List<Map<String, String>> tagList) {
         String name = (recorder.name() == null || recorder.name().isEmpty()) ? "default" : recorder.name();
-        ConfigurationRecorder stored = new ConfigurationRecorder(name, recorder.roleARN(), recorder.recordingGroup(),
-                recorder.recordingMode());
-        configurationRecorders.put(region, stored);
+        synchronized (lockFor(recorderLockKey(region))) {
+            ConfigurationRecorder existing = configurationRecorders.get(region);
+            boolean created = existing == null || !existing.name().equals(name);
+            String arn = created || existing.arn() == null
+                    ? AwsArnUtils.Arn.of("config", region, regionResolver.getAccountId(),
+                            "configuration-recorder/" + name + "/" + shortId()).toString()
+                    : existing.arn();
+            // Tags before the recorder, as storeConfigRule does: a retry after a failed tag write
+            // finds no recorder and creates both.
+            if (created && tagList != null && !tagList.isEmpty()) {
+                applyTags(arn, tagList);
+            }
+            configurationRecorders.put(region, new ConfigurationRecorder(arn, name, recorder.roleARN(),
+                    recorder.recordingGroup(), recorder.recordingMode()));
+            if (created && existing != null) {
+                tags.remove(existing.arn());
+            }
+        }
     }
 
     public List<ConfigurationRecorder> describeConfigurationRecorders(String region, List<String> names) {
@@ -712,15 +732,22 @@ public class AwsConfigService {
     }
 
     public void deleteConfigurationRecorder(String region, String name) {
-        ConfigurationRecorder recorder = configurationRecorders.get(region);
-        if (recorder == null || !recorder.name().equals(name)) {
-            throw new AwsException("NoSuchConfigurationRecorderException",
-                    "Cannot find configuration recorder with the specified name.", 400);
+        synchronized (lockFor(recorderLockKey(region))) {
+            ConfigurationRecorder recorder = configurationRecorders.get(region);
+            if (recorder == null || !recorder.name().equals(name)) {
+                throw new AwsException("NoSuchConfigurationRecorderException",
+                        "Cannot find configuration recorder with the specified name.", 400);
+            }
+            configurationRecorders.remove(region);
+            tags.remove(recorder.arn());
+            recorderRunning.remove(runtimeKey(region));
+            recorderLastStartTime.remove(runtimeKey(region));
+            recorderLastStopTime.remove(runtimeKey(region));
         }
-        configurationRecorders.remove(region);
-        recorderRunning.remove(runtimeKey(region));
-        recorderLastStartTime.remove(runtimeKey(region));
-        recorderLastStopTime.remove(runtimeKey(region));
+    }
+
+    private String recorderLockKey(String region) {
+        return "configuration-recorder|" + runtimeKey(region);
     }
 
     public void startConfigurationRecorder(String region, String name) {
@@ -1023,12 +1050,13 @@ public class AwsConfigService {
     // --- Tagging ---
 
     /** TagResource, UntagResource and ListTagsForResource each model ResourceNotFoundException.
-     *  For the kinds Floci stores (config rules, conformance packs, aggregation authorizations)
-     *  the ARN must name a resource that exists in the caller's account and the request Region,
-     *  so a deleted resource, or one in another account, Region or partition, is not found. The
-     *  check and the tag write run under the lock that resource's delete takes, so a delete cannot
-     *  land between them and leave an orphan tag entry for a resource that is gone. ARNs of kinds
-     *  Floci does not model are passed through unchecked, as before. */
+     *  For the kinds Floci stores (config rules, conformance packs, aggregation authorizations,
+     *  configuration recorders) the ARN must name a resource that exists in the caller's account
+     *  and the request Region, so a deleted resource, or one in another account, Region or
+     *  partition, is not found. The check and the tag write run under the lock that resource's
+     *  delete takes, so a delete cannot land between them and leave an orphan tag entry for a
+     *  resource that is gone. ARNs of kinds Floci does not model are passed through unchecked,
+     *  as before. */
     public void tagResource(String region, String arn, List<Map<String, String>> tagList) {
         onTaggableResource(region, arn, () -> {
             applyTags(arn, tagList);
@@ -1102,6 +1130,13 @@ public class AwsConfigService {
                 exists = () -> {
                     ConfigRule rule = rulesFor(region).get(ruleName);
                     return rule != null && arn.equals(rule.configRuleArn());
+                };
+            }
+            case "configuration-recorder" -> {
+                lockKey = recorderLockKey(region);
+                exists = () -> {
+                    ConfigurationRecorder recorder = configurationRecorders.get(region);
+                    return recorder != null && arn.equals(recorder.arn());
                 };
             }
             default -> {

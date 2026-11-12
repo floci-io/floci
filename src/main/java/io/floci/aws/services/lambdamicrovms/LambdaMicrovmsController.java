@@ -1,5 +1,6 @@
 package io.floci.aws.services.lambdamicrovms;
 
+import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ArrayNode;
@@ -12,6 +13,7 @@ import io.floci.aws.services.lambdamicrovms.LambdaMicrovmsService.Microvm;
 import io.floci.aws.services.lambdamicrovms.LambdaMicrovmsService.MicrovmBuild;
 import io.floci.aws.services.lambdamicrovms.LambdaMicrovmsService.MicrovmImage;
 import io.floci.aws.services.lambdamicrovms.LambdaMicrovmsService.MicrovmImageVersion;
+import io.floci.aws.services.lambdamicrovms.LambdaMicrovmsService.RuntimeSettings;
 import jakarta.inject.Inject;
 import jakarta.ws.rs.Consumes;
 import jakarta.ws.rs.DELETE;
@@ -27,6 +29,8 @@ import jakarta.ws.rs.core.HttpHeaders;
 import jakarta.ws.rs.core.MediaType;
 import jakarta.ws.rs.core.Response;
 
+import java.util.ArrayList;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 
@@ -89,6 +93,7 @@ public class LambdaMicrovmsController {
     public Response createMicrovmImage(@Context HttpHeaders headers, String body) {
         String region = regionResolver.resolveRegion(headers);
         JsonNode request = parse(body);
+        LambdaMicrovmImageRequestShapes.check("CreateMicrovmImage", request);
         JsonNode codeArtifact = request.path("codeArtifact");
         MicrovmImage image = service.createImage(
                 region,
@@ -97,7 +102,8 @@ public class LambdaMicrovmsController {
                 text(request, "baseImageArn"),
                 text(request, "buildRoleArn"),
                 codeArtifact.isMissingNode() ? null : text(codeArtifact, "uri"),
-                text(request, "description"));
+                text(request, "description"), text(request, "baseImageVersion"), runtimeSettings(request),
+                mapMember(request, "tags"));
         return Response.status(201).entity(imageNode(image, ImageShape.CREATE)).build();
     }
 
@@ -129,13 +135,14 @@ public class LambdaMicrovmsController {
                                        String body) {
         String region = regionResolver.resolveRegion(headers);
         JsonNode request = parse(body);
+        LambdaMicrovmImageRequestShapes.check("UpdateMicrovmImage", request);
         JsonNode updArtifact = request.path("codeArtifact");
         // Read the active version before the update mints a new one.
         String activeBefore = service.getImage(region, imageIdentifier).latestActiveImageVersion;
         MicrovmImage image = service.updateImage(region, imageIdentifier,
                 text(request, "baseImageArn"), text(request, "buildRoleArn"),
                 updArtifact.isMissingNode() ? null : text(updArtifact, "uri"),
-                text(request, "description"));
+                text(request, "description"), text(request, "baseImageVersion"), runtimeSettings(request));
         return Response.ok(imageNode(image, ImageShape.UPDATE, activeBefore)).build();
     }
 
@@ -384,8 +391,7 @@ public class LambdaMicrovmsController {
             // Neither is settable — not by the request, not by the
             // CloudFormation resource type. The service fills them in.
             node.putArray("resources").addObject().put("minimumMemoryInMiB", DEFAULT_MEMORY_MIB);
-            node.putArray("egressNetworkConnectors")
-                    .add(managedEgressConnector(regionOf(image.imageArn)));
+            putRuntimeSettings(node, regionOf(image.imageArn), image.runtimeSettings);
         }
 
         // Create sends tags as null, Get sends an object, Update omits the
@@ -423,9 +429,59 @@ public class LambdaMicrovmsController {
         // object. Recorded.
         node.putNull("tags");
         node.putArray("resources").addObject().put("minimumMemoryInMiB", DEFAULT_MEMORY_MIB);
-        node.putArray("egressNetworkConnectors")
-                .add(managedEgressConnector(regionOf(image.imageArn)));
+        putRuntimeSettings(node, regionOf(image.imageArn),
+                version.runtimeSettings != null ? version.runtimeSettings : RuntimeSettings.defaults());
         return node;
+    }
+
+    private RuntimeSettings runtimeSettings(JsonNode request) {
+        JsonNode logging = request.path("logging");
+        List<String> architectures = new ArrayList<>();
+        for (JsonNode cpu : request.path("cpuConfigurations")) {
+            architectures.add(cpu.path("architecture").asText());
+        }
+        return new RuntimeSettings(
+                request.hasNonNull("egressNetworkConnectors")
+                        ? listMember(request, "egressNetworkConnectors") : null,
+                text(logging.path("cloudWatch"), "logGroup"), logging.hasNonNull("disabled"),
+                mapMember(request, "environmentVariables"),
+                listMember(request, "additionalOsCapabilities"), architectures);
+    }
+
+    private Map<String, String> mapMember(JsonNode request, String name) {
+        return request.hasNonNull(name)
+                ? objectMapper.convertValue(request.get(name), new TypeReference<Map<String, String>>() {}) : Map.of();
+    }
+
+    private List<String> listMember(JsonNode request, String name) {
+        return request.hasNonNull(name)
+                ? objectMapper.convertValue(request.get(name), new TypeReference<List<String>>() {}) : List.of();
+    }
+
+    private void putRuntimeSettings(ObjectNode node, String region, RuntimeSettings settings) {
+        ArrayNode egress = node.putArray("egressNetworkConnectors");
+        if (settings.egressNetworkConnectors() == null || settings.egressNetworkConnectors().isEmpty()) {
+            egress.add(managedEgressConnector(region));
+        } else {
+            settings.egressNetworkConnectors().forEach(egress::add);
+        }
+        if (settings.loggingDisabled()) {
+            node.putObject("logging").putObject("disabled");
+        } else if (settings.logGroup() != null) {
+            node.putObject("logging").putObject("cloudWatch").put("logGroup", settings.logGroup());
+        }
+        if (!settings.environmentVariables().isEmpty()) {
+            ObjectNode environment = node.putObject("environmentVariables");
+            settings.environmentVariables().forEach(environment::put);
+        }
+        if (!settings.additionalOsCapabilities().isEmpty()) {
+            ArrayNode capabilities = node.putArray("additionalOsCapabilities");
+            settings.additionalOsCapabilities().forEach(capabilities::add);
+        }
+        if (!settings.architectures().isEmpty()) {
+            ArrayNode cpus = node.putArray("cpuConfigurations");
+            settings.architectures().forEach(architecture -> cpus.addObject().put("architecture", architecture));
+        }
     }
 
     private ObjectNode buildNode(MicrovmImage image, MicrovmImageVersion version, MicrovmBuild build) {

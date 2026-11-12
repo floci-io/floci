@@ -17,6 +17,7 @@ import io.floci.aws.services.memorydb.model.User;
 import io.floci.aws.services.memorydb.proxy.MemoryDbProxyManager;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.function.Executable;
 
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -204,6 +205,24 @@ class MemoryDbServiceTest {
         AwsException acl = assertThrows(AwsException.class,
                 () -> service.tagResource("arn:aws:memorydb:us-east-1:000000000000:acl/missing", Map.of("env", "dev")));
         assertEquals("ACLNotFoundFault", acl.jsonType());
+    }
+
+    @Test
+    void notFoundFaultsAnswer400() {
+        String arn = "arn:aws:memorydb:us-east-1:000000000000:";
+        assertNotFoundFault("ClusterNotFoundFault", () -> service.getCluster("missing", "us-east-1"));
+        assertNotFoundFault("ClusterNotFoundFault", () -> service.listTags(arn + "cluster/missing"));
+        assertNotFoundFault("ClusterNotFoundFault",
+                () -> service.listTags("arn:aws:memorydb:eu-west-1:000000000000:cluster/missing"));
+        assertNotFoundFault("UserNotFoundFault", () -> service.describeUsers("missing", "us-east-1"));
+        assertNotFoundFault("UserNotFoundFault", () -> service.deleteUser("missing", "us-east-1"));
+        assertNotFoundFault("UserNotFoundFault", () -> service.createAcl(acl("an-acl", "missing"), "us-east-1"));
+        assertNotFoundFault("UserNotFoundFault", () -> service.listTags(arn + "user/missing"));
+        assertNotFoundFault("ACLNotFoundFault", () -> service.describeAcls("missing", "us-east-1"));
+        assertNotFoundFault("ACLNotFoundFault", () -> service.deleteAcl("missing", "us-east-1"));
+        assertNotFoundFault("ACLNotFoundFault",
+                () -> service.createCluster(cluster("a-cluster", "missing"), "us-east-1"));
+        assertNotFoundFault("ACLNotFoundFault", () -> service.listTags(arn + "acl/missing"));
     }
 
     @Test
@@ -643,6 +662,12 @@ class MemoryDbServiceTest {
         cluster.setName(name);
         cluster.setAclName(aclName);
         return cluster;
+    }
+
+    private void assertNotFoundFault(String code, Executable call) {
+        AwsException ex = assertThrows(AwsException.class, call);
+        assertEquals(code, ex.jsonType());
+        assertEquals(400, ex.getHttpStatus());
     }
 
     @Test

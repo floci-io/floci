@@ -13,6 +13,7 @@ import io.floci.aws.core.common.XmlBuilder;
 import io.floci.aws.services.docdb.DocDbQueryHandler;
 import io.floci.aws.services.neptune.NeptuneQueryHandler;
 import io.floci.aws.services.rds.export.RdsExportTaskService;
+import io.floci.aws.services.rds.model.BlueGreenDeployment;
 import io.floci.aws.services.rds.model.DatabaseEngine;
 import io.floci.aws.services.rds.model.DbCluster;
 import io.floci.aws.services.rds.model.DbClusterAutomatedBackup;
@@ -219,6 +220,10 @@ public class RdsQueryHandler {
                 case "FailoverGlobalCluster" -> handleFailoverGlobalCluster(params, region);
                 case "SwitchoverGlobalCluster" -> handleSwitchoverGlobalCluster(params, region);
                 case "FailoverDBCluster" -> handleFailoverDbCluster(params, region);
+                case "CreateBlueGreenDeployment" -> handleCreateBlueGreenDeployment(params, region);
+                case "DescribeBlueGreenDeployments" -> handleDescribeBlueGreenDeployments(params, region);
+                case "SwitchoverBlueGreenDeployment" -> handleSwitchoverBlueGreenDeployment(params, region);
+                case "DeleteBlueGreenDeployment" -> handleDeleteBlueGreenDeployment(params, region);
                 case "AddTagsToResource" -> handleAddTagsToResource(params, region);
                 case "ListTagsForResource" -> handleListTagsForResource(params, region);
                 case "RemoveTagsFromResource" -> handleRemoveTagsFromResource(params, region);
@@ -232,6 +237,96 @@ public class RdsQueryHandler {
             return AwsQueryResponse.error("InternalFailure",
                     "Unexpected error: " + AwsErrorMessages.describe(e), AwsNamespaces.RDS, 500);
         }
+    }
+
+    // ── Blue/Green deployments ────────────────────────────────────────────────
+
+    private Response handleCreateBlueGreenDeployment(MultivaluedMap<String, String> params, String region) {
+        BlueGreenDeployment deployment = service.createBlueGreenDeployment(
+                new RdsService.BlueGreenDeploymentRequest(
+                        params.getFirst("BlueGreenDeploymentName"),
+                        params.getFirst("Source"),
+                        params.getFirst("TargetEngineVersion"),
+                        params.getFirst("TargetDBParameterGroupName"),
+                        params.getFirst("TargetDBClusterParameterGroupName"),
+                        params.getFirst("TargetDBInstanceClass"),
+                        parseOptionalInteger(params, "TargetAllocatedStorage"),
+                        params.getFirst("TargetStorageType"),
+                        parseTags(params)),
+                region);
+        return Response.ok(AwsQueryResponse.envelope("CreateBlueGreenDeployment", AwsNamespaces.RDS,
+                blueGreenDeploymentXml("BlueGreenDeployment", deployment))).build();
+    }
+
+    private Response handleDescribeBlueGreenDeployments(MultivaluedMap<String, String> params, String region) {
+        Map<String, List<String>> filters = new LinkedHashMap<>();
+        for (int i = 1; params.getFirst("Filters.Filter." + i + ".Name") != null; i++) {
+            String name = params.getFirst("Filters.Filter." + i + ".Name");
+            filters.put(name, extractRdsFilterValues(params, name));
+        }
+        RdsService.BlueGreenDeploymentPage page = service.describeBlueGreenDeployments(region,
+                params.getFirst("BlueGreenDeploymentIdentifier"), filters,
+                optionalInt(params.getFirst("MaxRecords")), params.getFirst("Marker"));
+        XmlBuilder xml = new XmlBuilder().start("BlueGreenDeployments");
+        for (BlueGreenDeployment deployment : page.deployments()) {
+            xml.raw(blueGreenDeploymentXml("member", deployment));
+        }
+        xml.end("BlueGreenDeployments");
+        if (page.marker() != null) {
+            xml.elem("Marker", page.marker());
+        }
+        return Response.ok(AwsQueryResponse.envelope("DescribeBlueGreenDeployments", AwsNamespaces.RDS,
+                xml.build())).build();
+    }
+
+    private Response handleSwitchoverBlueGreenDeployment(MultivaluedMap<String, String> params, String region) {
+        BlueGreenDeployment deployment = service.switchoverBlueGreenDeployment(
+                params.getFirst("BlueGreenDeploymentIdentifier"),
+                parseOptionalInteger(params, "SwitchoverTimeout"), region);
+        return Response.ok(AwsQueryResponse.envelope("SwitchoverBlueGreenDeployment", AwsNamespaces.RDS,
+                blueGreenDeploymentXml("BlueGreenDeployment", deployment))).build();
+    }
+
+    private Response handleDeleteBlueGreenDeployment(MultivaluedMap<String, String> params, String region) {
+        BlueGreenDeployment deployment = service.deleteBlueGreenDeployment(
+                params.getFirst("BlueGreenDeploymentIdentifier"),
+                parseOptionalBoolean(params, "DeleteTarget"), region);
+        return Response.ok(AwsQueryResponse.envelope("DeleteBlueGreenDeployment", AwsNamespaces.RDS,
+                blueGreenDeploymentXml("BlueGreenDeployment", deployment))).build();
+    }
+
+    private static String blueGreenDeploymentXml(String element, BlueGreenDeployment d) {
+        XmlBuilder xml = new XmlBuilder().start(element)
+                .elem("BlueGreenDeploymentIdentifier", d.getBlueGreenDeploymentIdentifier())
+                .elem("BlueGreenDeploymentName", d.getBlueGreenDeploymentName())
+                .elem("Source", d.getSource())
+                .elem("Target", d.getTarget())
+                .start("SwitchoverDetails");
+        for (BlueGreenDeployment.SwitchoverDetail detail : d.getSwitchoverDetails()) {
+            xml.start("member")
+               .elem("SourceMember", detail.getSourceMember())
+               .elem("TargetMember", detail.getTargetMember())
+               .elem("Status", detail.getStatus())
+               .end("member");
+        }
+        xml.end("SwitchoverDetails").start("Tasks");
+        for (BlueGreenDeployment.Task task : d.getTasks()) {
+            xml.start("member").elem("Name", task.getName()).elem("Status", task.getStatus()).end("member");
+        }
+        xml.end("Tasks").elem("Status", d.getStatus());
+        if (d.getStatusDetails() != null) {
+            xml.elem("StatusDetails", d.getStatusDetails());
+        }
+        if (d.getCreateTime() != null) {
+            xml.elem("CreateTime", d.getCreateTime().toString());
+        }
+        if (d.getDeleteTime() != null) {
+            xml.elem("DeleteTime", d.getDeleteTime().toString());
+        }
+        xml.start("TagList");
+        writeTags(xml, d.getTags());
+        xml.end("TagList");
+        return xml.end(element).build();
     }
 
     // ── DB Instances ──────────────────────────────────────────────────────────

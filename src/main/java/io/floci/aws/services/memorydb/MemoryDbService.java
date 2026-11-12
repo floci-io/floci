@@ -175,7 +175,7 @@ public class MemoryDbService {
             throw new AwsException("InvalidParameterValueException", "ClusterName is required.", 400);
         }
         return resourceGet(clusters, name, region).orElseThrow(() ->
-                new AwsException("ClusterNotFoundFault", "Cluster not found.", 404));
+                new AwsException("ClusterNotFoundFault", "Cluster not found.", 400));
     }
 
     public Collection<Cluster> describeClusters(String filterName) {
@@ -570,7 +570,7 @@ public class MemoryDbService {
                     .or(() -> DEFAULT_USER.equals(filterName)
                             ? Optional.of(List.of(builtinDefaultUser(region)))
                             : Optional.empty())
-                    .orElseThrow(() -> new AwsException("UserNotFoundFault", "User not found.", 404));
+                    .orElseThrow(() -> new AwsException("UserNotFoundFault", "User not found.", 400));
         }
         migrateLegacyUsers(region);
         List<User> all = new ArrayList<>();
@@ -589,7 +589,7 @@ public class MemoryDbService {
                     "The default user cannot be deleted.", 400);
         }
         User user = resourceGet(users, name, region).orElseThrow(() ->
-                new AwsException("UserNotFoundFault", "User not found.", 404));
+                new AwsException("UserNotFoundFault", "User not found.", 400));
         users.delete(key(region, name));
         LOG.infov("MemoryDB user {0} deleted", name);
         return user;
@@ -619,7 +619,7 @@ public class MemoryDbService {
                         "Duplicate user name " + userName + " in ACL.", 400);
             }
             if (!userExists(userName, region)) {
-                throw new AwsException("UserNotFoundFault", "User " + userName + " not found.", 404);
+                throw new AwsException("UserNotFoundFault", "User " + userName + " not found.", 400);
             }
         }
 
@@ -646,7 +646,7 @@ public class MemoryDbService {
                     .or(() -> DEFAULT_ACL.equals(filterName)
                             ? Optional.of(List.of(builtinOpenAccessAcl(region)))
                             : Optional.empty())
-                    .orElseThrow(() -> new AwsException("ACLNotFoundFault", "ACL not found.", 404));
+                    .orElseThrow(() -> new AwsException("ACLNotFoundFault", "ACL not found.", 400));
         }
         migrateLegacyAcls(region);
         List<Acl> all = new ArrayList<>();
@@ -665,7 +665,7 @@ public class MemoryDbService {
                     "The open-access ACL cannot be deleted.", 400);
         }
         Acl acl = resourceGet(acls, name, region).orElseThrow(() ->
-                new AwsException("ACLNotFoundFault", "ACL not found.", 404));
+                new AwsException("ACLNotFoundFault", "ACL not found.", 400));
         if (!clustersUsingAcl(name, region).isEmpty()) {
             throw new AwsException("InvalidACLStateFault",
                     "ACL " + name + " is associated with one or more clusters.", 400);
@@ -793,7 +793,7 @@ public class MemoryDbService {
 
     private void requireAclExists(String aclName, String region) {
         if (!DEFAULT_ACL.equals(aclName) && resourceGet(acls, aclName, region).isEmpty()) {
-            throw new AwsException("ACLNotFoundFault", "ACL " + aclName + " not found.", 404);
+            throw new AwsException("ACLNotFoundFault", "ACL " + aclName + " not found.", 400);
         }
     }
 
@@ -851,13 +851,13 @@ public class MemoryDbService {
         if (resource.startsWith("user/")) {
             User user = resourceGet(users, resource.substring("user/".length()), region)
                     .filter(u -> resourceArn.equals(u.getArn()))
-                    .orElseThrow(() -> new AwsException("UserNotFoundFault", "User not found.", 404));
+                    .orElseThrow(() -> new AwsException("UserNotFoundFault", "User not found.", 400));
             return new TaggedResource(user.getTags(), () -> users.put(key(region, user.getName()), user));
         }
         if (resource.startsWith("acl/")) {
             Acl acl = resourceGet(acls, resource.substring("acl/".length()), region)
                     .filter(a -> resourceArn.equals(a.getArn()))
-                    .orElseThrow(() -> new AwsException("ACLNotFoundFault", "ACL not found.", 404));
+                    .orElseThrow(() -> new AwsException("ACLNotFoundFault", "ACL not found.", 400));
             return new TaggedResource(acl.getTags(), () -> acls.put(key(region, acl.getName()), acl));
         }
         Cluster cluster = clusterByArn(resourceArn);
@@ -876,13 +876,13 @@ public class MemoryDbService {
                 throw new IllegalArgumentException("ARN owner mismatch");
             }
         } catch (IllegalArgumentException e) {
-            throw new AwsException("ClusterNotFoundFault", "Cluster not found.", 404);
+            throw new AwsException("ClusterNotFoundFault", "Cluster not found.", 400);
         }
         migrateLegacyClusters(currentRegion());
         return clusters.scan(k -> k.startsWith(currentRegion() + ":")).stream()
                 .filter(c -> resourceArn.equals(c.getArn()))
                 .findFirst()
-                .orElseThrow(() -> new AwsException("ClusterNotFoundFault", "Cluster not found.", 404));
+                .orElseThrow(() -> new AwsException("ClusterNotFoundFault", "Cluster not found.", 400));
     }
 
     private void startBackend(Cluster cluster, boolean authRequired) {

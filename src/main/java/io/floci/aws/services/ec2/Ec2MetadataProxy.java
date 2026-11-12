@@ -22,9 +22,30 @@ public final class Ec2MetadataProxy {
 
     private Ec2MetadataProxy() {}
 
+    /**
+     * Moves the exec'd shell, and everything it starts, out of the container's root cgroup into the
+     * leaf {@code /sys/fs/cgroup/floci}. A {@code docker exec} lands in the root of the container's
+     * cgroup namespace, and a systemd guest runs with a private one. cgroup v2 will not enable
+     * controllers in a cgroup's {@code subtree_control} while that cgroup holds processes, so a
+     * long-lived socat left in the root kept it empty, and kubelet with the cgroupfs driver then
+     * failed to create {@code kubepods.slice} ("pids.max: no such file or directory").
+     *
+     * <p>Acts only when this shell sits at the root of a cgroup v2 namespace ({@code 0::/}) whose
+     * cgroupfs is writable. A host-namespace container reports its full path, cgroup v1 reports one
+     * line per hierarchy, and a read-only mount fails {@code -w} (access(2) reports EROFS, even for
+     * root); all three run as before. Any {@code mkdir} or write that still fails is swallowed.
+     * A plain directory rather than {@code systemd-run}, because the proxy starts while the guest's
+     * systemd may still be booting, and systemd neither reaps nor moves a cgroup it did not create.
+     */
+    static final String LEAVE_ROOT_CGROUP =
+            "if [ \"$(cat /proc/self/cgroup 2>/dev/null)\" = 0::/ ] && [ -w /sys/fs/cgroup/cgroup.procs ]; then"
+                    + " { mkdir -p /sys/fs/cgroup/floci && echo $$ >/sys/fs/cgroup/floci/cgroup.procs; } 2>/dev/null || true;"
+                    + " fi";
+
     public static String[] installCommand() {
         return new String[]{"sh", "-c", String.join("\n",
                 "set -eu",
+                LEAVE_ROOT_CGROUP,
                 CLEAR_APPLICATION_PATHS,
                 "if command -v ip >/dev/null 2>&1 && command -v socat >/dev/null 2>&1 && command -v curl >/dev/null 2>&1; then exit 0; fi",
                 "if command -v apt-get >/dev/null 2>&1; then",
@@ -91,6 +112,7 @@ public final class Ec2MetadataProxy {
         String logFile = "/tmp/floci-" + name + "-proxy.log";
         return new String[]{"sh", "-c", String.join("\n",
                 "set -eu",
+                LEAVE_ROOT_CGROUP,
                 CLEAR_APPLICATION_PATHS,
                 "ip addr show dev lo | grep -q '" + bindIp + "/32' || ip addr add " + bindIp + "/32 dev lo",
                 // The pid file is on the container's writable layer, so it outlives a restart while

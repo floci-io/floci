@@ -1253,10 +1253,8 @@ public class OrganizationsService implements ScpProvider, RootAccessOrganization
         organization.setResourcePolicyContent(content);
         if (tags != null) {
             // Put replaces rather than merges: a caller that supplies Tags is stating the full set,
-            // so a key it no longer lists is dropped. The resource policy is not addressable by
-            // TagResource/UntagResource the way accounts, OUs, roots and policies are, so this call
-            // is the only way CloudFormation can converge Tags on an update. Omitting Tags
-            // entirely (null) leaves the existing ones untouched.
+            // so a key it no longer lists is dropped. CloudFormation relies on this to converge
+            // Tags on an update. Omitting Tags entirely (null) leaves the existing ones untouched.
             organization.getResourcePolicyTags().clear();
             organization.getResourcePolicyTags().putAll(tags);
         }
@@ -1805,6 +1803,10 @@ public class OrganizationsService implements ScpProvider, RootAccessOrganization
             OrganizationPolicy policy = requirePolicy(organization, resourceId);
             return new TagOwner(policy.getTags(),
                     () -> policies.putForAccount(master, resourceId, policy));
+        }
+        if (resourceId.equals(organization.getResourcePolicyId())) {
+            return new TagOwner(organization.getResourcePolicyTags(),
+                    () -> organizations.putForAccount(master, organization.getId(), organization));
         }
         throw new AwsException("TargetNotFoundException",
                 "We can't find a resource with the ResourceId " + resourceId + ".", 400);

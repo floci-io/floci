@@ -363,6 +363,13 @@ public class EventBridgeService implements ResourceProvider, StoredResourceArns 
         if (eventPattern != null && !eventPattern.isBlank()) {
             validateEventPattern(eventPattern);
         }
+        if (scheduleExpression != null && !scheduleExpression.isBlank()) {
+            try {
+                ScheduleExpressionParser.validate(scheduleExpression);
+            } catch (IllegalArgumentException e) {
+                throw new AwsException("ValidationException", "Parameter ScheduleExpression is not valid.", 400);
+            }
+        }
         String effectiveBus = resolvedBusName(busName);
         ensureBusExists(effectiveBus, region);
 

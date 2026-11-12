@@ -1754,8 +1754,8 @@ class Ec2ContainerManagerTest {
 
         awaitUntil(() -> "running".equals(instance.getState().getName()), Duration.ofSeconds(2));
         verify(harness.builder).withCmd(List.of("/sbin/init"));
-        verify(harness.builder).withCgroupnsMode("host");
-        verify(harness.builder).withBind("/sys/fs/cgroup", "/sys/fs/cgroup");
+        verify(harness.builder).withCgroupnsMode("private");
+        verify(harness.builder, never()).withBind("/sys/fs/cgroup", "/sys/fs/cgroup");
         verify(harness.builder).withReadOnlyBind("/lib/modules/6.8.0-test", "/lib/modules/6.8.0-test");
         verify(harness.builder, never()).withReadOnlyBind(eq("/lib/modules"), anyString());
         // User data runs after the sshd step, so once it has started that step is settled.
@@ -1763,6 +1763,24 @@ class Ec2ContainerManagerTest {
         assertEquals(-1, commandIndex(harness.executedCommands, "/usr/sbin/sshd"),
                 "a systemd guest's init starts sshd; Floci must not start a second one");
         verify(harness.lifecycleManager).create(any(ContainerSpec.class), eq("linux/arm64"));
+    }
+
+    @Test
+    void privilegedSystemdGuestGetsAPrivateCgroupNamespaceAndNoHostTree() {
+        ContainerBuilder.Builder spec = mock(ContainerBuilder.Builder.class, RETURNS_SELF);
+        Ec2ContainerManager.applySystemdCgroup(spec, true);
+        verify(spec).withCgroupnsMode("private");
+        verify(spec, never()).withBind(anyString(), anyString());
+    }
+
+    @Test
+    void unprivilegedSystemdGuestUnderSecurityGroupEnforcementKeepsAWritableCgroupTree() {
+        // Docker mounts an unprivileged container's private cgroupfs read-only, and systemd
+        // cannot boot on it.
+        ContainerBuilder.Builder spec = mock(ContainerBuilder.Builder.class, RETURNS_SELF);
+        Ec2ContainerManager.applySystemdCgroup(spec, false);
+        verify(spec).withCgroupnsMode("host");
+        verify(spec).withBind("/sys/fs/cgroup", "/sys/fs/cgroup");
     }
 
     @Test

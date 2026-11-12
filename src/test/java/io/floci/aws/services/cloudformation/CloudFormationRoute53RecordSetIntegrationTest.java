@@ -13,6 +13,7 @@ import io.restassured.specification.RequestSpecification;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.CsvSource;
 import org.junit.jupiter.params.provider.ValueSource;
 import org.mockito.Mockito;
 
@@ -279,6 +280,107 @@ class CloudFormationRoute53RecordSetIntegrationTest {
             .formParam("Parameters.member.2.ParameterKey", "Address")
             .formParam("Parameters.member.2.ParameterValue", address)
         .when().post("/").then().statusCode(200);
+    }
+
+    @Test
+    void multivalueRecordsSurviveStackCreationUpdatesAndDeletion() {
+        String suffix = Long.toString(System.nanoTime(), 36);
+        String stackName = "r53-multivalue-" + suffix;
+        String zoneName = suffix + ".cfn-multivalue.example.test";
+        String template = """
+                {
+                  "Resources": {
+                    "Zone": {
+                      "Type": "AWS::Route53::HostedZone",
+                      "Properties": {"Name": "%1$s"}
+                    },
+                    "Record": {
+                      "Type": "AWS::Route53::RecordSet",
+                      "Properties": {
+                        "HostedZoneId": {"Ref": "Zone"},
+                        "Name": "single.%1$s.", "Type": "A", "TTL": "10",
+                        "SetIdentifier": "single", "MultiValueAnswer": true,
+                        "ResourceRecords": ["192.0.2.1"]
+                      }
+                    },
+                    "Group": {
+                      "Type": "AWS::Route53::RecordSetGroup",
+                      "Properties": {
+                        "HostedZoneId": {"Ref": "Zone"},
+                        "RecordSets": [{
+                          "Name": "group.%1$s.", "Type": "A", "TTL": "10",
+                          "SetIdentifier": "group", "MultiValueAnswer": true,
+                          "ResourceRecords": ["192.0.2.2"]
+                        }]
+                      }
+                    }
+                  }
+                }
+                """.formatted(zoneName);
+
+        createStack(stackName, template);
+        assertStackStatus(stackName, "CREATE_COMPLETE");
+        String zoneId = CfnRequests.physicalId(stackName, "Zone", CFN_AUTH);
+        try {
+            String created = listResourceRecordSets(zoneId);
+            assertTrue(created.contains("<SetIdentifier>single</SetIdentifier><MultiValueAnswer>true</MultiValueAnswer>"),
+                    created);
+            assertTrue(created.contains("<SetIdentifier>group</SetIdentifier><MultiValueAnswer>true</MultiValueAnswer>"),
+                    created);
+
+            updateStack(stackName, template.replace("\"MultiValueAnswer\": true", "\"MultiValueAnswer\": false"));
+            assertStackStatus(stackName, "UPDATE_COMPLETE");
+            String updated = listResourceRecordSets(zoneId);
+            assertTrue(updated.contains("<SetIdentifier>single</SetIdentifier><MultiValueAnswer>false</MultiValueAnswer>"),
+                    updated);
+            assertTrue(updated.contains("<SetIdentifier>group</SetIdentifier><MultiValueAnswer>false</MultiValueAnswer>"),
+                    updated);
+
+            updateStack(stackName, template.replace(", \"MultiValueAnswer\": true", ""));
+            assertStackStatus(stackName, "UPDATE_COMPLETE");
+            String omitted = listResourceRecordSets(zoneId);
+            assertTrue(omitted.contains("<SetIdentifier>single</SetIdentifier>"), omitted);
+            assertTrue(omitted.contains("<SetIdentifier>group</SetIdentifier>"), omitted);
+            assertFalse(omitted.contains("<MultiValueAnswer>"), omitted);
+        } finally {
+            deleteStack(stackName);
+            CfnStackWaits.awaitStackDeleted(stackName);
+        }
+    }
+
+    @ParameterizedTest
+    @CsvSource({"AWS::Route53::RecordSet,yes", "AWS::Route53::RecordSet,1",
+            "AWS::Route53::RecordSetGroup,yes", "AWS::Route53::RecordSetGroup,1"})
+    void malformedResolvedMultiValueAnswerFailsBeforeCreatingARecord(String resourceType, String value) {
+        String suffix = Long.toString(System.nanoTime(), 36);
+        String stackName = "r53-invalid-multivalue-" + suffix;
+        String zoneName = suffix + ".cfn-invalid-multivalue.example.test";
+        String zoneId = createHostedZone(zoneName, "invalid-multivalue-" + suffix);
+        String record = """
+                {"Name":"multi.%s.", "Type":"A", "TTL":"10", "SetIdentifier":"instance-1",
+                 "MultiValueAnswer":{"Ref":"Flag"}, "ResourceRecords":["192.0.2.1"]}
+                """.formatted(zoneName);
+        String properties = resourceType.equals("AWS::Route53::RecordSetGroup")
+                ? "{\"HostedZoneId\":\"" + zoneId + "\", \"RecordSets\":[" + record + "]}"
+                : record.replace("{\"Name\":", "{\"HostedZoneId\":\"" + zoneId + "\", \"Name\":");
+        String template = """
+                {"Parameters":{"Flag":{"Type":"String", "Default":"%s"}},
+                 "Resources":{"Record":{"Type":"%s", "Properties":%s}}}
+                """.formatted(value, resourceType, properties);
+        try {
+            createStack(stackName, template);
+            CfnStackWaits.StackState state = CfnStackWaits.awaitTerminal(stackName);
+            assertEquals("ROLLBACK_COMPLETE", state.status(), state.reason());
+            String failure = CfnStackWaits.failedResourceReason(stackName);
+            assertTrue(failure.contains("MultiValueAnswer must be true or false"), failure);
+            String records = listResourceRecordSets(zoneId);
+            assertFalse(records.contains("<Name>multi." + zoneName + ".</Name>"), records);
+        } finally {
+            deleteStack(stackName);
+            CfnStackWaits.awaitStackDeleted(stackName);
+            given().header("Authorization", ROUTE53_AUTH)
+                    .when().delete("/2013-04-01/hostedzone/" + zoneId).then().statusCode(200);
+        }
     }
 
     @Test

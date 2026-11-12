@@ -18,6 +18,7 @@ import java.util.HashMap;
 import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.UUID;
 import java.util.function.Function;
 import java.util.function.UnaryOperator;
@@ -933,15 +934,35 @@ public class CloudFormationTemplateEngine {
         return parts == null ? TextNode.valueOf("") : resolveGetAttNodeParts(parts[0], parts[1]);
     }
 
-    private static String[] getAttParts(JsonNode getAtt) {
-        if (getAtt.isArray() && getAtt.size() == 2) {
-            return new String[] {getAtt.get(0).asText(), getAtt.get(1).asText()};
+    /** Matches a GetAtt dependency using the same operands as attribute value resolution. */
+    public boolean referencesGetAttAttribute(JsonNode getAtt, String logicalId, Set<String> attributeNames) {
+        String[] parts = getAttParts(getAtt);
+        return parts != null && logicalId.equals(parts[0]) && attributeNames.contains(parts[1]);
+    }
+
+    private String[] getAttParts(JsonNode getAtt) {
+        String errorMessage = "Template error: every Fn::GetAtt object requires two non-empty parameters, "
+                + "the resource name and the resource attribute";
+        String[] parts;
+        if (getAtt.isArray()) {
+            if (getAtt.size() != 2) {
+                throw new AwsException("ValidationError", errorMessage, 400);
+            }
+            JsonNode attribute = getAtt.get(1);
+            String attributeName = attribute.has("Ref")
+                    ? resolveRef(attribute.get("Ref").asText()) : attribute.asText();
+            parts = new String[] {getAtt.get(0).asText(), attributeName};
+        } else if (getAtt.isTextual()) {
+            errorMessage = "Template error: if specifying one argument to Fn::GetAtt, "
+                    + "that argument must be a non-empty string in format <LogicalId>.<Attribute>";
+            parts = getAtt.textValue().split("\\.", 2);
+        } else {
+            return null;
         }
-        if (getAtt.isTextual()) {
-            String[] parts = getAtt.textValue().split("\\.", 2);
-            return new String[] {parts[0], parts.length > 1 ? parts[1] : ""};
+        if (parts.length != 2 || parts[0].isEmpty() || parts[1].isEmpty()) {
+            throw new AwsException("ValidationError", errorMessage, 400);
         }
-        return null;
+        return parts;
     }
 
     private Map<String, String> findAttributeSource(String logicalId, String attrName) {
