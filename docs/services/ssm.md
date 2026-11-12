@@ -216,17 +216,11 @@ when it names the request's partition, region and account; an ARN naming another
 `GetParameter` and `GetParameters` accept the returned ARN, optionally followed by
 `:version` or `:label`, for parameters in the caller's account and request region.
 Batch reads keep unresolved inputs in `InvalidParameters` in their original form.
+An ARN whose resource is `parameter//<name>` names `//<name>`, never `/<name>`.
 ARNs naming another account, region or partition never resolve to a same-name local
 parameter. Cross-account shared parameters are not modeled. Secrets Manager
 references continue to use `/aws/reference/secretsmanager/<secret-id>`, not a
 parameter ARN.
-
-With IAM enforcement on, each action is checked against the parameter its handler acts on:
-`GetParametersByPath` against its `Path` (the root path `/` when it is empty or missing),
-`GetParameters` and `DeleteParameters` against every entry in `Names`, the tagging actions against
-`ResourceId`, and the other parameter actions against `Name`. A `:version` or `:label` selector on a
-read is dropped, and a `PutParameter` name is checked without the surrounding spaces it is stored
-without.
 
 ## Parameter Resource Policies
 
