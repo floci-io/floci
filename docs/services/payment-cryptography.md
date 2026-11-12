@@ -59,7 +59,12 @@
   a key alone, as the reference states them. A request naming a key another way is
   refused, and the permission check reads the same member the request does.
 - **Listing by state:** `ListKeys` takes a `KeyState` and answers with the keys in
-  that state alone, and with every key when it names none.
+  that state alone, and with every key when it names none. Each key in the list is the
+  whole key rather than the summary the model names, which a client reads as the summary.
+- **The members a request may name that the service does not read:** `CreateKey` and
+  `ImportKey` take `ReplicationRegions`, and `ImportKey` takes `RequesterComment`, and the
+  service reads none of them. No replica is made and no approval is recorded, because the
+  replication and the multi-party approval are not emulated.
 - **An alias may name no key:** `UpdateAlias` names the key of an alias, and an update
   that names none removes the key the alias names and leaves the alias. `CreateAlias`
   refuses an alias without a key, as the reference does, though its model requires
@@ -76,6 +81,18 @@
   DUKPT key by its serial number, and the derived key leaves instead of the base derivation
   key. The base derivation key may not be exportable itself and still derive that initial key,
   which the export guide says the standards allow.
+- **The keys a key exchange names:** a TR-31 block's wrapping key must be a key
+  encryption key that may wrap, and of the family the block's own type names, so a TDES
+  wrapping key carries a type B block and an AES one a type D block. A key agreement needs
+  a key agreement key that may derive. The certificate a cryptogram or an agreement names
+  must be one the named authority signed. A key that is disabled does no work, so it may
+  not wrap, unwrap, agree or vouch for a certificate.
+- **The strength a wrapping key must have:** a wrapping key must be at least as strong as
+  the key it carries, by the matrix the guide publishes. A TR-31 block's wrapping key is
+  therefore no weaker than the key it carries, an RSA cryptogram's is capped by its
+  modulus, so RSA-2048 carries Triple DES but not AES-128, RSA-3072 and RSA-4096 carry
+  AES-128, and no RSA size carries AES-192 or AES-256, and a key the two parties agreed
+  is capped by the curve's strength, so P-256 carries no AES-192.
 - **The check value of an export:** a key block carries the check value of the key it
   carries, and a cryptogram carries none, because it carries no key block at all.
 - **The TR-34 and the AS2805 forms are not made.** A request that asks for one of them is
