@@ -31,10 +31,12 @@ import java.io.IOException;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.nio.file.attribute.PosixFilePermission;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.Set;
 
 import static org.junit.jupiter.api.Assertions.assertArrayEquals;
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -137,7 +139,7 @@ class RdsArchiveRetryTest {
             assertTarEntry(tar, "restore.sh", RdsContainerManager.postgresRestoreScript());
             assertNull(tar.getNextEntry());
         }
-        assertEquals(List.of(List.of("sh", "/tmp/restore.sh", "admin"), List.of("rm", "-f", "/tmp/dump.sql")), commands);
+        assertEquals(List.of(List.of("sh", "/tmp/restore.sh", "admin")), commands);
         InOrder order = inOrder(uploads.commands.get(1), docker);
         order.verify(uploads.commands.get(1)).exec();
         order.verify(docker).execCreateCmd(CONTAINER);
@@ -238,7 +240,7 @@ class RdsArchiveRetryTest {
 
         manager.restoreMysqlSnapshot(DatabaseEngine.MARIADB, CONTAINER, "admin", "secret", "-- dump");
 
-        assertEquals(List.of(List.of("sh", "/tmp/restore.sh", "mariadb", "admin"), List.of("rm", "-f", "/tmp/dump.sql")), commands);
+        assertEquals(List.of(List.of("sh", "/tmp/restore.sh", "mariadb", "admin")), commands);
         assertEquals(List.of(List.of("MYSQL_PWD=secret")), envs);
         try (TarArchiveInputStream tar = new TarArchiveInputStream(
                 new ByteArrayInputStream(uploads.completed.getFirst()))) {
@@ -359,8 +361,7 @@ class RdsArchiveRetryTest {
         assertEquals(exit, result.exit());
         assertEquals(left, result.dumpLeft());
         if (left) {
-            assertEquals(java.util.Set.of(java.nio.file.attribute.PosixFilePermission.OWNER_READ,
-                    java.nio.file.attribute.PosixFilePermission.OWNER_WRITE),
+            assertEquals(Set.of(PosixFilePermission.OWNER_READ, PosixFilePermission.OWNER_WRITE),
                     Files.getPosixFilePermissions(dir.resolve("dump.sql")));
         }
     }

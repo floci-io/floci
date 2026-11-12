@@ -1243,6 +1243,7 @@ public class RdsContainerManager implements RdsBackendGate, RdsBackendEndpointRe
                     "/tmp", uploadName, out -> out.write(archive),
                     RetryingTarCopier.DEFAULT_MAX_ATTEMPTS, uploadBackoffMillis);
 
+            boolean succeeded = false;
             try {
                 ContainerExec.Result result = null;
                 for (int i = 0; i < attempts; i++) {
@@ -1264,9 +1265,11 @@ public class RdsContainerManager implements RdsBackendGate, RdsBackendEndpointRe
                     throw new RuntimeException(operation + " failed with exit code "
                             + (result != null ? result.exitCode() : -1) + ": " + errMsg);
                 }
+                succeeded = true;
                 return result.stdout();
             } finally {
-                if (files.containsKey("dump.sql")) {
+                // On success the script's own EXIT trap has removed it.
+                if (!succeeded && files.containsKey("dump.sql")) {
                     removeDump(containerId);
                 }
             }
