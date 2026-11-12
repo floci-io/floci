@@ -797,13 +797,27 @@ public class OrganizationsJsonHandler {
         return value.isMissingNode() || value.isNull() ? null : value.asText();
     }
 
-    /** Organizations sends tags as a list of {@code {Key, Value}} objects, not a map. */
+    /**
+     * Organizations sends tags as a list of {@code {Key, Value}} objects, not a map. A repeated key
+     * is gone once the list is a map, so it is refused while reading it.
+     */
     private static Map<String, String> parseTags(JsonNode node) {
         if (node == null || !node.isArray()) {
             return null;
         }
         Map<String, String> tags = new LinkedHashMap<>();
-        node.forEach(entry -> tags.put(entry.path("Key").asText(), entry.path("Value").asText("")));
+        for (JsonNode entry : node) {
+            String key = text(entry, "Key");
+            String value = text(entry, "Value");
+            if (key == null || value == null) {
+                throw new AwsException("InvalidInputException",
+                        "Each tag needs a Key and a Value, and neither can be null.", 400);
+            }
+            if (tags.putIfAbsent(key, value) != null) {
+                throw new AwsException("InvalidInputException", "Duplicate tag key: " + key + ".", 400,
+                        Map.of("Reason", "DUPLICATE_TAG_KEY"));
+            }
+        }
         return tags;
     }
 
