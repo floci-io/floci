@@ -266,15 +266,10 @@ final class PaymentCryptographyKeyExchange {
     /** The key material, encrypted under the receiver's certificate. */
     private Exported exportCryptogram(String region, PaymentCryptographyKey key, byte[] clear,
                                       Map<String, Object> material) {
+        // The shape check settles the members the model requires and the values it names,
+        // so the certificate and the authority are there and the spec is one of the two.
         String certText = text(material, "WrappingKeyCertificate");
-        if (certText.isEmpty()) {
-            throw validation("KeyMaterial.KeyCryptogram.WrappingKeyCertificate is required");
-        }
         String caIdentifier = text(material, "CertificateAuthorityPublicKeyIdentifier");
-        if (caIdentifier.isEmpty()) {
-            throw validation("KeyMaterial.KeyCryptogram.CertificateAuthorityPublicKeyIdentifier "
-                    + "is required");
-        }
         PaymentCryptographyKey caKey = usableKey(caIdentifier, region);
         PublicKey wrappingKey = verifiedCertificate(certText, caKey, "the wrapping key certificate")
                 .getPublicKey();
@@ -291,10 +286,6 @@ final class PaymentCryptographyKeyExchange {
         }
         String spec = text(material, "WrappingSpec");
         String digest = RsaOaep.digestFor(spec.isEmpty() ? "RSA_OAEP_SHA_256" : spec);
-        if (digest == null) {
-            throw validation("WrappingSpec '" + spec + "' not supported "
-                    + "(RSA_OAEP_SHA_256, RSA_OAEP_SHA_512)");
-        }
         byte[] encrypted = RsaOaep.encrypt(wrappingKey, clear, digest);
         return new Exported(HEX_UPPER.formatHex(encrypted), "KEY_CRYPTOGRAM", null);
     }
@@ -417,10 +408,10 @@ final class PaymentCryptographyKeyExchange {
 
     /** A key out of an RSA-OAEP cryptogram. */
     private Imported importCryptogram(Map<String, Object> material) {
+        // The shape check settles the members the model requires and the values it names,
+        // so the attributes are there, the cryptogram is hexadecimal and the spec is one of
+        // the two.
         Map<String, Object> attributes = object(material, "KeyAttributes");
-        if (attributes == null) {
-            throw validation("KeyMaterial.KeyCryptogram.KeyAttributes is required");
-        }
         String algorithm = String.valueOf(attributes.get("KeyAlgorithm"));
         PaymentCryptographyKeyAlgorithm keyAlgorithm =
                 PaymentCryptographyKeyAlgorithm.from(algorithm);
@@ -429,19 +420,9 @@ final class PaymentCryptographyKeyExchange {
                     + "service imports (TDES_2KEY, TDES_3KEY, AES_128, AES_192, AES_256)");
         }
         String cryptogram = text(material, "WrappedKeyCryptogram");
-        if (cryptogram.isEmpty() || !isHex(cryptogram)) {
-            throw validation("KeyMaterial.KeyCryptogram.WrappedKeyCryptogram (hex) is required");
-        }
         String spec = text(material, "WrappingSpec");
         String digest = RsaOaep.digestFor(spec.isEmpty() ? "RSA_OAEP_SHA_256" : spec);
-        if (digest == null) {
-            throw validation("WrappingSpec '" + spec + "' not supported "
-                    + "(RSA_OAEP_SHA_256, RSA_OAEP_SHA_512)");
-        }
         String usage = String.valueOf(attributes.get("KeyUsage"));
-        if (usage.isEmpty() || "null".equals(usage)) {
-            throw validation("KeyMaterial.KeyCryptogram.KeyAttributes.KeyUsage is required");
-        }
         // The token is taken last, so a request that is refused for any other reason does not
         // spend it.
         String token = text(material, "ImportToken");
@@ -788,7 +769,7 @@ final class PaymentCryptographyKeyExchange {
     @SuppressWarnings("unchecked")
     private static Map<String, Object> object(Map<String, Object> material, String name) {
         Object value = material == null ? null : material.get(name);
-        return value instanceof Map<?, ?> map ? (Map<String, Object>) map : null;
+        return value instanceof Map<?, ?> map ? (Map<String, Object>) map : Map.of();
     }
 
     /** Whether a string is hexadecimal. */
@@ -1186,9 +1167,6 @@ final class PaymentCryptographyKeyExchange {
         }
         PublicKey publicKey = certificate.getPublicKey();
         Map<String, Object> attributes = object(material, "KeyAttributes");
-        if (attributes == null) {
-            throw validation("KeyMaterial.KeyAttributes is required");
-        }
         String algorithm = algorithmOf(publicKey);
         Map<String, Boolean> modes = modesOf(attributes);
         return new Imported(algorithm, String.valueOf(attributes.get("KeyUsage")), modes, true,

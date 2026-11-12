@@ -245,6 +245,138 @@ class PaymentCryptographyIntegrationTest {
                     .body("message", containsString("not a form the service exports"));
     }
 
+    /**
+     * The shape check settles the members the model requires, so a request missing one is
+     * refused by it, before the operation does any work. The refusal a caller sees is
+     * therefore the shape check's, and the service does not repeat the check.
+     */
+    @Test
+    void theModelCheckRefusesAnExportWithoutAWrappingKeyCertificate() {
+        String arn = call("CreateKey", CREATE_KEY)
+                .then().statusCode(200)
+                    .extract().path("Key.KeyArn");
+
+        Response answer = call("ExportKey", "{\"ExportKeyIdentifier\":\"" + arn + "\",\"KeyMaterial\":{"
+                + "\"KeyCryptogram\":{\"CertificateAuthorityPublicKeyIdentifier\":\"" + arn + "\"}}}");
+
+        assertTheModelRefused(answer, "WrappingKeyCertificate");
+    }
+
+    @Test
+    void theModelCheckRefusesAnImportWithoutItsKeyAttributes() {
+        Response answer = call("ImportKey", "{\"KeyMaterial\":{\"KeyCryptogram\":{"
+                + "\"Exportable\":true,"
+                + "\"WrappedKeyCryptogram\":\"" + "0".repeat(32) + "\","
+                + "\"ImportToken\":\"import-token-" + "0".repeat(24) + "\"}}}");
+
+        assertTheModelRefused(answer, "KeyAttributes");
+    }
+
+    @Test
+    void theModelCheckRefusesAnImportWhoseKeyAttributesHaveNoUsage() {
+        Response answer = call("ImportKey", "{\"KeyMaterial\":{\"KeyCryptogram\":{"
+                + "\"Exportable\":true,"
+                + "\"WrappedKeyCryptogram\":\"" + "0".repeat(32) + "\","
+                + "\"ImportToken\":\"import-token-" + "0".repeat(24) + "\","
+                + "\"KeyAttributes\":{\"KeyClass\":\"SYMMETRIC_KEY\","
+                + "\"KeyAlgorithm\":\"AES_128\","
+                + "\"KeyModesOfUse\":{\"Encrypt\":true,\"Decrypt\":true}}}}}");
+
+        assertTheModelRefused(answer, "KeyUsage");
+    }
+
+    @Test
+    void theModelCheckRefusesAnImportOfAPublicKeyWithoutItsKeyAttributes() {
+        Response answer = call("ImportKey", "{\"KeyMaterial\":{\"RootCertificatePublicKey\":{"
+                + "\"PublicKeyCertificate\":\"a certificate\"}}}");
+
+        assertTheModelRefused(answer, "KeyAttributes");
+    }
+
+    @Test
+    void theModelCheckRefusesAnExportWithoutItsCertificateAuthorityPublicKeyIdentifier() {
+        Response answer = call("ExportKey", "{\"ExportKeyIdentifier\":\"" + keyArn() + "\","
+                + "\"KeyMaterial\":{\"KeyCryptogram\":{\"WrappingKeyCertificate\":\"a certificate\"}}}");
+
+        assertTheModelRefused(answer, "CertificateAuthorityPublicKeyIdentifier");
+    }
+
+    @Test
+    void theModelCheckRefusesAnImportWhoseCryptogramIsNotHexadecimal() {
+        Response answer = call("ImportKey", "{\"KeyMaterial\":{\"KeyCryptogram\":{"
+                + "\"Exportable\":true,"
+                + "\"WrappedKeyCryptogram\":\"not hexadecimal at all\","
+                + "\"ImportToken\":\"import-token-" + "0".repeat(24) + "\","
+                + "\"KeyAttributes\":" + keyAttributes() + "}}}");
+
+        assertTheModelRefused(answer, "WrappedKeyCryptogram");
+    }
+
+    @Test
+    void theModelCheckRefusesACryptogramWithAWrappingSpecItDoesNotName() {
+        Response answer = call("ExportKey", "{\"ExportKeyIdentifier\":\"" + keyArn() + "\","
+                + "\"KeyMaterial\":{\"KeyCryptogram\":{"
+                + "\"CertificateAuthorityPublicKeyIdentifier\":\"" + keyArn() + "\","
+                + "\"WrappingKeyCertificate\":\"a certificate\","
+                + "\"WrappingSpec\":\"RSA_OAEP_SHA_1\"}}}");
+
+        assertTheModelRefused(answer, "WrappingSpec");
+    }
+
+    @Test
+    void theModelCheckRefusesAnAgreementWithADerivationFunctionItDoesNotName() {
+        Response answer = call("ExportKey", "{\"ExportKeyIdentifier\":\"" + keyArn() + "\","
+                + "\"KeyMaterial\":{\"DiffieHellmanTr31KeyBlock\":{"
+                + "\"PrivateKeyIdentifier\":\"" + keyArn() + "\","
+                + "\"CertificateAuthorityPublicKeyIdentifier\":\"" + keyArn() + "\","
+                + "\"PublicKeyCertificate\":\"a certificate\","
+                + "\"DeriveKeyAlgorithm\":\"AES_128\","
+                + "\"KeyDerivationFunction\":\"NIST_SP800_X\","
+                + "\"KeyDerivationHashAlgorithm\":\"SHA_256\","
+                + "\"DerivationData\":{\"SharedInformation\":\"00112233\"}}}}");
+
+        assertTheModelRefused(answer, "KeyDerivationFunction");
+    }
+
+    @Test
+    void theModelCheckRefusesAnAgreementWithADerivationHashItDoesNotName() {
+        Response answer = call("ExportKey", "{\"ExportKeyIdentifier\":\"" + keyArn() + "\","
+                + "\"KeyMaterial\":{\"DiffieHellmanTr31KeyBlock\":{"
+                + "\"PrivateKeyIdentifier\":\"" + keyArn() + "\","
+                + "\"CertificateAuthorityPublicKeyIdentifier\":\"" + keyArn() + "\","
+                + "\"PublicKeyCertificate\":\"a certificate\","
+                + "\"DeriveKeyAlgorithm\":\"AES_128\","
+                + "\"KeyDerivationFunction\":\"NIST_SP800\","
+                + "\"KeyDerivationHashAlgorithm\":\"SHA_224\","
+                + "\"DerivationData\":{\"SharedInformation\":\"00112233\"}}}}");
+
+        assertTheModelRefused(answer, "KeyDerivationHashAlgorithm");
+    }
+
+    /** The ARN of a key the request may name. */
+    private static String keyArn() {
+        return call("CreateKey", CREATE_KEY).then().statusCode(200)
+                .extract().path("Key.KeyArn");
+    }
+
+    /** The key attributes of a symmetric key, with every member the model requires. */
+    private static String keyAttributes() {
+        return "{\"KeyUsage\":\"TR31_D0_SYMMETRIC_DATA_ENCRYPTION_KEY\","
+                + "\"KeyClass\":\"SYMMETRIC_KEY\",\"KeyAlgorithm\":\"AES_128\","
+                + "\"KeyModesOfUse\":{\"Encrypt\":true,\"Decrypt\":true}}";
+    }
+
+    /**
+     * The refusal a caller sees when a request is missing a member the model requires: the
+     * shape check's, because the shape check runs before the operation does.
+     */
+    private static void assertTheModelRefused(Response answer, String member) {
+        answer.then().statusCode(400)
+                .body("__type", equalTo("ValidationException"))
+                .body("message", containsString("failed to satisfy constraint"))
+                .body("message", containsString(member));
+    }
+
     @Test
     void aKeyThatAsksForACheckValueOfAnotherKindIsRefused() {
         // The kind follows the algorithm, so a request that names another is refused
