@@ -7996,25 +7996,25 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
             return true;
         }
         if (networkInterfaces.scan(k -> k.startsWith(region + "::")).stream()
-                .anyMatch(eni -> eni.getGroups().stream().anyMatch(group -> groupId.equals(group.getGroupId())))) {
+                .anyMatch(eni -> nullToEmpty(eni.getGroups()).stream().anyMatch(group -> groupId.equals(group.getGroupId())))) {
             return true;
         }
         if (instances.scan(k -> k.startsWith(region + "::")).stream()
-                .filter(instance -> !"terminated".equals(instance.getState().getName()))
-                .anyMatch(instance -> instance.getSecurityGroups().stream()
+                .filter(instance -> instance.getState() == null || !"terminated".equals(instance.getState().getName()))
+                .anyMatch(instance -> nullToEmpty(instance.getSecurityGroups()).stream()
                         .anyMatch(group -> groupId.equals(group.getGroupId())))) {
             return true;
         }
         if (vpcEndpoints.scan(k -> k.startsWith(region + "::")).stream()
-                .anyMatch(endpoint -> endpoint.getSecurityGroupIds().contains(groupId))) {
+                .anyMatch(endpoint -> nullToEmpty(endpoint.getSecurityGroupIds()).contains(groupId))) {
             return true;
         }
         return securityGroups.scan(k -> k.startsWith(region + "::")).stream()
                 .filter(group -> !groupId.equals(group.getGroupId())
                         && Objects.equals(selected.getVpcId(), group.getVpcId()))
                 .flatMap(group -> Stream.concat(
-                        group.getIpPermissions().stream(), group.getIpPermissionsEgress().stream()))
-                .flatMap(permission -> permission.getUserIdGroupPairs().stream())
+                        nullToEmpty(group.getIpPermissions()).stream(), nullToEmpty(group.getIpPermissionsEgress()).stream()))
+                .flatMap(permission -> nullToEmpty(permission.getUserIdGroupPairs()).stream())
                 .anyMatch(pair -> groupId.equals(pair.getGroupId())
                         && (pair.getUserId() == null || Objects.equals(selected.getOwnerId(), pair.getUserId())));
     }
