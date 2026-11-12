@@ -2531,11 +2531,14 @@ public class ApiGatewayService implements ResourceProvider, Resettable {
                     || !Set.of("type", "path", "method", "statusCode", "name").contains(key)) {
                 throw new AwsException("BadRequestException", "Invalid documentation part location", 400);
             }
-            location.put(key, fieldValue);
+            // Terraform sends unset location members as empty strings.
+            if (!fieldValue.isBlank()) {
+                location.put(key, fieldValue);
+            }
         }
         // AWS REST examples allow REQUEST_BODY without a name despite the model's required marker.
         if (DOCUMENTATION_PART_NAMED_TYPES.contains(type) && !"REQUEST_BODY".equals(type)
-                && (location.get("name") == null || location.get("name").isBlank())) {
+                && !location.containsKey("name")) {
             throw new AwsException("BadRequestException", "Documentation part location name is required", 400);
         }
         if (location.containsKey("name") && !DOCUMENTATION_PART_NAMED_TYPES.contains(type)
