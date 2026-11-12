@@ -530,14 +530,20 @@ class PaymentCryptographyIntegrationTest {
      */
     @Test
     void aKeyWithoutItsUsageOrItsModesIsRefused() {
-        call("CreateKey", "{\"KeyAttributes\":{\"KeyAlgorithm\":\"AES_256\",\"KeyClass\":\"SYMMETRIC_KEY\","
-                + "\"KeyModesOfUse\":{\"Encrypt\":true}},\"Exportable\":true}")
-                .then().statusCode(400)
-                    .body("__type", containsString("ValidationException"));
-        call("CreateKey", "{\"KeyAttributes\":{\"KeyAlgorithm\":\"AES_256\",\"KeyClass\":\"SYMMETRIC_KEY\","
-                + "\"KeyUsage\":\"TR31_D0_SYMMETRIC_DATA_ENCRYPTION_KEY\"},\"Exportable\":true}")
-                .then().statusCode(400)
-                    .body("__type", containsString("ValidationException"));
+        // The shape check settles the members the attributes must carry, so it is the refusal
+        // that answers, and the message a caller sees is its own.
+        assertTheModelRefused(call("CreateKey", "{\"KeyAttributes\":{\"KeyAlgorithm\":\"AES_256\","
+                + "\"KeyClass\":\"SYMMETRIC_KEY\",\"KeyModesOfUse\":{\"Encrypt\":true}},"
+                + "\"Exportable\":true}"), "KeyUsage");
+        assertTheModelRefused(call("CreateKey", "{\"KeyAttributes\":{\"KeyAlgorithm\":\"AES_256\","
+                + "\"KeyClass\":\"SYMMETRIC_KEY\","
+                + "\"KeyUsage\":\"TR31_D0_SYMMETRIC_DATA_ENCRYPTION_KEY\"},\"Exportable\":true}"),
+                "KeyModesOfUse");
+    }
+
+    @Test
+    void aKeyWithoutItsAttributesIsRefused() {
+        assertTheModelRefused(call("CreateKey", "{\"Exportable\":true}"), "KeyAttributes");
     }
 
     /**

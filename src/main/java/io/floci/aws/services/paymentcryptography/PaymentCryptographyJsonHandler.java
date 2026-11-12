@@ -81,18 +81,9 @@ public class PaymentCryptographyJsonHandler {
     // ---- keys ---------------------------------------------------------------
 
     private Map<String, Object> createKey(JsonNode request, String region) {
+        // The shape check settles the attributes and the members they must carry, so they are
+        // there and they carry a usage and the modes of use, as the reference requires.
         JsonNode attributes = request.get("KeyAttributes");
-        if (attributes == null || !attributes.isObject()) {
-            throw new AwsException("ValidationException", "KeyAttributes is required", 400);
-        }
-        // The service requires the usage and the modes of use of a key, as the
-        // reference does: a key without them says nothing about what it is for.
-        if (!attributes.hasNonNull("KeyUsage")) {
-            throw new AwsException("ValidationException", "KeyAttributes.KeyUsage is required", 400);
-        }
-        if (!attributes.hasNonNull("KeyModesOfUse")) {
-            throw new AwsException("ValidationException", "KeyAttributes.KeyModesOfUse is required", 400);
-        }
         Map<String, Object> declared = new LinkedHashMap<>();
         attributes.fields().forEachRemaining(entry -> {
             // KeyModesOfUse is a nested structure, not a name: it is read below

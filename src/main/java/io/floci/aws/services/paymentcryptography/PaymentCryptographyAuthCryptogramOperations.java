@@ -260,11 +260,9 @@ public class PaymentCryptographyAuthCryptogramOperations {
     private static SessionKey resolveDerivation(JsonNode request) {
         boolean optionB = "EMV_OPTION_B".equals(text(request, "MajorKeyDerivationMode"));
 
-        JsonNode skd = request.get("SessionKeyDerivationAttributes");
-        if (skd == null) {
-            throw validation("SessionKeyDerivationAttributes is required");
-        }
-        String variant = soleVariant(skd);
+        // The shape check settles the derivation attributes, so they are there, and the
+        // attributes must name exactly one variant.
+        String variant = soleVariant(request.get("SessionKeyDerivationAttributes"));
         if (variant == null) {
             throw validation("SessionKeyDerivationAttributes must specify exactly one variant");
         }
@@ -285,7 +283,7 @@ public class PaymentCryptographyAuthCryptogramOperations {
             throw validation("SessionKeyDerivationAttributes." + variant
                     + " is not a recognized variant");
         }
-        JsonNode attrs = skd.get(variant);
+        JsonNode attrs = request.get("SessionKeyDerivationAttributes").get(variant);
         String pan = text(attrs, "PrimaryAccountNumber");
         String psn = text(attrs, "PanSequenceNumber");
         String atc = text(attrs, "ApplicationTransactionCounter");
