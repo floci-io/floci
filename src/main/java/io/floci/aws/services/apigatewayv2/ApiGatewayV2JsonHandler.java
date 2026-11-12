@@ -650,6 +650,9 @@ public class ApiGatewayV2JsonHandler {
     private ObjectNode toIntegrationNode(Integration i) {
         ObjectNode node = objectMapper.createObjectNode();
         node.put("IntegrationId", i.getIntegrationId());
+        if (i.getDescription() != null) {
+            node.put("Description", i.getDescription());
+        }
         node.put("IntegrationType", i.getIntegrationType());
         if (i.getIntegrationSubtype() != null) {
             node.put("IntegrationSubtype", i.getIntegrationSubtype());

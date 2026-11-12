@@ -2865,6 +2865,9 @@ public class ApiGatewayController {
     private ObjectNode toV2IntegrationNode(Integration i) {
         ObjectNode node = objectMapper.createObjectNode();
         node.put("integrationId", i.getIntegrationId());
+        if (i.getDescription() != null) {
+            node.put("description", i.getDescription());
+        }
         node.put("integrationType", i.getIntegrationType());
         if (i.getIntegrationSubtype() != null) {
             node.put("integrationSubtype", i.getIntegrationSubtype());
