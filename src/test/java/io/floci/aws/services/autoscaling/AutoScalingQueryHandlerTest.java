@@ -48,13 +48,75 @@ class AutoScalingQueryHandlerTest {
 
         assertEquals(400, response.getStatus(), action);
         assertTrue(response.getEntity().toString().contains("<Code>MalformedInput</Code>"), action);
-        assertTrue(response.getEntity().toString().contains("Tags.member.2.PropagateAtLaunch"), action);
+        verifyNoInteractions(service);
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"CreateAutoScalingGroup", "CreateOrUpdateTags", "DeleteTags"})
+    void sparseMalformedTagPropagationIsRejectedBeforeServiceCalls(String action) {
+        AutoScalingService service = mock(AutoScalingService.class);
+        MultivaluedHashMap<String, String> params = new MultivaluedHashMap<>();
+        params.add("AutoScalingGroupName", "missing");
+        params.add("Tags.member.3.Key", "invalid");
+        params.add("Tags.member.3.PropagateAtLaunch", "yes");
+
+        Response response = new AutoScalingQueryHandler(service).handle(action, params, REGION);
+
+        assertEquals(400, response.getStatus());
+        assertTrue(response.getEntity().toString().contains("<Code>MalformedInput</Code>"));
+        verifyNoInteractions(service);
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"CreateAutoScalingGroup", "CreateOrUpdateTags", "DeleteTags"})
+    void controlCharacterFlagReturnsParseableXml(String action) throws Exception {
+        AutoScalingService service = mock(AutoScalingService.class);
+        MultivaluedHashMap<String, String> params = new MultivaluedHashMap<>();
+        params.add("AutoScalingGroupName", "missing");
+        params.add("Tags.member.1.Key", "invalid");
+        params.add("Tags.member.1.PropagateAtLaunch", "invalid" + (char) 0 + (char) 1);
+
+        Response response = new AutoScalingQueryHandler(service).handle(action, params, REGION);
+
+        assertEquals(400, response.getStatus());
+        Element root = assertModeledNamespace(response.getEntity().toString());
+        assertEquals("MalformedInput", root.getElementsByTagNameNS(XML_NAMESPACE, "Code").item(0).getTextContent());
+        verifyNoInteractions(service);
+    }
+
+    @Test
+    void sparseRequiredFlagErrorUsesOriginalMemberIndex() {
+        AutoScalingService service = mock(AutoScalingService.class);
+        MultivaluedHashMap<String, String> params = new MultivaluedHashMap<>();
+        params.add("Tags.member.7.Key", "missing-flag");
+
+        Response response = new AutoScalingQueryHandler(service).handle("CreateOrUpdateTags", params, REGION);
+
+        assertEquals(400, response.getStatus());
+        assertTrue(response.getEntity().toString().contains("Tags.member.7.PropagateAtLaunch is required"));
+        verifyNoInteractions(service);
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"CreateAutoScalingGroup", "CreateOrUpdateTags", "DeleteTags"})
+    void memberWithoutKeyIsRejectedBeforeMutation(String action) {
+        AutoScalingService service = mock(AutoScalingService.class);
+        MultivaluedHashMap<String, String> params = new MultivaluedHashMap<>();
+        params.add("AutoScalingGroupName", "missing");
+        params.add("Tags.member.1.Key", "valid");
+        params.add("Tags.member.1.PropagateAtLaunch", "true");
+        params.add("Tags.member.3.PropagateAtLaunch", "false");
+
+        Response response = new AutoScalingQueryHandler(service).handle(action, params, REGION);
+
+        assertEquals(400, response.getStatus());
+        assertTrue(response.getEntity().toString().contains("Tags.member.3.Key is required"));
         verifyNoInteractions(service);
     }
 
     private static Stream<Arguments> malformedTagPropagationValues() {
         return Stream.of("CreateAutoScalingGroup", "CreateOrUpdateTags", "DeleteTags")
-                .flatMap(action -> Stream.of("", " ", "yes", "1", "true ", " false")
+                .flatMap(action -> Stream.of("", " ", "yes", "TRUE", "true ", " false")
                         .map(flag -> Arguments.of(action, flag)));
     }
 
