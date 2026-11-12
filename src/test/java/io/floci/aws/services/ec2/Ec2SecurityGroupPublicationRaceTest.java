@@ -5,11 +5,13 @@ import io.floci.aws.core.common.AwsException;
 import io.floci.aws.core.storage.InMemoryStorage;
 import io.floci.aws.services.ec2.model.Instance;
 import io.floci.aws.services.ec2.model.InstanceState;
+import io.floci.aws.services.ec2.model.IpPermission;
 import io.floci.aws.services.ec2.model.NetworkInterface;
 import io.floci.aws.services.ec2.model.Reservation;
 import io.floci.aws.services.ec2.model.SecurityGroup;
 import io.floci.aws.services.ec2.model.SecurityGroupRule;
 import io.floci.aws.services.ec2.model.Tag;
+import io.floci.aws.services.ec2.model.UserIdGroupPair;
 import io.floci.aws.services.ec2.model.VpcEndpoint;
 import io.floci.aws.services.ec2.portforward.Ec2PortForwardManager;
 import io.floci.aws.testing.InMemoryStorageFactory;
@@ -17,6 +19,7 @@ import io.floci.aws.testing.ParkingStore;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.CsvSource;
+import org.junit.jupiter.params.provider.ValueSource;
 
 import java.util.List;
 import java.util.Map;
@@ -35,6 +38,74 @@ import static org.junit.jupiter.api.Assertions.*;
 import static org.mockito.Mockito.*;
 
 class Ec2SecurityGroupPublicationRaceTest {
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    void rulePublicationProtectsReferencedGroupFromDeletion(boolean egress) throws Exception {
+        TestStores factory = new TestStores();
+        Ec2Service service = service(factory);
+        String region = "us-east-1";
+        String vpc = service.createVpc(region, "10.0.0.0/16", false).getVpcId();
+        String source = service.createSecurityGroup(region, "source", "source", vpc).getGroupId();
+        String target = service.createSecurityGroup(region, "target", "target", vpc).getGroupId();
+        IpPermission permission = groupPermission(target);
+        factory.rules.parkNextWrite();
+        ExecutorService executor = Executors.newFixedThreadPool(2);
+        try {
+            Future<List<SecurityGroupRule>> authorized = executor.submit(() -> egress
+                    ? service.authorizeSecurityGroupEgress(region, source, List.of(permission))
+                    : service.authorizeSecurityGroupIngress(region, source, List.of(permission)));
+            assertTrue(factory.rules.awaitParked(), "Authorization must reach rule publication");
+            AtomicReference<Thread> deletingThread = new AtomicReference<>();
+            Future<AwsException> deleted = executor.submit(() -> {
+                deletingThread.set(Thread.currentThread());
+                try {
+                    service.deleteSecurityGroup(region, target);
+                    return null;
+                } catch (AwsException failure) {
+                    return failure;
+                }
+            });
+            awaitBlockedOrDone(deletingThread, deleted);
+            factory.rules.release();
+            List<SecurityGroupRule> published = authorized.get(5, TimeUnit.SECONDS);
+            AwsException failure = deleted.get(5, TimeUnit.SECONDS);
+            assertNotNull(failure, "Deletion must observe the published cross-group reference");
+            assertEquals("DependencyViolation", failure.getErrorCode());
+            assertEquals(target, published.getFirst().getReferencedGroupInfo().getGroupId());
+            assertEquals(1, service.describeSecurityGroups(region, List.of(target), List.of(), Map.of()).size());
+        } finally {
+            factory.rules.release();
+            executor.shutdownNow();
+            assertTrue(executor.awaitTermination(5, TimeUnit.SECONDS));
+        }
+    }
+
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    void unknownGroupReferenceKeepsExistingCompatibility(boolean egress) {
+        Ec2Service service = service(new TestStores());
+        String region = "us-east-1";
+        String vpc = service.createVpc(region, "10.0.0.0/16", false).getVpcId();
+        String source = service.createSecurityGroup(region, "source", "source", vpc).getGroupId();
+        List<SecurityGroupRule> rules = egress
+                ? service.authorizeSecurityGroupEgress(region, source, List.of(groupPermission("sg-unknown")))
+                : service.authorizeSecurityGroupIngress(region, source, List.of(groupPermission("sg-unknown")));
+        assertEquals("sg-unknown", rules.getFirst().getReferencedGroupInfo().getGroupId());
+        assertTrue(service.describeSecurityGroupRules(region, List.of(source), List.of()).stream()
+                .anyMatch(rule -> rules.getFirst().getSecurityGroupRuleId().equals(rule.getSecurityGroupRuleId())));
+    }
+
+    private static IpPermission groupPermission(String target) {
+        UserIdGroupPair pair = new UserIdGroupPair();
+        pair.setGroupId(target);
+        IpPermission permission = new IpPermission();
+        permission.setIpProtocol("tcp");
+        permission.setFromPort(443);
+        permission.setToPort(443);
+        permission.setUserIdGroupPairs(List.of(pair));
+        return permission;
+    }
+
     @ParameterizedTest
     @CsvSource({"group,false", "group,true", "rule,false", "rule,true"})
     void failedCreationRemovesOnlyItsOwnGroupAndDefaultRule(String failingStore, boolean afterWrite) {

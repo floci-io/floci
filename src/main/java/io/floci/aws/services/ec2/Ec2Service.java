@@ -8047,17 +8047,19 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
     public List<SecurityGroupRule> authorizeSecurityGroupIngress(String region, String groupId, List<IpPermission> permissions) {
         ensureDefaultResources(region);
         List<SecurityGroupRule> rules = new ArrayList<>();
-        synchronized (lockFor(key(region, groupId))) {
-            SecurityGroup sg = getRequiredSecurityGroup(region, groupId);
-            requireKnownPrefixLists(region, permissions);
-            List<IpPermission> next = new ArrayList<>(sg.getIpPermissions());
-            for (IpPermission perm : permissions) {
-                resolveGroupReferences(region, sg.getVpcId(), perm);
-                next.add(perm);
-                rules.addAll(createRules(region, groupId, perm, false));
+        synchronized (attachmentTopologyLock(region)) {
+            synchronized (lockFor(key(region, groupId))) {
+                SecurityGroup sg = getRequiredSecurityGroup(region, groupId);
+                requireKnownPrefixLists(region, permissions);
+                List<IpPermission> next = new ArrayList<>(sg.getIpPermissions());
+                for (IpPermission perm : permissions) {
+                    resolveGroupReferences(region, sg.getVpcId(), perm);
+                    next.add(perm);
+                    rules.addAll(createRules(region, groupId, perm, false));
+                }
+                sg.setIpPermissions(next);
+                securityGroups.put(key(region, groupId), sg);
             }
-            sg.setIpPermissions(next);
-            securityGroups.put(key(region, groupId), sg);
         }
         reconcilePublishedPortsForGroup(region, groupId);
         return rules;
@@ -8066,17 +8068,19 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
     public List<SecurityGroupRule> authorizeSecurityGroupEgress(String region, String groupId, List<IpPermission> permissions) {
         ensureDefaultResources(region);
         List<SecurityGroupRule> rules = new ArrayList<>();
-        synchronized (lockFor(key(region, groupId))) {
-            SecurityGroup sg = getRequiredSecurityGroup(region, groupId);
-            requireKnownPrefixLists(region, permissions);
-            List<IpPermission> next = new ArrayList<>(sg.getIpPermissionsEgress());
-            for (IpPermission perm : permissions) {
-                resolveGroupReferences(region, sg.getVpcId(), perm);
-                next.add(perm);
-                rules.addAll(createRules(region, groupId, perm, true));
+        synchronized (attachmentTopologyLock(region)) {
+            synchronized (lockFor(key(region, groupId))) {
+                SecurityGroup sg = getRequiredSecurityGroup(region, groupId);
+                requireKnownPrefixLists(region, permissions);
+                List<IpPermission> next = new ArrayList<>(sg.getIpPermissionsEgress());
+                for (IpPermission perm : permissions) {
+                    resolveGroupReferences(region, sg.getVpcId(), perm);
+                    next.add(perm);
+                    rules.addAll(createRules(region, groupId, perm, true));
+                }
+                sg.setIpPermissionsEgress(next);
+                securityGroups.put(key(region, groupId), sg);
             }
-            sg.setIpPermissionsEgress(next);
-            securityGroups.put(key(region, groupId), sg);
         }
         reconcileFirewallPolicies(region);
         return rules;
