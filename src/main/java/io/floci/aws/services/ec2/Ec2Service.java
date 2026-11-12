@@ -5846,22 +5846,11 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
     public void modifyInstanceGroups(String region, String instanceId, List<String> groupIds) {
         ensureDefaultResources(region);
         String instanceKey = callerAccountId() + "::" + key(region, instanceId);
-        RefCountedLock assignment = instanceGroupLocks.compute(instanceKey, (ignored, existing) -> {
-            if (existing == null) {
-                return new RefCountedLock();
-            }
-            existing.refCount.incrementAndGet();
-            return existing;
-        });
         // This per-instance lock precedes the topology lock; external I/O holds only this lock.
-        assignment.lock.lock();
-        try {
+        withResourceLock(instanceGroupLocks, instanceKey, () -> {
             modifyInstanceGroupsLocked(region, instanceId, groupIds);
-        } finally {
-            assignment.lock.unlock();
-            instanceGroupLocks.computeIfPresent(instanceKey, (ignored, existing) ->
-                    existing.refCount.decrementAndGet() == 0 ? null : existing);
-        }
+            return null;
+        });
     }
 
     private void modifyInstanceGroupsLocked(String region, String instanceId, List<String> groupIds) {
@@ -14764,10 +14753,14 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
     private record VolumeDevice(String accountId, String region, String instanceId, String device) {}
 
     private <T> T withVolumeLock(String volumeId, Supplier<T> action) {
-        if (volumeId == null) {
+        return withResourceLock(volumeLocks, volumeId, action);
+    }
+
+    private <T> T withResourceLock(ConcurrentHashMap<String, RefCountedLock> locks, String resourceId, Supplier<T> action) {
+        if (resourceId == null) {
             return action.get();
         }
-        RefCountedLock refLock = volumeLocks.compute(volumeId, (k, v) -> {
+        RefCountedLock refLock = locks.compute(resourceId, (k, v) -> {
             if (v == null) {
                 return new RefCountedLock();
             }
@@ -14779,7 +14772,7 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
             return action.get();
         } finally {
             refLock.lock.unlock();
-            volumeLocks.computeIfPresent(volumeId, (k, v) -> {
+            locks.computeIfPresent(resourceId, (k, v) -> {
                 if (v.refCount.decrementAndGet() <= 0) {
                     return null;
                 }

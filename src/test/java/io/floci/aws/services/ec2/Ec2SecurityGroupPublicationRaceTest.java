@@ -56,15 +56,7 @@ class Ec2SecurityGroupPublicationRaceTest {
                     : service.authorizeSecurityGroupIngress(region, source, List.of(permission)));
             assertTrue(factory.rules.awaitParked(), "Authorization must reach rule publication");
             AtomicReference<Thread> deletingThread = new AtomicReference<>();
-            Future<AwsException> deleted = executor.submit(() -> {
-                deletingThread.set(Thread.currentThread());
-                try {
-                    service.deleteSecurityGroup(region, target);
-                    return null;
-                } catch (AwsException failure) {
-                    return failure;
-                }
-            });
+            Future<AwsException> deleted = deleteGroup(executor, deletingThread, service, region, target);
             awaitBlockedOrDone(deletingThread, deleted);
             factory.rules.release();
             List<SecurityGroupRule> published = authorized.get(5, TimeUnit.SECONDS);
@@ -273,17 +265,8 @@ class Ec2SecurityGroupPublicationRaceTest {
                     region, subnet, "race", null, List.of(), List.of(group), List.of()));
             assertTrue(factory.interfaces.awaitParked(), "Creator must reach the ENI publication boundary");
             AtomicReference<Thread> deletingThread = new AtomicReference<>();
-            Future<AwsException> deleted = executor.submit(() -> {
-                deletingThread.set(Thread.currentThread());
-                try {
-                    service.deleteSecurityGroup(region, group);
-                    return null;
-                } catch (AwsException error) {
-                    return error;
-                }
-            });
-            await().atMost(5, TimeUnit.SECONDS).until(() -> deleted.isDone()
-                    || deletingThread.get() != null && deletingThread.get().getState() == Thread.State.BLOCKED);
+            Future<AwsException> deleted = deleteGroup(executor, deletingThread, service, region, group);
+            awaitBlockedOrDone(deletingThread, deleted);
             factory.interfaces.release();
             NetworkInterface networkInterface = created.get(5, TimeUnit.SECONDS);
             AwsException error = deleted.get(5, TimeUnit.SECONDS);
@@ -339,17 +322,8 @@ class Ec2SecurityGroupPublicationRaceTest {
                     1, 1, null, List.of(group), subnet, null, List.of(), null, null));
             assertTrue(factory.instances.awaitParked(), "Launch must reach instance publication");
             AtomicReference<Thread> deletingThread = new AtomicReference<>();
-            Future<AwsException> deleted = executor.submit(() -> {
-                deletingThread.set(Thread.currentThread());
-                try {
-                    service.deleteSecurityGroup(region, group);
-                    return null;
-                } catch (AwsException error) {
-                    return error;
-                }
-            });
-            await().atMost(5, TimeUnit.SECONDS).until(() -> deleted.isDone()
-                    || deletingThread.get() != null && deletingThread.get().getState() == Thread.State.BLOCKED);
+            Future<AwsException> deleted = deleteGroup(executor, deletingThread, service, region, group);
+            awaitBlockedOrDone(deletingThread, deleted);
             factory.instances.release();
             Reservation reservation = created.get(5, TimeUnit.SECONDS);
             AwsException error = deleted.get(5, TimeUnit.SECONDS);
@@ -515,17 +489,8 @@ class Ec2SecurityGroupPublicationRaceTest {
             });
             assertTrue(factory.groups.awaitParked(), "Modifier must capture the replacement group before deletion");
             AtomicReference<Thread> deletingThread = new AtomicReference<>();
-            Future<AwsException> deleted = executor.submit(() -> {
-                deletingThread.set(Thread.currentThread());
-                try {
-                    service.deleteSecurityGroup(region, replacement);
-                    return null;
-                } catch (AwsException error) {
-                    return error;
-                }
-            });
-            await().atMost(5, TimeUnit.SECONDS).until(() -> deleted.isDone()
-                    || deletingThread.get() != null && deletingThread.get().getState() == Thread.State.BLOCKED);
+            Future<AwsException> deleted = deleteGroup(executor, deletingThread, service, region, replacement);
+            awaitBlockedOrDone(deletingThread, deleted);
             factory.groups.release();
             AwsException modifyError = modified.get(5, TimeUnit.SECONDS);
             AwsException deleteError = deleted.get(5, TimeUnit.SECONDS);
@@ -807,15 +772,7 @@ class Ec2SecurityGroupPublicationRaceTest {
             Future<VpcEndpoint> created = executor.submit(() -> createEndpoint(service, region, vpc, group));
             assertTrue(factory.endpoints.awaitParked());
             AtomicReference<Thread> deletingThread = new AtomicReference<>();
-            Future<AwsException> deleted = executor.submit(() -> {
-                deletingThread.set(Thread.currentThread());
-                try {
-                    service.deleteSecurityGroup(region, group);
-                    return null;
-                } catch (AwsException failure) {
-                    return failure;
-                }
-            });
+            Future<AwsException> deleted = deleteGroup(executor, deletingThread, service, region, group);
             awaitBlockedOrDone(deletingThread, deleted);
             assertFalse(deleted.isDone());
             factory.endpoints.release();
@@ -849,15 +806,7 @@ class Ec2SecurityGroupPublicationRaceTest {
                     List.of(replacement), List.of(original), null, null, null));
             assertTrue(factory.groups.awaitParked());
             AtomicReference<Thread> deletingThread = new AtomicReference<>();
-            Future<AwsException> deleted = executor.submit(() -> {
-                deletingThread.set(Thread.currentThread());
-                try {
-                    service.deleteSecurityGroup(region, replacement);
-                    return null;
-                } catch (AwsException failure) {
-                    return failure;
-                }
-            });
+            Future<AwsException> deleted = deleteGroup(executor, deletingThread, service, region, replacement);
             awaitBlockedOrDone(deletingThread, deleted);
             assertFalse(deleted.isDone());
             factory.groups.release();
@@ -910,6 +859,19 @@ class Ec2SecurityGroupPublicationRaceTest {
             executor.shutdownNow();
             assertTrue(executor.awaitTermination(5, TimeUnit.SECONDS));
         }
+    }
+
+    private static Future<AwsException> deleteGroup(ExecutorService executor, AtomicReference<Thread> deletingThread,
+                                                   Ec2Service service, String region, String group) {
+        return executor.submit(() -> {
+            deletingThread.set(Thread.currentThread());
+            try {
+                service.deleteSecurityGroup(region, group);
+                return null;
+            } catch (AwsException failure) {
+                return failure;
+            }
+        });
     }
 
     private static VpcEndpoint createEndpoint(Ec2Service service, String region, String vpc, String group) {
