@@ -35,6 +35,17 @@ public record ProvisionContext(CloudFormationTemplateEngine engine, String regio
         this(engine, region, accountId, stackName, priorPhysicalId, event -> {}, null, null);
     }
 
+    /**
+     * A copy of this context that differs only in the prior physical id. The engine's change list,
+     * the previous properties and the progress callback travel with it, so a provisioner that
+     * re-bases its context (after restoring a rollback snapshot, or for a cleanup record) does not
+     * drop the engine's statement of the update, and a component added later is kept too.
+     */
+    public ProvisionContext withPriorPhysicalId(String priorPhysicalId) {
+        return new ProvisionContext(engine, region, accountId, stackName, priorPhysicalId, progress,
+                priorProperties, changes);
+    }
+
     /** Intermediate resource events retain the stack pipeline's event IDs and metadata. */
     public static void report(Consumer<StackEvent> progress, String physicalId, String status, String reason) {
         StackEvent event = new StackEvent();
