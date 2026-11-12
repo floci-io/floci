@@ -1074,6 +1074,11 @@ public class NativeDynamoDbJsonHandler {
             throw inValidationEnvelope(e);
         }
 
+        if (exprAttrValues != null) {
+            exprAttrValues.forEach(DynamoDbAttributeValueValidator::validate);
+        }
+        attributeUpdateValues.forEach(DynamoDbAttributeValueValidator::validate);
+
         Consumer<JsonNode> expectedCheck = legacyExpectedCheck(tableName, region, key, true, expectedUpd,
                 conditionalOperatorUpd, returnValuesOnConditionCheckFailure);
         DynamoDbService.UpdateResult result = dynamoDbService.updateItem(
@@ -3082,15 +3087,21 @@ public class NativeDynamoDbJsonHandler {
         if (older) {
             requireValidTransactExpressions(op, true);
             requireTransactItemOrKey(action);
-            return;
+        } else {
+            requireTransactItemOrKey(action);
+            List<String> onFailureErrors = new ArrayList<>();
+            addPartiQLReturnValuesError(op, action.path("ReturnValuesOnConditionCheckFailure"), onFailureErrors);
+            throwValidationErrors(onFailureErrors);
+            // AWS checks the depth of every value, so even an unused or condition-only value fails the request.
+            DynamoDbAttributeValueValidator.requireNestingWithinLimit(op.get("ExpressionAttributeValues"), false);
+            requireValidTransactExpressions(op, false);
         }
-        requireTransactItemOrKey(action);
-        List<String> onFailureErrors = new ArrayList<>();
-        addPartiQLReturnValuesError(op, action.path("ReturnValuesOnConditionCheckFailure"), onFailureErrors);
-        throwValidationErrors(onFailureErrors);
-        // AWS checks the depth of every value, so even an unused or condition-only value fails the request.
-        DynamoDbAttributeValueValidator.requireNestingWithinLimit(op.get("ExpressionAttributeValues"), false);
-        requireValidTransactExpressions(op, false);
+        if ("Update".equals(action.type()) && op.has("UpdateExpression")) {
+            JsonNode values = op.get("ExpressionAttributeValues");
+            if (values != null) {
+                values.forEach(DynamoDbAttributeValueValidator::validate);
+            }
+        }
     }
 
     private static void requireTransactItemOrKey(TransactAction action) {
