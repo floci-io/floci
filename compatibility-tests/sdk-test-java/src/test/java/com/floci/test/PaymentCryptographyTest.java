@@ -28,6 +28,7 @@ import software.amazon.awssdk.services.paymentcryptography.model.KeyState;
 import software.amazon.awssdk.services.paymentcryptography.model.KeyUsage;
 import software.amazon.awssdk.services.paymentcryptography.model.ListKeysResponse;
 import software.amazon.awssdk.services.paymentcryptography.model.Tag;
+import software.amazon.awssdk.services.paymentcryptography.model.Tr34KeyBlockFormat;
 import software.amazon.awssdk.services.paymentcryptography.model.WrappedKeyMaterialFormat;
 
 import java.io.ByteArrayInputStream;
@@ -587,6 +588,49 @@ class PaymentCryptographyTest {
                 new X500Name("CN=" + subjectName), subject.getPublic());
         return new JcaX509CertificateConverter().getCertificate(builder.build(
                 new JcaContentSignerBuilder("SHA256withRSA").build(issuer.getPrivate())));
+    }
+    @Test
+    void aKeyLeavesTheServiceAndComesBackThroughATr34KeyBlock() {
+        // The parameters of the import name the certificate the block is wrapped under, and
+        // the parameters of the export name the certificate the block is signed with.
+        GetParametersForImportResponse importParameters = client.getParametersForImport(r -> r
+                .keyMaterialType(KeyMaterialType.TR34_KEY_BLOCK)
+                .wrappingKeyAlgorithm(KeyAlgorithm.RSA_2048));
+        GetParametersForExportResponse exportParameters = client.getParametersForExport(r -> r
+                .keyMaterialType(KeyMaterialType.TR34_KEY_BLOCK)
+                .signingKeyAlgorithm(KeyAlgorithm.RSA_2048));
+
+        // Each certificate is the authority of the party it belongs to.
+        Key receiver = importPublicKey(importParameters.wrappingKeyCertificate());
+        Key sender = importPublicKey(exportParameters.signingKeyCertificate());
+
+        Key key = createTdesKey();
+
+        ExportKeyResponse exported = client.exportKey(r -> r
+                .exportKeyIdentifier(key.keyArn())
+                .keyMaterial(m -> m.tr34KeyBlock(b -> b
+                        .certificateAuthorityPublicKeyIdentifier(receiver.keyArn())
+                        .wrappingKeyCertificate(importParameters.wrappingKeyCertificate())
+                        .exportToken(exportParameters.exportToken())
+                        .keyBlockFormat(Tr34KeyBlockFormat.X9_TR34_2012)
+                        .randomNonce("A1B2C3D4E5F60718"))));
+
+        assertThat(exported.wrappedKey().wrappedKeyMaterialFormat())
+                .isEqualTo(WrappedKeyMaterialFormat.TR34_KEY_BLOCK);
+        assertThat(exported.wrappedKey().keyMaterial()).isNotBlank();
+
+        ImportKeyResponse imported = client.importKey(r -> r
+                .keyMaterial(m -> m.tr34KeyBlock(b -> b
+                        .certificateAuthorityPublicKeyIdentifier(sender.keyArn())
+                        .signingKeyCertificate(exportParameters.signingKeyCertificate())
+                        .importToken(importParameters.importToken())
+                        .wrappedKeyBlock(exported.wrappedKey().keyMaterial())
+                        .keyBlockFormat(Tr34KeyBlockFormat.X9_TR34_2012)
+                        .randomNonce("A1B2C3D4E5F60718"))));
+
+        assertThat(imported.key().keyArn()).isNotBlank();
+        assertThat(imported.key().keyAttributes().keyUsage())
+                .isEqualTo(KeyUsage.TR31_D0_SYMMETRIC_DATA_ENCRYPTION_KEY);
     }
 
 }

@@ -6,6 +6,7 @@ import io.floci.aws.services.paymentcryptography.crypto.Certificates;
 import io.floci.aws.services.paymentcryptography.crypto.ConcatKdf;
 import io.floci.aws.services.paymentcryptography.crypto.Ecdh;
 import io.floci.aws.services.paymentcryptography.crypto.RsaOaep;
+import io.floci.aws.services.paymentcryptography.crypto.Tr34;
 import io.floci.aws.services.paymentcryptography.model.PaymentCryptographyKey;
 import org.bouncycastle.asn1.x500.X500Name;
 
@@ -48,8 +49,6 @@ import java.util.concurrent.ConcurrentHashMap;
  *       receiver under their certificate.
  *   <li>{@code DiffieHellmanTr31KeyBlock}: a TR-31 key block under a key the two parties
  *       agreed with ECDH.
- *   <li>{@code As2805KeyCryptogram}: the key material under a key encryption key, bound to
- *       its purpose by the AS2805 variant.
  * </ul>
  *
  * <p>The import takes the same forms and two more: a root or trusted public key may arrive
@@ -65,21 +64,27 @@ final class PaymentCryptographyKeyExchange {
     static final List<String> EXPORT_FORMS = List.of(
             "Tr31KeyBlock",
             "KeyCryptogram",
+            "Tr34KeyBlock",
             "DiffieHellmanTr31KeyBlock");
 
     /** The forms the import takes, in the order the service lists them. */
     static final List<String> IMPORT_FORMS = List.of(
             "Tr31KeyBlock",
             "KeyCryptogram",
+            "Tr34KeyBlock",
             "RootCertificatePublicKey",
             "TrustedCertificatePublicKey",
             "DiffieHellmanTr31KeyBlock");
 
     /** The key material types that take import parameters. */
-    private static final List<String> IMPORT_PARAMETER_TYPES = List.of("KEY_CRYPTOGRAM");
+    private static final List<String> IMPORT_PARAMETER_TYPES =
+            List.of("KEY_CRYPTOGRAM", "TR34_KEY_BLOCK");
 
     /** The key material types that take export parameters. */
     private static final List<String> EXPORT_PARAMETER_TYPES = List.of("TR34_KEY_BLOCK");
+
+    /** The material type an export token is issued for. */
+    private static final String EXPORT_MATERIAL_TYPE = "TR34_KEY_BLOCK";
 
     /** The prefix an import token's name carries, as the model states it. */
     private static final String IMPORT_TOKEN_PREFIX = "import-token-";
@@ -226,6 +231,7 @@ final class PaymentCryptographyKeyExchange {
         return switch (form) {
             case "Tr31KeyBlock" -> exportTr31(region, key, clear, material);
             case "KeyCryptogram" -> exportCryptogram(region, key, clear, material);
+            case "Tr34KeyBlock" -> exportTr34(region, key, clear, material);
             case "DiffieHellmanTr31KeyBlock" -> exportEcdh(region, key, clear, material);
             default -> throw validation("KeyMaterial." + form + " is not a form the service exports ("
                     + String.join(", ", EXPORT_FORMS) + ")");
@@ -338,6 +344,7 @@ final class PaymentCryptographyKeyExchange {
         return switch (form) {
             case "Tr31KeyBlock" -> importTr31(region, material);
             case "KeyCryptogram" -> importCryptogram(material);
+            case "Tr34KeyBlock" -> importTr34(region, material);
             case "RootCertificatePublicKey" -> importPublicKey(region, material, "");
             case "TrustedCertificatePublicKey" -> importPublicKey(region, material,
                     text(material, "CertificateAuthorityPublicKeyIdentifier"));
@@ -744,6 +751,31 @@ final class PaymentCryptographyKeyExchange {
     /** The clear material of a key, which an export needs. */
     private static byte[] clearMaterial(PaymentCryptographyKey key) {
         return PaymentCryptographyKeyRules.material(key);
+    }
+
+    /**
+     * The TR-31 header a key leaves the service in, in the clear.
+     *
+     * <p>A TR-34 block carries the header in the clear beside the encrypted key block, so the
+     * receiver knows what the key is before it opens the block. The header is written the
+     * way a TR-31 block's is: the type names the cipher that protects the block, which in a
+     * TR-34 block is the ephemeral Triple DES key, and the rest names the key the block
+     * carries.
+     *
+     * <p>The length field is the placeholder the reference writes, because the field is
+     * ignored in a TR-34 block: what the block carries is the key, not a block of a length
+     * that the receiver would have to compute.
+     *
+     * @param key the key under export
+     * @return the header, sixteen characters
+     */
+    private static String tr31Header(PaymentCryptographyKey key) {
+        String usage = PaymentCryptographyService.usageCode(key.getKeyUsage());
+        String mode = PaymentCryptographyService.modeCode(key);
+        String algorithm = PaymentCryptographyService.algorithmByte(key);
+        String exportability = key.isExportable() ? "E" : "N";
+        // The protection of a TR-34 block is the ephemeral Triple DES key, so the type is B.
+        return "B9999" + usage + algorithm + mode + "00" + exportability + "0000";
     }
 
     /** The modes of use the attributes name, as the service reads them. */
@@ -1173,4 +1205,93 @@ final class PaymentCryptographyKeyExchange {
                 null, Base64.getEncoder().encodeToString(publicKey.getEncoded()), null,
                 certificatePem(certText), "PUBLIC_KEY");
     }
+
+    /** A TR-34 key block: the key signed by the service and wrapped for the receiver. */
+    private Exported exportTr34(String region, PaymentCryptographyKey key, byte[] clear,
+                                Map<String, Object> material) {
+        // The shape check settles the members the model requires and the values it names,
+        // so the authority, the certificate and the format are there.
+        String caIdentifier = text(material, "CertificateAuthorityPublicKeyIdentifier");
+        PaymentCryptographyKey caKey = usableKey(caIdentifier, region);
+        String certText = text(material, "WrappingKeyCertificate");
+        PublicKey wrappingKey = verifiedCertificate(certText, caKey, "the wrapping key certificate")
+                .getPublicKey();
+        int modulusBits = modulusBitsOf(wrappingKey);
+        String tooWeak = PaymentCryptographyKeyStrength.refusal(
+                PaymentCryptographyKeyStrength.rsaBitsOf(modulusBits),
+                PaymentCryptographyKeyStrength.bitsOf(key.getKeyAlgorithm()),
+                "RSA_" + modulusBits, key.getKeyAlgorithm());
+        if (tooWeak != null) {
+            throw validation(tooWeak);
+        }
+        String token = text(material, "ExportToken");
+        Issued signing = take(exportTokens, token, EXPORT_MATERIAL_TYPE);
+        if (signing == null) {
+            throw notFound(token.isEmpty() ? "(missing)" : token);
+        }
+        String nonce = text(material, "RandomNonce");
+        if (!nonce.isEmpty() && !isHex(nonce)) {
+            throw validation("KeyMaterial.Tr34KeyBlock.RandomNonce must be hexadecimal");
+        }
+        String header = tr31Header(key);
+        byte[] block = Tr34.build(clear, header, nonce.isEmpty() ? null : HEX.parseHex(nonce),
+                signing.privateKey, wrappingKey, null, signing.certificateDer);
+        return new Exported(HEX_UPPER.formatHex(block), "TR34_KEY_BLOCK", null);
+    }
+
+
+
+
+    /** A key out of a TR-34 key block. */
+    private Imported importTr34(String region, Map<String, Object> material) {
+        String token = text(material, "ImportToken");
+        Issued issued = take(importTokens, token, "TR34_KEY_BLOCK");
+        if (issued == null) {
+            throw notFound(token.isEmpty() ? "(missing)" : token);
+        }
+        // The shape check settles the members the model requires and the values it names,
+        // so the block, the signing certificate, the authority and the format are there.
+        String block = text(material, "WrappedKeyBlock");
+        String signingCertificate = text(material, "SigningKeyCertificate");
+        // The service requires the authority: the signing certificate has to chain to it.
+        String caIdentifier = text(material, "CertificateAuthorityPublicKeyIdentifier");
+        PaymentCryptographyKey caKey = usableKey(caIdentifier, region);
+        PublicKey caPublicKey = publicKeyOf(caKey);
+        if (caPublicKey == null) {
+            throw validation("CertificateAuthorityPublicKeyIdentifier does not reference a "
+                    + "public-key certificate");
+        }
+        requireVerify(caKey, "verifying a certificate");
+        // The nonce is what binds the block to this exchange: the importer chooses it and
+        // the exporter signs it. An import without one is an import whose freshness is not
+        // checked, and that is refused rather than quietly accepted.
+        String nonce = text(material, "RandomNonce");
+        if (nonce.isEmpty()) {
+            throw validation("KeyMaterial.Tr34KeyBlock.RandomNonce is required");
+        }
+        if (!isHex(nonce)) {
+            throw validation("KeyMaterial.Tr34KeyBlock.RandomNonce must be hexadecimal");
+        }
+        Tr34.Recovered recovered;
+        try {
+            recovered = Tr34.recoverAndVerify(block, issued.privateKey, signingCertificate,
+                    caPublicKey, nonce);
+        } catch (RuntimeException e) {
+            throw validation("the TR-34 key block did not open: " + e.getMessage());
+        }
+        // The header the block carried in the clear names the key: its usage, its mode and
+        // its algorithm. The header a TR-34 block carries is a TR-31 header, so it is read
+        // the way a TR-31 one is.
+        String usageCode = PaymentCryptographyTr31.usageOf(recovered.header);
+        String mode = PaymentCryptographyTr31.modeOf(recovered.header);
+        String exportability = PaymentCryptographyTr31.exportabilityOf(recovered.header);
+        String usage = PaymentCryptographyService.usageName(usageCode);
+        byte[] clear = HEX.parseHex(recovered.keyHex);
+        String algorithm = PaymentCryptographyService.algorithmOf(recovered.header, clear.length);
+        return new Imported(algorithm, usage,
+                PaymentCryptographyService.modesFor(mode),
+                "E".equals(exportability), clear, null, null, null, "SYMMETRIC_KEY");
+    }
+
+
 }
