@@ -7,6 +7,7 @@ import io.floci.aws.core.common.AwsException;
 import io.floci.aws.core.common.RegionResolver;
 import io.floci.aws.core.storage.AccountAwareStorageBackend;
 import io.floci.aws.core.storage.InMemoryStorage;
+import io.floci.aws.core.storage.PersistentStorage;
 import io.floci.aws.core.storage.StorageBackend;
 import io.floci.aws.core.storage.StorageFactory;
 import io.floci.aws.services.glue.model.AuthenticationConfiguration;
@@ -42,18 +43,23 @@ import io.floci.aws.services.glue.schemaregistry.model.RegistryId;
 import io.floci.aws.services.glue.schemaregistry.model.SchemaId;
 import io.floci.aws.services.kms.KmsService;
 import io.floci.aws.services.resourcegroupstagging.ResourceGroupsTaggingService;
+import io.floci.aws.testing.ParkingStore;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.io.TempDir;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.CsvSource;
+import org.junit.jupiter.params.provider.ValueSource;
 
 import java.nio.charset.StandardCharsets;
+import java.nio.file.Path;
 import java.time.Instant;
 import java.util.Base64;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.Set;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.ExecutorService;
@@ -62,8 +68,10 @@ import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicReference;
 import java.util.stream.IntStream;
 
+import static io.floci.aws.testing.ThreadStates.awaitBlockedOrDone;
 import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
@@ -76,6 +84,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyBoolean;
 import static org.mockito.Mockito.clearInvocations;
+import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.spy;
 import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
@@ -94,6 +103,9 @@ class GlueServiceTest {
                     + "\"fields\":[{\"name\":\"id\",\"type\":\"long\"},"
                     + "{\"name\":\"email\",\"type\":[\"null\",\"string\"],\"default\":null}]}";
 
+    @TempDir
+    Path tempDir;
+
     private GlueService glueService;
     private GlueSchemaRegistryService schemaRegistryService;
     private KmsService kmsService;
@@ -109,6 +121,11 @@ class GlueServiceTest {
     }
 
     private void setUp(StorageBackend<String, Partition> partitions) {
+        setUp(partitions, new InMemoryStorage<>());
+    }
+
+    private void setUp(StorageBackend<String, Partition> partitions,
+                       StorageBackend<String, UserDefinedFunction> functions) {
         RegionResolver regionResolver = new RegionResolver(REGION, ACCOUNT_ID);
         StorageFactory storageFactory = new InMemoryStorageFactory();
         schemaRegistryService = spy(new GlueSchemaRegistryService(storageFactory, regionResolver));
@@ -126,7 +143,7 @@ class GlueServiceTest {
                 partitionStore,
                 new InMemoryStorage<String, PartitionIndexDescriptor>(),
                 new InMemoryStorage<String, Map<String, Object>>(),
-                new InMemoryStorage<String, UserDefinedFunction>(),
+                functions,
                 new InMemoryStorage<String, Job>(),
                 new InMemoryStorage<String, Crawler>(),
                 new InMemoryStorage<String, Classifier>(),
@@ -2306,5 +2323,105 @@ class GlueServiceTest {
 
     private static List<String> names(GlueService.Page<Table> page) {
         return page.items().stream().map(Table::getName).toList();
+    }
+
+    @Test
+    void deleteDatabaseDeletesItsUserDefinedFunctions() {
+        UserDefinedFunction function = new UserDefinedFunction();
+        function.setFunctionName("fn");
+        glueService.createUserDefinedFunction("db1", function);
+        glueService.deleteDatabase("db1");
+        glueService.createDatabase(new Database("db1"));
+        AwsException missing = assertThrows(AwsException.class,
+                () -> glueService.getUserDefinedFunction("db1", "fn"));
+        assertEquals("EntityNotFoundException", missing.getErrorCode());
+    }
+
+    @Test
+    void deleteDatabaseRemovesLegacyFunctionsWithoutTouchingOtherAccounts() {
+        Path file = tempDir.resolve("functions.json");
+        PersistentStorage<String, UserDefinedFunction> persisted = new PersistentStorage<>(file, new TypeReference<>() {});
+        persisted.putAll(Map.of(
+                "db1:legacy", function("db1", "legacy"),
+                ACCOUNT_ID + "/db1:current", function("db1", "current"),
+                "111111111111/db1:legacy", function("db1", "legacy"),
+                ACCOUNT_ID + "/db1:neighbor:legacy", function("db1:neighbor", "legacy")));
+        PersistentStorage<String, UserDefinedFunction> reloaded = new PersistentStorage<>(file, new TypeReference<>() {});
+        reloaded.load();
+        setUp(new InMemoryStorage<>(), new AccountAwareStorageBackend<>(reloaded, null, ACCOUNT_ID));
+
+        glueService.deleteDatabase("db1");
+        glueService.createDatabase(new Database("db1"));
+
+        AwsException missing = assertThrows(AwsException.class,
+                () -> glueService.getUserDefinedFunction("db1", "legacy"));
+        assertEquals("EntityNotFoundException", missing.getErrorCode());
+        assertTrue(glueService.getUserDefinedFunctions("db1", ".*").isEmpty());
+        reloaded.load();
+        assertEquals(Set.of("111111111111/db1:legacy", ACCOUNT_ID + "/db1:neighbor:legacy"), reloaded.keys());
+        glueService.createUserDefinedFunction("db1", function("db1", "legacy"));
+        assertEquals("legacy", glueService.getUserDefinedFunction("db1", "legacy").getFunctionName());
+    }
+
+    @Test
+    void deleteDatabaseCommitsFunctionRemovalOnce() {
+        InMemoryStorage<String, UserDefinedFunction> functions = spy(new InMemoryStorage<>());
+        setUp(new InMemoryStorage<>(), functions);
+        glueService.createUserDefinedFunction("db1", function("db1", "one"));
+        glueService.createUserDefinedFunction("db1", function("db1", "two"));
+        clearInvocations(functions);
+
+        glueService.deleteDatabase("db1");
+
+        assertTrue(functions.isEmpty());
+        verify(functions).deleteAllAtomically(Set.of("db1:one", "db1:two"));
+        verify(functions, never()).delete(any());
+    }
+
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    void databaseDeletionWaitsForFunctionPublication(boolean update) throws Exception {
+        ParkingStore<UserDefinedFunction> functions = new ParkingStore<>();
+        setUp(new InMemoryStorage<>(), functions);
+        if (update) {
+            glueService.createUserDefinedFunction("db1", function("db1", "fn"));
+        }
+        functions.parkNextWrite();
+        ExecutorService executor = Executors.newFixedThreadPool(2);
+        try {
+            Future<?> writer = executor.submit(() -> {
+                if (update) {
+                    glueService.updateUserDefinedFunction("db1", "fn", function("db1", "fn"));
+                } else {
+                    glueService.createUserDefinedFunction("db1", function("db1", "fn"));
+                }
+            });
+            assertTrue(functions.awaitParked(), "function writer reached its publication point");
+            AtomicReference<Thread> deleteThread = new AtomicReference<>();
+            Future<?> deletion = executor.submit(() -> {
+                deleteThread.set(Thread.currentThread());
+                glueService.deleteDatabase("db1");
+            });
+            awaitBlockedOrDone(deleteThread, deletion);
+            assertFalse(deletion.isDone(), "database deletion must wait for the in-flight function writer");
+            functions.release();
+            writer.get(5, TimeUnit.SECONDS);
+            deletion.get(5, TimeUnit.SECONDS);
+            glueService.createDatabase(new Database("db1"));
+            assertEquals("EntityNotFoundException", assertThrows(AwsException.class,
+                    () -> glueService.getUserDefinedFunction("db1", "fn")).getErrorCode());
+        } finally {
+            functions.release();
+            executor.shutdownNow();
+            assertTrue(executor.awaitTermination(5, TimeUnit.SECONDS));
+        }
+    }
+
+    private static UserDefinedFunction function(String database, String name) {
+        UserDefinedFunction function = new UserDefinedFunction();
+        function.setDatabaseName(database);
+        function.setFunctionName(name);
+        function.setClassName("example.Function");
+        return function;
     }
 }
