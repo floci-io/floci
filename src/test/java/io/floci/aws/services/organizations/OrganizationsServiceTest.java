@@ -397,8 +397,9 @@ class OrganizationsServiceTest {
         service.enablePolicyType(MANAGEMENT_ACCOUNT, rootId, "SERVICE_CONTROL_POLICY");
         OrganizationPolicy policy = service.createPolicy(MANAGEMENT_ACCOUNT, "{}", null, "Policy",
                 "SERVICE_CONTROL_POLICY", null);
+        String resourcePolicyId = service.putResourcePolicy(MANAGEMENT_ACCOUNT, "{}", null).id();
 
-        for (String resourceId : List.of(rootId, unit.getId(), policy.getId(), MANAGEMENT_ACCOUNT)) {
+        for (String resourceId : List.of(rootId, unit.getId(), policy.getId(), MANAGEMENT_ACCOUNT, resourcePolicyId)) {
             service.tagResource(MANAGEMENT_ACCOUNT, resourceId, Map.of("env", "test"));
             assertEquals(Map.of("env", "test"), service.listTagsForResource(MANAGEMENT_ACCOUNT, resourceId));
             service.untagResource(MANAGEMENT_ACCOUNT, resourceId, List.of("env"));
@@ -415,8 +416,7 @@ class OrganizationsServiceTest {
         assertEquals(Map.of("env", "test", "owner", "platform"),
                 service.describeResourcePolicy(MANAGEMENT_ACCOUNT).tags());
 
-        // The resource policy is not addressable by TagResource/UntagResource, so Put is the only
-        // way a dropped key can be removed — CloudFormation relies on this to converge on update.
+        // Put drops a key the new set leaves out; CloudFormation relies on that to converge on update.
         service.putResourcePolicy(MANAGEMENT_ACCOUNT, content, Map.of("env", "prod"));
         assertEquals(Map.of("env", "prod"), service.describeResourcePolicy(MANAGEMENT_ACCOUNT).tags());
 
@@ -424,6 +424,25 @@ class OrganizationsServiceTest {
         // Tags property on every other Organizations type.
         service.putResourcePolicy(MANAGEMENT_ACCOUNT, content, null);
         assertEquals(Map.of("env", "prod"), service.describeResourcePolicy(MANAGEMENT_ACCOUNT).tags());
+    }
+
+    @Test
+    void putResourcePolicyTagsAreListedThroughItsId() {
+        service.createOrganization(MANAGEMENT_ACCOUNT, "ALL");
+        String policyId = service.putResourcePolicy(MANAGEMENT_ACCOUNT, "{\"Version\":\"2012-10-17\"}",
+                Map.of("env", "test")).id();
+
+        assertEquals(Map.of("env", "test"), service.listTagsForResource(MANAGEMENT_ACCOUNT, policyId));
+    }
+
+    @Test
+    void anUnknownResourcePolicyIdIsNotATagTarget() {
+        service.createOrganization(MANAGEMENT_ACCOUNT, "ALL");
+        service.putResourcePolicy(MANAGEMENT_ACCOUNT, "{\"Version\":\"2012-10-17\"}", null);
+
+        AwsException error = assertThrows(AwsException.class, () -> service.tagResource(
+                MANAGEMENT_ACCOUNT, "rp-doesnotexist", Map.of("env", "test")));
+        assertEquals("TargetNotFoundException", error.getErrorCode());
     }
 
     @Test
