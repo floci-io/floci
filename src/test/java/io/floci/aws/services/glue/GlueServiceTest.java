@@ -126,12 +126,18 @@ class GlueServiceTest {
 
     private void setUp(StorageBackend<String, Partition> partitions,
                        StorageBackend<String, UserDefinedFunction> functions) {
+        setUp(partitions, functions, new InMemoryStorage<>());
+    }
+
+    private void setUp(StorageBackend<String, Partition> partitions,
+                       StorageBackend<String, UserDefinedFunction> functions,
+                       StorageBackend<String, Table> tables) {
         RegionResolver regionResolver = new RegionResolver(REGION, ACCOUNT_ID);
         StorageFactory storageFactory = new InMemoryStorageFactory();
         schemaRegistryService = spy(new GlueSchemaRegistryService(storageFactory, regionResolver));
         kmsService = new KmsService(storageFactory, regionResolver);
         databaseStore = new InMemoryStorage<>();
-        tableStore = new InMemoryStorage<>();
+        tableStore = tables;
         tableVersionStore = new InMemoryStorage<>();
         columnStatisticsStore = new InMemoryStorage<>();
         partitionStore = partitions;
@@ -2412,6 +2418,83 @@ class GlueServiceTest {
                     () -> glueService.getUserDefinedFunction("db1", "fn")).getErrorCode());
         } finally {
             functions.release();
+            executor.shutdownNow();
+            assertTrue(executor.awaitTermination(5, TimeUnit.SECONDS));
+        }
+    }
+
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    void databaseDeletionWaitsForTablePublication(boolean update) throws Exception {
+        ParkingStore<Table> tables = new ParkingStore<>();
+        setUp(new InMemoryStorage<>(), new InMemoryStorage<>(), tables);
+        if (update) {
+            glueService.createTable("db1", paginationTable("table"));
+        }
+        tables.parkNextWrite();
+        ExecutorService executor = Executors.newFixedThreadPool(2);
+        try {
+            Future<?> writer = executor.submit(() -> {
+                if (update) {
+                    glueService.updateTable("db1", paginationTable("table"), null, false);
+                } else {
+                    glueService.createTable("db1", paginationTable("table"));
+                }
+            });
+            assertTrue(tables.awaitParked(), "table writer reached its publication point");
+            AtomicReference<Thread> deleteThread = new AtomicReference<>();
+            Future<?> deletion = executor.submit(() -> {
+                deleteThread.set(Thread.currentThread());
+                glueService.deleteDatabase("db1");
+            });
+            awaitBlockedOrDone(deleteThread, deletion);
+            assertFalse(deletion.isDone(), "database deletion must wait for the in-flight table writer");
+            tables.release();
+            writer.get(5, TimeUnit.SECONDS);
+            deletion.get(5, TimeUnit.SECONDS);
+
+            glueService.createDatabase(new Database("db1"));
+            assertTrue(glueService.getTables("db1").isEmpty());
+            assertTrue(tableVersionStore.keys().isEmpty());
+            glueService.createTable("db1", paginationTable("table"));
+            assertEquals("0", glueService.getTable("db1", "table").getVersionId());
+        } finally {
+            tables.release();
+            executor.shutdownNow();
+            assertTrue(executor.awaitTermination(5, TimeUnit.SECONDS));
+        }
+    }
+
+    @Test
+    void tableCreationWaitsForDatabaseDeletionAndThenRejectsTheMissingDatabase() throws Exception {
+        ParkingStore<Table> tables = new ParkingStore<>();
+        setUp(new InMemoryStorage<>(), new InMemoryStorage<>(), tables);
+        glueService.createTable("db1", paginationTable("existing"));
+        tables.parkNextRead();
+        ExecutorService executor = Executors.newFixedThreadPool(2);
+        try {
+            Future<?> deletion = executor.submit(() -> glueService.deleteDatabase("db1"));
+            assertTrue(tables.awaitParked(), "database deletion reached the existing table");
+            AtomicReference<Thread> createThread = new AtomicReference<>();
+            Future<?> creation = executor.submit(() -> {
+                createThread.set(Thread.currentThread());
+                glueService.createTable("db1", paginationTable("new"));
+            });
+            awaitBlockedOrDone(createThread, creation);
+            assertFalse(creation.isDone(), "table creation must wait for database deletion");
+            tables.release();
+            deletion.get(5, TimeUnit.SECONDS);
+            ExecutionException failure = assertThrows(ExecutionException.class,
+                    () -> creation.get(5, TimeUnit.SECONDS));
+            AwsException refused = assertInstanceOf(AwsException.class, failure.getCause());
+            assertEquals("EntityNotFoundException", refused.getErrorCode());
+
+            glueService.createDatabase(new Database("db1"));
+            assertTrue(glueService.getTables("db1").isEmpty());
+            glueService.createTable("db1", paginationTable("new"));
+            assertEquals("new", glueService.getTable("db1", "new").getName());
+        } finally {
+            tables.release();
             executor.shutdownNow();
             assertTrue(executor.awaitTermination(5, TimeUnit.SECONDS));
         }
