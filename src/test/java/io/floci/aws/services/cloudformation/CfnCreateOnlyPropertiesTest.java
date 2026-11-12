@@ -123,8 +123,11 @@ class CfnCreateOnlyPropertiesTest {
         assertFalse(CfnCreateOnlyProperties.isCreateOnly("AWS::AppConfig::Application", "Name"));
         assertTrue(CfnCreateOnlyProperties.isCreateOnly("AWS::AppConfig::Environment", "ApplicationId"));
         assertFalse(CfnCreateOnlyProperties.isCreateOnly("AWS::AppConfig::Environment", "Name"));
-        assertEquals(Set.of("ApplicationId", "LocationUri", "Type"),
+        assertEquals(Set.of("ApplicationId", "LocationUri"),
                 CfnCreateOnlyProperties.getCreateOnlyProperties("AWS::AppConfig::ConfigurationProfile"));
+        // Type is not create-only: the registry schema lists only ApplicationId and LocationUri, and the
+        // AWS resource page gives Type "Update requires: No interruption".
+        assertFalse(CfnCreateOnlyProperties.isCreateOnly("AWS::AppConfig::ConfigurationProfile", "Type"));
         assertFalse(CfnCreateOnlyProperties.isCreateOnly("AWS::AppConfig::ConfigurationProfile", "Name"));
         assertEquals(Set.of("Name", "ReplicateTo"),
                 CfnCreateOnlyProperties.getCreateOnlyProperties("AWS::AppConfig::DeploymentStrategy"));
