@@ -291,4 +291,69 @@ class EfsIntegrationTest {
             .statusCode(200)
             .body("FileSystems.FileSystemId", not(hasItem(fileSystemId)));
     }
+
+    @Test
+    @Order(14)
+    void createMountTargetKeepsItsAddressTypeAndAssignsNoIpv4AddressToAnIpv6OnlyTarget() {
+        String ipv6FileSystemId = given()
+            .contentType("application/json")
+            .body("{\"CreationToken\": \"mount-target-address-types\"}")
+        .when()
+            .post("/2015-02-01/file-systems")
+        .then()
+            .statusCode(201)
+            .extract().jsonPath().getString("FileSystemId");
+
+        given()
+            .contentType("application/json")
+            .body("""
+                {"FileSystemId": "%s", "SubnetId": "subnet-0123456789abcdef0",
+                 "IpAddressType": "IPV6_ONLY", "Ipv6Address": "2600:1f18::1"}
+                """.formatted(ipv6FileSystemId))
+        .when()
+            .post("/2015-02-01/mount-targets")
+        .then()
+            .statusCode(200)
+            .body("IpAddressType", equalTo("IPV6_ONLY"))
+            .body("Ipv6Address", equalTo("2600:1f18::1"))
+            .body("IpAddress", nullValue());
+
+        given()
+            .queryParam("FileSystemId", ipv6FileSystemId)
+        .when()
+            .get("/2015-02-01/mount-targets")
+        .then()
+            .statusCode(200)
+            .body("MountTargets[0].IpAddressType", equalTo("IPV6_ONLY"))
+            .body("MountTargets[0].IpAddress", nullValue());
+    }
+
+    @Test
+    @Order(15)
+    void createMountTargetWithoutASubnetIsRejectedAndStoresNothing() {
+        String bareFileSystemId = given()
+            .contentType("application/json")
+            .body("{\"CreationToken\": \"mount-target-no-subnet\"}")
+        .when()
+            .post("/2015-02-01/file-systems")
+        .then()
+            .statusCode(201)
+            .extract().jsonPath().getString("FileSystemId");
+
+        given()
+            .contentType("application/json")
+            .body("{\"FileSystemId\": \"" + bareFileSystemId + "\"}")
+        .when()
+            .post("/2015-02-01/mount-targets")
+        .then()
+            .statusCode(400);
+
+        given()
+            .queryParam("FileSystemId", bareFileSystemId)
+        .when()
+            .get("/2015-02-01/mount-targets")
+        .then()
+            .statusCode(200)
+            .body("MountTargets", empty());
+    }
 }
