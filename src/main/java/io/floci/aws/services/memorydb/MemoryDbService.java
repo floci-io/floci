@@ -556,6 +556,7 @@ public class MemoryDbService {
         user.setMinimumEngineVersion(DEFAULT_ENGINE_VERSION);
         user.setArn(buildArn(region, "user", name));
         user.setCreatedAt(Instant.now());
+        user.setTags(spec.getTags());
 
         users.put(resourceKey, user);
         LOG.infov("MemoryDB user {0} created with authMode={1}", name, user.getAuthMode());
@@ -631,6 +632,7 @@ public class MemoryDbService {
         acl.setMinimumEngineVersion(DEFAULT_ENGINE_VERSION);
         acl.setArn(buildArn(region, "acl", name));
         acl.setCreatedAt(Instant.now());
+        acl.setTags(spec.getTags());
 
         acls.put(resourceKey, acl);
         LOG.infov("MemoryDB ACL {0} created with users={1}", name, acl.getUserNames());
@@ -707,21 +709,21 @@ public class MemoryDbService {
     // ──────────────────────────── Tags ────────────────────────────
 
     public Map<String, String> listTags(String resourceArn) {
-        return clusterByArn(resourceArn).getTags();
+        return taggedResource(resourceArn).tags();
     }
 
     public Map<String, String> tagResource(String resourceArn, Map<String, String> tags) {
-        Cluster cluster = clusterByArn(resourceArn);
-        cluster.getTags().putAll(tags);
-        clusters.put(key(cluster.getRegion(), cluster.getName()), cluster);
-        return cluster.getTags();
+        TaggedResource resource = taggedResource(resourceArn);
+        resource.tags().putAll(tags);
+        resource.save().run();
+        return resource.tags();
     }
 
     public Map<String, String> untagResource(String resourceArn, List<String> tagKeys) {
-        Cluster cluster = clusterByArn(resourceArn);
-        tagKeys.forEach(cluster.getTags()::remove);
-        clusters.put(key(cluster.getRegion(), cluster.getName()), cluster);
-        return cluster.getTags();
+        TaggedResource resource = taggedResource(resourceArn);
+        tagKeys.forEach(resource.tags()::remove);
+        resource.save().run();
+        return resource.tags();
     }
 
     // ──────────────────────────── Authentication ────────────────────────────
@@ -840,6 +842,28 @@ public class MemoryDbService {
     }
 
     // ──────────────────────────── Internals ────────────────────────────
+
+    private record TaggedResource(Map<String, String> tags, Runnable save) {}
+
+    private TaggedResource taggedResource(String resourceArn) {
+        String resource = AwsArnUtils.resourceIfArnFor(resourceArn, "memorydb").orElse("");
+        String region = currentRegion();
+        if (resource.startsWith("user/")) {
+            User user = resourceGet(users, resource.substring("user/".length()), region)
+                    .filter(u -> resourceArn.equals(u.getArn()))
+                    .orElseThrow(() -> new AwsException("UserNotFoundFault", "User not found.", 404));
+            return new TaggedResource(user.getTags(), () -> users.put(key(region, user.getName()), user));
+        }
+        if (resource.startsWith("acl/")) {
+            Acl acl = resourceGet(acls, resource.substring("acl/".length()), region)
+                    .filter(a -> resourceArn.equals(a.getArn()))
+                    .orElseThrow(() -> new AwsException("ACLNotFoundFault", "ACL not found.", 404));
+            return new TaggedResource(acl.getTags(), () -> acls.put(key(region, acl.getName()), acl));
+        }
+        Cluster cluster = clusterByArn(resourceArn);
+        return new TaggedResource(cluster.getTags(),
+                () -> clusters.put(key(cluster.getRegion(), cluster.getName()), cluster));
+    }
 
     private Cluster clusterByArn(String resourceArn) {
         if (resourceArn == null) {
