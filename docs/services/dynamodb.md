@@ -26,6 +26,8 @@ including batch, transaction and PartiQL table extraction.
 | `DeleteTable` | Delete a table |
 | `DescribeTable` | Get table metadata |
 | `ListTables` | List all tables |
+| `DescribeLimits` | Get the default account and table capacity quotas |
+| `DescribeEndpoints` | Get Floci's own host and port as the endpoint |
 | `UpdateTable` | Update throughput, indexes, streams |
 | `PutItem` | Write an item |
 | `GetItem` | Read an item by primary key |

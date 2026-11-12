@@ -4,6 +4,7 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
+import io.floci.aws.config.EmulatorConfig;
 import io.floci.aws.core.common.AwsArnUtils;
 import io.floci.aws.core.common.AwsErrorResponse;
 import io.floci.aws.core.common.AwsException;
@@ -37,6 +38,7 @@ import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 import jakarta.ws.rs.core.Response;
 
+import java.net.URI;
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.Collections;
@@ -87,15 +89,17 @@ public class NativeDynamoDbJsonHandler {
     private final DynamoDbService dynamoDbService;
     private final NativeDynamoDbTableService tableService;
     private final ObjectMapper objectMapper;
+    private final EmulatorConfig config;
     private final DynamoDbPartiQLHandler partiQLHandler;
     private final Object importLock = new Object();
 
     @Inject
     public NativeDynamoDbJsonHandler(DynamoDbService dynamoDbService, NativeDynamoDbTableService tableService,
-                                     ObjectMapper objectMapper) {
+                                     ObjectMapper objectMapper, EmulatorConfig config) {
         this.dynamoDbService = dynamoDbService;
         this.tableService = tableService;
         this.objectMapper = objectMapper;
+        this.config = config;
         this.partiQLHandler = new DynamoDbPartiQLHandler(dynamoDbService, objectMapper);
     }
 
@@ -103,7 +107,7 @@ public class NativeDynamoDbJsonHandler {
     NativeDynamoDbJsonHandler(DynamoDbService dynamoDbService, DynamoDbStreamService dynamoDbStreamService,
                               KinesisService kinesisService, ObjectMapper objectMapper) {
         this(dynamoDbService, new NativeDynamoDbTableService(dynamoDbService, dynamoDbStreamService, kinesisService),
-                objectMapper);
+                objectMapper, null);
     }
 
     public Response handle(String action, JsonNode request, String region) throws Exception {
@@ -112,6 +116,8 @@ public class NativeDynamoDbJsonHandler {
             case "DeleteTable" -> handleDeleteTable(request, region);
             case "DescribeTable" -> handleDescribeTable(request, region);
             case "ListTables" -> handleListTables(request, region);
+            case "DescribeLimits" -> handleDescribeLimits();
+            case "DescribeEndpoints" -> handleDescribeEndpoints();
             case "PutItem" -> handlePutItem(request, region);
             case "GetItem" -> handleGetItem(request, region);
             case "DeleteItem" -> handleDeleteItem(request, region);
@@ -164,6 +170,29 @@ public class NativeDynamoDbJsonHandler {
                     .build();
 
         };
+    }
+
+    // The default account quotas, the same in every Region measured.
+    private static final long ACCOUNT_MAX_CAPACITY_UNITS = 80_000;
+    private static final long TABLE_MAX_CAPACITY_UNITS = 40_000;
+    private static final int ENDPOINT_CACHE_PERIOD_IN_MINUTES = 1440;
+
+    private Response handleDescribeLimits() {
+        ObjectNode response = objectMapper.createObjectNode();
+        response.put("AccountMaxReadCapacityUnits", ACCOUNT_MAX_CAPACITY_UNITS);
+        response.put("AccountMaxWriteCapacityUnits", ACCOUNT_MAX_CAPACITY_UNITS);
+        response.put("TableMaxReadCapacityUnits", TABLE_MAX_CAPACITY_UNITS);
+        response.put("TableMaxWriteCapacityUnits", TABLE_MAX_CAPACITY_UNITS);
+        return Response.ok(response).build();
+    }
+
+    // A client with endpoint discovery on sends its later requests to this address, so it names Floci.
+    private Response handleDescribeEndpoints() {
+        ObjectNode response = objectMapper.createObjectNode();
+        response.putArray("Endpoints").addObject()
+                .put("Address", URI.create(config.effectiveBaseUrl()).getAuthority())
+                .put("CachePeriodInMinutes", ENDPOINT_CACHE_PERIOD_IN_MINUTES);
+        return Response.ok(response).build();
     }
 
     private Response handleCreateTable(JsonNode request, String region) {
