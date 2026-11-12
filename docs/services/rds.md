@@ -1171,7 +1171,7 @@ The parameters a PostgreSQL client sends when it connects (`options` such as `-c
 
 On MySQL, `AWSAuthenticationPlugin` is proprietary to RDS and ships in no public MySQL build, so
 `CREATE USER ... IDENTIFIED WITH AWSAuthenticationPlugin AS 'RDS'` would fail against the container
-with `ERROR 1524 (HY000): Plugin 'AWSAuthenticationPlugin' is not loaded`. The proxy rewrites that
+because the plugin is unavailable. The proxy rewrites that
 clause to `IDENTIFIED WITH mysql_native_password AS '*000...0'`, an authentication string no
 password hashes to. The account is therefore created, can be granted to and can be dropped, but
 holds no password of its own, which is what an IAM DB user is: an account whose credentials come
@@ -1180,7 +1180,7 @@ pre-creates for PostgreSQL.
 
 On a connection that negotiates zstd compression, the proxy forwards command frames unchanged,
 including frames with an uncompressed payload. It does not rewrite this IAM user DDL, so the
-container rejects `AWSAuthenticationPlugin` with `ERROR 1524 (HY000)` on that connection.
+backend rejects the unsupported `AWSAuthenticationPlugin` on that connection.
 
 For users created through the rewrite, `SHOW CREATE USER` reports the substituted plugin rather
 than `AWSAuthenticationPlugin`, so a Terraform or Pulumi refresh sees drift on `auth_plugin`.
