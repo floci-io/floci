@@ -25,7 +25,6 @@ import io.floci.aws.services.s3.S3ControlArnUtils;
 import io.floci.aws.services.s3.S3ObjectKeys;
 import io.floci.aws.services.secretsmanager.SecretsManagerService;
 import io.floci.aws.services.sqs.SqsService;
-import io.floci.aws.services.ssm.SsmService;
 import io.quarkus.vertx.http.runtime.CurrentVertxRequest;
 import io.vertx.ext.web.RoutingContext;
 import jakarta.enterprise.context.ApplicationScoped;
@@ -92,16 +91,6 @@ public class ResourceArnBuilder {
     /** The SSM actions whose {@code ResourceArn} names the parameter they act on, in place of {@code Name}. */
     private static final Set<String> SSM_RESOURCE_POLICY_ACTIONS =
             Set.of("PutResourcePolicy", "GetResourcePolicies", "DeleteResourcePolicy");
-    /**
-     * The SSM tagging actions, whose handler tags the parameter {@code ResourceId} names, whatever its type, reading
-     * a legacy {@code parameter<name>} ARN as {@code parameter/<name>}.
-     */
-    private static final Set<String> SSM_TAGGING_OPERATIONS =
-            Set.of("AddTagsToResource", "ListTagsForResource", "RemoveTagsFromResource");
-    private static final Set<String> SSM_NAMES_OPERATIONS = Set.of("GetParameters", "DeleteParameters");
-    private static final Set<String> SSM_SELECTOR_READ_OPERATIONS = Set.of("GetParameter", "GetParameters");
-    private static final Set<String> SSM_TEXT_NAME_OPERATIONS = Set.of("PutParameter", "GetParameter",
-            "DeleteParameter", "GetParameterHistory", "LabelParameterVersion");
 
     private final ObjectMapper objectMapper;
     /**
@@ -242,7 +231,7 @@ public class ResourceArnBuilder {
             case "sns"            -> List.of(buildSnsArn(ctx, region, accountId));
             case "dynamodb"       -> buildDynamoDbArns(ctx, region, accountId);
             case "kinesis"        -> List.of(buildKinesisArn(ctx, region, accountId));
-            case "ssm"            -> buildSsmArns(ctx, region, accountId, partition);
+            case "ssm"            -> List.of(buildSsmArn(ctx, region, accountId));
             case "iam"            -> buildIamArns(ctx, region, accountId);
             case "resource-groups" -> List.of(buildResourceGroupArn(ctx, region, accountId));
             case "scheduler"      -> List.of(buildSchedulerArn(path, ctx, region, accountId, partition));
@@ -1916,12 +1905,7 @@ public class ResourceArnBuilder {
     }
 
     // ── SSM ──────────────────────────────────────────────────────────────────────
-    /**
-     * The parameter ARNs an SSM request is evaluated against, read from the field its handler acts on, with each
-     * name taken as the handler reads it.
-     */
-    private List<String> buildSsmArns(ContainerRequestContext ctx, String region, String accountId,
-                                      String partition) {
+    private String buildSsmArn(ContainerRequestContext ctx, String region, String accountId) {
         JsonNode json = readJsonBody(ctx);
         if (json != null && json.isObject()) {
             String operation = IamActionRegistry.targetOperation(ctx);
@@ -1929,77 +1913,21 @@ public class ResourceArnBuilder {
                     && json.hasNonNull("ResourceArn")) {
                 String resourceArn = json.get("ResourceArn").asText().trim();
                 if (AwsArnUtils.isArnFor(resourceArn, "ssm")) {
-                    return List.of(resourceArn);
+                    return resourceArn;
                 }
             }
-            boolean selectorRead = operation != null && SSM_SELECTOR_READ_OPERATIONS.contains(operation);
-            if (operation != null && SSM_TAGGING_OPERATIONS.contains(operation)) {
-                String resourceId = SsmService.withLegacyParameterSlash(json.path("ResourceId").asText(),
-                        partition, region, accountId);
-                return List.of(ssmParameterArn(resourceId, region, accountId));
-            } else if ("GetParametersByPath".equals(operation)) {
-                String path = json.path("Path").asText();
-                if (path.length() > 1 && path.endsWith("/") && !path.endsWith("//")) {
-                    path = path.substring(0, path.length() - 1);
+            if (json.hasNonNull("Name")) {
+                String name = json.get("Name").asText().trim();
+                if (!name.isEmpty()) {
+                    if (AwsArnUtils.isArnFor(name, "ssm")) {
+                        return name;
+                    }
+                    String paramResource = name.startsWith("/") ? "parameter" + name : "parameter/" + name;
+                    return AwsArnUtils.Arn.of("ssm", region, accountId, paramResource).toString();
                 }
-                return List.of(ssmParameterArn(path.isEmpty() ? "/" : path, region, accountId));
-            } else if (operation != null && SSM_NAMES_OPERATIONS.contains(operation)) {
-                List<String> arns = new ArrayList<>();
-                for (JsonNode entry : json.path("Names")) {
-                    String name = entry.asText();
-                    arns.add(ssmParameterArn(selectorRead ? withoutSsmSelector(name) : name, region, accountId));
-                }
-                if (!arns.isEmpty()) {
-                    return arns;
-                }
-            } else if (json.hasNonNull("Name")
-                    || operation != null && SSM_TEXT_NAME_OPERATIONS.contains(operation)) {
-                String name = json.path("Name").asText();
-                if ("PutParameter".equals(operation)) {
-                    name = SsmService.withoutSurroundingSpaces(name);
-                } else if ("UnlabelParameterVersion".equals(operation)) {
-                    name = name.strip();
-                }
-                return List.of(ssmParameterArn(selectorRead ? withoutSsmSelector(name) : name, region, accountId));
             }
         }
-        return List.of(AwsArnUtils.Arn.of("ssm", region, accountId, "parameter/*").toString());
-    }
-
-    private static String ssmParameterArn(String name, String region, String accountId) {
-        if (AwsArnUtils.isArnFor(name, "ssm")) {
-            return name;
-        }
-        String paramResource = name.startsWith("/") ? "parameter" + name : "parameter/" + name;
-        return AwsArnUtils.Arn.of("ssm", region, accountId, paramResource).toString();
-    }
-
-    /**
-     * The parameter a read names without its {@code :version} or {@code :label} selector. A parameter name
-     * cannot contain a colon, so the last colon of the name, or of an ARN's resource, starts the selector. A
-     * name that only looks like an ARN is a plain name, as {@code SsmService} reads it.
-     */
-    private static String withoutSsmSelector(String nameOrArn) {
-        if (AwsArnUtils.looksLikeArn(nameOrArn)) {
-            AwsArnUtils.Arn arn;
-            try {
-                arn = AwsArnUtils.parse(nameOrArn);
-            } catch (IllegalArgumentException e) {
-                return withoutSelector(nameOrArn);
-            }
-            String resource = withoutSelector(arn.resource());
-            return new AwsArnUtils.Arn(arn.partition(), arn.service(), arn.region(), arn.accountId(), resource)
-                    .toString();
-        }
-        return withoutSelector(nameOrArn);
-    }
-
-    private static String withoutSelector(String name) {
-        int separator = name.lastIndexOf(':');
-        if (separator <= 0 || separator == name.length() - 1) {
-            return name;
-        }
-        return name.substring(0, separator);
+        return AwsArnUtils.Arn.of("ssm", region, accountId, "parameter/*").toString();
     }
 
     // ── KMS ──────────────────────────────────────────────────────────────────────

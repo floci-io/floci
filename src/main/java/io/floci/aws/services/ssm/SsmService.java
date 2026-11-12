@@ -1354,8 +1354,8 @@ public class SsmService implements ResourceProvider {
      * account. Floci gave a top-level parameter that form before its ARNs matched AWS, and tagging still resolves
      * it. Any other value, including a legacy ARN of another partition, region or account, is returned as is.
      */
-    public static String withLegacyParameterSlash(String resourceId, String partition, String region,
-                                                  String accountId) {
+    private static String withLegacyParameterSlash(String resourceId, String partition, String region,
+                                                   String accountId) {
         if (resourceId == null || !AwsArnUtils.looksLikeArn(resourceId)) {
             return resourceId;
         }
