@@ -1738,4 +1738,19 @@ class SecretsManagerServiceTest {
         assertEquals("kept", stored.getDescription());
         assertEquals("alias/app", stored.getKmsKeyId());
     }
+
+    @Test
+    void aRefusedUpdateSecretVersionStageLeavesTheStagingLabelsInPlace() {
+        Secret created = service.createSecret("staged", "v1", null, null, null, null, REGION);
+        String current = created.getCurrentVersionId();
+        String missing = "0".repeat(36);
+
+        AwsException refused = assertThrows(AwsException.class, () ->
+                service.updateSecretVersionStage("staged", missing, current, "AWSCURRENT", REGION));
+
+        assertEquals("ResourceNotFoundException", refused.getErrorCode());
+        Secret after = service.describeSecret("staged", REGION);
+        assertEquals(List.of("AWSCURRENT"), after.getVersions().get(current).getVersionStages());
+        assertEquals(current, after.getCurrentVersionId());
+    }
 }
