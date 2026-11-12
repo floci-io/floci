@@ -4,19 +4,21 @@
     "botocore": "botocore 1.43.118 (installed package)"
   },
   "operations": {
-    "EncryptData": "EncryptDataInput",
     "DecryptData": "DecryptDataInput",
-    "ReEncryptData": "ReEncryptDataInput",
-    "GenerateMac": "GenerateMacInput",
-    "VerifyMac": "VerifyMacInput",
-    "GeneratePinData": "GeneratePinDataInput",
-    "VerifyPinData": "VerifyPinDataInput",
-    "TranslatePinData": "TranslatePinDataInput",
-    "GenerateMacEmvPinChange": "GenerateMacEmvPinChangeInput",
-    "GenerateCardValidationData": "GenerateCardValidationDataInput",
-    "VerifyCardValidationData": "VerifyCardValidationDataInput",
+    "EncryptData": "EncryptDataInput",
+    "GenerateAs2805KekValidation": "GenerateAs2805KekValidationInput",
     "GenerateAuthRequestCryptogram": "GenerateAuthRequestCryptogramInput",
-    "VerifyAuthRequestCryptogram": "VerifyAuthRequestCryptogramInput"
+    "GenerateCardValidationData": "GenerateCardValidationDataInput",
+    "GenerateMac": "GenerateMacInput",
+    "GenerateMacEmvPinChange": "GenerateMacEmvPinChangeInput",
+    "GeneratePinData": "GeneratePinDataInput",
+    "ReEncryptData": "ReEncryptDataInput",
+    "TranslateKeyMaterial": "TranslateKeyMaterialInput",
+    "TranslatePinData": "TranslatePinDataInput",
+    "VerifyAuthRequestCryptogram": "VerifyAuthRequestCryptogramInput",
+    "VerifyCardValidationData": "VerifyCardValidationDataInput",
+    "VerifyMac": "VerifyMacInput",
+    "VerifyPinData": "VerifyPinDataInput"
   },
   "shapes": {
     "AmexAttributes": {
@@ -63,6 +65,13 @@
       "max": 16,
       "pattern": "[0-9a-fA-F]+"
     },
+    "As2805KekValidationType": {
+      "type": "structure",
+      "members": {
+        "KekValidationRequest": "KekValidationRequest",
+        "KekValidationResponse": "KekValidationResponse"
+      }
+    },
     "As2805PekDerivationAttributes": {
       "type": "structure",
       "required": [
@@ -73,6 +82,12 @@
         "SystemTraceAuditNumber": "SystemTraceAuditNumberType",
         "TransactionAmount": "TransactionAmountType"
       }
+    },
+    "As2805RandomKeyMaterial": {
+      "type": "string",
+      "min": 16,
+      "max": 48,
+      "pattern": "(?:[0-9a-fA-F]{16}|[0-9a-fA-F]{32}|[0-9a-fA-F]{48})"
     },
     "AsymmetricEncryptionAttributes": {
       "type": "structure",
@@ -233,6 +248,12 @@
         "Visa": "VisaAttributes",
         "Emv2000": "Emv2000Attributes",
         "Mastercard": "MasterCardAttributes"
+      }
+    },
+    "DiffieHellmanDerivationData": {
+      "type": "structure",
+      "members": {
+        "SharedInformation": "SharedInformation"
       }
     },
     "DiscoverDynamicCardVerificationCode": {
@@ -466,6 +487,19 @@
         "OFB"
       ]
     },
+    "GenerateAs2805KekValidationInput": {
+      "type": "structure",
+      "required": [
+        "KeyIdentifier",
+        "KekValidationType",
+        "RandomKeySendVariantMask"
+      ],
+      "members": {
+        "KeyIdentifier": "KeyArnOrKeyAliasType",
+        "KekValidationType": "As2805KekValidationType",
+        "RandomKeySendVariantMask": "RandomKeySendVariantMask"
+      }
+    },
     "GenerateAuthRequestCryptogramInput": {
       "type": "structure",
       "required": [
@@ -661,6 +695,35 @@
         "PinValidationData": "PinValidationDataType"
       }
     },
+    "IncomingDiffieHellmanTr31KeyBlock": {
+      "type": "structure",
+      "required": [
+        "PrivateKeyIdentifier",
+        "CertificateAuthorityPublicKeyIdentifier",
+        "PublicKeyCertificate",
+        "DeriveKeyAlgorithm",
+        "KeyDerivationFunction",
+        "KeyDerivationHashAlgorithm",
+        "DerivationData",
+        "WrappedKeyBlock"
+      ],
+      "members": {
+        "PrivateKeyIdentifier": "KeyArnOrKeyAliasType",
+        "CertificateAuthorityPublicKeyIdentifier": "KeyArnOrKeyAliasType",
+        "PublicKeyCertificate": "CertificateType",
+        "DeriveKeyAlgorithm": "SymmetricKeyAlgorithm",
+        "KeyDerivationFunction": "KeyDerivationFunction",
+        "KeyDerivationHashAlgorithm": "KeyDerivationHashAlgorithm",
+        "DerivationData": "DiffieHellmanDerivationData",
+        "WrappedKeyBlock": "Tr31WrappedKeyBlock"
+      }
+    },
+    "IncomingKeyMaterial": {
+      "type": "structure",
+      "members": {
+        "DiffieHellmanTr31KeyBlock": "IncomingDiffieHellmanTr31KeyBlock"
+      }
+    },
     "InitializationVectorType": {
       "type": "string",
       "min": 16,
@@ -686,6 +749,25 @@
       "type": "integer",
       "min": 4,
       "max": 32
+    },
+    "KekValidationRequest": {
+      "type": "structure",
+      "required": [
+        "DeriveKeyAlgorithm"
+      ],
+      "members": {
+        "DeriveKeyAlgorithm": "SymmetricKeyAlgorithm",
+        "RandomKeyMaxLength": "RandomKeyMaxLength"
+      }
+    },
+    "KekValidationResponse": {
+      "type": "structure",
+      "required": [
+        "RandomKeySend"
+      ],
+      "members": {
+        "RandomKeySend": "As2805RandomKeyMaterial"
+      }
     },
     "KeyArnOrKeyAliasType": {
       "type": "string",
@@ -810,6 +892,21 @@
       "max": 2,
       "pattern": "[0-9]+"
     },
+    "OutgoingKeyMaterial": {
+      "type": "structure",
+      "members": {
+        "Tr31KeyBlock": "OutgoingTr31KeyBlock"
+      }
+    },
+    "OutgoingTr31KeyBlock": {
+      "type": "structure",
+      "required": [
+        "WrappingKeyIdentifier"
+      ],
+      "members": {
+        "WrappingKeyIdentifier": "KeyArnOrKeyAliasType"
+      }
+    },
     "PaddingType": {
       "type": "string",
       "enum": [
@@ -903,6 +1000,21 @@
       "min": 1,
       "max": 16,
       "pattern": "[0-9a-fA-F]+"
+    },
+    "RandomKeyMaxLength": {
+      "type": "string",
+      "enum": [
+        "BYTES_8",
+        "BYTES_16",
+        "BYTES_24"
+      ]
+    },
+    "RandomKeySendVariantMask": {
+      "type": "string",
+      "enum": [
+        "VARIANT_MASK_82C0",
+        "VARIANT_MASK_82"
+      ]
     },
     "ReEncryptDataInput": {
       "type": "structure",
@@ -1108,6 +1220,18 @@
       "min": 2,
       "max": 1024,
       "pattern": "[0-9a-fA-F]+"
+    },
+    "TranslateKeyMaterialInput": {
+      "type": "structure",
+      "required": [
+        "IncomingKeyMaterial",
+        "OutgoingKeyMaterial"
+      ],
+      "members": {
+        "IncomingKeyMaterial": "IncomingKeyMaterial",
+        "OutgoingKeyMaterial": "OutgoingKeyMaterial",
+        "KeyCheckValueAlgorithm": "KeyCheckValueAlgorithm"
+      }
     },
     "TranslatePinDataInput": {
       "type": "structure",

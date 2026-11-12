@@ -118,6 +118,11 @@ public final class RequestConstraintCheck {
         checkValue(model.path("operations").path(operation).asText(), request, operation);
     }
 
+    /** Whether the model holds the input shape of {@code operation}. */
+    public boolean holds(String operation) {
+        return model.path("operations").has(operation);
+    }
+
     /** Checks one modeled value without treating it as a whole request. */
     public void checkShape(String shapeName, JsonNode value) {
         checkValue(shapeName, value, shapeName);

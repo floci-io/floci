@@ -152,7 +152,8 @@ def generator_name(script: str) -> str:
     return path.relative_to(REPO_ROOT).as_posix() if path.is_relative_to(REPO_ROOT) else path.name
 
 
-def main(argv: list[str] | None, *, script: str, model: Path, output: Path, description: str,
+def main(argv: list[str] | None, *, script: str, model: Path, output: Path,
+         description: str | None = None,
          outputs: bool = False, required: bool = False, operations: tuple[str, ...] | None = None,
          constraints: bool = False,
          prepare: Callable[[dict], dict] | None = None) -> int:
