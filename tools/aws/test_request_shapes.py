@@ -26,6 +26,7 @@ import regen_ecr_shapes
 import regen_ecs_shapes
 import regen_emr_serverless_shapes
 import regen_iam_shapes
+import regen_cloudfront_keyvaluestore_shapes
 import regen_payment_cryptography_data_shapes
 import regen_payment_cryptography_shapes
 import regen_logs_delivery_shapes
@@ -406,6 +407,8 @@ def test_each_constraints_script_runs_the_shared_main_with_its_operations(script
      "payment-cryptography-request-shapes.json"),
     (regen_payment_cryptography_data_shapes, "payment-cryptography-data/2022-02-03",
      "payment-cryptography-data-request-shapes.json"),
+    (regen_cloudfront_keyvaluestore_shapes, "cloudfront-keyvaluestore/2022-07-26",
+     "cloudfront-keyvaluestore-request-shapes.json"),
 ])
 def test_each_payment_cryptography_script_runs_the_shared_main_with_every_operation(script, model, output,
                                                                                    monkeypatch):
@@ -449,6 +452,7 @@ def test_each_vendored_constraints_file_carries_its_operations_and_resolves_its_
 
 @pytest.mark.parametrize("script", [
     regen_payment_cryptography_shapes, regen_payment_cryptography_data_shapes,
+    regen_cloudfront_keyvaluestore_shapes,
 ])
 def test_each_payment_cryptography_file_carries_every_operation_the_model_names(script):
     # The generator names no operation, so the file carries every operation the model names:

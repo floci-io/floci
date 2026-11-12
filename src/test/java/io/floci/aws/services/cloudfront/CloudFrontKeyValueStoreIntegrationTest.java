@@ -314,6 +314,15 @@ class CloudFrontKeyValueStoreIntegrationTest {
     }
 
     @Test
+    void listKeyValueStoresHonoursTheStatusFilter() {
+        Store store = createStore(uniqueName(), "status");
+
+        given().queryParam("Status", "READY").when().get(CLOUDFRONT + "key-value-store")
+                .then().statusCode(200).body(containsString(store.name()));
+        given().queryParam("Status", "PENDING").when().get(CLOUDFRONT + "key-value-store")
+                .then().statusCode(200).body(not(containsString(store.name())));
+    }
+    @Test
     void aMalformedMaxResultsIsAValidationError() {
         Store store = createStore(uniqueName(), "page");
 

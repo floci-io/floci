@@ -103,8 +103,8 @@ class CloudFrontKeyValueStoreServiceTest {
         service.create("alpha", null);
         service.create("beta", null);
 
-        List<KeyValueStore> firstPage = service.list(null, 2);
-        List<KeyValueStore> secondPage = service.list("beta", 2);
+        List<KeyValueStore> firstPage = service.list(null, 2, null);
+        List<KeyValueStore> secondPage = service.list("beta", 2, null);
 
         assertEquals(List.of("alpha", "beta"), firstPage.stream().map(KeyValueStore::getName).toList());
         assertEquals(List.of("gamma"), secondPage.stream().map(KeyValueStore::getName).toList());
@@ -307,7 +307,7 @@ class CloudFrontKeyValueStoreServiceTest {
         service.create("c", null);
         service.delete("b", b.getEtag());
 
-        List<KeyValueStore> page = service.list("b", 10);
+        List<KeyValueStore> page = service.list("b", 10, null);
 
         assertEquals(List.of("c"), page.stream().map(KeyValueStore::getName).toList());
     }
@@ -332,4 +332,13 @@ class CloudFrontKeyValueStoreServiceTest {
         assertEquals(created.getArn(), service.find("key-value-store", List.of("tenants"), "us-east-1").orElseThrow());
         assertTrue(service.find("key-value-store", List.of("missing"), "us-east-1").isEmpty());
         assertTrue(service.find("distribution", List.of("tenants"), "us-east-1").isEmpty());
+    }
+    @Test
+    void listFiltersByStatus() {
+        CloudFrontKeyValueStoreService service = newService();
+        service.create("a", null);
+        service.create("b", null);
+
+        assertEquals(2, service.list(null, 10, "READY").size());
+        assertTrue(service.list(null, 10, "PENDING").isEmpty());
     }}

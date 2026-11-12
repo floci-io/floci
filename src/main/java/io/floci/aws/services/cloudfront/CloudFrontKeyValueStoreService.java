@@ -89,8 +89,11 @@ public class CloudFrontKeyValueStoreService implements StoredResourceArns {
                 new AwsException("EntityNotFound", "The specified KeyValueStore does not exist.", 404));
     }
 
-    public List<KeyValueStore> list(String marker, int maxItems) {
+    public List<KeyValueStore> list(String marker, int maxItems, String status) {
         List<KeyValueStore> all = new ArrayList<>(store.scan(key -> true));
+        if (status != null && !status.isEmpty()) {
+            all.removeIf(kvs -> !status.equals(kvs.getStatus()));
+        }
         all.sort(Comparator.comparing(KeyValueStore::getName));
         if (marker != null && !marker.isEmpty()) {
             all = new ArrayList<>(all.stream().filter(kvs -> kvs.getName().compareTo(marker) > 0).toList());

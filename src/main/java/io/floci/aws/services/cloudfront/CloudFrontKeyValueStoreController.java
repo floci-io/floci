@@ -44,6 +44,7 @@ public class CloudFrontKeyValueStoreController {
     private static final Logger LOG = Logger.getLogger(CloudFrontKeyValueStoreController.class);
 
     private static final String ETAG = "ETag";
+    private static final String KVS_ARN = "KvsARN";
     private static final String KEY = "Key";
     private static final String VALUE = "Value";
     private static final String ITEM_COUNT = "ItemCount";
@@ -62,6 +63,8 @@ public class CloudFrontKeyValueStoreController {
     @Path("/{kvsArn}")
     public Response describeKeyValueStore(@PathParam("kvsArn") String kvsArn) {
         return handle(() -> {
+            ObjectNode request = objectMapper.createObjectNode().put(KVS_ARN, kvsArn);
+            CloudFrontKeyValueStoreRequestShapes.check("DescribeKeyValueStore", request);
             KeyValueStore kvs = service.describeByArn(kvsArn);
             ObjectNode body = objectMapper.createObjectNode();
             body.put(ITEM_COUNT, CloudFrontKeyValueStoreService.itemCount(kvs));
@@ -80,8 +83,16 @@ public class CloudFrontKeyValueStoreController {
                              @QueryParam("NextToken") String nextToken,
                              @QueryParam("MaxResults") String maxResults) {
         return handle(() -> {
-            CloudFrontKeyValueStoreService.KeyPage page = service.listKeys(kvsArn, nextToken,
-                    Pagination.parseMaxResults(maxResults, "ValidationException"));
+            Integer pageSize = Pagination.parseMaxResults(maxResults, "ValidationException");
+            ObjectNode request = objectMapper.createObjectNode().put(KVS_ARN, kvsArn);
+            if (nextToken != null) {
+                request.put("NextToken", nextToken);
+            }
+            if (pageSize != null) {
+                request.put("MaxResults", pageSize);
+            }
+            CloudFrontKeyValueStoreRequestShapes.check("ListKeys", request);
+            CloudFrontKeyValueStoreService.KeyPage page = service.listKeys(kvsArn, nextToken, pageSize);
             ObjectNode body = objectMapper.createObjectNode();
             ArrayNode items = body.putArray("Items");
             for (Map.Entry<String, String> entry : page.items()) {
@@ -104,9 +115,8 @@ public class CloudFrontKeyValueStoreController {
                     > CloudFrontKeyValueStoreService.MAX_UPDATE_PAYLOAD_BYTES) {
                 throw new AwsException("ValidationException", "The request payload is too large.", 400);
             }
-            JsonNode request = readBody(requestBody);
-            requireArrayWhenPresent(request, "Puts");
-            requireArrayWhenPresent(request, "Deletes");
+            ObjectNode request = operationRequest(requestBody, kvsArn, null, ifMatch);
+            CloudFrontKeyValueStoreRequestShapes.check("UpdateKeys", request);
             if (request.path("Puts").size() + request.path("Deletes").size()
                     > CloudFrontKeyValueStoreService.MAX_KEY_UPDATES) {
                 throw new AwsException("ValidationException",
@@ -115,11 +125,11 @@ public class CloudFrontKeyValueStoreController {
             }
             Map<String, String> puts = new LinkedHashMap<>();
             for (JsonNode put : request.path("Puts")) {
-                puts.put(requiredText(put, KEY), requiredText(put, VALUE));
+                puts.put(put.get(KEY).textValue(), put.get(VALUE).textValue());
             }
             List<String> deletes = new ArrayList<>();
             for (JsonNode delete : request.path("Deletes")) {
-                deletes.add(requiredText(delete, KEY));
+                deletes.add(delete.get(KEY).textValue());
             }
             return sizeResponse(service.updateKeys(kvsArn, ifMatch, puts, deletes));
         });
@@ -129,6 +139,8 @@ public class CloudFrontKeyValueStoreController {
     @Path("/{kvsArn}/keys/{key}")
     public Response getKey(@PathParam("kvsArn") String kvsArn, @PathParam("key") String key) {
         return handle(() -> {
+            ObjectNode request = objectMapper.createObjectNode().put(KVS_ARN, kvsArn).put(KEY, key);
+            CloudFrontKeyValueStoreRequestShapes.check("GetKey", request);
             CloudFrontKeyValueStoreService.KeyLookup lookup = service.getKey(kvsArn, key);
             KeyValueStore kvs = lookup.store();
             ObjectNode body = objectMapper.createObjectNode();
@@ -147,8 +159,9 @@ public class CloudFrontKeyValueStoreController {
                            @HeaderParam("If-Match") String ifMatch,
                            String requestBody) {
         return handle(() -> {
-            JsonNode request = readBody(requestBody);
-            return sizeResponse(service.putKey(kvsArn, ifMatch, key, requiredText(request, VALUE)));
+            ObjectNode request = operationRequest(requestBody, kvsArn, key, ifMatch);
+            CloudFrontKeyValueStoreRequestShapes.check("PutKey", request);
+            return sizeResponse(service.putKey(kvsArn, ifMatch, key, request.get(VALUE).textValue()));
         });
     }
 
@@ -157,7 +170,11 @@ public class CloudFrontKeyValueStoreController {
     public Response deleteKey(@PathParam("kvsArn") String kvsArn,
                               @PathParam("key") String key,
                               @HeaderParam("If-Match") String ifMatch) {
-        return handle(() -> sizeResponse(service.deleteKey(kvsArn, ifMatch, key)));
+        return handle(() -> {
+            ObjectNode request = operationRequest(null, kvsArn, key, ifMatch);
+            CloudFrontKeyValueStoreRequestShapes.check("DeleteKey", request);
+            return sizeResponse(service.deleteKey(kvsArn, ifMatch, key));
+        });
     }
 
     private Response sizeResponse(KeyValueStore kvs) {
@@ -167,7 +184,7 @@ public class CloudFrontKeyValueStoreController {
         return Response.ok(body).header(ETAG, kvs.getDataEtag()).build();
     }
 
-    private JsonNode readBody(String requestBody) {
+    private ObjectNode readBody(String requestBody) {
         try {
             JsonNode body = requestBody == null || requestBody.isBlank()
                     ? objectMapper.createObjectNode()
@@ -175,28 +192,28 @@ public class CloudFrontKeyValueStoreController {
             if (!body.isObject()) {
                 throw new AwsException("ValidationException", "The request body must be a JSON object.", 400);
             }
-            return body;
+            return (ObjectNode) body;
         } catch (JsonProcessingException e) {
             throw new AwsException("ValidationException", "Malformed JSON request body.", 400);
         }
     }
 
-    private static String requiredText(JsonNode node, String field) {
-        if (!node.hasNonNull(field)) {
-            throw new AwsException("ValidationException", field + " is required.", 400);
+    /**
+     * The request as the model reads it: the members of the body, then those the path and the {@code If-Match}
+     * header carry, which a body cannot override.
+     */
+    private ObjectNode operationRequest(String requestBody, String kvsArn, String key, String ifMatch) {
+        ObjectNode request = readBody(requestBody).deepCopy();
+        request.remove("IfMatch");
+        request.put(KVS_ARN, kvsArn);
+        if (key != null) {
+            request.put(KEY, key);
         }
-        if (!node.isObject() || !node.get(field).isTextual()) {
-            throw new AwsException("ValidationException", field + " must be a string.", 400);
+        if (ifMatch != null) {
+            request.put("IfMatch", ifMatch);
         }
-        return node.get(field).textValue();
+        return request;
     }
-
-    private static void requireArrayWhenPresent(JsonNode request, String field) {
-        if (request.hasNonNull(field) && !request.get(field).isArray()) {
-            throw new AwsException("ValidationException", field + " must be a list.", 400);
-        }
-    }
-
     private static BigDecimal epochSeconds(Instant instant) {
         return BigDecimal.valueOf(instant == null ? 0 : instant.toEpochMilli(), 3);
     }

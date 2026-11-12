@@ -1040,10 +1040,11 @@ public class CloudFrontController {
     @GET
     @Path("/key-value-store")
     public Response listKeyValueStores(@QueryParam("Marker") String marker,
+                                       @QueryParam("Status") String status,
                                        @QueryParam("MaxItems") @DefaultValue("100") int maxItems) {
         try {
             Page<KeyValueStore> page = page(
-                    service.listKeyValueStores(marker, paginationFetchLimit(maxItems)),
+                    service.listKeyValueStores(marker, paginationFetchLimit(maxItems), status),
                     maxItems, KeyValueStore::getName);
             XmlBuilder xml = new XmlBuilder()
                     .start("KeyValueStoreList", NS)

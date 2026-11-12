@@ -2023,8 +2023,8 @@ public class CloudFrontService implements ServerCertificateReferenceProvider {
         return keyValueStores.describe(name);
     }
 
-    public List<KeyValueStore> listKeyValueStores(String marker, int maxItems) {
-        return keyValueStores.list(marker, maxItems);
+    public List<KeyValueStore> listKeyValueStores(String marker, int maxItems, String status) {
+        return keyValueStores.list(marker, maxItems, status);
     }
 
     public KeyValueStore updateKeyValueStore(String name, String ifMatch, String comment) {
