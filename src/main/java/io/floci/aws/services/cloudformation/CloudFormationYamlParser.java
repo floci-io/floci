@@ -67,6 +67,8 @@ public class CloudFormationYamlParser {
             register("!Length",     n -> fnMap("Fn::Length", n));
             register("!ToJsonString", n -> fnMap("Fn::ToJsonString", n));
             register("!Transform",  n -> fnMap("Fn::Transform", n));
+            // CloudFormation has no date type: an unquoted 2010-09-09 or 2012-10-17 is the text.
+            yamlConstructors.put(Tag.TIMESTAMP, yamlConstructors.get(Tag.STR));
         }
 
         private void register(String tag, NodeConverter converter) {
