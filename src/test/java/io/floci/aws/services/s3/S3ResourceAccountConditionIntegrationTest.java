@@ -12,10 +12,7 @@ import io.quarkus.test.junit.TestProfile;
 import org.junit.jupiter.api.extension.RegisterExtension;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.ValueSource;
-import software.amazon.awssdk.auth.credentials.AwsBasicCredentials;
-import software.amazon.awssdk.auth.credentials.AwsCredentials;
 import software.amazon.awssdk.auth.credentials.AwsSessionCredentials;
-import software.amazon.awssdk.auth.credentials.StaticCredentialsProvider;
 import software.amazon.awssdk.core.sync.RequestBody;
 import software.amazon.awssdk.regions.Region;
 import software.amazon.awssdk.services.iam.IamClient;
@@ -61,7 +58,8 @@ class S3ResourceAccountConditionIntegrationTest {
                 S3RequestSigner.signedAs(ownerKeys.accessKeyId(), ownerKeys.secretAccessKey()), bucket));
         try (IamClient iam = AwsTestClients.create(IamClient.builder(), CALLER, Region.US_EAST_1);
              StsClient sts = AwsTestClients.create(StsClient.builder(), CALLER, Region.US_EAST_1);
-             S3Client owner = client(AwsBasicCredentials.create(ownerKeys.accessKeyId(), ownerKeys.secretAccessKey()))) {
+             S3Client owner = AwsTestClients.create(S3Client.builder().forcePathStyle(true),
+                     ownerKeys.accessKeyId(), ownerKeys.secretAccessKey(), Region.US_EAST_1, endpoint)) {
             String roleArn = iam.createRole(request -> request.roleName(role).assumeRolePolicyDocument("""
                     {"Version":"2012-10-17","Statement":[{"Effect":"Allow","Action":"sts:AssumeRole",
                       "Principal":{"AWS":"arn:aws:iam::%s:root"}}]}
@@ -106,13 +104,9 @@ class S3ResourceAccountConditionIntegrationTest {
                 """.formatted(bucket, conditionKey, owner);
         Credentials credentials = sts.assumeRole(request -> request.roleArn(roleArn)
                 .roleSessionName("snapshot-" + owner).policy(policy)).credentials();
-        return client(AwsSessionCredentials.create(
-                credentials.accessKeyId(), credentials.secretAccessKey(), credentials.sessionToken()));
-    }
-
-    private S3Client client(AwsCredentials credentials) {
-        return S3Client.builder().endpointOverride(endpoint).region(Region.US_EAST_1).forcePathStyle(true)
-                .credentialsProvider(StaticCredentialsProvider.create(credentials)).build();
+        return AwsTestClients.create(S3Client.builder().forcePathStyle(true), AwsSessionCredentials.create(
+                credentials.accessKeyId(), credentials.secretAccessKey(), credentials.sessionToken()),
+                Region.US_EAST_1, endpoint);
     }
 
     private static void denied(Runnable operation) {

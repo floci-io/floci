@@ -1,7 +1,7 @@
 package io.floci.aws.services.iam;
 
+import io.floci.aws.testing.AwsTestClients;
 import software.amazon.awssdk.auth.credentials.AwsSessionCredentials;
-import software.amazon.awssdk.auth.credentials.StaticCredentialsProvider;
 import software.amazon.awssdk.regions.Region;
 import software.amazon.awssdk.services.iam.model.Role;
 import software.amazon.awssdk.services.sts.StsClient;
@@ -35,10 +35,9 @@ final class FederatedSessionAssertions {
     private static void assertIdentity(URI endpoint, IamService iam, Role role, String sessionName,
                                        Credentials credentials, AssumedRoleUser assumedRoleUser) {
         GetCallerIdentityResponse identity;
-        try (StsClient caller = StsClient.builder().endpointOverride(endpoint).region(Region.US_EAST_1)
-                .credentialsProvider(StaticCredentialsProvider.create(AwsSessionCredentials.create(
-                        credentials.accessKeyId(), credentials.secretAccessKey(), credentials.sessionToken())))
-                .build()) {
+        try (StsClient caller = AwsTestClients.create(StsClient.builder(), AwsSessionCredentials.create(
+                credentials.accessKeyId(), credentials.secretAccessKey(), credentials.sessionToken()),
+                Region.US_EAST_1, endpoint)) {
             identity = caller.getCallerIdentity();
         }
         assertAll(

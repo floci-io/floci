@@ -2,6 +2,7 @@ package io.floci.aws.testing;
 
 import io.restassured.RestAssured;
 import software.amazon.awssdk.auth.credentials.AwsBasicCredentials;
+import software.amazon.awssdk.auth.credentials.AwsCredentials;
 import software.amazon.awssdk.auth.credentials.StaticCredentialsProvider;
 import software.amazon.awssdk.awscore.client.builder.AwsClientBuilder;
 import software.amazon.awssdk.awscore.client.builder.AwsSyncClientBuilder;
@@ -44,6 +45,12 @@ public final class AwsTestClients {
         return create(builder, accessKey, secretKey, region, UrlConnectionHttpClient.builder(), endpoint);
     }
 
+    /** SDK credentials, including session tokens, with an explicit endpoint. */
+    public static <B extends AwsClientBuilder<B, C> & AwsSyncClientBuilder<B, C>, C> C create(
+            B builder, AwsCredentials credentials, Region region, URI endpoint) {
+        return create(builder, credentials, region, UrlConnectionHttpClient.builder(), endpoint);
+    }
+
     private static <B extends AwsClientBuilder<B, C> & AwsSyncClientBuilder<B, C>, C> C create(
             B builder, String account, Region region, SdkHttpClient.Builder<?> httpClientBuilder, URI endpoint) {
         return create(builder, account, "test", region, httpClientBuilder, endpoint);
@@ -53,9 +60,16 @@ public final class AwsTestClients {
     public static <B extends AwsClientBuilder<B, C> & AwsSyncClientBuilder<B, C>, C> C create(
             B builder, String accessKey, String secretKey, Region region,
             SdkHttpClient.Builder<?> httpClientBuilder, URI endpoint) {
+        return create(builder, AwsBasicCredentials.create(accessKey, secretKey), region, httpClientBuilder, endpoint);
+    }
+
+    /** SDK credentials, including session tokens, with an explicit transport and endpoint. */
+    public static <B extends AwsClientBuilder<B, C> & AwsSyncClientBuilder<B, C>, C> C create(
+            B builder, AwsCredentials credentials, Region region,
+            SdkHttpClient.Builder<?> httpClientBuilder, URI endpoint) {
         return builder.endpointOverride(endpoint)
                 .httpClientBuilder(httpClientBuilder).region(region)
-                .credentialsProvider(StaticCredentialsProvider.create(AwsBasicCredentials.create(accessKey, secretKey)))
+                .credentialsProvider(StaticCredentialsProvider.create(credentials))
                 .build();
     }
 }
