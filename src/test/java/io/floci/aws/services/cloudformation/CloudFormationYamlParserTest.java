@@ -39,7 +39,7 @@ class CloudFormationYamlParserTest {
               Fn::Select:
                 - 1
                 - Fn::Cidr:
-                    - Fn::GetAtt: [Vpc, CidrBlock]
+                    - Fn::GetAtt: Vpc.CidrBlock
                     - 4
                     - 8
             """);
@@ -84,5 +84,13 @@ class CloudFormationYamlParserTest {
     void getAttSequenceFormPreservesANestedIntrinsic() throws Exception {
         JsonNode shorthand = parse("Value: !GetAtt [Vpc, !Ref AttributeName]\n");
         assertEquals("AttributeName", shorthand.get("Value").get("Fn::GetAtt").get(1).get("Ref").asText());
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"Vpc.CidrBlock", "Vpc", "Vpc.", ".CidrBlock", ""})
+    void getAttScalarFormPreservesItsOriginalString(String operand) throws Exception {
+        JsonNode getAtt = parse("Value: !GetAtt '" + operand + "'").get("Value").get("Fn::GetAtt");
+        assertTrue(getAtt.isTextual());
+        assertEquals(operand, getAtt.textValue());
     }
 }

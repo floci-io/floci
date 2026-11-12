@@ -953,6 +953,8 @@ public class CloudFormationTemplateEngine {
                     ? resolveRef(attribute.get("Ref").asText()) : attribute.asText();
             parts = new String[] {getAtt.get(0).asText(), attributeName};
         } else if (getAtt.isTextual()) {
+            errorMessage = "Template error: if specifying one argument to Fn::GetAtt, "
+                    + "that argument must be a non-empty string in format <LogicalId>.<Attribute>";
             parts = getAtt.textValue().split("\\.", 2);
         } else {
             return null;

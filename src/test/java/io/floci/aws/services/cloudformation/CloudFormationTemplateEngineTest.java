@@ -222,10 +222,21 @@ class CloudFormationTemplateEngineTest {
     @ValueSource(strings = {
         "[]", "[Vpc]", "[Vpc, CidrBlock, Extra]",
         "['', CidrBlock]", "[Vpc, '']", "['', '']",
-        "'Vpc.'", "'.CidrBlock'", "'Vpc'", "''",
         "[Vpc, !Ref EmptyAttribute]"
     })
     void getAttRejectsMissingOrEmptyOperands(String operands) {
+        assertInvalidGetAtt(operands, "Template error: every Fn::GetAtt object requires two non-empty parameters, "
+                + "the resource name and the resource attribute");
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"'Vpc.'", "'.CidrBlock'", "'Vpc'", "''"})
+    void getAttRejectsMalformedStringOperands(String operand) {
+        assertInvalidGetAtt(operand, "Template error: if specifying one argument to Fn::GetAtt, "
+                + "that argument must be a non-empty string in format <LogicalId>.<Attribute>");
+    }
+
+    private void assertInvalidGetAtt(String operands, String expectedMessage) {
         CloudFormationTemplateEngine e = new CloudFormationTemplateEngine("000000000000", "us-east-1", "my-stack",
                 "stack/id", Map.of("EmptyAttribute", ""), Map.of(),
                 Map.of("Vpc", Map.of("CidrBlock", "10.0.0.0/16")), Map.of(), Map.of(), mapper, name -> null);
@@ -243,9 +254,7 @@ class CloudFormationTemplateEngineTest {
             assertEquals(400, scalarFailure.getHttpStatus());
             assertEquals(400, nodeFailure.getHttpStatus());
             assertEquals(400, dependencyFailure.getHttpStatus());
-            assertEquals("Template error: every Fn::GetAtt object requires two non-empty parameters, "
-                            + "the resource name and the resource attribute",
-                    scalarFailure.getMessage());
+            assertEquals(expectedMessage, scalarFailure.getMessage());
             assertEquals(scalarFailure.getMessage(), nodeFailure.getMessage());
             assertEquals(scalarFailure.getMessage(), dependencyFailure.getMessage());
         }

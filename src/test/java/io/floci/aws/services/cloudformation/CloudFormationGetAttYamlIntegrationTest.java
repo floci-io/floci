@@ -5,6 +5,7 @@ import io.floci.aws.testing.CfnStackWaits;
 import io.quarkus.test.junit.QuarkusTest;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.CsvSource;
 import org.junit.jupiter.params.provider.ValueSource;
 import software.amazon.awssdk.regions.Region;
 import software.amazon.awssdk.services.cloudformation.CloudFormationClient;
@@ -47,6 +48,9 @@ class CloudFormationGetAttYamlIntegrationTest {
                       - Arn
                   Scalar:
                     Value: !GetAtt Queue.Arn
+                  LongScalar:
+                    Value:
+                      Fn::GetAtt: Queue.Arn
                   Referenced:
                     Value: !GetAtt [Queue, !Ref AttributeName]
                   LongReferenced:
@@ -68,7 +72,7 @@ class CloudFormationGetAttYamlIntegrationTest {
                         .attributes().get(QueueAttributeName.QUEUE_ARN);
                 assertNotNull(queueArn);
 
-                for (String output : List.of("Flow", "Block", "Scalar", "Referenced", "LongReferenced")) {
+                for (String output : List.of("Flow", "Block", "Scalar", "LongScalar", "Referenced", "LongReferenced")) {
                     assertEquals(queueArn, CfnStackWaits.output(stack, output), output);
                 }
             } finally {
@@ -79,13 +83,18 @@ class CloudFormationGetAttYamlIntegrationTest {
     }
 
     @ParameterizedTest
-    @ValueSource(strings = {
-        "!GetAtt [Queue]",
-        "!GetAtt [Queue, '']",
-        "!GetAtt Queue.",
-        "!GetAtt [Queue, !Ref EmptyAttribute]"
+    @CsvSource(delimiter = '|', value = {
+        "!GetAtt [Queue] | false",
+        "!GetAtt [Queue, ''] | false",
+        "!GetAtt [] | false",
+        "!GetAtt [Queue, !Ref EmptyAttribute] | false",
+        "!GetAtt Queue | true",
+        "!GetAtt Queue. | true",
+        "!GetAtt .Arn | true",
+        "!GetAtt '' | true",
+        "{Fn::GetAtt: Queue} | true"
     })
-    void invalidGetAttOutputReportsTheValidationReason(String expression) {
+    void invalidGetAttOutputReportsTheValidationReason(String expression, boolean stringForm) {
         String name = "cfn-getatt-invalid-" + Long.toString(System.nanoTime(), 36);
         String template = """
                 Parameters:
@@ -107,9 +116,12 @@ class CloudFormationGetAttYamlIntegrationTest {
             cloudFormation.createStack(request -> request.stackName(name).templateBody(template));
             try {
                 Stack stack = CfnStackWaits.awaitStatus(cloudFormation, name, "ROLLBACK_COMPLETE");
-                assertEquals("Template error: every Fn::GetAtt object requires two non-empty parameters, "
-                                + "the resource name and the resource attribute",
-                        stack.stackStatusReason());
+                String expectedMessage = stringForm
+                        ? "Template error: if specifying one argument to Fn::GetAtt, "
+                                + "that argument must be a non-empty string in format <LogicalId>.<Attribute>"
+                        : "Template error: every Fn::GetAtt object requires two non-empty parameters, "
+                                + "the resource name and the resource attribute";
+                assertEquals(expectedMessage, stack.stackStatusReason());
             } finally {
                 cloudFormation.deleteStack(request -> request.stackName(name));
                 CfnStackWaits.awaitStackDeleted(name);
