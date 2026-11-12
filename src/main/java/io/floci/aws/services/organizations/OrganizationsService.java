@@ -1249,15 +1249,16 @@ public class OrganizationsService implements ScpProvider, RootAccessOrganization
             organization.setResourcePolicyId(policyId);
             organization.setResourcePolicyArn(
                     arn(organization.getMasterAccountId(), "resourcepolicy/" + organization.getId() + "/" + policyId));
+            if (tags != null) {
+                organization.getResourcePolicyTags().putAll(tags);
+            }
+        } else if (tags != null && !tags.isEmpty()) {
+            // The model says Tags apply only when this call creates the policy and that it throws
+            // otherwise, without naming the error. An empty list has no tags to apply.
+            throw invalidInput("Tags apply only to the initial creation of the resource policy."
+                    + " Use TagResource and UntagResource to change its tags.");
         }
         organization.setResourcePolicyContent(content);
-        if (tags != null) {
-            // Put replaces rather than merges: a caller that supplies Tags is stating the full set,
-            // so a key it no longer lists is dropped. CloudFormation relies on this to converge
-            // Tags on an update. Omitting Tags entirely (null) leaves the existing ones untouched.
-            organization.getResourcePolicyTags().clear();
-            organization.getResourcePolicyTags().putAll(tags);
-        }
         organizations.putForAccount(organization.getMasterAccountId(), organization.getId(), organization);
         return resourcePolicyView(organization);
     }

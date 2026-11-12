@@ -379,7 +379,9 @@ returns the management account id, while `Fn::GetAtt Org.Id` returns the organiz
 - `Policy` — `TargetIds` is reconciled on update: targets the template adds are attached and ones
   it drops are detached. Deleting the resource detaches its remaining targets first, since
   `DeletePolicy` refuses while a policy is still attached.
-- `ResourcePolicy` — backed by `PutResourcePolicy`, which is already create-or-update.
+- `ResourcePolicy` — backed by `PutResourcePolicy`, which is create-or-update but applies `Tags`
+  only when it creates the policy, so an update converges `Tags` through `TagResource` and
+  `UntagResource` on the policy's `rp-` id.
 
 `Fn::GetAtt OrganizationalUnit.Path` and `Fn::GetAtt Account.Paths` return the organization path —
 `o-<org>/r-<root>/[ou-<ou>/…]<id>/`. An account has one parent and therefore one path, so the
