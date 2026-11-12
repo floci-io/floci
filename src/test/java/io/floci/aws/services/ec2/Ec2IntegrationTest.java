@@ -5938,6 +5938,116 @@ class Ec2IntegrationTest {
     }
 
     @Test
+    @Order(3226)
+    void ipamPoolAndAllocationTagsRoundTripOverQuery() {
+        String ipamId = given()
+            .formParam("Action", "CreateIpam")
+            .header("Authorization", AUTH_HEADER)
+        .when().post("/")
+        .then().statusCode(200).extract().path("CreateIpamResponse.ipam.ipamId");
+        String scopeId = given()
+            .formParam("Action", "DescribeIpams")
+            .formParam("IpamId.1", ipamId)
+            .header("Authorization", AUTH_HEADER)
+        .when().post("/")
+        .then().statusCode(200).extract().path("DescribeIpamsResponse.ipamSet.item.privateDefaultScopeId");
+        String poolId = given()
+            .formParam("Action", "CreateIpamPool")
+            .formParam("IpamScopeId", scopeId)
+            .formParam("AddressFamily", "ipv4")
+            .formParam("TagSpecification.1.ResourceType", "ipam-pool")
+            .formParam("TagSpecification.1.Tag.1.Key", "team")
+            .formParam("TagSpecification.1.Tag.1.Value", "red")
+            .header("Authorization", AUTH_HEADER)
+        .when().post("/")
+        .then().statusCode(200)
+            .body("CreateIpamPoolResponse.ipamPool.tagSet.item.key", equalTo("team"))
+            .extract().path("CreateIpamPoolResponse.ipamPool.ipamPoolId");
+
+        given()
+            .formParam("Action", "DescribeTags")
+            .formParam("Filter.1.Name", "resource-id")
+            .formParam("Filter.1.Value.1", poolId)
+            .header("Authorization", AUTH_HEADER)
+        .when().post("/")
+        .then().statusCode(200)
+            .body("DescribeTagsResponse.tagSet.item.key", equalTo("team"))
+            .body("DescribeTagsResponse.tagSet.item.value", equalTo("red"))
+            .body("DescribeTagsResponse.tagSet.item.resourceType", equalTo("ipam-pool"));
+
+        given()
+            .formParam("Action", "CreateTags")
+            .formParam("ResourceId.1", poolId)
+            .formParam("Tag.1.Key", "env")
+            .formParam("Tag.1.Value", "dev")
+            .header("Authorization", AUTH_HEADER)
+        .when().post("/")
+        .then().statusCode(200);
+        // Read back from another region: the pool resolves there by id, and its tags come with it.
+        String otherRegionAuth = "AWS4-HMAC-SHA256 Credential=test/20260205/us-west-2/ec2/aws4_request";
+        given()
+            .formParam("Action", "DescribeIpamPools")
+            .formParam("IpamPoolId.1", poolId)
+            .header("Authorization", otherRegionAuth)
+        .when().post("/")
+        .then().statusCode(200)
+            .body("DescribeIpamPoolsResponse.ipamPoolSet.item.tagSet.item.key", containsInAnyOrder("team", "env"));
+        assertIpamPoolFilter("tag:env", "dev", scopeId, poolId, true);
+        assertIpamPoolFilter("tag-key", "team", scopeId, poolId, true);
+
+        given()
+            .formParam("Action", "ProvisionIpamPoolCidr")
+            .formParam("IpamPoolId", poolId)
+            .formParam("Cidr", "10.0.0.0/16")
+            .header("Authorization", AUTH_HEADER)
+        .when().post("/")
+        .then().statusCode(200);
+        String allocationId = given()
+            .formParam("Action", "AllocateIpamPoolCidr")
+            .formParam("IpamPoolId", poolId)
+            .formParam("NetmaskLength", "24")
+            .formParam("TagSpecification.1.ResourceType", "ipam-pool-allocation")
+            .formParam("TagSpecification.1.Tag.1.Key", "team")
+            .formParam("TagSpecification.1.Tag.1.Value", "red")
+            .header("Authorization", AUTH_HEADER)
+        .when().post("/")
+        .then().statusCode(200)
+            .body("AllocateIpamPoolCidrResponse.ipamPoolAllocation.tagSet.item.key", equalTo("team"))
+            .extract().path("AllocateIpamPoolCidrResponse.ipamPoolAllocation.ipamPoolAllocationId");
+        given()
+            .formParam("Action", "GetIpamPoolAllocations")
+            .formParam("IpamPoolId", poolId)
+            .header("Authorization", otherRegionAuth)
+        .when().post("/")
+        .then().statusCode(200)
+            .body("GetIpamPoolAllocationsResponse.ipamPoolAllocationSet.item.tagSet.item.value", equalTo("red"));
+        given()
+            .formParam("Action", "DescribeTags")
+            .formParam("Filter.1.Name", "resource-id")
+            .formParam("Filter.1.Value.1", allocationId)
+            .header("Authorization", AUTH_HEADER)
+        .when().post("/")
+        .then().statusCode(200)
+            .body("DescribeTagsResponse.tagSet.item.resourceType", equalTo("ipam-pool-allocation"));
+
+        given()
+            .formParam("Action", "DeleteIpamPool")
+            .formParam("IpamPoolId", poolId)
+            .header("Authorization", AUTH_HEADER)
+        .when().post("/")
+        .then().statusCode(200);
+        given()
+            .formParam("Action", "DescribeTags")
+            .formParam("Filter.1.Name", "resource-id")
+            .formParam("Filter.1.Value.1", poolId)
+            .formParam("Filter.1.Value.2", allocationId)
+            .header("Authorization", AUTH_HEADER)
+        .when().post("/")
+        .then().statusCode(200)
+            .body("DescribeTagsResponse.tagSet.item.size()", equalTo(0));
+    }
+
+    @Test
     @Order(323)
     void associateIpamByoasnSuccess() {
         given()

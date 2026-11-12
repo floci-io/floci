@@ -10897,6 +10897,13 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
         if (resourceId.startsWith("sir-")) {
             return "spot-instances-request";
         }
+        // Checked before the pool prefix, which it starts with.
+        if (resourceId.startsWith("ipam-pool-alloc-")) {
+            return "ipam-pool-allocation";
+        }
+        if (resourceId.startsWith("ipam-pool-")) {
+            return "ipam-pool";
+        }
         return "unknown";
     }
 
