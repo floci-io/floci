@@ -1297,6 +1297,14 @@ final class PaymentCryptographyKeyExchange {
                     + "DATA_ENCRYPTION_KEY_VARIANT_22, MESSAGE_AUTHENTICATION_KEY_VARIANT_24, "
                     + "PIN_ENCRYPTION_KEY_VARIANT_28)");
         }
+        // The variant says what the key is for, so it has to be the variant the key's own
+        // usage calls for. A key exported under another variant would come back with the
+        // other variant's usage, so the export would change what the key is for.
+        if (!variant.usage().equals(key.getKeyUsage())) {
+            throw validation("the AS2805 variant " + variant.name() + " is for a key whose "
+                    + "usage is " + variant.usage() + ", but the key " + key.getArn() + " is "
+                    + key.getKeyUsage());
+        }
         String wrappingKeyIdentifier = text(material, "WrappingKeyIdentifier");
         PaymentCryptographyKey kek = usableKey(wrappingKeyIdentifier, region);
         if (!PaymentCryptographyService.mayWrap(kek)) {
@@ -1435,6 +1443,14 @@ final class PaymentCryptographyKeyExchange {
         if (algorithm == null || !algorithm.symmetric()) {
             throw validation("KeyAlgorithm '" + algorithmName + "' is not a symmetric algorithm this "
                     + "service imports (TDES_2KEY, TDES_3KEY, AES_128, AES_192, AES_256)");
+        }
+        // The wrapping key has to be at least as strong as the key it protects, the same
+        // rule the export enforces, so a cryptogram that the export would refuse to write
+        // does not open here either.
+        String tooWeak = PaymentCryptographyKeyStrength.refusal(kek.getKeyAlgorithm(),
+                algorithmName);
+        if (tooWeak != null) {
+            throw validation(tooWeak);
         }
         PaymentCryptographyKeyAlgorithm kekAlgorithm =
                 PaymentCryptographyKeyAlgorithm.from(kek.getKeyAlgorithm());
