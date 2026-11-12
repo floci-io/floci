@@ -1734,6 +1734,38 @@ class IamRequestResourceEnforcementIntegrationTest {
         refused(restore(user, restored, source), "redshift:RestoreFromClusterSnapshot");
     }
 
+    @Test
+    void aRedshiftRestoreWithOwnerAccountIsCheckedOnTheOwnerSnapshot() {
+        String source = "res-source-" + suffix();
+        String restored = "res-restored-" + suffix();
+        String ownerAccount = "111122223333";
+        String ownerSnapshotArn = "arn:aws:redshift:us-east-1:" + ownerAccount + ":snapshot:" + source + "/snap";
+        User user = user("res-redshift-restore-owner");
+
+        user.policy(allowOn("redshift:RestoreFromClusterSnapshot", REDSHIFT + "cluster:" + restored) + ","
+                + allowOn("redshift:RestoreFromClusterSnapshot", ownerSnapshotArn));
+        restoreWithOwner(user, restored, source, ownerAccount)
+                .statusCode(404).body(containsString("ClusterSnapshotNotFound"));
+
+        user.policy(allowOn("redshift:RestoreFromClusterSnapshot", REDSHIFT + "cluster:" + restored) + ","
+                + allowOn("redshift:RestoreFromClusterSnapshot", "*") + ","
+                + "{\"Effect\":\"Deny\",\"Action\":\"redshift:RestoreFromClusterSnapshot\",\"Resource\":\""
+                + ownerSnapshotArn + "\"}");
+        refused(restoreWithOwner(user, restored, source, ownerAccount), "redshift:RestoreFromClusterSnapshot");
+
+        user.policy(allowOn("redshift:RestoreFromClusterSnapshot", REDSHIFT + "cluster:" + restored) + ","
+                + allowOn("redshift:RestoreFromClusterSnapshot", REDSHIFT + "snapshot:" + source + "/snap"));
+        refused(restoreWithOwner(user, restored, source, ownerAccount), "redshift:RestoreFromClusterSnapshot");
+    }
+
+    private static ValidatableResponse restoreWithOwner(User user, String cluster, String snapshotCluster,
+                                                        String ownerAccount) {
+        return user.query("redshift", "RestoreFromClusterSnapshot").formParam("Version", "2012-12-01")
+                .formParam("ClusterIdentifier", cluster).formParam("SnapshotIdentifier", "snap")
+                .formParam("SnapshotClusterIdentifier", snapshotCluster)
+                .formParam("OwnerAccount", ownerAccount).post("/").then();
+    }
+
     private static ValidatableResponse redshiftTag(User user, String arn) {
         return user.query("redshift", "CreateTags").formParam("Version", "2012-12-01").formParam("ResourceName", arn)
                 .formParam("Tags.Tag.1.Key", "team").formParam("Tags.Tag.1.Value", "data").post("/").then();

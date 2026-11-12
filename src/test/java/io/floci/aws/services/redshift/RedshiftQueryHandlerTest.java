@@ -693,6 +693,18 @@ class RedshiftQueryHandlerTest {
     }
 
     @Test
+    void restoreFromClusterSnapshotOfAnotherPartitionArnIsNotFound() {
+        MultivaluedMap<String, String> params = new MultivaluedHashMap<>();
+        params.putSingle("ClusterIdentifier", "restored-cluster");
+        params.putSingle("SnapshotArn", "arn:aws-cn:redshift:us-east-1:999999999999:snapshot:src/my-snap");
+
+        AwsException ex = assertThrows(AwsException.class,
+                () -> handler.handle("RestoreFromClusterSnapshot", params, "auth"));
+        assertEquals("ClusterSnapshotNotFound", ex.getErrorCode());
+        verify(service, never()).restoreFromClusterSnapshot(any(), any(), any(), any(), any());
+    }
+
+    @Test
     void restoreFromClusterSnapshotPassesTheOwnerAccountItNames() {
         MultivaluedMap<String, String> params = new MultivaluedHashMap<>();
         params.putSingle("ClusterIdentifier", "restored-cluster");

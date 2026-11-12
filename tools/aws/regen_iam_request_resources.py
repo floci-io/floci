@@ -568,10 +568,12 @@ CORRECTIONS: dict[str, tuple[list[dict], str]] = {
        "ClusterIdentifier alone when DbName is absent"),
     "redshift:RestoreFromClusterSnapshot": ([
         {"type": "cluster", "fill": {"ClusterName": "ClusterIdentifier"}},
-        {"type": "snapshot", "fill": {"ClusterName": "SnapshotClusterIdentifier", "SnapshotName": "SnapshotIdentifier"}},
+        {"type": "snapshot", "fill": {"ClusterName": "SnapshotClusterIdentifier", "SnapshotName": "SnapshotIdentifier"},
+         "account": "OwnerAccount"},
         {"types": ["snapshot"], "arn": "SnapshotArn"},
     ], "the snapshot's cluster is SnapshotClusterIdentifier ('The name of the cluster the source snapshot was created "
        "from'), not ClusterIdentifier, the cluster 'that will be created from restoring the snapshot'; its "
+       "OwnerAccount names the snapshot owner for cross-account restores; its "
        "DefaultIamRoleArn is an IAM role's ARN and its RedshiftIdcApplicationArn an IAM Identity Center "
        "application's, never a cluster's or a snapshot's"),
     **{f"redshift:{operation}": ([{"types": ["cluster", "eventsubscription", "hsmclientcertificate", "hsmconfiguration",

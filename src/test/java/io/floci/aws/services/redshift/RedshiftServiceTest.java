@@ -2112,6 +2112,31 @@ class RedshiftServiceTest {
     }
 
     @Test
+    void describeSharedSnapshotsAndRestoreDenyCrossRegionSnapshotByName() {
+        Snapshot foreignRegionSnap = snapshotOf("shared-foreign", "c1");
+        foreignRegionSnap.setSnapshotArn("arn:aws:redshift:eu-west-1:999999999999:snapshot:c1/shared-foreign");
+        foreignRegionSnap.getAccountsWithRestoreAccess().add("111111111111");
+
+        when(snapshotBackend.scanForAccount(eq("999999999999"), any())).thenReturn(List.of(foreignRegionSnap));
+        assertTrue(service.describeSharedSnapshots("999999999999", null, null).isEmpty());
+        assertEquals("ClusterSnapshotNotFound", assertThrows(AwsException.class,
+                () -> service.describeSharedSnapshots("999999999999", "shared-foreign", null)).getErrorCode());
+
+        when(snapshotBackend.getForAccount("999999999999", "shared-foreign")).thenReturn(Optional.of(foreignRegionSnap));
+        when(clusterBackend.get("c1")).thenReturn(Optional.empty());
+        assertEquals("ClusterSnapshotNotFound", assertThrows(AwsException.class,
+                () -> service.restoreFromClusterSnapshot("c1", "shared-foreign", null, null, "999999999999")).getErrorCode());
+    }
+
+    @Test
+    void restoreFromClusterSnapshotWithInvalidOwnerAccountThrowsInvalidParameterValue() {
+        assertEquals("InvalidParameterValue", assertThrows(AwsException.class,
+                () -> service.restoreFromClusterSnapshot("c1", "snap-1", null, null, "not-an-account")).getErrorCode());
+        assertEquals("InvalidParameterValue", assertThrows(AwsException.class,
+                () -> service.restoreFromClusterSnapshot("c1", "snap-1", null, null, "12345")).getErrorCode());
+    }
+
+    @Test
     void deleteSnapshotOfAnotherClusterIsNotFoundAndKept() {
         when(snapshotBackend.get("snap-1")).thenReturn(Optional.of(snapshotOf("snap-1", "protected")));
 
@@ -2508,6 +2533,7 @@ class RedshiftServiceTest {
         source.setKmsKeyId("orig-key");
         source.setTags(Map.of("Env", "Test"));
         source.setCopiedToRegions(new HashSet<>(Set.of("us-west-2")));
+        source.getAccountsWithRestoreAccess().add("222222222222");
         targetSnapshotIsFree("manual-copy-1");
 
         Snapshot copy = service.copyClusterSnapshot("auto-snap-1", "manual-copy-1", null, 30);
@@ -2521,6 +2547,7 @@ class RedshiftServiceTest {
         assertEquals("orig-key", copy.getKmsKeyId());
         assertEquals(Map.of("Env", "Test"), copy.getTags());
         assertTrue(copy.getCopiedToRegions().isEmpty());
+        assertTrue(copy.getAccountsWithRestoreAccess().isEmpty());
         verify(snapshotBackend).putAllAtomically(any());
         verify(snapshotBackend).flush();
     }

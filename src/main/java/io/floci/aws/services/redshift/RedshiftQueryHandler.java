@@ -5,6 +5,7 @@ import io.floci.aws.core.common.AwsArnUtils;
 import io.floci.aws.core.common.AwsException;
 import io.floci.aws.core.common.AwsNamespaces;
 import io.floci.aws.core.common.AwsQueryLists;
+import io.floci.aws.core.common.AwsRegions;
 import io.floci.aws.core.common.IamEnforcementFilter;
 import io.floci.aws.core.common.PaginatedResult;
 import io.floci.aws.core.common.RegionResolver;
@@ -1327,7 +1328,9 @@ public class RedshiftQueryHandler {
         }
         // An ARN from another region must not match a local snapshot by name. One from another account names that
         // account's snapshot, which the service checks was shared with the caller.
-        if (!arn.region().equals(regionResolver.resolveRegionFromAuth(authorizationHeader))) {
+        String requestRegion = regionResolver.resolveRegionFromAuth(authorizationHeader);
+        if (!arn.region().equals(requestRegion)
+                || !arn.partition().equals(AwsRegions.partitionFor(requestRegion))) {
             throw new AwsException("ClusterSnapshotNotFound", "Snapshot " + snapshotArn + " not found", 404);
         }
         String owner = arn.accountId().equals(regionResolver.getAccountId()) ? null : arn.accountId();

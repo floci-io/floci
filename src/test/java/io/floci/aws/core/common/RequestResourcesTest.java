@@ -996,6 +996,20 @@ class RequestResourcesTest {
     }
 
     @Test
+    void redshiftRestoreFromClusterSnapshotUsesOwnerAccountForSourceSnapshot() {
+        String own = "arn:aws:redshift:us-east-1:000000000000:";
+        String owner = "arn:aws:redshift:us-east-1:111122223333:";
+        assertEquals(List.of(own + "cluster:restored", owner + "snapshot:source/snap"),
+                of("redshift:RestoreFromClusterSnapshot",
+                        form("Action=RestoreFromClusterSnapshot&ClusterIdentifier=restored&SnapshotIdentifier=snap"
+                                + "&SnapshotClusterIdentifier=source&OwnerAccount=111122223333")));
+        assertEquals(List.of(own + "cluster:restored", own + "snapshot:source/snap"),
+                of("redshift:RestoreFromClusterSnapshot",
+                        form("Action=RestoreFromClusterSnapshot&ClusterIdentifier=restored&SnapshotIdentifier=snap"
+                                + "&SnapshotClusterIdentifier=source")));
+    }
+
+    @Test
     void aRequestNamingNoResourceOrOfANamespaceTheTableDoesNotReadIsCheckedOnStar() {
         assertEquals(List.of(), of("ecr:DescribeRepositories", json("{}")));
         assertEquals(List.of(), of("ecr:GetAuthorizationToken", json("{}")));
