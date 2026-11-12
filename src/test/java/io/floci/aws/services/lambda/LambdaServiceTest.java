@@ -29,10 +29,13 @@ import java.io.ByteArrayOutputStream;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.util.AbstractMap;
+import java.util.AbstractSet;
 import java.util.ArrayList;
 import java.util.Base64;
 import java.util.HashMap;
 import java.util.HashSet;
+import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
@@ -44,6 +47,7 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.BiFunction;
 import java.util.stream.Collectors;
@@ -109,6 +113,100 @@ class LambdaServiceTest {
         assertNotNull(fn.getFunctionArn());
         assertTrue(fn.getFunctionArn().contains("my-function"));
         assertNotNull(fn.getRevisionId());
+    }
+
+    @Test
+    void createFunctionRejectsEnvironmentOverFourKilobytes() {
+        Map<String, Object> request = baseRequest("oversized-environment-create");
+        request.put("Environment", Map.of("Variables", Map.of("BIG", "x".repeat(5000))));
+
+        AwsException error = assertThrows(AwsException.class,
+                () -> service.createFunction(REGION, request));
+
+        assertEquals("InvalidParameterValueException", error.getErrorCode());
+        assertEquals(400, error.getHttpStatus());
+        assertTrue(error.getMessage().contains("environment variables you have provided exceeded the 4KB limit"));
+        AwsException missing = assertThrows(AwsException.class,
+                () -> service.getFunction(REGION, "oversized-environment-create"));
+        assertEquals("ResourceNotFoundException", missing.getErrorCode());
+    }
+
+    @Test
+    void oversizedEnvironmentStopsSerializationBeforeTraversingTheWholeMap() {
+        AtomicInteger visited = new AtomicInteger();
+        Map<String, String> variables = new AbstractMap<>() {
+            @Override
+            public Set<Entry<String, String>> entrySet() {
+                return new AbstractSet<>() {
+                    @Override
+                    public Iterator<Entry<String, String>> iterator() {
+                        return Stream.generate(() -> {
+                            int index = visited.incrementAndGet();
+                            if (index > 64) {
+                                throw new AssertionError("Quota validation traversed too much of the environment");
+                            }
+                            return Map.entry("KEY_" + index, "x".repeat(512));
+                        }).limit(10_000).iterator();
+                    }
+
+                    @Override
+                    public int size() {
+                        return 10_000;
+                    }
+                };
+            }
+        };
+        Map<String, Object> request = baseRequest("bounded-environment-create");
+        request.put("Environment", Map.of("Variables", variables));
+
+        AwsException error = assertThrows(AwsException.class, () -> service.createFunction(REGION, request));
+
+        assertEquals("InvalidParameterValueException", error.getErrorCode());
+        assertTrue(visited.get() < 64);
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"é", "😀"})
+    void measuredEnvironmentPreviewIsBoundedWithoutSplittingUtf8(String character) {
+        Map<String, Object> request = baseRequest("bounded-unicode-diagnostic");
+        request.put("Environment", Map.of("Variables", Map.of(
+                "BIG", "x".repeat(5110) + character.repeat(10_000))));
+
+        AwsException error = assertThrows(AwsException.class, () -> service.createFunction(REGION, request));
+
+        assertEquals("InvalidParameterValueException", error.getErrorCode());
+        String marker = " String measured: ";
+        assertTrue(error.getMessage().contains(marker));
+        String measured = error.getMessage().substring(error.getMessage().indexOf(marker) + marker.length());
+        String expected = "{\"BIG\":\"" + "x".repeat(5110) + ("é".equals(character) ? "é" : "") + "...";
+        assertEquals(expected, measured);
+        assertTrue(measured.getBytes(StandardCharsets.UTF_8).length <= 5123);
+    }
+
+    @Test
+    void updateFunctionConfigurationRejectsEnvironmentOverFourKilobytes() {
+        Map<String, Object> request = baseRequest("oversized-environment-update");
+        request.put("Environment", Map.of("Variables", Map.of("MARKER", "original")));
+        LambdaFunction original = service.createFunction(REGION, request);
+        String description = original.getDescription();
+        String revisionId = original.getRevisionId();
+
+        AwsException error = assertThrows(AwsException.class,
+                () -> service.updateFunctionConfiguration(REGION, "oversized-environment-update", Map.of(
+                        "Description", "rejected update",
+                        "Timeout", 60,
+                        "MemorySize", 512,
+                        "Environment", Map.of("Variables", Map.of("BIG", "x".repeat(5000))))));
+
+        assertEquals("InvalidParameterValueException", error.getErrorCode());
+        assertEquals(400, error.getHttpStatus());
+        assertTrue(error.getMessage().contains("environment variables you have provided exceeded the 4KB limit"));
+        LambdaFunction unchanged = service.getFunction(REGION, "oversized-environment-update");
+        assertEquals(Map.of("MARKER", "original"), unchanged.getEnvironment());
+        assertEquals(description, unchanged.getDescription());
+        assertEquals(10, unchanged.getTimeout());
+        assertEquals(256, unchanged.getMemorySize());
+        assertEquals(revisionId, unchanged.getRevisionId());
     }
 
     @Test

@@ -4,6 +4,7 @@ import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.SerializationFeature;
 import io.floci.aws.config.EmulatorConfig;
 import io.floci.aws.core.common.AwsArnUtils;
 import io.floci.aws.core.common.AwsException;
@@ -53,8 +54,13 @@ import jakarta.inject.Inject;
 import org.jboss.logging.Logger;
 
 import java.io.IOException;
+import java.io.OutputStream;
+import java.io.OutputStreamWriter;
 import java.math.BigDecimal;
 import java.net.URLEncoder;
+import java.nio.ByteBuffer;
+import java.nio.CharBuffer;
+import java.nio.charset.CodingErrorAction;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.InvalidPathException;
@@ -111,6 +117,8 @@ public class LambdaService implements ResourceProvider {
     private static final int MAX_SOURCE_ACCESS_CONFIGURATIONS = 23;
     private static final int LIST_FUNCTIONS_PAGE_SIZE = 50;
     private static final int MAX_LIST_FUNCTIONS_ITEMS = 10_000;
+    private static final int MAX_ENVIRONMENT_BYTES = 4096;
+    private static final int MAX_ENVIRONMENT_DIAGNOSTIC_BYTES = 5120;
     // UpdateFunctionCode S3Bucket (3-63 characters, [0-9A-Za-z\.\-_]*(?<!\.)) and S3Key (1-1024) shapes.
     private static final Pattern S3_BUCKET_PATTERN = Pattern.compile("[0-9A-Za-z\\.\\-_]*(?<!\\.)");
     // Create/UpdateAlias FunctionVersion (VersionWithLatestPublished: 1-1024, pattern below) and Description (max 256).
@@ -2843,12 +2851,67 @@ public class LambdaService implements ResourceProvider {
     }
 
     @SuppressWarnings("unchecked")
-    private static Map<String, String> environmentVariables(Map<String, Object> environment) {
+    private Map<String, String> environmentVariables(Map<String, Object> environment) {
         if (environment == null) {
             return null;
         }
-        return (Map<String, String>) (Map<?, ?>) structureValue(
+        Map<String, String> variables = (Map<String, String>) (Map<?, ?>) structureValue(
                 environment.get("Variables"), "Environment.Variables");
+        if (variables != null) {
+            EnvironmentSizeOutputStream output = new EnvironmentSizeOutputStream();
+            // A Writer preserves Unicode characters; Jackson's byte generator escapes surrogate pairs.
+            try (OutputStreamWriter writer = new OutputStreamWriter(output, StandardCharsets.UTF_8)) {
+                objectMapper.writer().without(SerializationFeature.INDENT_OUTPUT).writeValue(writer, variables);
+            } catch (IOException e) {
+                if (!output.truncated) {
+                    throw new AwsException("SerializationException", "Environment.Variables could not be serialized", 400);
+                }
+            }
+            if (output.size > MAX_ENVIRONMENT_BYTES) {
+                throw new AwsException("InvalidParameterValueException",
+                        "Lambda was unable to configure your environment variables because the environment variables "
+                                + "you have provided exceeded the 4KB limit. String measured: " + output.measuredString(),
+                        400);
+            }
+        }
+        return variables;
+    }
+
+    private static final class EnvironmentSizeOutputStream extends OutputStream {
+        private final byte[] measured = new byte[MAX_ENVIRONMENT_DIAGNOSTIC_BYTES];
+        private int size;
+        private boolean truncated;
+
+        @Override
+        public void write(int value) throws IOException {
+            if (size == measured.length) {
+                overflow();
+            }
+            measured[size++] = (byte) value;
+        }
+
+        @Override
+        public void write(byte[] source, int offset, int length) throws IOException {
+            Objects.checkFromIndexSize(offset, length, source.length);
+            int copied = Math.min(length, measured.length - size);
+            System.arraycopy(source, offset, measured, size, copied);
+            size += copied;
+            if (copied < length) {
+                overflow();
+            }
+        }
+
+        private void overflow() throws IOException {
+            truncated = true;
+            throw new IOException("Environment exceeds the diagnostic capture limit");
+        }
+
+        private String measuredString() {
+            CharBuffer decoded = CharBuffer.allocate(size);
+            StandardCharsets.UTF_8.newDecoder().onMalformedInput(CodingErrorAction.IGNORE)
+                    .decode(ByteBuffer.wrap(measured, 0, size), decoded, true);
+            return decoded.flip().toString() + (truncated ? "..." : "");
+        }
     }
 
     /**
