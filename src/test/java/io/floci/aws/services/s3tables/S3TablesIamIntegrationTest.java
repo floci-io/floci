@@ -1,5 +1,6 @@
 package io.floci.aws.services.s3tables;
 
+import io.floci.aws.testing.AwsTestClients;
 import io.floci.aws.testing.SignedIamEnforcementProfile;
 import io.floci.aws.testing.SignedIamUsers;
 import io.floci.aws.testutil.AwsRequestSigner;
@@ -9,6 +10,9 @@ import io.quarkus.test.junit.TestProfile;
 import io.restassured.response.Response;
 import io.restassured.specification.RequestSpecification;
 import org.junit.jupiter.api.Test;
+import software.amazon.awssdk.regions.Region;
+import software.amazon.awssdk.services.s3tables.S3TablesClient;
+import software.amazon.awssdk.services.s3tables.model.S3TablesException;
 
 import java.net.URI;
 import java.net.URLEncoder;
@@ -21,6 +25,9 @@ import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.containsString;
 import static org.hamcrest.Matchers.equalTo;
 import static org.hamcrest.Matchers.not;
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
  * S3 Tables requests are checked against the caller's policies through its generated routes: a table bucket call on
@@ -191,6 +198,63 @@ class S3TablesIamIntegrationTest {
             deleteBucket(tagged, "analytics");
             send(admin, "DELETE", "/buckets/" + encoded(untagged), null).then().statusCode(204);
         }
+    }
+
+    @Test
+    void encryptionReadbackRequiresPermissionOnTheRequestedBucket() throws Exception {
+        String bucket = createBucket();
+        try {
+            try (SignedIamUsers.User user = SignedIamUsers.createUser(endpoint, "s3t-enc-");
+                    S3TablesClient client = encryptionClient(user)) {
+                encryptionDenied(client, bucket);
+            }
+            String other = createBucket();
+            try (SignedIamUsers.User user = SignedIamUsers.createUser(endpoint, "s3t-enc-", "read",
+                    allow("\"s3tables:GetTableBucketEncryption\"", bucket));
+                    S3TablesClient client = encryptionClient(user)) {
+                assertEquals("AES256", client.getTableBucketEncryption(request -> request.tableBucketARN(bucket))
+                        .encryptionConfiguration().sseAlgorithmAsString());
+                encryptionDenied(client, other);
+            } finally {
+                send(admin, "DELETE", "/buckets/" + encoded(other), null).then().statusCode(204);
+            }
+            String policy = """
+                    {
+                      "Version": "2012-10-17",
+                      "Statement": [
+                        {
+                          "Effect": "Allow",
+                          "Action": "s3tables:GetTableBucketEncryption",
+                          "Resource": "*"
+                        },
+                        {
+                          "Effect": "Deny",
+                          "Action": "s3tables:GetTableBucketEncryption",
+                          "Resource": "%s"
+                        }
+                      ]
+                    }
+                    """.formatted(bucket);
+            try (SignedIamUsers.User user = SignedIamUsers.createUser(endpoint, "s3t-enc-", "deny", policy);
+                    S3TablesClient client = encryptionClient(user)) {
+                encryptionDenied(client, bucket);
+            }
+        } finally {
+            send(admin, "DELETE", "/buckets/" + encoded(bucket), null).then().statusCode(204);
+        }
+    }
+
+    private S3TablesClient encryptionClient(SignedIamUsers.User user) {
+        return AwsTestClients.create(S3TablesClient.builder(), user.accessKeyId(), user.secretAccessKey(),
+                Region.US_EAST_1, endpoint);
+    }
+
+    private static void encryptionDenied(S3TablesClient client, String bucket) {
+        S3TablesException error = assertThrows(S3TablesException.class,
+                () -> client.getTableBucketEncryption(request -> request.tableBucketARN(bucket)));
+        assertEquals(403, error.statusCode());
+        assertTrue(error.getMessage().contains("not authorized to perform: s3tables:GetTableBucketEncryption"),
+                error.getMessage());
     }
 
     private String createTable(String bucket, String namespace, String name) throws Exception {
