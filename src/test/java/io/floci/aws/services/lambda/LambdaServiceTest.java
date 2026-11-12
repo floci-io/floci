@@ -165,6 +165,24 @@ class LambdaServiceTest {
         assertTrue(visited.get() < 64);
     }
 
+    @ParameterizedTest
+    @ValueSource(strings = {"é", "😀"})
+    void measuredEnvironmentPreviewIsBoundedWithoutSplittingUtf8(String character) {
+        Map<String, Object> request = baseRequest("bounded-unicode-diagnostic");
+        request.put("Environment", Map.of("Variables", Map.of(
+                "BIG", "x".repeat(5110) + character.repeat(10_000))));
+
+        AwsException error = assertThrows(AwsException.class, () -> service.createFunction(REGION, request));
+
+        assertEquals("InvalidParameterValueException", error.getErrorCode());
+        String marker = " String measured: ";
+        assertTrue(error.getMessage().contains(marker));
+        String measured = error.getMessage().substring(error.getMessage().indexOf(marker) + marker.length());
+        String expected = "{\"BIG\":\"" + "x".repeat(5110) + ("é".equals(character) ? "é" : "") + "...";
+        assertEquals(expected, measured);
+        assertTrue(measured.getBytes(StandardCharsets.UTF_8).length <= 5123);
+    }
+
     @Test
     void updateFunctionConfigurationRejectsEnvironmentOverFourKilobytes() {
         Map<String, Object> request = baseRequest("oversized-environment-update");

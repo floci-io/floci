@@ -83,6 +83,9 @@ An oversized environment returns HTTP 400 with `InvalidParameterValueException` 
 creating a function or changing any stored configuration. Omitting `Environment` on an
 update preserves the existing variables; an empty `Variables` object clears them.
 Validation stops serializing oversized input without allocating full JSON and UTF-8 copies.
+Quota errors include AWS's `String measured:` detail. The diagnostic retains up to 5,120
+UTF-8 bytes of compact variables JSON; larger inputs end with `...`, dropping any incomplete
+trailing UTF-8 character. This keeps diagnostic allocation and serialization bounded.
 CloudFormation omits unchanged environment variables during in-place configuration updates,
 so a function persisted before quota enforcement can retain an oversized environment when
 another property changes. Changing or removing its variables still updates the environment

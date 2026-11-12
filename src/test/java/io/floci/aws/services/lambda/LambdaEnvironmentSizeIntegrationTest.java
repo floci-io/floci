@@ -12,6 +12,9 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.MethodSource;
 import software.amazon.awssdk.core.SdkBytes;
+import software.amazon.awssdk.core.interceptor.Context;
+import software.amazon.awssdk.core.interceptor.ExecutionAttributes;
+import software.amazon.awssdk.core.interceptor.ExecutionInterceptor;
 import software.amazon.awssdk.regions.Region;
 import software.amazon.awssdk.services.cloudformation.CloudFormationClient;
 import software.amazon.awssdk.services.lambda.LambdaClient;
@@ -21,6 +24,7 @@ import software.amazon.awssdk.services.lambda.model.FunctionCode;
 import software.amazon.awssdk.services.lambda.model.GetFunctionConfigurationResponse;
 import software.amazon.awssdk.services.lambda.model.InvalidParameterValueException;
 import software.amazon.awssdk.services.lambda.model.ResourceNotFoundException;
+import software.amazon.awssdk.services.lambda.model.UpdateFunctionConfigurationRequest;
 
 import java.io.ByteArrayOutputStream;
 import java.io.IOException;
@@ -48,7 +52,17 @@ class LambdaEnvironmentSizeIntegrationTest {
 
     @BeforeEach
     void openClient() {
-        client = AwsTestClients.create(LambdaClient.builder(), ACCOUNT, Region.US_EAST_1);
+        client = AwsTestClients.create(LambdaClient.builder().overrideConfiguration(configuration -> configuration
+                .addExecutionInterceptor(new ExecutionInterceptor() {
+                    @Override
+                    public void beforeTransmission(Context.BeforeTransmission context, ExecutionAttributes attributes) {
+                        if (context.request() instanceof UpdateFunctionConfigurationRequest) {
+                            long length = context.requestBody().orElseThrow().contentLength();
+                            assertTrue(length < 5120,
+                                    "Update bodies must stay below the separate 5,120-byte request limit: " + length);
+                        }
+                    }
+                })), ACCOUNT, Region.US_EAST_1);
     }
 
     @AfterEach
@@ -72,6 +86,7 @@ class LambdaEnvironmentSizeIntegrationTest {
                 () -> client.createFunction(request));
 
         assertQuotaError(error);
+        assertMeasuredJson(error, variables);
         assertThrows(ResourceNotFoundException.class,
                 () -> client.getFunctionConfiguration(get -> get.functionName(name)));
     }
@@ -88,6 +103,7 @@ class LambdaEnvironmentSizeIntegrationTest {
                         .environment(environment(variables))));
 
         assertQuotaError(error);
+        assertMeasuredJson(error, variables);
         GetFunctionConfigurationResponse unchanged = configuration(name);
         assertEquals(original.environment(), unchanged.environment());
         assertEquals(original.description(), unchanged.description());
@@ -123,10 +139,21 @@ class LambdaEnvironmentSizeIntegrationTest {
     }
 
     @Test
-    void substantiallyOversizedEnvironmentIsRejectedOnCreateAndUpdate() throws IOException {
+    void substantiallyOversizedCreateReturnsABoundedMeasuredJsonPreview() throws IOException {
+        String name = functionName();
         Map<String, String> variables = Map.of("BIG", "x".repeat(1_000_000));
-        createRejectsOversizedEnvironmentWithoutCreatingFunction(variables);
-        rejectedUpdatePreservesConfiguration(variables);
+        CreateFunctionRequest request = functionRequest(name).environment(environment(variables)).build();
+
+        InvalidParameterValueException error = assertThrows(InvalidParameterValueException.class,
+                () -> client.createFunction(request));
+
+        assertQuotaError(error);
+        String measured = measuredJson(error);
+        assertTrue(measured.startsWith("{\"BIG\":\"" + "x".repeat(100)));
+        assertTrue(measured.endsWith("..."));
+        assertTrue(measured.getBytes(StandardCharsets.UTF_8).length <= 5123);
+        assertThrows(ResourceNotFoundException.class,
+                () -> client.getFunctionConfiguration(get -> get.functionName(name)));
     }
 
     @Test
@@ -197,7 +224,7 @@ class LambdaEnvironmentSizeIntegrationTest {
                 Map.of("BIG", "x".repeat(4087)),
                 Map.of("AA", "x".repeat(2040), "BB", "x".repeat(2040)),
                 Map.of("BIG", "é".repeat(2043) + "x"),
-                Map.of("BIG", "😀".repeat(1022)),
+                Map.of("BIG", "x".repeat(4084) + "😀"),
                 Map.of("BIG", "x".repeat(3991) + "😀" + "x".repeat(92)),
                 Map.of("BIG", "\"".repeat(2043) + "x"),
                 Map.of("BIG", "\n".repeat(2043) + "x"));
@@ -210,7 +237,7 @@ class LambdaEnvironmentSizeIntegrationTest {
                 Map.of("BIG", "x".repeat(4086)),
                 Map.of("AA", "x".repeat(2040), "BB", "x".repeat(2039)),
                 Map.of("BIG", "é".repeat(2043)),
-                Map.of("BIG", "😀".repeat(1021) + "xx"),
+                Map.of("BIG", "x".repeat(4082) + "😀"),
                 Map.of("BIG", "x".repeat(3991) + "😀" + "x".repeat(91)),
                 Map.of("BIG", "\"".repeat(2043)),
                 Map.of("BIG", "\n".repeat(2043)));
@@ -262,5 +289,16 @@ class LambdaEnvironmentSizeIntegrationTest {
         assertEquals("InvalidParameterValueException", error.awsErrorDetails().errorCode());
         assertTrue(error.awsErrorDetails().errorMessage()
                 .contains("environment variables you have provided exceeded the 4KB limit"));
+    }
+
+    private static void assertMeasuredJson(InvalidParameterValueException error, Map<String, String> variables) {
+        assertEquals(new ObjectMapper().valueToTree(variables).toString(), measuredJson(error));
+    }
+
+    private static String measuredJson(InvalidParameterValueException error) {
+        String message = error.awsErrorDetails().errorMessage();
+        String marker = " String measured: ";
+        assertTrue(message.contains(marker), "The quota error must include AWS's measured JSON detail");
+        return message.substring(message.indexOf(marker) + marker.length());
     }
 }
