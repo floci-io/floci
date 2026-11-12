@@ -27,7 +27,7 @@ including batch, transaction and PartiQL table extraction.
 | `DescribeTable` | Get table metadata |
 | `ListTables` | List all tables |
 | `DescribeLimits` | Get the default account and table capacity quotas |
-| `DescribeEndpoints` | Get the Regional DynamoDB endpoint |
+| `DescribeEndpoints` | Get Floci's own host and port as the endpoint |
 | `UpdateTable` | Update throughput, indexes, streams |
 | `PutItem` | Write an item |
 | `GetItem` | Read an item by primary key |

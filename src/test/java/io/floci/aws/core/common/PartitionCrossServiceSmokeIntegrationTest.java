@@ -420,17 +420,6 @@ class PartitionCrossServiceSmokeIntegrationTest {
 
     @ParameterizedTest
     @MethodSource(PartitionMatrix.NON_COMMERCIAL_CASES)
-    void dynamoDbEndpointAddress(PartitionCase partitionCase) {
-        String region = offered(partitionCase, "dynamodb");
-        String host = json10(region, "dynamodb", "DynamoDB_20120810.DescribeEndpoints", "{}")
-        .when().post("/").then().statusCode(200)
-            .extract().jsonPath().getString("Endpoints[0].Address");
-        PartitionMatrix.assertHostIn(partitionCase, host);
-        assertEquals("dynamodb." + region + "." + partitionCase.dnsSuffix(), host);
-    }
-
-    @ParameterizedTest
-    @MethodSource(PartitionMatrix.NON_COMMERCIAL_CASES)
     void cloudWatchAlarmArn(PartitionCase partitionCase) {
         String region = offered(partitionCase, "monitoring");
         String name = unique("smoke-alarm", partitionCase);

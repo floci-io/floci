@@ -4,8 +4,8 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
+import io.floci.aws.config.EmulatorConfig;
 import io.floci.aws.core.common.AwsArnUtils;
-import io.floci.aws.core.common.AwsEndpoints;
 import io.floci.aws.core.common.AwsErrorResponse;
 import io.floci.aws.core.common.AwsException;
 import io.floci.aws.core.common.SmithyValidationErrors;
@@ -38,6 +38,7 @@ import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 import jakarta.ws.rs.core.Response;
 
+import java.net.URI;
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.Collections;
@@ -88,15 +89,17 @@ public class NativeDynamoDbJsonHandler {
     private final DynamoDbService dynamoDbService;
     private final NativeDynamoDbTableService tableService;
     private final ObjectMapper objectMapper;
+    private final EmulatorConfig config;
     private final DynamoDbPartiQLHandler partiQLHandler;
     private final Object importLock = new Object();
 
     @Inject
     public NativeDynamoDbJsonHandler(DynamoDbService dynamoDbService, NativeDynamoDbTableService tableService,
-                                     ObjectMapper objectMapper) {
+                                     ObjectMapper objectMapper, EmulatorConfig config) {
         this.dynamoDbService = dynamoDbService;
         this.tableService = tableService;
         this.objectMapper = objectMapper;
+        this.config = config;
         this.partiQLHandler = new DynamoDbPartiQLHandler(dynamoDbService, objectMapper);
     }
 
@@ -104,7 +107,7 @@ public class NativeDynamoDbJsonHandler {
     NativeDynamoDbJsonHandler(DynamoDbService dynamoDbService, DynamoDbStreamService dynamoDbStreamService,
                               KinesisService kinesisService, ObjectMapper objectMapper) {
         this(dynamoDbService, new NativeDynamoDbTableService(dynamoDbService, dynamoDbStreamService, kinesisService),
-                objectMapper);
+                objectMapper, null);
     }
 
     public Response handle(String action, JsonNode request, String region) throws Exception {
@@ -114,7 +117,7 @@ public class NativeDynamoDbJsonHandler {
             case "DescribeTable" -> handleDescribeTable(request, region);
             case "ListTables" -> handleListTables(request, region);
             case "DescribeLimits" -> handleDescribeLimits();
-            case "DescribeEndpoints" -> handleDescribeEndpoints(region);
+            case "DescribeEndpoints" -> handleDescribeEndpoints();
             case "PutItem" -> handlePutItem(request, region);
             case "GetItem" -> handleGetItem(request, region);
             case "DeleteItem" -> handleDeleteItem(request, region);
@@ -183,10 +186,11 @@ public class NativeDynamoDbJsonHandler {
         return Response.ok(response).build();
     }
 
-    private Response handleDescribeEndpoints(String region) {
+    // A client with endpoint discovery on sends its later requests to this address, so it names Floci.
+    private Response handleDescribeEndpoints() {
         ObjectNode response = objectMapper.createObjectNode();
         response.putArray("Endpoints").addObject()
-                .put("Address", AwsEndpoints.host("dynamodb", region))
+                .put("Address", URI.create(config.effectiveBaseUrl()).getAuthority())
                 .put("CachePeriodInMinutes", ENDPOINT_CACHE_PERIOD_IN_MINUTES);
         return Response.ok(response).build();
     }

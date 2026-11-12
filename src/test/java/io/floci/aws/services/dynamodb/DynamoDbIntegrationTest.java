@@ -895,7 +895,7 @@ class DynamoDbIntegrationTest {
     }
 
     @Test
-    void describeEndpointsNamesTheRegionalEndpoint() {
+    void describeEndpointsNamesFloci() {
         given()
             .header("X-Amz-Target", "DynamoDB_20120810.DescribeEndpoints")
             .contentType(DYNAMODB_CONTENT_TYPE)
@@ -904,7 +904,7 @@ class DynamoDbIntegrationTest {
             .post("/")
         .then()
             .statusCode(200)
-            .body("Endpoints.Address", contains("dynamodb.us-east-1.amazonaws.com"))
+            .body("Endpoints.Address", contains("localhost:4566"))
             .body("Endpoints.CachePeriodInMinutes", contains(1440));
     }
 
