@@ -28,6 +28,7 @@ import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 
+import static io.floci.aws.testing.LocalHttpsServer.hookUrl;
 import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
@@ -149,7 +150,7 @@ class EventBridgeInvokerApiDestinationTest {
     void deliversToAnEndpointWhoseCertificateChainsToAnExtraCa(@TempDir Path dir) throws Exception {
         FlociCertificateAuthority privateCa = FlociCertificateAuthority.loadOrCreate(dir.resolve("private-ca"));
         AtomicInteger delivered = new AtomicInteger();
-        HttpsServer server = httpsEndpoint(privateCa, delivered);
+        HttpsServer server = LocalHttpsServer.hook(privateCa, exchange -> delivered.incrementAndGet());
         try {
             assertRefused(hookUrl(server), Optional.empty(), delivered);
 
@@ -166,7 +167,7 @@ class EventBridgeInvokerApiDestinationTest {
         FlociCertificateAuthority privateCa = FlociCertificateAuthority.loadOrCreate(dir.resolve("private-ca"));
         FlociCertificateAuthority unrelatedCa = FlociCertificateAuthority.loadOrCreate(dir.resolve("unrelated-ca"));
         AtomicInteger delivered = new AtomicInteger();
-        HttpsServer server = httpsEndpoint(privateCa, delivered);
+        HttpsServer server = LocalHttpsServer.hook(privateCa, exchange -> delivered.incrementAndGet());
         try {
             assertRefused(hookUrl(server), Optional.of(unrelatedCa.certificatePath().toString()), delivered);
         } finally {
@@ -186,10 +187,6 @@ class EventBridgeInvokerApiDestinationTest {
         invoker(endpoint, extraCaPath).invokeTarget(apiDestinationTarget(), "{}", REGION);
     }
 
-    private static String hookUrl(HttpsServer server) {
-        return "https://localhost:" + server.getAddress().getPort() + "/hook";
-    }
-
     // An invoker built the way CDI builds it, its API destination pointing at endpoint, with TLS off.
     private static EventBridgeInvoker invoker(String endpoint, Optional<String> extraCaPath) {
         EmulatorConfig config = mock(EmulatorConfig.class, RETURNS_DEEP_STUBS);
@@ -206,19 +203,6 @@ class EventBridgeInvokerApiDestinationTest {
 
     private static Target apiDestinationTarget() {
         return new Target("tls-target", DESTINATION_ARN, null, null);
-    }
-
-    // An HTTPS endpoint on localhost serving a certificate the CA issued, counting the requests to /hook.
-    private static HttpsServer httpsEndpoint(FlociCertificateAuthority ca, AtomicInteger requests) throws Exception {
-        HttpsServer server = LocalHttpsServer.issuedBy(ca);
-        server.createContext("/hook", exchange -> {
-            exchange.getRequestBody().readAllBytes();
-            requests.incrementAndGet();
-            exchange.sendResponseHeaders(200, -1);
-            exchange.close();
-        });
-        server.start();
-        return server;
     }
 
     private static ApiDestination rateLimited(String name, int limit) {

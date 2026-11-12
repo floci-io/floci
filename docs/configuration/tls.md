@@ -128,7 +128,7 @@ When custom certificate paths are provided, `FLOCI_TLS_SELF_SIGNED` is ignored a
 
 ## Trusting Your Own CAs for Outbound Calls
 
-Some calls go out from Floci itself: an EventBridge API destination delivering an event, or Floci fetching a JWT issuer's keys. When the endpoint's certificate is issued by a private or corporate CA, Floci refuses it by default, because Floci trusts only the root CAs built into its Java runtime. Floci does not read the operating system's trust store, so adding the CA there (`update-ca-trust`, `update-ca-certificates`) has no effect.
+Some calls go out from Floci itself: an EventBridge API destination delivering an event, SNS posting to an HTTPS subscription, or Floci fetching a JWT issuer's keys. When the endpoint's certificate is issued by a private or corporate CA, Floci refuses it by default, because Floci trusts only the root CAs built into its Java runtime. Floci does not read the operating system's trust store, so adding the CA there (`update-ca-trust`, `update-ca-certificates`) has no effect.
 
 Point `FLOCI_TLS_EXTRA_CA_PATH` (config key `floci.tls.extra-ca-path`) at a PEM file holding those CA certificates:
 
@@ -145,7 +145,7 @@ services:
 
 - It works whether or not `FLOCI_TLS_ENABLED` is set. Floci does not need to serve HTTPS itself.
 - The CAs are added to what Floci already trusts: the JVM's root CAs, and Floci's own CA when TLS is enabled. Public endpoints keep working.
-- Floci's own clients that use them: EventBridge API destination delivery, and the JWT issuer fetch for HTTP API JWT authorizers and AppSync OIDC providers.
+- Floci's own clients that use them: EventBridge API destination delivery, SNS HTTPS subscriptions (the subscription confirmation and notification delivery), and the JWT issuer fetch for HTTP API JWT authorizers and AppSync OIDC providers.
 - Containers Floci launches do not receive these CAs. They keep `/etc/floci-ca-bundle.pem` exactly as described in [Containers Floci Launches](#containers-floci-launches); a workload that calls such an endpoint itself configures its own CAs.
 - The file may hold several certificates. A private key kept in it is ignored.
 - A file that is missing, unreadable, or holds no certificate stops Floci at startup with a message naming the path, however the setting is given.
