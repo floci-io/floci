@@ -3,6 +3,7 @@ package io.floci.aws.services.rds.proxy;
 import org.jboss.logging.Logger;
 
 import javax.net.ssl.SSLSocket;
+
 import java.io.ByteArrayOutputStream;
 import java.io.EOFException;
 import java.io.IOException;
@@ -80,10 +81,13 @@ public class MySqlProtocolHandler {
 
     private static final int COM_QUERY = 0x03;
     private static final int MAX_PACKET_PAYLOAD = 0xFFFFFF;
+    private static final int CLIENT_QUERY_ATTRIBUTES = 0x0800_0000;
+    private static final int CLIENT_MULTI_STATEMENTS = 0x0001_0000;
 
     private static final Pattern IAM_AUTH_PLUGIN = Pattern.compile(
-            "IDENTIFIED\\s+WITH\\s+`?AWSAuthenticationPlugin`?"
-                    + "(?:\\s+AS\\s+(?:'[^']*'|\"[^\"]*\"|0x[0-9A-Fa-f]+))?",
+            "IDENTIFIED\\s+WITH\\s+(?:`AWSAuthenticationPlugin`|AWSAuthenticationPlugin(?![A-Za-z0-9_$]))"
+                    + "(?:\\s+AS\\s+(?:'(?:\\\\.|''|[^'\\\\])*'|\"(?:\\\\.|\"\"|[^\"\\\\])*\"|0x[0-9A-Fa-f]+))?"
+                    + "(?!\\s+AS\\b)",
             Pattern.CASE_INSENSITIVE);
     private static final String NO_MATCHING_PASSWORD_HASH =
             "*0000000000000000000000000000000000000000";
@@ -919,8 +923,14 @@ public class MySqlProtocolHandler {
     private static void relayClientCommands(InputStream from, OutputStream to, int capabilities) {
         boolean compressed = (capabilities & (CLIENT_COMPRESS | CLIENT_ZSTD_COMPRESSION_ALGORITHM)) != 0;
         if (compressed) {
-            // The compressed stream may split an inner packet across arbitrary outer frames.
-            relay(from, to);
+            try {
+                MySqlCompressedCommandRelay.relay(from, to,
+                        (capabilities & CLIENT_ZSTD_COMPRESSION_ALGORITHM) != 0,
+                        (capabilities & CLIENT_QUERY_ATTRIBUTES) != 0,
+                        (capabilities & CLIENT_MULTI_STATEMENTS) != 0);
+            } catch (IOException e) {
+                LOG.debugv(e, "Compressed MySQL command relay ended");
+            }
             return;
         }
         try {
@@ -944,11 +954,70 @@ public class MySqlProtocolHandler {
     static byte[] rewriteIamAuthPlugin(byte[] payload) {
         String text = new String(payload, StandardCharsets.ISO_8859_1);
         Matcher matcher = IAM_AUTH_PLUGIN.matcher(text);
-        if (!matcher.find()) {
+        SqlContext context = new SqlContext();
+        StringBuffer rewritten = new StringBuffer();
+        boolean changed = false;
+        while (matcher.find()) {
+            context.advanceTo(text, matcher.start());
+            if (context.inCode()) {
+                matcher.appendReplacement(rewritten, Matcher.quoteReplacement(IAM_AUTH_PLUGIN_REPLACEMENT));
+                changed = true;
+            }
+        }
+        if (!changed) {
             return null;
         }
-        return matcher.replaceAll(Matcher.quoteReplacement(IAM_AUTH_PLUGIN_REPLACEMENT))
-                .getBytes(StandardCharsets.ISO_8859_1);
+        matcher.appendTail(rewritten);
+        return rewritten.toString().getBytes(StandardCharsets.ISO_8859_1);
+    }
+
+    private static final class SqlContext {
+        private int offset;
+        private char quote;
+        private boolean lineComment;
+        private boolean blockComment;
+
+        boolean inCode() {
+            return quote == 0 && !lineComment && !blockComment;
+        }
+
+        void advanceTo(String sql, int target) {
+            while (offset < target) {
+                char current = sql.charAt(offset);
+                char next = offset + 1 < sql.length() ? sql.charAt(offset + 1) : 0;
+                if (lineComment) {
+                    if (current == '\n' || current == '\r') {
+                        lineComment = false;
+                    }
+                } else if (blockComment) {
+                    if (current == '*' && next == '/') {
+                        blockComment = false;
+                        offset++;
+                    }
+                } else if (quote != 0) {
+                    if (quote != '`' && current == '\\' && next != 0) {
+                        offset++;
+                    } else if (current == quote) {
+                        if (next == quote) {
+                            offset++;
+                        } else {
+                            quote = 0;
+                        }
+                    }
+                } else if (current == '\'' || current == '"' || current == '`') {
+                    quote = current;
+                } else if (current == '#'
+                        || (current == '-' && next == '-'
+                        && offset + 2 < sql.length() && Character.isWhitespace(sql.charAt(offset + 2)))) {
+                    lineComment = true;
+                } else if (current == '/' && next == '*'
+                        && (offset + 2 >= sql.length() || sql.charAt(offset + 2) != '!')) {
+                    blockComment = true;
+                    offset++;
+                }
+                offset++;
+            }
+        }
     }
 
     private static void relay(InputStream from, OutputStream to) {
