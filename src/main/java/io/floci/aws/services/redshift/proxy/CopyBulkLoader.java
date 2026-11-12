@@ -73,7 +73,7 @@ final class CopyBulkLoader {
         return accepted;
     }
 
-    private static void writeRecord(OutputStream output, byte[] record) throws IOException {
+    static void writeRecord(OutputStream output, byte[] record) throws IOException {
         for (int offset = 0; offset < record.length; offset += 8192) {
             int length = Math.min(8192, record.length - offset);
             byte[] chunk = new byte[length];
@@ -152,7 +152,7 @@ final class CopyBulkLoader {
         }
     }
 
-    private static final class Cursor implements AutoCloseable {
+    static final class Cursor implements AutoCloseable {
         private final CopyStatementParser.S3CopyFrom spec;
         private final InputStream source;
         private final CopyRecordReader records;
@@ -178,7 +178,7 @@ final class CopyBulkLoader {
                 source.close();
                 throw exception;
             }
-            records = new CopyRecordReader(source, spec, true);
+            records = new CopyRecordReader(source, spec, !spec.transforms().toleratesErrors());
         }
 
         byte[] next() throws IOException {
@@ -187,6 +187,7 @@ final class CopyBulkLoader {
                 try {
                     raw = records.next(wanted -> CopyEtlLoader.acquireTransformHeap(heldMib, wanted));
                 } catch (S3TransferException exception) {
+                    releaseHeap();
                     raw = records.lastRecord();
                     line = records.recordLine() + spec.headerLines();
                     throw exception;
@@ -199,8 +200,13 @@ final class CopyBulkLoader {
                 if (spec.transforms().ignoreBlankLines() && CopyEtlLoader.isBlankLine(raw)) {
                     continue;
                 }
-                CopyEtlLoader.acquireTransformHeap(heldMib, (int) ((raw.length * 2L) / (1024 * 1024)) + 1);
-                return CopyEtlLoader.transform(spec, raw, jsonColumns, widths, kinds, scales, heldMib);
+                try {
+                    CopyEtlLoader.acquireTransformHeap(heldMib, (int) ((raw.length * 2L) / (1024 * 1024)) + 1);
+                    return CopyEtlLoader.transform(spec, raw, jsonColumns, widths, kinds, scales, heldMib);
+                } catch (RuntimeException exception) {
+                    releaseHeap();
+                    throw exception;
+                }
             }
         }
 

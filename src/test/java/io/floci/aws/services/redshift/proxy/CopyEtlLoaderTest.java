@@ -13,6 +13,7 @@ import java.util.Arrays;
 import java.util.List;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.TimeUnit;
+import java.util.zip.GZIPOutputStream;
 
 import static org.junit.jupiter.api.Assertions.*;
 import static org.mockito.Mockito.*;
@@ -139,6 +140,60 @@ class CopyEtlLoaderTest {
     @Test
     void blankLinesFailByDefaultAndAreLogged() throws Exception {
         runLoad("", "1\n\n2\n", 0, 1, true, 1211);
+    }
+
+    @Test
+    void ignoreAllErrorsToleratesBlankLinesWhenNotBlankSkipped() throws Exception {
+        runLoad("IGNOREALLERRORS", "1\n\n2\n", 2, 1, false, 1211, "", 2);
+    }
+
+    @Test
+    void ignoreAllErrorsDecompressesGzipThroughCursor() throws Exception {
+        ByteArrayOutputStream compressed = new ByteArrayOutputStream();
+        try (GZIPOutputStream gzip = new GZIPOutputStream(compressed)) {
+            gzip.write("1\nbad\n2\n".getBytes(StandardCharsets.UTF_8));
+        }
+        S3Service s3 = mock(S3Service.class);
+        when(s3.objectExists("bucket", "data")).thenReturn(true);
+        when(s3.getObject("bucket", "data")).thenReturn(new S3Object("bucket", "data",
+                compressed.toByteArray(), "application/gzip"));
+        CopyStatementParser.S3CopyFrom spec = (CopyStatementParser.S3CopyFrom) CopyStatementParser.parse(
+                "COPY events FROM 's3://bucket/data' GZIP IGNOREALLERRORS");
+        List<CopyLoadError> errors = new ArrayList<>();
+        try (ServerSocket listener = new ServerSocket(0);
+                Socket client = new Socket("localhost", listener.getLocalPort()); Socket server = listener.accept()) {
+            client.setSoTimeout(5000);
+            server.setSoTimeout(5000);
+            CompletableFuture<Void> serving = CompletableFuture.runAsync(() -> {
+                try {
+                    FakeCopyBackend fake = new FakeCopyBackend(server);
+                    fake.rejectRows(row -> row.startsWith("bad"));
+                    fake.serveUntilSync(new ByteArrayOutputStream(), sql -> { },
+                            sql -> sql.startsWith("SELECT (SELECT oid") ? List.of(List.of("10", "42", "99")) : List.of());
+                } catch (Exception exception) {
+                    throw new AssertionError(exception);
+                }
+            });
+            CopyBackendSession backend = new CopyBackendSession(client, frame -> { });
+            backend.loadErrorSink(errors::add);
+            assertEquals(2, CopyEtlLoader.execute(backend, spec, s3, null, null, List.of(), false));
+            backend.finish(false);
+            backend.synchronize();
+            serving.get(5, TimeUnit.SECONDS);
+            assertEquals(1, errors.size());
+            assertEquals("bad", errors.getFirst().rawLine());
+            assertEquals(2, errors.getFirst().lineNumber());
+        }
+    }
+
+    @Test
+    void cursorReleasesHeapPermitsEvenWhenRecordParsingFails() throws Exception {
+        int permitsBefore = S3CopySimulator.COPY_TRANSFORM_HEAP_MIB.availablePermits();
+        try {
+            runLoad("", "1\n\n2\n", 0, 1, true, 1211);
+        } finally {
+            assertEquals(permitsBefore, S3CopySimulator.COPY_TRANSFORM_HEAP_MIB.availablePermits());
+        }
     }
 
     private static void runLoad(String options, String data, long expectedCount, int expectedErrors, boolean failure)

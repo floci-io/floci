@@ -4,6 +4,7 @@ import io.floci.aws.core.common.AwsException;
 import io.floci.aws.core.common.PostgresWire;
 import io.floci.aws.core.common.RequestScopes;
 import io.floci.aws.services.iam.IamService;
+import io.floci.aws.services.redshift.proxy.CopyBulkLoader.Cursor;
 import io.floci.aws.services.redshift.proxy.S3CopySimulator.ColumnInfo;
 import io.floci.aws.services.redshift.proxy.S3CopySimulator.CopyInput;
 import io.floci.aws.services.redshift.proxy.S3CopySimulator.S3TransferException;
@@ -184,64 +185,35 @@ final class CopyEtlLoader {
             S3CopySimulator.authorizeCopyObject(spec, input.s3(), input.iamService(), input.roleSession(), key);
             S3Object object = input.readObject(key);
             byte[] data = object != null && object.getData() != null ? object.getData() : new byte[0];
-            try (InputStream raw = new ByteArrayInputStream(data);
-                    InputStream source = CopySourceInputStream.open(raw, spec.gzip())) {
-                S3CopySimulator.skipLines(source, spec.headerLines());
-                CopyRecordReader records = new CopyRecordReader(source, spec, !spec.transforms().toleratesErrors());
-                int[] heldMib = new int[]{0};
-                try {
+            try (Cursor cursor = new Cursor(spec, data, jsonColumns, widths, kinds, scales)) {
+                while (true) {
                     byte[] record;
-                    while (true) {
-                        try {
-                            record = records.next(wantedMib -> acquireTransformHeap(heldMib, wantedMib));
-                        } catch (S3TransferException exception) {
-                            recordError(backend, context, spec, key, records.recordLine() + spec.headerLines(),
-                                    records.lastRecord(), catalog, exception);
-                            if (RECORD_ERRORS.contains(exception.sqlState()) && (spec.transforms().ignoreAllErrors()
-                                    || ++rejected < spec.transforms().maxError())) {
-                                break;
-                            }
-                            throw exception;
-                        }
-                        if (record == null) {
-                            break;
-                        }
-                        if (spec.transforms().ignoreBlankLines() && isBlankLine(record)) {
+                    try {
+                        record = cursor.next();
+                    } catch (S3TransferException exception) {
+                        recordError(backend, context, spec, key, cursor.line(), cursor.raw(), catalog, exception);
+                        if (isRecordError(exception) && (spec.transforms().ignoreAllErrors()
+                                || ++rejected < spec.transforms().maxError())) {
                             continue;
                         }
-                        backend.execute("SAVEPOINT " + rowSavepoint);
-                        try {
-                            acquireTransformHeap(heldMib, (int) ((record.length * 2L) / (1024 * 1024)) + 1);
-                            byte[] transformed = transform(spec, record, jsonColumns, widths, kinds, scales, heldMib);
-                            accepted += backend.copy(sql, output -> {
-                                for (int offset = 0; offset < transformed.length; offset += 8192) {
-                                    int length = Math.min(8192, transformed.length - offset);
-                                    byte[] chunk = new byte[length];
-                                    System.arraycopy(transformed, offset, chunk, 0, length);
-                                    S3CopySimulator.writeCopyData(output, chunk, length);
-                                }
-                            });
-                        } catch (S3TransferException exception) {
-                            backend.recover();
-                            backend.execute("ROLLBACK TO SAVEPOINT " + rowSavepoint);
-                            recordError(backend, context, spec, key, records.recordLine() + spec.headerLines(), record, catalog, exception);
-                            if (!RECORD_ERRORS.contains(exception.sqlState()) || (!spec.transforms().ignoreAllErrors()
-                                    && ++rejected >= spec.transforms().maxError())) {
-                                throw exception;
-                            }
-                        } finally {
-                            if (heldMib[0] > 0) {
-                                S3CopySimulator.COPY_TRANSFORM_HEAP_MIB.release(heldMib[0]);
-                                heldMib[0] = 0;
-                            }
+                        throw exception;
+                    }
+                    if (record == null) {
+                        break;
+                    }
+                    backend.execute("SAVEPOINT " + rowSavepoint);
+                    try {
+                        accepted += backend.copy(sql, output -> CopyBulkLoader.writeRecord(output, record));
+                    } catch (S3TransferException exception) {
+                        backend.recover();
+                        backend.execute("ROLLBACK TO SAVEPOINT " + rowSavepoint);
+                        recordError(backend, context, spec, key, cursor.line(), cursor.raw(), catalog, exception);
+                        if (!isRecordError(exception) || (!spec.transforms().ignoreAllErrors()
+                                && ++rejected >= spec.transforms().maxError())) {
+                            throw exception;
                         }
-                        backend.execute("RELEASE SAVEPOINT " + rowSavepoint);
                     }
-                } finally {
-                    if (heldMib[0] > 0) {
-                        S3CopySimulator.COPY_TRANSFORM_HEAP_MIB.release(heldMib[0]);
-                        heldMib[0] = 0;
-                    }
+                    backend.execute("RELEASE SAVEPOINT " + rowSavepoint);
                 }
             }
         }
