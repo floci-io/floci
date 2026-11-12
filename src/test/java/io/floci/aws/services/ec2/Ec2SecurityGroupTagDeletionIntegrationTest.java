@@ -1,22 +1,18 @@
 package io.floci.aws.services.ec2;
 
+import io.floci.aws.testing.AwsTestClients;
 import io.floci.aws.testing.PartitionCleanup;
 import io.quarkus.test.junit.QuarkusTest;
-import io.restassured.RestAssured;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.RegisterExtension;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.ValueSource;
-import software.amazon.awssdk.auth.credentials.AwsBasicCredentials;
-import software.amazon.awssdk.auth.credentials.StaticCredentialsProvider;
-import software.amazon.awssdk.http.urlconnection.UrlConnectionHttpClient;
 import software.amazon.awssdk.regions.Region;
 import software.amazon.awssdk.services.ec2.Ec2Client;
 import software.amazon.awssdk.services.ec2.model.Ec2Exception;
 import software.amazon.awssdk.services.ec2.model.Filter;
 import software.amazon.awssdk.services.ec2.model.Tag;
 
-import java.net.URI;
 import java.util.List;
 import java.util.UUID;
 
@@ -148,12 +144,7 @@ class Ec2SecurityGroupTagDeletionIntegrationTest {
     }
 
     private Ec2Client client(Region region, String account) {
-        Ec2Client client = Ec2Client.builder()
-                .endpointOverride(URI.create("http://localhost:" + RestAssured.port))
-                .region(region)
-                .credentialsProvider(StaticCredentialsProvider.create(
-                        AwsBasicCredentials.create(account, "test")))
-                .httpClientBuilder(UrlConnectionHttpClient.builder()).build();
+        Ec2Client client = AwsTestClients.create(Ec2Client.builder(), account, region);
         cleanup.register(client::close);
         return client;
     }

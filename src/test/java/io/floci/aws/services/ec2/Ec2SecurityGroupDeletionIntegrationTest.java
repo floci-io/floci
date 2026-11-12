@@ -78,7 +78,7 @@ class Ec2SecurityGroupDeletionIntegrationTest {
                     Map.of("vpc-id", List.of(vpc))).getFirst().getGroupId();
             AwsException error = assertThrows(AwsException.class, () ->
                     service.deleteSecurityGroup(REGION, group, null, false));
-            assertEquals("Client.CannotDelete", error.getErrorCode());
+            assertEquals("CannotDelete", error.getErrorCode());
             assertEquals(group, service.describeSecurityGroups(
                     REGION, List.of(group), List.of(), Map.of()).getFirst().getGroupId());
         });

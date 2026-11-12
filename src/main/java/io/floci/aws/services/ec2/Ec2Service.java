@@ -7992,7 +7992,7 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
             synchronized (lockFor(key(region, selectedId))) {
                 SecurityGroup selected = getRequiredSecurityGroup(region, selectedId);
                 if ("default".equals(selected.getGroupName())) {
-                    throw new AwsException("Client.CannotDelete", "The default security group cannot be deleted", 400);
+                    throw new AwsException("CannotDelete", "The default security group cannot be deleted", 400);
                 }
                 if (hasSecurityGroupDependencies(region, selected)) {
                     throw new AwsException("DependencyViolation",
@@ -8031,6 +8031,10 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
             return true;
         }
         if (vpcEndpoints.scan(k -> k.startsWith(region + "::")).stream()
+                .anyMatch(endpoint -> nullToEmpty(endpoint.getSecurityGroupIds()).contains(groupId))) {
+            return true;
+        }
+        if (instanceConnectEndpoints.scan(k -> k.startsWith(region + "::")).stream()
                 .anyMatch(endpoint -> nullToEmpty(endpoint.getSecurityGroupIds()).contains(groupId))) {
             return true;
         }
