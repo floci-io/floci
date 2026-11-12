@@ -1828,6 +1828,64 @@ class NativeDynamoDbJsonHandlerTest {
         assertEquals("ResourceNotFoundException", ex.getErrorCode(), ex.getMessage());
     }
 
+    @ParameterizedTest
+    @CsvSource(delimiter = '|', textBlock = """
+            SET a = :v SET b = :v                                   | SET
+            REMOVE a REMOVE b                                       | REMOVE
+            ADD a :s ADD b :s                                       | ADD
+            DELETE a :s DELETE b :s                                 | DELETE
+            add a :s\tADD b :s                                      | ADD
+            REMOVE a REMOVE b REMOVE c                              | REMOVE
+            ADD a :s REMOVE b REMOVE c ADD d :s                     | REMOVE
+            SET a = :v DELETE b :s ADD c :s DELETE d :s SET e = :v  | DELETE
+            """)
+    void updateItemRejectsARepeatedSectionBeforeTheTableLookup(String expression, String section) {
+        ObjectNode request = updateUserRequest();
+        request.put("TableName", "Missing");
+        request.put("UpdateExpression", expression);
+        request.set("ExpressionAttributeValues", valueAndSet());
+
+        AwsException ex = assertThrows(AwsException.class,
+                () -> handler.handle("UpdateItem", request, "eu-west-1"));
+        assertEquals("ValidationException", ex.getErrorCode());
+        assertEquals("1 validation error detected: Invalid UpdateExpression: The \"" + section
+                + "\" section can only be used once in an update expression;", ex.getMessage());
+    }
+
+    @ParameterizedTest
+    @CsvSource(delimiter = '|', textBlock = """
+            ADD a :v ADD b :v     | Incorrect operand type for operator or function; operator: ADD, operand type: STRING, typeSet: ALLOWED_FOR_ADD_OPERAND
+            ADD a :s ADD b :w     | An expression attribute value used in expression is not defined; attribute value: :w
+            """)
+    void updateItemChecksARepeatedSectionAfterTheOtherUpdateExpressionErrors(String expression, String message) {
+        ObjectNode request = updateUserRequest();
+        request.put("TableName", "Missing");
+        request.put("UpdateExpression", expression);
+        request.set("ExpressionAttributeValues", valueAndSet());
+
+        AwsException ex = assertThrows(AwsException.class,
+                () -> handler.handle("UpdateItem", request, "eu-west-1"));
+        assertEquals("1 validation error detected: Invalid UpdateExpression: " + message, ex.getMessage());
+    }
+
+    @Test
+    void updateItemRefusesARepeatedSectionForACallerThatSkipsTheHandler() throws Exception {
+        createUsersTable("eu-west-1");
+        ObjectNode key = item("userId", "u1");
+
+        AwsException ex = assertThrows(AwsException.class, () -> service.updateItem("Users", key, null,
+                "ADD a :s ADD b :s", null, valueAndSet(), "NONE", "eu-west-1"));
+        assertEquals("Invalid UpdateExpression: The \"ADD\" section can only be used once in an update expression;",
+                ex.getMessage());
+        assertNull(service.getItem("Users", key, "eu-west-1"));
+    }
+
+    private ObjectNode valueAndSet() {
+        ObjectNode values = singleValue(":v");
+        values.putObject(":s").putArray("SS").add("x");
+        return values;
+    }
+
     @Test
     void updateItemAcceptsAnUpdateExpressionOfExactly4096Bytes() throws Exception {
         createUsersTable("eu-west-1");
@@ -2071,6 +2129,21 @@ class NativeDynamoDbJsonHandlerTest {
                 () -> handler.handle("TransactWriteItems", transactWrite("Update", update), "eu-west-1"));
         assertEquals("ValidationException", ex.getErrorCode());
         assertEquals("Invalid UpdateExpression: Syntax error; token: \",\", near: \"a, b\"", ex.getMessage());
+        assertNull(service.getItem("Users", item("userId", "u1"), "eu-west-1"));
+    }
+
+    @Test
+    void transactWriteItemsRejectsARepeatedSection() {
+        createUsersTable("eu-west-1");
+        ObjectNode update = mapper.createObjectNode();
+        update.set("Key", item("userId", "u1"));
+        update.put("UpdateExpression", "REMOVE a REMOVE b");
+
+        AwsException ex = assertThrows(AwsException.class,
+                () -> handler.handle("TransactWriteItems", transactWrite("Update", update), "eu-west-1"));
+        assertEquals("ValidationException", ex.getErrorCode());
+        assertEquals("Invalid UpdateExpression: The \"REMOVE\" section can only be used once in an update expression;",
+                ex.getMessage());
         assertNull(service.getItem("Users", item("userId", "u1"), "eu-west-1"));
     }
 

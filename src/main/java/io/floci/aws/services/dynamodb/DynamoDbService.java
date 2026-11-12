@@ -3474,6 +3474,7 @@ public class DynamoDbService {
         // name as a bare identifier instead.
         String remaining = expression.trim().replaceAll("\\s+", " ");
         DynamoDbReservedWords.check(remaining, "UpdateExpression");
+        requireSectionsUsedOnce(remaining);
 
         while (!remaining.isEmpty()) {
             String upper = remaining.toUpperCase();
@@ -4387,9 +4388,23 @@ public class DynamoDbService {
         }
     }
 
+    static void requireSectionsUsedOnce(String expression) {
+        Set<String> seen = new HashSet<>();
+        for (ExpressionEvaluator.Token token : ExpressionEvaluator.tokenize(expression)) {
+            String word = token.value().toUpperCase(Locale.ROOT);
+            if (token.type() == ExpressionEvaluator.TokenType.IDENTIFIER && UPDATE_SECTIONS.contains(word)
+                    && !seen.add(word)) {
+                throw new AwsException("ValidationException", "Invalid UpdateExpression: The \"" + word
+                        + "\" section can only be used once in an update expression;", 400);
+            }
+        }
+    }
+
     private static boolean isUpdatePunctuation(char c) {
         return "()[],.=+-".indexOf(c) >= 0;
     }
+
+    private static final List<String> UPDATE_SECTIONS = List.of("SET", "REMOVE", "ADD", "DELETE");
 
     // DynamoDB reads a SET target path up to "=", so a comma before it fails on the comma.
     static void requireAssignmentAfterSetTarget(String expression) {
@@ -4424,7 +4439,7 @@ public class DynamoDbService {
                 case COMMA -> target = inSet && depth == 0 ? i + 1 : -1;
                 case IDENTIFIER -> {
                     String word = token.value().toUpperCase(Locale.ROOT);
-                    if (depth == 0 && List.of("SET", "REMOVE", "ADD", "DELETE").contains(word)) {
+                    if (depth == 0 && UPDATE_SECTIONS.contains(word)) {
                         inSet = word.equals("SET");
                         target = inSet ? i + 1 : -1;
                     }
