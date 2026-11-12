@@ -48,8 +48,8 @@ Each of those operations ends up in exactly one of three places:
 - `byHand`: operations Floci checks itself, because they need one of several tagging actions.
   `TagOnCreateMembersTest` holds the two lists to each other.
 - `notRead`: the model has no tag member, the model lacks the operation, or the operation has an
-  explicit exception because its tags are nested deeper than this file reads.
-  A modeled request with an unreadable protocol or opaque payload instead needs an explicit exception.
+  explicit exception because its tags are nested deeper than this file reads. An unreadable protocol
+  or opaque payload gets its reason from the model as well.
 
 An operation whose tagging action takes the namespace's `CreateAction` condition key, as EC2's
 `ec2:CreateTags` does, is marked `createAction`, and Floci gives that key the operation's name. One
@@ -164,6 +164,8 @@ NO_TAGS = "no member of the request carries tags"
 # For an operation AWS has shipped since the botocore pin. A bump bringing the operation in
 # replaces this verdict with its tag members (or NO_TAGS).
 NOT_IN_BOTOCORE = "the pinned botocore does not have the operation yet, so its request cannot be read"
+UNREADABLE_PROTOCOL = "the request uses a protocol this file does not read"
+OPAQUE_PAYLOAD = "the request has an opaque payload this file does not read"
 # Operations whose tags need an operation-specific reason instead of the model-derived verdict.
 NOT_READ = {
     "ec2:RequestSpotFleet": "its tags are in spotFleetRequestConfig, deeper than the members this file reads",
@@ -383,14 +385,20 @@ def _collection(model: dict, shape_name: str) -> dict | None:
     return None
 
 
-def tag_members(model: dict, operation: str) -> list[dict]:
-    """The members of the operation's request the rule reads, as vendored entries."""
-    spec = model["operations"].get(operation)
-    if spec is None or "input" not in spec or not readable(model):
-        return []
+def tag_members(model: dict, operation: str) -> tuple[list[dict], str | None]:
+    """The request's tag members, or the model-derived reason none can be read."""
+    if operation not in model["operations"]:
+        return [], NOT_IN_BOTOCORE
+    spec = model["operations"][operation]
+    if not isinstance(spec, dict):
+        raise ValueError(f"{operation}: botocore operation is not an object")
+    if "input" not in spec:
+        return [], NO_TAGS
+    if not readable(model):
+        return [], UNREADABLE_PROTOCOL
     root = model["shapes"][spec["input"]["shape"]]
     if root.get("payload") is not None:
-        return []
+        return [], OPAQUE_PAYLOAD
     found = []
     for name, member in root.get("members", {}).items():
         if member.get("location") not in BODY_LOCATIONS or not TAG_MEMBER_RE.match(name):
@@ -413,7 +421,7 @@ def tag_members(model: dict, operation: str) -> list[dict]:
                 if len(kinds) == 1:
                     inner_collection["resourceType"] = _serialized(kinds[0], element["members"][kinds[0]], model)
                 found.append({"member": path, **inner_collection})
-    return found
+    return found, None if found else NO_TAGS
 
 
 def resource_arns(documents: list[dict], namespaces: set[str]) -> dict[str, dict[str, str]]:
@@ -447,16 +455,10 @@ def entry_for(operation: str, upstream: dict, models: dict[str, dict]) -> dict:
         return {**head, "notRead": NOT_READ[operation]}
     if len(upstream["tagging"]) != 1:
         raise ValueError(f"{operation}: needs one of {upstream['tagging']}; check it by hand (BY_HAND)")
-    for client, model in models.items():
-        spec = model["operations"].get(name)
-        if spec is None or "input" not in spec:
-            continue
-        root = model["shapes"][spec["input"]["shape"]]
-        if not readable(model) or root.get("payload") is not None:
-            raise ValueError(f"{operation}: {client} request cannot be read; add an explicit NOT_READ reason")
+    readings = [tag_members(model, name) for model in models.values()]
     members: dict[str, dict] = {}
-    for model in models.values():
-        for member in tag_members(model, name):
+    for found, _reason in readings:
+        for member in found:
             members.setdefault(member["member"], member)
     for path in EXCLUDED_MEMBERS.get(operation, {}):
         members.pop(path, None)
@@ -465,8 +467,11 @@ def entry_for(operation: str, upstream: dict, models: dict[str, dict]) -> dict:
             raise ValueError(f"{operation}: QUERY_MEMBERS names {path}, which its request does not have")
         members[path] = {**members[path], "query": query}
     if not members:
-        modeled = any(name in model["operations"] for model in models.values())
-        return {**head, "notRead": NO_TAGS if modeled else NOT_IN_BOTOCORE}
+        reasons = [reason for _found, reason in readings]
+        reason = next((item for item in reasons if item in (UNREADABLE_PROTOCOL, OPAQUE_PAYLOAD)),
+                      NO_TAGS if NO_TAGS in reasons or any(found for found, _reason in readings)
+                      else NOT_IN_BOTOCORE)
+        return {**head, "notRead": reason}
     return {**head, "tags": [members[path] for path in sorted(members)]}
 
 
@@ -517,7 +522,7 @@ def _unmatched_exclusions(covered: dict[str, dict], namespaces: dict[str, list[s
             continue
         name = operation.split(":", 1)[1]
         found = {member["member"] for model in load_models(data, set(namespaces[namespace_of(operation)])).values()
-                 for member in tag_members(model, name)}
+                 for member in tag_members(model, name)[0]}
         problems += [f"EXCLUDED_MEMBERS names {path} for {operation}, which its request does not have"
                      for path in paths if path not in found]
     return problems
