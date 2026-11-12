@@ -69,7 +69,7 @@ final class DynamoDbItemSize {
 
     /**
      * The size of an UpdateExpression statement, or empty when an action lacks the assignment or the
-     * value its clause needs. The update parser refuses such a statement.
+     * value its clause needs, or leaves a parenthesis open. The update parser refuses such a statement.
      */
     static OptionalInt updateStatementSize(String expression, Function<String, List<Object>> paths,
                                            JsonNode values) {
@@ -96,11 +96,27 @@ final class DynamoDbItemSize {
     }
 
     private static boolean readable(String clause, String action) {
+        if (leavesParenthesisOpen(action)) {
+            return false;
+        }
         return switch (clause) {
             case "SET" -> action.indexOf('=') >= 0;
             case "ADD" -> action.indexOf(' ') >= 0;
             default -> true;
         };
+    }
+
+    private static boolean leavesParenthesisOpen(String action) {
+        int open = 0;
+        for (int i = 0; i < action.length(); i++) {
+            char c = action.charAt(i);
+            if (c == '(') {
+                open++;
+            } else if (c == ')' && open > 0) {
+                open--;
+            }
+        }
+        return open > 0;
     }
 
     private static int actionSize(String clause, String action, PathTree targets,

@@ -232,6 +232,9 @@ class DynamoDbItemSizeServiceTest {
             ADD a
             SET ,
             ADD ,
+            SET a = if_not_exists(b, :v
+            SET a = list_append(c, :v
+            SET a = if_not_exists(list_append(c, :v), :v
             """)
     void updateItemLeavesAStatementItCannotSizeToTheUpdateParser(String expression) {
         seed("a", "c", stringValue("x"));
