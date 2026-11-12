@@ -1530,7 +1530,7 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
         defaultVpc.setOwnerId(ownerAccountId);
         defaultVpc.setRegion(region);
         defaultVpc.getCidrBlockAssociationSet().add(
-                new VpcCidrBlockAssociation("vpc-cidr-assoc-" + Ec2Ids.stableHex("vpc-cidr-assoc::" + region), "172.31.0.0/16"));
+                new VpcCidrBlockAssociation("vpc-cidr-assoc-default", "172.31.0.0/16"));
         vpcs.put(key(region, vpcId), defaultVpc);
         declareVpcNetwork(region, vpcId, "172.31.0.0/16");
 
@@ -2173,11 +2173,11 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
     // correctly keyed by region. RdsService derives the same ids from these methods so its
     // default DB subnet group resolves against the right region's default VPC.
     public static String defaultVpcId(String region) {
-        return "vpc-" + Ec2Ids.stableHex("vpc::" + region);
+        return "vpc-default-" + region;
     }
 
     public static String defaultSubnetId(String region, String azSuffix) {
-        return "subnet-" + Ec2Ids.stableHex("subnet::" + region + "::" + azSuffix);
+        return "subnet-default-" + region + "-" + azSuffix;
     }
 
     public static boolean isModelledAvailabilityZone(String region, String zone) {
@@ -2185,7 +2185,7 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
     }
 
     public static String defaultSecurityGroupId(String region) {
-        return "sg-" + Ec2Ids.stableHex("sg::" + region);
+        return "sg-default-" + region;
     }
 
     /**
