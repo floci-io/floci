@@ -52,7 +52,9 @@ public class MySqlProtocolHandler {
     private static final Logger LOG = Logger.getLogger(MySqlProtocolHandler.class);
 
     private static final int CLIENT_SSL = 0x0800;
+    private static final int CLIENT_COMPRESS = 0x0020;
     private static final int CLIENT_PLUGIN_AUTH = 0x0008_0000;
+    private static final int CLIENT_ZSTD_COMPRESSION_ALGORITHM = 0x0400_0000;
     private static final int CLIENT_PLUGIN_AUTH_LENENC_CLIENT_DATA = 0x200000;
     private static final int CLIENT_SECURE_CONNECTION = 0x8000;
     private static final int CLIENT_CONNECT_WITH_DB = 0x0008;
@@ -265,7 +267,7 @@ public class MySqlProtocolHandler {
         // Authenticated: clear the handshake deadline so a long-lived idle session is never killed.
         client.setSoTimeout(0);
         backend.setSoTimeout(0);
-        bridge(client, backend);
+        bridge(client, backend, parsed.capabilities());
     }
 
     /**
@@ -405,7 +407,7 @@ public class MySqlProtocolHandler {
             closeQuietly(backend);
             return;
         }
-        bridge(client, backend);
+        bridge(client, backend, parsed.capabilities());
     }
 
     /** mysql_clear_password sends the password NUL-terminated. */
@@ -866,7 +868,7 @@ public class MySqlProtocolHandler {
 
     // ── Bridge ────────────────────────────────────────────────────────────────
 
-    private static void bridge(Socket client, Socket backend) {
+    private static void bridge(Socket client, Socket backend, int capabilities) {
         InputStream clientIn, backendIn;
         OutputStream clientOut, backendOut;
         try {
@@ -891,7 +893,7 @@ public class MySqlProtocolHandler {
         };
         Thread t1 = RelayThreads.start("rds-mysql-c2b", () -> {
             try {
-                relayClientCommands(clientIn, backendOut);
+                relayClientCommands(clientIn, backendOut, capabilities);
             } finally {
                 closeBoth.run();
             }
@@ -914,7 +916,13 @@ public class MySqlProtocolHandler {
         }
     }
 
-    private static void relayClientCommands(InputStream from, OutputStream to) {
+    private static void relayClientCommands(InputStream from, OutputStream to, int capabilities) {
+        boolean compressed = (capabilities & (CLIENT_COMPRESS | CLIENT_ZSTD_COMPRESSION_ALGORITHM)) != 0;
+        if (compressed) {
+            // The compressed stream may split an inner packet across arbitrary outer frames.
+            relay(from, to);
+            return;
+        }
         try {
             byte[] raw;
             while ((raw = readMysqlPacketRaw(from)) != null) {
