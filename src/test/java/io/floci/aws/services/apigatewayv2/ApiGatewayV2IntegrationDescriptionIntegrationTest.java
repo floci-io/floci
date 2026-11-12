@@ -5,19 +5,27 @@ import io.floci.aws.services.apigatewayv2.model.Integration;
 import io.floci.aws.testing.AwsTestClients;
 import io.floci.aws.testing.RestAssuredJsonUtils;
 import io.quarkus.test.junit.QuarkusTest;
+import io.restassured.response.Response;
 import io.restassured.specification.RequestSpecification;
 import jakarta.inject.Inject;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.Arguments;
+import org.junit.jupiter.params.provider.MethodSource;
+import org.junit.jupiter.params.provider.ValueSource;
 import software.amazon.awssdk.http.apache5.Apache5HttpClient;
 import software.amazon.awssdk.regions.Region;
 import software.amazon.awssdk.services.apigatewayv2.ApiGatewayV2Client;
 import software.amazon.awssdk.services.apigatewayv2.model.CreateIntegrationResponse;
 import software.amazon.awssdk.services.apigatewayv2.model.UpdateIntegrationResponse;
 
+import java.util.HashMap;
+import java.util.List;
 import java.util.Map;
+import java.util.stream.Stream;
 
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.equalTo;
@@ -131,6 +139,54 @@ class ApiGatewayV2IntegrationDescriptionIntegrationTest {
                 .integrationMethod("POST")).description());
     }
 
+    @ParameterizedTest
+    @MethodSource("nonStringDescriptions")
+    void createRejectsNonStringDescriptionsWithoutStoringAnIntegration(boolean json11, Object description) {
+        integrationDescriptionRequest(json11, null, description)
+                .then().statusCode(400)
+                .body("__type", equalTo("BadRequestException"));
+
+        assertEquals(0, client.getIntegrations(b -> b.apiId(apiId)).items().size());
+    }
+
+    @ParameterizedTest
+    @MethodSource("nonStringDescriptions")
+    void updateRejectsNonStringDescriptionsWithoutChangingTheIntegration(boolean json11, Object description) {
+        String integrationId = createIntegration();
+        client.updateIntegration(b -> b.apiId(apiId).integrationId(integrationId).description("stored"));
+
+        integrationDescriptionRequest(json11, integrationId, description)
+                .then().statusCode(400)
+                .body("__type", equalTo("BadRequestException"));
+
+        assertEquals("stored", client.getIntegration(b -> b.apiId(apiId)
+                .integrationId(integrationId)).description());
+        assertEquals("https://example.com", client.getIntegration(b -> b.apiId(apiId)
+                .integrationId(integrationId)).integrationUri());
+    }
+
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    void nullDescriptionIsOptionalOnCreateAndPreservesTheValueOnUpdate(boolean json11) {
+        String integrationId = integrationDescriptionRequest(json11, null, null)
+                .then().statusCode(201)
+                .extract().path(json11 ? "IntegrationId" : "integrationId");
+        assertNull(client.getIntegration(b -> b.apiId(apiId).integrationId(integrationId)).description());
+        client.updateIntegration(b -> b.apiId(apiId).integrationId(integrationId).description("stored"));
+
+        integrationDescriptionRequest(json11, integrationId, null)
+                .then().statusCode(200)
+                .body(json11 ? "Description" : "description", equalTo("stored"));
+
+        assertEquals("stored", client.getIntegration(b -> b.apiId(apiId)
+                .integrationId(integrationId)).description());
+    }
+
+    private static Stream<Arguments> nonStringDescriptions() {
+        return Stream.of(42, true, List.of("invalid"), Map.of("value", "invalid"))
+                .flatMap(value -> Stream.of(Arguments.of(false, value), Arguments.of(true, value)));
+    }
+
     @Test
     void copiedAndSerializedIntegrationRetainsDescriptionOnRestore() throws Exception {
         String integrationId = createIntegration();
@@ -180,7 +236,19 @@ class ApiGatewayV2IntegrationDescriptionIntegrationTest {
                 .then().statusCode(200)
                 .body("Items[0].Description", equalTo("probe2"));
 
-        assertEquals("probe2", client.getIntegration(b -> b.apiId(apiId)
+        jsonRequest("UpdateIntegration")
+                .body(Map.of("ApiId", apiId, "IntegrationId", integrationId, "IntegrationMethod", "POST"))
+                .when().post("/")
+                .then().statusCode(200)
+                .body("Description", equalTo("probe2"));
+
+        jsonRequest("UpdateIntegration")
+                .body(Map.of("ApiId", apiId, "IntegrationId", integrationId, "Description", ""))
+                .when().post("/")
+                .then().statusCode(200)
+                .body("Description", equalTo(""));
+
+        assertEquals("", client.getIntegration(b -> b.apiId(apiId)
                 .integrationId(integrationId)).description());
     }
 
@@ -188,6 +256,32 @@ class ApiGatewayV2IntegrationDescriptionIntegrationTest {
         return given().contentType("application/x-amz-json-1.1")
                 .header("X-Amz-Target", "AmazonApiGatewayV2." + action)
                 .header("Authorization", "AWS4-HMAC-SHA256 Credential=test/20261111/us-east-1/apigatewayv2/aws4_request");
+    }
+
+    private Response integrationDescriptionRequest(boolean json11, String integrationId, Object description) {
+        if (json11) {
+            Map<String, Object> request = new HashMap<>(Map.of("ApiId", apiId,
+                    "IntegrationUri", "https://updated.example.com"));
+            request.put("Description", description);
+            if (integrationId != null) {
+                request.put("IntegrationId", integrationId);
+            } else {
+                request.putAll(Map.of("IntegrationType", "HTTP_PROXY", "IntegrationMethod", "GET",
+                        "PayloadFormatVersion", "1.0"));
+            }
+            return jsonRequest(integrationId == null ? "CreateIntegration" : "UpdateIntegration")
+                    .body(request).post("/");
+        }
+        Map<String, Object> request = new HashMap<>(Map.of("integrationUri", "https://updated.example.com"));
+        request.put("description", description);
+        if (integrationId == null) {
+            request.putAll(Map.of("integrationType", "HTTP_PROXY", "integrationMethod", "GET",
+                    "payloadFormatVersion", "1.0"));
+            return given().contentType("application/json").body(request)
+                    .post("/v2/apis/" + apiId + "/integrations");
+        }
+        return given().contentType("application/json").body(request)
+                .patch("/v2/apis/" + apiId + "/integrations/" + integrationId);
     }
 
     private String createIntegration() {
