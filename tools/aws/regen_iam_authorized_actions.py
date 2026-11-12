@@ -150,7 +150,8 @@ def fetch_references(source_dir: Path | None) -> tuple[list[dict], str]:
 def authorized_actions_from(documents: list[dict]) -> dict[str, dict[str, str]]:
     """Each namespace's operations authorized by one action of another name, sorted.
 
-    An operation keeps its own name when the reference gives it no single answer: when it is listed
+    An operation whose own name is no action and that several authorize is the one its name starts
+    with as a word, when one does. An operation keeps its own name when the reference gives it no single answer: when it is listed
     for several SDK clients, which the reference gives one action between them although AWS can
     authorize each client's call differently (S3's GetPublicAccessBlock is
     s3:GetBucketPublicAccessBlock, S3 Control's is the account's), or when its name is listed more
@@ -168,6 +169,16 @@ def authorized_actions_from(documents: list[dict]) -> dict[str, dict[str, str]]:
             if not isinstance(name, str) or not NAME_RE.match(name):
                 raise ValueError(f"{namespace}: operation entry without a usable 'Name': {operation!r}")
             authorized = _counted_actions(namespace, _authorized_actions(namespace, operation))
+            if len(authorized) > 1 and name.lower() not in own_actions:
+                # An operation whose own name is no action and that several authorize is the one of them its
+                # name starts with as a word (CloudFront's CreateDistributionWithTags is
+                # cloudfront:CreateDistribution), the others being what AWS checks beside it. A plural is no
+                # such word: S3's DeleteObjects is checked for each object it deletes.
+                prefixed = [(service, action) for service, action in authorized
+                            if service == namespace and action != name and name.startswith(action)
+                            and (name[len(action)].isupper() or name[len(action)].isdigit())]
+                if len(prefixed) == 1:
+                    authorized = prefixed
             mapped = None
             if len(authorized) == 1 and len(_sdk_clients(namespace, operation)) <= 1:
                 service, action = authorized[0]

@@ -117,6 +117,30 @@ def test_a_tagging_action_beside_several_leaves_them_several():
     assert found == {}
 
 
+def test_an_operation_named_for_no_action_is_the_one_of_its_actions_its_name_starts_with():
+    # CloudFront's CreateDistributionWithTags is no IAM action: AWS checks cloudfront:CreateDistribution, and the
+    # others it lists only for what the request adds (a connection group, a VPC origin, its tags).
+    found = r.authorized_actions_from([service("cloudfront", {"CreateDistributionWithTags": [
+        "cloudfront:CreateConnectionGroup", "cloudfront:CreateDistribution", "cloudfront:GetVpcOrigin",
+        "cloudfront:TagResource"]}, ["CreateConnectionGroup", "CreateDistribution", "GetVpcOrigin", "TagResource"])])
+    assert found == {"cloudfront": {"CreateDistributionWithTags": "cloudfront:CreateDistribution"}}
+
+
+def test_an_action_matching_a_name_only_in_case_is_not_its_prefix():
+    # API Gateway names its actions for HTTP verbs: PutIntegration lists apigateway:PUT beside others, which is no
+    # prefix of its name.
+    found = r.authorized_actions_from([service("apigateway", {"PutIntegration": [
+        "apigateway:PUT", "apigateway:POST"]}, ["PUT", "POST"])])
+    assert found == {}
+
+
+def test_a_plural_of_an_action_is_not_named_for_it():
+    # S3's DeleteObjects deletes several objects, each checked as s3:DeleteObject where it is deleted.
+    found = r.authorized_actions_from([service("s3", {"DeleteObjects": [
+        "s3:DeleteObject", "s3:DeleteObjectVersion"]}, ["DeleteObject", "DeleteObjectVersion"])])
+    assert found == {}
+
+
 def test_namespaces_and_operations_are_sorted():
     found = r.authorized_actions_from([
         service("sqs", {"SendMessageBatch": ["sqs:SendMessage"],
