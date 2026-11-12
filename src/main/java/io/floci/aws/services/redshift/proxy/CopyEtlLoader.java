@@ -20,6 +20,7 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.Set;
 import java.util.UUID;
+import java.util.function.Consumer;
 import java.util.function.IntConsumer;
 
 /** Executes COPY transformations and error tolerance on the caller's PostgreSQL 15 session. */
@@ -33,10 +34,17 @@ final class CopyEtlLoader {
     static boolean runSimple(Socket client, Socket socket, CopyStatementParser.S3Statement spec,
                               S3Service s3, IamService iam, String account, List<String> roles,
                               char status, IntConsumer onStatusChange) throws IOException {
+        return runSimple(client, socket, spec, s3, iam, account, roles, status, onStatusChange, null);
+    }
+
+    static boolean runSimple(Socket client, Socket socket, CopyStatementParser.S3Statement spec,
+                              S3Service s3, IamService iam, String account, List<String> roles,
+                              char status, IntConsumer onStatusChange, Consumer<CopyLoadError> errorSink) throws IOException {
         CopyBackendSession backend = new CopyBackendSession(socket, response -> {
             client.getOutputStream().write(response.toPacketBytes());
             client.getOutputStream().flush();
         });
+        backend.loadErrorSink(errorSink);
         long accepted = 0;
         S3TransferException failure = null;
         try {
@@ -118,17 +126,22 @@ final class CopyEtlLoader {
         List<Integer> widths = spec.transforms().truncateColumns() ? S3CopySimulator.alignMaxBytes(spec, catalog) : null;
         List<CopyRecordTransformer.ColumnKind> kinds = spec.transforms().needsColumnTypes()
                 ? S3CopySimulator.alignKinds(spec, catalog) : null;
+        List<Integer> scales = S3CopySimulator.alignScales(spec, catalog);
+        CopyLoadError.Context context = backend.loadErrorSink() == null ? null : CopyLoadError.Context.create(
+                backend.query("SELECT (SELECT oid FROM pg_roles WHERE rolname = current_user), pg_backend_pid(), "
+                        + "to_regclass(" + PostgresWire.quoteLiteral(spec.targetTable()) + ")::oid"));
         CopyInput input = exactObject
                 ? S3CopySimulator.prepareObjectCopy(spec, s3, iam, account, roles, expectedETag, versionId)
                 : S3CopySimulator.prepareCopy(spec, s3, iam, account, roles);
         try {
-            if (!spec.transforms().toleratesErrors()) {
+            if (!spec.transforms().toleratesErrors() && backend.loadErrorSink() == null
+                    && scales.stream().allMatch(value -> value == null)) {
                 return backend.copy(S3CopySimulator.copyBackendSql(spec, discovered),
                         output -> S3CopySimulator.streamCopyInput(input, discovered, widths, kinds, output));
             }
             try {
                 return RequestScopes.callAsChecked(S3CopySimulator.keyAccount(spec, s3, iam),
-                        () -> loadRecords(backend, input, discovered, widths, kinds));
+                        () -> loadRecords(backend, input, discovered, widths, kinds, scales, catalog, context));
             } catch (IOException | RuntimeException exception) {
                 throw exception;
             } catch (Exception exception) {
@@ -161,7 +174,8 @@ final class CopyEtlLoader {
     }
 
     private static long loadRecords(CopyBackendSession backend, CopyInput input, List<String> discovered,
-                                     List<Integer> widths, List<CopyRecordTransformer.ColumnKind> kinds)
+                                     List<Integer> widths, List<CopyRecordTransformer.ColumnKind> kinds,
+                                     List<Integer> scales, List<ColumnInfo> catalog, CopyLoadError.Context context)
             throws IOException {
         CopyStatementParser.S3CopyFrom spec = input.spec();
         List<String> jsonColumns = S3CopySimulator.jsonColumns(spec, discovered);
@@ -176,15 +190,32 @@ final class CopyEtlLoader {
             try (InputStream raw = new ByteArrayInputStream(data);
                     InputStream source = CopySourceInputStream.open(raw, spec.gzip())) {
                 S3CopySimulator.skipLines(source, spec.headerLines());
-                CopyRecordReader records = new CopyRecordReader(source, spec);
+                CopyRecordReader records = new CopyRecordReader(source, spec, !spec.transforms().toleratesErrors());
                 int[] heldMib = new int[]{0};
                 try {
                     byte[] record;
-                    while ((record = records.next(wantedMib -> acquireTransformHeap(heldMib, wantedMib))) != null) {
+                    while (true) {
+                        try {
+                            record = records.next(wantedMib -> acquireTransformHeap(heldMib, wantedMib));
+                        } catch (S3TransferException exception) {
+                            recordError(backend, context, spec, key, records.recordLine() + spec.headerLines(),
+                                    records.lastRecord(), catalog, exception);
+                            if (RECORD_ERRORS.contains(exception.sqlState()) && (spec.transforms().ignoreAllErrors()
+                                    || ++rejected < spec.transforms().maxError())) {
+                                break;
+                            }
+                            throw exception;
+                        }
+                        if (record == null) {
+                            break;
+                        }
+                        if (spec.transforms().ignoreBlankLines() && isBlankLine(record)) {
+                            continue;
+                        }
                         backend.execute("SAVEPOINT " + rowSavepoint);
                         try {
                             acquireTransformHeap(heldMib, (int) ((record.length * 2L) / (1024 * 1024)) + 1);
-                            byte[] transformed = transform(spec, record, jsonColumns, widths, kinds, heldMib);
+                            byte[] transformed = transform(spec, record, jsonColumns, widths, kinds, scales, heldMib);
                             accepted += backend.copy(sql, output -> {
                                 for (int offset = 0; offset < transformed.length; offset += 8192) {
                                     int length = Math.min(8192, transformed.length - offset);
@@ -196,7 +227,9 @@ final class CopyEtlLoader {
                         } catch (S3TransferException exception) {
                             backend.recover();
                             backend.execute("ROLLBACK TO SAVEPOINT " + rowSavepoint);
-                            if (!RECORD_ERRORS.contains(exception.sqlState()) || ++rejected >= spec.transforms().maxError()) {
+                            recordError(backend, context, spec, key, records.recordLine() + spec.headerLines(), record, catalog, exception);
+                            if (!RECORD_ERRORS.contains(exception.sqlState()) || (!spec.transforms().ignoreAllErrors()
+                                    && ++rejected >= spec.transforms().maxError())) {
                                 throw exception;
                             }
                         } finally {
@@ -220,7 +253,10 @@ final class CopyEtlLoader {
 
     private static byte[] transform(CopyStatementParser.S3CopyFrom spec, byte[] record, List<String> jsonColumns,
                                     List<Integer> widths, List<CopyRecordTransformer.ColumnKind> kinds,
-                                    int[] heldMib) throws IOException {
+                                    List<Integer> scales, int[] heldMib) throws IOException {
+        if (!spec.jsonAuto() && isBlankLine(record)) {
+            throw new S3TransferException("22P04", "COPY input line contained no data", null);
+        }
         if (spec.jsonAuto()) {
             ByteArrayOutputStream csv = new ByteArrayOutputStream();
             OutputStream bounded = new OutputStream() {
@@ -250,16 +286,38 @@ final class CopyEtlLoader {
                 }
             };
             JsonLinesToCsvConverter.convert(new ByteArrayInputStream(record), jsonColumns, bounded, spec.jsonAutoIgnoreCase());
-            return csv.toByteArray();
+            CopyStatementParser.S3CopyFrom csvSpec = new CopyStatementParser.S3CopyFrom(spec.targetTable(),
+                    spec.columns(), spec.bucket(), spec.keyOrPrefix(), ",", 0, false, true, null, null,
+                    false, false, false, spec.transforms());
+            return new CopyRecordTransformer(csvSpec, widths, kinds, scales).apply(csv.toByteArray(), bytes -> {
+                checkOutputBudget(bytes, record.length + 2L * csv.size(), heldMib);
+            });
         }
-        return new CopyRecordTransformer(spec, widths, kinds).apply(record, bytes -> {
-            if (bytes > S3CopySimulator.COPY_TRANSFORM_MAX_OBJECT_BYTES) {
-                throw new S3TransferException("54000", "COPY transformed record exceeds the size limit", null);
-            }
-            if (heldMib != null) {
-                acquireTransformHeap(heldMib, (int) ((record.length + 2L * bytes) / (1024 * 1024)) + 1);
-            }
+        return new CopyRecordTransformer(spec, widths, kinds, scales).apply(record, bytes -> {
+            checkOutputBudget(bytes, record.length, heldMib);
         });
+    }
+
+    private static void checkOutputBudget(int bytes, long inputBytes, int[] heldMib) {
+        if (bytes > S3CopySimulator.COPY_TRANSFORM_MAX_OBJECT_BYTES) {
+            throw new S3TransferException("54000", "COPY transformed record exceeds the size limit", null);
+        }
+        if (heldMib != null) {
+            acquireTransformHeap(heldMib, (int) ((inputBytes + 2L * bytes) / (1024 * 1024)) + 1);
+        }
+    }
+
+    private static boolean isBlankLine(byte[] record) {
+        return record.length == 1 && (record[0] == '\n' || record[0] == '\r')
+                || record.length == 2 && record[0] == '\r' && record[1] == '\n';
+    }
+
+    private static void recordError(CopyBackendSession backend, CopyLoadError.Context context,
+                                     CopyStatementParser.S3CopyFrom spec, String key, long line, byte[] record,
+                                     List<ColumnInfo> catalog, S3TransferException exception) {
+        if (context != null && RECORD_ERRORS.contains(exception.sqlState())) {
+            backend.loadErrorSink().accept(CopyLoadError.from(context, spec, key, line, record, catalog, exception));
+        }
     }
 
 }

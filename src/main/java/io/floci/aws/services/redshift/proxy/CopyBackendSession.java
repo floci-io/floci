@@ -12,6 +12,7 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
+import java.util.function.Consumer;
 
 /** Internal COPY commands use named extended statements so client statements and portals survive. */
 final class CopyBackendSession {
@@ -24,6 +25,15 @@ final class CopyBackendSession {
     private String activeStatement;
     private boolean parsed;
     private char readyStatus = 'I';
+    private Consumer<CopyLoadError> loadErrorSink;
+
+    void loadErrorSink(Consumer<CopyLoadError> sink) {
+        loadErrorSink = sink;
+    }
+
+    Consumer<CopyLoadError> loadErrorSink() {
+        return loadErrorSink;
+    }
 
     CopyBackendSession(Socket backend, FrameSink asynchronous) {
         this.backend = backend;
@@ -209,7 +219,7 @@ final class CopyBackendSession {
                 failed = true;
                 Map<Character, String> fields = PostgresWire.parseFields(response.body(), 0);
                 throw new S3TransferException(fields.getOrDefault('C', "XX000"),
-                        fields.getOrDefault('M', "COPY backend command failed"), null);
+                        fields.getOrDefault('M', "COPY backend command failed"), null, fields);
             }
             if (response.type() == '1') {
                 parsed = true;

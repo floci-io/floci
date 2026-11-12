@@ -5,12 +5,49 @@ import org.junit.jupiter.api.Test;
 import java.nio.charset.StandardCharsets;
 import java.util.Arrays;
 import java.util.List;
+import java.util.concurrent.atomic.AtomicInteger;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class CopyRecordTransformerTest {
+
+    @Test
+    void expandedDecimalsAreBudgetedBeforeTheNextFieldIsWritten() {
+        CopyStatementParser.S3CopyFrom spec = (CopyStatementParser.S3CopyFrom) CopyStatementParser.parse(
+                "COPY t FROM 's3://b/k' CSV");
+        AtomicInteger observed = new AtomicInteger();
+        assertThrows(IllegalArgumentException.class, () -> new CopyRecordTransformer(spec, null, null, List.of(0, 0, 0))
+                .apply("1e3,1e3,1e3\n".getBytes(StandardCharsets.UTF_8), size -> {
+                    observed.set(size);
+                    if (size > 3) {
+                        throw new IllegalArgumentException("Output budget exceeded");
+                    }
+                }));
+        assertEquals(4, observed.get());
+    }
+
+    @Test
+    void decimalScaleUsesTruncationByDefaultAndRoundecRoundsTiesAwayFromZero() {
+        for (String option : List.of("", "ROUNDEC")) {
+            CopyStatementParser.S3CopyFrom spec = (CopyStatementParser.S3CopyFrom) CopyStatementParser.parse(
+                    "COPY t FROM 's3://b/k' CSV " + option);
+            byte[] output = new CopyRecordTransformer(spec, null, null, Arrays.asList(2, 2, null))
+                    .apply("20.259,-20.255,20.259\n,,\\N\n".getBytes(StandardCharsets.UTF_8));
+            assertEquals(option.isEmpty() ? "20.25,-20.25,20.259\n,,\\N\n" : "20.26,-20.26,20.259\n,,\\N\n",
+                    new String(output, StandardCharsets.UTF_8));
+        }
+    }
+
+    @Test
+    void ignoreBlankLinesDoesNotDiscardWhitespaceOrQuotedEmptyFields() {
+        CopyStatementParser.S3CopyFrom spec = (CopyStatementParser.S3CopyFrom) CopyStatementParser.parse(
+                "COPY t FROM 's3://b/k' CSV IGNOREBLANKLINES");
+        assertEquals("\"a\n\nb\"\n   \n\"\"\n,\n",
+                new String(new CopyRecordTransformer(spec, null).apply(
+                        "\n\r\n\"a\n\nb\"\n   \n\"\"\n,\n".getBytes(StandardCharsets.UTF_8)), StandardCharsets.UTF_8));
+    }
 
     private static CopyStatementParser.CopyTransforms transforms(
             boolean blanks, boolean empty, boolean removeQuotes, boolean truncate, Character invalid) {

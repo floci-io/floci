@@ -11,6 +11,29 @@ import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 
 class CopyRecordReaderTest {
+    @Test
+    void physicalLineNumbersIncludeQuotedAndEscapedNewlines() throws IOException {
+        CopyRecordReader reader = reader("1,\"a\n\nb\"\r\n\r\n2,last\n", "CSV");
+        assertEquals("1,\"a\n\nb\"\r\n", next(reader));
+        assertEquals(1, reader.recordLine());
+        assertEquals("\r\n", next(reader));
+        assertEquals(4, reader.recordLine());
+        assertEquals("2,last\n", next(reader));
+        assertEquals(5, reader.recordLine());
+    }
+
+    @Test
+    void wholeJsonModeRetainsPrettyPrintedObjectsAndBracesInsideStrings() throws IOException {
+        CopyStatementParser.S3CopyFrom spec = (CopyStatementParser.S3CopyFrom) CopyStatementParser.parse(
+                "COPY t FROM 's3://b/k' JSON 'auto'");
+        CopyRecordReader reader = new CopyRecordReader(new ByteArrayInputStream(
+                "{\n\"name\":\"a}b\"\n}\n{\"name\":\"last\"}".getBytes(StandardCharsets.UTF_8)), spec, true);
+        assertEquals("{\n\"name\":\"a}b\"\n}\n", next(reader));
+        assertEquals("{\"name\":\"last\"}\n", next(reader));
+        assertEquals(4, reader.recordLine());
+        assertNull(next(reader));
+    }
+
     private static CopyRecordReader reader(String content, String options) {
         CopyStatementParser.S3CopyFrom spec = (CopyStatementParser.S3CopyFrom) CopyStatementParser.parse(
                 "COPY events FROM 's3://bucket/data' " + options);

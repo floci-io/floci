@@ -1,9 +1,12 @@
 package io.floci.aws.services.redshift.proxy;
 
 import java.io.ByteArrayOutputStream;
+import java.math.BigDecimal;
+import java.math.RoundingMode;
 import java.nio.charset.StandardCharsets;
 import java.util.Arrays;
 import java.util.List;
+import java.util.Map;
 import java.util.function.IntConsumer;
 
 /**
@@ -35,6 +38,7 @@ final class CopyRecordTransformer {
     private final List<Integer> columnMaxBytes;
     private final List<ColumnKind> columnKinds;
     private final boolean emptyNullString;
+    private final List<Integer> columnScales;
 
     CopyRecordTransformer(CopyStatementParser.S3CopyFrom spec, List<Integer> columnMaxBytes) {
         this(spec, columnMaxBytes, null);
@@ -42,6 +46,12 @@ final class CopyRecordTransformer {
 
     CopyRecordTransformer(CopyStatementParser.S3CopyFrom spec, List<Integer> columnMaxBytes,
                           List<ColumnKind> columnKinds) {
+        this(spec, columnMaxBytes, columnKinds, null);
+    }
+
+    CopyRecordTransformer(CopyStatementParser.S3CopyFrom spec, List<Integer> columnMaxBytes,
+                          List<ColumnKind> columnKinds, List<Integer> columnScales) {
+        this.columnScales = columnScales;
         this.columnKinds = columnKinds;
         this.emptyNullString = spec.nullAs() != null && spec.nullAs().isEmpty();
         this.transforms = spec.transforms();
@@ -61,7 +71,7 @@ final class CopyRecordTransformer {
         byte[] data = transforms.invalidCharReplacement() != null
                 ? sanitizeUtf8(input, (byte) transforms.invalidCharReplacement().charValue())
                 : input;
-        if (!transforms.fieldLevel()) {
+        if (!transforms.fieldLevel() && (columnScales == null || columnScales.stream().allMatch(scale -> scale == null))) {
             if (onOutputBytes != null) {
                 onOutputBytes.accept(data.length);
             }
@@ -76,7 +86,7 @@ final class CopyRecordTransformer {
         ByteArrayOutputStream out = new ByteArrayOutputStream(data.length + 16);
         int position = 0;
         while (position < data.length) {
-            position = transformRecord(data, position, out);
+            position = transformRecord(data, position, out, onOutputBytes);
             if (onOutputBytes != null) {
                 onOutputBytes.accept(out.size());
             }
@@ -131,12 +141,29 @@ final class CopyRecordTransformer {
         return overlongOrOutOfRange ? 0 : length;
     }
 
-    private int transformRecord(byte[] data, int start, ByteArrayOutputStream out) {
+    private int transformRecord(byte[] data, int start, ByteArrayOutputStream out, IntConsumer onOutputBytes) {
+        if (transforms.ignoreBlankLines()) {
+            if (data[start] == NEWLINE) {
+                return start + 1;
+            }
+            if (isCrlfAt(data, start)) {
+                return Math.min(start + 2, data.length);
+            }
+        }
         int position = start;
         int column = 0;
         while (true) {
             Field field = scanField(data, position);
-            writeField(field, column, out);
+            try {
+                writeField(field, column, out);
+            } catch (S3CopySimulator.S3TransferException error) {
+                throw new S3CopySimulator.S3TransferException(error.sqlState(), error.getMessage(), error,
+                        Map.of('c', Integer.toString(column + 1), 'd',
+                                new String(field.value(), 0, Math.min(field.value().length, 1024), StandardCharsets.UTF_8)));
+            }
+            if (onOutputBytes != null) {
+                onOutputBytes.accept(out.size());
+            }
             position = field.tokenEnd();
             if (position >= data.length) {
                 fillMissingColumns(column + 1, out);
@@ -249,6 +276,9 @@ final class CopyRecordTransformer {
         boolean nullMarkerField = !field.quoted() && Arrays.equals(value, nullMarker);
         boolean converted = false;
         if (!nullMarkerField) {
+            byte[] decimal = convertDecimal(value, column);
+            converted = decimal != value;
+            value = decimal;
             byte[] temporal = convertTemporal(value, column);
             if (temporal == null) {
                 out.writeBytes(nullMarker);
@@ -267,6 +297,28 @@ final class CopyRecordTransformer {
             writeCsvQuoted(limited, out);
         } else {
             out.writeBytes(escapeTextField(limited));
+        }
+    }
+
+    private byte[] convertDecimal(byte[] value, int column) {
+        if (columnScales == null || column >= columnScales.size() || columnScales.get(column) == null || value.length == 0) {
+            return value;
+        }
+        try {
+            BigDecimal decimal = new BigDecimal(new String(value, StandardCharsets.UTF_8).trim());
+            if (decimal.precision() - (long) decimal.scale() > 1000) {
+                throw new ArithmeticException("Numeric value exceeds the supported precision");
+            }
+            RoundingMode rounding = transforms.roundDecimal() ? RoundingMode.HALF_UP : RoundingMode.DOWN;
+            if (decimal.scale() - (long) decimal.precision() > columnScales.get(column) + 1L) {
+                decimal = BigDecimal.ZERO;
+            }
+            return decimal.setScale(columnScales.get(column), rounding).toPlainString().getBytes(StandardCharsets.UTF_8);
+        } catch (NumberFormatException ignored) {
+            // Let PostgreSQL report invalid numeric text with its normal SQLSTATE and column context.
+            return value;
+        } catch (ArithmeticException exception) {
+            throw new S3CopySimulator.S3TransferException("22003", "COPY numeric value out of range", exception);
         }
     }
 

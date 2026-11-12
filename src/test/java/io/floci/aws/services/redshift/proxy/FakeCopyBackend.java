@@ -6,15 +6,22 @@ import java.io.ByteArrayOutputStream;
 import java.io.OutputStream;
 import java.net.Socket;
 import java.nio.charset.StandardCharsets;
+import java.util.Arrays;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.function.Function;
+import java.util.function.Predicate;
 
 /** Extended-query backend for COPY tests, including catalog discovery and transaction recovery. */
 final class FakeCopyBackend {
     private final Socket socket;
     private Function<String, List<List<String>>> rows = sql -> List.of();
+    private Predicate<String> rejectRow = row -> false;
+
+    void rejectRows(Predicate<String> predicate) {
+        rejectRow = predicate;
+    }
 
     FakeCopyBackend(Socket socket) {
         this.socket = socket;
@@ -45,6 +52,7 @@ final class FakeCopyBackend {
         boolean copyCompleted = false;
         boolean finishing = false;
         int closed = 0;
+        ByteArrayOutputStream copyRecord = new ByteArrayOutputStream();
         PostgresWireDecoder.FrontendMessage message;
         while ((message = decoder.nextMessage()) != null) {
             if (failed && message.type() != 'S') {
@@ -94,9 +102,18 @@ final class FakeCopyBackend {
                         observer.executed(sql);
                     }
                 }
-                case 'd' -> copied.write(message.body());
+                case 'd' -> copyRecord.write(message.body());
                 case 'c' -> {
-                    PostgresWire.write(out, 'C', PostgresWire.cStringBytes("COPY 1"));
+                    if (rejectRow.test(copyRecord.toString(StandardCharsets.UTF_8))) {
+                        byte[] error = S3CopySimulator.errorBody("22P02", "invalid integer");
+                        PostgresWire.write(out, 'E', Arrays.copyOf(error, error.length - 1),
+                                new byte[]{'W'}, PostgresWire.cStringBytes("COPY events, line 1, column id: \"bad\""), new byte[1]);
+                        failed = true;
+                    } else {
+                        copied.write(copyRecord.toByteArray());
+                        PostgresWire.write(out, 'C', PostgresWire.cStringBytes("COPY 1"));
+                    }
+                    copyRecord.reset();
                     copyCompleted = true;
                 }
                 case 'f' -> {

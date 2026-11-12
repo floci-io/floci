@@ -34,6 +34,7 @@ import java.util.concurrent.TimeUnit;
 import java.util.concurrent.locks.LockSupport;
 import java.util.concurrent.locks.ReentrantLock;
 import java.util.function.BiConsumer;
+import java.util.function.Consumer;
 
 /**
  * Replaces the transparent {@code bridge()} for Redshift connections so SQL in Simple and Extended
@@ -85,6 +86,12 @@ public class RedshiftInterceptingBridge {
     private final Map<String, ExtendedSpectrumExchange.PortalCursor> spectrumCursors = new HashMap<>();
     private final BackendResponseCoordinator coordinator = new BackendResponseCoordinator(session);
     private final CopyBackendSession copyBackend;
+    private Consumer<CopyLoadError> loadErrorSink;
+
+    void loadErrorSink(Consumer<CopyLoadError> sink) {
+        loadErrorSink = sink;
+        copyBackend.loadErrorSink(sink);
+    }
 
     private final ReentrantLock backendLock;
     /** Budget of {@link #runWithBackendOwned} only; the Extended Query paths keep {@link #PUMP_PARK_WAIT_MS}. */
@@ -318,8 +325,10 @@ public class RedshiftInterceptingBridge {
             boolean intercepted = runWithBackendOwned(() -> switch (statement) {
                 case CopyStatementParser.S3CopyJobRun run -> CopyEtlLoader.runSimple(
                         client, backend, run, s3Service, iamService, clusterAccountId, iamRoleArns,
-                        coordinator.lastReadyStatus(), status -> coordinator.onBackendFrame('Z', new byte[]{(byte) status}));
-                case CopyStatementParser.S3CopyFrom copy -> S3CopySimulator.runCopyFrom(
+                        coordinator.lastReadyStatus(), status -> coordinator.onBackendFrame('Z', new byte[]{(byte) status}), loadErrorSink);
+                case CopyStatementParser.S3CopyFrom copy -> loadErrorSink != null ? CopyEtlLoader.runSimple(
+                        client, backend, copy, s3Service, iamService, clusterAccountId, iamRoleArns, coordinator.lastReadyStatus(),
+                        status -> coordinator.onBackendFrame('Z', new byte[]{(byte) status}), loadErrorSink) : S3CopySimulator.runCopyFrom(
                         client, backend, copy, s3Service, iamService, clusterAccountId, iamRoleArns, coordinator.lastReadyStatus(),
                         status -> coordinator.onBackendFrame('Z', new byte[]{(byte) status}));
                 case CopyStatementParser.S3Unload unload -> S3CopySimulator.runUnload(
