@@ -46,7 +46,7 @@
   with the key, its state `DELETE_PENDING` and the moment its deletion takes effect.
   A key that is gone does not come back: a tagging request for it is refused. The
   service deletes a key the moment it is asked to, so the waiting period of
-  `DeleteKeyInDays` is read and checked but not waited for.
+  `DeleteKeyInDays` is checked against the range the model states and is not waited for.
 - **Creating a key:** `CreateKey` takes `Exportable`, `Enabled` and `Tags`, and a key
   created disabled or with tags comes back that way. The `KeyUsage` and the
   `KeyModesOfUse` of the key are required, as the reference requires them. The answer

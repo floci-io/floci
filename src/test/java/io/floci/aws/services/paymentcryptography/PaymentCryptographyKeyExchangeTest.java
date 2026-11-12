@@ -396,6 +396,17 @@ class PaymentCryptographyKeyExchangeTest {
     }
 
     @Test
+    void aKeyPairHasACertificate() {
+        PaymentCryptographyKey key = createKeyPair("RSA_2048");
+
+        Map<String, Object> answer = service.publicKeyCertificate(key);
+
+        String certificate = (String) answer.get("KeyCertificate");
+        assertNotNull(certificate);
+        assertNotNull(Certificates.parseCertificate(certificate));
+    }
+
+    @Test
     void aFormTheServiceDoesNotKnowIsRefused() {
         PaymentCryptographyKey key = createKey("AES_256", "TR31_D0_SYMMETRIC_DATA_ENCRYPTION_KEY");
 
