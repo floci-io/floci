@@ -888,9 +888,16 @@ public class EmrService implements Resettable, StoredResourceArns, ContainerTear
         });
     }
 
-    /** The cluster's managed scaling policy as raw JSON, or null when it has none. */
+    /**
+     * The cluster's managed scaling policy as raw JSON, or null when it has none. A cluster shutting down or ended
+     * answers with the job flow message instead, as AWS was recorded doing (terraform-provider-aws#15541).
+     */
     public String getManagedScalingPolicy(String clusterId) {
-        return call(() -> requireCluster(clusterId).getManagedScalingPolicy());
+        return call(() -> {
+            EmrCluster cluster = requireCluster(clusterId);
+            rejectShutDownCluster(cluster, EmrService::jobFlowShutDownValidation);
+            return cluster.getManagedScalingPolicy();
+        });
     }
 
     public void removeManagedScalingPolicy(String clusterId) {
@@ -1130,18 +1137,19 @@ public class EmrService implements Resettable, StoredResourceArns, ContainerTear
     }
 
     /**
-     * AddJobFlowSteps' answer for a job flow that is shutting down or ended. The operations whose models,
-     * like AddJobFlowSteps', declare no InvalidRequestException give it too: AddInstanceGroups, the Set*
-     * setters, and Put and Remove of the managed scaling, auto-termination and automatic scaling policies.
+     * AddJobFlowSteps' and GetManagedScalingPolicy's answer for a job flow that is shutting down or ended. The
+     * operations whose models, like theirs, declare no InvalidRequestException give it too: AddInstanceGroups, the
+     * Set* setters, and Put and Remove of the managed scaling, auto-termination and automatic scaling policies.
      */
     private static AwsException jobFlowShutDownValidation() {
         return new AwsException("ValidationException", JOB_FLOW_SHUT_DOWN, 400);
     }
 
     /**
-     * Refuses a change to a cluster that is shutting down or ended with {@code answer}, the job flow message in
-     * the code the operation's model points at. AWS's answer is recorded for AddJobFlowSteps and
-     * ModifyInstanceFleet only; the operations calling this, documented for running clusters, take it from them.
+     * Refuses a call on a cluster that is shutting down or ended with {@code answer}, the job flow message in the
+     * code the operation's model points at. AWS's answer is recorded for AddJobFlowSteps, ModifyInstanceFleet and
+     * GetManagedScalingPolicy, and Terraform's provider expects it from RemoveManagedScalingPolicy; the other
+     * operations calling this, documented for running clusters, take it from them.
      */
     private static void rejectShutDownCluster(EmrCluster cluster, Supplier<AwsException> answer) {
         if (isShutDown(cluster)) {

@@ -22,12 +22,16 @@ class RequestConstraintCheckTest {
              "shapes": {
                "PutInput": {"type": "structure", "required": ["name"],
                             "members": {"name": "Name", "items": "Items", "count": "Count", "labels": "Labels",
-                                        "kind": "Kind", "quoted": "Quoted"}},
+                                        "kind": "Kind", "quoted": "Quoted", "percent": "Percent",
+                                        "double": "Double", "wide": "Wide"}},
                "Name": {"type": "string", "min": 2, "max": 5, "pattern": "[a-z]+"},
                "Quoted": {"type": "string", "pattern": "[a-z]+", "quotedPattern": "[a-z]*"},
                "Items": {"type": "list", "max": 2, "member": "Item"},
                "Item": {"type": "structure", "required": ["id"], "members": {"id": "Name"}},
                "Count": {"type": "integer", "min": 1, "max": 10},
+               "Percent": {"type": "float", "min": 0, "max": 100},
+               "Double": {"type": "double", "min": 0, "max": 100},
+               "Wide": {"type": "long", "min": 9007199254740993, "max": 9007199254740995},
                "Labels": {"type": "map", "key": "Name", "value": "Name"},
                "Kind": {"type": "string", "enum": ["A", "B"]}
              }}
@@ -42,7 +46,7 @@ class RequestConstraintCheckTest {
                 }
 
                 @Override
-                public AwsException bounds(String path, String type, Long min, Long max, long size) {
+                public AwsException bounds(String path, String type, Long min, Long max, Number size) {
                     return fail("bounds " + path + " " + type + " " + min + ".." + max + " " + size);
                 }
 
@@ -123,6 +127,19 @@ class RequestConstraintCheckTest {
         assertEquals("bounds Put.name string 2..5 1", violation("{\"name\":\"\\uD83D\\uDE00\"}"));
     }
 
+    @Test
+    void fractionalBoundsAreNotTruncatedAndLongBoundsStayExact() {
+        assertDoesNotThrow(() -> CHECK.check("Put", json("{\"name\":\"ab\",\"percent\":99.5,\"double\":0.5}")));
+        assertEquals("bounds Put.percent float 0..100 100.1", violation("{\"name\":\"ab\",\"percent\":100.1}"));
+        assertEquals("bounds Put.percent float 0..100 -0.1", violation("{\"name\":\"ab\",\"percent\":-0.1}"));
+        assertEquals("type Put.percent float", violation("{\"name\":\"ab\",\"percent\":\"50\"}"));
+        assertEquals("bounds Put.double double 0..100 100.1", violation("{\"name\":\"ab\",\"double\":100.1}"));
+        assertEquals("type Put.count integer", violation("{\"name\":\"ab\",\"count\":2147483648}"));
+        assertDoesNotThrow(() -> CHECK.check("Put", json("{\"name\":\"ab\",\"wide\":9007199254740993}")));
+        assertEquals("bounds Put.wide long 9007199254740993..9007199254740995 9007199254740992",
+                violation("{\"name\":\"ab\",\"wide\":9007199254740992}"));
+    }
+
     @ParameterizedTest
     @ValueSource(strings = {"InvalidRequestException", "InvalidParameterException", "ValidationException"})
     void standardMessagesPreserveTheWireFormatForEachServiceCode(String errorCode) {
@@ -143,6 +160,10 @@ class RequestConstraintCheckTest {
                         + "'Member must have value greater than or equal to 1'"},
                 {"{\"name\":\"ab\",\"count\":11}", "Invalid parameter at 'count' failed to satisfy constraint: "
                         + "'Member must have value less than or equal to 10'"},
+                {"{\"name\":\"ab\",\"percent\":-0.1}", "Invalid parameter at 'percent' failed to satisfy constraint: "
+                        + "'Member must have value greater than or equal to 0'"},
+                {"{\"name\":\"ab\",\"percent\":100.1}", "Invalid parameter at 'percent' failed to satisfy constraint: "
+                        + "'Member must have value less than or equal to 100'"},
                 {"{\"name\":\"ab\",\"kind\":\"C\"}", "Invalid parameter at 'kind' failed to satisfy constraint: "
                         + "'Member must satisfy enum value set: [A, B]'"},
                 {"{\"name\":\"ab\",\"items\":[{},{},{}]}", "Invalid parameter at 'items' failed to satisfy constraint: "

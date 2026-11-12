@@ -5,6 +5,8 @@ import io.floci.aws.core.common.AwsException;
 import io.floci.aws.core.common.PostgresWire;
 import io.floci.aws.core.common.RequestScopes;
 import io.floci.aws.services.iam.IamService;
+import io.floci.aws.services.s3.S3ConditionKeys;
+import io.floci.aws.services.s3.S3ResourceArns;
 import io.floci.aws.services.s3.S3Service;
 import io.floci.aws.services.s3.model.PutObjectOptions;
 import io.floci.aws.services.s3.model.S3Object;
@@ -167,7 +169,7 @@ public final class S3CopySimulator {
                 } else if (!exactObject) {
                     if (roleSession != null) {
                         RedshiftRoleAccess.authorizeSessionAction(s3, iamService, roleSession, spec.iamRoleArn(),
-                                "s3:ListBucket", copyBucketArn(spec, s3), Map.of("s3:prefix", List.of(spec.keyOrPrefix())));
+                                "s3:ListBucket", copyBucketArn(spec, s3), S3ConditionKeys.listing(spec.keyOrPrefix()));
                         s3.authorizeSignedListBucket(roleSession.accessKeyId(), roleSession.sessionToken(), spec.bucket(),
                                 spec.keyOrPrefix());
                     } else {
@@ -229,8 +231,7 @@ public final class S3CopySimulator {
         if (spec.iamRoleArn() != null) {
             return RedshiftRoleAccess.bucketArn(spec.iamRoleArn(), spec.bucket());
         }
-        return AwsArnUtils.Arn.global(s3.bucketPartition(spec.bucket()), "s3", "",
-                spec.bucket()).toString();
+        return S3ResourceArns.bucket(s3.bucketPartition(spec.bucket()), spec.bucket());
     }
 
     private static String copyObjectArn(CopyStatementParser.S3CopyFrom spec, S3Service s3, String key) {

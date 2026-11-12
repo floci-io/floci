@@ -104,9 +104,11 @@ A cluster that is `TERMINATING`, `TERMINATED` or `TERMINATED_WITH_ERRORS` also r
 the four `Set*` setters, and `Put` and `Remove` of its managed scaling, auto-termination and automatic
 scaling policies, with the same "shutting down" message: `ModifyCluster` as `InvalidRequestException`
 with `ErrorCode` `INVALID_JOB_SHUT_DOWN`, since its model declares that exception, and the others as
-`ValidationException`, since theirs declare none. AWS documents these operations for running clusters,
-but no answer for an ended one is recorded, so this is Floci's reading, taken from the operations whose
-answer is. A `Set*` request naming such a cluster changes none of the clusters it names. `AddTags` and
+`ValidationException`, since theirs declare none. `GetManagedScalingPolicy` gives such a cluster that
+`ValidationException` in place of its policy, as AWS was recorded doing, and Terraform's provider expects the
+same answer from `RemoveManagedScalingPolicy`. For the other operations, which AWS documents for running
+clusters, no answer for an ended one is recorded, so theirs is Floci's reading, taken from the operations
+whose answer is. A `Set*` request naming such a cluster changes none of the clusters it names. `AddTags` and
 `RemoveTags` refuse a `TERMINATED` or `TERMINATED_WITH_ERRORS` cluster, as the Management Guide says "you
 cannot add, edit, or remove tags from a terminated cluster", with `InvalidRequestException` "Tags cannot
 be modified on terminated clusters." The guide names no error: the message is the one a tagging tool

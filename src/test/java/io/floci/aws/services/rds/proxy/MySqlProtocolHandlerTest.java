@@ -7,6 +7,7 @@ import io.floci.aws.testutil.SigV4TokenTestHelper;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.CsvSource;
 import org.junit.jupiter.params.provider.ValueSource;
 
 import javax.net.ssl.SSLContext;
@@ -28,8 +29,11 @@ import java.security.cert.X509Certificate;
 import java.time.Instant;
 import java.util.Arrays;
 import java.util.HexFormat;
+import java.util.concurrent.FutureTask;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
+import java.util.zip.DeflaterOutputStream;
 
 import static org.junit.jupiter.api.Assertions.assertArrayEquals;
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -43,6 +47,7 @@ class MySqlProtocolHandlerTest {
     private static final int CLIENT_PROTOCOL_41 = 0x0200;
     private static final int CLIENT_SECURE_CONNECTION = 0x8000;
     private static final int CLIENT_SSL = 0x0800;
+    private static final int CLIENT_COMPRESS = 0x0020;
     private static final int CLIENT_PLUGIN_AUTH = 0x0008_0000;
     private static final String MYSQL_NATIVE_PASSWORD = "mysql_native_password";
     private static final String MYSQL_CLEAR_PASSWORD = "mysql_clear_password";
@@ -128,6 +133,207 @@ class MySqlProtocolHandlerTest {
 
         assertEquals((byte) 1, backendResponseSeq.get(), "sequence must be unchanged when no TLS upgrade occurs");
         assertEquals("admin", extractUsername(backendResponsePayload.get()));
+    }
+
+    @ParameterizedTest
+    @CsvSource({"false,false,false", "true,false,false", "true,true,false", "true,false,true"})
+    void relaysCompleteCommandFrameAfterCompressionNegotiation(boolean compressed, boolean zlibPayload,
+                                                               boolean tls) throws Exception {
+        ByteArrayOutputStream queryPayload = new ByteArrayOutputStream();
+        queryPayload.write(0x03); // COM_QUERY
+        queryPayload.writeBytes("SET @floci_probe=1".getBytes(StandardCharsets.UTF_8));
+        byte[] command = wrapPacket(0, queryPayload.toByteArray());
+        byte[] expectedFrame = compressed ? wrapCompressedFrame(command, zlibPayload) : command;
+        assertRelayedCommandFrames(expectedFrame, compressed, tls);
+    }
+
+    @Test
+    void relaysZstdNegotiatedFrameUnchanged() throws Exception {
+        byte[] command = wrapPacket(0, new byte[]{0x03, 'S', 'E', 'L', 'E', 'C', 'T', ' ', '1'});
+        assertRelayedCommandFrames(wrapCompressedPacket(command), CLIENT_ZSTD_COMPRESSION_ALGORITHM, false);
+    }
+
+    @ParameterizedTest
+    @CsvSource({"false,false", "false,true", "true,false", "true,true"})
+    void relaysFragmentedCompressedCommandBytesUnchanged(boolean trailingPartialHeader,
+                                                        boolean zlibPayload) throws Exception {
+        ByteArrayOutputStream queryPayload = new ByteArrayOutputStream();
+        queryPayload.write(0x03); // COM_QUERY
+        queryPayload.writeBytes("SET @floci_probe=1".getBytes(StandardCharsets.UTF_8));
+        byte[] command = wrapPacket(0, queryPayload.toByteArray());
+        byte[] firstPayload;
+        byte[] secondPayload;
+        if (trailingPartialHeader) {
+            byte[] nextCommand = wrapPacket(1, new byte[]{0x03, 'S', 'E', 'L', 'E', 'C', 'T', ' ', '1'});
+            firstPayload = Arrays.copyOf(command, command.length + 2);
+            System.arraycopy(nextCommand, 0, firstPayload, command.length, 2);
+            secondPayload = Arrays.copyOfRange(nextCommand, 2, nextCommand.length);
+        } else {
+            int split = command.length / 2;
+            firstPayload = Arrays.copyOf(command, split);
+            secondPayload = Arrays.copyOfRange(command, split, command.length);
+        }
+        ByteArrayOutputStream frames = new ByteArrayOutputStream();
+        frames.writeBytes(wrapCompressedFrame(firstPayload, zlibPayload, 0));
+        frames.writeBytes(wrapCompressedFrame(secondPayload, zlibPayload, 1));
+        assertRelayedCommandFrames(frames.toByteArray(), true, false);
+    }
+
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    void relaysLargeCompressedCommandUnchanged(boolean zlibPayload) throws Exception {
+        ByteArrayOutputStream query = new ByteArrayOutputStream();
+        query.write(0x03); // COM_QUERY
+        query.writeBytes("CREATE USER 'app'@'%' IDENTIFIED WITH AWSAuthenticationPlugin AS 'RDS' /*"
+                .getBytes(StandardCharsets.UTF_8));
+        byte[] padding = new byte[1 << 20];
+        Arrays.fill(padding, (byte) 'x');
+        query.writeBytes(padding);
+        query.writeBytes("*/".getBytes(StandardCharsets.UTF_8));
+        byte[] command = wrapPacket(0, query.toByteArray());
+        byte[] frame = wrapCompressedFrame(command, zlibPayload);
+        assertRelayedCommandFrames(frame, CLIENT_COMPRESS, false, true);
+    }
+
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    void relaysEachCompressedCommandBeforeTheNextArrives(boolean zlibPayload) throws Exception {
+        byte[] firstCommand = wrapPacket(0, new byte[]{0x03, 'S', 'E', 'L', 'E', 'C', 'T', ' ', '1'});
+        byte[] secondCommand = wrapPacket(0, new byte[]{0x03, 'S', 'E', 'L', 'E', 'C', 'T', ' ', '2'});
+        byte[] firstFrame = wrapCompressedFrame(firstCommand, zlibPayload);
+        byte[] secondFrame = wrapCompressedFrame(secondCommand, zlibPayload);
+        byte[] responseFrame = wrapCompressedPacket(wrapPacket(1, OK_PAYLOAD), 1);
+        withLoggedInClient(CLIENT_COMPRESS, CLIENT_COMPRESS, false, streams -> {
+            streams.clientOut().write(firstFrame);
+            streams.clientOut().flush();
+            assertArrayEquals(firstFrame, readCompressedFrame(streams.backendIn()));
+            streams.backendOut().write(responseFrame);
+            streams.backendOut().flush();
+            assertArrayEquals(responseFrame, readCompressedFrame(streams.clientIn()));
+            streams.clientOut().write(secondFrame);
+            streams.clientOut().flush();
+            assertArrayEquals(secondFrame, readCompressedFrame(streams.backendIn()));
+        });
+    }
+
+    private void assertRelayedCommandFrames(byte[] expectedFrame, boolean compressed, boolean tls)
+            throws Exception {
+        assertRelayedCommandFrames(expectedFrame, compressed ? CLIENT_COMPRESS : 0, tls);
+    }
+
+    private void assertRelayedCommandFrames(byte[] expectedFrame, int compressionCapability, boolean tls)
+            throws Exception {
+        assertRelayedCommandFrames(expectedFrame, compressionCapability, tls, false);
+    }
+
+    private void assertRelayedCommandFrames(byte[] expectedFrame, int compressionCapability, boolean tls,
+                                          boolean readConcurrently) throws Exception {
+        withLoggedInClient(CLIENT_COMPRESS | CLIENT_ZSTD_COMPRESSION_ALGORITHM,
+                compressionCapability, tls, streams -> {
+                    FutureTask<byte[]> receivedFrame = null;
+                    if (readConcurrently) {
+                        receivedFrame = new FutureTask<>(
+                                () -> streams.backendIn().readNBytes(expectedFrame.length));
+                        Thread.ofVirtual().start(receivedFrame);
+                        FutureTask<Void> sentFrame = new FutureTask<>(() -> {
+                            streams.clientOut().write(expectedFrame);
+                            streams.clientOut().flush();
+                            return null;
+                        });
+                        Thread.ofVirtual().start(sentFrame);
+                        sentFrame.get(3, TimeUnit.SECONDS);
+                    } else {
+                        streams.clientOut().write(expectedFrame);
+                        streams.clientOut().flush();
+                    }
+                    assertEquals(compressionCapability, streams.backendClientCapabilities()
+                            & (CLIENT_COMPRESS | CLIENT_ZSTD_COMPRESSION_ALGORITHM));
+                    byte[] received = readConcurrently
+                            ? receivedFrame.get(3, TimeUnit.SECONDS)
+                            : streams.backendIn().readNBytes(expectedFrame.length);
+                    assertArrayEquals(expectedFrame, received);
+                });
+    }
+
+    private record ClientBackendStreams(InputStream clientIn, OutputStream clientOut,
+                                        InputStream backendIn, OutputStream backendOut,
+                                        int backendClientCapabilities) {}
+
+    @FunctionalInterface
+    private interface LoggedInClientAssertion {
+        void accept(ClientBackendStreams streams) throws Exception;
+    }
+
+    private void withLoggedInClient(int backendCompressionCapabilities, int clientCompressionCapability,
+                                    boolean tls, LoggedInClientAssertion assertion) throws Exception {
+        byte[] nonce = fixedNonce();
+        try (ServerSocket backendServer = new ServerSocket(0);
+             ServerSocket clientServer = new ServerSocket(0);
+             Socket ourClient = new Socket("localhost", clientServer.getLocalPort());
+             Socket proxyClient = clientServer.accept();
+             Socket backend = new Socket("localhost", backendServer.getLocalPort());
+             Socket backendPeer = backendServer.accept()) {
+            ourClient.setSoTimeout(2_500);
+            backendPeer.setSoTimeout(2_500);
+            Thread authThread = startProxy(proxyClient, backend, NO_RECONNECT, false, testTlsCertificates());
+            try {
+                InputStream clientIn = ourClient.getInputStream();
+                OutputStream clientOut = ourClient.getOutputStream();
+                InputStream backendIn = backendPeer.getInputStream();
+                OutputStream backendOut = backendPeer.getOutputStream();
+                backendOut.write(buildHandshakeV10(nonce, null, backendCompressionCapabilities));
+                backendOut.flush();
+                byte[] handshake = readMysqlPacketRaw(clientIn);
+                assertNotNull(handshake);
+                assertTrue((capabilityFlagsLower(handshake) & CLIENT_COMPRESS) != 0);
+                int capabilities = CLIENT_PROTOCOL_41 | CLIENT_SECURE_CONNECTION
+                        | clientCompressionCapability;
+                int sequence = 1;
+                if (tls) {
+                    clientOut.write(buildSslRequest());
+                    clientOut.flush();
+                    SSLSocket sslClient = trustedClientSocket(ourClient);
+                    sslClient.startHandshake();
+                    clientIn = sslClient.getInputStream();
+                    clientOut = sslClient.getOutputStream();
+                    capabilities |= CLIENT_SSL;
+                    sequence = 2;
+                }
+                clientOut.write(buildHandshakeResponse41("admin", scrambleNativePassword("secret", nonce),
+                        (byte) sequence, capabilities));
+                clientOut.flush();
+                byte[] backendResponse = readMysqlPacketRaw(backendIn);
+                assertNotNull(backendResponse);
+                int backendClientCapabilities = (backendResponse[4] & 0xFF)
+                        | ((backendResponse[5] & 0xFF) << 8)
+                        | ((backendResponse[6] & 0xFF) << 16)
+                        | ((backendResponse[7] & 0xFF) << 24);
+                writeMysqlPacket(backendOut, 2, OK_PAYLOAD);
+                backendOut.flush();
+                assertArrayEquals(wrapPacket(sequence + 1, OK_PAYLOAD), readMysqlPacketRaw(clientIn));
+                assertion.accept(new ClientBackendStreams(clientIn, clientOut, backendIn, backendOut,
+                        backendClientCapabilities));
+            } finally {
+                ourClient.close();
+                proxyClient.close();
+                backend.close();
+                backendPeer.close();
+                authThread.join(3_000);
+                assertFalse(authThread.isAlive(), "proxy did not terminate");
+            }
+        }
+    }
+
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    void relaysCompressedIamCommandWithoutRewriting(boolean zlibPayload) throws Exception {
+        ByteArrayOutputStream query = new ByteArrayOutputStream();
+        query.write(0x03); // COM_QUERY
+        query.writeBytes("CREATE USER 'app'@'%' IDENTIFIED WITH AWSAuthenticationPlugin AS 'RDS'"
+                .getBytes(StandardCharsets.UTF_8));
+        byte[] command = wrapPacket(0, query.toByteArray());
+        byte[] frame = wrapCompressedFrame(command, zlibPayload);
+        assertRelayedCommandFrames(frame, true, false);
     }
 
     @Test
@@ -822,6 +1028,11 @@ class MySqlProtocolHandlerTest {
     }
 
     private static byte[] buildHandshakeV10(byte[] nonce, String authPlugin) throws IOException {
+        return buildHandshakeV10(nonce, authPlugin, 0);
+    }
+
+    private static byte[] buildHandshakeV10(byte[] nonce, String authPlugin, int extraCapabilities)
+            throws IOException {
         ByteArrayOutputStream payload = new ByteArrayOutputStream();
         payload.write(10); // protocol version
         payload.write("8.0.34".getBytes(StandardCharsets.UTF_8));
@@ -829,7 +1040,7 @@ class MySqlProtocolHandlerTest {
         writeInt32LE(payload, 1); // connection id
         payload.write(nonce, 0, 8); // auth-plugin-data part 1
         payload.write(0); // filler
-        int capabilities = CLIENT_PROTOCOL_41 | CLIENT_SECURE_CONNECTION;
+        int capabilities = CLIENT_PROTOCOL_41 | CLIENT_SECURE_CONNECTION | extraCapabilities;
         if (authPlugin != null) {
             capabilities |= CLIENT_PLUGIN_AUTH;
         }
@@ -878,6 +1089,9 @@ class MySqlProtocolHandlerTest {
         payload.write(0);
         payload.write(scramble.length); // CLIENT_SECURE_CONNECTION: 1-byte length prefix
         payload.write(scramble);
+        if ((capabilities & CLIENT_ZSTD_COMPRESSION_ALGORITHM) != 0) {
+            payload.write(3); // zstd compression level
+        }
 
         return wrapPacket(sequence, payload.toByteArray());
     }
@@ -998,6 +1212,62 @@ class MySqlProtocolHandlerTest {
         raw[2] = (byte) ((len >> 16) & 0xFF);
         raw[3] = (byte) sequence;
         System.arraycopy(payload, 0, raw, 4, payload.length);
+        return raw;
+    }
+
+    private static byte[] wrapCompressedFrame(byte[] payload, boolean zlibPayload) throws IOException {
+        return wrapCompressedFrame(payload, zlibPayload, 0);
+    }
+
+    private static byte[] wrapCompressedFrame(byte[] payload, boolean zlibPayload, int sequence) throws IOException {
+        return zlibPayload ? wrapZlibCompressedPacket(payload, sequence) : wrapCompressedPacket(payload, sequence);
+    }
+
+    private static byte[] wrapCompressedPacket(byte[] mysqlPacket) {
+        return wrapCompressedPacket(mysqlPacket, 0);
+    }
+
+    private static byte[] wrapCompressedPacket(byte[] mysqlPacket, int sequence) {
+        byte[] raw = new byte[7 + mysqlPacket.length];
+        raw[0] = (byte) (mysqlPacket.length & 0xFF);
+        raw[1] = (byte) ((mysqlPacket.length >> 8) & 0xFF);
+        raw[2] = (byte) ((mysqlPacket.length >> 16) & 0xFF);
+        raw[3] = (byte) sequence;
+        // Uncompressed length 0: short commands may use an uncompressed payload.
+        System.arraycopy(mysqlPacket, 0, raw, 7, mysqlPacket.length);
+        return raw;
+    }
+
+    private static byte[] wrapZlibCompressedPacket(byte[] mysqlPacket, int sequence) throws IOException {
+        ByteArrayOutputStream compressed = new ByteArrayOutputStream();
+        try (DeflaterOutputStream deflater = new DeflaterOutputStream(compressed)) {
+            deflater.write(mysqlPacket);
+        }
+        byte[] payload = compressed.toByteArray();
+        byte[] raw = new byte[7 + payload.length];
+        raw[0] = (byte) (payload.length & 0xFF);
+        raw[1] = (byte) ((payload.length >> 8) & 0xFF);
+        raw[2] = (byte) ((payload.length >> 16) & 0xFF);
+        raw[3] = (byte) sequence;
+        raw[4] = (byte) (mysqlPacket.length & 0xFF);
+        raw[5] = (byte) ((mysqlPacket.length >> 8) & 0xFF);
+        raw[6] = (byte) ((mysqlPacket.length >> 16) & 0xFF);
+        System.arraycopy(payload, 0, raw, 7, payload.length);
+        return raw;
+    }
+
+    private static byte[] readCompressedFrame(InputStream in) throws IOException {
+        byte[] header = in.readNBytes(7);
+        if (header.length != 7) {
+            throw new EOFException("Incomplete compressed MySQL header");
+        }
+        int length = (header[0] & 0xFF) | ((header[1] & 0xFF) << 8) | ((header[2] & 0xFF) << 16);
+        byte[] payload = in.readNBytes(length);
+        if (payload.length != length) {
+            throw new EOFException("Incomplete compressed MySQL payload");
+        }
+        byte[] raw = Arrays.copyOf(header, 7 + length);
+        System.arraycopy(payload, 0, raw, 7, length);
         return raw;
     }
 

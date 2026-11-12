@@ -27,7 +27,7 @@ final class SecurityHubRequestShapes {
                 }
 
                 @Override
-                public AwsException bounds(String path, String type, Long min, Long max, long size) {
+                public AwsException bounds(String path, String type, Long min, Long max, Number size) {
                     if ("BatchImportFindings.Findings".equals(path)) {
                         return invalid("Findings must contain between " + min + " and " + max + " findings.");
                     }

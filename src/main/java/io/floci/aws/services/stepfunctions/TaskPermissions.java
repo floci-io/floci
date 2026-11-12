@@ -12,6 +12,7 @@ import io.floci.aws.services.eventbridge.EventBridgeService;
 import io.floci.aws.services.iam.IamAuthorizedActions;
 import io.floci.aws.services.iam.ResourceArnBuilder;
 import io.floci.aws.services.redshiftdata.RedshiftDataTargetSubmitter;
+import io.floci.aws.services.s3.S3ResourceArns;
 import io.floci.aws.services.sqs.SqsService;
 import io.floci.aws.services.stepfunctions.LambdaTaskAuthorizer.Permission;
 import io.floci.aws.services.stepfunctions.model.StateMachine;
@@ -230,8 +231,8 @@ record TaskPermissions(String deniedError, List<Permission> permissions) {
             return accessDenied("S3.", List.of());
         }
         String partition = AwsArnUtils.parse(machine.getStateMachineArn()).partition();
-        return accessDenied("S3.", List.of(new Permission("s3:PutObject",
-                AwsArnUtils.Arn.global(partition, "s3", "", bucket + "/" + key).toString())));
+        return accessDenied("S3.",
+                List.of(new Permission("s3:PutObject", S3ResourceArns.object(partition, bucket, key))));
     }
 
     /**

@@ -33,9 +33,9 @@ final class CloudWatchLogsRequestShapes {
                 }
 
                 @Override
-                public AwsException bounds(String path, String type, Long min, Long max, long size) {
+                public AwsException bounds(String path, String type, Long min, Long max, Number size) {
                     String measure = "integer".equals(type) || "long".equals(type) ? "value" : "length";
-                    return max != null && size > max
+                    return max != null && size.longValue() > max
                             ? violation(path, "Member must have " + measure + " less than or equal to " + max)
                             : violation(path, "Member must have " + measure + " greater than or equal to " + min);
                 }
