@@ -85,6 +85,7 @@ PREFIX ?= $(HOME)/.local
         iam-action-resources-test iam-authorized-actions-sync iam-authorized-actions-check \
         cfn-property-types-sync cfn-property-types-check cfn-property-types-verify cfn-property-types-test \
         cfn-schema-surface-sync cfn-schema-surface-verify cfn-schema-surface-test \
+        cfn-create-only-sync cfn-create-only-verify cfn-create-only-test \
         iam-authorized-actions-verify iam-authorized-actions-test iam-passed-roles-sync iam-passed-roles-check \
         iam-passed-roles-verify iam-passed-roles-test iam-passed-network-connectors-sync \
         iam-passed-network-connectors-check iam-passed-network-connectors-verify \
@@ -812,6 +813,25 @@ cfn-schema-surface-verify: ## CI gate (online): the committed CloudFormation sch
 
 cfn-schema-surface-test: ## Run the CloudFormation schema surface generator's unit tests
 	$(PYTHON) -m pytest tools/aws/test_regen_cfn_schema_surface.py -q
+
+cfn-create-only-sync: ## Regenerate src/main/resources/cloudformation/create-only-properties.json from AWS's resource schemas (commit the result)
+	$(PYTHON) tools/aws/regen_cfn_create_only.py
+
+cfn-create-only-verify: ## CI gate (online): the committed CloudFormation create-only properties must still match AWS's schemas
+	@$(PYTHON) tools/aws/regen_cfn_create_only.py --verify; status=$$?; \
+	if [ $$status -eq 2 ]; then \
+		echo ""; \
+		echo "error: could not read AWS's CloudFormation resource schemas, so nothing was verified."; \
+		exit 1; \
+	elif [ $$status -ne 0 ]; then \
+		echo ""; \
+		echo "error: AWS has changed a resource schema the CloudFormation create-only properties come from."; \
+		echo "       Run 'make cfn-create-only-sync' and commit the result."; \
+		exit 1; \
+	fi
+
+cfn-create-only-test: ## Run the CloudFormation create-only generator's unit tests
+	$(PYTHON) -m pytest tools/aws/test_regen_cfn_create_only.py -q
 
 .PHONY: dynamodb-condition-keys-sync dynamodb-condition-keys-check dynamodb-condition-keys-verify
 dynamodb-condition-keys-sync: ## Regenerate DynamoDB IAM condition keys from AWS and botocore

@@ -75,9 +75,8 @@
   ],
   "AWS::AppConfig::Application": [],
   "AWS::AppConfig::ConfigurationProfile": [
-    "ApplicationId",
     "LocationUri",
-    "Type"
+    "ApplicationId"
   ],
   "AWS::AppConfig::DeploymentStrategy": [
     "Name",
@@ -97,13 +96,23 @@
     "ApiId"
   ],
   "AWS::AppSync::GraphQLApi": [],
-  "AWS::AppSync::GraphQLSchema": [
-    "ApiId"
-  ],
+  "AWS::AppSync::GraphQLSchema": [],
   "AWS::AppSync::Resolver": [
     "ApiId",
     "FieldName",
     "TypeName"
+  ],
+  "AWS::ApplicationAutoScaling::ScalableTarget": [
+    "ResourceId",
+    "ScalableDimension",
+    "ServiceNamespace"
+  ],
+  "AWS::ApplicationAutoScaling::ScalingPolicy": [
+    "PolicyName",
+    "ServiceNamespace",
+    "ResourceId",
+    "ScalableDimension",
+    "ScalingTargetId"
   ],
   "AWS::AutoScaling::AutoScalingGroup": [
     "InstanceId",
@@ -146,7 +155,8 @@
     "ComputeEnvironmentName",
     "Tags",
     "Type",
-    "EksConfiguration",
+    "EksConfiguration/EksClusterArn",
+    "EksConfiguration/KubernetesNamespace",
     "ComputeResources/ManagedInstancesProvider/InstanceLaunchTemplate/CapacityOptionType",
     "ComputeResources/ManagedInstancesProvider/InstanceLaunchTemplate/FipsEnabled"
   ],
@@ -156,6 +166,17 @@
   "AWS::Batch::JobQueue": [
     "JobQueueName",
     "JobQueueType"
+  ],
+  "AWS::BedrockAgentCore::Memory": [
+    "Name",
+    "EncryptionKeyArn"
+  ],
+  "AWS::BedrockAgentCore::Runtime": [
+    "AgentRuntimeName"
+  ],
+  "AWS::BedrockAgentCore::RuntimeEndpoint": [
+    "AgentRuntimeId",
+    "Name"
   ],
   "AWS::CertificateManager::Certificate": [
     "SubjectAlternativeNames",
@@ -186,6 +207,9 @@
     "TrailName"
   ],
   "AWS::CloudWatch::Alarm": [
+    "AlarmName"
+  ],
+  "AWS::CloudWatch::CompositeAlarm": [
     "AlarmName"
   ],
   "AWS::CloudWatch::Dashboard": [
@@ -223,17 +247,33 @@
     "GroupName"
   ],
   "AWS::Cognito::UserPoolIdentityProvider": [
+    "UserPoolId",
     "ProviderName",
-    "ProviderType",
-    "UserPoolId"
+    "ProviderType"
   ],
   "AWS::Cognito::UserPoolResourceServer": [
-    "Identifier",
-    "UserPoolId"
+    "UserPoolId",
+    "Identifier"
+  ],
+  "AWS::Cognito::UserPoolUser": [
+    "DesiredDeliveryMediums",
+    "ForceAliasCreation",
+    "UserAttributes",
+    "Username",
+    "UserPoolId",
+    "ValidationData",
+    "ClientMetadata",
+    "MessageAction"
+  ],
+  "AWS::Cognito::UserPoolUserToGroupAttachment": [
+    "UserPoolId",
+    "GroupName",
+    "Username"
   ],
   "AWS::Config::ConfigRule": [
     "ConfigRuleName"
   ],
+  "AWS::DSQL::Cluster": [],
   "AWS::DynamoDB::GlobalTable": [
     "TableName"
   ],
@@ -449,13 +489,32 @@
     "AmiType",
     "Subnets"
   ],
+  "AWS::ElastiCache::CacheCluster": [
+    "Port",
+    "SnapshotArns",
+    "SnapshotName",
+    "CacheSubnetGroupName",
+    "ClusterName",
+    "Engine",
+    "NetworkType"
+  ],
   "AWS::ElastiCache::ServerlessCache": [
     "ServerlessCacheName",
     "KmsKeyId",
     "SnapshotArnsToRestore",
     "SubnetIds",
-    "ConnectionType",
-    "NetworkType"
+    "NetworkType",
+    "ConnectionType"
+  ],
+  "AWS::ElastiCache::SubnetGroup": [
+    "CacheSubnetGroupName"
+  ],
+  "AWS::ElastiCache::User": [
+    "UserId",
+    "UserName"
+  ],
+  "AWS::ElastiCache::UserGroup": [
+    "UserGroupId"
   ],
   "AWS::ElasticLoadBalancingV2::Listener": [
     "LoadBalancerArn"
@@ -476,6 +535,13 @@
     "VpcId",
     "Protocol",
     "IpAddressType"
+  ],
+  "AWS::Events::ApiDestination": [
+    "Name"
+  ],
+  "AWS::Events::Archive": [
+    "ArchiveName",
+    "SourceArn"
   ],
   "AWS::Events::EventBus": [
     "Name"
@@ -540,6 +606,10 @@
   "AWS::IoT::TopicRule": [
     "RuleName"
   ],
+  "AWS::KMS::Alias": [
+    "AliasName"
+  ],
+  "AWS::KMS::Key": [],
   "AWS::Kinesis::Stream": [
     "Name"
   ],
@@ -556,14 +626,11 @@
     "IcebergDestinationConfiguration/CatalogConfiguration",
     "SnowflakeDestinationConfiguration/SnowflakeVpcConfiguration"
   ],
-  "AWS::KMS::Alias": [
-    "AliasName"
-  ],
-  "AWS::KMS::Key": [],
   "AWS::Lambda::Alias": [
     "Name",
     "FunctionName"
   ],
+  "AWS::Lambda::CodeSigningConfig": [],
   "AWS::Lambda::EventInvokeConfig": [
     "FunctionName",
     "Qualifier"
@@ -675,6 +742,7 @@
     "DBSystemId",
     "DatabaseName",
     "EngineMode",
+    "WithExpressConfiguration",
     "KmsKeyId",
     "PubliclyAccessible",
     "RestoreToTime",
@@ -744,8 +812,24 @@
     "Description"
   ],
   "AWS::Redshift::ClusterSubnetGroup": [],
+  "AWS::Redshift::EventSubscription": [
+    "SubscriptionName"
+  ],
+  "AWS::RedshiftServerless::Namespace": [
+    "NamespaceName"
+  ],
+  "AWS::RedshiftServerless::Workgroup": [
+    "WorkgroupName",
+    "NamespaceName"
+  ],
+  "AWS::Route53::HealthCheck": [
+    "HealthCheckConfig/Type",
+    "HealthCheckConfig/MeasureLatency",
+    "HealthCheckConfig/RequestInterval"
+  ],
   "AWS::Route53::HostedZone": [
-    "Name"
+    "Name",
+    "DelegationSetId"
   ],
   "AWS::Route53::RecordSet": [
     "HostedZoneName",
@@ -777,22 +861,12 @@
     "VectorBucketName",
     "EncryptionConfiguration"
   ],
-  "AWS::Scheduler::ScheduleGroup": [
-    "Name"
-  ],
   "AWS::SES::EmailIdentity": [
     "EmailIdentity"
   ],
-  "AWS::SecretsManager::Secret": [
-    "Name"
-  ],
-  "AWS::SecretsManager::SecretTargetAttachment": [
-    "SecretId"
-  ],
-  "AWS::Signer::SigningProfile": [
-    "ProfileName",
-    "PlatformId",
-    "SignatureValidityPeriod"
+  "AWS::SES::ReceiptRule": [
+    "Rule/Name",
+    "RuleSetName"
   ],
   "AWS::SNS::Subscription": [
     "Endpoint",
@@ -812,9 +886,49 @@
   "AWS::SSM::Parameter": [
     "Name"
   ],
+  "AWS::Scheduler::Schedule": [
+    "Name"
+  ],
+  "AWS::Scheduler::ScheduleGroup": [
+    "Name"
+  ],
+  "AWS::SecretsManager::Secret": [
+    "Name"
+  ],
+  "AWS::SecretsManager::SecretTargetAttachment": [
+    "SecretId"
+  ],
+  "AWS::ServiceDiscovery::HttpNamespace": [
+    "Name"
+  ],
+  "AWS::ServiceDiscovery::PrivateDnsNamespace": [
+    "Vpc",
+    "Name"
+  ],
+  "AWS::ServiceDiscovery::PublicDnsNamespace": [
+    "Name"
+  ],
+  "AWS::ServiceDiscovery::Service": [
+    "HealthCheckCustomConfig",
+    "Name",
+    "Type",
+    "NamespaceId"
+  ],
+  "AWS::Signer::SigningProfile": [
+    "ProfileName",
+    "PlatformId",
+    "SignatureValidityPeriod"
+  ],
   "AWS::StepFunctions::StateMachine": [
     "StateMachineName",
     "StateMachineType"
+  ],
+  "AWS::Transfer::Server": [
+    "Domain"
+  ],
+  "AWS::Transfer::User": [
+    "ServerId",
+    "UserName"
   ],
   "AWS::WAFv2::IPSet": [
     "Name",
@@ -826,5 +940,9 @@
   "AWS::WAFv2::WebACL": [
     "Name",
     "Scope"
+  ],
+  "AWS::WAFv2::WebACLAssociation": [
+    "ResourceArn",
+    "WebACLArn"
   ]
 }
