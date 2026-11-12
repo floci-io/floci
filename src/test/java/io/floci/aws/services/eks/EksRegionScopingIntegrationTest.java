@@ -104,6 +104,22 @@ class EksRegionScopingIntegrationTest {
                 }
             }
 
+            // Minting takes the same ?region=, which wins over the request's Region, so an
+            // unsigned caller can pick either cluster.
+            for (String region : new String[] {"eu-west-1", "eu-central-1"}) {
+                given().header("Authorization", auth("eu-west-1")).contentType("application/json")
+                        .queryParam("region", region)
+                        .body(Map.of("namespace", "default", "serviceAccount", "app"))
+                        .post("/_floci/eks/clusters/" + name + "/oidc-token")
+                        .then().statusCode(200)
+                        .body("issuer", equalTo(issuers.get(region)));
+            }
+            given().header("Authorization", auth("eu-west-1")).contentType("application/json")
+                    .queryParam("region", "ap-south-1")
+                    .body(Map.of("namespace", "default", "serviceAccount", "app"))
+                    .post("/_floci/eks/clusters/" + name + "/oidc-token")
+                    .then().statusCode(404);
+
             given().header("Authorization", auth("eu-west-1")).delete("/clusters/" + name)
                     .then().statusCode(200);
             given().header("Authorization", auth("eu-central-1")).get("/clusters/" + name)

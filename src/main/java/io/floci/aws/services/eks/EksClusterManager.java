@@ -1404,8 +1404,9 @@ public class EksClusterManager
     }
 
     /**
-     * Account-qualified Docker name for a cluster. Cluster names are unique only within an
-     * account, so a non-default account's cluster is qualified with its account ID — otherwise
+     * Account-qualified Docker name for a cluster. Cluster names are unique only within a Region
+     * of an account, so a non-default account's cluster is qualified with its account ID (and,
+     * where needed, its Region; see {@link #accountQualifiedClusterName}) — otherwise
      * two accounts' same-named clusters would resolve to the same container and data volume,
      * letting one account reach (or, via startCluster's stale-container removal, destroy) the
      * other's workloads. The default account keeps the historical unqualified name so existing

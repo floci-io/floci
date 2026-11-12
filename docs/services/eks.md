@@ -914,6 +914,8 @@ curl -sX POST http://localhost:4566/_floci/eks/clusters/my-cluster/oidc-token \
 
 `audience` (default `sts.amazonaws.com`) and `expirySeconds` (default 24h, max 7d) are optional. This is Floci plumbing under `_floci/…`, not an AWS API.
 
+Cluster names are unique only within a Region of an account. When clusters with the same name exist in more than one Region, add `?region=<region>` to choose one, for example `…/clusters/my-cluster/oidc-token?region=eu-west-1`. Without it, the request's Region is used, and then the account's only cluster of that name. The discovery and key routes below take the same parameter.
+
 ### Trust policy
 
 Note that the OIDC provider ARN and the condition keys use the issuer with the scheme stripped `oidc.eks.<region>.amazonaws.com/id/<id>`, which is how the AWS console, `eksctl`, and Terraform all render it.

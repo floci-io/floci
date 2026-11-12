@@ -920,10 +920,6 @@ public class EksService implements TagHandler, ResourceProvider, Ec2InstanceLaun
                         "No cluster found for name: " + name, 404));
     }
 
-    public Cluster findClusterForFlociRoute(String name) {
-        return findClusterForFlociRoute(name, null);
-    }
-
     /** The Region of {@code cluster}, from its ARN. */
     public String clusterRegion(Cluster cluster) {
         return resolveClusterRegion(cluster);
