@@ -1023,6 +1023,7 @@ public class NativeDynamoDbJsonHandler {
                         throw new AwsException("ValidationException",
                                 "Invalid UpdateExpression: Syntax error; token: \"" + token + "\", near: \"" + near + "\"", 400);
                     }
+                    DynamoDbService.requireAssignmentAfterSetTarget(updateExpression);
                     DynamoDbService.requireClosedParentheses(updateExpression, "1 validation error detected: ");
                 }
                 // Undefined tokens, then ConditionExpression's semantic errors, must both be caught

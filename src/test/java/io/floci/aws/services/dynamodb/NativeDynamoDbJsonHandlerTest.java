@@ -1784,6 +1784,50 @@ class NativeDynamoDbJsonHandlerTest {
         });
     }
 
+    @ParameterizedTest
+    @CsvSource(delimiter = '|', textBlock = """
+            SET a, b = :v                            | a, b
+            SET a ,  b = :v                          | a ,  b
+            SET a,b = :v                             | a,b
+            set a, b = :v                            | a, b
+            SET a = :v, b, c = :v                    | b, c
+            SET a.b[1], c = :v                       | ], c
+            SET #n, b = :v                           | #n, b
+            SET , b = :v                             | SET , b
+            SET ,                                    | SET ,
+            SET a,                                   | a,
+            SET a = :v, , b = :v                     | , , b
+            SET a, b = (:v                           | a, b
+            SET a = if_not_exists(b, :v), c, d = :v  | c, d
+            REMOVE b SET a, c = :v                   | a, c
+            SET a, b = :v $                          | a, b
+            """)
+    void updateItemRejectsACommaInASetTargetBeforeTheTableLookup(String expression, String near) {
+        ObjectNode request = updateUserRequest();
+        request.put("TableName", "Missing");
+        request.put("UpdateExpression", expression);
+        request.set("ExpressionAttributeValues", singleValue(":v"));
+
+        AwsException ex = assertThrows(AwsException.class,
+                () -> handler.handle("UpdateItem", request, "eu-west-1"));
+        assertEquals("ValidationException", ex.getErrorCode());
+        assertEquals("1 validation error detected: Invalid UpdateExpression: Syntax error; "
+                + "token: \",\", near: \"" + near + "\"", ex.getMessage());
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"SET a = :v REMOVE b, c", "SET a = if_not_exists(b, :v), c = :v", "SET a = b + :v, c = :v"})
+    void updateItemReadsACommaOutsideASetTargetAsASeparator(String expression) {
+        ObjectNode request = updateUserRequest();
+        request.put("TableName", "Missing");
+        request.put("UpdateExpression", expression);
+        request.set("ExpressionAttributeValues", singleValue(":v"));
+
+        AwsException ex = assertThrows(AwsException.class,
+                () -> handler.handle("UpdateItem", request, "eu-west-1"));
+        assertEquals("ResourceNotFoundException", ex.getErrorCode(), ex.getMessage());
+    }
+
     @Test
     void updateItemAcceptsAnUpdateExpressionOfExactly4096Bytes() throws Exception {
         createUsersTable("eu-west-1");
@@ -2013,6 +2057,21 @@ class NativeDynamoDbJsonHandlerTest {
                 () -> handler.handle("TransactWriteItems", transactWrite("Update", update), "eu-west-1"));
         assertEquals("ValidationException", ex.getErrorCode());
         assertEquals("Invalid UpdateExpression: Syntax error; token: \"<EOF>\", near: \":v\"", ex.getMessage());
+    }
+
+    @Test
+    void transactWriteItemsRejectsACommaInASetTarget() {
+        createUsersTable("eu-west-1");
+        ObjectNode update = mapper.createObjectNode();
+        update.set("Key", item("userId", "u1"));
+        update.put("UpdateExpression", "SET a, b = :v");
+        update.set("ExpressionAttributeValues", singleValue(":v"));
+
+        AwsException ex = assertThrows(AwsException.class,
+                () -> handler.handle("TransactWriteItems", transactWrite("Update", update), "eu-west-1"));
+        assertEquals("ValidationException", ex.getErrorCode());
+        assertEquals("Invalid UpdateExpression: Syntax error; token: \",\", near: \"a, b\"", ex.getMessage());
+        assertNull(service.getItem("Users", item("userId", "u1"), "eu-west-1"));
     }
 
     @Test
