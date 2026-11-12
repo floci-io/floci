@@ -1178,11 +1178,14 @@ holds no password of its own, which is what an IAM DB user is: an account whose 
 from IAM rather than from MySQL. This is the MySQL counterpart of the empty `rds_iam` role Floci
 pre-creates for PostgreSQL.
 
-Two limits follow from that. `SHOW CREATE USER` reports the substituted plugin rather than
-`AWSAuthenticationPlugin`, so a Terraform or Pulumi refresh sees drift on `auth_plugin`. And
-connecting with a token is not yet emulated for MySQL: unlike PostgreSQL, which receives the
-password in cleartext, MySQL sends a scramble, so the proxy would have to drive the
-`mysql_clear_password` auth switch that real RDS triggers before it could see a token to validate.
+On a connection that negotiates zstd compression, the proxy forwards command frames unchanged,
+including frames with an uncompressed payload. It does not rewrite this IAM user DDL, so the
+container rejects `AWSAuthenticationPlugin` with `ERROR 1524 (HY000)` on that connection.
+
+For users created through the rewrite, `SHOW CREATE USER` reports the substituted plugin rather
+than `AWSAuthenticationPlugin`, so a Terraform or Pulumi refresh sees drift on `auth_plugin`.
+MySQL IAM token login is supported over TLS: the proxy can request a `mysql_clear_password`
+auth switch to validate the token, then authenticates to the container as the master user.
 
 ## Certificate authorities
 
