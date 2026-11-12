@@ -713,10 +713,7 @@ public class AwsConfigService {
 
     public List<ConfigurationRecorder> describeConfigurationRecorders(String region, List<String> names, String arn) {
         ConfigurationRecorder recorder = configurationRecorders.get(region);
-        if (arn != null && (recorder == null || !arn.equals(recorder.arn()))) {
-            throw new AwsException("NoSuchConfigurationRecorderException",
-                    "Cannot find configuration recorder with the specified ARN.", 400);
-        }
+        requireRecorderArn(arn, recorder);
         if (recorder == null) {
             if (names != null && !names.isEmpty()) {
                 throw new AwsException("NoSuchConfigurationRecorderException",
@@ -733,6 +730,13 @@ public class AwsConfigService {
             }
         }
         return List.of(recorder);
+    }
+
+    private static void requireRecorderArn(String arn, ConfigurationRecorder recorder) {
+        if (arn != null && (recorder == null || !arn.equals(recorder.arn()))) {
+            throw new AwsException("NoSuchConfigurationRecorderException",
+                    "Cannot find configuration recorder with the specified ARN.", 400);
+        }
     }
 
     public void deleteConfigurationRecorder(String region, String name) {
@@ -777,10 +781,7 @@ public class AwsConfigService {
     public List<ConfigurationRecorderStatus> describeConfigurationRecorderStatus(String region, List<String> names,
                                                                                  String arn) {
         ConfigurationRecorder recorder = configurationRecorders.get(region);
-        if (arn != null && (recorder == null || !arn.equals(recorder.arn()))) {
-            throw new AwsException("NoSuchConfigurationRecorderException",
-                    "Cannot find configuration recorder with the specified ARN.", 400);
-        }
+        requireRecorderArn(arn, recorder);
         if (recorder == null) {
             if (names != null && !names.isEmpty()) {
                 throw new AwsException("NoSuchConfigurationRecorderException",
