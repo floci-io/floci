@@ -1,6 +1,8 @@
 package io.floci.aws.services.paymentcryptography.crypto;
 
+import org.bouncycastle.asn1.ASN1Encodable;
 import org.bouncycastle.asn1.ASN1InputStream;
+import org.bouncycastle.asn1.ASN1ObjectIdentifier;
 import org.bouncycastle.asn1.ASN1OctetString;
 import org.bouncycastle.asn1.ASN1Sequence;
 import org.bouncycastle.asn1.ASN1Set;
@@ -9,12 +11,16 @@ import org.junit.jupiter.api.Assertions;
 import org.junit.jupiter.api.Test;
 
 import java.io.IOException;
+import java.nio.charset.StandardCharsets;
 import java.security.KeyPair;
 import java.security.KeyPairGenerator;
+import java.time.Instant;
 import java.util.HexFormat;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
  * The TR-34 builder, against the TR-34 verifier.
@@ -87,7 +93,97 @@ public class PaymentCryptographyTr34RoundTripTest {
 
         assertEquals(HEX_UPPER.formatHex(HEX.parseHex("404142434445464748494A4B4C4D4E4F")),
                 recovered.keyHex);
+        // The block names its recipient by the certificate's own issuer and serial number,
+        // so the receiver can tell which of its keys the block is for.
+        assertEquals(HexFormat.of().formatHex(Certificates.certificateId(krdCertificate.der())),
+                HexFormat.of().formatHex(recipientId(block)),
+                "the recipient the block names");
     }
+
+    @Test
+    void refusesASigningCertificateThatHasExpired() throws Exception {
+        KeyPair krd = rsaKeyPair();
+        KeyPair kdh = rsaKeyPair();
+        Instant past = Instant.now().minusSeconds(7200);
+        Instant expired = Instant.now().minusSeconds(3600);
+        Certificates.Minted expiredCertificate = CertificatesTest.mint(kdh.getPublic(), "kdh",
+                kdh.getPrivate(), "kdh", past, expired);
+
+        byte[] block = Tr34.build(HEX.parseHex("404142434445464748494A4B4C4D4E4F"),
+                "B0010P0TB00E0000", null, kdh.getPrivate(), krd.getPublic());
+
+        IllegalArgumentException refused = assertThrows(IllegalArgumentException.class,
+                () -> Tr34.recoverAndVerify(HEX_UPPER.formatHex(block), krd.getPrivate(),
+                        expiredCertificate.pem(), null, null));
+        assertTrue(refused.getMessage().contains("validity window"), refused.getMessage());
+    }
+
+    @Test
+    void refusesASigningCertificateThatIsNotYetValid() throws Exception {
+        KeyPair krd = rsaKeyPair();
+        KeyPair kdh = rsaKeyPair();
+        Instant future = Instant.now().plusSeconds(3600);
+        Instant later = Instant.now().plusSeconds(7200);
+        Certificates.Minted earlyCertificate = CertificatesTest.mint(kdh.getPublic(), "kdh",
+                kdh.getPrivate(), "kdh", future, later);
+
+        byte[] block = Tr34.build(HEX.parseHex("404142434445464748494A4B4C4D4E4F"),
+                "B0010P0TB00E0000", null, kdh.getPrivate(), krd.getPublic());
+
+        IllegalArgumentException refused = assertThrows(IllegalArgumentException.class,
+                () -> Tr34.recoverAndVerify(HEX_UPPER.formatHex(block), krd.getPrivate(),
+                        earlyCertificate.pem(), null, null));
+        assertTrue(refused.getMessage().contains("validity window"), refused.getMessage());
+    }
+
+    @Test
+    void refusesABlockThatCarriesNoHeader() throws Exception {
+        KeyPair krd = rsaKeyPair();
+        KeyPair kdh = rsaKeyPair();
+        Certificates.Minted kdhCertificate = CertificatesTest.mint(kdh.getPublic(), "kdh",
+                kdh.getPrivate(), "kdh");
+
+        // The block is signed correctly, but its key block names no key: the header that
+        // says what the block carries is empty.
+        byte[] block = Tr34.build(HEX.parseHex("404142434445464748494A4B4C4D4E4F"),
+                "", null, kdh.getPrivate(), krd.getPublic());
+
+        IllegalArgumentException refused = assertThrows(IllegalArgumentException.class,
+                () -> Tr34.recoverAndVerify(HEX_UPPER.formatHex(block), krd.getPrivate(),
+                        kdhCertificate.pem(), null, null));
+        assertTrue(refused.getMessage().contains("no TR-31 header"), refused.getMessage());
+    }
+
+    /**
+     * The header a block carries in the clear.
+     *
+     * <p>The header travels in the clear beside the encrypted key block, so a reader sees
+     * what the block carries without opening it.
+     *
+     * @param block the block
+     * @return the header
+     */
+    public static String clearHeader(byte[] block) throws IOException {
+        ASN1Sequence contentInfo = ASN1Sequence.getInstance(block);
+        ASN1Sequence signedData = ASN1Sequence.getInstance(
+                ASN1TaggedObject.getInstance(contentInfo.getObjectAt(1)), true);
+        ASN1Set signerInfos = ASN1Set.getInstance(signedData.getObjectAt(3));
+        ASN1Sequence signerInfo = ASN1Sequence.getInstance(signerInfos.getObjectAt(0));
+        ASN1Set attributes = ASN1Set.getInstance(
+                ASN1TaggedObject.getInstance(signerInfo.getObjectAt(3)), false);
+        for (ASN1Encodable element : attributes) {
+            ASN1Sequence attribute = ASN1Sequence.getInstance(element);
+            if (!"1.2.840.113549.1.7.1".equals(
+                    ASN1ObjectIdentifier.getInstance(attribute.getObjectAt(0)).getId())) {
+                continue;
+            }
+            ASN1Set values = ASN1Set.getInstance(attribute.getObjectAt(1));
+            return new String(ASN1OctetString.getInstance(values.getObjectAt(0)).getOctets(),
+                    StandardCharsets.US_ASCII);
+        }
+        throw new IllegalStateException("the block carries no header in the clear");
+    }
+
     /** The recipient identifier a block carries: the receiver's certificate identifier. */
     private static byte[] recipientId(byte[] block) throws IOException {
         ASN1Sequence contentInfo = ASN1Sequence.getInstance(block);

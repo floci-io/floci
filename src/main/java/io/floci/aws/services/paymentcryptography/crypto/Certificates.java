@@ -11,6 +11,7 @@ import java.io.ByteArrayInputStream;
 import java.io.IOException;
 import java.io.StringWriter;
 import java.nio.charset.StandardCharsets;
+import java.security.cert.CertificateEncodingException;
 import java.security.cert.CertificateException;
 import java.security.cert.CertificateFactory;
 import java.security.cert.X509Certificate;
@@ -102,6 +103,20 @@ public final class Certificates {
                     certificate.getSerialNumber()).getEncoded();
         } catch (IOException e) {
             throw new IllegalStateException("cannot encode the certificate identifier", e);
+        }
+    }
+
+    /**
+     * The certificate in DER.
+     *
+     * @param certificate the certificate
+     * @return the certificate in DER
+     */
+    public static byte[] toDer(X509Certificate certificate) {
+        try {
+            return certificate.getEncoded();
+        } catch (CertificateEncodingException e) {
+            throw new IllegalArgumentException("the certificate does not encode: " + e.getMessage());
         }
     }
 

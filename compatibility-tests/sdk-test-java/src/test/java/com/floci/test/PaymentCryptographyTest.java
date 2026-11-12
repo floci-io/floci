@@ -589,6 +589,20 @@ class PaymentCryptographyTest {
         return new JcaX509CertificateConverter().getCertificate(builder.build(
                 new JcaContentSignerBuilder("SHA256withRSA").build(issuer.getPrivate())));
     }
+
+    @Test
+    void anExportSigningKeyThatIsNotRsa2048IsRefused() {
+        // The block is signed with the key the export parameters issue, and the block's
+        // signature is an RSA one, so a signing key that is not an RSA_2048 one cannot
+        // sign it.
+        assertThatThrownBy(() -> client.getParametersForExport(r -> r
+                .keyMaterialType(KeyMaterialType.TR34_KEY_BLOCK)
+                .signingKeyAlgorithm(KeyAlgorithm.ECC_NIST_P256)))
+                .isInstanceOf(AwsServiceException.class)
+                .satisfies(thrown -> assertThat(((AwsServiceException) thrown).awsErrorDetails()
+                        .errorCode()).isEqualTo("ValidationException"));
+    }
+
     @Test
     void aKeyLeavesTheServiceAndComesBackThroughATr34KeyBlock() {
         // The parameters of the import name the certificate the block is wrapped under, and

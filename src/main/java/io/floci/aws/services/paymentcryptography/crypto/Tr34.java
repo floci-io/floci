@@ -123,6 +123,9 @@ public final class Tr34 {
     /** The size of the ephemeral Triple DES key. */
     private static final int EPHEMERAL_KEY_SIZE = 24;
 
+    /** The length of the TR-31 header a block carries, in characters. */
+    private static final int HEADER_LENGTH = 16;
+
     private Tr34() {
     }
 
@@ -355,8 +358,17 @@ public final class Tr34 {
         byte[] encryptedBlock = ASN1OctetString.getInstance(
                 ASN1TaggedObject.getInstance(contentEncryption.getObjectAt(2)), false).getOctets();
 
-        // The signing certificate has to chain to the registered authority.
+        // The signing certificate has to chain to the registered authority, and it has to be
+        // inside its validity window: a certificate that has expired, or that is not valid
+        // yet, is not a certificate the authority vouches for now, so its key does not
+        // authenticate a block.
         X509Certificate signingCertificate = Certificates.parseCertificate(signingCertPem);
+        try {
+            signingCertificate.checkValidity();
+        } catch (GeneralSecurityException e) {
+            throw new IllegalArgumentException("the signing certificate is outside its validity "
+                    + "window: " + e.getMessage());
+        }
         if (caPublicKey != null) {
             try {
                 signingCertificate.verify(caPublicKey);
@@ -600,6 +612,13 @@ public final class Tr34 {
         }
         if (key == null) {
             throw new IllegalArgumentException("symmetric key octet string not found in key block");
+        }
+        if (header.length() < HEADER_LENGTH) {
+            // The header names the key the block carries, so a block without one says
+            // nothing about what it carries. It is refused here rather than read, because
+            // the readers of a header index into it and an empty one has nothing to index.
+            throw new IllegalArgumentException("the key block carries no TR-31 header, or one of "
+                    + "fewer than " + HEADER_LENGTH + " characters");
         }
         return new Recovered(HEX_UPPER.formatHex(key), header);
     }

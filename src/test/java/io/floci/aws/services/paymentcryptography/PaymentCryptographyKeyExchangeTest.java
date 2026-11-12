@@ -504,6 +504,91 @@ class PaymentCryptographyKeyExchangeTest {
                 () -> service.importKey("us-east-1", "Tr34KeyBlock", incoming, "", true, Map.of()));
         assertEquals("ValidationException", refused.getErrorCode());
     }
+    @ParameterizedTest
+    @ValueSource(strings = {"RSA_3072", "RSA_4096", "ECC_NIST_P256", "ECC_NIST_P384", "ECC_NIST_P521"})
+    void anExportSigningKeyThatIsNotRsa2048IsRefused(String algorithm) {
+        // The block is signed with the key the export parameters issue, and the block's
+        // signature is an RSA one, so a signing key that is not an RSA_2048 one cannot
+        // sign it.
+        AwsException refused = assertThrows(AwsException.class,
+                () -> service.parametersForExport("TR34_KEY_BLOCK", algorithm, false));
+
+        assertEquals("ValidationException", refused.getErrorCode());
+        assertTrue(refused.getMessage().contains("signed with RSA_2048"), refused.getMessage());
+    }
+    @Test
+    void aTr34BlockThatCarriesNoHeaderIsRefused() {
+        // A block that is signed correctly but whose key block names no key says nothing
+        // about what it carries, so it is refused rather than read.
+        Map<String, Object> importParameters = service.parametersForImport("TR34_KEY_BLOCK",
+                "RSA_2048", false);
+        X509Certificate wrapping = Certificates.parseCertificate(
+                (String) importParameters.get("WrappingKeyCertificate"));
+
+        SecureRandom random = new SecureRandom();
+        KeyPair signing = PaymentCryptographyKeyPairs.rsa(2048, random);
+        Certificates.Minted certificate = CertificatesTest.mint(signing.getPublic(),
+                "floci sender", signing.getPrivate(), "floci sender");
+        PaymentCryptographyKey sender = createAuthority(certificate.pem());
+
+        byte[] block = Tr34.build(
+                HexFormat.of().parseHex("000102030405060708090A0B0C0D0E0F"),
+                "", HexFormat.of().parseHex("A1B2C3D4E5F60718"), signing.getPrivate(),
+                wrapping.getPublicKey());
+
+        Map<String, Object> incoming = new LinkedHashMap<>();
+        incoming.put("ImportToken", importParameters.get("ImportToken"));
+        incoming.put("SigningKeyCertificate", certificate.pem());
+        incoming.put("WrappedKeyBlock", HexFormat.of().withUpperCase().formatHex(block));
+        incoming.put("CertificateAuthorityPublicKeyIdentifier", sender.getKeyId());
+        incoming.put("KeyBlockFormat", "X9_TR34_2012");
+        incoming.put("RandomNonce", "A1B2C3D4E5F60718");
+
+        AwsException refused = assertThrows(AwsException.class,
+                () -> service.importKey("us-east-1", "Tr34KeyBlock", incoming, "", true, Map.of()));
+
+        assertEquals("ValidationException", refused.getErrorCode());
+    }
+
+    @Test
+    void anInitialKeyThatLeavesUnderATr34BlockIsSensitive() throws Exception {
+        // The initial key of the DUKPT derivation is sensitive, so the header that names it
+        // says so, whichever form the key leaves in.
+        Map<String, Object> attributes = new LinkedHashMap<>();
+        attributes.put("KeyAlgorithm", "TDES_2KEY");
+        attributes.put("KeyClass", "SYMMETRIC_KEY");
+        attributes.put("KeyUsage", "TR31_B0_BASE_DERIVATION_KEY");
+        PaymentCryptographyKey base = service.createKey("us-east-1", attributes,
+                Map.of("DeriveKey", Boolean.TRUE), false, true, Map.of());
+
+        Map<String, Object> exportParameters = service.parametersForExport("TR34_KEY_BLOCK",
+                "RSA_2048", false);
+        Map<String, Object> importParameters = service.parametersForImport("TR34_KEY_BLOCK",
+                "RSA_2048", false);
+        PaymentCryptographyKey receiver = createAuthority(
+                (String) importParameters.get("WrappingKeyCertificate"));
+        PaymentCryptographyKey sender = createAuthority(
+                (String) exportParameters.get("SigningKeyCertificate"));
+
+        Map<String, Object> material = new LinkedHashMap<>();
+        material.put("ExportToken", exportParameters.get("ExportToken"));
+        material.put("WrappingKeyCertificate", importParameters.get("WrappingKeyCertificate"));
+        material.put("CertificateAuthorityPublicKeyIdentifier", receiver.getKeyId());
+        material.put("KeyBlockFormat", "X9_TR34_2012");
+        material.put("RandomNonce", "A1B2C3D4E5F60718");
+
+        Map<String, Object> answer = service.exportKey("us-east-1", base.getKeyId(), "Tr34KeyBlock",
+                material, "12345678900000000001", "");
+        Map<?, ?> wrapped = (Map<?, ?>) answer.get("WrappedKey");
+
+        // The header travels in the clear, so it can be read without opening the block.
+        String header = PaymentCryptographyTr34RoundTripTest.clearHeader(
+                HexFormat.of().parseHex((String) wrapped.get("KeyMaterial")));
+
+        assertEquals("B1", header.substring(5, 7), "the usage of the derived key");
+        assertEquals("S", header.substring(11, 12), "the derived key is a sensitive one");
+    }
+
     @Test
     void anImportTokenIsRefusedForAnotherKindOfMaterial() {
         // A token is issued for one kind of material, so it cannot be spent on another.

@@ -770,10 +770,14 @@ final class PaymentCryptographyKeyExchange {
      * @return the header, sixteen characters
      */
     private static String tr31Header(PaymentCryptographyKey key) {
-        String usage = PaymentCryptographyService.usageCode(key.getKeyUsage());
+        // The usage code and the exportability are the ones the TR-31 block carries, so a
+        // key that leaves under a TR-34 block is named the same way as one that leaves
+        // under a TR-31 block. The usage code of a key, and not of its usage name, is what
+        // the initial derivation key has a code of its own for.
+        String usage = PaymentCryptographyService.usageCode(key);
         String mode = PaymentCryptographyService.modeCode(key);
         String algorithm = PaymentCryptographyService.algorithmByte(key);
-        String exportability = key.isExportable() ? "E" : "N";
+        String exportability = ownExportability(key);
         // The protection of a TR-34 block is the ephemeral Triple DES key, so the type is B.
         return "B9999" + usage + algorithm + mode + "00" + exportability + "0000";
     }
@@ -1134,9 +1138,13 @@ final class PaymentCryptographyKeyExchange {
                     + "parameters here (" + String.join(", ", EXPORT_PARAMETER_TYPES) + ")");
         }
         PaymentCryptographyKeyAlgorithm signing = PaymentCryptographyKeyAlgorithm.from(algorithm);
-        if (signing == null || signing.symmetric()) {
+        if (signing != PaymentCryptographyKeyAlgorithm.RSA_2048) {
+            // The TR-34 block is signed with the key these parameters issue, and the block's
+            // signature is an RSA one, so a signing key that is not an RSA key cannot sign
+            // it. The model says the same: RSA_2048 is the only signing key algorithm
+            // allowed.
             throw validation("SigningKeyAlgorithm '" + algorithm + "' not supported "
-                    + "(RSA_2048, RSA_3072, RSA_4096, ECC_NIST_P256, ECC_NIST_P384, ECC_NIST_P521)");
+                    + "(RSA_2048): a TR-34 key block is signed with RSA_2048");
         }
         String last = materialType + "/" + algorithm;
         Issued previous = lastExportParameters.get(last);
@@ -1144,9 +1152,7 @@ final class PaymentCryptographyKeyExchange {
             return exportParameters(previous);
         }
         long now = clock.millis();
-        KeyPair pair = signing.rsa
-                ? PaymentCryptographyKeyPairs.rsa(signing.bytes * 8, random)
-                : PaymentCryptographyKeyPairs.ec(signing, random);
+        KeyPair pair = PaymentCryptographyKeyPairs.rsa(signing.bytes * 8, random);
         // The certificate lives as long as the token, so the parameters never hand out a
         // certificate that has expired.
         Certificates.Minted certificate = mintSelfSigned(pair, "floci key-export KRD",
@@ -1214,8 +1220,9 @@ final class PaymentCryptographyKeyExchange {
         String caIdentifier = text(material, "CertificateAuthorityPublicKeyIdentifier");
         PaymentCryptographyKey caKey = usableKey(caIdentifier, region);
         String certText = text(material, "WrappingKeyCertificate");
-        PublicKey wrappingKey = verifiedCertificate(certText, caKey, "the wrapping key certificate")
-                .getPublicKey();
+        X509Certificate receiver = verifiedCertificate(certText, caKey,
+                "the wrapping key certificate");
+        PublicKey wrappingKey = receiver.getPublicKey();
         int modulusBits = modulusBitsOf(wrappingKey);
         String tooWeak = PaymentCryptographyKeyStrength.refusal(
                 PaymentCryptographyKeyStrength.rsaBitsOf(modulusBits),
@@ -1234,8 +1241,11 @@ final class PaymentCryptographyKeyExchange {
             throw validation("KeyMaterial.Tr34KeyBlock.RandomNonce must be hexadecimal");
         }
         String header = tr31Header(key);
+        // The block names its recipient: the receiver's certificate identifier is the
+        // issuer and serial number of the certificate the request brought.
         byte[] block = Tr34.build(clear, header, nonce.isEmpty() ? null : HEX.parseHex(nonce),
-                signing.privateKey, wrappingKey, null, signing.certificateDer);
+                signing.privateKey, wrappingKey, Certificates.toDer(receiver),
+                signing.certificateDer);
         return new Exported(HEX_UPPER.formatHex(block), "TR34_KEY_BLOCK", null);
     }
 
@@ -1290,7 +1300,7 @@ final class PaymentCryptographyKeyExchange {
         String algorithm = PaymentCryptographyService.algorithmOf(recovered.header, clear.length);
         return new Imported(algorithm, usage,
                 PaymentCryptographyService.modesFor(mode),
-                "E".equals(exportability), clear, null, null, null, "SYMMETRIC_KEY");
+                exportableOnImport(exportability), clear, null, null, null, "SYMMETRIC_KEY");
     }
 
 
