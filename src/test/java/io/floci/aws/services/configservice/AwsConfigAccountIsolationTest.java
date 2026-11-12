@@ -46,7 +46,8 @@ class AwsConfigAccountIsolationTest {
     void recorderStartStopAndDeletionStayInTheirAccount() {
         for (String account : List.of(FIRST, SECOND)) {
             context.setAccountId(account);
-            service.putConfigurationRecorder(REGION, new ConfigurationRecorder("default", "role", null, null));
+            service.putConfigurationRecorder(REGION, new ConfigurationRecorder(null, "default", "role", null, null),
+                    null);
             service.putDeliveryChannel(REGION, new DeliveryChannel("default", "bucket", null, null, null, null));
         }
         context.setAccountId(FIRST);

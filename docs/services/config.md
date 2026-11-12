@@ -195,14 +195,15 @@ aws configservice delete-config-rule --config-rule-name s3-bucket-versioning
       `DeleteAggregationAuthorization` on an authorization that does not exist succeeds,
       because the Config API models no "not found" error for that operation.
     - `TagResource`, `UntagResource` and `ListTagsForResource` answer
-      `ResourceNotFoundException` for a config rule, conformance pack or aggregation
-      authorization ARN that does not name an existing resource in the caller's account and
-      region. ARNs of resource kinds Floci does not model (configuration aggregators, stored
-      queries, organization rules and packs, recorders) are accepted without a check.
+      `ResourceNotFoundException` for a config rule, conformance pack, aggregation
+      authorization or configuration recorder ARN that does not name an existing resource in the
+      caller's account and region. ARNs of resource kinds Floci does not model (configuration
+      aggregators, stored queries, organization rules and packs) are accepted without a check.
     - `PutConfigRule` applies its `Tags` only when it creates the rule; a later
       `PutConfigRule` for the same rule leaves its tags unchanged, as AWS documents. Use
       `TagResource` and `UntagResource` to change them. `DeleteConfigRule` drops the rule's tags.
+      `PutConfigurationRecorder` and `DeleteConfigurationRecorder` do the same for the recorder.
     - `PutConfigRule` and `PutAggregationAuthorization` reject more than 50 `Tags`, a tag
       without a 1-128 character `Key`, or a `Value` over 256 characters with
-      `InvalidParameterValueException`, and store nothing. A tag with no `Value` is stored with
-      an empty value.
+      `InvalidParameterValueException`, and store nothing. `PutConfigurationRecorder` rejects
+      the same with `ValidationException`. A tag with no `Value` is stored with an empty value.
