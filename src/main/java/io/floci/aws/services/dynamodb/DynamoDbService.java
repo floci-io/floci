@@ -4404,7 +4404,7 @@ public class DynamoDbService {
         return "()[],.=+-".indexOf(c) >= 0;
     }
 
-    private static final List<String> UPDATE_SECTIONS = List.of("SET", "REMOVE", "ADD", "DELETE");
+    private static final Set<String> UPDATE_SECTIONS = Set.of("SET", "REMOVE", "ADD", "DELETE");
 
     // DynamoDB reads a SET target path up to "=", so a comma before it fails on the comma.
     static void requireAssignmentAfterSetTarget(String expression) {
