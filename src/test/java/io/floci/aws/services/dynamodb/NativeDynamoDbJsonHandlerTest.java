@@ -6,6 +6,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.floci.aws.core.common.AwsException;
+import io.floci.aws.core.common.AwsRegions;
 import io.floci.aws.core.common.SmithyValidationErrors;
 import io.floci.aws.core.storage.InMemoryStorage;
 import io.floci.aws.core.storage.PersistentStorage;
@@ -29,6 +30,11 @@ import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.ExecutionException;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
 
 import static org.junit.jupiter.api.Assertions.*;
 
@@ -872,6 +878,44 @@ class NativeDynamoDbJsonHandlerTest {
 
         assertEquals("ResourceNotFoundException", missingTable.getErrorCode());
         assertEquals("ValidationException", existingIndex.getErrorCode());
+    }
+
+    @Test
+    void concurrentRequestsCannotPassTheAccountQuotaTogether() throws Exception {
+        try (ExecutorService pool = Executors.newFixedThreadPool(16)) {
+            for (String region : AwsRegions.advertised(AwsRegions.DEFAULT_PARTITION)) {
+                CountDownLatch start = new CountDownLatch(1);
+                List<Future<Response>> results = new ArrayList<>();
+                for (int i = 0; i < 8; i++) {
+                    handler.handle("CreateTable", quotaTableRequest("old" + i, 1, 1, 1, 1), region);
+                    JsonNode create = quotaTableRequest("new" + i, 10000, 1, 1, 1);
+                    JsonNode update = throughputUpdate("old" + i, 10000, 1);
+                    results.add(pool.submit(() -> {
+                        start.await();
+                        return handler.handle("CreateTable", create, region);
+                    }));
+                    results.add(pool.submit(() -> {
+                        start.await();
+                        return handler.handle("UpdateTable", update, region);
+                    }));
+                }
+                start.countDown();
+                for (Future<Response> result : results) {
+                    try {
+                        result.get();
+                    } catch (ExecutionException e) {
+                        AwsException refused = assertInstanceOf(AwsException.class, e.getCause());
+                        assertEquals("LimitExceededException", refused.getErrorCode());
+                    }
+                }
+
+                long reserved = 0;
+                for (String name : service.listTables(region)) {
+                    reserved += DynamoDbCapacityQuotas.Capacity.of(service.describeTable(name, region)).read();
+                }
+                assertTrue(reserved <= DynamoDbCapacityQuotas.ACCOUNT_MAX_CAPACITY_UNITS, region + " " + reserved);
+            }
+        }
     }
 
     // Request validation for AWS parity: real DynamoDB rejects each of these with a

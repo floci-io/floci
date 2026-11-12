@@ -133,6 +133,8 @@ public class DynamoDbService {
     // relies on ReentrantLock's re-entrancy so the inner put/update/delete calls do
     // not deadlock after the outer transaction already took each participant's lock.
     private final ConcurrentHashMap<String, ConcurrentHashMap<String, ReentrantLock>> itemLocks = new ConcurrentHashMap<>();
+    // Held from an account quota check until the capacity it allowed is stored.
+    private final Object capacityLock = new Object();
     // ClientRequestToken idempotency for TransactWriteItems. AWS retains tokens for
     // ~10 minutes; floci uses the same window. The cache entry stores a hash of the
     // request body so a replay with the same token but different parameters can be
@@ -687,11 +689,12 @@ public class DynamoDbService {
             table.setVectorIndexes(created);
         }
 
-        if (!"PAY_PER_REQUEST".equals(billingMode)) {
-            DynamoDbCapacityQuotas.requireNewTableWithinQuotas(table, reservedCapacity(region), region);
+        synchronized (capacityLock) {
+            if (!"PAY_PER_REQUEST".equals(billingMode)) {
+                DynamoDbCapacityQuotas.requireNewTableWithinQuotas(table, reservedCapacity(region), region);
+            }
+            tableStore.put(storageKey, table);
         }
-
-        tableStore.put(storageKey, table);
         itemsByTable.put(scopedItemsKey(storageKey), new ConcurrentSkipListMap<>());
         LOG.infov("Created table: {0} in region {1}", tableName, region);
         return table;
@@ -1045,6 +1048,10 @@ public class DynamoDbService {
         if (kinesisForwarder != null) {
             kinesisForwarder.onDestinationDisabled(regionResolver.getAccountId(), region, tableName, streamArn);
         }
+    }
+
+    Object capacityLock() {
+        return capacityLock;
     }
 
     private Capacity reservedCapacity(String region) {
