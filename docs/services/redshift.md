@@ -127,11 +127,13 @@ The attributes follow the [CloudFormation resource schema](https://docs.aws.amaz
 | `DescribeClusters` | List clusters and their connection details |
 | `DeleteCluster` | Create the requested final snapshot, then remove the cluster; accepts `SkipFinalClusterSnapshot` to delete without a backup |
 | `CreateClusterSnapshot` | Back up a cluster to a SQL dump via `pg_dump` |
-| `DescribeClusterSnapshots` | List snapshots, optionally filtered by snapshot or cluster identifier and SnapshotType (manual or automated) |
+| `DescribeClusterSnapshots` | List snapshots, optionally filtered by snapshot or cluster identifier and SnapshotType (manual or automated). Every snapshot reports `OwnerAccount` and `AccountsWithRestoreAccess`. With `OwnerAccount` set to another account, only the snapshots that account has authorized the caller to restore are listed, and naming one that is not shared is `ClusterSnapshotNotFound` |
+| `AuthorizeSnapshotAccess` | Let another account restore a manual, available snapshot (`AccountWithRestoreAccess`, a 12 digit account id). Authorizing an account twice is `AuthorizationAlreadyExists` |
+| `RevokeSnapshotAccess` | Take the restore access of an account away; the next restore by it is refused. An account that was not authorized is `AuthorizationNotFound` |
 | `DeleteClusterSnapshot` | Remove a snapshot and its stored dump |
 | `ModifyClusterSnapshot` | Update the retention period of a manual cluster snapshot |
 | `CopyClusterSnapshot` | Copy an automated cluster snapshot to a manual snapshot with a new identifier and retention period |
-| `RestoreFromClusterSnapshot` | Create a new cluster and load a snapshot's dump into it via `psql`; accepts `SnapshotIdentifier` or a same-account, same-region `SnapshotArn` |
+| `RestoreFromClusterSnapshot` | Create a new cluster and load a snapshot's dump into it via `psql`; accepts `SnapshotIdentifier` or a same-region `SnapshotArn`. `OwnerAccount`, or a `SnapshotArn` of another account, restores a snapshot that account has authorized the caller to restore, and is refused with `AccessToSnapshotDenied` otherwise; the dump is read from the owner's directory and the cluster is created in the caller's account |
 | `CreateClusterParameterGroup` | Register a parameter group (metadata only) |
 | `DescribeClusterParameterGroups` | List parameter groups, optionally filtered by name |
 | `DescribeClusterParameters` | Return the parameters of a group, with any values set by `ModifyClusterParameterGroup` |
@@ -613,7 +615,13 @@ For `AWS::Redshift::ClusterParameterGroup`, `Parameters` is applied via `ModifyC
   update both the cluster's master password and its secret value; rotation requires an available
   cluster and does not use a Lambda function.
 - Snapshot restoration has the same limitations as `RestoreFromClusterSnapshot`: snapshots are
-  local SQL dumps, not cross-account backups or a full Redshift engine image.
+  local SQL dumps, not a full Redshift engine image.
+- Snapshot sharing is recorded on the snapshot. `AuthorizeSnapshotAccess` adds the account to
+  `AccountsWithRestoreAccess` and `RevokeSnapshotAccess` removes it, so a snapshot deleted and taken again under
+  the same name starts with no grant. Only a manual, available snapshot can be shared. A shared snapshot can be
+  described and restored by the account it is shared with, and by no other action. The caller's own identity
+  policies are the IAM filter's to check when IAM enforcement is on. KMS key grants are not checked, and a
+  snapshot copied to another Region is shared only through the Region it was taken in.
 - `AWS::Redshift::ClusterSecurityGroup` is accepted as metadata: Floci does not emulate the legacy EC2-Classic security group model.
 
 ## Configuration

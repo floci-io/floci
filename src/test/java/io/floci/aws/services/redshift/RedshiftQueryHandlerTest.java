@@ -621,7 +621,7 @@ class RedshiftQueryHandlerTest {
         cluster.setMasterUsername("admin");
         cluster.setClusterStatus("available");
         cluster.setEndpoint(new Endpoint("localhost", 5439));
-        when(service.restoreFromClusterSnapshot("restored-cluster", "test-snapshot", null, "dc2.large")).thenReturn(cluster);
+        when(service.restoreFromClusterSnapshot("restored-cluster", "test-snapshot", null, "dc2.large", null)).thenReturn(cluster);
 
         Response response = handler.handle("RestoreFromClusterSnapshot", params);
         assertEquals(200, response.getStatus());
@@ -638,11 +638,11 @@ class RedshiftQueryHandlerTest {
         params.putSingle("ClusterIdentifier", "restored-cluster");
         params.putSingle("SnapshotArn", "arn:aws:redshift:us-east-1:acc:snapshot:src/my-snap");
         Cluster cluster = availableCluster("restored-cluster");
-        when(service.restoreFromClusterSnapshot("restored-cluster", "my-snap", "src", null)).thenReturn(cluster);
+        when(service.restoreFromClusterSnapshot("restored-cluster", "my-snap", "src", null, null)).thenReturn(cluster);
 
         Response response = handler.handle("RestoreFromClusterSnapshot", params, "auth");
         assertEquals(200, response.getStatus());
-        verify(service).restoreFromClusterSnapshot("restored-cluster", "my-snap", "src", null);
+        verify(service).restoreFromClusterSnapshot("restored-cluster", "my-snap", "src", null, null);
     }
 
     @Test
@@ -668,15 +668,41 @@ class RedshiftQueryHandlerTest {
     }
 
     @Test
-    void restoreFromClusterSnapshotForeignAccountArnNotFound() {
+    void restoreFromClusterSnapshotForeignAccountArnNamesTheOwner() {
         MultivaluedMap<String, String> params = new MultivaluedHashMap<>();
         params.putSingle("ClusterIdentifier", "restored-cluster");
         params.putSingle("SnapshotArn", "arn:aws:redshift:us-east-1:999999999999:snapshot:src/my-snap");
+        when(service.restoreFromClusterSnapshot("restored-cluster", "my-snap", "src", null, "999999999999"))
+                .thenReturn(availableCluster("restored-cluster"));
+
+        Response response = handler.handle("RestoreFromClusterSnapshot", params, "auth");
+        assertEquals(200, response.getStatus());
+        verify(service).restoreFromClusterSnapshot("restored-cluster", "my-snap", "src", null, "999999999999");
+    }
+
+    @Test
+    void restoreFromClusterSnapshotOfAnotherRegionArnIsNotFound() {
+        MultivaluedMap<String, String> params = new MultivaluedHashMap<>();
+        params.putSingle("ClusterIdentifier", "restored-cluster");
+        params.putSingle("SnapshotArn", "arn:aws:redshift:eu-west-1:999999999999:snapshot:src/my-snap");
 
         AwsException ex = assertThrows(AwsException.class,
                 () -> handler.handle("RestoreFromClusterSnapshot", params, "auth"));
         assertEquals("ClusterSnapshotNotFound", ex.getErrorCode());
-        verify(service, never()).restoreFromClusterSnapshot(any(), any(), any(), any());
+        verify(service, never()).restoreFromClusterSnapshot(any(), any(), any(), any(), any());
+    }
+
+    @Test
+    void restoreFromClusterSnapshotPassesTheOwnerAccountItNames() {
+        MultivaluedMap<String, String> params = new MultivaluedHashMap<>();
+        params.putSingle("ClusterIdentifier", "restored-cluster");
+        params.putSingle("SnapshotIdentifier", "my-snap");
+        params.putSingle("OwnerAccount", "999999999999");
+        when(service.restoreFromClusterSnapshot("restored-cluster", "my-snap", null, null, "999999999999"))
+                .thenReturn(availableCluster("restored-cluster"));
+
+        assertEquals(200, handler.handle("RestoreFromClusterSnapshot", params, "auth").getStatus());
+        verify(service).restoreFromClusterSnapshot("restored-cluster", "my-snap", null, null, "999999999999");
     }
 
     @Test
@@ -690,7 +716,7 @@ class RedshiftQueryHandlerTest {
                 () -> handler.handle("RestoreFromClusterSnapshot", params, "auth"));
         assertEquals("InvalidParameterCombination", ex.getErrorCode());
         assertEquals(400, ex.getHttpStatus());
-        verify(service, never()).restoreFromClusterSnapshot(any(), any(), any(), any());
+        verify(service, never()).restoreFromClusterSnapshot(any(), any(), any(), any(), any());
     }
 
     /** The cluster a request is authorized on, snapshot:<cluster>/<name>, is the one its snapshot must be of. */
@@ -712,11 +738,11 @@ class RedshiftQueryHandlerTest {
         params.putSingle("ClusterIdentifier", "restored-cluster");
         params.putSingle("SnapshotIdentifier", "test-snapshot");
         params.putSingle("SnapshotClusterIdentifier", "prod");
-        when(service.restoreFromClusterSnapshot("restored-cluster", "test-snapshot", "prod", null))
+        when(service.restoreFromClusterSnapshot("restored-cluster", "test-snapshot", "prod", null, null))
                 .thenReturn(availableCluster("restored-cluster"));
 
         assertEquals(200, handler.handle("RestoreFromClusterSnapshot", params, "auth").getStatus());
-        verify(service).restoreFromClusterSnapshot("restored-cluster", "test-snapshot", "prod", null);
+        verify(service).restoreFromClusterSnapshot("restored-cluster", "test-snapshot", "prod", null, null);
     }
 
     @Test
@@ -730,7 +756,7 @@ class RedshiftQueryHandlerTest {
                 () -> handler.handle("RestoreFromClusterSnapshot", params, "auth"));
         assertEquals("ClusterSnapshotNotFound", ex.getErrorCode());
         assertEquals(404, ex.getHttpStatus());
-        verify(service, never()).restoreFromClusterSnapshot(any(), any(), any(), any());
+        verify(service, never()).restoreFromClusterSnapshot(any(), any(), any(), any(), any());
     }
 
     @Test
@@ -742,7 +768,7 @@ class RedshiftQueryHandlerTest {
         AwsException ex = assertThrows(AwsException.class,
                 () -> handler.handle("RestoreFromClusterSnapshot", params, "auth"));
         assertEquals("ClusterSnapshotNotFound", ex.getErrorCode());
-        verify(service, never()).restoreFromClusterSnapshot(any(), any(), any(), any());
+        verify(service, never()).restoreFromClusterSnapshot(any(), any(), any(), any(), any());
     }
 
     @Test
