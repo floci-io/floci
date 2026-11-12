@@ -1,8 +1,8 @@
 package io.floci.aws.services.cloudformation;
 
 import io.floci.aws.core.common.XmlParser;
-import io.floci.aws.testing.CfnStackWaits;
 import io.floci.aws.services.ses.SesReceiptRuleService;
+import io.floci.aws.testing.CfnStackWaits;
 import io.floci.aws.testing.RestAssuredJsonUtils;
 import io.quarkus.test.junit.QuarkusTest;
 import jakarta.inject.Inject;
@@ -11,6 +11,7 @@ import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
 
 import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 
@@ -1123,7 +1124,7 @@ class CloudFormationChangeSetDiffIntegrationTest {
             .statusCode(200)
             .extract().body().asString();
 
-        Map<String, String> result = new java.util.HashMap<>();
+        Map<String, String> result = new HashMap<>();
         for (Map<String, String> change : XmlParser.extractGroups(desc, "ResourceChange")) {
             result.put(change.get("LogicalResourceId"), change.get("Replacement"));
         }
