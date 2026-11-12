@@ -968,6 +968,21 @@ class ContainerLauncherTest {
         verify(lifecycleManager).startCreated(eq("container-123"), any());
     }
 
+    @Test
+    void launchFunction_imageWorkingDirectoryOnAMountedFileSystem_starts() throws Exception {
+        workingDirectory("/mnt/efs/app");
+        directoryMode("/mnt", 0755);
+        directoryMode("/mnt/efs", 0700);
+        LambdaFunction fn = imageFunction();
+        fn.setFileSystemConfigs(List.of(new LambdaFileSystemConfig(
+                "arn:aws:elasticfilesystem:us-east-1:222233334444:access-point/fsap-0123456789abcdef0",
+                "/mnt/efs")));
+
+        launcher.launch(fn);
+
+        verify(lifecycleManager).startCreated(eq("container-123"), any());
+    }
+
     private void workingDirectory(String workingDir) {
         ContainerConfig containerConfig = mock(ContainerConfig.class);
         lenient().when(containerConfig.getWorkingDir()).thenReturn(workingDir);
@@ -987,8 +1002,8 @@ class ContainerLauncherTest {
             tar.closeArchiveEntry();
         }
         CopyArchiveFromContainerCmd copy = mock(CopyArchiveFromContainerCmd.class);
-        when(copy.exec()).thenReturn(new ByteArrayInputStream(bos.toByteArray()));
-        when(dockerClient.copyArchiveFromContainerCmd("container-123", path)).thenReturn(copy);
+        lenient().when(copy.exec()).thenReturn(new ByteArrayInputStream(bos.toByteArray()));
+        lenient().when(dockerClient.copyArchiveFromContainerCmd("container-123", path)).thenReturn(copy);
     }
 
     private static LambdaFunction imageFunction() {
