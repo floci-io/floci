@@ -223,7 +223,9 @@
       "BatchCreateVehicle": "iotfleetwise:CreateVehicle"
     },
     "lakeformation": {
-      "GetTemporaryDataLocationCredentials": "lakeformation:GetDataAccess"
+      "GetGlueFunctionSessionContext": "lakeformation:GetDataAccess",
+      "GetTemporaryDataLocationCredentials": "lakeformation:GetDataAccess",
+      "GetTemporaryGlueFunctionCredentials": "lakeformation:GetDataAccess"
     },
     "lambda": {
       "GetLayerVersionByArn": "lambda:GetLayerVersion",
@@ -352,6 +354,7 @@
       "StartPolicyGeneration",
       "ValidatePolicy"
     ],
+    "apigateway": [],
     "cloudfront": [
       "CreateAnycastIpList",
       "CreateCachePolicy",
@@ -1025,6 +1028,65 @@
       "StartTraceRetrieval",
       "UpdateIndexingRule",
       "UpdateTraceSegmentDestination"
+    ]
+  },
+  "authorizedByMethod": {
+    "apigateway": [
+      "CreateApi",
+      "CreateApiKey",
+      "CreateAuthorizer",
+      "CreateDeployment",
+      "CreateDomainName",
+      "CreateDomainNameAccessAssociation",
+      "CreateIntegration",
+      "CreateModel",
+      "CreateRestApi",
+      "CreateStage",
+      "CreateUsagePlan",
+      "CreateVpcLink",
+      "DeleteAuthorizer",
+      "DeleteDeployment",
+      "DeleteDomainName",
+      "DeleteIntegration",
+      "DeleteIntegrationResponse",
+      "DeleteModel",
+      "DeleteStage",
+      "DeleteVpcLink",
+      "GenerateClientCertificate",
+      "GetAuthorizer",
+      "GetAuthorizers",
+      "GetDeployment",
+      "GetDeployments",
+      "GetDomainName",
+      "GetDomainNames",
+      "GetIntegration",
+      "GetIntegrationResponse",
+      "GetModel",
+      "GetModelTemplate",
+      "GetModels",
+      "GetStage",
+      "GetStages",
+      "GetTags",
+      "GetVpcLink",
+      "GetVpcLinks",
+      "ImportApi",
+      "ImportRestApi",
+      "PutIntegration",
+      "PutRestApi",
+      "ReimportApi",
+      "TagResource",
+      "UntagResource",
+      "UpdateAccount",
+      "UpdateApi",
+      "UpdateAuthorizer",
+      "UpdateDeployment",
+      "UpdateDomainName",
+      "UpdateIntegration",
+      "UpdateIntegrationResponse",
+      "UpdateModel",
+      "UpdateRestApi",
+      "UpdateStage",
+      "UpdateVpcLink"
     ]
   }
 }
