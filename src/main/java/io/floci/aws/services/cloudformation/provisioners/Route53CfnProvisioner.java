@@ -169,6 +169,8 @@ public class Route53CfnProvisioner implements CfnResourceProvisioner {
         }
         // Route 53 requires a set identifier of at least one character, so a blank one means none.
         rrs.setSetIdentifier(ctx.resolveOrDefault(props, "SetIdentifier", null));
+        String multiValueAnswer = ctx.resolveOrDefault(props, "MultiValueAnswer", null);
+        rrs.setMultiValueAnswer(multiValueAnswer == null ? null : Boolean.valueOf(multiValueAnswer));
         rrs.setRecords(parseResourceRecords(props, ctx));
         rrs.setAliasTarget(parseAliasTarget(props, ctx));
         rrs.setRegion(ctx.resolveOrDefault(props, "Region", null));

@@ -16,6 +16,7 @@ import io.floci.aws.services.route53.model.ResourceRecordSet;
 import io.floci.aws.services.route53.model.VpcAssociation;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.NullSource;
 import org.junit.jupiter.params.provider.ValueSource;
 import org.mockito.ArgumentCaptor;
 import org.mockito.ArgumentMatcher;
@@ -715,8 +716,10 @@ class Route53CfnProvisionerTest {
         verifyNoInteractions(service);
     }
 
-    @Test
-    void recordSetCarriesItsRoutingPolicy() {
+    @ParameterizedTest
+    @NullSource
+    @ValueSource(booleans = {true, false})
+    void recordSetCarriesItsRoutingPolicy(Boolean multiValueAnswer) {
         Route53Service service = mock(Route53Service.class);
         JsonNode props = new ObjectMapper().createObjectNode()
                 .put("HostedZoneId", "Z1")
@@ -728,6 +731,9 @@ class Route53CfnProvisionerTest {
                 .put("Failover", "PRIMARY")
                 .put("Weight", "10")
                 .put("HealthCheckId", "hc-1");
+        if (multiValueAnswer != null) {
+            ((ObjectNode) props).put("MultiValueAnswer", multiValueAnswer);
+        }
         StackResource resource = new StackResource();
         resource.setLogicalId("Record");
         resource.setResourceType("AWS::Route53::RecordSet");
@@ -743,6 +749,7 @@ class Route53CfnProvisionerTest {
         assertEquals("PRIMARY", rrs.getFailover());
         assertEquals(Long.valueOf(10), rrs.getWeight());
         assertEquals("hc-1", rrs.getHealthCheckId());
+        assertEquals(multiValueAnswer, rrs.getMultiValueAnswer());
     }
 
     @Test

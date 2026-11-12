@@ -601,7 +601,6 @@ AWS::Route53::HostedZone	QueryLoggingConfig	accepted and ignored
 AWS::Route53::RecordSet	CidrRoutingConfig	accepted and ignored
 AWS::Route53::RecordSet	Comment	accepted and ignored
 AWS::Route53::RecordSet	GeoLocation	accepted and ignored
-AWS::Route53::RecordSet	MultiValueAnswer	accepted and ignored
 AWS::S3::Bucket	AbacStatus	accepted and ignored
 AWS::S3::Bucket	AccelerateConfiguration	silently dropped, as the S3CfnProvisioner javadoc records
 AWS::S3::Bucket	AccessControl	silently dropped, as the S3CfnProvisioner javadoc records

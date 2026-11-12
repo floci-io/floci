@@ -282,6 +282,72 @@ class CloudFormationRoute53RecordSetIntegrationTest {
     }
 
     @Test
+    void multivalueRecordsSurviveStackCreationUpdatesAndDeletion() {
+        String suffix = Long.toString(System.nanoTime(), 36);
+        String stackName = "r53-multivalue-" + suffix;
+        String zoneName = suffix + ".cfn-multivalue.example.test";
+        String template = """
+                {
+                  "Resources": {
+                    "Zone": {
+                      "Type": "AWS::Route53::HostedZone",
+                      "Properties": {"Name": "%1$s"}
+                    },
+                    "Record": {
+                      "Type": "AWS::Route53::RecordSet",
+                      "Properties": {
+                        "HostedZoneId": {"Ref": "Zone"},
+                        "Name": "single.%1$s.", "Type": "A", "TTL": "10",
+                        "SetIdentifier": "single", "MultiValueAnswer": true,
+                        "ResourceRecords": ["192.0.2.1"]
+                      }
+                    },
+                    "Group": {
+                      "Type": "AWS::Route53::RecordSetGroup",
+                      "Properties": {
+                        "HostedZoneId": {"Ref": "Zone"},
+                        "RecordSets": [{
+                          "Name": "group.%1$s.", "Type": "A", "TTL": "10",
+                          "SetIdentifier": "group", "MultiValueAnswer": true,
+                          "ResourceRecords": ["192.0.2.2"]
+                        }]
+                      }
+                    }
+                  }
+                }
+                """.formatted(zoneName);
+
+        createStack(stackName, template);
+        assertStackStatus(stackName, "CREATE_COMPLETE");
+        String zoneId = CfnRequests.physicalId(stackName, "Zone", CFN_AUTH);
+        try {
+            String created = listResourceRecordSets(zoneId);
+            assertTrue(created.contains("<SetIdentifier>single</SetIdentifier><MultiValueAnswer>true</MultiValueAnswer>"),
+                    created);
+            assertTrue(created.contains("<SetIdentifier>group</SetIdentifier><MultiValueAnswer>true</MultiValueAnswer>"),
+                    created);
+
+            updateStack(stackName, template.replace("\"MultiValueAnswer\": true", "\"MultiValueAnswer\": false"));
+            assertStackStatus(stackName, "UPDATE_COMPLETE");
+            String updated = listResourceRecordSets(zoneId);
+            assertTrue(updated.contains("<SetIdentifier>single</SetIdentifier><MultiValueAnswer>false</MultiValueAnswer>"),
+                    updated);
+            assertTrue(updated.contains("<SetIdentifier>group</SetIdentifier><MultiValueAnswer>false</MultiValueAnswer>"),
+                    updated);
+
+            updateStack(stackName, template.replace(", \"MultiValueAnswer\": true", ""));
+            assertStackStatus(stackName, "UPDATE_COMPLETE");
+            String omitted = listResourceRecordSets(zoneId);
+            assertTrue(omitted.contains("<SetIdentifier>single</SetIdentifier>"), omitted);
+            assertTrue(omitted.contains("<SetIdentifier>group</SetIdentifier>"), omitted);
+            assertFalse(omitted.contains("<MultiValueAnswer>"), omitted);
+        } finally {
+            deleteStack(stackName);
+            CfnStackWaits.awaitStackDeleted(stackName);
+        }
+    }
+
+    @Test
     void latencyRecordsKeepTheirRoutingPolicyAndHealthCheck() {
         String suffix = Long.toString(System.nanoTime(), 36);
         String stackName = "r53-routing-" + suffix;

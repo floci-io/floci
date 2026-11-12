@@ -860,6 +860,9 @@ public class Route53Controller {
         if (rrs.getWeight() != null) xml.elem("Weight", rrs.getWeight());
         if (rrs.getRegion() != null) xml.elem("Region", rrs.getRegion());
         if (rrs.getFailover() != null) xml.elem("Failover", rrs.getFailover());
+        if (rrs.getMultiValueAnswer() != null) {
+            xml.elem("MultiValueAnswer", rrs.getMultiValueAnswer());
+        }
         if (rrs.getTtl() != null) xml.elem("TTL", rrs.getTtl());
         if (rrs.getRecords() != null && !rrs.getRecords().isEmpty()) {
             xml.start("ResourceRecords");
@@ -1094,6 +1097,11 @@ public class Route53Controller {
                         }
                         case "SetIdentifier" -> {
                             if (inRrs && currentRrs != null) currentRrs.setSetIdentifier(r.getElementText());
+                        }
+                        case "MultiValueAnswer" -> {
+                            if (inRrs && currentRrs != null) {
+                                currentRrs.setMultiValueAnswer(Boolean.valueOf(r.getElementText()));
+                            }
                         }
                         case "Weight" -> {
                             if (inRrs && currentRrs != null) {
