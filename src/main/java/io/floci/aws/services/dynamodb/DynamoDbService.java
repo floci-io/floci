@@ -1396,8 +1396,8 @@ public class DynamoDbService {
 
         // AWS refuses an over-limit statement before it evaluates the condition.
         if (sizeRule == UpdateSizeRule.UPDATE_ITEM && updateExpression != null) {
-            requireUpdateStatementWithinSizeLimit(DynamoDbItemSize.updateStatementSize(updateExpression,
-                    path -> parsePath(path, expressionAttrNames), expressionAttrValues));
+            DynamoDbItemSize.updateStatementSize(updateExpression, path -> parsePath(path, expressionAttrNames),
+                    expressionAttrValues).ifPresent(DynamoDbService::requireUpdateStatementWithinSizeLimit);
         }
 
         return withItemLock(storageKey, itemKey, () -> {

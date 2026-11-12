@@ -225,6 +225,22 @@ class DynamoDbItemSizeServiceTest {
         assertEquals("pk".length() + "a".length() + "c".length() + "x".length(), storedBytes("a"));
     }
 
+    @ParameterizedTest
+    @CsvSource(delimiter = '|', textBlock = """
+            SET a
+            SET a = :v, b
+            ADD a
+            SET ,
+            ADD ,
+            """)
+    void updateItemLeavesAStatementItCannotSizeToTheUpdateParser(String expression) {
+        seed("a", "c", stringValue("x"));
+
+        AwsException refused = assertThrows(AwsException.class, () -> service.updateItem(TABLE, key("a"), null,
+                expression, null, values(":v", stringValue("v")), "NONE", REGION));
+        assertEquals("ValidationException", refused.getErrorCode());
+    }
+
     @Test
     void updateItemChecksTheConditionBeforeTheFinishedItem() {
         seed("a", "b", stringValue(padding("a", MAX_ITEM_SIZE, 0)));
