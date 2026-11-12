@@ -595,6 +595,56 @@ class PaymentCryptographyKeyExchangeTest {
         assertEquals("ValidationException", refused.getErrorCode());
         assertTrue(refused.getMessage().contains("signed with RSA_2048"), refused.getMessage());
     }
+
+    @Test
+    void aCryptogramUnderAVariantThatIsNotTheKeysPurposeIsRefused() {
+        // The variant says what the key is for, so a key exported under another variant
+        // would come back with the other variant's usage, and the export would change what
+        // the key is for.
+        PaymentCryptographyKey kek = createKey("AES_256", "TR31_K0_KEY_ENCRYPTION_KEY");
+        PaymentCryptographyKey key = createKey("AES_256", "TR31_D0_SYMMETRIC_DATA_ENCRYPTION_KEY");
+
+        AwsException refused = assertThrows(AwsException.class,
+                () -> service.exportKey("us-east-1", key.getKeyId(), "As2805KeyCryptogram",
+                        Map.of(
+                                "As2805KeyVariant", "TERMINAL_MAJOR_KEY_VARIANT_00",
+                                "WrappingKeyIdentifier", kek.getKeyId()), "", ""));
+
+        assertEquals("ValidationException", refused.getErrorCode());
+    }
+
+    @Test
+    void aCryptogramUnderAWeakerWrappingKeyIsRefused() {
+        // The wrapping key has to be at least as strong as the key it protects, the same
+        // rule the export enforces, so a cryptogram the export would refuse to write does
+        // not open here either.
+        PaymentCryptographyKey kek = createKey("TDES_2KEY", "TR31_K0_KEY_ENCRYPTION_KEY");
+        String cryptogram = PaymentCryptographyAs2805Cryptogram.wrap(
+                HexFormat.of().parseHex("000102030405060708090A0B0C0D0E0F10111213141516171819"
+                        + "1A1B1C1D1E1F"),
+                0x00, PaymentCryptographyKeyAlgorithm.AES_256,
+                PaymentCryptographyCrypto.fromHex(kek.getKeyMaterialHex()),
+                PaymentCryptographyKeyAlgorithm.TDES_2KEY);
+
+        Map<String, Object> incoming = new LinkedHashMap<>();
+        incoming.put("As2805KeyVariant", "TERMINAL_MAJOR_KEY_VARIANT_00");
+        incoming.put("WrappingKeyIdentifier", kek.getKeyId());
+        incoming.put("WrappedKeyCryptogram", cryptogram);
+        incoming.put("KeyAlgorithm", "AES_256");
+        incoming.put("KeyAttributes", Map.of(
+                "KeyAlgorithm", "AES_256",
+                "KeyClass", "SYMMETRIC_KEY",
+                "KeyUsage", "TR31_K0_KEY_ENCRYPTION_KEY",
+                "KeyModesOfUse", Map.of("Encrypt", true, "Decrypt", true)));
+        incoming.put("Exportable", true);
+
+        AwsException refused = assertThrows(AwsException.class,
+                () -> service.importKey("us-east-1", "As2805KeyCryptogram", incoming, "", true,
+                        Map.of()));
+
+        assertEquals("ValidationException", refused.getErrorCode());
+    }
+
     @Test
     void aTr34BlockThatCarriesNoHeaderIsRefused() {
         // A block that is signed correctly but whose key block names no key says nothing

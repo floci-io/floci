@@ -430,6 +430,32 @@ class PaymentCryptographyTest {
             assertThat(exported.wrappedKey().keyMaterial()).isNotBlank();
         }
     }
+
+    @Test
+    void aCryptogramUnderAVariantThatIsNotTheKeysPurposeIsRefused() {
+        // The variant says what the key is for, so a key of another purpose cannot leave
+        // under it.
+        Key encryptionKey = client.createKey(r -> r
+                .keyAttributes(a -> a
+                        .keyAlgorithm(KeyAlgorithm.AES_256)
+                        .keyClass(KeyClass.SYMMETRIC_KEY)
+                        .keyUsage(KeyUsage.TR31_K0_KEY_ENCRYPTION_KEY)
+                        .keyModesOfUse(modes -> modes.wrap(true).unwrap(true)))
+                .exportable(true))
+                .key();
+        keyArns.add(encryptionKey.keyArn());
+        Key key = createAesKey();
+
+        assertThatThrownBy(() -> client.exportKey(r -> r
+                .exportKeyIdentifier(key.keyArn())
+                .keyMaterial(m -> m.as2805KeyCryptogram(b -> b
+                        .as2805KeyVariant(As2805KeyVariant.TERMINAL_MAJOR_KEY_VARIANT_00)
+                        .wrappingKeyIdentifier(encryptionKey.keyArn())))))
+                .isInstanceOf(AwsServiceException.class)
+                .satisfies(thrown -> assertThat(((AwsServiceException) thrown).awsErrorDetails()
+                        .errorCode()).isEqualTo("ValidationException"));
+    }
+
     @Test
     void aCryptogramUnderAKeyThatIsNotAKeyEncryptionKeyIsRefused() {
         // A key that is neither a key encryption key nor a key block protection key cannot
