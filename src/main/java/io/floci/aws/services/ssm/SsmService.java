@@ -1120,6 +1120,68 @@ public class SsmService implements ResourceProvider {
         return true;
     }
 
+    /**
+     * {@code AddTagsToResource} on the resource of {@code resourceType}: a document by its name, an
+     * association by its ID, and a parameter, or any type Floci does not tag yet, as before.
+     */
+    public synchronized void addTagsToResource(String resourceType, String resourceId, Map<String, String> tags,
+                                               String region) {
+        switch (resourceType) {
+            case "Document" -> {
+                validateTagKeys(tags);
+                SsmDocument document = taggableDocument(resourceId, region);
+                document.getTags().putAll(tags);
+                documentStore.put(regionKey(region, resourceId), document);
+            }
+            case "Association" -> {
+                validateTagKeys(tags);
+                SsmAssociation association = taggableAssociation(resourceId, region);
+                association.getTags().putAll(tags);
+                associationStore.put(regionKey(region, resourceId), association);
+            }
+            default -> addTagsToResource(resourceId, tags, region);
+        }
+    }
+
+    /** {@code ListTagsForResource} on the resource of {@code resourceType}. */
+    public Map<String, String> listTagsForResource(String resourceType, String resourceId, String region) {
+        return switch (resourceType) {
+            case "Document" -> taggableDocument(resourceId, region).getTags();
+            case "Association" -> taggableAssociation(resourceId, region).getTags();
+            default -> listTagsForResource(resourceId, region);
+        };
+    }
+
+    /** {@code RemoveTagsFromResource} on the resource of {@code resourceType}; a key it lacks is ignored. */
+    public synchronized void removeTagsFromResource(String resourceType, String resourceId, List<String> tagKeys,
+                                                    String region) {
+        switch (resourceType) {
+            case "Document" -> {
+                SsmDocument document = taggableDocument(resourceId, region);
+                tagKeys.forEach(document.getTags()::remove);
+                documentStore.put(regionKey(region, resourceId), document);
+            }
+            case "Association" -> {
+                SsmAssociation association = taggableAssociation(resourceId, region);
+                tagKeys.forEach(association.getTags()::remove);
+                associationStore.put(regionKey(region, resourceId), association);
+            }
+            default -> removeTagsFromResource(resourceId, tagKeys, region);
+        }
+    }
+
+    private SsmDocument taggableDocument(String name, String region) {
+        return documentStore.get(regionKey(region, name)).orElseThrow(() -> resourceNotFound(name));
+    }
+
+    private SsmAssociation taggableAssociation(String associationId, String region) {
+        return associationStore.get(regionKey(region, associationId)).orElseThrow(() -> resourceNotFound(associationId));
+    }
+
+    private static AwsException resourceNotFound(String resourceId) {
+        return new AwsException("InvalidResourceId", "Resource " + resourceId + " not found.", 400);
+    }
+
     public void addTagsToResource(String resourceId, Map<String, String> tags, String region) {
         validateTagKeys(tags);
         String storageKey = regionKey(region, parameterTagName(resourceId, region));
@@ -1426,6 +1488,12 @@ public class SsmService implements ResourceProvider {
     }
 
     public synchronized SsmDocument createDocument(String name, String content, String documentType, String region) {
+        return createDocument(name, content, documentType, Map.of(), region);
+    }
+
+    public synchronized SsmDocument createDocument(String name, String content, String documentType,
+                                                   Map<String, String> tags, String region) {
+        validateTagKeys(tags);
         String storageKey = regionKey(region, name);
         if (documentStore.get(storageKey).isPresent()) {
             throw new AwsException("DocumentAlreadyExists",
@@ -1433,6 +1501,7 @@ public class SsmService implements ResourceProvider {
         }
         SsmDocument document = new SsmDocument(name, content, documentType);
         document.setOwner(regionResolver.getAccountId());
+        document.setTags(tags);
         documentStore.put(storageKey, document);
         return document;
     }
@@ -1609,6 +1678,24 @@ public class SsmService implements ResourceProvider {
             String maxConcurrency,
             String complianceSeverity,
             String region) {
+        return createAssociation(name, associationName, documentVersion, instanceId, targets, parameters,
+                scheduleExpression, maxErrors, maxConcurrency, complianceSeverity, Map.of(), region);
+    }
+
+    public synchronized SsmAssociation createAssociation(
+            String name,
+            String associationName,
+            String documentVersion,
+            String instanceId,
+            List<SsmAssociation.Target> targets,
+            Map<String, List<String>> parameters,
+            String scheduleExpression,
+            String maxErrors,
+            String maxConcurrency,
+            String complianceSeverity,
+            Map<String, String> tags,
+            String region) {
+        validateTagKeys(tags);
         SsmDocument document = getDocument(name, region);
         validateDocumentVersion(document, documentVersion);
 
@@ -1644,6 +1731,7 @@ public class SsmService implements ResourceProvider {
         association.setMaxConcurrency(maxConcurrency);
         association.setComplianceSeverity(complianceSeverity);
         association.setAssociationVersion("1");
+        association.setTags(tags);
         // Real SSM starts an association at "Pending" and transitions it to "Success"/"Failed" once
         // its execution engine runs it. This emulator has no execution engine, so it reports
         // "Success" immediately rather than modeling a state that would never change on its own.
