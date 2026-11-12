@@ -80,65 +80,14 @@ class MySqlProtocolHandlerTest {
 
     @Test
     void forwardsPlaintextHandshakeResponseUnmodifiedWhenClientDoesNotRequestTls() throws Exception {
-        byte[] nonce = fixedNonce();
-        AtomicReference<Byte> backendResponseSeq = new AtomicReference<>();
-        AtomicReference<byte[]> backendResponsePayload = new AtomicReference<>();
-
-        try (ServerSocket backendServer = new ServerSocket(0);
-             ServerSocket clientServer = new ServerSocket(0)) {
-
-            Thread backendThread = Thread.ofVirtual().start(() -> {
-                try {
-                    mockMySqlBackend(backendServer, nonce, backendResponseSeq, backendResponsePayload);
-                } catch (IOException e) {
-                    throw new RuntimeException(e);
-                }
-            });
-
-            try (Socket ourClient = new Socket("localhost", clientServer.getLocalPort())) {
-                Socket proxyClient = clientServer.accept();
-                Socket backend = new Socket("localhost", backendServer.getLocalPort());
-
-                Thread authThread = Thread.ofVirtual().start(() -> {
-                    try {
-                        MySqlProtocolHandler.handleAuth(
-                                proxyClient, backend, NO_RECONNECT, "admin", "secret",
-                                false, testSigV4Validator(), testTlsCertificates(),
-                                (user, pass) -> PasswordValidator.AuthResult.MASTER_EQUIVALENT, 5000,
-                                username -> true, testBinding());
-                    } catch (IOException e) {
-                        throw new RuntimeException(e);
-                    }
-                });
-
-                InputStream clientIn = ourClient.getInputStream();
-                OutputStream clientOut = ourClient.getOutputStream();
-
-                byte[] serverHandshake = readMysqlPacketRaw(clientIn);
-                assertNotNull(serverHandshake);
-                // The proxy forces CLIENT_SSL even though the mock backend didn't advertise it.
-                assertTrue((capabilityFlagsLower(serverHandshake) & CLIENT_SSL) != 0);
-
-                byte[] scramble = scrambleNativePassword("secret", nonce);
-                byte[] response = buildHandshakeResponse41("admin", scramble, (byte) 1);
-                clientOut.write(response);
-                clientOut.flush();
-
-                // Wait for the backend's OK packet to come back through the bridge before tearing
-                // down sockets, so we don't race the proxy mid-relay.
-                assertNotNull(readMysqlPacketRaw(clientIn));
-
-                ourClient.close();
-                proxyClient.close();
-                authThread.join(5_000);
-                backendThread.join(5_000);
-                assertEquals(false, authThread.isAlive(), "authThread did not terminate");
-                assertEquals(false, backendThread.isAlive(), "backendThread did not terminate");
-            }
-        }
-
-        assertEquals((byte) 1, backendResponseSeq.get(), "sequence must be unchanged when no TLS upgrade occurs");
-        assertEquals("admin", extractUsername(backendResponsePayload.get()));
+        withLoggedInClient(0, 0, false, streams -> {
+            // The proxy forces CLIENT_SSL even though the mock backend did not advertise it.
+            assertTrue((capabilityFlagsLower(streams.serverHandshake()) & CLIENT_SSL) != 0);
+            assertEquals((byte) 1, streams.backendResponse()[3],
+                    "sequence must be unchanged when no TLS upgrade occurs");
+            assertEquals("admin", extractUsername(Arrays.copyOfRange(
+                    streams.backendResponse(), 4, streams.backendResponse().length)));
+        });
     }
 
     @ParameterizedTest
@@ -630,7 +579,8 @@ class MySqlProtocolHandlerTest {
 
     private record ClientBackendStreams(InputStream clientIn, OutputStream clientOut,
                                         InputStream backendIn, OutputStream backendOut,
-                                        int backendClientCapabilities) {}
+                                        int backendClientCapabilities, byte[] serverHandshake,
+                                        byte[] backendResponse, Socket client, Socket proxyClient) {}
 
     @FunctionalInterface
     private interface LoggedInClientAssertion {
@@ -658,7 +608,9 @@ class MySqlProtocolHandlerTest {
                 backendOut.flush();
                 byte[] handshake = readMysqlPacketRaw(clientIn);
                 assertNotNull(handshake);
-                assertTrue((capabilityFlagsLower(handshake) & CLIENT_COMPRESS) != 0);
+                if ((backendCompressionCapabilities & CLIENT_COMPRESS) != 0) {
+                    assertTrue((capabilityFlagsLower(handshake) & CLIENT_COMPRESS) != 0);
+                }
                 int capabilities = CLIENT_PROTOCOL_41 | CLIENT_SECURE_CONNECTION
                         | clientCompressionCapability;
                 int sequence = 1;
@@ -685,7 +637,7 @@ class MySqlProtocolHandlerTest {
                 backendOut.flush();
                 assertArrayEquals(wrapPacket(sequence + 1, OK_PAYLOAD), readMysqlPacketRaw(clientIn));
                 assertion.accept(new ClientBackendStreams(clientIn, clientOut, backendIn, backendOut,
-                        backendClientCapabilities));
+                        backendClientCapabilities, handshake, backendResponse, ourClient, proxyClient));
             } finally {
                 ourClient.close();
                 proxyClient.close();
@@ -886,62 +838,15 @@ class MySqlProtocolHandlerTest {
 
     @Test
     void closesTheBackendWhenTheClientDropsWithoutQuitting() throws Exception {
-        byte[] nonce = fixedNonce();
-        AtomicReference<Integer> backendReadAfterDrop = new AtomicReference<>();
-
-        try (ServerSocket backendServer = new ServerSocket(0);
-             ServerSocket clientServer = new ServerSocket(0)) {
-
-            Thread backendThread = Thread.ofVirtual().start(() -> {
-                try (Socket socket = backendServer.accept()) {
-                    OutputStream out = socket.getOutputStream();
-                    InputStream in = socket.getInputStream();
-                    out.write(buildHandshakeV10(nonce));
-                    out.flush();
-                    readMysqlPacketRaw(in);
-                    writeMysqlPacket(out, 2, OK_PAYLOAD);
-                    out.flush();
-                    // Stays connected and silent, as an idle MySQL server does.
-                    socket.setSoTimeout(5_000);
-                    backendReadAfterDrop.set(in.read());
-                } catch (IOException e) {
-                    throw new UncheckedIOException(e);
-                }
-            });
-
-            Socket proxyClient;
-            try (Socket ourClient = new Socket("localhost", clientServer.getLocalPort())) {
-                proxyClient = clientServer.accept();
-                Socket backend = new Socket("localhost", backendServer.getLocalPort());
-
-                Thread authThread = Thread.ofVirtual().start(() -> {
-                    try {
-                        MySqlProtocolHandler.handleAuth(
-                                proxyClient, backend, NO_RECONNECT, "admin", "secret",
-                                false, testSigV4Validator(), testTlsCertificates(),
-                                (user, pass) -> PasswordValidator.AuthResult.MASTER_EQUIVALENT, 5000,
-                                username -> true, testBinding());
-                    } catch (IOException e) {
-                        throw new UncheckedIOException(e);
-                    }
-                });
-
-                InputStream clientIn = ourClient.getInputStream();
-                OutputStream clientOut = ourClient.getOutputStream();
-                assertNotNull(readMysqlPacketRaw(clientIn));
-                clientOut.write(buildHandshakeResponse41("admin", scrambleNativePassword("secret", nonce), (byte) 1));
-                clientOut.flush();
-                assertNotNull(readMysqlPacketRaw(clientIn));
-
-                // No COM_QUIT: the client just goes away.
-                ourClient.close();
-
-                joinAll(backendThread, authThread);
-            }
-            assertTrue(proxyClient.isClosed(), "the proxy must close its side of the dropped client");
-        }
-
-        assertEquals(-1, backendReadAfterDrop.get(), "the proxy must close the backend once the client drops");
+        AtomicReference<Socket> proxyClient = new AtomicReference<>();
+        withLoggedInClient(0, 0, false, streams -> {
+            proxyClient.set(streams.proxyClient());
+            // No COM_QUIT: the client just goes away while the backend stays idle.
+            streams.client().close();
+            assertEquals(-1, streams.backendIn().read(),
+                    "the proxy must close the backend once the client drops");
+        });
+        assertTrue(proxyClient.get().isClosed(), "the proxy must close its side of the dropped client");
     }
 
     @Test
