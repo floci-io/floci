@@ -707,4 +707,30 @@ class AppSyncServiceTest {
         assertEquals("original", service.getType(api.getApiId(), "Item").getDescription());
         assertEquals("SDL", service.getType(api.getApiId(), "Item").getFormat().name());
     }
+
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    void createTypeRejectsMissingFormatWithoutStoringTheType(boolean explicitNull) {
+        GraphqlApi api = service.createGraphqlApi(
+                Map.of("name", "types", "authenticationType", "API_KEY"), "us-east-1");
+        Map<String, Object> request = new HashMap<>();
+        request.put("definition", "type Item { id: ID }");
+        if (explicitNull) {
+            request.put("format", null);
+        }
+
+        AwsException refused = assertThrows(AwsException.class,
+                () -> service.createType(api.getApiId(), request));
+
+        assertEquals("BadRequestException", refused.getErrorCode());
+        assertEquals(400, refused.getHttpStatus());
+        assertTrue(refused.getMessage().contains("format"));
+        assertTrue(service.listTypes(api.getApiId(), null, null).items().isEmpty());
+        assertEquals("NotFoundException", assertThrows(AwsException.class,
+                () -> service.getType(api.getApiId(), "Item")).getErrorCode());
+
+        request.put("format", "SDL");
+        service.createType(api.getApiId(), request);
+        assertEquals("SDL", service.getType(api.getApiId(), "Item").getFormat().name());
+    }
 }

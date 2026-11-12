@@ -591,12 +591,17 @@ public class AppSyncService {
         if (typeStore.get(typeKey).isPresent()) {
             throw new AwsException("BadRequestException", "Type with name %s already exists.".formatted(name), 400);
         }
+        Object formatValue = request.get("format");
+        if (formatValue == null) {
+            throw new AwsException("BadRequestException", "A type format is required", 400);
+        }
+        TypeFormat format = parseEnum(TypeFormat.class, formatValue);
         AppSyncType type = new AppSyncType();
         type.setApiId(apiId);
         type.setName(name);
         type.setDefinition((String) request.get("definition"));
         type.setDescription((String) request.get("description"));
-        type.setFormat(parseEnum(TypeFormat.class, request.getOrDefault("format", "SDL")));
+        type.setFormat(format);
 
         typeStore.put(typeKey, type);
         return type;
