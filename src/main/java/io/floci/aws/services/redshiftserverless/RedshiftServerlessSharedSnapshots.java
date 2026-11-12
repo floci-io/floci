@@ -35,16 +35,19 @@ public class RedshiftServerlessSharedSnapshots {
     private final IamService iamService;
     private final RegionResolver regionResolver;
     private final Instance<RequestContext> requestContext;
+    private final RedshiftServerlessResourcePolicyProvider resourcePolicyProvider;
 
     @Inject
     public RedshiftServerlessSharedSnapshots(RedshiftServerlessResourcePolicyService policies,
                                              IamPolicyEvaluator evaluator, IamService iamService,
-                                             RegionResolver regionResolver, Instance<RequestContext> requestContext) {
+                                             RegionResolver regionResolver, Instance<RequestContext> requestContext,
+                                             RedshiftServerlessResourcePolicyProvider resourcePolicyProvider) {
         this.policies = policies;
         this.evaluator = evaluator;
         this.iamService = iamService;
         this.regionResolver = regionResolver;
         this.requestContext = requestContext;
+        this.resourcePolicyProvider = resourcePolicyProvider;
     }
 
     /**
@@ -72,7 +75,8 @@ public class RedshiftServerlessSharedSnapshots {
         caller.putPrincipalKeys(context);
         Map<String, List<String>> effective = IamConditionContextResolver.withGlobalContext(context,
                 snapshot.getSnapshotArn(), region, regionResolver.getAccountId(), ownerAccount, GET_ACTION);
-        ResourcePolicyDecision decision = evaluator.evaluateResourcePolicyFor(List.of(policy),
+        String normalizedPolicy = resourcePolicyProvider.withResource(policy, snapshot.getSnapshotArn());
+        ResourcePolicyDecision decision = evaluator.evaluateResourcePolicyFor(List.of(normalizedPolicy),
                 RequestPrincipal.caller(caller), GET_ACTION, snapshot.getSnapshotArn(), effective);
         // ALLOW_ACCOUNT is a grant to the caller's whole account, which a cross-account policy may give.
         return decision == ResourcePolicyDecision.ALLOW || decision == ResourcePolicyDecision.ALLOW_ACCOUNT

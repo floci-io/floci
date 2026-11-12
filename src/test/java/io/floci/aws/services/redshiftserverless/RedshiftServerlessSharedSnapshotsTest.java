@@ -38,9 +38,12 @@ class RedshiftServerlessSharedSnapshotsTest {
         IamService iamService = mock(IamService.class);
         when(iamService.resolveCallerArns(any())).thenReturn(Optional.empty());
         Instance<RequestContext> requestContext = mock(Instance.class);
+        ObjectMapper objectMapper = new ObjectMapper();
+        RedshiftServerlessResourcePolicyProvider resourcePolicyProvider = new RedshiftServerlessResourcePolicyProvider(
+                mock(RedshiftServerlessService.class), policies, objectMapper);
         shared = new RedshiftServerlessSharedSnapshots(policies,
-                new IamPolicyEvaluator(new ObjectMapper()), iamService, new RegionResolver(REGION, CALLER),
-                requestContext);
+                new IamPolicyEvaluator(objectMapper), iamService, new RegionResolver(REGION, CALLER),
+                requestContext, resourcePolicyProvider);
 
         snapshot = new RedshiftServerlessSnapshot();
         snapshot.setSnapshotName("shared");
@@ -55,6 +58,37 @@ class RedshiftServerlessSharedSnapshotsTest {
     private static String statement(String effect, String principal) {
         return "{\"Version\":\"2012-10-17\",\"Statement\":[{\"Effect\":\"" + effect + "\",\"Principal\":{\"AWS\":\""
                 + principal + "\"},\"Action\":\"redshift-serverless:GetSnapshot\",\"Resource\":\"*\"}]}";
+    }
+
+    @Test
+    void aResourceLessAllowSharesTheSnapshot() {
+        policy(statement("Allow", CALLER).replace(",\"Resource\":\"*\"", ""));
+
+        assertEquals(List.of(snapshot), shared.readable(OWNER, List.of(snapshot), REGION));
+    }
+
+    @Test
+    void aResourceLessDenyOverridesAnExplicitAllow() {
+        policy("""
+                {"Statement":[
+                  {"Effect":"Allow","Principal":{"AWS":"222222222222"},
+                   "Action":"redshift-serverless:GetSnapshot","Resource":"*"},
+                  {"Effect":"Deny","Principal":{"AWS":"222222222222"},
+                   "Action":"redshift-serverless:GetSnapshot"}
+                ]}
+                """);
+
+        assertEquals(List.of(), shared.readable(OWNER, List.of(snapshot), REGION));
+    }
+
+    @Test
+    void aSingleResourceLessStatementSharesTheSnapshot() {
+        policy("""
+                {"Statement":{"Effect":"Allow","Principal":{"AWS":"222222222222"},
+                 "Action":"redshift-serverless:GetSnapshot"}}
+                """);
+
+        assertEquals(List.of(snapshot), shared.readable(OWNER, List.of(snapshot), REGION));
     }
 
     @Test
