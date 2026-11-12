@@ -426,8 +426,10 @@ and described through the CloudFront control plane, and its keys are managed thr
 - Every key write needs the store's current data plane ETag in `If-Match`, and rotates it. `UpdateKeys`
   applies its puts and deletes together (at most 50 entries and 3 MB per request), and changes nothing when any
   entry is invalid, including a put without a `Value`. A stale or missing ETag on the
-  data plane is a `ValidationException` ("Pre-Condition failed during update of Key-Value-Store"), and on the
-  control plane an `InvalidIfMatchVersion`.
+  data plane is a `ValidationException` ("Pre-Condition failed during update of Key-Value-Store"). Control-plane
+  update and delete return `PreconditionFailed` (412) for stale UUID versions issued by Floci, and
+  `InvalidIfMatchVersion` (400) for missing or malformed versions. Rejected requests preserve the store.
+  ETags retain Floci's existing UUID representation; this does not define an AWS version format.
 - The control plane and the data plane keep independent ETags: a comment update rotates only the control plane
   ETag, and a key write only the data plane ETag.
 - An account can hold at most 200 stores (`EntityLimitExceeded`), and a store can be associated with at most 100
