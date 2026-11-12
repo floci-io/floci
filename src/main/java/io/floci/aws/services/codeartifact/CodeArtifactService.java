@@ -720,6 +720,7 @@ public class CodeArtifactService implements Resettable {
         String owner = effectiveOwner(domainOwner);
         String key = repositoryKey(region, domain, repository);
         CodeArtifactRepository r = requireRepository(owner, key, repository);
+        validateDescription(description);
         if (upstreams != null) {
             if (!upstreams.isEmpty() && !r.getExternalConnections().isEmpty()) {
                 throw conflict("Repository '" + repository + "' has an external connection; "
@@ -730,7 +731,6 @@ public class CodeArtifactService implements Resettable {
             r.setUpstreams(new ArrayList<>(upstreams));
         }
         if (description != null) {
-            validateDescription(description);
             r.setDescription(description);
         }
         repositories.putForAccount(owner, key, r);
