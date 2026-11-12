@@ -163,6 +163,31 @@ class RuntimeApiServerTest {
 
     @Test
     @Timeout(10)
+    void nextEndpoint_emitsTraceIdHeaderOnlyWhenPresent() throws Exception {
+        String traceId = "Root=1-6af70000-0000000000000000000000aa;Parent=00000000000000a1;Sampled=1";
+        PendingInvocation withTrace = new PendingInvocation(
+                "req-trace", "{}".getBytes(), System.currentTimeMillis() + 60_000,
+                "arn:aws:lambda:us-east-1:000000000000:function:test",
+                new CompletableFuture<>());
+        withTrace.setTraceId(traceId);
+        server.enqueue(withTrace);
+
+        HttpRequest next = HttpRequest.newBuilder()
+                .uri(URI.create("http://localhost:" + port + "/2018-06-01/runtime/invocation/next"))
+                .GET().build();
+        HttpResponse<String> first = httpClient.send(next, HttpResponse.BodyHandlers.ofString());
+        assertEquals(traceId, first.headers().firstValue("Lambda-Runtime-Trace-Id").orElse(null));
+
+        server.enqueue(new PendingInvocation(
+                "req-notrace", "{}".getBytes(), System.currentTimeMillis() + 60_000,
+                "arn:aws:lambda:us-east-1:000000000000:function:test",
+                new CompletableFuture<>()));
+        HttpResponse<String> second = httpClient.send(next, HttpResponse.BodyHandlers.ofString());
+        assertTrue(second.headers().firstValue("Lambda-Runtime-Trace-Id").isEmpty());
+    }
+
+    @Test
+    @Timeout(10)
     void nextEndpoint_startsDeadlineWhenInvocationIsDispatched() throws Exception {
         long queuedDeadline = System.currentTimeMillis() + 1_000;
         PendingInvocation invocation = new PendingInvocation(

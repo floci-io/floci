@@ -66,6 +66,31 @@ class LambdaDurableProtocolIntegrationTest {
     }
 
     @Test
+    void anInvokeTraceHeaderReachesTheInvocationAndTheExecution() throws Exception {
+        String traceHeader = "Root=1-6af70000-0000000000000000000000aa;Parent=00000000000000a1;Sampled=1";
+        CompletableFuture<Response> invoke = CompletableFuture.supplyAsync(() -> given()
+                .header("X-Amz-Durable-Execution-Name", "traced-1")
+                .header("X-Amzn-Trace-Id", traceHeader)
+                .body("{}")
+                .post(LAMBDA + "/functions/" + FUNCTION + ":$LATEST/invocations"));
+
+        Invocation invocation = invoker.awaitInvocation(Duration.ofSeconds(30));
+        String arn = MAPPER.readTree(invocation.payload()).get("DurableExecutionArn").asText();
+        assertEquals(traceHeader, invocation.traceId());
+
+        given()
+            .urlEncodingEnabled(false)
+        .when()
+            .get(DURABLE + "/durable-executions/" + arn)
+        .then()
+            .statusCode(200)
+            .body("TraceHeader.XAmznTraceId", equalTo(traceHeader));
+
+        invocation.response().complete(handlerResponse("{\"Status\": \"SUCCEEDED\", \"Result\": \"{}\"}"));
+        assertEquals(200, invoke.get(30, TimeUnit.SECONDS).statusCode());
+    }
+
+    @Test
     void aSynchronousInvokeReturnsTheResultOfACheckpointedExecution() throws Exception {
         CompletableFuture<Response> invoke = CompletableFuture.supplyAsync(() -> given()
                 .header("X-Amz-Durable-Execution-Name", "sync-1")

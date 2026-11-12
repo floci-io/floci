@@ -252,6 +252,11 @@ and an output over 1 MB fails the operation. A missing function or an unqualifie
 fails the operation at once, and a target in another account or Region is rejected at checkpoint.
 Stopping the parent leaves the child running, as on AWS.
 
+Each durable execution gets an X-Ray trace header. It is built from the `X-Amzn-Trace-Id` header of
+Invoke when the request carries one. `GetDurableExecution` returns it as `TraceHeader`. Every
+invocation of the execution gets the same `Root` in `_X_AMZN_TRACE_ID`. A `PassThrough` function
+gets the `Parent` of the execution. An `Active` function gets a new `Parent` on each invocation.
+
 `GetDurableExecutionHistory` leaves payloads out unless `IncludeExecutionData=true` is sent. The
 API reference names `true` as the default, but AWS answers this way.
 
@@ -269,8 +274,10 @@ Not emulated yet:
 - Durable executions started by Step Functions or by an event source mapping. These invoke the
   function as a plain one.
 - Payload encryption. `KMSKeyArn` is stored and returned only.
-- EventBridge status-change events, the X-Ray `TraceHeader`, and a dead-letter queue or
-  destinations for durable executions.
+- EventBridge status-change events and a dead-letter queue or destinations for durable
+  executions.
+- The `Lineage` field AWS adds to the trace header, and trace header propagation through chained
+  invokes.
 - The per-execution limits of 3,000 operations and 100 MB of persisted payload.
 
 ## Code signing configuration pagination
