@@ -2393,34 +2393,17 @@ class GlueServiceTest {
             glueService.createUserDefinedFunction("db1", function("db1", "fn"));
         }
         functions.parkNextWrite();
-        ExecutorService executor = Executors.newFixedThreadPool(2);
-        try {
-            Future<?> writer = executor.submit(() -> {
-                if (update) {
-                    glueService.updateUserDefinedFunction("db1", "fn", function("db1", "fn"));
-                } else {
-                    glueService.createUserDefinedFunction("db1", function("db1", "fn"));
-                }
-            });
-            assertTrue(functions.awaitParked(), "function writer reached its publication point");
-            AtomicReference<Thread> deleteThread = new AtomicReference<>();
-            Future<?> deletion = executor.submit(() -> {
-                deleteThread.set(Thread.currentThread());
-                glueService.deleteDatabase("db1");
-            });
-            awaitBlockedOrDone(deleteThread, deletion);
-            assertFalse(deletion.isDone(), "database deletion must wait for the in-flight function writer");
-            functions.release();
-            writer.get(5, TimeUnit.SECONDS);
-            deletion.get(5, TimeUnit.SECONDS);
-            glueService.createDatabase(new Database("db1"));
-            assertEquals("EntityNotFoundException", assertThrows(AwsException.class,
-                    () -> glueService.getUserDefinedFunction("db1", "fn")).getErrorCode());
-        } finally {
-            functions.release();
-            executor.shutdownNow();
-            assertTrue(executor.awaitTermination(5, TimeUnit.SECONDS));
-        }
+        assertOperationWaitsForParkedStore(functions, () -> {
+            if (update) {
+                glueService.updateUserDefinedFunction("db1", "fn", function("db1", "fn"));
+            } else {
+                glueService.createUserDefinedFunction("db1", function("db1", "fn"));
+            }
+        }, () -> glueService.deleteDatabase("db1"));
+
+        glueService.createDatabase(new Database("db1"));
+        assertEquals("EntityNotFoundException", assertThrows(AwsException.class,
+                () -> glueService.getUserDefinedFunction("db1", "fn")).getErrorCode());
     }
 
     @ParameterizedTest
@@ -2432,37 +2415,19 @@ class GlueServiceTest {
             glueService.createTable("db1", paginationTable("table"));
         }
         tables.parkNextWrite();
-        ExecutorService executor = Executors.newFixedThreadPool(2);
-        try {
-            Future<?> writer = executor.submit(() -> {
-                if (update) {
-                    glueService.updateTable("db1", paginationTable("table"), null, false);
-                } else {
-                    glueService.createTable("db1", paginationTable("table"));
-                }
-            });
-            assertTrue(tables.awaitParked(), "table writer reached its publication point");
-            AtomicReference<Thread> deleteThread = new AtomicReference<>();
-            Future<?> deletion = executor.submit(() -> {
-                deleteThread.set(Thread.currentThread());
-                glueService.deleteDatabase("db1");
-            });
-            awaitBlockedOrDone(deleteThread, deletion);
-            assertFalse(deletion.isDone(), "database deletion must wait for the in-flight table writer");
-            tables.release();
-            writer.get(5, TimeUnit.SECONDS);
-            deletion.get(5, TimeUnit.SECONDS);
+        assertOperationWaitsForParkedStore(tables, () -> {
+            if (update) {
+                glueService.updateTable("db1", paginationTable("table"), null, false);
+            } else {
+                glueService.createTable("db1", paginationTable("table"));
+            }
+        }, () -> glueService.deleteDatabase("db1"));
 
-            glueService.createDatabase(new Database("db1"));
-            assertTrue(glueService.getTables("db1").isEmpty());
-            assertTrue(tableVersionStore.keys().isEmpty());
-            glueService.createTable("db1", paginationTable("table"));
-            assertEquals("0", glueService.getTable("db1", "table").getVersionId());
-        } finally {
-            tables.release();
-            executor.shutdownNow();
-            assertTrue(executor.awaitTermination(5, TimeUnit.SECONDS));
-        }
+        glueService.createDatabase(new Database("db1"));
+        assertTrue(glueService.getTables("db1").isEmpty());
+        assertTrue(tableVersionStore.keys().isEmpty());
+        glueService.createTable("db1", paginationTable("table"));
+        assertEquals("0", glueService.getTable("db1", "table").getVersionId());
     }
 
     @Test
@@ -2471,30 +2436,36 @@ class GlueServiceTest {
         setUp(new InMemoryStorage<>(), new InMemoryStorage<>(), tables);
         glueService.createTable("db1", paginationTable("existing"));
         tables.parkNextRead();
+        assertOperationWaitsForParkedStore(tables, () -> glueService.deleteDatabase("db1"), () -> {
+            AwsException refused = assertThrows(AwsException.class,
+                    () -> glueService.createTable("db1", paginationTable("new")));
+            assertEquals("EntityNotFoundException", refused.getErrorCode());
+        });
+
+        glueService.createDatabase(new Database("db1"));
+        assertTrue(glueService.getTables("db1").isEmpty());
+        glueService.createTable("db1", paginationTable("new"));
+        assertEquals("new", glueService.getTable("db1", "new").getName());
+    }
+
+    private static void assertOperationWaitsForParkedStore(ParkingStore<?> store, Runnable parkedOperation,
+                                                          Runnable waitingOperation) throws Exception {
         ExecutorService executor = Executors.newFixedThreadPool(2);
         try {
-            Future<?> deletion = executor.submit(() -> glueService.deleteDatabase("db1"));
-            assertTrue(tables.awaitParked(), "database deletion reached the existing table");
-            AtomicReference<Thread> createThread = new AtomicReference<>();
-            Future<?> creation = executor.submit(() -> {
-                createThread.set(Thread.currentThread());
-                glueService.createTable("db1", paginationTable("new"));
+            Future<?> parked = executor.submit(parkedOperation);
+            assertTrue(store.awaitParked(), "first operation reached the armed store");
+            AtomicReference<Thread> waitingThread = new AtomicReference<>();
+            Future<?> waiting = executor.submit(() -> {
+                waitingThread.set(Thread.currentThread());
+                waitingOperation.run();
             });
-            awaitBlockedOrDone(createThread, creation);
-            assertFalse(creation.isDone(), "table creation must wait for database deletion");
-            tables.release();
-            deletion.get(5, TimeUnit.SECONDS);
-            ExecutionException failure = assertThrows(ExecutionException.class,
-                    () -> creation.get(5, TimeUnit.SECONDS));
-            AwsException refused = assertInstanceOf(AwsException.class, failure.getCause());
-            assertEquals("EntityNotFoundException", refused.getErrorCode());
-
-            glueService.createDatabase(new Database("db1"));
-            assertTrue(glueService.getTables("db1").isEmpty());
-            glueService.createTable("db1", paginationTable("new"));
-            assertEquals("new", glueService.getTable("db1", "new").getName());
+            awaitBlockedOrDone(waitingThread, waiting);
+            assertFalse(waiting.isDone(), "second operation must wait for the parked operation");
+            store.release();
+            parked.get(5, TimeUnit.SECONDS);
+            waiting.get(5, TimeUnit.SECONDS);
         } finally {
-            tables.release();
+            store.release();
             executor.shutdownNow();
             assertTrue(executor.awaitTermination(5, TimeUnit.SECONDS));
         }
