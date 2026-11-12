@@ -3,16 +3,13 @@ package io.floci.aws.services.redshiftserverless;
 import io.floci.aws.core.common.AwsArnUtils;
 import io.floci.aws.core.common.IamConditionContextResolver;
 import io.floci.aws.core.common.RegionResolver;
-import io.floci.aws.core.common.RequestContext;
 import io.floci.aws.services.iam.IamPolicyEvaluator;
 import io.floci.aws.services.iam.IamPolicyEvaluator.ResourcePolicyDecision;
-import io.floci.aws.services.iam.IamService;
 import io.floci.aws.services.iam.IamService.CallerArns;
+import io.floci.aws.services.iam.RequestCallerResolver;
 import io.floci.aws.services.iam.RequestPrincipal;
 import io.floci.aws.services.redshiftserverless.model.RedshiftServerlessSnapshot;
 import jakarta.enterprise.context.ApplicationScoped;
-import jakarta.enterprise.context.ContextNotActiveException;
-import jakarta.enterprise.inject.Instance;
 import jakarta.inject.Inject;
 
 import java.util.HashMap;
@@ -32,21 +29,19 @@ public class RedshiftServerlessSharedSnapshots {
 
     private final RedshiftServerlessResourcePolicyService policies;
     private final IamPolicyEvaluator evaluator;
-    private final IamService iamService;
     private final RegionResolver regionResolver;
-    private final Instance<RequestContext> requestContext;
+    private final RequestCallerResolver callers;
     private final RedshiftServerlessResourcePolicyProvider resourcePolicyProvider;
 
     @Inject
     public RedshiftServerlessSharedSnapshots(RedshiftServerlessResourcePolicyService policies,
-                                             IamPolicyEvaluator evaluator, IamService iamService,
-                                             RegionResolver regionResolver, Instance<RequestContext> requestContext,
+                                             IamPolicyEvaluator evaluator, RegionResolver regionResolver,
+                                             RequestCallerResolver callers,
                                              RedshiftServerlessResourcePolicyProvider resourcePolicyProvider) {
         this.policies = policies;
         this.evaluator = evaluator;
-        this.iamService = iamService;
         this.regionResolver = regionResolver;
-        this.requestContext = requestContext;
+        this.callers = callers;
         this.resourcePolicyProvider = resourcePolicyProvider;
     }
 
@@ -65,7 +60,7 @@ public class RedshiftServerlessSharedSnapshots {
     }
 
     private boolean allows(String policy, RedshiftServerlessSnapshot snapshot, String ownerAccount, String region) {
-        CallerArns caller = callerArns();
+        CallerArns caller = callers.caller();
         // an account in one partition cannot be granted a snapshot of another, whatever the policy names
         if (!AwsArnUtils.parse(snapshot.getSnapshotArn()).partition()
                 .equals(AwsArnUtils.parse(caller.callerArn()).partition())) {
@@ -81,21 +76,5 @@ public class RedshiftServerlessSharedSnapshots {
         // ALLOW_ACCOUNT is a grant to the caller's whole account, which a cross-account policy may give.
         return decision == ResourcePolicyDecision.ALLOW || decision == ResourcePolicyDecision.ALLOW_ACCOUNT
                 || decision == ResourcePolicyDecision.ALLOW_DIRECT_IAM_USER;
-    }
-
-    private CallerArns callerArns() {
-        String accountId = regionResolver.getAccountId();
-        return iamService.resolveCallerArns(accessKeyId())
-                .orElseGet(() -> CallerArns.accountRoot(regionResolver.buildGlobalArn("iam", accountId, "root"),
-                        accountId));
-    }
-
-    private String accessKeyId() {
-        try {
-            return requestContext.isResolvable() ? requestContext.get().getAccessKeyId() : null;
-        } catch (ContextNotActiveException e) {
-            // A call outside a request, such as CloudFormation's, is the account's own.
-            return null;
-        }
     }
 }

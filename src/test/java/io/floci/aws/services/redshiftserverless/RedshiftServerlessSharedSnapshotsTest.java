@@ -5,6 +5,7 @@ import io.floci.aws.core.common.RegionResolver;
 import io.floci.aws.core.common.RequestContext;
 import io.floci.aws.services.iam.IamPolicyEvaluator;
 import io.floci.aws.services.iam.IamService;
+import io.floci.aws.services.iam.RequestCallerResolver;
 import io.floci.aws.services.redshiftserverless.model.RedshiftServerlessSnapshot;
 import jakarta.enterprise.inject.Instance;
 import org.junit.jupiter.api.BeforeEach;
@@ -39,11 +40,12 @@ class RedshiftServerlessSharedSnapshotsTest {
         when(iamService.resolveCallerArns(any())).thenReturn(Optional.empty());
         Instance<RequestContext> requestContext = mock(Instance.class);
         ObjectMapper objectMapper = new ObjectMapper();
+        RegionResolver regionResolver = new RegionResolver(REGION, CALLER);
         RedshiftServerlessResourcePolicyProvider resourcePolicyProvider = new RedshiftServerlessResourcePolicyProvider(
                 mock(RedshiftServerlessService.class), policies, objectMapper);
         shared = new RedshiftServerlessSharedSnapshots(policies,
-                new IamPolicyEvaluator(objectMapper), iamService, new RegionResolver(REGION, CALLER),
-                requestContext, resourcePolicyProvider);
+                new IamPolicyEvaluator(objectMapper), regionResolver,
+                new RequestCallerResolver(iamService, regionResolver, requestContext), resourcePolicyProvider);
 
         snapshot = new RedshiftServerlessSnapshot();
         snapshot.setSnapshotName("shared");
