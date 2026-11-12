@@ -183,6 +183,31 @@ class DurableCheckpointApplierTest {
     }
 
     @Test
+    void aCloseWithoutPayloadOrErrorStillRecordsTheEmptyWrapper() {
+        DurableExecution execution = execution();
+        DurableCheckpointApplier.apply(execution, List.of(stepStart("s1", null), stepStart("s2", null),
+                stepStart("s3", null), contextStart("c1"), contextStart("c2")), NOW, REACHABLE);
+        DurableCheckpointApplier.apply(execution, List.of(
+                update("s1", null, DurableOperationType.STEP, DurableOperationAction.SUCCEED, null),
+                update("s2", null, DurableOperationType.STEP, DurableOperationAction.FAIL, null),
+                new DurableOperationUpdate("s3", null, null, DurableOperationType.STEP, null,
+                        DurableOperationAction.RETRY, null, null, 1, null, null, null, null, null, null),
+                update("c1", null, DurableOperationType.CONTEXT, DurableOperationAction.SUCCEED, null),
+                update("c2", null, DurableOperationType.CONTEXT, DurableOperationAction.FAIL, null)), NOW, REACHABLE);
+
+        Map<String, Object> empty = Map.of("Truncated", false);
+        List<Map<String, Object>> closes = execution.getHistory().subList(5, 10).stream()
+                .map(event -> event.getDetails()).toList();
+        assertEquals(List.of(
+                Map.of("StepSucceededDetails", Map.of("Result", empty, "RetryDetails", Map.of("CurrentAttempt", 1))),
+                Map.of("StepFailedDetails", Map.of("Error", empty, "RetryDetails", Map.of("CurrentAttempt", 1))),
+                Map.of("StepSucceededDetails", Map.of("Result", empty,
+                        "RetryDetails", Map.of("CurrentAttempt", 1, "NextAttemptDelaySeconds", 1))),
+                Map.of("ContextSucceededDetails", Map.of("Result", empty)),
+                Map.of("ContextFailedDetails", Map.of("Error", empty))), closes);
+    }
+
+    @Test
     void aRejectedBatchLeavesTheExecutionUntouched() {
         DurableExecution execution = execution();
         long sequence = execution.getChangeSequence();
@@ -225,6 +250,10 @@ class DurableCheckpointApplierTest {
 
     private static DurableOperationUpdate stepStart(String id, String parentId) {
         return update(id, parentId, DurableOperationType.STEP, DurableOperationAction.START, null);
+    }
+
+    private static DurableOperationUpdate contextStart(String id) {
+        return update(id, null, DurableOperationType.CONTEXT, DurableOperationAction.START, null);
     }
 
     private static DurableOperationUpdate waitStart(String id) {
