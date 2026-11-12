@@ -25,6 +25,7 @@ on:
       - 'tools/aws/regen_cfn_schema_surface.py'
       - 'tools/aws/test_regen_cfn_schema_surface.py'
       - 'src/main/resources/cloudformation/create-only-properties.json'
+      - 'src/test/resources/cloudformation/supported-resource-types.tsv'
       - 'tools/aws/regen_cfn_create_only.py'
       - 'tools/aws/test_regen_cfn_create_only.py'
       - '.github/workflows/cfn-schema-drift.yml'

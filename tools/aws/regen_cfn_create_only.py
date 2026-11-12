@@ -60,6 +60,16 @@ def create_only(schema: dict) -> list[str]:
     return names
 
 
+def check_schema(resource_type: str, schema: object) -> None:
+    """Refuse a schema that is not the one for `resource_type`, so a stub or renamed file cannot pass as empty."""
+    if not isinstance(schema, dict):
+        raise ValueError(f"the schema for {resource_type} is not an object")
+    if schema.get("typeName") != resource_type:
+        raise ValueError(f"the schema for {resource_type} has typeName {schema.get('typeName')!r}")
+    if not isinstance(schema.get("properties"), dict):
+        raise ValueError(f"the schema for {resource_type} has no 'properties' object")
+
+
 def fetch_schemas(resource_types: list[str], source_dir: Path | None) -> tuple[dict[str, dict], str]:
     """The schema of every resource type that has one, and where they came from."""
     schemas: dict[str, dict] = {}
@@ -114,6 +124,8 @@ def main(argv: list[str] | None = None) -> int:
               f"Fix the directory, or declare a type with no schema in SCHEMALESS.", file=sys.stderr)
         return 1
     try:
+        for resource_type in sorted(schemas):
+            check_schema(resource_type, schemas[resource_type])
         document = render(schemas)
     except (AttributeError, TypeError, ValueError) as e:
         print(f"error: could not read the CloudFormation resource schemas ({e})", file=sys.stderr)
