@@ -50,6 +50,7 @@ import java.util.Optional;
 import java.util.concurrent.TimeUnit;
 import java.util.function.BooleanSupplier;
 import java.util.regex.Pattern;
+import java.util.stream.Collectors;
 import java.util.zip.GZIPOutputStream;
 
 /**
@@ -87,6 +88,22 @@ public class EmrServerlessSparkRunner implements SparkJobRunner, ContainerTeardo
     // The copies of a block a cluster's core nodes keep, as an hdfs-site.xml property: there, as the image's own says two
     // and a Hadoop client reads hdfs-site.xml after core-site.xml.
     private static final String HDFS_SITE_VARIABLE = "FLOCI_HDFS_SITE";
+    // Where a step on its cluster's YARN finds the ResourceManager, as a yarn-site.xml property, a Hadoop client reading
+    // yarn-site.xml after core-site.xml.
+    private static final String YARN_SITE_VARIABLE = "FLOCI_YARN_SITE";
+    // The folder of a step's image holding the Hadoop its cluster's nodes run from, which its hadoop command runs from
+    // on YARN, as the MapReduce home the local job runner uses has no YARN client to speak of.
+    private static final String HADOOP_ROOT_VARIABLE = "FLOCI_HADOOP_ROOT";
+    // S3A's AWS SDK, in the folder a release keeps it in or in the jar the others keep it in, each harmless where it is
+    // not.
+    private static final List<String> AWS_SDK_JARS = List.of("/usr/share/aws/aws-java-sdk-v2/*",
+            "/usr/share/aws/emr/serverless-goodies/lib/emr-serverless-spark-goodies.jar");
+    // The java.base packages Hadoop 3.4's JVMs reach into, which Java 17 opens only when told, through
+    // JDK_JAVA_OPTIONS, which Java 9 on reads and Java 8, on which a release may run and which refuses the options
+    // themselves, ignores.
+    private static final List<String> YARN_OPENED_PACKAGES = List.of("java.lang", "java.lang.reflect",
+            "java.lang.invoke", "java.util", "java.util.concurrent", "java.util.regex", "java.net", "java.io",
+            "java.nio", "sun.nio.ch", "sun.nio.cs", "sun.security.action", "sun.util.calendar");
     private static final String HADOOP_LOG4J_VARIABLE = "FLOCI_HADOOP_LOG4J";
     private static final String HADOOP_ENV_VARIABLE = "FLOCI_HADOOP_ENV";
     private static final Pattern SHELL_NAME = Pattern.compile("[A-Za-z_][A-Za-z0-9_]*");
@@ -173,6 +190,9 @@ public class EmrServerlessSparkRunner implements SparkJobRunner, ContainerTeardo
             "  if [ -n \"${" + HDFS_SITE_VARIABLE + ":-}\" ]; then",
             "    site hdfs-site.xml \"$" + HDFS_SITE_VARIABLE + "\"",
             "  fi",
+            "  if [ -n \"${" + YARN_SITE_VARIABLE + ":-}\" ]; then",
+            "    site yarn-site.xml \"$" + YARN_SITE_VARIABLE + "\"",
+            "  fi",
             "  if [ ! -s \"$hadoop_conf/log4j.properties\" ]; then",
             "    printf '%s\\n' '" + String.join("' '", HADOOP_CONSOLE_LOG) + "' > \"$hadoop_conf/log4j.properties\"",
             "  fi",
@@ -197,6 +217,21 @@ public class EmrServerlessSparkRunner implements SparkJobRunner, ContainerTeardo
             "  export HADOOP_HDFS_HOME=\"${HADOOP_HDFS_HOME:-/usr/lib/hadoop}\"",
             "  export HADOOP_MAPRED_HOME=\"${HADOOP_MAPRED_HOME:-" + MAPRED_HOME + "}\"",
             "  export HADOOP_YARN_HOME=\"${HADOOP_YARN_HOME:-/usr/lib/hadoop}\"",
+            // On YARN the hadoop command, and so hadoop-streaming and hdfs dfs, runs from the nodes' Hadoop, its homes
+            // set for it alone, so a spark-submit in the same step keeps the Hadoop the release gives Spark.
+            "  if [ -n \"${" + HADOOP_ROOT_VARIABLE + ":-}\" ]; then",
+            "    r=$" + HADOOP_ROOT_VARIABLE,
+            "    printf '%s\\n' '#!/bin/bash'"
+                    + " \"export HADOOP_HOME=$r/hadoop HADOOP_COMMON_HOME=$r/hadoop"
+                    + " HADOOP_LIBEXEC_DIR=$r/hadoop/libexec HADOOP_HDFS_HOME=$r/hadoop-hdfs"
+                    + " HADOOP_MAPRED_HOME=$r/hadoop-mapreduce HADOOP_YARN_HOME=$r/hadoop-yarn\""
+                    + " 'export HADOOP_CLASSPATH=\"${HADOOP_CLASSPATH:-}:" + String.join(":", AWS_SDK_JARS) + "\"'"
+                    + " \"exec $r/hadoop/bin/hadoop \\\"\\$@\\\"\" > /tmp/floci-bin/hadoop",
+            "    printf '%s\\n' '#!/bin/bash'"
+                    + " \"exec /tmp/floci-bin/hadoop jar $r/hadoop-mapreduce/hadoop-streaming.jar \\\"\\$@\\\"\""
+                    + " > /tmp/floci-bin/hadoop-streaming",
+            "    chmod +x /tmp/floci-bin/hadoop /tmp/floci-bin/hadoop-streaming",
+            "  fi",
             "fi");
     // A step on a cluster, or one whose job has log4j2.properties lines, runs spark-submit after this.
     private static final String SPARK_CONF_WRAPPER = wrapper(SPARK_CONF_COPY, HADOOP_CONF_SETUP);
@@ -240,8 +275,9 @@ public class EmrServerlessSparkRunner implements SparkJobRunner, ContainerTeardo
     private static final String HIVE_DEFAULT_IMAGE =
             "public.ecr.aws/emr-serverless/hive/%s:latest"; // partition-literal: ECR Public's registry host, where AWS publishes the base images; hive-image-template overrides it
     // Hive's settings beside Floci's Hadoop ones. The image's Tez runs its DAGs through EMR Serverless's own container
-    // plugins, which the public image cannot reach, so Tez runs them in local mode, in Hive's JVM. The port range its
-    // client talks to it on is a placeholder EMR Serverless fills.
+    // plugins, which the public image cannot reach, so where there is no YARN Tez runs them in local mode, in Hive's
+    // JVM (see hiveOnYarnSettings for where there is). The port range its client talks to it on is a placeholder EMR
+    // Serverless fills.
     private static final List<SparkSetting> HIVE_SETTINGS = List.of(
             new SparkSetting("tez.local.mode", "true"),
             new SparkSetting("tez.am.client.am.port-range", "40000-40100"));
@@ -385,7 +421,7 @@ public class EmrServerlessSparkRunner implements SparkJobRunner, ContainerTeardo
                             job.environment()));
             // bash -c's script gets "floci" as its $0, and what runs after it as its arguments, "$@".
             if (job.engine() == Engine.HIVE) {
-                List<String> hive = hiveArguments(job, endpoint);
+                List<String> hive = hiveArguments(job, endpoint, executorEnvironment);
                 List<String> entrypoint = new ArrayList<>(List.of("/bin/bash", "-c", HIVE_WRAPPER, "floci"));
                 entrypoint.addAll(job.command() != null ? job.command() : List.of(HIVE));
                 container.withUser("root")
@@ -420,7 +456,12 @@ public class EmrServerlessSparkRunner implements SparkJobRunner, ContainerTeardo
             // Hive's settings reach it as --hiveconf settings, so only a Spark job's container sets up Hadoop.
             if (job.storage() != null && job.engine() == Engine.SPARK) {
                 container.withEnv(HADOOP_SITE_VARIABLE, hadoopSite(job, endpoint))
-                        .withEnv(MAPRED_SITE_VARIABLE, mapredSite(job));
+                        .withEnv(MAPRED_SITE_VARIABLE, mapredSite(job, executorEnvironment));
+                if (onYarn) {
+                    container.withEnv(HADOOP_ROOT_VARIABLE, hadoopRoot(job))
+                            .withEnv(YARN_SITE_VARIABLE, siteProperty("yarn.resourcemanager.hostname",
+                                    job.storage().resourceManager()));
+                }
                 if (job.storage() != null && job.storage().replication() > 0) {
                     container.withEnv(HDFS_SITE_VARIABLE, siteProperty("dfs.replication",
                             String.valueOf(job.storage().replication())));
@@ -791,12 +832,13 @@ public class EmrServerlessSparkRunner implements SparkJobRunner, ContainerTeardo
     }
 
     /**
-     * {@code hive}'s arguments: Floci's S3 and Glue, as a Spark run gets them, Tez in local mode, and on a cluster its
+     * {@code hive}'s arguments: Floci's S3 and Glue, as a Spark run gets them, Tez on its cluster's YARN, whose
+     * containers get {@code executorEnvironment} as Spark's executors do, or else in local mode, and on a cluster its
      * HDFS and metastore, each a {@code --hiveconf}, which a later one replaces, then the run's own arguments.
      */
-    static List<String> hiveArguments(Job job, String flociEndpoint) {
+    static List<String> hiveArguments(Job job, String flociEndpoint, List<String> executorEnvironment) {
         List<SparkSetting> settings = new ArrayList<>(hadoopSettings(job, flociEndpoint));
-        settings.addAll(HIVE_SETTINGS);
+        settings.addAll(onYarn(job) ? hiveOnYarnSettings(job, executorEnvironment) : HIVE_SETTINGS);
         if (job.storage() != null) {
             settings.addAll(hdfsSettings(job.storage()));
             settings.addAll(hiveClusterSettings(job.storage()));
@@ -870,7 +912,7 @@ public class EmrServerlessSparkRunner implements SparkJobRunner, ContainerTeardo
      */
     static String hadoopSite(Job job, String flociEndpoint) {
         List<SparkSetting> settings = new ArrayList<>(hadoopSettings(job, flociEndpoint));
-        settings.addAll(localJobHdfsSettings(job.storage()));
+        settings.addAll(onYarn(job) ? yarnJobHdfsSettings(job.storage()) : localJobHdfsSettings(job.storage()));
         List<String> properties = new ArrayList<>();
         for (SparkSetting setting : settings) {
             properties.add(siteProperty(setting.key(), setting.value()));
@@ -888,14 +930,114 @@ public class EmrServerlessSparkRunner implements SparkJobRunner, ContainerTeardo
     }
 
     /**
-     * The {@code mapred-site.xml} properties a step's MapReduce gets: its cluster's {@code mapred-site}, then
-     * Floci's local mode and staging folder, which win, as there is no YARN to run a job on.
+     * The {@code mapred-site.xml} properties a step's MapReduce gets. On its cluster's YARN, Floci's settings for that,
+     * whose containers get {@code executorEnvironment} as Spark's executors do, then its cluster's {@code mapred-site},
+     * which replaces them; where there is no YARN to run a job on, its cluster's {@code mapred-site}, then Floci's local
+     * mode and staging folder, which win.
      */
-    static String mapredSite(Job job) {
+    static String mapredSite(Job job, List<String> executorEnvironment) {
         List<String> properties = new ArrayList<>();
+        if (onYarn(job)) {
+            yarnMapReduceSettings(job, executorEnvironment)
+                    .forEach(setting -> properties.add(siteProperty(setting.key(), setting.value())));
+            job.mapredSite().forEach((name, value) -> properties.add(siteProperty(name, value)));
+            return String.join("\n", properties);
+        }
         job.mapredSite().forEach((name, value) -> properties.add(siteProperty(name, value)));
         properties.add(MAPRED_SITE);
         return String.join("\n", properties);
+    }
+
+    // A MapReduce job on the cluster's YARN: its application master and tasks find Hadoop in the nodes' layout, which
+    // yarn.application.classpath's default does not name, and S3A's AWS SDK, reach Floci with the step's AWS environment,
+    // and are sized for a NodeManager as Spark's executors are. The image's core-site.xml names the LZO codec, so its
+    // jars come too.
+    private static List<SparkSetting> yarnMapReduceSettings(Job job, List<String> executorEnvironment) {
+        String root = hadoopRoot(job);
+        List<String> classPath = new ArrayList<>(hadoopLayout(root));
+        classPath.addAll(AWS_SDK_JARS);
+        String environment = containerEnvironment(executorEnvironment,
+                "HADOOP_MAPRED_HOME=" + root + "/hadoop-mapreduce");
+        return List.of(
+                new SparkSetting("mapreduce.framework.name", "yarn"),
+                new SparkSetting("mapreduce.application.classpath", String.join(",", classPath)),
+                new SparkSetting("yarn.app.mapreduce.am.env", environment),
+                new SparkSetting("mapreduce.map.env", environment),
+                new SparkSetting("mapreduce.reduce.env", environment),
+                new SparkSetting("yarn.app.mapreduce.am.resource.mb", "1024"),
+                new SparkSetting("mapreduce.map.memory.mb", "768"),
+                new SparkSetting("mapreduce.reduce.memory.mb", "768"));
+    }
+
+    // Hive's Tez on the cluster's YARN. The image's tez-site.xml names EMR Serverless's own plugins, whose stock
+    // counterparts are in the same jars, named here as Tez's own defaults are; its port ranges and addresses are
+    // placeholders EMR Serverless fills, its compression needs a native library the image lacks, and a task's two
+    // virtual cores never match the one YARN's default scheduler grants, so Tez would give each container back. An
+    // application master says where it is by ${env.NM_HOST}, which is left for its own node to fill in: the settings
+    // are read on the step's side first, and $NM_HOST or an env of the step's would be filled in there.
+    private static List<SparkSetting> hiveOnYarnSettings(Job job, List<String> executorEnvironment) {
+        String root = hadoopRoot(job);
+        List<String> classPath = new ArrayList<>(List.of("$PWD/*", root + "/hive/lib/hive-exec.jar", root + "/tez/*",
+                root + "/tez/lib/*"));
+        classPath.addAll(hadoopLayout(root));
+        String environment = containerEnvironment(executorEnvironment, "HIVE_HOME=" + root + "/hive",
+                "TEZ_HOME=" + root + "/tez");
+        return List.of(
+                new SparkSetting("yarn.resourcemanager.hostname", job.storage().resourceManager()),
+                new SparkSetting("tez.local.mode", "false"),
+                new SparkSetting("tez.framework.client", "org.apache.tez.client.TezYarnClient"),
+                new SparkSetting("tez.am.class", "org.apache.tez.dag.app.DAGAppMaster"),
+                new SparkSetting("tez.task.class", "org.apache.tez.runtime.task.TezChild"),
+                new SparkSetting("tez.am.yarn.scheduler.class", "org.apache.tez.dag.app.rm.YarnTaskSchedulerService"),
+                new SparkSetting("tez.am.yarn.communicator.class", "org.apache.tez.dag.app.TezTaskCommunicatorImpl"),
+                new SparkSetting("tez.am.yarn.container-launcher.class",
+                        "org.apache.tez.dag.app.launcher.TezContainerLauncherImpl"),
+                new SparkSetting("tez.am.shuffle.auxiliary-service.id", "mapreduce_shuffle"),
+                new SparkSetting("tez.am.client.am.port-range", "40000-40100"),
+                new SparkSetting("tez.am.task.am.port-range", "40101-40200"),
+                new SparkSetting("tez.am.client.am.hostname", "${env.NM_HOST}"),
+                new SparkSetting("tez.am.task.am.hostname", "${env.NM_HOST}"),
+                new SparkSetting("tez.am.client.am.bind-host", "0.0.0.0"),
+                new SparkSetting("tez.am.task.am.bind-host", "0.0.0.0"),
+                new SparkSetting("tez.shuffle.bind-host", "0.0.0.0"),
+                new SparkSetting("tez.lib.uris", "file://" + root + "/tez/,file://" + root + "/tez/lib/"),
+                new SparkSetting("tez.use.cluster.hadoop-libs", "false"),
+                new SparkSetting("tez.cluster.additional.classpath.prefix", String.join(":", classPath)),
+                new SparkSetting("tez.am.launch.env", environment),
+                new SparkSetting("tez.task.launch.env", environment),
+                new SparkSetting("tez.am.resource.memory.mb", "1024"),
+                new SparkSetting("hive.tez.container.size", "768"),
+                new SparkSetting("hive.tez.cpu.vcores", "1"),
+                new SparkSetting("tez.runtime.intermediate-output.should-compress", "false"),
+                new SparkSetting("tez.runtime.intermediate-input.is-compressed", "false"));
+    }
+
+    // The folders holding Hadoop on a cluster's nodes, as a class path's entries; the LZO codec's beside them.
+    private static List<String> hadoopLayout(String root) {
+        return List.of(root + "/hadoop-mapreduce/*", root + "/hadoop-mapreduce/lib/*", root + "/hadoop/*",
+                root + "/hadoop/lib/*", root + "/hadoop-hdfs/*", root + "/hadoop-hdfs/lib/*", root + "/hadoop-yarn/*",
+                root + "/hadoop-yarn/lib/*", "/usr/lib/hadoop-lzo/lib/*");
+    }
+
+    // A YARN container's environment as Hadoop's settings take it, comma-separated: the options Java 17 needs, the
+    // variables given, then the step's AWS environment.
+    private static String containerEnvironment(List<String> executorEnvironment, String... variables) {
+        List<String> environment = new ArrayList<>(List.of("JDK_JAVA_OPTIONS=" + yarnJavaOptions()));
+        environment.addAll(List.of(variables));
+        environment.addAll(executorEnvironment);
+        return String.join(",", environment);
+    }
+
+    // Where the Hadoop of a job's cluster's nodes is in its image: an emr-spark-* release's in the folder EmrReleaseImages
+    // keeps it apart in.
+    private static String hadoopRoot(Job job) {
+        return sparkRuntime(job.releaseLabel()) ? "/opt" : "/usr/lib";
+    }
+
+    /** The JVM options that open to Hadoop's classes the packages it reaches into, which Java 8 ignores. */
+    public static String yarnJavaOptions() {
+        return YARN_OPENED_PACKAGES.stream().map(name -> "--add-opens=java.base/" + name + "=ALL-UNNAMED")
+                .collect(Collectors.joining(" "));
     }
 
     /** The lines a step's {@code hadoop} command gets after those of its {@code log4j.properties}. */
@@ -1006,6 +1148,13 @@ public class EmrServerlessSparkRunner implements SparkJobRunner, ContainerTeardo
         if (storage.replication() > 0) {
             settings.add(new SparkSetting("dfs.replication", String.valueOf(storage.replication())));
         }
+        return settings;
+    }
+
+    // The cluster's HDFS for a MapReduce job on its YARN, its staging folder there with the rest, by HDFS's own client.
+    private static List<SparkSetting> yarnJobHdfsSettings(Storage storage) {
+        List<SparkSetting> settings = new ArrayList<>(hdfsSettings(storage));
+        settings.add(new SparkSetting("fs.hdfs.impl", "org.apache.hadoop.hdfs.DistributedFileSystem"));
         return settings;
     }
 

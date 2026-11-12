@@ -143,6 +143,26 @@ class EmrHiveStepsDockerIntegrationTest {
     }
 
     @Test
+    void aHiveStepsTezTasksRunInYarnContainersOnItsClustersPrimaryNode() {
+        startCluster(HIVE_AND_SPARK, "[]", null);
+        List<String> instances = emr("ListInstances", "{\"ClusterId\":\"" + clusterId + "\"}").jsonPath()
+                .getList("Instances.PrivateDnsName");
+
+        // A query that groups its rows through a shuffle, its tasks giving the hosts they ran on: the primary node,
+        // whose NodeManager runs them on a cluster without core nodes, not the step's container. Core and task nodes
+        // running a job's containers are EmrDockerRunnerDockerIntegrationTest's, as a cluster with Hive starts slower.
+        assertEquals("COMPLETED", hiveStep("-e", "create external table kv (k string, v int) row format delimited"
+                + " fields terminated by ',' location '" + s3Uri("data/rows/") + "';"
+                + " insert overwrite directory '" + s3Uri("out/tez/") + "' row format delimited fields terminated"
+                + " by ',' collection items terminated by ' ' select sum(v), count(k),"
+                + " collect_set(split(reflect('java.net.InetAddress', 'getLocalHost'), '/')[0]) from kv;"));
+        String[] fields = objects("out/tez/").trim().split(",");
+        assertEquals(List.of("6", "3"), List.of(fields[0], fields[1]), () -> String.join(",", fields));
+        List<String> hosts = List.of(fields[2].split(" "));
+        assertTrue(instances.containsAll(hosts), hosts + " among " + instances);
+    }
+
+    @Test
     void aClustersHiveSiteForTheGlueDataCatalogKeepsItsHiveStepsTablesInFlocisGlue() {
         String database = bucket.replace('-', '_');
         GlueClient glue = AwsTestClients.create(GlueClient.builder(), "000000000000", Region.US_EAST_1);
