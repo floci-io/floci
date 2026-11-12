@@ -357,6 +357,7 @@ public interface EmulatorConfig {
     }
 
     interface ServiceStorageOverrides {
+        RekognitionStorageConfig rekognition();
         SsmStorageConfig ssm();
         SqsStorageConfig sqs();
         S3StorageConfig s3();
@@ -407,6 +408,13 @@ public interface EmulatorConfig {
         LakeFormationStorageConfig lakeformation();
         EfsStorageConfig efs();
         SageMakerStorageConfig sagemaker();
+    }
+
+    interface RekognitionStorageConfig {
+        Optional<String> mode();
+
+        @WithDefault("5000")
+        long flushIntervalMs();
     }
 
     interface ApsStorageConfig {

@@ -29,6 +29,14 @@
     }
   },
   "rekognition": {
+    "mock-bucket/collection-face.jpg": {
+      "DetectFaces": {
+        "FaceDetails": [
+          { "Confidence": 99.9, "BoundingBox": { "Width": 0.4, "Height": 0.4, "Left": 0.1, "Top": 0.1 } },
+          { "Confidence": 99.5, "BoundingBox": { "Width": 0.1, "Height": 0.1, "Left": 0.6, "Top": 0.6 } }
+        ]
+      }
+    },
     "mock-bucket/cat.jpg": {
       "DetectLabels": {
         "Labels": [

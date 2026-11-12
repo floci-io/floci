@@ -29,6 +29,8 @@ floci:
     wal:
       compaction-interval-ms: 60000
     services:
+      rekognition:
+        flush-interval-ms: 60000
       ssm:
         flush-interval-ms: 60000
       dynamodb:
