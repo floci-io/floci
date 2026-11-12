@@ -38,7 +38,7 @@ import static org.junit.jupiter.api.Assumptions.assumeTrue;
 import static org.mockito.Mockito.mock;
 
 /**
- * A systemd guest sees the Docker host's module tree, read-only. The launch goes through the real
+ * A systemd guest sees the Docker host's module tree, read-only, and runs in a private cgroup namespace. The launch goes through the real
  * {@link Ec2ContainerManager} container spec and a real Docker daemon. The image is Alpine rather
  * than a systemd cloud image, which is too heavy to pull in CI: the systemd runtime only decides
  * the container's command and mounts, and Alpine's busybox {@code /sbin/init} stays up as PID 1.
@@ -115,6 +115,17 @@ class Ec2SystemdGuestDockerIntegrationTest {
                     new String[]{"sh", "-c", "touch /lib/modules/.floci-w && rm /lib/modules/.floci-w"}, 30);
             assertEquals(0, writable.exitCode(),
                     "guest's /lib/modules outside " + modulesDir + " is not writable: " + writable.summary());
+
+            // A privileged guest gets its own cgroup namespace: it sits at the namespace root, and
+            // Docker mounts that cgroupfs read-write so the guest's systemd can create slices.
+            ContainerExec.Result cgroup = ContainerExec.runMerged(docker, containerId,
+                    new String[]{"cat", "/proc/self/cgroup"}, 30);
+            assertEquals(0, cgroup.exitCode(), "cannot read the guest's cgroup: " + cgroup.summary());
+            assertTrue(cgroup.stdout().lines().anyMatch("0::/"::equals),
+                    "guest is not at the root of a private cgroup namespace: " + cgroup.stdout());
+            ContainerExec.Result cgroupfs = ContainerExec.runMerged(docker, containerId,
+                    new String[]{"sh", "-c", "mkdir /sys/fs/cgroup/.floci-w && rmdir /sys/fs/cgroup/.floci-w"}, 30);
+            assertEquals(0, cgroupfs.exitCode(), "guest's cgroupfs is not writable: " + cgroupfs.summary());
         } finally {
             // terminate() removes the container and releases the SSH port in the shared allocator.
             CountDownLatch torndown = new CountDownLatch(1);
