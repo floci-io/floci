@@ -116,9 +116,9 @@ call `LeaveOrganization`. An account in no organization gets
 | `EnablePolicyType` | Enables a policy type on the specified root. |
 | `DisablePolicyType` | Disables a policy type on the specified root. |
 | `DescribeEffectivePolicy` | Returns the merged policy of the given type that applies to a target. |
-| `TagResource` | Adds or overwrites tags on a root, OU, account or policy. |
-| `UntagResource` | Removes the specified tags from a root, OU, account or policy. |
-| `ListTagsForResource` | Lists the tags on a root, OU, account or policy. |
+| `TagResource` | Adds or overwrites tags on a root, OU, account, policy or resource policy. |
+| `UntagResource` | Removes the specified tags from a root, OU, account, policy or resource policy. |
+| `ListTagsForResource` | Lists the tags on a root, OU, account, policy or resource policy. |
 | `EnableAWSServiceAccess` | Enables trusted access for an AWS service principal. |
 | `DisableAWSServiceAccess` | Disables trusted access for an AWS service principal. |
 | `ListAWSServiceAccessForOrganization` | Lists the service principals with trusted access enabled. |
