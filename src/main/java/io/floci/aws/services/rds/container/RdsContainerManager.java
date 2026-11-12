@@ -1243,31 +1243,50 @@ public class RdsContainerManager implements RdsBackendGate, RdsBackendEndpointRe
                     "/tmp", uploadName, out -> out.write(archive),
                     RetryingTarCopier.DEFAULT_MAX_ATTEMPTS, uploadBackoffMillis);
 
-            ContainerExec.Result result = null;
-            for (int i = 0; i < attempts; i++) {
-                result = ContainerExec.run(lifecycleManager.getDockerClient(), containerId, cmd, env,
-                        timeoutSeconds);
-                if (result.exitCode() != 2) {
-                    break;
+            try {
+                ContainerExec.Result result = null;
+                for (int i = 0; i < attempts; i++) {
+                    result = ContainerExec.run(lifecycleManager.getDockerClient(), containerId, cmd, env,
+                            timeoutSeconds);
+                    if (result.exitCode() != 2) {
+                        break;
+                    }
+                    try {
+                        Thread.sleep(1000);
+                    } catch (InterruptedException ie) {
+                        Thread.currentThread().interrupt();
+                        throw new RuntimeException("Interrupted while waiting to run " + operation, ie);
+                    }
                 }
-                try {
-                    Thread.sleep(1000);
-                } catch (InterruptedException ie) {
-                    Thread.currentThread().interrupt();
-                    throw new RuntimeException("Interrupted while waiting to run " + operation, ie);
-                }
-            }
 
-            if (result == null || result.exitCode() != 0) {
-                String errMsg = result != null ? (result.stderr().isEmpty() ? result.stdout() : result.stderr()) : "";
-                throw new RuntimeException(operation + " failed with exit code "
-                        + (result != null ? result.exitCode() : -1) + ": " + errMsg);
+                if (result == null || result.exitCode() != 0) {
+                    String errMsg = result != null ? (result.stderr().isEmpty() ? result.stdout() : result.stderr()) : "";
+                    throw new RuntimeException(operation + " failed with exit code "
+                            + (result != null ? result.exitCode() : -1) + ": " + errMsg);
+                }
+                return result.stdout();
+            } finally {
+                if (files.containsKey("dump.sql")) {
+                    removeDump(containerId);
+                }
             }
-            return result.stdout();
         } catch (RuntimeException e) {
             throw e;
         } catch (Exception e) {
             throw new RuntimeException("Failed to run " + operation, e);
+        }
+    }
+
+    /**
+     * Removes the uploaded dump when the script could not: it gave up on a server that never answered,
+     * or its exec timed out or was killed. Best effort, since the container may be gone.
+     */
+    private void removeDump(String containerId) {
+        try {
+            ContainerExec.run(lifecycleManager.getDockerClient(), containerId,
+                    new String[]{"rm", "-f", "/tmp/dump.sql"}, 30);
+        } catch (RuntimeException e) {
+            LOG.debugv("Could not remove /tmp/dump.sql from {0}: {1}", containerId, e.getMessage());
         }
     }
 
@@ -1383,7 +1402,8 @@ public class RdsContainerManager implements RdsBackendGate, RdsBackendEndpointRe
                 $ACCOUNTS
                 EOF
                 while IFS= read -r grantee; do
-                  if [ -n "$grantee" ]; then unesc "$grantee"; SQL "SHOW GRANTS FOR $R" | sed 's/$/;/'; fi
+                  # A statement ends where the next GRANT begins, not at every line: a name with a newline spans two.
+                  if [ -n "$grantee" ]; then unesc "$grantee"; SQL "SHOW GRANTS FOR $R" | awk 'BEGIN{ORS=""} /^GRANT /{if(NR>1)print ";\\n"} NR>1&&!/^GRANT /{print "\\n"} {print} END{if(NR)print ";\\n"}'; fi
                 done <<EOF
                 $ROLES
                 $ACCOUNTS
@@ -1438,6 +1458,9 @@ public class RdsContainerManager implements RdsBackendGate, RdsBackendEndpointRe
                 #!/bin/sh
                 set -e
                 USER="$1"
+                # The dump holds every database; leave none behind. Exit 2 means the server is not up:
+                # the caller retries, and needs it.
+                trap 'rc=$?; [ "$rc" = 2 ] || rm -f /tmp/dump.sql /tmp/dump_filtered.sql' EXIT
 
                 # Drop every database but postgres, template0 and template1, including template
                 # databases an image creates at startup (PostGIS's template_postgis), which the dump
@@ -1453,6 +1476,7 @@ public class RdsContainerManager implements RdsBackendGate, RdsBackendEndpointRe
                 # Exclude the master user CREATE ROLE statement to avoid conflicts during restore
                 sed -e "s/^CREATE ROLE \\\"\\?$USER\\\"\\?.*;/-- &/" /tmp/dump.sql > /tmp/dump_filtered.sql
                 mv /tmp/dump_filtered.sql /tmp/dump.sql
+                chmod 600 /tmp/dump.sql
 
                 # Drop all non-current-user, non-system roles
                 psql -v ON_ERROR_STOP=1 -U "$USER" -d postgres -tAc \\

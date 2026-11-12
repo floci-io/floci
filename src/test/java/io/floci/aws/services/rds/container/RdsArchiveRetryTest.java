@@ -137,7 +137,7 @@ class RdsArchiveRetryTest {
             assertTarEntry(tar, "restore.sh", RdsContainerManager.postgresRestoreScript());
             assertNull(tar.getNextEntry());
         }
-        assertEquals(List.of(List.of("sh", "/tmp/restore.sh", "admin")), commands);
+        assertEquals(List.of(List.of("sh", "/tmp/restore.sh", "admin"), List.of("rm", "-f", "/tmp/dump.sql")), commands);
         InOrder order = inOrder(uploads.commands.get(1), docker);
         order.verify(uploads.commands.get(1)).exec();
         order.verify(docker).execCreateCmd(CONTAINER);
@@ -191,7 +191,7 @@ class RdsArchiveRetryTest {
 
         assertTrue(failure.getMessage().contains("psql restore failed with exit code 1: invalid dump"));
         assertEquals(1, uploads.commands.size());
-        assertEquals(List.of(List.of("sh", "/tmp/restore.sh", "admin")), commands);
+        assertEquals(List.of(List.of("sh", "/tmp/restore.sh", "admin"), List.of("rm", "-f", "/tmp/dump.sql")), commands);
     }
 
     @Test
@@ -206,7 +206,7 @@ class RdsArchiveRetryTest {
 
         assertSame(transportFailure, failure);
         assertEquals(1, uploads.commands.size());
-        assertEquals(List.of(List.of("sh", "/tmp/restore.sh", "admin")), commands);
+        assertEquals(List.of(List.of("sh", "/tmp/restore.sh", "admin"), List.of("rm", "-f", "/tmp/dump.sql")), commands);
     }
 
     @Test
@@ -238,7 +238,7 @@ class RdsArchiveRetryTest {
 
         manager.restoreMysqlSnapshot(DatabaseEngine.MARIADB, CONTAINER, "admin", "secret", "-- dump");
 
-        assertEquals(List.of(List.of("sh", "/tmp/restore.sh", "mariadb", "admin")), commands);
+        assertEquals(List.of(List.of("sh", "/tmp/restore.sh", "mariadb", "admin"), List.of("rm", "-f", "/tmp/dump.sql")), commands);
         assertEquals(List.of(List.of("MYSQL_PWD=secret")), envs);
         try (TarArchiveInputStream tar = new TarArchiveInputStream(
                 new ByteArrayInputStream(uploads.completed.getFirst()))) {
@@ -247,7 +247,6 @@ class RdsArchiveRetryTest {
             // mysqld runs as an unprivileged user and must not be able to LOAD_FILE the dump.
             assertEquals(0600, dump.getMode());
         }
-        assertTrue(RdsContainerManager.mysqlRestoreScript().contains("rm -f /tmp/dump.sql"));
     }
 
     @Test
@@ -260,6 +259,10 @@ class RdsArchiveRetryTest {
                 for last; do :; done
                 case "$last" in
                   *information_schema.schemata*) printf 'a\\\\nb\\nplain\\n' ;;
+                  *CONCAT*QUOTE*) printf '\\047u\\\\nser\\047@\\047%%\\047\\n' ;;
+                  *QUOTE*) printf '\\047r\\\\nole\\047\\n' ;;
+                  *SHOW*GRANTS*) printf 'GRANT USAGE ON *.* TO %s\\n' "${last#SHOW GRANTS FOR }" ;;
+                  *SHOW*) printf '%s\\n' "$last" ;;
                 esac
                 """);
         Path dump = dir.resolve("dump");
@@ -276,6 +279,90 @@ class RdsArchiveRetryTest {
 
         assertEquals(0, process.waitFor(), output);
         assertTrue(output.startsWith("<a\nb><plain>"), output);
+        // Roles, accounts and grantees are decoded too: each statement carries the real newline.
+        assertTrue(output.contains("CREATE ROLE IF NOT EXISTS 'r\nole';"), output);
+        assertTrue(output.contains("SHOW CREATE USER 'u\nser'@'%'"), output);
+        // Each GRANT ends with one ';', after the whole name, not after the line the newline split.
+        assertTrue(output.contains("GRANT USAGE ON *.* TO 'r\nole';\n"), output);
+        assertTrue(output.contains("GRANT USAGE ON *.* TO 'u\nser'@'%';\n"), output);
+    }
+
+    @Test
+    void restoreRemovesTheDumpEvenWhenItsExecDiesBeforeTheScriptCanClean() {
+        failingUploads(0, 0);
+        List<List<String>> commands = ContainerExecStubs.completeEveryExec(docker, CONTAINER, 0, "", "");
+        RuntimeException killed = new RuntimeException(new IOException("exec killed"));
+        when(docker.execStartCmd(anyString())).thenThrow(killed);
+
+        RuntimeException failure = assertThrows(RuntimeException.class,
+                () -> manager.restoreMysqlSnapshot(DatabaseEngine.MYSQL, CONTAINER, "admin", "secret", "-- dump"));
+
+        assertSame(killed, failure);
+        assertEquals(List.of("rm", "-f", "/tmp/dump.sql"), commands.getLast());
+    }
+
+    /** Runs a restore script on a stub client or psql; returns the exit code, and whether the dump is left. */
+    private record Restore(int exit, boolean dumpLeft, String mode) {
+    }
+
+    private Restore runRestoreScript(Path dir, String script, String mode, boolean takesClient) throws Exception {
+        Path dump = dir.resolve("dump.sql");
+        Files.writeString(dump, "SELECT 1;");
+        Path stub = dir.resolve("stub");
+        // down: the server does not answer; fail: it answers but the replay fails; up: all well.
+        Files.writeString(stub, """
+                #!/bin/sh
+                case "$*" in
+                  *-f*) [ "$MODE" = down ] && exit 2; [ "$MODE" = fail ] && exit 1; exit 0 ;;
+                  *-e*) [ "$MODE" = down ] && exit 1; exit 0 ;;
+                esac
+                [ "$MODE" = down ] && exit 2
+                [ "$MODE" = fail ] && exit 1
+                exit 0
+                """);
+        Path psql = dir.resolve("psql");
+        Files.copy(stub, psql);
+        for (Path p : List.of(stub, psql)) {
+            assertTrue(p.toFile().setExecutable(true));
+        }
+        Path file = dir.resolve("restore.sh");
+        Files.writeString(file, script.replace("/tmp/dump", dir + "/dump"));
+        List<String> command = new ArrayList<>(List.of("sh", file.toString()));
+        if (takesClient) {
+            command.add(stub.toString());
+        }
+        command.add("admin");
+        ProcessBuilder pb = new ProcessBuilder(command).redirectErrorStream(true);
+        pb.environment().put("MODE", mode);
+        pb.environment().put("PATH", dir + ":" + System.getenv("PATH"));
+        Process process = pb.start();
+        process.getInputStream().readAllBytes();
+        return new Restore(process.waitFor(), Files.exists(dump), mode);
+    }
+
+    @ParameterizedTest
+    @CsvSource({"up,0,false", "fail,1,false", "down,2,true"})
+    void mysqlRestoreScriptRemovesTheDumpUnlessTheServerIsStillDown(String mode, int exit, boolean left,
+            @TempDir Path dir) throws Exception {
+        Restore result = runRestoreScript(dir, RdsContainerManager.mysqlRestoreScript(), mode, true);
+
+        assertEquals(exit, result.exit());
+        assertEquals(left, result.dumpLeft());
+    }
+
+    @ParameterizedTest
+    @CsvSource({"up,0,false", "fail,1,false", "down,2,true"})
+    void postgresRestoreScriptRemovesTheDumpUnlessTheServerIsStillDownAndKeepsItPrivate(String mode, int exit,
+            boolean left, @TempDir Path dir) throws Exception {
+        Restore result = runRestoreScript(dir, RdsContainerManager.postgresRestoreScript(), mode, false);
+
+        assertEquals(exit, result.exit());
+        assertEquals(left, result.dumpLeft());
+        if (left) {
+            assertEquals(java.util.Set.of(java.nio.file.attribute.PosixFilePermission.OWNER_READ,
+                    java.nio.file.attribute.PosixFilePermission.OWNER_WRITE),
+                    Files.getPosixFilePermissions(dir.resolve("dump.sql")));
+        }
     }
 
     @Test
