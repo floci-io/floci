@@ -1956,6 +1956,42 @@ class SsmIntegrationTest {
             .body("Parameter.Value", equalTo("v"));
     }
 
+    @Test
+    void aDoubleSlashArnDoesNotReadTheParameterUnderOneSlash() {
+        String name = "/double-slash-" + UUID.randomUUID();
+        String doubleSlashArn = "arn:aws:ssm:us-east-1:000000000000:parameter/" + name;
+        given()
+            .header("X-Amz-Target", "AmazonSSM.PutParameter")
+            .contentType(SSM_CONTENT_TYPE)
+            .body("{ \"Name\": \"" + name + "\", \"Value\": \"v\", \"Type\": \"String\" }")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200);
+
+        for (String selected : List.of(doubleSlashArn, doubleSlashArn + ":1")) {
+            given()
+                .header("X-Amz-Target", "AmazonSSM.GetParameter")
+                .contentType(SSM_CONTENT_TYPE)
+                .body("{ \"Name\": \"" + selected + "\" }")
+            .when()
+                .post("/")
+            .then()
+                .statusCode(400)
+                .body("__type", equalTo("ParameterNotFound"));
+            given()
+                .header("X-Amz-Target", "AmazonSSM.GetParameters")
+                .contentType(SSM_CONTENT_TYPE)
+                .body("{ \"Names\": [\"" + selected + "\"] }")
+            .when()
+                .post("/")
+            .then()
+                .statusCode(200)
+                .body("Parameters", hasSize(0))
+                .body("InvalidParameters", contains(selected));
+        }
+    }
+
     private void putIntelligentTiering(String name, String jsonEscapedValue) {
         given()
             .header("X-Amz-Target", "AmazonSSM.PutParameter")
