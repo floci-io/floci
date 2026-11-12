@@ -758,11 +758,10 @@ public class Ec2ContainerManager {
             specBuilder.withLabels(Map.of(ContainerStorageHelper.SECURITY_GROUP_WORKLOAD_LABEL, "true"));
         }
         if (image.systemd()) {
+            applySystemdCgroup(specBuilder, namespace == null);
             specBuilder
-                    .withCgroupnsMode("host")
                     .withMount(new Mount().withType(MountType.TMPFS).withTarget("/run"))
-                    .withMount(new Mount().withType(MountType.TMPFS).withTarget("/run/lock"))
-                    .withBind("/sys/fs/cgroup", "/sys/fs/cgroup");
+                    .withMount(new Mount().withType(MountType.TMPFS).withTarget("/run/lock"));
             // The guest shares the Docker host's kernel but ships none of its modules, so
             // `modprobe br_netfilter` (Kubernetes node setup) fails with "not found" even
             // when the module is built in. Only the running kernel's directory is bound: the
@@ -789,6 +788,25 @@ public class Ec2ContainerManager {
         }
         LOG.warn("Docker host kernel version unknown; systemd guest launches without /lib/modules");
         return null;
+    }
+
+    /**
+     * The cgroup setup a systemd guest boots with. A privileged guest gets a private cgroup namespace,
+     * as kind gives its nodes: Docker mounts that namespace's cgroupfs read-write for a privileged
+     * container, so the guest's systemd owns its own subtree. With the host namespace and the host's
+     * {@code /sys/fs/cgroup} bound in, every guest's systemd managed the same tree, so two Kubernetes
+     * nodes shared one {@code kubepods.slice} and each kubelet tore down the other's pod sandboxes.
+     *
+     * <p>A guest under security-group enforcement runs unprivileged, and Docker mounts an unprivileged
+     * container's private cgroupfs read-only, where systemd cannot create its slices. That guest keeps
+     * the host namespace and the read-write bind it booted with before, and with it the shared tree.
+     */
+    static void applySystemdCgroup(ContainerBuilder.Builder spec, boolean privileged) {
+        if (privileged) {
+            spec.withCgroupnsMode("private");
+        } else {
+            spec.withCgroupnsMode("host").withBind("/sys/fs/cgroup", "/sys/fs/cgroup");
+        }
     }
 
     private void failLaunch(Instance instance) {
