@@ -168,18 +168,10 @@ public class KinesisJsonHandler {
         return Response.ok(objectMapper.createObjectNode()).build();
     }
 
-    /**
-     * MaxRecordSizeInKiB is modelled as an integer, so a float or a value outside int range is a
-     * type error rather than something to truncate into the range check.
-     */
     private Integer optionalMaxRecordSize(JsonNode request) {
         JsonNode size = request.path("MaxRecordSizeInKiB");
         if (size.isMissingNode() || size.isNull()) {
             return null;
-        }
-        if (!size.isIntegralNumber() || !size.canConvertToInt()) {
-            throw new AwsException("InvalidArgumentException",
-                    "MaxRecordSizeInKiB must be an integer", 400);
         }
         return size.intValue();
     }
@@ -190,23 +182,16 @@ public class KinesisJsonHandler {
         if (streamArn == null || streamArn.isBlank()) {
             throw new AwsException("InvalidArgumentException", "StreamARN is required", 400);
         }
-        Integer size = optionalMaxRecordSize(request);
-        if (size == null) {
-            throw new AwsException("InvalidArgumentException", "MaxRecordSizeInKiB is required", 400);
-        }
-        service.updateMaxRecordSize(extractStreamNameFromArn(streamArn), size, region);
+        service.updateMaxRecordSize(extractStreamNameFromArn(streamArn),
+                request.path("MaxRecordSizeInKiB").intValue(), region);
         return Response.ok(objectMapper.createObjectNode()).build();
     }
 
     private Response handleUpdateShardCount(JsonNode request, String region) {
         String streamName = resolveStreamName(request);
-        JsonNode targetNode = request.path("TargetShardCount");
-        if (!targetNode.isIntegralNumber() || !targetNode.canConvertToInt()) {
-            throw new AwsException("InvalidArgumentException", "TargetShardCount must be an integer", 400);
-        }
         String scalingType = request.path("ScalingType").asText(null);
         KinesisService.UpdateShardCountResult result =
-                service.updateShardCount(streamName, targetNode.intValue(), scalingType, region);
+                service.updateShardCount(streamName, request.path("TargetShardCount").intValue(), scalingType, region);
 
         ObjectNode response = objectMapper.createObjectNode();
         response.put("StreamName", result.streamName());
@@ -234,23 +219,12 @@ public class KinesisJsonHandler {
     private Response handleListStreams(JsonNode request, String region) {
         int limit = 100;
         if (request.hasNonNull("Limit")) {
-            JsonNode value = request.get("Limit");
-            if (!value.isIntegralNumber() || !value.canConvertToInt() || value.intValue() < 1 || value.intValue() > 10000) {
-                throw new AwsException("InvalidArgumentException", "Limit must be an integer between 1 and 10000", 400);
-            }
-            limit = Math.min(value.intValue(), 100);
+            limit = Math.min(request.get("Limit").intValue(), 100);
         }
-        JsonNode start = request.path("ExclusiveStartStreamName");
-        String startName = start.asText(null);
-        if (!start.isMissingNode() && !start.isNull()
-                && (!start.isTextual() || !startName.matches("[a-zA-Z0-9_.-]{1,128}"))) {
-            throw new AwsException("InvalidArgumentException", "ExclusiveStartStreamName must be a valid stream name", 400);
-        }
-        JsonNode token = request.path("NextToken");
-        if (!token.isMissingNode() && !token.isNull() && !token.isTextual()) {
-            throw invalidNextToken();
-        }
-        String after = token.isTextual() ? streamCursorFromToken(decodeNextToken(token.textValue()), region) : startName;
+        String startName = request.path("ExclusiveStartStreamName").asText(null);
+        String after = request.hasNonNull("NextToken")
+                ? streamCursorFromToken(decodeNextToken(request.get("NextToken").textValue()), region)
+                : startName;
         List<KinesisStream> streams = service.listStreamDetails(region).stream()
                 .filter(stream -> after == null || stream.getStreamName().compareTo(after) > 0)
                 .toList();
@@ -493,18 +467,9 @@ public class KinesisJsonHandler {
 
     private Response handleRemoveTagsFromStream(JsonNode request, String region) {
         String streamName = resolveStreamName(request);
-        JsonNode tagKeysNode = request.path("TagKeys");
         List<String> tagKeys = new ArrayList<>();
-        if (!tagKeysNode.isMissingNode() && !tagKeysNode.isNull()) {
-            if (!tagKeysNode.isArray()) {
-                throw new AwsException("SerializationException", "TagKeys must be a list of strings.", 400);
-            }
-            for (JsonNode node : tagKeysNode) {
-                if (!node.isTextual()) {
-                    throw new AwsException("SerializationException", "TagKeys must be a list of strings.", 400);
-                }
-                tagKeys.add(node.textValue());
-            }
+        for (JsonNode node : request.path("TagKeys")) {
+            tagKeys.add(node.textValue());
         }
         service.removeTagsFromStream(streamName, tagKeys, region);
         return Response.ok(objectMapper.createObjectNode()).build();
@@ -524,24 +489,13 @@ public class KinesisJsonHandler {
         return Response.ok(response).build();
     }
 
-    // Shared by CreateStream and AddTagsToStream so the two paths cannot drift: the same
-    // request shape has to produce the same stored tags whichever operation carries it.
-    // A missing or null Tags member yields an empty map; anything else that is not a map
-    // of strings is a wire deserialization error rather than a value to coerce, so a
-    // number or boolean is rejected instead of being stored as its text.
     private Map<String, String> parseTags(JsonNode request) {
         Map<String, String> tags = new HashMap<>();
         JsonNode tagsNode = request.path("Tags");
         if (tagsNode.isMissingNode() || tagsNode.isNull()) {
             return tags;
         }
-        if (!tagsNode.isObject()) {
-            throw new AwsException("SerializationException", "Tags must be a map of string values.", 400);
-        }
         tagsNode.fields().forEachRemaining(entry -> {
-            if (!entry.getValue().isTextual()) {
-                throw new AwsException("SerializationException", "Tags must be a map of string values.", 400);
-            }
             tags.put(entry.getKey(), entry.getValue().textValue());
         });
         return tags;
@@ -845,9 +799,6 @@ public class KinesisJsonHandler {
     }
 
     private PaginationToken decodeNextToken(String nextToken) {
-        if (nextToken.isEmpty() || nextToken.length() > 1_048_576) {
-            throw invalidNextToken();
-        }
         String decoded;
         try {
             decoded = Base64Url.decode(nextToken);

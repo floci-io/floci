@@ -91,8 +91,8 @@ class KinesisListStreamsTest {
     }
 
     @ParameterizedTest
-    @ValueSource(strings = {"0", "-1", "10001", "1.5", "\"one\"", "999999999999999999999"})
-    void rejectsInvalidLimitsEvenForAnEmptyRegion(String limit) throws Exception {
+    @ValueSource(strings = {"0", "-1", "10001"})
+    void rejectsLimitsOutsideModeledBoundsEvenForAnEmptyRegion(String limit) throws Exception {
         ObjectNode request = (ObjectNode) mapper.readTree("{\"Limit\":" + limit + "}");
         AwsException error = assertThrows(AwsException.class, () -> list(request));
         assertEquals("InvalidArgumentException", error.getErrorCode());
@@ -100,7 +100,16 @@ class KinesisListStreamsTest {
     }
 
     @ParameterizedTest
-    @ValueSource(strings = {"\"\"", "\"invalid/name\"", "123"})
+    @ValueSource(strings = {"1.5", "\"one\"", "999999999999999999999"})
+    void rejectsNonIntegerLimitsAsModeledTypeErrors(String limit) throws Exception {
+        ObjectNode request = (ObjectNode) mapper.readTree("{\"Limit\":" + limit + "}");
+        AwsException error = assertThrows(AwsException.class, () -> list(request));
+        assertEquals("SerializationException", error.getErrorCode());
+        assertEquals(400, error.getHttpStatus());
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"\"\"", "\"invalid/name\""})
     void rejectsInvalidExclusiveStartNames(String name) throws Exception {
         ObjectNode request = (ObjectNode) mapper.readTree("{\"ExclusiveStartStreamName\":" + name + "}");
         AwsException error = assertThrows(AwsException.class, () -> list(request));
@@ -109,21 +118,31 @@ class KinesisListStreamsTest {
     }
 
     @Test
-    void nonStringListStreamsMembersKeepTheirExistingErrors() {
+    void nonStringListStreamsMembersUseModeledTypeErrors() {
         ObjectNode limit = mapper.createObjectNode().put("Limit", "one");
         AwsException invalidLimit = assertThrows(AwsException.class, () -> list(limit));
-        assertEquals("InvalidArgumentException", invalidLimit.getErrorCode());
-        assertEquals("Limit must be an integer between 1 and 10000", invalidLimit.getMessage());
+        assertEquals("SerializationException", invalidLimit.getErrorCode());
+        assertEquals("ListStreams.Limit must be a integer.", invalidLimit.getMessage());
 
         ObjectNode start = mapper.createObjectNode().put("ExclusiveStartStreamName", 123);
         AwsException invalidStart = assertThrows(AwsException.class, () -> list(start));
-        assertEquals("InvalidArgumentException", invalidStart.getErrorCode());
-        assertEquals("ExclusiveStartStreamName must be a valid stream name", invalidStart.getMessage());
+        assertEquals("SerializationException", invalidStart.getErrorCode());
+        assertEquals("ListStreams.ExclusiveStartStreamName must be a string.", invalidStart.getMessage());
 
         ObjectNode token = mapper.createObjectNode().put("NextToken", false);
         AwsException invalidToken = assertThrows(AwsException.class, () -> list(token));
-        assertEquals("InvalidArgumentException", invalidToken.getErrorCode());
-        assertEquals("The NextToken is not valid.", invalidToken.getMessage());
+        assertEquals("SerializationException", invalidToken.getErrorCode());
+        assertEquals("ListStreams.NextToken must be a string.", invalidToken.getMessage());
+    }
+
+    @Test
+    void rejectsModeledNextTokenLengthBeforeDecoding() {
+        for (String token : List.of("", "x".repeat(1_048_577))) {
+            ObjectNode request = mapper.createObjectNode().put("NextToken", token);
+            AwsException error = assertThrows(AwsException.class, () -> list(request));
+            assertEquals("InvalidArgumentException", error.getErrorCode());
+            assertEquals("ListStreams.NextToken is outside the modeled bounds.", error.getMessage());
+        }
     }
 
     private void create(String name, String region) {

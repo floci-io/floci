@@ -475,14 +475,14 @@ class KinesisJsonHandlerTest {
     }
 
     @Test
-    void createStreamKeepsTheNonMapTagsSerializationError() {
+    void createStreamRejectsNonMapTagsThroughTheModeledShape() {
         ObjectNode request = MAPPER.createObjectNode().put("StreamName", "test-stream");
         request.putArray("Tags").add("not-a-map");
 
         AwsException error = assertThrows(AwsException.class,
                 () -> handler.handle("CreateStream", request, REGION));
         assertEquals("SerializationException", error.getErrorCode());
-        assertEquals("Tags must be a map of string values.", error.getMessage());
+        assertEquals("CreateStream.Tags must be a map.", error.getMessage());
         assertTrue(service.listStreamDetails(REGION).isEmpty());
     }
 
@@ -1310,7 +1310,7 @@ class KinesisJsonHandlerTest {
             }
             AwsException ex = assertThrows(AwsException.class,
                     () -> handler.handle("CreateStream", create, REGION));
-            assertEquals("InvalidArgumentException", ex.getErrorCode(), "for " + bad);
+            assertEquals("SerializationException", ex.getErrorCode(), "for " + bad);
         }
     }
 
@@ -1387,7 +1387,7 @@ class KinesisJsonHandlerTest {
         AwsException ex = assertThrows(AwsException.class,
                 () -> handler.handle("UpdateMaxRecordSize", update, REGION));
         assertEquals("InvalidArgumentException", ex.getErrorCode());
-        assertEquals("MaxRecordSizeInKiB is required", ex.getMessage());
+        assertEquals("UpdateMaxRecordSize.MaxRecordSizeInKiB is required.", ex.getMessage());
     }
 
     @Test
@@ -1535,7 +1535,7 @@ class KinesisJsonHandlerTest {
     }
 
     @Test
-    void updateShardCountRejectsNonIntegerTargetWithExistingError() {
+    void updateShardCountRejectsNonIntegerTargetThroughTheModeledShape() {
         createStream("test-stream");
         ObjectNode request = MAPPER.createObjectNode();
         request.put("StreamName", "test-stream");
@@ -1544,8 +1544,8 @@ class KinesisJsonHandlerTest {
 
         AwsException error = assertThrows(AwsException.class,
                 () -> handler.handle("UpdateShardCount", request, REGION));
-        assertEquals("InvalidArgumentException", error.getErrorCode());
-        assertEquals("TargetShardCount must be an integer", error.getMessage());
+        assertEquals("SerializationException", error.getErrorCode());
+        assertEquals("UpdateShardCount.TargetShardCount must be a integer.", error.getMessage());
     }
 
     @Test
@@ -1718,7 +1718,8 @@ class KinesisJsonHandlerTest {
             AwsException ex = assertThrows(AwsException.class,
                     () -> handler.handle("CreateStream", create, REGION));
             assertEquals("SerializationException", ex.getErrorCode());
-            assertEquals("Tags must be a map of string values.", ex.getMessage());
+            assertTrue(ex.getMessage().startsWith("CreateStream.Tags."));
+            assertTrue(ex.getMessage().endsWith(" must be a string."));
             assertEquals(400, ex.getHttpStatus());
         }
 
@@ -1792,7 +1793,7 @@ class KinesisJsonHandlerTest {
             AwsException ex = assertThrows(AwsException.class,
                     () -> handler.handle("RemoveTagsFromStream", remove, REGION));
             assertEquals("SerializationException", ex.getErrorCode());
-            assertEquals("TagKeys must be a list of strings.", ex.getMessage());
+            assertTrue(ex.getMessage().startsWith("RemoveTagsFromStream.TagKeys"));
             assertEquals(400, ex.getHttpStatus());
         }
 
