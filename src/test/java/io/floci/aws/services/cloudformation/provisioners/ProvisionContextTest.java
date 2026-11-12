@@ -9,6 +9,7 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.MethodSource;
 
+import java.lang.reflect.RecordComponent;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -62,6 +63,25 @@ class ProvisionContextTest {
     private ProvisionContext contextWithPriorProperties(String priorProperties) {
         return new ProvisionContext(engine, "us-east-1", "000000000000", "my-stack", "prior-id",
                 event -> { }, priorProperties == null ? null : props(priorProperties));
+    }
+
+    @Test
+    void withPriorPhysicalIdChangesOnlyThePriorPhysicalId() throws Exception {
+        PropertyChanges changes = PropertyChanges.between("AWS::SQS::Queue", true,
+                props("{\"A\":1}"), props("{\"A\":2}"));
+        ProvisionContext original = new ProvisionContext(engine, "eu-west-1", "123456789012", "stack",
+                "old-id", event -> {}, props("{\"A\":1}"), changes);
+
+        for (String replacement : new String[] {"new-id", null}) {
+            ProvisionContext copy = original.withPriorPhysicalId(replacement);
+
+            for (RecordComponent component : ProvisionContext.class.getRecordComponents()) {
+                Object expected = component.getName().equals("priorPhysicalId")
+                        ? replacement : component.getAccessor().invoke(original);
+                assertSame(expected, component.getAccessor().invoke(copy), component.getName());
+            }
+        }
+        assertEquals("old-id", original.priorPhysicalId());
     }
 
     @Test
