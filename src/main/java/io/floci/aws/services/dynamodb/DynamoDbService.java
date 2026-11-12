@@ -4384,6 +4384,54 @@ public class DynamoDbService {
         return "()[],.=+-".indexOf(c) >= 0;
     }
 
+    // DynamoDB reads a SET target path up to "=", so a comma before it fails on the comma.
+    static void requireAssignmentAfterSetTarget(String expression) {
+        List<ExpressionEvaluator.Token> tokens = ExpressionEvaluator.tokenize(expression);
+        boolean inSet = false;
+        int target = -1;
+        int depth = 0;
+        for (int i = 0; i < tokens.size(); i++) {
+            ExpressionEvaluator.Token token = tokens.get(i);
+            if (target >= 0) {
+                switch (token.type()) {
+                    case COMMA -> throw new AwsException("ValidationException",
+                            "Invalid UpdateExpression: Syntax error; token: \",\", near: \""
+                                    + expression.substring(tokens.get(i - 1).pos(), tokens.get(i + 1).end()) + "\"",
+                            400);
+                    case EQ -> {
+                        if (i == target) {
+                            return;
+                        }
+                        target = -1;
+                    }
+                    case IDENTIFIER, NAME_REF, DOT, LBRACKET, NUMBER, RBRACKET -> { }
+                    default -> {
+                        return;
+                    }
+                }
+                continue;
+            }
+            switch (token.type()) {
+                case LPAREN -> depth++;
+                case RPAREN -> depth--;
+                case COMMA -> target = inSet && depth == 0 ? i + 1 : -1;
+                case IDENTIFIER -> {
+                    String word = token.value().toUpperCase(Locale.ROOT);
+                    if (depth == 0 && List.of("SET", "REMOVE", "ADD", "DELETE").contains(word)) {
+                        inSet = word.equals("SET");
+                        target = inSet ? i + 1 : -1;
+                    }
+                }
+                case UNKNOWN -> {
+                    if (!isUpdatePunctuation(token.value().charAt(0))) {
+                        return;
+                    }
+                }
+                default -> { }
+            }
+        }
+    }
+
     static int findNextComma(String s) {
         // Find next comma that is not inside a function call
         int depth = 0;
