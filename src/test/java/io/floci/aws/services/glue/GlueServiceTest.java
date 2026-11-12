@@ -44,6 +44,8 @@ import io.floci.aws.services.kms.KmsService;
 import io.floci.aws.services.resourcegroupstagging.ResourceGroupsTaggingService;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.CsvSource;
 
 import java.nio.charset.StandardCharsets;
 import java.time.Instant;
@@ -51,12 +53,21 @@ import java.util.Base64;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.ExecutionException;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.TimeoutException;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.stream.IntStream;
 
+import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertInstanceOf;
 import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
@@ -94,6 +105,10 @@ class GlueServiceTest {
 
     @BeforeEach
     void setUp() {
+        setUp(new InMemoryStorage<>());
+    }
+
+    private void setUp(StorageBackend<String, Partition> partitions) {
         RegionResolver regionResolver = new RegionResolver(REGION, ACCOUNT_ID);
         StorageFactory storageFactory = new InMemoryStorageFactory();
         schemaRegistryService = spy(new GlueSchemaRegistryService(storageFactory, regionResolver));
@@ -102,7 +117,7 @@ class GlueServiceTest {
         tableStore = new InMemoryStorage<>();
         tableVersionStore = new InMemoryStorage<>();
         columnStatisticsStore = new InMemoryStorage<>();
-        partitionStore = new InMemoryStorage<>();
+        partitionStore = partitions;
         glueService = new GlueService(
                 databaseStore,
                 tableStore,
@@ -568,6 +583,99 @@ class GlueServiceTest {
         assertEquals("AlreadyExistsException", refused.getErrorCode());
         assertEquals(Map.of("kept", "yes"),
                 glueService.getPartition("db1", "plain", List.of("2026")).getParameters());
+    }
+
+    @ParameterizedTest
+    @CsvSource({"false, false", "false, true", "true, false", "true, true"})
+    void concurrentPartitionCreatesPreserveTheFirstWrite(boolean firstInBatch, boolean duplicateInBatch)
+            throws Exception {
+        PausingPartitionStore store = new PausingPartitionStore();
+        setUp(store);
+        Table table = new Table();
+        table.setName("plain");
+        table.setPartitionKeys(List.of(new Column("year", "string")));
+        glueService.createTable("db1", table);
+        Partition first = new Partition();
+        first.setValues(List.of("2026"));
+        first.setParameters(Map.of("revision", "first"));
+        Partition duplicate = new Partition();
+        duplicate.setValues(first.getValues());
+        duplicate.setParameters(Map.of("revision", "duplicate"));
+        Partition other = new Partition();
+        other.setValues(List.of("2027"));
+
+        ExecutorService pool = Executors.newFixedThreadPool(2);
+        try {
+            Future<List<GlueService.BatchCreatePartitionError>> original = pool.submit(() -> {
+                if (firstInBatch) {
+                    return glueService.batchCreatePartitions("db1", "plain", List.of(first));
+                }
+                glueService.createPartition("db1", "plain", first);
+                return List.of();
+            });
+            assertTrue(store.firstRead.await(5, TimeUnit.SECONDS), "first create did not read the partition");
+            CountDownLatch duplicateStarted = new CountDownLatch(1);
+            Future<List<GlueService.BatchCreatePartitionError>> competing = pool.submit(() -> {
+                duplicateStarted.countDown();
+                if (duplicateInBatch) {
+                    return glueService.batchCreatePartitions("db1", "plain", List.of(duplicate, other));
+                }
+                glueService.createPartition("db1", "plain", duplicate);
+                return List.of();
+            });
+            assertTrue(duplicateStarted.await(5, TimeUnit.SECONDS), "duplicate create did not start");
+            try {
+                competing.get(500, TimeUnit.MILLISECONDS);
+            } catch (TimeoutException expected) {
+                // The duplicate waits while the first create holds its read open.
+            } catch (ExecutionException expected) {
+                // Check the request's result below after releasing the first create.
+            }
+            store.release.countDown();
+
+            assertEquals(List.of(), assertDoesNotThrow(() -> original.get(5, TimeUnit.SECONDS)));
+            if (duplicateInBatch) {
+                assertEquals(List.of(new GlueService.BatchCreatePartitionError(first.getValues(),
+                                new GlueService.ErrorDetail("AlreadyExistsException", "Partition already exists."))),
+                        assertDoesNotThrow(() -> competing.get(5, TimeUnit.SECONDS)));
+                assertEquals(other.getValues(),
+                        glueService.getPartition("db1", "plain", other.getValues()).getValues());
+            } else {
+                ExecutionException rejected = assertThrows(ExecutionException.class,
+                        () -> competing.get(5, TimeUnit.SECONDS));
+                AwsException failure = assertInstanceOf(AwsException.class, rejected.getCause());
+                assertEquals("AlreadyExistsException", failure.getErrorCode());
+                assertEquals(400, failure.getHttpStatus());
+            }
+            assertEquals(first.getParameters(),
+                    glueService.getPartition("db1", "plain", first.getValues()).getParameters());
+            assertEquals(duplicateInBatch ? 2 : 1, glueService.getPartitions("db1", "plain").size());
+        } finally {
+            store.release.countDown();
+            pool.shutdownNow();
+            assertTrue(pool.awaitTermination(5, TimeUnit.SECONDS), "partition creates did not stop");
+        }
+    }
+
+    private static final class PausingPartitionStore extends InMemoryStorage<String, Partition> {
+        private final AtomicBoolean pause = new AtomicBoolean(true);
+        private final CountDownLatch firstRead = new CountDownLatch(1);
+        private final CountDownLatch release = new CountDownLatch(1);
+
+        @Override
+        public Optional<Partition> get(String key) {
+            Optional<Partition> found = super.get(key);
+            if (pause.compareAndSet(true, false)) {
+                firstRead.countDown();
+                try {
+                    assertTrue(release.await(10, TimeUnit.SECONDS), "first partition read was not released");
+                } catch (InterruptedException interrupted) {
+                    Thread.currentThread().interrupt();
+                    throw new IllegalStateException("Interrupted while holding the first partition read", interrupted);
+                }
+            }
+            return found;
+        }
     }
 
     @Test
