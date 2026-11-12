@@ -1211,14 +1211,7 @@ public class RedshiftQueryHandler {
           .end("ClusterParameterGroups");
 
         if (cluster.getTags() != null && !cluster.getTags().isEmpty()) {
-            builder.start("Tags");
-            for (Map.Entry<String, String> tag : cluster.getTags().entrySet()) {
-                builder.start("Tag")
-                    .elem("Key", tag.getKey())
-                    .elem("Value", tag.getValue())
-                  .end("Tag");
-            }
-            builder.end("Tags");
+            builder.raw(tagsXml(cluster.getTags()));
         }
 
         if (cluster.getSnapshotCopyDestinationRegion() != null) {
@@ -1328,12 +1321,7 @@ public class RedshiftQueryHandler {
         if (snapshot.getKmsKeyId() != null) {
             builder.elem("Encrypted", "true").elem("KmsKeyId", snapshot.getKmsKeyId());
         }
-        builder.start("Tags");
-        for (Map.Entry<String, String> tag : snapshot.getTags().entrySet()) {
-            builder.start("Tag").elem("Key", tag.getKey()).elem("Value", tag.getValue()).end("Tag");
-        }
-
-        return builder.end("Tags").end("Snapshot").build();
+        return builder.raw(tagsXml(snapshot.getTags())).end("Snapshot").build();
     }
 
     private Response clusterResponse(String operation, Cluster cluster) {
@@ -1385,15 +1373,8 @@ public class RedshiftQueryHandler {
         }
         builder.end("ScheduleDefinitions")
             .elem("ScheduleIdentifier", schedule.getScheduleIdentifier())
-            .elem("ScheduleDescription", schedule.getScheduleDescription());
-        builder.start("Tags");
-        for (Map.Entry<String, String> tag : schedule.getTags().entrySet()) {
-            builder.start("Tag")
-                .elem("Key", tag.getKey())
-                .elem("Value", tag.getValue())
-              .end("Tag");
-        }
-        builder.end("Tags");
+            .elem("ScheduleDescription", schedule.getScheduleDescription())
+            .raw(tagsXml(schedule.getTags()));
         List<String> associated = service.clustersUsingSnapshotSchedule(schedule.getScheduleIdentifier());
         builder.elem("AssociatedClusterCount", associated.size()).start("AssociatedClusters");
         for (String clusterIdentifier : associated) {
@@ -1461,16 +1442,13 @@ public class RedshiftQueryHandler {
     }
 
     private String buildClusterParameterGroupXml(ClusterParameterGroup group) {
-        XmlBuilder builder = new XmlBuilder()
+        return new XmlBuilder()
             .start("ClusterParameterGroup")
             .elem("ParameterGroupName", group.getParameterGroupName())
             .elem("ParameterGroupFamily", group.getParameterGroupFamily())
             .elem("Description", group.getDescription())
-            .start("Tags");
-        for (Map.Entry<String, String> tag : group.getTags().entrySet()) {
-            builder.start("Tag").elem("Key", tag.getKey()).elem("Value", tag.getValue()).end("Tag");
-        }
-        return builder.end("Tags").end("ClusterParameterGroup").build();
+            .raw(tagsXml(group.getTags()))
+            .end("ClusterParameterGroup").build();
     }
 
     private String buildClusterSubnetGroupXml(ClusterSubnetGroup group) {
@@ -1489,11 +1467,7 @@ public class RedshiftQueryHandler {
             }
             builder.elem("SubnetStatus", "Active").end("Subnet");
         }
-        builder.end("Subnets").start("Tags");
-        for (Map.Entry<String, String> tag : group.getTags().entrySet()) {
-            builder.start("Tag").elem("Key", tag.getKey()).elem("Value", tag.getValue()).end("Tag");
-        }
-        return builder.end("Tags").end("ClusterSubnetGroup").build();
+        return builder.end("Subnets").raw(tagsXml(group.getTags())).end("ClusterSubnetGroup").build();
     }
 
     private Response eventSubscriptionResponse(String operation, EventSubscription subscription) {
@@ -1527,14 +1501,10 @@ public class RedshiftQueryHandler {
         for (String category : subscription.getEventCategoriesList()) {
             builder.elem("EventCategory", category);
         }
-        builder.end("EventCategoriesList")
+        return builder.end("EventCategoriesList")
                 .elem("SubscriptionCreationTime", EVENT_TIMESTAMP.format(subscription.getSubscriptionCreationTime()))
                 .elem("Enabled", String.valueOf(subscription.isEnabled()))
-                .start("Tags");
-        for (Map.Entry<String, String> tag : subscription.getTags().entrySet()) {
-            builder.start("Tag").elem("Key", tag.getKey()).elem("Value", tag.getValue()).end("Tag");
-        }
-        return builder.end("Tags")
+                .raw(tagsXml(subscription.getTags()))
                 .elem("Status", subscription.getStatus())
                 .elem("CustomerAwsId", subscription.getCustomerAwsId())
                 .end("EventSubscription").build();
@@ -1598,14 +1568,7 @@ public class RedshiftQueryHandler {
             .elem("KmsKeyId", grant.getKmsKeyId());
 
         if (grant.getTags() != null && !grant.getTags().isEmpty()) {
-            builder.start("Tags");
-            for (Map.Entry<String, String> tag : grant.getTags().entrySet()) {
-                builder.start("Tag")
-                    .elem("Key", tag.getKey())
-                    .elem("Value", tag.getValue())
-                  .end("Tag");
-            }
-            builder.end("Tags");
+            builder.raw(tagsXml(grant.getTags()));
         }
 
         return builder.end("SnapshotCopyGrant").build();
@@ -1664,16 +1627,17 @@ public class RedshiftQueryHandler {
             builder.start("Errors").end("Errors");
         }
         if (integration.getTags() != null && !integration.getTags().isEmpty()) {
-            builder.start("Tags");
-            for (Map.Entry<String, String> tag : integration.getTags().entrySet()) {
-                builder.start("Tag")
-                    .elem("Key", tag.getKey())
-                    .elem("Value", tag.getValue())
-                  .end("Tag");
-            }
-            builder.end("Tags");
+            builder.raw(tagsXml(integration.getTags()));
         }
         return builder.build();
+    }
+
+    private static String tagsXml(Map<String, String> tags) {
+        XmlBuilder builder = new XmlBuilder().start("Tags");
+        for (Map.Entry<String, String> tag : tags.entrySet()) {
+            builder.start("Tag").elem("Key", tag.getKey()).elem("Value", tag.getValue()).end("Tag");
+        }
+        return builder.end("Tags").build();
     }
 
     /**

@@ -11,6 +11,7 @@ import io.floci.aws.services.redshift.model.ClusterParameterGroup;
 import io.floci.aws.services.redshift.model.ClusterSubnetGroup;
 import io.floci.aws.services.redshift.model.Endpoint;
 import io.floci.aws.services.redshift.model.EventSubscription;
+import io.floci.aws.services.redshift.model.Integration;
 import io.floci.aws.services.redshift.model.Parameter;
 import io.floci.aws.services.redshift.model.Snapshot;
 import io.floci.aws.services.redshift.model.SnapshotCopyGrant;
@@ -23,6 +24,7 @@ import org.junit.jupiter.api.Test;
 import org.mockito.ArgumentCaptor;
 
 import java.time.Instant;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 
@@ -1307,6 +1309,62 @@ class RedshiftQueryHandlerTest {
         assertTrue(xml.contains("<Tags>"));
         assertTrue(xml.contains("<Key>env</Key>"));
         assertTrue(xml.contains("<Value>prod</Value>"));
+    }
+
+    @Test
+    void describeResponsesListTagsAndClustersGrantsAndIntegrationsOmitAnEmptyList() {
+        List<String> describes = List.of("DescribeClusters", "DescribeClusterSnapshots",
+                "DescribeClusterParameterGroups", "DescribeClusterSubnetGroups", "DescribeSnapshotSchedules",
+                "DescribeEventSubscriptions", "DescribeSnapshotCopyGrants", "DescribeIntegrations");
+        Map<String, String> tags = new LinkedHashMap<>();
+        tags.put("team", "red");
+        tags.put("env", "dev");
+        stubOneOfEachTaggedResource(tags);
+        for (String action : describes) {
+            String xml = (String) handler.handle(action, new MultivaluedHashMap<>()).getEntity();
+            assertTrue(xml.contains("<Tags><Tag><Key>team</Key><Value>red</Value></Tag>"
+                    + "<Tag><Key>env</Key><Value>dev</Value></Tag></Tags>"), action);
+        }
+
+        List<String> omitEmpty = List.of("DescribeClusters", "DescribeSnapshotCopyGrants", "DescribeIntegrations");
+        stubOneOfEachTaggedResource(Map.of());
+        for (String action : describes) {
+            String xml = (String) handler.handle(action, new MultivaluedHashMap<>()).getEntity();
+            assertEquals(!omitEmpty.contains(action), xml.contains("<Tags></Tags>"), action);
+            assertEquals(!omitEmpty.contains(action), xml.contains("<Tags>"), action);
+        }
+    }
+
+    private void stubOneOfEachTaggedResource(Map<String, String> tags) {
+        Cluster cluster = new Cluster();
+        cluster.setTags(tags);
+        when(service.describeClusters(any())).thenReturn(List.of(cluster));
+        Snapshot snapshot = new Snapshot();
+        snapshot.setTags(tags);
+        when(service.describeSnapshots(any(), any())).thenReturn(List.of(snapshot));
+        ClusterParameterGroup parameterGroup = new ClusterParameterGroup();
+        parameterGroup.setTags(tags);
+        when(service.describeClusterParameterGroups(any())).thenReturn(List.of(parameterGroup));
+        ClusterSubnetGroup subnetGroup = new ClusterSubnetGroup();
+        subnetGroup.setTags(tags);
+        when(service.describeClusterSubnetGroups(any())).thenReturn(List.of(subnetGroup));
+        SnapshotSchedule schedule = new SnapshotSchedule();
+        schedule.setTags(tags);
+        when(service.describeSnapshotSchedules(any(), any(), any(), any(), any(), any()))
+                .thenReturn(new PaginatedResult<>(List.of(schedule), null));
+        EventSubscription subscription = new EventSubscription();
+        subscription.setSubscriptionCreationTime(Instant.parse("2026-11-12T00:00:00Z"));
+        subscription.setTags(tags);
+        when(service.describeEventSubscriptions(any(), any(), any(), any(), any()))
+                .thenReturn(new PaginatedResult<>(List.of(subscription), null));
+        SnapshotCopyGrant grant = new SnapshotCopyGrant();
+        grant.setTags(tags);
+        when(service.describeSnapshotCopyGrants(any(), any(), any()))
+                .thenReturn(new PaginatedResult<>(List.of(grant), null));
+        Integration integration = new Integration();
+        integration.setTags(tags);
+        when(service.describeIntegrations(any(), any(), any(), any()))
+                .thenReturn(new RedshiftService.IntegrationPage(List.of(integration), null));
     }
 
     // ── GetClusterCredentials ────────────────────────────────────────────────
