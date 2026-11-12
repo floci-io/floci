@@ -63,7 +63,8 @@ public final class AwsTestClients {
         return create(builder, AwsBasicCredentials.create(accessKey, secretKey), region, httpClientBuilder, endpoint);
     }
 
-    private static <B extends AwsClientBuilder<B, C> & AwsSyncClientBuilder<B, C>, C> C create(
+    /** SDK credentials, including session tokens, with an explicit transport and endpoint. */
+    public static <B extends AwsClientBuilder<B, C> & AwsSyncClientBuilder<B, C>, C> C create(
             B builder, AwsCredentials credentials, Region region,
             SdkHttpClient.Builder<?> httpClientBuilder, URI endpoint) {
         return builder.endpointOverride(endpoint)
