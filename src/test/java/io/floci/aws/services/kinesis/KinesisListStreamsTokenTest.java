@@ -66,11 +66,20 @@ class KinesisListStreamsTokenTest {
     }
 
     @ParameterizedTest
-    @ValueSource(strings = {"\"\"", "\"!\"", "\"YQ\"", "123", "{}", "[]", "false"})
-    void rejectsMalformedAndNonStringTokens(String token) throws Exception {
+    @ValueSource(strings = {"\"\"", "\"!\"", "\"YQ\""})
+    void rejectsMalformedStringTokens(String token) throws Exception {
         ObjectNode request = (ObjectNode) mapper.readTree("{\"NextToken\":" + token + "}");
         AwsException error = assertThrows(AwsException.class, () -> list(request));
         assertEquals("InvalidArgumentException", error.getErrorCode());
+        assertEquals(400, error.getHttpStatus());
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"123", "{}", "[]", "false"})
+    void rejectsNonStringTokensThroughTheModeledShape(String token) throws Exception {
+        ObjectNode request = (ObjectNode) mapper.readTree("{\"NextToken\":" + token + "}");
+        AwsException error = assertThrows(AwsException.class, () -> list(request));
+        assertEquals("SerializationException", error.getErrorCode());
         assertEquals(400, error.getHttpStatus());
     }
 

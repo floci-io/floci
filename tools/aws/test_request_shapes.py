@@ -27,6 +27,7 @@ import regen_ecr_shapes
 import regen_ecs_shapes
 import regen_emr_serverless_shapes
 import regen_iam_shapes
+import regen_kinesis_shapes
 import regen_payment_cryptography_data_shapes
 import regen_payment_cryptography_shapes
 import regen_logs_delivery_shapes
@@ -260,6 +261,7 @@ CONSTRAINED_MODEL = {
 
 @pytest.mark.parametrize("script, model_path", [
     (regen_athena_shapes, "athena/2017-05-18"),
+    (regen_kinesis_shapes, "kinesis/2013-12-02"),
     (regen_rekognition_shapes, "rekognition/2016-06-27"),
 ])
 def test_generators_keep_constraints_for_every_operation_and_detect_new_operations(script, model_path, tmp_path, monkeypatch):
@@ -435,6 +437,7 @@ def vendored(script) -> tuple[str, ...]:
     regen_apigateway_documentation_shapes, regen_ecr_shapes, regen_iam_shapes, regen_logs_delivery_shapes,
     regen_resource_groups_shapes, regen_sts_shapes,
     regen_securityhub_shapes,
+    regen_kinesis_shapes,
     regen_rekognition_shapes,
     regen_athena_shapes,
     regen_cur_shapes,
@@ -532,6 +535,24 @@ def test_rekognition_shapes_keep_constraints_and_leave_image_bytes_to_the_image_
     assert shapes["MaxFacesToIndex"] == {"type": "integer", "min": 1}
     assert shapes["Image"]["members"] == {"S3Object": "S3Object"}
     assert "ImageBlob" not in shapes
+
+
+def test_kinesis_shapes_keep_tag_bounds_and_leave_wire_types_to_handlers():
+    doc = json.loads(regen_kinesis_shapes.OUTPUT.read_text(encoding="utf-8"))
+    shapes = doc["shapes"]
+
+    assert doc["operations"]["RegisterStreamConsumer"] == "RegisterStreamConsumerInput"
+    assert shapes["TagMap"]["min"] == 1
+    assert shapes["TagMap"]["max"] == 200
+    assert shapes["TagKey"]["min"] == 1
+    assert shapes["TagKey"]["max"] == 128
+    assert shapes["TagValue"]["max"] == 256
+    assert shapes["TagKeyList"]["min"] == 1
+    assert shapes["TagKeyList"]["max"] == 50
+    assert "Data" not in shapes["PutRecordInput"]["members"]
+    assert "Data" in shapes["PutRecordInput"]["required"]
+    assert "Data" in shapes["PutRecordsRequestEntry"]["required"]
+    assert "Timestamp" not in shapes["GetShardIteratorInput"]["members"]
 
 
 def test_securityhub_shapes_keep_required_findings_and_resource_strings():

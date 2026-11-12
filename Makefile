@@ -290,6 +290,7 @@ aws-data-sync-botocore: ## Regenerate only the AWS data derived from botocore, s
 	$(PYTHON) tools/aws/regen_payment_cryptography_data_shapes.py
 	$(PYTHON) tools/aws/regen_securityhub_shapes.py
 	$(PYTHON) tools/aws/regen_rekognition_shapes.py
+	$(PYTHON) tools/aws/regen_kinesis_shapes.py
 	$(PYTHON) tools/aws/regen_iam_shapes.py
 	$(PYTHON) tools/aws/regen_sts_shapes.py
 	$(PYTHON) tools/aws/regen_apigateway_types.py
@@ -405,6 +406,10 @@ aws-data-check-botocore: ## The AWS data derived from botocore must match a fres
 	}
 	@$(PYTHON) tools/aws/regen_rekognition_shapes.py --check || { \
 		echo "error: Rekognition request shapes are out of date; run 'make aws-data-sync'."; \
+		exit 1; \
+	}
+	@$(PYTHON) tools/aws/regen_kinesis_shapes.py --check || { \
+		echo "error: Kinesis request shapes are out of date; run 'make aws-data-sync'."; \
 		exit 1; \
 	}
 	@$(PYTHON) tools/aws/regen_apigateway_types.py --check || { \
