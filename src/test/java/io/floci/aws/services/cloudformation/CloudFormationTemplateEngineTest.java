@@ -12,6 +12,7 @@ import org.junit.jupiter.params.provider.ValueSource;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.function.Function;
 import java.util.function.UnaryOperator;
 
@@ -218,22 +219,35 @@ class CloudFormationTemplateEngineTest {
     }
 
     @ParameterizedTest
-    @ValueSource(strings = {"[]", "[Vpc]", "[Vpc, CidrBlock, Extra]"})
-    void getAttRejectsWrongNumberOfOperands(String operands) {
-        CloudFormationTemplateEngine e = engineWithAttributes(Map.of("Vpc", Map.of("CidrBlock", "10.0.0.0/16")));
+    @ValueSource(strings = {
+        "[]", "[Vpc]", "[Vpc, CidrBlock, Extra]",
+        "['', CidrBlock]", "[Vpc, '']", "['', '']",
+        "'Vpc.'", "'.CidrBlock'", "'Vpc'", "''",
+        "[Vpc, !Ref EmptyAttribute]"
+    })
+    void getAttRejectsMissingOrEmptyOperands(String operands) {
+        CloudFormationTemplateEngine e = new CloudFormationTemplateEngine("000000000000", "us-east-1", "my-stack",
+                "stack/id", Map.of("EmptyAttribute", ""), Map.of(),
+                Map.of("Vpc", Map.of("CidrBlock", "10.0.0.0/16")), Map.of(), Map.of(), mapper, name -> null);
         CloudFormationYamlParser parser = new CloudFormationYamlParser(mapper);
         for (JsonNode value : List.of(parser.parse("!GetAtt " + operands),
                 parser.parse("Fn::GetAtt: " + operands))) {
             AwsException scalarFailure = assertThrows(AwsException.class, () -> e.resolve(value));
             AwsException nodeFailure = assertThrows(AwsException.class, () -> e.resolveNode(value));
+            AwsException dependencyFailure = assertThrows(AwsException.class,
+                    () -> e.referencesGetAttAttribute(value.get("Fn::GetAtt"), "Vpc", Set.of("CidrBlock")));
 
             assertEquals("ValidationError", scalarFailure.getErrorCode());
             assertEquals("ValidationError", nodeFailure.getErrorCode());
+            assertEquals("ValidationError", dependencyFailure.getErrorCode());
             assertEquals(400, scalarFailure.getHttpStatus());
             assertEquals(400, nodeFailure.getHttpStatus());
-            assertEquals("Template error: Fn::GetAtt requires exactly two parameters.",
+            assertEquals(400, dependencyFailure.getHttpStatus());
+            assertEquals("Template error: every Fn::GetAtt object requires two non-empty parameters, "
+                            + "the resource name and the resource attribute",
                     scalarFailure.getMessage());
             assertEquals(scalarFailure.getMessage(), nodeFailure.getMessage());
+            assertEquals(scalarFailure.getMessage(), dependencyFailure.getMessage());
         }
     }
 

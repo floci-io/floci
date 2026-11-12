@@ -79,6 +79,45 @@ class CloudFormationGetAttYamlIntegrationTest {
     }
 
     @ParameterizedTest
+    @ValueSource(strings = {
+        "!GetAtt [Queue]",
+        "!GetAtt [Queue, '']",
+        "!GetAtt Queue.",
+        "!GetAtt [Queue, !Ref EmptyAttribute]"
+    })
+    void invalidGetAttOutputReportsTheValidationReason(String expression) {
+        String name = "cfn-getatt-invalid-" + Long.toString(System.nanoTime(), 36);
+        String template = """
+                Parameters:
+                  EmptyAttribute:
+                    Type: String
+                    Default: ""
+                Resources:
+                  Queue:
+                    Type: AWS::SQS::Queue
+                    Properties:
+                      QueueName: %s
+                Outputs:
+                  Invalid:
+                    Value: %s
+                """.formatted(name, expression);
+
+        try (CloudFormationClient cloudFormation = AwsTestClients.create(
+                CloudFormationClient.builder(), "test", Region.US_EAST_1)) {
+            cloudFormation.createStack(request -> request.stackName(name).templateBody(template));
+            try {
+                Stack stack = CfnStackWaits.awaitStatus(cloudFormation, name, "ROLLBACK_COMPLETE");
+                assertEquals("Template error: every Fn::GetAtt object requires two non-empty parameters, "
+                                + "the resource name and the resource attribute",
+                        stack.stackStatusReason());
+            } finally {
+                cloudFormation.deleteStack(request -> request.stackName(name));
+                CfnStackWaits.awaitStackDeleted(name);
+            }
+        }
+    }
+
+    @ParameterizedTest
     @ValueSource(booleans = {false, true})
     void stackUpdatesTrackReferencedAttributeNames(boolean executeChangeSet) {
         String name = "cfn-getatt-update-" + Long.toString(System.nanoTime(), 36);

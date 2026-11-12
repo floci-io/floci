@@ -941,21 +941,26 @@ public class CloudFormationTemplateEngine {
     }
 
     private String[] getAttParts(JsonNode getAtt) {
+        String errorMessage = "Template error: every Fn::GetAtt object requires two non-empty parameters, "
+                + "the resource name and the resource attribute";
+        String[] parts;
         if (getAtt.isArray()) {
             if (getAtt.size() != 2) {
-                throw new AwsException("ValidationError",
-                        "Template error: Fn::GetAtt requires exactly two parameters.", 400);
+                throw new AwsException("ValidationError", errorMessage, 400);
             }
             JsonNode attribute = getAtt.get(1);
             String attributeName = attribute.has("Ref")
                     ? resolveRef(attribute.get("Ref").asText()) : attribute.asText();
-            return new String[] {getAtt.get(0).asText(), attributeName};
+            parts = new String[] {getAtt.get(0).asText(), attributeName};
+        } else if (getAtt.isTextual()) {
+            parts = getAtt.textValue().split("\\.", 2);
+        } else {
+            return null;
         }
-        if (getAtt.isTextual()) {
-            String[] parts = getAtt.textValue().split("\\.", 2);
-            return new String[] {parts[0], parts.length > 1 ? parts[1] : ""};
+        if (parts.length != 2 || parts[0].isEmpty() || parts[1].isEmpty()) {
+            throw new AwsException("ValidationError", errorMessage, 400);
         }
-        return null;
+        return parts;
     }
 
     private Map<String, String> findAttributeSource(String logicalId, String attrName) {
