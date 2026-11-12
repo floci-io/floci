@@ -46,6 +46,7 @@ import java.util.*;
 import java.util.ArrayList;
 import java.util.Set;
 import java.util.concurrent.TimeUnit;
+import java.util.function.Consumer;
 import java.util.regex.Pattern;
 import java.util.regex.PatternSyntaxException;
 
@@ -1126,20 +1127,9 @@ public class SsmService implements ResourceProvider {
      */
     public synchronized void addTagsToResource(String resourceType, String resourceId, Map<String, String> tags,
                                                String region) {
-        switch (resourceType) {
-            case "Document" -> {
-                validateTagKeys(tags);
-                SsmDocument document = taggableDocument(resourceId, region);
-                document.getTags().putAll(tags);
-                documentStore.put(regionKey(region, resourceId), document);
-            }
-            case "Association" -> {
-                validateTagKeys(tags);
-                SsmAssociation association = taggableAssociation(resourceId, region);
-                association.getTags().putAll(tags);
-                associationStore.put(regionKey(region, resourceId), association);
-            }
-            default -> addTagsToResource(resourceId, tags, region);
+        validateTagKeys(tags);
+        if (!updateTags(resourceType, resourceId, region, current -> current.putAll(tags))) {
+            addTagsToResource(resourceId, tags, region);
         }
     }
 
@@ -1155,19 +1145,34 @@ public class SsmService implements ResourceProvider {
     /** {@code RemoveTagsFromResource} on the resource of {@code resourceType}; a key it lacks is ignored. */
     public synchronized void removeTagsFromResource(String resourceType, String resourceId, List<String> tagKeys,
                                                     String region) {
+        if (!updateTags(resourceType, resourceId, region, current -> tagKeys.forEach(current::remove))) {
+            removeTagsFromResource(resourceId, tagKeys, region);
+        }
+    }
+
+    /**
+     * Applies {@code change} to the tags of the document or association {@code resourceId} names and stores
+     * it; {@code false}, changing nothing, for any other {@code resourceType}.
+     */
+    private boolean updateTags(String resourceType, String resourceId, String region,
+                               Consumer<Map<String, String>> change) {
+        String storageKey = regionKey(region, resourceId);
         switch (resourceType) {
             case "Document" -> {
                 SsmDocument document = taggableDocument(resourceId, region);
-                tagKeys.forEach(document.getTags()::remove);
-                documentStore.put(regionKey(region, resourceId), document);
+                change.accept(document.getTags());
+                documentStore.put(storageKey, document);
             }
             case "Association" -> {
                 SsmAssociation association = taggableAssociation(resourceId, region);
-                tagKeys.forEach(association.getTags()::remove);
-                associationStore.put(regionKey(region, resourceId), association);
+                change.accept(association.getTags());
+                associationStore.put(storageKey, association);
             }
-            default -> removeTagsFromResource(resourceId, tagKeys, region);
+            default -> {
+                return false;
+            }
         }
+        return true;
     }
 
     private SsmDocument taggableDocument(String name, String region) {

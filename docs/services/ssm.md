@@ -30,7 +30,8 @@
 
 `CreateDocument` and `CreateAssociation` keep their `Tags`. A document's tags are also returned in
 the `DocumentDescription` of `CreateDocument`, `UpdateDocument` and `DescribeDocument`, and in each
-`ListDocuments` entry.
+`ListDocuments` entry. With IAM enforcement on, tagging a document is checked against
+`document/<name>` and tagging an association against `association/<id>`.
 
 `DescribeParameters` includes the stored parameter's `ARN` in each metadata entry, matching
 `GetParameter`. This applies to filtered and paginated results as well.
