@@ -43,7 +43,7 @@ public class EksOidcTokenController {
 
     @POST
     public Response mintToken(@PathParam("name") String clusterName, Map<String, Object> request) {
-        Cluster cluster = eksService.describeCluster(clusterName);
+        Cluster cluster = eksService.findClusterForFlociRoute(clusterName);
         String issuer = cluster.getIdentity() != null && cluster.getIdentity().getOidc() != null
                 ? cluster.getIdentity().getOidc().getIssuer()
                 : null;
@@ -59,7 +59,7 @@ public class EksOidcTokenController {
         Integer lifetime = integer(body, "expirySeconds");
 
         String token = oidcService.mintServiceAccountToken(
-                clusterName, issuer, namespace, serviceAccount, audience, lifetime);
+                eksService.clusterKey(cluster), issuer, namespace, serviceAccount, audience, lifetime);
 
         Map<String, Object> response = new LinkedHashMap<>();
         response.put("token", token);

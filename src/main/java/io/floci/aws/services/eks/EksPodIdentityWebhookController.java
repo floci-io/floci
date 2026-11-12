@@ -40,10 +40,23 @@ public class EksPodIdentityWebhookController {
     }
 
     @POST
+    @Path("scope/{accountId}/{region}")
+    public Response review(@PathParam("clusterName") String clusterName,
+                           @PathParam("accountId") String accountId,
+                           @PathParam("region") String region,
+                           Map<String, Object> admissionReview) {
+        return Response.ok(webhook.review(clusterName, accountId, region, admissionReview)).build();
+    }
+
+    /**
+     * The route registered by clusters started before the Region was part of the path. Their
+     * webhook configuration lives in the k3s data volume, so it outlives an upgrade.
+     */
+    @POST
     @Path("scope/{accountId}")
     public Response review(@PathParam("clusterName") String clusterName,
                            @PathParam("accountId") String accountId,
                            Map<String, Object> admissionReview) {
-        return Response.ok(webhook.review(clusterName, accountId, admissionReview)).build();
+        return Response.ok(webhook.review(clusterName, accountId, null, admissionReview)).build();
     }
 }

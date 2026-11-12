@@ -463,6 +463,12 @@ With a persistent [storage mode](../configuration/storage.md) (the default), clu
   `floci-eks-<name>` container and volume: restoration adopts the surviving container when its
   `io.floci.account` label matches the owning account, so pre-upgrade workloads are not
   orphaned.
+- Cluster names are unique only within a Region of an account, so a cluster outside the default
+  Region, or one sharing its name with a cluster in another Region, puts its Region first in its
+  container and volume names: `floci-aws-eks-<region>.<name>`, or
+  `floci-aws-eks-<region>.<account>.<name>` for a non-default account. A cluster in the default
+  Region keeps the unqualified name, and so does any cluster created before Region qualification:
+  its record moves to a Region-scoped key on startup, but its container and volume keep their names.
 
 A restored cluster reports `CREATING` until its API server answers again, then returns to
 `ACTIVE` with a freshly extracted certificate authority. If the container cannot be brought

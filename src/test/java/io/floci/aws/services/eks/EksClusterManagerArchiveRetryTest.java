@@ -213,7 +213,7 @@ class EksClusterManagerArchiveRetryTest {
     void podIdentityManifestRetriesWithItsFullContentAndMode() {
         failFirstUploadOf("server/manifests/floci-eks-pod-identity.yaml");
         byte[] expected = EksClusterManager.buildPodIdentityWebhookConfiguration(
-                "https://host.docker.internal:4566/_floci/eks/clusters/demo/pod-identity-webhook/scope/000000000000",
+                "https://host.docker.internal:4566/_floci/eks/clusters/demo/pod-identity-webhook/scope/000000000000/us-east-1",
                 CA_PEM).getBytes(StandardCharsets.UTF_8);
 
         manager.registerPodIdentityWebhook(CONTAINER_ID, cluster());

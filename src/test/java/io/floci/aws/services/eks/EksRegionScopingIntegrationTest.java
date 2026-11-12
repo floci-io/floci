@@ -3,11 +3,14 @@ package io.floci.aws.services.eks;
 import io.quarkus.test.junit.QuarkusTest;
 import org.junit.jupiter.api.Test;
 
+import java.util.List;
 import java.util.Map;
 
 import static io.restassured.RestAssured.given;
+import static org.hamcrest.Matchers.empty;
 import static org.hamcrest.Matchers.equalTo;
 import static org.hamcrest.Matchers.hasItem;
+import static org.hamcrest.Matchers.hasKey;
 import static org.hamcrest.Matchers.not;
 
 /**
@@ -44,6 +47,45 @@ class EksRegionScopingIntegrationTest {
         } finally {
             given().header("Authorization", auth("eu-west-1")).delete("/clusters/" + CLUSTER)
                     .then().statusCode(200);
+        }
+    }
+
+    /** #7966: a name only has to be unique within a Region of the account. */
+    @Test
+    void theSameClusterNameCanBeUsedInTwoRegions() {
+        String name = "region-shared";
+        for (String region : new String[] {"eu-west-1", "eu-central-1"}) {
+            given().header("Authorization", auth(region)).contentType("application/json")
+                    .body(Map.of("name", name, "roleArn", "arn:aws:iam::" + ACCOUNT + ":role/cluster"))
+                    .post("/clusters").then().statusCode(200)
+                    .body("cluster.arn", equalTo("arn:aws:eks:" + region + ":" + ACCOUNT + ":cluster/" + name));
+        }
+
+        try {
+            given().header("Authorization", auth("eu-west-1")).contentType("application/json")
+                    .body(Map.of("name", name, "roleArn", "arn:aws:iam::" + ACCOUNT + ":role/cluster"))
+                    .post("/clusters").then().statusCode(409)
+                    .body("__type", equalTo("ResourceInUseException"));
+
+            given().header("Authorization", auth("eu-west-1")).contentType("application/json")
+                    .body(Map.of("nodegroupName", "workers",
+                            "nodeRole", "arn:aws:iam::" + ACCOUNT + ":role/node",
+                            "subnets", List.of("subnet-0123456789abcdef0")))
+                    .post("/clusters/" + name + "/node-groups").then().statusCode(200);
+            given().header("Authorization", auth("eu-west-1")).get("/clusters/" + name + "/node-groups")
+                    .then().statusCode(200).body("nodegroups", hasItem("workers"));
+            given().header("Authorization", auth("eu-central-1")).get("/clusters/" + name + "/node-groups")
+                    .then().statusCode(200).body("nodegroups", empty());
+
+            given().header("Authorization", auth("eu-west-1")).delete("/clusters/" + name)
+                    .then().statusCode(200);
+            given().header("Authorization", auth("eu-central-1")).get("/clusters/" + name)
+                    .then().statusCode(200)
+                    .body("cluster.arn", equalTo("arn:aws:eks:eu-central-1:" + ACCOUNT + ":cluster/" + name))
+                    .body("cluster", not(hasKey("dockerNameRegion")));
+        } finally {
+            given().header("Authorization", auth("eu-west-1")).delete("/clusters/" + name);
+            given().header("Authorization", auth("eu-central-1")).delete("/clusters/" + name);
         }
     }
 

@@ -1425,10 +1425,19 @@ public class EksClusterManager
         return ContainerStorageHelper.resourceName(config, "eks", null, accountQualifiedClusterName(cluster));
     }
 
+    /**
+     * The cluster's name qualified by its account and, when {@link Cluster#getDockerNameRegion()}
+     * is set, by its Region, which leads: {@code [<region>.][<accountId>.]<name>}. Cluster names
+     * are unique only within a Region of an account, so same-named clusters in two Regions need
+     * distinct containers and volumes. The forms cannot collide: a name holds no dot, an account
+     * id is all digits, and a Region never is.
+     */
     private String accountQualifiedClusterName(Cluster cluster) {
         String accountId = cluster.getAccountId();
         boolean defaultAccount = accountId == null || accountId.equals(config.defaultAccountId());
-        return defaultAccount ? cluster.getName() : accountId + "." + cluster.getName();
+        String qualified = defaultAccount ? cluster.getName() : accountId + "." + cluster.getName();
+        String region = cluster.getDockerNameRegion();
+        return region == null || region.isBlank() ? qualified : region + "." + qualified;
     }
 
     /**
@@ -1446,6 +1455,11 @@ public class EksClusterManager
      */
     private String resolveRestoredDockerName(Cluster cluster) {
         String qualified = accountQualifiedName(cluster);
+        if (cluster.getDockerNameRegion() != null) {
+            // Region qualification postdates both the account qualifier and the floci-aws- rename,
+            // so no older name can hold this cluster's resources.
+            return qualified;
+        }
 
         // A cluster created after account qualification but before the floci-aws- rename lives
         // under the qualified name with the old prefix. Nothing else about it changed, so adopt
@@ -2232,7 +2246,7 @@ public class EksClusterManager
             return;
         }
         String url = "https://" + dockerHostResolver.resolve() + ":" + config.port()
-                + podIdentityWebhookPath(clusterName, resolveClusterAccountId(cluster));
+                + podIdentityWebhookPath(clusterName, resolveClusterAccountId(cluster), clusterRegion(cluster));
         String manifest = buildPodIdentityWebhookConfiguration(url, certificateAuthority.caPem());
         writeLocalCopy(Paths.get(config.services().eks().dataPath(), "webhook", clusterName,
                 POD_IDENTITY_MANIFEST_FILE), manifest, clusterName);
@@ -2253,8 +2267,8 @@ public class EksClusterManager
      * token webhook puts its scope there: the API server calls Floci with no AWS credentials, so a
      * cluster owned by a non-default account would otherwise never be found.
      */
-    static String podIdentityWebhookPath(String clusterName, String accountId) {
-        return "/_floci/eks/clusters/" + clusterName + "/pod-identity-webhook/scope/" + accountId;
+    static String podIdentityWebhookPath(String clusterName, String accountId, String region) {
+        return "/_floci/eks/clusters/" + clusterName + "/pod-identity-webhook/scope/" + accountId + "/" + region;
     }
 
     /**
@@ -2709,7 +2723,7 @@ public class EksClusterManager
         if (nodeGroupStorage == null || cluster == null || cluster.getName() == null) {
             return List.of();
         }
-        String prefix = cluster.getName() + "/";
+        String prefix = EksService.clusterKey(clusterRegion(cluster), cluster.getName()) + "/";
         String accountId = resolveClusterAccountId(cluster);
         List<Nodegroup> groups;
         if (nodeGroupStorage instanceof AccountAwareStorageBackend<Nodegroup> aware) {
