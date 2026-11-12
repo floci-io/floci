@@ -2060,6 +2060,21 @@ class NativeDynamoDbJsonHandlerTest {
     }
 
     @Test
+    void transactWriteItemsRejectsACommaInASetTarget() {
+        createUsersTable("eu-west-1");
+        ObjectNode update = mapper.createObjectNode();
+        update.set("Key", item("userId", "u1"));
+        update.put("UpdateExpression", "SET a, b = :v");
+        update.set("ExpressionAttributeValues", singleValue(":v"));
+
+        AwsException ex = assertThrows(AwsException.class,
+                () -> handler.handle("TransactWriteItems", transactWrite("Update", update), "eu-west-1"));
+        assertEquals("ValidationException", ex.getErrorCode());
+        assertEquals("Invalid UpdateExpression: Syntax error; token: \",\", near: \"a, b\"", ex.getMessage());
+        assertNull(service.getItem("Users", item("userId", "u1"), "eu-west-1"));
+    }
+
+    @Test
     void transactWriteItemsRejectsAPutItemWithALeafAtLevel33() {
         createUsersTable("eu-west-1");
         ObjectNode put = mapper.createObjectNode();
