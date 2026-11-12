@@ -14,7 +14,6 @@ import java.util.Map;
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.containsString;
 import static org.hamcrest.Matchers.equalTo;
-import static org.hamcrest.Matchers.not;
 import static org.hamcrest.Matchers.nullValue;
 
 @QuarkusTest
@@ -125,7 +124,7 @@ class GlobalCorsFilterIntegrationTest {
             .post("/")
         .then()
             .statusCode(status)
-            .header("Access-Control-Allow-Origin", equalTo("*"))
+            .header("Access-Control-Allow-Origin", equalTo("https://ui.example.test"))
             .header("Access-Control-Expose-Headers", containsString("x-visible-header"))
             .header("Access-Control-Expose-Headers", containsString("x-amzn-RequestId"))
             .header("Access-Control-Expose-Headers", containsString("x-amzn-ErrorType"))
@@ -134,7 +133,7 @@ class GlobalCorsFilterIntegrationTest {
     }
 
     @Test
-    void cognitoResponsesFromUnlistedOriginsKeepOnlyDefaultExposedHeaders() {
+    void cognitoResponsesFromUnlistedOriginsGetNoCorsHeaders() {
         given()
             .header("Origin", "https://not-allowed.example.test")
             .header("X-Amz-Target", "AWSCognitoIdentityProviderService.ListUserPools")
@@ -144,12 +143,8 @@ class GlobalCorsFilterIntegrationTest {
             .post("/")
         .then()
             .statusCode(200)
-            .header("Access-Control-Allow-Origin", equalTo("*"))
-            .header("Access-Control-Expose-Headers", not(containsString("x-visible-header")))
-            .header("Access-Control-Expose-Headers", containsString("x-amzn-RequestId"))
-            .header("Access-Control-Expose-Headers", containsString("x-amzn-ErrorType"))
-            .header("Access-Control-Expose-Headers", containsString("x-amzn-ErrorMessage"))
-            .header("Access-Control-Expose-Headers", containsString("Date"));
+            .header("Access-Control-Allow-Origin", nullValue())
+            .header("Access-Control-Expose-Headers", nullValue());
     }
 
     @Test

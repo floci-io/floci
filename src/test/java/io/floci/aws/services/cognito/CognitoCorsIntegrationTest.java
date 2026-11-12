@@ -2,8 +2,10 @@ package io.floci.aws.services.cognito;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import io.floci.aws.testing.ExtraCorsOriginProfile;
 import io.floci.aws.testing.RestAssuredJsonUtils;
 import io.quarkus.test.junit.QuarkusTest;
+import io.quarkus.test.junit.TestProfile;
 import io.restassured.response.Response;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
@@ -22,6 +24,7 @@ import static org.hamcrest.Matchers.notNullValue;
 import static org.hamcrest.Matchers.nullValue;
 
 @QuarkusTest
+@TestProfile(ExtraCorsOriginProfile.class)
 class CognitoCorsIntegrationTest {
 
     private static final String ORIGIN = "http://localhost:3000";
@@ -43,18 +46,18 @@ class CognitoCorsIntegrationTest {
                 .header("Access-Control-Request-Headers", requestedHeaders)
                 .when().options("/")
                 .then()
-                .statusCode(200)
-                .header("Access-Control-Allow-Origin", equalTo("*"))
-                .header("Access-Control-Allow-Methods", equalTo("POST"))
-                .header("Access-Control-Allow-Headers", equalTo(requestedHeaders))
-                .header("Access-Control-Expose-Headers", containsString("x-amzn-RequestId"))
-                .header("Access-Control-Max-Age", equalTo("172800"))
+                .statusCode(204)
+                .header("Access-Control-Allow-Origin", equalTo(ORIGIN))
+                .header("Access-Control-Allow-Methods", containsString("POST"))
+                .header("Access-Control-Allow-Headers", containsString("content-type"))
+                .header("Access-Control-Allow-Headers", containsString("x-amz-target"))
+                .header("Access-Control-Allow-Headers", containsString("x-amz-user-agent"))
                 .header("Access-Control-Allow-Credentials", nullValue());
     }
 
     @ParameterizedTest
-    @ValueSource(strings = {ORIGIN, "https://browser.example.test", "null"})
-    void browserCanReadCognitoAuthenticationErrors(String origin) {
+    @CsvSource({ORIGIN + ",true", "https://browser.example.test,false", "null,false"})
+    void authenticationErrorsOnlyExposeHeadersToAllowedOrigins(String origin, boolean allowed) {
         given()
                 .header("Origin", origin)
                 .contentType("application/x-amz-json-1.1")
@@ -66,9 +69,9 @@ class CognitoCorsIntegrationTest {
                 .when().post("/")
                 .then()
                 .statusCode(400)
-                .header("Access-Control-Allow-Origin", equalTo("*"))
-                .header("Access-Control-Expose-Headers", containsString("x-amzn-RequestId"))
-                .header("Access-Control-Expose-Headers", containsString("x-amzn-ErrorType"))
+                .header("Access-Control-Allow-Origin", allowed ? equalTo(origin) : nullValue())
+                .header("Access-Control-Expose-Headers", allowed ? containsString("x-amzn-RequestId") : nullValue())
+                .header("Access-Control-Expose-Headers", allowed ? containsString("x-amzn-ErrorType") : nullValue())
                 .header("Access-Control-Allow-Credentials", nullValue())
                 .body("__type", equalTo("ResourceNotFoundException"));
     }
@@ -84,7 +87,7 @@ class CognitoCorsIntegrationTest {
                 .when().post("/")
                 .then()
                 .statusCode(400)
-                .header("Access-Control-Allow-Origin", equalTo("*"))
+                .header("Access-Control-Allow-Origin", equalTo(ORIGIN))
                 .body("__type", equalTo("SerializationException"));
     }
 
@@ -115,7 +118,7 @@ class CognitoCorsIntegrationTest {
                     .when().post("/")
                     .then()
                     .statusCode(200)
-                    .header("Access-Control-Allow-Origin", equalTo("*"))
+                    .header("Access-Control-Allow-Origin", equalTo(ORIGIN))
                     .body("ChallengeName", equalTo("NEW_PASSWORD_REQUIRED"))
                     .extract().response();
             JsonNode challenge = OBJECT_MAPPER.readTree(response.asByteArray());
@@ -131,7 +134,7 @@ class CognitoCorsIntegrationTest {
                     .when().post("/")
                     .then()
                     .statusCode(200)
-                    .header("Access-Control-Allow-Origin", equalTo("*"))
+                    .header("Access-Control-Allow-Origin", equalTo(ORIGIN))
                     .body("AuthenticationResult.AccessToken", notNullValue())
                     .body("AuthenticationResult.IdToken", notNullValue());
         } finally {
@@ -150,16 +153,19 @@ class CognitoCorsIntegrationTest {
     }
 
     @Test
-    void sharedPreflightDoesNotExposeOtherJsonServices() {
+    void unlistedOriginsCannotUseTheSharedJsonPreflight() {
         given()
-                .header("Origin", ORIGIN)
+                .header("Origin", "https://not-allowed.example.test")
                 .header("Access-Control-Request-Method", "POST")
                 .header("Access-Control-Request-Headers", "content-type,x-amz-target")
                 .when().options("/")
-                .then().statusCode(200);
+                .then()
+                .statusCode(405)
+                .header("Access-Control-Allow-Origin", nullValue())
+                .header("Access-Control-Allow-Headers", nullValue());
 
         given()
-                .header("Origin", ORIGIN)
+                .header("Origin", "https://not-allowed.example.test")
                 .header("X-Amz-Target", "DynamoDB_20120810.ListTables")
                 .contentType("application/x-amz-json-1.0")
                 .body("{}")
@@ -174,7 +180,7 @@ class CognitoCorsIntegrationTest {
             "/bucket/key,POST,content-type;x-amz-target", "/execute-api/missing/prod,POST,content-type;x-amz-target"})
     void unrelatedPreflightsDoNotGetCognitoCors(String path, String method, String headers) {
         given()
-                .header("Origin", ORIGIN)
+                .header("Origin", "https://not-allowed.example.test")
                 .header("Access-Control-Request-Method", method)
                 .header("Access-Control-Request-Headers", headers.replace(';', ','))
                 .when().options(path)
@@ -183,9 +189,9 @@ class CognitoCorsIntegrationTest {
     }
 
     @Test
-    void aCognitoTargetDoesNotExposeAQueryResponse() {
+    void aCognitoTargetDoesNotExposeAQueryResponseToAnUnlistedOrigin() {
         given()
-                .header("Origin", ORIGIN)
+                .header("Origin", "https://not-allowed.example.test")
                 .header("X-Amz-Target", TARGET_PREFIX + "InitiateAuth")
                 .contentType("application/x-www-form-urlencoded")
                 .body("Action=GetCallerIdentity&Version=2011-06-15")
@@ -204,7 +210,7 @@ class CognitoCorsIntegrationTest {
                 .header("Access-Control-Request-Private-Network", "true")
                 .when().options("/")
                 .then()
-                .statusCode(200)
+                .statusCode(204)
                 .header("Access-Control-Allow-Private-Network", nullValue());
     }
 }
