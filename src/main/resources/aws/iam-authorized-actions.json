@@ -426,6 +426,7 @@
       "UpdatePublicKey",
       "UpdateSavingsPlan"
     ],
+    "cloudfront-keyvaluestore": [],
     "controltower": [
       "CreateLandingZone",
       "CreateManagedAccount",

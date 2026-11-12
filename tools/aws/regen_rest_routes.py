@@ -55,6 +55,7 @@ MODELS: dict[str, str] = {
     "apigateway": "apigateway",
     "apigatewayv2": "apigateway",
     "cloudfront": "cloudfront",
+    "cloudfront-keyvaluestore": "cloudfront-keyvaluestore",
     "controltower": "controltower",
     "dsql": "dsql",
     "eks": "eks",

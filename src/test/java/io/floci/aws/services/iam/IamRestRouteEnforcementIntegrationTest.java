@@ -1,11 +1,13 @@
 package io.floci.aws.services.iam;
 
+import io.floci.aws.core.common.XmlParser;
 import io.floci.aws.testing.EnforcementFixtures;
 import io.floci.aws.testing.IamEnforcementProfile;
 import io.floci.aws.testing.PartitionCleanup;
 import io.quarkus.test.common.http.TestHTTPResource;
 import io.quarkus.test.junit.QuarkusTest;
 import io.quarkus.test.junit.TestProfile;
+import io.restassured.response.Response;
 import io.restassured.response.ValidatableResponse;
 import io.restassured.specification.RequestSpecification;
 import org.junit.jupiter.api.Test;
@@ -16,6 +18,7 @@ import java.net.URLEncoder;
 import java.nio.charset.StandardCharsets;
 import java.util.HashMap;
 import java.util.Map;
+import java.util.UUID;
 
 import static io.floci.aws.testing.EnforcementFixtures.auth;
 import static io.restassured.RestAssured.given;
@@ -71,6 +74,49 @@ class IamRestRouteEnforcementIntegrationTest {
                 .get("/2018-10-31/layers").then().statusCode(404);
     }
 
+    @Test
+    void cloudFrontKeyValueStoreDataPlaneRoutesAreCheckedByOperation() {
+        String user = user("route-kvs");
+        String arn = "arn:aws:cloudfront::" + ACCOUNT + ":key-value-store/" + UUID.randomUUID();
+        String path = "/key-value-stores/" + URLEncoder.encode(arn, StandardCharsets.UTF_8);
+
+        policy(user, allow("cloudfront-keyvaluestore:ListKeys", "*"));
+        refused(as(user, "cloudfront-keyvaluestore").urlEncodingEnabled(false).get(path).then(),
+                "cloudfront-keyvaluestore:DescribeKeyValueStore");
+        refused(as(user, "cloudfront-keyvaluestore").urlEncodingEnabled(false).header("If-Match", "etag")
+                .body("{\"Value\":\"v\"}").put(path + "/keys/k").then(), "cloudfront-keyvaluestore:PutKey");
+
+        policy(user, allow("cloudfront-keyvaluestore:DescribeKeyValueStore", arn));
+        // Allowed on that store, the request reaches the data plane, which has no such store.
+        as(user, "cloudfront-keyvaluestore").urlEncodingEnabled(false).get(path).then().statusCode(404);
+    }
+    @Test
+    void cloudFrontKeyValueStoreControlPlaneIsCheckedAgainstTheStoresReturnedArn() {
+        String user = user("route-kvs-control");
+        String name = "kvs-" + suffix();
+        String namespace = "http://cloudfront.amazonaws.com/doc/2020-05-31/";
+        Response created = given().header("Authorization", auth(ADMIN, "cloudfront"))
+                .contentType("application/xml")
+                .body("<CreateKeyValueStoreRequest xmlns=\"" + namespace + "\"><Name>" + name
+                        + "</Name></CreateKeyValueStoreRequest>")
+                .post("/2020-05-31/key-value-store");
+        created.then().statusCode(201);
+        String arn = XmlParser.extractFirst(created.asString(), "ARN", null);
+        String etag = created.header("ETag");
+
+        policy(user, allow("cloudfront:*", "*") + "," +
+                "{\"Effect\":\"Deny\",\"Action\":\"cloudfront:DeleteKeyValueStore\",\"Resource\":\"" + arn + "\"}");
+        refused(as(user, "cloudfront").header("If-Match", etag).delete("/2020-05-31/key-value-store/" + name).then(),
+                "cloudfront:DeleteKeyValueStore");
+        as(user, "cloudfront").get("/2020-05-31/key-value-store/" + name).then().statusCode(200);
+
+        policy(user, allow("cloudfront:DescribeKeyValueStore", "arn:aws:cloudfront::" + ACCOUNT
+                + ":key-value-store/not-this-one"));
+        refused(as(user, "cloudfront").get("/2020-05-31/key-value-store/" + name).then(),
+                "cloudfront:DescribeKeyValueStore");
+        policy(user, allow("cloudfront:DescribeKeyValueStore", arn));
+        as(user, "cloudfront").get("/2020-05-31/key-value-store/" + name).then().statusCode(200);
+    }
     @Test
     void aScheduleRequestSignedForAnotherServiceIsStillCheckedAsScheduler() {
         // Checked by the route it reached, not by the credential scope it was signed with: an S3
