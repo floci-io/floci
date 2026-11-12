@@ -4240,6 +4240,8 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
                         if (inst.getLaunchTime() != null) {
                             eni.setAttachTime(ISO_FMT.format(inst.getLaunchTime()));
                         }
+                        // Caller-supplied ENI defaults to false; an implicit interface defaults to true.
+                        eni.setDeleteOnTermination(suppliedEni == null);
                         inst.getNetworkInterfaces().add(eni);
                         if (suppliedEni != null) {
                             // The standalone record stays authoritative rather than being folded into the
@@ -15608,9 +15610,20 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
         attached.setAttachmentId(attachment.getAttachmentId());
         attached.setDeviceIndex(deviceIndex);
         attached.setAttachTime(attachment.getAttachTime());
+        attached.setDeleteOnTermination(attachment.isDeleteOnTermination());
         inst.getNetworkInterfaces().add(attached);
         instances.put(key(region, instanceId), inst);
         return attachment;
+    }
+
+    /** Sets DeleteOnTermination on the launched instance's network interfaces for an explicit request param. */
+    public void setNetworkInterfaceDeleteOnTermination(String region, String instanceId, boolean value) {
+        Instance inst = instances.get(key(region, instanceId)).orElse(null);
+        if (inst == null) return;
+        for (InstanceNetworkInterface eni : inst.getNetworkInterfaces()) {
+            eni.setDeleteOnTermination(value);
+        }
+        instances.put(key(region, instanceId), inst);
     }
 
     /** Detaches a standalone ENI by attachment id, floci-kt9. */
