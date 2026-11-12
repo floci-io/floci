@@ -49,6 +49,7 @@
 | `EnableKey` | Enable a key |
 | `DisableKey` | Disable a key |
 | `RotateKeyOnDemand` | Rotate key material on demand (symmetric keys only) |
+| `ListKeyRotations` | List completed rotations or all key materials, with pagination |
 | `GetParametersForImport` | Get the wrapping key and import token for an `EXTERNAL` key |
 | `ImportKeyMaterial` | Import key material into an `EXTERNAL` key |
 | `DeleteImportedKeyMaterial` | Delete imported key material, returning the key to `PendingImport` |
@@ -91,6 +92,26 @@ blob (header, IV, ciphertext or tag), all fail GCM tag verification the same way
 `RotateKeyOnDemand` mints a new backing key and switches future encryptions to it, but keeps prior
 backing keys in the key's state, so ciphertext encrypted before a rotation keeps decrypting after
 it, matching real AWS KMS, which also retains prior backing keys.
+
+### Rotation history
+
+`ListKeyRotations` returns the material identifier, completion time and `ON_DEMAND` rotation type
+for each completed `RotateKeyOnDemand` call. By default it lists only rotated material.
+`IncludeKeyMaterial=ALL_KEY_MATERIAL` also includes the first material, which has no rotation date
+or type. `KeyMaterialState` identifies the `CURRENT` encryption material and the `NON_CURRENT`
+material retained for decryption. Each entry returns the bare key ID in `KeyId`, including when
+the request uses a key ARN. The listing accepts a key ID or key ARN, with `Limit` from 1 to
+1000 (default 100) and `Marker`/`NextMarker` pagination.
+
+History is stored with the key and follows multi-Region material replication. Disabling a key
+or scheduling its deletion does not remove the history. For imported symmetric material, the
+all-material listing includes `ImportState`, and the configured expiration while the material
+is imported. The existing limitation on rotating imported material still applies.
+
+Rotation dates are recorded for rotations performed by versions supporting this operation.
+Older persisted backing material remains usable and appears in the all-material listing, but
+Floci cannot reconstruct its historical rotation dates. Enabling automatic rotation stores the
+setting; it does not schedule rotations or create synthetic rotation-history entries.
 
 ### Legacy blob formats (read-only)
 
@@ -172,8 +193,7 @@ own the material and cannot rotate it.
   `CreateKey` with `UnsupportedOperationException`.
 - Holding several imported key materials on one symmetric key, which real KMS uses for on-demand
   rotation of imported material, is not emulated. `ImportType=NEW_KEY_MATERIAL` on a key that
-  already has key material is rejected with `UnsupportedOperationException`, and
-  `ListKeyRotations` is not implemented.
+  already has key material is rejected with `UnsupportedOperationException`.
 
 ## AWS Managed Keys
 
