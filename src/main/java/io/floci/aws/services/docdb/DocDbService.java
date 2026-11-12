@@ -343,7 +343,7 @@ public class DocDbService {
                 }
             }
         } else if (create) {
-            securityGroups = List.of(Ec2Service.defaultSecurityGroupId(region));
+            securityGroups = List.of(ec2Service.resolveDefaultSecurityGroupId(region));
         }
         String kmsKeyArn = resolveKmsKeyArn(settings.kmsKeyId(), region);
         String backup = settings.preferredBackupWindow();
@@ -498,7 +498,7 @@ public class DocDbService {
             changed = true;
         }
         if (cluster.getVpcSecurityGroupIds() == null || cluster.getVpcSecurityGroupIds().isEmpty()) {
-            cluster.setVpcSecurityGroupIds(List.of(Ec2Service.defaultSecurityGroupId(region)));
+            cluster.setVpcSecurityGroupIds(List.of(ec2Service.resolveDefaultSecurityGroupId(region)));
             changed = true;
         }
         if (cluster.getPreferredBackupWindow() == null) {
