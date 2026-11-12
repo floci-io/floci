@@ -165,6 +165,10 @@ RDS endpoints return the us-east-1 hosted zone ID `Z2R2ITUGPM61AM` in all region
 | `FailoverGlobalCluster` | Promote a secondary to primary (failover with `AllowDataLoss`, or switchover) |
 | `SwitchoverGlobalCluster` | Promote a secondary to primary and demote the current primary to a secondary |
 | `FailoverDBCluster` | Move a DB cluster's writer role to a reader instance, the named one or the first |
+| `CreateBlueGreenDeployment` | Stage a green copy of a DB instance with a new engine version, parameter group, class or storage; see [Blue/Green deployments](#bluegreen-deployments) |
+| `DescribeBlueGreenDeployments` | List blue/green deployments, by identifier and the `blue-green-deployment-identifier`, `blue-green-deployment-name`, `source` and `target` filters |
+| `SwitchoverBlueGreenDeployment` | Make the green instance production: it takes the blue name, ARN, endpoint and tags, and blue becomes `<name>-old1` |
+| `DeleteBlueGreenDeployment` | Delete a deployment, with `DeleteTarget` also deleting the green instance before switchover |
 | `AddTagsToResource` | Add tags to a DB resource |
 | `ListTagsForResource` | List tags for a DB resource |
 | `RemoveTagsFromResource` | Remove tags from a DB resource |
@@ -691,6 +695,42 @@ connections drop while the container, endpoint and data stay. Deleting a source 
 same-region replicas; a cross-region replica keeps its link with the replication status
 `terminated` until it is promoted or deleted, which is what AWS does for PostgreSQL. Deleting a
 replica drops it from its source's list.
+
+## Blue/Green deployments
+
+`CreateBlueGreenDeployment` takes a PostgreSQL, MySQL or MariaDB DB instance by ARN as `Source`
+and creates its green copy, named `<source>-green-<suffix>`. The green instance inherits the
+blue one's settings and tags, with `TargetEngineVersion`, `TargetDBParameterGroupName`,
+`TargetDBInstanceClass`, `TargetAllocatedStorage` and `TargetStorageType` applied. Without
+`TargetDBParameterGroupName` it keeps the blue parameter group when the engine version stays in the
+same family, and gets the default group of the new family on a major upgrade. Both instances report
+the link in `DescribeDBInstances` as a read replica pair. The green database is initialised from a
+dump of the blue one taken at creation, the mechanism snapshots use, so it holds the blue data as
+of that moment; writes made to blue afterwards are not streamed to it.
+
+Creation finishes before the response, so the deployment is reported `AVAILABLE` straight away
+with its `SwitchoverDetails` and `Tasks`. As on AWS, a source needs automated backups on
+(`InvalidDBInstanceState` otherwise), a lower `TargetEngineVersion` is refused, and an instance can
+be in one deployment at a time. Floci refuses with `SourceDatabaseNotSupportedFault` an instance
+that belongs to a cluster, is a read replica or has read replicas, keeps its master password in
+Secrets Manager, or is a DB proxy target, and refuses a DB cluster source with
+`SourceClusterNotSupportedFault`. `TargetIops`, `TargetStorageThroughput` and
+`UpgradeTargetStorageConfig` are accepted and not applied, as `CreateDBInstance` treats IOPS.
+
+`SwitchoverBlueGreenDeployment` requires the deployment to be `AVAILABLE` and both instances
+available. Green takes the blue identifier, ARN, endpoint and tags, so clients that connect to the
+blue endpoint reach the new database without a change. Blue is renamed `<name>-old<n>`, moves to
+the endpoint green had, and keeps running. The deployment ends `SWITCHOVER_COMPLETED`, with
+`Source` naming the old instance and `Target` the new production one. The switchover completes
+before the response; `SwitchoverTimeout` is checked against the 30 to 3600 second range and has
+nothing else to bound. The old instance is not made read only.
+
+Before switchover, a deployment whose blue or green instance has been deleted, or whose green
+instance was promoted, reports `INVALID_CONFIGURATION` and can no longer be switched over.
+`DeleteBlueGreenDeployment` deletes the green instance too with `DeleteTarget`, which is refused
+after switchover; without it the green instance is kept as a standalone instance. The blue
+instance is never touched. A deployment is tagged through its
+`arn:aws:rds:<region>:<account>:deployment:<identifier>` ARN.
 
 ## Engine catalogue
 
