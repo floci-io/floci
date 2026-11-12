@@ -1,5 +1,6 @@
 package io.floci.aws.services.redshift.proxy;
 
+import io.floci.aws.services.redshift.proxy.CopyBulkLoader.Cursor;
 import io.floci.aws.services.s3.S3Service;
 import io.floci.aws.services.s3.model.S3Object;
 import org.junit.jupiter.api.Test;
@@ -193,6 +194,40 @@ class CopyEtlLoaderTest {
             runLoad("", "1\n\n2\n", 0, 1, true, 1211);
         } finally {
             assertEquals(permitsBefore, S3CopySimulator.COPY_TRANSFORM_HEAP_MIB.availablePermits());
+        }
+    }
+
+    @Test
+    void writeRecordChunksLongRowsAcrossPostgresCopyDataFrames() throws Exception {
+        ByteArrayOutputStream output = new ByteArrayOutputStream();
+        byte[] longRecord = "a".repeat(20000).getBytes(StandardCharsets.UTF_8);
+        CopyBulkLoader.writeRecord(output, longRecord);
+        byte[] bytes = output.toByteArray();
+        assertEquals(20015, bytes.length);
+        assertEquals('d', bytes[0]);
+        assertEquals('d', bytes[8197]);
+        assertEquals('d', bytes[8197 * 2]);
+    }
+
+    @Test
+    void cursorIteratesTransformedRecordsAndTracksLineAndRaw() throws Exception {
+        CopyStatementParser.S3CopyFrom spec = (CopyStatementParser.S3CopyFrom) CopyStatementParser.parse(
+                "COPY events FROM 's3://bucket/data' CSV IGNOREHEADER 1");
+        byte[] data = "h1,h2\n1,first\n2,second\n".getBytes(StandardCharsets.UTF_8);
+        try (Cursor cursor = new Cursor(spec, data, null, null, null, null)) {
+            byte[] first = cursor.next();
+            assertNotNull(first);
+            assertEquals("1,first\n", new String(first, StandardCharsets.UTF_8));
+            assertEquals(2, cursor.line());
+            assertEquals("1,first\n", new String(cursor.raw(), StandardCharsets.UTF_8));
+
+            byte[] second = cursor.next();
+            assertNotNull(second);
+            assertEquals("2,second\n", new String(second, StandardCharsets.UTF_8));
+            assertEquals(3, cursor.line());
+            assertEquals("2,second\n", new String(cursor.raw(), StandardCharsets.UTF_8));
+
+            assertNull(cursor.next());
         }
     }
 
