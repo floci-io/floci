@@ -74,9 +74,10 @@
 - **The key exchange:** `ExportKey` and `ImportKey` take the form of the key material the
   request names, one form per request. A key leaves under a TR-31 block the service wraps
   with a key it holds, under an RSA-OAEP cryptogram the receiver's certificate protects, under
-  a TR-34 key block the service signs and wraps for the receiver, or under a key the two
-  parties agreed with ECDH; it comes back under the same protections, and a public key comes
-  back under the certificate that carries it. A key that is not exportable
+  a TR-34 key block the service signs and wraps for the receiver, under an AS2805 cryptogram
+  the receiver's key encryption key protects, or under a key the two parties agreed with ECDH;
+  it comes back under the same protections, and a public key comes back under the certificate
+  that carries it. A key that is not exportable
   does not leave, a key pair has no material a key block could carry, and a counterparty's
   certificate that the named authority did not sign is refused. An export may name an initial
   DUKPT key by its serial number, and the derived key leaves instead of the base derivation
@@ -107,9 +108,20 @@
   or that carries no header to say what it holds is refused. The signing key the export
   parameters issue is an RSA one, because the block's signature is an RSA signature, so
   `GetParametersForExport` takes `RSA_2048` and refuses the other algorithms.
-- **The AS2805 form is not made.** A request that asks for it is refused with the error that
-  says so, rather than answered with something of another kind, and the refusal names the
-  forms the service serves.
+- **The AS2805 key cryptogram:** a key leaves under a key encryption key, bound to its
+  purpose by the AS2805 variant, and comes back the same way. The variant is exclusive-ored
+  into the key before it is encrypted, so a cryptogram wrapped under one variant does not
+  open under another, and the check value inside it catches a wrong wrapping key. The
+  variants served are `TERMINAL_MAJOR_KEY_VARIANT_00`, `DATA_ENCRYPTION_KEY_VARIANT_22`,
+  `MESSAGE_AUTHENTICATION_KEY_VARIANT_24` and `PIN_ENCRYPTION_KEY_VARIANT_28`. A variant
+  says what the key is for, so a key may only leave under the variant that matches its own
+  usage, and the wrapping key has to be at least as strong as the key it carries, on the
+  import as well as on the export.
+- **The bytes of an AS2805 cryptogram are this emulator's own.** The layout of the standard
+  is not published, so the cryptogram this service reads and writes is its own
+  construction. A cryptogram another producer built does not open here, and one this
+  service built does not open there. The fields, the variant mapping and the key rules are
+  the ones the service publishes, and those are what it implements.
 - **The block headers a request names:** an export may name the modes of use, the
   exportability, the version and the optional blocks of the TR-31 block it produces, and
   the block carries them. An optional block is written with its length in hexadecimal, and
