@@ -5,6 +5,7 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.floci.aws.core.common.AwsException;
 import io.floci.aws.core.common.AwsNamespaces;
+import io.floci.aws.core.common.AwsQueryBooleans;
 import io.floci.aws.core.common.AwsQueryResponse;
 import io.floci.aws.core.common.PaginatedResult;
 import io.floci.aws.core.common.RegionResolver;
@@ -493,18 +494,7 @@ public class SesQueryHandler {
      */
     private static boolean parseXsdBoolean(MultivaluedMap<String, String> params, String name) {
         String raw = params.getFirst(name);
-        if (raw == null) {
-            return false;
-        }
-        if (raw.isEmpty()) {
-            throw new AwsException("MalformedInput", "missing value for boolean type", 400);
-        }
-        return switch (raw) {
-            case "true", "1" -> true;
-            case "false", "0" -> false;
-            default -> throw new AwsException("MalformedInput",
-                    "boolean must follow xsd1.1 definition", 400);
-        };
+        return raw != null && AwsQueryBooleans.parse(raw);
     }
 
     private Response handleGetIdentityMailFromDomainAttributes(MultivaluedMap<String, String> params, String region) {
