@@ -18,6 +18,7 @@ import java.util.HashMap;
 import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.UUID;
 import java.util.function.Function;
 import java.util.function.UnaryOperator;
@@ -931,6 +932,12 @@ public class CloudFormationTemplateEngine {
     private JsonNode resolveGetAttNode(JsonNode getAtt) {
         String[] parts = getAttParts(getAtt);
         return parts == null ? TextNode.valueOf("") : resolveGetAttNodeParts(parts[0], parts[1]);
+    }
+
+    /** Matches a GetAtt dependency using the same operands as attribute value resolution. */
+    public boolean referencesGetAttAttribute(JsonNode getAtt, String logicalId, Set<String> attributeNames) {
+        String[] parts = getAttParts(getAtt);
+        return parts != null && logicalId.equals(parts[0]) && attributeNames.contains(parts[1]);
     }
 
     private String[] getAttParts(JsonNode getAtt) {

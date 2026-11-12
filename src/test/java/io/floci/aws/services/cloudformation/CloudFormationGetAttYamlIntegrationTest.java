@@ -4,13 +4,20 @@ import io.floci.aws.testing.AwsTestClients;
 import io.floci.aws.testing.CfnStackWaits;
 import io.quarkus.test.junit.QuarkusTest;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
 import software.amazon.awssdk.regions.Region;
 import software.amazon.awssdk.services.cloudformation.CloudFormationClient;
+import software.amazon.awssdk.services.cloudformation.model.ChangeSetType;
+import software.amazon.awssdk.services.cloudformation.model.ResourceStatus;
 import software.amazon.awssdk.services.cloudformation.model.Stack;
 import software.amazon.awssdk.services.sqs.SqsClient;
 import software.amazon.awssdk.services.sqs.model.QueueAttributeName;
+import software.amazon.awssdk.services.ssm.SsmClient;
 
 import java.util.List;
+import java.util.Set;
+import java.util.stream.Collectors;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
@@ -64,6 +71,103 @@ class CloudFormationGetAttYamlIntegrationTest {
                 for (String output : List.of("Flow", "Block", "Scalar", "Referenced", "LongReferenced")) {
                     assertEquals(queueArn, CfnStackWaits.output(stack, output), output);
                 }
+            } finally {
+                cloudFormation.deleteStack(request -> request.stackName(name));
+                CfnStackWaits.awaitStackDeleted(name);
+            }
+        }
+    }
+
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    void stackUpdatesTrackReferencedAttributeNames(boolean executeChangeSet) {
+        String name = "cfn-getatt-update-" + Long.toString(System.nanoTime(), 36);
+        String template = """
+                Parameters:
+                  AttributeName:
+                    Type: String
+                    Default: LatestVersionNumber
+                  StableAttributeName:
+                    Type: String
+                    Default: DefaultVersionNumber
+                Conditions:
+                  UseLatest: !Equals [!Ref AttributeName, LatestVersionNumber]
+                Resources:
+                  Lt:
+                    Type: AWS::EC2::LaunchTemplate
+                    Properties:
+                      LaunchTemplateData:
+                        ImageId: ami-12345678
+                        InstanceType: t3.micro
+                  Latest:
+                    Type: AWS::SSM::Parameter
+                    Properties:
+                      Name: %1$s/latest
+                      Type: String
+                      Value: !GetAtt [Lt, !Ref AttributeName]
+                  Wrapped:
+                    Type: AWS::SSM::Parameter
+                    Properties:
+                      Name: %1$s/wrapped
+                      Type: String
+                      Value: !Sub ["${Version}", {Version: !If [UseLatest, !GetAtt [Lt, !Ref AttributeName], "0"]}]
+                  Stable:
+                    Type: AWS::SSM::Parameter
+                    Properties:
+                      Name: %1$s/stable
+                      Type: String
+                      Value: !GetAtt [Lt, !Ref StableAttributeName]
+                  Inactive:
+                    Type: AWS::SSM::Parameter
+                    Properties:
+                      Name: %1$s/inactive
+                      Type: String
+                      Value: !If [UseLatest, !GetAtt [Lt, !Ref StableAttributeName], !GetAtt [Lt, !Ref AttributeName]]
+                """.formatted(name);
+        String updatedTemplate = template.replace("t3.micro", "t3.small");
+
+        try (CloudFormationClient cloudFormation = AwsTestClients.create(
+                CloudFormationClient.builder(), "test", Region.US_EAST_1);
+                SsmClient ssm = AwsTestClients.create(SsmClient.builder(), "test", Region.US_EAST_1)) {
+            cloudFormation.createStack(request -> request.stackName(name).templateBody(template));
+            try {
+                CfnStackWaits.awaitStatus(cloudFormation, name, "CREATE_COMPLETE");
+                for (String parameter : List.of("latest", "wrapped", "stable", "inactive")) {
+                    assertEquals("1", ssm.getParameter(request -> request.name(name + "/" + parameter))
+                            .parameter().value(), parameter);
+                }
+
+                if (executeChangeSet) {
+                    cloudFormation.createChangeSet(request -> request.stackName(name)
+                            .changeSetName("update-version").changeSetType(ChangeSetType.UPDATE)
+                            .templateBody(updatedTemplate));
+                    Set<String> changedResources = cloudFormation.describeChangeSet(request ->
+                            request.stackName(name).changeSetName("update-version")).changes().stream()
+                            .map(change -> change.resourceChange().logicalResourceId()).collect(Collectors.toSet());
+                    assertEquals(Set.of("Lt", "Latest", "Wrapped"), changedResources,
+                            "The preview must include only consumers of the changed attribute");
+                    cloudFormation.executeChangeSet(request ->
+                            request.stackName(name).changeSetName("update-version"));
+                } else {
+                    cloudFormation.updateStack(request -> request.stackName(name).templateBody(updatedTemplate));
+                }
+
+                CfnStackWaits.awaitStatus(cloudFormation, name, "UPDATE_COMPLETE");
+                for (String parameter : List.of("latest", "wrapped")) {
+                    assertEquals("2", ssm.getParameter(request -> request.name(name + "/" + parameter))
+                            .parameter().value(), parameter + " must read the updated launch template version");
+                }
+                for (String parameter : List.of("stable", "inactive")) {
+                    assertEquals("1", ssm.getParameter(request -> request.name(name + "/" + parameter))
+                            .parameter().value(), parameter);
+                }
+                Set<String> updatedParameters = cloudFormation.describeStackEvents(request -> request.stackName(name))
+                        .stackEvents().stream()
+                        .filter(event -> "AWS::SSM::Parameter".equals(event.resourceType())
+                                && event.resourceStatus() == ResourceStatus.UPDATE_COMPLETE)
+                        .map(event -> event.logicalResourceId()).collect(Collectors.toSet());
+                assertEquals(Set.of("Latest", "Wrapped"), updatedParameters,
+                        "Unchanged attributes and inactive branches must not trigger an update");
             } finally {
                 cloudFormation.deleteStack(request -> request.stackName(name));
                 CfnStackWaits.awaitStackDeleted(name);
