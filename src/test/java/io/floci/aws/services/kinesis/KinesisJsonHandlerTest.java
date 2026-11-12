@@ -256,15 +256,19 @@ class KinesisJsonHandlerTest {
             request.putObject("Tags").put("valid", "initial");
             assertEquals(200, handler.handle("TagResource", request, REGION).getStatus());
 
-            request.set("Tags", MAPPER.createObjectNode().put("bad*key", "value"));
-            AwsException badKey = assertThrows(AwsException.class,
-                    () -> handler.handle("TagResource", request, REGION));
-            assertEquals("InvalidArgumentException", badKey.getErrorCode());
+            for (String key : List.of("bad*key", "bad:key")) {
+                request.set("Tags", MAPPER.createObjectNode().put(key, "value"));
+                AwsException badKey = assertThrows(AwsException.class,
+                        () -> handler.handle("TagResource", request, REGION));
+                assertEquals("InvalidArgumentException", badKey.getErrorCode());
+            }
 
-            request.set("Tags", MAPPER.createObjectNode().put("valid", "bad*value"));
-            AwsException badValue = assertThrows(AwsException.class,
-                    () -> handler.handle("TagResource", request, REGION));
-            assertEquals("InvalidArgumentException", badValue.getErrorCode());
+            for (String value : List.of("bad*value", "bad:value")) {
+                request.set("Tags", MAPPER.createObjectNode().put("valid", value));
+                AwsException badValue = assertThrows(AwsException.class,
+                        () -> handler.handle("TagResource", request, REGION));
+                assertEquals("InvalidArgumentException", badValue.getErrorCode());
+            }
 
             JsonNode tags = responseEntity(handler.handle("ListTagsForResource",
                     MAPPER.createObjectNode().put("ResourceARN", arn), REGION)).path("Tags");
@@ -276,8 +280,8 @@ class KinesisJsonHandlerTest {
     @Test
     void tagResourceAcceptsDocumentedUnicodeAndSymbols() {
         createStream("test-stream");
-        String key = "\u00c9quipe_./=+@-:9";
-        String value = "\u7a7a \u767d";
+        String key = "\u00c9quipe_./=+@-%9";
+        String value = "\u7a7a \u767d%";
         ObjectNode request = MAPPER.createObjectNode().put("ResourceARN", STREAM_ARN);
         request.putObject("Tags").put(key, value);
         assertEquals(200, handler.handle("TagResource", request, REGION).getStatus());

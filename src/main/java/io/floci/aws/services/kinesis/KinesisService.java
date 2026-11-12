@@ -56,7 +56,7 @@ public class KinesisService implements ResourceProvider {
     private static final int MAX_RECORDS_PER_REQUEST = 500;
     private static final int MAX_REQUEST_SIZE_BYTES = 10 * 1024 * 1024;
     private static final Pattern VALID_RESOURCE_TAG_CHARACTERS =
-            Pattern.compile("[\\p{L}\\p{Nd}\\s_.:/=+@-]*", Pattern.UNICODE_CHARACTER_CLASS);
+            Pattern.compile("[\\p{L}\\p{Nd}\\s_./=+%@-]*", Pattern.UNICODE_CHARACTER_CLASS);
     /**
      * UpdateShardCount's documented default limits: the per-account/region shard-per-stream
      * ceiling, and how many scaling calls a stream may take in a rolling 24-hour window.
