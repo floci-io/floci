@@ -709,6 +709,49 @@ class IamRestRouteEnforcementIntegrationTest {
     }
 
     /**
+     * A GuardDuty malware protection plan request, which GuardDutyRouteFilter moves onto {@code /_guardduty}, is
+     * checked as the model's route for it, on the plan its path names, and so is one sent to {@code /_guardduty}
+     * itself: a caller with no grant is refused before a plan is created, a grant scoped to the plan lets
+     * {@code GetMalwareProtectionPlan} read it and refuses another, and a deny on the plan keeps it from being
+     * deleted under an allow on everything.
+     */
+    @Test
+    void aGuardDutyMalwareProtectionPlanRequestIsCheckedOnThePlanItsPathNames() {
+        String user = user("route-plan");
+        String region = "eu-west-3";
+        String plan = "{\"role\":\"arn:aws:iam::" + ACCOUNT + ":role/malware-scan\","
+                + "\"protectedResource\":{\"s3Bucket\":{\"bucketName\":\"route-plan-" + suffix() + "\"}}}";
+        refused(as(user, region, "guardduty").body(plan).post("/malware-protection-plan").then(),
+                "guardduty:CreateMalwareProtectionPlan");
+        refused(as(user, region, "guardduty").get("/malware-protection-plan").then(),
+                "guardduty:ListMalwareProtectionPlans");
+        // GuardDuty refuses a second plan for one bucket, so this create also shows the refused one made none.
+        String id = given().header("Authorization", auth(ADMIN, region, "guardduty"))
+                .contentType("application/json").body(plan).post("/malware-protection-plan")
+                .then().statusCode(200).extract().path("malwareProtectionPlanId");
+        cleanup.register(() -> given().header("Authorization", auth(ADMIN, region, "guardduty"))
+                .delete("/malware-protection-plan/" + id));
+        String arn = "arn:aws:guardduty:" + region + ":" + ACCOUNT + ":malware-protection-plan/" + id;
+        refused(as(user, region, "guardduty").get("/malware-protection-plan/" + id).then(),
+                "guardduty:GetMalwareProtectionPlan");
+        refused(as(user, region, "guardduty").get("/_guardduty/malware-protection-plan/" + id).then(),
+                "guardduty:GetMalwareProtectionPlan");
+
+        policy(user, allow("guardduty:GetMalwareProtectionPlan", arn));
+        as(user, region, "guardduty").get("/malware-protection-plan/" + id).then().statusCode(200)
+                .body("arn", equalTo(arn));
+        as(user, region, "guardduty").get("/_guardduty/malware-protection-plan/" + id).then().statusCode(200)
+                .body("arn", equalTo(arn));
+        refused(as(user, region, "guardduty").get("/malware-protection-plan/other" + id).then(),
+                "guardduty:GetMalwareProtectionPlan");
+
+        policy(user, allow("guardduty:*", "*") + "," + deny("guardduty:DeleteMalwareProtectionPlan", arn));
+        refused(as(user, region, "guardduty").delete("/malware-protection-plan/" + id).then(),
+                "guardduty:DeleteMalwareProtectionPlan");
+        as(user, region, "guardduty").get("/malware-protection-plan/" + id).then().statusCode(200);
+    }
+
+    /**
      * A segment ending in a matrix parameter, which the router ignores, is checked as the route it reaches, on the
      * resource its path names: the routed path carries no matrix parameter, so the rule matches and the ARN is the
      * named resource's, and a grant scoped to it lets the request through while a caller with none is refused.

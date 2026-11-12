@@ -7,6 +7,7 @@ import io.floci.aws.core.common.IamOperation;
 import io.floci.aws.core.common.ProtocolClaim;
 import io.floci.aws.core.common.RequestResources;
 import io.floci.aws.core.common.ResteasyRequests;
+import io.floci.aws.core.common.SignedServiceRoute;
 import io.floci.aws.core.common.WireProtocol;
 import io.floci.aws.services.dynamodb.DynamoDbPartiQLParser;
 import io.floci.aws.services.eks.EksController;
@@ -696,9 +697,10 @@ public class IamActionRegistry {
      * matches, and is checked as that operation's action ({@link IamAuthorizedActions#actionFor}), as a
      * request naming its operation is, when Floci can check it as AWS does ({@code checkedAsAws}). One it
      * cannot is left unmapped rather than checked on {@code *}, which would refuse a grant scoped to the
-     * resource AWS checks it on. The scopes the vendored routes list as hand-routed, S3's and API Gateway's,
-     * have their rules alone. Returns {@code null} when nothing maps the request (caller treats this as
-     * ALLOW).
+     * resource AWS checks it on. A request a route filter moved under an internal prefix is matched on its
+     * path without the prefix ({@link #withoutInternalPrefix}), the path the model gives it. The scopes the
+     * vendored routes list as hand-routed, S3's and API Gateway's, have their rules alone. Returns
+     * {@code null} when nothing maps the request (caller treats this as ALLOW).
      */
     public String resolveRoute(String credentialScope, ContainerRequestContext ctx) {
         String method = ctx.getMethod().toUpperCase();
@@ -731,8 +733,8 @@ public class IamActionRegistry {
                 return rule.action();
             }
         }
-        Optional<String> operation = restRoutes.operation(credentialScope, method, path,
-                ctx.getUriInfo() == null ? null : ctx.getUriInfo().getQueryParameters());
+        Optional<String> operation = restRoutes.operation(credentialScope, method, withoutInternalPrefix(ctx, path),
+                ctx.getUriInfo() == null ? null : ctx.getUriInfo().getQueryParameters(), movedUnderPrefix(ctx));
         if (operation.isPresent()) {
             String action = IamAuthorizedActions.actionFor(credentialScope, operation.get());
             if (checkedAsAws(credentialScope, operation.get(), action)) {
@@ -759,8 +761,8 @@ public class IamActionRegistry {
         if (credentialScope == null || !routes.routes(credentialScope)) {
             return Map.of();
         }
-        return routes.match(credentialScope, ctx.getMethod().toUpperCase(), routedPath(ctx),
-                        ctx.getUriInfo() == null ? null : ctx.getUriInfo().getQueryParameters())
+        return routes.match(credentialScope, ctx.getMethod().toUpperCase(), withoutInternalPrefix(ctx, routedPath(ctx)),
+                        ctx.getUriInfo() == null ? null : ctx.getUriInfo().getQueryParameters(), movedUnderPrefix(ctx))
                 .map(IamRestRoutes.Match::labels).orElse(Map.of());
     }
 
@@ -772,7 +774,8 @@ public class IamActionRegistry {
             return Map.of();
         }
         return IamRestRoutes.vendored().match(operation.substring(0, separator), ctx.getMethod().toUpperCase(),
-                        routedPath(ctx), ctx.getUriInfo().getQueryParameters())
+                        withoutInternalPrefix(ctx, routedPath(ctx)), ctx.getUriInfo().getQueryParameters(),
+                        movedUnderPrefix(ctx))
                 .filter(match -> match.operation().equals(operation.substring(separator + 1)))
                 .map(IamRestRoutes.Match::located).orElse(Map.of());
     }
@@ -839,6 +842,23 @@ public class IamActionRegistry {
      */
     static String routedPath(ContainerRequestContext ctx) {
         return withoutTrailingSlash(rawPath(ctx));
+    }
+
+    /**
+     * The path without the internal prefix a route filter moved the request under ({@link SignedServiceRoute}), which
+     * is the path the service's model gives the operation and the vendored routes hold; the path itself when it was
+     * moved under none.
+     */
+    static String withoutInternalPrefix(ContainerRequestContext ctx, String path) {
+        return SignedServiceRoute.internalPrefix(ctx)
+                .filter(prefix -> path.equals(prefix) || path.startsWith(prefix + "/"))
+                .map(prefix -> path.length() == prefix.length() ? "/" : path.substring(prefix.length()))
+                .orElse(path);
+    }
+
+    /** Whether a route filter moved the request under an internal prefix, so the router matched its path decoded. */
+    private static boolean movedUnderPrefix(ContainerRequestContext ctx) {
+        return SignedServiceRoute.internalPrefix(ctx).isPresent();
     }
 
     /** The path without its trailing slashes, the root's own kept. */

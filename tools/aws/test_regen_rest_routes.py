@@ -145,3 +145,10 @@ def test_shared_tag_alternative_collision_is_rejected():
     with pytest.raises(SystemExit, match="one route names more than one operation"):
         r.build({"controltower": model("rest-json", "2020-01-01",
             TagResource=("POST", "/tags/{resourceArn}"), OtherOperation=("POST", "/tags"))}, "test")
+
+
+@pytest.mark.parametrize("name", ["payment-cryptography-data", "signer", "xray", "guardduty"])
+def test_a_model_a_route_filter_moves_under_a_prefix_keeps_its_own_paths(name):
+    # IAM matches a moved request on its path without the prefix its filter records, so the routes are the model's.
+    doc = r.build({name: model("rest-json", "2020-01-01", GetThing=("GET", "/things/{ThingId}"))}, "test")
+    assert doc["models"][name]["operations"]["GetThing"]["requestUri"] == "/things/{ThingId}"
