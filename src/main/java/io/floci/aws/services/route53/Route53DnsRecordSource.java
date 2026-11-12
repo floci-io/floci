@@ -119,9 +119,9 @@ public class Route53DnsRecordSource implements DnsRecordSource {
             case 6 -> DnsRecord.Soa::new;
             default -> DnsRecord.Txt::new;
         };
-        DnsAnswer answer = buildRecords(name, zone.matchingRecords().stream()
+        DnsAnswer answer = buildPublicRecords(name, type, zone.matchingRecords().stream()
                 .filter(record -> record.getType().equals(recordType)).toList(),
-                recordFactory, Route53DnsRecordSource::publicTtlOf);
+                recordFactory);
         if (answer.responseCode() != 0) {
             return Optional.of(answer);
         }
@@ -143,6 +143,31 @@ public class Route53DnsRecordSource implements DnsRecordSource {
             LOG.debugv("Cannot encode public DNS records for {0}: {1}", name, e.getMessage());
             return Optional.of(DnsAnswer.refused());
         }
+    }
+
+    private DnsAnswer buildPublicRecords(String name, int type, List<ResourceRecordSet> sets,
+                                        Function<String, DnsRecord> recordFactory) {
+        if (sets.stream().noneMatch(record -> record.getAliasTarget() != null)) {
+            return buildRecords(name, sets, recordFactory, Route53DnsRecordSource::publicTtlOf);
+        }
+        if (sets.size() != 1 || embeddedDnsServer == null || (type != 1 && type != 28)) {
+            return DnsAnswer.refused();
+        }
+        ResourceRecordSet record = sets.getFirst();
+        AliasTarget alias = record.getAliasTarget();
+        if (record.getSetIdentifier() != null || record.getWeight() != null || record.getRegion() != null
+                || record.getFailover() != null || record.getHealthCheckId() != null
+                || Boolean.TRUE.equals(record.getMultiValueAnswer())
+                || alias.isEvaluateTargetHealth() || record.getTtl() != null
+                || record.getRecords() != null && !record.getRecords().isEmpty()) {
+            return DnsAnswer.refused();
+        }
+        DnsAnswer target = embeddedDnsServer.resolveAliasTarget(
+                alias.getDnsName(), alias.getHostedZoneId(), type).orElseGet(DnsAnswer::refused);
+        if (target.responseCode() != 0 || target.records().stream().anyMatch(value -> value.type() != type)) {
+            return DnsAnswer.refused();
+        }
+        return target;
     }
 
     @Override

@@ -79,7 +79,9 @@ For a Docker host client, publish UDP separately from HTTP on loopback, for exam
 
 The longest matching public zone answers. Missing names return NXDOMAIN; existing names without the requested supported type return NOERROR with no answers. Both include the zone SOA with the smaller of its TTL and minimum field for negative caching. Changes and deletes affect DNS through the same stored record sets as the Route 53 API.
 
-Public aliases, CNAME chasing, health-based or weighted record selection, and delegation referrals are not implemented. Queries for supported types that require these features, ambiguous duplicate public zones, or malformed stored records return REFUSED without claiming authority. Other query types retain the existing emulator-name and upstream resolution paths. Private-zone and VPC forwarding-rule precedence remains unchanged. UDP responses honor legacy/EDNS size limits and set truncation when necessary; TCP fallback is not implemented.
+Simple public `A` aliases to stored Application Load Balancers resolve to the embedded DNS server's IPv4 address with a 60-second TTL. The target DNS name and canonical hosted-zone ID must match exactly one stored load balancer, including when the zone and balancer have different owners. Names are case-insensitive and accept the load balancer's `dualstack.` prefix. An `AAAA` alias to a valid target returns NOERROR without addresses because this listener has no IPv6 address. Deleted, ambiguous, unsupported, and mismatched targets return REFUSED without recursive DNS or emulator-suffix fallback.
+
+This provides DNS answers; routing an alias hostname through an ALB's HTTP or TLS listener is a separate data-plane capability. Other public alias target types, CNAME chasing, health-based or weighted record selection, and delegation referrals are not implemented. Queries for supported types that require these features, ambiguous duplicate public zones, or malformed stored records return REFUSED without claiming authority. Other query types retain the existing emulator-name and upstream resolution paths. Private-zone and VPC forwarding-rule precedence remains unchanged. UDP responses honor legacy/EDNS size limits and set truncation when necessary; TCP fallback is not implemented.
 
 ## Default Nameservers
 
@@ -215,4 +217,4 @@ the record. DELETE still requires matching record values and routing properties.
 - Query logging configs
 - DNSSEC (key signing keys, enabling/disabling)
 - `TestDNSAnswer`
-- Public authoritative record types other than simple A, AAAA, TXT, NS, and SOA; public aliases, routing policies, delegation referrals, and DNS-over-TCP
+- Public authoritative record types other than simple A, AAAA, TXT, NS, and SOA; alias targets other than Application Load Balancers, alias data-plane routing, routing policies, delegation referrals, and DNS-over-TCP

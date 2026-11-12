@@ -377,6 +377,29 @@ public class EmbeddedDnsServer {
         return resolveRecordWithOwnership(name, myIp, 1);
     }
 
+    /** Only one stored resource may claim an alias target; failures cannot fall through to DNS. */
+    public Optional<DnsAnswer> resolveAliasTarget(String name, String hostedZoneId, int type) {
+        DnsAnswer resolved = null;
+        if (recordSources != null) {
+            for (DnsRecordSource source : recordSources) {
+                try {
+                    Optional<DnsAnswer> candidate = source.resolveAliasTarget(name, hostedZoneId, type);
+                    if (candidate.isPresent()) {
+                        if (resolved != null) {
+                            return Optional.of(DnsAnswer.refused());
+                        }
+                        resolved = candidate.orElseThrow();
+                    }
+                } catch (RuntimeException failure) {
+                    LOG.debugv("DNS alias source {0} failed to resolve {1}: {2}",
+                            source.getClass().getSimpleName(), name, failure.getMessage());
+                    return Optional.of(DnsAnswer.refused());
+                }
+            }
+        }
+        return Optional.ofNullable(resolved);
+    }
+
     private Optional<DnsAnswer> resolveRecordWithOwnership(String name, String myIp, int type) {
         Optional<DnsAnswer> stored = resolveFromRecordSources(name, type, true);
         if (stored.isPresent()) {

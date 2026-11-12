@@ -33,6 +33,7 @@ import java.net.InetAddress;
 import java.time.Instant;
 import java.util.*;
 import java.util.ArrayList;
+import java.util.Collection;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
@@ -102,6 +103,22 @@ public class ElbV2Service implements ResourceProvider, ServerCertificateReferenc
 
     // tags: resource-ARN → {key → value}
     private Map<String, Map<String, String>> tags = new ConcurrentHashMap<>();
+
+    /** DNS selects the resource owner independently of a management request's account. */
+    List<LoadBalancer> findByDnsName(String name) {
+        if (name == null || name.isBlank()) {
+            return List.of();
+        }
+        String normalized = name.endsWith(".") ? name.substring(0, name.length() - 1) : name;
+        if (normalized.regionMatches(true, 0, "dualstack.", 0, "dualstack.".length())) {
+            normalized = normalized.substring("dualstack.".length());
+        }
+        String target = normalized;
+        Collection<Map<String, LoadBalancer>> regions = allAccounts(loadBalancers, loadBalancerStore);
+        return regions.stream().flatMap(region -> region.values().stream())
+                .filter(lb -> target.equalsIgnoreCase(lb.getDnsName()))
+                .toList();
+    }
 
     @PostConstruct
     void initializeStorage()
