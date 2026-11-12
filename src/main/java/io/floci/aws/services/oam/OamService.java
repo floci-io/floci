@@ -7,6 +7,7 @@ import io.floci.aws.core.common.AwsArnUtils;
 import io.floci.aws.core.common.AwsException;
 import io.floci.aws.core.common.Base64Url;
 import io.floci.aws.core.common.RegionResolver;
+import io.floci.aws.core.common.StoredResourceArns;
 import io.floci.aws.core.storage.AccountAwareStorageBackend;
 import io.floci.aws.core.storage.StorageBackend;
 import io.floci.aws.core.storage.StorageFactory;
@@ -23,12 +24,13 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
+import java.util.Optional;
 import java.util.Set;
 import java.util.UUID;
 import java.util.regex.Pattern;
 
 @ApplicationScoped
-public class OamService {
+public class OamService implements StoredResourceArns {
     private static final Pattern SINK_NAME = Pattern.compile("[A-Za-z0-9_.-]{1,255}");
     private static final Set<String> RESOURCE_TYPES = Set.of(
             "AWS::CloudWatch::Metric", "AWS::Logs::LogGroup", "AWS::XRay::Trace",
@@ -206,14 +208,39 @@ public class OamService {
     }
 
     private OamSink getSinkAcrossAccounts(String arn) {
+        if (arnAccount(arn) == null) {
+            throw invalid("SinkIdentifier must be a sink ARN.");
+        }
+        return sinkAcrossAccounts(arn).orElseThrow(() -> notFound("Sink", arn));
+    }
+
+    /** The sink stored under the ARN in the account it names, which a link is made to from another account. */
+    private Optional<OamSink> sinkAcrossAccounts(String arn) {
         String owner = arnAccount(arn);
-        if (owner == null) throw invalid("SinkIdentifier must be a sink ARN.");
         if (sinks instanceof AccountAwareStorageBackend<?> aware) {
             @SuppressWarnings("unchecked")
             AccountAwareStorageBackend<OamSink> typed = (AccountAwareStorageBackend<OamSink>) aware;
-            return typed.getForAccount(owner, arn).orElseThrow(() -> notFound("Sink", arn));
+            return typed.getForAccount(owner, arn);
         }
-        return sinks.get(arn).orElseThrow(() -> notFound("Sink", arn));
+        return sinks.get(arn);
+    }
+
+    @Override
+    public String namespace() {
+        return "oam";
+    }
+
+    @Override
+    public Optional<String> find(String type, List<String> names, String region) {
+        return Optional.empty();
+    }
+
+    /** A sink another account owns, which {@code CreateLink} finds in that account and links the caller's to. */
+    @Override
+    public boolean reachedInItsAccount(String arn, String accountId) {
+        String owner = arnAccount(arn);
+        return owner != null && !owner.isEmpty() && !owner.equals(accountId) && arn.contains(":sink/")
+                && sinkAcrossAccounts(arn).isPresent();
     }
 
     private Map<String, String> resourceTags(String arn) {

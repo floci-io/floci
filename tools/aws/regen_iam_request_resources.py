@@ -732,9 +732,11 @@ def _protocols(model: dict) -> set[str]:
 
 
 def with_absent_arn(resources: list[dict], formats: dict[str, str], optional: set[str]) -> list[dict]:
-    """Adds, for an optional top-level member holding the ARN of a type whose format has no variable of its own
-    (Security Hub's `hub/default`), that type for a request leaving the member out: there is one resource of the
-    type in the caller's account and Region, the one its service acts on then (`DescribeHub` with no `HubArn`)."""
+    """Adds, for an optional top-level member holding the ARN of a type, that type for a request leaving the member
+    out. A type whose format has no variable of its own (Security Hub's `hub/default`) has one resource in the caller's
+    account and Region, the one its service acts on then (`DescribeHub` with no `HubArn`). Any other is the one its
+    service uses for a request naming none (`default`), which the reader asks the service for, and none when it has
+    none: Resource Explorer's `Search` with no `ViewArn` searches with the Region's default view."""
     named = {resource["type"] for resource in resources if "type" in resource}
     added = []
     for resource in resources:
@@ -743,9 +745,47 @@ def with_absent_arn(resources: list[dict], formats: dict[str, str], optional: se
             continue
         for kind in resource["types"]:
             variables = [v for v in VARIABLE_RE.findall(formats.get(kind, "")) if v not in KNOWN_VARIABLES]
-            if kind in formats and not variables and kind not in named and related(stem(member), stem(kind)):
-                added.append({"type": kind, "fill": {}, "when": {member: [None]}})
+            if kind in formats and kind not in named and related(stem(member), stem(kind)):
+                added.append({"type": kind, "fill": {}, "when": {member: [None]}} if not variables
+                             else {"type": kind, "fill": {}, "when": {member: [None]}, "default": True})
                 named.add(kind)
+    return resources + added
+
+
+def map_fields(models: dict[str, dict], operation: str) -> dict[str, str]:
+    """The fields of each value of a top-level map of structures in the operation's request body that hold a string and
+    end as an id, a name or an identifier, by their path, `Name{}.Field`, each with the field's name."""
+    found: dict[str, str] = {}
+    for model in models.values():
+        spec = model["operations"].get(operation)
+        if spec is None or "input" not in spec or _reading(model) != "all":
+            continue
+        for name, member in model["shapes"][spec["input"]["shape"]].get("members", {}).items():
+            shape = model["shapes"][member["shape"]]
+            if member.get("location") not in BODY_LOCATIONS or shape["type"] != "map":
+                continue
+            value = model["shapes"][shape["value"]["shape"]]
+            for field, nested in value.get("members", {}).items() if value["type"] == "structure" else ():
+                if kind_of(field) and model["shapes"][nested["shape"]]["type"] == "string":
+                    found.setdefault(f"{name}{{}}.{field}", field)
+    return found
+
+
+def with_map_fields(resources: list[dict], types: list[str], formats: dict[str, str],
+                    fields: dict[str, str]) -> list[dict]:
+    """The resources, and a type the action acts on whose format has one variable of its own and that no resource
+    names by its variables, named by the one field of each value of a map of structures named after it, one resource
+    for each value: FIS's `CreateExperimentTemplate` acts on each action its `actions` map names by `actionId`."""
+    named = {resource["type"] for resource in resources if "type" in resource}
+    added = []
+    for kind in types:
+        variables = [v for v in VARIABLE_RE.findall(formats.get(kind, "")) if v not in KNOWN_VARIABLES]
+        if kind in named or kind not in formats or len(variables) != 1:
+            continue
+        filling = [path for path, field in sorted(fields.items())
+                   if stem(field) == stem(kind) and compatible(field, variables[0])]
+        if len(filling) == 1:
+            added.append({"type": kind, "fill": {variables[0]: filling[0]}})
     return resources + added
 
 
@@ -1002,7 +1042,7 @@ def with_arn_of(resources: list[dict], formats: dict[str, str], members: dict[st
         arn_of = {member: named_by(members[member], formats) for member in sorted(read) if member in members}
         arn_of = {member: kind for member, kind in arn_of.items() if kind is not None}
         found.append(dict(resource, arnOf={**resource.get("arnOf", {}), **arn_of})
-                     if "fill" in resource and arn_of else resource)
+                     if "fill" in resource and "default" not in resource and arn_of else resource)
     return found
 
 
@@ -1040,7 +1080,7 @@ def with_account(resources: list[dict], formats: dict[str, str], accounts: list[
     member is absent."""
     if len(accounts) != 1:
         return resources
-    return [dict(resource, account=accounts[0]) if "fill" in resource
+    return [dict(resource, account=accounts[0]) if "fill" in resource and "default" not in resource
             and "${Account}" in formats.get(resource["type"], "")
             and resource.get("when", {}).get(accounts[0]) != [None] else resource for resource in resources]
 
@@ -1200,6 +1240,25 @@ def creates_for(operation: str, types: list[str], formats: dict[str, str], membe
     return found
 
 
+def makes_for(operation: str, types: list[str], formats: dict[str, str], members: dict[str, str],
+              arn_members: set[str] | None = None, labels: dict[str, str] | None = None) -> list[dict]:
+    """The resource a create whose action acts on no resource type makes: of the one type of its namespace named as
+    the operation is past its verb, or else related to that name, named as the rule names a type an action acts on,
+    its variables nothing fills open. AWS checks the tagging action a create's tags need on the resource being
+    tagged, so they are checked there (`CreateView` makes `view/<ViewName>/*`, `CreateSink` `sink/*`), and the create
+    itself stays checked on `*`."""
+    name = operation.split(":", 1)[1]
+    if types or not CREATING_RE.match(name):
+        return []
+    created = stem(CREATING_RE.sub("", name))
+    kinds = [kind for kind in formats if stem(kind) == created] \
+        or [kind for kind in formats if related(created, stem(kind))]
+    if len(kinds) != 1:
+        return []
+    return [resource for resource in resources_for(operation, kinds, formats, members, arn_members, labels)
+            if resource.get("type") == kinds[0]][:1]
+
+
 def by_members_key_is_empty(kinds: list[str], filled: dict[str, dict[str, str]]) -> bool:
     """Whether the types are named by no member at all: each a create's own type, all ids minted."""
     return all(not filled[kind] for kind in kinds)
@@ -1325,6 +1384,7 @@ def entry_for(operation: str, upstream: dict, formats: dict[str, str], models: d
         resources = with_absent_arn(resources, formats, optional)
         resources = with_absent_account(resources, formats, account_members(models, operation.split(":", 1)[1]),
                                         optional)
+        resources = with_map_fields(resources, types, formats, map_fields(models, operation.split(":", 1)[1]))
     resources = with_account(resources, formats, account_members(models, operation.split(":", 1)[1]))
     resources = with_arn_of(resources, formats, name_or_arn_members(models, operation.split(":", 1)[1]))
     resources = with_made(resources, operation, formats)
@@ -1332,7 +1392,11 @@ def entry_for(operation: str, upstream: dict, formats: dict[str, str], models: d
     creates = creates_for(operation, types, formats, members)
     if creates:
         entry["creates"] = creates
-    named = _named(resources) | _named(creates)
+    makes = makes_for(operation, types, formats, members, arn_members,
+                      path_labels(models, operation.split(":", 1)[1]))
+    if makes:
+        entry["makes"] = makes
+    named = _named(resources) | _named(creates) | _named(makes)
     located = {member: where for member, where in located_members(models, operation.split(":", 1)[1]).items()
                if member in named}
     if located:
@@ -1539,7 +1603,8 @@ def render(document: dict) -> str:
 PATH_RE = re.compile(r"^[A-Za-z][A-Za-z0-9_]*(\[])?$")
 # A member filling a variable may also be a field of a structure, or of each element of a list of structures, one
 # value for each.
-FILL_PATH_RE = re.compile(r"^[A-Za-z][A-Za-z0-9_]*(\[]|\[]\.[A-Za-z][A-Za-z0-9_]*|\.[A-Za-z][A-Za-z0-9_]*)?$")
+FILL_PATH_RE = re.compile(r"^[A-Za-z][A-Za-z0-9_]*(\[]|\[]\.[A-Za-z][A-Za-z0-9_]*|\{}\.[A-Za-z][A-Za-z0-9_]*"
+                          r"|\.[A-Za-z][A-Za-z0-9_]*)?$")
 # ARN paths can traverse structures, array elements ([]) and map values ({}).
 ARN_PATH_RE = re.compile(r"^(?:[A-Za-z][A-Za-z0-9_]*(\[])?(\.[A-Za-z][A-Za-z0-9_]*(\[])?)?"
                          r"|[A-Za-z][A-Za-z0-9_]*\{\}(\.[A-Za-z][A-Za-z0-9_]*){1,2})$")
@@ -1590,7 +1655,8 @@ def validate(document: dict) -> list[str]:
         if not OPERATION_RE.match(operation) or namespace not in namespaces:
             problems.append(f"{operation!r} is not an operation of a namespace the file reads")
             continue
-        if not isinstance(entry, dict) or not {"action", "types", "resources"} <= set(entry) <= {"action", "types", "resources", "creates", "located", "targets"}:
+        if not isinstance(entry, dict) or not {"action", "types", "resources"} <= set(entry) <= {
+                "action", "types", "resources", "creates", "makes", "located", "targets"}:
             problems.append(f"{operation} is not an action, its types and its resources")
             continue
         if not isinstance(entry["action"], str) or not OPERATION_RE.match(entry["action"]) \
@@ -1604,6 +1670,11 @@ def validate(document: dict) -> list[str]:
             problems += _resource_problems(operation, resource, set(types), formats.get(namespace, {}))
         for created in entry.get("creates", []) if isinstance(entry.get("creates", []), list) else [None]:
             problems += _created_problems(operation, created, set(types), formats.get(namespace, {}))
+        for made in entry.get("makes", []) if isinstance(entry.get("makes", []), list) else [None]:
+            if types or not isinstance(made, dict) or set(made) != {"type", "fill"}:
+                problems.append(f"{operation} makes {made!r}, which is no type's variables of a create acting on none")
+            else:
+                problems += _resource_problems(operation, made, {made["type"]}, formats.get(namespace, {}))
         targets = entry.get("targets")
         if targets is not None:
             if not isinstance(targets, dict) or set(targets) != {"member", "query", "prefixes"}:
@@ -1637,8 +1708,12 @@ def _resource_problems(operation: str, resource: object, types: set[str], format
                                               or {"types", "through"} <= set(resource) <= {"types", "through", "when",
                                                                                             "endpoint"}
                                               or {"type", "fill"} <= set(resource) <= {"type", "fill", "when", "unless", "absent", "arnOf", "account",
-                                                                                       "fixed", "made", "before", "find", "endpoint"}):
+                                                                                       "fixed", "made", "before", "find", "endpoint",
+                                                                                       "default"}):
         return [f"{operation} names {resource!r}, which is neither an ARN member nor a type's variables"]
+    if "default" in resource and (resource["default"] is not True or resource["fill"] or not resource.get("when")
+                                  or set(resource) - {"type", "fill", "when", "default", "endpoint"}):
+        return [f"{operation} names {resource!r} as its service's default, which is not for a request naming none"]
     if "endpoint" in resource and not (isinstance(resource["endpoint"], str) and resource["endpoint"]):
         return [f"{operation} serves {resource!r} on {resource['endpoint']!r}, which is no endpoint prefix"]
     if resource.get("made", True) is not True:
@@ -1670,7 +1745,7 @@ def _resource_problems(operation: str, resource: object, types: set[str], format
     if not isinstance(fill, dict) or set(fill) - variables or not all(
             isinstance(path, str) and FILL_PATH_RE.match(path) for path in fill.values()):
         return [f"{operation} fills {fill!r}, which are no variables of {kinds[0]}'s ARN by members"]
-    if sum("[]" in path for path in fill.values()) > 1:
+    if sum("[]" in path or "{}" in path for path in fill.values()) > 1:
         return [f"{operation} fills {kinds[0]} from more than one list"]
     fixed = resource.get("fixed", {})
     if not isinstance(fixed, dict) or set(fixed) - variables or set(fixed) & set(fill) or not all(
@@ -1712,7 +1787,7 @@ def _read_as_one(path: object, fill: dict) -> bool:
     field of each element of a list of structures that fills a variable, one value for each element."""
     if not isinstance(path, str):
         return False
-    if "[]." in path:
+    if "[]." in path or "{}." in path:
         return bool(FILL_PATH_RE.match(path)) and path in fill.values()
     return bool(FILL_PATH_RE.match(path)) and not path.endswith("[]")
 

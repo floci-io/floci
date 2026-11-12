@@ -44,6 +44,8 @@ class IamRestRouteEnforcementIntegrationTest {
     private static final String ACCOUNT = "000000000000";
     /** The management account of an organization of this class's own, which no other test uses. */
     private static final String MANAGEMENT = "731000000154";
+    /** Another account, owning the sinks and shares this class's own account reaches across accounts. */
+    private static final String PEER = "731000000162";
 
     @TestHTTPResource("/")
     static URI baseUri;
@@ -1067,6 +1069,146 @@ class IamRestRouteEnforcementIntegrationTest {
                 .statusCode(200).body("View.ViewArn", equalTo(view));
         refused(request(user, service, "POST", "/GetView", "{\"ViewArn\":\"" + other + "\"}"),
                 "resource-explorer-2:GetView");
+    }
+
+    @Test
+    void createsActingOnNoResourceTypeAreCheckedForTheirTagsOnWhatTheyMake() {
+        String service = "resource-explorer-2";
+        String user = user("route-made-tags");
+        String views = "arn:aws:resource-explorer-2:us-east-1:" + ACCOUNT + ":view/*";
+        String indexes = "arn:aws:resource-explorer-2:eu-west-2:" + ACCOUNT + ":index/*";
+        String sinks = "arn:aws:oam:us-east-1:" + ACCOUNT + ":sink/*";
+        String tags = "\"Tags\":{\"team\":\"red\"}";
+        String creates = allow("resource-explorer-2:CreateView", "*") + "," + allow("resource-explorer-2:CreateIndex", "*")
+                + "," + allow("oam:CreateSink", "*");
+
+        // A tagging grant scoped to the type a create makes lets its tags through.
+        policy(user, creates + "," + allow("resource-explorer-2:TagResource", views) + ","
+                + allow("resource-explorer-2:TagResource", indexes) + "," + allow("oam:TagResource", sinks));
+        String view = request(user, service, "POST", "/CreateView",
+                "{\"ViewName\":\"route-made-" + suffix() + "\"," + tags + "}").statusCode(200).extract().path("View.ViewArn");
+        cleanup.register(() -> adminOf(service).body("{\"ViewArn\":\"" + view + "\"}").post("/DeleteView"));
+        String sink = request(user, "oam", "POST", "/CreateSink", "{\"Name\":\"route-made-" + suffix() + "\"," + tags + "}")
+                .statusCode(200).extract().path("Arn");
+        cleanup.register(() -> adminOf("oam").body("{\"Identifier\":\"" + sink + "\"}").post("/DeleteSink"));
+        Response index = as(user, "eu-west-2", service).body("{" + tags + "}").post("/CreateIndex");
+        index.then().statusCode(not(403));
+        if (index.statusCode() == 200) {
+            String arn = index.path("Arn");
+            cleanup.register(() -> given().header("Authorization", auth(ADMIN, "eu-west-2", service))
+                    .contentType("application/json").body("{\"Arn\":\"" + arn + "\"}").post("/DeleteIndex"));
+        }
+
+        // A grant on another type, or a deny on the type made, refuses them.
+        policy(user, creates + "," + allow("resource-explorer-2:TagResource", indexes.replace("eu-west-2", "us-east-1"))
+                + "," + allow("oam:TagResource", "*") + "," + deny("oam:TagResource", sinks));
+        refused(request(user, service, "POST", "/CreateView", "{\"ViewName\":\"route-made-" + suffix() + "\"," + tags + "}"),
+                "resource-explorer-2:TagResource");
+        refused(as(user, "eu-west-2", service).body("{" + tags + "}").post("/CreateIndex").then(),
+                "resource-explorer-2:TagResource");
+        refused(request(user, "oam", "POST", "/CreateSink", "{\"Name\":\"route-made-" + suffix() + "\"," + tags + "}"),
+                "oam:TagResource");
+    }
+
+    @Test
+    void oamCreateLinkIsCheckedOnTheSinkOfTheAccountItsArnNamesAlone() {
+        String sink = given().header("Authorization", auth(PEER, "oam")).contentType("application/json")
+                .body("{\"Name\":\"route-peer-" + suffix() + "\"}").post("/CreateSink")
+                .then().statusCode(200).extract().path("Arn");
+        cleanup.register(() -> given().header("Authorization", auth(PEER, "oam")).contentType("application/json")
+                .body("{\"Identifier\":\"" + sink + "\"}").post("/DeleteSink"));
+        String sinkPolicy = "{\"Version\":\"2012-10-17\",\"Statement\":[{\"Effect\":\"Allow\",\"Principal\":{\"AWS\":[\""
+                + ACCOUNT + "\"]},\"Action\":[\"oam:CreateLink\"],\"Resource\":\"*\"}]}";
+        given().header("Authorization", auth(PEER, "oam")).contentType("application/json")
+                .body("{\"SinkIdentifier\":\"" + sink + "\",\"Policy\":\"" + sinkPolicy.replace("\"", "\\\"") + "\"}")
+                .post("/PutSinkPolicy").then().statusCode(200);
+        String user = user("route-oam-link");
+        String action = "oam:CreateLink";
+        String body = "{\"SinkIdentifier\":\"" + sink + "\",\"LabelTemplate\":\"$AccountName\","
+                + "\"ResourceTypes\":[\"AWS::CloudWatch::Metric\"]}";
+
+        // The sink is the other account's, which the link is made to: a grant on a sink of that name of the caller's
+        // own is no grant on it.
+        policy(user, allow(action, sink.replace(PEER, ACCOUNT)));
+        refused(request(user, "oam", "POST", "/CreateLink", body), action);
+        policy(user, allow(action, "*") + "," + deny(action, sink));
+        refused(request(user, "oam", "POST", "/CreateLink", body), action);
+        policy(user, allow(action, sink));
+        String link = request(user, "oam", "POST", "/CreateLink", body).statusCode(200).extract().path("Arn");
+        cleanup.register(() -> adminOf("oam").body("{\"Identifier\":\"" + link + "\"}").post("/DeleteLink"));
+    }
+
+    @Test
+    void ramInvitationIsCheckedOnTheInvitationOfTheAccountThatSentIt() {
+        String share = given().header("Authorization", auth(PEER, "ram")).contentType("application/json")
+                .body("{\"name\":\"route-invite-" + suffix() + "\",\"principals\":[\"" + ACCOUNT + "\"]}")
+                .post("/createresourceshare").then().statusCode(200).extract().path("resourceShare.resourceShareArn");
+        cleanup.register(() -> given().header("Authorization", auth(PEER, "ram")).queryParam("resourceShareArn", share)
+                .delete("/deleteresourceshare"));
+        String invitation = adminOf("ram").body("{\"resourceShareArns\":[\"" + share + "\"]}")
+                .post("/getresourceshareinvitations").then().statusCode(200)
+                .extract().path("resourceShareInvitations[0].resourceShareInvitationArn");
+        String user = user("route-ram-invite");
+        String action = "ram:AcceptResourceShareInvitation";
+        String body = "{\"resourceShareInvitationArn\":\"" + invitation + "\"}";
+
+        policy(user, allow(action, invitation.replace(PEER, ACCOUNT)));
+        refused(request(user, "ram", "POST", "/acceptresourceshareinvitation", body), action);
+        policy(user, allow(action, invitation));
+        request(user, "ram", "POST", "/acceptresourceshareinvitation", body).statusCode(200)
+                .body("resourceShareInvitation.status", equalTo("ACCEPTED"));
+        // The share it accepted is the other account's, whose permissions it reads there.
+        policy(user, allow("ram:ListResourceSharePermissions", share));
+        request(user, "ram", "POST", "/listresourcesharepermissions", "{\"resourceShareArn\":\"" + share + "\"}")
+                .statusCode(200);
+    }
+
+    @Test
+    void fisTemplatesAreCheckedOnTheActionsTheyName() {
+        String user = user("route-fis-actions");
+        String create = "fis:CreateExperimentTemplate";
+        String update = "fis:UpdateExperimentTemplate";
+        String wait = "arn:aws:fis:us-east-1:" + ACCOUNT + ":action/aws:fis:wait";
+        String templates = "arn:aws:fis:us-east-1:" + ACCOUNT + ":experiment-template/*";
+        String template = "{\"clientToken\":\"" + suffix() + "\",\"description\":\"d\",\"roleArn\":\"arn:aws:iam::"
+                + ACCOUNT + ":role/fis\",\"stopConditions\":[{\"source\":\"none\"}],\"targets\":{},\"actions\":"
+                + "{\"wait\":{\"actionId\":\"aws:fis:wait\",\"parameters\":{\"duration\":\"PT1M\"}}}}";
+        String actions = "{\"actions\":{\"wait\":{\"actionId\":\"aws:fis:wait\",\"parameters\":{\"duration\":\"PT2M\"}}}}";
+        String passRole = allow("iam:PassRole", "*");
+
+        policy(user, allow(create, "*") + "," + deny(create, wait) + "," + passRole);
+        refused(request(user, "fis", "POST", "/experimentTemplates", template), create);
+        policy(user, allow(create, templates) + "," + passRole);
+        refused(request(user, "fis", "POST", "/experimentTemplates", template), create);
+        policy(user, allow(create, templates) + "," + allow(create, wait) + "," + passRole);
+        String id = request(user, "fis", "POST", "/experimentTemplates", template)
+                .statusCode(200).extract().path("experimentTemplate.id");
+        cleanup.register(() -> adminOf("fis").delete("/experimentTemplates/" + id));
+
+        policy(user, allow(update, "*") + "," + deny(update, wait));
+        refused(request(user, "fis", "PATCH", "/experimentTemplates/" + id, actions), update);
+        policy(user, allow(update, templates) + "," + allow(update, wait));
+        request(user, "fis", "PATCH", "/experimentTemplates/" + id, actions).statusCode(200);
+    }
+
+    @Test
+    void resourceExplorerSearchesNamingNoViewAreCheckedOnTheDefaultView() {
+        String service = "resource-explorer-2";
+        String view = adminOf(service).body("{}").post("/GetDefaultView").then().statusCode(200).extract().path("ViewArn");
+        String other = "arn:aws:resource-explorer-2:us-east-1:" + ACCOUNT + ":view/other/1";
+        String user = user("route-re2-default");
+        String action = "resource-explorer-2:Search";
+        String search = "{\"QueryString\":\"\"}";
+
+        policy(user, allow(action, view));
+        request(user, service, "POST", "/Search", search).statusCode(200);
+        request(user, service, "POST", "/ListResources", "{}").statusCode(200);
+        policy(user, allow(action, other));
+        refused(request(user, service, "POST", "/Search", search), action);
+        refused(request(user, service, "POST", "/ListResources", "{}"), action);
+        policy(user, allow(action, "*") + "," + deny(action, view));
+        refused(request(user, service, "POST", "/Search", search), action);
+        refused(request(user, service, "POST", "/ListResources", "{}"), action);
     }
 
     @Test

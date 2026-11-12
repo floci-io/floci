@@ -77,10 +77,66 @@ def test_an_optional_arn_member_of_a_type_without_variables_names_it_when_absent
     named = [{"types": ["catalog", "thing"], "arn": "CatalogArn"}]
     assert r.with_absent_arn(named, FORMATS, {"CatalogArn"}) == named + [
         {"type": "catalog", "fill": {}, "when": {"CatalogArn": [None]}}]
-    # A required member is always there, and a type with a variable of its own names no one resource without it.
+    # A required member is always there.
     assert r.with_absent_arn(named, FORMATS, set()) == named
-    assert r.with_absent_arn([{"types": ["thing"], "arn": "ThingArn"}], FORMATS, {"ThingArn"}) == [
-        {"types": ["thing"], "arn": "ThingArn"}]
+
+
+def test_an_optional_arn_member_of_a_type_with_variables_names_its_services_default_when_absent():
+    # Resource Explorer's Search with no ViewArn searches with the Region's default view, which its service finds.
+    named = [{"types": ["thing"], "arn": "ThingArn"}]
+    default = {"type": "thing", "fill": {}, "when": {"ThingArn": [None]}, "default": True}
+    assert r.with_absent_arn(named, FORMATS, {"ThingArn"}) == named + [default]
+    assert r.with_absent_arn(named, FORMATS, set()) == named
+    # A member named after another type names no default of this one, and the default takes no account member.
+    assert r.with_absent_arn([{"types": ["thing"], "arn": "PoolArn"}], FORMATS, {"PoolArn"}) == [
+        {"types": ["thing"], "arn": "PoolArn"}]
+    assert r.with_account([default], FORMATS, ["registryId"]) == [default]
+
+
+VIEWS = {"view": "arn:${Partition}:svc:${Region}:${Account}:view/${ViewName}/${ViewUuid}",
+         "managed-view": "arn:${Partition}:svc:${Region}:${Account}:managed-view/${ManagedViewName}/${ManagedViewUuid}",
+         "index": "arn:${Partition}:svc:${Region}:${Account}:index/${IndexUuid}",
+         "userpool": "arn:${Partition}:svc:${Region}:${Account}:userpool/${UserPoolId}",
+         "grouppool": "arn:${Partition}:svc:${Region}:${Account}:grouppool/${GroupPoolId}"}
+
+
+def test_a_create_whose_action_acts_on_no_type_makes_the_one_named_as_it_is():
+    # Its tags are checked on what it makes: the type of its own name before one ending with it, its ids open.
+    assert r.makes_for("svc:CreateView", [], VIEWS, members("ViewName", "ClientToken")) == [
+        {"type": "view", "fill": {"ViewName": "ViewName"}}]
+    assert r.makes_for("svc:CreateIndex", [], VIEWS, members("ClientToken")) == [{"type": "index", "fill": {}}]
+    # A create whose action acts on types is checked on them, and an operation creating nothing makes nothing.
+    assert r.makes_for("svc:CreateView", ["view"], VIEWS, members("ViewName")) == []
+    assert r.makes_for("svc:DescribeView", [], VIEWS, members("ViewName")) == []
+    # Nor does a create named after no type, or one named after none exactly and related to two.
+    assert r.makes_for("svc:CreateSearch", [], VIEWS, {}) == []
+    assert r.makes_for("svc:CreatePool", [], VIEWS, {}) == []
+
+
+def test_a_built_document_with_what_a_create_makes_a_default_and_a_maps_ids_validates(corrections, tmp_path):
+    service = model({"CreateThing": {"ThingName": "String"}, "ListThings": {"ThingArn": "String"}, "ApplySteps": {}})
+    service["shapes"]["Step"] = {"type": "structure", "members": {"poolId": {"shape": "String"},
+                                                                  "note": {"shape": "String"}}}
+    service["shapes"]["Steps"] = {"type": "map", "key": {"shape": "String"}, "value": {"shape": "Step"}}
+    service["shapes"]["ApplyStepsIn"]["members"]["steps"] = {"shape": "Steps"}
+    write_models(tmp_path, {"svc": service})
+    documents = [reference("svc", {"CreateThing": [], "ListThings": ["thing"], "ApplySteps": ["pool"]},
+                           {"thing": FORMATS["thing"], "pool": FORMATS["pool"]})]
+    document = r.build(documents, "test", tmp_path, "botocore test")
+    assert r.validate(document) == [] and r.derive(document, tmp_path) == []
+    operations = document["operations"]
+    assert operations["svc:CreateThing"] == {"action": "svc:CreateThing", "types": [], "resources": [],
+                                             "makes": [{"type": "thing", "fill": {"ThingName": "ThingName"}}]}
+    assert operations["svc:ListThings"]["resources"] == [
+        {"types": ["thing"], "arn": "ThingArn"}, {"type": "thing", "fill": {}, "when": {"ThingArn": [None]}, "default": True}]
+    # A field of each value of a map of structures, named after a type the action acts on, names one of it each.
+    assert operations["svc:ApplySteps"]["resources"] == [{"type": "pool", "fill": {"PoolId": "steps{}.poolId"}}]
+    assert json.loads(r.render(document)) == document
+    # A create acting on types makes nothing this way, and a default is for a request naming none, by no member.
+    operations["svc:ListThings"]["makes"] = [{"type": "thing", "fill": {}}]
+    operations["svc:CreateThing"]["resources"] = [{"type": "thing", "fill": {"ThingName": "ThingName"},
+                                                   "when": {"ThingArn": [None]}, "default": True}]
+    assert len(r.validate(document)) == 2
 
 
 def test_types_named_only_through_the_same_members_are_alternatives():
