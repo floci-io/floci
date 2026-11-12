@@ -1100,7 +1100,12 @@ public class Route53Controller {
                         }
                         case "MultiValueAnswer" -> {
                             if (inRrs && currentRrs != null) {
-                                currentRrs.setMultiValueAnswer(Boolean.valueOf(r.getElementText()));
+                                String multiValueAnswer = r.getElementText();
+                                if (!"true".equals(multiValueAnswer) && !"false".equals(multiValueAnswer)) {
+                                    throw new AwsException("InvalidInput",
+                                            "MultiValueAnswer must be true or false.", 400);
+                                }
+                                currentRrs.setMultiValueAnswer(Boolean.valueOf(multiValueAnswer));
                             }
                         }
                         case "Weight" -> {

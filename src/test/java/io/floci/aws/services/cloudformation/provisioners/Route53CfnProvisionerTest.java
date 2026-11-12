@@ -758,6 +758,15 @@ class Route53CfnProvisionerTest {
                 + "\"SetIdentifier\":\"a\",\"Weight\":\"heavy\"}");
     }
 
+    @ParameterizedTest
+    @ValueSource(strings = {"\"yes\"", "\"1\"", "1", "0", "\"TRUE\"", "\"False\""})
+    void recordSetWithMalformedMultiValueAnswerIsRejected(String value) {
+        assertRecordSetRejected("""
+                {"HostedZoneId":"Z1", "Name":"multi.example.test.", "Type":"A", "TTL":"10",
+                 "SetIdentifier":"instance-1", "ResourceRecords":["192.0.2.1"], "MultiValueAnswer":%s}
+                """.formatted(value));
+    }
+
     @Test
     void recordGroupWritesEveryRecordSetInOneBatchWithItsRoutingPolicy() throws Exception {
         Route53Service service = mock(Route53Service.class);

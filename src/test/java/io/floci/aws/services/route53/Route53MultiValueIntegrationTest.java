@@ -16,12 +16,47 @@ import software.amazon.awssdk.services.route53.model.ResourceRecordSet;
 
 import java.util.UUID;
 
+import static io.restassured.RestAssured.given;
+import static org.hamcrest.Matchers.containsString;
+import static org.hamcrest.Matchers.equalTo;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 @QuarkusTest
 class Route53MultiValueIntegrationTest {
+
+    @ParameterizedTest
+    @ValueSource(strings = {"yes", "1", "0", "TRUE", "False", "", " true "})
+    void malformedMultiValueAnswerRejectsTheWholeChangeBatch(String value) {
+        String zoneId = Route53HostedZoneTestSupport.createZone(
+                "multivalue-invalid.example.test.", "multivalue-invalid-" + UUID.randomUUID());
+        String record = """
+                <Change><Action>CREATE</Action><ResourceRecordSet>
+                  <Name>%s.multivalue-invalid.example.test.</Name><Type>A</Type>
+                  <SetIdentifier>instance-1</SetIdentifier>%s<TTL>10</TTL>
+                  <ResourceRecords><ResourceRecord><Value>192.0.2.1</Value></ResourceRecord></ResourceRecords>
+                </ResourceRecordSet></Change>
+                """;
+        String body = """
+                <ChangeResourceRecordSetsRequest xmlns="https://route53.amazonaws.com/doc/2013-04-01/">
+                  <ChangeBatch><Changes>%s%s</Changes></ChangeBatch>
+                </ChangeResourceRecordSetsRequest>
+                """.formatted(record.formatted("valid", "<MultiValueAnswer>true</MultiValueAnswer>"),
+                        record.formatted("invalid", "<MultiValueAnswer>" + value + "</MultiValueAnswer>"));
+        try {
+            given().contentType("application/xml").body(body)
+                    .when().post("/2013-04-01/hostedzone/" + zoneId + "/rrset")
+                    .then().statusCode(400)
+                    .body("ErrorResponse.Error.Code", equalTo("InvalidInput"))
+                    .body("ErrorResponse.Error.Message", containsString("MultiValueAnswer"));
+            given().when().get("/2013-04-01/hostedzone/" + zoneId + "/rrset")
+                    .then().statusCode(200)
+                    .body("ListResourceRecordSetsResponse.ResourceRecordSets.ResourceRecordSet.size()", equalTo(2));
+        } finally {
+            given().when().delete("/2013-04-01/hostedzone/" + zoneId).then().statusCode(200);
+        }
+    }
 
     @ParameterizedTest
     @NullSource
