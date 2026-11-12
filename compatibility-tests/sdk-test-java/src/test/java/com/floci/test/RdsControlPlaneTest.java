@@ -542,27 +542,40 @@ class RdsControlPlaneTest {
     }
 
     @Test
-    @DisplayName("ModifyDBInstance resizes and upgrades an instance, and Describe reports it")
-    void sdkResizesAndUpgradesAStandaloneInstance() {
+    @DisplayName("ModifyDBInstance resizes an instance and refuses unsupported engine upgrades atomically")
+    void sdkResizesAnInstanceAndRejectsUnsupportedEngineUpgrades() {
         String instanceName = TestFixtures.uniqueName("rds-resize-db");
         try {
             createDbInstance(rds, instanceName, "resize-secret");
 
-            DBInstance modified = rds.modifyDBInstance(b -> b
+            assertThatThrownBy(() -> rds.modifyDBInstance(b -> b
                     .dbInstanceIdentifier(instanceName)
                     .dbInstanceClass("db.t3.large")
                     .allocatedStorage(100)
-                    .engineVersion("16.4")).dbInstance();
+                    .engineVersion("16.4")))
+                    .isInstanceOfSatisfying(RdsException.class, e -> assertThat(
+                            e.awsErrorDetails().errorCode()).isEqualTo("InvalidParameterCombination"));
+
+            DBInstance unchanged = rds.describeDBInstances(b -> b.dbInstanceIdentifier(instanceName))
+                    .dbInstances().get(0);
+            assertThat(unchanged.dbInstanceClass()).isEqualTo("db.t3.micro");
+            assertThat(unchanged.allocatedStorage()).isEqualTo(20);
+            assertThat(unchanged.engineVersion()).isEqualTo("16.3");
+
+            DBInstance modified = rds.modifyDBInstance(b -> b
+                    .dbInstanceIdentifier(instanceName)
+                    .dbInstanceClass("db.t3.large")
+                    .allocatedStorage(100)).dbInstance();
 
             assertThat(modified.dbInstanceClass()).isEqualTo("db.t3.large");
             assertThat(modified.allocatedStorage()).isEqualTo(100);
-            assertThat(modified.engineVersion()).isEqualTo("16.4");
+            assertThat(modified.engineVersion()).isEqualTo("16.3");
 
             DBInstance described = rds.describeDBInstances(b -> b.dbInstanceIdentifier(instanceName))
                     .dbInstances().get(0);
             assertThat(described.dbInstanceClass()).isEqualTo("db.t3.large");
             assertThat(described.allocatedStorage()).isEqualTo(100);
-            assertThat(described.engineVersion()).isEqualTo("16.4");
+            assertThat(described.engineVersion()).isEqualTo("16.3");
 
             assertThatThrownBy(() -> rds.modifyDBInstance(b -> b
                     .dbInstanceIdentifier(instanceName).allocatedStorage(50)))
@@ -574,11 +587,18 @@ class RdsControlPlaneTest {
                     .isInstanceOfSatisfying(RdsException.class, e -> assertThat(
                             e.awsErrorDetails().errorCode()).isEqualTo("InvalidParameterCombination"));
 
-            DBInstance upgraded = rds.modifyDBInstance(b -> b
+            assertThatThrownBy(() -> rds.modifyDBInstance(b -> b
                     .dbInstanceIdentifier(instanceName)
                     .engineVersion("17.2")
-                    .allowMajorVersionUpgrade(true)).dbInstance();
-            assertThat(upgraded.engineVersion()).isEqualTo("17.2");
+                    .allowMajorVersionUpgrade(true)))
+                    .isInstanceOfSatisfying(RdsException.class, e -> assertThat(
+                            e.awsErrorDetails().errorCode()).isEqualTo("InvalidParameterCombination"));
+
+            DBInstance afterRejectedUpgrades = rds.describeDBInstances(b -> b.dbInstanceIdentifier(instanceName))
+                    .dbInstances().get(0);
+            assertThat(afterRejectedUpgrades.engineVersion()).isEqualTo("16.3");
+            assertThat(afterRejectedUpgrades.dbInstanceClass()).isEqualTo("db.t3.large");
+            assertThat(afterRejectedUpgrades.allocatedStorage()).isEqualTo(100);
         } finally {
             deleteDbInstance(rds, instanceName);
         }

@@ -473,6 +473,12 @@ changes rather than reporting a version the server is not running. `AllowMajorVe
 and `ApplyImmediately` do not bypass this limitation. Repeating the current version is allowed,
 including alongside changes to other settings.
 
+A standalone instance created while Docker is unavailable may change its version before its first
+backend startup. Its eventual container uses the updated version. Floci persists this never-started
+state, and protects the version before attempting to initialize the database, including when a later
+proxy startup fails. Existing databases remain protected after a reboot, storage reload, or lost
+container. Older records without this state are protected conservatively.
+
 In mock mode (`FLOCI_SERVICES_RDS_MOCK=true`), `EngineVersion` updates the instance metadata.
 A minor upgrade is accepted on its own. A different major version needs
 `AllowMajorVersionUpgrade`, without which the request fails with `InvalidParameterCombination`.

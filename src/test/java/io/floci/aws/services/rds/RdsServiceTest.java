@@ -2603,6 +2603,97 @@ class RdsServiceTest {
         assertEquals("16.4", rdsService.getDbInstance("real-engine").getEngineVersion());
     }
 
+    @Test
+    void modifyDbInstanceUpdatesEngineVersionBeforeTheFirstBackendStart() {
+        when(containerManager.tryStart(any(), any(), any(), any(), any(), any(), any(), any(), any(), any()))
+                .thenReturn(null);
+        createScalingInstance("offline-upgrade", "postgres", "16.4", 20);
+        assertNull(rdsService.getDbInstance("offline-upgrade").getContainerId());
+        assertNull(rdsService.ensureInstanceBackend("offline-upgrade", "us-east-1").getContainerId());
+
+        DbInstance modified = rdsService.modifyDbInstance("offline-upgrade", null, null, null,
+                null, null, null, null, DbInstanceSettings.unchanged(), null,
+                new DbInstanceScalingChanges(null, null, "17.2", true));
+
+        assertEquals("17.2", modified.getEngineVersion());
+        assertTrue(modified.isBackendNeverStarted());
+        clearInvocations(containerManager);
+        when(containerManager.tryStart(any(), any(), any(), any(), any(), any(), any(), any(), any(), any()))
+                .thenReturn(new RdsContainerHandle("new-container", "offline-upgrade", "localhost", 5432));
+        DbInstance started = rdsService.ensureInstanceBackend("offline-upgrade", "us-east-1");
+
+        assertEquals("17.2", started.getEngineVersion());
+        assertEquals("new-container", started.getContainerId());
+        assertFalse(started.isBackendNeverStarted());
+        verify(containerManager).tryStart(any(), eq("offline-upgrade"), any(), any(), eq(DatabaseEngine.POSTGRES),
+                eq("postgres:17.2-alpine"), any(), any(), any(), any());
+    }
+
+    @ParameterizedTest
+    @ValueSource(booleans = {true, false})
+    void engineVersionProtectionSurvivesMissingRuntimeAndStorageReload(
+            boolean started, @TempDir Path directory) {
+        Path file = directory.resolve("instances.json");
+        TypeReference<Map<String, DbInstance>> type = new TypeReference<>() {};
+        PersistentStorage<String, DbInstance> instances = new PersistentStorage<>(file, type);
+        rdsService = newService(containerManager, proxyManager, instances,
+                new InMemoryStorage<>(), new InMemoryStorage<>(), new InMemoryStorage<>(), new InMemoryStorage<>());
+        if (!started) {
+            when(containerManager.tryStart(any(), any(), any(), any(), any(), any(), any(), any(), any(), any()))
+                    .thenReturn(null);
+        }
+        createScalingInstance("history-db", "postgres", "16.4", 20);
+        DbInstance created = rdsService.getDbInstance("history-db");
+        created.setContainerId(null);
+        created.setContainerHost(null);
+        created.setContainerPort(0);
+        instances.put(instances.keys().iterator().next(), created);
+
+        PersistentStorage<String, DbInstance> reloaded = new PersistentStorage<>(file, type);
+        reloaded.load();
+        rdsService = newService(containerManager, proxyManager, reloaded,
+                new InMemoryStorage<>(), new InMemoryStorage<>(), new InMemoryStorage<>(), new InMemoryStorage<>());
+        Executable modify = () -> rdsService.modifyDbInstance("history-db", null, null, null,
+                null, null, null, null, DbInstanceSettings.unchanged(), null,
+                new DbInstanceScalingChanges(null, null, "17.2", true));
+
+        if (started) {
+            assertEquals("InvalidParameterCombination", assertThrows(AwsException.class, modify).getErrorCode());
+            assertEquals("16.4", rdsService.getDbInstance("history-db").getEngineVersion());
+        } else {
+            assertDoesNotThrow(modify);
+            assertEquals("17.2", rdsService.getDbInstance("history-db").getEngineVersion());
+        }
+    }
+
+    @Test
+    void engineVersionProtectionIsPersistedBeforeAProxyStartupFailure(@TempDir Path directory) {
+        Path file = directory.resolve("instances.json");
+        TypeReference<Map<String, DbInstance>> type = new TypeReference<>() {};
+        PersistentStorage<String, DbInstance> instances = new PersistentStorage<>(file, type);
+        rdsService = newService(containerManager, proxyManager, instances,
+                new InMemoryStorage<>(), new InMemoryStorage<>(), new InMemoryStorage<>(), new InMemoryStorage<>());
+        when(containerManager.tryStart(any(), any(), any(), any(), any(), any(), any(), any(), any(), any()))
+                .thenReturn(null);
+        createScalingInstance("failed-proxy", "postgres", "16.4", 20);
+        when(containerManager.tryStart(any(), any(), any(), any(), any(), any(), any(), any(), any(), any()))
+                .thenReturn(new RdsContainerHandle("late-container", "failed-proxy", "localhost", 5432));
+        doThrow(new IllegalStateException("port in use")).when(proxyManager).startProxy(
+                any(), any(), any(), anyBoolean(), anyInt(), any(), anyInt(), any(), any(), any(), any(), any(), any());
+
+        assertThrows(IllegalStateException.class, () -> rdsService.ensureInstanceBackend("failed-proxy", "us-east-1"));
+
+        PersistentStorage<String, DbInstance> reloaded = new PersistentStorage<>(file, type);
+        reloaded.load();
+        rdsService = newService(containerManager, proxyManager, reloaded,
+                new InMemoryStorage<>(), new InMemoryStorage<>(), new InMemoryStorage<>(), new InMemoryStorage<>());
+        assertNull(rdsService.getDbInstance("failed-proxy").getContainerId());
+        assertEquals("InvalidParameterCombination", assertThrows(AwsException.class, () ->
+                rdsService.modifyDbInstance("failed-proxy", null, null, null,
+                        null, null, null, null, DbInstanceSettings.unchanged(), null,
+                        new DbInstanceScalingChanges(null, null, "17.2", true))).getErrorCode());
+    }
+
     @ParameterizedTest
     @CsvSource({"mysql,8.0,8.4", "mariadb,10.11,11.4", "sqlserver-se,15.00,16.00",
             "postgres,16.4,16.3"})
