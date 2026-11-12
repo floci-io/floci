@@ -5,6 +5,7 @@ import io.floci.aws.config.EmulatorConfig;
 import io.floci.aws.core.common.AwsArnUtils;
 import io.floci.aws.core.common.AwsEndpoints;
 import io.floci.aws.core.common.AwsException;
+import io.floci.aws.core.common.ModelTemplateGenerator;
 import io.floci.aws.core.common.PaginatedResult;
 import io.floci.aws.core.common.Pagination;
 import io.floci.aws.core.common.RegionResolver;
@@ -1369,6 +1370,15 @@ public class ApiGatewayV2Service {
     public Model getModel(String region, String apiId, String modelId) {
         return modelStore.get(modelKey(region, apiId, modelId))
                 .orElseThrow(() -> new AwsException("NotFoundException", "Model not found", 404));
+    }
+
+    public String getModelTemplate(String region, String apiId, String modelId) {
+        Api api = getApi(region, apiId);
+        if (!"WEBSOCKET".equals(api.getProtocolType())) {
+            throw new AwsException("BadRequestException", "Model templates are supported only for WebSocket APIs.", 400);
+        }
+        Model model = getModel(region, apiId, modelId);
+        return ModelTemplateGenerator.generate(model.getSchema(), model.getContentType(), true);
     }
 
     public List<Model> getModels(String region, String apiId) {

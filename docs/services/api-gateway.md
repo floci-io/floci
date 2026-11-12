@@ -123,6 +123,29 @@ Unknown integration type strings produce warnings and leave the method without a
 integration. With `failOnWarnings=true`, the import or update is rejected before
 changing the API. Leading/trailing whitespace and non-ASCII lookalikes are not accepted.
 
+### Model templates
+
+`GetModelTemplate` reads the current stored model schema. REST APIs return a VTL template
+containing a typed example JSON payload; WebSocket APIs return a VTL mapping template that
+reads the input JSON. WebSocket string values are JSON-escaped, including quotes, backslashes,
+newlines and apostrophes. Nested objects, typed arrays and finite local JSON Pointer
+references (`#/definitions/...`) are supported. Updating the model changes the next generated
+template; no generated-template cache or additional persistent state is used.
+
+This is a bounded JSON-schema subset for `application/json` models. Schema composition
+(`allOf`, `anyOf`, `oneOf`, `not`), enums, const values, union types, tuple/untyped arrays,
+external or cyclic references, and property names containing VTL delimiters (`'`, `"`, `\`,
+`$`, `#`) or control characters return `UnsupportedOperation` (HTTP 501). Validation-only
+constraints such as ranges and formats do not determine the example values. A schema must
+state a supported type, or provide `properties`/`items` from which the type can be inferred.
+The WebSocket mapping projects declared properties; undeclared input fields are not copied,
+and missing or null declared values become JSON null. Mapping inputs must match the declared
+scalar and container types; templates do not validate or coerce payloads. HTTP API templates
+remain unsupported.
+
+Local generation limits are 1,048,576 schema characters, 4,096 visited schema nodes, 32 levels
+of nesting and 262,144 output characters. These are Floci limits, not AWS service quotas.
+
 ### Supported Operations
 
 | Category | Operations |
@@ -141,7 +164,7 @@ changing the API. Leading/trailing whitespace and non-ASCII lookalikes are not a
 | **Usage Plan Keys** | CreateUsagePlanKey, GetUsagePlanKey, GetUsagePlanKeys, DeleteUsagePlanKey |
 | **Request Validators** | CreateRequestValidator, GetRequestValidator, GetRequestValidators, UpdateRequestValidator, DeleteRequestValidator |
 | **Gateway Responses** | PutGatewayResponse, GetGatewayResponse, GetGatewayResponses, UpdateGatewayResponse, DeleteGatewayResponse |
-| **Models** | CreateModel, GetModel, GetModels, UpdateModel, DeleteModel |
+| **Models** | CreateModel, GetModel, GetModels, GetModelTemplate, UpdateModel, DeleteModel |
 | **Documentation Parts** | CreateDocumentationPart, GetDocumentationPart, GetDocumentationParts, UpdateDocumentationPart, DeleteDocumentationPart |
 | **Domain Names** | CreateDomainName, GetDomainName, GetDomainNames, UpdateDomainName, DeleteDomainName |
 | **Base Path Mappings** | CreateBasePathMapping, GetBasePathMapping, GetBasePathMappings, UpdateBasePathMapping, DeleteBasePathMapping |
@@ -432,7 +455,6 @@ treated as a gateway response.
 These management-plane operations have no handler in v1. Calls will return `404` or an error:
 
 - Authorizer testing: `TestInvokeAuthorizer`
-- Model templates: `GetModelTemplate`
 - Documentation versions (5 operations)
 - Client Certificates (5 operations)
 - `ImportDocumentationParts`
@@ -1059,7 +1081,7 @@ listener relays the request unchanged and does not add a hop.
 | **Authorizers** | CreateAuthorizer, GetAuthorizer, GetAuthorizers, UpdateAuthorizer, DeleteAuthorizer |
 | **Stages** | CreateStage, GetStage, GetStages, UpdateStage, DeleteStage |
 | **Deployments** | CreateDeployment, GetDeployment, GetDeployments, UpdateDeployment, DeleteDeployment |
-| **Models** | CreateModel, GetModel, GetModels, UpdateModel, DeleteModel |
+| **Models** | CreateModel, GetModel, GetModels, GetModelTemplate, UpdateModel, DeleteModel |
 | **Domain Names** | CreateDomainName, GetDomainName, GetDomainNames, UpdateDomainName, DeleteDomainName |
 | **API Mappings** | CreateApiMapping, GetApiMapping, GetApiMappings, UpdateApiMapping, DeleteApiMapping |
 | **VPC Links** | CreateVpcLink, GetVpcLink, GetVpcLinks, UpdateVpcLink, DeleteVpcLink |

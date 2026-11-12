@@ -21,8 +21,8 @@ Operation counts are exact. For dispatch-table services (Query and JSON 1.1) eac
 | [Lambda](lambda.md) | `/2015-03-31/functions/...` + `/2025-12-01/durable-executions/...` | REST JSON | 69 |
 | [Lambda MicroVMs](lambda-microvms.md) | `/2025-09-09/...` + `/2026-04-04/...` | REST JSON | 23 |
 | [Lambda Web Functions](lambda-web-functions.md) | `/2025-03-07/web-functions/...` | REST JSON | 20 |
-| [API Gateway v1](api-gateway.md) | `/restapis/...` | REST JSON | 101 |
-| [API Gateway v2](api-gateway.md#v2) | `/v2/apis/...` | REST JSON | 66 (+ the data plane) |
+| [API Gateway v1](api-gateway.md) | `/restapis/...` | REST JSON | 102 |
+| [API Gateway v2](api-gateway.md#v2) | `/v2/apis/...` | REST JSON | 67 (+ the data plane) |
 | [IAM](iam.md) | `POST /` with `Action=` param | Query | 180 |
 | [STS](sts.md) | `POST /` with `Action=` param | Query | 11 |
 | [AWS Sign-In](iam.md#aws-sign-in-login-credentials) | `/v1/authorize`, `/v1/token` | REST JSON | 2 |
