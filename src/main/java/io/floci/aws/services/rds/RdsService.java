@@ -901,6 +901,7 @@ public class RdsService implements Resettable, ResourceProvider {
                     instance.setContainerHost(handle.getHost());
                     instance.setContainerPort(handle.getPort());
                 } else if (!containerManager.refusedParameterGroup(dbInstanceArn)) {
+                    instance.setBackendNeverStarted(containerManager.getActiveHandle(dbInstanceArn) == null);
                     LOG.warnv("DB instance {0} created without a backing database container: no "
                             + "Docker daemon is reachable. Metadata operations work; connections to "
                             + "the database do not until a daemon appears.", id);
@@ -3881,6 +3882,8 @@ public class RdsService implements Resettable, ResourceProvider {
         // Resolved before the first setter runs, since the checks it carries read the instance's
         // current size and engine version: a refusal here must leave the whole request unapplied.
         DbInstanceScalingChanges resolvedScaling = scaling.resolveFor(instance);
+        String previousEngineVersion = instance.getEngineVersion();
+        boolean restartForUpgrade = requiresMinorEngineRestart(instance, resolvedScaling.engineVersion());
         DbInstanceSettings effective = withEffectiveWindows(settings, instance);
         if (isBlank(instance.getDbClusterIdentifier()) && !isAuroraEngine(engineName(instance))) {
             effective.validateStorageType();
@@ -3943,6 +3946,9 @@ public class RdsService implements Resettable, ResourceProvider {
             instance.setAutoMinorVersionUpgrade(autoMinorVersionUpgrade);
         }
         effective.applyTo(instance);
+        if (restartForUpgrade) {
+            instance.setStatus(DbInstanceStatus.MODIFYING);
+        }
         resolvedScaling.applyTo(instance);
         if (publiclyAccessible != null) {
             instance.setPubliclyAccessible(publiclyAccessible);
@@ -3964,8 +3970,80 @@ public class RdsService implements Resettable, ResourceProvider {
                     rdsResourceRelayKey(instance.getDbInstanceArn(), id), iamEnabled);
         }
 
+        if (restartForUpgrade) {
+            restartForMinorEngineUpgrade(instance, previousEngineVersion, effectiveRegion);
+        }
+
         LOG.infov("DB instance {0} modified", id);
         return instance;
+    }
+
+    private boolean requiresMinorEngineRestart(DbInstance instance, String requestedVersion) {
+        if (config.services().rds().mock()
+                || isBlank(requestedVersion) || requestedVersion.equals(instance.getEngineVersion())) {
+            return false;
+        }
+        String currentVersion = instance.getEngineVersion();
+        boolean imageChanges = !imageForEngine(instance.getEngine(), currentVersion)
+                .equals(imageForEngine(instance.getEngine(), requestedVersion));
+        if (instance.isBackendNeverStarted() && imageChanges) {
+            return false;
+        }
+        boolean numericVersions = currentVersion != null
+                && currentVersion.matches("[0-9]{1,9}(\\.[0-9]{1,9})*")
+                && requestedVersion.matches("[0-9]{1,9}(\\.[0-9]{1,9})*");
+        if (!isBlank(instance.getDbClusterIdentifier()) || isAuroraEngine(engineName(instance))
+                || !numericVersions
+                || !engineVersionFamily(instance.getEngine(), currentVersion)
+                        .equals(engineVersionFamily(instance.getEngine(), requestedVersion))
+                || RdsEngineCatalog.compareVersions(requestedVersion, currentVersion) <= 0
+                || !imageChanges) {
+            throw new AwsException("InvalidParameterCombination",
+                    "Only minor engine upgrades with version-specific images are supported for "
+                            + "standalone container-backed DB instances.", 400);
+        }
+        return true;
+    }
+
+    private static String engineVersionFamily(DatabaseEngine engine, String version) {
+        String[] parts = version.split("\\.");
+        if (parts.length == 1 || engine == DatabaseEngine.POSTGRES && parts[0].length() > 1) {
+            return parts[0];
+        }
+        return parts[0] + "." + parts[1];
+    }
+
+    private void restartForMinorEngineUpgrade(DbInstance instance, String previousVersion, String region) {
+        String id = instance.getDbInstanceIdentifier();
+        String previousContainerId = instance.getContainerId();
+        try {
+            proxyManager.stopProxy(rdsResourceRelayKey(instance.getDbInstanceArn(), id));
+            if (previousContainerId != null) {
+                containerManager.stop(buildHandle(instance));
+            }
+            instance.setContainerId(null);
+            instance.setContainerHost(null);
+            instance.setContainerPort(0);
+            startStandaloneInstanceBackend(instance, id, region);
+            if (!hasBackend(instance.getContainerHost(), instance.getContainerPort())) {
+                throw new AwsException("InvalidDBInstanceState",
+                        "The database backend could not be started for the engine version upgrade.", 400);
+            }
+            instance.setStatus(DbInstanceStatus.AVAILABLE);
+            putInstanceForScope(currentAccountId(), region, id, instance);
+        } catch (RuntimeException | Error failure) {
+            if (!hasBackend(instance.getContainerHost(), instance.getContainerPort())
+                    || Objects.equals(previousContainerId, instance.getContainerId())) {
+                instance.setEngineVersion(previousVersion);
+            }
+            instance.setStatus(DbInstanceStatus.FAILED);
+            try {
+                putInstanceForScope(currentAccountId(), region, id, instance);
+            } catch (RuntimeException persistFailure) {
+                failure.addSuppressed(persistFailure);
+            }
+            throw failure;
+        }
     }
 
     /**
@@ -4358,16 +4436,11 @@ public class RdsService implements Resettable, ResourceProvider {
             }
             return;
         }
-        String image = imageForEngine(instance.getEngine(), instance.getEngineVersion());
         String storageResourceId = resolvedInstanceStorageResourceId(instance);
         String dockerVolumeName = resolvedInstanceDockerVolumeName(instance);
         RdsContainerHandle handle;
         try {
-            handle = containerManager.tryStart(
-                    instance.getDbInstanceArn(), id, storageResourceId,
-                    dockerVolumeName, instance.getEngine(), image, instance.getMasterUsername(),
-                    instance.getMasterPassword(), instance.getDbName(),
-                    instanceEngineParameters(instance));
+            handle = startInstanceContainer(instance);
         } catch (RuntimeException | Error e) {
             instance.setStatus(DbInstanceStatus.FAILED);
             putInstanceForScope(currentAccountId(), effectiveRegion, id, instance);
@@ -4644,14 +4717,9 @@ public class RdsService implements Resettable, ResourceProvider {
                     }
                     throw e;
                 }
-                String image = imageForEngine(instance.getEngine(), instance.getEngineVersion());
                 String storageResourceId = resolvedInstanceStorageResourceId(instance);
                 String dockerVolumeName = resolvedInstanceDockerVolumeName(instance);
-                RdsContainerHandle handle = containerManager.tryStart(
-                        instance.getDbInstanceArn(), id, storageResourceId,
-                        dockerVolumeName, instance.getEngine(), image, instance.getMasterUsername(),
-                        instance.getMasterPassword(), instance.getDbName(),
-                        instanceEngineParameters(instance));
+                RdsContainerHandle handle = startInstanceContainer(instance);
                 instance.setContainerStorageResourceId(storageResourceId);
                 instance.setDockerVolumeName(dockerVolumeName);
                 instance.setContainerId(handle != null ? handle.getContainerId() : null);
@@ -4833,12 +4901,7 @@ public class RdsService implements Resettable, ResourceProvider {
             backendHost = cluster.getContainerHost();
             backendPort = cluster.getContainerPort();
         } else {
-            String image = imageForEngine(instance.getEngine(), instance.getEngineVersion());
-            started = containerManager.tryStart(
-                    instance.getDbInstanceArn(), id, resolvedInstanceStorageResourceId(instance),
-                    resolvedInstanceDockerVolumeName(instance), instance.getEngine(), image,
-                    instance.getMasterUsername(), instance.getMasterPassword(), instance.getDbName(),
-                    instanceEngineParameters(instance));
+            started = startInstanceContainer(instance);
             if (started == null) {
                 return instance;
             }
@@ -4894,6 +4957,31 @@ public class RdsService implements Resettable, ResourceProvider {
         reportedMemberRelayFailures.remove(instance.getDbInstanceArn());
         LOG.infov("Backing database container for DB instance {0} started on retry", id);
         return instance;
+    }
+
+    /** Records a possible database initialization before startup, even if its proxy later fails. */
+    private RdsContainerHandle startInstanceContainer(DbInstance instance) {
+        boolean neverStarted = instance.isBackendNeverStarted();
+        String accountId = accountIdFromArn(instance.getDbInstanceArn());
+        String region = regionFromArn(instance.getDbInstanceArn());
+        String id = instance.getDbInstanceIdentifier();
+        if (neverStarted) {
+            instance.setBackendNeverStarted(false);
+            putInstanceForScope(accountId, region, id, instance);
+        }
+        RdsContainerHandle started = containerManager.tryStart(
+                instance.getDbInstanceArn(), id, resolvedInstanceStorageResourceId(instance),
+                resolvedInstanceDockerVolumeName(instance), instance.getEngine(),
+                imageForEngine(instance.getEngine(), instance.getEngineVersion()),
+                instance.getMasterUsername(), instance.getMasterPassword(), instance.getDbName(),
+                instanceEngineParameters(instance));
+        if (neverStarted && started == null
+                && !containerManager.refusedParameterGroup(instance.getDbInstanceArn())
+                && containerManager.getActiveHandle(instance.getDbInstanceArn()) == null) {
+            instance.setBackendNeverStarted(true);
+            putInstanceForScope(accountId, region, id, instance);
+        }
+        return started;
     }
 
     /**
@@ -9699,13 +9787,7 @@ public class RdsService implements Resettable, ResourceProvider {
                     instance.setContainerHost(cluster.getContainerHost());
                     instance.setContainerPort(cluster.getContainerPort());
                 } else {
-                    String image = imageForEngine(instance.getEngine(), instance.getEngineVersion());
-                    restoredHandle = containerManager.tryStart(
-                            instance.getDbInstanceArn(), instance.getDbInstanceIdentifier(),
-                            instance.getContainerStorageResourceId(),
-                            instance.getDockerVolumeName(), instance.getEngine(), image,
-                            instance.getMasterUsername(), instance.getMasterPassword(), instance.getDbName(),
-                            instanceEngineParameters(instance));
+                    restoredHandle = startInstanceContainer(instance);
                     backendHost = restoredHandle != null ? restoredHandle.getHost() : null;
                     backendPort = restoredHandle != null ? restoredHandle.getPort() : 0;
                     instance.setContainerId(restoredHandle != null ? restoredHandle.getContainerId() : null);

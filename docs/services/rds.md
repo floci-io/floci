@@ -455,7 +455,7 @@ keep a cluster awake; and parameter group changes do not resume one.
 
 ## Modifying a DB instance
 
-`ModifyDBInstance` applies `DBInstanceClass`, `AllocatedStorage` and `EngineVersion`, and
+`ModifyDBInstance` applies `DBInstanceClass` and `AllocatedStorage`, and
 `DescribeDBInstances` reports the new values. Members the request leaves out keep their current
 value, so a partial modify does not reset anything.
 
@@ -467,7 +467,29 @@ value, so a partial modify does not reset anything.
   rather than refused, which is what AWS does. SQL Server takes the size it is given.
 - The same size is not a change and is left alone.
 
-`EngineVersion` accepts a minor upgrade on its own. A different major version needs
+Standalone container-backed instances support minor `EngineVersion` upgrades when the default
+image follows the requested version. Floci stops the proxy and database container, starts the new
+engine image on the same storage volume, and rebinds the existing endpoint. It reports `available`
+only after both the new backend and proxy have started. A failed restart reports `failed` and
+retains the storage volume.
+
+Major upgrades and downgrades fail with `InvalidParameterCombination` before any settings change.
+PostgreSQL 10 and later use the leading component as the major version; older PostgreSQL releases,
+MySQL, and MariaDB use the first two components. Existing databases need a migration for a major
+upgrade, which Floci does not perform. `AllowMajorVersionUpgrade` does not bypass this limitation.
+Custom image overrides and SQL Server do not map `EngineVersion` to a new image, so their version
+changes are also refused. Cluster members must use cluster-level engine management. Repeating the
+current version is allowed alongside other changes without restarting the database.
+
+A standalone instance created while Docker is unavailable may change its version before its first
+backend startup when its image follows the requested version. Its eventual container uses the
+updated version. Floci persists this never-started
+state, and protects the version before attempting to initialize the database, including when a later
+proxy startup fails. Existing databases remain protected against major changes after a reboot,
+storage reload, or lost container. Older records without this state are treated as existing databases.
+
+In mock mode (`FLOCI_SERVICES_RDS_MOCK=true`), `EngineVersion` updates the instance metadata.
+A minor upgrade is accepted on its own. A different major version needs
 `AllowMajorVersionUpgrade`, without which the request fails with `InvalidParameterCombination`.
 Major versions are compared on the leading version component, so a MySQL 8.0 to 8.4 upgrade reads
 as a minor one here while AWS treats it as major.
@@ -476,17 +498,11 @@ A refused member fails the whole request: a modify that carries a new `DBInstanc
 shrinking `AllocatedStorage` returns `InvalidParameterCombination` and leaves the class as it was,
 so a read-back never reports a value the request did not get.
 
-Two deviations are worth knowing:
-
-- **Changes apply immediately.** AWS defers a class, storage or engine-version change to the
-  preferred maintenance window unless `ApplyImmediately` is set, and reports it under
-  `PendingModifiedValues` until then. Floci runs no maintenance window and does not model
-  `PendingModifiedValues`, so it applies the change as soon as the request lands whatever
-  `ApplyImmediately` says. Without this a deferred change would never be applied at all, and every
-  read-back would report the same drift.
-- **The backing container is not re-imaged.** An engine-version change is recorded on the instance
-  and reported on read, but the container started at create time keeps running the image it was
-  started with. This is control-plane compatibility, like Aurora Serverless v2 scaling above.
+Accepted changes apply immediately. AWS defers a class, storage or engine-version change to the
+preferred maintenance window unless `ApplyImmediately` is set, and reports it under
+`PendingModifiedValues` until then. Floci runs no maintenance window and does not model
+`PendingModifiedValues`, so it applies accepted changes as soon as the request lands whatever
+`ApplyImmediately` says.
 
 For standalone, non-Aurora instances with instance-owned storage, `CreateDBInstance` and
 `ModifyDBInstance` retain the `StorageType` values `gp2`, `gp3`, `io1` and `io2`. A modify
