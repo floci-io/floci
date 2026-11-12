@@ -306,7 +306,8 @@ A Fargate service retains its requested `platformVersion`, defaulting to `LATEST
 `CreateService`, `UpdateService` and `DescribeServices` return that setting, while its tasks,
 deployments and service revisions report the resolved version (`1.4.0` for `LATEST`). Updating
 between `LATEST` and that concrete version changes the service setting without rolling the
-deployment. EC2 services omit the platform members.
+deployment. Rollback restores the requested version from the successful revision. Older persisted
+revisions without that setting restore their stored platform version. EC2 services omit the platform members.
 
 A described service always carries `events` and `taskSets`, empty list and all, so a client can
 tell an empty answer from a member Floci never wrote. `taskSets` holds the service's task sets, the

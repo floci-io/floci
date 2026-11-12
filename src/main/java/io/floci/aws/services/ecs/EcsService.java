@@ -4823,6 +4823,7 @@ public class EcsService implements ContainerTeardown, ResourceProvider, Resettab
         revision.setLaunchType(svc.getLaunchType());
         revision.setCapacityProviderStrategy(svc.getCapacityProviderStrategy());
         revision.setPlatformVersion(resolvePlatformVersion(svc.getPlatformVersion()));
+        revision.setRequestedPlatformVersion(svc.getPlatformVersion());
         revision.setPlatformFamily(svc.getPlatformFamily());
         revision.setLoadBalancers(svc.getLoadBalancers());
         revision.setServiceRegistries(svc.getServiceRegistries());
@@ -5044,7 +5045,8 @@ public class EcsService implements ContainerTeardown, ResourceProvider, Resettab
         svc.setTaskDefinition(revision.getTaskDefinition());
         svc.setLaunchType(revision.getLaunchType());
         svc.setCapacityProviderStrategy(revision.getCapacityProviderStrategy());
-        svc.setPlatformVersion(revision.getPlatformVersion());
+        svc.setPlatformVersion(revision.getRequestedPlatformVersion() != null
+                ? revision.getRequestedPlatformVersion() : revision.getPlatformVersion());
         svc.setPlatformFamily(revision.getPlatformFamily());
         svc.setLoadBalancers(revision.getLoadBalancers());
         svc.setServiceRegistries(revision.getServiceRegistries());
