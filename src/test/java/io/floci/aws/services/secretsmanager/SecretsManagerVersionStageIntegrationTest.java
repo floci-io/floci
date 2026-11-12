@@ -5,9 +5,11 @@ import io.quarkus.test.junit.QuarkusTest;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.CsvSource;
 import org.junit.jupiter.params.provider.ValueSource;
 import software.amazon.awssdk.regions.Region;
 import software.amazon.awssdk.services.secretsmanager.SecretsManagerClient;
+import software.amazon.awssdk.services.secretsmanager.model.InvalidParameterException;
 import software.amazon.awssdk.services.secretsmanager.model.ResourceNotFoundException;
 
 import java.util.List;
@@ -47,6 +49,33 @@ class SecretsManagerVersionStageIntegrationTest {
         } finally {
             client.close();
         }
+    }
+
+    @ParameterizedTest
+    @CsvSource({"AWSCURRENT,true", "AWSCURRENT,false", "REVIEW,true", "REVIEW,false"})
+    void invalidRemovalTakesPrecedenceOverMissingDestination(String stage, boolean omitRemovalId) {
+        Map<String, List<String>> before = client.describeSecret(request -> request.secretId(name))
+                .versionIdsToStages();
+        String removal = omitRemovalId ? null : pending;
+        String missing = UUID.randomUUID().toString();
+
+        InvalidParameterException refused = assertThrows(InvalidParameterException.class,
+                () -> client.updateSecretVersionStage(request -> request.secretId(name).versionStage(stage)
+                        .removeFromVersionId(removal).moveToVersionId(missing)));
+
+        assertEquals(400, refused.statusCode());
+        assertEquals("InvalidParameterException", refused.awsErrorDetails().errorCode());
+        String expectedMessage = omitRemovalId
+                ? ("The parameter RemoveFromVersionId can't be empty. Staging label %s is currently attached to "
+                    + "version %s, so you must explicitly reference that version in RemoveFromVersionId.")
+                    .formatted(stage, current)
+                : ("When you move staging label %s, if you specify RemoveFromVersionId, it must be set to the "
+                    + "version that currently has the staging label %s.").formatted(stage, current);
+        assertEquals(expectedMessage, refused.awsErrorDetails().errorMessage());
+        assertEquals(before, client.describeSecret(request -> request.secretId(name)).versionIdsToStages());
+        assertEquals(current, client.getSecretValue(request -> request.secretId(name)).versionId());
+        assertEquals("current", client.getSecretValue(request -> request.secretId(name).versionStage(stage))
+                .secretString());
     }
 
     @ParameterizedTest

@@ -1966,13 +1966,6 @@ public class SecretsManagerService implements ResourceProvider {
         throwIfReplica(secret);
 
         synchronized (lockFor(secret.getArn())) {
-            // Checked before any label is moved: a refused request must leave the labels where they were.
-            if (moveToVersionId != null && !secret.getVersions().containsKey(moveToVersionId)) {
-                throw new AwsException("ResourceNotFoundException",
-                        "Secrets Manager can't find the specified secret value for VersionId: %s.".formatted(moveToVersionId),
-                        400);
-            }
-
             SecretVersion versionByStage = findVersionByStage(secret, versionStage);
             String currentVersionId = versionByStage != null
                     ? versionByStage.getVersionId() : null;
@@ -1993,7 +1986,16 @@ public class SecretsManagerService implements ResourceProvider {
                                 + "version that currently has the staging label %s.")
                             .formatted(versionStage, currentVersionId), 400);
                 }
+            }
 
+            // Validate the destination before any staging label is changed.
+            if (moveToVersionId != null && !secret.getVersions().containsKey(moveToVersionId)) {
+                throw new AwsException("ResourceNotFoundException",
+                        "Secrets Manager can't find the specified secret value for VersionId: %s.".formatted(moveToVersionId),
+                        400);
+            }
+
+            if (currentVersionId != null) {
                 List<String> mutableStages = new ArrayList<>(secret.getVersions()
                         .get(removeFromVersionId).getVersionStages());
                 mutableStages.remove(versionStage);
