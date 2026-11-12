@@ -68,6 +68,14 @@ public class S3TablesController {
         return Response.noContent().build();
     }
 
+    @GET
+    @Path("/buckets/{tableBucketARN}/storage-class")
+    public Response getTableBucketStorageClass(@Context HttpHeaders headers,
+                                               @Encoded @PathParam("tableBucketARN") String tableBucketArn) {
+        return Response.ok(Map.of("storageClassConfiguration",
+                service.getTableBucketStorageClass(decode(tableBucketArn), region(headers)))).build();
+    }
+
     @PUT
     @Path("/buckets/{tableBucketARN}/policy")
     public Response putTableBucketPolicy(@Context HttpHeaders headers, @Encoded @PathParam("tableBucketARN") String tableBucketArn,

@@ -82,6 +82,11 @@ public class S3TablesService {
         store.delete(storageKey(region, bucket.getName()));
     }
 
+    public synchronized Object getTableBucketStorageClass(String tableBucketArn, String region) {
+        Object configuration = getTableBucket(tableBucketArn, region).getStorageClassConfiguration();
+        return configuration == null ? Map.of("storageClass", "STANDARD") : configuration;
+    }
+
     public synchronized Namespace createNamespace(String tableBucketArn, List<String> namespace, String region) {
         String namespaceName = namespaceName(namespace);
         TableBucket bucket = getTableBucket(tableBucketArn, region);
