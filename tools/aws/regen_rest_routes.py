@@ -79,27 +79,10 @@ MODELS: dict[str, str] = {
     "xray": "xray",
 }
 
-# The models whose routes are rewritten onto an internal prefix, and the prefix they are rewritten
-# onto, with whether the labels in their paths hold an ARN. A service whose routes sit under such a
-# prefix has them there, and the prefix names them.
-INTERNAL_ROUTES: dict[str, tuple[str, bool]] = {
-    # The Payment Cryptography data plane's routes sit under the prefix its route filter rewrites
-    # them onto, and the key they name is an ARN, whose slashes the rewritten path holds: the label
-    # spans them, as the controller's own path does.
-    "payment-cryptography-data": ("/_paymentcryptography", True),
-    # Signer's routes collide with S3's path-style ones and are rewritten onto the prefix its route
-    # filter owns, so its routes are vendored as the rewritten path: the action and the request's
-    # resource labels both resolve from it.
-    "signer": ("/_signer", False),
-    # X-Ray's routes collide with S3's path-style ones too, for the same reason and with the same
-    # fix: the vendored route is the path its filter rewrites the request onto.
-    "xray": ("/_xray", False),
-}
-
-# Operations a model does not serve itself, so their path is not rewritten onto its internal prefix.
-# The shared tags controller serves /tags/{resourceArn} for every service that is a TagHandler, and
-# the service's route filter leaves that path alone; prefixing it here would advertise a route no
-# request ever arrives on, and the IAM check would find no rule for it.
+# Operations a model does not serve itself. The shared tags controller serves /tags/{resourceArn} for every
+# service that is a TagHandler, the ARN taking the rest of the path, and the bare /tags too. A route a service's
+# filter moves under an internal prefix is vendored at the model's own path all the same: IAM matches it on the
+# path without the prefix the filter records (SignedServiceRoute).
 SHARED_ROUTES: dict[str, frozenset[str]] = {
     "controltower": frozenset({"TagResource", "UntagResource", "ListTagsForResource"}),
     "signer": frozenset({"TagResource", "UntagResource", "ListTagsForResource"}),
@@ -131,22 +114,15 @@ def build(models: dict[str, dict], provenance: str) -> dict:
         model = models[name]
         if model["metadata"].get("protocol") not in ("rest-json", "rest-xml"):
             raise SystemExit(f"error: {name} is not a REST model")
-        prefix, arn_labels = INTERNAL_ROUTES.get(name, ("", False))
         shared = SHARED_ROUTES.get(name, frozenset())
         operations = {}
         for operation in sorted(model["operations"]):
             http = model["operations"][operation]["http"]
+            request_uri = http["requestUri"]
             if operation in shared:
-                request_uri = http["requestUri"]
                 # A shared tags route names its resource as an ARN, which holds slashes: the label
                 # has to span them or the route matches no tag request at all.
                 request_uri = re.sub(r"\{([^}]*[Aa]rn[^}]*)}", r"{\1+}", request_uri)
-            else:
-                request_uri = prefix + http["requestUri"]
-            if arn_labels:
-                # A label holding an ARN spans the slashes the ARN holds, which the rewritten path
-                # holds as they are.
-                request_uri = re.sub(r"\{([^}]+)\}", r"{\1+}", request_uri)
             route = {"method": http["method"], "requestUri": request_uri}
             if operation in shared:
                 # SharedTagsController also serves the bare path, reading POST's body and

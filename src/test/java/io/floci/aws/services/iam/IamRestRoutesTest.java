@@ -162,6 +162,22 @@ class IamRestRoutesTest {
     }
 
     /**
+     * A path a route filter moved under an internal prefix, given without it, was matched decoded, so a label's value
+     * may hold the slashes its encoding hid: when the path matches no route with each label taking one segment, its
+     * labels take the segments their values span. A route that matches with one segment a label still wins, and an
+     * ordinary path's labels never span.
+     */
+    @Test
+    void aPathMovedUnderAPrefixMayHoldTheSlashesItsLabelsWereDecodedTo() {
+        assertEquals(Optional.of("GetThing"), routes.operation("svc", "GET", "/things/web/part", null, true));
+        assertEquals(Optional.empty(), routes.operation("svc", "GET", "/things/web/part", null, false));
+        assertEquals(Map.of("ThingName", "a/b", "PartPath", "c"),
+                routes.match("svc", "GET", "/things/a/b/parts/c", null, true)
+                        .map(IamRestRoutes.Match::labels).orElse(Map.of()));
+        assertEquals(Optional.of("ListParts"), routes.operation("svc", "GET", "/things/web/parts/list", null, true));
+    }
+
+    /**
      * A literal segment matches itself alone, a dot in it no other character, and may end in a matrix parameter,
      * which RESTEasy keeps in the path it matched.
      */
