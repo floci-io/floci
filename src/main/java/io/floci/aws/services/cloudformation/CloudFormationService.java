@@ -69,6 +69,7 @@ import java.util.function.BiFunction;
 import java.util.function.Function;
 import java.util.function.Predicate;
 import java.util.function.UnaryOperator;
+import java.util.regex.MatchResult;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 import java.util.stream.Collectors;
@@ -866,16 +867,38 @@ public class CloudFormationService implements ResourceProvider {
      * any update, which converges it and records them for the next time.
      */
     private ObjectNode comparedDeployedTemplate(Stack stack, JsonNode deployedTemplate, String region) {
-        Map<String, String> digests = stack.dynamicReferenceDigestsSnapshot();
-        return comparedTemplate(deployedTemplate, deployedParameters(stack), stack, region,
-                value -> digests.getOrDefault(value, UNRECORDED_DIGEST_PREFIX + UUID.randomUUID()));
+        return comparedDeployedTemplate(stack, deployedTemplate, region, new HashSet<>());
     }
 
     /**
-     * Starts the compared form of a dynamic reference whose value the stack never recorded. Such a
-     * form differs from any update by construction, so it is no evidence about the old value.
+     * As above, collecting into {@code noEvidenceForms} every form made up for a reference the stack
+     * holds no digest for. They are told apart by identity, never by their text, which a value could
+     * share.
+     */
+    private ObjectNode comparedDeployedTemplate(Stack stack, JsonNode deployedTemplate, String region,
+                                                Set<String> noEvidenceForms) {
+        Map<String, String> digests = stack.dynamicReferenceDigestsSnapshot();
+        return comparedTemplate(deployedTemplate, deployedParameters(stack), stack, region, value -> {
+            String digest = digests.get(value);
+            // A digest of "unresolvable" is what an older record may hold; it is no evidence either.
+            if (digest == null || digest.startsWith(UNRESOLVABLE_PREFIX)) {
+                digest = UNRECORDED_DIGEST_PREFIX + UUID.randomUUID();
+                noEvidenceForms.add(digest);
+            }
+            return digest;
+        });
+    }
+
+    /**
+     * Starts the compared form made up for a dynamic reference whose value the stack never recorded
+     * (or could not resolve when it recorded). Such a form differs from any update by construction,
+     * so it is no evidence about the old value. It only builds the text; the forms are recognised by
+     * the set {@code comparedDeployedTemplate} fills.
      */
     private static final String UNRECORDED_DIGEST_PREFIX = "unrecorded ";
+
+    /** Starts the compared form made up for a dynamic reference that did not resolve. */
+    private static final String UNRESOLVABLE_PREFIX = "unresolvable ";
 
     /** The parameter values the stack's template was deployed with. */
     private static Map<String, String> deployedParameters(Stack stack) {
@@ -889,15 +912,32 @@ public class CloudFormationService implements ResourceProvider {
      * master credentials with them.
      */
     private UnaryOperator<String> currentDynamicReferences(Stack stack, String region) {
+        return currentDynamicReferences(stack, region, new HashSet<>());
+    }
+
+    /** As above, collecting into {@code unresolvable} the forms made up for references that did not resolve. */
+    private UnaryOperator<String> currentDynamicReferences(Stack stack, String region, Set<String> unresolvable) {
         return value -> {
             try {
                 return dynamicReferenceDigest(stack, dynamicReferences.resolveDynamicReferences(value, region, true));
             } catch (AwsException | IllegalStateException e) {
                 // What CfnDynamicReferences cannot resolve fails the operation when it runs; until
-                // then it is something to change.
-                return "unresolvable " + UUID.randomUUID();
+                // then it is something to change. Only the reference text is logged, never a value.
+                LOG.warnv("Stack {0}: a dynamic reference did not resolve ({1}): {2}", stack.getStackName(),
+                        referencesIn(value), e.getMessage());
+                String form = UNRESOLVABLE_PREFIX + UUID.randomUUID();
+                unresolvable.add(form);
+                return form;
             }
         };
+    }
+
+    private static final Pattern DYNAMIC_REFERENCE_TEXT = Pattern.compile("\\{\\{resolve:[^}]*}}");
+
+    /** The dynamic references a string holds, without whatever text surrounds them. */
+    private static String referencesIn(String value) {
+        return DYNAMIC_REFERENCE_TEXT.matcher(value).results().map(MatchResult::group)
+                .collect(Collectors.joining(", "));
     }
 
     /**
@@ -907,18 +947,22 @@ public class CloudFormationService implements ResourceProvider {
      * its last deployment recorded; a reference the template no longer has is dropped.
      */
     private void recordDynamicReferenceDigests(Stack stack, JsonNode template, String region) {
-        UnaryOperator<String> current = currentDynamicReferences(stack, region);
+        Set<String> unresolvable = new HashSet<>();
+        UnaryOperator<String> current = currentDynamicReferences(stack, region, unresolvable);
         Map<String, String> digests = new LinkedHashMap<>();
         try {
             comparedTemplate(template, deployedParameters(stack), stack, region, value -> {
                 String digest = current.apply(value);
-                digests.put(value, digest);
+                // A reference that did not resolve is recorded as nothing, so it reads as unrecorded.
+                if (!unresolvable.contains(digest)) {
+                    digests.put(value, digest);
+                }
                 return digest;
             });
         } catch (AwsException e) {
             // Nothing recorded compares as a change, which the next update converges and records.
-            LOG.debugv("Recording no dynamic reference values for stack {0}: {1}", stack.getStackName(),
-                    e.getMessage());
+            LOG.warnv("Stack {0}: recording no dynamic reference digests; the template did not resolve: {1}",
+                    stack.getStackName(), e.getMessage());
             digests.clear();
         }
         stack.replaceDynamicReferenceDigests(digests);
@@ -1126,9 +1170,11 @@ public class CloudFormationService implements ResourceProvider {
             // and the parameters and conditions they read.
             JsonNode[] compared = new JsonNode[2];
             Set<String> currentReferenceForms = new HashSet<>();
+            Set<String> noEvidenceForms = new HashSet<>();
             if (oldTemplate != null) {
                 try {
-                    compared[0] = comparedDeployedTemplate(stack, oldTemplate, region).path("Resources");
+                    compared[0] = comparedDeployedTemplate(stack, oldTemplate, region, noEvidenceForms)
+                            .path("Resources");
                     UnaryOperator<String> currentReferences = currentDynamicReferences(stack, region);
                     compared[1] = comparedTemplate(newTemplate, newResolvedParams, stack, region, value -> {
                         String form = currentReferences.apply(value);
@@ -1145,7 +1191,7 @@ public class CloudFormationService implements ResourceProvider {
 
             ReplacementDecider replacementDecider = new ReplacementDecider(stack, region, compared, oldResolvedParams,
                     newResolvedParams, oldConditions, newConditions, oldTemplate, newTemplate, changedParams,
-                    changedConditions, currentReferenceForms);
+                    changedConditions, currentReferenceForms, noEvidenceForms);
             Set<String> replacedResourceIds = new HashSet<>();
             List<ResourceChange> changes = new ArrayList<>();
             newResources.fields().forEachRemaining(e -> {
@@ -1396,9 +1442,10 @@ public class CloudFormationService implements ResourceProvider {
      * <p>A dynamic reference on either side of a create-only property sends the decision to the
      * compared forms. Those hold an HMAC digest of what a reference resolved to, never the value,
      * so a plain value on the other side is digested under the same key before the two are compared.
-     * A form that starts with {@code UNRECORDED_DIGEST_PREFIX} stands for a reference whose old value
-     * the stack never recorded: there is no evidence about it, and the replacement answer falls back to
-     * the template text. The diff itself still reports such a resource as changed, which converges it.
+     * A form made up for a reference whose old value the stack never recorded is no evidence about
+     * it (it is recognised by identity, not by its text): that property alone is decided by its
+     * template text, the others by the compared forms. The diff itself still reports such a resource
+     * as changed, which converges it.
      *
      * <p>The dependency pass marks a resource whose create-only value reads an attribute that changes
      * in place as {@code Conditional}, as AWS does for a replacement that depends on a value known
@@ -1418,12 +1465,16 @@ public class CloudFormationService implements ResourceProvider {
         private final Set<String> changedConditions;
         /** The compared forms that stand for a resolved dynamic reference, not for a plain value. */
         private final Set<String> referenceForms;
+        /** The compared forms of the deployed template that carry no evidence about the old value. */
+        private final Set<String> noEvidenceForms;
+        /** Logical ids whose resolution failure was logged in this computation. */
+        private final Set<String> warned = new HashSet<>();
 
         ReplacementDecider(Stack stack, String region, JsonNode[] compared, Map<String, String> oldParams,
                            Map<String, String> newParams, Map<String, Boolean> oldConditions,
                            Map<String, Boolean> newConditions, JsonNode oldTemplate, JsonNode newTemplate,
                            Set<String> changedParams, Set<String> changedConditions,
-                           Set<String> currentReferenceForms) {
+                           Set<String> currentReferenceForms, Set<String> noEvidenceForms) {
             this.stack = stack;
             this.region = region;
             this.compared = compared;
@@ -1437,6 +1488,8 @@ public class CloudFormationService implements ResourceProvider {
             this.changedConditions = changedConditions;
             this.referenceForms = new HashSet<>(stack.dynamicReferenceDigestsSnapshot().values());
             this.referenceForms.addAll(currentReferenceForms);
+            this.referenceForms.addAll(noEvidenceForms);
+            this.noEvidenceForms = noEvidenceForms;
         }
 
         boolean decide(String resourceType, String logicalId, JsonNode oldDef, JsonNode newDef) {
@@ -1445,19 +1498,17 @@ public class CloudFormationService implements ResourceProvider {
             boolean asWritten = requiresReplacement(resourceType, oldProps, newProps, changedParams,
                     changedConditions);
             if (!CfnCreateOnlyProperties.hasSchema(resourceType) || !oldProps.isObject() || !newProps.isObject()) {
-                return asWritten || comparedChanged(resourceType, logicalId);
+                return asWritten || comparedChanged(resourceType, logicalId, oldProps, newProps);
             }
             boolean dynamic = anyCreateOnlyValue(resourceType, oldProps, ReplacementDecider::holdsDynamicReference)
                     || anyCreateOnlyValue(resourceType, newProps, ReplacementDecider::holdsDynamicReference);
             Boolean resolved = resolvedChange(resourceType, logicalId, oldProps, newProps);
             if (resolved == null) {
-                return asWritten || comparedChanged(resourceType, logicalId);
+                return asWritten || comparedChanged(resourceType, logicalId, oldProps, newProps);
             }
             if (dynamic) {
-                if (compared == null || compared[0] == null || unrecordedOldValue(resourceType, logicalId)) {
-                    return asWritten;
-                }
-                return comparedChanged(resourceType, logicalId);
+                return compared == null || compared[0] == null
+                        ? asWritten : comparedChanged(resourceType, logicalId, oldProps, newProps);
             }
             return resolved;
         }
@@ -1466,28 +1517,47 @@ public class CloudFormationService implements ResourceProvider {
             return subtree.toString().contains("{{resolve:");
         }
 
-        /** Whether the create-only value differs between the compared forms, a reference's digest against a plain value's. */
-        private boolean comparedChanged(String resourceType, String logicalId) {
+        /**
+         * Whether a create-only property differs, decided per property: between the compared forms
+         * (a reference's digest against a plain value's), or, where the old form carries no evidence,
+         * by the template text of that property alone.
+         */
+        private boolean comparedChanged(String resourceType, String logicalId, JsonNode oldProps,
+                                        JsonNode newProps) {
             if (compared == null || compared[0] == null || compared[1] == null
                     || !CfnCreateOnlyProperties.hasSchema(resourceType)) {
                 return false;
             }
-            if (unrecordedOldValue(resourceType, logicalId)) {
-                return false;
-            }
             JsonNode before = compared[0].path(logicalId).path("Properties");
             JsonNode after = compared[1].path(logicalId).path("Properties");
-            return before.isObject() && after.isObject()
-                    && CfnCreateOnlyProperties.createOnlyValueChanged(resourceType, digested(before), digested(after));
-        }
-
-        /** Whether a create-only value of the deployed compared form is a reference the stack never recorded. */
-        private boolean unrecordedOldValue(String resourceType, String logicalId) {
-            if (compared == null || compared[0] == null || !CfnCreateOnlyProperties.hasSchema(resourceType)) {
+            if (!before.isObject() || !after.isObject()) {
                 return false;
             }
-            return anyCreateOnlyValue(resourceType, compared[0].path(logicalId).path("Properties"),
-                    subtree -> holdsText(subtree, text -> text.startsWith(UNRECORDED_DIGEST_PREFIX)));
+            JsonNode digestedBefore = digested(before);
+            JsonNode digestedAfter = digested(after);
+            for (String pointer : CfnCreateOnlyProperties.getCreateOnlyProperties(resourceType)) {
+                boolean changed = noEvidence(pointer, before)
+                        ? writtenPointerChanged(pointer, oldProps, newProps)
+                        : CfnCreateOnlyProperties.createOnlyPointerChanged(pointer, digestedBefore, digestedAfter);
+                if (changed) {
+                    return true;
+                }
+            }
+            return false;
+        }
+
+        /** Whether the old compared form under the pointer holds a form made up for a missing digest. */
+        private boolean noEvidence(String pointer, JsonNode oldCompared) {
+            return CfnCreateOnlyProperties.subtreesAt(pointer, oldCompared).stream()
+                    .anyMatch(subtree -> holdsText(subtree, noEvidenceForms::contains));
+        }
+
+        /** The answer of the template text for one pointer, as {@code requiresReplacement} gives it for all. */
+        private boolean writtenPointerChanged(String pointer, JsonNode oldProps, JsonNode newProps) {
+            return CfnCreateOnlyProperties.createOnlyPointerChanged(pointer, oldProps, newProps)
+                    || CfnCreateOnlyProperties.subtreesAt(pointer, newProps).stream().anyMatch(subtree ->
+                            referencesAnyParameter(subtree, changedParams)
+                                    || referencesAnyCondition(subtree, changedConditions));
         }
 
         private static boolean holdsText(JsonNode node, Predicate<String> test) {
@@ -1540,9 +1610,11 @@ public class CloudFormationService implements ResourceProvider {
                         engineOver(accountId, newParams, physicalIds, attributes, newConditions, newTemplate)
                                 .resolveNode(newProps));
             } catch (RuntimeException e) {
-                LOG.warnv("Create-only values of {0} ({1}) could not be resolved for the diff; "
-                        + "the preview falls back to the template text: {2}", logicalId, resourceType,
-                        e.getMessage());
+                if (warned.add(logicalId)) {
+                    LOG.warnv("Create-only values of {0} ({1}) could not be resolved for the diff; "
+                            + "the preview falls back to the template text: {2}", logicalId, resourceType,
+                            e.getMessage());
+                }
                 return null;
             }
         }
