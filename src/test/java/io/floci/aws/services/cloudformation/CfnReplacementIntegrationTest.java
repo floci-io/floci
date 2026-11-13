@@ -123,8 +123,25 @@ class CfnReplacementIntegrationTest {
                         CLUSTER + "\"CacheNodeType\": \"cache.t3.micro\"",
                         CLUSTER + "\"CacheNodeType\": \"cache.t3.small\"",
                         "False", true, null),
-                SUBNET_GROUP_REPLACED);
+                SUBNET_GROUP_REPLACED,
+                new Row("deployed parameter renamed, same value",
+                        locationStack(stringParameter("NameA", HOSTED), "", REF_A, "d"),
+                        locationStack(stringParameter("NameB", HOSTED), "", REF_B, "e"),
+                        "Subject", "False", false, null),
+                new Row("deployed parameter value moved into a mapping",
+                        locationStack(stringParameter("NameA", HOSTED), "", REF_A, "d"),
+                        locationStack("", "\"M\": {\"k\": {\"v\": \"" + HOSTED + "\"}}",
+                                "{\"Fn::FindInMap\": [\"M\", \"k\", \"v\"]}", "e"),
+                        "Subject", "False", false, null),
+                new Row("deployed parameter renamed, another value",
+                        locationStack(stringParameter("NameA", HOSTED), "", REF_A, "d"),
+                        locationStack(stringParameter("NameB", "ssm-parameter://deployed-other"), "", REF_B, "e"),
+                        "Subject", "True", true, null));
     }
+
+    private static final String HOSTED = "hosted";
+    private static final String REF_A = "{\"Ref\": \"NameA\"}";
+    private static final String REF_B = "{\"Ref\": \"NameB\"}";
 
     @ParameterizedTest
     @MethodSource("rows")
@@ -443,6 +460,18 @@ class CfnReplacementIntegrationTest {
         current.dynamicReferenceDigestsSnapshot().keySet()
                 .forEach(key -> unresolvable.put(key, "unresolvable " + UUID.randomUUID()));
         current.replaceDynamicReferenceDigests(unresolvable);
+    }
+
+    /** A profile whose create-only LocationUri is {@code locationUri}, read from {@code parameters} and {@code mappings}. */
+    private static String locationStack(String parameters, String mappings, String locationUri, String description) {
+        String template = subjectStack(appConfigApplication("deployed-app"), parameters, PROFILE_TYPE,
+                profileProperties(APP_REF, "\"LocationUri\": " + locationUri + ", \"Description\": \""
+                        + description + "\""));
+        return mappings.isEmpty() ? template : "{\"Mappings\": {" + mappings + "}, " + template.substring(1);
+    }
+
+    private static String stringParameter(String name, String value) {
+        return "\"" + name + "\": {\"Type\": \"String\", \"Default\": \"" + value + "\"}";
     }
 
     private static void update(Row row, String stack) throws Exception {
