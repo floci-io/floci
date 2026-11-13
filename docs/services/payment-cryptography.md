@@ -105,9 +105,25 @@
   inside its validity window. The block names its recipient by the receiver's certificate,
   so the receiver can tell which of its keys the block is for. A block whose signature does
   not verify, whose digest does not match, whose nonce is not the one the request quotes,
-  or that carries no header to say what it holds is refused. The signing key the export
-  parameters issue is an RSA one, because the block's signature is an RSA signature, so
-  `GetParametersForExport` takes `RSA_2048` and refuses the other algorithms.
+  or that carries no header to say what it holds is refused.
+- **The cipher of a TR-34 block:** the key block is enciphered with the cipher the key needs,
+  as the reference does, so a key is never protected by something weaker than itself: a
+  Triple DES key under Triple DES and an AES key under AES-128. The key a block may carry is
+  therefore the one the guide's matrix allows for a receiver's certificate, which is a Triple
+  DES key or an AES-128 key, and an AES-128 key needs a receiver whose certificate is
+  RSA-3072 or RSA-4096.
+- **The signing key of a TR-34 block:** the service signs the block with the key the export
+  parameters issued, so the export has to name the export token they issued, and a request
+  that names its own signing key is refused. The signing key is an RSA one, because the
+  block's signature is an RSA signature, so `GetParametersForExport` takes `RSA_2048` and
+  refuses the other algorithms.
+- **The headers a TR-34 export names:** a request may narrow the modes of use and the
+  exportability of the key, and the header the block carries says so, the same as it does
+  for a TR-31 block. A TR-34 block's header names the key and carries nothing else, so a
+  request that names optional blocks is refused.
+- **The nonce of a TR-34 block:** the nonce binds the block to the exchange, and it is
+  optional in the model, so a block made without one is read without the freshness it
+  carries.
 - **The AS2805 form is not made.** A request that asks for it is refused with the error that
   says so, rather than answered with something of another kind, and the refusal names the
   forms the service serves.
