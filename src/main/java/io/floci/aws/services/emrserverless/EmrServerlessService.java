@@ -428,8 +428,8 @@ public class EmrServerlessService {
             return violations;
         }
         if (states.size() > max) {
-            violations.add("Value '" + states + "' at 'states' failed to satisfy constraint: "
-                    + "Member must have length less than or equal to " + max);
+            violations.add(SmithyValidationErrors.Violations.QUOTED.constraint("states", states.toString(),
+                    "Member must have length less than or equal to " + max));
         }
         if (!allowed.containsAll(states)) {
             violations.add(SmithyValidationErrors.notAllInEnum(states, "states", allowed));
