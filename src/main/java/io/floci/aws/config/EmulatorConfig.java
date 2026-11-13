@@ -2259,6 +2259,12 @@ public interface EmulatorConfig {
         @WithDefault("true")
         boolean enabled();
 
+        @WithDefault("0")
+        long creatingDelayMillis();
+
+        @WithDefault("0")
+        long updatingDelayMillis();
+
         /**
          * Lifetime of ListShards and ListStreams NextTokens, in milliseconds. Defaults to 300000;
          * lowering it lets tests exercise the expiry path without waiting.
