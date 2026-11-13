@@ -55,9 +55,10 @@ class UnenforcedIamCredentialNoticeTest {
 
         List<String> warnings = warnings(() -> assertTrue(notice.observe("ASIAROLESESSION", ACCOUNT)));
 
-        assertEquals(1, warnings.size());
-        assertTrue(warnings.getFirst().startsWith("A request in account 123456789012 was signed with "
-                + "a session Floci issued (ASIAROLESESSION), "), warnings.getFirst());
+        assertEquals(List.of("A request in account 123456789012 was signed with a session Floci issued "
+                + "(ASIAROLESESSION), but IAM policy enforcement is off, so Floci allowed it without evaluating "
+                + "the policies that apply to it. Set FLOCI_SERVICES_IAM_ENFORCEMENT_ENABLED=true to evaluate "
+                + "them as AWS does. This is logged once."), warnings);
     }
 
     @Test
