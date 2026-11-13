@@ -292,6 +292,8 @@ floci:
       default-recovery-window-days: 30
     kinesis:
       enabled: true
+      creating-delay-millis: 0
+      updating-delay-millis: 0
       list-shards-next-token-ttl-millis: 300000
     firehose:
       enabled: true
