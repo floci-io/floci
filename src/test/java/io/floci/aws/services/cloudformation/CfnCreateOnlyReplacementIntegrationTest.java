@@ -4,18 +4,24 @@ import io.floci.aws.testing.AwsTestClients;
 import io.floci.aws.testing.CfnStackWaits;
 import io.floci.aws.testing.DockerAvailability;
 import io.quarkus.test.junit.QuarkusTest;
+import io.restassured.http.ContentType;
 import org.junit.jupiter.api.Assumptions;
+import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.MethodSource;
 import software.amazon.awssdk.regions.Region;
 import software.amazon.awssdk.services.cloudformation.CloudFormationClient;
 import software.amazon.awssdk.services.cloudformation.model.ChangeSetType;
 import software.amazon.awssdk.services.elasticache.ElastiCacheClient;
+import software.amazon.awssdk.services.ssm.SsmClient;
 
 import java.util.List;
 import java.util.stream.Stream;
 
+import static io.restassured.RestAssured.given;
+import static org.hamcrest.Matchers.equalTo;
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertNotEquals;
 
 /**
  * For an AppConfig profile and an ElastiCache cluster, one create-only and
@@ -120,6 +126,47 @@ class CfnCreateOnlyReplacementIntegrationTest {
                             request.cacheClusterId(after)).cacheClusters().getFirst().cacheSubnetGroupName());
                 }
             }
+        } finally {
+            CfnStackWaits.deleteStack(stack);
+        }
+    }
+
+    @Test
+    void aCreateOnlyValueFromADynamicReferenceThatChangesReplacesTheResource() throws Exception {
+        String suffix = Long.toString(System.nanoTime(), 36);
+        String stack = "repl-dynamic-" + suffix;
+        String parameter = "/repl/location-" + suffix;
+        String profile = "\"ApplicationId\": {\"Ref\": \"App\"}, \"Name\": \"settings\", "
+                + "\"LocationUri\": \"{{resolve:ssm:" + parameter + "}}\", \"Type\": \"AWS.Freeform\"";
+        Row row = new Row("dynamic LocationUri", APP, "", "AWS::AppConfig::ConfigurationProfile",
+                profile, profile + ", \"Description\": \"edited\"", "True", false, null);
+        try (CloudFormationClient cfn = AwsTestClients.create(CloudFormationClient.builder(), "test", Region.US_EAST_1);
+                SsmClient ssm = AwsTestClients.create(SsmClient.builder(), "test", Region.US_EAST_1)) {
+            ssm.putParameter(request -> request.name(parameter).type("String").value("ssm-parameter://orders-a"));
+            cfn.createStack(request -> request.stackName(stack).templateBody(row.template(row.before(), false)));
+            CfnStackWaits.awaitStatus(cfn, stack, "CREATE_COMPLETE");
+            String before = physicalId(cfn, stack);
+
+            ssm.putParameter(request -> request.name(parameter).type("String").value("ssm-parameter://orders-b")
+                    .overwrite(true));
+            cfn.createChangeSet(request -> request.stackName(stack).changeSetName("change")
+                    .changeSetType(ChangeSetType.UPDATE).templateBody(row.template(row.after(), true)));
+            List<String> reported = cfn.describeChangeSet(request -> request.stackName(stack)
+                    .changeSetName("change")).changes().stream()
+                    .filter(change -> "Subject".equals(change.resourceChange().logicalResourceId()))
+                    .map(change -> change.resourceChange().replacementAsString()).toList();
+            assertEquals(List.of("True"), reported);
+
+            cfn.executeChangeSet(request -> request.stackName(stack).changeSetName("change"));
+            CfnStackWaits.awaitStatus(cfn, stack, "UPDATE_COMPLETE");
+            String after = physicalId(cfn, stack);
+
+            assertNotEquals(before, after, "the changed SSM value replaces the profile");
+            String application = cfn.describeStackResource(request -> request.stackName(stack)
+                    .logicalResourceId("App")).stackResourceDetail().physicalResourceId();
+            given().contentType(ContentType.JSON)
+                    .get("/applications/" + application + "/configurationprofiles/" + after)
+                    .then().statusCode(200).body("LocationUri", equalTo("ssm-parameter://orders-b"));
         } finally {
             CfnStackWaits.deleteStack(stack);
         }
