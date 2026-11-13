@@ -19,14 +19,20 @@
 | `DescribeParameters` | List parameters with optional filters |
 | `LabelParameterVersion` | Attach a label to a specific version |
 | `UnlabelParameterVersion` | Remove labels from a specific version |
-| `AddTagsToResource` | Tag a parameter |
-| `ListTagsForResource` | List tags on a parameter |
-| `RemoveTagsFromResource` | Remove tags from a parameter |
+| `AddTagsToResource` | Tag a parameter, a document (by name) or an association (by ID), picked by `ResourceType` |
+| `ListTagsForResource` | List tags on a parameter, a document or an association |
+| `RemoveTagsFromResource` | Remove tags from a parameter, a document or an association |
 | `PutResourcePolicy` | Attach or update the resource policy of an Advanced-tier parameter |
 | `GetResourcePolicies` | List the resource policy attached to a parameter |
 | `DeleteResourcePolicy` | Remove a parameter's resource policy |
 | `DescribePatchBaselines` | List AWS-owned predefined patch baselines (filter by `OWNER`, `OPERATING_SYSTEM`, `NAME_PREFIX`) |
 | `GetDefaultPatchBaseline` | Get the default patch baseline id for an operating system |
+
+`CreateDocument` and `CreateAssociation` keep their `Tags`. A document's tags are also returned in
+the `DocumentDescription` of `CreateDocument`, `UpdateDocument` and `DescribeDocument`, and in each
+`ListDocuments` entry. With IAM enforcement on, the tag calls are checked against the resource their
+`ResourceType` and `ResourceId` name: `document/<name>`, `association/<id>` or `parameter/<name>`
+without its leading `/`. `CreateDocument` is checked against `document/<name>`.
 
 `DescribeParameters` includes the stored parameter's `ARN` in each metadata entry, matching
 `GetParameter`. This applies to filtered and paginated results as well.
