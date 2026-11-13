@@ -846,10 +846,11 @@ class EmrClusterStorageTest {
                         + " 'log4j.appender.console=org.apache.log4j.ConsoleAppender'")));
         // The NameNode answering on its port is its own, the one its format gave the ClusterId, not another
         // cluster's sharing its namespace.
-        verify(spec).withEntrypoint(argThat(entrypoint -> entrypoint.get(2).contains(String.join(" ",
+        verify(spec).withEntrypoint(argThat(entrypoint -> entrypoint.get(2).contains(
                 "cid=$(sed -n \"s/^clusterID=//p\" /mnt/namenode/current/VERSION);"
                         + " hdfs namenode & n=1; if [ -z \"$FLOCI_NODE_WORKERS\" ] || [ -d /mnt/datanode/current ];"
-                        + " then hdfs datanode & n=2; fi;",
+                        + " then hdfs datanode & n=2; fi; dirs=\"/tmp /user/hadoop\";")
+                && entrypoint.get(2).contains(String.join(" ",
                 "until curl -sf -m 5 \"http://127.0.0.1:9870/jmx?qry=Hadoop:service=NameNode,name=NameNodeInfo\"",
                 "| grep -q \"\\\"ClusterId\\\" : \\\"$cid\\\"\"; do",
                 "[ \"$(jobs -rp | wc -l)\" = $n ] || exit 1; sleep 0.2; done;"))));
@@ -864,7 +865,7 @@ class EmrClusterStorageTest {
                 "until curl -sf -m 5 \"http://127.0.0.1:9870/jmx?qry=Hadoop:service=NameNode,name=NameNodeInfo\"",
                 "| grep -q \"\\\"Safemode\\\" : \\\"\\\"\"; do",
                 "[ \"$(jobs -rp | wc -l)\" = $n ] || exit 1; sleep 0.2; done;",
-                "hdfs dfs -mkdir -p /tmp /user/hadoop || exit 1;"))
+                "hdfs dfs -mkdir -p $dirs || exit 1;"))
                 && entrypoint.get(2).contains(String.join(" ", "fi;", "touch /tmp/floci-hdfs-ready;",
                 // Not wait -n, which an emr-6.x image's bash, 4.2, does not have.
                 "while [ \"$(jobs -rp | wc -l)\" = $n ]; do sleep 1; done;",
@@ -933,7 +934,7 @@ class EmrClusterStorageTest {
     }
 
     @Test
-    void aClusterThatRunsYarnHasItsPrimaryNodeRunAResourceManagerAndANodeManagerAfterItsHdfs() {
+    void aClusterThatRunsYarnHasItsPrimaryNodeRunAResourceManagerAndANodeManagerWithItsHdfs() {
         when(lifecycle.probeContainer(hdfsName)).thenReturn(ContainerLiveness.NOT_RUNNING);
         when(lifecycle.createAndStart(any())).thenReturn(new ContainerLifecycleManager.ContainerInfo("c-7", Map.of()));
         when(lifecycle.probeContainer("c-7")).thenReturn(ContainerLiveness.RUNNING);
@@ -968,9 +969,12 @@ class EmrClusterStorageTest {
                         + " yarn resourcemanager & n=\\$\\(\\(n \\+ 1\\)\\); if \\[ -z \"\\$FLOCI_NODE_WORKERS\" \\]; then "
                         + "JDK_JAVA_OPTIONS=\"--add-opens=java\\.base/java\\.lang=ALL-UNNAMED[^\"]*\""
                         + " yarn nodemanager &").matcher(entrypoint.get(2)).find()));
-        // Ready once the NodeManager has registered, and the node gone if either daemon exits while starting.
+        // Started with the NameNode, as neither needs the HDFS to start; ready once the NodeManager has registered,
+        // and the node gone if either daemon exits while starting.
         verify(spec).withEntrypoint(argThat(entrypoint -> entrypoint.get(2).contains(
-                "yarn nodemanager & n=$((n + 1)); fi; "
+                "yarn nodemanager & n=$((n + 1)); fi; fi; "
+                        + "until curl -sf -m 5 \"http://127.0.0.1:9870/jmx?qry=Hadoop:service=NameNode,name=NameNodeInfo\"")
+                && entrypoint.get(2).contains("if [ -n \"$FLOCI_YARN_MEMORY_MB\" ]; then "
                         + "until curl -sf -m 5 http://127.0.0.1:8088/ws/v1/cluster/metrics"
                         + " | grep -q \"\\\"activeNodes\\\":[1-9]\"; do "
                         + "[ \"$(jobs -rp | wc -l)\" = $n ] || exit 1; sleep 0.2; done; fi;"
@@ -1194,12 +1198,18 @@ class EmrClusterStorageTest {
                 "--hiveconf fs.s3a.endpoint=http://host.docker.internal:4566"
                         + " --hiveconf fs.s3a.endpoint.region=us-east-1 ")
                 && settings.contains(" --hiveconf fs.s3.impl=org.apache.hadoop.fs.s3a.S3AFileSystem ")));
-        // Hive's exec jar where a Hive session would upload it, so two at once do not race to.
+        // Hive's exec jar where a Hive session would upload it, so two at once do not race to, its folder made with
+        // the others in one go.
         verify(spec).withEntrypoint(argThat(entrypoint -> entrypoint.get(2).contains(
-                "hdfs dfs -mkdir -p /user/hive/warehouse /tmp/hadoop/.hiveJars || exit 1; "
+                "if [ -n \"$FLOCI_HIVE_METASTORE\" ]; then dirs=\"$dirs /user/hive/warehouse /tmp/hadoop/.hiveJars\";")
+                && entrypoint.get(2).contains("hdfs dfs -mkdir -p $dirs || exit 1; "
+                        + "if [ -n \"$FLOCI_HIVE_METASTORE\" ]; then "
                         + "jar=$(ls /usr/lib/hive/lib/hive-exec-[0-9]*.jar | head -1); hdfs dfs -put -f \"$jar\" "
                         + "/tmp/hadoop/.hiveJars/$(basename \"$jar\" .jar)"
-                        + "-$(sha256sum \"$jar\" | cut -d\" \" -f1).jar")));
+                        + "-$(sha256sum \"$jar\" | cut -d\" \" -f1).jar || exit 1; until (exec 3<>/dev/tcp")));
+        // Started with the NameNode, as it needs no HDFS to start, and waited for once the HDFS is ready.
+        verify(spec).withEntrypoint(argThat(entrypoint -> entrypoint.get(2).indexOf("hive --service metastore")
+                < entrypoint.get(2).indexOf("until curl -sf -m 5 \"http://127.0.0.1:9870/jmx")));
         // With the Hive image's Hadoop configuration, as Hive steps run; in a folder Derby can write its log in; its
         // database on the primary node's own volume, its warehouse in the HDFS, ready only once it listens, and the
         // node gone if it exits while starting.
