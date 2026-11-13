@@ -17,8 +17,10 @@ import java.util.Map;
 import java.util.concurrent.atomic.AtomicReference;
 
 import static io.restassured.RestAssured.given;
+import static org.hamcrest.Matchers.equalTo;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 @QuarkusTest
@@ -93,15 +95,21 @@ class HttpProxyRequestSourceMappingIntegrationTest {
         assertEquals("blue", request.path("x-backend").asText());
     }
 
+    @Test
+    void wholeBodyCarryingALineBreakIsRejectedBeforeTheBackend() {
+        configureApi(Map.of("overwrite:header.x-order", "$request.body"));
+        invokeExpectingRejectedHeader("o-1\r\nX-Injected: 1", "x-order");
+    }
+
+    @Test
+    void wholeBodyCarryingALineBreakIsRejectedWhenTheHostIsMapped() {
+        configureApi(Map.of("overwrite:header.Host", "orders.internal",
+                "overwrite:header.x-order", "$request.body"));
+        invokeExpectingRejectedHeader("o-1\r\nX-Injected: 1", "x-order");
+    }
+
     private void configureApi() {
-        apiId = given().contentType(ContentType.JSON)
-                .body(Map.of("name", "request-source-mapping", "protocolType", "HTTP"))
-                .post("/v2/apis").then().statusCode(201).extract().path("apiId");
-        String apiPath = "/v2/apis/" + apiId;
-        given().contentType(ContentType.JSON)
-                .body(Map.of("stageName", "test", "autoDeploy", true, "stageVariables", Map.of("backend", "blue")))
-                .post(apiPath + "/stages").then().statusCode(201);
-        Map<String, String> requestParameters = Map.ofEntries(
+        configureApi(Map.ofEntries(
                 Map.entry("overwrite:header.x-order", "$request.body.order.id"),
                 Map.entry("overwrite:header.x-backend", "$stageVariables.backend"),
                 Map.entry("overwrite:header.x-stage", "$context.stage"),
@@ -113,7 +121,17 @@ class HttpProxyRequestSourceMappingIntegrationTest {
                 Map.entry("overwrite:header.x-missing", "$request.body.order.missing"),
                 Map.entry("overwrite:header.x-missing-stage", "$stageVariables.missing"),
                 Map.entry("overwrite:querystring.order", "$request.body.order.id"),
-                Map.entry("overwrite:path", "/orders/$request.body.order.id/$context.stage"));
+                Map.entry("overwrite:path", "/orders/$request.body.order.id/$context.stage")));
+    }
+
+    private void configureApi(Map<String, String> requestParameters) {
+        apiId = given().contentType(ContentType.JSON)
+                .body(Map.of("name", "request-source-mapping", "protocolType", "HTTP"))
+                .post("/v2/apis").then().statusCode(201).extract().path("apiId");
+        String apiPath = "/v2/apis/" + apiId;
+        given().contentType(ContentType.JSON)
+                .body(Map.of("stageName", "test", "autoDeploy", true, "stageVariables", Map.of("backend", "blue")))
+                .post(apiPath + "/stages").then().statusCode(201);
         String integrationId = given().contentType(ContentType.JSON)
                 .body(Map.of("integrationType", "HTTP_PROXY", "integrationMethod", "POST",
                         "integrationUri", "http://127.0.0.1:" + backend.getAddress().getPort() + "/orders",
@@ -127,5 +145,12 @@ class HttpProxyRequestSourceMappingIntegrationTest {
     private void invoke(String body) {
         given().contentType(ContentType.JSON).body(body)
                 .post("/execute-api/" + apiId + "/test/orders").then().statusCode(200);
+    }
+
+    private void invokeExpectingRejectedHeader(String body, String header) {
+        given().contentType(ContentType.TEXT).body(body)
+                .post("/execute-api/" + apiId + "/test/orders").then().statusCode(502)
+                .body("message", equalTo("Bad Gateway: invalid request header value for " + header));
+        assertNull(received.get());
     }
 }

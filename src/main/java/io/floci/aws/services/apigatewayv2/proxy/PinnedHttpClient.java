@@ -16,6 +16,7 @@ import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
+import java.util.regex.Pattern;
 
 /**
  * Sends one plain-HTTP request to an already checked {@link InetAddress} and reads the response
@@ -49,6 +50,12 @@ public final class PinnedHttpClient {
     private static final Set<String> BODYLESS_METHODS =
             Set.of("GET", "HEAD", "OPTIONS", "DELETE", "TRACE");
 
+    /** An RFC 9110 field name: a token, so it cannot carry a separator or a line break. */
+    private static final Pattern HEADER_NAME = Pattern.compile("[!#$%&'*+.^_`|~0-9A-Za-z-]+");
+
+    private static final char HORIZONTAL_TAB = '\t';
+    private static final char DELETE = 0x7F;
+
     private PinnedHttpClient() {
     }
 
@@ -66,6 +73,39 @@ public final class PinnedHttpClient {
         }
     }
 
+    /** Raised before anything is sent when a request header would not stay a single header line. */
+    public static final class InvalidRequestHeaderException extends IOException {
+        public InvalidRequestHeaderException(String message) {
+            super(message);
+        }
+    }
+
+    /**
+     * Rejects a header that would not survive as one HTTP/1.1 header line: a name that is not a
+     * token, or a value carrying NUL, CR, LF or any other control character besides horizontal tab.
+     * Mapped values can come from the caller's request body or query string, so writing them as
+     * given would let a caller add header lines of its own or smuggle a second request. The
+     * messages name the header but never echo the value.
+     *
+     * @param name  the header name
+     * @param value the header value
+     * @throws InvalidRequestHeaderException when the name or value cannot be sent
+     */
+    public static void requireValidHeader(String name, String value) throws InvalidRequestHeaderException {
+        if (name == null || !HEADER_NAME.matcher(name).matches()) {
+            throw new InvalidRequestHeaderException("invalid request header name");
+        }
+        if (value == null) {
+            throw new InvalidRequestHeaderException("invalid request header value for " + name);
+        }
+        for (int i = 0; i < value.length(); i++) {
+            char c = value.charAt(i);
+            if ((c < ' ' && c != HORIZONTAL_TAB) || c == DELETE) {
+                throw new InvalidRequestHeaderException("invalid request header value for " + name);
+            }
+        }
+    }
+
     /**
      * Connects to {@code address} and exchanges one request/response pair.
      *
@@ -77,6 +117,8 @@ public final class PinnedHttpClient {
      *                   because this client writes them itself
      * @param body       the request body, may be null or empty
      * @param timeout    how long to wait for the backend to respond
+     * @throws InvalidRequestHeaderException before connecting, when the Host header or any header
+     *                                       that would be written fails {@link #requireValidHeader}
      */
     public static Response send(InetAddress address, URI target, String method, String hostHeader,
                                 Map<String, List<String>> headers, byte[] body, Duration timeout)
@@ -84,6 +126,10 @@ public final class PinnedHttpClient {
         byte[] payload = body == null ? new byte[0] : body;
         String upperMethod = method.toUpperCase(Locale.ROOT);
         int port = target.getPort() == -1 ? DEFAULT_HTTP_PORT : target.getPort();
+        if (hostHeader != null) {
+            requireValidHeader("Host", hostHeader);
+        }
+        requireValidHeaders(headers);
 
         try (Socket socket = new Socket()) {
             socket.connect(new InetSocketAddress(address, port), CONNECT_TIMEOUT_MILLIS);
@@ -99,6 +145,21 @@ public final class PinnedHttpClient {
             out.flush();
 
             return readResponse(socket.getInputStream(), upperMethod);
+        }
+    }
+
+    private static void requireValidHeaders(Map<String, List<String>> headers)
+            throws InvalidRequestHeaderException {
+        if (headers == null) {
+            return;
+        }
+        for (Map.Entry<String, List<String>> header : headers.entrySet()) {
+            if (CLIENT_OWNED_HEADERS.contains(header.getKey().toLowerCase(Locale.ROOT))) {
+                continue;
+            }
+            for (String value : header.getValue()) {
+                requireValidHeader(header.getKey(), value);
+            }
         }
     }
 

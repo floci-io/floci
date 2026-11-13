@@ -856,6 +856,10 @@ and one that selects an object or array maps its JSON. A missing field, an empty
 that is not JSON resolves to nothing, so that header or query mapping is skipped, and the same
 expression embedded in an `overwrite:path` value such as `/orders/$request.body.order.id` becomes
 an empty string. Floci evaluates the whole body, where AWS reads only its first 100 KB.
+A header value mapped from any source, including the whole `$request.body`, is
+rejected when it contains CR, LF, NUL or any other control character besides tab, as is a mapped
+`Host`: the request never reaches the backend and the caller receives `502` with
+`{"message":"Bad Gateway: invalid request header value for <name>"}`.
 
 HTTP API `AWS_PROXY` integrations accept every `integrationSubtype` AWS defines:
 `EventBridge-PutEvents`, `SQS-SendMessage`, `SQS-ReceiveMessage`, `SQS-DeleteMessage`,
