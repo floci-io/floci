@@ -444,7 +444,7 @@ final class CognitoAuthFlowHandler {
             throw new AwsException("NotAuthorizedException", "Session does not match client", 400);
         }
         String username = responses.get("USERNAME");
-        if (username == null || !service.signInKey(pool, username).equals(service.signInKey(pool, state.username()))) {
+        if (!isSessionUser(pool, username, state.username())) {
             throw new AwsException("NotAuthorizedException", "Session does not match user", 400);
         }
         validateSecretHash(client, responses, username);
@@ -548,7 +548,7 @@ final class CognitoAuthFlowHandler {
             PasswordChangeSession pending = session == null ? null : passwordChangeSessions.get(session);
             if (pending == null || sessionExpired(pending.expiresAt())
                     || !pool.getId().equals(pending.userPoolId()) || !client.getClientId().equals(pending.clientId())
-                    || !service.signInKey(pool, pending.username()).equals(service.signInKey(pool, username))) {
+                    || !isSessionUser(pool, username, pending.username())) {
                 throw new AwsException("NotAuthorizedException", "Invalid session for the user.", 400);
             }
             validateSecretHash(client, responses, username);
@@ -886,6 +886,28 @@ final class CognitoAuthFlowHandler {
                     username, pool.getId(), e.getMessage());
             return null;
         }
+    }
+
+    /**
+     * Whether {@code supplied}, the USERNAME of a challenge response, names the user a session was issued for.
+     * The session keeps the user's own username, which in a pool with {@code UsernameAttributes} is the
+     * {@code sub} and not the email or phone number the user signed in with. AWS documents that an SRP
+     * response must use that username and not an alias (the SRP paths here stay strict), and documents
+     * only {@code USERNAME} for the other challenges, without excluding the alias. The custom-auth
+     * challenges here already resolve the alias to the session's user, so the NEW_PASSWORD_REQUIRED and MFA
+     * challenges of the other flows do as well. A direct match of the sign-in keys counts, so a pool
+     * without aliases and its case sensitivity behave as before; only otherwise is the supplied value
+     * resolved to its user.
+     */
+    private boolean isSessionUser(UserPool pool, String supplied, String sessionUsername) {
+        if (supplied == null) {
+            return false;
+        }
+        if (service.signInKey(pool, supplied).equals(service.signInKey(pool, sessionUsername))) {
+            return true;
+        }
+        String canonical = resolveToCanonicalUsername(pool, supplied);
+        return canonical != null && canonical.equals(resolveToCanonicalUsername(pool, sessionUsername));
     }
 
     // ──────────────────────────── SRP ────────────────────────────
@@ -2556,7 +2578,7 @@ final class CognitoAuthFlowHandler {
             throw new AwsException("NotAuthorizedException", "Session does not match client", 400);
         }
         String username = responses.get("USERNAME");
-        if (username == null || !service.signInKey(pool, username).equals(service.signInKey(pool, state.username()))) {
+        if (!isSessionUser(pool, username, state.username())) {
             throw new AwsException("NotAuthorizedException", "Session does not match user", 400);
         }
         validateSecretHash(client, responses, username);
