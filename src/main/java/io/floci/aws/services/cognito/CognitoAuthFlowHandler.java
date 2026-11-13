@@ -1623,7 +1623,7 @@ final class CognitoAuthFlowHandler {
         validateSecretHash(client, responses, suppliedUsername);
 
         CognitoUser user = service.adminGetUser(pool.getId(), state.username);
-        if (!user.getUsername().equals(resolveToCanonicalUsername(pool, suppliedUsername))) {
+        if (!isSessionUser(pool, suppliedUsername, user.getUsername())) {
             throw new AwsException("NotAuthorizedException", "Invalid session for the user.", 400);
         }
 
@@ -1763,7 +1763,7 @@ final class CognitoAuthFlowHandler {
     private void validateCustomUsername(UserPool pool, UserPoolClient client, CustomAuthSession state,
                                           Map<String, String> responses) {
         String supplied = responses.get("USERNAME");
-        if (!state.username.equals(resolveToCanonicalUsername(pool, supplied))) {
+        if (!isSessionUser(pool, supplied, state.username)) {
             throw new AwsException("NotAuthorizedException", "Invalid session for the user.", 400);
         }
         validateSecretHash(client, responses, supplied);

@@ -1,7 +1,6 @@
 package io.floci.aws.services.cognito;
 
 import com.fasterxml.jackson.databind.JsonNode;
-import com.fasterxml.jackson.databind.ObjectMapper;
 import io.floci.aws.testing.RestAssuredJsonUtils;
 import io.quarkus.test.junit.QuarkusTest;
 import jakarta.inject.Inject;
@@ -14,11 +13,10 @@ import java.util.concurrent.ThreadLocalRandom;
 
 import static io.floci.aws.services.cognito.CognitoRestAssuredUtils.cognitoAction;
 import static io.floci.aws.services.cognito.CognitoRestAssuredUtils.cognitoJson;
-import static io.restassured.RestAssured.given;
+import static io.floci.aws.services.cognito.CognitoRestAssuredUtils.latestSms;
 import static org.hamcrest.Matchers.equalTo;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
-import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
  * MFA challenges in a pool created with {@code UsernameAttributes = ["email"]}. The session of such a challenge
@@ -27,7 +25,6 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
  */
 @QuarkusTest
 class CognitoAliasMfaIntegrationTest {
-    private static final ObjectMapper JSON = new ObjectMapper();
     private static final String PASSWORD = "Perm1234!";
     private static final String TEMPORARY_PASSWORD = "Temp1234!";
 
@@ -211,12 +208,5 @@ class CognitoAliasMfaIntegrationTest {
                 {"ClientId":"%s","ChallengeName":"%s","Session":"%s",
                  "ChallengeResponses":{"USERNAME":"%s"%s}}
                 """.formatted(clientId, challengeName, session, username, extraResponses);
-    }
-
-    private static String latestSms(String phone) throws Exception {
-        JsonNode messages = JSON.readTree(given().queryParam("phone", phone).get("/_aws/sns")
-                .then().statusCode(200).extract().asString()).path("messages");
-        assertTrue(messages.isArray() && !messages.isEmpty(), "an SMS should have been sent to " + phone);
-        return messages.get(messages.size() - 1).path("Message").asText();
     }
 }
