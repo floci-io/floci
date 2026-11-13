@@ -1024,18 +1024,26 @@ public class KmsService implements ResourceProvider {
 
     public ImportParameters getParametersForImport(String keyId, String wrappingAlgorithm,
                                                    String wrappingKeySpec, String region) {
+        String keyArn;
         synchronized (backingKeyMaterialLock) {
             KmsKey key = resolveKey(keyId, region);
             requireExternalOrigin(key);
             requireNotPendingDeletion(key);
             KmsKeyImport.validateWrappingAlgorithm(key.getKeySpec(), wrappingAlgorithm, wrappingKeySpec);
+            keyArn = key.getArn();
+        }
 
-            KmsKeyImport.WrappingKeyPair wrappingKeyPair = KmsKeyImport.generateWrappingKeyPair(wrappingKeySpec);
-            KmsImportParameters parameters = new KmsImportParameters();
-            parameters.setWrappingPrivateKeyEncoded(wrappingKeyPair.privateKeyEncoded());
-            parameters.setWrappingAlgorithm(wrappingAlgorithm);
-            parameters.setImportToken(newImportToken());
-            parameters.setParametersValidTo(Instant.now().plus(IMPORT_PARAMETERS_VALIDITY).getEpochSecond());
+        KmsKeyImport.WrappingKeyPair wrappingKeyPair = generateImportWrappingKeyPair(wrappingKeySpec);
+        KmsImportParameters parameters = new KmsImportParameters();
+        parameters.setWrappingPrivateKeyEncoded(wrappingKeyPair.privateKeyEncoded());
+        parameters.setWrappingAlgorithm(wrappingAlgorithm);
+        parameters.setImportToken(newImportToken());
+        parameters.setParametersValidTo(Instant.now().plus(IMPORT_PARAMETERS_VALIDITY).getEpochSecond());
+        synchronized (backingKeyMaterialLock) {
+            KmsKey key = resolveKey(keyArn, region);
+            requireExternalOrigin(key);
+            requireNotPendingDeletion(key);
+            KmsKeyImport.validateWrappingAlgorithm(key.getKeySpec(), wrappingAlgorithm, wrappingKeySpec);
             key.setImportParameters(parameters);
             keyStore.put(region + "::" + key.getKeyId(), key);
 
@@ -1044,6 +1052,10 @@ public class KmsService implements ResourceProvider {
             return new ImportParameters(key.getArn(), wrappingKeyPair.publicKeyEncoded(),
                     parameters.getImportToken(), parameters.getParametersValidTo());
         }
+    }
+
+    KmsKeyImport.WrappingKeyPair generateImportWrappingKeyPair(String wrappingKeySpec) {
+        return KmsKeyImport.generateWrappingKeyPair(wrappingKeySpec);
     }
 
     /**

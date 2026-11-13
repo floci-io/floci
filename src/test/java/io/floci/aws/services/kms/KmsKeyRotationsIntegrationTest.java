@@ -3,6 +3,7 @@ package io.floci.aws.services.kms;
 import io.floci.aws.testing.RestAssuredJsonUtils;
 import io.quarkus.test.common.http.TestHTTPResource;
 import io.quarkus.test.junit.QuarkusTest;
+import io.restassured.response.Response;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
@@ -95,18 +96,20 @@ class KmsKeyRotationsIntegrationTest {
         "{\"KeyId\":\"00000000-0000-0000-0000-000000000000\",\"IncludeKeyMaterial\":\"invalid\"}"
     })
     void malformedRequestsReturnAwsValidationErrors(String request) {
-        given().contentType("application/x-amz-json-1.1")
-                .header("X-Amz-Target", "TrentService.ListKeyRotations")
-                .body(request).post("/")
+        listRotations(request)
                 .then().statusCode(400).body("__type", equalTo("ValidationException"));
     }
 
     @Test
     void aliasesAreRejectedForKeyOnlyListing() {
-        given().contentType("application/x-amz-json-1.1")
-                .header("X-Amz-Target", "TrentService.ListKeyRotations")
-                .body("{\"KeyId\":\"alias/rotation-history\"}").post("/")
+        listRotations("{\"KeyId\":\"alias/rotation-history\"}")
                 .then().statusCode(400).body("__type", equalTo("InvalidArnException"));
+    }
+
+    private Response listRotations(String request) {
+        return given().contentType("application/x-amz-json-1.1")
+                .header("X-Amz-Target", "TrentService.ListKeyRotations")
+                .body(request).post("/");
     }
 
     private KmsClient client() {
