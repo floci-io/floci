@@ -445,7 +445,7 @@ public class GlueService {
         LOG.infov("Deleted Glue Database: {0}", name);
     }
 
-    public void createTable(String databaseName, Table table) {
+    public synchronized void createTable(String databaseName, Table table) {
         requireValidSortColumns(sortColumnViolations("tableInput", table.getStorageDescriptor()));
         Database database = getDatabase(databaseName);
         String key = tableKey(databaseName, table.getName());
