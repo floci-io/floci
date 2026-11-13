@@ -5,6 +5,7 @@ import io.floci.aws.testing.MutableClock;
 import io.quarkus.test.junit.QuarkusTest;
 import io.quarkus.test.junit.QuarkusTestProfile;
 import io.quarkus.test.junit.TestProfile;
+import io.restassured.RestAssured;
 import jakarta.inject.Inject;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
@@ -176,6 +177,68 @@ class S3RestoreStateIntegrationTest {
                         .then().statusCode(200).body(equalTo("instant"));
             } finally {
                 given().when().delete(path + "?versionId=" + version).then().statusCode(204);
+            }
+        }
+    }
+
+    @Test
+    void websiteDoesNotServeArchivedIndexOrErrorDocumentUntilRestored() {
+        try (Fixture fixture = new Fixture()) {
+            String indexPath = fixture.bucketPath() + "/index.html";
+            String errorPath = fixture.bucketPath() + "/error.html";
+            String websiteHost = fixture.bucket + ".s3-website-us-east-1.localhost:" + RestAssured.port;
+            String websiteConfiguration = "<WebsiteConfiguration><IndexDocument><Suffix>index.html</Suffix>"
+                    + "</IndexDocument><ErrorDocument><Key>error.html</Key></ErrorDocument>"
+                    + "</WebsiteConfiguration>";
+            given().body(websiteConfiguration).when().put(fixture.bucketPath() + "?website")
+                    .then().statusCode(200);
+
+            String indexVersion = null;
+            String errorVersion = null;
+            try {
+                indexVersion = given().header("x-amz-storage-class", "GLACIER").body("archived index")
+                        .when().put(indexPath).then().statusCode(200).extract().header("x-amz-version-id");
+                errorVersion = given().header("x-amz-storage-class", "DEEP_ARCHIVE").body("archived error")
+                        .when().put(errorPath).then().statusCode(200).extract().header("x-amz-version-id");
+
+                given().header("Host", websiteHost).when().get("/missing-page").then().statusCode(404)
+                        .body(not(containsString("archived error")));
+                given().header("Host", websiteHost).when().head("/").then().statusCode(200);
+                given().header("Host", websiteHost).when().head("/index.html").then().statusCode(200);
+                given().header("Host", websiteHost).when().get("/index.html").then().statusCode(403)
+                        .header("Content-Type", containsString("text/html"))
+                        .body(not(containsString("archived index")))
+                        .body(not(containsString("archived error")));
+                given().header("Host", websiteHost).when().get("/").then().statusCode(not(equalTo(200)))
+                        .body(not(containsString("archived index")));
+
+                given().body(RESTORE_REQUEST).when().post(indexPath + "?versionId=" + indexVersion + "&restore")
+                        .then().statusCode(202);
+                given().body(RESTORE_REQUEST).when().post(errorPath + "?versionId=" + errorVersion + "&restore")
+                        .then().statusCode(202);
+                given().header("Host", websiteHost).when().get("/").then().statusCode(not(equalTo(200)))
+                        .body(not(containsString("archived index")));
+                given().header("Host", websiteHost).when().get("/missing-page").then().statusCode(404)
+                        .body(not(containsString("archived error")));
+
+                clock.advance(Duration.ofSeconds(61));
+                given().header("Host", websiteHost).when().get("/").then().statusCode(200)
+                        .body(equalTo("archived index"));
+                given().header("Host", websiteHost).when().get("/missing-page").then().statusCode(404)
+                        .body(equalTo("archived error"));
+
+                clock.advance(Duration.ofDays(2));
+                given().header("Host", websiteHost).when().get("/").then().statusCode(not(equalTo(200)))
+                        .body(not(containsString("archived index")));
+                given().header("Host", websiteHost).when().get("/missing-page").then().statusCode(404)
+                        .body(not(containsString("archived error")));
+            } finally {
+                if (errorVersion != null) {
+                    given().when().delete(errorPath + "?versionId=" + errorVersion).then().statusCode(204);
+                }
+                if (indexVersion != null) {
+                    given().when().delete(indexPath + "?versionId=" + indexVersion).then().statusCode(204);
+                }
             }
         }
     }

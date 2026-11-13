@@ -1128,13 +1128,7 @@ public class S3Controller {
             S3Object obj = read.object();
             boolean bodyHandedOff = false;
             try {
-                if ("GLACIER".equals(obj.getStorageClass()) || "DEEP_ARCHIVE".equals(obj.getStorageClass())) {
-                    S3Service.RestoreStatus restore = s3Service.restoreStatus(obj);
-                    if (restore == null || restore.inProgress()) {
-                        throw new AwsException("InvalidObjectState",
-                                "The action is not valid for the object's storage class", 403);
-                    }
-                }
+                s3Service.requireArchivedObjectReadable(obj);
                 if (hasPreconditions(ifMatch, ifNoneMatch, ifModifiedSince, ifUnmodifiedSince)) {
                     // Evaluate preconditions against the same snapshot that is served: a separate
                     // metadata fetch could approve one version (e.g. If-Match for a CAS read) while a
@@ -1345,6 +1339,12 @@ public class S3Controller {
     }
 
     private Response websiteObjectResponse(S3Service.ObjectRead read, ResponseHeaderOverrides overrides) {
+        try {
+            s3Service.requireArchivedObjectReadable(read.object());
+        } catch (AwsException e) {
+            closeQuietly(read);
+            throw e;
+        }
         return fullObjectResponse(read, overrides, false);
     }
 
@@ -3769,9 +3769,16 @@ public class S3Controller {
         // The routing layer strips a trailing slash from the object key, so the "directory" intent
         // has to be recovered from the raw request path before handing off to the service.
         String rawPath = currentVertxRequest.getCurrent().request().path();
-        return renderWebsiteResolution(bucket,
-                s3Service.resolveWebsiteRequest(bucket, key, rawPath.endsWith("/"), authorization),
-                rawPath, includeBody);
+        try {
+            return renderWebsiteResolution(bucket,
+                    s3Service.resolveWebsiteRequest(bucket, key, rawPath.endsWith("/"), authorization),
+                    rawPath, includeBody);
+        } catch (AwsException e) {
+            if (!"InvalidObjectState".equals(e.getErrorCode())) {
+                throw e;
+            }
+            return serveWebsiteErrorResponse(bucket, authorization, e);
+        }
     }
 
     private Response serveWebsiteErrorResponse(String bucket,
