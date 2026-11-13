@@ -10471,6 +10471,14 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
     // ─── Tags ──────────────────────────────────────────────────────────────────
 
     public void createTags(String region, List<String> resourceIds, List<Tag> tagList) {
+        createTags(region, resourceIds, tagList, false);
+    }
+
+    /**
+     * As above; with {@code dryRun} the request passes every check a write makes, the
+     * per-resource limit included, and is then answered with DryRunOperation, nothing written.
+     */
+    public void createTags(String region, List<String> resourceIds, List<Tag> tagList, boolean dryRun) {
         validateTagTargets(region, resourceIds);
         validateUserTagKeys(tagList);
         validateTagLengths(tagList);
@@ -10483,6 +10491,9 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
         withTagWriteLocks(region, resourceIds, () -> {
             for (String resourceId : resourceIds) {
                 requireWithinTagLimit(region, resourceId, tagList);
+            }
+            if (dryRun) {
+                throw new AwsException("DryRunOperation", "Request would have succeeded, but DryRun flag is set.", 412);
             }
             createSystemTags(region, resourceIds, tagList);
         });
@@ -10712,8 +10723,16 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
     }
 
     public void deleteTags(String region, List<String> resourceIds, List<Tag> tagList) {
+        deleteTags(region, resourceIds, tagList, false);
+    }
+
+    /** As above; with {@code dryRun} the request is validated and then answered with DryRunOperation. */
+    public void deleteTags(String region, List<String> resourceIds, List<Tag> tagList, boolean dryRun) {
         validateTagTargets(region, resourceIds);
         validateUserTagKeys(tagList);
+        if (dryRun) {
+            throw new AwsException("DryRunOperation", "Request would have succeeded, but DryRun flag is set.", 412);
+        }
         deleteResourceTags(region, resourceIds, tagList);
     }
 
@@ -14850,6 +14869,14 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
     }
 
     public void deleteVolume(String region, String volumeId) {
+        deleteVolume(region, volumeId, false);
+    }
+
+    /**
+     * As above; with {@code dryRun} the volume must still exist and be detached, and the request
+     * is then answered with DryRunOperation, the volume and its backing storage left in place.
+     */
+    public void deleteVolume(String region, String volumeId, boolean dryRun) {
         if (volumeId == null || volumeId.isBlank()) {
             throw new AwsException("MissingParameter", "The parameter VolumeId is missing", 400);
         }
@@ -14861,6 +14888,9 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
             if ("in-use".equals(volume.getState()) || !volume.getAttachments().isEmpty()) {
                 throw new AwsException("VolumeInUse",
                         "Volume " + volumeId + " is currently attached to an instance", 400);
+            }
+            if (dryRun) {
+                throw new AwsException("DryRunOperation", "Request would have succeeded, but DryRun flag is set.", 412);
             }
             if (volumeBlockDeviceManager != null && volumeBlockDeviceManager.isAvailable()) {
                 if (!volumeBlockDeviceManager.deleteVolume(volumeId)) {
@@ -15147,6 +15177,15 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
     }
 
     public VolumeAttachment attachVolume(String region, String volumeId, String instanceId, String device) {
+        return attachVolume(region, volumeId, instanceId, device, false);
+    }
+
+    /**
+     * As above; with {@code dryRun} the volume, the instance and the device pass every check an
+     * attachment makes, and the request is then answered with DryRunOperation, nothing attached.
+     */
+    public VolumeAttachment attachVolume(String region, String volumeId, String instanceId, String device,
+                                         boolean dryRun) {
         ensureDefaultResources(region);
         if (volumeId == null || volumeId.isEmpty()) {
             throw new AwsException("MissingParameter",
@@ -15172,14 +15211,15 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
                         "The device '" + device + "' is already in use by an attachment in progress", 400);
             }
             try {
-                return attachVolumeToInstance(region, volumeId, instanceId, device);
+                return attachVolumeToInstance(region, volumeId, instanceId, device, dryRun);
             } finally {
                 pendingVolumeAttachments.remove(target);
             }
         });
     }
 
-    private VolumeAttachment attachVolumeToInstance(String region, String volumeId, String instanceId, String device) {
+    private VolumeAttachment attachVolumeToInstance(String region, String volumeId, String instanceId, String device,
+                                                    boolean dryRun) {
         Volume volume = getRequiredVolume(region, volumeId);
         Instance inst = getRequiredInstance(region, instanceId);
         if (!List.of("running", "stopped").contains(inst.getState().getName())) {
@@ -15215,6 +15255,9 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
                 }
             }
         }
+        if (dryRun) {
+            throw new AwsException("DryRunOperation", "Request would have succeeded, but DryRun flag is set.", 412);
+        }
 
         if (volumeBlockDeviceManager != null) {
             volumeBlockDeviceManager.attachVolume(volume, inst, device);
@@ -15236,6 +15279,15 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
     }
 
     public VolumeAttachment detachVolume(String region, String volumeId, String instanceId, String device, boolean force) {
+        return detachVolume(region, volumeId, instanceId, device, force, false);
+    }
+
+    /**
+     * As above; with {@code dryRun} the attachment passes every check a detach makes, and the
+     * request is then answered with DryRunOperation, the volume left attached.
+     */
+    public VolumeAttachment detachVolume(String region, String volumeId, String instanceId, String device,
+                                         boolean force, boolean dryRun) {
         if (volumeId == null || volumeId.isEmpty()) {
             throw new AwsException("MissingParameter", "The parameter VolumeId is missing", 400);
         }
@@ -15264,6 +15316,9 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
             throw new AwsException("InvalidParameterCombination",
                     "Device " + inst.getRootDeviceName() + " has the root partition on it. Detaching it will damage the " +
                             "filesystem/partition tables. To force detachment, use the force parameter", 400);
+        }
+        if (dryRun) {
+            throw new AwsException("DryRunOperation", "Request would have succeeded, but DryRun flag is set.", 412);
         }
         target.setState("detached");
         volume.getAttachments().clear();

@@ -4206,7 +4206,7 @@ public class Ec2QueryHandler {
             String v = p.getFirst("Tag." + i + ".Value");
             tagList.add(creationTag(k, v));
         }
-        service.createTags(region, resourceIds, tagList);
+        service.createTags(region, resourceIds, tagList, Boolean.parseBoolean(p.getFirst("DryRun")));
         return booleanResponse("CreateTags");
     }
 
@@ -4219,7 +4219,7 @@ public class Ec2QueryHandler {
             String v = p.getFirst("Tag." + i + ".Value");
             tagList.add(new Tag(k, v));
         }
-        service.deleteTags(region, resourceIds, tagList);
+        service.deleteTags(region, resourceIds, tagList, Boolean.parseBoolean(p.getFirst("DryRun")));
         return booleanResponse("DeleteTags");
     }
 
@@ -6769,6 +6769,9 @@ public class Ec2QueryHandler {
         String kmsKeyId = p.getFirst("KmsKeyId");
 
         List<Tag> volumeTags = parseTagsForResource(p, "volume");
+        // Answered once the parameters and tags are read, everything a real create checks, so a
+        // dry run stores no volume and creates no backing file.
+        checkDryRun(p);
 
         Volume vol = service.createVolume(region, availabilityZone, volumeType, size,
                 encrypted, kmsKeyId, iops, throughput, snapshotId, volumeTags);
@@ -6798,7 +6801,7 @@ public class Ec2QueryHandler {
     }
 
     private Response handleDeleteVolume(MultivaluedMap<String, String> p, String region) {
-        service.deleteVolume(region, p.getFirst("VolumeId"));
+        service.deleteVolume(region, p.getFirst("VolumeId"), Boolean.parseBoolean(p.getFirst("DryRun")));
         return booleanResponse("DeleteVolume");
     }
 
@@ -6895,7 +6898,8 @@ public class Ec2QueryHandler {
         String volumeId = p.getFirst("VolumeId");
         String instanceId = p.getFirst("InstanceId");
         String device = p.getFirst("Device");
-        VolumeAttachment attachment = service.attachVolume(region, volumeId, instanceId, device);
+        VolumeAttachment attachment = service.attachVolume(region, volumeId, instanceId, device,
+                Boolean.parseBoolean(p.getFirst("DryRun")));
         return volumeAttachmentResponse("AttachVolume", attachment, "attaching");
     }
 
@@ -6904,7 +6908,8 @@ public class Ec2QueryHandler {
         String instanceId = p.getFirst("InstanceId");
         String device = p.getFirst("Device");
         boolean force = "true".equalsIgnoreCase(p.getFirst("Force"));
-        VolumeAttachment attachment = service.detachVolume(region, volumeId, instanceId, device, force);
+        VolumeAttachment attachment = service.detachVolume(region, volumeId, instanceId, device, force,
+                Boolean.parseBoolean(p.getFirst("DryRun")));
         return volumeAttachmentResponse("DetachVolume", attachment, "detaching");
     }
 

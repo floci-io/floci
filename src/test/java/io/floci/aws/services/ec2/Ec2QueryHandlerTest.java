@@ -250,7 +250,7 @@ class Ec2QueryHandlerTest {
         assertEquals(200, response.getStatus());
         @SuppressWarnings("unchecked")
         ArgumentCaptor<List<Tag>> tags = ArgumentCaptor.forClass(List.class);
-        verify(service).createTags(eq("us-east-1"), eq(List.of("vpc-test")), tags.capture());
+        verify(service).createTags(eq("us-east-1"), eq(List.of("vpc-test")), tags.capture(), eq(false));
         assertEquals(List.of("", "", "present"),
                 tags.getValue().stream().map(Tag::getValue).toList());
     }
@@ -267,7 +267,7 @@ class Ec2QueryHandlerTest {
         assertEquals(200, response.getStatus());
         @SuppressWarnings("unchecked")
         ArgumentCaptor<List<Tag>> tags = ArgumentCaptor.forClass(List.class);
-        verify(service).deleteTags(eq("us-east-1"), eq(List.of("vpc-test")), tags.capture());
+        verify(service).deleteTags(eq("us-east-1"), eq(List.of("vpc-test")), tags.capture(), eq(false));
         assertNull(tags.getValue().getFirst().getValue());
     }
 
