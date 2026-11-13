@@ -82,8 +82,7 @@ public final class CfnCreateOnlyProperties {
      */
     public static boolean createOnlyValueChanged(String resourceType, JsonNode oldProps, JsonNode newProps) {
         for (String pointer : getCreateOnlyProperties(resourceType)) {
-            String[] segments = pointer.split("/");
-            if (pointerChanged(oldProps, newProps, segments, 0, segments.length == 1)) {
+            if (createOnlyPointerChanged(pointer, oldProps, newProps)) {
                 return true;
             }
         }
