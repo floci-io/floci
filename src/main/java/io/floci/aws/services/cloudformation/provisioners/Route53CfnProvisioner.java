@@ -868,7 +868,19 @@ public class Route53CfnProvisioner implements CfnResourceProvisioner {
         }
     }
 
+    /**
+     * Creates the zone, or updates it in place. {@code Name} and {@code DelegationSetId} are
+     * create-only, so an update whose change set says {@code Replacement} creates a new zone; the
+     * displaced zone is deleted once the update commits, or put back when it rolls back, through
+     * {@link ReplacementCleanup}. AWS refuses to delete a zone that still holds records beyond the
+     * default NS and SOA, and so does {@link Route53Service#deleteHostedZone}: the cleanup then
+     * retries and gives up as for any displaced entity.
+     */
     private void provisionHostedZone(StackResource resource, JsonNode props, ProvisionContext ctx) {
+        if (ctx.isUpdate()) {
+            ReplacementCleanup.endRollbackRetry(resource);
+        }
+        Map<String, String> attributesBefore = Map.copyOf(resource.getAttributes());
         String name = ctx.resolveOptional(props, "Name");
         if (name == null || name.isBlank()) {
             throw new IllegalArgumentException("AWS::Route53::HostedZone requires Name");
@@ -877,9 +889,20 @@ public class Route53CfnProvisioner implements CfnResourceProvisioner {
         JsonNode resolved = ctx.engine().resolveNode(props);
         String comment = resolved.path("HostedZoneConfig").path("Comment").asText(null);
         List<VpcAssociation> vpcs = parseVpcs(resolved.path("VPCs"));
+        String delegationSetId = ctx.resolveOptional(props, "DelegationSetId");
         String callerReference = ctx.stackName() + "/" + resource.getLogicalId();
         boolean isTrackedZoneMissing = resource.getPhysicalId() != null
                 && !zoneExists(resource.getPhysicalId());
+        // The engine's change decides, as for the change set's Replacement. A tracked zone that is gone
+        // is recreated below, not replaced: there is nothing to delete or put back.
+        String priorZoneId = resource.getPhysicalId();
+        boolean replacing = ctx.isUpdate() && priorZoneId != null && !isTrackedZoneMissing
+                && ctx.changes(HOSTED_ZONE, props).requiresReplacement();
+        if (replacing) {
+            // The displaced zone keeps its caller reference, so the new one needs its own.
+            callerReference = callerReference + "/" + UUID.randomUUID();
+            resource.setPhysicalId(null);
+        }
         if (isTrackedZoneMissing) {
             // The tracked physical ID may be a leftover from the retired monolith's HostedZone
             // stub, which minted a random Z-id with zero Route53Service backing (see commit
@@ -895,8 +918,9 @@ public class Route53CfnProvisioner implements CfnResourceProvisioner {
             // template's list are wired in afterward via AssociateVPCWithHostedZone,
             // matching how a real CloudFormation update converges an existing zone.
             VpcAssociation firstVpc = vpcs.isEmpty() ? null : vpcs.get(0);
-            Route53Service.CreateZoneResult created = route53Service.createHostedZone(
-                    name, callerReference, comment, firstVpc);
+            Route53Service.CreateZoneResult created = delegationSetId == null
+                    ? route53Service.createHostedZone(name, callerReference, comment, firstVpc)
+                    : route53Service.createHostedZone(name, callerReference, comment, firstVpc, delegationSetId);
             id = created.zone().getId();
             // Record the physical ID before any follow-up call that can fail: once the
             // zone exists, the stack engine must be able to track and clean it up even
@@ -924,6 +948,9 @@ public class Route53CfnProvisioner implements CfnResourceProvisioner {
                 // there is nothing left to reconcile.
                 route53Service.deleteHostedZone(id);
                 resource.getAttributes().put(CfnRollback.UPDATE_ROLLBACK_RESTORED_ATTR, "true");
+                if (replacing) {
+                    resource.setPhysicalId(priorZoneId);
+                }
                 throw e;
             }
         } else {
@@ -945,11 +972,15 @@ public class Route53CfnProvisioner implements CfnResourceProvisioner {
                 if ("true".equals(resource.getAttributes().get(CfnRollback.ROLLBACK_OWNED_ATTR))) {
                     route53Service.deleteHostedZone(id);
                     resource.getAttributes().put(CfnRollback.UPDATE_ROLLBACK_RESTORED_ATTR, "true");
+                    if (replacing) {
+                        resource.setPhysicalId(priorZoneId);
+                    }
                 }
                 throw e;
             }
         }
         resource.getAttributes().remove(CfnRollback.ROLLBACK_OWNED_ATTR);
+        ReplacementCleanup.record(resource, ctx, attributesBefore, replacing);
     }
 
     private boolean zoneExists(String id) {
@@ -964,13 +995,18 @@ public class Route53CfnProvisioner implements CfnResourceProvisioner {
         }
     }
 
+    /** The types whose replacing update is cleaned up through {@link ReplacementCleanup}. */
+    private static boolean replacesWithCleanup(StackResource resource) {
+        return HEALTH_CHECK.equals(resource.getResourceType()) || HOSTED_ZONE.equals(resource.getResourceType());
+    }
+
     @Override
     public boolean hasReplacementUpdate(StackResource resource) {
         if (RECORD_SET_GROUP.equals(resource.getResourceType())) {
             GroupSnapshot prior = groupSnapshot(resource);
             return prior != null && movedZone(resource, prior);
         }
-        return HEALTH_CHECK.equals(resource.getResourceType()) && ReplacementCleanup.hasReplacement(resource);
+        return replacesWithCleanup(resource) && ReplacementCleanup.hasReplacement(resource);
     }
 
     @Override
@@ -978,8 +1014,7 @@ public class Route53CfnProvisioner implements CfnResourceProvisioner {
         if (RECORD_SET_GROUP.equals(resource.getResourceType())) {
             return groupCleanupPhysicalId(resource);
         }
-        return HEALTH_CHECK.equals(resource.getResourceType())
-                ? ReplacementCleanup.cleanupPhysicalId(resource) : null;
+        return replacesWithCleanup(resource) ? ReplacementCleanup.cleanupPhysicalId(resource) : null;
     }
 
     @Override
@@ -987,7 +1022,7 @@ public class Route53CfnProvisioner implements CfnResourceProvisioner {
         if (RECORD_SET_GROUP.equals(resource.getResourceType())) {
             return completeGroupCleanup(resource, false);
         }
-        return HEALTH_CHECK.equals(resource.getResourceType())
+        return replacesWithCleanup(resource)
                 ? ReplacementCleanup.complete(resource, this::delete) : UpdateCleanupResult.notApplicable();
     }
 
@@ -1009,7 +1044,9 @@ public class Route53CfnProvisioner implements CfnResourceProvisioner {
      */
     @Override
     public void clearUpdate(StackResource resource) {
-        if (HEALTH_CHECK.equals(resource.getResourceType())) {
+        if (HOSTED_ZONE.equals(resource.getResourceType())) {
+            ReplacementCleanup.clear(resource);
+        } else if (HEALTH_CHECK.equals(resource.getResourceType())) {
             resource.getAttributes().remove(CfnRollback.HEALTH_CHECK_UPDATE_SNAPSHOT_ATTR);
             ReplacementCleanup.clear(resource);
         } else if (RECORD_SET_GROUP.equals(resource.getResourceType())) {
@@ -1029,6 +1066,9 @@ public class Route53CfnProvisioner implements CfnResourceProvisioner {
     public boolean rollbackUpdate(StackResource resource) {
         if (RECORD_SET_GROUP.equals(resource.getResourceType())) {
             return rollbackGroupUpdate(resource);
+        }
+        if (HOSTED_ZONE.equals(resource.getResourceType())) {
+            return ReplacementCleanup.rollback(resource, this::delete);
         }
         if (!HEALTH_CHECK.equals(resource.getResourceType())) {
             return false;
