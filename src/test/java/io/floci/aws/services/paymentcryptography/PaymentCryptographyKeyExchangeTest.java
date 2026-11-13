@@ -515,9 +515,10 @@ class PaymentCryptographyKeyExchangeTest {
     @Test
     void aTr34ExportCarriesTheOptionalBlocks() throws Exception {
         // The header of a TR-34 block carries the optional blocks the request names, the
-        // way the header of a TR-31 block does.
-        Tr34Exchange exchange = tr34Exchange();
-        PaymentCryptographyKey key = createKey("TDES_2KEY",
+        // way the header of a TR-31 block does, and the padding block that keeps the
+        // header a whole number of cipher blocks is the last of them.
+        Tr34Exchange exchange = tr34Exchange("RSA_3072");
+        PaymentCryptographyKey key = createKey("AES_128",
                 "TR31_D0_SYMMETRIC_DATA_ENCRYPTION_KEY");
         exchange.exportMaterial().put("KeyBlockHeaders",
                 Map.of("OptionalBlocks", Map.of("AB", "0011")));
@@ -526,12 +527,16 @@ class PaymentCryptographyKeyExchangeTest {
                 exchange.exportMaterial(), "", "");
         Map<?, ?> wrapped = (Map<?, ?>) answer.get("WrappedKey");
 
-        // The header travels in the clear, so it can be read without opening the block. It
-        // says how many optional blocks there are, and they follow it.
+        // The header travels in the clear, so it can be read without opening the block.
         String header = PaymentCryptographyTr34RoundTripTest.clearHeader(
                 HexFormat.of().parseHex((String) wrapped.get("KeyMaterial")));
-        assertEquals("01", header.substring(12, 14), "the number of optional blocks");
-        assertTrue(header.endsWith("AB080011"), "the optional block is not in the header");
+        // The version has no meaning in a TR-34 block, and the reference writes the same
+        // one every time.
+        assertEquals("D", header.substring(0, 1), "the version of the header");
+        // The header says how many optional blocks there are, and the padding block is one
+        // of them.
+        assertEquals("02", header.substring(12, 14), "the number of optional blocks");
+        assertTrue(header.endsWith("AB080011PB080000"), "the optional blocks are not in the header");
 
         PaymentCryptographyKey imported = service.importKey("us-east-1", "Tr34KeyBlock",
                 exchange.importMaterial((String) wrapped.get("KeyMaterial")), "", true, Map.of());

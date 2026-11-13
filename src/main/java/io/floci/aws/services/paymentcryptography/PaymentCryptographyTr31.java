@@ -108,7 +108,7 @@ final class PaymentCryptographyTr31 {
      * @param blockSize the cipher block size in characters
      * @return the blocks, with the padding block appended when one is needed
      */
-    private static List<String[]> withPadding(List<String[]> blocks, int blockSize) {
+    static List<String[]> withPadding(List<String[]> blocks, int blockSize) {
         int total = 0;
         for (String[] block : blocks) {
             total += block[0].length() + 2 + block[1].length();

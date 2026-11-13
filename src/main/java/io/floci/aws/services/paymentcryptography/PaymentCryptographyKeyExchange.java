@@ -785,15 +785,17 @@ final class PaymentCryptographyKeyExchange {
         // The type names the cipher that protects the key, and the cipher is the one the
         // key needs, so a Triple DES key is protected with Triple DES and an AES key with
         // AES.
-        String type = "A".equals(algorithm) ? "D" : "B";
-        // The length field is the placeholder the reference writes, because the field is
-        // ignored in a TR-34 block: what the block carries is the key, not a block of a
-        // length that the receiver would have to compute.
-        String header = type + "9999" + usage + algorithm + mode + version + exportability
-                + PaymentCryptographyTr31.two(blocks.size(), 10) + "00";
-        // The optional blocks follow the header, each its identifier over two characters,
-        // its length over two and then its value, the way a TR-31 block carries them.
-        return header + PaymentCryptographyTr31.optionalBlocks(blocks);
+        // The version and the length are the placeholders the reference writes, because
+        // neither has a meaning in a TR-34 block: what the block carries is the key, not a
+        // block of a length the receiver would have to compute. The optional blocks follow
+        // the header, each its identifier over two characters, its length over two and then
+        // its value, the way a TR-31 block carries them, and the padding block that keeps
+        // the header a whole number of cipher blocks is the last of them.
+        List<String[]> padded = PaymentCryptographyTr31.withPadding(blocks,
+                "A".equals(algorithm) ? 16 : 8);
+        String header = "D9999" + usage + algorithm + mode + version + exportability
+                + PaymentCryptographyTr31.two(padded.size(), 10) + "00";
+        return header + PaymentCryptographyTr31.optionalBlocks(padded);
     }
 
     /** The modes of use the attributes name, as the service reads them. */
