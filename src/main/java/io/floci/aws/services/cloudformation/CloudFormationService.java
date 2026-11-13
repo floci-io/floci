@@ -1164,7 +1164,8 @@ public class CloudFormationService implements ResourceProvider {
                         || "AWS::CloudFormation::Stack".equals(resourceType))) {
                     boolean typeChanged = !oldDef.path("Type").asText().equals(resourceType);
                     boolean replacement = typeChanged
-                            || requiresReplacement(resourceType, oldDef.path("Properties"), newDef.path("Properties"), changedParams, changedConditions);
+                            || requiresReplacement(resourceType, oldDef.path("Properties"), newDef.path("Properties"), changedParams, changedConditions)
+                            || comparedCreateOnlyChanged(resourceType, compared, logicalId);
                     if (replacement) {
                         replacedResourceIds.add(logicalId);
                     }
@@ -1277,6 +1278,7 @@ public class CloudFormationService implements ResourceProvider {
 
                             boolean replacement = typeChanged
                                     || (oldDef != null && requiresReplacement(resourceType, oldDef.path("Properties"), newDef.path("Properties"), changedParams, changedConditions))
+                                    || (oldDef != null && comparedCreateOnlyChanged(resourceType, compared, logicalId))
                                     || createOnlyReferencesReplaced;
                             if (replacement && replacedResourceIds.add(logicalId)) {
                                 anyNewChange = true;
@@ -1334,6 +1336,23 @@ public class CloudFormationService implements ResourceProvider {
             }
         }
         return false;
+    }
+
+    /**
+     * Whether a create-only property differs between the resolved forms the diff compared, which
+     * see what the template text cannot: a dynamic reference whose stored value moved, an imported
+     * value that changed. Without compared forms (a template that did not resolve) there is nothing
+     * to read.
+     */
+    private static boolean comparedCreateOnlyChanged(String resourceType, JsonNode[] compared, String logicalId) {
+        if (compared == null || compared[0] == null || compared[1] == null
+                || !CfnCreateOnlyProperties.hasSchema(resourceType)) {
+            return false;
+        }
+        JsonNode before = compared[0].path(logicalId).path("Properties");
+        JsonNode after = compared[1].path(logicalId).path("Properties");
+        return before.isObject() && after.isObject()
+                && CfnCreateOnlyProperties.createOnlyValueChanged(resourceType, before, after);
     }
 
     private boolean requiresReplacement(String resourceType, JsonNode oldProps, JsonNode newProps,
