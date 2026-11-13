@@ -268,13 +268,13 @@ class Ec2VolumeBlockDeviceManagerTest {
      * and every attachment reported the helper unavailable; the daemon creates the bind source.
      */
     @Test
-    void helperInsideAContainerLeavesCreatingTheHostBindDirectoryToDocker(@TempDir Path directory)
-            throws Exception {
-        Path hostPersistentPath = Files.createFile(directory.resolve("not-a-directory")).resolve("floci-data");
+    void helperInsideAContainerLeavesCreatingTheHostBindDirectoryToDocker(@TempDir Path directory) {
+        Path hostPersistentPath = directory.resolve("floci-data");
         when(containerDetector.isRunningInContainer()).thenReturn(true);
         ContainerBuilder.Builder helperBuilder = helperToBeCreatedOn(hostPersistentPath);
 
         assertEquals(Optional.of("/dev/xvdf"), manager.attachVolume(volume(), runningInstance(), "/dev/xvdf"));
+        assertFalse(Files.exists(hostPersistentPath), "Floci must not create the Docker host's directory itself");
         verify(helperBuilder).withBind(hostPersistentPath.resolve("ec2").resolve("volumes").toString(), "/volumes");
     }
 

@@ -20,7 +20,6 @@ import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 import org.jboss.logging.Logger;
 
-import java.nio.file.Path;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
@@ -498,11 +497,12 @@ public class Ec2VolumeBlockDeviceManager implements ContainerTeardown, Resettabl
             } else {
                 // The host path names a directory on the Docker host. Inside a container Floci
                 // cannot reach it, so the daemon creates the missing bind source instead.
-                Path hostPath = ContainerStorageHelper.hostResourcePath(config, "ec2", "volumes");
+                String hostPath = ContainerStorageHelper.hostResourcePath(config, "ec2", "volumes")
+                        .toAbsolutePath().toString();
                 if (!containerDetector.isRunningInContainer()) {
-                    ContainerStorageHelper.ensureHostDir(hostPath.toString());
+                    ContainerStorageHelper.ensureHostDir(hostPath);
                 }
-                builder.withBind(hostPath.toAbsolutePath().toString(), "/volumes");
+                builder.withBind(hostPath, "/volumes");
             }
 
             ContainerSpec spec = builder.build();
