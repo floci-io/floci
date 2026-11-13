@@ -357,6 +357,18 @@ class SesIntegrationTest {
     @Test
     @Order(17)
     void setIdentityNotificationTopic() {
+        // SES refuses a topic that does not exist.
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .header("Authorization", "AWS4-HMAC-SHA256 Credential=AKID/20260101/us-east-1/sns/aws4_request")
+            .formParam("Action", "CreateTopic")
+            .formParam("Name", "bounce-topic")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body(containsString("arn:aws:sns:us-east-1:000000000000:bounce-topic"));
+
         given()
             .contentType("application/x-www-form-urlencoded")
             .header("Authorization", "AWS4-HMAC-SHA256 Credential=AKID/20260101/us-east-1/email/aws4_request")

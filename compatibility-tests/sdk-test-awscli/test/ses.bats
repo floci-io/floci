@@ -6,12 +6,17 @@ load 'test_helper/common-setup'
 setup_file() {
     export TEST_EMAIL="$(unique_name test)@example.com"
     export TEST_DOMAIN="$(unique_name test).example.com"
+    # SES refuses a notification topic that does not exist.
+    local topic_out
+    topic_out=$(aws_cmd sns create-topic --name "$(unique_name bounce-topic)")
+    export BOUNCE_TOPIC_ARN=$(json_get "$topic_out" '.TopicArn')
 }
 
 teardown_file() {
     # Cleanup identities
     aws_cmd ses delete-identity --identity "$TEST_EMAIL" >/dev/null 2>&1 || true
     aws_cmd ses delete-identity --identity "$TEST_DOMAIN" >/dev/null 2>&1 || true
+    aws_cmd sns delete-topic --topic-arn "$BOUNCE_TOPIC_ARN" >/dev/null 2>&1 || true
 }
 
 @test "SES: verify email identity" {
@@ -112,7 +117,7 @@ teardown_file() {
     run aws_cmd ses set-identity-notification-topic \
         --identity "$TEST_EMAIL" \
         --notification-type Bounce \
-        --sns-topic arn:aws:sns:us-east-1:000000000000:bounce-topic
+        --sns-topic "$BOUNCE_TOPIC_ARN"
     # Accept success or known parser bug output
     [[ $status -eq 0 ]] || [[ "$output" == *"SetIdentityNotificationTopicResult"* ]]
 }

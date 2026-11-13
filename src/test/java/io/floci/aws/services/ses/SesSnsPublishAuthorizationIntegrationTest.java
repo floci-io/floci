@@ -186,14 +186,21 @@ class SesSnsPublishAuthorizationIntegrationTest {
                 .body(containsString("<DeliveryTopic>" + topicArn + "</DeliveryTopic>"));
     }
 
+    /** Probed: SetIdentityNotificationTopic refuses a topic whose policy does not let SES publish. */
     @Test
-    void anotherAccountsTopicWithoutAnSesGrantRefusesTheNotification() {
-        String topicArn = createTopic(OTHER, "foreign-" + suffix());
+    void anIdentityCannotNameATopicThatRefusesSes() {
         String sender = createSender();
-        setIdentityNotificationTopic(sender, "Bounce", topicArn);
+        String closed = createTopic(OWNER, "closed-" + suffix());
+        setTopicPolicy(OWNER, closed, rootOnly(closed));
+        String foreign = createTopic(OTHER, "foreign-" + suffix());
 
-        sendEmail(sender, BOUNCE, null);
-
+        for (String topicArn : List.of(closed, foreign)) {
+            ses(OWNER, "SetIdentityNotificationTopic",
+                    Map.of("Identity", sender, "NotificationType", "Bounce", "SnsTopic", topicArn))
+                    .statusCode(400)
+                    .body(containsString("<Code>InvalidParameterValue</Code>"))
+                    .body(containsString("SNS topic " + topicArn + " is invalid."));
+        }
         notificationAttributes(sender).body(containsString("<BounceTopic></BounceTopic>"));
     }
 
