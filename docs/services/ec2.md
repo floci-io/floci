@@ -2,12 +2,24 @@
 
 **Protocol:** EC2 Query (XML) — `POST http://localhost:4566/` with `Action=` parameter
 
+## Instance IAM authorization
+
+With IAM enforcement enabled, modeled instance-list operations, including `StartInstances`, `StopInstances`, `TerminateInstances`, and `RebootInstances`, authorize each requested instance ARN before changing any instance state.
+Policies can scope access to an exact instance ARN or use stored tags through `ec2:ResourceTag/<key>` and `aws:ResourceTag/<key>`.
+A batch containing an unauthorized instance is denied in full, including when another instance in that batch is allowed.
+These checks also apply in EC2 mock mode.
+Target members and resource-tag condition keys come from generated AWS model and Service Reference data.
+Malformed percent escapes in a form body are rejected with a client error before authorization uses any partially decoded parameters.
+See the [AWS EC2 authorization reference](https://docs.aws.amazon.com/service-authorization/latest/reference/list_ec2.html) for supported resource types and condition keys.
+
 ## Instance Execution Model
 
 `RunInstances` launches a **real Docker container** for each instance. By default, the container is kept alive with `tail -f /dev/null` so any base image works regardless of its default CMD. Catalog entries that opt into the `systemd` guest runtime start `/sbin/init` instead, with the Docker mounts needed for a systemd-based cloud-image guest. Those guests also get the Docker host's `/lib/modules/<KernelVersion>` (the running kernel's directory only, so the guest's own package manager keeps a writable `/lib/modules`) read-only, so `modprobe` finds modules the shared kernel already has (for example `br_netfilter`, which Kubernetes node setup loads). The mount is read-only, but it is not a boundary for a privileged guest: one can remount that directory read-write and load any module built for the shared kernel (see the warning below). On Docker Desktop or OrbStack, that directory is the Linux VM's, which may not hold modules matching the kernel that VM is running. If `/lib/modules/<KernelVersion>` does not exist on the Docker daemon's host, Docker creates an empty root-owned directory there and `modprobe` still fails. The bind is read-only, so a guest that installs the `linux-modules` package for the host's exact kernel version cannot write into it.
 
 !!! warning "Systemd guests can load modules into the host kernel"
     An instance container runs privileged exactly when `FLOCI_NETWORK_SECURITY_GROUP_ENFORCEMENT_ENABLED` is off; with it on, the container joins a Floci-protected network namespace unprivileged, without Docker's `CAP_SYS_MODULE`, and a launch whose namespace cannot be created fails rather than falling back to privileged. A privileged systemd guest with the host's `/lib/modules/<KernelVersion>` mounted can `modprobe` any module that tree holds. The module loads into the **shared** kernel of the Docker host (or Docker Desktop / OrbStack VM), not into the guest. User data or an AMI that loads modules therefore changes the machine Floci runs on. Run systemd catalog images only with user data you would run on that host yourself, and prefer a disposable VM or CI runner for untrusted workloads.
+
+A systemd guest gets a private cgroup namespace, as kind runs its nodes, so its systemd owns its own cgroup subtree and two guests running Kubernetes nodes do not share (and tear down) each other's `kubepods.slice`. Under security-group enforcement the guest runs unprivileged, and Docker mounts an unprivileged container's private cgroupfs read-only; there the guest keeps the host's cgroup namespace and a read-write bind of `/sys/fs/cgroup`, so it boots, but its cgroups are shared with the host and with other such guests. The private namespace was measured on OrbStack (cgroup v2); cgroup v1 hosts are untested. Floci's link-local IMDS proxy, which it starts in the guest with `docker exec`, moves itself into the leaf cgroup `/sys/fs/cgroup/floci` first: an exec'd process lands in the root of the guest's cgroup namespace, and cgroup v2 will not enable controllers in a cgroup that holds processes, so a proxy left there kept kubelet (cgroupfs driver) from creating `kubepods.slice`. Processes your own user data or SSM commands leave running in the background are not moved.
 
 | EC2 state | Docker operation |
 |---|---|
@@ -382,7 +394,7 @@ private gateway lifecycles are not modelled.
 |--------|-------------|
 | CreateSecurityGroup | Creates a security group in a VPC, the default VPC when `VpcId` is absent or empty. `DryRun=true` is answered with `DryRunOperation` and creates nothing. A tag specification error or a missing `GroupName`, `GroupDescription` or VPC keeps its own error; a taken group name is checked only without `DryRun`. |
 | DescribeSecurityGroups | Lists or returns stored security groups. |
-| DeleteSecurityGroup | Deletes a security group from the local EC2 store. |
+| DeleteSecurityGroup | Deletes a group and its rules by ID, or by name within the account and region's default VPC. Name lookup reports `VPCIdNotSpecified` when no default VPC exists. Default groups cannot be deleted. Existing network-interface, active-instance and other same-VPC group references report `DependencyViolation`; self-references do not prevent deletion. `DryRun` reports `DryRunOperation` without deleting the group or rules. Blank or malformed boolean values are rejected before deletion. |
 | AuthorizeSecurityGroupIngress | Adds inbound permissions. Sources may be IPv4 ranges, IPv6 ranges, or another security group (`UserIdGroupPairs`, sent on the wire as `Groups`); prefix list sources are not stored. One rule is stored per source, each carrying its own description. |
 | AuthorizeSecurityGroupEgress | Adds outbound permissions, with the same source types as the inbound call. |
 | RevokeSecurityGroupIngress | Removes inbound permissions. Matches on protocol and port range only, so it removes every permission on that port regardless of source. Protocol numbers and names match each other (`6` is `tcp`), and an all-traffic (`-1`) permission matches whatever ports the request names, as on AWS (Terraform revokes the default egress rule as `-1` with ports `0`). |

@@ -141,6 +141,15 @@ public class ContainerLifecycleManager {
         return createAndStart(spec, false);
     }
 
+    /**
+     * Creates and starts a container for a specific Docker platform.
+     *
+     * @param platform Docker platform, such as {@code linux/arm64}, or null for the daemon's own
+     */
+    public ContainerInfo createAndStart(ContainerSpec spec, String platform) {
+        return createAndStart(spec, platform, false);
+    }
+
     /** Starts a disposable container, reclaiming its anonymous volumes if startup fails. */
     public ContainerInfo createAndStartEphemeral(ContainerSpec spec) {
         return createAndStart(spec, true);
@@ -293,6 +302,9 @@ public class ContainerLifecycleManager {
         }
         if (spec.user() != null && !spec.user().isBlank()) {
             createCmd.withUser(spec.user());
+        }
+        if (spec.dnsName() != null) {
+            createCmd.withHostName(spec.dnsName()).withAliases(spec.dnsName());
         }
         if (env != null && !env.isEmpty()) {
             createCmd.withEnv(env);

@@ -16,7 +16,6 @@ import org.junit.jupiter.params.provider.ValueSource;
 import software.amazon.awssdk.auth.credentials.AwsBasicCredentials;
 import software.amazon.awssdk.auth.credentials.AwsCredentials;
 import software.amazon.awssdk.auth.credentials.AwsSessionCredentials;
-import software.amazon.awssdk.auth.credentials.StaticCredentialsProvider;
 import software.amazon.awssdk.http.apache5.Apache5HttpClient;
 import software.amazon.awssdk.regions.Region;
 import software.amazon.awssdk.services.ec2.Ec2Client;
@@ -59,9 +58,8 @@ class Ec2SignatureErrorIntegrationTest {
                 ? AwsBasicCredentials.create(key, "session-secret")
                 : AwsSessionCredentials.create(key, "session-secret",
                         "wrong".equals(tokenMode) ? "wrong-token" : "issued-token");
-        try (Ec2Client client = Ec2Client.builder().endpointOverride(endpoint).region(Region.US_EAST_1)
-                .httpClientBuilder(Apache5HttpClient.builder())
-                .credentialsProvider(StaticCredentialsProvider.create(credentials)).build()) {
+        try (Ec2Client client = AwsTestClients.create(Ec2Client.builder(),
+                credentials, Region.US_EAST_1, Apache5HttpClient.builder(), endpoint)) {
             if ("live".equals(tokenMode)) {
                 assertNotNull(client.describeVpcs().vpcs());
                 return;

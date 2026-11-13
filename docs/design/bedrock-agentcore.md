@@ -95,7 +95,7 @@ All verified against the AWS API reference. **Note verbs and trailing slashes.**
 | DeleteAgentRuntime | `DELETE /runtimes/{agentRuntimeId}/?clientToken={t}` | 202 | body `{agentRuntimeId, status: DELETING}` |
 
 Identity: `agentRuntimeId` = `<name>-<10 [a-zA-Z0-9]>` (`[a-zA-Z][a-zA-Z0-9_]{0,99}-[a-zA-Z0-9]{10}`).
-ARN embeds a fresh UUID + version: `arn:aws:bedrock-agentcore:<region>:<account>:agent/<uuid>:<version>`.
+Runtime ARN: `arn:<partition>:bedrock-agentcore:<region>:<account>:runtime/<agentRuntimeId>`, stable across versions.
 `agentRuntimeVersion` is a string int starting `"1"`, incremented on Update. `status` = `READY`.
 
 ### Agent Runtime Endpoint (control plane)
@@ -108,7 +108,7 @@ ARN embeds a fresh UUID + version: `arn:aws:bedrock-agentcore:<region>:<account>
 | DeleteAgentRuntimeEndpoint | `DELETE /runtimes/{agentRuntimeId}/runtime-endpoints/{endpointName}/?clientToken={t}` | 202 |
 | ListAgentRuntimeEndpoints | `POST /runtimes/{agentRuntimeId}/runtime-endpoints/?maxResults=&nextToken=` | 200 |
 
-Endpoint ARN `arn:aws:bedrock-agentcore:<region>:<account>:agentEndpoint/<uuid>` (no version).
+Endpoint ARN `arn:<partition>:bedrock-agentcore:<region>:<account>:runtime/<agentRuntimeId>/runtime-endpoint/<name>`.
 Create body: `name` (required), `agentRuntimeVersion`/`description`/`clientToken`/`tags` (optional).
 Fields: `liveVersion` (serving) vs `targetVersion` (requested). A `DEFAULT` endpoint is auto-created
 on runtime create so an unqualified invoke resolves.

@@ -24,6 +24,7 @@ import io.quarkus.vertx.http.runtime.CurrentVertxRequest;
 import io.vertx.core.http.HttpServerRequest;
 import io.vertx.ext.web.RoutingContext;
 import jakarta.enterprise.inject.Instance;
+import jakarta.ws.rs.WebApplicationException;
 import jakarta.ws.rs.container.ContainerRequestContext;
 import jakarta.ws.rs.core.MediaType;
 import jakarta.ws.rs.core.MultivaluedHashMap;
@@ -49,6 +50,7 @@ import java.util.Optional;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.clearInvocations;
@@ -74,10 +76,9 @@ class ResourceArnBuilderTest {
         for (String id : List.of("N1", "%2Fdelegationset%2FN1")) {
             when(uriInfo.getRequestUri()).thenReturn(URI.create("http://localhost/2013-04-01/delegationset/" + id));
             when(uriInfo.getBaseUri()).thenReturn(URI.create("http://localhost/"));
-            MultivaluedMap<String, String> parameters = new MultivaluedHashMap<>();
-            parameters.putSingle("Id", id.equals("N1") ? "N1" : "/delegationset/N1");
-            when(uriInfo.getPathParameters()).thenReturn(parameters);
             for (String operation : List.of("GetReusableDelegationSet", "DeleteReusableDelegationSet")) {
+                // The id is read from the route the request matched, the type's path Route 53 returns it under dropped.
+                when(ctx.getMethod()).thenReturn(operation.startsWith("Get") ? "GET" : "DELETE");
                 assertEquals(List.of("arn:" + partition + ":route53:::delegationset/N1"),
                         builder.buildResources("route53", "route53:" + operation, ctx, region, ACCOUNT, partition));
             }
@@ -684,6 +685,32 @@ class ResourceArnBuilderTest {
                 builder.buildResources("ec2", "ec2:CreateTags", ctx, "us-east-1", ACCOUNT, "aws"));
     }
 
+    @ParameterizedTest
+    @CsvSource({"StartInstances,aws-cn,cn-north-1", "StopInstances,aws-us-gov,us-gov-west-1",
+            "RebootInstances,aws-cn,cn-north-1", "TerminateInstances,aws-us-gov,us-gov-west-1"})
+    void instanceLifecycleTargetsUseOnlyTheHandlersInstanceIds(String operation, String partition, String region) {
+        queryParams.add("InstanceId.1", "i-query-decoy");
+        setFormBody("Action=" + operation + "&InstanceId.1=i-first&InstanceId.1=i-duplicate"
+                + "&InstanceId.2=i-second&InstanceId.3=i-first&InstanceId.5=i-gap&ResourceId.1=i-decoy");
+        String prefix = "arn:" + partition + ":ec2:" + region + ":111122223333:instance/";
+        assertEquals(List.of(prefix + "i-first", prefix + "i-second", prefix + "i-first"),
+                builder.buildResources("ec2", "ec2:" + operation, ctx, region, "111122223333", partition));
+        setFormBody("Action=" + operation + "&InstanceId.2=i-gap&ResourceId.1=i-decoy");
+        assertEquals(List.of("*"),
+                builder.buildResources("ec2", "ec2:" + operation, ctx, region, "111122223333", partition));
+        when(ctx.getMethod()).thenReturn("GET");
+        contextProperties.put(AwsProtocolClaimFilter.CLAIM_PROPERTY,
+                new ProtocolClaim(WireProtocol.AWS_QUERY, null, operation, null));
+        queryParams.clear();
+        queryParams.add("Action", operation);
+        queryParams.add("InstanceId.1", "i-first");
+        queryParams.add("InstanceId.1", "i-decoy");
+        queryParams.add("InstanceId.2", "i-second");
+        queryParams.add("InstanceId.4", "i-gap");
+        assertEquals(List.of(prefix + "i-first", prefix + "i-second"),
+                builder.buildResources("ec2", "ec2:" + operation, ctx, region, "111122223333", partition));
+    }
+
     @Test
     void largeTagBatchReusesTheDecodedFormAndLeavesTheBodyForTheHandler() throws IOException {
         StringBuilder form = new StringBuilder("Action=CreateTags");
@@ -987,10 +1014,10 @@ class ResourceArnBuilderTest {
     }
 
     @Test
-    void stsMalformedRoleArnIsAuthorizedAsNoRole() {
-        // Read as absent, so the request reaches the form reader, which refuses it as it does today.
+    void stsMalformedRoleEncodingIsRejectedBeforeWildcardAuthorization() {
         setFormBody("Action=AssumeRole&Version=2011-06-15&RoleArn=arn%3Aaws%ZZ&RoleSessionName=robin");
-        assertEquals("*", sts("sts:AssumeRole"));
+        WebApplicationException error = assertThrows(WebApplicationException.class, () -> sts("sts:AssumeRole"));
+        assertEquals(404, error.getResponse().getStatus());
     }
 
     @Test

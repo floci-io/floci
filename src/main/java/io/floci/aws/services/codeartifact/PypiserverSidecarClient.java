@@ -2,9 +2,11 @@ package io.floci.aws.services.codeartifact;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import io.floci.aws.core.common.StreamingResponses;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 
+import java.io.InputStream;
 import java.net.URI;
 import java.net.URLEncoder;
 import java.net.http.HttpClient;
@@ -13,6 +15,7 @@ import java.net.http.HttpRequest.BodyPublishers;
 import java.net.http.HttpResponse;
 import java.net.http.HttpResponse.BodyHandlers;
 import java.nio.charset.StandardCharsets;
+import java.nio.file.Path;
 import java.time.Duration;
 import java.time.Instant;
 import java.time.format.DateTimeFormatter;
@@ -121,6 +124,43 @@ public class PypiserverSidecarClient implements RepositorySidecarManager {
                     + "upstream returned " + response.statusCode());
         }
         return Optional.of(response.body());
+    }
+
+    /**
+     * {@link #fetchPackageVersionAsset}'s streamed sibling; see {@link RepositorySidecarManager}
+     * for why. Uses the worst-case download timeout, not the byte[] overload's flat 10 seconds:
+     * this one asset download can be gigabytes, and its real size isn't known until the response
+     * itself arrives.
+     */
+    @Override
+    public Optional<StreamedAsset> fetchPackageVersionAssetStreamed(String repositoryContainerId, String domain,
+            String repository, String namespace, String packageName, String version, String assetName) {
+        if (!filenameEmbedsVersion(assetName, packageName, version)) {
+            return Optional.empty();
+        }
+        String baseUrl = ensureReady(repositoryContainerId, null);
+        if (!packageIndexListsAsset(baseUrl, packageName, assetName)) {
+            return Optional.empty();
+        }
+        URI uri = SidecarUriUtils.combine(URI.create(baseUrl), "/packages/" + SidecarUriUtils.encodeSegment(assetName));
+        HttpRequest request = HttpRequest.newBuilder(uri).timeout(SidecarUriUtils.maxTransferTimeout()).GET().build();
+        HttpResponse<InputStream> response;
+        try {
+            response = httpClient.send(request, BodyHandlers.ofInputStream());
+        } catch (Exception e) {
+            throw new IllegalStateException("Could not reach the pypiserver sidecar to fetch " + assetName, e);
+        }
+        if (response.statusCode() == 404) {
+            StreamingResponses.closeQuietly(response.body());
+            return Optional.empty();
+        }
+        if (response.statusCode() != 200) {
+            StreamingResponses.closeQuietly(response.body());
+            throw new IllegalStateException("Could not fetch " + assetName + " from the pypiserver sidecar: "
+                    + "upstream returned " + response.statusCode());
+        }
+        long contentLength = response.headers().firstValueAsLong("Content-Length").orElse(-1);
+        return Optional.of(new StreamedAsset(response.body(), contentLength));
     }
 
     /**
@@ -364,7 +404,36 @@ public class PypiserverSidecarClient implements RepositorySidecarManager {
             String namespace, String packageName, String version, String assetName, byte[] content) {
         String baseUrl = ensureReady(repositoryContainerId, null);
         String boundary = "flociPypiCopyBoundary" + System.nanoTime();
-        byte[] head = ("--" + boundary + "\r\n"
+        byte[] head = multipartHead(boundary, packageName, version, assetName);
+        byte[] tail = multipartTail(boundary);
+        byte[] body = new byte[head.length + content.length + tail.length];
+        System.arraycopy(head, 0, body, 0, head.length);
+        System.arraycopy(content, 0, body, head.length, content.length);
+        System.arraycopy(tail, 0, body, head.length + content.length, tail.length);
+        sendMultipartUpload(baseUrl, boundary, BodyPublishers.ofByteArray(body), assetName, body.length);
+    }
+
+    /**
+     * {@link #storePackageVersionAsset(String, String, String, String, String, String, String,
+     * byte[])}'s own streamed sibling: the same multipart shape, but the file part streams
+     * straight from disk via {@code BodyPublishers.concat}, so the asset's own content is never
+     * copied into one combined array the way the {@code byte[]} overload above still does for
+     * content that is already resident.
+     */
+    @Override
+    public void storePackageVersionAsset(String repositoryContainerId, String domain, String repository,
+            String namespace, String packageName, String version, String assetName, Path content,
+            long contentLength) {
+        String baseUrl = ensureReady(repositoryContainerId, null);
+        String boundary = "flociPypiCopyBoundary" + System.nanoTime();
+        byte[] head = multipartHead(boundary, packageName, version, assetName);
+        byte[] tail = multipartTail(boundary);
+        HttpRequest.BodyPublisher publisher = MultipartFilePublisher.concat(head, content, tail);
+        sendMultipartUpload(baseUrl, boundary, publisher, assetName, contentLength);
+    }
+
+    private static byte[] multipartHead(String boundary, String packageName, String version, String assetName) {
+        return ("--" + boundary + "\r\n"
                 + "Content-Disposition: form-data; name=\":action\"\r\n\r\nfile_upload\r\n"
                 + "--" + boundary + "\r\n"
                 + "Content-Disposition: form-data; name=\"name\"\r\n\r\n" + packageName + "\r\n"
@@ -373,16 +442,18 @@ public class PypiserverSidecarClient implements RepositorySidecarManager {
                 + "--" + boundary + "\r\n"
                 + "Content-Disposition: form-data; name=\"content\"; filename=\"" + assetName + "\"\r\n"
                 + "Content-Type: application/octet-stream\r\n\r\n").getBytes(StandardCharsets.UTF_8);
-        byte[] tail = ("\r\n--" + boundary + "--\r\n").getBytes(StandardCharsets.UTF_8);
-        byte[] body = new byte[head.length + content.length + tail.length];
-        System.arraycopy(head, 0, body, 0, head.length);
-        System.arraycopy(content, 0, body, head.length, content.length);
-        System.arraycopy(tail, 0, body, head.length + content.length, tail.length);
+    }
 
+    private static byte[] multipartTail(String boundary) {
+        return ("\r\n--" + boundary + "--\r\n").getBytes(StandardCharsets.UTF_8);
+    }
+
+    private void sendMultipartUpload(String baseUrl, String boundary, HttpRequest.BodyPublisher publisher,
+            String assetName, long contentLength) {
         HttpRequest request = HttpRequest.newBuilder(URI.create(baseUrl + "/"))
-                .timeout(Duration.ofSeconds(30))
+                .timeout(SidecarUriUtils.transferTimeout(contentLength))
                 .header("Content-Type", "multipart/form-data; boundary=" + boundary)
-                .POST(BodyPublishers.ofByteArray(body))
+                .POST(publisher)
                 .build();
         HttpResponse<String> response;
         try {

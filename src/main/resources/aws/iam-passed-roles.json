@@ -1,7 +1,7 @@
 {
-  "_source": {"generator": "tools/aws/regen_iam_passed_roles.py", "reference": "https://servicereference.us-east-1.amazonaws.com/", "botocore": "botocore 1.43.118 (local/aws/botocore)", "retrieved": "2026-11-02", "note": "make iam-passed-roles-check re-derives every member from botocore; make iam-passed-roles-verify checks every operation against AWS."},
-  "namespaces": {"application-autoscaling": ["application-autoscaling"], "athena": ["athena"], "autoscaling": ["autoscaling"], "budgets": ["budgets"], "cloudformation": ["cloudcontrol", "cloudformation"], "cloudtrail": ["cloudtrail"], "cloudwatch": ["cloudwatch", "cloudwatchomni"], "codebuild": ["codebuild"], "codedeploy": ["codedeploy"], "codepipeline": ["codepipeline"], "cognito-identity": ["cognito-identity"], "cognito-idp": ["cognito-idp"], "comprehend": ["comprehend"], "config": ["config"], "datasync": ["datasync"], "dms": ["dms"], "dsql": ["dsql"], "ec2": ["ec2"], "ecr": ["ecr"], "ecs": ["ecs"], "eks": ["eks"], "elasticmapreduce": ["emr"], "events": ["eventbridgev2", "events"], "firehose": ["firehose"], "glue": ["glue"], "iam": ["iam"], "kinesis": ["kinesis"], "kinesisanalytics": ["kinesisanalytics", "kinesisanalyticsv2"], "lambda": ["lambda", "lambda-core", "lambda-microvms", "lambda-web"], "logs": ["logs"], "pipes": ["pipes"], "rds": ["docdb", "neptune", "rds"], "redshift": ["redshift"], "redshift-serverless": ["redshift-serverless"], "rekognition": ["rekognition"], "resource-groups": ["resource-groups"], "s3": ["s3", "s3control"], "sagemaker": ["sagemaker"], "scheduler": ["scheduler"], "secretsmanager": ["secretsmanager"], "servicecatalog": ["servicecatalog"], "ses": ["mailmanager", "pinpoint-email", "ses", "sesv2"], "sns": ["sns"], "ssm": ["ssm"], "states": ["stepfunctions"], "swf": ["swf"], "textract": ["textract"], "transcribe": ["transcribe"], "transfer": ["transfer"], "translate": ["translate"]},
-  "notCovered": {"access-analyzer": "REST routes no rule maps yet", "airflow": "REST routes no rule maps yet", "apigateway": "authorized by HTTP method, so no request is checked as one of these operations", "appconfig": "REST routes no rule maps yet", "appsync": "REST routes no rule maps yet", "aps": "REST routes no rule maps yet", "aws-marketplace": "REST routes no rule maps yet", "backup": "REST routes no rule maps yet", "batch": "REST routes no rule maps yet", "bedrock": "REST routes no rule maps yet", "bedrock-agentcore": "REST routes no rule maps yet", "cloudfront": "REST routes no rule maps yet", "dlm": "REST routes no rule maps yet", "elasticfilesystem": "REST routes no rule maps yet", "emr-serverless": "REST routes no rule maps yet", "es": "REST routes no rule maps yet", "fis": "REST routes no rule maps yet", "guardduty": "REST routes no rule maps yet", "iot": "REST routes no rule maps yet", "kafka": "REST routes no rule maps yet", "macie2": "REST routes no rule maps yet", "mq": "REST routes no rule maps yet", "quicksight": "metadata-only REST subset; role passing and iam:PassRole checks are not implemented", "rum": "REST routes no rule maps yet", "s3tables": "REST routes no rule maps yet"},
+  "_source": {"generator": "tools/aws/regen_iam_passed_roles.py", "reference": "https://servicereference.us-east-1.amazonaws.com/", "botocore": "botocore 1.43.118 (installed package)", "retrieved": "2026-11-12", "note": "make iam-passed-roles-check re-derives every member from botocore; make iam-passed-roles-verify checks every operation against AWS."},
+  "namespaces": {"application-autoscaling": ["application-autoscaling"], "athena": ["athena"], "autoscaling": ["autoscaling"], "budgets": ["budgets"], "cloudformation": ["cloudcontrol", "cloudformation"], "cloudtrail": ["cloudtrail"], "cloudwatch": ["cloudwatch", "cloudwatchomni"], "codebuild": ["codebuild"], "codedeploy": ["codedeploy"], "codepipeline": ["codepipeline"], "cognito-identity": ["cognito-identity"], "cognito-idp": ["cognito-idp"], "comprehend": ["comprehend"], "config": ["config"], "datasync": ["datasync"], "dms": ["dms"], "dsql": ["dsql"], "ec2": ["ec2"], "ecr": ["ecr"], "ecs": ["ecs"], "eks": ["eks"], "elasticmapreduce": ["emr"], "emr-serverless": ["emr-serverless"], "events": ["eventbridgev2", "events"], "firehose": ["firehose"], "glue": ["glue"], "iam": ["iam"], "kinesis": ["kinesis"], "kinesisanalytics": ["kinesisanalytics", "kinesisanalyticsv2"], "lambda": ["lambda", "lambda-core", "lambda-microvms", "lambda-web"], "logs": ["logs"], "pipes": ["pipes"], "rds": ["docdb", "neptune", "rds"], "redshift": ["redshift"], "redshift-serverless": ["redshift-serverless"], "rekognition": ["rekognition"], "resource-groups": ["resource-groups"], "s3": ["s3", "s3control"], "sagemaker": ["sagemaker"], "scheduler": ["scheduler"], "secretsmanager": ["secretsmanager"], "servicecatalog": ["servicecatalog"], "ses": ["mailmanager", "pinpoint-email", "ses", "sesv2"], "sns": ["sns"], "ssm": ["ssm"], "states": ["stepfunctions"], "swf": ["swf"], "textract": ["textract"], "transcribe": ["transcribe"], "transfer": ["transfer"], "translate": ["translate"]},
+  "notCovered": {"access-analyzer": "REST routes no rule maps yet", "airflow": "REST routes no rule maps yet", "apigateway": "authorized by HTTP method, so no request is checked as one of these operations", "appconfig": "REST routes no rule maps yet", "appsync": "REST routes no rule maps yet", "aps": "REST routes no rule maps yet", "aws-marketplace": "REST routes no rule maps yet", "backup": "REST routes no rule maps yet", "batch": "REST routes no rule maps yet", "bedrock": "REST routes no rule maps yet", "bedrock-agentcore": "REST routes no rule maps yet", "cloudfront": "REST routes no rule maps yet", "dlm": "REST routes no rule maps yet", "elasticfilesystem": "REST routes no rule maps yet", "es": "REST routes no rule maps yet", "fis": "REST routes no rule maps yet", "guardduty": "REST routes no rule maps yet", "iot": "REST routes no rule maps yet", "kafka": "REST routes no rule maps yet", "macie2": "REST routes no rule maps yet", "mq": "REST routes no rule maps yet", "quicksight": "metadata-only REST subset; role passing and iam:PassRole checks are not implemented", "rum": "REST routes no rule maps yet", "s3tables": "REST routes no rule maps yet"},
   "otherNamespaces": ["agent-registry", "aidevops", "aiops", "airflow-serverless", "amplify", "aoss", "appflow", "appmesh", "apprunner", "appstream", "arc-region-switch", "backup-gateway", "backup-search", "bcm-dashboards", "braket", "chatbot", "chime", "cleanrooms", "cleanrooms-ml", "codeconnections", "codestar-connections", "cognito-sync", "comprehendmedical", "databrew", "dataexchange", "datapipeline", "datazone", "dax", "deadline", "devicefarm", "elemental-inference", "emr-containers", "entityresolution", "fms", "forecast", "frauddetector", "gamelift", "gameliftstreams", "geo", "grafana", "greengrass", "groundstation", "health-agent", "healthlake", "imagebuilder", "iotdeviceadvisor", "iotfleetwise", "iotmanagedintegrations", "iotsitewise", "iottwinmaker", "iotwireless", "kafkaconnect", "kendra", "lex", "lookoutequipment", "m2", "machinelearning", "mediaconnect", "mediaconvert", "medialive", "mediapackage", "mediapackage-vod", "mediapackagev2", "mediastore", "medical-imaging", "mobiletargeting", "neptune-graph", "observabilityadmin", "odb", "omics", "opensearch", "osis", "partnercentral", "pcs", "personalize", "profile", "proton", "qbusiness", "repostspace", "resiliencehub", "rolesanywhere", "s3files", "sagemaker-geospatial", "securityagent", "securitylake", "shield", "sms-voice", "snowball", "social-messaging", "ssm-incidents", "ssm-quicksetup", "storagegateway", "supportapp", "synthetics", "timestream", "voiceid", "wellarchitected", "wisdom", "workmail", "workspaces"],
   "operations": {
     "application-autoscaling:RegisterScalableTarget": {"passedTo": ["application-autoscaling"], "byHand": "the scalable target's role"},
@@ -364,7 +364,9 @@
       {"member": "infrastructureRoleArn", "passedTo": "ecs"},
       {"member": "taskRoleArn", "passedTo": "ecs-tasks"}
     ]},
-    "ecs:CreateGateway": {"passedTo": ["ecs"], "notRead": "botocore's model has no such operation"},
+    "ecs:CreateGateway": {"passedTo": ["ecs"], "roles": [
+      {"member": "infrastructureRoleArn", "passedTo": "ecs"}
+    ]},
     "ecs:CreateService": {"passedTo": ["ecs", "ecs-tasks"], "byHand": "the task definition's roles and the service's infrastructure roles"},
     "ecs:CreateTaskSet": {"passedTo": ["ecs-tasks"], "byHand": "the task definition's roles"},
     "ecs:RegisterDaemonTaskDefinition": {"passedTo": ["ecs-tasks"], "roles": [
@@ -380,7 +382,9 @@
       {"member": "executionRoleArn", "passedTo": "ecs-tasks"},
       {"member": "taskRoleArn", "passedTo": "ecs-tasks"}
     ]},
-    "ecs:UpdateGateway": {"passedTo": ["ecs"], "notRead": "botocore's model has no such operation"},
+    "ecs:UpdateGateway": {"passedTo": ["ecs"], "roles": [
+      {"member": "infrastructureRoleArn", "passedTo": "ecs"}
+    ]},
     "ecs:UpdateService": {"passedTo": ["ecs", "ecs-tasks"], "byHand": "the task definition's roles and the service's infrastructure roles"},
     "eks:CreateAccessEntry": {"passedTo": ["ec2"], "byHand": "the principal, for the node types alone"},
     "eks:CreateAddon": {"passedTo": ["eks"], "byHand": "the service account role and each Pod Identity association's role"},
@@ -409,10 +413,16 @@
       {"member": "ExecutionEngine.ExecutionRoleArn"},
       {"member": "ServiceRole", "byName": true}
     ]},
-    "elasticmapreduce:StartSession": {"passedTo": ["elasticmapreduce", "managed-compute.elasticmapreduce"], "roles": [
-      {"member": "ExecutionRoleArn", "passedTo": "elasticmapreduce"}
+    "elasticmapreduce:StartSession": {"passedTo": ["managed-compute.elasticmapreduce"], "roles": [
+      {"member": "ExecutionRoleArn", "passedTo": "managed-compute.elasticmapreduce"}
     ]},
     "elasticmapreduce:UpdateStudio": {"passedTo": [], "notRead": "no member of the request names a role"},
+    "emr-serverless:StartJobRun": {"passedTo": ["emr-serverless"], "roles": [
+      {"member": "executionRoleArn", "passedTo": "emr-serverless"}
+    ]},
+    "emr-serverless:StartSession": {"passedTo": ["emr-serverless"], "roles": [
+      {"member": "executionRoleArn", "passedTo": "emr-serverless"}
+    ]},
     "events:CreateEndpoint": {"passedTo": ["events"], "roles": [
       {"member": "RoleArn", "passedTo": "events"}
     ]},
@@ -605,6 +615,7 @@
       {"member": "S3Configuration.RoleARN", "passedTo": "kinesisanalytics"},
       {"member": "ServiceExecutionRole", "passedTo": "kinesisanalytics"}
     ]},
+    "kinesisanalytics:ImportSnapshot": {"passedTo": ["kinesisanalytics"], "notRead": "the pinned botocore does not have the operation yet, so its request cannot be read"},
     "kinesisanalytics:UpdateApplication": {"passedTo": ["kinesisanalytics"], "roles": [
       {"member": "ApplicationUpdate.CloudWatchLoggingOptionUpdates[].RoleARNUpdate", "passedTo": "kinesisanalytics"},
       {"member": "ApplicationUpdate.InputUpdates[].InputProcessingConfigurationUpdate.InputLambdaProcessorUpdate.RoleARNUpdate", "passedTo": "kinesisanalytics"},
@@ -642,6 +653,7 @@
     "logs:PutSubscriptionFilter": {"passedTo": ["logs"], "roles": [
       {"member": "roleArn", "passedTo": "logs"}
     ]},
+    "logs:StartQuery": {"passedTo": ["logs"], "notRead": "no member of the request names a role"},
     "logs:UpdateScheduledQuery": {"passedTo": ["logs"], "roles": [
       {"member": "destinationConfiguration.lookupTableConfiguration.roleArn", "passedTo": "logs"},
       {"member": "destinationConfiguration.s3Configuration.roleArn", "passedTo": "logs"},
@@ -943,6 +955,7 @@
     "ssm:CreateDocument": {"passedTo": ["justintimeaccess.ssm", "ssm"], "notRead": "no member of the request names a role"},
     "ssm:DescribeAutomationStepExecutions": {"passedTo": ["ssm"], "notRead": "no member of the request names a role"},
     "ssm:GetAutomationExecution": {"passedTo": ["ssm"], "notRead": "no member of the request names a role"},
+    "ssm:RegisterDefaultHostManagementConfiguration": {"passedTo": ["ssm"], "notRead": "the pinned botocore does not have the operation yet, so its request cannot be read"},
     "ssm:RegisterTaskWithMaintenanceWindow": {"passedTo": ["ssm"], "roles": [
       {"member": "ServiceRoleArn", "passedTo": "ssm"},
       {"member": "TaskInvocationParameters.RunCommand.ServiceRoleArn", "passedTo": "ssm"}

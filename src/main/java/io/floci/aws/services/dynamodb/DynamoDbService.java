@@ -24,6 +24,8 @@ import io.floci.aws.core.storage.AccountAwareStorageBackend;
 import io.floci.aws.core.storage.InMemoryStorage;
 import io.floci.aws.core.storage.StorageBackend;
 import io.floci.aws.core.storage.StorageFactory;
+import io.floci.aws.services.dynamodb.DynamoDbCapacityQuotas.Capacity;
+import io.floci.aws.services.dynamodb.NativeDynamoDbTableService.GsiThroughputUpdate;
 import io.floci.aws.services.dynamodb.model.AttributeDefinition;
 import io.floci.aws.services.dynamodb.model.ConditionalCheckFailedException;
 import io.floci.aws.services.dynamodb.model.ContributorInsights;
@@ -36,6 +38,7 @@ import io.floci.aws.services.dynamodb.model.IncrementalExportSpecification;
 import io.floci.aws.services.dynamodb.model.KeySchemaElement;
 import io.floci.aws.services.dynamodb.model.LocalSecondaryIndex;
 import io.floci.aws.services.dynamodb.model.PointInTimeChange;
+import io.floci.aws.services.dynamodb.model.ProvisionedThroughput;
 import io.floci.aws.services.dynamodb.model.StreamDescription;
 import io.floci.aws.services.dynamodb.model.TableBackup;
 import io.floci.aws.services.dynamodb.model.TableDefinition;
@@ -131,6 +134,8 @@ public class DynamoDbService {
     // relies on ReentrantLock's re-entrancy so the inner put/update/delete calls do
     // not deadlock after the outer transaction already took each participant's lock.
     private final ConcurrentHashMap<String, ConcurrentHashMap<String, ReentrantLock>> itemLocks = new ConcurrentHashMap<>();
+    // Held from an account quota check until the capacity it allowed is stored.
+    private final Object capacityLock = new Object();
     // ClientRequestToken idempotency for TransactWriteItems. AWS retains tokens for
     // ~10 minutes; floci uses the same window. The cache entry stores a hash of the
     // request body so a replay with the same token but different parameters can be
@@ -644,6 +649,11 @@ public class DynamoDbService {
             table.getProvisionedThroughput().setReadCapacityUnits(readCapacity);
             table.getProvisionedThroughput().setWriteCapacityUnits(writeCapacity);
         }
+        // Track warm throughput: on-demand uses fixed values, provisioned uses the capacity.
+        ProvisionedThroughput tp = readCapacity != null && writeCapacity != null
+                ? new ProvisionedThroughput(readCapacity, writeCapacity) : null;
+        table.setWarmReadUnitsPerSecond(TableDefinition.defaultWarmReadUnits(billingMode, tp));
+        table.setWarmWriteUnitsPerSecond(TableDefinition.defaultWarmWriteUnits(billingMode, tp));
 
         if (gsis != null && !gsis.isEmpty()) {
             for (GlobalSecondaryIndex gsi : gsis) {
@@ -685,7 +695,12 @@ public class DynamoDbService {
             table.setVectorIndexes(created);
         }
 
-        tableStore.put(storageKey, table);
+        synchronized (capacityLock) {
+            if (!"PAY_PER_REQUEST".equals(billingMode)) {
+                DynamoDbCapacityQuotas.requireNewTableWithinQuotas(table, reservedCapacity(region), region);
+            }
+            tableStore.put(storageKey, table);
+        }
         itemsByTable.put(scopedItemsKey(storageKey), new ConcurrentSkipListMap<>());
         LOG.infov("Created table: {0} in region {1}", tableName, region);
         return table;
@@ -1041,6 +1056,19 @@ public class DynamoDbService {
         }
     }
 
+    Object capacityLock() {
+        return capacityLock;
+    }
+
+    private Capacity reservedCapacity(String region) {
+        String prefix = region + "::";
+        Capacity reserved = Capacity.NONE;
+        for (TableDefinition table : tableStore.scan(k -> k.startsWith(prefix))) {
+            reserved = reserved.plus(Capacity.of(table));
+        }
+        return reserved;
+    }
+
     public List<String> listTables(String region) {
         String prefix = region + "::";
         return tableStore.scan(k -> k.startsWith(prefix)).stream()
@@ -1394,6 +1422,12 @@ public class DynamoDbService {
 
         String itemKey = buildItemKey(table, key, true);
 
+        // AWS refuses an over-limit statement before it evaluates the condition.
+        if (sizeRule == UpdateSizeRule.UPDATE_ITEM && updateExpression != null) {
+            DynamoDbItemSize.updateStatementSize(updateExpression, path -> parsePath(path, expressionAttrNames),
+                    expressionAttrValues).ifPresent(DynamoDbService::requireUpdateStatementWithinSizeLimit);
+        }
+
         return withItemLock(storageKey, itemKey, () -> {
             ConcurrentSkipListMap<String, JsonNode> items = itemsFor(storageKey, stagedItems, true);
 
@@ -1503,12 +1537,7 @@ public class DynamoDbService {
             // AWS validates index key values against the item the update produces.
             validateIndexKeyTypes(table, item, true);
 
-            if (sizeRule == UpdateSizeRule.UPDATE_ITEM && updateExpression != null) {
-                requireUpdateItemWithinSizeLimit(item, DynamoDbItemSize.updateStatementSize(updateExpression,
-                        path -> parsePath(path, expressionAttrNames), expressionAttrValues));
-            } else {
-                requireUpdatedItemWithinSizeLimit(item);
-            }
+            requireUpdatedItemWithinSizeLimit(item);
 
             if (stagedItems == null) {
                 pointInTimeRecovery.recordItem(regionResolver.getAccountId(), storageKey, table, itemKey, existing);
@@ -2427,8 +2456,8 @@ public class DynamoDbService {
         }
     }
 
-    private static void requireUpdateItemWithinSizeLimit(JsonNode item, int statementSize) {
-        if (!DynamoDbItemSize.updateItemWithinLimit(item, statementSize)) {
+    private static void requireUpdateStatementWithinSizeLimit(int statementSize) {
+        if (!DynamoDbItemSize.updateStatementWithinLimit(statementSize)) {
             throw new UpdatedItemTooLargeException();
         }
     }
@@ -2505,6 +2534,17 @@ public class DynamoDbService {
                                         List<AttributeDefinition> newAttrDefs,
                                         List<VectorIndexCreate> vectorCreates, List<String> vectorDeletes,
                                         String billingMode, String region) {
+        return updateTable(tableName, readCapacity, writeCapacity, gsiCreates, gsiDeletes, List.of(),
+                           newAttrDefs, vectorCreates, vectorDeletes, billingMode, region);
+    }
+
+    /** @param gsiUpdates the index throughput changes, which the caller applies after this returns */
+    public TableDefinition updateTable(String tableName, Long readCapacity, Long writeCapacity,
+                                        List<GlobalSecondaryIndex> gsiCreates, List<String> gsiDeletes,
+                                        List<GsiThroughputUpdate> gsiUpdates,
+                                        List<AttributeDefinition> newAttrDefs,
+                                        List<VectorIndexCreate> vectorCreates, List<String> vectorDeletes,
+                                        String billingMode, String region) {
         String canonicalTableName = canonicalTableName(region, tableName);
         String storageKey = regionKey(region, canonicalTableName);
         TableDefinition table = tableStore.get(storageKey)
@@ -2520,6 +2560,7 @@ public class DynamoDbService {
             throw new AwsException("ValidationException",
                     "The parameter 'ProvisionedThroughput.WriteCapacityUnits' must be greater than 0", 400);
         }
+        DynamoDbCapacityQuotas.requireWithinTableQuota(readCapacity, writeCapacity, region);
         if (readCapacity != null && writeCapacity != null
                 && "PROVISIONED".equals(table.getBillingMode())
                 && readCapacity.equals(table.getProvisionedThroughput().getReadCapacityUnits())
@@ -2565,15 +2606,42 @@ public class DynamoDbService {
         if (newAttrDefs != null) {
             knownAttrDefs.addAll(newAttrDefs);
         }
+        String newBillingMode = billingMode != null ? billingMode : table.getBillingMode();
         validateVectorIndexUpdates(table, vectorIndexCreates, vectorIndexDeletes,
-                gsiCreates.size() + gsiDeletes.size(), knownAttrDefs,
-                billingMode != null ? billingMode : table.getBillingMode());
+                gsiCreates.size() + gsiDeletes.size(), knownAttrDefs, newBillingMode);
+        if (!"PAY_PER_REQUEST".equals(newBillingMode)) {
+            DynamoDbCapacityQuotas.requireUpdateWithinQuotas(table, readCapacity, writeCapacity, gsiCreates,
+                    gsiDeletes, gsiUpdates, reservedCapacity(region), region);
+        }
 
         if (readCapacity != null) {
             table.getProvisionedThroughput().setReadCapacityUnits(readCapacity);
+            if (readCapacity > table.getWarmReadUnitsPerSecond()) {
+                table.setWarmReadUnitsPerSecond(readCapacity);
+            }
         }
         if (writeCapacity != null) {
             table.getProvisionedThroughput().setWriteCapacityUnits(writeCapacity);
+            if (writeCapacity > table.getWarmWriteUnitsPerSecond()) {
+                table.setWarmWriteUnitsPerSecond(writeCapacity);
+            }
+        }
+
+        // Handle billing mode switch.
+        if (billingMode != null && !billingMode.equals(table.getBillingMode())) {
+            table.setBillingMode(billingMode);
+            if ("PAY_PER_REQUEST".equals(billingMode)) {
+                table.getProvisionedThroughput().setReadCapacityUnits(0L);
+                table.getProvisionedThroughput().setWriteCapacityUnits(0L);
+                long wru = TableDefinition.defaultWarmReadUnits("PAY_PER_REQUEST", null);
+                long wwu = TableDefinition.defaultWarmWriteUnits("PAY_PER_REQUEST", null);
+                if (wru > table.getWarmReadUnitsPerSecond()) {
+                    table.setWarmReadUnitsPerSecond(wru);
+                }
+                if (wwu > table.getWarmWriteUnitsPerSecond()) {
+                    table.setWarmWriteUnitsPerSecond(wwu);
+                }
+            }
         }
 
         for (String indexName : gsiDeletes) {
@@ -3459,11 +3527,11 @@ public class DynamoDbService {
                                         List<String> touched) {
         // Parse SET and REMOVE clauses from expressions like:
         // "SET #n = :newName, age = :newAge REMOVE oldField"
-        if (expression.isBlank()) {
+        if (expression.isEmpty()) {
             throw new AwsException("ValidationException",
                     "Invalid UpdateExpression: The expression can not be empty;", 400);
         }
-        requireClosedParentheses(expression, "");
+        DynamoDbUpdateExpressionSyntax.check(expression);
         // AWS tokenizes UpdateExpression whitespace-insensitively, so collapse runs of
         // whitespace (newlines, tabs, multiple spaces) so clause-keyword dispatch and the
         // comma-separated action parsing below work regardless of formatting. Normalize
@@ -3472,6 +3540,7 @@ public class DynamoDbService {
         // name as a bare identifier instead.
         String remaining = expression.trim().replaceAll("\\s+", " ");
         DynamoDbReservedWords.check(remaining, "UpdateExpression");
+        requireSectionsUsedOnce(remaining);
 
         while (!remaining.isEmpty()) {
             String upper = remaining.toUpperCase();
@@ -3585,27 +3654,9 @@ public class DynamoDbService {
                             "The parameter cannot be converted to a numeric value", 400);
                 }
             } else if (startsWithFunctionCall(valuePart, "if_not_exists")) {
-                // if_not_exists(attrRef, fallbackExpr) evaluates to:
-                //   attrRef's current value  — when attrRef exists in the item
-                //   fallbackExpr             — otherwise
-                // The result is always assigned to attrPath.
-                String[] args = extractFunctionArgs(valuePart);
-                if (args.length == 2) {
-                    String checkAttr = resolveAttributeName(args[0].trim(), exprAttrNames);
-                    String fallbackExpr = args[1].trim();
-                    JsonNode resolved;
-                    if (hasValueAtPath(snapshot, checkAttr, exprAttrNames)) {
-                        // attrRef exists — evaluate to its current value
-                        resolved = getValueAtPath(snapshot, checkAttr, exprAttrNames);
-                    } else if (fallbackExpr.startsWith(":") && exprAttrValues != null) {
-                        resolved = exprAttrValues.get(fallbackExpr);
-                    } else {
-                        // fallback is itself an attribute reference
-                        resolved = getValueAtPath(snapshot, resolveAttributeName(fallbackExpr, exprAttrNames), exprAttrNames);
-                    }
-                    if (resolved != null) {
-                        setValueAtPath(item, attrPath, resolved, exprAttrNames);
-                    }
+                JsonNode resolved = evaluateSetExpr(snapshot, valuePart, exprAttrNames, exprAttrValues);
+                if (resolved != null) {
+                    setValueAtPath(item, attrPath, resolved, exprAttrNames);
                 }
             } else if (startsWithFunctionCall(valuePart.toLowerCase(), "list_append")) {
                 int open = valuePart.indexOf('(');
@@ -3660,13 +3711,7 @@ public class DynamoDbService {
         return clause;
     }
 
-    /**
-     * Strip balanced outer parentheses from a SET-action RHS expression, repeatedly,
-     * so that producers wrapping arithmetic or function calls in parens (e.g.
-     * "(c - :v)" or "((if_not_exists(c, :d) - :v))") parse identically to the
-     * unwrapped form. Rejects forms like "(a) - (b)" where the outer parens do
-     * not actually enclose the whole expression.
-     */
+    /** Removes parentheses around the whole operand, so "(c - :v)" reads as "c - :v" and "(a) - (b)" stays. */
     static String stripOuterParens(String expr) {
         String s = expr.trim();
         while (s.length() >= 2 && s.charAt(0) == '(' && s.charAt(s.length() - 1) == ')') {
@@ -3683,20 +3728,17 @@ public class DynamoDbService {
         return s;
     }
 
-    private JsonNode evaluateSetExpr(ObjectNode item, String expr,
+    private JsonNode evaluateSetExpr(ObjectNode item, String operand,
                                      JsonNode exprAttrNames, JsonNode exprAttrValues) {
+        String expr = stripOuterParens(operand);
         if (startsWithFunctionCall(expr.toLowerCase(), "if_not_exists")) {
             String[] args = extractFunctionArgs(expr);
             if (args.length == 2) {
-                String checkAttr = resolveAttributeName(args[0].trim(), exprAttrNames);
-                String fallbackExpr = args[1].trim();
+                String checkAttr = resolveAttributeName(stripOuterParens(args[0]), exprAttrNames);
                 if (hasValueAtPath(item, checkAttr, exprAttrNames)) {
                     return getValueAtPath(item, checkAttr, exprAttrNames);
-                } else if (fallbackExpr.startsWith(":") && exprAttrValues != null) {
-                    return exprAttrValues.get(fallbackExpr);
-                } else {
-                    return getValueAtPath(item, resolveAttributeName(fallbackExpr, exprAttrNames), exprAttrNames);
                 }
+                return evaluateSetExpr(item, args[1], exprAttrNames, exprAttrValues);
             }
             return null;
         } else if (expr.startsWith(":") && exprAttrValues != null) {
@@ -3927,44 +3969,6 @@ public class DynamoDbService {
         return clause;
     }
 
-    private static final Map<String, String> OPERAND_TYPE_NAMES = Map.of(
-            "S", "STRING", "N", "NUMBER", "B", "Binary", "BOOL", "BOOL", "NULL", "NULL", "L", "LIST", "M", "MAP");
-
-    void requireAddOrDeleteOperandTypes(String updateExpression, JsonNode exprAttrValues, boolean inValidationEnvelope) {
-        if (updateExpression == null || exprAttrValues == null) {
-            return;
-        }
-        String remaining = updateExpression.trim().replaceAll("\\s+", " ");
-        while (!remaining.isEmpty()) {
-            String keyword = remaining.substring(0, Math.max(remaining.indexOf(' '), 0)).toUpperCase();
-            String body = remaining.substring(keyword.length()).trim();
-            int nextClause = findNextClauseKeyword(body);
-            String actions = nextClause < 0 ? body : body.substring(0, nextClause);
-            remaining = nextClause < 0 ? "" : body.substring(nextClause);
-            Set<String> allowed = switch (keyword) {
-                case "ADD" -> Set.of("N", "SS", "NS", "BS");
-                case "DELETE" -> Set.of("SS", "NS", "BS");
-                default -> null;
-            };
-            while (allowed != null && !actions.isBlank()) {
-                int comma = findNextComma(actions);
-                String[] words = (comma < 0 ? actions : actions.substring(0, comma)).trim().split(" ");
-                actions = comma < 0 ? "" : actions.substring(comma + 1);
-                JsonNode operand = exprAttrValues.get(words[words.length - 1]);
-                if (operand == null) {
-                    continue;
-                }
-                String type = DynamoDbAttributeValueValidator.typeOf(operand);
-                if (!allowed.contains(type)) {
-                    throw new AwsException("ValidationException", (inValidationEnvelope ? "1 validation error detected: " : "")
-                            + "Invalid UpdateExpression: Incorrect operand type for operator or function;"
-                            + " operator: " + keyword + ", operand type: " + OPERAND_TYPE_NAMES.get(type)
-                            + ", typeSet: ALLOWED_FOR_ADD_OPERAND", 400);
-                }
-            }
-        }
-    }
-
     private static void requireSameTypeAsOperand(JsonNode existingValue, JsonNode operand, List<String> types) {
         for (String type : types) {
             if (operand.has(type) && existingValue != null && !existingValue.has(type)) {
@@ -4101,7 +4105,7 @@ public class DynamoDbService {
             arr.add(value);
         }
     }
-    
+
     private void setValueAtPath(ObjectNode item, String path, JsonNode value, JsonNode exprAttrNames) {
         List<Object> tokens = parsePath(path, exprAttrNames);
         if (tokens.isEmpty()) return;
@@ -4354,40 +4358,19 @@ public class DynamoDbService {
         }
     }
 
-    // DynamoDB reads an unclosed call or group to the end of the expression and reports the
-    // raw text from its last token on, trailing whitespace included. UpdateItem wraps the
-    // error in the validation envelope, TransactWriteItems does not.
-    static void requireClosedParentheses(String expression, String envelope) {
-        int depth = 0;
-        int lastToken = 0;
-        for (int i = 0; i < expression.length(); i++) {
-            char c = expression.charAt(i);
-            if (Character.isWhitespace(c)) {
-                continue;
+    static void requireSectionsUsedOnce(String expression) {
+        Set<String> seen = new HashSet<>();
+        for (ExpressionEvaluator.Token token : ExpressionEvaluator.tokenize(expression)) {
+            String word = token.value().toUpperCase(Locale.ROOT);
+            if (token.type() == ExpressionEvaluator.TokenType.IDENTIFIER && UPDATE_SECTIONS.contains(word)
+                    && !seen.add(word)) {
+                throw new AwsException("ValidationException", "Invalid UpdateExpression: The \"" + word
+                        + "\" section can only be used once in an update expression;", 400);
             }
-            if (c == '(') {
-                depth++;
-            } else if (c == ')') {
-                depth--;
-                if (depth < 0) {
-                    return;
-                }
-            }
-            if (i == 0 || isUpdatePunctuation(c) || isUpdatePunctuation(expression.charAt(i - 1))
-                    || Character.isWhitespace(expression.charAt(i - 1))) {
-                lastToken = i;
-            }
-        }
-        if (depth > 0) {
-            throw new AwsException("ValidationException",
-                    envelope + "Invalid UpdateExpression: Syntax error; token: \"<EOF>\", near: \""
-                            + expression.substring(lastToken) + "\"", 400);
         }
     }
 
-    private static boolean isUpdatePunctuation(char c) {
-        return "()[],.=+-".indexOf(c) >= 0;
-    }
+    static final Set<String> UPDATE_SECTIONS = Set.of("SET", "REMOVE", "ADD", "DELETE");
 
     static int findNextComma(String s) {
         // Find next comma that is not inside a function call

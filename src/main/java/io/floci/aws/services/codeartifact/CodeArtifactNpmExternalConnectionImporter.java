@@ -10,6 +10,9 @@ import jakarta.inject.Inject;
 import org.jboss.logging.Logger;
 
 import java.io.IOException;
+import java.io.UncheckedIOException;
+import java.nio.file.Files;
+import java.nio.file.Path;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
@@ -284,53 +287,79 @@ public class CodeArtifactNpmExternalConnectionImporter {
                         namespace, packageName, version).filter(externalConnectionName::equals).isPresent();
                 return imported;
             }
-            Optional<NpmExternalConnectionClient.FetchedAsset> fetched;
+            Path staged;
             try {
-                fetched = externalConnectionClient.fetchTarball(externalConnectionName, namespace, packageName,
-                        version);
-            } catch (RuntimeException e) {
-                LOG.warnv(e, "Could not fetch {0} {1} {2} from {3} while retaining an npm package through an "
-                        + "external connection.", namespace, packageName, version, externalConnectionName);
-                return false;
+                staged = Files.createTempFile("codeartifact-npm-import-", ".bin");
+            } catch (IOException e) {
+                throw new UncheckedIOException("Failed to create a staging file for an npm external-connection "
+                        + "import", e);
             }
-            if (fetched.isEmpty()) {
-                return false;
-            }
-            byte[] content = fetched.get().content();
-            // Fetched again here, full rather than abbreviated, rather than reusing whatever
-            // mergedPackument already saw: that call is per-request and never keeps anything
-            // around between one request and the next, and this is the one real network call
-            // this whole import attempt pays for retrieving a version's dependencies/engines/
-            // scripts and the package's own readme (see ExternalPackumentDetails' own javadoc),
-            // paid at most once per version ever actually retained.
-            ExternalPackumentDetails details = fetchExternalPackumentDetails(externalConnectionName, namespace,
-                    packageName, version);
-            if (details.versionDoc() == null) {
-                // Raised by hectorvent's review: storing now with no full-form document would
-                // retain this version with the minimal one storeRetainedVersionAsset falls back
-                // to (no dependencies/engines/scripts), and permanently so, since the merge above
-                // skips any version once versions.has(version) is true. Returning false instead
-                // abandons this attempt without writing anything, so a later download retries the
-                // full fetch rather than settling for a degraded document forever.
-                LOG.warnv("Not retaining {0}/{1}@{2} from {3} without its full-form version "
-                        + "document; a later download will retry.", namespace, packageName, version,
-                        externalConnectionName);
-                return false;
-            }
-            CodeArtifactService.AssetRetentionAttemptResult result = service.retainAssetUnderVersionFence(region,
-                    domain, owner, repository, "npm", namespace, packageName, version, versionFenceSnapshot,
-                    packageFenceSnapshot, claim.episodeId(), repoId, assetName, content,
-                    () -> verdaccio.storeRetainedVersionAsset(repoId, domain, repository, namespace, packageName,
-                            version, assetName, content, details.versionDoc()));
-            imported = result.fenceMatched() && result.wroteNewContent();
-            if (imported) {
-                // Raised by Greptile's review: without this, GetPackageVersionReadme 404s on an
-                // otherwise fully retained version, since npm (unlike nuget's BaGetter) answers
-                // that call from a capture taken at write time, never live from the sidecar; see
-                // CodeArtifactService#recordPublishedPackageVersionReadme's own javadoc for why
-                // versionFenceSnapshot, taken before this same write, is what it checks against.
-                service.recordPublishedPackageVersionReadme(region, domain, owner, repository, "npm", namespace,
-                        packageName, version, details.readme(), versionFenceSnapshot);
+            try {
+                Optional<NpmExternalConnectionClient.FetchedFile> fetched;
+                try {
+                    fetched = externalConnectionClient.fetchTarball(externalConnectionName, namespace, packageName,
+                            version, staged);
+                } catch (AssetDigestingInputStream.AssetTooLargeException e) {
+                    // The same 5 GB AWS quota CodeArtifactNpmDataPlane's own real npm publish proxy
+                    // already enforces, now checked by fetchTarball(Path) itself during the
+                    // download rather than in a second pass over the staged file afterward: a
+                    // tarball this large is rejected before it is ever fully pulled across the
+                    // network and written to local disk.
+                    LOG.warnv("Skipping {0}/{1}@{2}: the real registry''s own file is larger than this "
+                            + "emulator''s {3}-byte asset quota.", namespace, packageName, version,
+                            CodeArtifactService.MAX_ASSET_FILE_SIZE_BYTES);
+                    return false;
+                } catch (RuntimeException e) {
+                    LOG.warnv(e, "Could not fetch {0} {1} {2} from {3} while retaining an npm package through an "
+                            + "external connection.", namespace, packageName, version, externalConnectionName);
+                    return false;
+                }
+                if (fetched.isEmpty()) {
+                    return false;
+                }
+                long contentLength = fetched.get().size();
+                // Fetched again here, full rather than abbreviated, rather than reusing whatever
+                // mergedPackument already saw: that call is per-request and never keeps anything
+                // around between one request and the next, and this is the one real network call
+                // this whole import attempt pays for retrieving a version's dependencies/engines/
+                // scripts and the package's own readme (see ExternalPackumentDetails' own javadoc),
+                // paid at most once per version ever actually retained.
+                ExternalPackumentDetails details = fetchExternalPackumentDetails(externalConnectionName, namespace,
+                        packageName, version);
+                if (details.versionDoc() == null) {
+                    // Raised by hectorvent's review: storing now with no full-form document would
+                    // retain this version with the minimal one storeRetainedVersionAsset falls back
+                    // to (no dependencies/engines/scripts), and permanently so, since the merge above
+                    // skips any version once versions.has(version) is true. Returning false instead
+                    // abandons this attempt without writing anything, so a later download retries the
+                    // full fetch rather than settling for a degraded document forever.
+                    LOG.warnv("Not retaining {0}/{1}@{2} from {3} without its full-form version "
+                            + "document; a later download will retry.", namespace, packageName, version,
+                            externalConnectionName);
+                    return false;
+                }
+                CodeArtifactService.AssetRetentionAttemptResult result = service.retainAssetUnderVersionFence(region,
+                        domain, owner, repository, "npm", namespace, packageName, version, versionFenceSnapshot,
+                        packageFenceSnapshot, claim.episodeId(), repoId, assetName, contentLength,
+                        () -> verdaccio.storeRetainedVersionAsset(repoId, domain, repository, namespace, packageName,
+                                version, assetName, staged, contentLength, details.versionDoc()));
+                imported = result.fenceMatched() && result.wroteNewContent();
+                if (imported) {
+                    // Raised by Greptile's review: without this, GetPackageVersionReadme 404s on
+                    // an otherwise fully retained version, since npm (unlike nuget's BaGetter)
+                    // answers that call from a capture taken at write time, never live from the
+                    // sidecar; see CodeArtifactService#recordPublishedPackageVersionReadme's own
+                    // javadoc for why versionFenceSnapshot, taken before this same write, is what
+                    // it checks against.
+                    service.recordPublishedPackageVersionReadme(region, domain, owner, repository, "npm", namespace,
+                            packageName, version, details.readme(), versionFenceSnapshot);
+                }
+            } finally {
+                try {
+                    Files.deleteIfExists(staged);
+                } catch (IOException e) {
+                    LOG.warnv(e, "Could not delete a staged npm external-connection import file at {0}", staged);
+                }
             }
             return imported;
         } finally {

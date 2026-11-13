@@ -204,6 +204,7 @@ cross-resource references.
 | Secrets Manager | `Secret`, `SecretTargetAttachment` |
 | ECR | `Repository` |
 | ECS | `Cluster`, `TaskDefinition`, `Service`, `CapacityProvider`, `ClusterCapacityProviderAssociations` |
+| EFS | `FileSystem` (metadata only, there is no NFS data plane), `MountTarget` (`SecurityGroups` update in place, every other property replaces), `AccessPoint` (`AccessPointTags` update in place, every other property replaces) |
 | EKS | `Cluster`, `Nodegroup` |
 | RDS | `DBInstance` (starts a real container), `DBCluster` (starts a real container), `DBSubnetGroup`, `DBParameterGroup`, `DBClusterParameterGroup`, `DBProxy`, `DBProxyTargetGroup` |
 | Aurora DSQL | `Cluster` |
@@ -310,9 +311,18 @@ address. Dropping exhausted debt prevents later retries, but does not establish 
 the bus name, and `Fn::GetAtt` supports `Arn` and `Name`. `Description` and `Tags` are applied when
 the bus is created. Rules that reference the bus are removed before stack deletion.
 
-The current implementation is limited to custom buses with the `Name`, `Description`, `Tags`, and
-`Policy` properties. `EventSourceName`, `KmsKeyIdentifier`, `DeadLetterConfig`, and `LogConfig` are
-rejected with `ValidationError` instead of being silently ignored. AWS models a `Name` change as
+The current implementation supports the `Name`, `EventSourceName`, `Description`, `Tags`, and
+`Policy` properties. With `EventSourceName` the resource creates a
+[partner event bus](eventbridge.md#partner-event-buses), whose `Name` must equal it, as AWS
+requires; a template with a different `Name` fails with `ValidationError`. A partner bus takes no
+`Policy` and fails with `ValidationError` when one is given; an `AWS::Events::EventBusPolicy`
+on a partner bus fails its stack. AWS treats `Name` and `EventSourceName` as replacement-only, so
+dropping `EventSourceName` makes AWS attempt to replace the bus; on `UpdateStack` with the same
+`Name`, Floci keeps the bus as it is instead. An `EventSourceName` the template gives is checked as
+on creation, so a malformed source, one that differs from `Name`, or one added to a custom bus fails
+the update.
+`KmsKeyIdentifier`, `DeadLetterConfig`, and `LogConfig` are rejected with `ValidationError`
+instead of being silently ignored. AWS models a `Name` change as
 resource replacement; Floci currently rejects that update until generic replacement handling is
 available. `Policy` is applied when the bus is created. On `UpdateStack` the template's `Tags` are
 applied to the same bus in place: a key the stack recorded setting and the new template drops is
@@ -379,7 +389,9 @@ returns the management account id, while `Fn::GetAtt Org.Id` returns the organiz
 - `Policy` — `TargetIds` is reconciled on update: targets the template adds are attached and ones
   it drops are detached. Deleting the resource detaches its remaining targets first, since
   `DeletePolicy` refuses while a policy is still attached.
-- `ResourcePolicy` — backed by `PutResourcePolicy`, which is already create-or-update.
+- `ResourcePolicy` — backed by `PutResourcePolicy`, which is create-or-update but applies `Tags`
+  only when it creates the policy, so an update converges `Tags` through `TagResource` and
+  `UntagResource` on the policy's `rp-` id.
 
 `Fn::GetAtt OrganizationalUnit.Path` and `Fn::GetAtt Account.Paths` return the organization path —
 `o-<org>/r-<root>/[ou-<ou>/…]<id>/`. An account has one parent and therefore one path, so the
@@ -436,6 +448,17 @@ What each dynamic reference resolved to is kept on the stack when an operation c
 HMAC-SHA256 under a random key of the stack's own, so no resolved value is stored. An update that
 fails and rolls back keeps the values of the last deployment. A stack set instance whose stack has
 nothing to change is left as it is and succeeds, and the change set that found it so is not kept.
+
+For a resource type in the create-only table, the `Replacement` of a modified resource comes from
+the resolved values, not the template text. A dynamic reference on either side is compared through
+its digest, and a plain value on the other side is digested the same way, so
+`{{resolve:ssm:/p}}` holding `hosted` and the literal `hosted` are one value. A reference whose old
+value the stack never recorded (a stack persisted before digests were kept) gives no evidence about
+the old value: its `Replacement` follows the template text, while the update still converges the
+stack and records the digests. A resource whose create-only property reads an attribute that changes
+in place gets `Replacement: Conditional`, as on AWS, and `ExecuteChangeSet` replaces it only if
+the resolved value changed. A property that cannot be resolved is logged at `WARN` with its
+logical id, and the preview falls back to the template text.
 
 A `CreateChangeSet` for such an update is created `FAILED`, `UNAVAILABLE`, with `The submitted
 information didn't contain changes. Submit different information to create a change set.`, which is
@@ -591,6 +614,32 @@ Dynamic-reference expansion is currently scoped to these RDS credential properti
   reads the previous value from the previous template, resolved on that update, so a change made
   only through a parameter, or anything else the update changes, is not seen there.
 - `KmsKeyId` is still accepted and ignored, so an encrypted instance reports no key.
+
+## ELBv2 target group targets
+
+`AWS::ElasticLoadBalancingV2::TargetGroup` registers its `Targets` once the group is created, as
+`RegisterTargets` does, so `DescribeTargetHealth` reports them. A target is its `Id` and its `Port`,
+the group's port when it names none, so one instance can be declared on several ports. A Lambda
+target has no port and is its function ARN alone.
+
+- On `UpdateStack` (no interruption, as in AWS), the group keeps its ARN. The targets the template
+  gains are registered first, then the targets the previous template declared and the new one
+  drops are deregistered. A template that drops `Targets` deregisters every target the stack
+  declared. A target registered some other way, by `RegisterTargets`, an Auto Scaling group or an
+  ECS service, stays registered until a template declares it and a later one drops it. A declared
+  target registered with another `AvailabilityZone` is registered again with the declared one.
+- A target `RegisterTargets` refuses registers nothing, as it checks every target before it
+  registers any. A group the stack had just created for the resource is then deleted again, and a
+  group the update kept is left as it was. If deregistering fails after the registration, a kept
+  group gets back the registrations it had.
+- A failed update deregisters the targets the update registered and registers the ones it
+  deregistered again. When the group is gone by then, the rollback fails with
+  `TargetGroupNotFound` and leaves the stack in `UPDATE_ROLLBACK_FAILED`. `ContinueUpdateRollback`
+  fails the same way until the target group is passed in `ResourcesToSkip` (see
+  [Failed update rollbacks](#failed-update-rollbacks)).
+- A target group created before Floci registered `Targets` has no targets from its template. The
+  first update that changes the group registers the declared targets and deregisters nothing.
+- `QuicServerId` is accepted and ignored, as Floci's `RegisterTargets` has no QUIC support.
 
 ## S3 ownership controls
 
@@ -988,6 +1037,12 @@ Lambda. floci supports two shapes:
 
 The handler's `Data` keys resolve through `Fn::GetAtt`, except keys that begin with `__Floci`. Floci
 reserves that prefix for its own resource state and ignores such keys.
+
+An update whose handler returned a new `PhysicalResourceId` replaced the resource. Once the update
+commits, the stack enters `UPDATE_COMPLETE_CLEANUP_IN_PROGRESS` and the id it replaced gets a
+`Delete` carrying the properties it had, with no `OldResourceProperties`, as on AWS. A `Delete` the
+handler fails is tried three times, then reported as `DELETE_FAILED`, and the update still completes.
+Under `UpdateReplacePolicy: Retain` the replaced id gets no `Delete`.
 
 A failed stack update rolls back a custom resource whose handler was sent an `Update`, as
 CloudFormation does. This holds whether the handler applied the update and a later resource failed,

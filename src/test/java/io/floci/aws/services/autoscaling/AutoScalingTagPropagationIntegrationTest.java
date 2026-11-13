@@ -4,6 +4,7 @@ import io.floci.aws.core.common.RequestScopes;
 import io.floci.aws.testing.AwsTestClients;
 import io.quarkus.test.junit.QuarkusTest;
 import io.restassured.path.xml.XmlPath;
+import io.restassured.response.Response;
 import io.restassured.specification.RequestSpecification;
 import jakarta.inject.Inject;
 import org.junit.jupiter.api.Test;
@@ -29,6 +30,7 @@ import java.util.function.BiConsumer;
 import java.util.stream.Collectors;
 
 import static io.floci.aws.testing.QueryRequests.request;
+import static org.hamcrest.Matchers.equalTo;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -96,6 +98,132 @@ class AutoScalingTagPropagationIntegrationTest {
                     .contains("Tags.member." + (invalidFirst ? 1 : 3) + ".PropagateAtLaunch"));
             assertEquals(before, describeGroupTags(client, name));
         });
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"", " ", "yes", "TRUE", "true ", " false"})
+    void malformedPropagationLeavesExistingTagsUnchanged(String flag) {
+        withAutoScalingGroup(List.of(Tag.builder().key("existing").value("before")
+                .propagateAtLaunch(true).build()), (client, name) -> {
+                    Map<String, TagDescription> before = describeGroupTags(client, name);
+                    for (String action : List.of("CreateOrUpdateTags", "DeleteTags")) {
+                        request(ACCOUNT, "autoscaling", action)
+                                .formParam("Tags.member.1.ResourceId", name)
+                                .formParam("Tags.member.1.ResourceType", "auto-scaling-group")
+                                .formParam("Tags.member.1.Key", "existing")
+                                .formParam("Tags.member.1.Value", "changed")
+                                .formParam("Tags.member.1.PropagateAtLaunch", "false")
+                                .formParam("Tags.member.2.ResourceId", "missing-group")
+                                .formParam("Tags.member.2.ResourceType", "auto-scaling-group")
+                                .formParam("Tags.member.2.Key", "invalid")
+                                .formParam("Tags.member.2.PropagateAtLaunch", flag)
+                                .post("/").then().statusCode(400)
+                                .body("ErrorResponse.Error.Code", equalTo("MalformedInput"));
+                        assertEquals(before, describeGroupTags(client, name));
+                    }
+                });
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"", " ", "yes", "TRUE", "true ", " false"})
+    void malformedPropagationCannotCreateGroup(String flag) {
+        String name = "tag-malformed-" + UUID.randomUUID();
+        try (AutoScalingClient client = AwsTestClients.create(AutoScalingClient.builder(), ACCOUNT, Region.of(REGION))) {
+            try {
+                Response response = request(ACCOUNT, "autoscaling", "CreateAutoScalingGroup")
+                        .formParam("AutoScalingGroupName", name)
+                        .formParam("LaunchConfigurationName", "missing-configuration")
+                        .formParam("MinSize", 0).formParam("MaxSize", 1).formParam("DesiredCapacity", 0)
+                        .formParam("AvailabilityZones.member.1", REGION + "a")
+                        .formParam("Tags.member.1.Key", "invalid")
+                        .formParam("Tags.member.1.PropagateAtLaunch", flag)
+                        .post("/");
+                assertTrue(client.describeAutoScalingGroups(r -> r.autoScalingGroupNames(name))
+                        .autoScalingGroups().isEmpty());
+                response.then().statusCode(400).body("ErrorResponse.Error.Code", equalTo("MalformedInput"));
+            } finally {
+                if (!client.describeAutoScalingGroups(r -> r.autoScalingGroupNames(name)).autoScalingGroups().isEmpty()) {
+                    client.deleteAutoScalingGroup(r -> r.autoScalingGroupName(name).forceDelete(true));
+                }
+            }
+        }
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"yes", "invalid\u0000flag"})
+    void sparseInvalidFlagLeavesExistingTagsUnchanged(String flag) {
+        withAutoScalingGroup(List.of(Tag.builder().key("existing").value("before")
+                .propagateAtLaunch(true).build()), (client, name) -> {
+                    Map<String, TagDescription> before = describeGroupTags(client, name);
+                    for (String action : List.of("CreateOrUpdateTags", "DeleteTags")) {
+                        request(ACCOUNT, "autoscaling", action)
+                                .formParam("Tags.member.1.ResourceId", name)
+                                .formParam("Tags.member.1.ResourceType", "auto-scaling-group")
+                                .formParam("Tags.member.1.Key", "existing")
+                                .formParam("Tags.member.1.Value", "changed")
+                                .formParam("Tags.member.1.PropagateAtLaunch", "false")
+                                .formParam("Tags.member.3.ResourceId", name)
+                                .formParam("Tags.member.3.ResourceType", "auto-scaling-group")
+                                .formParam("Tags.member.3.Key", "later")
+                                .formParam("Tags.member.3.PropagateAtLaunch", flag)
+                                .post("/").then().statusCode(400)
+                                .body("ErrorResponse.Error.Code", equalTo("MalformedInput"));
+                        assertEquals(before, describeGroupTags(client, name));
+                    }
+                });
+    }
+
+    @ParameterizedTest
+    @CsvSource({"1,true", "0,false"})
+    void numericPropagationFlagsAreAccepted(String flag, boolean expected) {
+        withAutoScalingGroup(List.of(Tag.builder().key("existing").value("before")
+                .propagateAtLaunch(!expected).build()), (client, name) -> {
+                    request(ACCOUNT, "autoscaling", "CreateOrUpdateTags")
+                            .formParam("Tags.member.1.ResourceId", name)
+                            .formParam("Tags.member.1.ResourceType", "auto-scaling-group")
+                            .formParam("Tags.member.1.Key", "existing")
+                            .formParam("Tags.member.1.PropagateAtLaunch", flag)
+                            .post("/").then().statusCode(200);
+                    assertEquals(expected, describeGroupTags(client, name).get("existing").propagateAtLaunch());
+                });
+    }
+
+    @Test
+    void sparseTagsRetainCreateDefaultsUpdateAndDeleteSemantics() {
+        String name = "sparse-tags-" + UUID.randomUUID();
+        try (AutoScalingClient client = AwsTestClients.create(AutoScalingClient.builder(), ACCOUNT, Region.of(REGION))) {
+            try {
+                request(ACCOUNT, "autoscaling", "CreateAutoScalingGroup")
+                        .formParam("AutoScalingGroupName", name)
+                        .formParam("LaunchConfigurationName", "sparse-configuration")
+                        .formParam("MinSize", 0).formParam("MaxSize", 1).formParam("DesiredCapacity", 0)
+                        .formParam("AvailabilityZones.member.1", REGION + "a")
+                        .formParam("Tags.member.3.Key", "existing")
+                        .formParam("Tags.member.3.Value", "before")
+                        .post("/").then().statusCode(200);
+                assertEquals("before", describeGroupTags(client, name).get("existing").value());
+                assertTrue(describeGroupTags(client, name).get("existing").propagateAtLaunch());
+                request(ACCOUNT, "autoscaling", "CreateOrUpdateTags")
+                        .formParam("Tags.member.7.ResourceId", name)
+                        .formParam("Tags.member.7.ResourceType", "auto-scaling-group")
+                        .formParam("Tags.member.7.Key", "existing")
+                        .formParam("Tags.member.7.Value", "after")
+                        .formParam("Tags.member.7.PropagateAtLaunch", "false")
+                        .post("/").then().statusCode(200);
+                assertEquals("after", describeGroupTags(client, name).get("existing").value());
+                assertEquals(false, describeGroupTags(client, name).get("existing").propagateAtLaunch());
+                request(ACCOUNT, "autoscaling", "DeleteTags")
+                        .formParam("Tags.member.9.ResourceId", name)
+                        .formParam("Tags.member.9.ResourceType", "auto-scaling-group")
+                        .formParam("Tags.member.9.Key", "existing")
+                        .post("/").then().statusCode(200);
+                assertTrue(describeGroupTags(client, name).isEmpty());
+            } finally {
+                if (!client.describeAutoScalingGroups(r -> r.autoScalingGroupNames(name)).autoScalingGroups().isEmpty()) {
+                    client.deleteAutoScalingGroup(r -> r.autoScalingGroupName(name).forceDelete(true));
+                }
+            }
+        }
     }
 
     @Test

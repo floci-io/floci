@@ -657,7 +657,7 @@ public class SsmJsonHandler {
         String content = requireDocumentContent(request);
         String documentType = requireDocumentType(request);
 
-        SsmDocument document = ssmService.createDocument(name, content, documentType, region);
+        SsmDocument document = ssmService.createDocument(name, content, documentType, requestTags(request), region);
         return Response.ok(documentDescriptionResponse(document)).build();
     }
 
@@ -695,6 +695,7 @@ public class SsmJsonHandler {
         description.put("Status", document.getStatus());
         description.put("LatestVersion", String.valueOf(document.getDocumentVersion()));
         description.put("DefaultVersion", String.valueOf(document.getDocumentVersion()));
+        description.set("Tags", tagList(document.getTags()));
         response.set("DocumentDescription", description);
         return response;
     }
@@ -794,6 +795,7 @@ public class SsmJsonHandler {
             if (d.getDocumentFormat() != null) {
                 docNode.put("DocumentFormat", d.getDocumentFormat());
             }
+            docNode.set("Tags", tagList(d.getTags()));
             docArray.add(docNode);
         }
         response.set("DocumentIdentifiers", docArray);
@@ -863,7 +865,7 @@ public class SsmJsonHandler {
 
         SsmAssociation assoc = ssmService.createAssociation(
                 name, associationName, documentVersion, instanceId, targets, parameters, scheduleExpression,
-                maxErrors, maxConcurrency, complianceSeverity, region);
+                maxErrors, maxConcurrency, complianceSeverity, requestTags(request), region);
 
         return Response.ok(associationDescriptionResponse(assoc)).build();
     }
@@ -1200,38 +1202,38 @@ public class SsmJsonHandler {
     }
 
     private Response handleAddTagsToResource(JsonNode request, String region) {
-        String resourceId = request.path("ResourceId").asText();
-        Map<String, String> tags = new LinkedHashMap<>();
-        request.path("Tags").forEach(t ->
-                tags.put(t.path("Key").asText(), t.path("Value").asText()));
-
-        ssmService.addTagsToResource(resourceId, tags, region);
+        ssmService.addTagsToResource(request.path("ResourceType").asText(), request.path("ResourceId").asText(),
+                requestTags(request), region);
         return Response.ok(objectMapper.createObjectNode()).build();
     }
 
     private Response handleListTagsForResource(JsonNode request, String region) {
-        String resourceId = request.path("ResourceId").asText();
-        Map<String, String> tags = ssmService.listTagsForResource(resourceId, region);
-
+        Map<String, String> tags = ssmService.listTagsForResource(request.path("ResourceType").asText(),
+                request.path("ResourceId").asText(), region);
         ObjectNode response = objectMapper.createObjectNode();
-        ArrayNode tagsArray = objectMapper.createArrayNode();
-        for (Map.Entry<String, String> entry : tags.entrySet()) {
-            ObjectNode tagNode = objectMapper.createObjectNode();
-            tagNode.put("Key", entry.getKey());
-            tagNode.put("Value", entry.getValue());
-            tagsArray.add(tagNode);
-        }
-        response.set("TagList", tagsArray);
+        response.set("TagList", tagList(tags));
         return Response.ok(response).build();
     }
 
     private Response handleRemoveTagsFromResource(JsonNode request, String region) {
-        String resourceId = request.path("ResourceId").asText();
         List<String> tagKeys = new ArrayList<>();
         request.path("TagKeys").forEach(k -> tagKeys.add(k.asText()));
-
-        ssmService.removeTagsFromResource(resourceId, tagKeys, region);
+        ssmService.removeTagsFromResource(request.path("ResourceType").asText(), request.path("ResourceId").asText(),
+                tagKeys, region);
         return Response.ok(objectMapper.createObjectNode()).build();
+    }
+
+    /** A request's {@code Tags} list as a map; empty when it has none. */
+    private static Map<String, String> requestTags(JsonNode request) {
+        Map<String, String> tags = new LinkedHashMap<>();
+        request.path("Tags").forEach(t -> tags.put(t.path("Key").asText(), t.path("Value").asText()));
+        return tags;
+    }
+
+    private ArrayNode tagList(Map<String, String> tags) {
+        ArrayNode list = objectMapper.createArrayNode();
+        tags.forEach((key, value) -> list.addObject().put("Key", key).put("Value", value));
+        return list;
     }
 
     private static final int GET_RESOURCE_POLICIES_MAX_RESULTS = 50;
@@ -1602,8 +1604,9 @@ public class SsmJsonHandler {
         documentNode.put("Content", effectiveContent);
         documentNode.put("Status", document.getStatus());
         if (document.getCreatedDate() != null) {
-            documentNode.put("CreatedDate", document.getCreatedDate().toString());
+            documentNode.put("CreatedDate", EpochSeconds.fromInstant(document.getCreatedDate()));
         }
+        documentNode.set("Tags", tagList(document.getTags()));
         response.set("Document", documentNode);
         return Response.ok(response).build();
     }

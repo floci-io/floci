@@ -11,6 +11,8 @@ import io.floci.aws.core.common.StoredResourceArns;
 import io.floci.aws.core.storage.InMemoryStorage;
 import io.floci.aws.core.storage.StorageBackend;
 import io.floci.aws.core.storage.StorageFactory;
+import io.floci.aws.services.acm.CertificateGenerator;
+import io.floci.aws.services.paymentcryptography.crypto.DukptCrypto;
 import io.floci.aws.services.paymentcryptography.model.PaymentCryptographyAlias;
 import io.floci.aws.services.paymentcryptography.model.PaymentCryptographyKey;
 import jakarta.enterprise.context.ApplicationScoped;
@@ -18,6 +20,7 @@ import jakarta.inject.Inject;
 
 import java.security.KeyPair;
 import java.security.SecureRandom;
+import java.time.Clock;
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.Base64;
@@ -64,23 +67,34 @@ public class PaymentCryptographyService implements Resettable, StoredResourceArn
     /** The class of a key that is only a public half. */
     private static final String PUBLIC_KEY_CLASS = "PUBLIC_KEY";
 
+    /** The origin of a key the service made itself. */
+    private static final String ORIGIN_SERVICE = "AWS_PAYMENT_CRYPTOGRAPHY";
+
+    /** The origin of a key whose material came in from outside the service. */
+    private static final String ORIGIN_EXTERNAL = "EXTERNAL";
+
     private final StorageBackend<String, PaymentCryptographyKey> keyStore;
     private final StorageBackend<String, PaymentCryptographyAlias> aliasStore;
 
+    /** The key exchange: the forms a key may leave in, and the certificates that carry them. */
+    private final PaymentCryptographyKeyExchange exchange;
     private final RegionResolver regionResolver;
     private final SecureRandom secureRandom;
     private final PaymentCryptographyRequestContext requestContext;
 
     @Inject
     public PaymentCryptographyService(StorageFactory storageFactory, RegionResolver regionResolver,
-                                      PaymentCryptographyRequestContext requestContext) {
+                                      PaymentCryptographyRequestContext requestContext,
+                                      CertificateGenerator certificates) {
         this(storageFactory.create(STORAGE_KEY, "payment-cryptography-keys.json",
                         new TypeReference<>() {}),
                 storageFactory.create(STORAGE_KEY, "payment-cryptography-aliases.json",
                         new TypeReference<>() {}),
                 regionResolver,
                 new SecureRandom(),
-                requestContext);
+                requestContext,
+                certificates,
+                Clock.systemUTC());
     }
 
     PaymentCryptographyService(StorageBackend<String, PaymentCryptographyKey> keyStore,
@@ -108,9 +122,21 @@ public class PaymentCryptographyService implements Resettable, StoredResourceArn
                                 RegionResolver regionResolver,
                                 SecureRandom secureRandom,
                                 PaymentCryptographyRequestContext requestContext) {
+        this(keyStore, aliasStore, regionResolver, secureRandom, requestContext,
+                new CertificateGenerator(), Clock.systemUTC());
+    }
+
+    PaymentCryptographyService(StorageBackend<String, PaymentCryptographyKey> keyStore,
+                                StorageBackend<String, PaymentCryptographyAlias> aliasStore,
+                                RegionResolver regionResolver,
+                                SecureRandom secureRandom,
+                                PaymentCryptographyRequestContext requestContext,
+                                CertificateGenerator certificates,
+                                Clock clock) {
         this.keyStore = keyStore;
         this.aliasStore = aliasStore;
         this.regionResolver = regionResolver;
+        this.exchange = new PaymentCryptographyKeyExchange(this, certificates, clock);
         this.secureRandom = secureRandom;
         this.requestContext = requestContext;
     }
@@ -135,7 +161,7 @@ public class PaymentCryptographyService implements Resettable, StoredResourceArn
                                            boolean enabled, Map<String, String> tags,
                                            String materialHex) {
         return makeKey(region, attributes, modesOfUse, exportable, enabled, tags, materialHex,
-                null, null, null);
+                null, null, null, ORIGIN_SERVICE);
     }
 
     /**
@@ -148,12 +174,14 @@ public class PaymentCryptographyService implements Resettable, StoredResourceArn
      * @param publicKeyBase64 the public half of an asymmetric key, or null
      * @param privateKeyBase64 the private half of an asymmetric key, or null
      * @param certificatePem the certificate an imported public key arrived with, or null
+     * @param origin where the key material came from
      */
     private PaymentCryptographyKey makeKey(String region, Map<String, Object> attributes,
                                            Map<String, Boolean> modesOfUse, boolean exportable,
                                            boolean enabled, Map<String, String> tags,
                                            String materialHex, String publicKeyBase64,
-                                           String privateKeyBase64, String certificatePem) {
+                                           String privateKeyBase64, String certificatePem,
+                                           String origin) {
         String algorithmName = string(attributes, "KeyAlgorithm", "AES_256");
         String keyClass = string(attributes, "KeyClass", "SYMMETRIC_KEY");
         // The material has to be the algorithm's, so a key that says otherwise would be a key
@@ -212,6 +240,7 @@ public class PaymentCryptographyService implements Resettable, StoredResourceArn
         key.setKeyPublicKeyBase64(publicKeyBase64);
         key.setKeyPrivateKeyBase64(privateKeyBase64);
         key.setKeyCertificatePem(certificatePem);
+        key.setKeyOrigin(origin);
         if (algorithm.symmetric()) {
             key.setKeyMaterialHex(materialHex != null
                     ? materialHex
@@ -528,6 +557,182 @@ public class PaymentCryptographyService implements Resettable, StoredResourceArn
     // ---- the key exchange ----------------------------------------------------
 
     /**
+     * The key as it leaves the service, in the form the request names.
+     *
+     * <p>A key that is not exportable does not leave. The form decides how it is protected: a
+     * TR-31 block under a key the service holds, an RSA-OAEP cryptogram under the receiver's
+     * certificate, a TR-34 block the service signs, a block under a key the two parties
+     * agreed, or an AS2805 cryptogram.
+     *
+     * @param region the region the key is in
+     * @param keyIdentifier the key that leaves
+     * @param form the form the request names
+     * @param material the members of the form
+     * @return the material, the format it is in, and the key that protects it
+     */
+    public Map<String, Object> exportKey(String region, String keyIdentifier, String form,
+                                          Map<String, Object> material, String keySerialNumber,
+                                          String checkValueAlgorithm) {
+        PaymentCryptographyKey key = findKey(region, keyIdentifier);
+        if (key == null) {
+            throw new AwsException("ResourceNotFoundException", "Key not found: " + keyIdentifier, 400);
+        }
+        PaymentCryptographyKeyRules.requireEnabled(key);
+        // An initial key leaves instead of the key itself: the service derives it and does
+        // not keep it.
+        PaymentCryptographyKey leaving = keySerialNumber.isEmpty() ? key : initialKey(key, keySerialNumber);
+        if (!checkValueAlgorithm.isEmpty()
+                && !checkValueAlgorithm.equals(leaving.getKeyCheckValueAlgorithm())) {
+            throw new AwsException("ValidationException",
+                    "the check value algorithm " + checkValueAlgorithm + " is not the one the key "
+                            + leaving.getArn() + " has, which is "
+                            + leaving.getKeyCheckValueAlgorithm(), 400);
+        }
+        if (!leaving.isExportable() && keySerialNumber.isEmpty()) {
+            throw new AwsException("ValidationException",
+                    "the key " + key.getArn() + " is not exportable", 400);
+        }
+        PaymentCryptographyKeyExchange.Exported exported = exchange.export(region, leaving, form, material);
+        Map<String, Object> wrapped = new LinkedHashMap<>();
+        wrapped.put("KeyMaterial", exported.material());
+        wrapped.put("WrappedKeyMaterialFormat", exported.format());
+        // The check value belongs to a key block: a cryptogram carries no block, so it has no
+        // check value either, which is what the reference answers.
+        if (!"KEY_CRYPTOGRAM".equals(exported.format())) {
+            wrapped.put("KeyCheckValue", leaving.getKeyCheckValue());
+            wrapped.put("KeyCheckValueAlgorithm", leaving.getKeyCheckValueAlgorithm());
+        }
+        if (exported.wrappingKeyArn() != null) {
+            wrapped.put("WrappingKeyArn", exported.wrappingKeyArn());
+        }
+        return Map.of("WrappedKey", wrapped);
+    }
+
+    /**
+     * The key that comes into the service, in the form the request names.
+     *
+     * @param region the region the key comes into
+     * @param form the form the request names
+     * @param material the members of the form
+     * @return the key
+     */
+    public PaymentCryptographyKey importKey(String region, String form, Map<String, Object> material,
+                                         String checkValueAlgorithm, boolean enabled,
+                                         Map<String, String> tags) {
+        PaymentCryptographyKeyExchange.Imported imported = exchange.importKey(region, form, material);
+        Map<String, Object> attributes = new LinkedHashMap<>();
+        attributes.put("KeyAlgorithm", imported.algorithm());
+        attributes.put("KeyClass", imported.keyClass());
+        attributes.put("KeyUsage", imported.usage());
+        if (!checkValueAlgorithm.isEmpty()) {
+            PaymentCryptographyKeyAlgorithm algorithm =
+                    PaymentCryptographyKeyAlgorithm.from(imported.algorithm());
+            String own = algorithm == null ? "" : algorithm.checkValueAlgorithm();
+            if (!checkValueAlgorithm.equals(own)) {
+                throw new AwsException("ValidationException",
+                        "the check value algorithm " + checkValueAlgorithm + " is not the one a "
+                                + imported.algorithm() + " key has, which is " + own, 400);
+            }
+        }
+        return makeKey(region, attributes, imported.modes(), imported.exportable(), enabled, tags,
+                imported.material() == null ? null
+                        : PaymentCryptographyCrypto.toHex(imported.material()),
+                imported.publicKeyBase64(), imported.privateKeyBase64(), imported.certificatePem(),
+                ORIGIN_EXTERNAL);
+    }
+
+    /**
+     * The initial key of the DUKPT derivation, derived from a base derivation key.
+     *
+     * <p>The derived key is a PIN encryption key of sixteen bytes, and it does not leave the
+     * service again: what leaves is the derived key, not the base one.
+     *
+     * @param base the base derivation key
+     * @param keySerialNumber the serial number of the key the derivation starts from
+     * @return the derived key, as the key that leaves
+     */
+    private static PaymentCryptographyKey initialKey(PaymentCryptographyKey base,
+                                                      String keySerialNumber) {
+        if (!"TR31_B0_BASE_DERIVATION_KEY".equals(base.getKeyUsage())) {
+            throw new AwsException("ValidationException",
+                    "an initial key under export is derived from a base derivation key, but "
+                            + base.getArn() + " is " + base.getKeyUsage(), 400);
+        }
+        byte[] initial;
+        try {
+            initial = DukptCrypto.deriveIpek(PaymentCryptographyKeyRules.materialHex(base),
+                    keySerialNumber);
+        } catch (RuntimeException e) {
+            throw new AwsException("ValidationException",
+                    "the initial key could not be derived: " + e.getMessage(), 400);
+        }
+        PaymentCryptographyKey derived = new PaymentCryptographyKey();
+        derived.setKeyId(base.getKeyId());
+        derived.setArn(base.getArn());
+        derived.setRegion(base.getRegion());
+        derived.setKeyAlgorithm("TDES_2KEY");
+        derived.setKeyClass("SYMMETRIC_KEY");
+        // The standard gives the key derived from a base derivation key the usage of an
+        // initial derivation key, and the mode of a derivable one.
+        derived.setKeyUsage("TR31_B1_INITIAL_DERIVATION_KEY");
+        derived.setKeyModesOfUse(new LinkedHashMap<>(Map.of("DeriveKey", Boolean.TRUE)));
+        derived.setKeyMaterialHex(PaymentCryptographyCrypto.toHex(initial));
+        derived.setKeyCheckValue(PaymentCryptographyCrypto.checkValue(derived.getKeyMaterialHex(),
+                PaymentCryptographyKeyAlgorithm.TDES_2KEY));
+        derived.setKeyCheckValueAlgorithm("ANSI_X9_24");
+        // The derived key is for the counterparty's use and does not leave again.
+        derived.setExportable(false);
+        return derived;
+    }
+
+    /**
+     * The number of exchange tokens the service holds.
+     *
+     * <p>For the test that watches the expired ones swept.
+     *
+     * @return how many tokens are held
+     */
+    int issuedTokenCount() {
+        return exchange.issuedTokenCount();
+    }
+
+
+
+    /**
+     * The algorithm a key block carries.
+     *
+     * <p>The block names the algorithm of the key it carries, and the length of the material
+     * says which of that family's keys it is. The algorithm is not guessed from the length
+     * alone, because a TDES key and an AES key of the same length are different keys.
+     *
+     * <p>The header's algorithm byte fixes how long the key may be, so a key of a length the
+     * algorithm does not allow is refused rather than read as a key of another length.
+     */
+    static String algorithmOf(String block, int materialLength) {
+        String family = PaymentCryptographyTr31.algorithmInHeader(block);
+        int length = materialLength;
+        return switch (family) {
+            case "A" -> switch (length) {
+                case 16 -> "AES_128";
+                case 24 -> "AES_192";
+                case 32 -> "AES_256";
+                default -> throw new AwsException("ValidationException",
+                        "the key block carries a " + (length * 8) + "-bit key; AES needs 128/192/256", 400);
+            };
+            case "T" -> switch (length) {
+                case 16 -> "TDES_2KEY";
+                case 24 -> "TDES_3KEY";
+                default -> throw new AwsException("ValidationException",
+                        "the key block carries a " + (length * 8) + "-bit key; TDES needs 128/192", 400);
+            };
+            default -> throw new AwsException("ValidationException",
+                    "the key block's algorithm is '" + family + "', which is not one this service has a key "
+                            + "algorithm for (T for TDES, A for AES)", 400);
+        };
+    }
+
+
+    /**
      * The usages a key block may carry, and the modes of use each of them has.
      *
      * <p>A key block carries the usage of the key it carries, so every usage the service
@@ -556,6 +761,36 @@ public class PaymentCryptographyService implements Resettable, StoredResourceArn
             Map.entry("V1", "TR31_V1_IBM3624_PIN_VERIFICATION_KEY"),
             Map.entry("V2", "TR31_V2_VISA_PIN_VERIFICATION_KEY"),
             Map.entry("S0", "TR31_S0_ASYMMETRIC_KEY_FOR_DIGITAL_SIGNATURE"));
+
+    /**
+     * The usage name of the key an initial derivation key has.
+     *
+     * <p>The standard gives an initial derivation key the usage code B1, and the key the
+     * service derives carries that code in the block it is exported in. The name is the
+     * service's own marker for such a key: the API has no usage name for it, because a key
+     * with that usage never lives in the service.
+     */
+    static final String INITIAL_DERIVATION_KEY_USAGE = "TR31_B1_INITIAL_DERIVATION_KEY";
+
+    /** The TR-31 usage code of an initial derivation key. */
+    static final String INITIAL_DERIVATION_KEY_CODE = "B1";
+
+    /**
+     * Whether a key is the one derived from a base derivation key.
+     *
+     * <p>It is an initial derivation key, and the standard gives it the usage code B1.
+     */
+    static boolean isInitialDerivationKey(PaymentCryptographyKey key) {
+        return INITIAL_DERIVATION_KEY_USAGE.equals(key.getKeyUsage());
+    }
+
+    /** The TR-31 usage code of a key, which the initial derivation key has of its own. */
+    static String usageCode(PaymentCryptographyKey key) {
+        if (isInitialDerivationKey(key)) {
+            return INITIAL_DERIVATION_KEY_CODE;
+        }
+        return usageCode(key.getKeyUsage());
+    }
 
     /** The TR-31 usage code of a usage name, such as {@code D0}. */
     static String usageCode(String usageName) {
@@ -620,23 +855,20 @@ public class PaymentCryptographyService implements Resettable, StoredResourceArn
     /**
      * The modes of use a mode of use code of a key block stands for.
      *
-     * <p>A key encryption key wraps and unwraps rather than encrypts and decrypts, so the
-     * same character means the other modes for one.
+     * <p>The character says what the key may be used for, and both spellings of a direction
+     * stand for it: a key that may encrypt may also wrap, and a key that may decrypt may also
+     * unwrap. A block that says {@code B} therefore grants all four of them, whichever use the
+     * key has, which is what the reference does.
      *
      * @param mode the mode of use character of the block
-     * @param isKek true when the block carries a key encryption key
+     * @return the modes of use the character stands for
      */
-    static Map<String, Boolean> modesFor(String mode, boolean isKek) {
+    static Map<String, Boolean> modesFor(String mode) {
         return switch (mode) {
-            case "B" -> isKek
-                    ? Map.of("Wrap", Boolean.TRUE, "Unwrap", Boolean.TRUE)
-                    : Map.of("Encrypt", Boolean.TRUE, "Decrypt", Boolean.TRUE);
-            case "E" -> isKek
-                    ? Map.of("Wrap", Boolean.TRUE)
-                    : Map.of("Encrypt", Boolean.TRUE);
-            case "D" -> isKek
-                    ? Map.of("Unwrap", Boolean.TRUE)
-                    : Map.of("Decrypt", Boolean.TRUE);
+            case "B" -> Map.of("Encrypt", Boolean.TRUE, "Decrypt", Boolean.TRUE,
+                    "Wrap", Boolean.TRUE, "Unwrap", Boolean.TRUE);
+            case "E" -> Map.of("Encrypt", Boolean.TRUE, "Wrap", Boolean.TRUE);
+            case "D" -> Map.of("Decrypt", Boolean.TRUE, "Unwrap", Boolean.TRUE);
             case "G" -> Map.of("Generate", Boolean.TRUE);
             case "V" -> Map.of("Verify", Boolean.TRUE);
             case "C" -> Map.of("Generate", Boolean.TRUE, "Verify", Boolean.TRUE);
@@ -648,19 +880,18 @@ public class PaymentCryptographyService implements Resettable, StoredResourceArn
     }
 
     /**
-     * The mode of use character a key block carries.
+     * The mode of use character a set of modes gives.
      *
-     * <p>The character is read off the key's own modes, because that is what it says: a key
-     * that encrypts and decrypts is a {@code B}, one that only encrypts is an {@code E}. A key
-     * encryption key wraps and unwraps rather than encrypts and decrypts, so its modes are read
-     * that way.
+     * <p>The character is read off the modes, because that is what it says: a key that
+     * encrypts and decrypts is a {@code B}, one that only encrypts is an {@code E}. A key
+     * encryption key wraps and unwraps rather than encrypts and decrypts, so its modes are
+     * read that way.
      *
-     * @param key the key the block carries
+     * @param modes the modes of the key
+     * @param isKek whether the key is a key encryption key, whose modes are wrap and unwrap
      * @return the character
      */
-    static String modeCode(PaymentCryptographyKey key) {
-        Map<String, Boolean> modes = key.getKeyModesOfUse();
-        boolean isKek = isKeyEncryptionKey(key.getKeyUsage());
+    static String modeCode(Map<String, Boolean> modes, boolean isKek) {
         boolean encrypt = isKek
                 ? enabled(modes, "Wrap") || enabled(modes, "Encrypt")
                 : enabled(modes, "Encrypt");
@@ -692,6 +923,18 @@ public class PaymentCryptographyService implements Resettable, StoredResourceArn
             return "X";
         }
         return "N";
+    }
+
+    /**
+     * The mode of use character a key block carries.
+     *
+     * <p>The character is read off the key's own modes, because that is what it says.
+     *
+     * @param key the key the block carries
+     * @return the character
+     */
+    static String modeCode(PaymentCryptographyKey key) {
+        return modeCode(key.getKeyModesOfUse(), isKeyEncryptionKey(key.getKeyUsage()));
     }
 
     /** Whether a mode of use is on. A key with no modes at all has every one of them. */
@@ -847,5 +1090,22 @@ public class PaymentCryptographyService implements Resettable, StoredResourceArn
     /** The key store, for the tests. */
     Optional<PaymentCryptographyKey> storedKey(String region, String keyId) {
         return keyStore.get(storageKey(region, keyId));
+    }
+
+    /** The certificate of a public key. */
+    public Map<String, Object> publicKeyCertificate(PaymentCryptographyKey key) {
+        return exchange.publicKeyCertificate(key);
+    }
+
+    /** The parameters a counterparty needs to import a key into this service. */
+    public Map<String, Object> parametersForImport(String materialType, String algorithm,
+                                                    boolean reuse) {
+        return exchange.parametersForImport(materialType, algorithm, reuse);
+    }
+
+    /** The parameters a counterparty needs to import a key this service exported. */
+    public Map<String, Object> parametersForExport(String materialType, String algorithm,
+                                                    boolean reuse) {
+        return exchange.parametersForExport(materialType, algorithm, reuse);
     }
 }

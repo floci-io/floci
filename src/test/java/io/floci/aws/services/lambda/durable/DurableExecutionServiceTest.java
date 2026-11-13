@@ -29,14 +29,18 @@ import java.util.ArrayDeque;
 import java.util.ArrayList;
 import java.util.Deque;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.TimeUnit;
 import java.util.function.Function;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
@@ -137,6 +141,51 @@ class DurableExecutionServiceTest {
         assertEquals(2, invoker.events.size());
         assertEquals(DurableExecutionStatus.SUCCEEDED, service.get(arn).getStatus());
         assertTrue(eventTypes(service.get(arn)).containsAll(List.of("WaitStarted", "WaitSucceeded")));
+    }
+
+    @Test
+    void aReceivedTraceHeaderIsStoredAndPassedUnchangedToAPassThroughInvocation() {
+        String header = "Root=1-6af70000-0000000000000000000000aa;Parent=00000000000000a1;Sampled=1";
+        invoker.script(event -> succeeded("\"done\""));
+
+        DurableExecution execution = startWithTraceHeader("traced", header);
+
+        assertEquals(header, service.get(execution.getExecutionArn()).getTraceHeader());
+        assertEquals(List.of(header), invoker.traceIds);
+    }
+
+    @Test
+    void anActiveFunctionKeepsRootAndSampledAndGetsANewParentOnEachInvocation() {
+        invoker.activeTracing = true;
+        invoker.script(event -> {
+            checkpoint(event, token(event), List.of(waitStart("w1", 5)));
+            return pending();
+        });
+        invoker.script(event -> succeeded("\"done\""));
+        String header = "Root=1-6af70000-0000000000000000000000aa;Parent=00000000000000a1;Sampled=1";
+
+        startWithTraceHeader("active", header);
+        clock.advance(Duration.ofSeconds(5));
+        service.sweep();
+
+        assertEquals(2, invoker.traceIds.size());
+        Pattern shape = Pattern.compile("Root=1-6af70000-0000000000000000000000aa;Parent=([0-9a-f]{16});Sampled=1");
+        Matcher first = shape.matcher(invoker.traceIds.get(0));
+        Matcher second = shape.matcher(invoker.traceIds.get(1));
+        assertTrue(first.matches());
+        assertTrue(second.matches());
+        assertNotEquals(first.group(1), second.group(1));
+        assertNotEquals("00000000000000a1", first.group(1));
+    }
+
+    @Test
+    void aStartWithoutATraceHeaderStoresANewOneForAPassThroughFunction() {
+        invoker.script(event -> succeeded("\"done\""));
+
+        DurableExecution execution = start("untraced", "{}", true);
+
+        assertTrue(service.get(execution.getExecutionArn()).getTraceHeader()
+                .matches("Root=1-[0-9a-f]{8}-[0-9a-f]{24};Parent=[0-9a-f]{16};Sampled=0"));
     }
 
     @Test
@@ -281,7 +330,7 @@ class DurableExecutionServiceTest {
         assertEquals(409, conflict.getHttpStatus());
 
         AwsException otherVersion = assertThrows(AwsException.class, () -> service.start(
-                new StartRequest(ACCOUNT, REGION, FUNCTION, "2", "same", "{\"a\":1}", true)));
+                new StartRequest(ACCOUNT, REGION, FUNCTION, "2", "same", "{\"a\":1}", true, null)));
         assertEquals("Execution already started: " + first.getExecutionArn(), otherVersion.getMessage());
     }
 
@@ -489,7 +538,7 @@ class DurableExecutionServiceTest {
 
         invoker.functionName = "other-fn";
         DurableExecution second = service.start(new StartRequest(ACCOUNT, REGION, "other-fn", "1", "shared", "{\"x\":1}",
-                true));
+                true, null));
 
         assertFalse(first.getExecutionArn().equals(second.getExecutionArn()));
         assertEquals("\"b\"", service.get(second.getExecutionArn()).getResult());
@@ -689,6 +738,82 @@ class DurableExecutionServiceTest {
     }
 
     @Test
+    void aDurableChainedChildTakesTheRequestedTraceHeaderAndPassesItToItsInvocation() {
+        String header = "Root=1-6af70000-0000000000000000000000e1;Parent=00000000000000e1;Sampled=1";
+        invoker.childScript("child-fn", event -> succeeded("\"c\""));
+        invoker.script(event -> {
+            checkpoint(event, token(event), List.of(chainedStart("i1", "child-fn:1", null, header)));
+            return pending();
+        });
+        invoker.script(event -> succeeded("\"done\""));
+
+        DurableExecution parent = service.get(startWithTraceHeader("exec-1",
+                "Root=1-6af70000-0000000000000000000000aa;Parent=00000000000000a1;Sampled=1").getExecutionArn());
+
+        DurableExecution child = service.get(parent.getOperations().get("i1").getChildExecutionArn());
+        assertEquals(header, child.getTraceHeader());
+        assertEquals(List.of(header), invoker.otherTraceIds.get("child-fn"));
+    }
+
+    @Test
+    void aDurableChainedChildWithoutARequestedTraceHeaderTakesTheParentHeader() {
+        String parentHeader = "Root=1-6af70000-0000000000000000000000aa;Parent=00000000000000a1;Sampled=1";
+        invoker.childScript("child-fn", event -> succeeded("\"c\""));
+        invoker.script(event -> {
+            checkpoint(event, token(event), List.of(chainedStart("i1", "child-fn:1", null)));
+            return pending();
+        });
+        invoker.script(event -> succeeded("\"done\""));
+
+        DurableExecution parent = service.get(startWithTraceHeader("exec-1", parentHeader).getExecutionArn());
+
+        DurableExecution child = service.get(parent.getOperations().get("i1").getChildExecutionArn());
+        assertEquals(parentHeader, child.getTraceHeader());
+        assertEquals(List.of(parentHeader), invoker.otherTraceIds.get("child-fn"));
+    }
+
+    @Test
+    void aPlainChainedTargetGetsTheRequestedTraceHeader() {
+        String header = "Root=1-6af70000-0000000000000000000000e1;Parent=00000000000000e1;Sampled=1";
+        invoker.plainFunctions.put("plain-fn", event -> handlerResponse("{}"));
+        invoker.plainFunctions.put("active-fn", event -> handlerResponse("{}"));
+        invoker.activeFunctions.add("active-fn");
+        invoker.script(event -> {
+            checkpoint(event, token(event), List.of(chainedStart("p", "plain-fn", null, header),
+                    chainedStart("a", "active-fn", null, header)));
+            return pending();
+        });
+        invoker.script(event -> succeeded("\"done\""));
+
+        start("exec-1", "{}", false);
+
+        assertEquals(List.of(header), invoker.otherTraceIds.get("plain-fn"));
+        assertEquals(1, invoker.otherTraceIds.get("active-fn").size());
+        assertTrue(invoker.otherTraceIds.get("active-fn").get(0)
+                .matches("Root=1-6af70000-0000000000000000000000e1;Parent=(?!00000000000000e1)[0-9a-f]{16};Sampled=1"));
+    }
+
+    @Test
+    void aPlainPassThroughTargetGetsANewParentOnlyForAnUnsampledHeaderWithoutOne() {
+        invoker.plainFunctions.put("sampled-fn", event -> handlerResponse("{}"));
+        invoker.plainFunctions.put("unsampled-fn", event -> handlerResponse("{}"));
+        invoker.script(event -> {
+            checkpoint(event, token(event), List.of(
+                    chainedStart("s", "sampled-fn", null, "Root=1-6af70000-0000000000000000000000a1;Sampled=1"),
+                    chainedStart("u", "unsampled-fn", null, "Root=1-6af70000-0000000000000000000000a2;Sampled=0")));
+            return pending();
+        });
+        invoker.script(event -> succeeded("\"done\""));
+
+        start("exec-1", "{}", false);
+
+        assertEquals(List.of("Root=1-6af70000-0000000000000000000000a1"), invoker.otherTraceIds.get("sampled-fn"));
+        assertEquals(1, invoker.otherTraceIds.get("unsampled-fn").size());
+        assertTrue(invoker.otherTraceIds.get("unsampled-fn").get(0)
+                .matches("Root=1-6af70000-0000000000000000000000a2;Parent=[0-9a-f]{16};Sampled=0"));
+    }
+
+    @Test
     void aChainedInvokeOfAPlainFunctionFailsWithItsErrorOrAnOversizedOutput() {
         invoker.plainFunctions.put("raising-fn",
                 event -> functionError("{\"errorMessage\":\"child exploded\",\"errorType\":\"ValueError\"}"));
@@ -876,8 +1001,14 @@ class DurableExecutionServiceTest {
     }
 
     private static DurableOperationUpdate chainedStart(String id, String functionName, String payload) {
+        return chainedStart(id, functionName, payload, null);
+    }
+
+    private static DurableOperationUpdate chainedStart(String id, String functionName, String payload,
+                                                       String traceHeader) {
         return new DurableOperationUpdate(id, null, null, DurableOperationType.CHAINED_INVOKE, "ChainedInvoke",
-                DurableOperationAction.START, payload, null, null, null, null, null, null, functionName, null);
+                DurableOperationAction.START, payload, null, null, null, null, null, null, functionName, null,
+                traceHeader);
     }
 
     private static void assertCallbackClosed(Executable call) {
@@ -893,7 +1024,11 @@ class DurableExecutionServiceTest {
     }
 
     private DurableExecution start(String name, String payload, boolean synchronous) {
-        return service.start(new StartRequest(ACCOUNT, REGION, FUNCTION, "1", name, payload, synchronous));
+        return service.start(new StartRequest(ACCOUNT, REGION, FUNCTION, "1", name, payload, synchronous, null));
+    }
+
+    private DurableExecution startWithTraceHeader(String name, String traceHeader) {
+        return service.start(new StartRequest(ACCOUNT, REGION, FUNCTION, "1", name, "{}", false, traceHeader));
     }
 
     private CheckpointResult checkpoint(JsonNode event, String token, List<DurableOperationUpdate> updates) {
@@ -925,27 +1060,27 @@ class DurableExecutionServiceTest {
     private static DurableOperationUpdate step(String id, DurableOperationAction action, String payload,
                                                DurableErrorObject error) {
         return new DurableOperationUpdate(id, null, null, DurableOperationType.STEP, "Step", action, payload, error,
-                null, null, null, null, null, null, null);
+                null, null, null, null, null, null, null, null);
     }
 
     private static DurableOperationUpdate stepRetry(String id, int delaySeconds, DurableErrorObject error) {
         return new DurableOperationUpdate(id, null, null, DurableOperationType.STEP, "Step",
-                DurableOperationAction.RETRY, null, error, delaySeconds, null, null, null, null, null, null);
+                DurableOperationAction.RETRY, null, error, delaySeconds, null, null, null, null, null, null, null);
     }
 
     private static DurableOperationUpdate callbackStart(String id, int timeoutSeconds, int heartbeatSeconds) {
         return new DurableOperationUpdate(id, null, null, DurableOperationType.CALLBACK, "Callback",
-                DurableOperationAction.START, null, null, null, null, null, timeoutSeconds, heartbeatSeconds, null, null);
+                DurableOperationAction.START, null, null, null, null, null, timeoutSeconds, heartbeatSeconds, null, null, null);
     }
 
     private static DurableOperationUpdate waitStart(String id, int seconds) {
         return new DurableOperationUpdate(id, null, null, DurableOperationType.WAIT, "Wait",
-                DurableOperationAction.START, null, null, null, seconds, null, null, null, null, null);
+                DurableOperationAction.START, null, null, null, seconds, null, null, null, null, null, null);
     }
 
     private static DurableOperationUpdate executionSucceed(String payload) {
         return new DurableOperationUpdate("execution-result", null, null, DurableOperationType.EXECUTION, null,
-                DurableOperationAction.SUCCEED, payload, null, null, null, null, null, null, null, null);
+                DurableOperationAction.SUCCEED, payload, null, null, null, null, null, null, null, null, null);
     }
 
     private static DurableFunctionInvoker.DurableInvocationResult succeeded(String result) {
@@ -979,6 +1114,12 @@ class DurableExecutionServiceTest {
         int childExecutionTimeoutSeconds = 3600;
         String functionName = FUNCTION;
         int retentionPeriodInDays = 7;
+        boolean activeTracing;
+        /** Functions that trace Active, plain or durable, whatever activeTracing says. */
+        final Set<String> activeFunctions = new HashSet<>();
+        final List<String> traceIds = new ArrayList<>();
+        /** The trace id each invocation of a function other than the one under test received. */
+        final Map<String, List<String>> otherTraceIds = new HashMap<>();
 
         void script(Function<JsonNode, DurableInvocationResult> script) {
             scripts.add(script);
@@ -993,7 +1134,8 @@ class DurableExecutionServiceTest {
             String version = qualifier == null ? "$LATEST" : qualifier;
             if (plainFunctions.containsKey(functionName)) {
                 return new ResolvedDurableTarget(accountId, region, functionName,
-                        "arn:aws:lambda:us-east-1:000000000000:function:" + functionName, version, false, 0, 0);
+                        "arn:aws:lambda:us-east-1:000000000000:function:" + functionName, version, false, 0, 0,
+                        activeFunctions.contains(functionName));
             }
             String name = FUNCTION.equals(functionName) ? this.functionName : functionName;
             if (!name.equals(this.functionName) && !childScripts.containsKey(name)) {
@@ -1003,16 +1145,20 @@ class DurableExecutionServiceTest {
             return new ResolvedDurableTarget(accountId, region, name,
                     "arn:aws:lambda:us-east-1:000000000000:function:" + name + ":" + durableVersion, durableVersion,
                     true, name.equals(this.functionName) ? executionTimeoutSeconds : childExecutionTimeoutSeconds,
-                    retentionPeriodInDays);
+                    retentionPeriodInDays, activeTracing || activeFunctions.contains(name));
         }
 
         @Override
-        public DurableInvocationResult invoke(ResolvedDurableTarget target, byte[] payload, String requestId) {
+        public DurableInvocationResult invoke(ResolvedDurableTarget target, byte[] payload, String requestId,
+                                             String traceId) {
             JsonNode event;
             try {
                 event = MAPPER.readTree(payload);
             } catch (IOException e) {
                 throw new UncheckedIOException(e);
+            }
+            if (!FUNCTION.equals(target.functionName())) {
+                otherTraceIds.computeIfAbsent(target.functionName(), ignored -> new ArrayList<>()).add(traceId);
             }
             if (!target.durable()) {
                 return plainFunctions.get(target.functionName()).apply(event);
@@ -1024,6 +1170,7 @@ class DurableExecutionServiceTest {
             }
             events.add(event);
             requestIds.add(requestId);
+            traceIds.add(traceId);
             Function<JsonNode, DurableInvocationResult> script = scripts.poll();
             if (script == null) {
                 return handlerResponse("{\"Status\":\"FAILED\",\"Error\":{\"ErrorMessage\":\"no script for "

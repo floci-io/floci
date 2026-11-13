@@ -75,6 +75,22 @@ Floci Lambda runs your function code locally inside real Docker containers - clo
 supported ranges before changing any stored settings. A rejected value returns
 `InvalidParameterValueException` and leaves the function configuration unchanged.
 
+`CreateFunction` and `UpdateFunctionConfiguration` enforce the 4 KB environment-variable
+limit. The compact JSON `Variables` object must fit within 4,096 UTF-8 bytes, including
+keys, values, punctuation, and JSON escaping, as described in the
+[AWS deployment guidance](https://docs.aws.amazon.com/lambda/latest/dg/troubleshooting-deployment.html).
+An oversized environment returns HTTP 400 with `InvalidParameterValueException` before
+creating a function or changing any stored configuration. Omitting `Environment` on an
+update preserves the existing variables; an empty `Variables` object clears them.
+Validation stops serializing oversized input without allocating full JSON and UTF-8 copies.
+Quota errors include AWS's `String measured:` detail. The diagnostic retains up to 5,120
+UTF-8 bytes of compact variables JSON; larger inputs end with `...`, dropping any incomplete
+trailing UTF-8 character. This keeps diagnostic allocation and serialization bounded.
+CloudFormation omits unchanged environment variables during in-place configuration updates,
+so a function persisted before quota enforcement can retain an oversized environment when
+another property changes. Changing or removing its variables still updates the environment
+and enforces the quota.
+
 The event invoke configuration is stored and returned as AWS does, and `AWS::Lambda::EventInvokeConfig`
 provisions it from a stack. A SAM function's `EventInvokeConfig` expands into that resource as
 `sam deploy` does: on `$LATEST`, or on the `AutoPublishAlias` alias, with the inline role policy for
@@ -236,6 +252,16 @@ and an output over 1 MB fails the operation. A missing function or an unqualifie
 fails the operation at once, and a target in another account or Region is rejected at checkpoint.
 Stopping the parent leaves the child running, as on AWS.
 
+Each durable execution gets an X-Ray trace header. It is built from the `X-Amzn-Trace-Id` header of
+Invoke when the request carries one. `GetDurableExecution` returns it as `TraceHeader`. Every
+invocation of the execution gets the same `Root` in `_X_AMZN_TRACE_ID`. A `PassThrough` function
+gets the `Parent` of the execution. When the header has none, the function gets only the `Root` if
+`Sampled=1`, and a new `Parent` on each invocation if `Sampled=0`. An `Active` function gets a new
+`Parent` on each invocation.
+A durable execution started by a chained invoke takes its header from
+`ChainedInvokeOptions.XAmznTraceId`, or from the calling execution when that is absent. A plain
+function invoked this way gets the same header.
+
 `GetDurableExecutionHistory` leaves payloads out unless `IncludeExecutionData=true` is sent. The
 API reference names `true` as the default, but AWS answers this way.
 
@@ -253,8 +279,9 @@ Not emulated yet:
 - Durable executions started by Step Functions or by an event source mapping. These invoke the
   function as a plain one.
 - Payload encryption. `KMSKeyArn` is stored and returned only.
-- EventBridge status-change events, the X-Ray `TraceHeader`, and a dead-letter queue or
-  destinations for durable executions.
+- EventBridge status-change events and a dead-letter queue or destinations for durable
+  executions.
+- The `Lineage` field AWS adds to the trace header.
 - The per-execution limits of 3,000 operations and 100 MB of persisted payload.
 
 ## Code signing configuration pagination
@@ -1182,6 +1209,10 @@ A container image function whose `ImageUri` names an image already present on th
 ### Private registry authentication
 
 Container image functions (`"PackageType": "Image"`) that pull from private registries need Docker credentials. See [Docker Configuration → Private Registry Authentication](../configuration/docker.md#private-registry-authentication) for the full guide.
+
+### Image user and working directory
+
+AWS runs a container image function as its own least-privileged user, not the image's `USER`. Floci keeps running the container as the image's user, but before it starts the container it checks that Lambda's user could enter the working directory (`ImageConfig.WorkingDirectory`, or the image's `WORKDIR`). Lambda's user owns nothing in the image, so a directory on that path must be executable by other users. Symlinks on the path are followed, and the check stops at a file system the function mounts from EFS, which Lambda enters as the access point's user. When a directory is not executable by other users, such as a `0700` home directory owned by the image's user, the invocation fails with `Runtime.InvalidEntrypoint`, as on AWS. Set `WORKDIR` to a directory everyone can enter, such as `/`.
 
 ## Examples
 

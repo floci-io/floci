@@ -7,6 +7,7 @@ import io.floci.aws.core.common.AwsArnUtils;
 import io.floci.aws.core.common.AwsException;
 import io.floci.aws.core.common.Resettable;
 import io.floci.aws.services.lambda.launcher.ContainerHandle;
+import io.floci.aws.services.lambda.launcher.LambdaInitException;
 import io.floci.aws.services.lambda.model.FunctionEventInvokeConfig;
 import io.floci.aws.services.lambda.model.InvocationType;
 import io.floci.aws.services.lambda.model.InvokeResult;
@@ -167,7 +168,12 @@ public class LambdaExecutorService implements Resettable {
     }
 
     public InvokeResult invoke(LambdaFunction fn, byte[] payload, InvocationType type, String requestId) {
-        return invoke(fn, payload, type, 0, null, null, requestId, null);
+        return invoke(fn, payload, type, 0, null, null, requestId, null, null);
+    }
+
+    public InvokeResult invoke(LambdaFunction fn, byte[] payload, InvocationType type, String requestId,
+                               String traceId) {
+        return invoke(fn, payload, type, 0, null, null, requestId, null, traceId);
     }
 
     /**
@@ -192,7 +198,7 @@ public class LambdaExecutorService implements Resettable {
     InvokeResult invoke(LambdaFunction fn, byte[] payload, InvocationType type, int chainDepth,
                         String invokedQualifier, String clientContext) {
         return invoke(fn, payload, type, chainDepth, invokedQualifier, clientContext, UUID.randomUUID().toString(),
-                null);
+                null, null);
     }
 
     /**
@@ -202,12 +208,12 @@ public class LambdaExecutorService implements Resettable {
     public InvokeResult invokeStreaming(LambdaFunction fn, byte[] payload, int chainDepth, String invokedQualifier,
                                         ResponseStreamListener listener) {
         return invoke(fn, payload, InvocationType.RequestResponse, chainDepth, invokedQualifier, null,
-                UUID.randomUUID().toString(), listener);
+                UUID.randomUUID().toString(), listener, null);
     }
 
     private InvokeResult invoke(LambdaFunction fn, byte[] payload, InvocationType type, int chainDepth,
                                 String invokedQualifier, String clientContext, String requestId,
-                                ResponseStreamListener listener) {
+                                ResponseStreamListener listener, String traceId) {
         if (type == InvocationType.DryRun) {
             return new InvokeResult(204, null, new byte[0], null, requestId);
         }
@@ -259,7 +265,7 @@ public class LambdaExecutorService implements Resettable {
         }
 
         try {
-            return executeSync(fn, payload, requestId, clientContext, invokedQualifier, listener);
+            return executeSync(fn, payload, requestId, clientContext, invokedQualifier, listener, traceId);
         } finally {
             permit.close();
         }
@@ -315,7 +321,7 @@ public class LambdaExecutorService implements Resettable {
         }
         InvokeResult result;
         try (permit) {
-            result = executeSync(event.fn(), event.payload(), event.requestId(), null, event.invokedQualifier(), null);
+            result = executeSync(event.fn(), event.payload(), event.requestId(), null, event.invokedQualifier(), null, null);
         } catch (RuntimeException e) {
             LOG.warnv("Error in async Lambda execution for {0}: {1}", event.fn().getFunctionName(), e.getMessage());
             // Stops retrying, as upstream did: routes the previous attempt's result, or UnknownError when
@@ -363,6 +369,10 @@ public class LambdaExecutorService implements Resettable {
      * message.
      */
     static String initFailureMessage(Exception e, boolean dockerExecutor) {
+        LambdaInitException initFailure = initException(e);
+        if (initFailure != null) {
+            return initFailure.getMessage();
+        }
         for (Throwable cause = e; dockerExecutor && cause != null; cause = cause.getCause()) {
             if (cause instanceof SocketException || cause instanceof UnknownHostException) {
                 return "Failed to start Lambda container: Docker is not reachable (" + cause.getMessage()
@@ -372,9 +382,24 @@ public class LambdaExecutorService implements Resettable {
         return "Failed to start Lambda container: " + e.getMessage();
     }
 
+    /** The error type an init failure reports: the runtime's own when it has one, else {@code Lambda.InitError}. */
+    static String initFailureType(Exception e) {
+        LambdaInitException initFailure = initException(e);
+        return initFailure != null ? initFailure.errorType() : "Lambda.InitError";
+    }
+
+    private static LambdaInitException initException(Throwable e) {
+        for (Throwable cause = e; cause != null; cause = cause.getCause()) {
+            if (cause instanceof LambdaInitException initFailure) {
+                return initFailure;
+            }
+        }
+        return null;
+    }
+
     private InvokeResult executeSync(LambdaFunction fn, byte[] payload, String requestId,
                                      String clientContext, String invokedQualifier,
-                                     ResponseStreamListener listener) {
+                                     ResponseStreamListener listener, String traceId) {
         ContainerHandle handle;
         try {
             handle = warmPool.acquireProvisioned(fn, invokedQualifier);
@@ -384,7 +409,7 @@ public class LambdaExecutorService implements Resettable {
         } catch (Exception e) {
             LOG.warnv("Failed to acquire container for function {0}: {1}", fn.getFunctionName(), e.getMessage());
             return new InvokeResult(200, "Unhandled",
-                    buildErrorPayload(initFailureMessage(e, dockerExecutor), "Lambda.InitError"),
+                    buildErrorPayload(initFailureMessage(e, dockerExecutor), initFailureType(e)),
                     null, requestId);
         }
         long deadlineMs = System.currentTimeMillis() + (long) fn.getTimeout() * 1000;
@@ -392,6 +417,7 @@ public class LambdaExecutorService implements Resettable {
                 requestId, payload, deadlineMs, fn.getFunctionArn(),
                 new CompletableFuture<>());
         invocation.setClientContext(clientContext);
+        invocation.setTraceId(traceId);
         invocation.setResponseStreamListener(listener);
         RuntimeApiServer runtimeApiServer = handle.getRuntimeApiServer();
         boolean initializing = !runtimeApiServer.hasRuntimePolled();

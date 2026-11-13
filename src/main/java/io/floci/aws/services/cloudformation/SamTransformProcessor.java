@@ -1847,8 +1847,12 @@ class SamTransformProcessor {
         roleProps.set("AssumeRolePolicyDocument", assumePolicy);
 
         ArrayNode managedPolicies = objectMapper.createArrayNode();
+        JsonNode durableConfig = properties.path("DurableConfig");
+        String basicPolicyArn = durableConfig.isObject() && !durableConfig.isEmpty()
+                ? "arn:${AWS::Partition}:iam::aws:policy/service-role/AWSLambdaBasicDurableExecutionRolePolicy"
+                : "arn:${AWS::Partition}:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole";
         ObjectNode basicExecutionRole = objectMapper.createObjectNode();
-        basicExecutionRole.put("Fn::Sub", "arn:${AWS::Partition}:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole");
+        basicExecutionRole.put("Fn::Sub", basicPolicyArn);
         managedPolicies.add(basicExecutionRole);
 
         JsonNode userPolicies = properties.path("Policies");
@@ -1907,6 +1911,8 @@ class SamTransformProcessor {
         copyIfPresent(properties, "EphemeralStorage", lambdaProps);
         copyIfPresent(properties, "VpcConfig", lambdaProps);
         copyIfPresent(properties, "FileSystemConfigs", lambdaProps);
+        copyIfPresent(properties, "LoggingConfig", lambdaProps);
+        copyIfPresent(properties, "DurableConfig", lambdaProps);
 
         JsonNode tracing = properties.path("Tracing");
         if (!tracing.isMissingNode()) {

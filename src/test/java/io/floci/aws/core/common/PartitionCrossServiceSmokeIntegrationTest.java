@@ -55,7 +55,7 @@ class PartitionCrossServiceSmokeIntegrationTest {
             "eventbridge", "eventbridgev2", "firehose", "fis", "glue", "guardduty", "iot", "kinesis", "kinesisanalytics", "lambda",
             "lambdamicrovms", "lambdaweb", "memorydb", "msk", "mwaa", "networkfirewall", "oam", "opensearch", "organizations",
             "paymentcryptography", "pipes", "quicksight", "ram", "rds", "redshift", "redshiftserverless",
-            "resourceexplorer2", "resourcegroups", "route53resolver",
+            "rekognition", "resourceexplorer2", "resourcegroups", "route53resolver",
             "s3tables", "s3vectors", "sagemaker", "scheduler", "secretsmanager", "servicequotas", "ses", "signer", "sns", "sqs",
             "stepfunctions", "timestreaminfluxdb", "transfer", "verifiedpermissions", "wafv2",
             "xray");
@@ -70,6 +70,20 @@ class PartitionCrossServiceSmokeIntegrationTest {
     @BeforeAll
     static void configureRestAssured() {
         RestAssuredJsonUtils.configureAwsContentTypes();
+    }
+
+    @ParameterizedTest
+    @MethodSource(PartitionMatrix.NON_COMMERCIAL_CASES)
+    void rekognitionCollectionArn(PartitionCase partitionCase) {
+        String region = offered(partitionCase, "rekognition");
+        String id = unique("smoke-collection", partitionCase);
+        String body = "{\"CollectionId\":\"" + id + "\"}";
+        String arn = signed(region, "rekognition").contentType(JSON_1_1)
+                .header("X-Amz-Target", "RekognitionService.CreateCollection").body(body)
+                .post("/").then().statusCode(200).extract().path("CollectionArn");
+        cleanup.register(() -> signed(region, "rekognition").contentType(JSON_1_1)
+                .header("X-Amz-Target", "RekognitionService.DeleteCollection").body(body).post("/"));
+        PartitionMatrix.assertArnIn(partitionCase, arn);
     }
 
     @ParameterizedTest
@@ -838,6 +852,27 @@ class PartitionCrossServiceSmokeIntegrationTest {
         .when().delete("/2020-05-31/function/" + name));
         PartitionMatrix.assertGlobalArnIn(partitionCase,
                 created.xmlPath().getString("FunctionSummary.FunctionMetadata.FunctionARN"));
+    }
+
+    @ParameterizedTest
+    @MethodSource(PartitionMatrix.NON_COMMERCIAL_CASES)
+    void cloudFrontKeyValueStoreArn(PartitionCase partitionCase) {
+        String region = offered(partitionCase, "cloudfront");
+        String name = unique("smoke-kvs", partitionCase);
+        String body = """
+                <CreateKeyValueStoreRequest xmlns="http://cloudfront.amazonaws.com/doc/2020-05-31/">
+                  <Name>%s</Name>
+                </CreateKeyValueStoreRequest>
+                """.formatted(name);
+        Response created = signed(region, "cloudfront")
+            .contentType("application/xml")
+            .body(body)
+        .when().post("/2020-05-31/key-value-store").then().statusCode(201).extract().response();
+        String etag = created.header("ETag");
+        cleanup.register(() -> signed(region, "cloudfront")
+            .header("If-Match", etag)
+        .when().delete("/2020-05-31/key-value-store/" + name));
+        PartitionMatrix.assertGlobalArnIn(partitionCase, created.xmlPath().getString("KeyValueStore.ARN"));
     }
 
     @ParameterizedTest

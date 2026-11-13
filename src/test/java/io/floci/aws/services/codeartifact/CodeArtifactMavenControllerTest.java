@@ -3,13 +3,22 @@ package io.floci.aws.services.codeartifact;
 import io.floci.aws.core.common.AwsException;
 import io.floci.aws.services.codeartifact.CodeArtifactService.AuthorizationTokenScope;
 import io.floci.aws.services.codeartifact.ReposiliteSidecarClient.DeployOutcome;
-import io.floci.aws.services.codeartifact.ReposiliteSidecarClient.FetchedArtifact;
+import io.floci.aws.services.codeartifact.ReposiliteSidecarClient.StreamedArtifact;
 import jakarta.ws.rs.core.HttpHeaders;
 import jakarta.ws.rs.core.Response;
+import jakarta.ws.rs.core.StreamingOutput;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
+import java.io.ByteArrayInputStream;
+import java.io.ByteArrayOutputStream;
+import java.io.IOException;
+import java.io.InputStream;
+import java.io.UncheckedIOException;
 import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.nio.file.StandardCopyOption;
 import java.util.List;
 import java.util.Optional;
 
@@ -18,6 +27,7 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyLong;
 import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
@@ -58,6 +68,20 @@ class CodeArtifactMavenControllerTest {
         when(service.resolveAuthorizationToken("some-token", DOMAIN))
                 .thenReturn(Optional.of(new AuthorizationTokenScope(OWNER, REGION)));
         when(service.ensureFormatContainerId("maven", REGION, DOMAIN, OWNER, REPOSITORY)).thenReturn(REPO_ID);
+        // service is a mock, so its own real stageAssetBody (which the controller now calls to
+        // stream a deploy's body to disk) never runs; stubbed here to actually stage to a real
+        // temp file, the same real behavior the controller depends on, so content-length/byte
+        // accounting downstream of it reflects what was actually uploaded rather than a null Path.
+        when(service.stageAssetBody(any())).thenAnswer(invocation -> {
+            InputStream in = invocation.getArgument(0);
+            Path staged = Files.createTempFile("maven-controller-test-", ".bin");
+            Files.copy(in, staged, StandardCopyOption.REPLACE_EXISTING);
+            return staged;
+        });
+        doAnswer(invocation -> {
+            Files.deleteIfExists(invocation.getArgument(0));
+            return null;
+        }).when(service).deleteStagedAssetBody(any());
     }
 
     /**
@@ -70,11 +94,12 @@ class CodeArtifactMavenControllerTest {
      */
     @Test
     void aSecondRequestForBareMetadataStillAttemptsAFreshImportEvenWhenALocalCopyAlreadyExists() {
-        FetchedArtifact stale = new FetchedArtifact("<metadata/>".getBytes(StandardCharsets.UTF_8),
-                "application/xml");
-        FetchedArtifact refreshed = new FetchedArtifact("<metadata><refreshed/></metadata>"
-                .getBytes(StandardCharsets.UTF_8), "application/xml");
-        when(reposilite.fetchArtifact(REPO_ID, METADATA_GAV)).thenReturn(Optional.of(stale))
+        StreamedArtifact stale = new StreamedArtifact(
+                new ByteArrayInputStream("<metadata/>".getBytes(StandardCharsets.UTF_8)), 11, "application/xml");
+        byte[] refreshedBytes = "<metadata><refreshed/></metadata>".getBytes(StandardCharsets.UTF_8);
+        StreamedArtifact refreshed = new StreamedArtifact(new ByteArrayInputStream(refreshedBytes),
+                refreshedBytes.length, "application/xml");
+        when(reposilite.fetchArtifactStreamed(REPO_ID, METADATA_GAV)).thenReturn(Optional.of(stale))
                 .thenReturn(Optional.of(refreshed));
         when(externalConnectionImporter.tryImport(REGION, DOMAIN, OWNER, REPOSITORY, REPO_ID, METADATA_GAV))
                 .thenReturn(true);
@@ -83,7 +108,7 @@ class CodeArtifactMavenControllerTest {
 
         assertEquals(200, response.getStatus());
         assertEquals("<metadata><refreshed/></metadata>",
-                new String((byte[]) response.getEntity(), StandardCharsets.UTF_8));
+                new String(readEntity(response), StandardCharsets.UTF_8));
         verify(externalConnectionImporter).tryImport(REGION, DOMAIN, OWNER, REPOSITORY, REPO_ID, METADATA_GAV);
     }
 
@@ -95,14 +120,25 @@ class CodeArtifactMavenControllerTest {
     @Test
     void aFixedVersionAssetIsNotReimportedOnceALocalCopyAlreadyExists() {
         String versionGav = "com/example/widget/1.0/widget-1.0.jar";
-        FetchedArtifact existing = new FetchedArtifact("real-bytes".getBytes(StandardCharsets.UTF_8),
+        byte[] realBytes = "real-bytes".getBytes(StandardCharsets.UTF_8);
+        StreamedArtifact existing = new StreamedArtifact(new ByteArrayInputStream(realBytes), realBytes.length,
                 "application/java-archive");
-        when(reposilite.fetchArtifact(REPO_ID, versionGav)).thenReturn(Optional.of(existing));
+        when(reposilite.fetchArtifactStreamed(REPO_ID, versionGav)).thenReturn(Optional.of(existing));
 
         Response response = controller.fetch(headers, DOMAIN, REPOSITORY, versionGav);
 
         assertEquals(200, response.getStatus());
         verify(externalConnectionImporter, never()).tryImport(any(), any(), any(), any(), any(), any());
+    }
+
+    private static byte[] readEntity(Response response) {
+        ByteArrayOutputStream out = new ByteArrayOutputStream();
+        try {
+            ((StreamingOutput) response.getEntity()).write(out);
+        } catch (IOException e) {
+            throw new UncheckedIOException(e);
+        }
+        return out.toByteArray();
     }
 
     /**
@@ -115,10 +151,10 @@ class CodeArtifactMavenControllerTest {
         blockPublish("com.example", "widget");
 
         Response response = controller.deploy(headers, DOMAIN, REPOSITORY, "com/example/widget/1.0/widget-1.0.jar",
-                "jar-bytes".getBytes(StandardCharsets.UTF_8));
+                new ByteArrayInputStream("jar-bytes".getBytes(StandardCharsets.UTF_8)));
 
         assertEquals(409, response.getStatus());
-        verify(reposilite, never()).deployArtifact(any(), any(), any());
+        verify(reposilite, never()).deployArtifact(any(), any(), any(Path.class));
         verify(service, never()).recordContainerBackedAssetBytes(any(), any(), any(), any(), any(), any(), any(),
                 anyLong(), anyLong());
     }
@@ -133,10 +169,10 @@ class CodeArtifactMavenControllerTest {
         blockPublish("com.example", "widget");
 
         Response response = controller.deploy(headers, DOMAIN, REPOSITORY, METADATA_GAV,
-                "<metadata/>".getBytes(StandardCharsets.UTF_8));
+                new ByteArrayInputStream("<metadata/>".getBytes(StandardCharsets.UTF_8)));
 
         assertEquals(409, response.getStatus());
-        verify(reposilite, never()).deployArtifact(any(), any(), any());
+        verify(reposilite, never()).deployArtifact(any(), any(), any(Path.class));
     }
 
     /**
@@ -152,11 +188,11 @@ class CodeArtifactMavenControllerTest {
         for (String gav : List.of("com/example/widget/1.0-SNAPSHOT/maven-metadata.xml",
                 "com/example/widget/1.0-SNAPSHOT/maven-metadata.xml.sha1")) {
             Response response = controller.deploy(headers, DOMAIN, REPOSITORY, gav,
-                    "<metadata/>".getBytes(StandardCharsets.UTF_8));
+                    new ByteArrayInputStream("<metadata/>".getBytes(StandardCharsets.UTF_8)));
 
             assertEquals(409, response.getStatus(), gav);
         }
-        verify(reposilite, never()).deployArtifact(any(), any(), any());
+        verify(reposilite, never()).deployArtifact(any(), any(), any(Path.class));
     }
 
     @Test
@@ -180,10 +216,11 @@ class CodeArtifactMavenControllerTest {
         blockPublish("com.example", "widget-SNAPSHOT");
 
         Response response = controller.deploy(headers, DOMAIN, REPOSITORY,
-                "com/example/widget-SNAPSHOT/maven-metadata.xml", "<metadata/>".getBytes(StandardCharsets.UTF_8));
+                "com/example/widget-SNAPSHOT/maven-metadata.xml",
+                new ByteArrayInputStream("<metadata/>".getBytes(StandardCharsets.UTF_8)));
 
         assertEquals(409, response.getStatus());
-        verify(reposilite, never()).deployArtifact(any(), any(), any());
+        verify(reposilite, never()).deployArtifact(any(), any(), any(Path.class));
     }
 
     @Test
@@ -204,7 +241,7 @@ class CodeArtifactMavenControllerTest {
     private void blockPublish(String namespace, String packageName) {
         // What Reposilite would answer if the deploy got through, so a missing refusal fails on
         // the status assertion rather than on a null outcome.
-        when(reposilite.deployArtifact(any(), any(), any()))
+        when(reposilite.deployArtifact(any(), any(), any(Path.class)))
                 .thenReturn(new DeployOutcome(201, true));
         doThrow(new AwsException("ConflictException", "Package '" + packageName + "' cannot be published because "
                 + "its origin configuration blocks direct publish.", 409))

@@ -90,6 +90,12 @@ runtimes reach `READY` immediately and hold metadata only. See
 A `DEFAULT` endpoint is created automatically with each runtime, and each runtime
 is associated with an auto-created, resolvable workload identity.
 
+Legacy `agent/<uuid>:<version>` runtime ARNs remain usable for invocation validation and tagging.
+Legacy `agentEndpoint/<uuid>` endpoint IDs resolve for tagging and CloudFormation updates and deletes.
+Responses use `runtime/<agentRuntimeId>` and `runtime/<agentRuntimeId>/runtime-endpoint/<name>`.
+With runtime existence validation enabled, a harness runtime ARN is valid while its harness remains
+registered; unknown and deleted runtime ARNs return `ResourceNotFoundException`.
+
 ## Memory events
 
 The event data plane is backed by real storage, so what a read returns is what was written rather
@@ -111,6 +117,8 @@ Memory *records* (extraction and retrieval) are not emulated: they depend on an 
 rather than on stored events.
 
 ## Harnesses
+
+Harness tags use the `harness/<id>` ARN. Tagging a harness runtime-environment ARN is not emulated.
 
 A harness is stored with its configuration and settles in `READY` at once. No agent runtime is
 started for it, and `InvokeHarness` does not read it.
@@ -190,8 +198,9 @@ block is ever produced even when a request supplies `tools`.
 
 ## Behavior notes
 
-- `agentRuntimeId` is `<name>-<10 alphanumerics>`; the ARN embeds a UUID and the
-  version: `arn:aws:bedrock-agentcore:<region>:<account>:agent/<uuid>:<version>`.
+- `agentRuntimeId` is `<name>-<10 alphanumerics>`; the runtime ARN is
+  `arn:<partition>:bedrock-agentcore:<region>:<account>:runtime/<agentRuntimeId>` and
+  stays the same across versions. Endpoint ARNs append `/runtime-endpoint/<name>`, including `DEFAULT`.
 - `agentRuntimeName` must match `[a-zA-Z][a-zA-Z0-9_]{0,47}` (no hyphens); invalid
   names return `ValidationException`.
 - Each `UpdateAgentRuntime` increments the version and preserves prior versions for

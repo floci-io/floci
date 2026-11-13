@@ -451,7 +451,11 @@ class KinesisServiceTest {
         Iterator<KinesisShard> reader = stream.getShards().iterator();
         reader.next();
 
-        kinesisService.splitShard("my-stream", shardId, "170141183460469231731687303715884105728", REGION);
+        KinesisShard.HashKeyRange firstRange = stream.getShards().getFirst().getHashKeyRange();
+        String splitPoint = new BigInteger(firstRange.startingHashKey())
+                .add(new BigInteger(firstRange.endingHashKey())).add(BigInteger.ONE)
+                .divide(BigInteger.TWO).toString();
+        kinesisService.splitShard("my-stream", shardId, splitPoint, REGION);
 
         // A plain ArrayList iterator throws ConcurrentModificationException here; COWAL keeps reading
         // its fixed pre-split snapshot.

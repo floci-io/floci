@@ -51,6 +51,11 @@ Running Floci directly on a Linux host (not in a container) with services that s
 | `FLOCI_SECURITY_DISABLE_CORS_HEADERS` | `false` | Disable Floci's global CORS response headers. Alias: `DISABLE_CORS_HEADERS` |
 | `FLOCI_SECURITY_CORS_ALLOW_PRIVATE_NETWORK` | `false` | Answer Private Network Access preflights with `Access-Control-Allow-Private-Network: true`, letting a page on a public/secure origin reach this loopback backend. Only applies after the origin passes the allow-list above. |
 
+The [Cognito JSON API](../services/cognito.md) follows this same origin allow-list,
+including its empty default, for both preflights and actual responses. For allowed
+origins, Cognito's request ID and error headers are exposed alongside configured extra
+exposed headers. The disable-CORS switch above also disables this behavior.
+
 ---
 
 ## TLS / HTTPS
@@ -60,7 +65,7 @@ Running Floci directly on a Linux host (not in a container) with services that s
 | `FLOCI_TLS_ENABLED` | `false` | Enable TLS/HTTPS on all endpoints (HTTP remains available simultaneously) |
 | `FLOCI_TLS_CERT_PATH` | _(none)_ | Path to a PEM certificate file. When set, disables auto-generation |
 | `FLOCI_TLS_KEY_PATH` | _(none)_ | Path to a PEM private key file. Required when `FLOCI_TLS_CERT_PATH` is set |
-| `FLOCI_TLS_EXTRA_CA_PATH` | _(none)_ | Path to a PEM file of extra CA certificates that Floci's own outbound HTTPS clients (EventBridge API destinations, JWT issuer fetch) trust on top of the JVM's roots. Works with TLS on or off; containers Floci launches do not receive them |
+| `FLOCI_TLS_EXTRA_CA_PATH` | _(none)_ | Path to a PEM file of extra CA certificates that Floci's own outbound HTTPS clients (EventBridge API destinations, SNS HTTPS subscriptions, JWT issuer fetch) trust on top of the JVM's roots. Works with TLS on or off; containers Floci launches do not receive them |
 | `FLOCI_TLS_SELF_SIGNED` | `true` | Auto-generate and persist a server certificate signed by Floci's local CA when no cert/key paths are provided |
 
 See [TLS / HTTPS](./tls.md) for SDK configuration examples and WebSocket (`wss://`) support.

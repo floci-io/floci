@@ -1,6 +1,6 @@
 """Tests for request_shapes, the generator behind regen_dynamodb_shapes, regen_sesv2_shapes, regen_apigateway_shapes,
-regen_ecs_shapes and regen_emr_serverless_shapes, and of the constraints regen_resource_groups_shapes,
-regen_ecr_shapes, regen_iam_shapes and regen_sts_shapes vendor.
+regen_ecs_shapes, regen_organizations_shapes and regen_emr_serverless_shapes, and of the constraints
+regen_resource_groups_shapes, regen_ecr_shapes, regen_iam_shapes and regen_sts_shapes vendor.
 
 Each generator names a model, an output and, for the constraints flavour, its operations, and hands
 the rest here, so what any one of them does differently is a constant and what they all do is
@@ -13,6 +13,7 @@ from __future__ import annotations
 import gzip
 import json
 import re
+from copy import deepcopy
 from pathlib import Path
 
 import pytest
@@ -20,14 +21,21 @@ import pytest
 import regen_apigateway_documentation_shapes
 import regen_apigateway_shapes
 import regen_athena_shapes
+import regen_cur_shapes
 import regen_dynamodb_shapes
 import regen_ecr_shapes
 import regen_ecs_shapes
 import regen_emr_serverless_shapes
 import regen_iam_shapes
+import regen_cloudfront_keyvaluestore_shapes
+import regen_kinesis_shapes
+import regen_lambda_microvm_shapes
+import regen_organizations_shapes
+import regen_payment_cryptography_data_shapes
 import regen_payment_cryptography_shapes
 import regen_logs_delivery_shapes
 import regen_resource_groups_shapes
+import regen_rekognition_shapes
 import regen_securityhub_shapes
 import regen_sesv2_shapes
 import regen_sts_shapes
@@ -41,7 +49,7 @@ DYNAMODB_MODEL = {
         "NoInput": {},
     },
     "shapes": {
-        "ScanInput": {"type": "structure", "members": {
+        "ScanInput": {"type": "structure", "required": ["TableName"], "members": {
             "TableName": {"shape": "TableName"},
             "AttributesToGet": {"shape": "AttributeNameList"},
             "ExclusiveStartKey": {"shape": "Key"},
@@ -99,6 +107,13 @@ def test_keeps_only_input_shapes_and_their_types():
     assert doc["shapes"]["TableName"] == {"type": "string"}
     assert doc["shapes"]["AttributeNameList"] == {"type": "list", "member": "AttributeName"}
     assert doc["shapes"]["Key"] == {"type": "map", "value": "AttributeValue"}
+
+
+def test_keeps_required_members_only_when_asked():
+    doc = r.build(DYNAMODB_MODEL, "botocore test", "tools/aws/regen_dynamodb_shapes.py", required=True)
+
+    assert doc["shapes"]["ScanInput"]["required"] == ["TableName"]
+    assert "required" not in doc["shapes"]["DescribeLimitsInput"]
 
 
 def test_keeps_only_body_members_of_input_shapes():
@@ -184,6 +199,7 @@ def test_generator_name_is_the_scripts_path_from_the_repository_root():
     assert r.generator_name(regen_sesv2_shapes.__file__) == "tools/aws/regen_sesv2_shapes.py"
     assert r.generator_name(regen_apigateway_shapes.__file__) == "tools/aws/regen_apigateway_shapes.py"
     assert r.generator_name(regen_ecs_shapes.__file__) == "tools/aws/regen_ecs_shapes.py"
+    assert r.generator_name(regen_organizations_shapes.__file__) == "tools/aws/regen_organizations_shapes.py"
 
 
 def test_generator_name_outside_the_repository_is_the_file_name(tmp_path):
@@ -204,13 +220,14 @@ def test_load_model_without_a_service_model_exits(tmp_path):
         r.load_model(tmp_path, Path("svc/2020-01-01"))
 
 
-@pytest.mark.parametrize("script, model, output", [
-    (regen_dynamodb_shapes, "dynamodb/2012-08-10", "dynamodb-request-shapes.json"),
-    (regen_sesv2_shapes, "sesv2/2019-09-27", "sesv2-request-shapes.json"),
-    (regen_apigateway_shapes, "apigateway/2015-07-09", "apigateway-request-shapes.json"),
-    (regen_ecs_shapes, "ecs/2014-11-13", "ecs-request-shapes.json"),
+@pytest.mark.parametrize("script, model, output, options", [
+    (regen_dynamodb_shapes, "dynamodb/2012-08-10", "dynamodb-request-shapes.json", {"required": True}),
+    (regen_sesv2_shapes, "sesv2/2019-09-27", "sesv2-request-shapes.json", {}),
+    (regen_apigateway_shapes, "apigateway/2015-07-09", "apigateway-request-shapes.json", {}),
+    (regen_ecs_shapes, "ecs/2014-11-13", "ecs-request-shapes.json", {}),
+    (regen_organizations_shapes, "organizations/2016-11-28", "organizations-request-shapes.json", {}),
 ])
-def test_each_script_runs_the_shared_main_with_its_model_and_output(script, model, output, monkeypatch):
+def test_each_script_runs_the_shared_main_with_its_model_and_output(script, model, output, options, monkeypatch):
     calls = []
     monkeypatch.setattr(r, "main", lambda argv, **kwargs: calls.append((argv, kwargs)) or 0)
 
@@ -220,6 +237,7 @@ def test_each_script_runs_the_shared_main_with_its_model_and_output(script, mode
         "model": Path(model),
         "output": r.REPO_ROOT / "src/main/resources/aws" / output,
         "description": script.__doc__,
+        **options,
     })]
 
 
@@ -246,14 +264,22 @@ CONSTRAINED_MODEL = {
 }
 
 
-def test_athena_generator_keeps_constraints_for_every_operation_and_detects_new_operations(tmp_path, monkeypatch):
-    output = tmp_path / "athena-request-shapes.json"
+@pytest.mark.parametrize("script, model_path", [
+    (regen_athena_shapes, "athena/2017-05-18"),
+    (regen_kinesis_shapes, "kinesis/2013-12-02"),
+    (regen_rekognition_shapes, "rekognition/2016-06-27"),
+])
+def test_generators_keep_constraints_for_every_operation_and_detect_new_operations(script, model_path, tmp_path, monkeypatch):
+    output = tmp_path / "request-shapes.json"
+    model = deepcopy(CONSTRAINED_MODEL)
+    model["shapes"]["Image"] = {"type": "structure", "members": {"Bytes": {"shape": "Blob"}}}
+    model["shapes"]["Blob"] = {"type": "blob"}
     monkeypatch.setattr(r, "resolve_botocore_data", lambda explicit: (tmp_path, "botocore test"))
-    monkeypatch.setattr(r, "load_model", lambda data, model: CONSTRAINED_MODEL)
+    monkeypatch.setattr(r, "load_model", lambda data, model_path: deepcopy(model))
     args = ["--output", str(output)]
 
-    assert regen_athena_shapes.MODEL == Path("athena/2017-05-18")
-    assert regen_athena_shapes.main(args) == 0
+    assert script.MODEL == Path(model_path)
+    assert script.main(args) == 0
     doc = json.loads(output.read_text())
     assert doc["operations"] == {"Put": "PutRequest", "Unused": "UnusedRequest"}
     assert doc["shapes"]["Name"]["min"] == 1
@@ -262,13 +288,13 @@ def test_athena_generator_keeps_constraints_for_every_operation_and_detects_new_
     assert doc["shapes"]["Kind"]["enum"] == ["A", "B"]
     assert doc["shapes"]["RuleList"]["max"] == 25
     assert doc["shapes"]["TagMap"]["key"] == "Name"
-    assert regen_athena_shapes.main(["--check", *args]) == 0
+    assert script.main(["--check", *args]) == 0
 
-    changed = {**CONSTRAINED_MODEL, "operations": {**CONSTRAINED_MODEL["operations"],
+    changed = {**model, "operations": {**model["operations"],
                                                 "NewOperation": {"input": {"shape": "PutRequest"}}}}
-    monkeypatch.setattr(r, "load_model", lambda data, model: changed)
-    assert regen_athena_shapes.main(["--check", *args]) == 1
-    assert regen_athena_shapes.main(args) == 0
+    monkeypatch.setattr(r, "load_model", lambda data, model_path: deepcopy(changed))
+    assert script.main(["--check", *args]) == 1
+    assert script.main(args) == 0
     assert "NewOperation" in json.loads(output.read_text())["operations"]
 
 
@@ -383,6 +409,32 @@ def test_each_constraints_script_runs_the_shared_main_with_its_operations(script
     })]
 
 
+@pytest.mark.parametrize("script, model, output", [
+    (regen_payment_cryptography_shapes, "payment-cryptography/2021-09-14",
+     "payment-cryptography-request-shapes.json"),
+    (regen_payment_cryptography_data_shapes, "payment-cryptography-data/2022-02-03",
+     "payment-cryptography-data-request-shapes.json"),
+    (regen_cloudfront_keyvaluestore_shapes, "cloudfront-keyvaluestore/2022-07-26",
+     "cloudfront-keyvaluestore-request-shapes.json"),
+])
+def test_each_payment_cryptography_script_runs_the_shared_main_with_every_operation(script, model, output,
+                                                                                   monkeypatch):
+    # The generator names no operation, so it asks the driver for the model's whole set: an
+    # operation the service serves later is covered without anyone adding it to a list.
+    calls = []
+    monkeypatch.setattr(r, "main", lambda argv, **kwargs: calls.append((argv, kwargs)) or 0)
+
+    assert script.main(["--check"]) == 0
+    assert calls == [(["--check"], {
+        "script": script.__file__,
+        "model": Path(model),
+        "output": r.REPO_ROOT / "src/main/resources/aws" / output,
+        "description": script.__doc__ or "",
+        "constraints": True,
+        "prepare": r.widen_partition_and_region,
+    })]
+
+
 def vendored(script) -> tuple[str, ...]:
     """The operations a generator's file carries, which is `OPERATIONS` unless it names more."""
     return getattr(script, "VENDORED", None) or script.OPERATIONS
@@ -390,14 +442,64 @@ def vendored(script) -> tuple[str, ...]:
 
 @pytest.mark.parametrize("script", [
     regen_apigateway_documentation_shapes, regen_ecr_shapes, regen_iam_shapes, regen_logs_delivery_shapes,
-    regen_payment_cryptography_shapes,
     regen_resource_groups_shapes, regen_sts_shapes,
     regen_securityhub_shapes,
+    regen_kinesis_shapes,
+    regen_rekognition_shapes,
+    regen_athena_shapes,
+    regen_cur_shapes,
+    regen_lambda_microvm_shapes,
 ])
 def test_each_vendored_constraints_file_carries_its_operations_and_resolves_its_shapes(script):
     doc = json.loads(script.OUTPUT.read_text(encoding="utf-8"))
 
-    assert sorted(doc["operations"]) == sorted(vendored(script))
+    # A generator that names no operation carries every one the model names, so the
+    # operations are only compared for one that names them.
+    if hasattr(script, "OPERATIONS") or hasattr(script, "VENDORED"):
+        assert sorted(doc["operations"]) == sorted(vendored(script))
+    assert_shapes_resolve(doc)
+
+
+@pytest.mark.parametrize("script", [
+    regen_payment_cryptography_shapes, regen_payment_cryptography_data_shapes,
+    regen_cloudfront_keyvaluestore_shapes,
+])
+def test_each_payment_cryptography_file_carries_every_operation_the_model_names(script):
+    # The generator names no operation, so the file carries every operation the model names:
+    # an operation the service serves later is checked without anyone adding it to a list.
+    pytest.importorskip("botocore")
+    try:
+        data, _ = r.resolve_botocore_data(None)
+    except SystemExit:
+        pytest.skip("the botocore data cannot be read here")
+    model = r.load_model(data, script.MODEL)
+
+    doc = json.loads(script.OUTPUT.read_text(encoding="utf-8"))
+
+    # An operation the model names without an input has no request to constrain.
+    named = {name for name, operation in model["operations"].items() if "input" in operation}
+    assert sorted(doc["operations"]) == sorted(named)
+    assert_shapes_resolve(doc)
+
+
+def test_main_leaves_out_an_operation_without_an_input(tmp_path, monkeypatch):
+    # An operation the model names without an input has no request to constrain, and the
+    # generator that asks for every operation leaves it out.
+    model = {"operations": {"Put": {"input": {"shape": "PutRequest"}}, "Nothing": {}},
+             "shapes": {"PutRequest": {"type": "structure", "members": {}}}}
+    output = tmp_path / "shapes.json"
+    monkeypatch.setattr(r, "resolve_botocore_data", lambda explicit: (tmp_path, "botocore test"))
+    monkeypatch.setattr(r, "load_model", lambda data, path: model)
+
+    assert r.main(["--output", str(output)], script=__file__, model=Path("x"), output=output,
+                  description="test", constraints=True) == 0
+
+    doc = json.loads(output.read_text())
+    assert doc["operations"] == {"Put": "PutRequest"}
+
+
+def assert_shapes_resolve(doc: dict) -> None:
+    """Every operation's shape is in the file, and every shape's members resolve to shapes in it."""
     for operation, shape in doc["operations"].items():
         assert shape in doc["shapes"], operation
     for name, shape in doc["shapes"].items():
@@ -425,6 +527,41 @@ def test_securityhub_shapes_keep_modelled_findings_and_filter_constraints():
     assert shapes["FindingProviderFields"]["members"]["RelatedFindings"] == "RelatedFindingList"
     assert shapes["RelatedFinding"]["required"] == ["ProductArn", "Id"]
     assert "Double" not in shapes
+
+
+def test_rekognition_shapes_keep_constraints_and_leave_image_bytes_to_the_image_validator():
+    doc = json.loads(regen_rekognition_shapes.OUTPUT.read_text(encoding="utf-8"))
+    shapes = doc["shapes"]
+
+    assert shapes["IndexFacesRequest"]["required"] == ["CollectionId", "Image"]
+    assert shapes["PageSize"]["min"] == 0
+    assert shapes["PageSize"]["max"] == 4096
+    assert shapes["Percent"] == {"type": "float", "min": 0, "max": 100}
+    assert shapes["Attributes"]["member"] == "Attribute"
+    assert "FACE_OCCLUDED" in shapes["Attribute"]["enum"]
+    assert shapes["TagKey"]["pattern"].startswith("^(?!aws:)")
+    assert shapes["FaceIdList"]["max"] == 4096
+    assert shapes["MaxFacesToIndex"] == {"type": "integer", "min": 1}
+    assert shapes["Image"]["members"] == {"S3Object": "S3Object"}
+    assert "ImageBlob" not in shapes
+
+
+def test_kinesis_shapes_keep_tag_bounds_and_leave_wire_types_to_handlers():
+    doc = json.loads(regen_kinesis_shapes.OUTPUT.read_text(encoding="utf-8"))
+    shapes = doc["shapes"]
+
+    assert doc["operations"]["RegisterStreamConsumer"] == "RegisterStreamConsumerInput"
+    assert shapes["TagMap"]["min"] == 1
+    assert shapes["TagMap"]["max"] == 200
+    assert shapes["TagKey"]["min"] == 1
+    assert shapes["TagKey"]["max"] == 128
+    assert shapes["TagValue"]["max"] == 256
+    assert shapes["TagKeyList"]["min"] == 1
+    assert shapes["TagKeyList"]["max"] == 50
+    assert "Data" not in shapes["PutRecordInput"]["members"]
+    assert "Data" in shapes["PutRecordInput"]["required"]
+    assert "Data" in shapes["PutRecordsRequestEntry"]["required"]
+    assert "Timestamp" not in shapes["GetShardIteratorInput"]["members"]
 
 
 def test_securityhub_shapes_keep_required_findings_and_resource_strings():
@@ -462,8 +599,11 @@ def test_ecr_shapes_name_the_ecr_model_and_its_registry_setting_actions():
 def test_payment_cryptography_shapes_name_its_model_and_its_control_plane_actions():
     assert regen_payment_cryptography_shapes.MODEL == Path("payment-cryptography/2021-09-14")
     assert regen_payment_cryptography_shapes.OUTPUT.name == "payment-cryptography-request-shapes.json"
-    assert "TagResource" in regen_payment_cryptography_shapes.OPERATIONS
-    assert "UpdateAlias" in regen_payment_cryptography_shapes.OPERATIONS
+    # The generator names no operation, so the file carries the model's whole set.
+    assert not hasattr(regen_payment_cryptography_shapes, "OPERATIONS")
+    operations = json.loads(regen_payment_cryptography_shapes.OUTPUT.read_text(encoding="utf-8"))["operations"]
+    assert "TagResource" in operations
+    assert "UpdateAlias" in operations
 
 
 def test_payment_cryptography_shapes_widen_the_partition_the_model_writes():

@@ -30,11 +30,11 @@ Operation counts are exact. For dispatch-table services (Query and JSON 1.1) eac
 | [Cognito](cognito.md) | `POST /` + `X-Amz-Target: AWSCognitoIdentityProviderService.*` | JSON 1.1 | 91 |
 | [Cognito Identity](cognitoidentity.md) | `POST /` + `X-Amz-Target: AWSCognitoIdentityService.*` | JSON 1.1 | 12 |
 | [Global Accelerator](globalaccelerator.md) | `POST /` + `X-Amz-Target: GlobalAccelerator_V20180706.*` | JSON 1.1 | 22 |
-| [KMS](kms.md) | `POST /` + `X-Amz-Target: TrentService.*` | JSON 1.1 | 44 |
+| [KMS](kms.md) | `POST /` + `X-Amz-Target: TrentService.*` | JSON 1.1 | 45 |
 | [CloudHSM v2](cloudhsmv2.md) | `POST /` + `X-Amz-Target: BaldrApiService.*` | JSON 1.1 | 18 |
-| [Kinesis](kinesis.md) | `POST /` + `X-Amz-Target: Kinesis_20131202.*` | JSON 1.1 | 29 |
+| [Kinesis](kinesis.md) | `POST /` + `X-Amz-Target: Kinesis_20131202.*` | JSON 1.1 | 32 |
 | [Managed Service for Apache Flink](kinesisanalytics.md) | `POST /` + `X-Amz-Target: KinesisAnalytics_20180523.*` | JSON 1.1 | 15 |
-| [Payment Cryptography](payment-cryptography.md) | `POST /` + `X-Amz-Target: PaymentCryptographyControlPlane.*` | JSON 1.0 | 12 |
+| [Payment Cryptography](payment-cryptography.md) | `POST /` + `X-Amz-Target: PaymentCryptographyControlPlane.*` | JSON 1.0 | 17 |
 | [Payment Cryptography data plane](payment-cryptography-data.md) | `POST /keys/{KeyIdentifier}/encrypt` and the rest | REST JSON | 12 |
 | [Secrets Manager](secrets-manager.md) | `POST /` + `X-Amz-Target: secretsmanager.*` | JSON 1.1 | 23 |
 | [Step Functions](step-functions.md) | `POST /` + `X-Amz-Target: AmazonStatesService.*` | JSON 1.1 | 32 |
@@ -68,7 +68,7 @@ Operation counts are exact. For dispatch-table services (Query and JSON 1.1) eac
 | [ElastiCache](elasticache.md) | `POST /` with `Action=` param + TCP proxy | Query + RESP | 35 |
 | [MemoryDB](memorydb.md) | `POST /` + `X-Amz-Target: AmazonMemoryDB.*` + TCP proxy | JSON 1.1 + RESP | 13 |
 | [Aurora DSQL](dsql.md) | `/cluster`, `/cluster/{identifier}`, `/cluster/{identifier}/policy` + TLS endpoint | REST JSON + wire | 9 |
-| [RDS](rds.md) | `POST /` with `Action=` param + TCP proxy | Query + wire | 117 |
+| [RDS](rds.md) | `POST /` with `Action=` param + TCP proxy | Query + wire | 121 |
 | [RDS Data API](rds-data.md) | `/Execute`, `/BeginTransaction`, `/CommitTransaction`, `/RollbackTransaction` | REST JSON | 4 |
 | [Timestream for InfluxDB](timestream-influxdb.md) | `POST /` + `X-Amz-Target: AmazonTimestreamInfluxDB.*` + InfluxDB container | JSON 1.0 + InfluxDB HTTP | 24 |
 | [MSK](msk.md) | `/v1/clusters/...`, `/api/v2/clusters/...` + Redpanda broker | REST JSON + Kafka | 8 |
@@ -81,7 +81,7 @@ Operation counts are exact. For dispatch-table services (Query and JSON 1.1) eac
 | [DocumentDB](docdb.md) | `POST /` with `Action=` param + MongoDB container | Query + MongoDB wire | 17 |
 | [DMS](dms.md) | `POST /` + `X-Amz-Target: AmazonDMSv20160101.*` | JSON 1.1 | 20 |
 | [QuickSight](quicksight.md) | `/accounts/{AwsAccountId}/...` | REST JSON, metadata only | 16 |
-| [Redshift](redshift.md) | `POST /` with `Action=` param + PostgreSQL container | Query + PostgreSQL wire (+ CFN) | 57 |
+| [Redshift](redshift.md) | `POST /` with `Action=` param + PostgreSQL container | Query + PostgreSQL wire (+ CFN) | 59 |
 | [Redshift Data API](redshift-data.md) | `POST /` + `X-Amz-Target: RedshiftData.*` | JSON 1.1 | 12 |
 | [Redshift Serverless](redshift-serverless.md) | `POST /` + `X-Amz-Target: RedshiftServerless.*` | JSON 1.1 | 55 |
 | [EMR](emr.md) | `POST /` + `X-Amz-Target: ElasticMapReduce.*` | JSON 1.1 | 40 |
@@ -131,8 +131,8 @@ Operation counts are exact. For dispatch-table services (Query and JSON 1.1) eac
 | [AWS Backup](backup.md) | `/backup-vaults/*`, `/logically-air-gapped-backup-vaults/*`, `/backup/plans/*`, `/backup-jobs/*`, `/supported-resource-types` | REST JSON | 35 |
 | [AWS FIS](fis.md) | `/experimentTemplates/*`, `/experiments/*`, `/actions/*`, `/targetResourceTypes/*`, `/safetyLevers/*`, `/tags/*` | REST JSON | 26 |
 | [CodeGuru Reviewer](codegurureviewer.md) | `/associations`, `/associations/{associationArn}`, `/tags/*` | REST JSON | 7 |
-| [CodeArtifact](codeartifact.md) | `/v1/domain*`, `/v1/repository*`, `/v1/package`, `/v1/package/version*`, `/v1/tag*`, `/v1/authorization-token`, `/codeartifact/maven/*`, `/codeartifact/npm/*`, `/codeartifact/pypi/*` | REST JSON | 37 |
-| [CloudFront](cloudfront.md) | `/2020-05-31/distribution/*`, `/2020-05-31/cache-policy/*`, `/2020-05-31/function/*` | REST XML | 50 |
+| [CodeArtifact](codeartifact.md) | `/v1/domain*`, `/v1/repository*`, `/v1/package`, `/v1/package/version*`, `/v1/package-group*`, `/v1/list-associated-packages`, `/v1/get-associated-package-group`, `/v1/tag*`, `/v1/authorization-token`, `/codeartifact/maven/*`, `/codeartifact/npm/*`, `/codeartifact/pypi/*` | REST JSON | 47 |
+| [CloudFront](cloudfront.md) | `/2020-05-31/distribution/*`, `/2020-05-31/cache-policy/*`, `/2020-05-31/function/*`, `/2020-05-31/key-value-store/*`, `/key-value-stores/*` | REST XML, REST JSON | 61 |
 | [Route53](route53.md) | `/2013-04-01/hostedzone/*`, `/2013-04-01/healthcheck/*`, `/2013-04-01/change/*`, `/2013-04-01/delegationset/*` | REST XML | 31 |
 | [Route 53 Resolver](route53resolver.md) | `POST /` + `X-Amz-Target: Route53Resolver.*` | JSON 1.1 | 22 |
 | [Amazon SageMaker](sagemaker.md) | `POST /` + `X-Amz-Target: SageMaker.*` | JSON 1.1 | 20 |
@@ -142,7 +142,7 @@ Operation counts are exact. For dispatch-table services (Query and JSON 1.1) eac
 | [CloudTrail](cloudtrail.md) | `POST /` + `X-Amz-Target: com.amazonaws.cloudtrail.v20131101.CloudTrail_20131101.*` | JSON 1.1 | 14 |
 | [Textract](textract.md) | `POST /` + `X-Amz-Target: Textract.*` | JSON 1.1 | 6 |
 | [Comprehend](comprehend.md) | `POST /` + `X-Amz-Target: Comprehend_20171127.*` | JSON 1.1 | 5 |
-| [Rekognition](rekognition.md) | `POST /` + `X-Amz-Target: RekognitionService.*` | JSON 1.1 | 5 |
+| [Rekognition](rekognition.md) | `POST /` + `X-Amz-Target: RekognitionService.*` | JSON 1.1 | 14 |
 | [Translate](translate.md) | `POST /` + `X-Amz-Target: AWSShineFrontendService_20170701.*` | JSON 1.1 | 3 |
 | [Transcribe](transcribe.md) | `POST /` + `X-Amz-Target: Transcribe.*` | JSON 1.1 | 8 |
 | [Pricing](pricing.md) | `POST /` + `X-Amz-Target: AWSPriceListService.*` | JSON 1.1 | 5 |

@@ -2,10 +2,12 @@ package io.floci.aws.services.configservice;
 
 import io.floci.aws.core.common.AwsException;
 import io.floci.aws.core.common.RegionResolver;
+import io.floci.aws.core.storage.AccountAwareStorageBackend;
 import io.floci.aws.core.storage.InMemoryStorage;
 import io.floci.aws.core.storage.StorageBackend;
 import io.floci.aws.services.configservice.model.ConfigRule;
 import io.floci.aws.services.configservice.model.ConfigRuleSource;
+import io.floci.aws.services.configservice.model.ConfigurationRecorder;
 import io.floci.aws.testing.InMemoryStorageFactory;
 import io.floci.aws.testing.ParkingStore;
 import org.junit.jupiter.api.Test;
@@ -13,17 +15,12 @@ import org.junit.jupiter.api.function.Executable;
 
 import java.util.List;
 import java.util.Map;
-import java.util.concurrent.ExecutionException;
-import java.util.concurrent.ExecutorService;
-import java.util.concurrent.Executors;
-import java.util.concurrent.Future;
-import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
-import java.util.concurrent.atomic.AtomicReference;
 
-import static io.floci.aws.testing.ThreadStates.awaitBlockedOrDone;
+import static io.floci.aws.testing.ParkingStoreAssertions.assertOperationWaitsForParkedStore;
 import static org.junit.jupiter.api.Assertions.assertEquals;
-import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNotEquals;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -37,6 +34,9 @@ class AwsConfigServiceTaggingTest {
     private static final String REGION = "us-east-1";
     private static final String ACCOUNT = "000000000000";
     private static final List<Map<String, String>> ENV_PROD = List.of(Map.of("Key", "env", "Value", "prod"));
+    private static final List<Map<String, String>> TEAM_RED = List.of(Map.of("Key", "team", "Value", "red"));
+    private static final String GHOST_RECORDER_ARN =
+            "arn:aws:config:us-east-1:000000000000:configuration-recorder/default/ghost";
 
     private AwsConfigService service() {
         return new AwsConfigService(new RegionResolver(REGION, ACCOUNT), null);
@@ -45,6 +45,12 @@ class AwsConfigServiceTaggingTest {
     private static void assertNotFound(Executable call) {
         AwsException ex = assertThrows(AwsException.class, call);
         assertEquals("ResourceNotFoundException", ex.getErrorCode());
+        assertEquals(400, ex.getHttpStatus());
+    }
+
+    private static void assertNoSuchRecorder(Executable call) {
+        AwsException ex = assertThrows(AwsException.class, call);
+        assertEquals("NoSuchConfigurationRecorderException", ex.getErrorCode());
         assertEquals(400, ex.getHttpStatus());
     }
 
@@ -155,6 +161,112 @@ class AwsConfigServiceTaggingTest {
     }
 
     @Test
+    void putConfigurationRecorderMintsAnArnAndAppliesRequestTagsAtCreationOnly() {
+        AwsConfigService service = service();
+        service.putConfigurationRecorder(REGION, recorder("default"), ENV_PROD);
+        String arn = recorderArn(service);
+        assertTrue(arn.startsWith("arn:aws:config:us-east-1:000000000000:configuration-recorder/default/"), arn);
+        assertEquals(ENV_PROD, service.listTagsForResource(REGION, arn));
+
+        service.putConfigurationRecorder(REGION, recorder("default"), List.of(Map.of("Key", "env", "Value", "dev")));
+
+        assertEquals(arn, recorderArn(service));
+        assertEquals(ENV_PROD, service.listTagsForResource(REGION, arn));
+        service.tagResource(REGION, arn, TEAM_RED);
+        service.untagResource(REGION, arn, List.of("env"));
+        assertEquals(TEAM_RED, service.listTagsForResource(REGION, arn));
+    }
+
+    @Test
+    void deletingARecorderDropsItsTagsAndARecreatedRecorderGetsANewArn() {
+        AwsConfigService service = service();
+        service.putConfigurationRecorder(REGION, recorder("default"), ENV_PROD);
+        String oldArn = recorderArn(service);
+
+        service.deleteConfigurationRecorder(REGION, "default");
+
+        assertTrue(service.storedTags(oldArn).isEmpty(), "delete must drop the recorder's tags");
+        assertAllThreeNotFound(service, REGION, oldArn);
+        service.putConfigurationRecorder(REGION, recorder("default"), TEAM_RED);
+        assertNotEquals(oldArn, recorderArn(service));
+        assertEquals(TEAM_RED, service.listTagsForResource(REGION, recorderArn(service)));
+    }
+
+    @Test
+    void aRecorderPutUnderAnotherNameReplacesTheOldOneAndItsTags() {
+        AwsConfigService service = service();
+        service.putConfigurationRecorder(REGION, recorder("default"), ENV_PROD);
+        String oldArn = recorderArn(service);
+
+        service.putConfigurationRecorder(REGION, recorder("renamed"), TEAM_RED);
+
+        String newArn = recorderArn(service);
+        assertTrue(newArn.contains(":configuration-recorder/renamed/"), newArn);
+        assertEquals(TEAM_RED, service.listTagsForResource(REGION, newArn));
+        assertAllThreeNotFound(service, REGION, oldArn);
+        assertTrue(service.storedTags(oldArn).isEmpty(), "the replaced recorder's tags must go");
+    }
+
+    @Test
+    void aRecorderSavedWithoutAnArnGetsOneOnItsNextPut() {
+        AwsConfigService service = serviceWithARecorderSavedWithoutAnArn();
+        assertNull(recorderArn(service));
+
+        service.putConfigurationRecorder(REGION, recorder("default"), ENV_PROD);
+
+        String arn = recorderArn(service);
+        assertTrue(arn.startsWith("arn:aws:config:us-east-1:000000000000:configuration-recorder/default/"), arn);
+        assertTrue(service.listTagsForResource(REGION, arn).isEmpty(), "the recorder already existed");
+    }
+
+    @Test
+    void aRecorderSavedWithoutAnArnCanBeDeleted() {
+        AwsConfigService service = serviceWithARecorderSavedWithoutAnArn();
+
+        service.deleteConfigurationRecorder(REGION, "default");
+
+        assertTrue(service.describeConfigurationRecorders(REGION, null, null).isEmpty());
+    }
+
+    @Test
+    void bothDescribeCallsReturnAndFilterByTheRecorderArn() {
+        AwsConfigService service = service();
+        service.putConfigurationRecorder(REGION, recorder("default"), null);
+        String arn = recorderArn(service);
+
+        assertEquals(arn, service.describeConfigurationRecorderStatus(REGION, null, null).getFirst().arn());
+        assertEquals(arn, service.describeConfigurationRecorders(REGION, null, arn).getFirst().arn());
+        assertEquals(arn, service.describeConfigurationRecorderStatus(REGION, null, arn).getFirst().arn());
+        assertEquals(arn, service.describeConfigurationRecorders(REGION, List.of("default"), arn).getFirst().arn());
+        assertEquals(arn,
+                service.describeConfigurationRecorderStatus(REGION, List.of("default"), arn).getFirst().arn());
+    }
+
+    @Test
+    void anArnOrNameThatMissesTheRecorderIsNoSuchConfigurationRecorder() {
+        AwsConfigService service = service();
+        assertNoSuchRecorder(() -> service.describeConfigurationRecorders(REGION, null, GHOST_RECORDER_ARN));
+        assertNoSuchRecorder(() -> service.describeConfigurationRecorderStatus(REGION, null, GHOST_RECORDER_ARN));
+
+        service.putConfigurationRecorder(REGION, recorder("default"), null);
+        String arn = recorderArn(service);
+
+        assertNoSuchRecorder(() -> service.describeConfigurationRecorders(REGION, null, GHOST_RECORDER_ARN));
+        assertNoSuchRecorder(() -> service.describeConfigurationRecorderStatus(REGION, null, GHOST_RECORDER_ARN));
+        assertNoSuchRecorder(() -> service.describeConfigurationRecorders(REGION, List.of("other"), arn));
+        assertNoSuchRecorder(() -> service.describeConfigurationRecorderStatus(REGION, List.of("other"), arn));
+    }
+
+    @Test
+    void aRecorderSavedWithoutAnArnHasNoArnInItsStatusAndNoArnFindsIt() {
+        AwsConfigService service = serviceWithARecorderSavedWithoutAnArn();
+
+        assertNull(service.describeConfigurationRecorderStatus(REGION, List.of("default"), null).getFirst().arn());
+        assertNoSuchRecorder(() -> service.describeConfigurationRecorders(REGION, null, GHOST_RECORDER_ARN));
+        assertNoSuchRecorder(() -> service.describeConfigurationRecorderStatus(REGION, null, GHOST_RECORDER_ARN));
+    }
+
+    @Test
     void anArnOfAKindFlociDoesNotModelIsPassedThrough() {
         AwsConfigService service = service();
         String arn = "arn:aws:config:us-east-1:000000000000:config-aggregator/config-aggregator-abc123";
@@ -177,27 +289,9 @@ class AwsConfigServiceTaggingTest {
         String arn = service.putConformancePack(REGION, "pack", "s3://bucket/t.yaml", null).conformancePackArn();
 
         tagStore.parkNextWrite();
-        ExecutorService pool = Executors.newFixedThreadPool(2);
-        try {
-            Future<?> tag = pool.submit(() -> service.tagResource(REGION, arn, ENV_PROD));
-            assertTrue(tagStore.awaitParked(), "the tag write must reach its persist");
-            AtomicReference<Thread> deleteThread = new AtomicReference<>();
-            Future<?> delete = pool.submit(() -> {
-                deleteThread.set(Thread.currentThread());
-                service.deleteConformancePack(REGION, "pack");
-            });
-            awaitBlockedOrDone(deleteThread, delete);
-            assertFalse(delete.isDone(), "the delete ran while a tag write on the same pack was mid-flight");
-
-            tagStore.release();
-            tag.get(2, TimeUnit.SECONDS);
-            delete.get(2, TimeUnit.SECONDS);
-        } catch (ExecutionException e) {
-            throw new AssertionError(e.getCause());
-        } finally {
-            tagStore.release();
-            pool.shutdownNow();
-        }
+        assertOperationWaitsForParkedStore(tagStore,
+                () -> service.tagResource(REGION, arn, ENV_PROD),
+                () -> service.deleteConformancePack(REGION, "pack"));
 
         assertTrue(service.storedTags(arn).isEmpty(), "a tag entry outlived the pack it was written for");
     }
@@ -225,9 +319,38 @@ class AwsConfigServiceTaggingTest {
         assertEquals(ENV_PROD, service.listTagsForResource(REGION, arn));
     }
 
+    @Test
+    void aRecorderPutRetriedAfterAFailedCreationTagWriteEndsWithTheTags() {
+        AtomicBoolean failNextWrite = new AtomicBoolean(true);
+        AwsConfigService service = serviceWithTagStore(new InMemoryStorage<String, Map<String, String>>() {
+            @Override
+            public void put(String key, Map<String, String> value) {
+                if (failNextWrite.getAndSet(false)) {
+                    throw new IllegalStateException("tag store unavailable");
+                }
+                super.put(key, value);
+            }
+        });
+
+        assertThrows(IllegalStateException.class,
+                () -> service.putConfigurationRecorder(REGION, recorder("default"), ENV_PROD));
+        service.putConfigurationRecorder(REGION, recorder("default"), ENV_PROD);
+
+        assertEquals(ENV_PROD, service.listTagsForResource(REGION, recorderArn(service)));
+    }
+
     private static AwsConfigService serviceWithTagStore(StorageBackend<String, Map<String, String>> tagStore) {
         AwsConfigService service = new AwsConfigService(new RegionResolver(REGION, ACCOUNT),
                 new InMemoryStorageFactory(ACCOUNT).withStore("config-tags.json", tagStore));
+        service.initializeStorage();
+        return service;
+    }
+
+    private static AwsConfigService serviceWithARecorderSavedWithoutAnArn() {
+        AccountAwareStorageBackend<ConfigurationRecorder> recorders = AccountAwareStorageBackend.inMemory(ACCOUNT);
+        recorders.put(REGION, recorder("default"));
+        AwsConfigService service = new AwsConfigService(new RegionResolver(REGION, ACCOUNT),
+                new InMemoryStorageFactory(ACCOUNT).withStore("config-recorders.json", recorders));
         service.initializeStorage();
         return service;
     }
@@ -236,5 +359,13 @@ class AwsConfigServiceTaggingTest {
         return new ConfigRule(name, null, null, null, null,
                 new ConfigRuleSource("AWS", "S3_BUCKET_VERSIONING_ENABLED", null, null),
                 null, null, null, null, null);
+    }
+
+    private static ConfigurationRecorder recorder(String name) {
+        return new ConfigurationRecorder(null, name, "arn:aws:iam::000000000000:role/config", null, null);
+    }
+
+    private static String recorderArn(AwsConfigService service) {
+        return service.describeConfigurationRecorders(REGION, null, null).getFirst().arn();
     }
 }

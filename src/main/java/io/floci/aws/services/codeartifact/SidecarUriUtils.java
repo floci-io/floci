@@ -3,14 +3,16 @@ package io.floci.aws.services.codeartifact;
 import io.floci.aws.core.common.auth.SigV4Canonicalization;
 
 import java.net.URI;
+import java.time.Duration;
 
 /**
- * Shared URI-construction helpers for the Maven, npm, and pypi sidecar clients, each of which
- * builds a request URI out of its own {@code baseUrl} plus one or more caller-supplied path
- * segments (a repository id, package coordinates, an asset filename). Package-private: every
+ * Shared helpers for the Maven, npm, pypi, and NuGet sidecar clients: URI construction out of
+ * each one's own {@code baseUrl} plus one or more caller-supplied path segments (a repository
+ * id, package coordinates, an asset filename), and a request timeout sized for forwarding a
+ * large asset's real bytes rather than a small metadata-only request. Package-private: every
  * caller lives in this package, and {@link #combine} in particular requires its {@code
  * encodedPath} argument to already be fully percent-encoded, a precondition not worth exposing
- * to unrelated callers outside the three clients that know to uphold it.
+ * to unrelated callers outside the four clients that know to uphold it.
  */
 final class SidecarUriUtils {
 
@@ -56,5 +58,39 @@ final class SidecarUriUtils {
             return segment.replace(".", "%2E");
         }
         return SigV4Canonicalization.uriEncode(segment);
+    }
+
+    /** A deliberately pessimistic floor: real transfers to a local sidecar container are far
+     * faster than this in practice, but the point of a floor is to be safe against a slow one,
+     * not to reflect a realistic average. */
+    private static final long MIN_TRANSFER_BYTES_PER_SECOND = 10L * 1024 * 1024;
+
+    /**
+     * A request timeout long enough to cover forwarding {@code contentLength} bytes to a sidecar
+     * container even at {@link #MIN_TRANSFER_BYTES_PER_SECOND}, plus a fixed 30-second grace
+     * period for the sidecar's own processing time, not just the wire transfer. Every sidecar
+     * client's own small, metadata-only request keeps its existing flat 30-second timeout
+     * unchanged; this is only for the one call per format that actually forwards an asset's real
+     * bytes, discovered by hand-testing a multi-GB upload end to end: a flat 30 seconds was never
+     * enough once an asset is sized in gigabytes rather than the kilobytes every existing test
+     * fixture uses, and every one of the four sidecar clients shared the exact same gap.
+     */
+    static Duration transferTimeout(long contentLength) {
+        return Duration.ofSeconds(30 + contentLength / MIN_TRANSFER_BYTES_PER_SECOND);
+    }
+
+    /**
+     * {@link #transferTimeout}'s own worst-case sibling, for a download whose real size isn't
+     * known until the response itself arrives: a GET can't size its own request timeout off a
+     * {@code contentLength} the way a PUT/POST already knows its own body's size upfront, so this
+     * uses {@code CodeArtifactService.MAX_ASSET_FILE_SIZE_BYTES} itself as the worst case instead.
+     * Every real asset-fetching GET, both the four sidecar clients' own streamed reads and the
+     * four external-connection clients' real public-registry fetches, shares this same gap for the
+     * identical reason the write side once did: a flat, small timeout sized for a metadata-only
+     * request silently cancels a transfer still legitimately in progress once it is no longer a
+     * few kilobytes but up to 5 GB.
+     */
+    static Duration maxTransferTimeout() {
+        return transferTimeout(CodeArtifactService.MAX_ASSET_FILE_SIZE_BYTES);
     }
 }

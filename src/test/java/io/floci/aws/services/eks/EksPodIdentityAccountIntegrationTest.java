@@ -17,6 +17,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.UUID;
 
+import static io.floci.aws.testing.IamTestPolicies.EMPTY_POLICY_DOCUMENT;
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.equalTo;
 import static org.hamcrest.Matchers.notNullValue;
@@ -84,7 +85,7 @@ class EksPodIdentityAccountIntegrationTest {
         cluster.setStatus(ClusterStatus.ACTIVE);
         String issuer = oidcService.newIssuerUrl("us-east-1");
         cluster.setIdentity(new ClusterIdentity(new OidcIdentity(issuer)));
-        oidcService.ensureKeyForAccount(account, name, issuer);
+        oidcService.ensureKeyForAccount(account, EksService.clusterKey("us-east-1", name), issuer);
         eksService.putClusterForAccount(account, cluster);
         // Persisted clusters lose this @JsonIgnore field; the ARN still names the owner.
         cluster.setAccountId(null);
@@ -93,7 +94,7 @@ class EksPodIdentityAccountIntegrationTest {
 
     private void createPodIdentityResources(String account, Cluster cluster, String roleName) {
         String roleArn = RequestScopes.callAs(account,
-                () -> iamService.createRole(roleName, "/", "{}", null, 3600, null).getArn());
+                () -> iamService.createRole(roleName, "/", EMPTY_POLICY_DOCUMENT, null, 3600, null).getArn());
         createPodIdentityResourcesForRole(account, cluster, roleArn);
     }
 
@@ -108,7 +109,7 @@ class EksPodIdentityAccountIntegrationTest {
 
     private String mintToken(String account, Cluster cluster) {
         return RequestScopes.callAs(account, () -> oidcService.mintServiceAccountToken(
-                cluster.getName(), cluster.getIdentity().getOidc().getIssuer(),
+                EksService.clusterKey("us-east-1", cluster.getName()), cluster.getIdentity().getOidc().getIssuer(),
                 NAMESPACE, SERVICE_ACCOUNT, "pods.eks.amazonaws.com", 3600));
     }
 

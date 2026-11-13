@@ -1,0 +1,84 @@
+{
+  "_source": {
+    "generator": "tools/aws/regen_cur_shapes.py",
+    "botocore": "botocore 1.43.118 (installed package)"
+  },
+  "operations": {
+    "ListTagsForResource": "ListTagsForResourceRequest",
+    "TagResource": "TagResourceRequest",
+    "UntagResource": "UntagResourceRequest"
+  },
+  "shapes": {
+    "ListTagsForResourceRequest": {
+      "type": "structure",
+      "required": [
+        "ReportName"
+      ],
+      "members": {
+        "ReportName": "ReportName"
+      }
+    },
+    "ReportName": {
+      "type": "string",
+      "max": 256,
+      "pattern": "[0-9A-Za-z!\\-_.*\\'()]+"
+    },
+    "Tag": {
+      "type": "structure",
+      "required": [
+        "Key",
+        "Value"
+      ],
+      "members": {
+        "Key": "TagKey",
+        "Value": "TagValue"
+      }
+    },
+    "TagKey": {
+      "type": "string",
+      "min": 1,
+      "max": 128,
+      "pattern": ".*"
+    },
+    "TagKeyList": {
+      "type": "list",
+      "min": 0,
+      "max": 200,
+      "member": "TagKey"
+    },
+    "TagList": {
+      "type": "list",
+      "min": 0,
+      "max": 200,
+      "member": "Tag"
+    },
+    "TagResourceRequest": {
+      "type": "structure",
+      "required": [
+        "ReportName",
+        "Tags"
+      ],
+      "members": {
+        "ReportName": "ReportName",
+        "Tags": "TagList"
+      }
+    },
+    "TagValue": {
+      "type": "string",
+      "min": 0,
+      "max": 256,
+      "pattern": ".*"
+    },
+    "UntagResourceRequest": {
+      "type": "structure",
+      "required": [
+        "ReportName",
+        "TagKeys"
+      ],
+      "members": {
+        "ReportName": "ReportName",
+        "TagKeys": "TagKeyList"
+      }
+    }
+  }
+}

@@ -26,6 +26,7 @@ import io.floci.aws.services.bedrockagentcorecontrol.BedrockAgentCoreResourcePol
 import io.floci.aws.services.bedrockagentcorecontrol.BedrockAgentCoreToolsController;
 import io.floci.aws.services.bedrockruntime.BedrockRuntimeController;
 import io.floci.aws.services.cloudfront.CloudFrontController;
+import io.floci.aws.services.cloudfront.CloudFrontKeyValueStoreController;
 import io.floci.aws.services.cloudfront.CloudFrontServingController;
 import io.floci.aws.services.cloudwatch.metrics.OtlpMetricsController;
 import io.floci.aws.services.codeartifact.CodeArtifactController;
@@ -667,7 +668,8 @@ public class ResolvedServiceCatalog {
                         protocols(ServiceProtocol.JSON),
                         Set.of("Comprehend_20171127."), Set.of("comprehend"), Set.of(), Set.of()),
                 descriptor("rekognition", "rekognition", config.services().rekognition().enabled(), true,
-                        null, null, 5000L, null, ServiceProtocol.JSON,
+                        "rekognition", storageMode(config.storage().services().rekognition().mode(), config.storage().mode()),
+                        config.storage().services().rekognition().flushIntervalMs(), null, ServiceProtocol.JSON,
                         protocols(ServiceProtocol.JSON),
                         Set.of("RekognitionService."), Set.of("rekognition"), Set.of(), Set.of()),
                 descriptor("pricing", "pricing", config.services().pricing().enabled(), true,
@@ -715,6 +717,12 @@ public class ResolvedServiceCatalog {
                         protocols(ServiceProtocol.REST_XML),
                         Set.of(), Set.of("cloudfront"), Set.of(),
                         Set.of(CloudFrontController.class, CloudFrontServingController.class)),
+                descriptor("cloudfront-keyvaluestore", "cloudfront-keyvaluestore",
+                        config.services().cloudfront().enabled(), true,
+                        null, null, 5000L, null, ServiceProtocol.REST_JSON,
+                        protocols(ServiceProtocol.REST_JSON),
+                        Set.of(), Set.of("cloudfront-keyvaluestore"), Set.of(),
+                        Set.of(CloudFrontKeyValueStoreController.class)),
                 descriptor("appsync", "appsync", config.services().appsync().enabled(), true,
                         "appsync", storageMode(config.storage().services().appsync().mode(), config.storage().mode()),
                         config.storage().services().appsync().flushIntervalMs(), null, ServiceProtocol.REST_JSON,

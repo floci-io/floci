@@ -275,7 +275,8 @@ final class DurableCheckpointApplier {
                     }
                     existing.setEndTimestamp(now);
                     touch(existing);
-                    event(existing, succeeded ? "ContextSucceeded" : "ContextFailed", resultOrError(existing));
+                    event(existing, succeeded ? "ContextSucceeded" : "ContextFailed",
+                            resultOrError(existing, !succeeded));
                 }
                 default -> throw invalid("Invalid action for the given operation type.");
             }
@@ -323,7 +324,9 @@ final class DurableCheckpointApplier {
             operation.setAttempt(attempt);
             operation.setResult(update.payload());
             operation.setError(update.error());
-            Map<String, Object> details = resultOrError(operation);
+            boolean failed = action == DurableOperationAction.FAIL
+                    || action == DurableOperationAction.RETRY && update.error() != null;
+            Map<String, Object> details = resultOrError(operation, failed);
             Map<String, Object> retryDetails = new LinkedHashMap<>();
             retryDetails.put("CurrentAttempt", attempt);
             details.put("RetryDetails", retryDetails);
@@ -342,7 +345,7 @@ final class DurableCheckpointApplier {
                     operation.setStatus(DurableOperationStatus.PENDING);
                     operation.setNextAttemptTimestamp(now + update.nextAttemptDelaySeconds() * 1000L);
                     retryDetails.put("NextAttemptDelaySeconds", update.nextAttemptDelaySeconds());
-                    event(operation, update.error() != null ? "StepFailed" : "StepSucceeded", details);
+                    event(operation, failed ? "StepFailed" : "StepSucceeded", details);
                 }
             }
             touch(operation);
@@ -392,6 +395,7 @@ final class DurableCheckpointApplier {
             DurableOperation operation = create(update);
             operation.setChainedFunctionName(update.chainedFunctionName());
             operation.setChainedTenantId(update.chainedTenantId());
+            operation.setChainedTraceHeader(update.chainedTraceHeader());
             operation.setInputPayload(update.payload());
             AwsException unreachable = unreachableTarget.apply(update.chainedFunctionName());
             if (unreachable == null) {
@@ -504,11 +508,11 @@ final class DurableCheckpointApplier {
             }
         }
 
-        private static Map<String, Object> resultOrError(DurableOperation operation) {
+        private static Map<String, Object> resultOrError(DurableOperation operation, boolean failed) {
             Map<String, Object> details = new LinkedHashMap<>();
-            if (operation.getError() != null) {
+            if (failed) {
                 details.put("Error", DurableHistory.errorWrapper(operation.getError()));
-            } else if (operation.getResult() != null) {
+            } else {
                 details.put("Result", DurableHistory.payloadWrapper(operation.getResult()));
             }
             return details;

@@ -548,11 +548,226 @@ class CloudFormationEventBusIntegrationTest {
         }
     }
 
+    @Test
+    void partnerEventBusIsProvisionedFromItsEventSourceName() {
+        String suffix = Long.toString(System.nanoTime(), 36);
+        String busName = "aws.partner/example.com/cfn-" + suffix;
+        String stackName = "eventbus-partner-" + suffix;
+
+        createStack(stackName, partnerEventBusTemplate(busName, busName));
+        assertStackStatus(stackName, "CREATE_COMPLETE");
+
+        JsonPath bus = callEventBridge("AWSEvents.DescribeEventBus", "{\"Name\":\"" + busName + "\"}", 200);
+        assertEquals(busName, bus.getString("Name"));
+        if (!bus.getString("Arn").endsWith(":event-bus/" + busName)) {
+            throw new AssertionError("unexpected partner bus ARN: " + bus.getString("Arn"));
+        }
+
+        deleteStack(stackName);
+        CfnStackWaits.awaitStackDeleted(stackName);
+        callEventBridge("AWSEvents.DescribeEventBus", "{\"Name\":\"" + busName + "\"}", 400);
+    }
+
+    @Test
+    void ruleOnAPartnerEventBusIsProvisionedAndRemovedWithTheStack() {
+        String suffix = Long.toString(System.nanoTime(), 36);
+        String busName = "aws.partner/example.com/cfn-rule-" + suffix;
+        String stackName = "eventbus-partner-rule-" + suffix;
+        String template = """
+                {
+                  "Resources": {
+                    "Bus": {
+                      "Type": "AWS::Events::EventBus",
+                      "Properties": { "Name": "%1$s", "EventSourceName": "%1$s" }
+                    },
+                    "Rule": {
+                      "Type": "AWS::Events::Rule",
+                      "DependsOn": "Bus",
+                      "Properties": {
+                        "Name": "partner-rule",
+                        "EventBusName": "%1$s",
+                        "EventPattern": { "source": ["example.com"] }
+                      }
+                    }
+                  }
+                }
+                """.formatted(busName);
+
+        createStack(stackName, template);
+        assertStackStatus(stackName, "CREATE_COMPLETE");
+        JsonPath rule = callEventBridge("AWSEvents.DescribeRule",
+                "{\"Name\":\"partner-rule\",\"EventBusName\":\"" + busName + "\"}", 200);
+        assertEquals(busName, rule.getString("EventBusName"));
+        if (!rule.getString("Arn").endsWith(":rule/" + busName + "/partner-rule")) {
+            throw new AssertionError("unexpected partner rule ARN: " + rule.getString("Arn"));
+        }
+
+        deleteStack(stackName);
+        CfnStackWaits.awaitStackDeleted(stackName);
+        callEventBridge("AWSEvents.DescribeEventBus", "{\"Name\":\"" + busName + "\"}", 400);
+    }
+
+    @Test
+    void partnerEventBusUpdateValidatesASuppliedEventSourceName() {
+        String suffix = Long.toString(System.nanoTime(), 36);
+        String busName = "aws.partner/example.com/cfn-update-" + suffix;
+        String stackName = "eventbus-partner-update-" + suffix;
+
+        createStack(stackName, partnerEventBusTemplate(busName, busName));
+        assertStackStatus(stackName, "CREATE_COMPLETE");
+        String busArn = callEventBridge("AWSEvents.DescribeEventBus",
+                "{\"Name\":\"" + busName + "\"}", 200).getString("Arn");
+
+        updateStack(stackName, """
+                {
+                  "Resources": {
+                    "Bus": {
+                      "Type": "AWS::Events::EventBus",
+                      "Properties": { "Name": "%s" }
+                    }
+                  }
+                }
+                """.formatted(busName));
+        assertStackStatus(stackName, "UPDATE_COMPLETE");
+
+        updateStack(stackName, partnerEventBusTemplate(busName, busName));
+        assertStackStatus(stackName, "UPDATE_COMPLETE");
+
+        updateStack(stackName, partnerEventBusTemplate(busName, "aws.partner/example.com/other-" + suffix));
+        assertStackStatus(stackName, "UPDATE_ROLLBACK_COMPLETE");
+        String events = describeStackEvents(stackName);
+        if (!events.contains("Name must match EventSourceName")) {
+            throw new AssertionError("partner-name mismatch on update was not preserved: " + events);
+        }
+
+        assertEquals(busArn, callEventBridge("AWSEvents.DescribeEventBus",
+                "{\"Name\":\"" + busName + "\"}", 200).getString("Arn"));
+
+        deleteStack(stackName);
+        CfnStackWaits.awaitStackDeleted(stackName);
+    }
+
+    @Test
+    void partnerEventBusNameMustMatchItsEventSourceName() {
+        String suffix = Long.toString(System.nanoTime(), 36);
+        String stackName = "eventbus-partner-mismatch-" + suffix;
+
+        createStack(stackName, partnerEventBusTemplate("aws.partner/example.com/a-" + suffix,
+                "aws.partner/example.com/b-" + suffix));
+        assertStackStatus(stackName, "ROLLBACK_COMPLETE");
+        String events = describeStackEvents(stackName);
+        if (!events.contains("Name must match EventSourceName")) {
+            throw new AssertionError("partner-name mismatch was not preserved: " + events);
+        }
+    }
+
+    @Test
+    void malformedPartnerEventSourceNameIsAValidationError() {
+        String suffix = Long.toString(System.nanoTime(), 36);
+        String stackName = "eventbus-partner-malformed-" + suffix;
+        String sourceName = "aws.partner/cfn-" + suffix;
+
+        createStack(stackName, partnerEventBusTemplate(sourceName, sourceName));
+        assertStackStatus(stackName, "ROLLBACK_COMPLETE");
+        String events = describeStackEvents(stackName);
+        if (!events.contains("Invalid AWS::Events::EventBus EventSourceName")) {
+            throw new AssertionError("malformed partner source name was not preserved: " + events);
+        }
+    }
+
+    @Test
+    void partnerEventBusRejectsAPolicy() {
+        String suffix = Long.toString(System.nanoTime(), 36);
+        String busName = "aws.partner/example.com/cfn-policy-" + suffix;
+        String stackName = "eventbus-partner-policy-" + suffix;
+        String template = """
+                {
+                  "Resources": {
+                    "Bus": {
+                      "Type": "AWS::Events::EventBus",
+                      "Properties": {
+                        "Name": "%1$s",
+                        "EventSourceName": "%1$s",
+                        "Policy": {
+                          "Version": "2012-10-17",
+                          "Statement": [{
+                            "Sid": "AllowAccount",
+                            "Effect": "Allow",
+                            "Principal": {"AWS": "arn:aws:iam::111122223333:root"},
+                            "Action": "events:PutEvents",
+                            "Resource": "*"
+                          }]
+                        }
+                      }
+                    }
+                  }
+                }
+                """.formatted(busName);
+
+        createStack(stackName, template);
+        assertStackStatus(stackName, "ROLLBACK_COMPLETE");
+        String events = describeStackEvents(stackName);
+        if (!events.contains("Policy is not supported on a partner event bus")) {
+            throw new AssertionError("partner bus policy rejection was not preserved: " + events);
+        }
+        callEventBridge("AWSEvents.DescribeEventBus", "{\"Name\":\"" + busName + "\"}", 400);
+    }
+
+    @Test
+    void eventBusPolicyOnAPartnerEventBusFails() {
+        String suffix = Long.toString(System.nanoTime(), 36);
+        String busName = "aws.partner/example.com/cfn-bus-policy-" + suffix;
+        String stackName = "eventbus-partner-bus-policy-" + suffix;
+        String template = """
+                {
+                  "Resources": {
+                    "Bus": {
+                      "Type": "AWS::Events::EventBus",
+                      "Properties": { "Name": "%1$s", "EventSourceName": "%1$s" }
+                    },
+                    "BusPolicy": {
+                      "Type": "AWS::Events::EventBusPolicy",
+                      "Properties": {
+                        "EventBusName": { "Ref": "Bus" },
+                        "StatementId": "AllowAccount",
+                        "Action": "events:PutEvents",
+                        "Principal": "111122223333"
+                      }
+                    }
+                  }
+                }
+                """.formatted(busName);
+
+        createStack(stackName, template);
+        assertStackStatus(stackName, "ROLLBACK_COMPLETE");
+        String events = describeStackEvents(stackName);
+        if (!events.contains("at &apos;eventBusName&apos;")) {
+            throw new AssertionError("partner bus policy statement was not refused: " + events);
+        }
+        callEventBridge("AWSEvents.DescribeEventBus", "{\"Name\":\"" + busName + "\"}", 400);
+    }
+
+    private static String partnerEventBusTemplate(String busName, String eventSourceName) {
+        return """
+                {
+                  "Resources": {
+                    "Bus": {
+                      "Type": "AWS::Events::EventBus",
+                      "Properties": {
+                        "Name": "%s",
+                        "EventSourceName": "%s"
+                      }
+                    }
+                  }
+                }
+                """.formatted(busName, eventSourceName);
+    }
+
     // "Policy" is deliberately absent: an inline resource policy is supported (see
     // provisionEventBridgeEventBus), so rejecting it would regress templates main supports today.
     @ParameterizedTest
     @ValueSource(strings = {
-            "EventSourceName", "KmsKeyIdentifier", "DeadLetterConfig", "LogConfig"
+            "KmsKeyIdentifier", "DeadLetterConfig", "LogConfig"
     })
     void unsupportedEventBusPropertiesFailInsteadOfBeingIgnored(String propertyName) {
         String suffix = Long.toString(System.nanoTime(), 36);

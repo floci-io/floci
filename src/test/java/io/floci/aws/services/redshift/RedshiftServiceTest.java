@@ -2054,6 +2054,89 @@ class RedshiftServiceTest {
     }
 
     @Test
+    void authorizeSnapshotAccessRecordsTheAccountOnceAndRevokeRemovesIt() {
+        Snapshot snapshot = snapshotOf("snap-1", "c1");
+        snapshot.setStatus("available");
+        snapshot.setSnapshotType("manual");
+        when(snapshotBackend.get("snap-1")).thenReturn(Optional.of(snapshot));
+
+        assertTrue(service.authorizeSnapshotAccess("snap-1", null, "222222222222")
+                .getAccountsWithRestoreAccess().contains("222222222222"));
+        assertEquals("AuthorizationAlreadyExists", assertThrows(AwsException.class,
+                () -> service.authorizeSnapshotAccess("snap-1", null, "222222222222")).getErrorCode());
+        assertTrue(service.revokeSnapshotAccess("snap-1", null, "222222222222")
+                .getAccountsWithRestoreAccess().isEmpty());
+        assertEquals("AuthorizationNotFound", assertThrows(AwsException.class,
+                () -> service.revokeSnapshotAccess("snap-1", null, "222222222222")).getErrorCode());
+    }
+
+    @Test
+    void anAutomatedSnapshotCannotBeShared() {
+        Snapshot snapshot = snapshotOf("snap-auto", "c1");
+        snapshot.setStatus("available");
+        snapshot.setSnapshotType("automated");
+        when(snapshotBackend.get("snap-auto")).thenReturn(Optional.of(snapshot));
+
+        assertEquals("InvalidClusterSnapshotState", assertThrows(AwsException.class,
+                () -> service.authorizeSnapshotAccess("snap-auto", null, "222222222222")).getErrorCode());
+    }
+
+    @Test
+    void anAccountIdThatIsNotTwelveDigitsIsRefused() {
+        assertEquals("InvalidParameterValue", assertThrows(AwsException.class,
+                () -> service.authorizeSnapshotAccess("snap-1", null, "not-an-account")).getErrorCode());
+    }
+
+    @Test
+    void describeSharedSnapshotsListsOnlyWhatTheOwnerAuthorizedTheCallerToRestore() {
+        Snapshot shared = snapshotOf("shared", "c1");
+        shared.getAccountsWithRestoreAccess().add("111111111111");
+        Snapshot hidden = snapshotOf("hidden", "c1");
+        when(snapshotBackend.scanForAccount(eq("999999999999"), any())).thenReturn(List.of(shared, hidden));
+
+        assertEquals(List.of(shared), service.describeSharedSnapshots("999999999999", null, null));
+        assertEquals(List.of(shared), service.describeSharedSnapshots("999999999999", "shared", "c1"));
+        assertEquals("ClusterSnapshotNotFound", assertThrows(AwsException.class,
+                () -> service.describeSharedSnapshots("999999999999", "hidden", null)).getErrorCode());
+    }
+
+    @Test
+    void restoreOfASnapshotTheOwnerHasNotSharedIsDenied() {
+        when(snapshotBackend.getForAccount("999999999999", "snap-1")).thenReturn(Optional.of(snapshotOf("snap-1", "c1")));
+        when(clusterBackend.get("c1")).thenReturn(Optional.empty());
+
+        AwsException ex = assertThrows(AwsException.class,
+                () -> service.restoreFromClusterSnapshot("c1", "snap-1", null, null, "999999999999"));
+        assertEquals("AccessToSnapshotDenied", ex.getErrorCode());
+        verifyNoInteractions(cm);
+    }
+
+    @Test
+    void describeSharedSnapshotsAndRestoreDenyCrossRegionSnapshotByName() {
+        Snapshot foreignRegionSnap = snapshotOf("shared-foreign", "c1");
+        foreignRegionSnap.setSnapshotArn("arn:aws:redshift:eu-west-1:999999999999:snapshot:c1/shared-foreign");
+        foreignRegionSnap.getAccountsWithRestoreAccess().add("111111111111");
+
+        when(snapshotBackend.scanForAccount(eq("999999999999"), any())).thenReturn(List.of(foreignRegionSnap));
+        assertTrue(service.describeSharedSnapshots("999999999999", null, null).isEmpty());
+        assertEquals("ClusterSnapshotNotFound", assertThrows(AwsException.class,
+                () -> service.describeSharedSnapshots("999999999999", "shared-foreign", null)).getErrorCode());
+
+        when(snapshotBackend.getForAccount("999999999999", "shared-foreign")).thenReturn(Optional.of(foreignRegionSnap));
+        when(clusterBackend.get("c1")).thenReturn(Optional.empty());
+        assertEquals("ClusterSnapshotNotFound", assertThrows(AwsException.class,
+                () -> service.restoreFromClusterSnapshot("c1", "shared-foreign", null, null, "999999999999")).getErrorCode());
+    }
+
+    @Test
+    void restoreFromClusterSnapshotWithInvalidOwnerAccountThrowsInvalidParameterValue() {
+        assertEquals("InvalidParameterValue", assertThrows(AwsException.class,
+                () -> service.restoreFromClusterSnapshot("c1", "snap-1", null, null, "not-an-account")).getErrorCode());
+        assertEquals("InvalidParameterValue", assertThrows(AwsException.class,
+                () -> service.restoreFromClusterSnapshot("c1", "snap-1", null, null, "12345")).getErrorCode());
+    }
+
+    @Test
     void deleteSnapshotOfAnotherClusterIsNotFoundAndKept() {
         when(snapshotBackend.get("snap-1")).thenReturn(Optional.of(snapshotOf("snap-1", "protected")));
 
@@ -2450,6 +2533,7 @@ class RedshiftServiceTest {
         source.setKmsKeyId("orig-key");
         source.setTags(Map.of("Env", "Test"));
         source.setCopiedToRegions(new HashSet<>(Set.of("us-west-2")));
+        source.getAccountsWithRestoreAccess().add("222222222222");
         targetSnapshotIsFree("manual-copy-1");
 
         Snapshot copy = service.copyClusterSnapshot("auto-snap-1", "manual-copy-1", null, 30);
@@ -2463,6 +2547,7 @@ class RedshiftServiceTest {
         assertEquals("orig-key", copy.getKmsKeyId());
         assertEquals(Map.of("Env", "Test"), copy.getTags());
         assertTrue(copy.getCopiedToRegions().isEmpty());
+        assertTrue(copy.getAccountsWithRestoreAccess().isEmpty());
         verify(snapshotBackend).putAllAtomically(any());
         verify(snapshotBackend).flush();
     }

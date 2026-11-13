@@ -37,6 +37,7 @@
 - **Alternative names:** `RequestCertificate` rejects an explicit empty `SubjectAlternativeNames` array with `ValidationException`, since the API requires at least one name in it; omit the field when there are no additional names. An `AWS::CertificateManager::Certificate` resource still accepts an empty array and requests the certificate for `DomainName` alone, but the CloudFormation template reference also lists a one-item minimum, so omit the property in templates that also deploy to AWS.
 - **Certificate Types:** `AMAZON_ISSUED` (default) and `PRIVATE` (when `CertificateAuthorityArn` is provided)
 - **Imported keys:** `ImportCertificate` requires a private key that matches the certificate. A rejected import leaves an existing certificate unchanged.
+- **Reimport:** Importing replacement material under an existing `CertificateArn` preserves the certificate's current tags. Use `AddTagsToCertificate` and `RemoveTagsFromCertificate` to change them.
 - **Export:** Only `PRIVATE` type certificates can be exported with their private key
 - **In use:** `DescribeCertificate` lists under `InUseBy` the CloudFront distribution of each Cognito custom domain that uses the certificate, each CloudFront distribution whose `ViewerCertificate.ACMCertificateArn` names it, and each ELBv2 or Classic load balancer whose listener serves it. `DeleteCertificate` refuses with `ResourceInUseException` while that list is not empty. Other consumers, such as API Gateway domain names, are not tracked yet.
 

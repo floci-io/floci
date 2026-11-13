@@ -15,6 +15,7 @@ import io.floci.aws.core.common.RequestContext;
 import io.floci.aws.core.common.RequestScopes;
 import io.floci.aws.core.common.Resettable;
 import io.floci.aws.core.common.SmithyValidationErrors;
+import io.floci.aws.core.common.docker.DockerPlatforms;
 import io.floci.aws.core.storage.AccountAwareStorageBackend;
 import io.floci.aws.core.storage.StorageFactory;
 import io.floci.aws.services.emrserverless.model.Application;
@@ -23,6 +24,7 @@ import io.floci.aws.services.emrserverless.model.JobRun;
 import io.floci.aws.services.emrserverless.model.JobRunAttemptSummary;
 import io.floci.aws.services.emrserverless.model.JobRunRecord;
 import io.floci.aws.services.emrserverless.model.JobRunSummary;
+import io.floci.aws.services.emrserverless.model.MaximumCapacity;
 import io.floci.aws.services.emrserverless.model.RuntimeConfiguration;
 import io.floci.aws.services.emrserverless.model.StartJobRunRequest;
 import io.floci.aws.services.emrserverless.model.WorkerTypeSpecification;
@@ -100,6 +102,7 @@ public class EmrServerlessJobRunService implements Resettable {
     // The worker types a Spark application's driver and a Hive application's run as.
     private static final String DRIVER_WORKER_TYPE = "Driver";
     private static final String HIVE_DRIVER_WORKER_TYPE = "HiveDriver";
+    private static final String EXECUTOR_WORKER_TYPE = "Executor";
     // spark-submit's option for a Spark property, and its short form; and its option for spark.archives.
     private static final String CONF_OPTION = "--conf";
     private static final String CONF_SHORT_OPTION = "-c";
@@ -161,6 +164,10 @@ public class EmrServerlessJobRunService implements Resettable {
     private final String imageTemplate;
     private final String hiveImageTemplate;
     private final String dockerNetwork;
+    // How many executor containers a Spark run may have at once: executor-containers, 0 for Spark's local mode.
+    private final int executorContainers;
+    // Whether a container run runs for its application's architecture: honour-architectures, off by default.
+    private final boolean honourArchitectures;
     // Container runs a thread is running; one not here that has not ended was left by a restart.
     private final Set<String> executing = new HashSet<>();
     // Raised by each reset, so a run's thread from before it writes nothing back after the wipe.
@@ -178,7 +185,9 @@ public class EmrServerlessJobRunService implements Resettable {
                 Executors.newCachedThreadPool(Thread.ofPlatform().daemon().name("emr-serverless-run-", 0).factory()),
                 config.services().emrserverless().imageTemplate().orElse(null),
                 config.services().emrserverless().hiveImageTemplate().orElse(null),
-                config.services().emrserverless().dockerNetwork().orElse(null));
+                config.services().emrserverless().dockerNetwork().orElse(null),
+                config.services().emrserverless().executorContainers(),
+                config.services().emrserverless().honourArchitectures());
         // Before any run of this process starts: a driver an earlier one left belongs to a run read as FAILED.
         if (this.sparkRunner != null && config.services().emrserverless().reconcileContainersOnStartup()) {
             sparkRunner.removeLeftoverDrivers(SERVICE);
@@ -205,6 +214,26 @@ public class EmrServerlessJobRunService implements Resettable {
                                ObjectMapper objectMapper, int runDurationSeconds, Clock clock,
                                SparkJobRunner sparkRunner, Executor runExecutor,
                                String imageTemplate, String hiveImageTemplate, String dockerNetwork) {
+        this(store, applications, iamService, regionResolver, requestContext, objectMapper, runDurationSeconds, clock,
+                sparkRunner, runExecutor, imageTemplate, hiveImageTemplate, dockerNetwork, 0);
+    }
+
+    EmrServerlessJobRunService(AccountAwareStorageBackend<JobRunRecord> store, EmrServerlessService applications,
+                               IamService iamService, RegionResolver regionResolver, RequestContext requestContext,
+                               ObjectMapper objectMapper, int runDurationSeconds, Clock clock,
+                               SparkJobRunner sparkRunner, Executor runExecutor,
+                               String imageTemplate, String hiveImageTemplate, String dockerNetwork,
+                               int executorContainers) {
+        this(store, applications, iamService, regionResolver, requestContext, objectMapper, runDurationSeconds, clock,
+                sparkRunner, runExecutor, imageTemplate, hiveImageTemplate, dockerNetwork, executorContainers, false);
+    }
+
+    EmrServerlessJobRunService(AccountAwareStorageBackend<JobRunRecord> store, EmrServerlessService applications,
+                               IamService iamService, RegionResolver regionResolver, RequestContext requestContext,
+                               ObjectMapper objectMapper, int runDurationSeconds, Clock clock,
+                               SparkJobRunner sparkRunner, Executor runExecutor,
+                               String imageTemplate, String hiveImageTemplate, String dockerNetwork,
+                               int executorContainers, boolean honourArchitectures) {
         if (runDurationSeconds < 0) {
             throw new IllegalArgumentException(
                     "floci.services.emrserverless.job-run-duration-seconds must not be negative: " + runDurationSeconds);
@@ -222,6 +251,8 @@ public class EmrServerlessJobRunService implements Resettable {
         this.imageTemplate = imageTemplate;
         this.hiveImageTemplate = hiveImageTemplate;
         this.dockerNetwork = dockerNetwork;
+        this.executorContainers = executorContainers;
+        this.honourArchitectures = honourArchitectures;
     }
 
     @PreDestroy
@@ -529,7 +560,7 @@ public class EmrServerlessJobRunService implements Resettable {
                     run.getReleaseLabel(), SparkJobRunner.Engine.HIVE, hiveImageTemplate, customImage(app),
                     dockerNetwork, run.getExecutionRole(), Map.of(), hiveArguments(app, run, hive), null, timeout,
                     driverLogFolder(app, run), driverCloudWatchLogs(app, run), Map.of(), List.of(), null, Map.of(),
-                    Map.of(), Map.of(), Map.of(), Map.of());
+                    Map.of(), Map.of(), Map.of(), Map.of(), null);
         } else {
             JobDriver.SparkSubmit sparkSubmit = run.getJobDriver().getSparkSubmit();
             Map<String, String> sparkDefaults = sparkDefaults(app, run);
@@ -538,11 +569,16 @@ public class EmrServerlessJobRunService implements Resettable {
                     run.getReleaseLabel(), SparkJobRunner.Engine.SPARK, imageTemplate, customImage(app),
                     dockerNetwork, run.getExecutionRole(), sparkDefaults, application(sparkSubmit), null, timeout,
                     driverLogFolder(app, run), driverCloudWatchLogs(app, run), driverEnvironment(sparkProperties),
-                    archives(sparkProperties), null, Map.of(), Map.of(), Map.of(), Map.of(), Map.of());
+                    archives(sparkProperties), null, Map.of(), Map.of(), Map.of(), Map.of(), Map.of(),
+                    executors(app, executorContainers));
         }
+        // With honour-architectures on, its containers run for the application's architecture, "x86_64 is the default
+        // option" on EMR Serverless; with it off, or where the application names none, for the Docker host's own.
+        SparkJobRunner.Job onPlatform = job.withPlatform(
+                honourArchitectures ? DockerPlatforms.forArchitecture(app.getArchitecture()) : null);
         executing.add(run.getJobRunId());
         long launchedIn = generation;
-        runExecutor.execute(() -> execute(job, launchedIn));
+        runExecutor.execute(() -> execute(onPlatform, launchedIn));
     }
 
     private void execute(SparkJobRunner.Job job, long launchedIn) {
@@ -560,18 +596,54 @@ public class EmrServerlessJobRunService implements Resettable {
     /**
      * The custom image a run's driver starts from, or null for the release's: its driver's worker type's,
      * {@code Driver} for a Spark application and {@code HiveDriver} for a Hive one, else the application's, which
-     * "EMR Serverless applies ... to all worker types". Local mode runs Spark's executors and Tez's tasks in the
-     * driver's container, so an {@code Executor} or {@code TezTask} image is not used.
+     * "EMR Serverless applies ... to all worker types". Tez runs a Hive run's tasks in the driver's container, so a
+     * {@code TezTask} image is not used; a Spark run's executors have their own, {@link #executors}.
      */
     static String customImage(Application app) {
-        String workerType = HIVE_TYPE.equalsIgnoreCase(app.getType()) ? HIVE_DRIVER_WORKER_TYPE : DRIVER_WORKER_TYPE;
-        WorkerTypeSpecification driver = app.getWorkerTypeSpecifications() != null
+        return workerImage(app, HIVE_TYPE.equalsIgnoreCase(app.getType()) ? HIVE_DRIVER_WORKER_TYPE : DRIVER_WORKER_TYPE);
+    }
+
+    // A worker type's custom image, else the application's, else null for the release's.
+    private static String workerImage(Application app, String workerType) {
+        WorkerTypeSpecification worker = app.getWorkerTypeSpecifications() != null
                 ? app.getWorkerTypeSpecifications().get(workerType) : null;
-        if (driver != null && driver.getImageConfiguration() != null
-                && driver.getImageConfiguration().getImageUri() != null) {
-            return driver.getImageConfiguration().getImageUri();
+        if (worker != null && worker.getImageConfiguration() != null
+                && worker.getImageConfiguration().getImageUri() != null) {
+            return worker.getImageConfiguration().getImageUri();
         }
         return app.getImageConfiguration() != null ? app.getImageConfiguration().getImageUri() : null;
+    }
+
+    /**
+     * Where a Spark run's executors run: in containers of their own, at most {@code containers} at once, in the
+     * {@code Executor} worker type's custom image, else the application's, and within the application's maximum
+     * capacity, which its runs share; or, with {@code containers} 0, in the driver's container, which Spark's local
+     * mode runs them in.
+     */
+    static SparkJobRunner.Executors executors(Application app, int containers) {
+        if (containers <= 0) {
+            return null;
+        }
+        MaximumCapacity capacity = app.getMaximumCapacity();
+        return new SparkJobRunner.Executors(containers, workerImage(app, EXECUTOR_WORKER_TYPE),
+                capacity != null ? capacityAmount(capacity.getCpu()) : 0,
+                capacity != null ? capacityAmount(capacity.getMemory()) : 0,
+                capacity != null ? capacityAmount(capacity.getDisk()) : 0, app.getArn());
+    }
+
+    // A maximum capacity's amount, as "400 vCPU" or "1024GB" give it, or 0 for none.
+    static long capacityAmount(String value) {
+        if (value == null) {
+            return 0;
+        }
+        int digits = 0;
+        while (digits < value.length() && Character.isDigit(value.charAt(digits))) {
+            digits++;
+        }
+        if (digits == 0) {
+            return 0;
+        }
+        return digits > 18 ? Long.MAX_VALUE : Long.parseLong(value.substring(0, digits));
     }
 
     /**
@@ -1128,7 +1200,6 @@ public class EmrServerlessJobRunService implements Resettable {
         }
         return limits;
     }
-
 
     /**
      * From Amazon EMR release 7.11.0 a BATCH run's timeout is 1 to 10080 minutes; an earlier release, or

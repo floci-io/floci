@@ -13,6 +13,7 @@ import org.junit.jupiter.params.provider.ValueSource;
 import java.time.Instant;
 import java.util.List;
 
+import static io.floci.aws.testing.IamTestPolicies.EMPTY_POLICY_DOCUMENT;
 import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
@@ -97,7 +98,7 @@ class IamManagedPolicyCatalogTest {
         IamPolicy policy = assertDoesNotThrow(() -> iamService.getPolicy(policyArn));
         assertEquals(policyArn, policy.getArn());
 
-        iamService.createRole("attach-target", "/", "{}", null, 3600, null);
+        iamService.createRole("attach-target", "/", EMPTY_POLICY_DOCUMENT, null, 3600, null);
         assertDoesNotThrow(() -> iamService.attachRolePolicy("attach-target", policyArn));
     }
 
@@ -237,7 +238,7 @@ class IamManagedPolicyCatalogTest {
 
     @Test
     void attachingAnInventedManagedPolicyFails() {
-        iamService.createRole("typo-role", "/", "{}", null, 3600, null);
+        iamService.createRole("typo-role", "/", EMPTY_POLICY_DOCUMENT, null, 3600, null);
 
         AwsException e = assertThrows(AwsException.class, () -> iamService.attachRolePolicy(
                 "typo-role", "arn:aws:iam::aws:policy/AmazonS3FullAcess"));

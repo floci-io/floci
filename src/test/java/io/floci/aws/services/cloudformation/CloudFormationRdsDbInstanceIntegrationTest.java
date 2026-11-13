@@ -1,15 +1,12 @@
 package io.floci.aws.services.cloudformation;
 
-import io.floci.aws.testing.AwsTestClients;
 import io.floci.aws.testing.CfnStackWaits;
+import io.floci.aws.testing.CfnTestStack;
 import io.floci.aws.testing.RdsMockProfile;
 import io.quarkus.test.junit.QuarkusTest;
 import io.quarkus.test.junit.TestProfile;
-import org.junit.jupiter.api.AfterEach;
-import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
-import software.amazon.awssdk.regions.Region;
-import software.amazon.awssdk.services.cloudformation.CloudFormationClient;
+import org.junit.jupiter.api.extension.RegisterExtension;
 import software.amazon.awssdk.services.cloudformation.model.Stack;
 import software.amazon.awssdk.services.ec2.Ec2Client;
 import software.amazon.awssdk.services.rds.RdsClient;
@@ -33,72 +30,47 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 @TestProfile(RdsMockProfile.class)
 class CloudFormationRdsDbInstanceIntegrationTest {
 
-    private final String stackName = "cfn-rds-db-" + Long.toString(System.nanoTime(), 36);
-    private CloudFormationClient cloudFormation;
-    private RdsClient rds;
-
-    @BeforeEach
-    void clients() {
-        cloudFormation = AwsTestClients.create(CloudFormationClient.builder(), "test", Region.US_EAST_1);
-        rds = AwsTestClients.create(RdsClient.builder(), "test", Region.US_EAST_1);
-    }
-
-    @AfterEach
-    void deleteStack() {
-        try {
-            CfnStackWaits.deleteStack(stackName);
-        } finally {
-            cloudFormation.close();
-            rds.close();
-        }
-    }
+    @RegisterExtension
+    final CfnTestStack stack = new CfnTestStack("cfn-rds-db");
 
     @Test
     void securityGroupsFollowTheTemplateThroughChangeRollbackAndRemoval() {
-        Stack created = create(template("First", false, false));
+        Stack created = stack.create(template("First", false, false));
         String id = output(created, "DbId");
         assertEquals(List.of(output(created, "FirstId")), groups(id));
 
-        Stack changed = update(template("Second", false, false), "UPDATE_COMPLETE");
+        Stack changed = stack.update(template("Second", false, false), "UPDATE_COMPLETE");
         assertEquals(id, output(changed, "DbId"));
         assertEquals(List.of(output(changed, "SecondId")), groups(id));
 
-        update(template("First", false, true), "UPDATE_ROLLBACK_COMPLETE");
+        stack.update(template("First", false, true), "UPDATE_ROLLBACK_COMPLETE");
         assertEquals(List.of(output(changed, "SecondId")), groups(id));
 
         // As AWS's handler does, a template that drops the groups puts the instance on its VPC's default group.
-        Stack cleared = update(template(null, false, false), "UPDATE_COMPLETE");
+        Stack cleared = stack.update(template(null, false, false), "UPDATE_COMPLETE");
         assertEquals(id, output(cleared, "DbId"));
         assertEquals(List.of(defaultGroupOf(instance(id).dbSubnetGroup().vpcId())), groups(id));
     }
 
     @Test
     void aStorageEncryptedChangeReplacesTheInstanceAndAFailedOneKeepsIt() {
-        String id = output(create(template(null, true, false)), "DbId");
+        String id = output(stack.create(template(null, true, false)), "DbId");
         assertTrue(instance(id).storageEncrypted());
 
         // Dropping StorageEncrypted asks for an unencrypted instance, which only a new one can be.
-        update(template(null, false, true), "UPDATE_ROLLBACK_COMPLETE");
+        stack.update(template(null, false, true), "UPDATE_ROLLBACK_COMPLETE");
         assertEquals(List.of(id), stackInstanceIds(), "the replacement is deleted again");
         assertTrue(instance(id).storageEncrypted());
 
-        String unencrypted = output(update(template(null, false, false), "UPDATE_COMPLETE"), "DbId");
+        String unencrypted = output(stack.update(template(null, false, false), "UPDATE_COMPLETE"), "DbId");
         assertNotEquals(id, unencrypted);
         assertFalse(instance(unencrypted).storageEncrypted());
         assertEquals(List.of(unencrypted), stackInstanceIds(), "the prior instance is deleted once the update commits");
 
-        String encrypted = output(update(template(null, true, false), "UPDATE_COMPLETE"), "DbId");
+        String encrypted = output(stack.update(template(null, true, false), "UPDATE_COMPLETE"), "DbId");
         assertNotEquals(unencrypted, encrypted);
         assertTrue(instance(encrypted).storageEncrypted());
         assertEquals(List.of(encrypted), stackInstanceIds());
-    }
-
-    private Stack create(String template) {
-        return CfnStackWaits.createStack(cloudFormation, stackName, template, "CREATE_COMPLETE");
-    }
-
-    private Stack update(String template, String expectedStatus) {
-        return CfnStackWaits.updateStack(cloudFormation, stackName, template, expectedStatus);
     }
 
     /**
@@ -125,8 +97,12 @@ class CloudFormationRdsDbInstanceIntegrationTest {
                 laterFails ? CfnStackWaits.failingResourceAfter("Db") : "");
     }
 
+    private RdsClient rds() {
+        return stack.client(RdsClient.builder());
+    }
+
     private DBInstance instance(String id) {
-        return rds.describeDBInstances(request -> request.dbInstanceIdentifier(id)).dbInstances().getFirst();
+        return rds().describeDBInstances(request -> request.dbInstanceIdentifier(id)).dbInstances().getFirst();
     }
 
     private List<String> groups(String id) {
@@ -135,16 +111,15 @@ class CloudFormationRdsDbInstanceIntegrationTest {
 
     /** The instances this stack's {@code Db} resource has, by the name CloudFormation generates for it. */
     private List<String> stackInstanceIds() {
-        return rds.describeDBInstances().dbInstances().stream().map(DBInstance::dbInstanceIdentifier)
-                .filter(id -> id.startsWith(stackName + "-db-")).toList();
+        return rds().describeDBInstances().dbInstances().stream()
+                .map(DBInstance::dbInstanceIdentifier)
+                .filter(id -> id.startsWith(stack.name() + "-db-")).toList();
     }
 
-    private static String defaultGroupOf(String vpcId) {
-        try (Ec2Client ec2 = AwsTestClients.create(Ec2Client.builder(), "test", Region.US_EAST_1)) {
-            return ec2.describeSecurityGroups(request -> request.filters(
-                    filter -> filter.name("vpc-id").values(vpcId),
-                    filter -> filter.name("group-name").values("default")))
-                    .securityGroups().getFirst().groupId();
-        }
+    private String defaultGroupOf(String vpcId) {
+        return stack.client(Ec2Client.builder()).describeSecurityGroups(request -> request.filters(
+                filter -> filter.name("vpc-id").values(vpcId),
+                filter -> filter.name("group-name").values("default")))
+                .securityGroups().getFirst().groupId();
     }
 }

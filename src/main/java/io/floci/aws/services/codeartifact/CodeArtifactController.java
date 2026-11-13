@@ -12,12 +12,20 @@ import io.floci.aws.core.common.JsonErrorResponseUtils;
 import io.floci.aws.core.common.PaginatedResult;
 import io.floci.aws.core.common.Pagination;
 import io.floci.aws.core.common.RegionResolver;
+import io.floci.aws.core.common.StreamingResponses;
 import io.floci.aws.services.codeartifact.CodeArtifactService.AuthorizationToken;
 import io.floci.aws.services.codeartifact.CodeArtifactService.DomainView;
-import io.floci.aws.services.codeartifact.CodeArtifactService.PackageVersionAssetResult;
+import io.floci.aws.services.codeartifact.CodeArtifactService.GetAssociatedPackageGroupResult;
+import io.floci.aws.services.codeartifact.CodeArtifactService.ListAllowedRepositoriesForGroupResult;
+import io.floci.aws.services.codeartifact.CodeArtifactService.ListAssociatedPackagesResult;
+import io.floci.aws.services.codeartifact.CodeArtifactService.PackageGroupAllowedRepositoryEdit;
+import io.floci.aws.services.codeartifact.CodeArtifactService.PackageGroupDescriptionView;
+import io.floci.aws.services.codeartifact.CodeArtifactService.PackageGroupListResult;
+import io.floci.aws.services.codeartifact.CodeArtifactService.PackageVersionAssetStreamResult;
 import io.floci.aws.services.codeartifact.CodeArtifactService.PackageVersionReadmeResult;
 import io.floci.aws.services.codeartifact.CodeArtifactService.PublishPackageVersionResult;
 import io.floci.aws.services.codeartifact.CodeArtifactService.ResourcePolicy;
+import io.floci.aws.services.codeartifact.CodeArtifactService.UpdatePackageGroupOriginConfigurationResult;
 import io.floci.aws.services.codeartifact.model.CodeArtifactPackageVersion;
 import io.floci.aws.services.codeartifact.model.CodeArtifactRepository;
 import io.floci.aws.services.codeartifact.model.ExternalConnection;
@@ -38,6 +46,7 @@ import jakarta.ws.rs.core.HttpHeaders;
 import jakarta.ws.rs.core.MediaType;
 import jakarta.ws.rs.core.Response;
 
+import java.io.InputStream;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -322,7 +331,7 @@ public class CodeArtifactController {
                                            @QueryParam("asset") String assetName,
                                            @QueryParam("unfinished") String unfinished,
                                            @HeaderParam("x-amz-content-sha256") String assetSha256,
-                                           byte[] body) {
+                                           InputStream body) {
         String region = regionResolver.resolveRegion(headers);
         PublishPackageVersionResult result = service.publishPackageVersion(region, domain, domainOwner, repository,
                 format, namespace, packageName, version, assetName, assetSha256, unfinished, body);
@@ -405,13 +414,16 @@ public class CodeArtifactController {
                                             @QueryParam("asset") String assetName,
                                             @QueryParam("revision") String revision) {
         String region = regionResolver.resolveRegion(headers);
-        PackageVersionAssetResult result = service.getPackageVersionAsset(region, domain, domainOwner, repository,
-                format, namespace, packageName, version, assetName, revision);
-        return Response.ok(result.asset().getContent(), MediaType.APPLICATION_OCTET_STREAM)
-                .header("X-AssetName", result.asset().getName())
+        PackageVersionAssetStreamResult result = service.getPackageVersionAssetStreamed(region, domain, domainOwner,
+                repository, format, namespace, packageName, version, assetName, revision);
+        Response.ResponseBuilder builder = Response.ok().type(MediaType.APPLICATION_OCTET_STREAM)
+                .header("X-AssetName", result.assetName())
                 .header("X-PackageVersion", version)
-                .header("X-PackageVersionRevision", result.packageVersionRevision())
-                .build();
+                .header("X-PackageVersionRevision", result.packageVersionRevision());
+        if (result.contentLength() >= 0) {
+            builder.header("Content-Length", result.contentLength());
+        }
+        return StreamingResponses.streamingResponse(result.content(), stream -> builder.entity(stream).build());
     }
 
     @POST
@@ -657,6 +669,140 @@ public class CodeArtifactController {
         return response;
     }
 
+    // -------------------------------------------------------------- package groups
+
+    @POST
+    @Path("/v1/package-group")
+    public Response createPackageGroup(@Context HttpHeaders headers, @QueryParam("domain") String domain,
+                                        @QueryParam("domain-owner") String domainOwner, String body) {
+        JsonNode req = readTree(body);
+        String region = regionResolver.resolveRegion(headers);
+        PackageGroupDescriptionView view = service.createPackageGroup(region, domain, domainOwner,
+                text(req, "packageGroup"), text(req, "contactInfo"), text(req, "description"),
+                readTagList(req.get("tags")));
+        return ok(single("packageGroup", packageGroupDescription(view)));
+    }
+
+    @DELETE
+    @Path("/v1/package-group")
+    public Response deletePackageGroup(@Context HttpHeaders headers, @QueryParam("domain") String domain,
+                                        @QueryParam("domain-owner") String domainOwner,
+                                        @QueryParam("package-group") String packageGroup) {
+        String region = regionResolver.resolveRegion(headers);
+        PackageGroupDescriptionView view = service.deletePackageGroup(region, domain, domainOwner, packageGroup);
+        return ok(single("packageGroup", packageGroupDescription(view)));
+    }
+
+    @GET
+    @Path("/v1/package-group")
+    public Response describePackageGroup(@Context HttpHeaders headers, @QueryParam("domain") String domain,
+                                          @QueryParam("domain-owner") String domainOwner,
+                                          @QueryParam("package-group") String packageGroup) {
+        String region = regionResolver.resolveRegion(headers);
+        PackageGroupDescriptionView view = service.describePackageGroup(region, domain, domainOwner, packageGroup);
+        return ok(single("packageGroup", packageGroupDescription(view)));
+    }
+
+    @PUT
+    @Path("/v1/package-group")
+    public Response updatePackageGroup(@Context HttpHeaders headers, @QueryParam("domain") String domain,
+                                        @QueryParam("domain-owner") String domainOwner, String body) {
+        JsonNode req = readTree(body);
+        String region = regionResolver.resolveRegion(headers);
+        PackageGroupDescriptionView view = service.updatePackageGroup(region, domain, domainOwner,
+                text(req, "packageGroup"), text(req, "contactInfo"), text(req, "description"));
+        return ok(single("packageGroup", packageGroupDescription(view)));
+    }
+
+    @PUT
+    @Path("/v1/package-group-origin-configuration")
+    public Response updatePackageGroupOriginConfiguration(@Context HttpHeaders headers,
+                                                           @QueryParam("domain") String domain,
+                                                           @QueryParam("domain-owner") String domainOwner,
+                                                           @QueryParam("package-group") String packageGroup,
+                                                           String body) {
+        JsonNode req = readTree(body);
+        String region = regionResolver.resolveRegion(headers);
+        UpdatePackageGroupOriginConfigurationResult result = service.updatePackageGroupOriginConfiguration(region,
+                domain, domainOwner, packageGroup, readPackageGroupRestrictions(req.get("restrictions")),
+                readAllowedRepositoryEdits(req.get("addAllowedRepositories"), "addAllowedRepositories"),
+                readAllowedRepositoryEdits(req.get("removeAllowedRepositories"), "removeAllowedRepositories"));
+        ObjectNode response = objectMapper.createObjectNode();
+        response.set("packageGroup", packageGroupDescription(result.packageGroup()));
+        response.set("allowedRepositoryUpdates", allowedRepositoryUpdates(result.allowedRepositoryUpdates()));
+        return ok(response);
+    }
+
+    @POST
+    @Path("/v1/package-groups")
+    public Response listPackageGroups(@Context HttpHeaders headers, @QueryParam("domain") String domain,
+                                       @QueryParam("domain-owner") String domainOwner,
+                                       @QueryParam("prefix") String prefix,
+                                       @QueryParam("max-results") String maxResults,
+                                       @QueryParam("next-token") String nextToken) {
+        String region = regionResolver.resolveRegion(headers);
+        PackageGroupListResult result = service.listPackageGroups(region, domain, domainOwner, prefix,
+                Pagination.parseMaxResults(maxResults, "ValidationException"), nextToken);
+        return ok(packageGroupListResponse(result));
+    }
+
+    @POST
+    @Path("/v1/package-groups/sub-groups")
+    public Response listSubPackageGroups(@Context HttpHeaders headers, @QueryParam("domain") String domain,
+                                          @QueryParam("domain-owner") String domainOwner,
+                                          @QueryParam("package-group") String packageGroup,
+                                          @QueryParam("max-results") String maxResults,
+                                          @QueryParam("next-token") String nextToken) {
+        String region = regionResolver.resolveRegion(headers);
+        PackageGroupListResult result = service.listSubPackageGroups(region, domain, domainOwner, packageGroup,
+                Pagination.parseMaxResults(maxResults, "ValidationException"), nextToken);
+        return ok(packageGroupListResponse(result));
+    }
+
+    @GET
+    @Path("/v1/package-group-allowed-repositories")
+    public Response listAllowedRepositoriesForGroup(@Context HttpHeaders headers,
+                                                     @QueryParam("domain") String domain,
+                                                     @QueryParam("domain-owner") String domainOwner,
+                                                     @QueryParam("package-group") String packageGroup,
+                                                     @QueryParam("originRestrictionType") String originRestrictionType,
+                                                     @QueryParam("max-results") String maxResults,
+                                                     @QueryParam("next-token") String nextToken) {
+        String region = regionResolver.resolveRegion(headers);
+        ListAllowedRepositoriesForGroupResult result = service.listAllowedRepositoriesForGroup(region, domain,
+                domainOwner, packageGroup, originRestrictionType,
+                Pagination.parseMaxResults(maxResults, "ValidationException"), nextToken);
+        return ok(listAllowedRepositoriesForGroupResponse(result));
+    }
+
+    @GET
+    @Path("/v1/list-associated-packages")
+    public Response listAssociatedPackages(@Context HttpHeaders headers, @QueryParam("domain") String domain,
+                                            @QueryParam("domain-owner") String domainOwner,
+                                            @QueryParam("package-group") String packageGroup,
+                                            @QueryParam("max-results") String maxResults,
+                                            @QueryParam("next-token") String nextToken,
+                                            @QueryParam("preview") String preview) {
+        String region = regionResolver.resolveRegion(headers);
+        ListAssociatedPackagesResult result = service.listAssociatedPackages(region, domain, domainOwner,
+                packageGroup, Pagination.parseMaxResults(maxResults, "ValidationException"), nextToken,
+                Boolean.parseBoolean(preview));
+        return ok(listAssociatedPackagesResponse(result));
+    }
+
+    @GET
+    @Path("/v1/get-associated-package-group")
+    public Response getAssociatedPackageGroup(@Context HttpHeaders headers, @QueryParam("domain") String domain,
+                                               @QueryParam("domain-owner") String domainOwner,
+                                               @QueryParam("format") String format,
+                                               @QueryParam("namespace") String namespace,
+                                               @QueryParam("package") String packageName) {
+        String region = regionResolver.resolveRegion(headers);
+        GetAssociatedPackageGroupResult result = service.getAssociatedPackageGroup(region, domain, domainOwner,
+                format, namespace, packageName);
+        return ok(getAssociatedPackageGroupResponse(result));
+    }
+
     // -------------------------------------------------------------------- tags
 
     @POST
@@ -856,6 +1002,137 @@ public class CodeArtifactController {
         node.put("revision", policy.revision());
         node.put("document", policy.document());
         return node;
+    }
+
+    private ObjectNode packageGroupDescription(PackageGroupDescriptionView view) {
+        ObjectNode node = objectMapper.createObjectNode();
+        node.put("arn", view.arn());
+        node.put("pattern", view.pattern());
+        node.put("domainName", view.domainName());
+        node.put("domainOwner", view.domainOwner());
+        node.put("createdTime", view.createdTime());
+        if (view.contactInfo() != null) {
+            node.put("contactInfo", view.contactInfo());
+        }
+        if (view.description() != null) {
+            node.put("description", view.description());
+        }
+        node.set("originConfiguration", packageGroupOriginConfiguration(view.restrictions()));
+        if (view.parentPattern() != null) {
+            ObjectNode parent = node.putObject("parent");
+            parent.put("arn", view.parentArn());
+            parent.put("pattern", view.parentPattern());
+        }
+        return node;
+    }
+
+    private ObjectNode packageGroupOriginConfiguration(
+            Map<String, CodeArtifactService.PackageGroupOriginRestrictionView> restrictions) {
+        ObjectNode configuration = objectMapper.createObjectNode();
+        ObjectNode restrictionsNode = configuration.putObject("restrictions");
+        restrictions.forEach((type, view) -> {
+            ObjectNode r = restrictionsNode.putObject(type);
+            r.put("mode", view.mode());
+            r.put("effectiveMode", view.effectiveMode());
+            if (view.inheritedFromArn() != null) {
+                ObjectNode inheritedFrom = r.putObject("inheritedFrom");
+                inheritedFrom.put("arn", view.inheritedFromArn());
+                inheritedFrom.put("pattern", view.inheritedFromPattern());
+            }
+            r.put("repositoriesCount", view.repositoriesCount());
+        });
+        return configuration;
+    }
+
+    private ObjectNode packageGroupListResponse(PackageGroupListResult result) {
+        ObjectNode response = objectMapper.createObjectNode();
+        ArrayNode items = response.putArray("packageGroups");
+        result.packageGroups().forEach(g -> items.add(packageGroupDescription(g)));
+        if (result.nextToken() != null) {
+            response.put("nextToken", result.nextToken());
+        }
+        return response;
+    }
+
+    private ObjectNode allowedRepositoryUpdates(Map<String, Map<String, List<String>>> updates) {
+        ObjectNode node = objectMapper.createObjectNode();
+        updates.forEach((type, byUpdateType) -> {
+            ObjectNode typeNode = node.putObject(type);
+            byUpdateType.forEach((updateType, names) -> {
+                ArrayNode items = typeNode.putArray(updateType);
+                names.forEach(items::add);
+            });
+        });
+        return node;
+    }
+
+    private ObjectNode listAllowedRepositoriesForGroupResponse(ListAllowedRepositoriesForGroupResult result) {
+        ObjectNode response = objectMapper.createObjectNode();
+        ArrayNode items = response.putArray("allowedRepositories");
+        result.allowedRepositories().forEach(items::add);
+        if (result.nextToken() != null) {
+            response.put("nextToken", result.nextToken());
+        }
+        return response;
+    }
+
+    private ObjectNode listAssociatedPackagesResponse(ListAssociatedPackagesResult result) {
+        ObjectNode response = objectMapper.createObjectNode();
+        ArrayNode items = response.putArray("packages");
+        result.packages().forEach(p -> {
+            ObjectNode node = objectMapper.createObjectNode();
+            node.put("format", p.format());
+            if (p.namespace() != null) {
+                node.put("namespace", p.namespace());
+            }
+            node.put("package", p.packageName());
+            node.put("associationType", p.associationType());
+            items.add(node);
+        });
+        if (result.nextToken() != null) {
+            response.put("nextToken", result.nextToken());
+        }
+        return response;
+    }
+
+    private ObjectNode getAssociatedPackageGroupResponse(GetAssociatedPackageGroupResult result) {
+        ObjectNode response = objectMapper.createObjectNode();
+        response.set("packageGroup", packageGroupDescription(result.packageGroup()));
+        response.put("associationType", result.associationType());
+        return response;
+    }
+
+    private Map<String, String> readPackageGroupRestrictions(JsonNode restrictionsNode) {
+        Map<String, String> values = new LinkedHashMap<>();
+        if (restrictionsNode == null || restrictionsNode.isNull()) {
+            return values;
+        }
+        if (!restrictionsNode.isObject()) {
+            throw new AwsException("ValidationException",
+                    "restrictions must be an object of restriction type to mode.", 400);
+        }
+        restrictionsNode.fields().forEachRemaining(e -> {
+            if (!e.getValue().isTextual()) {
+                throw new AwsException("ValidationException",
+                        "restrictions['" + e.getKey() + "'] must be a string.", 400);
+            }
+            values.put(e.getKey(), e.getValue().textValue());
+        });
+        return values;
+    }
+
+    private List<PackageGroupAllowedRepositoryEdit> readAllowedRepositoryEdits(JsonNode arrayNode, String field) {
+        List<PackageGroupAllowedRepositoryEdit> edits = new ArrayList<>();
+        if (arrayNode == null || arrayNode.isNull()) {
+            return edits;
+        }
+        if (!arrayNode.isArray()) {
+            throw new AwsException("ValidationException",
+                    field + " must be an array of {repositoryName, originRestrictionType} objects.", 400);
+        }
+        arrayNode.forEach(n -> edits.add(new PackageGroupAllowedRepositoryEdit(text(n, "repositoryName"),
+                text(n, "originRestrictionType"))));
+        return edits;
     }
 
     private ObjectNode single(String field, ObjectNode value) {

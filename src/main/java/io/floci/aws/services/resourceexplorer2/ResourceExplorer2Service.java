@@ -7,6 +7,7 @@ import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.floci.aws.core.common.AwsArnUtils;
 import io.floci.aws.core.common.AwsException;
 import io.floci.aws.core.common.RegionResolver;
+import io.floci.aws.core.common.StoredResourceArns;
 import io.floci.aws.core.resource.ExplorerResource;
 import io.floci.aws.core.resource.ResourceProvider;
 import io.floci.aws.core.resource.SupportedResourceType;
@@ -48,7 +49,7 @@ import java.util.function.Consumer;
 import java.util.regex.Pattern;
 
 @ApplicationScoped
-public class ResourceExplorer2Service {
+public class ResourceExplorer2Service implements StoredResourceArns {
 
     private static final Logger LOG = Logger.getLogger(ResourceExplorer2Service.class);
 
@@ -61,6 +62,7 @@ public class ResourceExplorer2Service {
     private final StorageBackend<String, String> defaultViewStore;
     /** Completed setup tasks, keyed by the TaskId GetResourceExplorerSetup reads back. */
     private final StorageBackend<String, SetupTask> setupTaskStore;
+    private final ResourceExplorer2RequestContext requestContext;
 
     /**
      * The maximum number of matching resources {@code Search} returns across all pages. Per the AWS
@@ -88,15 +90,19 @@ public class ResourceExplorer2Service {
     private static final Pattern REGION_PATTERN = Pattern.compile("[a-z-]+-[a-z]+-[0-9]");
     /** AWS caps AggregatorRegions at one entry, since an account has at most one aggregator index. */
     private static final int MAX_AGGREGATOR_REGIONS = 1;
+    /** The name of the view the default region's baseline makes its default. */
+    private static final String DEFAULT_VIEW_NAME = "default-view";
 
     @Inject
     public ResourceExplorer2Service(Instance<ResourceProvider> providers,
                                      RegionResolver regionResolver,
                                      ObjectMapper objectMapper,
-                                     StorageFactory storageFactory) {
+                                     StorageFactory storageFactory,
+                                     ResourceExplorer2RequestContext requestContext) {
         this.providers = providers;
         this.regionResolver = regionResolver;
         this.objectMapper = objectMapper;
+        this.requestContext = requestContext;
         this.indexStore = storageFactory.create("resourceexplorer2",
                 "resourceexplorer2-indexes.json",
                 new TypeReference<>() {});
@@ -132,6 +138,20 @@ public class ResourceExplorer2Service {
                              StorageBackend<String, View> viewStore,
                              StorageBackend<String, String> defaultViewStore,
                              StorageBackend<String, SetupTask> setupTaskStore) {
+        this(providers, regionResolver, objectMapper, indexStore, viewStore, defaultViewStore, setupTaskStore,
+                new ResourceExplorer2RequestContext());
+    }
+
+    /** As above, with the context of the request the service runs in. */
+    ResourceExplorer2Service(Instance<ResourceProvider> providers,
+                             RegionResolver regionResolver,
+                             ObjectMapper objectMapper,
+                             StorageBackend<String, Index> indexStore,
+                             StorageBackend<String, View> viewStore,
+                             StorageBackend<String, String> defaultViewStore,
+                             StorageBackend<String, SetupTask> setupTaskStore,
+                             ResourceExplorer2RequestContext requestContext) {
+        this.requestContext = requestContext;
         this.providers = providers;
         this.regionResolver = regionResolver;
         this.objectMapper = objectMapper;
@@ -155,13 +175,13 @@ public class ResourceExplorer2Service {
      * <p>The guard keys on an ACTIVE index, not "store is empty": a restart with persisted storage
      * keeps the index active, so this is a no-op and an explicit DisassociateDefaultView stays in
      * effect. Only a genuine loss of the index (fresh boot or a reset) triggers re-provisioning.
+     *
+     * <p>Synchronized so concurrent first requests check and provision as one step, and provision once.
      */
-    private void ensureDefaultRegionProvisioned() {
+    private synchronized void ensureDefaultRegionProvisioned() {
         String region = regionResolver.getDefaultRegion();
         String accountId = regionResolver.getAccountId();
-        boolean hasActiveDefaultRegionIndex = indexStore.scan(_ -> true).stream()
-                .anyMatch(i -> region.equals(i.region()) && i.state() != IndexState.DELETED);
-        if (hasActiveDefaultRegionIndex) {
+        if (defaultRegionIndexed()) {
             return;
         }
         String indexArn = regionResolver.buildArn("resource-explorer-2", region,
@@ -172,14 +192,21 @@ public class ResourceExplorer2Service {
 
         String viewId = UUID.randomUUID().toString();
         String viewArn = regionResolver.buildArn("resource-explorer-2", region,
-                "view/default-view/" + viewId);
-        View view = new View(viewArn, "default-view", accountId,
+                "view/" + DEFAULT_VIEW_NAME + "/" + viewId);
+        View view = new View(viewArn, DEFAULT_VIEW_NAME, accountId,
                 regionResolver.buildGlobalArn("iam", accountId, "root"),
                 null,
                 List.of(new IncludedProperty("tags")),
                 new HashMap<>(), Instant.now());
         viewStore.put(viewArn, view);
         defaultViewStore.put(region, viewArn);
+    }
+
+    /** Whether the default region has an active index, so a request provisions no baseline there. */
+    private boolean defaultRegionIndexed() {
+        String region = regionResolver.getDefaultRegion();
+        return indexStore.scan(_ -> true).stream()
+                .anyMatch(i -> region.equals(i.region()) && i.state() != IndexState.DELETED);
     }
 
     private static String regionOf(View view) {
@@ -455,6 +482,35 @@ public class ResourceExplorer2Service {
 
     public void disassociateDefaultView(String region) {
         defaultViewStore.delete(region);
+    }
+
+    @Override
+    public String namespace() {
+        return "resource-explorer-2";
+    }
+
+    @Override
+    public Optional<String> find(String type, List<String> names, String region) {
+        return Optional.empty();
+    }
+
+    /**
+     * The Region's default view, which {@code Search} and {@code ListResources} use for a request naming no view, read
+     * without writing anything, since IAM asks before it decides: the one stored, or, where such a request first
+     * provisions the default Region's baseline, that baseline's view, its id not minted yet. The request then searches
+     * the view found here (see {@link #defaultViewArn}).
+     */
+    @Override
+    public Optional<String> findDefault(String type, String region) {
+        if (!"view".equals(type)) {
+            return Optional.empty();
+        }
+        Optional<String> stored = defaultViewStore.get(region);
+        Optional<String> found = stored.isPresent() || !region.equals(regionResolver.getDefaultRegion())
+                || defaultRegionIndexed() ? stored
+                : Optional.of(regionResolver.buildArn("resource-explorer-2", region, "view/" + DEFAULT_VIEW_NAME + "/*"));
+        requestContext.pinCheckedDefaultView(region, found.orElse(""));
+        return found;
     }
 
     public String getDefaultView(String region) {
@@ -983,7 +1039,7 @@ public class ResourceExplorer2Service {
 
     private View resolveView(String viewArn, String region) {
         ensureDefaultRegionProvisioned();
-        String arn = (viewArn != null) ? viewArn : defaultViewStore.get(region).orElse(null);
+        String arn = (viewArn != null) ? viewArn : defaultViewArn(region);
         if (arn == null) {
             throw new AwsException("UnauthorizedException",
                     "No default view is configured for region " + region
@@ -992,6 +1048,23 @@ public class ResourceExplorer2Service {
         return viewStore.get(arn)
                 .orElseThrow(() -> new AwsException("ResourceNotFoundException",
                         "View not found: " + arn, 404));
+    }
+
+    /**
+     * The Region's default view this request searches: the one its permission check found, when it checked one, since
+     * another request may associate another default in between; the baseline view provisioned since, when the check
+     * found it about to be; the one stored otherwise. Null for none.
+     */
+    private String defaultViewArn(String region) {
+        String stored = defaultViewStore.get(region).orElse(null);
+        String checked = requestContext.checkedDefaultView(region);
+        if (checked == null) {
+            return stored;
+        }
+        if (checked.endsWith("/*")) {
+            return stored != null && stored.startsWith(checked.substring(0, checked.length() - 1)) ? stored : null;
+        }
+        return checked.isEmpty() ? null : checked;
     }
 
     private static int decodeNextToken(String token) {

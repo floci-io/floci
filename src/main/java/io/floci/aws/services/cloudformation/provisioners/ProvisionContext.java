@@ -7,7 +7,6 @@ import io.floci.aws.services.cloudformation.model.StackEvent;
 
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
-import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
@@ -22,11 +21,29 @@ import java.util.function.Consumer;
  */
 public record ProvisionContext(CloudFormationTemplateEngine engine, String region,
                                String accountId, String stackName, String priorPhysicalId,
-                               Consumer<StackEvent> progress, JsonNode priorProperties) {
+                               Consumer<StackEvent> progress, JsonNode priorProperties,
+                               PropertyChanges changes) {
+
+    public ProvisionContext(CloudFormationTemplateEngine engine, String region,
+                            String accountId, String stackName, String priorPhysicalId,
+                            Consumer<StackEvent> progress, JsonNode priorProperties) {
+        this(engine, region, accountId, stackName, priorPhysicalId, progress, priorProperties, null);
+    }
 
     public ProvisionContext(CloudFormationTemplateEngine engine, String region,
                             String accountId, String stackName, String priorPhysicalId) {
-        this(engine, region, accountId, stackName, priorPhysicalId, event -> {}, null);
+        this(engine, region, accountId, stackName, priorPhysicalId, event -> {}, null, null);
+    }
+
+    /**
+     * A copy of this context that differs only in the prior physical id. The engine's change list,
+     * the previous properties and the progress callback travel with it, so a provisioner that
+     * re-bases its context (after restoring a rollback snapshot, or for a cleanup record) does not
+     * drop the engine's statement of the update, and a component added later is kept too.
+     */
+    public ProvisionContext withPriorPhysicalId(String priorPhysicalId) {
+        return new ProvisionContext(engine, region, accountId, stackName, priorPhysicalId, progress,
+                priorProperties, changes);
     }
 
     /** Intermediate resource events retain the stack pipeline's event IDs and metadata. */
@@ -58,6 +75,15 @@ public record ProvisionContext(CloudFormationTemplateEngine engine, String regio
      * this as "reuse the existing entity" must still reject or replace on createOnly properties.
      */
     public boolean isUpdate() {
+        return isUpdate(priorPhysicalId);
+    }
+
+    /**
+     * The one definition of "this call is an update": a non-blank prior physical id. The engine
+     * uses it to build the property changes it hands a provisioner, so the statement and
+     * {@link #isUpdate()} cannot disagree.
+     */
+    public static boolean isUpdate(String priorPhysicalId) {
         return priorPhysicalId != null && !priorPhysicalId.isBlank();
     }
 
@@ -88,16 +114,20 @@ public record ProvisionContext(CloudFormationTemplateEngine engine, String regio
      * (a create-only property is a replacement question, not a clear).
      */
     public Set<String> droppedProperties(JsonNode props) {
-        Set<String> dropped = new LinkedHashSet<>();
-        if (!isUpdate() || priorProperties == null) {
-            return dropped;
+        return PropertyChanges.between(null, isUpdate(), priorProperties, props).dropped();
+    }
+
+    /**
+     * What this update did to each top-level property of the resource: the engine's own statement
+     * when it made one, which decides changed against unchanged by the forms CloudFormation
+     * compares, otherwise one derived from this context's previous properties and {@code props}.
+     * {@code resourceType} only tells which properties are create-only on the derived form.
+     */
+    public PropertyChanges changes(String resourceType, JsonNode props) {
+        if (changes != null) {
+            return changes;
         }
-        priorProperties.fieldNames().forEachRemaining(name -> {
-            if (previouslyDeclared(name) && (props == null || !props.has(name))) {
-                dropped.add(name);
-            }
-        });
-        return dropped;
+        return PropertyChanges.between(resourceType, isUpdate(), priorProperties, props);
     }
 
     /**

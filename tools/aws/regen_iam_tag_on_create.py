@@ -42,13 +42,14 @@ that need that action, and is marked `requestTags` when that action takes the re
 `CreateElasticsearchDomain` beside `es:AddTags`, as the OpenSearch Service developer guide's policy for
 creating a domain only with a tag grants `es:CreateDomain` and `es:AddTags`. One with no action of its
 name, or no tagging action going with that action, is left out.
-Each of those operations ends up in exactly one of three places, and generation fails on an operation
-that would end up in none:
+Each of those operations ends up in exactly one of three places:
 
 - `tags`: the members it reads.
 - `byHand`: operations Floci checks itself, because they need one of several tagging actions.
   `TagOnCreateMembersTest` holds the two lists to each other.
-- `notRead`: operations whose request carries no tags this table can read, each with its reason.
+- `notRead`: the model has no tag member, the model lacks the operation, or the operation has an
+  explicit exception because its tags are nested deeper than this file reads. An unreadable protocol
+  or opaque payload gets its reason from the model as well.
 
 An operation whose tagging action takes the namespace's `CreateAction` condition key, as EC2's
 `ec2:CreateTags` does, is marked `createAction`, and Floci gives that key the operation's name. One
@@ -69,8 +70,8 @@ The Service Reference is live rather than a pinned dependency, so a fresh genera
 byte-identical. The two gates split along the sources:
 
 - `--check` is offline and needs the pinned botocore. The file must be well-formed, and every
-  operation's members must be exactly what the rule and the corrections give from botocore for the
-  models the file names, so a hand-edited member fails.
+  operation's members and model-derived `notRead` verdict must be exactly what the rule and the
+  corrections give from botocore for the models the file names, so a stale verdict fails.
 - `--verify` is online and stdlib-only. Every operation the file carries must still list the same
   tagging actions, with the same `createAction` and `requestTags`, for the same SDK clients, and
   every resource type in `resourceArns` must still have its ARN. An operation AWS has added
@@ -108,12 +109,13 @@ NAMESPACES = (
     "bcm-pricing-calculator", "budgets", "ce", "cloudformation", "cloudhsm", "cloudtrail", "cloudwatch",
     "codedeploy", "codepipeline", "cognito-identity", "cognito-idp", "comprehend", "config", "controltower", "cur",
     "datasync", "dms", "dsql", "dynamodb", "ec2", "ecr", "ecs", "eks", "elasticache", "elasticloadbalancing",
-    "elasticmapreduce", "es", "events", "firehose", "globalaccelerator", "glue", "guardduty", "iam", "kinesis",
-    "kinesisanalytics", "kms", "lambda", "lightsail", "logs", "macie2", "memorydb", "network-firewall",
-    "organizations", "payment-cryptography", "pipes", "rds", "redshift", "redshift-serverless", "rekognition",
-    "resource-groups", "route53resolver", "sagemaker", "scheduler", "secretsmanager", "securityhub",
-    "servicediscovery", "ses", "signer", "sns", "sqs", "ssm", "sso", "states", "sts", "swf", "textract",
-    "timestream-influxdb", "transcribe", "transfer", "translate", "wafv2", "xray",
+    "elasticmapreduce", "emr-serverless", "es", "events", "firehose", "fis", "globalaccelerator", "glue",
+    "guardduty", "iam", "kinesis", "kinesisanalytics", "kms", "lambda", "lightsail", "logs", "macie2", "memorydb",
+    "network-firewall", "oam", "organizations", "payment-cryptography", "pipes", "ram", "rds", "redshift",
+    "redshift-serverless", "rekognition", "resource-explorer-2", "resource-groups", "route53resolver", "sagemaker",
+    "scheduler", "secretsmanager", "securityhub", "servicediscovery", "ses", "signer", "sns", "sqs", "ssm", "sso",
+    "states", "sts", "swf", "textract", "timestream-influxdb", "transcribe", "transfer", "translate", "wafv2",
+    "xray",
 )
 
 _NO_ROUTES = "REST routes no rule maps yet"
@@ -123,14 +125,14 @@ NOT_COVERED = {
     "airflow": _NO_ROUTES, "app-integrations": _NO_ROUTES, "appconfig": _NO_ROUTES, "appsync": _NO_ROUTES,
     "aps": _NO_ROUTES, "aws-marketplace": _NO_ROUTES, "backup": _NO_ROUTES,
     "batch": _NO_ROUTES, "bedrock": _NO_ROUTES, "bedrock-agentcore": _NO_ROUTES,
-    "cloudfront": _NO_ROUTES, "codeguru-reviewer": _NO_ROUTES, "connect": _NO_ROUTES,
+    "cloudfront": "its creation tags are a Tags structure holding Items, which this file does not read yet",
+    "codeguru-reviewer": _NO_ROUTES, "connect": _NO_ROUTES,
     "detective": _NO_ROUTES, "dlm": _NO_ROUTES,
-    "elasticfilesystem": _NO_ROUTES, "emr-serverless": _NO_ROUTES, "fis": _NO_ROUTES,
+    "elasticfilesystem": _NO_ROUTES,
     "inspector2": _NO_ROUTES, "iot": _NO_ROUTES, "kafka": _NO_ROUTES,
-    "mq": _NO_ROUTES, "oam": _NO_ROUTES,
+    "mq": _NO_ROUTES,
     "quicksight": "metadata-only REST subset; creation-tag IAM authorization is not implemented",
-    "ram": _NO_ROUTES,
-    "resource-explorer-2": _NO_ROUTES, "rum": _NO_ROUTES, "s3tables": _NO_ROUTES,
+    "rum": _NO_ROUTES, "s3tables": _NO_ROUTES,
     "s3": "authorized by route; S3 checks s3:PutObjectTagging for an object it creates with tags itself",
     "servicecatalog": "its operations that tag are AppRegistry's, whose REST routes no rule maps yet",
 }
@@ -159,27 +161,14 @@ BY_HAND = {
 }
 
 NO_TAGS = "no member of the request carries tags"
-# For an operation AWS has shipped since the botocore pin. It lasts until a bump brings the operation in, when
-# entry_for refuses it, so that its tags are read.
+# For an operation AWS has shipped since the botocore pin. A bump bringing the operation in
+# replaces this verdict with its tag members (or NO_TAGS).
 NOT_IN_BOTOCORE = "the pinned botocore does not have the operation yet, so its request cannot be read"
-# Operations the reference lists with a tagging action whose request carries no tags this file reads.
+UNREADABLE_PROTOCOL = "the request uses a protocol this file does not read"
+OPAQUE_PAYLOAD = "the request has an opaque payload this file does not read"
+# Operations whose tags need an operation-specific reason instead of the model-derived verdict.
 NOT_READ = {
-    "athena:CreateSystemTableConfiguration": NOT_IN_BOTOCORE,
-    "cloudformation:ExecuteChangeSet": NO_TAGS,
-    "dynamodb:UpdateTable": NO_TAGS,
     "ec2:RequestSpotFleet": "its tags are in spotFleetRequestConfig, deeper than the members this file reads",
-    "ecr:BatchGetImage": NO_TAGS,
-    "ecs:CreateGateway": NO_TAGS,
-    "iam:AcquireRole": NO_TAGS,
-    "rds:CreateDBCapacityReservation": NO_TAGS,
-    "rds:DeleteDBCluster": NO_TAGS,
-    "rds:DeleteDBInstance": NO_TAGS,
-    "rds:DeleteTenantDatabase": NO_TAGS,
-    "network-firewall:CreateFirewallPolicyV2": NO_TAGS,
-    "events:StartReplay": NO_TAGS,
-    "rds:StopDBInstance": NO_TAGS,
-    "sagemaker:CreateClusterExtension": NOT_IN_BOTOCORE,
-    "ssm:StartExecutionPreview": NO_TAGS,
 }
 
 # Members the rule reads that carry no tags the operation attaches, each with why.
@@ -396,14 +385,20 @@ def _collection(model: dict, shape_name: str) -> dict | None:
     return None
 
 
-def tag_members(model: dict, operation: str) -> list[dict]:
-    """The members of the operation's request the rule reads, as vendored entries."""
-    spec = model["operations"].get(operation)
-    if spec is None or "input" not in spec or not readable(model):
-        return []
+def tag_members(model: dict, operation: str) -> tuple[list[dict], str | None]:
+    """The request's tag members, or the model-derived reason none can be read."""
+    if operation not in model["operations"]:
+        return [], NOT_IN_BOTOCORE
+    spec = model["operations"][operation]
+    if not isinstance(spec, dict):
+        raise ValueError(f"{operation}: botocore operation is not an object")
+    if "input" not in spec:
+        return [], NO_TAGS
+    if not readable(model):
+        return [], UNREADABLE_PROTOCOL
     root = model["shapes"][spec["input"]["shape"]]
     if root.get("payload") is not None:
-        return []
+        return [], OPAQUE_PAYLOAD
     found = []
     for name, member in root.get("members", {}).items():
         if member.get("location") not in BODY_LOCATIONS or not TAG_MEMBER_RE.match(name):
@@ -426,7 +421,7 @@ def tag_members(model: dict, operation: str) -> list[dict]:
                 if len(kinds) == 1:
                     inner_collection["resourceType"] = _serialized(kinds[0], element["members"][kinds[0]], model)
                 found.append({"member": path, **inner_collection})
-    return found
+    return found, None if found else NO_TAGS
 
 
 def resource_arns(documents: list[dict], namespaces: set[str]) -> dict[str, dict[str, str]]:
@@ -457,14 +452,13 @@ def entry_for(operation: str, upstream: dict, models: dict[str, dict]) -> dict:
         return {**head, "byHand": BY_HAND[operation]}
     name = operation.split(":", 1)[1]
     if operation in NOT_READ:
-        if NOT_READ[operation] == NOT_IN_BOTOCORE and any(name in model["operations"] for model in models.values()):
-            raise ValueError(f"{operation}: the pinned botocore has it now, so take it out of NOT_READ")
         return {**head, "notRead": NOT_READ[operation]}
     if len(upstream["tagging"]) != 1:
         raise ValueError(f"{operation}: needs one of {upstream['tagging']}; check it by hand (BY_HAND)")
+    readings = [tag_members(model, name) for model in models.values()]
     members: dict[str, dict] = {}
-    for model in models.values():
-        for member in tag_members(model, name):
+    for found, _reason in readings:
+        for member in found:
             members.setdefault(member["member"], member)
     for path in EXCLUDED_MEMBERS.get(operation, {}):
         members.pop(path, None)
@@ -473,8 +467,11 @@ def entry_for(operation: str, upstream: dict, models: dict[str, dict]) -> dict:
             raise ValueError(f"{operation}: QUERY_MEMBERS names {path}, which its request does not have")
         members[path] = {**members[path], "query": query}
     if not members:
-        raise ValueError(f"{operation}: no request member carries tags; say why it is not read (NOT_READ) "
-                         f"or check it by hand (BY_HAND)")
+        reasons = [reason for _found, reason in readings]
+        reason = next((item for item in reasons if item in (UNREADABLE_PROTOCOL, OPAQUE_PAYLOAD)),
+                      NO_TAGS if NO_TAGS in reasons or any(found for found, _reason in readings)
+                      else NOT_IN_BOTOCORE)
+        return {**head, "notRead": reason}
     return {**head, "tags": [members[path] for path in sorted(members)]}
 
 
@@ -525,7 +522,7 @@ def _unmatched_exclusions(covered: dict[str, dict], namespaces: dict[str, list[s
             continue
         name = operation.split(":", 1)[1]
         found = {member["member"] for model in load_models(data, set(namespaces[namespace_of(operation)])).values()
-                 for member in tag_members(model, name)}
+                 for member in tag_members(model, name)[0]}
         problems += [f"EXCLUDED_MEMBERS names {path} for {operation}, which its request does not have"
                      for path in paths if path not in found]
     return problems

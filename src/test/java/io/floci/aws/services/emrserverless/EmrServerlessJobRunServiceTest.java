@@ -13,6 +13,7 @@ import io.floci.aws.services.emrserverless.model.JobDriver;
 import io.floci.aws.services.emrserverless.model.JobRun;
 import io.floci.aws.services.emrserverless.model.JobRunAttemptSummary;
 import io.floci.aws.services.emrserverless.model.JobRunRecord;
+import io.floci.aws.services.emrserverless.model.MaximumCapacity;
 import io.floci.aws.services.emrserverless.model.MonitoringConfiguration;
 import io.floci.aws.services.emrserverless.model.RuntimeConfiguration;
 import io.floci.aws.services.emrserverless.model.StartJobRunRequest;
@@ -28,6 +29,7 @@ import java.util.ArrayList;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
 import java.util.Optional;
 import java.util.Set;
 import java.util.UUID;
@@ -37,8 +39,10 @@ import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.argThat;
 import static org.mockito.Mockito.RETURNS_DEEP_STUBS;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.timeout;
 import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
@@ -295,7 +299,7 @@ class EmrServerlessJobRunServiceTest {
         String driverImage = "123456789012.dkr.ecr.us-east-1.amazonaws.com/spark/driver:7.5.0";
         CreateApplicationRequest wholeApplication = applicationRequest("custom", "emr-7.5.0", "SPARK");
         wholeApplication.setImageConfiguration(EmrServerlessServiceTest.image(applicationImage));
-        // Local mode runs the executors in the driver's container, so an Executor image is not used.
+        // The executors' worker type's image is theirs, not the driver's.
         wholeApplication.setWorkerTypeSpecifications(
                 Map.of("Executor", EmrServerlessServiceTest.workerType(driverImage)));
         CreateApplicationRequest perWorkerType = applicationRequest("per-worker-type", "emr-7.5.0", "SPARK");
@@ -312,6 +316,120 @@ class EmrServerlessJobRunServiceTest {
         assertEquals(applicationImage, runner.jobs.get(0).customImage());
         assertEquals(driverImage, runner.jobs.get(1).customImage());
         assertNull(runner.jobs.get(2).customImage());
+    }
+
+    @Test
+    void aRunsContainersRunForItsApplicationsArchitectureElseTheDockerHostsOwn() {
+        FakeRunner runner = new FakeRunner();
+        EmrServerlessJobRunService service = honouringService(runner);
+        CreateApplicationRequest graviton = applicationRequest("graviton", "emr-7.5.0", "SPARK");
+        graviton.setArchitecture("ARM64");
+        CreateApplicationRequest x86 = applicationRequest("x86", "emr-7.5.0", "SPARK");
+        x86.setArchitecture("X86_64");
+        CreateApplicationRequest hive = applicationRequest("hive-graviton", "emr-7.5.0", "HIVE");
+        hive.setArchitecture("ARM64");
+
+        service.startJobRun(applications.createApplication(graviton).getApplicationId(), request(null, null));
+        service.startJobRun(applications.createApplication(x86).getApplicationId(), request(null, null));
+        service.startJobRun(applicationId, request(null, null));
+        service.startJobRun(applications.createApplication(hive).getApplicationId(),
+                hiveRequest("s3://bucket/queries/report.sql", null, null));
+        for (int i = 0; i < 4; i++) {
+            runNext();
+        }
+
+        assertEquals("linux/arm64", runner.jobs.get(0).platform());
+        assertEquals("linux/amd64", runner.jobs.get(1).platform());
+        // An application that names none runs on the Docker host's own platform.
+        assertNull(runner.jobs.get(2).platform());
+        assertEquals("linux/arm64", runner.jobs.get(3).platform());
+    }
+
+    @Test
+    void aRunsContainersRunForItsApplicationsArchitectureOnlyWithHonourArchitecturesOn() {
+        for (boolean honour : List.of(true, false)) {
+            EmulatorConfig config = mock(EmulatorConfig.class, RETURNS_DEEP_STUBS);
+            when(config.services().emrserverless().runnerMode()).thenReturn("docker");
+            when(config.services().emrserverless().honourArchitectures()).thenReturn(honour);
+            EmrServerlessSparkRunner sparkRunner = mock(EmrServerlessSparkRunner.class);
+            when(sparkRunner.run(any(), any())).thenReturn(SparkJobRunner.Outcome.exitedWith(0));
+            EmrServerlessJobRunService service = new EmrServerlessJobRunService(new InMemoryStorageFactory(ACCOUNT_ID),
+                    applications, iamService, new RegionResolver(REGION, ACCOUNT_ID), null, objectMapper, config, clock,
+                    sparkRunner);
+            CreateApplicationRequest graviton = applicationRequest("graviton-" + honour, "emr-7.5.0", "SPARK");
+            graviton.setArchitecture("ARM64");
+            try {
+                service.startJobRun(applications.createApplication(graviton).getApplicationId(), request(null, null));
+
+                // Off, the default, an ARM64 application's run stays on the Docker host's own platform.
+                String platform = honour ? "linux/arm64" : null;
+                verify(sparkRunner, timeout(10_000))
+                        .run(argThat(job -> Objects.equals(platform, job.platform())), any());
+            } finally {
+                service.shutdown();
+            }
+        }
+    }
+
+    @Test
+    void aSparkRunsExecutorsRunApartInTheirWorkerTypesImageWithinTheApplicationsMaximumCapacity() {
+        FakeRunner runner = new FakeRunner();
+        EmrServerlessJobRunService service = dockerService(runner, 2);
+        String applicationImage = "123456789012.dkr.ecr.us-east-1.amazonaws.com/spark/custom:7.5.0";
+        String executorImage = "123456789012.dkr.ecr.us-east-1.amazonaws.com/spark/executor:7.5.0";
+        CreateApplicationRequest capped = applicationRequest("capped", "emr-7.5.0", "SPARK");
+        capped.setImageConfiguration(EmrServerlessServiceTest.image(applicationImage));
+        capped.setWorkerTypeSpecifications(Map.of("Executor", EmrServerlessServiceTest.workerType(executorImage)));
+        MaximumCapacity capacity = new MaximumCapacity();
+        capacity.setCpu("12 vCPU");
+        capacity.setMemory("64 GB");
+        capacity.setDisk("200 GB");
+        capped.setMaximumCapacity(capacity);
+        CreateApplicationRequest whole = applicationRequest("whole", "emr-7.5.0", "SPARK");
+        whole.setImageConfiguration(EmrServerlessServiceTest.image(applicationImage));
+        String hive = applications.createApplication(applicationRequest("hive", "emr-7.5.0", "HIVE"))
+                .getApplicationId();
+
+        Application cappedApplication = applications.createApplication(capped);
+        Application wholeApplication = applications.createApplication(whole);
+        service.startJobRun(cappedApplication.getApplicationId(), request(null, null));
+        service.startJobRun(wholeApplication.getApplicationId(), request(null, null));
+        service.startJobRun(applicationId, request(null, null));
+        service.startJobRun(hive, hiveRequest("s3://bucket/queries/report.sql", null, null));
+        for (int i = 0; i < 4; i++) {
+            runNext();
+        }
+
+        // Each within its application's capacity, which that application's runs share.
+        assertEquals(new SparkJobRunner.Executors(2, executorImage, 12, 64, 200, cappedApplication.getArn()),
+                runner.jobs.get(0).executors());
+        // The application's image applies to every worker type; without one, the release's.
+        assertEquals(new SparkJobRunner.Executors(2, applicationImage, 0, 0, 0, wholeApplication.getArn()),
+                runner.jobs.get(1).executors());
+        assertEquals(new SparkJobRunner.Executors(2, null, 0, 0, 0,
+                applications.getApplication(applicationId).getArn()), runner.jobs.get(2).executors());
+        // Tez runs a Hive run's tasks in its driver's container.
+        assertNull(runner.jobs.get(3).executors());
+    }
+
+    @Test
+    void withoutExecutorContainersARunsExecutorsRunInItsDriversContainer() {
+        FakeRunner runner = new FakeRunner();
+        EmrServerlessJobRunService service = dockerService(runner, 0);
+
+        service.startJobRun(applicationId, request(null, null));
+        runNext();
+
+        assertNull(runner.jobs.get(0).executors());
+    }
+
+    @Test
+    void aMaximumCapacitysAmountIsTheNumberItStartsWith() {
+        assertEquals(400, EmrServerlessJobRunService.capacityAmount("400 vCPU"));
+        assertEquals(1024, EmrServerlessJobRunService.capacityAmount("1024GB"));
+        assertEquals(0, EmrServerlessJobRunService.capacityAmount(null));
+        assertEquals(0, EmrServerlessJobRunService.capacityAmount("GB"));
+        assertEquals(Long.MAX_VALUE, EmrServerlessJobRunService.capacityAmount("9".repeat(30)));
     }
 
     @Test
@@ -1015,6 +1133,18 @@ class EmrServerlessJobRunServiceTest {
     private EmrServerlessJobRunService dockerService(SparkJobRunner runner) {
         return new EmrServerlessJobRunService(store, applications, iamService, new RegionResolver(REGION, ACCOUNT_ID),
                 null, objectMapper, 0, clock, runner, tasks::add);
+    }
+
+    // A service whose Spark runs have up to executorContainers executors in containers of their own.
+    private EmrServerlessJobRunService dockerService(SparkJobRunner runner, int executorContainers) {
+        return new EmrServerlessJobRunService(store, applications, iamService, new RegionResolver(REGION, ACCOUNT_ID),
+                null, objectMapper, 0, clock, runner, tasks::add, null, null, null, executorContainers);
+    }
+
+    // A service whose container runs run for their application's architecture, as with honour-architectures on.
+    private EmrServerlessJobRunService honouringService(SparkJobRunner runner) {
+        return new EmrServerlessJobRunService(store, applications, iamService, new RegionResolver(REGION, ACCOUNT_ID),
+                null, objectMapper, 0, clock, runner, tasks::add, null, null, null, 0, true);
     }
 
     private void runNext() {

@@ -165,6 +165,10 @@ RDS endpoints return the us-east-1 hosted zone ID `Z2R2ITUGPM61AM` in all region
 | `FailoverGlobalCluster` | Promote a secondary to primary (failover with `AllowDataLoss`, or switchover) |
 | `SwitchoverGlobalCluster` | Promote a secondary to primary and demote the current primary to a secondary |
 | `FailoverDBCluster` | Move a DB cluster's writer role to a reader instance, the named one or the first |
+| `CreateBlueGreenDeployment` | Stage a green copy of a DB instance with a new engine version, parameter group, class or storage; see [Blue/Green deployments](#bluegreen-deployments) |
+| `DescribeBlueGreenDeployments` | List blue/green deployments, by identifier and the `blue-green-deployment-identifier`, `blue-green-deployment-name`, `source` and `target` filters |
+| `SwitchoverBlueGreenDeployment` | Make the green instance production: it takes the blue name, ARN, endpoint and tags, and blue becomes `<name>-old1` |
+| `DeleteBlueGreenDeployment` | Delete a deployment, with `DeleteTarget` also deleting the green instance before switchover |
 | `AddTagsToResource` | Add tags to a DB resource |
 | `ListTagsForResource` | List tags for a DB resource |
 | `RemoveTagsFromResource` | Remove tags from a DB resource |
@@ -455,7 +459,7 @@ keep a cluster awake; and parameter group changes do not resume one.
 
 ## Modifying a DB instance
 
-`ModifyDBInstance` applies `DBInstanceClass`, `AllocatedStorage` and `EngineVersion`, and
+`ModifyDBInstance` applies `DBInstanceClass` and `AllocatedStorage`, and
 `DescribeDBInstances` reports the new values. Members the request leaves out keep their current
 value, so a partial modify does not reset anything.
 
@@ -467,7 +471,29 @@ value, so a partial modify does not reset anything.
   rather than refused, which is what AWS does. SQL Server takes the size it is given.
 - The same size is not a change and is left alone.
 
-`EngineVersion` accepts a minor upgrade on its own. A different major version needs
+Standalone container-backed instances support minor `EngineVersion` upgrades when the default
+image follows the requested version. Floci stops the proxy and database container, starts the new
+engine image on the same storage volume, and rebinds the existing endpoint. It reports `available`
+only after both the new backend and proxy have started. A failed restart reports `failed` and
+retains the storage volume.
+
+Major upgrades and downgrades fail with `InvalidParameterCombination` before any settings change.
+PostgreSQL 10 and later use the leading component as the major version; older PostgreSQL releases,
+MySQL, and MariaDB use the first two components. Existing databases need a migration for a major
+upgrade, which Floci does not perform. `AllowMajorVersionUpgrade` does not bypass this limitation.
+Custom image overrides and SQL Server do not map `EngineVersion` to a new image, so their version
+changes are also refused. Cluster members must use cluster-level engine management. Repeating the
+current version is allowed alongside other changes without restarting the database.
+
+A standalone instance created while Docker is unavailable may change its version before its first
+backend startup when its image follows the requested version. Its eventual container uses the
+updated version. Floci persists this never-started
+state, and protects the version before attempting to initialize the database, including when a later
+proxy startup fails. Existing databases remain protected against major changes after a reboot,
+storage reload, or lost container. Older records without this state are treated as existing databases.
+
+In mock mode (`FLOCI_SERVICES_RDS_MOCK=true`), `EngineVersion` updates the instance metadata.
+A minor upgrade is accepted on its own. A different major version needs
 `AllowMajorVersionUpgrade`, without which the request fails with `InvalidParameterCombination`.
 Major versions are compared on the leading version component, so a MySQL 8.0 to 8.4 upgrade reads
 as a minor one here while AWS treats it as major.
@@ -476,17 +502,11 @@ A refused member fails the whole request: a modify that carries a new `DBInstanc
 shrinking `AllocatedStorage` returns `InvalidParameterCombination` and leaves the class as it was,
 so a read-back never reports a value the request did not get.
 
-Two deviations are worth knowing:
-
-- **Changes apply immediately.** AWS defers a class, storage or engine-version change to the
-  preferred maintenance window unless `ApplyImmediately` is set, and reports it under
-  `PendingModifiedValues` until then. Floci runs no maintenance window and does not model
-  `PendingModifiedValues`, so it applies the change as soon as the request lands whatever
-  `ApplyImmediately` says. Without this a deferred change would never be applied at all, and every
-  read-back would report the same drift.
-- **The backing container is not re-imaged.** An engine-version change is recorded on the instance
-  and reported on read, but the container started at create time keeps running the image it was
-  started with. This is control-plane compatibility, like Aurora Serverless v2 scaling above.
+Accepted changes apply immediately. AWS defers a class, storage or engine-version change to the
+preferred maintenance window unless `ApplyImmediately` is set, and reports it under
+`PendingModifiedValues` until then. Floci runs no maintenance window and does not model
+`PendingModifiedValues`, so it applies accepted changes as soon as the request lands whatever
+`ApplyImmediately` says.
 
 For standalone, non-Aurora instances with instance-owned storage, `CreateDBInstance` and
 `ModifyDBInstance` retain the `StorageType` values `gp2`, `gp3`, `io1` and `io2`. A modify
@@ -691,6 +711,42 @@ connections drop while the container, endpoint and data stay. Deleting a source 
 same-region replicas; a cross-region replica keeps its link with the replication status
 `terminated` until it is promoted or deleted, which is what AWS does for PostgreSQL. Deleting a
 replica drops it from its source's list.
+
+## Blue/Green deployments
+
+`CreateBlueGreenDeployment` takes a PostgreSQL, MySQL or MariaDB DB instance by ARN as `Source`
+and creates its green copy, named `<source>-green-<suffix>`. The green instance inherits the
+blue one's settings and tags, with `TargetEngineVersion`, `TargetDBParameterGroupName`,
+`TargetDBInstanceClass`, `TargetAllocatedStorage` and `TargetStorageType` applied. Without
+`TargetDBParameterGroupName` it keeps the blue parameter group when the engine version stays in the
+same family, and gets the default group of the new family on a major upgrade. Both instances report
+the link in `DescribeDBInstances` as a read replica pair. The green database is initialised from a
+dump of the blue one taken at creation, the mechanism snapshots use, so it holds the blue data as
+of that moment; writes made to blue afterwards are not streamed to it.
+
+Creation finishes before the response, so the deployment is reported `AVAILABLE` straight away
+with its `SwitchoverDetails` and `Tasks`. As on AWS, a source needs automated backups on
+(`InvalidDBInstanceState` otherwise), a lower `TargetEngineVersion` is refused, and an instance can
+be in one deployment at a time. Floci refuses with `SourceDatabaseNotSupportedFault` an instance
+that belongs to a cluster, is a read replica or has read replicas, keeps its master password in
+Secrets Manager, or is a DB proxy target, and refuses a DB cluster source with
+`SourceClusterNotSupportedFault`. `TargetIops`, `TargetStorageThroughput` and
+`UpgradeTargetStorageConfig` are accepted and not applied, as `CreateDBInstance` treats IOPS.
+
+`SwitchoverBlueGreenDeployment` requires the deployment to be `AVAILABLE` and both instances
+available. Green takes the blue identifier, ARN, endpoint and tags, so clients that connect to the
+blue endpoint reach the new database without a change. Blue is renamed `<name>-old<n>`, moves to
+the endpoint green had, and keeps running. The deployment ends `SWITCHOVER_COMPLETED`, with
+`Source` naming the old instance and `Target` the new production one. The switchover completes
+before the response; `SwitchoverTimeout` is checked against the 30 to 3600 second range and has
+nothing else to bound. The old instance is not made read only.
+
+Before switchover, a deployment whose blue or green instance has been deleted, or whose green
+instance was promoted, reports `INVALID_CONFIGURATION` and can no longer be switched over.
+`DeleteBlueGreenDeployment` deletes the green instance too with `DeleteTarget`, which is refused
+after switchover; without it the green instance is kept as a standalone instance. The blue
+instance is never touched. A deployment is tagged through its
+`arn:aws:rds:<region>:<account>:deployment:<identifier>` ARN.
 
 ## Engine catalogue
 
@@ -1115,18 +1171,24 @@ The parameters a PostgreSQL client sends when it connects (`options` such as `-c
 
 On MySQL, `AWSAuthenticationPlugin` is proprietary to RDS and ships in no public MySQL build, so
 `CREATE USER ... IDENTIFIED WITH AWSAuthenticationPlugin AS 'RDS'` would fail against the container
-with `ERROR 1524 (HY000): Plugin 'AWSAuthenticationPlugin' is not loaded`. The proxy rewrites that
+because the plugin is unavailable. The proxy rewrites that
 clause to `IDENTIFIED WITH mysql_native_password AS '*000...0'`, an authentication string no
 password hashes to. The account is therefore created, can be granted to and can be dropped, but
 holds no password of its own, which is what an IAM DB user is: an account whose credentials come
 from IAM rather than from MySQL. This is the MySQL counterpart of the empty `rds_iam` role Floci
 pre-creates for PostgreSQL.
 
-Two limits follow from that. `SHOW CREATE USER` reports the substituted plugin rather than
-`AWSAuthenticationPlugin`, so a Terraform or Pulumi refresh sees drift on `auth_plugin`. And
-connecting with a token is not yet emulated for MySQL: unlike PostgreSQL, which receives the
-password in cleartext, MySQL sends a scramble, so the proxy would have to drive the
-`mysql_clear_password` auth switch that real RDS triggers before it could see a token to validate.
+On a connection that negotiates zstd compression, the proxy forwards command frames unchanged,
+including frames with an uncompressed payload. It does not rewrite this IAM user DDL, so the
+backend rejects the unsupported `AWSAuthenticationPlugin` on that connection.
+
+For users created through the rewrite, `SHOW CREATE USER` reports the substituted plugin rather
+than `AWSAuthenticationPlugin`, so a Terraform or Pulumi refresh sees drift on `auth_plugin`.
+MySQL IAM token login is supported over TLS: the proxy can request a `mysql_clear_password`
+auth switch to validate the token, then authenticates to the container as the master user.
+Unlike RDS, that MySQL session stays the master user: `CURRENT_USER()` reports the master,
+and the IAM user's own grants do not apply. The PostgreSQL proxy instead hands the session
+over to the role named in the token.
 
 ## Certificate authorities
 

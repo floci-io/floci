@@ -29,6 +29,8 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.function.Executable;
 import org.junit.jupiter.api.io.TempDir;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.CsvSource;
 import org.mockito.ArgumentCaptor;
 
 import java.io.ByteArrayInputStream;
@@ -4012,9 +4014,8 @@ class DynamoDbServiceTest {
     }
 
     @Test
-    void updateItemSetDoubledOuterParensStillApplies() {
+    void updateItemRefusesDoubledOuterParens() {
         String region = "eu-west-1";
-        // Defence-in-depth: even multiply-wrapped expressions should parse the same as bare.
         createUsersTable(region);
 
         ObjectNode existing = mapper.createObjectNode();
@@ -4031,12 +4032,47 @@ class DynamoDbServiceTest {
         ObjectNode exprNames = mapper.createObjectNode();
         exprNames.put("#cnt", "counter");
 
-        service.updateItem("Users", key, null,
+        AwsException ex = assertThrows(AwsException.class, () -> service.updateItem("Users", key, null,
                 "SET #cnt = ((#cnt - :v))",
-                exprNames, exprValues, null, region);
+                exprNames, exprValues, null, region));
+        assertEquals("Invalid UpdateExpression: The expression has redundant parentheses;", ex.getMessage());
 
         JsonNode stored = service.getItem("Users", key, region);
-        assertEquals("7", stored.get("counter").get("N").asText());
+        assertEquals("10", stored.get("counter").get("N").asText());
+    }
+
+    @ParameterizedTest
+    @CsvSource(delimiter = '|', textBlock = """
+            SET a = (:v) + (:w)                                  | a | {"N":"5"}
+            SET a = ((:v) + :w)                                  | a | {"N":"5"}
+            SET a = :w - (:v)                                    | a | {"N":"1"}
+            SET a = (n) + (:v)                                   | a | {"N":"12"}
+            SET a = (k[0]) + (k[1])                              | a | {"N":"9"}
+            SET a = (if_not_exists(n, :v)) + (:w)                | a | {"N":"13"}
+            SET a = if_not_exists(z, if_not_exists(n, :v)) + :w  | a | {"N":"13"}
+            SET a = if_not_exists((#n), :v)                      | a | {"N":"10"}
+            SET a = if_not_exists((z), (:v))                     | a | {"N":"2"}
+            SET a = if_not_exists(z, (n))                        | a | {"N":"10"}
+            SET a = if_not_exists(z, if_not_exists(n, :v))       | a | {"N":"10"}
+            SET a = if_not_exists(z, if_not_exists(y, :v))       | a | {"N":"2"}
+            SET a = if_not_exists(z, (if_not_exists((y), (:v)))) | a | {"N":"2"}
+            SET l = list_append((:l), (:m))                      | l | {"L":[{"S":"x"},{"S":"y"}]}
+            SET l = list_append((if_not_exists(l, :l)), :m)      | l | {"L":[{"S":"x"},{"S":"y"}]}
+            SET l = (list_append(:l, (:m)))                      | l | {"L":[{"S":"x"},{"S":"y"}]}
+            """)
+    void updateItemAppliesParenthesizedAndNestedOperands(String expression, String attribute, String expected)
+            throws IOException {
+        String region = "eu-west-1";
+        createUsersTable(region);
+        service.putItem("Users", (ObjectNode) mapper.readTree("""
+                {"userId":{"S":"u1"},"n":{"N":"10"},"k":{"L":[{"N":"4"},{"N":"5"}]}}"""), region);
+        ObjectNode names = mapper.createObjectNode().put("#n", "n");
+        ObjectNode values = (ObjectNode) mapper.readTree("""
+                {":v":{"N":"2"},":w":{"N":"3"},":l":{"L":[{"S":"x"}]},":m":{"L":[{"S":"y"}]}}""");
+
+        service.updateItem("Users", item("userId", "u1"), null, expression, names, values, null, region);
+
+        assertEquals(mapper.readTree(expected), service.getItem("Users", item("userId", "u1"), region).get(attribute));
     }
 
     @Test

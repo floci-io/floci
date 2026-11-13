@@ -844,7 +844,7 @@ class OrganizationsIntegrationTest {
         String content = "{\"Version\":\"2012-10-17\",\"Statement\":[{\"Effect\":\"Allow\","
                 + "\"Principal\":{\"AWS\":\"*\"},\"Action\":\"organizations:Describe*\",\"Resource\":\"*\"}]}";
 
-        organizations("PutResourcePolicy", "{\"Content\":" + quote(content) + "}")
+        String resourcePolicyId = organizations("PutResourcePolicy", "{\"Content\":" + quote(content) + "}")
         .when()
             .post("/")
         .then()
@@ -852,7 +852,8 @@ class OrganizationsIntegrationTest {
             .body("ResourcePolicy.ResourcePolicySummary.Id", startsWith("rp-"))
             .body("ResourcePolicy.ResourcePolicySummary.Arn",
                     startsWith("arn:aws:organizations::000000000000:resourcepolicy/" + organizationId))
-            .body("ResourcePolicy.Content", equalTo(content));
+            .body("ResourcePolicy.Content", equalTo(content))
+            .extract().jsonPath().getString("ResourcePolicy.ResourcePolicySummary.Id");
 
         organizations("DescribeResourcePolicy", "{}")
         .when()
@@ -860,6 +861,30 @@ class OrganizationsIntegrationTest {
         .then()
             .statusCode(200)
             .body("ResourcePolicy.Content", equalTo(content));
+
+        organizations("TagResource",
+                "{\"ResourceId\":\"" + resourcePolicyId + "\",\"Tags\":[{\"Key\":\"env\",\"Value\":\"test\"}]}")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200);
+
+        organizations("PutResourcePolicy",
+                "{\"Content\":" + quote(content) + ",\"Tags\":[{\"Key\":\"env\",\"Value\":\"prod\"}]}")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(400)
+            .body("__type", equalTo("InvalidInputException"));
+
+        organizations("ListTagsForResource", "{\"ResourceId\":\"" + resourcePolicyId + "\"}")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("Tags", hasSize(1))
+            .body("Tags[0].Key", equalTo("env"))
+            .body("Tags[0].Value", equalTo("test"));
 
         organizations("DeleteResourcePolicy", "{}")
         .when()

@@ -139,7 +139,7 @@ class EksPodIdentityDockerIntegrationTest {
         cluster.setIdentity(new ClusterIdentity(new OidcIdentity(issuer)));
         eksService.putClusterForAccount("000000000000", cluster);
 
-        ClusterOidcKey key = oidcService.ensureKeyForAccount("000000000000", clusterName, issuer);
+        ClusterOidcKey key = oidcService.ensureKeyForAccount("000000000000", EksService.clusterKey("us-east-1", clusterName), issuer);
         assertNotNull(key);
 
         associationService.create(cluster, new CreatePodIdentityAssociationRequest(
@@ -162,7 +162,7 @@ class EksPodIdentityDockerIntegrationTest {
 
         eksClusterManager.configurePodIdentityRelay(cluster, containerId);
 
-        String validToken = oidcService.mintServiceAccountToken(clusterName, issuer, "default", "workload-sa",
+        String validToken = oidcService.mintServiceAccountToken(EksService.clusterKey("us-east-1", clusterName), issuer, "default", "workload-sa",
                 "pods.eks.amazonaws.com", 3600);
 
         String credsJson = execInContainer(containerId, "curl -s -f -H 'Authorization: " + validToken + "' http://169.254.170.23/v1/credentials");
@@ -170,7 +170,7 @@ class EksPodIdentityDockerIntegrationTest {
         assertTrue(credsJson.contains("\"AccessKeyId\""));
         assertTrue(credsJson.contains("ASIA"));
 
-        String unassociatedToken = oidcService.mintServiceAccountToken(clusterName, issuer, "default", "other-sa",
+        String unassociatedToken = oidcService.mintServiceAccountToken(EksService.clusterKey("us-east-1", clusterName), issuer, "default", "other-sa",
                 "pods.eks.amazonaws.com", 3600);
         String missingCode = execInContainer(containerId, "curl -s -o /dev/null -w '%{http_code}' -H 'Authorization: " + unassociatedToken + "' http://169.254.170.23/v1/credentials");
         assertEquals("404", missingCode.trim());

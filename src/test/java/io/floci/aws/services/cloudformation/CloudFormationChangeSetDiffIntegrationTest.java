@@ -1,14 +1,17 @@
 package io.floci.aws.services.cloudformation;
 
 import io.floci.aws.core.common.XmlParser;
+import io.floci.aws.services.ses.SesReceiptRuleService;
 import io.floci.aws.testing.CfnStackWaits;
 import io.floci.aws.testing.RestAssuredJsonUtils;
 import io.quarkus.test.junit.QuarkusTest;
+import jakarta.inject.Inject;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
 
 import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 
@@ -28,6 +31,9 @@ import static org.junit.jupiter.api.Assertions.assertFalse;
 class CloudFormationChangeSetDiffIntegrationTest {
 
     private static final String SSM_CONTENT_TYPE = "application/x-amz-json-1.1";
+
+    @Inject
+    SesReceiptRuleService ses;
 
     private final List<String> stacksToDelete = new ArrayList<>();
 
@@ -486,6 +492,70 @@ class CloudFormationChangeSetDiffIntegrationTest {
             .body(containsString("<Replacement>True</Replacement>"));
     }
 
+    /**
+     * Registry schema aws-cognito-userpooluser.json (CloudformationSchema.zip, us-east-1) lists
+     * /properties/UserPoolId in createOnlyProperties; the resource page
+     * aws-resource-cognito-userpooluser says "Update requires: Replacement" for UserPoolId.
+     */
+    @Test
+    void createOnlyPropertyChange_reportsReplacementTrue() {
+        String stackName = "cs-diff-create-only-stack";
+        stacksToDelete.add(stackName);
+
+        String initialTemplate = userPoolUserTemplate("PoolA");
+        String changedTemplate = userPoolUserTemplate("PoolB");
+
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "CreateStack")
+            .formParam("StackName", stackName)
+            .formParam("TemplateBody", initialTemplate)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200);
+
+        CfnStackWaits.awaitStatus(stackName, "CREATE_COMPLETE");
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "CreateChangeSet")
+            .formParam("StackName", stackName)
+            .formParam("ChangeSetName", "create-only-cs")
+            .formParam("ChangeSetType", "UPDATE")
+            .formParam("TemplateBody", changedTemplate)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200);
+
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "DescribeChangeSet")
+            .formParam("StackName", stackName)
+            .formParam("ChangeSetName", "create-only-cs")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body(containsString("<LogicalResourceId>U</LogicalResourceId>"))
+            .body(containsString("<Replacement>True</Replacement>"));
+    }
+
+    private static String userPoolUserTemplate(String poolLogicalId) {
+        return """
+            {
+              "Resources": {
+                "PoolA": {"Type": "AWS::Cognito::UserPool", "Properties": {"UserPoolName": "cs-diff-pool-a"}},
+                "PoolB": {"Type": "AWS::Cognito::UserPool", "Properties": {"UserPoolName": "cs-diff-pool-b"}},
+                "U": {
+                  "Type": "AWS::Cognito::UserPoolUser",
+                  "Properties": {"UserPoolId": {"Ref": "%s"}, "Username": "cs-diff-user"}
+                }
+              }
+            }
+            """.formatted(poolLogicalId);
+    }
+
     @Test
     void ssmParameterValueDrift_isReportedAsAChange() {
         String stackName = "cs-diff-ssm-drift-stack";
@@ -877,5 +947,187 @@ class CloudFormationChangeSetDiffIntegrationTest {
         boolean unchangedQueueIncluded = changes.stream()
                 .anyMatch(m -> "UnchangedQueue".equals(m.get("LogicalResourceId")));
         assertFalse(unchangedQueueIncluded);
+    }
+
+    /**
+     * Registry schema aws-route53-healthcheck.json lists only /properties/HealthCheckConfig/Type,
+     * /MeasureLatency and /RequestInterval in createOnlyProperties, so editing the Port inside
+     * HealthCheckConfig is an in-place update and editing its Type is a replacement.
+     */
+    @Test
+    void nestedCreateOnlyPointer_replacesOnlyWhenTheNestedValueChanges() {
+        String stackName = "cs-diff-nested-hc-stack";
+        stacksToDelete.add(stackName);
+
+        createStack(stackName, healthCheckTemplate("HTTP", 80));
+
+        assertEquals("False", previewReplacement(stackName, "hc-port-cs", healthCheckTemplate("HTTP", 8080)).get("Check"));
+        assertEquals("True", previewReplacement(stackName, "hc-type-cs", healthCheckTemplate("HTTPS", 80)).get("Check"));
+    }
+
+    private static String healthCheckTemplate(String type, int port) {
+        return """
+            {
+              "Resources": {
+                "Check": {
+                  "Type": "AWS::Route53::HealthCheck",
+                  "Properties": {
+                    "HealthCheckConfig": {
+                      "Type": "%s", "IPAddress": "192.0.2.10", "Port": %d, "ResourcePath": "/x"
+                    }
+                  }
+                }
+              }
+            }
+            """.formatted(type, port);
+    }
+
+    /**
+     * Registry schema aws-ses-receiptrule.json lists /properties/Rule/Name and /properties/RuleSetName
+     * in createOnlyProperties, but not Rule/Enabled: toggling Enabled is in place, renaming is not.
+     */
+    @Test
+    void sesReceiptRule_replacesOnRuleNameButNotOnEnabled() {
+        String stackName = "cs-diff-nested-ses-stack";
+        String ruleSet = "cs-diff-nested-ses-set";
+        stacksToDelete.add(stackName);
+        ses.createReceiptRuleSet(ruleSet, "us-east-1");
+        try {
+            createStack(stackName, receiptRuleTemplate(ruleSet, "rule-a", true));
+
+            assertEquals("False", previewReplacement(stackName, "ses-enabled-cs",
+                    receiptRuleTemplate(ruleSet, "rule-a", false)).get("Rule"));
+            assertEquals("True", previewReplacement(stackName, "ses-name-cs",
+                    receiptRuleTemplate(ruleSet, "rule-b", true)).get("Rule"));
+        } finally {
+            deleteStackNow(stackName);
+            ses.deleteReceiptRuleSet(ruleSet, "us-east-1");
+        }
+    }
+
+    private static String receiptRuleTemplate(String ruleSet, String name, boolean enabled) {
+        return """
+            {
+              "Resources": {
+                "Rule": {
+                  "Type": "AWS::SES::ReceiptRule",
+                  "Properties": {
+                    "RuleSetName": "%s",
+                    "Rule": {"Name": "%s", "Enabled": %s, "Recipients": ["example.com"]}
+                  }
+                }
+              }
+            }
+            """.formatted(ruleSet, name, enabled);
+    }
+
+    /**
+     * Registry schema aws-batch-computeenvironment.json lists /properties/ComputeResources/SpotIamFleetRole
+     * in createOnlyProperties and does not list ComputeResources/InstanceRole. AWS::IAM::Role RoleName is
+     * create-only (aws-iam-role.json), so renaming the role replaces it. A compute environment that
+     * references the replaced role under SpotIamFleetRole is replaced with it; one that references it only
+     * under InstanceRole (same parent, not create-only) is updated in place.
+     */
+    @Test
+    void dependentIsReplacedOnlyWhenTheReferenceSitsUnderANestedCreateOnlyPointer() {
+        String stackName = "cs-diff-nested-dep-stack";
+        stacksToDelete.add(stackName);
+
+        createStack(stackName, roleAndComputeTemplate("cs-diff-nested-role-a"));
+
+        Map<String, String> replacement = previewReplacement(stackName, "dep-cs",
+                roleAndComputeTemplate("cs-diff-nested-role-b"));
+        assertEquals("True", replacement.get("Role"));
+        assertEquals("True", replacement.get("CreateOnlyRef"));
+        assertEquals("False", replacement.get("SiblingRef"));
+    }
+
+    private static String roleAndComputeTemplate(String roleName) {
+        return """
+            {
+              "Resources": {
+                "Role": {
+                  "Type": "AWS::IAM::Role",
+                  "Properties": {
+                    "RoleName": "%s",
+                    "AssumeRolePolicyDocument": {"Version": "2012-10-17", "Statement": [
+                      {"Effect": "Allow", "Principal": {"Service": "batch.amazonaws.com"}, "Action": "sts:AssumeRole"}]}
+                  }
+                },
+                "CreateOnlyRef": {
+                  "Type": "AWS::Batch::ComputeEnvironment",
+                  "Properties": {
+                    "ComputeEnvironmentName": "cs-diff-nested-ce-1",
+                    "Type": "MANAGED",
+                    "ComputeResources": {"Type": "FARGATE", "MaxvCpus": 4, "Subnets": ["subnet-local"],
+                      "SecurityGroupIds": ["sg-local"], "SpotIamFleetRole": {"Ref": "Role"}}
+                  }
+                },
+                "SiblingRef": {
+                  "Type": "AWS::Batch::ComputeEnvironment",
+                  "Properties": {
+                    "ComputeEnvironmentName": "cs-diff-nested-ce-2",
+                    "Type": "MANAGED",
+                    "ComputeResources": {"Type": "FARGATE", "MaxvCpus": 4, "Subnets": ["subnet-local"],
+                      "SecurityGroupIds": ["sg-local"], "InstanceRole": {"Ref": "Role"}}
+                  }
+                }
+              }
+            }
+            """.formatted(roleName);
+    }
+
+    private void createStack(String stackName, String template) {
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "CreateStack")
+            .formParam("StackName", stackName)
+            .formParam("TemplateBody", template)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200);
+        CfnStackWaits.awaitStatus(stackName, "CREATE_COMPLETE");
+    }
+
+    private void deleteStackNow(String stackName) {
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "DeleteStack")
+            .formParam("StackName", stackName)
+        .when()
+            .post("/");
+    }
+
+    /** Creates an UPDATE change set and returns the Replacement value per logical id. */
+    private Map<String, String> previewReplacement(String stackName, String changeSetName, String template) {
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "CreateChangeSet")
+            .formParam("StackName", stackName)
+            .formParam("ChangeSetName", changeSetName)
+            .formParam("ChangeSetType", "UPDATE")
+            .formParam("TemplateBody", template)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200);
+
+        String desc = given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "DescribeChangeSet")
+            .formParam("StackName", stackName)
+            .formParam("ChangeSetName", changeSetName)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .extract().body().asString();
+
+        Map<String, String> result = new HashMap<>();
+        for (Map<String, String> change : XmlParser.extractGroups(desc, "ResourceChange")) {
+            result.put(change.get("LogicalResourceId"), change.get("Replacement"));
+        }
+        return result;
     }
 }

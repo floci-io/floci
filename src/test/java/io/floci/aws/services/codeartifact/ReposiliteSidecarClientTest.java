@@ -11,11 +11,14 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
 import java.io.IOException;
+import java.io.InputStream;
 import java.io.OutputStream;
 import java.lang.reflect.Method;
 import java.net.InetSocketAddress;
 import java.net.URI;
 import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
+import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Optional;
@@ -349,6 +352,64 @@ class ReposiliteSidecarClientTest {
         assertArrayEquals("hello".getBytes(StandardCharsets.UTF_8), putBody.get());
     }
 
+    /**
+     * {@link #deployArtifactPutsTheBytesAndReturnsTheStatus}'s own streamed sibling: the file's
+     * real content ends up in the PUT body, sent via {@code BodyPublishers.ofFile} rather than a
+     * resident array.
+     */
+    @Test
+    void deployArtifactFromAPathPutsTheBytesAndReturnsTheStatus() throws Exception {
+        AtomicReference<byte[]> received = new AtomicReference<>();
+        AtomicReference<String> authHeader = new AtomicReference<>();
+        server.createContext("/dom--repo/com/example/a/1.0/a-1.0.jar", exchange -> {
+            authHeader.set(exchange.getRequestHeaders().getFirst("Authorization"));
+            received.set(exchange.getRequestBody().readAllBytes());
+            respond(exchange, 200, "");
+        });
+        Path staged = Files.createTempFile("reposilite-client-test-", ".tmp");
+        try {
+            Files.writeString(staged, "hello");
+
+            ReposiliteSidecarClient.DeployOutcome outcome = client.deployArtifact("dom--repo",
+                    "com/example/a/1.0/a-1.0.jar", staged);
+
+            assertThat(outcome.status(), is(200));
+            assertTrue(outcome.wroteNewContent());
+            assertArrayEquals("hello".getBytes(StandardCharsets.UTF_8), received.get());
+            assertThat(authHeader.get(), equalTo("Basic dGVzdDp0ZXN0"));
+        } finally {
+            Files.deleteIfExists(staged);
+        }
+    }
+
+    /**
+     * {@link #deployArtifactShortCircuitsToTwoHundredWithoutPuttingWhenContentIsByteIdentical}'s
+     * own streamed sibling: the idempotent-match preflight compares the staged file against the
+     * existing artifact in a lockstep stream comparison rather than one resident array against
+     * another, and must short-circuit the same way once they match.
+     */
+    @Test
+    void deployArtifactFromAPathShortCircuitsToTwoHundredWithoutPuttingWhenContentIsByteIdentical() throws Exception {
+        List<String> methodsSeen = new CopyOnWriteArrayList<>();
+        server.createContext("/dom--repo/com/example/a/1.0/a-1.0.jar", exchange -> {
+            methodsSeen.add(exchange.getRequestMethod());
+            respond(exchange, 200, "hello");
+        });
+        Path staged = Files.createTempFile("reposilite-client-test-", ".tmp");
+        try {
+            Files.writeString(staged, "hello");
+
+            ReposiliteSidecarClient.DeployOutcome outcome = client.deployArtifact("dom--repo",
+                    "com/example/a/1.0/a-1.0.jar", staged);
+
+            assertThat(outcome.status(), is(200));
+            assertFalse(outcome.wroteNewContent());
+            assertThat(methodsSeen, equalTo(List.of("GET")));
+        } finally {
+            Files.deleteIfExists(staged);
+        }
+    }
+
     @Test
     void fetchArtifactReturnsBytesAndContentTypeOnSuccess() {
         server.createContext("/dom--repo/com/example/a/1.0/a-1.0.jar", exchange -> {
@@ -373,6 +434,39 @@ class ReposiliteSidecarClientTest {
         assertTrue(artifact.isEmpty());
     }
 
+    /**
+     * {@link #fetchArtifactReturnsBytesAndContentTypeOnSuccess}'s own streamed sibling: same wire
+     * behavior, but the caller gets an open {@link InputStream} plus the real {@code
+     * Content-Length} instead of an already-resident {@code byte[]}.
+     */
+    @Test
+    void fetchArtifactStreamedReturnsTheStreamContentTypeAndLength() throws Exception {
+        server.createContext("/dom--repo/com/example/a/1.0/a-1.0.jar", exchange -> {
+            exchange.getResponseHeaders().set("Content-Type", "application/java-archive");
+            respond(exchange, 200, "jar-bytes");
+        });
+
+        Optional<ReposiliteSidecarClient.StreamedArtifact> artifact =
+                client.fetchArtifactStreamed("dom--repo", "com/example/a/1.0/a-1.0.jar");
+
+        assertTrue(artifact.isPresent());
+        try (InputStream in = artifact.get().content()) {
+            assertArrayEquals("jar-bytes".getBytes(StandardCharsets.UTF_8), in.readAllBytes());
+        }
+        assertThat(artifact.get().contentType(), equalTo("application/java-archive"));
+        assertThat(artifact.get().contentLength(), is(9L));
+    }
+
+    @Test
+    void fetchArtifactStreamedIsEmptyOnNotFound() {
+        server.createContext("/dom--repo/missing.jar", exchange -> respond(exchange, 404, ""));
+
+        Optional<ReposiliteSidecarClient.StreamedArtifact> artifact =
+                client.fetchArtifactStreamed("dom--repo", "missing.jar");
+
+        assertTrue(artifact.isEmpty());
+    }
+
     @Test
     void fetchPackageVersionAssetBuildsTheGavPathFromTheGroupIdArtifactIdVersionAndFilename() {
         settingsBody.set("{\"repositories\":[{\"id\":\"dom--repo\",\"visibility\":\"PUBLIC\",\"redeployment\":false}]}");
@@ -384,6 +478,27 @@ class ReposiliteSidecarClientTest {
 
         assertTrue(result.isPresent());
         assertArrayEquals("jar-bytes".getBytes(StandardCharsets.UTF_8), result.get());
+    }
+
+    /**
+     * {@link #fetchPackageVersionAssetBuildsTheGavPathFromTheGroupIdArtifactIdVersionAndFilename}'s
+     * own streamed sibling.
+     */
+    @Test
+    void fetchPackageVersionAssetStreamedBuildsTheGavPathFromTheGroupIdArtifactIdVersionAndFilename()
+            throws Exception {
+        settingsBody.set("{\"repositories\":[{\"id\":\"dom--repo\",\"visibility\":\"PUBLIC\",\"redeployment\":false}]}");
+        server.createContext("/api/settings/domain/maven", exchange -> respond(exchange, 200, settingsBody.get()));
+        server.createContext("/dom--repo/com/example/nested/a/1.0/a-1.0.jar", exchange -> respond(exchange, 200, "jar-bytes"));
+
+        Optional<RepositorySidecarManager.StreamedAsset> result = client.fetchPackageVersionAssetStreamed(
+                "dom--repo", "dom", "repo", "com.example.nested", "a", "1.0", "a-1.0.jar");
+
+        assertTrue(result.isPresent());
+        try (InputStream in = result.get().content()) {
+            assertArrayEquals("jar-bytes".getBytes(StandardCharsets.UTF_8), in.readAllBytes());
+        }
+        assertThat(result.get().contentLength(), is(9L));
     }
 
     /**

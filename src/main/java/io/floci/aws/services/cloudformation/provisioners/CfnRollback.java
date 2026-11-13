@@ -80,6 +80,15 @@ public final class CfnRollback {
     public static final String LOAD_BALANCER_SUBNETS_UPDATE_SNAPSHOT_ATTR = "__FlociLoadBalancerSubnetsUpdateSnapshot";
 
     /**
+     * Holds what an update that kept an ELBv2 target group changed in its registrations: the targets
+     * it registered that were not registered before, and the registrations it deregistered or
+     * registered over, so a failed stack update can put them back. Written by
+     * {@code ElbV2CfnProvisioner} between its RegisterTargets and DeregisterTargets and spent by the
+     * undo of a failed provision or by its {@code rollbackUpdate}, retained across a failed put back.
+     */
+    public static final String TARGET_GROUP_TARGETS_UPDATE_SNAPSHOT_ATTR = "__FlociTargetGroupTargetsUpdateSnapshot";
+
+    /**
      * Holds the targets an EventBridge rule carried before the update in flight reconciled them,
      * with the rule name, bus and region needed to address them again, so a failed stack update can
      * put them back. Written by {@code EventsCfnProvisioner} before its first target call and spent
@@ -376,6 +385,26 @@ public final class CfnRollback {
      * before its update call and spent by its {@code rollbackUpdate}.
      */
     public static final String NETWORK_CONNECTOR_UPDATE_SNAPSHOT_ATTR = "__FlociNetworkConnectorUpdateSnapshot";
+
+    /**
+     * Holds the mutable configuration an EFS file system carried before an in-place update changed
+     * it (throughput, backup, lifecycle, policy, protection and tags), so a failed stack update can
+     * put it back. Written by {@code EfsCfnProvisioner} before it reconciles and spent by its
+     * {@code rollbackUpdate}.
+     */
+    public static final String EFS_FILE_SYSTEM_UPDATE_SNAPSHOT_ATTR = "__FlociEfsFileSystemUpdateSnapshot";
+
+    /**
+     * Holds the security groups an EFS mount target carried before an in-place update changed them,
+     * so a failed stack update can put them back.
+     */
+    public static final String EFS_MOUNT_TARGET_UPDATE_SNAPSHOT_ATTR = "__FlociEfsMountTargetUpdateSnapshot";
+
+    /**
+     * Holds the tags an EFS access point carried before an in-place update changed them, so a
+     * failed stack update can put them back.
+     */
+    public static final String EFS_ACCESS_POINT_UPDATE_SNAPSHOT_ATTR = "__FlociEfsAccessPointUpdateSnapshot";
 
     private CfnRollback() {
     }

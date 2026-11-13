@@ -4,6 +4,7 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
+import io.floci.aws.config.EmulatorConfig;
 import io.floci.aws.core.common.AwsArnUtils;
 import io.floci.aws.core.common.AwsErrorResponse;
 import io.floci.aws.core.common.AwsException;
@@ -37,6 +38,7 @@ import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 import jakarta.ws.rs.core.Response;
 
+import java.net.URI;
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.Collections;
@@ -87,15 +89,17 @@ public class NativeDynamoDbJsonHandler {
     private final DynamoDbService dynamoDbService;
     private final NativeDynamoDbTableService tableService;
     private final ObjectMapper objectMapper;
+    private final EmulatorConfig config;
     private final DynamoDbPartiQLHandler partiQLHandler;
     private final Object importLock = new Object();
 
     @Inject
     public NativeDynamoDbJsonHandler(DynamoDbService dynamoDbService, NativeDynamoDbTableService tableService,
-                                     ObjectMapper objectMapper) {
+                                     ObjectMapper objectMapper, EmulatorConfig config) {
         this.dynamoDbService = dynamoDbService;
         this.tableService = tableService;
         this.objectMapper = objectMapper;
+        this.config = config;
         this.partiQLHandler = new DynamoDbPartiQLHandler(dynamoDbService, objectMapper);
     }
 
@@ -103,7 +107,7 @@ public class NativeDynamoDbJsonHandler {
     NativeDynamoDbJsonHandler(DynamoDbService dynamoDbService, DynamoDbStreamService dynamoDbStreamService,
                               KinesisService kinesisService, ObjectMapper objectMapper) {
         this(dynamoDbService, new NativeDynamoDbTableService(dynamoDbService, dynamoDbStreamService, kinesisService),
-                objectMapper);
+                objectMapper, null);
     }
 
     public Response handle(String action, JsonNode request, String region) throws Exception {
@@ -112,6 +116,8 @@ public class NativeDynamoDbJsonHandler {
             case "DeleteTable" -> handleDeleteTable(request, region);
             case "DescribeTable" -> handleDescribeTable(request, region);
             case "ListTables" -> handleListTables(request, region);
+            case "DescribeLimits" -> handleDescribeLimits();
+            case "DescribeEndpoints" -> handleDescribeEndpoints();
             case "PutItem" -> handlePutItem(request, region);
             case "GetItem" -> handleGetItem(request, region);
             case "DeleteItem" -> handleDeleteItem(request, region);
@@ -166,13 +172,35 @@ public class NativeDynamoDbJsonHandler {
         };
     }
 
+    private static final int ENDPOINT_CACHE_PERIOD_IN_MINUTES = 1440;
+
+    private Response handleDescribeLimits() {
+        ObjectNode response = objectMapper.createObjectNode();
+        response.put("AccountMaxReadCapacityUnits", DynamoDbCapacityQuotas.ACCOUNT_MAX_CAPACITY_UNITS);
+        response.put("AccountMaxWriteCapacityUnits", DynamoDbCapacityQuotas.ACCOUNT_MAX_CAPACITY_UNITS);
+        response.put("TableMaxReadCapacityUnits", DynamoDbCapacityQuotas.TABLE_MAX_CAPACITY_UNITS);
+        response.put("TableMaxWriteCapacityUnits", DynamoDbCapacityQuotas.TABLE_MAX_CAPACITY_UNITS);
+        return Response.ok(response).build();
+    }
+
+    // A client with endpoint discovery on sends its later requests to this address, so it names Floci.
+    private Response handleDescribeEndpoints() {
+        ObjectNode response = objectMapper.createObjectNode();
+        response.putArray("Endpoints").addObject()
+                .put("Address", URI.create(config.effectiveBaseUrl()).getAuthority())
+                .put("CachePeriodInMinutes", ENDPOINT_CACHE_PERIOD_IN_MINUTES);
+        return Response.ok(response).build();
+    }
+
     private Response handleCreateTable(JsonNode request, String region) {
         DynamoDbTableNames.requireShortName(textOrNull(request, "TableName"));
         throwValidationErrors(createTableViolations(request));
         TableDefinition table = createTableFromSpec(request, "", region, "ACTIVE");
 
+        ObjectNode tableNode = tableToNode(table);
+        tableNode.remove("WarmThroughput");
         ObjectNode response = objectMapper.createObjectNode();
-        response.set("TableDescription", tableToNode(table));
+        response.set("TableDescription", tableNode);
         return Response.ok(response).build();
     }
 
@@ -789,6 +817,7 @@ public class NativeDynamoDbJsonHandler {
 
         requireReadableValues(item, VALIDATION_ENVELOPE);
         DynamoDbAttributeValueValidator.requireNestingWithinLimit(item);
+        item.forEach(DynamoDbAttributeValueValidator::validate);
 
         JsonNode expected = request.has("Expected") ? request.get("Expected") : null;
         String conditionalOperator = request.has("ConditionalOperator")
@@ -1006,42 +1035,29 @@ public class NativeDynamoDbJsonHandler {
                         + "Non-expression parameters: {Expected} Expression parameters: {ConditionExpression}", 400);
             }
 
+            // DynamoDB checks the condition in full before it parses the update.
+            ExpressionEvaluator.validateSemantics(conditionExpression, "ConditionExpression", exprAttrNames, exprAttrValues);
+
             // Validate EAN/EAV usage across UpdateExpression + ConditionExpression
             if (updateExpression != null) {
-                // Pre-validate syntax: expression must start with a valid clause keyword.
-                // AWS tokenizes UpdateExpression whitespace-insensitively, so collapse runs
-                // of whitespace (newlines, tabs, multiple spaces) before matching keywords.
-                String ue = updateExpression.trim().replaceAll("\\s+", " ");
-                if (!ue.isEmpty()) {
-                    String upper = ue.toUpperCase();
-                    if (!upper.startsWith("SET ") && !upper.startsWith("REMOVE ") && !upper.startsWith("ADD ") && !upper.startsWith("DELETE ")) {
-                        String[] parts = ue.split("\\s+", 3);
-                        String token = parts[0];
-                        String near = parts.length >= 2
-                                ? (token + " " + parts[1]).substring(0, Math.min(token.length() + 1 + parts[1].length(), 20))
-                                : token;
-                        throw new AwsException("ValidationException",
-                                "Invalid UpdateExpression: Syntax error; token: \"" + token + "\", near: \"" + near + "\"", 400);
-                    }
-                    DynamoDbService.requireClosedParentheses(updateExpression, "1 validation error detected: ");
+                if (!updateExpression.isEmpty()) {
+                    DynamoDbUpdateExpressionSyntax.check(updateExpression, exprAttrNames, exprAttrValues);
                 }
-                // Undefined tokens, then ConditionExpression's semantic errors, must both be caught
-                // before the unused-EAN/EAV checks below.
-                requireDefinedTokens(updateExpression, "UpdateExpression", exprAttrNames, exprAttrValues);
-                ExpressionEvaluator.validateSemantics(conditionExpression, "ConditionExpression", exprAttrNames, exprAttrValues);
                 requireNonEmptyExpression(updateExpression, "UpdateExpression");
-                DynamoDbReservedWords.check(ue, "UpdateExpression");
+                DynamoDbService.requireSectionsUsedOnce(updateExpression);
                 Set<String> hashTokens = extractHashTokens(updateExpression, conditionExpression);
                 checkUnusedEan(exprAttrNames, hashTokens);
                 Set<String> colonTokensAll = extractColonTokens(updateExpression, conditionExpression);
                 checkUnusedEav(exprAttrValues, colonTokensAll);
-                dynamoDbService.requireAddOrDeleteOperandTypes(updateExpression, exprAttrValues, true);
-            } else {
-                ExpressionEvaluator.validateSemantics(conditionExpression, "ConditionExpression", exprAttrNames, exprAttrValues);
             }
         } catch (AwsException e) {
             throw inValidationEnvelope(e);
         }
+
+        if (exprAttrValues != null) {
+            exprAttrValues.forEach(DynamoDbAttributeValueValidator::validate);
+        }
+        attributeUpdateValues.forEach(DynamoDbAttributeValueValidator::validate);
 
         Consumer<JsonNode> expectedCheck = legacyExpectedCheck(tableName, region, key, true, expectedUpd,
                 conditionalOperatorUpd, returnValuesOnConditionCheckFailure);
@@ -1617,8 +1633,7 @@ public class NativeDynamoDbJsonHandler {
     private static final int MAX_VECTOR_SEARCH_TOP_K = 100;
 
     private Response handleSearchVectors(JsonNode request, String region) {
-        requireSearchVectorsMember(request, "SearchVector");
-        requireSearchVectorsMember(request, "IndexName");
+        DynamoDbRequestShapes.requireSearchVectorsMembers(request);
         String tableName = request.path("TableName").asText();
         String indexName = request.get("IndexName").asText();
         String rccSearchError = returnConsumedCapacityError(request);
@@ -1627,7 +1642,6 @@ public class NativeDynamoDbJsonHandler {
             throw new AwsException("ValidationException", rccSearchError, 400);
         }
         String rccSearch = request.path("ReturnConsumedCapacity").asText("NONE");
-        requireSearchVectorsMember(request, "TopK");
         int topK = request.get("TopK").asInt();
         if (topK < 1) {
             // AWS names this member TopK and quotes no value, unlike every other member of this
@@ -1674,19 +1688,6 @@ public class NativeDynamoDbJsonHandler {
             response.set("ConsumedCapacity", consumedCapacity);
         }
         return Response.ok(response).build();
-    }
-
-    /**
-     * Rejects an omitted required member of SearchVectors the way the AWS frontend does: as a
-     * deserialisation failure quoting the offset of the body's closing brace, which for the
-     * compact JSON an SDK sends is the body length. Measured in eu-west-2, 2026-09-23.
-     */
-    private static void requireSearchVectorsMember(JsonNode request, String member) {
-        if (!request.hasNonNull(member)) {
-            throw new AwsException("ValidationException",
-                    "missing field `" + member + "` at line 1 column "
-                    + request.toString().length(), 400);
-        }
     }
 
     /**
@@ -2032,6 +2033,17 @@ public class NativeDynamoDbJsonHandler {
 
         if (!gsiThroughputUpdates.isEmpty()) {
             TableDefinition currentTable = dynamoDbService.describeTable(tableName, region);
+            if (throughput != null) {
+                DynamoDbCapacityQuotas.requireWithinTableQuota(
+                        throughput.readCapacityUnits(), throughput.writeCapacityUnits(), region);
+            }
+            for (GsiThroughputUpdate gsiUpdate : gsiThroughputUpdates) {
+                Throughput gsiThroughput = gsiUpdate.provisionedThroughput();
+                if (gsiThroughput != null) {
+                    DynamoDbCapacityQuotas.requireWithinIndexQuota(gsiUpdate.indexName(),
+                            gsiThroughput.readCapacityUnits(), gsiThroughput.writeCapacityUnits(), region);
+                }
+            }
             for (GsiThroughputUpdate gsiUpdate : gsiThroughputUpdates) {
                 String indexName = gsiUpdate.indexName();
                 if (gsiDeletes.contains(indexName)) {
@@ -3066,15 +3078,21 @@ public class NativeDynamoDbJsonHandler {
         if (older) {
             requireValidTransactExpressions(op, true);
             requireTransactItemOrKey(action);
-            return;
+        } else {
+            requireTransactItemOrKey(action);
+            List<String> onFailureErrors = new ArrayList<>();
+            addPartiQLReturnValuesError(op, action.path("ReturnValuesOnConditionCheckFailure"), onFailureErrors);
+            throwValidationErrors(onFailureErrors);
+            // AWS checks the depth of every value, so even an unused or condition-only value fails the request.
+            DynamoDbAttributeValueValidator.requireNestingWithinLimit(op.get("ExpressionAttributeValues"), false);
+            requireValidTransactExpressions(op, false);
         }
-        requireTransactItemOrKey(action);
-        List<String> onFailureErrors = new ArrayList<>();
-        addPartiQLReturnValuesError(op, action.path("ReturnValuesOnConditionCheckFailure"), onFailureErrors);
-        throwValidationErrors(onFailureErrors);
-        // AWS checks the depth of every value, so even an unused or condition-only value fails the request.
-        DynamoDbAttributeValueValidator.requireNestingWithinLimit(op.get("ExpressionAttributeValues"), false);
-        requireValidTransactExpressions(op, false);
+        if ("Update".equals(action.type()) && op.has("UpdateExpression")) {
+            JsonNode values = op.get("ExpressionAttributeValues");
+            if (values != null) {
+                values.forEach(DynamoDbAttributeValueValidator::validate);
+            }
+        }
     }
 
     private static void requireTransactItemOrKey(TransactAction action) {
@@ -3087,6 +3105,9 @@ public class NativeDynamoDbJsonHandler {
         DynamoDbAttributeValueValidator.requireNestingWithinLimit(op.get("Key"), false);
         requireReadableValues(values, "");
         DynamoDbAttributeValueValidator.requireNonEmptyMemberNames(values);
+        if ("Put".equals(action.type())) {
+            values.forEach(DynamoDbAttributeValueValidator::validate);
+        }
     }
 
     private void requireValidTransactExpressions(JsonNode op, boolean older) {
@@ -3120,8 +3141,10 @@ public class NativeDynamoDbJsonHandler {
 
         requireNonEmptyExpression(updateExpression, "UpdateExpression");
         DynamoDbExpressionSize.checkRead(updateExpression, "UpdateExpression");
-        requireDefinedTokens(updateExpression, "UpdateExpression", exprAttrNames, exprAttrValues);
-        dynamoDbService.requireAddOrDeleteOperandTypes(updateExpression, exprAttrValues, false);
+        if (updateExpression != null) {
+            DynamoDbUpdateExpressionSyntax.check(updateExpression, exprAttrNames, exprAttrValues);
+            DynamoDbService.requireSectionsUsedOnce(updateExpression);
+        }
 
         checkUnusedEan(exprAttrNames, extractHashTokens(conditionExpression, updateExpression));
         checkUnusedEav(exprAttrValues, extractColonTokens(conditionExpression, updateExpression));
@@ -3560,8 +3583,7 @@ public class NativeDynamoDbJsonHandler {
     private record ExprToken(char prefix, String text) {}
 
     // Scans an expression once, left to right, for #name and :value placeholders, in the order
-    // they occur in the text. Both extractHashTokens/extractColonTokens (membership checks) and
-    // requireDefinedTokens (first-undefined-token-wins) build on this single scan.
+    // they occur in the text.
     private static List<ExprToken> scanExprTokens(String expr) {
         List<ExprToken> tokens = new ArrayList<>();
         if (expr == null) {
@@ -3607,25 +3629,6 @@ public class NativeDynamoDbJsonHandler {
             }
         }
         return tokens;
-    }
-
-    /**
-     * Rejects the first #name or :value token, in textual order, that neither
-     * ExpressionAttributeNames nor ExpressionAttributeValues defines. This matches DynamoDB for a
-     * single-action update expression; with several undefined tokens spread across an UpdateExpression's actions/clauses, DynamoDB
-     * may name a different one, though always with this same error type and message form.
-     */
-    private static void requireDefinedTokens(String expression, String exprType,
-            JsonNode exprAttrNames, JsonNode exprAttrValues) {
-        for (ExprToken token : scanExprTokens(expression)) {
-            if (token.prefix() == '#') {
-                if (exprAttrNames == null || !exprAttrNames.has(token.text())) {
-                    throw ExpressionEvaluator.undefinedName(exprType, token.text());
-                }
-            } else if (exprAttrValues == null || !exprAttrValues.has(token.text())) {
-                throw ExpressionEvaluator.undefinedValue(exprType, token.text());
-            }
-        }
     }
 
     /**
@@ -3886,8 +3889,8 @@ public class NativeDynamoDbJsonHandler {
 
         ObjectNode warmThroughput = objectMapper.createObjectNode();
         warmThroughput.put("Status", "ACTIVE");
-        warmThroughput.put("ReadUnitsPerSecond", 0);
-        warmThroughput.put("WriteUnitsPerSecond", 0);
+        warmThroughput.put("ReadUnitsPerSecond", table.getWarmReadUnitsPerSecond());
+        warmThroughput.put("WriteUnitsPerSecond", table.getWarmWriteUnitsPerSecond());
         node.set("WarmThroughput", warmThroughput);
 
         // Global-table replicas. In a single-process emulator every region is served by this same

@@ -1,16 +1,20 @@
 package io.floci.aws.services.codeartifact;
 
+import io.floci.aws.core.common.StreamingResponses;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 import org.jboss.logging.Logger;
 
+import java.io.ByteArrayOutputStream;
 import java.io.IOException;
+import java.io.InputStream;
 import java.net.URI;
 import java.net.URISyntaxException;
 import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
 import java.net.http.HttpResponse.BodyHandlers;
+import java.nio.file.Path;
 import java.time.Duration;
 import java.util.Locale;
 import java.util.Map;
@@ -64,8 +68,80 @@ public class NuGetExternalConnectionClient {
      * the real public repository {@code externalConnectionName} names.
      */
     public Optional<FetchedAsset> fetchPackage(String externalConnectionName, String packageId, String version) {
-        return send(externalConnectionName, packageId, version, "GET").map(r -> new FetchedAsset(r.body()));
+        ByteArrayOutputStream buffer = new ByteArrayOutputStream();
+        boolean fetched = fetchPackage(externalConnectionName, packageId, version, in -> in.transferTo(buffer));
+        return fetched ? Optional.of(new FetchedAsset(buffer.toByteArray())) : Optional.empty();
     }
+
+    /** One package version's real {@code .nupkg} size, fetched straight to {@code destination}
+     * without ever being held whole in memory. */
+    public record FetchedFile(long size) {}
+
+    /**
+     * {@link #fetchPackage(String, String, String)}'s own streamed sibling, for a package too
+     * large to ever hold as one {@code byte[]} (~2 GiB, the JVM array limit): the confirmed-live
+     * response streamed straight to {@code destination} instead of into a resident array. Capped
+     * at {@code CodeArtifactService.MAX_ASSET_FILE_SIZE_BYTES} during the copy itself, via {@link
+     * AssetDigestingInputStream}, rather than downloaded in full and checked only afterward: the
+     * real registry's own {@code .nupkg} size is otherwise unbounded, so without this an
+     * oversized one would still be fully pulled across the network and written to local disk
+     * before ever being rejected.
+     */
+    public Optional<FetchedFile> fetchPackage(String externalConnectionName, String packageId, String version,
+            Path destination) {
+        long[] size = new long[1];
+        boolean fetched = fetchPackage(externalConnectionName, packageId, version,
+                in -> size[0] = AssetDigestingInputStream.copyCapped(in, destination,
+                        CodeArtifactService.MAX_ASSET_FILE_SIZE_BYTES));
+        return fetched ? Optional.of(new FetchedFile(size[0])) : Optional.empty();
+    }
+
+    private interface BodyConsumer {
+        void accept(InputStream body) throws IOException;
+    }
+
+    /**
+     * The one real fetch both {@link #fetchPackage(String, String, String)} and {@link
+     * #fetchPackage(String, String, String, Path)} share. Uses the worst-case download timeout:
+     * the real {@code .nupkg} this fetches can be up to 5 GB, and its real size isn't known until
+     * the response itself arrives, so a flat 20 seconds would cancel a legitimately large,
+     * still-in-progress download.
+     */
+    private boolean fetchPackage(String externalConnectionName, String packageId, String version,
+            BodyConsumer consumer) {
+        String baseUrl = baseUrls.get(externalConnectionName);
+        if (baseUrl == null) {
+            return false;
+        }
+        HttpResponse<InputStream> response;
+        try {
+            HttpRequest request = HttpRequest.newBuilder(requestUri(baseUrl, packageId, version))
+                    .timeout(SidecarUriUtils.maxTransferTimeout())
+                    .GET()
+                    .build();
+            response = httpClient.send(request, BodyHandlers.ofInputStream());
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            return false;
+        } catch (IOException e) {
+            LOG.warnv("Could not fetch {0} {1} from external connection {2}: {3}", packageId, version,
+                    externalConnectionName, e.getMessage());
+            return false;
+        }
+        if (response.statusCode() != 200) {
+            StreamingResponses.closeQuietly(response.body());
+            return false;
+        }
+        try (InputStream body = response.body()) {
+            consumer.accept(body);
+            return true;
+        } catch (IOException e) {
+            LOG.warnv("Could not read {0} {1} from external connection {2}: {3}", packageId, version,
+                    externalConnectionName, e.getMessage());
+            return false;
+        }
+    }
+
 
     /** Whether {@code packageId}/{@code version} exists in the real public repository, without
      * downloading it. */
@@ -87,29 +163,6 @@ public class NuGetExternalConnectionClient {
             LOG.warnv("Could not check {0} {1} in external connection {2}: {3}", packageId, version,
                     externalConnectionName, e.getMessage());
             return false;
-        }
-    }
-
-    private Optional<HttpResponse<byte[]>> send(String externalConnectionName, String packageId, String version,
-            String method) {
-        String baseUrl = baseUrls.get(externalConnectionName);
-        if (baseUrl == null) {
-            return Optional.empty();
-        }
-        try {
-            HttpRequest request = HttpRequest.newBuilder(requestUri(baseUrl, packageId, version))
-                    .timeout(Duration.ofSeconds(20))
-                    .method(method, HttpRequest.BodyPublishers.noBody())
-                    .build();
-            HttpResponse<byte[]> response = httpClient.send(request, BodyHandlers.ofByteArray());
-            return response.statusCode() == 200 ? Optional.of(response) : Optional.empty();
-        } catch (InterruptedException e) {
-            Thread.currentThread().interrupt();
-            return Optional.empty();
-        } catch (IOException e) {
-            LOG.warnv("Could not fetch {0} {1} from external connection {2}: {3}", packageId, version,
-                    externalConnectionName, e.getMessage());
-            return Optional.empty();
         }
     }
 

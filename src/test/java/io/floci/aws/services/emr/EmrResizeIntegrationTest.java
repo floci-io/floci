@@ -204,7 +204,7 @@ class EmrResizeIntegrationTest {
                 .body(primary + ".Ec2InstanceId", equalTo("i-00000000000000001"))
                 .body(primary + ".PrivateDnsName", equalTo("ip-10-0-0-1.ec2.internal"))
                 .body("Instances.findAll { it.InstanceGroupId == '" + core + "' }.PrivateIpAddress",
-                        equalTo(List.of("10.0.0.2", "10.0.0.3", "10.0.0.4")));
+                        equalTo(List.of("10.1.0.1", "10.1.0.2", "10.1.0.3")));
         emr("DescribeCluster", "{\"ClusterId\":\"" + id + "\"}").then().statusCode(200)
                 .body("Cluster.MasterPublicDnsName", equalTo("ip-10-0-0-1.ec2.internal"));
         emr("TerminateJobFlows", "{\"JobFlowIds\":[\"" + id + "\"]}").then().statusCode(200);
@@ -222,7 +222,231 @@ class EmrResizeIntegrationTest {
         emr("ListInstances", "{\"ClusterId\":\"" + id + "\"}").then().statusCode(200)
                 .body("Instances.Ec2InstanceId", equalTo(List.of("i-00000000000000002", "i-00000000000000001",
                         "i-00000000000000003")))
-                .body("Instances.PrivateIpAddress", equalTo(List.of("10.0.0.2", "10.0.0.1", "10.0.0.3")));
+                .body("Instances.PrivateIpAddress", equalTo(List.of("10.1.0.1", "10.0.0.1", "10.2.0.1")));
+        emr("TerminateJobFlows", "{\"JobFlowIds\":[\"" + id + "\"]}").then().statusCode(200);
+    }
+
+    @Test
+    @Order(10)
+    void anInstanceKeepsItsAddressWhileAGroupListedBeforeItResizes() {
+        String id = emr("RunJobFlow", "{\"Name\":\"stable-addresses\",\"Instances\":{\"KeepJobFlowAliveWhenNoSteps\":true,"
+                + "\"InstanceGroups\":[{\"InstanceRole\":\"MASTER\",\"InstanceType\":\"m5.xlarge\",\"InstanceCount\":1},"
+                + "{\"InstanceRole\":\"CORE\",\"InstanceType\":\"m5.xlarge\",\"InstanceCount\":1},"
+                + "{\"InstanceRole\":\"TASK\",\"InstanceType\":\"m5.xlarge\",\"InstanceCount\":2}]}}")
+                .then().statusCode(200).extract().path("JobFlowId");
+        String core = emr("ListInstanceGroups", "{\"ClusterId\":\"" + id + "\"}").jsonPath()
+                .getString("InstanceGroups.find { it.InstanceGroupType == 'CORE' }.Id");
+        String task = emr("ListInstanceGroups", "{\"ClusterId\":\"" + id + "\"}").jsonPath()
+                .getString("InstanceGroups.find { it.InstanceGroupType == 'TASK' }.Id");
+        emr("ModifyInstanceGroups", "{\"ClusterId\":\"" + id + "\",\"InstanceGroups\":["
+                + "{\"InstanceGroupId\":\"" + core + "\",\"InstanceCount\":2}]}").then().statusCode(200);
+
+        emr("ListInstances", "{\"ClusterId\":\"" + id + "\"}").then().statusCode(200)
+                .body("Instances.findAll { it.InstanceGroupId == '" + task + "' }.PrivateIpAddress",
+                        equalTo(List.of("10.2.0.1", "10.2.0.2")))
+                .body("Instances.findAll { it.InstanceGroupId == '" + task + "' }.PrivateDnsName",
+                        equalTo(List.of("ip-10-2-0-1.ec2.internal", "ip-10-2-0-2.ec2.internal")));
+        emr("TerminateJobFlows", "{\"JobFlowIds\":[\"" + id + "\"]}").then().statusCode(200);
+    }
+
+    @Test
+    @Order(11)
+    void aFleetsInstancesAreListedOnePerUnitOnDemandFirstAndKeepTheirAddresses() {
+        String id = emr("RunJobFlow", "{\"Name\":\"fleet-instances\",\"Instances\":{\"KeepJobFlowAliveWhenNoSteps\":true,"
+                + "\"InstanceFleets\":[{\"InstanceFleetType\":\"CORE\",\"TargetOnDemandCapacity\":1,"
+                + "\"TargetSpotCapacity\":2,\"InstanceTypeConfigs\":[{\"InstanceType\":\"r5.2xlarge\"},"
+                + "{\"InstanceType\":\"m5.2xlarge\"}]},"
+                + "{\"InstanceFleetType\":\"MASTER\",\"TargetOnDemandCapacity\":1,"
+                + "\"InstanceTypeConfigs\":[{\"InstanceType\":\"m5.xlarge\"}]}]}}")
+                .then().statusCode(200).extract().path("JobFlowId");
+        Response fleets = emr("ListInstanceFleets", "{\"ClusterId\":\"" + id + "\"}");
+        String master = fleets.jsonPath().getString("InstanceFleets.find { it.InstanceFleetType == 'MASTER' }.Id");
+        String core = fleets.jsonPath().getString("InstanceFleets.find { it.InstanceFleetType == 'CORE' }.Id");
+        String task = emr("AddInstanceFleet", "{\"ClusterId\":\"" + id + "\",\"InstanceFleet\":"
+                + "{\"InstanceFleetType\":\"TASK\",\"TargetSpotCapacity\":1,"
+                + "\"InstanceTypeConfigs\":[{\"InstanceType\":\"c5.xlarge\"}]}}")
+                .then().statusCode(200).extract().path("InstanceFleetId");
+        String primary = "Instances.find { it.InstanceFleetId == '" + master + "' }";
+        String coreInstances = "Instances.findAll { it.InstanceFleetId == '" + core + "' }";
+        String taskInstances = "Instances.findAll { it.InstanceFleetId == '" + task + "' }";
+
+        // The primary node is numbered first, as DescribeCluster's MasterPublicDnsName names it, and each node as the
+        // cluster's containers are named.
+        emr("ListInstances", "{\"ClusterId\":\"" + id + "\"}").then().statusCode(200)
+                .body("Instances", hasSize(5))
+                .body("Instances.findAll { it.containsKey('InstanceGroupId') }", hasSize(0))
+                .body(primary + ".Ec2InstanceId", equalTo("i-00000000000000001"))
+                .body(primary + ".PrivateDnsName", equalTo("ip-10-0-0-1.ec2.internal"))
+                .body(primary + ".Market", equalTo("ON_DEMAND"))
+                .body(primary + ".InstanceType", equalTo("m5.xlarge"))
+                .body(coreInstances + ".PrivateIpAddress", equalTo(List.of("10.1.0.1", "10.1.0.2", "10.1.0.3")))
+                .body(coreInstances + ".Market", equalTo(List.of("ON_DEMAND", "SPOT", "SPOT")))
+                .body(coreInstances + ".InstanceType", equalTo(List.of("r5.2xlarge", "r5.2xlarge", "r5.2xlarge")))
+                .body(taskInstances + ".PrivateDnsName", equalTo(List.of("ip-10-2-0-1.ec2.internal")))
+                .body(taskInstances + ".Market", equalTo(List.of("SPOT")))
+                .body(taskInstances + ".InstanceType", equalTo(List.of("c5.xlarge")));
+        emr("DescribeCluster", "{\"ClusterId\":\"" + id + "\"}").then().statusCode(200)
+                .body("Cluster.MasterPublicDnsName", equalTo("ip-10-0-0-1.ec2.internal"));
+
+        emr("ModifyInstanceFleet", "{\"ClusterId\":\"" + id + "\",\"InstanceFleet\":"
+                + "{\"InstanceFleetId\":\"" + core + "\",\"TargetSpotCapacity\":0}}").then().statusCode(200);
+        emr("ListInstances", "{\"ClusterId\":\"" + id + "\"}").then().statusCode(200)
+                .body("Instances", hasSize(3))
+                .body(primary + ".Ec2InstanceId", equalTo("i-00000000000000001"))
+                .body(coreInstances + ".PrivateIpAddress", equalTo(List.of("10.1.0.1")))
+                .body(taskInstances + ".PrivateIpAddress", equalTo(List.of("10.2.0.1")));
+        emr("TerminateJobFlows", "{\"JobFlowIds\":[\"" + id + "\"]}").then().statusCode(200);
+    }
+
+    @Test
+    @Order(12)
+    void listInstancesKeepsTheGroupsOrFleetsItsFiltersName() {
+        String fleetsId = emr("RunJobFlow", "{\"Name\":\"fleet-filters\",\"Instances\":{\"KeepJobFlowAliveWhenNoSteps\":true,"
+                + "\"InstanceFleets\":[{\"InstanceFleetType\":\"MASTER\",\"TargetOnDemandCapacity\":1,"
+                + "\"InstanceTypeConfigs\":[{\"InstanceType\":\"m5.xlarge\"}]},"
+                + "{\"InstanceFleetType\":\"CORE\",\"TargetOnDemandCapacity\":2,"
+                + "\"InstanceTypeConfigs\":[{\"InstanceType\":\"m5.xlarge\"}]}]}}")
+                .then().statusCode(200).extract().path("JobFlowId");
+        String core = emr("ListInstanceFleets", "{\"ClusterId\":\"" + fleetsId + "\"}").jsonPath()
+                .getString("InstanceFleets.find { it.InstanceFleetType == 'CORE' }.Id");
+        String fleets = "{\"ClusterId\":\"" + fleetsId + "\",";
+
+        emr("ListInstances", fleets + "\"InstanceFleetType\":\"CORE\"}").then().statusCode(200)
+                .body("Instances.Ec2InstanceId", equalTo(List.of("i-00000000000000002", "i-00000000000000003")));
+        emr("ListInstances", fleets + "\"InstanceFleetType\":\"MASTER\"}").then().statusCode(200)
+                .body("Instances.PrivateIpAddress", equalTo(List.of("10.0.0.1")));
+        emr("ListInstances", fleets + "\"InstanceFleetId\":\"" + core + "\"}").then().statusCode(200)
+                .body("Instances", hasSize(2));
+        emr("ListInstances", fleets + "\"InstanceFleetId\":\"" + core + "\",\"InstanceFleetType\":\"MASTER\"}")
+                .then().statusCode(200).body("Instances", hasSize(0));
+        emr("ListInstances", fleets + "\"InstanceGroupTypes\":[\"MASTER\"]}").then().statusCode(200)
+                .body("Instances", hasSize(0));
+
+        String groupsId = emr("RunJobFlow", "{\"Name\":\"group-filters\",\"Instances\":{\"KeepJobFlowAliveWhenNoSteps\":true,"
+                + "\"InstanceGroups\":[{\"InstanceRole\":\"MASTER\",\"InstanceType\":\"m5.xlarge\",\"InstanceCount\":1},"
+                + "{\"InstanceRole\":\"CORE\",\"InstanceType\":\"m5.xlarge\",\"InstanceCount\":2},"
+                + "{\"InstanceRole\":\"TASK\",\"InstanceType\":\"m5.xlarge\",\"InstanceCount\":1}]}}")
+                .then().statusCode(200).extract().path("JobFlowId");
+        String task = emr("ListInstanceGroups", "{\"ClusterId\":\"" + groupsId + "\"}").jsonPath()
+                .getString("InstanceGroups.find { it.InstanceGroupType == 'TASK' }.Id");
+        String groups = "{\"ClusterId\":\"" + groupsId + "\",";
+
+        emr("ListInstances", groups + "\"InstanceGroupTypes\":[\"MASTER\"]}").then().statusCode(200)
+                .body("Instances.Ec2InstanceId", equalTo(List.of("i-00000000000000001")));
+        emr("ListInstances", groups + "\"InstanceGroupTypes\":[\"CORE\",\"TASK\"]}").then().statusCode(200)
+                .body("Instances.PrivateIpAddress", equalTo(List.of("10.1.0.1", "10.1.0.2", "10.2.0.1")));
+        emr("ListInstances", groups + "\"InstanceGroupId\":\"" + task + "\"}").then().statusCode(200)
+                .body("Instances.Ec2InstanceId", equalTo(List.of("i-00000000000000004")));
+        emr("ListInstances", groups + "\"InstanceGroupId\":\"" + task + "\",\"InstanceGroupTypes\":[\"CORE\"]}")
+                .then().statusCode(200).body("Instances", hasSize(0));
+        emr("ListInstances", groups + "\"InstanceFleetType\":\"MASTER\"}").then().statusCode(200)
+                .body("Instances", hasSize(0));
+        emr("TerminateJobFlows", "{\"JobFlowIds\":[\"" + fleetsId + "\",\"" + groupsId + "\"]}").then().statusCode(200);
+    }
+
+    @Test
+    @Order(13)
+    void aListingGivesAtMostTwoThousandInstancesAndAMarkerForTheRest() {
+        // "up to a maximum of 2,000", a fleet of any capacity costing a page.
+        String id = emr("RunJobFlow", "{\"Name\":\"many-instances\",\"Instances\":{\"KeepJobFlowAliveWhenNoSteps\":true,"
+                + "\"InstanceFleets\":[{\"InstanceFleetType\":\"MASTER\",\"TargetOnDemandCapacity\":1,"
+                + "\"InstanceTypeConfigs\":[{\"InstanceType\":\"m5.xlarge\"}]},"
+                + "{\"InstanceFleetType\":\"CORE\",\"TargetOnDemandCapacity\":2500,"
+                + "\"InstanceTypeConfigs\":[{\"InstanceType\":\"m5.xlarge\"}]}]}}")
+                .then().statusCode(200).extract().path("JobFlowId");
+
+        emr("ListInstances", "{\"ClusterId\":\"" + id + "\"}").then().statusCode(200)
+                .body("Instances", hasSize(2000))
+                .body("Instances[0].Ec2InstanceId", equalTo("i-00000000000000001"))
+                .body("Marker", equalTo("2000"));
+        emr("ListInstances", "{\"ClusterId\":\"" + id + "\",\"Marker\":\"2000\"}").then().statusCode(200)
+                .body("Instances", hasSize(501))
+                .body("Instances[0].Ec2InstanceId", equalTo("i-00000000000002001"))
+                .body("Instances[500].PrivateIpAddress", equalTo("10.1.9.214"))
+                .body("Marker", nullValue());
+        // The pages count what the filters keep.
+        emr("ListInstances", "{\"ClusterId\":\"" + id + "\",\"InstanceFleetType\":\"CORE\",\"Marker\":\"2000\"}")
+                .then().statusCode(200).body("Instances", hasSize(500));
+        emr("ListInstances", "{\"ClusterId\":\"" + id + "\",\"Marker\":\"next\"}").then().statusCode(400)
+                .body("__type", equalTo("InvalidRequestException"))
+                .body("message", equalTo("Invalid pagination token: next"));
+
+        // A fleet's two capacities add up past an int, and its last page is as cheap as its first.
+        String widest = emr("RunJobFlow", "{\"Name\":\"widest\",\"Instances\":{\"KeepJobFlowAliveWhenNoSteps\":true,"
+                + "\"InstanceFleets\":[{\"InstanceFleetType\":\"MASTER\",\"TargetOnDemandCapacity\":1,"
+                + "\"InstanceTypeConfigs\":[{\"InstanceType\":\"m5.xlarge\"}]},"
+                + "{\"InstanceFleetType\":\"CORE\",\"TargetOnDemandCapacity\":2147483647,"
+                + "\"TargetSpotCapacity\":2147483647,\"InstanceTypeConfigs\":[{\"InstanceType\":\"m5.xlarge\"}]}]}}")
+                .then().statusCode(200).extract().path("JobFlowId");
+        emr("ListInstances", "{\"ClusterId\":\"" + widest + "\"}").then().statusCode(200)
+                .body("Instances", hasSize(2000)).body("Marker", equalTo("2000"));
+        emr("ListInstances", "{\"ClusterId\":\"" + widest + "\",\"Marker\":\"4294967293\"}").then().statusCode(200)
+                .body("Instances.Ec2InstanceId", equalTo(List.of("i-00000004294967294", "i-00000004294967295")))
+                .body("Instances.Market", equalTo(List.of("SPOT", "SPOT")))
+                .body("Marker", nullValue());
+        emr("TerminateJobFlows", "{\"JobFlowIds\":[\"" + id + "\",\"" + widest + "\"]}").then().statusCode(200);
+    }
+
+    @Test
+    @Order(14)
+    void aClustersInstanceGroupsAndFleetsNeverMeet() {
+        // "instance fleets and instance groups cannot coexist in a cluster".
+        emr("RunJobFlow", "{\"Name\":\"both\",\"Instances\":{\"KeepJobFlowAliveWhenNoSteps\":true,"
+                + "\"InstanceGroups\":[{\"InstanceRole\":\"MASTER\",\"InstanceType\":\"m5.xlarge\",\"InstanceCount\":1}],"
+                + "\"InstanceFleets\":[{\"InstanceFleetType\":\"CORE\",\"TargetOnDemandCapacity\":1,"
+                + "\"InstanceTypeConfigs\":[{\"InstanceType\":\"m5.xlarge\"}]}]}}").then().statusCode(400)
+                .body("__type", equalTo("ValidationException"))
+                .body("message", equalTo("The RunJobFlow request can contain InstanceFleets parameters or"
+                        + " InstanceGroups parameters, but not both."));
+
+        String fleetsId = emr("RunJobFlow", "{\"Name\":\"fleets\",\"Instances\":{\"KeepJobFlowAliveWhenNoSteps\":true,"
+                + "\"InstanceFleets\":[{\"InstanceFleetType\":\"MASTER\",\"TargetOnDemandCapacity\":1,"
+                + "\"InstanceTypeConfigs\":[{\"InstanceType\":\"m5.xlarge\"}]}]}}")
+                .then().statusCode(200).extract().path("JobFlowId");
+        emr("AddInstanceGroups", "{\"JobFlowId\":\"" + fleetsId + "\",\"InstanceGroups\":[{\"InstanceRole\":\"TASK\","
+                + "\"InstanceType\":\"m5.xlarge\",\"InstanceCount\":1}]}").then().statusCode(400)
+                .body("__type", equalTo("ValidationException"))
+                .body("message", equalTo("Cluster " + fleetsId + " uses instance fleets, and instance fleets and"
+                        + " instance groups cannot coexist in a cluster."));
+        String groupsId = emr("RunJobFlow", "{\"Name\":\"groups\",\"Instances\":{\"KeepJobFlowAliveWhenNoSteps\":true,"
+                + "\"InstanceGroups\":[{\"InstanceRole\":\"MASTER\",\"InstanceType\":\"m5.xlarge\",\"InstanceCount\":1}]}}")
+                .then().statusCode(200).extract().path("JobFlowId");
+        emr("AddInstanceFleet", "{\"ClusterId\":\"" + groupsId + "\",\"InstanceFleet\":{\"InstanceFleetType\":\"TASK\","
+                + "\"TargetSpotCapacity\":1,\"InstanceTypeConfigs\":[{\"InstanceType\":\"m5.xlarge\"}]}}")
+                .then().statusCode(400)
+                .body("__type", equalTo("InvalidRequestException"))
+                .body("message", equalTo("Cluster " + groupsId + " uses instance groups, and instance fleets and"
+                        + " instance groups cannot coexist in a cluster."));
+        emr("ListInstanceFleets", "{\"ClusterId\":\"" + groupsId + "\"}").then().statusCode(200)
+                .body("InstanceFleets", hasSize(0));
+        emr("TerminateJobFlows", "{\"JobFlowIds\":[\"" + fleetsId + "\",\"" + groupsId + "\"]}").then().statusCode(200);
+    }
+
+    @Test
+    @Order(15)
+    void aFleetWithoutItsTypeOrAnInstanceTypeIsRefused() {
+        emr("RunJobFlow", "{\"Name\":\"typeless\",\"Instances\":{\"InstanceFleets\":["
+                + "{\"TargetOnDemandCapacity\":1,\"InstanceTypeConfigs\":[{\"InstanceType\":\"m5.xlarge\"},"
+                + "{\"WeightedCapacity\":1}]}]}}").then().statusCode(400)
+                .body("__type", equalTo("ValidationException"))
+                .body("message", equalTo("2 validation errors detected: Value null at"
+                        + " 'instances.instanceFleets.1.member.instanceFleetType' failed to satisfy constraint: Member"
+                        + " must not be null; Value null at"
+                        + " 'instances.instanceFleets.1.member.instanceTypeConfigs.2.member.instanceType' failed to"
+                        + " satisfy constraint: Member must not be null"));
+        String id = emr("RunJobFlow", "{\"Name\":\"typed\",\"Instances\":{\"KeepJobFlowAliveWhenNoSteps\":true,"
+                + "\"InstanceFleets\":[{\"InstanceFleetType\":\"MASTER\",\"TargetOnDemandCapacity\":1,"
+                + "\"InstanceTypeConfigs\":[{\"InstanceType\":\"m5.xlarge\"}]}]}}")
+                .then().statusCode(200).extract().path("JobFlowId");
+
+        emr("AddInstanceFleet", "{\"ClusterId\":\"" + id + "\",\"InstanceFleet\":{\"InstanceFleetType\":\"TASK\","
+                + "\"TargetSpotCapacity\":1,\"InstanceTypeConfigs\":[{\"BidPrice\":\"0.1\"}]}}").then().statusCode(400)
+                .body("__type", equalTo("ValidationException"))
+                .body("message", equalTo("1 validation error detected: Value null at"
+                        + " 'instanceFleet.instanceTypeConfigs.1.member.instanceType' failed to satisfy constraint:"
+                        + " Member must not be null"));
+        emr("ListInstanceFleets", "{\"ClusterId\":\"" + id + "\"}").then().statusCode(200)
+                .body("InstanceFleets", hasSize(1));
         emr("TerminateJobFlows", "{\"JobFlowIds\":[\"" + id + "\"]}").then().statusCode(200);
     }
 }

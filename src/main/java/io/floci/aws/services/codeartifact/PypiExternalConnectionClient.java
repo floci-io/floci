@@ -1,15 +1,19 @@
 package io.floci.aws.services.codeartifact;
 
+import io.floci.aws.core.common.StreamingResponses;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 import org.jboss.logging.Logger;
 
+import java.io.ByteArrayOutputStream;
 import java.io.IOException;
+import java.io.InputStream;
 import java.net.URI;
 import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
 import java.net.http.HttpResponse.BodyHandlers;
+import java.nio.file.Path;
 import java.time.Duration;
 import java.util.Map;
 import java.util.Optional;
@@ -172,55 +176,115 @@ public class PypiExternalConnectionClient {
      * whatever host the response names before this method ever gets a chance to check it.
      */
     public Optional<FetchedAsset> fetchFile(String externalConnectionName, String fileUrl) {
+        ByteArrayOutputStream buffer = new ByteArrayOutputStream();
+        boolean fetched = fetchFile(externalConnectionName, fileUrl, in -> in.transferTo(buffer));
+        return fetched ? Optional.of(new FetchedAsset(buffer.toByteArray())) : Optional.empty();
+    }
+
+    /** One real file's size, fetched straight to {@code destination} without ever being held whole in memory. */
+    public record FetchedFile(long size) {}
+
+    /**
+     * {@link #fetchFile(String, String)}'s own streamed sibling, for a file too large to ever
+     * hold as one {@code byte[]} (~2 GiB, the JVM array limit): the exact same host/redirect
+     * validation, with the confirmed-live final response streamed straight to {@code destination}
+     * instead of into a resident array. Capped at {@code
+     * CodeArtifactService.MAX_ASSET_FILE_SIZE_BYTES} during the copy itself, via {@link
+     * AssetDigestingInputStream}, rather than downloaded in full and checked only afterward: the
+     * real registry's own file size is otherwise unbounded, so without this an oversized one
+     * would still be fully pulled across the network and written to local disk before ever being
+     * rejected.
+     */
+    public Optional<FetchedFile> fetchFile(String externalConnectionName, String fileUrl, Path destination) {
+        long[] size = new long[1];
+        boolean fetched = fetchFile(externalConnectionName, fileUrl,
+                in -> size[0] = AssetDigestingInputStream.copyCapped(in, destination,
+                        CodeArtifactService.MAX_ASSET_FILE_SIZE_BYTES));
+        return fetched ? Optional.of(new FetchedFile(size[0])) : Optional.empty();
+    }
+
+    private interface BodyConsumer {
+        void accept(InputStream body) throws IOException;
+    }
+
+    /**
+     * The one real fetch loop both {@link #fetchFile(String, String)} and {@link #fetchFile(String,
+     * String, Path)} share: every redirect/host-trust decision lives here exactly once, so neither
+     * public overload can drift from the other on the part that actually matters for safety.
+     * {@code consumer} only ever runs once, against the confirmed-live, already-host-checked
+     * final {@code 200} response's own body, streamed rather than pre-buffered by {@link
+     * HttpResponse.BodyHandlers#ofInputStream()}: unlike {@code BodyHandlers.ofFile}, this never
+     * risks a redirect hop's own (discarded) body colliding with a destination file a later hop
+     * might still need to create fresh. Every hop's own request uses the worst-case download
+     * timeout, not a flat 30 seconds: the real file this can fetch is up to 5 GB, and its real
+     * size isn't known until the final, non-redirect response itself arrives, so a flat, small
+     * timeout would cancel a legitimately large, still-in-progress download on that last hop
+     * (the redirect hops ahead of it have no body worth waiting on anyway, so the longer timeout
+     * costs them nothing).
+     */
+    private boolean fetchFile(String externalConnectionName, String fileUrl, BodyConsumer consumer) {
         String baseUrl = baseUrls.get(externalConnectionName);
         if (baseUrl == null) {
-            return Optional.empty();
+            return false;
         }
         URI uri;
         try {
             uri = URI.create(fileUrl);
         } catch (IllegalArgumentException e) {
-            return Optional.empty();
+            return false;
         }
         for (int hop = 0; hop <= MAX_FILE_REDIRECTS; hop++) {
             if (!isTrustedFileHost(externalConnectionName, baseUrl, uri)) {
                 LOG.warnv("Refusing to fetch {0} for external connection {1}: its host is not a trusted file "
                         + "host for that connection.", uri, externalConnectionName);
-                return Optional.empty();
+                return false;
             }
-            HttpResponse<byte[]> response;
+            HttpResponse<InputStream> response;
             try {
                 HttpRequest request = HttpRequest.newBuilder(uri)
-                        .timeout(Duration.ofSeconds(30))
+                        .timeout(SidecarUriUtils.maxTransferTimeout())
                         .GET()
                         .build();
-                response = fileHttpClient.send(request, BodyHandlers.ofByteArray());
+                response = fileHttpClient.send(request, BodyHandlers.ofInputStream());
             } catch (InterruptedException e) {
                 Thread.currentThread().interrupt();
-                return Optional.empty();
+                return false;
             } catch (IOException e) {
                 LOG.warnv("Could not fetch {0} from external connection {1}: {2}", uri, externalConnectionName,
                         e.getMessage());
-                return Optional.empty();
+                return false;
             }
             if (isRedirect(response.statusCode())) {
+                StreamingResponses.closeQuietly(response.body());
                 String location = response.headers().firstValue("Location").orElse(null);
                 if (location == null) {
-                    return Optional.empty();
+                    return false;
                 }
                 try {
                     uri = uri.resolve(location);
                 } catch (IllegalArgumentException e) {
-                    return Optional.empty();
+                    return false;
                 }
                 continue;
             }
-            return response.statusCode() == 200 ? Optional.of(new FetchedAsset(response.body())) : Optional.empty();
+            if (response.statusCode() != 200) {
+                StreamingResponses.closeQuietly(response.body());
+                return false;
+            }
+            try (InputStream body = response.body()) {
+                consumer.accept(body);
+                return true;
+            } catch (IOException e) {
+                LOG.warnv("Could not read {0} from external connection {1}: {2}", uri, externalConnectionName,
+                        e.getMessage());
+                return false;
+            }
         }
         LOG.warnv("Too many redirects fetching {0} from external connection {1}; giving up.", fileUrl,
                 externalConnectionName);
-        return Optional.empty();
+        return false;
     }
+
 
     private static boolean isRedirect(int statusCode) {
         return statusCode == 301 || statusCode == 302 || statusCode == 303 || statusCode == 307

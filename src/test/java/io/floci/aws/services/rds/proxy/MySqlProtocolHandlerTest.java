@@ -7,12 +7,15 @@ import io.floci.aws.testutil.SigV4TokenTestHelper;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.CsvSource;
 import org.junit.jupiter.params.provider.ValueSource;
 
 import javax.net.ssl.SSLContext;
 import javax.net.ssl.SSLSocket;
 import javax.net.ssl.TrustManager;
 import javax.net.ssl.X509TrustManager;
+
+import java.io.ByteArrayInputStream;
 import java.io.ByteArrayOutputStream;
 import java.io.EOFException;
 import java.io.IOException;
@@ -28,8 +31,13 @@ import java.security.cert.X509Certificate;
 import java.time.Instant;
 import java.util.Arrays;
 import java.util.HexFormat;
+import java.util.concurrent.FutureTask;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
+import java.util.zip.Adler32;
+import java.util.zip.DeflaterOutputStream;
+import java.util.zip.InflaterInputStream;
 
 import static org.junit.jupiter.api.Assertions.assertArrayEquals;
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -43,6 +51,8 @@ class MySqlProtocolHandlerTest {
     private static final int CLIENT_PROTOCOL_41 = 0x0200;
     private static final int CLIENT_SECURE_CONNECTION = 0x8000;
     private static final int CLIENT_SSL = 0x0800;
+    private static final int CLIENT_COMPRESS = 0x0020;
+    private static final int CLIENT_MULTI_STATEMENTS = 0x0001_0000;
     private static final int CLIENT_PLUGIN_AUTH = 0x0008_0000;
     private static final String MYSQL_NATIVE_PASSWORD = "mysql_native_password";
     private static final String MYSQL_CLEAR_PASSWORD = "mysql_clear_password";
@@ -69,125 +79,875 @@ class MySqlProtocolHandlerTest {
 
     @Test
     void forwardsPlaintextHandshakeResponseUnmodifiedWhenClientDoesNotRequestTls() throws Exception {
-        byte[] nonce = fixedNonce();
-        AtomicReference<Byte> backendResponseSeq = new AtomicReference<>();
-        AtomicReference<byte[]> backendResponsePayload = new AtomicReference<>();
+        withLoggedInClient(0, 0, false, streams -> {
+            // The proxy forces CLIENT_SSL even though the mock backend did not advertise it.
+            assertTrue((capabilityFlagsLower(streams.serverHandshake()) & CLIENT_SSL) != 0);
+            assertEquals((byte) 1, streams.backendResponse()[3],
+                    "sequence must be unchanged when no TLS upgrade occurs");
+            assertEquals("admin", extractUsername(Arrays.copyOfRange(
+                    streams.backendResponse(), 4, streams.backendResponse().length)));
+        });
+    }
 
-        try (ServerSocket backendServer = new ServerSocket(0);
-             ServerSocket clientServer = new ServerSocket(0)) {
+    @ParameterizedTest
+    @CsvSource({"false,false,false", "true,false,false", "true,true,false", "true,false,true"})
+    void relaysCompleteCommandFrameAfterCompressionNegotiation(boolean compressed, boolean zlibPayload,
+                                                               boolean tls) throws Exception {
+        byte[] command = wrapPacket(0, comQueryPayload("SET @floci_probe=1"));
+        byte[] expectedFrame = compressed ? wrapCompressedFrame(command, zlibPayload) : command;
+        assertRelayedCommandFrames(expectedFrame, compressed, tls);
+    }
 
-            Thread backendThread = Thread.ofVirtual().start(() -> {
-                try {
-                    mockMySqlBackend(backendServer, nonce, backendResponseSeq, backendResponsePayload);
-                } catch (IOException e) {
-                    throw new RuntimeException(e);
-                }
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    void relaysZstdNegotiatedIamCommandUnchanged(boolean compressedPayload) throws Exception {
+        byte[] command = wrapPacket(0, comQueryPayload(
+                "CREATE USER 'app'@'%' IDENTIFIED WITH AWSAuthenticationPlugin AS 'RDS'"));
+        byte[] frame = compressedPayload ? wrapZstdStoredFrame(command, 0) : wrapCompressedPacket(command);
+        assertRelayedCommandFrames(frame, CLIENT_ZSTD_COMPRESSION_ALGORITHM, false);
+    }
+
+    @ParameterizedTest
+    @CsvSource({"false,false", "false,true", "true,false", "true,true"})
+    void relaysFragmentedCompressedCommandBytesUnchanged(boolean trailingPartialHeader,
+                                                        boolean zlibPayload) throws Exception {
+        byte[] command = wrapPacket(0, comQueryPayload("SET @floci_probe=1"));
+        byte[] firstPayload;
+        byte[] secondPayload;
+        if (trailingPartialHeader) {
+            byte[] nextCommand = wrapPacket(1, new byte[]{0x03, 'S', 'E', 'L', 'E', 'C', 'T', ' ', '1'});
+            firstPayload = Arrays.copyOf(command, command.length + 2);
+            System.arraycopy(nextCommand, 0, firstPayload, command.length, 2);
+            secondPayload = Arrays.copyOfRange(nextCommand, 2, nextCommand.length);
+        } else {
+            int split = command.length / 2;
+            firstPayload = Arrays.copyOf(command, split);
+            secondPayload = Arrays.copyOfRange(command, split, command.length);
+        }
+        byte[] firstFrame = wrapCompressedFrame(firstPayload, zlibPayload, 0);
+        byte[] secondFrame = wrapCompressedFrame(secondPayload, zlibPayload, 1);
+        if (trailingPartialHeader) {
+            withLoggedInClient(CLIENT_COMPRESS, CLIENT_COMPRESS, false, streams -> {
+                streams.clientOut().write(firstFrame);
+                streams.clientOut().flush();
+                assertArrayEquals(firstFrame, readCompressedFrame(streams.backendIn()));
+                streams.clientOut().write(secondFrame);
+                streams.clientOut().flush();
+                assertArrayEquals(secondFrame, readCompressedFrame(streams.backendIn()));
             });
+        } else {
+            ByteArrayOutputStream frames = new ByteArrayOutputStream();
+            frames.writeBytes(firstFrame);
+            frames.writeBytes(secondFrame);
+            assertRelayedCommandFrames(frames.toByteArray(), true, false);
+        }
+    }
 
-            try (Socket ourClient = new Socket("localhost", clientServer.getLocalPort())) {
-                Socket proxyClient = clientServer.accept();
-                Socket backend = new Socket("localhost", backendServer.getLocalPort());
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    void relaysLargeNonIamCompressedCommandUnchanged(boolean zlibPayload) throws Exception {
+        ByteArrayOutputStream query = new ByteArrayOutputStream();
+        query.write(0x03); // COM_QUERY
+        query.writeBytes("SELECT 1 /*"
+                .getBytes(StandardCharsets.UTF_8));
+        byte[] padding = new byte[1 << 20];
+        Arrays.fill(padding, (byte) 'x');
+        query.writeBytes(padding);
+        query.writeBytes("*/".getBytes(StandardCharsets.UTF_8));
+        byte[] command = wrapPacket(0, query.toByteArray());
+        byte[] frame = wrapCompressedFrame(command, zlibPayload);
+        assertRelayedCommandFrames(frame, CLIENT_COMPRESS, false, true);
+    }
 
-                Thread authThread = Thread.ofVirtual().start(() -> {
-                    try {
-                        MySqlProtocolHandler.handleAuth(
-                                proxyClient, backend, NO_RECONNECT, "admin", "secret",
-                                false, testSigV4Validator(), testTlsCertificates(),
-                                (user, pass) -> PasswordValidator.AuthResult.MASTER_EQUIVALENT, 5000,
-                                username -> true, testBinding());
-                    } catch (IOException e) {
-                        throw new RuntimeException(e);
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    void rewritesIamCommandAfterLargeCompressedCommand(boolean zlibPayload) throws Exception {
+        ByteArrayOutputStream firstQuery = new ByteArrayOutputStream();
+        firstQuery.write(0x03);
+        firstQuery.writeBytes("SELECT 1 /*".getBytes(StandardCharsets.US_ASCII));
+        byte[] padding = new byte[1 << 20];
+        Arrays.fill(padding, (byte) 'x');
+        firstQuery.writeBytes(padding);
+        firstQuery.writeBytes("*/".getBytes(StandardCharsets.US_ASCII));
+        byte[] firstFrame = wrapCompressedFrame(wrapPacket(0, firstQuery.toByteArray()), zlibPayload);
+        String sql = "CREATE USER 'app'@'%' IDENTIFIED WITH AWSAuthenticationPlugin AS 'RDS'";
+        byte[] secondQuery = comQueryPayload(sql);
+        byte[] secondFrame = wrapCompressedFrame(wrapPacket(0, secondQuery), zlibPayload);
+        withLoggedInClient(CLIENT_COMPRESS, CLIENT_COMPRESS, false, streams -> {
+            FutureTask<Void> sendFirst = new FutureTask<>(() -> {
+                streams.clientOut().write(firstFrame);
+                streams.clientOut().flush();
+                return null;
+            });
+            Thread.ofVirtual().start(sendFirst);
+            assertArrayEquals(firstFrame, readCompressedFrame(streams.backendIn()));
+            sendFirst.get(3, TimeUnit.SECONDS);
+            streams.backendOut().write(wrapCompressedPacket(wrapPacket(1, OK_PAYLOAD), 1));
+            streams.backendOut().flush();
+            assertNotNull(readCompressedFrame(streams.clientIn()));
+            streams.clientOut().write(secondFrame);
+            streams.clientOut().flush();
+            assertArrayEquals(expectedRewrittenIamCommand("CREATE USER"),
+                    decodeCompressedFrame(readCompressedFrame(streams.backendIn()), false));
+        });
+    }
+
+    @Test
+    void streamsNearLimitNonIamCompressedQueryBeforeItsLastFrame() throws Exception {
+        byte[] query = new byte[0xFFFFFF - 2];
+        Arrays.fill(query, (byte) ' ');
+        query[0] = 0x03;
+        System.arraycopy("SELECT 1".getBytes(StandardCharsets.US_ASCII), 0, query, 1, 8);
+        byte[] command = wrapPacket(0, query);
+        byte[] firstFrame = wrapCompressedPacket(Arrays.copyOf(command, 32), 0);
+        byte[] secondFrame = wrapCompressedPacket(Arrays.copyOfRange(command, 32, command.length), 1);
+        String sql = "CREATE USER 'app'@'%' IDENTIFIED WITH AWSAuthenticationPlugin AS 'RDS'";
+        byte[] nextQuery = comQueryPayload(sql);
+        byte[] nextFrame = wrapCompressedPacket(wrapPacket(0, nextQuery), 0);
+
+        withLoggedInClient(CLIENT_COMPRESS, CLIENT_COMPRESS, false, streams -> {
+            streams.clientOut().write(firstFrame);
+            streams.clientOut().flush();
+            assertArrayEquals(firstFrame, readCompressedFrame(streams.backendIn()));
+            FutureTask<Void> sendRest = new FutureTask<>(() -> {
+                streams.clientOut().write(secondFrame);
+                streams.clientOut().flush();
+                return null;
+            });
+            Thread.ofVirtual().start(sendRest);
+            assertArrayEquals(secondFrame, readCompressedFrame(streams.backendIn()));
+            sendRest.get(5, TimeUnit.SECONDS);
+            streams.backendOut().write(wrapCompressedPacket(wrapPacket(1, OK_PAYLOAD), 2));
+            streams.backendOut().flush();
+            assertNotNull(readCompressedFrame(streams.clientIn()));
+            streams.clientOut().write(nextFrame);
+            streams.clientOut().flush();
+            assertArrayEquals(expectedRewrittenIamCommand("CREATE USER"),
+                    decodeCompressedFrame(readCompressedFrame(streams.backendIn()), false));
+        });
+    }
+
+    @Test
+    void streamsSplitCreateTableCommandBeforeItsLastFrame() throws Exception {
+        String sql = "CREATE TABLE sample (id INT)";
+        byte[] query = comQueryPayload(sql);
+        byte[] command = wrapPacket(0, query);
+        byte[] firstFrame = wrapCompressedPacket(Arrays.copyOf(command, 5 + "CREATE TABLE".length()), 0);
+        byte[] secondFrame = wrapCompressedPacket(
+                Arrays.copyOfRange(command, 5 + "CREATE TABLE".length(), command.length), 1);
+        String iamSql = "CREATE USER 'app'@'%' IDENTIFIED WITH AWSAuthenticationPlugin AS 'RDS'";
+        byte[] iamQuery = comQueryPayload(iamSql);
+
+        withLoggedInClient(CLIENT_COMPRESS, CLIENT_COMPRESS, false, streams -> {
+            streams.clientOut().write(firstFrame);
+            streams.clientOut().flush();
+            assertArrayEquals(firstFrame, readCompressedFrame(streams.backendIn()));
+            streams.clientOut().write(secondFrame);
+            streams.clientOut().flush();
+            assertArrayEquals(secondFrame, readCompressedFrame(streams.backendIn()));
+            streams.backendOut().write(wrapCompressedPacket(wrapPacket(1, OK_PAYLOAD), 2));
+            streams.backendOut().flush();
+            assertNotNull(readCompressedFrame(streams.clientIn()));
+            streams.clientOut().write(wrapCompressedPacket(wrapPacket(0, iamQuery), 0));
+            streams.clientOut().flush();
+            assertArrayEquals(expectedRewrittenIamCommand("CREATE USER"),
+                    decodeCompressedFrame(readCompressedFrame(streams.backendIn()), false));
+        });
+    }
+
+    @Test
+    void releasesLargeEncodedFramesBeforeAnIncompleteIamCommandFinishes() throws Exception {
+        String sql = "CREATE USER 'app'@'%' IDENTIFIED WITH AWSAuthenticationPlugin AS 'RDS'";
+        byte[] query = comQueryPayload(sql);
+        byte[] command = wrapPacket(0, query);
+        byte[] firstFrame = wrapZlibFrameWithEmptyBlocks(Arrays.copyOf(command, 8), 0, 120_000);
+        byte[] secondFrame = wrapZlibFrameWithEmptyBlocks(Arrays.copyOfRange(command, 8, 9), 1, 120_000);
+        byte[] thirdFrame = wrapZlibCompressedPacket(Arrays.copyOfRange(command, 9, command.length), 2);
+        byte[] nextFrame = wrapZlibCompressedPacket(command, 0);
+
+        withLoggedInClient(CLIENT_COMPRESS, CLIENT_COMPRESS, false, streams -> {
+            streams.clientOut().write(firstFrame);
+            streams.clientOut().write(secondFrame);
+            streams.clientOut().flush();
+            assertArrayEquals(firstFrame, readCompressedFrame(streams.backendIn()));
+            assertArrayEquals(secondFrame, readCompressedFrame(streams.backendIn()));
+            streams.clientOut().write(thirdFrame);
+            streams.clientOut().flush();
+            assertArrayEquals(thirdFrame, readCompressedFrame(streams.backendIn()));
+            streams.backendOut().write(wrapCompressedPacket(wrapPacket(1, OK_PAYLOAD), 3));
+            streams.backendOut().flush();
+            assertNotNull(readCompressedFrame(streams.clientIn()));
+            streams.clientOut().write(nextFrame);
+            streams.clientOut().flush();
+            assertArrayEquals(expectedRewrittenIamCommand("CREATE USER"),
+                    decodeCompressedFrame(readCompressedFrame(streams.backendIn()), false));
+        });
+    }
+
+    @Test
+    void retainsPartialInnerHeaderAfterEncodedFrameFallback() throws Exception {
+        String sql = "CREATE USER 'app'@'%' IDENTIFIED WITH AWSAuthenticationPlugin AS 'RDS'";
+        byte[] query = comQueryPayload(sql);
+        byte[] command = wrapPacket(0, query);
+        byte[] firstFrame = wrapZlibFrameWithEmptyBlocks(Arrays.copyOf(command, 1), 0, 220_000);
+        byte[] secondFrame = wrapCompressedPacket(Arrays.copyOfRange(command, 1, 4), 1);
+        byte[] thirdFrame = wrapCompressedPacket(Arrays.copyOfRange(command, 4, command.length), 2);
+
+        withLoggedInClient(CLIENT_COMPRESS, CLIENT_COMPRESS, false, streams -> {
+            FutureTask<Void> sendFirst = new FutureTask<>(() -> {
+                streams.clientOut().write(firstFrame);
+                streams.clientOut().flush();
+                return null;
+            });
+            Thread.ofVirtual().start(sendFirst);
+            assertArrayEquals(firstFrame, readCompressedFrame(streams.backendIn()));
+            sendFirst.get(5, TimeUnit.SECONDS);
+            streams.clientOut().write(secondFrame);
+            streams.clientOut().flush();
+            assertArrayEquals(secondFrame, readCompressedFrame(streams.backendIn()));
+            streams.clientOut().write(thirdFrame);
+            streams.clientOut().flush();
+            assertArrayEquals(thirdFrame, readCompressedFrame(streams.backendIn()));
+            streams.backendOut().write(wrapCompressedPacket(wrapPacket(1, OK_PAYLOAD), 3));
+            streams.backendOut().flush();
+            assertNotNull(readCompressedFrame(streams.clientIn()));
+            streams.clientOut().write(wrapCompressedPacket(command, 0));
+            streams.clientOut().flush();
+            assertArrayEquals(expectedRewrittenIamCommand("CREATE USER"),
+                    decodeCompressedFrame(readCompressedFrame(streams.backendIn()), false));
+        });
+    }
+
+    @Test
+    void leavesContinuationOfLargeCompressedQueryUnchangedThenRewritesNextQuery() throws Exception {
+        byte[] largeQuery = new byte[0xFFFFFF];
+        Arrays.fill(largeQuery, (byte) 'x');
+        largeQuery[0] = 0x03;
+        byte[] firstPacket = wrapPacket(0, largeQuery);
+        String continuationSql = "CREATE USER 'app'@'%' IDENTIFIED WITH AWSAuthenticationPlugin AS 'RDS'";
+        byte[] continuation = new byte[continuationSql.length() + 1];
+        continuation[0] = 0x03;
+        System.arraycopy(continuationSql.getBytes(StandardCharsets.US_ASCII), 0,
+                continuation, 1, continuationSql.length());
+        byte[] firstFrame = wrapCompressedPacket(Arrays.copyOf(firstPacket, 0xFFFFFF), 0);
+        ByteArrayOutputStream remainder = new ByteArrayOutputStream();
+        remainder.write(firstPacket, 0xFFFFFF, firstPacket.length - 0xFFFFFF);
+        remainder.writeBytes(wrapPacket(1, continuation));
+        byte[] secondFrame = wrapCompressedPacket(remainder.toByteArray(), 1);
+        byte[] nextQuery = wrapPacket(0, continuation);
+        byte[] thirdFrame = wrapCompressedPacket(nextQuery, 0);
+
+        ByteArrayOutputStream input = new ByteArrayOutputStream();
+        input.writeBytes(firstFrame);
+        input.writeBytes(secondFrame);
+        input.writeBytes(thirdFrame);
+        ByteArrayOutputStream output = new ByteArrayOutputStream();
+        MySqlCompressedCommandRelay.relay(new ByteArrayInputStream(input.toByteArray()), output, false);
+        ByteArrayInputStream forwarded = new ByteArrayInputStream(output.toByteArray());
+        assertArrayEquals(firstFrame, readCompressedFrame(forwarded));
+        assertArrayEquals(secondFrame, readCompressedFrame(forwarded));
+        assertArrayEquals(expectedRewrittenIamCommand("CREATE USER"),
+                decodeCompressedFrame(readCompressedFrame(forwarded), false));
+        assertEquals(-1, forwarded.read());
+    }
+
+    @Test
+    void relaysUnrewritableFullCompressedFrameAndRewritesNextQuery() throws Exception {
+        String sql = "CREATE USER 'app'@'%' IDENTIFIED WITH AWSAuthenticationPlugin AS 'RDS'";
+        byte[] query = new byte[0xFFFFFF - 39];
+        Arrays.fill(query, (byte) ' ');
+        query[0] = 0x03;
+        System.arraycopy(sql.getBytes(StandardCharsets.US_ASCII), 0, query, 1, sql.length());
+        byte[] fullFrame = wrapCompressedPacket(wrapPacket(0, query), 0);
+        byte[] smallQuery = comQueryPayload(sql);
+        byte[] nextFrame = wrapCompressedPacket(wrapPacket(0, smallQuery), 0);
+
+        ByteArrayOutputStream input = new ByteArrayOutputStream();
+        input.writeBytes(fullFrame);
+        input.writeBytes(nextFrame);
+        ByteArrayOutputStream output = new ByteArrayOutputStream();
+        MySqlCompressedCommandRelay.relay(new ByteArrayInputStream(input.toByteArray()), output, false);
+        ByteArrayInputStream forwarded = new ByteArrayInputStream(output.toByteArray());
+        assertArrayEquals(fullFrame, readCompressedFrame(forwarded));
+        assertArrayEquals(expectedRewrittenIamCommand("CREATE USER"),
+                decodeCompressedFrame(readCompressedFrame(forwarded), false));
+        assertEquals(-1, forwarded.read());
+    }
+
+    @Test
+    void leavesIamRewriteAtExactInnerPacketLimitUnchanged() throws Exception {
+        String sql = "CREATE USER 'app'@'%' IDENTIFIED WITH AWSAuthenticationPlugin AS 'RDS'";
+        byte[] baseQuery = comQueryPayload(sql);
+        int growth = expectedRewrittenIamCommand("CREATE USER").length - wrapPacket(0, baseQuery).length;
+        byte[] query = new byte[0xFFFFFF - growth];
+        Arrays.fill(query, (byte) ' ');
+        System.arraycopy(baseQuery, 0, query, 0, baseQuery.length);
+        byte[] command = wrapPacket(0, query);
+        int split = command.length / 2;
+        byte[] firstFrame = wrapCompressedPacket(Arrays.copyOf(command, split), 0);
+        byte[] secondFrame = wrapCompressedPacket(Arrays.copyOfRange(command, split, command.length), 1);
+        byte[] nextFrame = wrapCompressedPacket(wrapPacket(0, baseQuery), 0);
+        ByteArrayOutputStream input = new ByteArrayOutputStream();
+        input.writeBytes(firstFrame);
+        input.writeBytes(secondFrame);
+        input.writeBytes(nextFrame);
+
+        ByteArrayOutputStream output = new ByteArrayOutputStream();
+        MySqlCompressedCommandRelay.relay(new ByteArrayInputStream(input.toByteArray()), output, false);
+        ByteArrayInputStream forwarded = new ByteArrayInputStream(output.toByteArray());
+        assertArrayEquals(firstFrame, readCompressedFrame(forwarded));
+        assertArrayEquals(secondFrame, readCompressedFrame(forwarded));
+        assertArrayEquals(expectedRewrittenIamCommand("CREATE USER"),
+                decodeCompressedFrame(readCompressedFrame(forwarded), false));
+        assertEquals(-1, forwarded.read());
+    }
+
+    @Test
+    void relaysLargeCommandAfterPreviousFrameEndedWithItsHeader() throws Exception {
+        byte[] smallQuery = wrapPacket(0, new byte[]{0x03, 'S', 'E', 'L', 'E', 'C', 'T', ' ', '1'});
+        byte[] largePayload = new byte[0xFFFFFF - 2];
+        Arrays.fill(largePayload, (byte) 'x');
+        largePayload[0] = 0x03;
+        byte[] largeQuery = wrapPacket(1, largePayload);
+        ByteArrayOutputStream firstPayload = new ByteArrayOutputStream();
+        firstPayload.writeBytes(smallQuery);
+        firstPayload.write(largeQuery, 0, 4);
+        byte[] firstFrame = wrapCompressedPacket(firstPayload.toByteArray(), 0);
+        byte[] secondFrame = wrapCompressedPacket(Arrays.copyOfRange(largeQuery, 4, largeQuery.length), 1);
+        String sql = "ALTER USER 'app'@'%' IDENTIFIED WITH AWSAuthenticationPlugin AS 'RDS'";
+        byte[] nextQuery = comQueryPayload(sql);
+        byte[] thirdFrame = wrapCompressedPacket(wrapPacket(0, nextQuery), 0);
+
+        ByteArrayOutputStream input = new ByteArrayOutputStream();
+        input.writeBytes(firstFrame);
+        input.writeBytes(secondFrame);
+        input.writeBytes(thirdFrame);
+        ByteArrayOutputStream output = new ByteArrayOutputStream();
+        MySqlCompressedCommandRelay.relay(new ByteArrayInputStream(input.toByteArray()), output, false);
+        ByteArrayInputStream forwarded = new ByteArrayInputStream(output.toByteArray());
+        assertArrayEquals(firstFrame, readCompressedFrame(forwarded));
+        assertArrayEquals(secondFrame, readCompressedFrame(forwarded));
+        assertArrayEquals(expectedRewrittenIamCommand("ALTER USER"),
+                decodeCompressedFrame(readCompressedFrame(forwarded), false));
+        assertEquals(-1, forwarded.read());
+    }
+
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    void rewritesCompleteIamCommandAfterForwardedPartialPacket(boolean zlibPayload) throws Exception {
+        byte[] firstQuery = wrapPacket(0, new byte[]{0x03, 'S', 'E', 'L', 'E', 'C', 'T', ' ', '1'});
+        byte[] secondQuery = wrapPacket(1, new byte[]{0x03, 'S', 'E', 'L', 'E', 'C', 'T', ' ', '2'});
+        String sql = "CREATE USER 'app'@'%' IDENTIFIED WITH AWSAuthenticationPlugin AS 'RDS'";
+        byte[] iamPayload = comQueryPayload(sql);
+        int split = 5;
+        ByteArrayOutputStream firstPayload = new ByteArrayOutputStream();
+        firstPayload.writeBytes(firstQuery);
+        firstPayload.write(secondQuery, 0, split);
+        ByteArrayOutputStream secondPayload = new ByteArrayOutputStream();
+        secondPayload.write(secondQuery, split, secondQuery.length - split);
+        secondPayload.writeBytes(wrapPacket(0, iamPayload));
+        byte[] firstFrame = wrapCompressedFrame(firstPayload.toByteArray(), zlibPayload, 0);
+        byte[] secondFrame = wrapCompressedFrame(secondPayload.toByteArray(), zlibPayload, 1);
+        ByteArrayOutputStream input = new ByteArrayOutputStream();
+        input.writeBytes(firstFrame);
+        input.writeBytes(secondFrame);
+
+        ByteArrayOutputStream output = new ByteArrayOutputStream();
+        MySqlCompressedCommandRelay.relay(new ByteArrayInputStream(input.toByteArray()), output, false);
+        ByteArrayInputStream forwarded = new ByteArrayInputStream(output.toByteArray());
+        assertArrayEquals(firstFrame, readCompressedFrame(forwarded));
+        ByteArrayOutputStream expected = new ByteArrayOutputStream();
+        expected.write(secondQuery, split, secondQuery.length - split);
+        expected.writeBytes(expectedRewrittenIamCommand("CREATE USER"));
+        assertArrayEquals(expected.toByteArray(), decodeCompressedFrame(readCompressedFrame(forwarded), false));
+        assertEquals(-1, forwarded.read());
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"plain", "zlib"})
+    void leavesPluginNameInCompressedUserPasswordAndCommentUnchanged(String compression) throws Exception {
+        String sql = "CREATE USER 'app'@'%' IDENTIFIED BY 'IDENTIFIED WITH AWSAuthenticationPlugin'"
+                + " /* IDENTIFIED WITH AWSAuthenticationPlugin */";
+        byte[] payload = comQueryPayload(sql);
+        byte[] frame = wrapCompressedCommand(wrapPacket(0, payload), compression, 0);
+        ByteArrayOutputStream output = new ByteArrayOutputStream();
+        MySqlCompressedCommandRelay.relay(new ByteArrayInputStream(frame), output, false);
+        assertArrayEquals(frame, output.toByteArray());
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"SELECT 'IDENTIFIED WITH AWSAuthenticationPlugin'",
+            "SELECT 1 /* IDENTIFIED WITH AWSAuthenticationPlugin */"})
+    void relaysPluginNameInCompressedQueryTextUnchanged(String sql) throws Exception {
+        byte[] query = comQueryPayload(sql);
+        byte[] frame = wrapCompressedPacket(wrapPacket(0, query));
+        ByteArrayOutputStream output = new ByteArrayOutputStream();
+        MySqlCompressedCommandRelay.relay(new ByteArrayInputStream(frame), output, false);
+        assertArrayEquals(frame, output.toByteArray());
+    }
+
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    void relaysEachCompressedCommandBeforeTheNextArrives(boolean zlibPayload) throws Exception {
+        byte[] firstCommand = wrapPacket(0, new byte[]{0x03, 'S', 'E', 'L', 'E', 'C', 'T', ' ', '1'});
+        byte[] secondCommand = wrapPacket(0, new byte[]{0x03, 'S', 'E', 'L', 'E', 'C', 'T', ' ', '2'});
+        byte[] firstFrame = wrapCompressedFrame(firstCommand, zlibPayload);
+        byte[] secondFrame = wrapCompressedFrame(secondCommand, zlibPayload);
+        byte[] responseFrame = wrapCompressedPacket(wrapPacket(1, OK_PAYLOAD), 1);
+        withLoggedInClient(CLIENT_COMPRESS, CLIENT_COMPRESS, false, streams -> {
+            streams.clientOut().write(firstFrame);
+            streams.clientOut().flush();
+            assertArrayEquals(firstFrame, readCompressedFrame(streams.backendIn()));
+            streams.backendOut().write(responseFrame);
+            streams.backendOut().flush();
+            assertArrayEquals(responseFrame, readCompressedFrame(streams.clientIn()));
+            streams.clientOut().write(secondFrame);
+            streams.clientOut().flush();
+            assertArrayEquals(secondFrame, readCompressedFrame(streams.backendIn()));
+        });
+    }
+
+    private void assertRelayedCommandFrames(byte[] expectedFrame, boolean compressed, boolean tls)
+            throws Exception {
+        assertRelayedCommandFrames(expectedFrame, compressed ? CLIENT_COMPRESS : 0, tls);
+    }
+
+    private void assertRelayedCommandFrames(byte[] expectedFrame, int compressionCapability, boolean tls)
+            throws Exception {
+        assertRelayedCommandFrames(expectedFrame, compressionCapability, tls, false);
+    }
+
+    private void assertRelayedCommandFrames(byte[] expectedFrame, int compressionCapability, boolean tls,
+                                          boolean readConcurrently) throws Exception {
+        withLoggedInClient(CLIENT_COMPRESS | CLIENT_ZSTD_COMPRESSION_ALGORITHM,
+                compressionCapability, tls, streams -> {
+                    FutureTask<byte[]> receivedFrame = null;
+                    if (readConcurrently) {
+                        receivedFrame = new FutureTask<>(
+                                () -> streams.backendIn().readNBytes(expectedFrame.length));
+                        Thread.ofVirtual().start(receivedFrame);
+                        FutureTask<Void> sentFrame = new FutureTask<>(() -> {
+                            streams.clientOut().write(expectedFrame);
+                            streams.clientOut().flush();
+                            return null;
+                        });
+                        Thread.ofVirtual().start(sentFrame);
+                        sentFrame.get(3, TimeUnit.SECONDS);
+                    } else {
+                        streams.clientOut().write(expectedFrame);
+                        streams.clientOut().flush();
                     }
+                    assertEquals(compressionCapability, streams.backendClientCapabilities()
+                            & (CLIENT_COMPRESS | CLIENT_ZSTD_COMPRESSION_ALGORITHM));
+                    byte[] received = readConcurrently
+                            ? receivedFrame.get(3, TimeUnit.SECONDS)
+                            : streams.backendIn().readNBytes(expectedFrame.length);
+                    assertArrayEquals(expectedFrame, received);
                 });
+    }
 
+    private record ClientBackendStreams(InputStream clientIn, OutputStream clientOut,
+                                        InputStream backendIn, OutputStream backendOut,
+                                        int backendClientCapabilities, byte[] serverHandshake,
+                                        byte[] backendResponse, Socket client, Socket proxyClient) {}
+
+    @FunctionalInterface
+    private interface LoggedInClientAssertion {
+        void accept(ClientBackendStreams streams) throws Exception;
+    }
+
+    private void withLoggedInClient(int backendCompressionCapabilities, int clientCompressionCapability,
+                                    boolean tls, LoggedInClientAssertion assertion) throws Exception {
+        byte[] nonce = fixedNonce();
+        try (ServerSocket backendServer = new ServerSocket(0);
+             ServerSocket clientServer = new ServerSocket(0);
+             Socket ourClient = new Socket("localhost", clientServer.getLocalPort());
+             Socket proxyClient = clientServer.accept();
+             Socket backend = new Socket("localhost", backendServer.getLocalPort());
+             Socket backendPeer = backendServer.accept()) {
+            ourClient.setSoTimeout(2_500);
+            backendPeer.setSoTimeout(2_500);
+            Thread authThread = startProxy(proxyClient, backend, NO_RECONNECT, false, testTlsCertificates());
+            try {
                 InputStream clientIn = ourClient.getInputStream();
                 OutputStream clientOut = ourClient.getOutputStream();
-
-                byte[] serverHandshake = readMysqlPacketRaw(clientIn);
-                assertNotNull(serverHandshake);
-                // The proxy forces CLIENT_SSL even though the mock backend didn't advertise it.
-                assertTrue((capabilityFlagsLower(serverHandshake) & CLIENT_SSL) != 0);
-
-                byte[] scramble = scrambleNativePassword("secret", nonce);
-                byte[] response = buildHandshakeResponse41("admin", scramble, (byte) 1);
-                clientOut.write(response);
+                InputStream backendIn = backendPeer.getInputStream();
+                OutputStream backendOut = backendPeer.getOutputStream();
+                backendOut.write(buildHandshakeV10(nonce, null, backendCompressionCapabilities));
+                backendOut.flush();
+                byte[] handshake = readMysqlPacketRaw(clientIn);
+                assertNotNull(handshake);
+                if ((backendCompressionCapabilities & CLIENT_COMPRESS) != 0) {
+                    assertTrue((capabilityFlagsLower(handshake) & CLIENT_COMPRESS) != 0);
+                }
+                int capabilities = CLIENT_PROTOCOL_41 | CLIENT_SECURE_CONNECTION
+                        | clientCompressionCapability;
+                int sequence = 1;
+                if (tls) {
+                    clientOut.write(buildSslRequest());
+                    clientOut.flush();
+                    SSLSocket sslClient = trustedClientSocket(ourClient);
+                    sslClient.startHandshake();
+                    clientIn = sslClient.getInputStream();
+                    clientOut = sslClient.getOutputStream();
+                    capabilities |= CLIENT_SSL;
+                    sequence = 2;
+                }
+                clientOut.write(buildHandshakeResponse41("admin", scrambleNativePassword("secret", nonce),
+                        (byte) sequence, capabilities));
                 clientOut.flush();
-
-                // Wait for the backend's OK packet to come back through the bridge before tearing
-                // down sockets, so we don't race the proxy mid-relay.
-                assertNotNull(readMysqlPacketRaw(clientIn));
-
+                byte[] backendResponse = readMysqlPacketRaw(backendIn);
+                assertNotNull(backendResponse);
+                int backendClientCapabilities = (backendResponse[4] & 0xFF)
+                        | ((backendResponse[5] & 0xFF) << 8)
+                        | ((backendResponse[6] & 0xFF) << 16)
+                        | ((backendResponse[7] & 0xFF) << 24);
+                writeMysqlPacket(backendOut, 2, OK_PAYLOAD);
+                backendOut.flush();
+                assertArrayEquals(wrapPacket(sequence + 1, OK_PAYLOAD), readMysqlPacketRaw(clientIn));
+                assertion.accept(new ClientBackendStreams(clientIn, clientOut, backendIn, backendOut,
+                        backendClientCapabilities, handshake, backendResponse, ourClient, proxyClient));
+            } finally {
                 ourClient.close();
                 proxyClient.close();
-                authThread.join(5_000);
-                backendThread.join(5_000);
-                assertEquals(false, authThread.isAlive(), "authThread did not terminate");
-                assertEquals(false, backendThread.isAlive(), "backendThread did not terminate");
+                backend.close();
+                backendPeer.close();
+                authThread.join(3_000);
+                assertFalse(authThread.isAlive(), "proxy did not terminate");
             }
         }
+    }
 
-        assertEquals((byte) 1, backendResponseSeq.get(), "sequence must be unchanged when no TLS upgrade occurs");
-        assertEquals("admin", extractUsername(backendResponsePayload.get()));
+    @ParameterizedTest
+    @CsvSource({"plain,CREATE USER", "zlib,CREATE USER",
+            "plain,ALTER USER", "zlib,ALTER USER"})
+    void rewritesCompressedIamCommand(String compression, String operation) throws Exception {
+        byte[] command = wrapPacket(0, comQueryPayload(
+                operation + " 'app'@'%' IDENTIFIED WITH AWSAuthenticationPlugin AS 'RDS'"));
+        byte[] frame = wrapCompressedCommand(command, compression, 0);
+        withLoggedInClient(CLIENT_COMPRESS, CLIENT_COMPRESS, false, streams -> {
+            streams.clientOut().write(frame);
+            streams.clientOut().flush();
+            byte[] forwarded = readCompressedFrame(streams.backendIn());
+            byte[] payload = decodeCompressedFrame(forwarded, false);
+            assertArrayEquals(expectedRewrittenIamCommand(operation), payload);
+        });
+    }
+
+    @Test
+    void relaysFragmentedUserCommandAfterPendingFrameLimitAndRewritesNextCommand() throws Exception {
+        String sql = "CREATE USER 'app'@'%' IDENTIFIED WITH AWSAuthenticationPlugin AS '"
+                + "x".repeat(65_600) + "'";
+        byte[] command = wrapPacket(0, comQueryPayload(sql));
+        ByteArrayOutputStream original = new ByteArrayOutputStream();
+        for (int i = 0; i < command.length; i++) {
+            original.writeBytes(wrapCompressedPacket(new byte[]{command[i]}, i));
+        }
+        byte[] next = wrapCompressedPacket(wrapPacket(0, comQueryPayload(
+                "CREATE USER 'app'@'%' IDENTIFIED WITH AWSAuthenticationPlugin AS 'RDS'")), 0);
+        ByteArrayOutputStream input = new ByteArrayOutputStream();
+        input.writeBytes(original.toByteArray());
+        input.writeBytes(next);
+
+        ByteArrayOutputStream output = new ByteArrayOutputStream();
+        MySqlCompressedCommandRelay.relay(new ByteArrayInputStream(input.toByteArray()), output, false);
+
+        byte[] forwarded = output.toByteArray();
+        byte[] originals = original.toByteArray();
+        assertTrue(Arrays.equals(originals, Arrays.copyOf(forwarded, originals.length)));
+        ByteArrayInputStream remainder = new ByteArrayInputStream(forwarded, originals.length,
+                forwarded.length - originals.length);
+        assertArrayEquals(expectedRewrittenIamCommand("CREATE USER"),
+                decodeCompressedFrame(readCompressedFrame(remainder), false));
+        assertEquals(-1, remainder.read());
+    }
+
+    @Test
+    void relaysCorruptZstdFrameUnchanged() throws Exception {
+        byte[] frame = {4, 0, 0, 0, 4, 0, 0, 0, 0, 0, 0};
+        ByteArrayOutputStream output = new ByteArrayOutputStream();
+        MySqlCompressedCommandRelay.relay(new ByteArrayInputStream(frame), output, true);
+        assertArrayEquals(frame, output.toByteArray());
+    }
+
+    @Test
+    void rewritesCompressedIamCommandWithQuotedAuthValue() throws Exception {
+        String prefix = "CREATE USER 'app'@'%' IDENTIFIED WITH AWSAuthenticationPlugin AS ";
+        String expected = "CREATE USER 'app'@'%' IDENTIFIED WITH mysql_native_password AS "
+                + "'*0000000000000000000000000000000000000000'";
+        for (String value : new String[]{"'abc\\'def'", "'abc''def'", "\"abc\\\"def\"", "\"abc\"\"def\""}) {
+            byte[] frame = wrapCompressedPacket(wrapPacket(0, comQueryPayload(prefix + value)));
+            ByteArrayOutputStream output = new ByteArrayOutputStream();
+            MySqlCompressedCommandRelay.relay(new ByteArrayInputStream(frame), output, false);
+            assertArrayEquals(wrapPacket(0, comQueryPayload(expected)),
+                    decodeCompressedFrame(readCompressedFrame(
+                            new ByteArrayInputStream(output.toByteArray())), false));
+        }
+    }
+
+    @Test
+    void relaysCompressedIamCommandWithUnterminatedQuotedAuthValueUnchanged() throws Exception {
+        String sql = "CREATE USER 'app'@'%' IDENTIFIED WITH AWSAuthenticationPlugin AS 'abc\\'def";
+        byte[] frame = wrapCompressedPacket(wrapPacket(0, comQueryPayload(sql)));
+        ByteArrayOutputStream output = new ByteArrayOutputStream();
+        MySqlCompressedCommandRelay.relay(new ByteArrayInputStream(frame), output, false);
+        assertArrayEquals(frame, output.toByteArray());
+    }
+
+    @Test
+    void rewritesCompressedUserDdlWithIdentifierAdjacentToUserKeyword() throws Exception {
+        for (String quotedName : new String[]{"'app'", "\"app\"", "`app`"}) {
+            String sql = "CREATE USER" + quotedName
+                    + "@'%' IDENTIFIED WITH AWSAuthenticationPlugin AS 'RDS'";
+            byte[] command = wrapPacket(0, comQueryPayload(sql));
+            int split = 5 + "CREATE USER".length();
+            byte[] first = wrapCompressedPacket(Arrays.copyOf(command, split), 0);
+            byte[] second = wrapCompressedPacket(Arrays.copyOfRange(command, split, command.length), 1);
+            ByteArrayOutputStream input = new ByteArrayOutputStream();
+            input.writeBytes(first);
+            input.writeBytes(second);
+            ByteArrayOutputStream output = new ByteArrayOutputStream();
+            MySqlCompressedCommandRelay.relay(new ByteArrayInputStream(input.toByteArray()), output, false);
+            ByteArrayInputStream forwarded = new ByteArrayInputStream(output.toByteArray());
+            ByteArrayOutputStream payload = new ByteArrayOutputStream();
+            payload.writeBytes(decodeCompressedFrame(readCompressedFrame(forwarded), false));
+            payload.writeBytes(decodeCompressedFrame(readCompressedFrame(forwarded), false));
+            String expected = "CREATE USER" + quotedName + "@'%' IDENTIFIED WITH mysql_native_password AS "
+                    + "'*0000000000000000000000000000000000000000'";
+            assertArrayEquals(wrapPacket(0, comQueryPayload(expected)), payload.toByteArray());
+            assertEquals(-1, forwarded.read());
+        }
+    }
+
+    @ParameterizedTest
+    @CsvSource({"plain,false", "plain,true", "zlib,false", "zlib,true"})
+    void rewritesIamUserDdlAfterStatementInCompressedQuery(String compression, boolean split) throws Exception {
+        String sql = "SET @x=1; CREATE USER 'app'@'%' IDENTIFIED WITH AWSAuthenticationPlugin AS 'RDS'";
+        byte[] query = comQueryPayload(sql);
+        byte[] command = wrapPacket(0, query);
+        int splitAt = 5 + "SET @x=1; ".length();
+        byte[] firstFrame = wrapCompressedCommand(
+                split ? Arrays.copyOf(command, splitAt) : command, compression, 0);
+        byte[] secondFrame = split ? wrapCompressedCommand(
+                Arrays.copyOfRange(command, splitAt, command.length), compression, 1) : null;
+        int capabilities = CLIENT_COMPRESS | CLIENT_MULTI_STATEMENTS;
+        withLoggedInClient(capabilities, capabilities, false, streams -> {
+            assertTrue((streams.backendClientCapabilities() & CLIENT_MULTI_STATEMENTS) != 0);
+            streams.clientOut().write(firstFrame);
+            if (secondFrame != null) {
+                streams.clientOut().write(secondFrame);
+            }
+            streams.clientOut().flush();
+            ByteArrayOutputStream forwarded = new ByteArrayOutputStream();
+            forwarded.writeBytes(decodeCompressedFrame(readCompressedFrame(streams.backendIn()), false));
+            if (secondFrame != null) {
+                forwarded.writeBytes(decodeCompressedFrame(readCompressedFrame(streams.backendIn()), false));
+            }
+            String expectedSql = "SET @x=1; CREATE USER 'app'@'%' IDENTIFIED WITH mysql_native_password AS "
+                    + "'*0000000000000000000000000000000000000000'";
+            assertArrayEquals(wrapPacket(0, comQueryPayload(expectedSql)), forwarded.toByteArray());
+            byte[] response = wrapCompressedPacket(wrapPacket(1, OK_PAYLOAD), split ? 2 : 1);
+            streams.backendOut().write(response);
+            streams.backendOut().flush();
+            assertArrayEquals(response, readCompressedFrame(streams.clientIn()));
+        });
+    }
+
+    @Test
+    void leavesDifferentPluginIdentifierUnchangedInCompressedUserDdl() throws Exception {
+        String sql = "CREATE USER a IDENTIFIED WITH AWSAuthenticationPluginSuffix AS 'x'";
+        byte[] query = comQueryPayload(sql);
+        byte[] frame = wrapCompressedPacket(wrapPacket(0, query));
+        ByteArrayOutputStream output = new ByteArrayOutputStream();
+        MySqlCompressedCommandRelay.relay(new ByteArrayInputStream(frame), output, false);
+        assertArrayEquals(frame, output.toByteArray());
+    }
+
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    void rewritesCompressedIamUserDdlInExecutableVersionComment(boolean split) throws Exception {
+        String sql = "/*!50000 CREATE USER 'app'@'%' IDENTIFIED WITH AWSAuthenticationPlugin AS 'RDS' */";
+        byte[] query = comQueryPayload(sql);
+        byte[] command = wrapPacket(0, query);
+        int splitAt = 7;
+        byte[] firstFrame = wrapCompressedPacket(split ? Arrays.copyOf(command, splitAt) : command, 0);
+        byte[] secondFrame = split
+                ? wrapCompressedPacket(Arrays.copyOfRange(command, splitAt, command.length), 1) : null;
+        ByteArrayOutputStream input = new ByteArrayOutputStream();
+        input.writeBytes(firstFrame);
+        if (secondFrame != null) {
+            input.writeBytes(secondFrame);
+        }
+        ByteArrayOutputStream output = new ByteArrayOutputStream();
+        MySqlCompressedCommandRelay.relay(new ByteArrayInputStream(input.toByteArray()), output, false);
+        ByteArrayInputStream forwarded = new ByteArrayInputStream(output.toByteArray());
+        ByteArrayOutputStream decoded = new ByteArrayOutputStream();
+        decoded.writeBytes(decodeCompressedFrame(readCompressedFrame(forwarded), false));
+        if (secondFrame != null) {
+            decoded.writeBytes(decodeCompressedFrame(readCompressedFrame(forwarded), false));
+        }
+        String expectedSql = "/*!50000 CREATE USER 'app'@'%' IDENTIFIED WITH mysql_native_password AS "
+                + "'*0000000000000000000000000000000000000000' */";
+        assertArrayEquals(wrapPacket(0, comQueryPayload(expectedSql)), decoded.toByteArray());
+        assertEquals(-1, forwarded.read());
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"/* client */ CREATE USER 'app'@'%'",
+            "CREATE /* client */ USER 'app'@'%'"})
+    void rewritesCompressedIamCommandWithSqlComments(String prefix) throws Exception {
+        String sql = prefix + " IDENTIFIED WITH AWSAuthenticationPlugin AS 'RDS'";
+        byte[] query = comQueryPayload(sql);
+        byte[] frame = wrapCompressedPacket(wrapPacket(0, query));
+        ByteArrayOutputStream output = new ByteArrayOutputStream();
+        MySqlCompressedCommandRelay.relay(new ByteArrayInputStream(frame), output, false);
+        String expectedSql = prefix + " IDENTIFIED WITH mysql_native_password AS "
+                + "'*0000000000000000000000000000000000000000'";
+        assertArrayEquals(wrapPacket(0, comQueryPayload(expectedSql)), decodeCompressedFrame(
+                readCompressedFrame(new ByteArrayInputStream(output.toByteArray())), false));
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"/", "-", "--"})
+    void rewritesCompressedIamCommandWithSplitLeadingComment(String splitPrefix) throws Exception {
+        String comment = "/".equals(splitPrefix) ? "/* client */ " : "-- client\n";
+        String sql = comment + "CREATE USER 'app'@'%' IDENTIFIED WITH AWSAuthenticationPlugin AS 'RDS'";
+        byte[] query = comQueryPayload(sql);
+        byte[] command = wrapPacket(0, query);
+        int split = 5 + splitPrefix.length();
+        byte[] firstFrame = wrapCompressedPacket(Arrays.copyOf(command, split), 0);
+        byte[] secondFrame = wrapCompressedPacket(Arrays.copyOfRange(command, split, command.length), 1);
+        ByteArrayOutputStream input = new ByteArrayOutputStream();
+        input.writeBytes(firstFrame);
+        input.writeBytes(secondFrame);
+
+        ByteArrayOutputStream output = new ByteArrayOutputStream();
+        MySqlCompressedCommandRelay.relay(new ByteArrayInputStream(input.toByteArray()), output, false);
+        ByteArrayInputStream forwarded = new ByteArrayInputStream(output.toByteArray());
+        ByteArrayOutputStream combined = new ByteArrayOutputStream();
+        combined.writeBytes(decodeCompressedFrame(readCompressedFrame(forwarded), false));
+        combined.writeBytes(decodeCompressedFrame(readCompressedFrame(forwarded), false));
+        String expectedSql = comment + "CREATE USER 'app'@'%' IDENTIFIED WITH mysql_native_password AS "
+                + "'*0000000000000000000000000000000000000000'";
+        assertArrayEquals(wrapPacket(0, comQueryPayload(expectedSql)), combined.toByteArray());
+        assertEquals(-1, forwarded.read());
+    }
+
+    @Test
+    void rewritesCompressedIamCommandWithEmptyQueryAttributes() throws Exception {
+        String sql = "ALTER USER 'app'@'%' IDENTIFIED WITH AWSAuthenticationPlugin AS 'RDS'";
+        byte[] sqlBytes = sql.getBytes(StandardCharsets.US_ASCII);
+        byte[] query = new byte[sqlBytes.length + 3];
+        query[0] = 0x03;
+        query[1] = 0x00; // zero query attributes
+        query[2] = 0x01; // one parameter set
+        System.arraycopy(sqlBytes, 0, query, 3, sqlBytes.length);
+        byte[] frame = wrapCompressedPacket(wrapPacket(0, query));
+        ByteArrayOutputStream output = new ByteArrayOutputStream();
+        MySqlCompressedCommandRelay.relay(new ByteArrayInputStream(frame), output, false, true);
+        byte[] expectedSql = ("ALTER USER 'app'@'%' IDENTIFIED WITH mysql_native_password AS "
+                + "'*0000000000000000000000000000000000000000'").getBytes(StandardCharsets.US_ASCII);
+        byte[] expected = new byte[expectedSql.length + 3];
+        expected[0] = 0x03;
+        expected[2] = 0x01;
+        System.arraycopy(expectedSql, 0, expected, 3, expectedSql.length);
+        assertArrayEquals(wrapPacket(0, expected), decodeCompressedFrame(
+                readCompressedFrame(new ByteArrayInputStream(output.toByteArray())), false));
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"plain", "zlib"})
+    void rewritesIamCommandSplitAcrossCompressedFrames(String compression) throws Exception {
+        String sql = "ALTER USER 'app'@'%' IDENTIFIED WITH AWSAuthenticationPlugin AS 'RDS'";
+        byte[] query = comQueryPayload(sql);
+        byte[] command = wrapPacket(0, query);
+        int split = command.length / 2;
+        byte[] firstFrame = wrapCompressedCommand(Arrays.copyOf(command, split), compression, 0);
+        byte[] secondFrame = wrapCompressedCommand(
+                Arrays.copyOfRange(command, split, command.length), compression, 1);
+        withLoggedInClient(CLIENT_COMPRESS, CLIENT_COMPRESS, false, streams -> {
+            streams.clientOut().write(firstFrame);
+            streams.clientOut().write(secondFrame);
+            streams.clientOut().flush();
+            byte[] firstOutput = readCompressedFrame(streams.backendIn());
+            byte[] secondOutput = readCompressedFrame(streams.backendIn());
+            assertEquals(0, firstOutput[3]);
+            assertEquals(1, secondOutput[3]);
+            ByteArrayOutputStream combined = new ByteArrayOutputStream();
+            combined.writeBytes(decodeCompressedFrame(firstOutput, false));
+            combined.writeBytes(decodeCompressedFrame(secondOutput, false));
+            assertArrayEquals(expectedRewrittenIamCommand("ALTER USER"), combined.toByteArray());
+            byte[] response = wrapCompressedPacket(wrapPacket(1, OK_PAYLOAD), 2);
+            streams.backendOut().write(response);
+            streams.backendOut().flush();
+            assertArrayEquals(response, readCompressedFrame(streams.clientIn()));
+        });
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"plain", "zlib"})
+    void rewritesIamCommandSplitOneBytePerCompressedFrame(String compression) throws Exception {
+        String sql = "CREATE USER 'app'@'%' IDENTIFIED WITH AWSAuthenticationPlugin AS 'RDS'";
+        byte[] query = comQueryPayload(sql);
+        byte[] command = wrapPacket(0, query);
+        ByteArrayOutputStream input = new ByteArrayOutputStream();
+        for (int sequence = 0; sequence < command.length; sequence++) {
+            input.writeBytes(wrapCompressedCommand(new byte[]{command[sequence]}, compression, sequence));
+        }
+
+        ByteArrayOutputStream output = new ByteArrayOutputStream();
+        MySqlCompressedCommandRelay.relay(new ByteArrayInputStream(input.toByteArray()), output, false);
+        ByteArrayInputStream forwarded = new ByteArrayInputStream(output.toByteArray());
+        ByteArrayOutputStream payload = new ByteArrayOutputStream();
+        for (int sequence = 0; sequence < command.length; sequence++) {
+            byte[] frame = readCompressedFrame(forwarded);
+            assertEquals(sequence, frame[3] & 0xFF);
+            payload.writeBytes(decodeCompressedFrame(frame, false));
+        }
+        assertArrayEquals(expectedRewrittenIamCommand("CREATE USER"), payload.toByteArray());
+        assertEquals(-1, forwarded.read());
+    }
+
+    @Test
+    void relaysEachFrameWhenIamRewriteWouldLeaveEmptyFrames() throws Exception {
+        String sql = "ALTER USER 'app'@'%' IDENTIFIED WITH AWSAuthenticationPlugin AS '"
+                + "x".repeat(100) + "'";
+        byte[] query = comQueryPayload(sql);
+        byte[] command = wrapPacket(0, query);
+        ByteArrayOutputStream input = new ByteArrayOutputStream();
+        for (int sequence = 0; sequence < command.length; sequence++) {
+            input.writeBytes(wrapCompressedPacket(new byte[]{command[sequence]}, sequence));
+        }
+        String nextSql = "CREATE USER 'app'@'%' IDENTIFIED WITH AWSAuthenticationPlugin AS 'RDS'";
+        byte[] nextQuery = comQueryPayload(nextSql);
+        input.writeBytes(wrapCompressedPacket(wrapPacket(0, nextQuery), 0));
+
+        ByteArrayOutputStream output = new ByteArrayOutputStream();
+        MySqlCompressedCommandRelay.relay(new ByteArrayInputStream(input.toByteArray()), output, false);
+        ByteArrayInputStream forwarded = new ByteArrayInputStream(output.toByteArray());
+        ByteArrayOutputStream payload = new ByteArrayOutputStream();
+        for (int sequence = 0; sequence < command.length; sequence++) {
+            byte[] frame = readCompressedFrame(forwarded);
+            assertEquals(sequence, frame[3] & 0xFF);
+            payload.writeBytes(decodeCompressedFrame(frame, false));
+        }
+        assertArrayEquals(command, payload.toByteArray());
+        assertArrayEquals(expectedRewrittenIamCommand("CREATE USER"),
+                decodeCompressedFrame(readCompressedFrame(forwarded), false));
+        assertEquals(-1, forwarded.read());
     }
 
     @Test
     void closesTheBackendWhenTheClientDropsWithoutQuitting() throws Exception {
-        byte[] nonce = fixedNonce();
-        AtomicReference<Integer> backendReadAfterDrop = new AtomicReference<>();
-
-        try (ServerSocket backendServer = new ServerSocket(0);
-             ServerSocket clientServer = new ServerSocket(0)) {
-
-            Thread backendThread = Thread.ofVirtual().start(() -> {
-                try (Socket socket = backendServer.accept()) {
-                    OutputStream out = socket.getOutputStream();
-                    InputStream in = socket.getInputStream();
-                    out.write(buildHandshakeV10(nonce));
-                    out.flush();
-                    readMysqlPacketRaw(in);
-                    writeMysqlPacket(out, 2, OK_PAYLOAD);
-                    out.flush();
-                    // Stays connected and silent, as an idle MySQL server does.
-                    socket.setSoTimeout(5_000);
-                    backendReadAfterDrop.set(in.read());
-                } catch (IOException e) {
-                    throw new UncheckedIOException(e);
-                }
-            });
-
-            Socket proxyClient;
-            try (Socket ourClient = new Socket("localhost", clientServer.getLocalPort())) {
-                proxyClient = clientServer.accept();
-                Socket backend = new Socket("localhost", backendServer.getLocalPort());
-
-                Thread authThread = Thread.ofVirtual().start(() -> {
-                    try {
-                        MySqlProtocolHandler.handleAuth(
-                                proxyClient, backend, NO_RECONNECT, "admin", "secret",
-                                false, testSigV4Validator(), testTlsCertificates(),
-                                (user, pass) -> PasswordValidator.AuthResult.MASTER_EQUIVALENT, 5000,
-                                username -> true, testBinding());
-                    } catch (IOException e) {
-                        throw new UncheckedIOException(e);
-                    }
-                });
-
-                InputStream clientIn = ourClient.getInputStream();
-                OutputStream clientOut = ourClient.getOutputStream();
-                assertNotNull(readMysqlPacketRaw(clientIn));
-                clientOut.write(buildHandshakeResponse41("admin", scrambleNativePassword("secret", nonce), (byte) 1));
-                clientOut.flush();
-                assertNotNull(readMysqlPacketRaw(clientIn));
-
-                // No COM_QUIT: the client just goes away.
-                ourClient.close();
-
-                joinAll(backendThread, authThread);
-            }
-            assertTrue(proxyClient.isClosed(), "the proxy must close its side of the dropped client");
-        }
-
-        assertEquals(-1, backendReadAfterDrop.get(), "the proxy must close the backend once the client drops");
+        AtomicReference<Socket> proxyClient = new AtomicReference<>();
+        withLoggedInClient(0, 0, false, streams -> {
+            proxyClient.set(streams.proxyClient());
+            // No COM_QUIT: the client just goes away while the backend stays idle.
+            streams.client().close();
+            assertEquals(-1, streams.backendIn().read(),
+                    "the proxy must close the backend once the client drops");
+        });
+        assertTrue(proxyClient.get().isClosed(), "the proxy must close its side of the dropped client");
     }
 
     @Test
@@ -822,6 +1582,11 @@ class MySqlProtocolHandlerTest {
     }
 
     private static byte[] buildHandshakeV10(byte[] nonce, String authPlugin) throws IOException {
+        return buildHandshakeV10(nonce, authPlugin, 0);
+    }
+
+    private static byte[] buildHandshakeV10(byte[] nonce, String authPlugin, int extraCapabilities)
+            throws IOException {
         ByteArrayOutputStream payload = new ByteArrayOutputStream();
         payload.write(10); // protocol version
         payload.write("8.0.34".getBytes(StandardCharsets.UTF_8));
@@ -829,7 +1594,7 @@ class MySqlProtocolHandlerTest {
         writeInt32LE(payload, 1); // connection id
         payload.write(nonce, 0, 8); // auth-plugin-data part 1
         payload.write(0); // filler
-        int capabilities = CLIENT_PROTOCOL_41 | CLIENT_SECURE_CONNECTION;
+        int capabilities = CLIENT_PROTOCOL_41 | CLIENT_SECURE_CONNECTION | extraCapabilities;
         if (authPlugin != null) {
             capabilities |= CLIENT_PLUGIN_AUTH;
         }
@@ -878,6 +1643,9 @@ class MySqlProtocolHandlerTest {
         payload.write(0);
         payload.write(scramble.length); // CLIENT_SECURE_CONNECTION: 1-byte length prefix
         payload.write(scramble);
+        if ((capabilities & CLIENT_ZSTD_COMPRESSION_ALGORITHM) != 0) {
+            payload.write(3); // zstd compression level
+        }
 
         return wrapPacket(sequence, payload.toByteArray());
     }
@@ -998,6 +1766,158 @@ class MySqlProtocolHandlerTest {
         raw[2] = (byte) ((len >> 16) & 0xFF);
         raw[3] = (byte) sequence;
         System.arraycopy(payload, 0, raw, 4, payload.length);
+        return raw;
+    }
+
+    private static byte[] expectedRewrittenIamCommand(String operation) {
+        String sql = operation + " 'app'@'%' IDENTIFIED WITH mysql_native_password AS "
+                + "'*0000000000000000000000000000000000000000'";
+        return wrapPacket(0, comQueryPayload(sql));
+    }
+
+    private static byte[] comQueryPayload(String sql) {
+        byte[] sqlBytes = sql.getBytes(StandardCharsets.US_ASCII);
+        byte[] payload = new byte[sqlBytes.length + 1];
+        payload[0] = 0x03;
+        System.arraycopy(sqlBytes, 0, payload, 1, sqlBytes.length);
+        return payload;
+    }
+
+    private static byte[] wrapCompressedFrame(byte[] payload, boolean zlibPayload) throws IOException {
+        return wrapCompressedFrame(payload, zlibPayload, 0);
+    }
+
+    private static byte[] wrapCompressedFrame(byte[] payload, boolean zlibPayload, int sequence) throws IOException {
+        return zlibPayload ? wrapZlibCompressedPacket(payload, sequence) : wrapCompressedPacket(payload, sequence);
+    }
+
+    private static byte[] wrapCompressedCommand(byte[] command, String compression, int sequence) throws IOException {
+        return switch (compression) {
+            case "plain" -> wrapCompressedPacket(command, sequence);
+            case "zlib" -> wrapZlibCompressedPacket(command, sequence);
+            default -> throw new IllegalArgumentException(compression);
+        };
+    }
+
+    private static byte[] wrapCompressedPacket(byte[] mysqlPacket) {
+        return wrapCompressedPacket(mysqlPacket, 0);
+    }
+
+    private static byte[] wrapCompressedPacket(byte[] mysqlPacket, int sequence) {
+        byte[] raw = new byte[7 + mysqlPacket.length];
+        raw[0] = (byte) (mysqlPacket.length & 0xFF);
+        raw[1] = (byte) ((mysqlPacket.length >> 8) & 0xFF);
+        raw[2] = (byte) ((mysqlPacket.length >> 16) & 0xFF);
+        raw[3] = (byte) sequence;
+        // Uncompressed length 0: short commands may use an uncompressed payload.
+        System.arraycopy(mysqlPacket, 0, raw, 7, mysqlPacket.length);
+        return raw;
+    }
+
+    private static byte[] wrapZlibCompressedPacket(byte[] mysqlPacket, int sequence) throws IOException {
+        ByteArrayOutputStream compressed = new ByteArrayOutputStream();
+        try (DeflaterOutputStream deflater = new DeflaterOutputStream(compressed)) {
+            deflater.write(mysqlPacket);
+        }
+        byte[] payload = compressed.toByteArray();
+        byte[] raw = new byte[7 + payload.length];
+        raw[0] = (byte) (payload.length & 0xFF);
+        raw[1] = (byte) ((payload.length >> 8) & 0xFF);
+        raw[2] = (byte) ((payload.length >> 16) & 0xFF);
+        raw[3] = (byte) sequence;
+        raw[4] = (byte) (mysqlPacket.length & 0xFF);
+        raw[5] = (byte) ((mysqlPacket.length >> 8) & 0xFF);
+        raw[6] = (byte) ((mysqlPacket.length >> 16) & 0xFF);
+        System.arraycopy(payload, 0, raw, 7, payload.length);
+        return raw;
+    }
+
+    private static byte[] wrapZlibFrameWithEmptyBlocks(byte[] payload, int sequence, int emptyBlocks) {
+        byte[] compressed = new byte[2 + emptyBlocks * 5 + 5 + payload.length + 4];
+        compressed[0] = 0x78;
+        compressed[1] = 0x01;
+        int offset = 2;
+        for (int i = 0; i < emptyBlocks; i++) {
+            compressed[offset++] = 0;
+            compressed[offset++] = 0;
+            compressed[offset++] = 0;
+            compressed[offset++] = (byte) 0xFF;
+            compressed[offset++] = (byte) 0xFF;
+        }
+        compressed[offset++] = 1;
+        compressed[offset++] = (byte) payload.length;
+        compressed[offset++] = (byte) (payload.length >> 8);
+        compressed[offset++] = (byte) ~payload.length;
+        compressed[offset++] = (byte) ~(payload.length >> 8);
+        System.arraycopy(payload, 0, compressed, offset, payload.length);
+        offset += payload.length;
+        Adler32 adler = new Adler32();
+        adler.update(payload);
+        long checksum = adler.getValue();
+        for (int shift = 24; shift >= 0; shift -= 8) {
+            compressed[offset++] = (byte) (checksum >> shift);
+        }
+        byte[] frame = new byte[7 + compressed.length];
+        frame[0] = (byte) compressed.length;
+        frame[1] = (byte) (compressed.length >> 8);
+        frame[2] = (byte) (compressed.length >> 16);
+        frame[3] = (byte) sequence;
+        frame[4] = (byte) payload.length;
+        frame[5] = (byte) (payload.length >> 8);
+        frame[6] = (byte) (payload.length >> 16);
+        System.arraycopy(compressed, 0, frame, 7, compressed.length);
+        return frame;
+    }
+
+    private static byte[] wrapZstdStoredFrame(byte[] mysqlPacket, int sequence) {
+        assertTrue(mysqlPacket.length <= 255);
+        byte[] frame = new byte[16 + mysqlPacket.length];
+        int compressedLength = frame.length - 7;
+        frame[0] = (byte) compressedLength;
+        frame[3] = (byte) sequence;
+        frame[4] = (byte) mysqlPacket.length;
+        // Single-segment zstd frame with one uncompressed block.
+        frame[7] = 0x28;
+        frame[8] = (byte) 0xB5;
+        frame[9] = 0x2F;
+        frame[10] = (byte) 0xFD;
+        frame[11] = 0x20;
+        frame[12] = (byte) mysqlPacket.length;
+        int blockHeader = (mysqlPacket.length << 3) | 1;
+        frame[13] = (byte) blockHeader;
+        frame[14] = (byte) (blockHeader >> 8);
+        frame[15] = (byte) (blockHeader >> 16);
+        System.arraycopy(mysqlPacket, 0, frame, 16, mysqlPacket.length);
+        return frame;
+    }
+
+    private static byte[] decodeCompressedFrame(byte[] frame, boolean zstd) throws IOException {
+        assertFalse(zstd);
+        int uncompressedLength = (frame[4] & 0xFF) | ((frame[5] & 0xFF) << 8)
+                | ((frame[6] & 0xFF) << 16);
+        byte[] payload = Arrays.copyOfRange(frame, 7, frame.length);
+        if (uncompressedLength == 0) {
+            return payload;
+        }
+        try (InputStream decoder = new InflaterInputStream(new ByteArrayInputStream(payload))) {
+            byte[] decoded = decoder.readAllBytes();
+            assertEquals(uncompressedLength, decoded.length);
+            return decoded;
+        }
+    }
+
+    private static byte[] readCompressedFrame(InputStream in) throws IOException {
+        byte[] header = in.readNBytes(7);
+        if (header.length != 7) {
+            throw new EOFException("Incomplete compressed MySQL header");
+        }
+        int length = (header[0] & 0xFF) | ((header[1] & 0xFF) << 8) | ((header[2] & 0xFF) << 16);
+        byte[] payload = in.readNBytes(length);
+        if (payload.length != length) {
+            throw new EOFException("Incomplete compressed MySQL payload");
+        }
+        byte[] raw = Arrays.copyOf(header, 7 + length);
+        System.arraycopy(payload, 0, raw, 7, length);
         return raw;
     }
 

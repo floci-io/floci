@@ -128,7 +128,10 @@ class RequestResourcesTest {
             assertEquals(List.of(), of(operation, json("{\"Resources\":\"i-one\"}")));
         }
         assertFalse(RequestResources.hasIndividualTargets("ec2:DescribeInstances"));
-        assertEquals(List.of(), RequestResources.ofBody("ec2:TerminateInstances",
+        assertEquals(List.of(instance), RequestResources.ofBody("ec2:TerminateInstances",
+                new ObjectMapper().readTree("{\"InstanceIds\":[\"i-one\"]}"), "aws", "us-east-1",
+                "000000000000", null));
+        assertEquals(List.of(), RequestResources.ofBody("ec2:DescribeInstances",
                 new ObjectMapper().readTree("{\"InstanceIds\":[\"i-one\"]}"), "aws", "us-east-1",
                 "000000000000", null));
     }
@@ -189,6 +192,125 @@ class RequestResourcesTest {
         String machine = "arn:aws:states:us-east-1:aws:stateMachine:orders";
         assertEquals(List.of(machine, MACHINE), of("states:DescribeStateMachine",
                 json("{\"stateMachineArn\":\"" + machine + "\"}")));
+    }
+
+    /**
+     * An ARN naming another account whose service acts on that account's resource for the caller (the sink an OAM
+     * link is made to, a RAM invitation sent to it) is that resource alone, never the caller's of that name too; one
+     * the service holds no such resource under is still checked as the caller's own too.
+     */
+    @Test
+    void anArnOfAnotherAccountItsServiceActsOnThereIsCheckedAsGivenAlone() {
+        String sink = "arn:aws:oam:us-east-1:111122223333:sink/abc";
+        String invitation = "arn:aws:ram:us-east-1:111122223333:resource-share-invitation/i-1";
+        String link = "{\"SinkIdentifier\":\"" + sink + "\",\"LabelTemplate\":\"$AccountName\"}";
+        String accept = "{\"resourceShareInvitationArn\":\"" + invitation + "\"}";
+
+        assertEquals(List.of(sink), RequestResources.of("oam:CreateLink", json(link), "aws", "us-east-1",
+                "000000000000", reaching("oam", sink)));
+        assertEquals(List.of(invitation), RequestResources.of("ram:AcceptResourceShareInvitation", json(accept), "aws",
+                "us-east-1", "000000000000", reaching("ram", invitation)));
+        assertEquals(List.of(sink, "arn:aws:oam:us-east-1:000000000000:sink/abc"), RequestResources.of("oam:CreateLink",
+                json(link), "aws", "us-east-1", "000000000000", reaching("oam", "arn:aws:oam:us-east-1:111122223333:sink/x")));
+        assertEquals(List.of(sink, "arn:aws:oam:us-east-1:000000000000:sink/abc"), of("oam:CreateLink", json(link)));
+    }
+
+    /**
+     * A request leaving out the member naming the resource its service then uses one of its own for is checked on
+     * the one the service finds: Resource Explorer's {@code Search} and {@code ListResources} with no {@code ViewArn},
+     * on the Region's default view; none when it has none, and the view a request names when it names one.
+     */
+    @Test
+    void aRequestNamingNoViewIsCheckedOnTheDefaultViewItsServiceFinds() {
+        String view = "arn:aws:resource-explorer-2:us-east-1:000000000000:view/default-view/1";
+        String named = "arn:aws:resource-explorer-2:us-east-1:000000000000:view/other/2";
+        StoredResourceArns explorer = new StoredResourceArns() {
+            @Override
+            public String namespace() {
+                return "resource-explorer-2";
+            }
+
+            @Override
+            public Optional<String> find(String type, List<String> names, String region) {
+                return Optional.empty();
+            }
+
+            @Override
+            public Optional<String> findDefault(String type, String region) {
+                return "view".equals(type) && "us-east-1".equals(region) ? Optional.of(view) : Optional.empty();
+            }
+        };
+        for (String operation : List.of("resource-explorer-2:Search", "resource-explorer-2:ListResources")) {
+            assertEquals(List.of(view), RequestResources.of(operation, json("{\"QueryString\":\"\"}"), "aws",
+                    "us-east-1", "000000000000", explorer));
+            assertEquals(List.of(view), RequestResources.of(operation, json("{\"ViewArn\":null}"), "aws",
+                    "us-east-1", "000000000000", explorer));
+            assertEquals(List.of(named), RequestResources.of(operation, json("{\"ViewArn\":\"" + named + "\"}"), "aws",
+                    "us-east-1", "000000000000", explorer));
+            assertEquals(List.of(), RequestResources.of(operation, json("{}"), "aws", "eu-west-1", "000000000000",
+                    explorer));
+            assertEquals(List.of(), of(operation, json("{}")));
+        }
+    }
+
+    /**
+     * A field of each value of a map of structures names one resource each, beside the others its request names: an
+     * FIS template's actions, by the {@code actionId} of each, as the template's create and update act on them.
+     */
+    @Test
+    void eachValueOfAMapNamesTheResourceItsFieldNames() {
+        String prefix = "arn:aws:fis:us-east-1:000000000000:";
+        String actions = "\"actions\":{\"stop\":{\"actionId\":\"aws:ec2:stop-instances\"},"
+                + "\"wait\":{\"actionId\":\"aws:fis:wait\",\"parameters\":{\"duration\":\"PT1M\"}}}";
+        assertEquals(List.of(prefix + "experiment-template/*", prefix + "action/aws:ec2:stop-instances",
+                prefix + "action/aws:fis:wait"), of("fis:CreateExperimentTemplate", json("{" + actions + "}")));
+        assertEquals(List.of(prefix + "experiment-template/EXT1", prefix + "action/aws:ec2:stop-instances",
+                prefix + "action/aws:fis:wait"), RequestResources.of("fis:UpdateExperimentTemplate",
+                json("{" + actions + "}"), "aws", "us-east-1", "000000000000", null, Map.of("id", "EXT1")));
+        assertEquals(List.of(prefix + "experiment-template/EXT1"), RequestResources.of("fis:UpdateExperimentTemplate",
+                json("{\"actions\":{}}"), "aws", "us-east-1", "000000000000", null, Map.of("id", "EXT1")));
+    }
+
+    /**
+     * A create whose action acts on no type tags the resource it makes where its tagging action acts on that type,
+     * and is itself checked on {@code *}: Resource Explorer's {@code CreateView} tags its view; a Cloud Map namespace
+     * create, whose {@code TagResource} acts on no type, tags nothing of its own, so its tags go where it is checked.
+     */
+    @Test
+    void aCreateActingOnNoTypeTagsWhatItMakesWhereItsTaggingActionActsOnIt() {
+        ContainerRequestContext view = json("{\"ViewName\":\"team\"}");
+        String made = "arn:aws:resource-explorer-2:us-east-1:000000000000:view/team/*";
+        assertEquals(List.of(made), RequestResources.created("resource-explorer-2:CreateView",
+                "resource-explorer-2:TagResource", view, "aws", "us-east-1", "000000000000", Map.of()));
+        assertEquals(List.of(made), created("resource-explorer-2:CreateView", view));
+        assertEquals(List.of(), of("resource-explorer-2:CreateView", view));
+        assertEquals(List.of("arn:aws:oam:us-east-1:000000000000:sink/*"), RequestResources.created("oam:CreateSink",
+                "oam:TagResource", json("{\"Name\":\"s\"}"), "aws", "us-east-1", "000000000000", Map.of()));
+        ContainerRequestContext namespace = json("{\"Name\":\"ns\"}");
+        assertEquals(List.of(), RequestResources.created("servicediscovery:CreateHttpNamespace",
+                "servicediscovery:TagResource", namespace, "aws", "us-east-1", "000000000000", Map.of()));
+        assertEquals(List.of("arn:aws:servicediscovery:us-east-1:000000000000:namespace/*"),
+                created("servicediscovery:CreateHttpNamespace", namespace));
+    }
+
+    /** A namespace's stored ARNs that find nothing, and act on the resource {@code arn} names in its own account. */
+    private static StoredResourceArns reaching(String namespace, String arn) {
+        return new StoredResourceArns() {
+            @Override
+            public String namespace() {
+                return namespace;
+            }
+
+            @Override
+            public Optional<String> find(String type, List<String> names, String region) {
+                return Optional.empty();
+            }
+
+            @Override
+            public boolean reachedInItsAccount(String reached, String accountId) {
+                return reached.equals(arn) && "000000000000".equals(accountId);
+            }
+        };
     }
 
     @Test
@@ -993,6 +1115,20 @@ class RequestResourcesTest {
         assertEquals(List.of(redshift + "dbname:prod/dev", redshift + "dbuser:prod/analyst"),
                 of("redshift:GetClusterCredentials",
                         form("Action=GetClusterCredentials&ClusterIdentifier=prod&DbUser=analyst&DbName=dev")));
+    }
+
+    @Test
+    void redshiftRestoreFromClusterSnapshotUsesOwnerAccountForSourceSnapshot() {
+        String own = "arn:aws:redshift:us-east-1:000000000000:";
+        String owner = "arn:aws:redshift:us-east-1:111122223333:";
+        assertEquals(List.of(own + "cluster:restored", owner + "snapshot:source/snap"),
+                of("redshift:RestoreFromClusterSnapshot",
+                        form("Action=RestoreFromClusterSnapshot&ClusterIdentifier=restored&SnapshotIdentifier=snap"
+                                + "&SnapshotClusterIdentifier=source&OwnerAccount=111122223333")));
+        assertEquals(List.of(own + "cluster:restored", own + "snapshot:source/snap"),
+                of("redshift:RestoreFromClusterSnapshot",
+                        form("Action=RestoreFromClusterSnapshot&ClusterIdentifier=restored&SnapshotIdentifier=snap"
+                                + "&SnapshotClusterIdentifier=source")));
     }
 
     @Test

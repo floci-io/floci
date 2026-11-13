@@ -62,6 +62,39 @@ class IamRestRoutesTest {
         });
     }
 
+    /**
+     * API Gateway v1 tags with a PUT on {@code /tags/{resource_arn}}, a label spanning the slashes of an ARN sent
+     * unencoded, and the shared tags controller's bare path tags with a POST naming the ARN in its body: that
+     * alternative is matched by its own method, never the operation's.
+     */
+    @Test
+    void anAlternativeIsMatchedByItsOwnMethod() {
+        IamRestRoutes vendored = IamRestRoutes.vendored();
+        IamRestRoutes.Match bare = vendored.match("apigateway", "POST", "/tags", null).orElseThrow();
+        assertEquals("TagResource", bare.operation());
+        assertEquals(Map.of("resourceArn", "body"), bare.located());
+        assertEquals(Optional.empty(), vendored.operation("apigateway", "PUT", "/tags", null));
+        assertEquals(Optional.of("TagResource"),
+                vendored.operation("apigateway", "PUT", "/tags/arn:aws:apigateway:us-east-1::/restapis/abc", null));
+        assertEquals(Optional.of("GetTags"), vendored.operation("apigateway", "GET", "/tags", null));
+        assertEquals(Optional.of("TagResource"),
+                vendored.operation("apigateway", "POST", "/v2/tags/arn:aws:apigateway:us-east-1::/apis/abc", null));
+
+        IamRestRoutes own = routes(ROUTES.replace("\"requestUri\": \"/things/{ThingName}?tagging\"",
+                "\"requestUri\": \"/things/{ThingName}?tagging\", \"alternatives\": [{\"method\": \"PUT\", "
+                        + "\"requestUri\": \"/tagging\", \"located\": {\"ThingName\": \"body\"}}]"));
+        assertEquals(Optional.of("TagThing"), own.operation("svc", "PUT", "/tagging", null));
+        assertEquals(Optional.empty(), own.operation("svc", "POST", "/tagging", null));
+    }
+
+    @Test
+    void anAlternativeOfNoKnownMethodIsRejected() {
+        String alternative = ROUTES.replace("\"requestUri\": \"/things/\"",
+                "\"requestUri\": \"/things/\", \"alternatives\": [{\"method\": \"FETCH\", \"requestUri\": \"/other\", "
+                        + "\"located\": {\"member\": \"body\"}}]");
+        assertThrows(IllegalStateException.class, () -> routes(alternative));
+    }
+
     @Test
     void malformedAlternativeMemberSourceIsRejected() {
         String alternative = ROUTES.replace("\"requestUri\": \"/things/\"",
@@ -159,6 +192,22 @@ class IamRestRoutesTest {
         assertEquals(Optional.of("ListThings"), get("/things/"));
         assertEquals(Optional.of("GetThing"), get("/things/web%2Fpart"));
         assertEquals(Optional.of("GetRoot"), get("/"));
+    }
+
+    /**
+     * A path a route filter moved under an internal prefix, given without it, was matched decoded, so a label's value
+     * may hold the slashes its encoding hid: when the path matches no route with each label taking one segment, its
+     * labels take the segments their values span. A route that matches with one segment a label still wins, and an
+     * ordinary path's labels never span.
+     */
+    @Test
+    void aPathMovedUnderAPrefixMayHoldTheSlashesItsLabelsWereDecodedTo() {
+        assertEquals(Optional.of("GetThing"), routes.operation("svc", "GET", "/things/web/part", null, true));
+        assertEquals(Optional.empty(), routes.operation("svc", "GET", "/things/web/part", null, false));
+        assertEquals(Map.of("ThingName", "a/b", "PartPath", "c"),
+                routes.match("svc", "GET", "/things/a/b/parts/c", null, true)
+                        .map(IamRestRoutes.Match::labels).orElse(Map.of()));
+        assertEquals(Optional.of("ListParts"), routes.operation("svc", "GET", "/things/web/parts/list", null, true));
     }
 
     /**

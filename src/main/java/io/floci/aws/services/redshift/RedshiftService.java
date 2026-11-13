@@ -36,6 +36,7 @@ import io.floci.aws.services.redshift.model.Snapshot;
 import io.floci.aws.services.redshift.model.SnapshotCopyGrant;
 import io.floci.aws.services.redshift.model.SnapshotSchedule;
 import io.floci.aws.services.redshift.proxy.RedshiftProxyManager;
+import io.floci.aws.services.s3.S3ResourceArns;
 import io.floci.aws.services.s3.S3Service;
 import io.floci.aws.services.secretsmanager.ManagedSecretRotator;
 import io.floci.aws.services.secretsmanager.RandomPasswordGenerator;
@@ -882,6 +883,11 @@ public class RedshiftService implements ManagedSecretRotator {
                 .toList();
     }
 
+    /** Whether {@code accountId} holds the integration, which is gone once it is deleted. */
+    public boolean integrationExists(String accountId, String integrationId) {
+        return integrations.getForAccount(accountId, integrationId).isPresent();
+    }
+
     public List<Integration> listS3AutoCopyIntegrations() {
         return integrations.scanAllAccountEntries(key -> true).stream()
                 .filter(entry -> S3_EVENT_SOURCE_TYPE.equals(entry.value().getSourceType()))
@@ -938,6 +944,27 @@ public class RedshiftService implements ManagedSecretRotator {
             }
             integrations.putForAccount(accountId, key, integration);
             queueStatusChange(integration, previousStatus);
+            return;
+        }
+        throw new AwsException("IntegrationNotFoundFault", "The requested integration doesn't exist.", 404);
+    }
+
+    /**
+     * Records whether the integration's current-state table holds its source's items: true once a backfill has
+     * filled it, false while it is being rebuilt. It is not an integration state, so no event is sent.
+     */
+    public synchronized void updateIntegrationCurrentState(String accountId, String integrationArn,
+                                                           boolean projected) {
+        for (String key : integrations.keysForAccount(accountId)) {
+            Optional<Integration> stored = integrations.getForAccount(accountId, key);
+            if (stored.isEmpty() || !integrationArn.equals(stored.get().getIntegrationArn())) {
+                continue;
+            }
+            Integration integration = stored.get();
+            if (integration.isCurrentStateProjected() != projected) {
+                integration.setCurrentStateProjected(projected);
+                integrations.putForAccount(accountId, key, integration);
+            }
             return;
         }
         throw new AwsException("IntegrationNotFoundFault", "The requested integration doesn't exist.", 404);
@@ -1195,7 +1222,7 @@ public class RedshiftService implements ManagedSecretRotator {
             if (!"available".equals(cluster.getClusterStatus())) {
                 throw new AwsException("InvalidClusterState", "Cluster must be available to create a final snapshot", 400);
             }
-            createSnapshot(finalSnapshotIdentifier, identifier, retentionPeriod);
+            createSnapshot(finalSnapshotIdentifier, identifier, retentionPeriod, null);
         }
 
         Cluster removed = mutate(() -> {
@@ -1615,8 +1642,8 @@ public class RedshiftService implements ManagedSecretRotator {
             String partition = s3Service.bucketPartition(bucketName);
             String sampleKey = RedshiftAuditLogPublisher.s3DeliveryKey(s3KeyPrefix, accountId, region,
                     cluster.getClusterIdentifier(), "connectionlog", Instant.now());
-            String bucketArn = AwsArnUtils.Arn.global(partition, "s3", "", bucketName).toString();
-            String objectArn = AwsArnUtils.Arn.global(partition, "s3", "", bucketName + "/" + sampleKey).toString();
+            String bucketArn = S3ResourceArns.bucket(partition, bucketName);
+            String objectArn = S3ResourceArns.object(partition, bucketName, sampleKey);
             String clusterArn = AwsArnUtils.Arn.of("redshift", region, accountId,
                     "cluster:" + cluster.getClusterIdentifier()).toString();
             Map<String, List<String>> requestKeys = Map.of("aws:RequestedRegion", List.of(region));
@@ -1941,30 +1968,40 @@ public class RedshiftService implements ManagedSecretRotator {
      * createSnapshot (or by a different account).
      */
     private boolean isTrustedDumpPath(String storedPath) {
+        return isTrustedDumpPath(storedPath, clusters.accountId());
+    }
+
+    private boolean isTrustedDumpPath(String storedPath, String ownerAccount) {
         if (storedPath == null || storedPath.isBlank()) {
             return false;
         }
-        Path dir = accountDumpDir();
+        Path dir = accountDumpDir(ownerAccount);
         return Paths.get(storedPath).toAbsolutePath().normalize().startsWith(dir);
     }
 
     public Snapshot createSnapshot(String snapshotIdentifier, String clusterIdentifier) {
-        return withResourceLock("cluster", clusterIdentifier, () -> withResourceLock("snapshot", snapshotIdentifier,
-                () -> createSnapshot(snapshotIdentifier, clusterIdentifier, null)));
+        return createSnapshot(snapshotIdentifier, clusterIdentifier, null);
     }
 
-    private Snapshot createSnapshot(String snapshotIdentifier, String clusterIdentifier, Integer retentionPeriod) {
+    public Snapshot createSnapshot(String snapshotIdentifier, String clusterIdentifier, Map<String, String> tags) {
+        return withResourceLock("cluster", clusterIdentifier, () -> withResourceLock("snapshot", snapshotIdentifier,
+                () -> createSnapshot(snapshotIdentifier, clusterIdentifier, null, tags)));
+    }
+
+    private Snapshot createSnapshot(String snapshotIdentifier, String clusterIdentifier, Integer retentionPeriod,
+                                    Map<String, String> tags) {
         validateSnapshotIdentifier(snapshotIdentifier);
         Optional<Cluster> clusterOpt = clusters.get(clusterIdentifier);
         if (clusterOpt.isEmpty()) {
             throw new AwsException("ClusterNotFound", "Cluster " + clusterIdentifier + " not found", 404);
         }
         return createSnapshot(clusters.accountId(), snapshotIdentifier, clusterOpt.get(), retentionPeriod,
-                Instant.now(), null);
+                Instant.now(), null, tags);
     }
 
     private Snapshot createSnapshot(String accountId, String snapshotIdentifier, Cluster cluster,
-                                     Integer retentionPeriod, Instant now, Instant scheduledTime) {
+                                     Integer retentionPeriod, Instant now, Instant scheduledTime,
+                                     Map<String, String> tags) {
         rejectPausedCluster(cluster);
         validateSnapshotIdentifier(snapshotIdentifier);
         String clusterIdentifier = cluster.getClusterIdentifier();
@@ -1989,6 +2026,9 @@ public class RedshiftService implements ManagedSecretRotator {
         snapshot.setSnapshotType(scheduledTime == null ? "manual" : "automated");
         snapshot.setScheduledTime(scheduledTime);
         snapshot.setClusterGeneration(cluster.getSnapshotGeneration());
+        if (tags != null) {
+            snapshot.setTags(new LinkedHashMap<>(tags));
+        }
         if (scheduledTime != null) {
             snapshot.setAutomatedSnapshotRetentionPeriod(cluster.getAutomatedSnapshotRetentionPeriod());
         }
@@ -2091,6 +2131,113 @@ public class RedshiftService implements ManagedSecretRotator {
 
     public List<Snapshot> describeSnapshots(String snapshotIdentifier) {
         return describeSnapshots(snapshotIdentifier, null);
+    }
+
+    /** Whether {@code ownerAccount} names an account other than the caller's. */
+    public boolean isOtherAccount(String ownerAccount) {
+        return ownerAccount != null && !ownerAccount.isBlank() && !ownerAccount.equals(clusters.accountId());
+    }
+
+    /**
+     * The snapshots {@code ownerAccount} has authorized the caller to restore, narrowed as
+     * {@link #describeSnapshots(String, String)} is. One the owner has not shared is left out of a listing, and
+     * reported as not found when named.
+     */
+    public List<Snapshot> describeSharedSnapshots(String ownerAccount, String snapshotIdentifier,
+                                                  String clusterIdentifier) {
+        List<Snapshot> shared = snapshots.scanForAccount(ownerAccount, key -> true).stream()
+                .filter(this::isSharedWithCaller)
+                .filter(this::isInRequestRegion)
+                .filter(snapshot -> takenFrom(snapshot, clusterIdentifier))
+                .toList();
+        if (snapshotIdentifier == null || snapshotIdentifier.isBlank()) {
+            return shared;
+        }
+        List<Snapshot> named = shared.stream()
+                .filter(snapshot -> snapshotIdentifier.equals(snapshot.getSnapshotIdentifier())).toList();
+        if (named.isEmpty()) {
+            throw new AwsException("ClusterSnapshotNotFound", "Snapshot " + snapshotIdentifier + " not found", 404);
+        }
+        return named;
+    }
+
+    private boolean isInRequestRegion(Snapshot snapshot) {
+        if (snapshot.getSnapshotArn() == null) {
+            return true;
+        }
+        AwsArnUtils.Arn arn = AwsArnUtils.parse(snapshot.getSnapshotArn());
+        return arn.region().equals(regionResolver.getRegion())
+                && arn.partition().equals(regionResolver.getPartition());
+    }
+
+    private boolean isSharedWithCaller(Snapshot snapshot) {
+        return snapshot.getAccountsWithRestoreAccess().contains(clusters.accountId());
+    }
+
+    /**
+     * Lets {@code accountId} restore the manual snapshot, as AuthorizeSnapshotAccess does. The grant lives on the
+     * snapshot record, so a snapshot deleted and taken again under the same name starts with none.
+     */
+    public Snapshot authorizeSnapshotAccess(String snapshotIdentifier, String snapshotClusterIdentifier,
+                                            String accountId) {
+        requireAccountId(accountId);
+        return withResourceLock("snapshot", snapshotIdentifier, () -> {
+            Snapshot snapshot = shareableSnapshot(snapshotIdentifier, snapshotClusterIdentifier);
+            if (!snapshot.getAccountsWithRestoreAccess().add(accountId)) {
+                throw new AwsException("AuthorizationAlreadyExists",
+                        "The specified AccountId is already authorized to restore " + snapshotIdentifier, 400);
+            }
+            saveSnapshot(snapshot);
+            return snapshot;
+        });
+    }
+
+    /** Takes the restore access of {@code accountId} away, as RevokeSnapshotAccess does. */
+    public Snapshot revokeSnapshotAccess(String snapshotIdentifier, String snapshotClusterIdentifier,
+                                         String accountId) {
+        requireAccountId(accountId);
+        return withResourceLock("snapshot", snapshotIdentifier, () -> {
+            Snapshot snapshot = shareableSnapshot(snapshotIdentifier, snapshotClusterIdentifier);
+            if (!snapshot.getAccountsWithRestoreAccess().remove(accountId)) {
+                throw new AwsException("AuthorizationNotFound",
+                        "The specified AccountId is not authorized to restore " + snapshotIdentifier, 404);
+            }
+            saveSnapshot(snapshot);
+            return snapshot;
+        });
+    }
+
+    private static void requireAccountId(String accountId) {
+        if (accountId == null || !accountId.matches("[0-9]{12}")) {
+            throw new AwsException("InvalidParameterValue",
+                    "AccountWithRestoreAccess must be a 12 digit account id", 400);
+        }
+    }
+
+    private Snapshot shareableSnapshot(String snapshotIdentifier, String snapshotClusterIdentifier) {
+        String copyKey = copyKey(regionResolver.getRegion(), snapshotIdentifier);
+        if (snapshotCopies.get(copyKey).isPresent()) {
+            throw new AwsException("InvalidClusterSnapshotState",
+                    "Snapshot " + snapshotIdentifier + " is not an available manual snapshot, which is the only kind"
+                            + " that can be shared", 400);
+        }
+        Snapshot snapshot = snapshots.get(snapshotIdentifier)
+                .filter(this::isInRequestRegion)
+                .filter(found -> takenFrom(found, snapshotClusterIdentifier))
+                .orElseThrow(() -> new AwsException("ClusterSnapshotNotFound",
+                        "Snapshot " + snapshotIdentifier + " not found", 404));
+        if (!"available".equals(snapshot.getStatus()) || !"manual".equals(snapshot.getSnapshotType())) {
+            throw new AwsException("InvalidClusterSnapshotState",
+                    "Snapshot " + snapshotIdentifier + " is not an available manual snapshot, which is the only kind"
+                            + " that can be shared", 400);
+        }
+        return snapshot;
+    }
+
+    private void saveSnapshot(Snapshot snapshot) {
+        String identifier = snapshot.getSnapshotIdentifier();
+        snapshots.putAllAtomically(Map.of(identifier, snapshot));
+        snapshots.flush();
     }
 
     public Optional<Snapshot> getSnapshot(String snapshotIdentifier) {
@@ -2197,6 +2344,7 @@ public class RedshiftService implements ManagedSecretRotator {
             copy.setScheduledTime(null);
             copy.setSnapshotArn(snapshotArn(source.getClusterIdentifier(), targetSnapshotIdentifier));
             copy.setCopiedToRegions(new LinkedHashSet<>());
+            copy.setAccountsWithRestoreAccess(new LinkedHashSet<>());
             copy.setSqlDump(null);
 
             Path copiedDump = null;
@@ -2293,10 +2441,26 @@ public class RedshiftService implements ManagedSecretRotator {
     /** Restores the snapshot, which must have been taken from {@code snapshotClusterIdentifier} when one is given. */
     public Cluster restoreFromClusterSnapshot(String clusterIdentifier, String snapshotIdentifier,
                                               String snapshotClusterIdentifier, String nodeType) {
+        return restoreFromClusterSnapshot(clusterIdentifier, snapshotIdentifier, snapshotClusterIdentifier, nodeType,
+                null);
+    }
+
+    /**
+     * Restores the snapshot {@code ownerAccount} owns, when it has authorized the caller to restore it. Without an
+     * owner, or with the caller's own account, the snapshot is the caller's.
+     */
+    public Cluster restoreFromClusterSnapshot(String clusterIdentifier, String snapshotIdentifier,
+                                              String snapshotClusterIdentifier, String nodeType,
+                                              String ownerAccount) {
+        if (ownerAccount != null && !ownerAccount.isBlank() && !ownerAccount.matches("[0-9]{12}")) {
+            throw new AwsException("InvalidParameterValue", "OwnerAccount must be a 12 digit account id", 400);
+        }
+        String snapshotOwner = isOtherAccount(ownerAccount) ? ownerAccount : clusters.accountId();
         return withResourceLock("cluster", clusterIdentifier, () -> {
             ensureNoManagedRotation(clusters.accountId(), clusterIdentifier);
-            return withResourceLock("snapshot", snapshotIdentifier, () -> mutate(
-                    () -> restoreSnapshot(clusterIdentifier, snapshotIdentifier, snapshotClusterIdentifier, nodeType)));
+            return withResourceLock(snapshotOwner, "snapshot", snapshotIdentifier, () -> mutate(
+                    () -> restoreSnapshot(clusterIdentifier, snapshotIdentifier, snapshotClusterIdentifier, nodeType,
+                            snapshotOwner)));
         });
     }
 
@@ -2309,7 +2473,8 @@ public class RedshiftService implements ManagedSecretRotator {
         return withResourceLock("cluster", clusterIdentifier, () -> withResourceLock("snapshot", snapshotIdentifier,
                 () -> {
                     ensureNoManagedRotation(clusters.accountId(), clusterIdentifier);
-                    Cluster cluster = restoreSnapshot(clusterIdentifier, snapshotIdentifier, null, nodeType);
+                    Cluster cluster = restoreSnapshot(clusterIdentifier, snapshotIdentifier, null, nodeType,
+                            clusters.accountId());
                     try {
                         cluster.setClusterSubnetGroupName(clusterSubnetGroupName);
                         if (manageMasterPassword) {
@@ -2352,18 +2517,25 @@ public class RedshiftService implements ManagedSecretRotator {
     }
 
     private Cluster restoreSnapshot(String clusterIdentifier, String snapshotIdentifier,
-                                    String snapshotClusterIdentifier, String nodeType) {
+                                    String snapshotClusterIdentifier, String nodeType, String snapshotOwner) {
         if (clusters.get(clusterIdentifier).isPresent()) {
             throw new AwsException("ClusterAlreadyExists", "Cluster " + clusterIdentifier + " already exists", 400);
         }
 
-        Optional<Snapshot> snapshotOpt = findSnapshot(snapshotIdentifier)
-                .filter(found -> takenFrom(found, snapshotClusterIdentifier));
+        boolean shared = !snapshotOwner.equals(clusters.accountId());
+        Optional<Snapshot> snapshotOpt = (shared ? snapshots.getForAccount(snapshotOwner, snapshotIdentifier)
+                : findSnapshot(snapshotIdentifier))
+                .filter(found -> takenFrom(found, snapshotClusterIdentifier))
+                .filter(found -> !shared || isInRequestRegion(found));
         if (snapshotOpt.isEmpty()) {
             throw new AwsException("ClusterSnapshotNotFound", "Snapshot " + snapshotIdentifier + " not found", 404);
         }
 
         Snapshot snapshot = snapshotOpt.get();
+        if (shared && !isSharedWithCaller(snapshot)) {
+            throw new AwsException("AccessToSnapshotDenied", "The owner of snapshot " + snapshotIdentifier
+                    + " has not authorized your account to restore it", 400);
+        }
 
         // Validate the stored dump location up front, before any provisioning. A snapshot whose
         // sqlDump was written by pre-validation code could point outside this account's dump dir;
@@ -2371,7 +2543,7 @@ public class RedshiftService implements ManagedSecretRotator {
         // and an orphaned container behind.
         String sqlDump = snapshot.getSqlDump();
         boolean hasDump = sqlDump != null && !sqlDump.isBlank();
-        if (hasDump && !isTrustedDumpPath(sqlDump)) {
+        if (hasDump && !isTrustedDumpPath(sqlDump, snapshotOwner)) {
             throw new AwsException("InvalidParameterValue",
                     "Snapshot " + snapshotIdentifier + " has an unusable dump location", 400);
         }
@@ -2381,7 +2553,8 @@ public class RedshiftService implements ManagedSecretRotator {
         String sourceCluster = snapshot.getClusterIdentifier();
         String password = Optional.ofNullable(snapshot.getMasterPassword())
                 .filter(p -> !p.isBlank())
-                .or(() -> clusters.get(sourceCluster).map(Cluster::getMasterPassword))
+                .or(() -> (shared ? clusters.getForAccount(snapshotOwner, sourceCluster) : clusters.get(sourceCluster))
+                        .map(Cluster::getMasterPassword))
                 .filter(p -> p != null && !p.isBlank())
                 .orElse("admin");
 
@@ -2443,6 +2616,11 @@ public class RedshiftService implements ManagedSecretRotator {
     // ── Parameter Group Operations ───────────────────────────────────────────
 
     public ClusterParameterGroup createClusterParameterGroup(String parameterGroupName, String parameterGroupFamily, String description) {
+        return createClusterParameterGroup(parameterGroupName, parameterGroupFamily, description, null);
+    }
+
+    public ClusterParameterGroup createClusterParameterGroup(String parameterGroupName, String parameterGroupFamily,
+                                                             String description, Map<String, String> tags) {
         if (DEFAULT_PARAMETER_GROUP_NAME.equals(parameterGroupName)) {
             throw new AwsException("InvalidParameterValue", "The default parameter group name is reserved.", 400);
         }
@@ -2451,6 +2629,9 @@ public class RedshiftService implements ManagedSecretRotator {
         }
 
         ClusterParameterGroup group = new ClusterParameterGroup(parameterGroupName, parameterGroupFamily, description);
+        if (tags != null) {
+            group.setTags(new LinkedHashMap<>(tags));
+        }
         parameterGroups.put(parameterGroupName, group);
         parameterGroups.flush();
         emitEvent(RedshiftEventCatalog.PARAMETER_GROUP_CREATED, parameterGroupName,
@@ -3175,7 +3356,7 @@ public class RedshiftService implements ManagedSecretRotator {
                 if (tooSoon) {
                     return false;
                 }
-                createSnapshot(accountId, snapshotId, cluster, null, now, scheduled);
+                createSnapshot(accountId, snapshotId, cluster, null, now, scheduled, null);
             } else if (!"automated".equals(existing.getSnapshotType())
                     || !clusterId.equals(existing.getClusterIdentifier()) || !scheduled.equals(existing.getScheduledTime())) {
                 throw new AwsException("ClusterSnapshotAlreadyExists", "Snapshot identifier is already in use", 400);
@@ -3361,6 +3542,7 @@ public class RedshiftService implements ManagedSecretRotator {
         copy.setSqlDump(dump == null ? null : dump.toString());
         copy.setCopiedToRegions(new LinkedHashSet<>());
         copy.setTags(new LinkedHashMap<>());
+        copy.setAccountsWithRestoreAccess(new LinkedHashSet<>());
         copy.setKmsKeyId(Optional.ofNullable(cluster.getSnapshotCopyGrantName())
                 .flatMap(name -> snapshotCopyGrants.getForAccount(accountId, name))
                 .map(SnapshotCopyGrant::getKmsKeyId).orElse(null));

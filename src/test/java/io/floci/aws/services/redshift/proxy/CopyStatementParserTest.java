@@ -14,6 +14,23 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 class CopyStatementParserTest {
 
     @Test
+    void remainingCopyOptionsAreAcceptedTogether() {
+        assertNotNull(copyFrom("COPY t FROM 's3://b/k' IGNOREBLANKLINES ROUNDEC IGNOREALLERRORS"));
+        assertNotNull(copyFrom("COPY t FROM 's3://b/k' CSV IGNOREBLANKLINES ROUNDEC MAXERROR 2"));
+        assertNotNull(copyFrom("COPY t FROM 's3://b/k' JSON 'auto' IGNOREALLERRORS"));
+    }
+
+    @Test
+    void ignoreAllErrorsCannotBeCombinedWithMaxErrorOrRepeated() {
+        assertNull(copyFrom("COPY t FROM 's3://b/k' IGNOREALLERRORS MAXERROR 0"));
+        assertNull(copyFrom("COPY t FROM 's3://b/k' MAXERROR 2 IGNOREALLERRORS"));
+        for (String option : List.of("IGNOREALLERRORS", "IGNOREBLANKLINES", "ROUNDEC")) {
+            assertNull(copyFrom("COPY t FROM 's3://b/k' " + option + " " + option));
+            assertNull(copyFrom("COPY t FROM 's3://b/k' " + option + "suffix"));
+        }
+    }
+
+    @Test
     void copyAndUnloadAcceptDefaultIamRole() {
         CopyStatementParser.S3CopyFrom copy = assertInstanceOf(CopyStatementParser.S3CopyFrom.class,
                 CopyStatementParser.parse("COPY people FROM 's3://bucket/data' IAM_ROLE default CSV"));

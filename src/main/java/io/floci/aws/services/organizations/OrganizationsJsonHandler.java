@@ -31,6 +31,7 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.function.Function;
+import java.util.function.Supplier;
 
 /**
  * AWS Organizations JSON 1.1 handler. Dispatched from
@@ -63,68 +64,76 @@ public class OrganizationsJsonHandler {
     public Response handle(String action, JsonNode request, String callerAccountId) {
         LOG.debugv("Organizations action: {0}", action);
         try {
-            return switch (action) {
-                case "CreateOrganization" -> createOrganization(request, callerAccountId);
-                case "DescribeOrganization" -> describeOrganization(callerAccountId);
-                case "DeleteOrganization" -> deleteOrganization(callerAccountId);
-                case "EnableAllFeatures" -> enableAllFeatures(callerAccountId);
-                case "ListRoots" -> listRoots(request, callerAccountId);
-                case "CreateOrganizationalUnit" -> createOrganizationalUnit(request, callerAccountId);
-                case "UpdateOrganizationalUnit" -> updateOrganizationalUnit(request, callerAccountId);
-                case "DeleteOrganizationalUnit" -> deleteOrganizationalUnit(request, callerAccountId);
-                case "DescribeOrganizationalUnit" -> describeOrganizationalUnit(request, callerAccountId);
-                case "ListOrganizationalUnitsForParent" -> listOrganizationalUnitsForParent(request, callerAccountId);
-                case "ListParents" -> listParents(request, callerAccountId);
-                case "ListChildren" -> listChildren(request, callerAccountId);
-                case "CreateAccount" -> createAccount(request, callerAccountId, false);
-                case "CreateGovCloudAccount" -> createAccount(request, callerAccountId, true);
-                case "DescribeCreateAccountStatus" -> describeCreateAccountStatus(request, callerAccountId);
-                case "ListCreateAccountStatus" -> listCreateAccountStatus(request, callerAccountId);
-                case "DescribeAccount" -> describeAccount(request, callerAccountId);
-                case "ListAccounts" -> listAccounts(request, callerAccountId);
-                case "ListAccountsForParent" -> listAccountsForParent(request, callerAccountId);
+            Supplier<Response> operation = switch (action) {
+                case "CreateOrganization" -> () -> createOrganization(request, callerAccountId);
+                case "DescribeOrganization" -> () -> describeOrganization(callerAccountId);
+                case "DeleteOrganization" -> () -> deleteOrganization(callerAccountId);
+                case "EnableAllFeatures" -> () -> enableAllFeatures(callerAccountId);
+                case "ListRoots" -> () -> listRoots(request, callerAccountId);
+                case "CreateOrganizationalUnit" -> () -> createOrganizationalUnit(request, callerAccountId);
+                case "UpdateOrganizationalUnit" -> () -> updateOrganizationalUnit(request, callerAccountId);
+                case "DeleteOrganizationalUnit" -> () -> deleteOrganizationalUnit(request, callerAccountId);
+                case "DescribeOrganizationalUnit" -> () -> describeOrganizationalUnit(request, callerAccountId);
+                case "ListOrganizationalUnitsForParent" ->
+                        () -> listOrganizationalUnitsForParent(request, callerAccountId);
+                case "ListParents" -> () -> listParents(request, callerAccountId);
+                case "ListChildren" -> () -> listChildren(request, callerAccountId);
+                case "CreateAccount" -> () -> createAccount(request, callerAccountId, false);
+                case "CreateGovCloudAccount" -> () -> createAccount(request, callerAccountId, true);
+                case "DescribeCreateAccountStatus" -> () -> describeCreateAccountStatus(request, callerAccountId);
+                case "ListCreateAccountStatus" -> () -> listCreateAccountStatus(request, callerAccountId);
+                case "DescribeAccount" -> () -> describeAccount(request, callerAccountId);
+                case "ListAccounts" -> () -> listAccounts(request, callerAccountId);
+                case "ListAccountsForParent" -> () -> listAccountsForParent(request, callerAccountId);
                 case "ListAccountsWithInvalidEffectivePolicy" ->
-                        listAccountsWithInvalidEffectivePolicy(request, callerAccountId);
-                case "MoveAccount" -> moveAccount(request, callerAccountId);
-                case "RemoveAccountFromOrganization" -> removeAccountFromOrganization(request, callerAccountId);
-                case "LeaveOrganization" -> leaveOrganization(callerAccountId);
-                case "CloseAccount" -> closeAccount(request, callerAccountId);
-                case "CreatePolicy" -> createPolicy(request, callerAccountId);
-                case "UpdatePolicy" -> updatePolicy(request, callerAccountId);
-                case "DeletePolicy" -> deletePolicy(request, callerAccountId);
-                case "DescribePolicy" -> describePolicy(request, callerAccountId);
-                case "ListPolicies" -> listPolicies(request, callerAccountId);
-                case "AttachPolicy" -> attachPolicy(request, callerAccountId);
-                case "DetachPolicy" -> detachPolicy(request, callerAccountId);
-                case "ListPoliciesForTarget" -> listPoliciesForTarget(request, callerAccountId);
-                case "ListTargetsForPolicy" -> listTargetsForPolicy(request, callerAccountId);
-                case "EnablePolicyType" -> enablePolicyType(request, callerAccountId);
-                case "DisablePolicyType" -> disablePolicyType(request, callerAccountId);
-                case "DescribeEffectivePolicy" -> describeEffectivePolicy(request, callerAccountId);
-                case "TagResource" -> tagResource(request, callerAccountId);
-                case "UntagResource" -> untagResource(request, callerAccountId);
-                case "ListTagsForResource" -> listTagsForResource(request, callerAccountId);
-                case "EnableAWSServiceAccess" -> enableAwsServiceAccess(request, callerAccountId);
-                case "DisableAWSServiceAccess" -> disableAwsServiceAccess(request, callerAccountId);
+                        () -> listAccountsWithInvalidEffectivePolicy(request, callerAccountId);
+                case "MoveAccount" -> () -> moveAccount(request, callerAccountId);
+                case "RemoveAccountFromOrganization" -> () -> removeAccountFromOrganization(request, callerAccountId);
+                case "LeaveOrganization" -> () -> leaveOrganization(callerAccountId);
+                case "CloseAccount" -> () -> closeAccount(request, callerAccountId);
+                case "CreatePolicy" -> () -> createPolicy(request, callerAccountId);
+                case "UpdatePolicy" -> () -> updatePolicy(request, callerAccountId);
+                case "DeletePolicy" -> () -> deletePolicy(request, callerAccountId);
+                case "DescribePolicy" -> () -> describePolicy(request, callerAccountId);
+                case "ListPolicies" -> () -> listPolicies(request, callerAccountId);
+                case "AttachPolicy" -> () -> attachPolicy(request, callerAccountId);
+                case "DetachPolicy" -> () -> detachPolicy(request, callerAccountId);
+                case "ListPoliciesForTarget" -> () -> listPoliciesForTarget(request, callerAccountId);
+                case "ListTargetsForPolicy" -> () -> listTargetsForPolicy(request, callerAccountId);
+                case "EnablePolicyType" -> () -> enablePolicyType(request, callerAccountId);
+                case "DisablePolicyType" -> () -> disablePolicyType(request, callerAccountId);
+                case "DescribeEffectivePolicy" -> () -> describeEffectivePolicy(request, callerAccountId);
+                case "TagResource" -> () -> tagResource(request, callerAccountId);
+                case "UntagResource" -> () -> untagResource(request, callerAccountId);
+                case "ListTagsForResource" -> () -> listTagsForResource(request, callerAccountId);
+                case "EnableAWSServiceAccess" -> () -> enableAwsServiceAccess(request, callerAccountId);
+                case "DisableAWSServiceAccess" -> () -> disableAwsServiceAccess(request, callerAccountId);
                 case "ListAWSServiceAccessForOrganization" ->
-                        listAwsServiceAccessForOrganization(request, callerAccountId);
-                case "RegisterDelegatedAdministrator" -> registerDelegatedAdministrator(request, callerAccountId);
-                case "DeregisterDelegatedAdministrator" -> deregisterDelegatedAdministrator(request, callerAccountId);
-                case "ListDelegatedAdministrators" -> listDelegatedAdministrators(request, callerAccountId);
-                case "ListDelegatedServicesForAccount" -> listDelegatedServicesForAccount(request, callerAccountId);
-                case "PutResourcePolicy" -> putResourcePolicy(request, callerAccountId);
-                case "DescribeResourcePolicy" -> describeResourcePolicy(callerAccountId);
-                case "DeleteResourcePolicy" -> deleteResourcePolicy(callerAccountId);
-                case "InviteAccountToOrganization" -> inviteAccountToOrganization(request, callerAccountId);
-                case "AcceptHandshake" -> acceptHandshake(request, callerAccountId);
-                case "DeclineHandshake" -> declineHandshake(request, callerAccountId);
-                case "CancelHandshake" -> cancelHandshake(request, callerAccountId);
-                case "DescribeHandshake" -> describeHandshake(request, callerAccountId);
-                case "ListHandshakesForAccount" -> listHandshakesForAccount(request, callerAccountId);
-                case "ListHandshakesForOrganization" -> listHandshakesForOrganization(request, callerAccountId);
-                default -> JsonErrorResponseUtils.createUnknownOperationErrorResponse(
-                        "AWSOrganizationsV20161128." + action);
+                        () -> listAwsServiceAccessForOrganization(request, callerAccountId);
+                case "RegisterDelegatedAdministrator" -> () -> registerDelegatedAdministrator(request, callerAccountId);
+                case "DeregisterDelegatedAdministrator" ->
+                        () -> deregisterDelegatedAdministrator(request, callerAccountId);
+                case "ListDelegatedAdministrators" -> () -> listDelegatedAdministrators(request, callerAccountId);
+                case "ListDelegatedServicesForAccount" ->
+                        () -> listDelegatedServicesForAccount(request, callerAccountId);
+                case "PutResourcePolicy" -> () -> putResourcePolicy(request, callerAccountId);
+                case "DescribeResourcePolicy" -> () -> describeResourcePolicy(callerAccountId);
+                case "DeleteResourcePolicy" -> () -> deleteResourcePolicy(callerAccountId);
+                case "InviteAccountToOrganization" -> () -> inviteAccountToOrganization(request, callerAccountId);
+                case "AcceptHandshake" -> () -> acceptHandshake(request, callerAccountId);
+                case "DeclineHandshake" -> () -> declineHandshake(request, callerAccountId);
+                case "CancelHandshake" -> () -> cancelHandshake(request, callerAccountId);
+                case "DescribeHandshake" -> () -> describeHandshake(request, callerAccountId);
+                case "ListHandshakesForAccount" -> () -> listHandshakesForAccount(request, callerAccountId);
+                case "ListHandshakesForOrganization" -> () -> listHandshakesForOrganization(request, callerAccountId);
+                default -> null;
             };
+            if (operation == null) {
+                return JsonErrorResponseUtils.createUnknownOperationErrorResponse(
+                        "AWSOrganizationsV20161128." + action);
+            }
+            OrganizationsRequestShapes.check(action, request);
+            return operation.get();
         } catch (AwsException e) {
             return JsonErrorResponseUtils.createErrorResponse(e);
         } catch (Exception e) {
@@ -588,7 +597,8 @@ public class OrganizationsJsonHandler {
     private Response inviteAccountToOrganization(JsonNode request, String caller) {
         JsonNode target = request.path("Target");
         Handshake handshake = service.inviteAccountToOrganization(caller,
-                text(target, "Id"), text(target, "Type"), text(request, "Notes"));
+                text(target, "Id"), text(target, "Type"), text(request, "Notes"),
+                parseTags(request.path("Tags")));
         return handshakeResponse(handshake);
     }
 
@@ -796,13 +806,27 @@ public class OrganizationsJsonHandler {
         return value.isMissingNode() || value.isNull() ? null : value.asText();
     }
 
-    /** Organizations sends tags as a list of {@code {Key, Value}} objects, not a map. */
+    /**
+     * Organizations sends tags as a list of {@code {Key, Value}} objects, not a map. A repeated key
+     * is gone once the list is a map, so it is refused while reading it.
+     */
     private static Map<String, String> parseTags(JsonNode node) {
         if (node == null || !node.isArray()) {
             return null;
         }
         Map<String, String> tags = new LinkedHashMap<>();
-        node.forEach(entry -> tags.put(entry.path("Key").asText(), entry.path("Value").asText("")));
+        for (JsonNode entry : node) {
+            String key = text(entry, "Key");
+            String value = text(entry, "Value");
+            if (key == null || value == null) {
+                throw new AwsException("InvalidInputException",
+                        "Each tag needs a Key and a Value, and neither can be null.", 400);
+            }
+            if (tags.putIfAbsent(key, value) != null) {
+                throw new AwsException("InvalidInputException", "Duplicate tag key: " + key + ".", 400,
+                        Map.of("Reason", "DUPLICATE_TAG_KEY"));
+            }
+        }
         return tags;
     }
 

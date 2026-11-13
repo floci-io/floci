@@ -46,6 +46,7 @@ public final class RecordingDynamoDbBackend implements DynamoDbItemAccess, Dynam
         table.setTableName(TABLE_NAME);
         table.setTableArn(TABLE_ARN);
         table.setKeySchema(List.of(new KeySchemaElement("id", "HASH")));
+        table.setAttributeDefinitions(List.of(new AttributeDefinition("id", "S")));
         return table;
     }
 

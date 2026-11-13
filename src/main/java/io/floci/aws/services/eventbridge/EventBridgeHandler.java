@@ -118,10 +118,11 @@ public class EventBridgeHandler {
 
     private Response handleCreateEventBus(JsonNode request, String region) {
         String name = request.path("Name").asText(null);
+        String eventSourceName = request.path("EventSourceName").asText(null);
         String description = request.path("Description").asText(null);
         String kmsKey = request.path("KmsKeyIdentifier").asText(null);
         Map<String, String> tags = parseTagsArray(request.path("Tags"));
-        EventBus bus = eventBridgeService.createEventBus(name, description, kmsKey,
+        EventBus bus = eventBridgeService.createEventBus(name, eventSourceName, description, kmsKey,
                 configJson(request.path("DeadLetterConfig")), configJson(request.path("LogConfig")), tags, region);
         // CreateEventBus answers with the bus's ARN and the configuration it was given.
         ObjectNode configuration = buildBusNode(bus);

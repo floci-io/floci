@@ -4,6 +4,7 @@ import com.cronutils.model.Cron;
 import com.cronutils.model.time.ExecutionTime;
 import com.cronutils.parser.CronParser;
 import io.floci.aws.core.common.AwsCronDefinitions;
+import io.floci.aws.core.common.AwsRateExpressions;
 
 import java.time.Instant;
 import java.time.LocalDateTime;
@@ -12,6 +13,7 @@ import java.time.ZoneOffset;
 import java.time.ZonedDateTime;
 import java.time.format.DateTimeFormatter;
 import java.time.format.ResolverStyle;
+import java.util.Locale;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
@@ -35,10 +37,6 @@ public final class SchedulerExpressionParser {
 
     private static final Pattern RATE_PATTERN = Pattern.compile(
             "^rate\\(\\s*(\\d+)\\s+(minutes?|hours?|days?|weeks?)\\s*\\)$",
-            Pattern.CASE_INSENSITIVE);
-
-    private static final Pattern AWS_RATE_PATTERN = Pattern.compile(
-            "^rate\\(\\s*(\\d+)\\s+(minutes?|hours?|days?)\\s*\\)$",
             Pattern.CASE_INSENSITIVE);
 
     private static final Pattern CRON_PATTERN = Pattern.compile(
@@ -71,17 +69,9 @@ public final class SchedulerExpressionParser {
         switch (classify(expression)) {
             case AT -> parseAt(expression, timezone);
             case RATE -> {
-                Matcher rate = AWS_RATE_PATTERN.matcher(expression.trim());
-                if (!rate.matches()) {
-                    throw new IllegalArgumentException("Week-based rates are not supported by Scheduler");
-                }
-                parseRateMillis(expression);
-                long value = Long.parseLong(rate.group(1));
-                String unit = rate.group(2);
-                boolean plural = unit.endsWith("s") || unit.endsWith("S");
-                if ((value == 1) == plural) {
-                    throw new IllegalArgumentException("Rate unit must be singular for 1 and plural for values greater than 1");
-                }
+                Rate rate = parseRate(expression);
+                AwsRateExpressions.validate(rate.value(), rate.unit());
+                rate.toMillis();
             }
             case CRON -> {
                 parseCron(expression);
@@ -108,22 +98,17 @@ public final class SchedulerExpressionParser {
      * Parses a {@code rate(...)} expression and returns the interval in milliseconds.
      */
     public static long parseRateMillis(String expression) {
+        return parseRate(expression).toMillis();
+    }
+
+    private static Rate parseRate(String expression) {
         Matcher m = RATE_PATTERN.matcher(expression.trim());
         if (!m.matches()) {
             throw new IllegalArgumentException("Not a valid rate() expression: " + expression);
         }
         long value = Long.parseLong(m.group(1));
-        if (value < 1) {
-            throw new IllegalArgumentException("Rate value must be >= 1, got: " + value);
-        }
-        String unit = m.group(2).toLowerCase();
-        return switch (unit) {
-            case "minute", "minutes" -> Math.multiplyExact(value, 60_000L);
-            case "hour", "hours" -> Math.multiplyExact(value, 3_600_000L);
-            case "day", "days" -> Math.multiplyExact(value, 86_400_000L);
-            case "week", "weeks" -> Math.multiplyExact(value, 604_800_000L);
-            default -> throw new IllegalArgumentException("Unknown rate unit: " + unit);
-        };
+        AwsRateExpressions.requirePositiveValue(value);
+        return new Rate(value, m.group(2).toLowerCase(Locale.ROOT));
     }
 
     /**
@@ -164,5 +149,17 @@ public final class SchedulerExpressionParser {
             return ZoneOffset.UTC;
         }
         return ZoneId.of(timezone);
+    }
+
+    private record Rate(long value, String unit) {
+        long toMillis() {
+            return switch (unit) {
+                case "minute", "minutes" -> Math.multiplyExact(value, 60_000L);
+                case "hour", "hours" -> Math.multiplyExact(value, 3_600_000L);
+                case "day", "days" -> Math.multiplyExact(value, 86_400_000L);
+                case "week", "weeks" -> Math.multiplyExact(value, 604_800_000L);
+                default -> throw new IllegalArgumentException("Unknown rate unit: " + unit);
+            };
+        }
     }
 }

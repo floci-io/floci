@@ -9,6 +9,7 @@ import io.floci.aws.core.common.AwsException;
 import io.floci.aws.core.common.RegionResolver;
 import io.floci.aws.core.storage.InMemoryStorage;
 import io.floci.aws.services.acm.AcmService;
+import io.floci.aws.services.cognito.model.CognitoGroup;
 import io.floci.aws.services.cognito.model.CognitoUser;
 import io.floci.aws.services.cognito.model.ResourceServerScope;
 import io.floci.aws.services.cognito.model.UserPool;
@@ -27,8 +28,11 @@ import io.floci.aws.services.sns.SnsService;
 import io.floci.aws.testing.MutableClock;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.parallel.Execution;
+import org.junit.jupiter.api.parallel.ExecutionMode;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.NullAndEmptySource;
+import org.junit.jupiter.params.provider.NullSource;
 import org.junit.jupiter.params.provider.ValueSource;
 import org.mockito.ArgumentCaptor;
 import org.mockito.invocation.InvocationOnMock;
@@ -81,6 +85,7 @@ import static org.mockito.Mockito.when;
  * Verifies that Cognito user-pool Lambda triggers fire on the right events with the right
  * triggerSource, and that their responses are correctly applied to the auth flow.
  */
+@Execution(ExecutionMode.CONCURRENT)
 class CognitoLambdaTriggersTest {
     private static final List<String> AUTH_FLOWS = List.of("ALLOW_USER_PASSWORD_AUTH",
             "ALLOW_ADMIN_USER_PASSWORD_AUTH", "ALLOW_CUSTOM_AUTH", "ALLOW_USER_SRP_AUTH", "ALLOW_REFRESH_TOKEN_AUTH");
@@ -1352,6 +1357,61 @@ class CognitoLambdaTriggersTest {
         assertNotNull(req.get("userAttributes"));
     }
 
+    @Test
+    @SuppressWarnings("unchecked")
+    void preTokenGenerationGroupConfigurationCarriesTheGroupsRoles() throws Exception {
+        UserPool pool = createPoolWithLambdaConfig(Map.of("PreTokenGeneration", "arn:aws:lambda:::pre-token"));
+        seedUser(pool, "alice", "Perm1234!");
+        UserPoolClient client = createClient(pool);
+        String admin = "arn:aws:iam::000000000000:role/admin";
+        String reader = "arn:aws:iam::000000000000:role/reader";
+        service.createGroup(pool.getId(), "admins", null, 1, admin);
+        service.createGroup(pool.getId(), "readers", null, 5, reader);
+        service.createGroup(pool.getId(), "no-role", null, 0, null);
+        service.adminAddUserToGroup(pool.getId(), "admins", "alice");
+        service.adminAddUserToGroup(pool.getId(), "readers", "alice");
+        service.adminAddUserToGroup(pool.getId(), "no-role", "alice");
+
+        ArgumentCaptor<byte[]> payloadCap = ArgumentCaptor.forClass(byte[].class);
+        when(lambdaService.invoke(anyString(), eq("arn:aws:lambda:::pre-token"), payloadCap.capture(), any()))
+                .thenReturn(ok(Map.of()));
+        service.initiateAuth(client.getClientId(), "USER_PASSWORD_AUTH",
+                Map.of("USERNAME", "alice", "PASSWORD", "Perm1234!"));
+
+        Map<String, Object> event = MAPPER.readValue(payloadCap.getValue(), new TypeReference<>() {});
+        Map<String, Object> groups = (Map<String, Object>) ((Map<String, Object>) event.get("request"))
+                .get("groupConfiguration");
+        assertEquals(Set.of("admins", "readers", "no-role"), Set.copyOf((List<String>) groups.get("groupsToOverride")));
+        assertEquals(Set.of(admin, reader), Set.copyOf((List<String>) groups.get("iamRolesToOverride")));
+        assertEquals(admin, groups.get("preferredRole"),
+                "the role of the lowest-precedence group that has one, as on AWS");
+    }
+
+    @Test
+    void preferredRoleFollowsAwsPrecedenceRules() {
+        String a = "arn:aws:iam::000000000000:role/a";
+        String b = "arn:aws:iam::000000000000:role/b";
+        assertEquals(a, CognitoAuthFlowHandler.preferredRole(List.of(group(1, a), group(2, b))));
+        assertEquals(a, CognitoAuthFlowHandler.preferredRole(List.of(group(null, b), group(3, a))),
+                "a group without precedence ranks after every group with one");
+        assertEquals(a, CognitoAuthFlowHandler.preferredRole(List.of(group(1, a), group(1, a))),
+                "a tie on the same role keeps that role");
+        assertNull(CognitoAuthFlowHandler.preferredRole(List.of(group(1, a), group(1, b))),
+                "a tie between different roles sets none");
+        assertEquals(b, CognitoAuthFlowHandler.preferredRole(List.of(group(null, b))));
+        assertNull(CognitoAuthFlowHandler.preferredRole(List.of(group(0, null))));
+        assertEquals(b, CognitoAuthFlowHandler.preferredRole(List.of(group(0, null), group(5, b))),
+                "a group without a role does not outrank one with a role (CreateGroup: the lowest "
+                        + "precedence group whose role ARN is given)");
+    }
+
+    private static CognitoGroup group(Integer precedence, String roleArn) {
+        CognitoGroup group = new CognitoGroup();
+        group.setPrecedence(precedence);
+        group.setRoleArn(roleArn);
+        return group;
+    }
+
     // =========================================================================
     // PreTokenGeneration for client credentials (M2M)
     // =========================================================================
@@ -1895,11 +1955,14 @@ class CognitoLambdaTriggersTest {
         verify(lambdaService, never()).invoke(anyString(), eq("arn:aws:lambda:::post"), any(byte[].class), any());
     }
 
-    @Test
+    @ParameterizedTest
+    @NullSource
+    @ValueSource(strings = {"ENABLED", "LEGACY"})
     @SuppressWarnings("unchecked")
-    void userMigrationCreatesAndAuthenticatesMissingUser() {
+    void userMigrationCreatesAndAuthenticatesMissingUser(String prevention) {
         UserPool pool = createPoolWithLambdaConfig(Map.of("UserMigration", "arn:aws:lambda:::migrate"));
         UserPoolClient client = createClient(pool);
+        client.setPreventUserExistenceErrors(prevention);
 
         Map<String, Object> migrationResp = Map.of(
                 "userAttributes", Map.of(
@@ -1923,10 +1986,13 @@ class CognitoLambdaTriggersTest {
         assertTrue(user.isEnabled());
     }
 
-    @Test
-    void userMigrationLambdaErrorPropagatesUserNotFound() {
+    @ParameterizedTest
+    @NullSource
+    @ValueSource(strings = {"ENABLED", "LEGACY"})
+    void userMigrationLambdaErrorHonorsUserExistenceErrorSetting(String prevention) {
         UserPool pool = createPoolWithLambdaConfig(Map.of("UserMigration", "arn:aws:lambda:::migrate"));
         UserPoolClient client = createClient(pool);
+        client.setPreventUserExistenceErrors(prevention);
 
         when(lambdaService.invoke(anyString(), eq("arn:aws:lambda:::migrate"), any(byte[].class), any()))
                 .thenReturn(lambdaError("Unhandled"));
@@ -1934,7 +2000,9 @@ class CognitoLambdaTriggersTest {
         AwsException ex = assertThrows(AwsException.class, () ->
                 service.initiateAuth(client.getClientId(), "USER_PASSWORD_AUTH",
                         Map.of("USERNAME", "ghost", "PASSWORD", "x")));
-        assertEquals("UserNotFoundException", ex.getErrorCode());
+        boolean hidden = "ENABLED".equals(prevention);
+        assertEquals(hidden ? "NotAuthorizedException" : "UserNotFoundException", ex.getErrorCode());
+        assertEquals(hidden ? "Incorrect username or password" : "User not found", ex.getMessage());
     }
 
     @Test

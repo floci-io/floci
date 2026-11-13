@@ -11,10 +11,8 @@ import io.quarkus.test.junit.TestProfile;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.RegisterExtension;
 import software.amazon.awssdk.auth.credentials.AwsSessionCredentials;
-import software.amazon.awssdk.auth.credentials.StaticCredentialsProvider;
 import software.amazon.awssdk.awscore.exception.AwsServiceException;
 import software.amazon.awssdk.core.sync.RequestBody;
-import software.amazon.awssdk.http.urlconnection.UrlConnectionHttpClient;
 import software.amazon.awssdk.regions.Region;
 import software.amazon.awssdk.services.iam.IamClient;
 import software.amazon.awssdk.services.iam.model.Tag;
@@ -125,8 +123,8 @@ class PrincipalTagEnforcementIntegrationTest {
             Credentials session = sts.assumeRole(r -> r.roleArn(target).roleSessionName("matching")).credentials();
             // A chained request sees the assumed role's tags, not the original user's tags.
             admin.tagUser(r -> r.userName(source).tags(tag("Team", "other")));
-            try (StsClient chained = StsClient.builder().endpointOverride(baseUri).region(Region.US_EAST_1)
-                    .httpClientBuilder(UrlConnectionHttpClient.builder()).credentialsProvider(provider(session)).build()) {
+            try (StsClient chained = AwsTestClients.create(StsClient.builder(),
+                    sessionCredentials(session), Region.US_EAST_1, baseUri)) {
                 chained.assumeRole(r -> r.roleArn(target).roleSessionName("chain"));
                 admin.untagRole(r -> r.roleName(name).tagKeys("Team"));
                 denied(() -> chained.assumeRole(r -> r.roleArn(target).roleSessionName("untagged")));
@@ -208,13 +206,11 @@ class PrincipalTagEnforcementIntegrationTest {
     }
 
     private IamClient sessionClient(Credentials session) {
-        return IamClient.builder().endpointOverride(baseUri).region(Region.US_EAST_1)
-                .httpClientBuilder(UrlConnectionHttpClient.builder()).credentialsProvider(provider(session)).build();
+        return AwsTestClients.create(IamClient.builder(), sessionCredentials(session), Region.US_EAST_1, baseUri);
     }
 
-    private static StaticCredentialsProvider provider(Credentials session) {
-        return StaticCredentialsProvider.create(AwsSessionCredentials.create(
-                session.accessKeyId(), session.secretAccessKey(), session.sessionToken()));
+    private static AwsSessionCredentials sessionCredentials(Credentials session) {
+        return AwsSessionCredentials.create(session.accessKeyId(), session.secretAccessKey(), session.sessionToken());
     }
 
     private static void denied(Runnable operation) {

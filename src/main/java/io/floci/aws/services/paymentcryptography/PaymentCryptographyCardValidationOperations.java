@@ -234,7 +234,7 @@ public class PaymentCryptographyCardValidationOperations {
     }
 
     /**
-     * Checks that the key has the mode of use the operation needs.
+     * The error a card request is refused with.
      */
     private static AwsException validation(String message) {
         return new AwsException("ValidationException", message, 400);

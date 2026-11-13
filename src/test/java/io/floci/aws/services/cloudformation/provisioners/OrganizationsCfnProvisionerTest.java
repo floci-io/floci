@@ -29,6 +29,7 @@ import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.ArgumentMatchers.isNull;
 import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.inOrder;
 import static org.mockito.Mockito.mock;
@@ -57,6 +58,10 @@ class OrganizationsCfnProvisionerTest {
     private final ObjectMapper mapper = new ObjectMapper();
 
     private ProvisionContext ctx() {
+        return ctx(null);
+    }
+
+    private ProvisionContext ctx(String priorPhysicalId) {
         CloudFormationTemplateEngine engine = mock(CloudFormationTemplateEngine.class);
         when(engine.resolve(any())).thenAnswer(inv -> {
             JsonNode node = inv.getArgument(0);
@@ -70,7 +75,7 @@ class OrganizationsCfnProvisionerTest {
             JsonNode node = inv.getArgument(0);
             return node.isTextual() ? node.asText() : node.toString();
         });
-        return new ProvisionContext(engine, "us-east-1", ACCOUNT, "my-stack");
+        return new ProvisionContext(engine, "us-east-1", ACCOUNT, "my-stack", priorPhysicalId);
     }
 
     private StackResource resource(String type, String logicalId) {
@@ -442,12 +447,16 @@ class OrganizationsCfnProvisionerTest {
 
     // ──────────────────────────── Resource policy ────────────────────────────
 
-    @Test
-    void resourcePolicySetsPhysicalIdAndGetAttAttributes() {
+    private void stubPutResourcePolicy() {
         when(organizations.putResourcePolicy(eq(ACCOUNT), anyString(), any()))
                 .thenReturn(new OrganizationsService.ResourcePolicyView("rp-abcd1234",
                         "arn:aws:organizations::" + ACCOUNT + ":resourcepolicy/" + ORG_ID + "/rp-abcd1234",
                         "{}", Map.of()));
+    }
+
+    @Test
+    void resourcePolicySetsPhysicalIdAndGetAttAttributes() {
+        stubPutResourcePolicy();
 
         StackResource r = resource("AWS::Organizations::ResourcePolicy", "Rp");
         ObjectNode props = mapper.createObjectNode();
@@ -462,25 +471,59 @@ class OrganizationsCfnProvisionerTest {
     }
 
     @Test
-    void resourcePolicyUpdatePassesTheFullTagSetSoDroppedKeysAreRemoved() {
-        when(organizations.putResourcePolicy(eq(ACCOUNT), anyString(), any()))
-                .thenReturn(new OrganizationsService.ResourcePolicyView("rp-abcd1234",
-                        "arn:aws:organizations::" + ACCOUNT + ":resourcepolicy/" + ORG_ID + "/rp-abcd1234",
-                        "{}", Map.of()));
+    void resourcePolicyCreatePassesItsTagsToPut() {
+        stubPutResourcePolicy();
+
+        StackResource r = resource("AWS::Organizations::ResourcePolicy", "Rp");
+        ObjectNode props = mapper.createObjectNode();
+        props.putObject("Content").put("Version", "2012-10-17");
+        props.putArray("Tags").addObject().put("Key", "env").put("Value", "test");
+
+        provisioner.provision(r, props, ctx());
+
+        verify(organizations).putResourcePolicy(eq(ACCOUNT), anyString(), eq(Map.of("env", "test")));
+        verify(organizations, never()).tagResource(anyString(), anyString(), any());
+        verify(organizations, never()).untagResource(anyString(), anyString(), any());
+    }
+
+    @Test
+    void resourcePolicyUpdateConvergesTagsThroughTagAndUntagResource() {
+        stubPutResourcePolicy();
+        when(organizations.listTagsForResource(ACCOUNT, "rp-abcd1234"))
+                .thenReturn(Map.of("env", "test", "owner", "platform"));
 
         StackResource r = resource("AWS::Organizations::ResourcePolicy", "Rp");
         r.setPhysicalId("rp-abcd1234");
         ObjectNode props = mapper.createObjectNode();
         props.putObject("Content").put("Version", "2012-10-17");
-        // The previous revision also carried "owner"; this one drops it.
-        props.putArray("Tags").addObject().put("Key", "env").put("Value", "prod");
+        // env changes, owner is dropped and team is added.
+        props.putArray("Tags")
+                .add(mapper.createObjectNode().put("Key", "env").put("Value", "prod"))
+                .add(mapper.createObjectNode().put("Key", "team").put("Value", "red"));
 
-        provisioner.provision(r, props, ctx());
+        provisioner.provision(r, props, ctx("rp-abcd1234"));
 
-        // putResourcePolicy replaces the tag map, so handing it exactly the template's set is what
-        // removes the dropped key. The other three types reach the same end via replaceTags, which
-        // cannot be used here because a resource policy is not a TagResource target.
-        verify(organizations).putResourcePolicy(eq(ACCOUNT), anyString(), eq(Map.of("env", "prod")));
+        // PutResourcePolicy applies Tags only when it creates the policy, so an update leaves them out.
+        verify(organizations).putResourcePolicy(eq(ACCOUNT), anyString(), isNull());
+        verify(organizations).untagResource(ACCOUNT, "rp-abcd1234", List.of("owner"));
+        verify(organizations).tagResource(ACCOUNT, "rp-abcd1234", Map.of("env", "prod", "team", "red"));
+    }
+
+    @Test
+    void resourcePolicyUpdateWithUnchangedTagsRemovesNone() {
+        stubPutResourcePolicy();
+        when(organizations.listTagsForResource(ACCOUNT, "rp-abcd1234")).thenReturn(Map.of("env", "test"));
+
+        StackResource r = resource("AWS::Organizations::ResourcePolicy", "Rp");
+        r.setPhysicalId("rp-abcd1234");
+        ObjectNode props = mapper.createObjectNode();
+        props.putObject("Content").put("Version", "2012-10-17");
+        props.putArray("Tags").addObject().put("Key", "env").put("Value", "test");
+
+        provisioner.provision(r, props, ctx("rp-abcd1234"));
+
+        verify(organizations).putResourcePolicy(eq(ACCOUNT), anyString(), isNull());
+        verify(organizations, never()).untagResource(anyString(), anyString(), any());
     }
 
     // ──────────────────────────── Delete ────────────────────────────

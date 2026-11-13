@@ -11,6 +11,7 @@ import io.floci.aws.services.redshift.model.ClusterParameterGroup;
 import io.floci.aws.services.redshift.model.ClusterSubnetGroup;
 import io.floci.aws.services.redshift.model.Endpoint;
 import io.floci.aws.services.redshift.model.EventSubscription;
+import io.floci.aws.services.redshift.model.Integration;
 import io.floci.aws.services.redshift.model.Parameter;
 import io.floci.aws.services.redshift.model.Snapshot;
 import io.floci.aws.services.redshift.model.SnapshotCopyGrant;
@@ -23,6 +24,7 @@ import org.junit.jupiter.api.Test;
 import org.mockito.ArgumentCaptor;
 
 import java.time.Instant;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 
@@ -362,6 +364,7 @@ class RedshiftQueryHandlerTest {
         regionResolver = mock(RegionResolver.class);
         when(regionResolver.getAccountId()).thenReturn("acc");
         when(regionResolver.resolveRegionFromAuth(anyString())).thenReturn("us-east-1");
+        when(regionResolver.partitionForRegion(anyString())).thenReturn("aws");
         handler = new RedshiftQueryHandler(service, credentialBroker, config, iamDbUserResolver, regionResolver);
     }
 
@@ -535,7 +538,7 @@ class RedshiftQueryHandlerTest {
         params.putSingle("ClusterIdentifier", "test-cluster");
 
         Snapshot snapshot = new Snapshot("test-snapshot", "test-cluster", "available", 5439, "admin");
-        when(service.createSnapshot("test-snapshot", "test-cluster")).thenReturn(snapshot);
+        when(service.createSnapshot("test-snapshot", "test-cluster", Map.of())).thenReturn(snapshot);
 
         Response response = handler.handle("CreateClusterSnapshot", params);
         assertEquals(200, response.getStatus());
@@ -619,7 +622,7 @@ class RedshiftQueryHandlerTest {
         cluster.setMasterUsername("admin");
         cluster.setClusterStatus("available");
         cluster.setEndpoint(new Endpoint("localhost", 5439));
-        when(service.restoreFromClusterSnapshot("restored-cluster", "test-snapshot", null, "dc2.large")).thenReturn(cluster);
+        when(service.restoreFromClusterSnapshot("restored-cluster", "test-snapshot", null, "dc2.large", null)).thenReturn(cluster);
 
         Response response = handler.handle("RestoreFromClusterSnapshot", params);
         assertEquals(200, response.getStatus());
@@ -636,11 +639,11 @@ class RedshiftQueryHandlerTest {
         params.putSingle("ClusterIdentifier", "restored-cluster");
         params.putSingle("SnapshotArn", "arn:aws:redshift:us-east-1:acc:snapshot:src/my-snap");
         Cluster cluster = availableCluster("restored-cluster");
-        when(service.restoreFromClusterSnapshot("restored-cluster", "my-snap", "src", null)).thenReturn(cluster);
+        when(service.restoreFromClusterSnapshot("restored-cluster", "my-snap", "src", null, null)).thenReturn(cluster);
 
         Response response = handler.handle("RestoreFromClusterSnapshot", params, "auth");
         assertEquals(200, response.getStatus());
-        verify(service).restoreFromClusterSnapshot("restored-cluster", "my-snap", "src", null);
+        verify(service).restoreFromClusterSnapshot("restored-cluster", "my-snap", "src", null, null);
     }
 
     @Test
@@ -666,15 +669,53 @@ class RedshiftQueryHandlerTest {
     }
 
     @Test
-    void restoreFromClusterSnapshotForeignAccountArnNotFound() {
+    void restoreFromClusterSnapshotForeignAccountArnNamesTheOwner() {
         MultivaluedMap<String, String> params = new MultivaluedHashMap<>();
         params.putSingle("ClusterIdentifier", "restored-cluster");
         params.putSingle("SnapshotArn", "arn:aws:redshift:us-east-1:999999999999:snapshot:src/my-snap");
+        when(service.restoreFromClusterSnapshot("restored-cluster", "my-snap", "src", null, "999999999999"))
+                .thenReturn(availableCluster("restored-cluster"));
+
+        Response response = handler.handle("RestoreFromClusterSnapshot", params, "auth");
+        assertEquals(200, response.getStatus());
+        verify(service).restoreFromClusterSnapshot("restored-cluster", "my-snap", "src", null, "999999999999");
+    }
+
+    @Test
+    void restoreFromClusterSnapshotOfAnotherRegionArnIsNotFound() {
+        MultivaluedMap<String, String> params = new MultivaluedHashMap<>();
+        params.putSingle("ClusterIdentifier", "restored-cluster");
+        params.putSingle("SnapshotArn", "arn:aws:redshift:eu-west-1:999999999999:snapshot:src/my-snap");
 
         AwsException ex = assertThrows(AwsException.class,
                 () -> handler.handle("RestoreFromClusterSnapshot", params, "auth"));
         assertEquals("ClusterSnapshotNotFound", ex.getErrorCode());
-        verify(service, never()).restoreFromClusterSnapshot(any(), any(), any(), any());
+        verify(service, never()).restoreFromClusterSnapshot(any(), any(), any(), any(), any());
+    }
+
+    @Test
+    void restoreFromClusterSnapshotOfAnotherPartitionArnIsNotFound() {
+        MultivaluedMap<String, String> params = new MultivaluedHashMap<>();
+        params.putSingle("ClusterIdentifier", "restored-cluster");
+        params.putSingle("SnapshotArn", "arn:aws-cn:redshift:us-east-1:999999999999:snapshot:src/my-snap");
+
+        AwsException ex = assertThrows(AwsException.class,
+                () -> handler.handle("RestoreFromClusterSnapshot", params, "auth"));
+        assertEquals("ClusterSnapshotNotFound", ex.getErrorCode());
+        verify(service, never()).restoreFromClusterSnapshot(any(), any(), any(), any(), any());
+    }
+
+    @Test
+    void restoreFromClusterSnapshotPassesTheOwnerAccountItNames() {
+        MultivaluedMap<String, String> params = new MultivaluedHashMap<>();
+        params.putSingle("ClusterIdentifier", "restored-cluster");
+        params.putSingle("SnapshotIdentifier", "my-snap");
+        params.putSingle("OwnerAccount", "999999999999");
+        when(service.restoreFromClusterSnapshot("restored-cluster", "my-snap", null, null, "999999999999"))
+                .thenReturn(availableCluster("restored-cluster"));
+
+        assertEquals(200, handler.handle("RestoreFromClusterSnapshot", params, "auth").getStatus());
+        verify(service).restoreFromClusterSnapshot("restored-cluster", "my-snap", null, null, "999999999999");
     }
 
     @Test
@@ -688,7 +729,7 @@ class RedshiftQueryHandlerTest {
                 () -> handler.handle("RestoreFromClusterSnapshot", params, "auth"));
         assertEquals("InvalidParameterCombination", ex.getErrorCode());
         assertEquals(400, ex.getHttpStatus());
-        verify(service, never()).restoreFromClusterSnapshot(any(), any(), any(), any());
+        verify(service, never()).restoreFromClusterSnapshot(any(), any(), any(), any(), any());
     }
 
     /** The cluster a request is authorized on, snapshot:<cluster>/<name>, is the one its snapshot must be of. */
@@ -710,11 +751,11 @@ class RedshiftQueryHandlerTest {
         params.putSingle("ClusterIdentifier", "restored-cluster");
         params.putSingle("SnapshotIdentifier", "test-snapshot");
         params.putSingle("SnapshotClusterIdentifier", "prod");
-        when(service.restoreFromClusterSnapshot("restored-cluster", "test-snapshot", "prod", null))
+        when(service.restoreFromClusterSnapshot("restored-cluster", "test-snapshot", "prod", null, null))
                 .thenReturn(availableCluster("restored-cluster"));
 
         assertEquals(200, handler.handle("RestoreFromClusterSnapshot", params, "auth").getStatus());
-        verify(service).restoreFromClusterSnapshot("restored-cluster", "test-snapshot", "prod", null);
+        verify(service).restoreFromClusterSnapshot("restored-cluster", "test-snapshot", "prod", null, null);
     }
 
     @Test
@@ -728,7 +769,7 @@ class RedshiftQueryHandlerTest {
                 () -> handler.handle("RestoreFromClusterSnapshot", params, "auth"));
         assertEquals("ClusterSnapshotNotFound", ex.getErrorCode());
         assertEquals(404, ex.getHttpStatus());
-        verify(service, never()).restoreFromClusterSnapshot(any(), any(), any(), any());
+        verify(service, never()).restoreFromClusterSnapshot(any(), any(), any(), any(), any());
     }
 
     @Test
@@ -740,7 +781,7 @@ class RedshiftQueryHandlerTest {
         AwsException ex = assertThrows(AwsException.class,
                 () -> handler.handle("RestoreFromClusterSnapshot", params, "auth"));
         assertEquals("ClusterSnapshotNotFound", ex.getErrorCode());
-        verify(service, never()).restoreFromClusterSnapshot(any(), any(), any(), any());
+        verify(service, never()).restoreFromClusterSnapshot(any(), any(), any(), any(), any());
     }
 
     @Test
@@ -762,7 +803,8 @@ class RedshiftQueryHandlerTest {
         params.putSingle("Description", "custom redshift param group");
 
         ClusterParameterGroup group = new ClusterParameterGroup("test-pg", "redshift-1.0", "custom redshift param group");
-        when(service.createClusterParameterGroup("test-pg", "redshift-1.0", "custom redshift param group")).thenReturn(group);
+        when(service.createClusterParameterGroup("test-pg", "redshift-1.0", "custom redshift param group", Map.of()))
+                .thenReturn(group);
 
         Response response = handler.handle("CreateClusterParameterGroup", params);
         assertEquals(200, response.getStatus());
@@ -1306,6 +1348,62 @@ class RedshiftQueryHandlerTest {
         assertTrue(xml.contains("<Tags>"));
         assertTrue(xml.contains("<Key>env</Key>"));
         assertTrue(xml.contains("<Value>prod</Value>"));
+    }
+
+    @Test
+    void describeResponsesListTagsAndClustersGrantsAndIntegrationsOmitAnEmptyList() {
+        List<String> describes = List.of("DescribeClusters", "DescribeClusterSnapshots",
+                "DescribeClusterParameterGroups", "DescribeClusterSubnetGroups", "DescribeSnapshotSchedules",
+                "DescribeEventSubscriptions", "DescribeSnapshotCopyGrants", "DescribeIntegrations");
+        Map<String, String> tags = new LinkedHashMap<>();
+        tags.put("team", "red");
+        tags.put("env", "dev");
+        stubOneOfEachTaggedResource(tags);
+        for (String action : describes) {
+            String xml = (String) handler.handle(action, new MultivaluedHashMap<>()).getEntity();
+            assertTrue(xml.contains("<Tags><Tag><Key>team</Key><Value>red</Value></Tag>"
+                    + "<Tag><Key>env</Key><Value>dev</Value></Tag></Tags>"), action);
+        }
+
+        List<String> omitEmpty = List.of("DescribeClusters", "DescribeSnapshotCopyGrants", "DescribeIntegrations");
+        stubOneOfEachTaggedResource(Map.of());
+        for (String action : describes) {
+            String xml = (String) handler.handle(action, new MultivaluedHashMap<>()).getEntity();
+            assertEquals(!omitEmpty.contains(action), xml.contains("<Tags></Tags>"), action);
+            assertEquals(!omitEmpty.contains(action), xml.contains("<Tags>"), action);
+        }
+    }
+
+    private void stubOneOfEachTaggedResource(Map<String, String> tags) {
+        Cluster cluster = new Cluster();
+        cluster.setTags(tags);
+        when(service.describeClusters(any())).thenReturn(List.of(cluster));
+        Snapshot snapshot = new Snapshot();
+        snapshot.setTags(tags);
+        when(service.describeSnapshots(any(), any())).thenReturn(List.of(snapshot));
+        ClusterParameterGroup parameterGroup = new ClusterParameterGroup();
+        parameterGroup.setTags(tags);
+        when(service.describeClusterParameterGroups(any())).thenReturn(List.of(parameterGroup));
+        ClusterSubnetGroup subnetGroup = new ClusterSubnetGroup();
+        subnetGroup.setTags(tags);
+        when(service.describeClusterSubnetGroups(any())).thenReturn(List.of(subnetGroup));
+        SnapshotSchedule schedule = new SnapshotSchedule();
+        schedule.setTags(tags);
+        when(service.describeSnapshotSchedules(any(), any(), any(), any(), any(), any()))
+                .thenReturn(new PaginatedResult<>(List.of(schedule), null));
+        EventSubscription subscription = new EventSubscription();
+        subscription.setSubscriptionCreationTime(Instant.parse("2026-11-12T00:00:00Z"));
+        subscription.setTags(tags);
+        when(service.describeEventSubscriptions(any(), any(), any(), any(), any()))
+                .thenReturn(new PaginatedResult<>(List.of(subscription), null));
+        SnapshotCopyGrant grant = new SnapshotCopyGrant();
+        grant.setTags(tags);
+        when(service.describeSnapshotCopyGrants(any(), any(), any()))
+                .thenReturn(new PaginatedResult<>(List.of(grant), null));
+        Integration integration = new Integration();
+        integration.setTags(tags);
+        when(service.describeIntegrations(any(), any(), any(), any()))
+                .thenReturn(new RedshiftService.IntegrationPage(List.of(integration), null));
     }
 
     // ── GetClusterCredentials ────────────────────────────────────────────────

@@ -1,6 +1,7 @@
 package io.floci.aws.services.s3;
 
 import io.quarkus.test.junit.QuarkusTest;
+import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
 
 import java.util.List;
@@ -21,10 +22,35 @@ class S3UnservedBucketSubresourceIntegrationTest {
 
     private static final List<String> METHODS = List.of("GET", "PUT", "DELETE", "POST", "HEAD");
 
+    /** The bucket the running test made. Every {@code @QuarkusTest} class shares one emulator, so it goes too. */
+    private String created;
+    /** The bucket the running test expects no request to make, which only a failing run leaves behind. */
+    private String neverCreated;
+
+    @AfterEach
+    void deleteTheBuckets() {
+        if (created != null) {
+            given().when().delete("/" + created).then().statusCode(204);
+        }
+        if (neverCreated != null) {
+            given().when().delete("/" + neverCreated);
+        }
+    }
+
+    private String createBucket(String bucket) {
+        given().when().put("/" + bucket).then().statusCode(200);
+        created = bucket;
+        return bucket;
+    }
+
+    private String neverCreated(String bucket) {
+        neverCreated = bucket;
+        return bucket;
+    }
+
     @Test
     void aSubresourceFlociDoesNotServeIsNotImplementedAndLeavesTheBucketAlone() {
-        String bucket = "unserved-subresource-bucket";
-        given().when().put("/" + bucket).then().statusCode(200);
+        String bucket = createBucket("unserved-subresource-bucket");
         String[][] requests = {
             {"DELETE", "metadataConfiguration"}, {"DELETE", "metadataTable"},
             {"GET", "metadataConfiguration"}, {"GET", "metadataTable"}, {"GET", "abac"}, {"GET", "session"},
@@ -44,8 +70,7 @@ class S3UnservedBucketSubresourceIntegrationTest {
 
     @Test
     void aSubresourceSentWithAMethodAwsDefinesNoneForIsNotAllowed() {
-        String bucket = "misdirected-subresource-bucket";
-        given().when().put("/" + bucket).then().statusCode(200);
+        String bucket = createBucket("misdirected-subresource-bucket");
         String[][] requests = {
             {"DELETE", "versioning"}, {"DELETE", "acl"}, {"DELETE", "uploads"},
             {"PUT", "location"}, {"PUT", "uploads"}, {"GET", "delete"}, {"POST", "versioning"},
@@ -66,8 +91,7 @@ class S3UnservedBucketSubresourceIntegrationTest {
     @Test
     void anEscapedAmpersandInAValueNamesNoSubresource() {
         // ?prefix=reports%26abac is one parameter whose value holds "&abac", not an ?abac sub-resource.
-        String bucket = "escaped-ampersand-bucket";
-        given().when().put("/" + bucket).then().statusCode(200);
+        String bucket = createBucket("escaped-ampersand-bucket");
         given().queryParam("prefix", "reports&abac")
         .when()
             .get("/" + bucket)
@@ -78,7 +102,7 @@ class S3UnservedBucketSubresourceIntegrationTest {
 
     @Test
     void aPutNamingASubresourceNeverCreatesTheBucket() {
-        String bucket = "never-created-by-a-subresource";
+        String bucket = neverCreated("never-created-by-a-subresource");
         given().queryParam("abac", "").when().put("/" + bucket).then().statusCode(501);
         given().queryParam("location", "").when().put("/" + bucket).then().statusCode(405);
         given().when().head("/" + bucket).then().statusCode(404);
@@ -86,9 +110,8 @@ class S3UnservedBucketSubresourceIntegrationTest {
 
     @Test
     void noSubresourceOfTheAwsModelRunsAsTheBucketsOwnOperation() {
-        String bucket = "every-subresource-bucket";
-        String missing = "every-subresource-missing";
-        given().when().put("/" + bucket).then().statusCode(200);
+        String bucket = createBucket("every-subresource-bucket");
+        String missing = neverCreated("every-subresource-missing");
         for (String name : S3BucketSubresources.vendored().names()) {
             for (String method : METHODS) {
                 String response = given().queryParam(name, "").when().request(method, "/" + bucket)

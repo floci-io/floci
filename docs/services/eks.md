@@ -463,6 +463,12 @@ With a persistent [storage mode](../configuration/storage.md) (the default), clu
   `floci-eks-<name>` container and volume: restoration adopts the surviving container when its
   `io.floci.account` label matches the owning account, so pre-upgrade workloads are not
   orphaned.
+- Cluster names are unique only within a Region of an account, so a cluster outside the default
+  Region, or one sharing its name with a cluster in another Region, puts its Region first in its
+  container and volume names: `floci-aws-eks-<region>.<name>`, or
+  `floci-aws-eks-<region>.<account>.<name>` for a non-default account. A cluster in the default
+  Region keeps the unqualified name, and so does any cluster created before Region qualification:
+  its record moves to a Region-scoped key on startup, but its container and volume keep their names.
 
 A restored cluster reports `CREATING` until its API server answers again, then returns to
 `ACTIVE` with a freshly extracted certificate authority. If the container cannot be brought
@@ -561,7 +567,7 @@ The node name, the instance ID in `spec.providerID`, and the synthetic EC2 insta
 
 Stock Amazon EKS clusters historically define a default `gp2` StorageClass pointing to the legacy in-tree `kubernetes.io/aws-ebs` plugin, but run no active storage provisioner without the EBS CSI driver. Unqualified PersistentVolumeClaims remain `Pending` on EKS because nothing can provision them. Floci matches this behavior by disabling k3s's bundled `local-path` provisioner and StorageClass, preventing unqualified claims from silently binding to the node filesystem.
 
-Callers requiring dynamic volume provisioning can install a driver (such as the `aws-ebs-csi-driver` addon) and define their desired StorageClass.
+Callers requiring dynamic volume provisioning can install a driver (such as the `aws-ebs-csi-driver` addon) and define their desired StorageClass. As on an EKS node, the cluster node's mounts are shared, so a driver's node plugin can mount volumes under `/var/lib/kubelet` with `Bidirectional` propagation.
 
 For local testing workflows that rely on automatic volume binding without a CSI driver, set `floci.services.eks.default-storage-class: true` (or `FLOCI_SERVICES_EKS_DEFAULT_STORAGE_CLASS=true`) to retain k3s's bundled `local-path` provisioner and default StorageClass.
 
@@ -908,6 +914,8 @@ curl -sX POST http://localhost:4566/_floci/eks/clusters/my-cluster/oidc-token \
 
 `audience` (default `sts.amazonaws.com`) and `expirySeconds` (default 24h, max 7d) are optional. This is Floci plumbing under `_floci/…`, not an AWS API.
 
+Cluster names are unique only within a Region of an account. When clusters with the same name exist in more than one Region, add `?region=<region>` to choose one, for example `…/clusters/my-cluster/oidc-token?region=eu-west-1`. Without it, the request's Region is used, and then the account's only cluster of that name. The discovery and key routes below take the same parameter.
+
 ### Trust policy
 
 Note that the OIDC provider ARN and the condition keys use the issuer with the scheme stripped `oidc.eks.<region>.amazonaws.com/id/<id>`, which is how the AWS console, `eksctl`, and Terraform all render it.
@@ -955,6 +963,8 @@ Served for fidelity and debugging, nothing in the IRSA flow dereferences them:
 | `GET /_floci/eks/clusters/<name>/oidc/keys` | JWKS containing the cluster's public key |
 
 These live under `_floci/…` rather than at the AWS-shaped issuer path, which Floci's embedded DNS does not resolve and which would collide with S3's path-style routing.
+
+Both take an optional `?region=<region>` query parameter. Cluster names are unique only within a Region of an account, so without it the request's Region is used, and then the account's only cluster of that name. The discovery document's `jwks_uri` always names the cluster's Region.
 
 ## ARN Format
 

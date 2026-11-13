@@ -5,6 +5,8 @@ import io.floci.aws.core.common.AwsException;
 import io.floci.aws.core.common.PostgresWire;
 import io.floci.aws.core.common.RequestScopes;
 import io.floci.aws.services.iam.IamService;
+import io.floci.aws.services.s3.S3ConditionKeys;
+import io.floci.aws.services.s3.S3ResourceArns;
 import io.floci.aws.services.s3.S3Service;
 import io.floci.aws.services.s3.model.PutObjectOptions;
 import io.floci.aws.services.s3.model.S3Object;
@@ -109,10 +111,20 @@ public final class S3CopySimulator {
 
     public static final class S3TransferException extends RuntimeException {
         private final String sqlState;
+        private final Map<Character, String> fields;
 
         public S3TransferException(String sqlState, String message, Throwable cause) {
+            this(sqlState, message, cause, Map.of());
+        }
+
+        S3TransferException(String sqlState, String message, Throwable cause, Map<Character, String> fields) {
             super(message, cause);
             this.sqlState = sqlState;
+            this.fields = Map.copyOf(fields);
+        }
+
+        Map<Character, String> fields() {
+            return fields;
         }
 
         public String sqlState() {
@@ -167,7 +179,7 @@ public final class S3CopySimulator {
                 } else if (!exactObject) {
                     if (roleSession != null) {
                         RedshiftRoleAccess.authorizeSessionAction(s3, iamService, roleSession, spec.iamRoleArn(),
-                                "s3:ListBucket", copyBucketArn(spec, s3), Map.of("s3:prefix", List.of(spec.keyOrPrefix())));
+                                "s3:ListBucket", copyBucketArn(spec, s3), S3ConditionKeys.listing(spec.keyOrPrefix()));
                         s3.authorizeSignedListBucket(roleSession.accessKeyId(), roleSession.sessionToken(), spec.bucket(),
                                 spec.keyOrPrefix());
                     } else {
@@ -229,8 +241,7 @@ public final class S3CopySimulator {
         if (spec.iamRoleArn() != null) {
             return RedshiftRoleAccess.bucketArn(spec.iamRoleArn(), spec.bucket());
         }
-        return AwsArnUtils.Arn.global(s3.bucketPartition(spec.bucket()), "s3", "",
-                spec.bucket()).toString();
+        return S3ResourceArns.bucket(s3.bucketPartition(spec.bucket()), spec.bucket());
     }
 
     private static String copyObjectArn(CopyStatementParser.S3CopyFrom spec, S3Service s3, String key) {
@@ -565,7 +576,7 @@ public final class S3CopySimulator {
                 : spec.columns().stream().map(S3CopySimulator::normalizeColumnName).toList();
     }
 
-    private static String normalizeColumnName(String identifier) {
+    static String normalizeColumnName(String identifier) {
         if (identifier != null && identifier.length() >= 2
                 && identifier.startsWith("\"") && identifier.endsWith("\"")) {
             return identifier.substring(1, identifier.length() - 1).replace("\"\"", "\"");
@@ -707,10 +718,18 @@ public final class S3CopySimulator {
         }
     }
 
-    record ColumnInfo(String name, Integer maxBytes, CopyRecordTransformer.ColumnKind kind) {
+    record ColumnInfo(String name, Integer maxBytes, CopyRecordTransformer.ColumnKind kind, Integer scale, String typeOid) {
+        ColumnInfo(String name, Integer maxBytes, CopyRecordTransformer.ColumnKind kind) {
+            this(name, maxBytes, kind, null, null);
+        }
+
         ColumnInfo(String name, Integer maxBytes) {
             this(name, maxBytes, CopyRecordTransformer.ColumnKind.OTHER);
         }
+    }
+
+    static List<Integer> alignScales(CopyStatementParser.S3CopyFrom spec, List<ColumnInfo> catalog) {
+        return align(spec, catalog, ColumnInfo::scale);
     }
 
     /** Positional max character length per COPY column; null entries mean no limit. */
@@ -786,7 +805,9 @@ public final class S3CopySimulator {
     static String columnInfoQuery(CopyStatementParser.S3CopyFrom spec) {
         // 1042 = bpchar, 1043 = varchar; atttypmod carries the declared length plus a 4-byte header.
         return "SELECT a.attname, CASE WHEN a.atttypid IN (1042, 1043) AND a.atttypmod > 4 "
-                + "THEN a.atttypmod - 4 END, a.atttypid FROM pg_catalog.pg_attribute a "
+                + "THEN a.atttypmod - 4 END, a.atttypid, "
+                + "CASE WHEN a.atttypid = 1700 AND a.atttypmod >= 4 "
+                + "THEN (((a.atttypmod - 4) & 2047) # 1024) - 1024 END FROM pg_catalog.pg_attribute a "
                 + "WHERE a.attrelid = to_regclass(" + PostgresWire.quoteLiteral(spec.targetTable()) + ") "
                 + "AND a.attnum > 0 AND NOT a.attisdropped AND a.attgenerated = '' "
                 + "ORDER BY a.attnum";
@@ -796,7 +817,8 @@ public final class S3CopySimulator {
         Integer maxBytes = values.size() >= 2 && values.get(1) != null
                 ? Integer.valueOf(values.get(1)) : null;
         String typeOid = values.size() >= 3 ? values.get(2) : null;
-        return new ColumnInfo(values.get(0), maxBytes, kindOf(typeOid));
+        Integer scale = values.size() >= 4 && values.get(3) != null ? Integer.valueOf(values.get(3)) : null;
+        return new ColumnInfo(values.get(0), maxBytes, kindOf(typeOid), scale, typeOid);
     }
 
     private static List<ColumnInfo> discoverColumnInfo(Socket client, Socket backend,

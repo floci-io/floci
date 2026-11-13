@@ -2,9 +2,9 @@
 
 CloudFront management-plane and local content-delivery emulation. Supports distribution lifecycle,
 cache policies, origin request policies, response headers policies, origin access controls, origin
-access identities, public keys, trusted key groups, CloudFront Functions, invalidations, tagging, and
-viewer delivery from S3 or custom origins for every CloudFront viewer method (GET, HEAD, OPTIONS, POST,
-PUT, PATCH and DELETE).
+access identities, public keys, trusted key groups, CloudFront Functions, key value stores, invalidations,
+tagging, and viewer delivery from S3 or custom origins for every CloudFront viewer method (GET, HEAD,
+OPTIONS, POST, PUT, PATCH and DELETE).
 
 **Protocol:** REST XML
 **API version:** `2020-05-31`
@@ -101,6 +101,31 @@ PUT, PATCH and DELETE).
 | `PublishFunction` | POST | `/2020-05-31/function/{Name}/publish` |
 | `DeleteFunction` | DELETE | `/2020-05-31/function/{Name}` |
 | `ListFunctions` | GET | `/2020-05-31/function` |
+
+### Key Value Stores
+
+Control plane, served with the rest of CloudFront:
+
+| Operation | Method | Path |
+|---|---|---|
+| `CreateKeyValueStore` | POST | `/2020-05-31/key-value-store` |
+| `DescribeKeyValueStore` | GET | `/2020-05-31/key-value-store/{Name}` |
+| `ListKeyValueStores` | GET | `/2020-05-31/key-value-store` |
+| `UpdateKeyValueStore` | PUT | `/2020-05-31/key-value-store/{Name}` |
+| `DeleteKeyValueStore` | DELETE | `/2020-05-31/key-value-store/{Name}` |
+
+The keys of a store are read and written through the separate `cloudfront-keyvaluestore` data plane
+(REST JSON, signing name `cloudfront-keyvaluestore`). It names the store by its ARN, percent-encoded in
+the path:
+
+| Operation | Method | Path |
+|---|---|---|
+| `DescribeKeyValueStore` | GET | `/key-value-stores/{KvsARN}` |
+| `ListKeys` | GET | `/key-value-stores/{KvsARN}/keys` |
+| `UpdateKeys` | POST | `/key-value-stores/{KvsARN}/keys` |
+| `GetKey` | GET | `/key-value-stores/{KvsARN}/keys/{Key}` |
+| `PutKey` | PUT | `/key-value-stores/{KvsARN}/keys/{Key}` |
+| `DeleteKey` | DELETE | `/key-value-stores/{KvsARN}/keys/{Key}` |
 
 ### Public Keys and Key Groups
 
@@ -375,6 +400,43 @@ PUT, PATCH and DELETE).
   `ListResponseHeadersPolicies?Type=managed`; `Type` uses the AWS lowercase `managed` or `custom`
   values.
 
+## Key Value Stores
+
+A key value store holds the key value pairs a CloudFront Function reads at the edge. The store is created
+and described through the CloudFront control plane, and its keys are managed through the
+`cloudfront-keyvaluestore` data plane, which Floci serves on the same port.
+
+- A store has a name (1 to 64 letters, digits, hyphens and underscores) and an ARN,
+  `arn:aws:cloudfront::<account>:key-value-store/<uuid>`. Stores are `READY` as soon as they are created.
+- The data plane takes the store's ARN in the request path, percent-encoded. The AWS SDKs prepend the
+  account id of that ARN to the endpoint host (`000000000000.localhost.floci.io`), which the embedded DNS
+  and the generated TLS certificate already cover. The requests are signed with SigV4A; Floci reads the
+  `cloudfront-keyvaluestore` signing name from its credential scope and does not verify the signature.
+  With `floci.auth.validate-signatures` on, these requests are refused: signature validation does not accept
+  SigV4A outside S3 yet, so leave it off when using the data plane.
+- With IAM enforcement on, the data plane is authorized as `cloudfront-keyvaluestore:<Operation>` on the store's ARN,
+  and the control plane as `cloudfront:<Operation>`.
+- Keys are listed in key order, 10 per page by default and up to 50 (`MaxResults`).
+- Quotas: a key is at most 512 bytes, a value at most 1,024 bytes and a store at most 5 MiB, counting the
+  UTF-8 bytes of every key and value. Exceeding the first two is a `ValidationException`, and exceeding the
+  store size is a `ServiceQuotaExceededException`. `ItemCount` and `TotalSizeInBytes` follow the same count.
+- Every key write needs the store's current data plane ETag in `If-Match`, and rotates it. `UpdateKeys`
+  applies its puts and deletes together (at most 50 entries and 3 MB per request), and changes nothing when any
+  entry is invalid, including a put without a `Value`. A stale or missing ETag on the
+  data plane is a `ValidationException` ("Pre-Condition failed during update of Key-Value-Store"), and on the
+  control plane an `InvalidIfMatchVersion`.
+- The control plane and the data plane keep independent ETags: a comment update rotates only the control plane
+  ETag, and a key write only the data plane ETag.
+- An account can hold at most 200 stores (`EntityLimitExceeded`), and a store can be associated with at most 100
+  functions (`TooManyFunctionsAssociatedToKeyValueStore`). Deleting a store also drops its tags.
+- Deleting a key that is not in the store is a `ResourceNotFoundException`. In `UpdateKeys` the delete of an
+  absent key is skipped.
+- A function can name at most one store in `FunctionConfig.KeyValueStoreAssociations`, and only with the
+  `cloudfront-js-2.0` runtime. The store has to exist (`EntityNotFound`), and a store that a function
+  uses cannot be deleted (`CannotDeleteEntityWhileInUse`).
+- Floci does not run CloudFront Functions. A function that reads the store with `cf.kvs()` is stored and
+  associated, but nothing executes it, so the store is useful for testing the code that writes it.
+
 ## Configuration
 
 | Property | Env var | Default | Description |
@@ -561,7 +623,13 @@ signatures must still return 403. Verify those cases through the proxy after con
 - Field-level encryption (`CreateFieldLevelEncryptionConfig`, etc.)
 - `TestFunction` execution (function is stored, not executed)
 - Streaming distributions (RTMP — deprecated by AWS)
-- VPC origins, Anycast IP lists, key value stores
+- VPC origins, Anycast IP lists
+- Importing keys into a key value store from S3: `CreateKeyValueStore` with an `ImportSource` is rejected with
+  `InvalidArgument`
+- Running CloudFront Functions, so the key value store can only be read and written through its API, not
+  from a function with `cf.kvs()`
+- CloudFormation provisioning of `AWS::CloudFront::KeyValueStore`, and `KeyValueStoreAssociations` on
+  `AWS::CloudFront::Function`
 - Monitoring subscriptions
 - CloudFormation provisioning of custom `AWS::CloudFront::ResponseHeadersPolicy` resources
   (literal custom or managed policy IDs are supported on distributions)

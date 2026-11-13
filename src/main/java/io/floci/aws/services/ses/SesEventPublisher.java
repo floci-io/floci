@@ -201,6 +201,17 @@ public class SesEventPublisher {
                 ed.getName(), eventType);
     }
 
+    /**
+     * Whether an identity may name {@code topicArn} for its notifications: the topic exists in
+     * {@code region}, the identity's own, and lets SES publish for {@code identityArn}. Probed:
+     * {@code SetIdentityNotificationTopic} refuses a topic of another region and one whose policy
+     * denies SES, not only a missing one.
+     */
+    public boolean mayNotifyIdentityTopic(String topicArn, String identityArn, String identityAccountId,
+                                          String region) {
+        return snsService.topicExists(topicArn, region) && sesMayPublish(topicArn, identityArn, identityAccountId);
+    }
+
     /** Whether the topic's policy lets SES publish to it for {@code sourceArn}, owned by {@code sourceAccount}. */
     private boolean sesMayPublish(String topicArn, String sourceArn, String sourceAccount) {
         return serviceCallAuthorizer.authorize("ses", "sns:Publish", topicArn, sourceArn, sourceAccount)

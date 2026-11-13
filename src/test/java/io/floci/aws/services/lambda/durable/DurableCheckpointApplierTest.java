@@ -35,10 +35,10 @@ class DurableCheckpointApplierTest {
     void anExecutionCloseCarriesOnlyItsOwnResultKind() {
         DurableErrorObject error = DurableErrorObject.of("m", "T");
         assertRejected(List.of(new DurableOperationUpdate("result", null, null, DurableOperationType.EXECUTION, null,
-                DurableOperationAction.SUCCEED, "\"p\"", error, null, null, null, null, null, null, null)),
+                DurableOperationAction.SUCCEED, "\"p\"", error, null, null, null, null, null, null, null, null)),
                 "Cannot provide an Error for SUCCEED action.");
         assertRejected(List.of(new DurableOperationUpdate("result", null, null, DurableOperationType.EXECUTION, null,
-                DurableOperationAction.FAIL, "\"p\"", error, null, null, null, null, null, null, null)),
+                DurableOperationAction.FAIL, "\"p\"", error, null, null, null, null, null, null, null, null)),
                 "Cannot provide a Payload for FAIL action.");
     }
 
@@ -46,7 +46,7 @@ class DurableCheckpointApplierTest {
     void anExecutionErrorHasTheSameSizeLimitAsAnOperationError() {
         DurableErrorObject large = DurableErrorObject.of("x".repeat(DurableCheckpointApplier.MAX_ERROR_BYTES), "T");
         assertRejected(List.of(new DurableOperationUpdate("result", null, null, DurableOperationType.EXECUTION, null,
-                DurableOperationAction.FAIL, null, large, null, null, null, null, null, null, null)),
+                DurableOperationAction.FAIL, null, large, null, null, null, null, null, null, null, null)),
                 "Error object size must be less than 32768 bytes.");
     }
 
@@ -79,7 +79,7 @@ class DurableCheckpointApplierTest {
         assertEquals("Invalid current STEP state to start.", reject(execution, List.of(stepStart("s1", null))));
         assertEquals("Cannot provide an Error for SUCCEED action.", reject(execution, List.of(
                 new DurableOperationUpdate("s1", null, null, DurableOperationType.STEP, null,
-                        DurableOperationAction.SUCCEED, null, DurableErrorObject.of("x", "y"), null, null, null, null, null, null, null))));
+                        DurableOperationAction.SUCCEED, null, DurableErrorObject.of("x", "y"), null, null, null, null, null, null, null, null))));
         assertEquals("Invalid StepOptions for the given action.", reject(execution, List.of(
                 update("s1", null, DurableOperationType.STEP, DurableOperationAction.RETRY, null))));
         DurableCheckpointApplier.apply(execution, List.of(update("s1", null, DurableOperationType.STEP,
@@ -183,6 +183,31 @@ class DurableCheckpointApplierTest {
     }
 
     @Test
+    void aCloseWithoutPayloadOrErrorStillRecordsTheEmptyWrapper() {
+        DurableExecution execution = execution();
+        DurableCheckpointApplier.apply(execution, List.of(stepStart("s1", null), stepStart("s2", null),
+                stepStart("s3", null), contextStart("c1"), contextStart("c2")), NOW, REACHABLE);
+        DurableCheckpointApplier.apply(execution, List.of(
+                update("s1", null, DurableOperationType.STEP, DurableOperationAction.SUCCEED, null),
+                update("s2", null, DurableOperationType.STEP, DurableOperationAction.FAIL, null),
+                new DurableOperationUpdate("s3", null, null, DurableOperationType.STEP, null,
+                        DurableOperationAction.RETRY, null, null, 1, null, null, null, null, null, null, null),
+                update("c1", null, DurableOperationType.CONTEXT, DurableOperationAction.SUCCEED, null),
+                update("c2", null, DurableOperationType.CONTEXT, DurableOperationAction.FAIL, null)), NOW, REACHABLE);
+
+        Map<String, Object> empty = Map.of("Truncated", false);
+        List<Map<String, Object>> closes = execution.getHistory().subList(5, 10).stream()
+                .map(event -> event.getDetails()).toList();
+        assertEquals(List.of(
+                Map.of("StepSucceededDetails", Map.of("Result", empty, "RetryDetails", Map.of("CurrentAttempt", 1))),
+                Map.of("StepFailedDetails", Map.of("Error", empty, "RetryDetails", Map.of("CurrentAttempt", 1))),
+                Map.of("StepSucceededDetails", Map.of("Result", empty,
+                        "RetryDetails", Map.of("CurrentAttempt", 1, "NextAttemptDelaySeconds", 1))),
+                Map.of("ContextSucceededDetails", Map.of("Result", empty)),
+                Map.of("ContextFailedDetails", Map.of("Error", empty))), closes);
+    }
+
+    @Test
     void aRejectedBatchLeavesTheExecutionUntouched() {
         DurableExecution execution = execution();
         long sequence = execution.getChangeSequence();
@@ -227,14 +252,18 @@ class DurableCheckpointApplierTest {
         return update(id, parentId, DurableOperationType.STEP, DurableOperationAction.START, null);
     }
 
+    private static DurableOperationUpdate contextStart(String id) {
+        return update(id, null, DurableOperationType.CONTEXT, DurableOperationAction.START, null);
+    }
+
     private static DurableOperationUpdate waitStart(String id) {
         return new DurableOperationUpdate(id, null, null, DurableOperationType.WAIT, null, DurableOperationAction.START,
-                null, null, null, 5, null, null, null, null, null);
+                null, null, null, 5, null, null, null, null, null, null);
     }
 
     private static DurableOperationUpdate callbackStart(String id, int timeoutSeconds, int heartbeatSeconds) {
         return new DurableOperationUpdate(id, null, null, DurableOperationType.CALLBACK, "Callback",
-                DurableOperationAction.START, null, null, null, null, null, timeoutSeconds, heartbeatSeconds, null, null);
+                DurableOperationAction.START, null, null, null, null, null, timeoutSeconds, heartbeatSeconds, null, null, null);
     }
 
     private static DurableOperationUpdate chainedStart(String id, String payload) {
@@ -243,7 +272,7 @@ class DurableCheckpointApplierTest {
 
     private static DurableOperationUpdate chainedStart(String id, String functionName, String payload) {
         return new DurableOperationUpdate(id, null, null, DurableOperationType.CHAINED_INVOKE, "ChainedInvoke",
-                DurableOperationAction.START, payload, null, null, null, null, null, null, functionName, null);
+                DurableOperationAction.START, payload, null, null, null, null, null, null, functionName, null, null);
     }
 
     private static DurableOperationUpdate executionSucceed() {
@@ -253,6 +282,6 @@ class DurableCheckpointApplierTest {
     private static DurableOperationUpdate update(String id, String parentId, DurableOperationType type,
                                                  DurableOperationAction action, String payload) {
         return new DurableOperationUpdate(id, parentId, null, type, null, action, payload, null, null, null, null, null,
-                null, null, null);
+                null, null, null, null);
     }
 }

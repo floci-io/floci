@@ -24,6 +24,8 @@ public class PolicyStatement {
     // statements from many documents are evaluated as one list, so each carries its own. Null
     // when the document has no Version element, which is the 2008-10-17 default.
     private final String version;
+    // The statement's Sid, for naming it in a decision record. Never used in matching. Null when absent.
+    private final String sid;
 
     public PolicyStatement(String effect,
                            Map<String, List<String>> principals,
@@ -34,6 +36,20 @@ public class PolicyStatement {
                            List<String> notResources,
                            Map<String, Map<String, List<String>>> conditions,
                            String version) {
+        this(effect, principals, notPrincipals, actions, notActions, resources, notResources, conditions,
+                version, null);
+    }
+
+    public PolicyStatement(String effect,
+                           Map<String, List<String>> principals,
+                           Map<String, List<String>> notPrincipals,
+                           List<String> actions,
+                           List<String> notActions,
+                           List<String> resources,
+                           List<String> notResources,
+                           Map<String, Map<String, List<String>>> conditions,
+                           String version,
+                           String sid) {
         this.effect = effect;
         this.principals = principals;
         this.notPrincipals = notPrincipals;
@@ -43,6 +59,7 @@ public class PolicyStatement {
         this.notResources = notResources;
         this.conditions = conditions;
         this.version = version;
+        this.sid = sid;
     }
 
     /** Without a version, {@code ${...}} stays literal text, as it does under 2008-10-17. */
@@ -69,6 +86,7 @@ public class PolicyStatement {
     public List<String> getNotResources()  { return notResources; }
     public Map<String, Map<String, List<String>>> getConditions() { return conditions; }
     public String getVersion()             { return version; }
+    public String getSid()                 { return sid; }
 
     public boolean isDeny()  { return "Deny".equalsIgnoreCase(effect); }
     public boolean isAllow() { return "Allow".equalsIgnoreCase(effect); }

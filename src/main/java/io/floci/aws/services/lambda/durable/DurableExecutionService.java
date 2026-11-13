@@ -115,7 +115,8 @@ public class DurableExecutionService implements Resettable {
     }
 
     public record StartRequest(String accountId, String region, String functionName, String qualifier,
-                               String executionName, String inputPayload, boolean synchronous) {
+                               String executionName, String inputPayload, boolean synchronous,
+                               String traceHeader) {
     }
 
     public record ListRequest(String accountId, String region, String functionName, String version,
@@ -548,6 +549,7 @@ public class DurableExecutionService implements Resettable {
     private void runInvocation(String accountId, String key, String invocationId, long launchGeneration) {
         ResolvedDurableTarget target;
         byte[] payload;
+        String traceId = null;
         long startedAt;
         synchronized (lockFor(accountId, key)) {
             DurableExecution execution = store.getForAccount(accountId, key).orElse(null);
@@ -563,6 +565,7 @@ public class DurableExecutionService implements Resettable {
             try {
                 target = invoker.resolve(accountId, execution.getRegion(), execution.getFunctionName(),
                         execution.getVersion());
+                traceId = DurableTraceHeader.forInvocation(execution.getTraceHeader(), target.activeTracing());
                 payload = objectMapper.writeValueAsBytes(
                         DurableWire.invocationEvent(execution, token, updatedOperationIds));
             } catch (AwsException | IOException e) {
@@ -578,7 +581,7 @@ public class DurableExecutionService implements Resettable {
             result = new DurableInvocationResult(null, null, "ResourceNotFoundException");
         } else {
             try {
-                result = invoker.invoke(target, payload, invocationId);
+                result = invoker.invoke(target, payload, invocationId, traceId);
             } catch (AwsException e) {
                 result = new DurableInvocationResult(null, DurableWire.functionErrorPayload(
                         DurableErrorObject.of(e.getMessage(), e.getErrorCode())),
@@ -688,11 +691,12 @@ public class DurableExecutionService implements Resettable {
     // ──────────────────────────── state changes ────────────────────────────
 
     private DurableExecution newExecution(StartRequest request, ResolvedDurableTarget target, String name, long now) {
-        return newExecution(request, target, name, UUID.randomUUID().toString(), now);
+        return newExecution(request, target, name, UUID.randomUUID().toString(),
+                DurableTraceHeader.forExecution(request.traceHeader(), target.activeTracing(), now / 1000), now);
     }
 
     private DurableExecution newExecution(StartRequest request, ResolvedDurableTarget target, String name,
-                                          String executionId, long now) {
+                                          String executionId, String traceHeader, long now) {
         DurableExecution execution = new DurableExecution();
         execution.setExecutionId(executionId);
         execution.setName(name);
@@ -703,6 +707,7 @@ public class DurableExecutionService implements Resettable {
         execution.setVersion(target.version());
         execution.setExecutionArn(target.functionArn() + "/durable-execution/" + name + "/" + executionId);
         execution.setStartTimestamp(now);
+        execution.setTraceHeader(traceHeader);
         execution.setInputPayload(request.inputPayload());
         execution.setExecutionTimeoutSeconds(target.executionTimeoutSeconds());
         execution.setRetentionPeriodInDays(target.retentionPeriodInDays());
@@ -850,12 +855,19 @@ public class DurableExecutionService implements Resettable {
                                                ResolvedDurableTarget target, String name, String executionId, long now,
                                                List<Runnable> effects) {
         StartRequest request = new StartRequest(target.accountId(), target.region(), target.functionName(),
-                target.version(), name, operation.getInputPayload(), false);
-        DurableExecution child = newExecution(request, target, name, executionId, now);
+                target.version(), name, operation.getInputPayload(), false, null);
+        DurableExecution child = newExecution(request, target, name, executionId,
+                chainedTraceHeader(parent, operation, target), now);
         child.setParentExecutionArn(parent.getExecutionArn());
         child.setParentOperationId(operation.getId());
         trigger(child, effects);
         return child;
+    }
+
+    private static String chainedTraceHeader(DurableExecution parent, DurableOperation operation,
+                                             ResolvedDurableTarget target) {
+        return DurableTraceHeader.forChainedChild(operation.getChainedTraceHeader(), parent.getTraceHeader(),
+                target.activeTracing());
     }
 
     private Runnable plainChainedInvoke(DurableExecution parent, DurableOperation operation,
@@ -866,19 +878,21 @@ public class DurableExecutionService implements Resettable {
         // A plain target gets {} when the update has no Payload. A durable child starts with no input.
         byte[] payload = (operation.getInputPayload() != null ? operation.getInputPayload() : "{}")
                 .getBytes(StandardCharsets.UTF_8);
+        String traceId = DurableTraceHeader.forInvocation(chainedTraceHeader(parent, operation, target),
+                target.activeTracing());
         long launchGeneration = generation.get();
         return () -> launchExecutor.execute(() -> {
-            ChainedOutcome outcome = invokePlainFunction(target, payload);
+            ChainedOutcome outcome = invokePlainFunction(target, payload, traceId);
             if (launchGeneration == generation.get()) {
                 finishChainedInvoke(accountId, key, operationId, null, outcome);
             }
         });
     }
 
-    private ChainedOutcome invokePlainFunction(ResolvedDurableTarget target, byte[] payload) {
+    private ChainedOutcome invokePlainFunction(ResolvedDurableTarget target, byte[] payload, String traceId) {
         DurableInvocationResult result;
         try {
-            result = invoker.invoke(target, payload, UUID.randomUUID().toString());
+            result = invoker.invoke(target, payload, UUID.randomUUID().toString(), traceId);
         } catch (AwsException e) {
             return ChainedOutcome.failed(e);
         } catch (RuntimeException e) {

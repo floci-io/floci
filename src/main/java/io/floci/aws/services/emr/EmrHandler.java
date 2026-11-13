@@ -40,6 +40,9 @@ import java.util.Map;
 public class EmrHandler {
 
     private static final Logger LOG = Logger.getLogger(EmrHandler.class);
+    // ListInstances "Provides information for all active Amazon EC2 instances and Amazon EC2 instances terminated in the
+    // last 30 days, up to a maximum of 2,000": that many to a call, the rest after its Marker.
+    static final int INSTANCES_PER_PAGE = 2000;
 
     private final EmrService service;
     private final ObjectMapper objectMapper;
@@ -295,7 +298,11 @@ public class EmrHandler {
     }
 
     private Response handleAddInstanceFleet(JsonNode request) {
-        EmrInstanceFleet fleet = parseInstanceFleet(request.path("InstanceFleet"));
+        List<String> violations = new ArrayList<>();
+        EmrInstanceFleet fleet = parseInstanceFleet(request.path("InstanceFleet"), "instanceFleet", violations);
+        if (!violations.isEmpty()) {
+            throw SmithyValidationErrors.validationException(violations);
+        }
         String id = service.addInstanceFleet(text(request, "ClusterId"), fleet);
         ObjectNode response = objectMapper.createObjectNode();
         response.put("ClusterId", text(request, "ClusterId"));
@@ -323,23 +330,104 @@ public class EmrHandler {
                 || (terminated && !withinTerminatedInstanceRetention(cluster.getEndDateTime(), Instant.now()))) {
             return Response.ok(response).build();
         }
-        // Listed in their groups' order, the first MASTER group's instances numbered first, so the primary node keeps
-        // its id and address, DescribeCluster's MasterPublicDnsName, while the other groups resize, as an instance
-        // does; any other group's follow, each after those before it.
-        EmrInstanceGroup primary = cluster.getInstanceGroups().stream().filter(EmrService::isMasterGroup)
-                .findFirst().orElse(null);
-        int next = primary == null ? 1 : 1 + listedInstanceCount(primary, terminated);
-        for (EmrInstanceGroup group : cluster.getInstanceGroups()) {
-            int count = listedInstanceCount(group, terminated);
-            int first = group == primary ? 1 : next;
-            for (int i = 0; i < count; i++) {
-                arr.add(syntheticInstanceNode(cluster, group, first + i, terminated));
+        String groupId = text(request, "InstanceGroupId");
+        List<String> groupTypes = stringList(request.path("InstanceGroupTypes"));
+        String fleetId = text(request, "InstanceFleetId");
+        String fleetType = text(request, "InstanceFleetType");
+        // Listed in their groups' or fleets' order, the primary node's group or fleet numbered first, so the primary
+        // node keeps its id and address, DescribeCluster's MasterPublicDnsName, while the others resize, as an
+        // instance does; any other's follow, each after those before it. Only the page asked for is built, so a
+        // group or fleet of any size costs a page. Counted in longs, as a fleet's two capacities add up past an int.
+        long skip = instancesMarker(text(request, "Marker"));
+        long start = skip;
+        int page = 0;
+        List<ListedInstances> listed = listedInstances(cluster, terminated);
+        ListedInstances primary = listed.stream().filter(set -> set.number() == 0).findFirst().orElse(null);
+        long next = primary == null ? 1 : 1 + primary.count();
+        for (ListedInstances set : listed) {
+            long first = set == primary ? 1 : next;
+            if (set != primary) {
+                next += set.count();
             }
-            if (group != primary) {
-                next += count;
+            if (!set.matches(groupId, groupTypes, fleetId, fleetType)) {
+                continue;
             }
+            if (skip >= set.count()) {
+                skip -= set.count();
+                continue;
+            }
+            for (long ordinal = skip + 1; ordinal <= set.count(); ordinal++) {
+                if (page == INSTANCES_PER_PAGE) {
+                    response.put("Marker", String.valueOf(start + page));
+                    return Response.ok(response).build();
+                }
+                arr.add(syntheticInstanceNode(cluster, set, first + ordinal - 1, ordinal, terminated));
+                page++;
+            }
+            skip = 0;
         }
         return Response.ok(response).build();
+    }
+
+    // How many of a listing's instances its Marker passes, the count the page before it ended at; none without one.
+    private static long instancesMarker(String marker) {
+        if (marker == null) {
+            return 0;
+        }
+        try {
+            long passed = Long.parseLong(marker);
+            if (passed >= 0) {
+                return passed;
+            }
+        } catch (NumberFormatException e) {
+            // Refused below, as any marker no page gave.
+        }
+        throw new AwsException("InvalidRequestException", "Invalid pagination token: " + marker, 400);
+    }
+
+    /**
+     * A cluster's instance groups' and fleets' instances, in the cluster's order. A fleet has one instance for each unit
+     * of its capacity, as its nodes do, its on-demand ones first, each of its first instance type.
+     */
+    static List<ListedInstances> listedInstances(EmrCluster cluster, boolean terminated) {
+        List<ListedInstances> listed = new ArrayList<>();
+        List<EmrInstanceGroup> groups = cluster.getInstanceGroups();
+        for (EmrInstanceGroup group : groups) {
+            int count = listedInstanceCount(group, terminated);
+            listed.add(new ListedInstances(group.getId(), null, group.getInstanceGroupType(), group.getInstanceType(),
+                    EmrService.groupNumber(groups, group), count, group.getMarket(), count));
+        }
+        List<EmrInstanceFleet> fleets = cluster.getInstanceFleets();
+        for (EmrInstanceFleet fleet : fleets) {
+            // An ended fleet has no capacity provisioned any more; its targets, which it can no longer change, say what
+            // it ran.
+            long onDemand = terminated ? fleet.getTargetOnDemandCapacity() : fleet.getProvisionedOnDemandCapacity();
+            long spot = terminated ? fleet.getTargetSpotCapacity() : fleet.getProvisionedSpotCapacity();
+            listed.add(new ListedInstances(null, fleet.getId(), fleet.getInstanceFleetType(),
+                    fleet.getInstanceTypes().isEmpty() ? null : fleet.getInstanceTypes().getFirst(),
+                    EmrService.fleetNumber(fleets, fleet), onDemand + spot, "ON_DEMAND", onDemand));
+        }
+        return listed;
+    }
+
+    /**
+     * The instances ListInstances lists for one instance group or fleet: {@code count} of them, with addresses numbered
+     * {@code number}, those after the first {@code spotAfter} on the spot market and the others on {@code market}.
+     */
+    record ListedInstances(String groupId, String fleetId, String type, String instanceType, int number, long count,
+                           String market, long spotAfter) {
+
+        String marketOf(long ordinal) {
+            return ordinal <= spotAfter ? market : "SPOT";
+        }
+
+        /** Whether ListInstances' filters keep them: the group ones keep groups' instances, the fleet ones fleets'. */
+        boolean matches(String instanceGroupId, List<String> groupTypes, String instanceFleetId, String fleetType) {
+            return (instanceGroupId == null || instanceGroupId.equals(groupId))
+                    && (groupTypes.isEmpty() || (groupId != null && groupTypes.contains(type)))
+                    && (instanceFleetId == null || instanceFleetId.equals(fleetId))
+                    && (fleetType == null || (fleetId != null && fleetType.equals(type)));
+        }
     }
 
     static boolean withinTerminatedInstanceRetention(Instant endedAt, Instant now) {
@@ -752,20 +840,27 @@ public class EmrHandler {
         return node;
     }
 
-    private ObjectNode syntheticInstanceNode(EmrCluster cluster, EmrInstanceGroup group, int index,
+    private ObjectNode syntheticInstanceNode(EmrCluster cluster, ListedInstances set, long index, long ordinal,
                                              boolean terminated) {
+        String privateIp = EmrService.privateIpAddress(set.number(), ordinal);
         ObjectNode node = objectMapper.createObjectNode();
         node.put("Id", "ci-" + index + cluster.getId());
         node.put("Ec2InstanceId", EmrService.ec2InstanceId(index));
         node.put("PublicDnsName", AwsEndpoints.ec2PublicDns("203.0.113." + index, cluster.getRegion()));
-        String privateIp = EmrService.privateIpAddress(index);
         node.put("PrivateDnsName", AwsRegions.ec2PrivateIpDnsName(privateIp, cluster.getRegion()));
         node.put("PrivateIpAddress", privateIp);
-        node.put("InstanceGroupId", group.getId());
-        if (group.getMarket() != null) {
-            node.put("Market", group.getMarket());
+        if (set.groupId() != null) {
+            node.put("InstanceGroupId", set.groupId());
         }
-        node.put("InstanceType", group.getInstanceType());
+        if (set.fleetId() != null) {
+            node.put("InstanceFleetId", set.fleetId());
+        }
+        if (set.marketOf(ordinal) != null) {
+            node.put("Market", set.marketOf(ordinal));
+        }
+        if (set.instanceType() != null) {
+            node.put("InstanceType", set.instanceType());
+        }
         node.putObject("Status").put("State", terminated ? "TERMINATED" : "RUNNING");
         return node;
     }
@@ -839,16 +934,41 @@ public class EmrHandler {
         if (!fleetsNode.isArray()) {
             return fleets;
         }
+        List<String> violations = new ArrayList<>();
+        int position = 1;
         for (JsonNode f : fleetsNode) {
-            fleets.add(parseInstanceFleet(f));
+            fleets.add(parseInstanceFleet(f, "instances.instanceFleets." + position++ + ".member", violations));
+        }
+        if (!violations.isEmpty()) {
+            throw SmithyValidationErrors.validationException(violations);
         }
         return fleets;
     }
 
-    private EmrInstanceFleet parseInstanceFleet(JsonNode f) {
+    /**
+     * An InstanceFleetConfig at {@code path} in its request, as the framework names a member's place; one without its
+     * required InstanceFleetType, or with an InstanceTypeConfigs member without its required InstanceType, adds to
+     * {@code violations}, as the framework refuses such a request.
+     */
+    private EmrInstanceFleet parseInstanceFleet(JsonNode f, String path, List<String> violations) {
         EmrInstanceFleet fleet = new EmrInstanceFleet();
         fleet.setName(f.path("Name").asText(null));
         fleet.setInstanceFleetType(f.path("InstanceFleetType").asText(null));
+        if (fleet.getInstanceFleetType() == null) {
+            violations.add(SmithyValidationErrors.notNull(path + ".instanceFleetType"));
+        }
+        List<String> instanceTypes = new ArrayList<>();
+        int position = 1;
+        for (JsonNode config : f.path("InstanceTypeConfigs")) {
+            String instanceType = config.path("InstanceType").asText(null);
+            if (instanceType == null) {
+                violations.add(SmithyValidationErrors.notNull(
+                        path + ".instanceTypeConfigs." + position + ".member.instanceType"));
+            }
+            instanceTypes.add(instanceType);
+            position++;
+        }
+        fleet.setInstanceTypes(instanceTypes);
         fleet.setTargetOnDemandCapacity(f.path("TargetOnDemandCapacity").asInt(0));
         fleet.setTargetSpotCapacity(f.path("TargetSpotCapacity").asInt(0));
         return fleet;

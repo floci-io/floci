@@ -1037,6 +1037,39 @@ public class RedshiftOperationsTest {
             .statusCode(200);
     }
 
+    @Test
+    @Order(3)
+    void parameterGroupAndSnapshotKeepTheirCreateTags() {
+        when(containerManager.start(any(), eq("cluster-create-tags"), any(), any(), any(), any()))
+                .thenReturn(new RedshiftContainerHandle("c4", "cluster-create-tags", "localhost", 5442));
+        assertEquals(200, redshift("CreateCluster", "ClusterIdentifier", "cluster-create-tags", "NodeType", "dc2.large",
+                "MasterUsername", "admin", "MasterUserPassword", "password123").statusCode());
+        String tag = "<Tag><Key>team</Key><Value>red</Value></Tag>";
+
+        redshift("CreateClusterParameterGroup", "ParameterGroupName", "pg-create-tags",
+                "ParameterGroupFamily", "redshift-1.0", "Description", "d",
+                "Tags.Tag.1.Key", "team", "Tags.Tag.1.Value", "red")
+            .then().statusCode(200).body(containsString("<Tags>" + tag + "</Tags>"));
+        redshift("DescribeClusterParameterGroups", "ParameterGroupName", "pg-create-tags")
+            .then().statusCode(200).body(containsString(tag));
+        redshift("DescribeTags", "ResourceName", "arn:aws:redshift:us-east-1:000000000000:parametergroup:pg-create-tags")
+            .then().statusCode(200).body(containsString(tag));
+
+        redshift("CreateClusterSnapshot", "SnapshotIdentifier", "snap-create-tags",
+                "ClusterIdentifier", "cluster-create-tags", "Tags.Tag.1.Key", "team", "Tags.Tag.1.Value", "red")
+            .then().statusCode(200).body(containsString("<Tags>" + tag + "</Tags>"));
+        redshift("DescribeClusterSnapshots", "SnapshotIdentifier", "snap-create-tags")
+            .then().statusCode(200).body(containsString(tag));
+        redshift("DescribeTags", "ResourceName",
+                "arn:aws:redshift:us-east-1:000000000000:snapshot:cluster-create-tags/snap-create-tags")
+            .then().statusCode(200).body(containsString(tag));
+
+        assertEquals(200, redshift("DeleteClusterSnapshot", "SnapshotIdentifier", "snap-create-tags").statusCode());
+        assertEquals(200, redshift("DeleteClusterParameterGroup", "ParameterGroupName", "pg-create-tags").statusCode());
+        assertEquals(200, redshift("DeleteCluster", "ClusterIdentifier", "cluster-create-tags",
+                "SkipFinalClusterSnapshot", "true").statusCode());
+    }
+
     /**
      * CreateSnapshotCopyGrant checks the name is free and then writes. Both steps run under the
      * service lock, so of two concurrent creates of one name exactly one wins and the other sees

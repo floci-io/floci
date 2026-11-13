@@ -14,6 +14,12 @@ public final class ResteasyRequests {
     private static final MultivaluedMap<String, String> NO_QUERY =
             new UnmodifiableMultivaluedMap<>(new MultivaluedHashMap<>());
 
+    private static final String QUERY_PARAMETERS = ResteasyRequests.class.getName() + ".queryParameters";
+
+    /** A URI rewrite gives the request a new UriInfo, which parses the query string again. */
+    private record QueryParameters(UriInfo uriInfo, MultivaluedMap<String, String> map) {
+    }
+
     private ResteasyRequests() {
     }
 
@@ -25,23 +31,30 @@ public final class ResteasyRequests {
     }
 
     /**
-     * {@link jakarta.ws.rs.core.UriInfo#getQueryParameters()}, which builds a map on each call, so a request
-     * with no query string gets a shared empty one.
+     * {@link jakarta.ws.rs.core.UriInfo#getQueryParameters()} read once per request, since each call copies
+     * the map. A request with no query string gets a shared empty map.
      */
     public static MultivaluedMap<String, String> queryParameters(ContainerRequestContext ctx) {
         ResteasyReactiveRequestContext request = of(ctx);
-        if (request != null && request.serverRequest().query() == null) {
-            return NO_QUERY;
-        }
-        return ctx.getUriInfo().getQueryParameters();
+        return request != null ? queryParameters(request) : ctx.getUriInfo().getQueryParameters();
     }
 
     /** {@link #queryParameters(ContainerRequestContext)} for a {@link UriInfo} injected into a bean. */
     public static MultivaluedMap<String, String> queryParameters(UriInfo uriInfo) {
         ResteasyReactiveRequestContext request = CurrentRequestManager.get();
-        if (request != null && request.serverRequest().query() == null) {
+        return request != null ? queryParameters(request) : uriInfo.getQueryParameters();
+    }
+
+    private static MultivaluedMap<String, String> queryParameters(ResteasyReactiveRequestContext request) {
+        if (request.serverRequest().query() == null) {
             return NO_QUERY;
         }
-        return uriInfo.getQueryParameters();
+        UriInfo uriInfo = request.getUriInfo();
+        if (request.getProperty(QUERY_PARAMETERS) instanceof QueryParameters read && read.uriInfo() == uriInfo) {
+            return read.map();
+        }
+        MultivaluedMap<String, String> map = uriInfo.getQueryParameters();
+        request.setProperty(QUERY_PARAMETERS, new QueryParameters(uriInfo, map));
+        return map;
     }
 }

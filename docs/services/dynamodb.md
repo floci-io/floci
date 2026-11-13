@@ -26,6 +26,8 @@ including batch, transaction and PartiQL table extraction.
 | `DeleteTable` | Delete a table |
 | `DescribeTable` | Get table metadata |
 | `ListTables` | List all tables |
+| `DescribeLimits` | Get the default account and table capacity quotas, which `CreateTable` and `UpdateTable` enforce |
+| `DescribeEndpoints` | Get Floci's own host and port as the endpoint |
 | `UpdateTable` | Update throughput, indexes, streams |
 | `PutItem` | Write an item |
 | `GetItem` | Read an item by primary key |
@@ -138,7 +140,7 @@ DynamoDB Streams are supported via a separate target (`DynamoDBStreams_20120810`
 
 Redshift zero-ETL integrations can consume these stream records directly. See the
 [Redshift DynamoDB zero-ETL](redshift.md#dynamodb-zero-etl) section for the supported sources and targets,
-landing table, checkpoint, and retry behavior.
+landing table, current-state table, checkpoint, and retry behavior.
 
 Stream records are held in memory. `POST /_floci/state/reset` removes every stream along with the
 tables, so `ListStreams` and `DescribeStream` no longer return the streams of tables created before

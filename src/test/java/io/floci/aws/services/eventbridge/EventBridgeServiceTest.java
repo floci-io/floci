@@ -22,6 +22,7 @@ import io.floci.aws.services.resourcegroupstagging.ResourceGroupsTaggingService;
 import io.floci.aws.testing.PartitionMatrix;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.function.Executable;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.Arguments;
 import org.junit.jupiter.params.provider.CsvSource;
@@ -55,17 +56,19 @@ class EventBridgeServiceTest {
 
     private EventBridgeService service;
     private TargetDispatcher dispatcherMock;
+    private StorageBackend<String, Rule> ruleStore;
     private StorageBackend<String, Replay> replayStore;
     private ReplayDispatcher replayDispatcherMock;
 
     @BeforeEach
     void setUp() {
         dispatcherMock = mock(TargetDispatcher.class);
+        ruleStore = new InMemoryStorage<>();
         replayStore = new InMemoryStorage<>();
         replayDispatcherMock = mock(ReplayDispatcher.class);
         service = new EventBridgeService(
                 new InMemoryStorage<>(),
-                new InMemoryStorage<>(),
+                ruleStore,
                 new InMemoryStorage<>(),
                 new InMemoryStorage<>(),
                 new InMemoryStorage<>(),
@@ -205,6 +208,140 @@ class EventBridgeServiceTest {
     }
 
     @Test
+    void createPartnerEventBusTakesItsEventSourceName() {
+        String name = "aws.partner/example.com/123/orders";
+        EventBus bus = service.createEventBus(name, name, "Partner bus", null, REGION);
+
+        assertEquals(name, bus.getName());
+        assertTrue(bus.getArn().endsWith(":event-bus/" + name));
+        assertEquals(bus.getArn(), service.describeEventBus(name, REGION).getArn());
+        assertEquals(name, service.describeEventBus(bus.getArn(), REGION).getName());
+    }
+
+    @Test
+    void createPartnerEventBusRejectsANameOtherThanItsEventSourceName() {
+        AwsException error = assertThrows(AwsException.class, () ->
+                service.createEventBus("aws.partner/example.com/a", "aws.partner/example.com/b",
+                        null, null, REGION));
+        assertEquals("ValidationException", error.getErrorCode());
+        assertEquals(400, error.getHttpStatus());
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"aws.partner/example.com", "partner/example.com/x", "aws.partner/example.com/x y"})
+    void createPartnerEventBusRejectsAnInvalidEventSourceName(String name) {
+        AwsException error = assertThrows(AwsException.class, () ->
+                service.createEventBus(name, name, null, null, REGION));
+        assertEquals("ValidationException", error.getErrorCode());
+        assertTrue(error.getMessage().contains("Value '" + name + "' at 'eventSourceName' failed to "
+                + "satisfy constraint: Member must satisfy regular expression pattern: "
+                + "aws\\.partner(/[\\.\\-_A-Za-z0-9]+){2,}"), error.getMessage());
+    }
+
+    @Test
+    void createPartnerEventBusRequiresAName() {
+        AwsException error = assertThrows(AwsException.class, () ->
+                service.createEventBus(null, "aws.partner/example.com/orders", null, null, REGION));
+        assertEquals("ValidationException", error.getErrorCode());
+        assertEquals("1 validation error detected: Value null at 'name' failed to satisfy constraint: "
+                + "Member must not be null", error.getMessage());
+    }
+
+    @Test
+    void putPermissionOnALongPartnerBusNameReportsOnlyThePattern() {
+        String name = "aws.partner/example.com/" + "o".repeat(200);
+        service.createEventBus(name, name, null, null, REGION);
+
+        AwsException error = assertThrows(AwsException.class, () ->
+                service.putPermission(name, "events:PutEvents", "111122223333", "allow", null, null, REGION));
+        assertEquals("ValidationException", error.getErrorCode());
+        assertEquals("1 validation error detected: Value '" + name + "' at 'eventBusName' failed to satisfy "
+                + "constraint: Member must satisfy regular expression pattern: [\\.\\-_A-Za-z0-9]+",
+                error.getMessage());
+    }
+
+    @Test
+    void putPermissionOnAPartnerBusNameBeyondTheModeledLengthReportsBothConstraints() {
+        String name = "aws.partner/example.com/" + "o".repeat(240);
+
+        AwsException error = assertThrows(AwsException.class, () ->
+                service.putPermission(name, "events:PutEvents", "111122223333", "allow", null, null, REGION));
+        assertEquals("ValidationException", error.getErrorCode());
+        assertTrue(error.getMessage().startsWith("2 validation errors detected: "), error.getMessage());
+        assertTrue(error.getMessage().contains("at 'eventBusName' failed to satisfy constraint: "
+                + "Member must have length less than or equal to 256"), error.getMessage());
+    }
+
+    @Test
+    void putEventsOnAPartnerBusByArnReachesTheRuleOnIt() {
+        String name = "aws.partner/example.com/123/orders";
+        EventBus bus = service.createEventBus(name, name, null, null, REGION);
+        Rule rule = service.putRule("partner-rule", name, "{\"source\":[\"example.com\"]}", null,
+                RuleState.ENABLED, null, null, null, REGION);
+        Target target = new Target("t1", "arn:aws:sqs:us-east-1:000000000000:queue-1", null, null);
+        service.putTargets("partner-rule", bus.getArn(), List.of(target), REGION);
+
+        service.putEvents(List.of(Map.of("EventBusName", bus.getArn(), "Source", "example.com",
+                "DetailType", "Order", "Detail", "{}")), REGION);
+
+        assertTrue(rule.getArn().endsWith(":rule/" + name + "/partner-rule"));
+        verify(dispatcherMock).dispatch(eq(rule.getArn()), eq(target), anyString(), eq(REGION), any());
+    }
+
+    @Test
+    void nestedPartnerBusesKeepTheirRulesApart() {
+        String parent = "aws.partner/example.com/orders";
+        String child = parent + "/eu";
+        service.createEventBus(parent, parent, null, null, REGION);
+        service.createEventBus(child, child, null, null, REGION);
+        service.putRule("child-rule", child, "{\"source\":[\"example.com\"]}", null,
+                RuleState.ENABLED, null, null, null, REGION);
+
+        assertTrue(service.listRules(parent, null, REGION).isEmpty());
+        assertEquals(1, service.listRules(child, null, REGION).size());
+        assertDoesNotThrow(() -> service.deleteEventBus(parent, REGION));
+    }
+
+    @Test
+    void putEventsOnAParentPartnerBusDoesNotFireTheNestedBusRules() {
+        String parent = "aws.partner/example.com/orders";
+        String child = parent + "/eu";
+        service.createEventBus(parent, parent, null, null, REGION);
+        service.createEventBus(child, child, null, null, REGION);
+        service.putRule("child-rule", child, "{\"source\":[\"example.com\"]}", null,
+                RuleState.ENABLED, null, null, null, REGION);
+        Target target = new Target("t1", "arn:aws:sqs:us-east-1:000000000000:queue-1", null, null);
+        service.putTargets("child-rule", child, List.of(target), REGION);
+
+        service.putEvents(List.of(Map.of("EventBusName", parent, "Source", "example.com",
+                "DetailType", "Order", "Detail", "{}")), REGION);
+
+        verify(dispatcherMock, never()).dispatch(anyString(), any(), anyString(), anyString(), any());
+    }
+
+    @Test
+    void ruleOnAPartnerBusIsTaggableByItsArn() {
+        String name = "aws.partner/example.com/123/orders";
+        service.createEventBus(name, name, null, null, REGION);
+        Rule rule = service.putRule("partner-rule", name, "{\"source\":[\"example.com\"]}", null,
+                RuleState.ENABLED, null, null, null, REGION);
+
+        service.tagResource(rule.getArn(), Map.of("team", "orders"), REGION);
+
+        assertEquals(Map.of("team", "orders"), service.listTagsForResource(rule.getArn(), REGION));
+    }
+
+    @Test
+    void deletePartnerEventBusByArn() {
+        String name = "aws.partner/example.com/123/orders";
+        EventBus bus = service.createEventBus(name, name, null, null, REGION);
+
+        service.deleteEventBus(bus.getArn(), REGION);
+
+        assertThrows(AwsException.class, () -> service.describeEventBus(name, REGION));
+    }
+
+    @Test
     void updateEventBusRejectsLongDescription() {
         service.createEventBus("my-bus", null, null, REGION);
         assertThrows(AwsException.class, () ->
@@ -272,6 +409,18 @@ class EventBridgeServiceTest {
     void deleteEventBusWithRulesThrows() {
         service.createEventBus("my-bus", null, null, REGION);
         service.putRule("rule-1", "my-bus", null, "rate(1 minute)", RuleState.ENABLED, null, null, null, REGION);
+
+        assertThrows(AwsException.class, () ->
+                service.deleteEventBus("my-bus", REGION));
+    }
+
+    @Test
+    void deleteEventBusWithALegacySlashNamedRuleThrows() {
+        service.createEventBus("my-bus", null, null, REGION);
+        Rule legacy = new Rule();
+        legacy.setName("team/rule-1");
+        legacy.setEventBusName("my-bus");
+        ruleStore.put("rule:" + REGION + ":my-bus/team/rule-1", legacy);
 
         assertThrows(AwsException.class, () ->
                 service.deleteEventBus("my-bus", REGION));
@@ -450,6 +599,20 @@ class EventBridgeServiceTest {
         assertEquals("rate(10 minutes)", rules.getFirst().getScheduleExpression());
     }
 
+    @ParameterizedTest
+    @ValueSource(strings = {"rate(1 minutes)", "rate(2 minute)", "rate(1 hours)",
+            "rate(2 hour)", "rate(1 days)", "rate(2 day)"})
+    void putRuleRejectsMismatchedRateUnits(String expression) {
+        AwsException error = assertThrows(AwsException.class, () ->
+                service.putRule("invalid-rate", null, null, expression, RuleState.ENABLED,
+                        null, null, null, REGION));
+
+        assertEquals("ValidationException", error.getErrorCode());
+        assertEquals("Parameter ScheduleExpression is not valid.", error.getMessage());
+        assertEquals(400, error.getHttpStatus());
+        assertTrue(service.listRules(null, null, REGION).isEmpty());
+    }
+
     @Test
     void putRuleForNonExistentBusThrows() {
         assertThrows(AwsException.class, () ->
@@ -466,6 +629,239 @@ class EventBridgeServiceTest {
         assertEquals(400, error.getHttpStatus());
         assertEquals("Parameter(s) EventPattern or ScheduleExpression must be specified.", error.getMessage());
         assertTrue(service.listRules(null, null, REGION).isEmpty());
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"a/b", "rule name", "rule:1"})
+    void putRuleRejectsANameOutsideThePattern(String name) {
+        AwsException error = assertThrows(AwsException.class, () ->
+                service.putRule(name, null, "{\"source\":[\"my.app\"]}", null, RuleState.ENABLED,
+                        null, null, null, REGION));
+        assertEquals("ValidationException", error.getErrorCode());
+        assertEquals(400, error.getHttpStatus());
+        assertEquals("1 validation error detected: Value '" + name + "' at 'name' failed to satisfy "
+                + "constraint: Member must satisfy regular expression pattern: [\\.\\-_A-Za-z0-9]+",
+                error.getMessage());
+        assertTrue(service.listRules(null, null, REGION).isEmpty());
+    }
+
+    @Test
+    void putRuleRejectsANameLongerThan64Characters() {
+        AwsException error = assertThrows(AwsException.class, () ->
+                service.putRule("r".repeat(65), null, "{\"source\":[\"my.app\"]}", null,
+                        RuleState.ENABLED, null, null, null, REGION));
+        assertEquals("ValidationException", error.getErrorCode());
+        assertTrue(error.getMessage().endsWith("Member must have length less than or equal to 64"));
+        assertDoesNotThrow(() -> service.putRule("r".repeat(64), null, "{\"source\":[\"my.app\"]}",
+                null, RuleState.ENABLED, null, null, null, REGION));
+    }
+
+    @Test
+    void putRuleRequiresAName() {
+        AwsException error = assertThrows(AwsException.class, () ->
+                service.putRule(null, null, "{\"source\":[\"my.app\"]}", null, RuleState.ENABLED,
+                        null, null, null, REGION));
+        assertEquals("ValidationException", error.getErrorCode());
+        assertEquals("1 validation error detected: Value null at 'name' failed to satisfy constraint: "
+                + "Member must not be null", error.getMessage());
+    }
+
+    @Test
+    void aRuleNameCannotReachIntoANestedPartnerBus() {
+        String parent = "aws.partner/example.com/orders";
+        service.createEventBus(parent, parent, null, null, REGION);
+        service.createEventBus(parent + "/eu", parent + "/eu", null, null, REGION);
+
+        assertThrows(AwsException.class, () -> service.putRule("eu/child-rule", parent,
+                "{\"source\":[\"example.com\"]}", null, RuleState.ENABLED, null, null, null, REGION));
+        assertTrue(service.listRules(parent + "/eu", null, REGION).isEmpty());
+    }
+
+    @Test
+    void ruleAndTargetOperationsRejectANameOutsideThePattern() {
+        Target target = new Target("t1", "arn:aws:sqs:us-east-1:000000000000:queue-1", null, null);
+
+        assertRuleNameRejected(() -> service.deleteRule("a/b", null, REGION), "name");
+        assertRuleNameRejected(() -> service.describeRule("a/b", null, REGION), "name");
+        assertRuleNameRejected(() -> service.enableRule("a/b", null, REGION), "name");
+        assertRuleNameRejected(() -> service.disableRule("a/b", null, REGION), "name");
+        assertRuleNameRejected(() -> service.putTargets("a/b", null, List.of(target), REGION), "rule");
+        assertRuleNameRejected(() -> service.removeTargets("a/b", null, List.of("t1"), REGION), "rule");
+        assertRuleNameRejected(() -> service.listTargetsByRule("a/b", null, REGION), "rule");
+    }
+
+    private static void assertRuleNameRejected(Executable call) {
+        AwsException error = assertThrows(AwsException.class, call);
+        assertEquals("ValidationException", error.getErrorCode());
+        assertEquals(400, error.getHttpStatus());
+    }
+
+    private static void assertRuleNameRejected(Executable call, String member) {
+        AwsException error = assertThrows(AwsException.class, call);
+        assertEquals("ValidationException", error.getErrorCode());
+        assertEquals(400, error.getHttpStatus());
+        assertEquals("1 validation error detected: Value 'a/b' at '" + member + "' failed to satisfy "
+                + "constraint: Member must satisfy regular expression pattern: [\\.\\-_A-Za-z0-9]+",
+                error.getMessage());
+    }
+
+    @Test
+    void aRuleOperationCannotReachIntoANestedPartnerBus() {
+        String parent = "aws.partner/example.com/orders";
+        service.createEventBus(parent, parent, null, null, REGION);
+        service.createEventBus(parent + "/eu", parent + "/eu", null, null, REGION);
+        service.putRule("child-rule", parent + "/eu", "{\"source\":[\"example.com\"]}", null,
+                RuleState.ENABLED, null, null, null, REGION);
+
+        assertRuleNameRejected(() -> service.deleteRule("eu/child-rule", parent, REGION));
+        assertEquals(1, service.listRules(parent + "/eu", null, REGION).size());
+    }
+
+    @Test
+    void aLegacySlashNamedRuleStaysRemovableByItsExactName() {
+        Rule legacy = new Rule();
+        legacy.setName("team/rule-1");
+        legacy.setArn("arn:aws:events:us-east-1:000000000000:rule/team/rule-1");
+        legacy.setEventBusName("default");
+        legacy.setState(RuleState.ENABLED);
+        ruleStore.put("rule:" + REGION + ":default/team/rule-1", legacy);
+
+        assertTrue(service.listTargetsByRule("team/rule-1", null, REGION).isEmpty());
+        service.deleteRule("team/rule-1", null, REGION);
+
+        assertTrue(ruleStore.get("rule:" + REGION + ":default/team/rule-1").isEmpty());
+        AwsException error = assertThrows(AwsException.class,
+                () -> service.describeRule("team/rule-1", null, REGION));
+        assertEquals("ValidationException", error.getErrorCode());
+    }
+
+    @ParameterizedTest
+    @MethodSource("legacyRuleNamesOutsideThePattern")
+    void aLegacyRuleNamedOutsideThePatternStaysManageableByItsExactName(String name) {
+        Rule legacy = new Rule();
+        legacy.setName(name);
+        legacy.setArn("arn:aws:events:us-east-1:000000000000:rule/" + name);
+        legacy.setEventBusName("default");
+        legacy.setState(RuleState.ENABLED);
+        ruleStore.put("rule:" + REGION + ":default/" + name, legacy);
+        Target target = new Target("t1", "arn:aws:sqs:us-east-1:000000000000:queue-1", null, null);
+        service.putTargets(name, null, List.of(target), REGION);
+
+        assertEquals(1, service.listTargetsByRule(name, null, REGION).size());
+        assertEquals(1, service.removeTargets(name, null, List.of("t1"), REGION).successfulCount());
+        service.disableRule(name, null, REGION);
+        assertEquals(RuleState.DISABLED, ruleStore.get("rule:" + REGION + ":default/" + name).orElseThrow().getState());
+        service.deleteRule(name, null, REGION);
+
+        assertTrue(ruleStore.get("rule:" + REGION + ":default/" + name).isEmpty());
+    }
+
+    static Stream<String> legacyRuleNamesOutsideThePattern() {
+        return Stream.of("r".repeat(65), "team rule");
+    }
+
+    @Test
+    void ruleExistsLooksUpAnInvalidNameWithoutRejectingIt() {
+        Rule legacy = new Rule();
+        legacy.setName("team/rule-1");
+        legacy.setEventBusName("default");
+        legacy.setState(RuleState.ENABLED);
+        ruleStore.put("rule:" + REGION + ":default/team/rule-1", legacy);
+
+        assertTrue(service.ruleExists("team/rule-1", null, REGION));
+        assertFalse(service.ruleExists("team/rule-2", null, REGION));
+    }
+
+    @Test
+    void aLegacySlashNamedRuleOnACustomBusIsTaggableByItsArn() {
+        service.createEventBus("foo", null, null, REGION);
+        String arn = "arn:aws:events:us-east-1:000000000000:rule/foo/team/r1";
+        Rule legacy = new Rule();
+        legacy.setName("team/r1");
+        legacy.setArn(arn);
+        legacy.setEventBusName("foo");
+        legacy.setState(RuleState.ENABLED);
+        ruleStore.put("rule:" + REGION + ":foo/team/r1", legacy);
+
+        service.tagResource(arn, Map.of("team", "orders", "env", "test"), REGION);
+        service.untagResource(arn, List.of("env"), REGION);
+
+        assertEquals(Map.of("team", "orders"), service.listTagsForResource(arn, REGION));
+    }
+
+    @Test
+    void aLegacySlashNamedRuleOnACustomBusStaysManageableByItsExactName() {
+        service.createEventBus("foo", null, null, REGION);
+        Rule legacy = new Rule();
+        legacy.setName("team/r1");
+        legacy.setArn("arn:aws:events:us-east-1:000000000000:rule/foo/team/r1");
+        legacy.setEventBusName("foo");
+        legacy.setState(RuleState.ENABLED);
+        ruleStore.put("rule:" + REGION + ":foo/team/r1", legacy);
+        Target target = new Target("t1", "arn:aws:sqs:us-east-1:000000000000:queue-1", null, null);
+
+        service.putTargets("team/r1", "foo", List.of(target), REGION);
+        assertEquals(1, service.listTargetsByRule("team/r1", "foo", REGION).size());
+        service.disableRule("team/r1", "foo", REGION);
+        assertEquals(RuleState.DISABLED, service.describeRule("team/r1", "foo", REGION).getState());
+        service.enableRule("team/r1", "foo", REGION);
+        assertEquals(1, service.removeTargets("team/r1", "foo", List.of("t1"), REGION).successfulCount());
+        service.deleteRule("team/r1", "foo", REGION);
+
+        assertTrue(ruleStore.get("rule:" + REGION + ":foo/team/r1").isEmpty());
+        assertDoesNotThrow(() -> service.deleteEventBus("foo", REGION));
+    }
+
+    @Test
+    void aPartnerBusDoesNotTakeOverALegacyRuleStoredUnderTheSameKey() {
+        String partner = "aws.partner/example.com/orders";
+        service.createEventBus("aws.partner", null, null, REGION);
+        Rule legacy = new Rule();
+        legacy.setName("example.com/orders/r1");
+        legacy.setArn("arn:aws:events:us-east-1:000000000000:rule/aws.partner/example.com/orders/r1");
+        legacy.setEventBusName("aws.partner");
+        legacy.setEventPattern("{\"source\":[\"example.com\"]}");
+        legacy.setState(RuleState.ENABLED);
+        ruleStore.put("rule:" + REGION + ":" + partner + "/r1", legacy);
+        Target target = new Target("t1", "arn:aws:sqs:us-east-1:000000000000:queue-1", null, null);
+        service.putTargets("example.com/orders/r1", "aws.partner", List.of(target), REGION);
+        service.createEventBus(partner, partner, null, null, REGION);
+
+        assertTrue(service.listRules(partner, null, REGION).isEmpty());
+        assertEquals("ResourceNotFoundException", assertThrows(AwsException.class,
+                () -> service.describeRule("r1", partner, REGION)).getErrorCode());
+        assertEquals(0, service.removeTargets("r1", partner, List.of("t1"), REGION).successfulCount());
+        assertEquals("ValidationException", assertThrows(AwsException.class,
+                () -> service.putRule("r1", partner, "{\"source\":[\"example.com\"]}", null,
+                        RuleState.ENABLED, null, null, null, REGION)).getErrorCode());
+        service.putEvents(List.of(Map.of("EventBusName", partner, "Source", "example.com",
+                "DetailType", "Order", "Detail", "{}")), REGION);
+
+        verify(dispatcherMock, never()).dispatch(anyString(), any(), anyString(), anyString(), any());
+        assertEquals("aws.partner", service.describeRule("example.com/orders/r1", "aws.partner", REGION)
+                .getEventBusName());
+        assertEquals(1, service.listTargetsByRule("example.com/orders/r1", "aws.partner", REGION).size());
+    }
+
+    @Test
+    void aSlashNamedRuleStoredForAnotherBusIsRejected() {
+        service.createEventBus("foo", null, null, REGION);
+        Rule nested = new Rule();
+        nested.setName("b");
+        nested.setArn("arn:aws:events:us-east-1:000000000000:rule/foo/a/b");
+        nested.setEventBusName("foo/a");
+        nested.setState(RuleState.ENABLED);
+        ruleStore.put("rule:" + REGION + ":foo/a/b", nested);
+        Target target = new Target("t1", "arn:aws:sqs:us-east-1:000000000000:queue-1", null, null);
+
+        assertRuleNameRejected(() -> service.describeRule("a/b", "foo", REGION), "name");
+        assertRuleNameRejected(() -> service.deleteRule("a/b", "foo", REGION), "name");
+        assertRuleNameRejected(() -> service.enableRule("a/b", "foo", REGION), "name");
+        assertRuleNameRejected(() -> service.disableRule("a/b", "foo", REGION), "name");
+        assertRuleNameRejected(() -> service.putTargets("a/b", "foo", List.of(target), REGION), "rule");
+        assertRuleNameRejected(() -> service.removeTargets("a/b", "foo", List.of("t1"), REGION), "rule");
+        assertRuleNameRejected(() -> service.listTargetsByRule("a/b", "foo", REGION), "rule");
+        assertTrue(ruleStore.get("rule:" + REGION + ":foo/a/b").isPresent());
     }
 
     @Test

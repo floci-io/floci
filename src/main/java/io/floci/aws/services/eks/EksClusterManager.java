@@ -116,6 +116,8 @@ public class EksClusterManager
     private static final String NODE_CAPACITY_LABEL = "io.floci.eks.node-capacity";
     private static final String DEFAULT_STORAGE_CLASS_LABEL = "io.floci.eks.default-storage-class";
     private static final String ENDPOINT_HOST_LABEL = "io.floci.eks.endpoint-host";
+    /** Marks a node started behind {@link #RSHARE_ENTRYPOINT}, whose mounts are shared. */
+    private static final String SHARED_MOUNTS_LABEL = "io.floci.eks.shared-mounts";
     private static final Pattern HOSTNAME = Pattern.compile(
             "[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?(\\.[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?)*");
 
@@ -680,6 +682,7 @@ public class EksClusterManager
                 "eks", cluster.getName(), labelAccountId, clusterRegion(cluster)));
         labels.put(NODE_CAPACITY_LABEL, capacityLabel(cluster, nodeLimits));
         labels.put(DEFAULT_STORAGE_CLASS_LABEL, String.valueOf(defaultStorageClass));
+        labels.put(SHARED_MOUNTS_LABEL, "true");
         if (!"localhost".equals(endpointHost)) {
             labels.put(ENDPOINT_HOST_LABEL, endpointHost);
         }
@@ -733,7 +736,7 @@ public class EksClusterManager
             try {
                 String accountId = resolveClusterAccountId(cluster);
                 String issuer = resolveClusterIssuer(cluster);
-                ClusterOidcKey oidcKey = oidcService.ensureKeyForAccount(accountId, cluster.getName(), issuer);
+                ClusterOidcKey oidcKey = oidcService.ensureKeyForAccount(accountId, oidcKeyName(cluster), issuer);
                 signingKeyFiles = writeSigningKeyFiles(cluster, oidcKey);
                 if (signingKeyFiles != null) {
                     serverArgs.addAll(buildIrsaServerArgs(oidcKey.getIssuer()));
@@ -761,19 +764,16 @@ public class EksClusterManager
             serverArgs.addAll(callerArgs);
         }
 
-        if (config.services().eks().disableCni()) {
-            // A container's /sys mount defaults to private propagation, which breaks
-            // Cilium's BPF filesystem mount ("mounted on /sys but it is not a shared or
-            // slave mount") — real EKS/kubeadm nodes don't hit this since they're VMs,
-            // not nested containers. `mount --make-rshared /` before k3s starts fixes
-            // it; kind's own node image runs the same fix in its entrypoint for the
-            // same reason. RSHARE_ENTRYPOINT is POSIX sh-compatible (no bashisms) — the
-            // k3s image has no bash, only busybox sh.
-            specBuilder.withEntrypoint(RSHARE_ENTRYPOINT);
-            specBuilder.withCmd(buildRshareWrappedCmd(serverArgs));
-        } else {
-            specBuilder.withCmd(serverArgs);
-        }
+        // A container's mounts default to private propagation, which a pod asking for mount
+        // propagation cannot start on: a CSI node plugin mounts its volumes under
+        // /var/lib/kubelet/pods with Bidirectional propagation ("is not a shared mount"), a node
+        // exporter reads / with HostToContainer, and Cilium mounts its BPF filesystem on /sys
+        // ("is not a shared or slave mount"). An EKS node is a VM, whose mounts are shared.
+        // `mount --make-rshared /` before k3s starts gives the node the same; kind's own node
+        // image runs the same fix in its entrypoint. RSHARE_ENTRYPOINT is POSIX sh-compatible
+        // (no bashisms): the k3s image has no bash, only busybox sh.
+        specBuilder.withEntrypoint(RSHARE_ENTRYPOINT);
+        specBuilder.withCmd(buildRshareWrappedCmd(serverArgs));
         ContainerSpec spec = specBuilder.build();
 
         // create -> inject webhook kubeconfig -> start, so the file exists before the API server boots.
@@ -864,7 +864,10 @@ public class EksClusterManager
             startCluster(cluster);
             return;
         }
-        if (capacityChanged || onAnotherNetwork(existing.get())
+        // A node started before its mounts were shared keeps private mounts, on which a CSI node plugin's
+        // Bidirectional mounts fail: it is replaced on the same data volume, as one with another capacity is.
+        boolean privateMounts = existingLabels == null || !"true".equals(existingLabels.get(SHARED_MOUNTS_LABEL));
+        if (capacityChanged || privateMounts || onAnotherNetwork(existing.get())
                 || !endpointHost.equals(certificateHost(existingLabels))) {
             replaceClusterContainer(cluster, null);
         }
@@ -1404,8 +1407,9 @@ public class EksClusterManager
     }
 
     /**
-     * Account-qualified Docker name for a cluster. Cluster names are unique only within an
-     * account, so a non-default account's cluster is qualified with its account ID — otherwise
+     * Account-qualified Docker name for a cluster. Cluster names are unique only within a Region
+     * of an account, so a non-default account's cluster is qualified with its account ID (and,
+     * where needed, its Region; see {@link #accountQualifiedClusterName}) — otherwise
      * two accounts' same-named clusters would resolve to the same container and data volume,
      * letting one account reach (or, via startCluster's stale-container removal, destroy) the
      * other's workloads. The default account keeps the historical unqualified name so existing
@@ -1425,10 +1429,19 @@ public class EksClusterManager
         return ContainerStorageHelper.resourceName(config, "eks", null, accountQualifiedClusterName(cluster));
     }
 
+    /**
+     * The cluster's name qualified by its account and, when {@link Cluster#getDockerNameRegion()}
+     * is set, by its Region, which leads: {@code [<region>.][<accountId>.]<name>}. Cluster names
+     * are unique only within a Region of an account, so same-named clusters in two Regions need
+     * distinct containers and volumes. The forms cannot collide: a name holds no dot, an account
+     * id is all digits, and a Region never is.
+     */
     private String accountQualifiedClusterName(Cluster cluster) {
         String accountId = cluster.getAccountId();
         boolean defaultAccount = accountId == null || accountId.equals(config.defaultAccountId());
-        return defaultAccount ? cluster.getName() : accountId + "." + cluster.getName();
+        String qualified = defaultAccount ? cluster.getName() : accountId + "." + cluster.getName();
+        String region = cluster.getDockerNameRegion();
+        return region == null || region.isBlank() ? qualified : region + "." + qualified;
     }
 
     /**
@@ -1446,6 +1459,11 @@ public class EksClusterManager
      */
     private String resolveRestoredDockerName(Cluster cluster) {
         String qualified = accountQualifiedName(cluster);
+        if (cluster.getDockerNameRegion() != null) {
+            // Region qualification postdates both the account qualifier and the floci-aws- rename,
+            // so no older name can hold this cluster's resources.
+            return qualified;
+        }
 
         // A cluster created after account qualification but before the floci-aws- rename lives
         // under the qualified name with the old prefix. Nothing else about it changed, so adopt
@@ -1574,20 +1592,19 @@ public class EksClusterManager
 
     /**
      * Overrides the image's default {@code ["/bin/k3s"]} entrypoint so a {@code mount
-     * --make-rshared /} can run immediately before k3s starts (see the disableCni branch
-     * in {@link #startCluster} for why). POSIX sh-compatible — the k3s image has no bash.
-     * A failed mount is logged to stderr rather than silently ignored, since it means the
-     * external CNI's BPF filesystem mount will fail later in a much more confusing way.
+     * --make-rshared /} can run immediately before k3s starts (see {@link #startCluster} for
+     * why). POSIX sh-compatible: the k3s image has no bash. A failed mount is logged to stderr
+     * rather than silently ignored, since it means a pod asking for mount propagation, a CSI
+     * node plugin or an external CNI, will fail later in a much more confusing way.
      */
     static final List<String> RSHARE_ENTRYPOINT = List.of("sh", "-c",
             "mount --make-rshared / || echo 'floci: WARN: mount --make-rshared / failed; "
-                    + "external CNI may not work' >&2; exec /bin/k3s \"$@\"");
+                    + "CSI drivers and an external CNI may not work' >&2; exec /bin/k3s \"$@\"");
 
     /**
      * Builds the CMD to pair with {@link #RSHARE_ENTRYPOINT}: an unused $0 placeholder
      * followed by the real k3s server args, so the entrypoint's "$@" expands to exactly
-     * {@code serverArgs} — the same args {@code withCmd(serverArgs)} would pass directly
-     * when the entrypoint isn't overridden.
+     * {@code serverArgs}, the args the image's own {@code /bin/k3s} entrypoint would take.
      */
     static List<String> buildRshareWrappedCmd(List<String> serverArgs) {
         List<String> wrappedCmd = new ArrayList<>();
@@ -1704,8 +1721,7 @@ public class EksClusterManager
      */
     private String writeWebhookKubeconfig(Cluster cluster) {
         String clusterName = cluster.getName();
-        Path localFile = Paths.get(config.services().eks().dataPath(), "webhook", clusterName, WEBHOOK_CONFIG_FILE)
-                .toAbsolutePath().normalize();
+        Path localFile = localClusterFile(cluster, "webhook", WEBHOOK_CONFIG_FILE);
         try {
             Files.createDirectories(localFile.getParent());
             Files.writeString(localFile, buildWebhookKubeconfig("http://" + dockerHostResolver.resolve() + ":"
@@ -1746,8 +1762,7 @@ public class EksClusterManager
             if (dataPath == null || dataPath.isBlank()) {
                 return null;
             }
-            Path localFile = Paths.get(dataPath, "audit", clusterName, AUDIT_POLICY_FILE)
-                    .toAbsolutePath().normalize();
+            Path localFile = localClusterFile(cluster, "audit", AUDIT_POLICY_FILE);
             Files.createDirectories(localFile.getParent());
             Files.writeString(localFile, buildAuditPolicy());
             return localFile.toString();
@@ -2011,6 +2026,24 @@ public class EksClusterManager
         return "000000000000";
     }
 
+    /**
+     * The key of {@code cluster}'s OIDC signing key in {@link EksOidcService}: the cluster's storage
+     * key, which carries its Region, as {@link EksService} creates, publishes and migrates it.
+     */
+    private String oidcKeyName(Cluster cluster) {
+        return EksService.clusterKey(clusterRegion(cluster), cluster.getName());
+    }
+
+    /**
+     * A file Floci writes for {@code cluster} under {@code <dataPath>/<kind>/<account>/<region>/<name>/},
+     * the layout of {@link #resolveKeysDir}. Cluster names are unique only within a Region of an
+     * account, so a shorter path would let same-named clusters overwrite each other's files.
+     */
+    Path localClusterFile(Cluster cluster, String kind, String fileName) {
+        return Paths.get(config.services().eks().dataPath(), kind, resolveClusterAccountId(cluster),
+                clusterRegion(cluster), cluster.getName(), fileName).toAbsolutePath().normalize();
+    }
+
     Path resolveKeysDir(Cluster cluster) {
         String accountId = resolveClusterAccountId(cluster);
         String region = clusterRegion(cluster);
@@ -2107,7 +2140,7 @@ public class EksClusterManager
         try {
             String accountId = resolveClusterAccountId(cluster);
             String issuer = resolveClusterIssuer(cluster);
-            ClusterOidcKey oidcKey = oidcService.ensureKeyForAccount(accountId, cluster.getName(), issuer);
+            ClusterOidcKey oidcKey = oidcService.ensureKeyForAccount(accountId, oidcKeyName(cluster), issuer);
             SigningKeyFiles keyFiles = writeSigningKeyFiles(cluster, oidcKey);
             if (keyFiles != null) {
                 copySigningKeysIntoContainer(containerId, keyFiles, cluster.getName());
@@ -2145,8 +2178,7 @@ public class EksClusterManager
         boolean tlsUri = config.services().ecr().tlsUri() && config.tls().enabled();
         String content = buildRegistriesYaml(mirrorAccounts(resolveClusterAccountId(cluster), config.defaultAccountId()),
                 mirrorRegions(region), ecrRegistryManager.advertisedPort(), endpoint, tlsUri);
-        writeLocalCopy(Paths.get(config.services().eks().dataPath(), "registries", clusterName,
-                "registries.yaml"), content, clusterName);
+        writeLocalCopy(localClusterFile(cluster, "registries", "registries.yaml"), content, clusterName);
         try {
             RetryingTarCopier.copyBytes(lifecycleManager.getDockerClient(), containerId, "/etc",
                     REGISTRIES_TAR_ENTRY, content.getBytes(StandardCharsets.UTF_8), 0644,
@@ -2232,10 +2264,9 @@ public class EksClusterManager
             return;
         }
         String url = "https://" + dockerHostResolver.resolve() + ":" + config.port()
-                + podIdentityWebhookPath(clusterName, resolveClusterAccountId(cluster));
+                + podIdentityWebhookPath(clusterName, resolveClusterAccountId(cluster), clusterRegion(cluster));
         String manifest = buildPodIdentityWebhookConfiguration(url, certificateAuthority.caPem());
-        writeLocalCopy(Paths.get(config.services().eks().dataPath(), "webhook", clusterName,
-                POD_IDENTITY_MANIFEST_FILE), manifest, clusterName);
+        writeLocalCopy(localClusterFile(cluster, "webhook", POD_IDENTITY_MANIFEST_FILE), manifest, clusterName);
         try {
             byte[] tar = tarSingleFile(POD_IDENTITY_MANIFEST_TAR_ENTRY, manifest);
             RetryingTarCopier.copyStreamed(lifecycleManager.getDockerClient(), containerId, K3S_DATA_DIR,
@@ -2253,8 +2284,8 @@ public class EksClusterManager
      * token webhook puts its scope there: the API server calls Floci with no AWS credentials, so a
      * cluster owned by a non-default account would otherwise never be found.
      */
-    static String podIdentityWebhookPath(String clusterName, String accountId) {
-        return "/_floci/eks/clusters/" + clusterName + "/pod-identity-webhook/scope/" + accountId;
+    static String podIdentityWebhookPath(String clusterName, String accountId, String region) {
+        return "/_floci/eks/clusters/" + clusterName + "/pod-identity-webhook/scope/" + accountId + "/" + region;
     }
 
     /**
@@ -2709,7 +2740,7 @@ public class EksClusterManager
         if (nodeGroupStorage == null || cluster == null || cluster.getName() == null) {
             return List.of();
         }
-        String prefix = cluster.getName() + "/";
+        String prefix = EksService.clusterKey(clusterRegion(cluster), cluster.getName()) + "/";
         String accountId = resolveClusterAccountId(cluster);
         List<Nodegroup> groups;
         if (nodeGroupStorage instanceof AccountAwareStorageBackend<Nodegroup> aware) {

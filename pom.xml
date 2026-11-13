@@ -352,6 +352,12 @@
         <!-- Testing -->
         <dependency>
             <groupId>software.amazon.awssdk</groupId>
+            <artifactId>rekognition</artifactId>
+            <version>${aws.sdk.version}</version>
+            <scope>test</scope>
+        </dependency>
+        <dependency>
+            <groupId>software.amazon.awssdk</groupId>
             <artifactId>accessanalyzer</artifactId>
             <version>${aws.sdk.version}</version>
             <scope>test</scope>
@@ -460,6 +466,12 @@
         </dependency>
         <dependency>
             <groupId>software.amazon.awssdk</groupId>
+            <artifactId>codeartifact</artifactId>
+            <version>${aws.sdk.version}</version>
+            <scope>test</scope>
+        </dependency>
+        <dependency>
+            <groupId>software.amazon.awssdk</groupId>
             <artifactId>controltower</artifactId>
             <version>${aws.sdk.version}</version>
             <scope>test</scope>
@@ -473,6 +485,12 @@
         <dependency>
             <groupId>software.amazon.awssdk</groupId>
             <artifactId>bcmdataexports</artifactId>
+            <version>${aws.sdk.version}</version>
+            <scope>test</scope>
+        </dependency>
+        <dependency>
+            <groupId>software.amazon.awssdk</groupId>
+            <artifactId>costandusagereport</artifactId>
             <version>${aws.sdk.version}</version>
             <scope>test</scope>
         </dependency>
@@ -521,6 +539,12 @@
         <dependency>
             <groupId>software.amazon.awssdk</groupId>
             <artifactId>cloudformation</artifactId>
+            <version>${aws.sdk.version}</version>
+            <scope>test</scope>
+        </dependency>
+        <dependency>
+            <groupId>software.amazon.awssdk</groupId>
+            <artifactId>appsync</artifactId>
             <version>${aws.sdk.version}</version>
             <scope>test</scope>
         </dependency>
@@ -656,6 +680,12 @@
         <dependency>
             <groupId>software.amazon.awssdk</groupId>
             <artifactId>url-connection-client</artifactId>
+            <version>${aws.sdk.version}</version>
+            <scope>test</scope>
+        </dependency>
+        <dependency>
+            <groupId>software.amazon.awssdk</groupId>
+            <artifactId>kms</artifactId>
             <version>${aws.sdk.version}</version>
             <scope>test</scope>
         </dependency>

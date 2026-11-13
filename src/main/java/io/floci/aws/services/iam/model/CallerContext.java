@@ -50,9 +50,26 @@ public record CallerContext(
 
     /** Copy of this context with one more identity policy, evaluated like the caller's own. */
     public CallerContext withIdentityPolicy(String policyDocument) {
+        return withIdentityPolicies(List.of(policyDocument));
+    }
+
+    /**
+     * Copy of this context with more identity policies, each evaluated like the caller's own. A
+     * simulation handed documents of its own adds them this way, so what the request brought and
+     * what the principal holds carry the same weight.
+     */
+    public CallerContext withIdentityPolicies(List<String> policyDocuments) {
+        if (policyDocuments.isEmpty()) {
+            return this;
+        }
         List<String> policies = new ArrayList<>(identityPolicies);
-        policies.add(policyDocument);
+        policies.addAll(policyDocuments);
         return new CallerContext(policies, sessionPolicyDocument, boundaryPolicyDocument, scpLevels, principalArn);
+    }
+
+    /** Copy of this context with the permissions boundary document a caller handed in instead. */
+    public CallerContext withBoundaryPolicy(String policyDocument) {
+        return new CallerContext(identityPolicies, sessionPolicyDocument, policyDocument, scpLevels, principalArn);
     }
 
     /** Copy of this context with the caller principal ARN attached. */

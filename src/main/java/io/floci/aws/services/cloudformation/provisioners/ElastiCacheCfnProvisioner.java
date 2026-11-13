@@ -22,7 +22,6 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
-import java.util.Objects;
 import java.util.Set;
 
 /**
@@ -46,7 +45,6 @@ public class ElastiCacheCfnProvisioner implements CfnResourceProvisioner {
     private static final List<String> UNSUPPORTED_CLUSTER_PROPERTIES = List.of("CacheSecurityGroupNames",
             "NotificationTopicArn", "AZMode", "PreferredAvailabilityZones", "LogDeliveryConfigurations",
             "SnapshotArns", "SnapshotName");
-    private static final String DEFAULT_NETWORK_TYPE = "ipv4";
     private static final int CLUSTER_ID_MAX_LENGTH = 50;
     private static final int SUBNET_GROUP_NAME_MAX_LENGTH = 255;
 
@@ -178,18 +176,11 @@ public class ElastiCacheCfnProvisioner implements CfnResourceProvisioner {
         Integer port = optionalInt(ctx.resolveOptional(props, "Port"));
 
         CacheCluster prior = ctx.isUpdate() ? findCluster(ctx.priorPhysicalId()) : null;
-        // Engine, CacheSubnetGroupName and NetworkType are create-only in AWS: a change replaces the
-        // cluster, so an unnamed one gets a fresh generated id. Port is not compared, because the
-        // emulator reports its own host proxy port rather than the requested one.
-        String networkType = ctx.resolveOptional(props, "NetworkType");
-        String desiredNetworkType = networkType == null || networkType.isBlank() ? DEFAULT_NETWORK_TYPE : networkType;
-        // A cluster stored before the type was recorded reads as the default, which is what it was created with.
-        String storedNetworkType = prior == null || prior.getNetworkType() == null
-                ? DEFAULT_NETWORK_TYPE : prior.getNetworkType();
-        boolean createOnlyChanged = prior != null
-                && (!engine.equalsIgnoreCase(prior.getEngine())
-                || !Objects.equals(subnetGroup, prior.getCacheSubnetGroupName())
-                || !desiredNetworkType.equals(storedNetworkType));
+        // The engine's change decides, as it does for the change set's Replacement: Port, SnapshotArns,
+        // SnapshotName, Engine, CacheSubnetGroupName, NetworkType and ClusterName are create-only in the
+        // registry. Port is read from the template, not the live cluster: the emulator reports its own
+        // host proxy port rather than the requested one. An unnamed cluster gets a fresh generated id.
+        boolean createOnlyChanged = prior != null && ctx.changes(CACHE_CLUSTER, props).requiresReplacement();
         if (createOnlyChanged && explicitName != null && explicitName.equals(ctx.priorPhysicalId())) {
             throw new AwsException("InvalidParameterValue", "Updating a create-only property of cache cluster "
                     + explicitName + " requires a new ClusterName", 400);

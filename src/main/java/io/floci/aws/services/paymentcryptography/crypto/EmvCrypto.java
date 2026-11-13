@@ -19,8 +19,8 @@ import java.util.HexFormat;
  * it was sent, and the padding the service applies is the one it applies to the input it
  * builds itself, which is the issuer authentication cryptogram.
  *
- * <p>All DES is done through three-key TDES rather than a single-DES provider:
- * single DES is expressed as TDES with K||K||K.
+ * <p>Each cipher says which one it uses: the retail MAC is single DES, and the
+ * key derivations are two-key TDES, which the cipher takes as K1||K2||K1.
  *
  * <p>The full PAN flows into master key derivation, because the derivation is
  * defined over the whole of it.
@@ -94,11 +94,12 @@ public final class EmvCrypto {
     }
 
     /**
-     * ISO/IEC 9797-1 MAC algorithm 3 (the retail MAC) with a 16-byte key.
+     * The retail MAC over data padded with the given ISO 9797-1 method.
      *
-     * <p>This is single-DES chaining, not three-key TDES. The key splits into
-     * K1 (left 8) and K2 (right 8); each block is enciphered under K1, and a
-     * single D_KR then E_KL final transform closes the tag:
+     * <p>This is ISO/IEC 9797-1 MAC algorithm 3 with a 16-byte key, and it is
+     * single-DES chaining, not three-key TDES. The key splits into K1 (left 8)
+     * and K2 (right 8); each block is enciphered under K1, and a single D_KR
+     * then E_KL final transform closes the tag:
      *
      * <pre>
      *   H_i  = E_KL(D_i XOR H_{i-1})   for i = 1..n
@@ -108,7 +109,6 @@ public final class EmvCrypto {
      * <p>Running a 3DES transform per block instead - the obvious reading -
      * produces a different MAC.
      */
-    /** The retail MAC over data padded with the given ISO 9797-1 method. */
     public static byte[] retailMac(byte[] key16, byte[] data, Padding padding) {
         byte[] kl = slice(key16, 0, 8);
         byte[] kr = slice(key16, 8, 16);

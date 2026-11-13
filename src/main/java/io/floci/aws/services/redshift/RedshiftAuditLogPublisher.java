@@ -8,6 +8,7 @@ import io.floci.aws.core.common.ServiceCallAuthorizer;
 import io.floci.aws.services.cloudwatch.logs.CloudWatchLogsService;
 import io.floci.aws.services.iam.IamPolicyEvaluator.Decision;
 import io.floci.aws.services.redshift.model.Cluster;
+import io.floci.aws.services.s3.S3ResourceArns;
 import io.floci.aws.services.s3.S3Service;
 import io.floci.aws.services.s3.model.S3Object;
 import jakarta.enterprise.context.ApplicationScoped;
@@ -327,7 +328,7 @@ public class RedshiftAuditLogPublisher {
                     cluster.getClusterIdentifier(), logType, now);
 
             String partition = regionResolver != null ? regionResolver.partitionForRegion(region) : AwsRegions.partitionFor(region);
-            String objectArn = AwsArnUtils.Arn.global(partition, "s3", "", bucket + "/" + key).toString();
+            String objectArn = S3ResourceArns.object(partition, bucket, key);
             String clusterArn = AwsArnUtils.Arn.of("redshift", region, accountId, "cluster:" + cluster.getClusterIdentifier()).toString();
             Map<String, List<String>> requestKeys = Map.of("aws:RequestedRegion", List.of(region));
 

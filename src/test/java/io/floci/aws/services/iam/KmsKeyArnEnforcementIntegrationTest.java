@@ -61,6 +61,21 @@ class KmsKeyArnEnforcementIntegrationTest {
     }
 
     @Test
+    void rotationHistoryUsesTheNamedKeyForAuthorization() {
+        String allowedArn = createKey();
+        String otherArn = createKey();
+        Session session = assumeRoleWith("""
+                {"Version":"2012-10-17","Statement":[
+                  {"Effect":"Allow","Action":"kms:ListKeyRotations","Resource":"%s"}]}"""
+                .formatted(allowedArn));
+
+        keyCall(session, "ListKeyRotations", "{\"KeyId\":\"" + allowedArn + "\"}")
+                .then().statusCode(200).body("Truncated", equalTo(false));
+        keyCall(session, "ListKeyRotations", "{\"KeyId\":\"" + otherArn + "\"}")
+                .then().statusCode(400).body("__type", equalTo("AccessDeniedException"));
+    }
+
+    @Test
     void aPolicyAllowingOneKeyArnAllowsThatKeyAndNoOther() {
         String allowedArn = createKey();
         String otherArn = createKey();

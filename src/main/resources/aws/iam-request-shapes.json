@@ -1674,6 +1674,7 @@
     "SimulatePrincipalPolicyRequest": {
       "type": "structure",
       "members": {
+        "PolicyInputList": "SimulationPolicyListType",
         "PermissionsBoundaryPolicyInputList": "SimulationPolicyListType",
         "PolicyExclusionList": "PolicyExclusionsListType",
         "ResourceArns": "ResourceNameListType",

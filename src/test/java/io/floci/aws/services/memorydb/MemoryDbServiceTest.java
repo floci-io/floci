@@ -17,7 +17,9 @@ import io.floci.aws.services.memorydb.model.User;
 import io.floci.aws.services.memorydb.proxy.MemoryDbProxyManager;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.function.Executable;
 
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
@@ -168,6 +170,75 @@ class MemoryDbServiceTest {
 
         service.untagResource(arn, List.of("env"));
         assertFalse(service.listTags(arn).containsKey("env"));
+    }
+
+    @Test
+    void usersAndAclsKeepCreateTagsAndCanBeTagged() {
+        User userSpec = new User();
+        userSpec.setName("tag-user");
+        userSpec.setAuthMode(AuthMode.PASSWORD);
+        userSpec.setPasswords(List.of("passwordpassword1"));
+        userSpec.setAccessString("on ~* +@all");
+        userSpec.setTags(new LinkedHashMap<>(Map.of("team", "red")));
+        String userArn = service.createUser(userSpec, "us-east-1").getArn();
+
+        Acl aclSpec = new Acl();
+        aclSpec.setName("tag-acl");
+        aclSpec.setUserNames(List.of("default", "tag-user"));
+        aclSpec.setTags(new LinkedHashMap<>(Map.of("team", "red")));
+        String aclArn = service.createAcl(aclSpec, "us-east-1").getArn();
+
+        assertEquals(Map.of("team", "red"), service.listTags(userArn));
+        assertEquals(Map.of("team", "red"), service.listTags(aclArn));
+
+        service.tagResource(userArn, Map.of("env", "dev"));
+        service.untagResource(aclArn, List.of("team"));
+        assertEquals(Map.of("team", "red", "env", "dev"), service.listTags(userArn));
+        assertEquals(Map.of(), service.listTags(aclArn));
+    }
+
+    @Test
+    void unknownUserOrAclArnRaisesItsNotFoundFault() {
+        AwsException user = assertThrows(AwsException.class,
+                () -> service.listTags("arn:aws:memorydb:us-east-1:000000000000:user/missing"));
+        assertEquals("UserNotFoundFault", user.jsonType());
+        AwsException acl = assertThrows(AwsException.class,
+                () -> service.tagResource("arn:aws:memorydb:us-east-1:000000000000:acl/missing", Map.of("env", "dev")));
+        assertEquals("ACLNotFoundFault", acl.jsonType());
+    }
+
+    @Test
+    void notFoundFaultsAnswer400() {
+        String arn = "arn:aws:memorydb:us-east-1:000000000000:";
+        assertNotFoundFault("ClusterNotFoundFault", () -> service.getCluster("missing", "us-east-1"));
+        assertNotFoundFault("ClusterNotFoundFault", () -> service.listTags(arn + "cluster/missing"));
+        assertNotFoundFault("ClusterNotFoundFault",
+                () -> service.listTags("arn:aws:memorydb:eu-west-1:000000000000:cluster/missing"));
+        assertNotFoundFault("ClusterNotFoundFault",
+                () -> service.listTags("arn:aws:memorydb:us-east-1:111111111111:cluster/missing"));
+        assertNotFoundFault("UserNotFoundFault", () -> service.describeUsers("missing", "us-east-1"));
+        assertNotFoundFault("UserNotFoundFault", () -> service.deleteUser("missing", "us-east-1"));
+        assertNotFoundFault("UserNotFoundFault", () -> service.createAcl(acl("an-acl", "missing"), "us-east-1"));
+        assertNotFoundFault("UserNotFoundFault", () -> service.listTags(arn + "user/missing"));
+        assertNotFoundFault("ACLNotFoundFault", () -> service.describeAcls("missing", "us-east-1"));
+        assertNotFoundFault("ACLNotFoundFault", () -> service.deleteAcl("missing", "us-east-1"));
+        assertNotFoundFault("ACLNotFoundFault",
+                () -> service.createCluster(cluster("a-cluster", "missing"), "us-east-1"));
+        assertNotFoundFault("ACLNotFoundFault", () -> service.listTags(arn + "acl/missing"));
+    }
+
+    @Test
+    void malformedOrOtherServiceArnRaisesInvalidArnFault() {
+        for (String arn : List.of("not-an-arn", "arn:aws:s3:::bucket")) {
+            for (Executable call : List.<Executable>of(
+                    () -> service.listTags(arn),
+                    () -> service.tagResource(arn, Map.of("env", "dev")),
+                    () -> service.untagResource(arn, List.of("env")))) {
+                AwsException ex = assertThrows(AwsException.class, call);
+                assertEquals("InvalidARNFault", ex.jsonType(), arn);
+                assertEquals(400, ex.getHttpStatus(), arn);
+            }
+        }
     }
 
     @Test
@@ -607,6 +678,12 @@ class MemoryDbServiceTest {
         cluster.setName(name);
         cluster.setAclName(aclName);
         return cluster;
+    }
+
+    private void assertNotFoundFault(String code, Executable call) {
+        AwsException ex = assertThrows(AwsException.class, call);
+        assertEquals(code, ex.jsonType());
+        assertEquals(400, ex.getHttpStatus());
     }
 
     @Test

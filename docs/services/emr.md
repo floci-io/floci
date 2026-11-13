@@ -86,8 +86,13 @@ does not exist.", as AWS does.
 Instance groups and fleets report `RUNNING` from the cluster's creation until it is `TERMINATED`. Then
 they report `TERMINATED` with zero running or provisioned capacity; their requested and target
 capacities remain recorded. `ListInstances` numbers the synthetic IDs and addresses of the `MASTER`
-group's instance first, so the primary node keeps `i-00000000000000001` and `10.0.0.1`, as
-`DescribeCluster`'s `MasterPublicDnsName` says, while the other groups resize; it retains each group's
+group's or fleet's instance first, so the primary node keeps `i-00000000000000001` and `10.0.0.1`, as
+`DescribeCluster`'s `MasterPublicDnsName` says, while the others resize, and every other instance's private
+address is `10.<group>.0.<n>`, its group's or fleet's number in the cluster and its own in it, so it too stays while
+another resizes. An instance fleet has an instance for each unit of its capacity, its on-demand ones first, each of the
+first instance type in its `InstanceTypeConfigs`. `InstanceGroupId` and `InstanceGroupTypes` keep instance groups'
+instances, `InstanceFleetId` and `InstanceFleetType` instance fleets', and a call's filters all apply together.
+`ListInstances` retains each group's or fleet's
 instances with their original synthetic IDs and `TERMINATED` status for 30 days after termination. New groups or fleets are rejected
 on terminated clusters. As on AWS, `ModifyInstanceGroups` answers `ValidationException` "An instance
 group may only be modified when the cluster is running or waiting." for a cluster in any other state,
@@ -98,15 +103,26 @@ running or waiting." with `ErrorCode` `MODIFY_INSTANCE_FLEET_OF_RUNNING_JOBFLOW_
 other state, such as `STARTING` or `BOOTSTRAPPING`. `AddInstanceFleet` gives a `TERMINATING` or
 `TERMINATED` cluster the "shutting down" answer, and `AddInstanceGroups` gives it as
 `ValidationException`, as `AddJobFlowSteps` does. `InstanceStates` filters the modeled `RUNNING` and
-`TERMINATED` instances.
+`TERMINATED` instances. As `ListInstances` "Provides information for all active Amazon EC2 instances and Amazon EC2
+instances terminated in the last 30 days, up to a maximum of 2,000", a call lists at most 2,000 and gives a `Marker`
+for the next; a `Marker` no call gave is refused with `InvalidRequestException`.
+A cluster has instance groups or instance fleets, never both, as "instance fleets and instance groups cannot coexist in a
+cluster": `RunJobFlow` with both is refused with `ValidationException` "The RunJobFlow request can contain
+InstanceFleets parameters or InstanceGroups parameters, but not both.", the API reference's own words, and
+`AddInstanceGroups` on a cluster with instance fleets with `ValidationException`, `AddInstanceFleet` on one with
+instance groups with `InvalidRequestException`, each saying the cluster uses the other kind; AWS's wording for these is
+not documented, so it is Floci's. A fleet without its `InstanceFleetType`, or with an `InstanceTypeConfigs` member
+without its `InstanceType`, both required, is refused with the framework's `ValidationException`.
 
 A cluster that is `TERMINATING`, `TERMINATED` or `TERMINATED_WITH_ERRORS` also refuses `ModifyCluster`,
 the four `Set*` setters, and `Put` and `Remove` of its managed scaling, auto-termination and automatic
 scaling policies, with the same "shutting down" message: `ModifyCluster` as `InvalidRequestException`
 with `ErrorCode` `INVALID_JOB_SHUT_DOWN`, since its model declares that exception, and the others as
-`ValidationException`, since theirs declare none. AWS documents these operations for running clusters,
-but no answer for an ended one is recorded, so this is Floci's reading, taken from the operations whose
-answer is. A `Set*` request naming such a cluster changes none of the clusters it names. `AddTags` and
+`ValidationException`, since theirs declare none. `GetManagedScalingPolicy` gives such a cluster that
+`ValidationException` in place of its policy, as AWS was recorded doing, and Terraform's provider expects the
+same answer from `RemoveManagedScalingPolicy`. For the other operations, which AWS documents for running
+clusters, no answer for an ended one is recorded, so theirs is Floci's reading, taken from the operations
+whose answer is. A `Set*` request naming such a cluster changes none of the clusters it names. `AddTags` and
 `RemoveTags` refuse a `TERMINATED` or `TERMINATED_WITH_ERRORS` cluster, as the Management Guide says "you
 cannot add, edit, or remove tags from a terminated cluster", with `InvalidRequestException` "Tags cannot
 be modified on terminated clusters." The guide names no error: the message is the one a tagging tool
@@ -135,7 +151,8 @@ holding the driver and its executors, or a command or a script. The cluster itse
   Management Guide writes Spark steps, runs the arguments after it, with its `--master` and `--deploy-mode` as
   given where the cluster runs YARN (see **YARN**) and without them where it does not. A custom JAR step runs its `MainClass`, or else the one its manifest names, through
   `spark-submit`, with the JAR and the step's `Args`; a MapReduce job it starts, such as the Management
-  Guide's `wordcount` of Hadoop's examples JAR, runs in local mode (see **Hadoop streaming and MapReduce**).
+  Guide's `wordcount` of Hadoop's examples JAR, runs on the cluster's YARN, or in local mode where it runs none (see
+  **Hadoop streaming and MapReduce**).
   A `Jar` of `/usr/lib/hadoop-mapreduce/hadoop-streaming.jar`, where EMR has it, runs the image's
   `/usr/lib/hadoop/hadoop-streaming.jar`. Any other `command-runner.jar` step runs its
   command, its first argument, with the rest, and a `script-runner.jar` step (by name, or by its
@@ -169,8 +186,10 @@ holding the driver and its executors, or a command or a script. The cluster itse
   container of their own, `emr-<cluster-id>-hdfs`, from the image the cluster's steps run in where it runs YARN (see
   **YARN**), else from the release's EMR Serverless Hive image, which has HDFS
   where the release's image has only its client (`hive-image-template` names another), or, for an `emr-spark-*`
-  release, which has no Hive image, from `emr-7.5.0`'s, with their data in a third volume, one copy of each block,
-  and permissions off. On a cluster with Hive or HCatalog (see **Which steps run**), the same container runs Hive's
+  release, which has no Hive image, from `emr-7.5.0`'s, with their data in a third volume and permissions off. Where
+  the cluster was created with core nodes the DataNodes are theirs instead (see **YARN**), and HDFS keeps what EMR's does, one copy
+  of a block below four core nodes, two below ten and three otherwise, or what the `hdfs-site` classification's
+  `dfs.replication` says, which is the one property of that classification Floci applies. On a cluster with Hive or HCatalog (see **Which steps run**), the same container runs Hive's
   metastore service, which EMR's HCatalog server is, on port 9083, its Derby database in that volume and its warehouse
   in the HDFS; it reaches the S3 locations of tables through Floci's S3 as the role of the cluster's EC2 instance
   profile, as the bootstrap actions do, with a session that goes with the container. It gets the cluster's `core-site`
@@ -201,8 +220,8 @@ holding the driver and its executors, or a command or a script. The cluster itse
   folder a `spark-env` export of `HADOOP_CONF_DIR` names, with the cluster's `core-site` after it, which wins; the
   image's `hdfs` command cannot run, so `hdfs dfs` runs as `hadoop fs`, and its other commands fail. A structured
   streaming query keeps its checkpoints through Spark's file system checkpoint manager, as its default one refuses
-  an `hdfs://` path without a host. In a command's Hadoop configuration, which a custom JAR's MapReduce in the
-  driver reads too, the `hdfs` scheme is a view of that HDFS in which one folder, `/tmp/hadoop/mapred/staging`, is
+  an `hdfs://` path without a host. Where the cluster runs no YARN, in a command's Hadoop configuration, which a custom
+  JAR's MapReduce in the driver reads too, the `hdfs` scheme is a view of that HDFS in which one folder, `/tmp/hadoop/mapred/staging`, is
   the container's own, for MapReduce in local mode (see **Hadoop streaming and MapReduce**); Spark and Hive keep
   HDFS's own client, so a Spark step can write a Hive table there. The HDFS container, its network and the volumes
   go once the cluster has ended and its last step is done ("HDFS is ephemeral storage that is reclaimed when you terminate a
@@ -210,15 +229,17 @@ holding the driver and its executors, or a command or a script. The cluster itse
   `reconcile-containers-on-startup` is off. A shutdown of Floci removes the HDFS containers of the clusters that are
   still up, and their next step starts them again, on the data their volume keeps. `/tmp` is each container's own.
 * **YARN**: on a Docker network of the cluster's own, the default, "the primary node runs the YARN ResourceManager
-  service", as the Management Guide puts it, and, as on a
-  cluster of one node, a NodeManager, both in the primary node's container, and the cluster's Spark runs on them. A
+  service", as the Management Guide puts it, in the primary node's container, with a NodeManager beside it on a cluster
+  created with no core node, which keeps it, and its DataNode, as core nodes are added, the blocks it holds staying in
+  reach, and the cluster's Spark, MapReduce (see **Hadoop streaming and MapReduce**) and Hive's Tez (see **Hive steps**)
+  run on them. A
   Spark step or custom JAR step submits to it, with `--master yarn` unless it names another master, and in the deploy
   mode it asks for, `client` when it names none, and so does a `spark-submit` a command or script starts. In client
   mode the driver stays in the step's container and its output in the step's logs, and the executors run in YARN's
-  containers on the node; in cluster mode the driver runs on the node too, its output in the application's container
-  logs (see **Output**) and only the client's in the step's.
-  The node needs Spark, Python and what the bootstrap actions installed, as an EMR cluster's nodes hold every
-  application it installs, so it runs from the image the steps run in: the bootstrap's, else the release's EMR
+  containers on the cluster's nodes; in cluster mode the driver runs on one of them too, its output in the application's
+  container logs (see **Output**) and only the client's in the step's.
+  A node needs Spark, Python and what the bootstrap actions installed, as an EMR cluster's nodes hold every
+  application it installs, so each runs from the image the steps run in: the bootstrap's, else the release's EMR
   Serverless image with the HDFS, MapReduce and YARN of its EMR Serverless Hive image, and Hive on a cluster with
   Hive, which Floci makes the first time one of the release's clusters needs it (see **Hive steps**), and in which the
   cluster's bootstrap actions run. An `emr-spark-*` release has no EMR Serverless Hive image, and `emr-7.5.0`'s HDFS and
@@ -232,8 +253,32 @@ holding the driver and its executors, or a command or a script. The cluster itse
   Floci's address on the cluster's network, which Floci's container joins as for the metastore (see **Storage**), over
   HTTP, which Floci serves beside HTTPS with TLS on, so no certificate is involved, with the step's AWS credentials,
   and find the driver at its container's name on that network.
-* **Hadoop streaming and MapReduce**: a step's `hadoop` command runs MapReduce in local mode, in its own JVM, on the
-  YARN clusters too (see **Known limitations**): the image has MapReduce only in Spark's shaded Hadoop client, which
+  Each core and task node is a container of its own on that network, `emr-<cluster-id>-node-<group>-<n>`, with its data
+  in a volume of its own: "Core nodes run the Data Node daemon", "a core node runs YARN NodeManager daemons, Hadoop
+  MapReduce tasks, and Spark executors", and "Task nodes don't run the Data Node daemon". Its name on the network is the
+  private DNS name `ListInstances` gives it, which YARN and HDFS know it by, an instance fleet's as an instance group's.
+  How many there are follows the instance
+  groups' counts or the instance fleets' target capacities, at most `yarn-max-worker-nodes`, 4 by default, core nodes
+  first, as each costs 300 to 800 MB while idle; with 0 the cluster runs on its primary node alone. `ModifyInstanceGroups`,
+  `AddInstanceGroups`, `ModifyInstanceFleet` and `AddInstanceFleet` reach the nodes of a cluster a step has started them
+  on at once, and the first step of any other starts those asked for by then. A new node takes work as soon as it has
+  registered, even from a step already running. One no longer wanted is decommissioned, as "both YARN NodeManager and
+  HDFS DataNode daemons must be decommissioned", so the steps running on it finish and its blocks move to the nodes that
+  stay, within EMR's default timeout of an hour, each node its own, and then it goes with its data; core nodes stop at the copies HDFS
+  keeps, as "Amazon EMR will not allow clusters to scale core nodes below `dfs.replication`". A core node's NodeManager
+  is decommissioned only once HDFS has moved its blocks, as a decommissioned NodeManager exits, which ends the node's
+  container, its DataNode with it. A core node that has gone stays among HDFS's excluded nodes for a minute, until the
+  NameNode, told to by Floci, has it dead 40 seconds after it stopped, so the copies of blocks it held never count
+  again. A core node a resize brings back under its name in that minute takes no new blocks until it is over. A core
+  node that stops before HDFS has moved its blocks starts again on its data, and one a shutdown of Floci cut off while
+  it was being decommissioned starts again on its data with the cluster's next step, to be decommissioned then.
+* **Hadoop streaming and MapReduce**: on a cluster that runs YARN (see **YARN**), a step's MapReduce runs there, its
+  application master and tasks in YARN's containers on the cluster's nodes. A step's `hadoop` command, and so
+  `hadoop-streaming`, a `hadoop jar` and `hdfs dfs`, run from the nodes' Hadoop (`/usr/lib`, or the one an `emr-spark-*`
+  release keeps in `/opt`), with a `mapred-site.xml` that names YARN, the nodes' folders and the step's AWS environment,
+  and an application master of 1 GB and tasks of 768 MB, which the cluster's `mapred-site` replaces. A custom JAR step's
+  MapReduce gets the same. Where the cluster runs no YARN, a step's `hadoop` command runs MapReduce in local mode, in
+  its own JVM: the image has MapReduce only in Spark's shaded Hadoop client, which
   Floci makes the
   command's MapReduce home (`HADOOP_MAPRED_HOME`, unless a `spark-env` export names one), so it is on the
   command's class path whatever `HADOOP_CLASSPATH` a command sets, and a copy of its `mapred-site.xml` sets
@@ -284,12 +329,14 @@ holding the driver and its executors, or a command or a script. The cluster itse
   on its class path, while the cluster's other steps keep the release image's. Then a `command-runner.jar` step
   running `hive-script`, as the AWS CLI writes a `Type=Hive` step (`hive-script --run-hive-script --args` and the
   step's `Args`), or `hive` itself, runs Hive: `hive-script` runs `hive` with the arguments after `--args`, as the
-  image's `hadoop` user in `/home/hadoop`, with Tez in local mode in its JVM, as an [EMR Serverless Hive job
-  run](emr-serverless.md#running-hive-job-runs)'s does, on the cluster's storage. It gets the cluster's `core-site`,
+  image's `hadoop` user in `/home/hadoop`, on the cluster's storage, its Tez on the cluster's YARN, or, where it runs
+  none, in local mode in its JVM, as an [EMR Serverless Hive job run](emr-serverless.md#running-hive-job-runs)'s does.
+  The images hold EMR Serverless's build of Tez, whose `tez-site.xml` names its own plugins, so on YARN Hive runs the
+  stock classes from the same jars, with an application master of 1 GB and tasks of 768 MB and one virtual core. It gets the cluster's `core-site`,
   `tez-site` and `hive-site` properties, each a `--hiveconf`, then the step's own arguments, so a `--hiveconf` of
   the step's wins over a classification's, as it does over `hive-site.xml`; the cluster's `hive-env` exports are its
   environment. Floci's settings come before them all, and any of them replaces one: S3A on Floci's S3 for `s3://`,
-  Tez in local mode, the cluster's HDFS, and its metastore. "By default, Hive records metastore information in a
+  where Tez runs, the cluster's HDFS, and its metastore. "By default, Hive records metastore information in a
   MySQL database on the primary node's file system", which Floci keeps in a Derby database of the metastore service
   its primary node runs (see **Storage**), so a table one Hive step makes is there for the next, until the cluster
   ends, and any number of Hive steps use it at once. The `hive-site` setting of
@@ -368,7 +415,8 @@ holding the driver and its executors, or a command or a script. The cluster itse
   when it stopped ends with `INTERNAL_ERROR` once Floci is back. With a `LogUri`, each action's output
   goes to `stdout.gz` and `stderr.gz` under `<LogUri>/<cluster-id>/node/<instance-id>/bootstrap-actions/<n>/`,
   as the Management Guide's bootstrap failure pages give the folder. The actions run once, as on the
-  master: there are no core or task nodes to run them on. Shutdown actions do not run, and
+  master, and every node of the cluster runs from the image they leave, so each holds what they installed. Shutdown
+  actions do not run, and
   `Status.ErrorDetails` is not given.
 * **States**: a step is `RUNNING` from when it starts until its driver or command exits; `step-duration-seconds`
   does not apply. The first step of a release also waits while its image is pulled (3.5 to 4.3 GB
@@ -447,16 +495,30 @@ holding the driver and its executors, or a command or a script. The cluster itse
 
 ### Known limitations
 
-- **One NodeManager, on the primary node.** A cluster's core and task instance groups get no NodeManager of their own,
-  so its executors all run on the primary node, however many instances the cluster names.
+- **No more nodes than `yarn-max-worker-nodes`.** A cluster that names more core and task instances runs that many,
+  core nodes first, while `ListInstances` still lists them all. Its core and task nodes offer the same capacity whatever
+  their instance type.
+- **An instance fleet's unit of capacity is one instance.** Floci does not choose among a fleet's instance types as EMR
+  does: `ListInstances` gives each of its instances the first in its `InstanceTypeConfigs`, and its target capacity is
+  divided by no `WeightedCapacity`, so it has an instance and a node for each unit.
+- **A resize shows at once.** An instance group is `RUNNING` with its new count, and an instance fleet its new capacity,
+  as soon as the resize is asked for, while the nodes take a few seconds to follow, or longer to decommission. A core
+  group shrunk below the copies HDFS keeps says the count asked for, while its nodes stop at the copies; EMR documents
+  that it does not scale below them, but no error for the request.
+- **No YARN node labels.** An application master can run on any node, as on EMR's 6.x releases by default. EMR's 7.x
+  releases label nodes by market type and 5.x's keep application masters on core nodes.
+- **No nodes for a cluster made with `MasterInstanceType`, `SlaveInstanceType` and `InstanceCount`.** Floci keeps no
+  instance groups for that older form of `RunJobFlow`, so such a cluster runs on its primary node alone.
 - **An `emr-spark-*` cluster's HDFS and YARN are `emr-7.5.0`'s.** The Release Guide lists both at Hadoop 3.4.2 for
   `emr-spark-8.0.0` and `emr-spark-8.1.0`, and EMR Serverless publishes no image holding them, so the primary node runs
   Hadoop 3.4.0's. Spark and its Hadoop client are the release's own.
 - **No YARN in a network namespace the steps share, or with no network.** With `docker-network` set to `host` or
   `container:<id>`, YARN's daemons would listen on every interface of the namespace, and with `none` the steps could not
   reach them, so the cluster's Spark runs in local mode.
-- **MapReduce and Tez in local mode.** On a cluster that runs YARN too, `hadoop-streaming`, a custom JAR's MapReduce and
-  Hive's Tez run in the step's container.
+- **MapReduce and Tez in local mode where there is no YARN.** Only a cluster that runs YARN (see **YARN**) runs them on
+  it; on any other, `hadoop-streaming`, a custom JAR's MapReduce and Hive's Tez run in the step's container.
+- **Tez's intermediate data is not compressed on YARN.** The images name the LZO codec for it, whose native library they
+  lack, so Floci turns that compression off, which a `tez-site` classification can turn back on with a codec they have.
 - **No Hive metastore service in a network namespace the steps share.** With `docker-network` set to `host` or
   `container:<id>`, the primary node runs HDFS but not Hive's metastore service: Hive 3's has no setting for the
   address it listens on, so it would serve its tables, and the files under them, on every interface of the
@@ -517,6 +579,7 @@ its `STARTING` event, has its events sent after the rest of that call's.
 | `FLOCI_SERVICES_EMR_HIVE_IMAGE_TEMPLATE` | `public.ecr.aws/emr-serverless/hive/%s:latest` | The EMR Serverless Hive image a `docker` cluster takes HDFS and YARN from, and a cluster with Hive takes Hive from, `%s` standing for the cluster's release label, or `emr-7.5.0` for the Hadoop of an `emr-spark-*` release; see [Storage and Hive steps](#running-steps) |
 | `FLOCI_SERVICES_EMR_YARN_NODE_MEMORY_MB` | `4096` | The memory a `docker` cluster's NodeManager offers the YARN containers its Spark executors run in (see [Running steps](#running-steps)) |
 | `FLOCI_SERVICES_EMR_YARN_NODE_VCORES` | `4` | The virtual cores it offers them |
+| `FLOCI_SERVICES_EMR_YARN_MAX_WORKER_NODES` | `4` | The most core and task nodes a `docker` cluster runs as containers of their own, core nodes first; 0 keeps a cluster on its primary node |
 | `FLOCI_SERVICES_EMR_RECONCILE_CONTAINERS_ON_STARTUP` | `true` | Remove the step drivers and bootstrap containers a previous run of this Floci left on the Docker daemon, and the images bootstrap actions left for clusters that are gone or have ended, when the EMR service starts; turn it off when two Floci instances share a daemon with the same port and no resource namespace |
 
 ## Release catalogue

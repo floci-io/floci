@@ -1,6 +1,8 @@
 package io.floci.aws.services.emr;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
+import io.floci.aws.services.emr.model.EmrCluster;
+import io.floci.aws.services.emr.model.EmrInstanceFleet;
 import io.floci.aws.services.emr.model.EmrInstanceGroup;
 import io.floci.aws.testing.RestAssuredJsonUtils;
 import io.quarkus.test.junit.QuarkusTest;
@@ -9,6 +11,7 @@ import org.junit.jupiter.api.Test;
 
 import java.time.Instant;
 import java.time.temporal.ChronoUnit;
+import java.util.Collections;
 import java.util.List;
 
 import static io.floci.aws.testing.EmrRequests.emr;
@@ -16,6 +19,7 @@ import static org.hamcrest.Matchers.equalTo;
 import static org.hamcrest.Matchers.hasSize;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 @QuarkusTest
@@ -170,6 +174,20 @@ class EmrTerminatedCapacityIntegrationTest {
         assertEquals(2, EmrHandler.listedInstanceCount(legacy, false));
     }
 
+    @Test
+    void aFleetStoredBeforeItsInstanceTypesWereKeptListsItsInstancesWithoutOne() throws Exception {
+        EmrCluster cluster = new EmrCluster();
+        cluster.getInstanceFleets().add(new ObjectMapper().readValue(
+                "{\"instanceFleetType\":\"CORE\",\"targetSpotCapacity\":2,\"provisionedSpotCapacity\":2}",
+                EmrInstanceFleet.class));
+
+        EmrHandler.ListedInstances listed = EmrHandler.listedInstances(cluster, false).getFirst();
+
+        assertEquals(2, listed.count());
+        assertNull(listed.instanceType());
+        assertEquals("SPOT", listed.marketOf(1));
+    }
+
     private static String clusterRequest(String id) {
         return "{\"ClusterId\":\"" + id + "\"}";
     }
@@ -231,5 +249,13 @@ class EmrTerminatedCapacityIntegrationTest {
                 .body("InstanceFleets.find { it.InstanceFleetType == 'CORE' }.TargetSpotCapacity", equalTo(3))
                 .body("InstanceFleets.find { it.InstanceFleetType == 'CORE' }.ProvisionedOnDemandCapacity", equalTo(0))
                 .body("InstanceFleets.find { it.InstanceFleetType == 'CORE' }.ProvisionedSpotCapacity", equalTo(0));
+        // What the fleets ran, kept as the 30 days of ended instances.
+        emr("ListInstances", clusterRequest(id)).then().statusCode(200)
+                .body("Instances.Id", equalTo(List.of("ci-1" + id, "ci-2" + id, "ci-3" + id, "ci-4" + id,
+                        "ci-5" + id, "ci-6" + id)))
+                .body("Instances.Market", equalTo(List.of("ON_DEMAND", "ON_DEMAND", "ON_DEMAND", "SPOT", "SPOT", "SPOT")))
+                .body("Instances.Status.State", equalTo(Collections.nCopies(6, "TERMINATED")));
+        emr("ListInstances", "{\"ClusterId\":\"" + id + "\",\"InstanceStates\":[\"RUNNING\"]}")
+                .then().statusCode(200).body("Instances", hasSize(0));
     }
 }

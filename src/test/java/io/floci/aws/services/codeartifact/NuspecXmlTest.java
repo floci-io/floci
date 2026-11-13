@@ -3,7 +3,10 @@ package io.floci.aws.services.codeartifact;
 import org.junit.jupiter.api.Test;
 
 import java.io.ByteArrayOutputStream;
+import java.io.IOException;
 import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
+import java.nio.file.Path;
 import java.util.Optional;
 import java.util.zip.ZipEntry;
 import java.util.zip.ZipOutputStream;
@@ -57,6 +60,28 @@ class NuspecXmlTest {
         NuspecXml.Metadata metadata = NuspecXml.extractFromNupkg(nupkg);
 
         assertEquals("Demo.Package", metadata.id());
+    }
+
+    /**
+     * {@code extractFromNupkg(Path)} is the streamed sibling a large {@code .nupkg} push actually
+     * uses: confirms it reads the same real {@code .nuspec} entry straight off disk, not just that
+     * the {@code byte[]} overload parses it from a resident array.
+     */
+    @Test
+    void extractFromNupkgFromAPathFindsTheRootNuspecEntryTheSameWayAsTheByteArrayOverload() throws IOException {
+        byte[] nupkg = buildNupkg(NUSPEC);
+        Path staged = Files.createTempFile("nuspec-xml-test-", ".nupkg");
+
+        try {
+            Files.write(staged, nupkg);
+
+            NuspecXml.Metadata metadata = NuspecXml.extractFromNupkg(staged);
+
+            assertEquals("Demo.Package", metadata.id());
+            assertEquals("1.0.0", metadata.version());
+        } finally {
+            Files.deleteIfExists(staged);
+        }
     }
 
     /** The manifest must sit at the archive root; a same-suffix entry nested in a subdirectory doesn't count. */

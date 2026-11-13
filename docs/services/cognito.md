@@ -3,6 +3,21 @@
 **Protocol:** JSON 1.1 (`X-Amz-Target: AWSCognitoIdentityProviderService.*`)
 **Endpoint:** `POST http://localhost:4566/`
 
+Browser clients can call the Cognito JSON API after their origin is admitted by
+`EXTRA_CORS_ALLOWED_ORIGINS` or `FLOCI_SECURITY_EXTRA_CORS_ALLOWED_ORIGINS`.
+For example, set `EXTRA_CORS_ALLOWED_ORIGINS=http://localhost:3000` for a local frontend.
+The default allow-list is empty. Unlisted origins receive no CORS headers, including on
+preflights and on successful or failed Cognito responses.
+
+The global CORS filter answers allowed preflights with 204 and supplies the allowed
+origin and request headers, including `content-type`, `x-amz-target`, and `x-amz-user-agent`.
+For allowed origins, Cognito responses also expose the AWS request ID and error headers.
+Those names are merged with configured extra exposed headers and any existing exposed
+headers, without duplicates that differ only in case. The global filter also controls
+Private Network Access and explicit wildcard-origin configuration.
+`FLOCI_SECURITY_DISABLE_CORS_HEADERS=true` disables CORS headers. Disabling the Cognito
+service disables its extra exposed headers. S3 and API Gateway retain their existing CORS policies.
+
 Floci serves pool-specific discovery and JWKS endpoints, plus a relaxed OAuth token endpoint, so local clients can mint and validate Cognito-like access tokens against RS256 signing keys.
 
 When configured, `PreAuthentication`, `PostAuthentication` and `PreTokenGeneration` Lambda triggers
@@ -13,6 +28,15 @@ responses return Cognito Lambda errors instead of issuing tokens without the tri
 where `errorMessage` is taken verbatim from the function's error payload, as on AWS.
 
 Sign-in by a disabled user fails with `NotAuthorizedException` (`User is disabled.`), as on AWS.
+
+`AdminCreateUser`, `SignUp`, `AdminUpdateUserAttributes` and `UpdateUserAttributes` reject
+`custom:` attributes that the user pool's schema does not declare with `InvalidParameterException`
+and `Attribute does not exist in the schema.`. Declare custom attributes with `CreateUserPool`
+or `AddCustomAttributes` before writing them. Validation runs before creating a user or changing
+any attributes, so a rejected request does not save partial changes.
+`NEW_PASSWORD_REQUIRED` responses, including custom SRP flows and administrative responses, also
+validate custom attributes before changing the password or consuming the challenge session. An
+undeclared attribute leaves both unchanged, so the client can correct the attributes and retry.
 
 `CreateUserPool` supports overriding several values using user-pool tags **only** at creation time:
 * `floci:override-id`, to pin the resulting `UserPool.Id`. Because a pinned id is caller-chosen it can be reused, which AWS never does. `DeleteUserPool` therefore deletes everything the pool owns (users, groups, app clients, resource servers, revoked token records and outstanding verification codes) so a pool recreated on the same id starts empty rather than inheriting the deleted pool's password hashes and client secrets.
@@ -538,6 +562,12 @@ empty list, matching AWS. It is enforced as if it had `ALLOW_REFRESH_TOKEN_AUTH`
 the stored or returned value. A client that signs in with `USER_PASSWORD_AUTH`, `ADMIN_USER_PASSWORD_AUTH` or
 `USER_AUTH` must list the matching `ALLOW_` value.
 
+With the app client's `PreventUserExistenceErrors` set to `ENABLED`, password authentication
+(`USER_PASSWORD_AUTH`, `ADMIN_USER_PASSWORD_AUTH` and the legacy `ADMIN_NO_SRP_AUTH`) returns
+`NotAuthorizedException` with `Incorrect username or password` for both an unknown username and
+an incorrect password. With `LEGACY`, or when the setting is omitted, an unknown username returns
+`UserNotFoundException`. See [AWS's user-existence error behavior](https://docs.aws.amazon.com/cognito/latest/developerguide/cognito-user-pool-managing-errors.html).
+
 ## Custom Message Trigger
 
 `CustomMessage` requests include the `{####}` code placeholder, the `{##Click Here##}`
@@ -925,6 +955,12 @@ Floci follows real Cognito semantics for pools created with `UsernameAttributes`
   the `RespondToAuthChallenge` `SECRET_HASH` is validated against the `USERNAME` sent that round. That
   `USERNAME` must still resolve to the session's user — the UUID or any of its current aliases — and a
   value naming a different user is rejected with `NotAuthorizedException`.
+- The same holds for the `USERNAME` of the other challenge responses (`NEW_PASSWORD_REQUIRED`,
+  `MFA_SETUP`, `SOFTWARE_TOKEN_MFA`, and the SMS and email MFA codes): the session keeps the UUID, and the
+  email or phone number the user signed in with names the same user. The AWS Developer Guide says that with
+  username attributes "you can use an email address or phone number in place of the username in all APIs
+  except the ListUsers operation" (Working with user attributes). The one exception is the SRP password
+  verifier, which has to use the `USER_ID_FOR_SRP` of the challenge, as AWS documents.
 - `AdminUpdateUserAttributes` can change the email; afterwards sign-in works with the new email and
   fails with the old one, while `Username`/`sub` stay fixed.
 - Duplicate email/phone on `AdminCreateUser`: `UsernameExistsException` when the incoming alias is

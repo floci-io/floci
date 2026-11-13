@@ -65,6 +65,12 @@ class PaymentCryptographyIntegrationTest {
              "KeyModesOfUse":{"Encrypt":true,"Decrypt":true}},
              "Exportable":true}""";
 
+    private static final String CREATE_KEY_PAIR = """
+            {"KeyAttributes":{"KeyAlgorithm":"RSA_2048","KeyClass":"ASYMMETRIC_KEY_PAIR",
+             "KeyUsage":"TR31_S0_ASYMMETRIC_KEY_FOR_DIGITAL_SIGNATURE",
+             "KeyModesOfUse":{"Sign":true,"Verify":true}},
+             "Exportable":true}""";
+
     @Test
     void aKeyIsCreatedAndReadBack() {
         String arn = call("CreateKey", CREATE_KEY)
@@ -102,6 +108,276 @@ class PaymentCryptographyIntegrationTest {
     }
 
     @Test
+    void anInitialKeyLeavesUnderTheBaseKeyItIsDerivedFrom() {
+        // The export names the key that leaves and the attributes that say which key of it
+        // leaves: the initial key is derived from the base key and is not the base key.
+        // The base derivation key is a double-length Triple DES key, which is what the
+        // derivation is defined over.
+        String base = call("CreateKey", "{\"KeyAttributes\":{\"KeyAlgorithm\":\"TDES_2KEY\","
+                + "\"KeyClass\":\"SYMMETRIC_KEY\",\"KeyUsage\":\"TR31_B0_BASE_DERIVATION_KEY\","
+                + "\"KeyModesOfUse\":{\"DeriveKey\":true}},"
+                + "\"Exportable\":true}")
+                .then().statusCode(200)
+                    .extract().path("Key.KeyArn");
+        String protection = call("CreateKey", "{\"KeyAttributes\":{\"KeyAlgorithm\":\"AES_256\","
+                + "\"KeyClass\":\"SYMMETRIC_KEY\","
+                + "\"KeyUsage\":\"TR31_K1_KEY_BLOCK_PROTECTION_KEY\","
+                + "\"KeyModesOfUse\":{\"Wrap\":true,\"Unwrap\":true}},"
+                + "\"Exportable\":true}")
+                .then().statusCode(200)
+                    .extract().path("Key.KeyArn");
+
+        call("ExportKey", """
+                {"ExportKeyIdentifier":"%s",
+                 "ExportAttributes":{"ExportDukptInitialKey":
+                 {"KeySerialNumber":"12345678900000000001"}},
+                 "KeyMaterial":{"Tr31KeyBlock":{"WrappingKeyIdentifier":"%s"}}}
+                """.formatted(base, protection))
+                .then().statusCode(200)
+                    .body("WrappedKey.WrappedKeyMaterialFormat", equalTo("TR31_KEY_BLOCK"))
+                    .body("WrappedKey.WrappingKeyArn", equalTo(protection));
+    }
+
+    @Test
+    void theImportParametersAreServedOverTheWire() {
+        call("GetParametersForImport", """
+                {"KeyMaterialType":"KEY_CRYPTOGRAM","WrappingKeyAlgorithm":"RSA_2048"}
+                """)
+                .then().statusCode(200)
+                    .body("ImportToken", matchesPattern("import-token-[0-9a-zA-Z]{16,64}"))
+                    .body("WrappingKeyAlgorithm", equalTo("RSA_2048"))
+                    .body("WrappingKeyCertificate", notNullValue())
+                    .body("WrappingKeyCertificateChain", notNullValue())
+                    .body("ParametersValidUntilTimestamp", greaterThanOrEqualTo(0));
+    }
+
+    @Test
+    void theParametersCanBeReusedOverTheWire() {
+        // A caller that asks for the last parameters gets them, token and certificate alike.
+        String first = call("GetParametersForImport", """
+                {"KeyMaterialType":"KEY_CRYPTOGRAM","WrappingKeyAlgorithm":"RSA_2048"}
+                """)
+                .then().statusCode(200)
+                    .extract().path("ImportToken");
+
+        call("GetParametersForImport", """
+                {"KeyMaterialType":"KEY_CRYPTOGRAM","WrappingKeyAlgorithm":"RSA_2048",
+                 "ReuseLastGeneratedToken":true}
+                """)
+                .then().statusCode(200)
+                    .body("ImportToken", equalTo(first));
+    }
+
+    @Test
+    void theExportParametersAreServedOverTheWire() {
+        call("GetParametersForExport", """
+                {"KeyMaterialType":"TR34_KEY_BLOCK","SigningKeyAlgorithm":"RSA_2048"}
+                """)
+                .then().statusCode(200)
+                    .body("ExportToken", matchesPattern("export-token-[0-9a-zA-Z]{16,64}"))
+                    .body("SigningKeyAlgorithm", equalTo("RSA_2048"))
+                    .body("SigningKeyCertificate", notNullValue())
+                    .body("SigningKeyCertificateChain", notNullValue())
+                    .body("ParametersValidUntilTimestamp", greaterThanOrEqualTo(0));
+    }
+
+    @Test
+    void anImportedKeyCarriesTheEnabledFlagAndTheTags() {
+        // The import names the key's state and its tags, and the key comes back that way.
+        String wrapping = call("CreateKey", """
+                {"KeyAttributes":{"KeyAlgorithm":"AES_256","KeyClass":"SYMMETRIC_KEY",
+                 "KeyUsage":"TR31_K1_KEY_BLOCK_PROTECTION_KEY",
+                 "KeyModesOfUse":{"Wrap":true,"Unwrap":true}},
+                 "Exportable":true}
+                """)
+                .then().statusCode(200)
+                    .extract().path("Key.KeyArn");
+        String arn = call("CreateKey", CREATE_KEY)
+                .then().statusCode(200)
+                    .extract().path("Key.KeyArn");
+        String block = call("ExportKey", "{\"ExportKeyIdentifier\":\"" + arn
+                + "\",\"KeyMaterial\":{\"Tr31KeyBlock\":{\"WrappingKeyIdentifier\":\""
+                + wrapping + "\"}}}")
+                .then().statusCode(200)
+                    .extract().path("WrappedKey.KeyMaterial");
+
+        String importedArn = call("ImportKey", "{\"KeyMaterial\":{\"Tr31KeyBlock\":{"
+                + "\"WrappingKeyIdentifier\":\"" + wrapping + "\",\"WrappedKeyBlock\":\"" + block
+                + "\"}},\"Enabled\":false,\"Tags\":[{\"Key\":\"Origin\",\"Value\":\"PRIMARY\"}]}")
+                .then().statusCode(200)
+                    .body("Key.Enabled", equalTo(false))
+                    .extract().path("Key.KeyArn");
+
+        // The key's answer carries no tags, so they are read the way they are read elsewhere.
+        call("ListTagsForResource", "{\"ResourceArn\":\"" + importedArn + "\"}")
+                .then().statusCode(200)
+                    .body("Tags[0].Key", equalTo("Origin"))
+                    .body("Tags[0].Value", equalTo("PRIMARY"));
+    }
+
+    @Test
+    void aRequestNamingTwoFormsIsRefused() {
+        // The union holds one form per request, and naming two is not naming one.
+        String arn = call("CreateKey", CREATE_KEY)
+                .then().statusCode(200)
+                    .extract().path("Key.KeyArn");
+
+        call("ExportKey", "{\"ExportKeyIdentifier\":\"" + arn + "\",\"KeyMaterial\":{"
+                + "\"Tr31KeyBlock\":{\"WrappingKeyIdentifier\":\"" + arn + "\"},"
+                + "\"KeyCryptogram\":{\"CertificateAuthorityPublicKeyIdentifier\":\"" + arn
+                + "\",\"WrappingKeyCertificate\":\"x\"}}}")
+                .then().statusCode(400)
+                    .body("__type", equalTo("ValidationException"));
+    }
+
+    @Test
+    void aRequestNamingAFormTheServiceDoesNotServeIsRefused() {
+        // The TR-34 form is one the model has and this service does not make.
+        String arn = call("CreateKey", CREATE_KEY)
+                .then().statusCode(200)
+                    .extract().path("Key.KeyArn");
+
+        call("ExportKey", "{\"ExportKeyIdentifier\":\"" + arn + "\",\"KeyMaterial\":{"
+                + "\"Tr34KeyBlock\":{\"CertificateAuthorityPublicKeyIdentifier\":\"" + arn
+                + "\",\"WrappingKeyCertificate\":\"x\",\"KeyBlockFormat\":\"X9_TR34_2012\"}}}")
+                .then().statusCode(400)
+                    .body("__type", equalTo("ValidationException"))
+                    .body("message", containsString("not a form the service exports"));
+    }
+
+    /**
+     * The shape check settles the members the model requires, so a request missing one is
+     * refused by it, before the operation does any work. The refusal a caller sees is
+     * therefore the shape check's, and the service does not repeat the check.
+     */
+    @Test
+    void theModelCheckRefusesAnExportWithoutAWrappingKeyCertificate() {
+        String arn = call("CreateKey", CREATE_KEY)
+                .then().statusCode(200)
+                    .extract().path("Key.KeyArn");
+
+        Response answer = call("ExportKey", "{\"ExportKeyIdentifier\":\"" + arn + "\",\"KeyMaterial\":{"
+                + "\"KeyCryptogram\":{\"CertificateAuthorityPublicKeyIdentifier\":\"" + arn + "\"}}}");
+
+        assertTheModelRefused(answer, "WrappingKeyCertificate");
+    }
+
+    @Test
+    void theModelCheckRefusesAnImportWithoutItsKeyAttributes() {
+        Response answer = call("ImportKey", "{\"KeyMaterial\":{\"KeyCryptogram\":{"
+                + "\"Exportable\":true,"
+                + "\"WrappedKeyCryptogram\":\"" + "0".repeat(32) + "\","
+                + "\"ImportToken\":\"import-token-" + "0".repeat(24) + "\"}}}");
+
+        assertTheModelRefused(answer, "KeyAttributes");
+    }
+
+    @Test
+    void theModelCheckRefusesAnImportWhoseKeyAttributesHaveNoUsage() {
+        Response answer = call("ImportKey", "{\"KeyMaterial\":{\"KeyCryptogram\":{"
+                + "\"Exportable\":true,"
+                + "\"WrappedKeyCryptogram\":\"" + "0".repeat(32) + "\","
+                + "\"ImportToken\":\"import-token-" + "0".repeat(24) + "\","
+                + "\"KeyAttributes\":{\"KeyClass\":\"SYMMETRIC_KEY\","
+                + "\"KeyAlgorithm\":\"AES_128\","
+                + "\"KeyModesOfUse\":{\"Encrypt\":true,\"Decrypt\":true}}}}}");
+
+        assertTheModelRefused(answer, "KeyUsage");
+    }
+
+    @Test
+    void theModelCheckRefusesAnImportOfAPublicKeyWithoutItsKeyAttributes() {
+        Response answer = call("ImportKey", "{\"KeyMaterial\":{\"RootCertificatePublicKey\":{"
+                + "\"PublicKeyCertificate\":\"a certificate\"}}}");
+
+        assertTheModelRefused(answer, "KeyAttributes");
+    }
+
+    @Test
+    void theModelCheckRefusesAnExportWithoutItsCertificateAuthorityPublicKeyIdentifier() {
+        Response answer = call("ExportKey", "{\"ExportKeyIdentifier\":\"" + keyArn() + "\","
+                + "\"KeyMaterial\":{\"KeyCryptogram\":{\"WrappingKeyCertificate\":\"a certificate\"}}}");
+
+        assertTheModelRefused(answer, "CertificateAuthorityPublicKeyIdentifier");
+    }
+
+    @Test
+    void theModelCheckRefusesAnImportWhoseCryptogramIsNotHexadecimal() {
+        Response answer = call("ImportKey", "{\"KeyMaterial\":{\"KeyCryptogram\":{"
+                + "\"Exportable\":true,"
+                + "\"WrappedKeyCryptogram\":\"not hexadecimal at all\","
+                + "\"ImportToken\":\"import-token-" + "0".repeat(24) + "\","
+                + "\"KeyAttributes\":" + keyAttributes() + "}}}");
+
+        assertTheModelRefused(answer, "WrappedKeyCryptogram");
+    }
+
+    @Test
+    void theModelCheckRefusesACryptogramWithAWrappingSpecItDoesNotName() {
+        Response answer = call("ExportKey", "{\"ExportKeyIdentifier\":\"" + keyArn() + "\","
+                + "\"KeyMaterial\":{\"KeyCryptogram\":{"
+                + "\"CertificateAuthorityPublicKeyIdentifier\":\"" + keyArn() + "\","
+                + "\"WrappingKeyCertificate\":\"a certificate\","
+                + "\"WrappingSpec\":\"RSA_OAEP_SHA_1\"}}}");
+
+        assertTheModelRefused(answer, "WrappingSpec");
+    }
+
+    @Test
+    void theModelCheckRefusesAnAgreementWithADerivationFunctionItDoesNotName() {
+        Response answer = call("ExportKey", "{\"ExportKeyIdentifier\":\"" + keyArn() + "\","
+                + "\"KeyMaterial\":{\"DiffieHellmanTr31KeyBlock\":{"
+                + "\"PrivateKeyIdentifier\":\"" + keyArn() + "\","
+                + "\"CertificateAuthorityPublicKeyIdentifier\":\"" + keyArn() + "\","
+                + "\"PublicKeyCertificate\":\"a certificate\","
+                + "\"DeriveKeyAlgorithm\":\"AES_128\","
+                + "\"KeyDerivationFunction\":\"NIST_SP800_X\","
+                + "\"KeyDerivationHashAlgorithm\":\"SHA_256\","
+                + "\"DerivationData\":{\"SharedInformation\":\"00112233\"}}}}");
+
+        assertTheModelRefused(answer, "KeyDerivationFunction");
+    }
+
+    @Test
+    void theModelCheckRefusesAnAgreementWithADerivationHashItDoesNotName() {
+        Response answer = call("ExportKey", "{\"ExportKeyIdentifier\":\"" + keyArn() + "\","
+                + "\"KeyMaterial\":{\"DiffieHellmanTr31KeyBlock\":{"
+                + "\"PrivateKeyIdentifier\":\"" + keyArn() + "\","
+                + "\"CertificateAuthorityPublicKeyIdentifier\":\"" + keyArn() + "\","
+                + "\"PublicKeyCertificate\":\"a certificate\","
+                + "\"DeriveKeyAlgorithm\":\"AES_128\","
+                + "\"KeyDerivationFunction\":\"NIST_SP800\","
+                + "\"KeyDerivationHashAlgorithm\":\"SHA_224\","
+                + "\"DerivationData\":{\"SharedInformation\":\"00112233\"}}}}");
+
+        assertTheModelRefused(answer, "KeyDerivationHashAlgorithm");
+    }
+
+    /** The ARN of a key the request may name. */
+    private static String keyArn() {
+        return call("CreateKey", CREATE_KEY).then().statusCode(200)
+                .extract().path("Key.KeyArn");
+    }
+
+    /** The key attributes of a symmetric key, with every member the model requires. */
+    private static String keyAttributes() {
+        return "{\"KeyUsage\":\"TR31_D0_SYMMETRIC_DATA_ENCRYPTION_KEY\","
+                + "\"KeyClass\":\"SYMMETRIC_KEY\",\"KeyAlgorithm\":\"AES_128\","
+                + "\"KeyModesOfUse\":{\"Encrypt\":true,\"Decrypt\":true}}";
+    }
+
+    /**
+     * The refusal a caller sees when a request is missing a member the model requires: the
+     * shape check's, because the shape check runs before the operation does.
+     */
+    private static void assertTheModelRefused(Response answer, String member) {
+        answer.then().statusCode(400)
+                .body("__type", equalTo("ValidationException"))
+                .body("message", containsString("failed to satisfy constraint"))
+                .body("message", containsString(member));
+    }
+
+    @Test
     void aKeyThatAsksForACheckValueOfAnotherKindIsRefused() {
         // The kind follows the algorithm, so a request that names another is refused
         // rather than answered with a value of another kind.
@@ -122,6 +398,31 @@ class PaymentCryptographyIntegrationTest {
                 .then().statusCode(200)
                     .body("Keys", hasSize(greaterThanOrEqualTo(1)))
                     .body("Keys.KeyArn", hasItem(equalTo(arn)));
+    }
+
+    @Test
+    void aListedKeyIsItsSummary() {
+        // A list carries the key's summary and not the whole key: the identifier, the state,
+        // the attributes, the check value and the two flags.
+        String arn = call("CreateKey", CREATE_KEY).then().statusCode(200)
+                .extract().path("Key.KeyArn");
+
+        call("ListKeys", "{}")
+                .then().statusCode(200)
+                    .body("Keys.find { it.KeyArn == '" + arn + "' }.KeyState",
+                            equalTo("CREATE_COMPLETE"))
+                    .body("Keys.find { it.KeyArn == '" + arn + "' }.KeyAttributes.KeyAlgorithm",
+                            equalTo("AES_256"))
+                    .body("Keys.find { it.KeyArn == '" + arn + "' }.KeyAttributes.KeyUsage",
+                            equalTo("TR31_D0_SYMMETRIC_DATA_ENCRYPTION_KEY"))
+                    .body("Keys.find { it.KeyArn == '" + arn + "' }.KeyCheckValue", notNullValue())
+                    .body("Keys.find { it.KeyArn == '" + arn + "' }.Enabled", equalTo(true))
+                    .body("Keys.find { it.KeyArn == '" + arn + "' }.Exportable", equalTo(true))
+                    // The summary holds no timestamp and no origin: those belong to the whole
+                    // key, which the list does not carry.
+                    .body("Keys.find { it.KeyArn == '" + arn + "' }.CreateTimestamp", nullValue())
+                    .body("Keys.find { it.KeyArn == '" + arn + "' }.KeyOrigin", nullValue())
+                    .body("Keys.find { it.KeyArn == '" + arn + "' }.UsageStartTimestamp", nullValue());
     }
 
     @Test
@@ -206,20 +507,68 @@ class PaymentCryptographyIntegrationTest {
                     .body("__type", containsString("UnknownOperationException"));
     }
 
+    @Test
+    void anOperationTheServiceDoesNotServeIsRefusedWhateverItsBodySays() {
+        // The model names the operation and the service does not serve it, so it is refused
+        // as the unknown operation it is. The body it carries does not change that: a body
+        // that breaks the model's rules is not the answer to an operation that is not
+        // served at all.
+        call("RestoreKey", "{}")
+                .then().statusCode(400)
+                    .body("__type", containsString("UnknownOperationException"));
+        call("RestoreKey", "{\"KeyIdentifier\":\"arn:aws:payment-cryptography:us-east-1:"
+                + "000000000000:key/abcdefghijklmnop\"}")
+                .then().statusCode(400)
+                    .body("__type", containsString("UnknownOperationException"));
+    }
+
+    @Test
+    void theCertificateOfAKeyIsServedOverTheWire() {
+        // The certificate of an asymmetric key, with the chain that goes with it.
+        String arn = call("CreateKey", CREATE_KEY_PAIR)
+                .then().statusCode(200)
+                    .extract().path("Key.KeyArn");
+
+        call("GetPublicKeyCertificate", "{\"KeyIdentifier\":\"" + arn + "\"}")
+                .then().statusCode(200)
+                    .body("KeyCertificate", notNullValue())
+                    .body("KeyCertificateChain", notNullValue());
+    }
+
+    @Test
+    void theCertificateOfAKeyIsNotServedForABareKeyId() {
+        // The identifier of a key is its ARN, an alias ARN or an alias name, and the model's
+        // pattern is what settles it, the same as for the other operations that take one. A
+        // bare id names no key, so it is refused the way GetKey refuses it.
+        String arn = call("CreateKey", CREATE_KEY_PAIR).then().statusCode(200)
+                .extract().path("Key.KeyArn");
+        String id = arn.substring(arn.lastIndexOf('/') + 1);
+
+        call("GetPublicKeyCertificate", "{\"KeyIdentifier\":\"" + id + "\"}")
+                .then().statusCode(400)
+                    .body("__type", containsString("ValidationException"));
+    }
+
     /**
      * A key is created with the usage and the modes of use the reference
      * requires, and a request without either of them is refused.
      */
     @Test
     void aKeyWithoutItsUsageOrItsModesIsRefused() {
-        call("CreateKey", "{\"KeyAttributes\":{\"KeyAlgorithm\":\"AES_256\",\"KeyClass\":\"SYMMETRIC_KEY\","
-                + "\"KeyModesOfUse\":{\"Encrypt\":true}},\"Exportable\":true}")
-                .then().statusCode(400)
-                    .body("__type", containsString("ValidationException"));
-        call("CreateKey", "{\"KeyAttributes\":{\"KeyAlgorithm\":\"AES_256\",\"KeyClass\":\"SYMMETRIC_KEY\","
-                + "\"KeyUsage\":\"TR31_D0_SYMMETRIC_DATA_ENCRYPTION_KEY\"},\"Exportable\":true}")
-                .then().statusCode(400)
-                    .body("__type", containsString("ValidationException"));
+        // The shape check settles the members the attributes must carry, so it is the refusal
+        // that answers, and the message a caller sees is its own.
+        assertTheModelRefused(call("CreateKey", "{\"KeyAttributes\":{\"KeyAlgorithm\":\"AES_256\","
+                + "\"KeyClass\":\"SYMMETRIC_KEY\",\"KeyModesOfUse\":{\"Encrypt\":true}},"
+                + "\"Exportable\":true}"), "KeyUsage");
+        assertTheModelRefused(call("CreateKey", "{\"KeyAttributes\":{\"KeyAlgorithm\":\"AES_256\","
+                + "\"KeyClass\":\"SYMMETRIC_KEY\","
+                + "\"KeyUsage\":\"TR31_D0_SYMMETRIC_DATA_ENCRYPTION_KEY\"},\"Exportable\":true}"),
+                "KeyModesOfUse");
+    }
+
+    @Test
+    void aKeyWithoutItsAttributesIsRefused() {
+        assertTheModelRefused(call("CreateKey", "{\"Exportable\":true}"), "KeyAttributes");
     }
 
     /**

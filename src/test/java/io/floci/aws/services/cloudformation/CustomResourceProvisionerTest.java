@@ -9,6 +9,7 @@ import io.floci.aws.core.common.docker.ContainerReachableEndpoint;
 import io.floci.aws.services.cloudformation.model.StackResource;
 import io.floci.aws.services.cloudformation.provisioners.CfnResourceDispatcher;
 import io.floci.aws.services.cloudformation.provisioners.CfnRollback;
+import io.floci.aws.services.cloudformation.provisioners.UpdateCleanupResult;
 import io.floci.aws.services.lambda.LambdaService;
 import io.floci.aws.services.lambda.model.InvocationType;
 import io.floci.aws.services.lambda.model.InvokeResult;
@@ -24,6 +25,7 @@ import java.util.function.Supplier;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
@@ -524,6 +526,92 @@ class CustomResourceProvisionerTest {
         assertTrue(provisioner.rollbackUpdate(unchanged, event -> { }));
 
         capturedEvents(2);
+    }
+
+    @Test
+    void committedReplacementSendsTheReplacedIdADeleteWithItsOldProperties() {
+        respond(event -> success(replacingId(event), Map.of()));
+        StackResource updated = update(create(), "bye");
+
+        assertTrue(provisioner.hasReplacementUpdate(updated));
+        assertEquals("phys-123", provisioner.updateCleanupPhysicalId(updated));
+        UpdateCleanupResult result = provisioner.completeUpdate(updated);
+
+        assertTrue(result.applicable());
+        assertTrue(result.complete());
+        assertEquals("phys-123", result.previousPhysicalId());
+        JsonNode delete = capturedEvents(3).get(2);
+        assertEquals("Delete", delete.get("RequestType").asText());
+        assertEquals("phys-123", delete.get("PhysicalResourceId").asText());
+        assertEquals("hi", message(delete, "ResourceProperties"));
+        assertEquals(SERVICE_TOKEN, delete.path("ResourceProperties").path("ServiceToken").asText());
+        assertFalse(delete.has("OldResourceProperties"));
+        assertEquals(STACK_ID, delete.get("StackId").asText());
+        assertEquals("phys-456", updated.getPhysicalId());
+    }
+
+    @Test
+    void cleanupDeleteTheHandlerFailsCountsEachAttemptWithItsReason() {
+        respond(event -> "Delete".equals(event.get("RequestType").asText())
+                ? failed("still in use") : success(replacingId(event), Map.of()));
+        StackResource updated = update(create(), "bye");
+
+        UpdateCleanupResult first = provisioner.completeUpdate(updated);
+        UpdateCleanupResult second = provisioner.completeUpdate(updated);
+
+        assertTrue(first.applicable());
+        assertFalse(first.complete());
+        assertEquals("phys-123", first.previousPhysicalId());
+        assertEquals(1, first.attempts());
+        assertTrue(first.failureReason().contains("still in use"), first.failureReason());
+        assertEquals(2, second.attempts());
+        capturedEvents(4);
+    }
+
+    @Test
+    void clearedReplacementOwesNoCleanup() {
+        respond(event -> success(replacingId(event), Map.of()));
+        StackResource updated = update(create(), "bye");
+
+        provisioner.clearUpdate(updated);
+
+        assertFalse(provisioner.hasReplacementUpdate(updated));
+        assertFalse(updated.getAttributes().containsKey(CfnRollback.CUSTOM_RESOURCE_UPDATE_SNAPSHOT_ATTR));
+    }
+
+    @Test
+    void replacementUnderUpdateReplacePolicyRetainSendsNoDelete() {
+        respond(event -> success(replacingId(event), Map.of()));
+        StackResource updated = update(create(), "bye");
+        updated.setUpdateReplacePolicy("Retain");
+
+        assertTrue(provisioner.hasReplacementUpdate(updated));
+        assertNull(provisioner.updateCleanupPhysicalId(updated));
+        UpdateCleanupResult result = provisioner.completeUpdate(updated);
+
+        assertTrue(result.applicable());
+        assertTrue(result.complete());
+        capturedEvents(2);
+    }
+
+    @Test
+    void committedInPlaceUpdateOwesNoCleanup() {
+        stubHandler("phys-123", Map.of());
+        StackResource updated = update(create(), "bye");
+
+        assertFalse(provisioner.hasReplacementUpdate(updated));
+        assertNull(provisioner.updateCleanupPhysicalId(updated));
+        UpdateCleanupResult result = provisioner.completeUpdate(updated);
+
+        assertTrue(result.applicable());
+        assertTrue(result.complete());
+        assertNull(result.previousPhysicalId());
+        capturedEvents(2);
+    }
+
+    /** The id a handler that replaces its resource on the "bye" update answers. */
+    private static String replacingId(JsonNode event) {
+        return "bye".equals(message(event, "ResourceProperties")) ? "phys-456" : "phys-123";
     }
 
     private List<JsonNode> capturedEvents(int count) {

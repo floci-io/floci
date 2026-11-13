@@ -12,6 +12,7 @@ import java.time.Clock;
 import java.time.Instant;
 import java.util.Optional;
 
+import static io.floci.aws.testing.IamTestPolicies.EMPTY_POLICY_DOCUMENT;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotEquals;
@@ -44,7 +45,7 @@ class EcsTaskRoleCredentialsTest {
                 new InMemoryStorage<>(), new InMemoryStorage<>(), new InMemoryStorage<>(),
                 new InMemoryStorage<>(), new InMemoryStorage<>(), new InMemoryStorage<>(),
                 sessions, new RegionResolver("us-east-1", "000000000000"), false, clock);
-        roleArn = iamService.createRole("ecsTaskRole", "/", "{}", null, 3600, null).getArn();
+        roleArn = iamService.createRole("ecsTaskRole", "/", EMPTY_POLICY_DOCUMENT, null, 3600, null).getArn();
 
         EmulatorConfig config = mock(EmulatorConfig.class, RETURNS_DEEP_STUBS);
         when(config.services().ecs().taskRoleCredentials().ttlSeconds()).thenReturn(21600L);
@@ -242,7 +243,7 @@ class EcsTaskRoleCredentialsTest {
         Instant now = clock.instant();
         String path = credentials.issue(TASK_ARN, roleArn, "000000000000", now).orElseThrow();
         iamService.deleteRole("ecsTaskRole");
-        iamService.createRole("ecsTaskRole", "/", "{}", null, 3600, null);
+        iamService.createRole("ecsTaskRole", "/", EMPTY_POLICY_DOCUMENT, null, 3600, null);
         assertTrue(credentials.resolveByPath(path, now).isEmpty());
         assertTrue(sessions.scan(key -> true).isEmpty());
     }
@@ -278,7 +279,7 @@ class EcsTaskRoleCredentialsTest {
         SessionCredential first = credentials.resolveByPath(path, now).orElseThrow();
         Instant nearExpiry = at(first.getExpiration().minusSeconds(60));
         credentials.resolveByPath(path, nearExpiry).orElseThrow();
-        String nextRole = iamService.createRole("nextRole", "/", "{}", null, 3600, null).getArn();
+        String nextRole = iamService.createRole("nextRole", "/", EMPTY_POLICY_DOCUMENT, null, 3600, null).getArn();
         String nextPath = credentials.issue(TASK_ARN, nextRole, "000000000000", nearExpiry).orElseThrow();
         assertNotEquals(path, nextPath);
         assertTrue(credentials.resolveByPath(path, nearExpiry).isEmpty());

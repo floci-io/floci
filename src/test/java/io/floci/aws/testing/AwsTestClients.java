@@ -46,6 +46,12 @@ public final class AwsTestClients {
         return create(builder, accessKey, secretKey, region, UrlConnectionHttpClient.builder(), endpoint);
     }
 
+    /** SDK credentials, including session tokens, with an explicit endpoint. */
+    public static <B extends AwsClientBuilder<B, C> & AwsSyncClientBuilder<B, C>, C> C create(
+            B builder, AwsCredentials credentials, Region region, URI endpoint) {
+        return create(builder, credentials, region, UrlConnectionHttpClient.builder(), endpoint);
+    }
+
     /** Temporary credentials, as AssumeRole or GetSessionToken returns them, sent with their session token. */
     public static <B extends AwsClientBuilder<B, C> & AwsSyncClientBuilder<B, C>, C> C create(
             B builder, String accessKey, String secretKey, String sessionToken, Region region) {
@@ -65,7 +71,8 @@ public final class AwsTestClients {
         return create(builder, AwsBasicCredentials.create(accessKey, secretKey), region, httpClientBuilder, endpoint);
     }
 
-    private static <B extends AwsClientBuilder<B, C> & AwsSyncClientBuilder<B, C>, C> C create(
+    /** SDK credentials, including session tokens, with an explicit transport and endpoint. */
+    public static <B extends AwsClientBuilder<B, C> & AwsSyncClientBuilder<B, C>, C> C create(
             B builder, AwsCredentials credentials, Region region,
             SdkHttpClient.Builder<?> httpClientBuilder, URI endpoint) {
         return builder.endpointOverride(endpoint)

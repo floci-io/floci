@@ -9,6 +9,8 @@ import io.floci.aws.services.codeartifact.model.ExternalConnection;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
+import java.nio.file.Files;
+import java.nio.file.Path;
 import java.util.List;
 import java.util.Optional;
 
@@ -81,7 +83,7 @@ class CodeArtifactNpmExternalConnectionImporterTest {
         when(verdaccio.packageVersionExists(REPO_ID, DOMAIN, REPOSITORY, null, PACKAGE_NAME, VERSION))
                 .thenReturn(false);
         when(service.retainAssetUnderVersionFence(anyString(), anyString(), anyString(), anyString(), anyString(),
-                any(), anyString(), anyString(), anyLong(), anyLong(), anyLong(), anyString(), anyString(), any(),
+                any(), anyString(), anyString(), anyLong(), anyLong(), anyLong(), anyString(), anyString(), anyLong(),
                 any())).thenReturn(new CodeArtifactService.AssetRetentionAttemptResult(true, true));
         when(verdaccio.ensureReady(REPO_ID, BASE_URL)).thenReturn(BASE_URL);
         when(verdaccio.publicUrl(DOMAIN, REPOSITORY)).thenReturn(BASE_URL);
@@ -89,8 +91,7 @@ class CodeArtifactNpmExternalConnectionImporterTest {
 
     @Test
     void tryImportAssetImportsFromExternalConnectionWhenNotFoundLocally() throws Exception {
-        when(externalConnectionClient.fetchTarball("public:npmjs", null, PACKAGE_NAME, VERSION))
-                .thenReturn(Optional.of(new NpmExternalConnectionClient.FetchedAsset(TARBALL_CONTENT)));
+        stubFetchTarball(TARBALL_CONTENT);
         // The real registry is reachable and genuinely has no readme for this package (unlike
         // Optional.empty(), which models the full fetch itself failing, see
         // tryImportAssetReturnsFalseAndRetriesLaterWhenTheFullPackumentFetchFails below).
@@ -107,7 +108,7 @@ class CodeArtifactNpmExternalConnectionImporterTest {
         assertTrue(imported);
         verify(service).retainAssetUnderVersionFence(eq(REGION), eq(DOMAIN), eq(OWNER), eq(REPOSITORY), eq("npm"),
                 isNull(), eq(PACKAGE_NAME), eq(VERSION), eq(99L), eq(42L), eq(EPISODE_ID), eq(REPO_ID),
-                eq(ASSET_NAME), eq(TARBALL_CONTENT), any());
+                eq(ASSET_NAME), eq((long) TARBALL_CONTENT.length), any());
         verify(service).ensureRetainedPackageOriginDefault(REGION, DOMAIN, OWNER, REPOSITORY, "npm", null,
                 PACKAGE_NAME, 42L);
         verify(service).recordPublishedPackageVersionReadme(REGION, DOMAIN, OWNER, REPOSITORY, "npm", null,
@@ -125,8 +126,7 @@ class CodeArtifactNpmExternalConnectionImporterTest {
      */
     @Test
     void tryImportAssetReturnsFalseAndRetriesLaterWhenTheFullPackumentFetchFails() {
-        when(externalConnectionClient.fetchTarball("public:npmjs", null, PACKAGE_NAME, VERSION))
-                .thenReturn(Optional.of(new NpmExternalConnectionClient.FetchedAsset(TARBALL_CONTENT)));
+        stubFetchTarball(TARBALL_CONTENT);
         when(externalConnectionClient.fetchFullPackument("public:npmjs", null, PACKAGE_NAME))
                 .thenReturn(Optional.empty());
 
@@ -136,7 +136,7 @@ class CodeArtifactNpmExternalConnectionImporterTest {
         assertFalse(imported);
         verify(service, never()).retainAssetUnderVersionFence(anyString(), anyString(), anyString(), anyString(),
                 anyString(), any(), anyString(), anyString(), anyLong(), anyLong(), anyLong(), anyString(),
-                anyString(), any(), any());
+                anyString(), anyLong(), any());
         verify(service, never()).ensureRetainedPackageOriginDefault(anyString(), anyString(), anyString(),
                 anyString(), anyString(), any(), anyString(), anyLong());
         verify(service, never()).recordPublishedPackageVersionReadme(anyString(), anyString(), anyString(),
@@ -153,8 +153,7 @@ class CodeArtifactNpmExternalConnectionImporterTest {
      */
     @Test
     void tryImportAssetPreservesTheRealVersionDocumentAndReadme() throws Exception {
-        when(externalConnectionClient.fetchTarball("public:npmjs", null, PACKAGE_NAME, VERSION))
-                .thenReturn(Optional.of(new NpmExternalConnectionClient.FetchedAsset(TARBALL_CONTENT)));
+        stubFetchTarball(TARBALL_CONTENT);
         ObjectMapper mapper = new ObjectMapper();
         ObjectNode full = mapper.createObjectNode();
         full.put("readme", "# Widget\nA real readme.");
@@ -233,10 +232,10 @@ class CodeArtifactNpmExternalConnectionImporterTest {
                 VERSION, ASSET_NAME);
 
         assertTrue(imported);
-        verify(externalConnectionClient, never()).fetchTarball(anyString(), any(), anyString(), anyString());
+        verify(externalConnectionClient, never()).fetchTarball(anyString(), any(), anyString(), anyString(), any());
         verify(service, never()).retainAssetUnderVersionFence(anyString(), anyString(), anyString(), anyString(),
                 anyString(), any(), anyString(), anyString(), anyLong(), anyLong(), anyLong(), anyString(),
-                anyString(), any(), any());
+                anyString(), anyLong(), any());
         verify(service).finishRetainedVersionOriginAttempt(REGION, DOMAIN, OWNER, REPOSITORY, "npm", null,
                 PACKAGE_NAME, VERSION, EPISODE_ID, true);
     }
@@ -258,7 +257,7 @@ class CodeArtifactNpmExternalConnectionImporterTest {
                 VERSION, ASSET_NAME);
 
         assertFalse(imported);
-        verify(externalConnectionClient, never()).fetchTarball(anyString(), any(), anyString(), anyString());
+        verify(externalConnectionClient, never()).fetchTarball(anyString(), any(), anyString(), anyString(), any());
         verify(service, never()).ensureRetainedPackageOriginDefault(anyString(), anyString(), anyString(),
                 anyString(), anyString(), any(), anyString(), anyLong());
         verify(service).finishRetainedVersionOriginAttempt(REGION, DOMAIN, OWNER, REPOSITORY, "npm", null,
@@ -267,8 +266,8 @@ class CodeArtifactNpmExternalConnectionImporterTest {
 
     @Test
     void tryImportAssetReturnsFalseAndFinishesWhenTheRealRegistryDoesNotHaveIt() {
-        when(externalConnectionClient.fetchTarball("public:npmjs", null, PACKAGE_NAME, VERSION))
-                .thenReturn(Optional.empty());
+        when(externalConnectionClient.fetchTarball(eq("public:npmjs"), isNull(), eq(PACKAGE_NAME), eq(VERSION),
+                any(Path.class))).thenReturn(Optional.empty());
 
         boolean imported = importer.tryImportAsset(REGION, DOMAIN, OWNER, REPOSITORY, REPO_ID, null, PACKAGE_NAME,
                 VERSION, ASSET_NAME);
@@ -276,15 +275,15 @@ class CodeArtifactNpmExternalConnectionImporterTest {
         assertFalse(imported);
         verify(service, never()).retainAssetUnderVersionFence(anyString(), anyString(), anyString(), anyString(),
                 anyString(), any(), anyString(), anyString(), anyLong(), anyLong(), anyLong(), anyString(),
-                anyString(), any(), any());
+                anyString(), anyLong(), any());
         verify(service).finishRetainedVersionOriginAttempt(REGION, DOMAIN, OWNER, REPOSITORY, "npm", null,
                 PACKAGE_NAME, VERSION, EPISODE_ID, false);
     }
 
     @Test
     void tryImportAssetFetchThatThrowsIsTreatedLikeAMissingPackageRatherThanPropagating() {
-        when(externalConnectionClient.fetchTarball("public:npmjs", null, PACKAGE_NAME, VERSION))
-                .thenThrow(new IllegalStateException("public registry unreachable"));
+        when(externalConnectionClient.fetchTarball(eq("public:npmjs"), isNull(), eq(PACKAGE_NAME), eq(VERSION),
+                any(Path.class))).thenThrow(new IllegalStateException("public registry unreachable"));
 
         boolean imported = importer.tryImportAsset(REGION, DOMAIN, OWNER, REPOSITORY, REPO_ID, null, PACKAGE_NAME,
                 VERSION, ASSET_NAME);
@@ -296,8 +295,7 @@ class CodeArtifactNpmExternalConnectionImporterTest {
 
     @Test
     void tryImportAssetReturnsFalseAndDoesNotRecordADefaultWhenTheFenceMovedDuringTheWrite() throws Exception {
-        when(externalConnectionClient.fetchTarball("public:npmjs", null, PACKAGE_NAME, VERSION))
-                .thenReturn(Optional.of(new NpmExternalConnectionClient.FetchedAsset(TARBALL_CONTENT)));
+        stubFetchTarball(TARBALL_CONTENT);
         ObjectMapper mapper = new ObjectMapper();
         ObjectNode full = mapper.createObjectNode();
         full.putObject("versions").putObject(VERSION);
@@ -305,7 +303,7 @@ class CodeArtifactNpmExternalConnectionImporterTest {
                 .thenReturn(Optional.of(new NpmExternalConnectionClient.FetchedAsset(mapper.writeValueAsBytes(
                         full))));
         when(service.retainAssetUnderVersionFence(anyString(), anyString(), anyString(), anyString(), anyString(),
-                any(), anyString(), anyString(), anyLong(), anyLong(), anyLong(), anyString(), anyString(), any(),
+                any(), anyString(), anyString(), anyLong(), anyLong(), anyLong(), anyString(), anyString(), anyLong(),
                 any())).thenReturn(new CodeArtifactService.AssetRetentionAttemptResult(false, false));
 
         boolean imported = importer.tryImportAsset(REGION, DOMAIN, OWNER, REPOSITORY, REPO_ID, null, PACKAGE_NAME,
@@ -633,5 +631,21 @@ class CodeArtifactNpmExternalConnectionImporterTest {
                 PACKAGE_NAME, false);
 
         assertTrue(merged.isEmpty());
+    }
+
+    /**
+     * {@code fetchTarball}'s real, streamed signature takes the destination {@link Path} to
+     * write to, generated fresh by the importer itself for every real call, so a test fixture
+     * can't name it in advance the way it could the old {@code byte[]}-returning method: this
+     * answers whatever path the importer actually passes by writing {@code content} straight to
+     * it, the same real effect the real method has.
+     */
+    private void stubFetchTarball(byte[] content) {
+        when(externalConnectionClient.fetchTarball(eq("public:npmjs"), isNull(), eq(PACKAGE_NAME), eq(VERSION),
+                any(Path.class))).thenAnswer(invocation -> {
+                    Path destination = invocation.getArgument(4);
+                    Files.write(destination, content);
+                    return Optional.of(new NpmExternalConnectionClient.FetchedFile(content.length));
+                });
     }
 }

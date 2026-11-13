@@ -23,6 +23,7 @@ import io.floci.aws.services.lambda.durable.DurableTokens;
 import io.floci.aws.services.lambdamicrovms.LambdaMicrovmsService;
 import io.floci.aws.services.s3.S3ControlArnUtils;
 import io.floci.aws.services.s3.S3ObjectKeys;
+import io.floci.aws.services.s3.S3ResourceArns;
 import io.floci.aws.services.secretsmanager.SecretsManagerService;
 import io.floci.aws.services.sqs.SqsService;
 import io.quarkus.vertx.http.runtime.CurrentVertxRequest;
@@ -239,10 +240,6 @@ public class ResourceArnBuilder {
             case "dsql"           -> List.of(buildDsqlArn(path, ctx, region, accountId, partition));
             case "eks"            -> List.of(buildEksArn(path, ctx, region, accountId));
             case "apigateway"     -> List.of(buildApiGatewayArn(ctx, region, partition));
-            case "route53"        -> "route53:GetReusableDelegationSet".equals(operation)
-                    || "route53:DeleteReusableDelegationSet".equals(operation)
-                    ? List.of(buildRoute53DelegationSetArn(ctx, partition))
-                    : namedResources(credentialScope, operation, ctx, region, accountId, partition);
             case "bedrock"        -> List.of(buildBedrockArn(path, ctx));
             default               -> namedResources(credentialScope, operation, ctx, region, accountId, partition);
         };
@@ -273,17 +270,6 @@ public class ResourceArnBuilder {
             }
         }
         return null;
-    }
-
-    private String buildRoute53DelegationSetArn(ContainerRequestContext ctx, String partition) {
-        String id = ctx.getUriInfo().getPathParameters().getFirst("Id");
-        if (id == null) {
-            return "*";
-        }
-        if (id.startsWith("/delegationset/")) {
-            id = id.substring(15);
-        }
-        return AwsArnUtils.Arn.global(partition, "route53", "", "delegationset/" + id).toString();
     }
 
     private String buildResourceGroupArn(ContainerRequestContext ctx, String region, String accountId) {
@@ -917,7 +903,7 @@ public class ResourceArnBuilder {
         String partition = AwsRegions.partitionFor(region);
         String stripped = path.startsWith("/") ? path.substring(1) : path;
         if (stripped.isEmpty()) {
-            return AwsArnUtils.Arn.global(partition, "s3", "", "*").toString();
+            return S3ResourceArns.bucket(partition, "*");
         }
         // S3VirtualHostFilter rewrites a bucket-level virtual-hosted request (GET /) to
         // /bucket/, and the empty key after that separator is not part of the resource.
@@ -925,10 +911,10 @@ public class ResourceArnBuilder {
         // go or a bucket-level ARN never matches. A key that itself ends in a slash
         // (a folder marker such as folder/) keeps it, because there the slash is key data.
         int firstSlash = stripped.indexOf('/');
-        if (firstSlash == stripped.length() - 1) {
-            stripped = stripped.substring(0, firstSlash);
+        if (firstSlash < 0 || firstSlash == stripped.length() - 1) {
+            return S3ResourceArns.bucket(partition, firstSlash < 0 ? stripped : stripped.substring(0, firstSlash));
         }
-        return AwsArnUtils.Arn.global(partition, "s3", "", stripped).toString();
+        return S3ResourceArns.object(partition, stripped.substring(0, firstSlash), stripped.substring(firstSlash + 1));
     }
 
     /**
@@ -2267,16 +2253,11 @@ public class ResourceArnBuilder {
      * A Query-protocol parameter, read from the same place the handler reads it. For a form POST
      * that is the body alone: {@code AwsQueryController} dispatches on the form parameters and never
      * sees the URL query, so authorizing a URL value would check one resource and act on another.
-     * A value with an invalid percent escape is read as absent, so the resource stays the default
-     * and the request goes on to be answered as it is without enforcement.
+     * An invalid percent escape is rejected by the shared form decoder before authorization.
      */
     private String firstFormParam(ContainerRequestContext ctx, String name) {
         if (RequestBodyReader.isForm(ctx)) {
-            try {
-                return RequestBodyReader.formField(ctx, name);
-            } catch (IllegalArgumentException malformed) {
-                return null;
-            }
+            return RequestBodyReader.formField(ctx, name);
         }
         return ctx.getUriInfo().getQueryParameters().getFirst(name);
     }

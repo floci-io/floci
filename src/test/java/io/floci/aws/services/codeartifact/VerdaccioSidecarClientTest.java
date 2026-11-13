@@ -11,13 +11,19 @@ import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
+import java.io.IOException;
+import java.io.InputStream;
 import java.lang.reflect.Field;
 import java.net.InetSocketAddress;
 import java.net.http.HttpClient;
 import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.util.Base64;
 import java.util.List;
 import java.util.Optional;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.atomic.AtomicReference;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -72,6 +78,33 @@ class VerdaccioSidecarClientTest {
 
         assertTrue(result.isPresent());
         assertEquals("tarball bytes", new String(result.get(), StandardCharsets.UTF_8));
+    }
+
+    /**
+     * {@link #fetchPackageVersionAssetGetsTheUnscopedTarballPath}'s own streamed sibling: same
+     * wire behavior, but the caller gets an open {@link InputStream} plus the real {@code
+     * Content-Length} instead of an already-resident {@code byte[]}.
+     */
+    @Test
+    void fetchPackageVersionAssetStreamedGetsTheUnscopedTarballPath() throws Exception {
+        VerdaccioSidecarManager manager = manager();
+        seedPooledContainer(manager, "npm-repo-1", "tracked-verdaccio-1", backendUrl);
+        respondWithMetadata("/demo-pkg", "1.0.0", "/demo-pkg/-/demo-pkg-1.0.0.tgz");
+        backend.createContext("/demo-pkg/-/demo-pkg-1.0.0.tgz", exchange -> {
+            byte[] body = "tarball bytes".getBytes(StandardCharsets.UTF_8);
+            exchange.sendResponseHeaders(200, body.length);
+            exchange.getResponseBody().write(body);
+            exchange.close();
+        });
+
+        Optional<RepositorySidecarManager.StreamedAsset> result = client(manager).fetchPackageVersionAssetStreamed(
+                "npm-repo-1", "dom", "repo", null, "demo-pkg", "1.0.0", "demo-pkg-1.0.0.tgz");
+
+        assertTrue(result.isPresent());
+        try (InputStream in = result.get().content()) {
+            assertEquals("tarball bytes", new String(in.readAllBytes(), StandardCharsets.UTF_8));
+        }
+        assertEquals(13, result.get().contentLength());
     }
 
     /**
@@ -225,6 +258,72 @@ class VerdaccioSidecarClientTest {
 
         JsonNode sentBody = new ObjectMapper().readTree(observedBody.get());
         assertTrue(sentBody.path("dist-tags").isMissingNode(), "must not send its own dist-tags: " + observedBody.get());
+    }
+
+    /**
+     * {@code storePackageVersionAsset(..., Path, long)}'s own streamed body, built from explicit
+     * JSON prefix/suffix fragments around a piped base64 encoder, not {@code mapper
+     * .writeValueAsBytes} the way the {@code byte[]} overload's body still is, must still be
+     * byte-for-byte the same request body a real Verdaccio instance would otherwise see from the
+     * {@code byte[]} overload for the exact same content: this sends both for identical input and
+     * compares the two captured request bodies directly, rather than only checking the streamed
+     * one parses as valid JSON with the fields it expects.
+     */
+    @Test
+    void storePackageVersionAssetFromAPathSendsTheExactSameBodyAsTheByteArrayOverload() throws Exception {
+        VerdaccioSidecarManager manager = manager();
+        seedPooledContainer(manager, "npm-repo-1", "tracked-verdaccio-1", backendUrl);
+        byte[] content = "tarball bytes, twice over".getBytes(StandardCharsets.UTF_8);
+        List<String> observedBodies = new CopyOnWriteArrayList<>();
+        backend.createContext("/demo-pkg", exchange -> {
+            observedBodies.add(new String(exchange.getRequestBody().readAllBytes(), StandardCharsets.UTF_8));
+            exchange.sendResponseHeaders(201, -1);
+            exchange.close();
+        });
+
+        client(manager).storePackageVersionAsset("npm-repo-1", "dom", "repo", null, "demo-pkg", "1.0.0",
+                "demo-pkg-1.0.0.tgz", content);
+
+        Path staged = Files.createTempFile("verdaccio-test-", ".bin");
+        try {
+            Files.write(staged, content);
+            client(manager).storePackageVersionAsset("npm-repo-1", "dom", "repo", null, "demo-pkg", "1.0.0",
+                    "demo-pkg-1.0.0.tgz", staged, content.length);
+        } finally {
+            Files.deleteIfExists(staged);
+        }
+
+        assertEquals(2, observedBodies.size());
+        assertEquals(observedBodies.get(0), observedBodies.get(1));
+        JsonNode sentBody = new ObjectMapper().readTree(observedBodies.get(1));
+        assertEquals("application/octet-stream", sentBody.path("_attachments")
+                .path("demo-pkg-1.0.0.tgz").path("content_type").asText());
+        assertEquals(content.length, sentBody.path("_attachments").path("demo-pkg-1.0.0.tgz")
+                .path("length").asLong());
+        assertEquals(Base64.getEncoder().encodeToString(content), sentBody.path("_attachments")
+                .path("demo-pkg-1.0.0.tgz").path("data").asText());
+    }
+
+    /**
+     * Raised by Qodo's review of this PR: {@code base64EncodingStream}'s writer thread used to
+     * simply close the pipe on its own read failure, which {@link PipedInputStream} cannot tell
+     * apart from the writer finishing normally — a real mid-publish failure (the staged file
+     * disappearing out from under it, say) would read as an ordinary clean EOF, silently sending
+     * a shorter payload than the {@code shasum}/{@code integrity}/{@code length} fields (computed
+     * from the file before this stream ever opened it) still claim. Targets {@code
+     * base64EncodingStream} directly (package-private for exactly this): a nonexistent path makes
+     * the writer's very first read fail, the simplest reproduction of "the writer failed before
+     * producing everything it was supposed to," which is the one property this fix actually
+     * changes, regardless of how far into the transfer the real failure happens to land.
+     */
+    @Test
+    void base64EncodingStreamFailsRatherThanReadingAsACleanEofWhenTheFileIsGone() throws IOException {
+        Path missing = Files.createTempFile("verdaccio-test-", ".bin");
+        Files.delete(missing);
+
+        InputStream encoding = VerdaccioSidecarClient.base64EncodingStream(missing);
+
+        assertThrows(IOException.class, encoding::read);
     }
 
     /**

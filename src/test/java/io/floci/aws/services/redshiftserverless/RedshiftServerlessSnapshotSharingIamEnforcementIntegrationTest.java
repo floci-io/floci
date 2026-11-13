@@ -26,6 +26,7 @@ import static io.floci.aws.testing.EnforcementFixtures.auth;
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.containsString;
 import static org.hamcrest.Matchers.equalTo;
+import static org.hamcrest.Matchers.hasSize;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyBoolean;
 import static org.mockito.ArgumentMatchers.anyInt;
@@ -71,6 +72,68 @@ class RedshiftServerlessSnapshotSharingIamEnforcementIntegrationTest {
         when(runtime.issueCredential(any(), any(), any(), any(), anyInt()))
                 .thenAnswer(invocation -> new TempCredential(invocation.getArgument(3), "temporary-password",
                         Instant.now().plusSeconds(900), List.of()));
+    }
+
+    @Test
+    void sharedSnapshotReadsAndListsRespectDenialsAndSnapshotRecreation() {
+        String suffix = UUID.randomUUID().toString().substring(0, 8);
+        String namespace = "read-src-" + suffix;
+        String snapshot = "read-shared-" + suffix;
+        String privateSnapshot = "read-private-" + suffix;
+        String callerKey = user(CALLER, """
+                {"Statement":[{"Effect":"Allow","Action":["redshift-serverless:GetSnapshot",
+                 "redshift-serverless:ListSnapshots"],"Resource":"*"}]}
+                """);
+        String allow = """
+                {"Statement":{"Effect":"Allow","Principal":{"AWS":"%s"},
+                 "Action":"redshift-serverless:GetSnapshot"}}
+                """.formatted(CALLER);
+        String deny = """
+                {"Statement":[
+                  {"Effect":"Allow","Principal":{"AWS":"%s"},
+                   "Action":"redshift-serverless:GetSnapshot","Resource":"*"},
+                  {"Effect":"Deny","Principal":{"AWS":"%s"},
+                   "Action":"redshift-serverless:GetSnapshot"}
+                ]}
+                """.formatted(CALLER, CALLER);
+        call(OWNER, "CreateNamespace", Map.of("namespaceName", namespace, "adminUsername", "admin")).statusCode(200);
+        String arn = call(OWNER, "CreateSnapshot", Map.of("snapshotName", snapshot, "namespaceName", namespace))
+                .statusCode(200).extract().path("snapshot.snapshotArn");
+        call(OWNER, "CreateSnapshot", Map.of("snapshotName", privateSnapshot, "namespaceName", namespace)).statusCode(200);
+        Map<String, String> byName = Map.of("snapshotName", snapshot, "ownerAccount", OWNER);
+        Map<String, String> byArn = Map.of("snapshotArn", arn, "ownerAccount", OWNER);
+        Map<String, String> list = Map.of("ownerAccount", OWNER);
+
+        readDenied(call(callerKey, "GetSnapshot", Map.of("snapshotName", privateSnapshot, "ownerAccount", OWNER)));
+        readDenied(call(callerKey, "GetSnapshot", byName));
+        call(callerKey, "ListSnapshots", list).statusCode(200).body("snapshots", hasSize(0));
+
+        call(OWNER, "PutResourcePolicy", Map.of("resourceArn", arn, "policy", allow)).statusCode(200);
+        call(callerKey, "GetSnapshot", byName).statusCode(200).body("snapshot.snapshotName", equalTo(snapshot));
+        call(callerKey, "GetSnapshot", byArn).statusCode(200).body("snapshot.snapshotName", equalTo(snapshot));
+        call(callerKey, "ListSnapshots", list).statusCode(200)
+                .body("snapshots", hasSize(1)).body("snapshots[0].snapshotName", equalTo(snapshot));
+
+        call(OWNER, "PutResourcePolicy", Map.of("resourceArn", arn, "policy", deny)).statusCode(200);
+        readDenied(call(callerKey, "GetSnapshot", byName));
+        call(callerKey, "ListSnapshots", list).statusCode(200).body("snapshots", hasSize(0));
+
+        call(OWNER, "DeleteResourcePolicy", Map.of("resourceArn", arn)).statusCode(200);
+        readDenied(call(callerKey, "GetSnapshot", byName));
+        call(callerKey, "ListSnapshots", list).statusCode(200).body("snapshots", hasSize(0));
+
+        call(OWNER, "PutResourcePolicy", Map.of("resourceArn", arn, "policy", allow)).statusCode(200);
+        call(callerKey, "GetSnapshot", byName).statusCode(200);
+        call(OWNER, "DeleteSnapshot", Map.of("snapshotName", snapshot)).statusCode(200);
+        call(OWNER, "CreateSnapshot", Map.of("snapshotName", snapshot, "namespaceName", namespace)).statusCode(200);
+        readDenied(call(callerKey, "GetSnapshot", byName));
+        readDenied(call(callerKey, "GetSnapshot", byArn));
+        call(callerKey, "ListSnapshots", list).statusCode(200).body("snapshots", hasSize(0));
+    }
+
+    private static void readDenied(ValidatableResponse response) {
+        response.statusCode(400).body("__type", equalTo("AccessDeniedException"))
+                .body("message", containsString("redshift-serverless:GetSnapshot"));
     }
 
     @Test

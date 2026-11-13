@@ -328,7 +328,7 @@ class OrganizationsServiceTest {
     void anExpiredHandshakeReportsExpiredAndCannotBeAccepted() {
         service.createOrganization(MANAGEMENT_ACCOUNT, "ALL");
         Handshake handshake = service.inviteAccountToOrganization(
-                MANAGEMENT_ACCOUNT, OUTSIDER_ACCOUNT, "ACCOUNT", null);
+                MANAGEMENT_ACCOUNT, OUTSIDER_ACCOUNT, "ACCOUNT", null, null);
 
         handshake.setExpirationTimestamp(Instant.now().minus(1, ChronoUnit.DAYS));
         handshakes.putForAccount(MANAGEMENT_ACCOUNT, handshake.getId(), handshake);
@@ -344,7 +344,7 @@ class OrganizationsServiceTest {
     void acceptingAnInvitationJoinsTheOrganizationAsAnInvitedMember() {
         Organization organization = service.createOrganization(MANAGEMENT_ACCOUNT, "ALL");
         Handshake handshake = service.inviteAccountToOrganization(
-                MANAGEMENT_ACCOUNT, OUTSIDER_ACCOUNT, "ACCOUNT", null);
+                MANAGEMENT_ACCOUNT, OUTSIDER_ACCOUNT, "ACCOUNT", null, null);
 
         Handshake accepted = service.acceptHandshake(OUTSIDER_ACCOUNT, handshake.getId());
         assertEquals("ACCEPTED", accepted.getState());
@@ -356,10 +356,31 @@ class OrganizationsServiceTest {
     }
 
     @Test
+    void acceptingAnInvitationAttachesItsTagsToTheAccount() {
+        service.createOrganization(MANAGEMENT_ACCOUNT, "ALL");
+        Handshake handshake = service.inviteAccountToOrganization(
+                MANAGEMENT_ACCOUNT, OUTSIDER_ACCOUNT, "ACCOUNT", null, Map.of("team", "red"));
+
+        service.acceptHandshake(OUTSIDER_ACCOUNT, handshake.getId());
+
+        assertEquals(Map.of("team", "red"), service.listTagsForResource(MANAGEMENT_ACCOUNT, OUTSIDER_ACCOUNT));
+    }
+
+    @Test
+    void anInvalidTagFailsTheWholeInvitation() {
+        service.createOrganization(MANAGEMENT_ACCOUNT, "ALL");
+
+        AwsException error = assertThrows(AwsException.class, () -> service.inviteAccountToOrganization(
+                MANAGEMENT_ACCOUNT, OUTSIDER_ACCOUNT, "ACCOUNT", null, Map.of("", "red")));
+        assertEquals("InvalidInputException", error.getErrorCode());
+        assertTrue(service.listHandshakesForOrganization(MANAGEMENT_ACCOUNT, null, null).isEmpty());
+    }
+
+    @Test
     void memberAccountsCannotPerformManagementActions() {
         Organization organization = service.createOrganization(MANAGEMENT_ACCOUNT, "ALL");
         Handshake handshake = service.inviteAccountToOrganization(
-                MANAGEMENT_ACCOUNT, OUTSIDER_ACCOUNT, "ACCOUNT", null);
+                MANAGEMENT_ACCOUNT, OUTSIDER_ACCOUNT, "ACCOUNT", null, null);
         service.acceptHandshake(OUTSIDER_ACCOUNT, handshake.getId());
 
         AwsException error = assertThrows(AwsException.class, () -> service.createOrganizationalUnit(
@@ -376,8 +397,9 @@ class OrganizationsServiceTest {
         service.enablePolicyType(MANAGEMENT_ACCOUNT, rootId, "SERVICE_CONTROL_POLICY");
         OrganizationPolicy policy = service.createPolicy(MANAGEMENT_ACCOUNT, "{}", null, "Policy",
                 "SERVICE_CONTROL_POLICY", null);
+        String resourcePolicyId = service.putResourcePolicy(MANAGEMENT_ACCOUNT, "{}", null).id();
 
-        for (String resourceId : List.of(rootId, unit.getId(), policy.getId(), MANAGEMENT_ACCOUNT)) {
+        for (String resourceId : List.of(rootId, unit.getId(), policy.getId(), MANAGEMENT_ACCOUNT, resourcePolicyId)) {
             service.tagResource(MANAGEMENT_ACCOUNT, resourceId, Map.of("env", "test"));
             assertEquals(Map.of("env", "test"), service.listTagsForResource(MANAGEMENT_ACCOUNT, resourceId));
             service.untagResource(MANAGEMENT_ACCOUNT, resourceId, List.of("env"));
@@ -386,23 +408,61 @@ class OrganizationsServiceTest {
     }
 
     @Test
-    void putResourcePolicyReplacesTagsRatherThanMergingThem() {
+    void putResourcePolicyWithoutTagsCreatesAnUntaggedPolicy() {
+        service.createOrganization(MANAGEMENT_ACCOUNT, "ALL");
+        String policyId = service.putResourcePolicy(MANAGEMENT_ACCOUNT, "{\"Version\":\"2012-10-17\"}", null).id();
+
+        assertTrue(service.listTagsForResource(MANAGEMENT_ACCOUNT, policyId).isEmpty());
+    }
+
+    @Test
+    void putResourcePolicyRefusesTagsForAnExistingPolicyAndChangesNothing() {
         service.createOrganization(MANAGEMENT_ACCOUNT, "ALL");
         String content = "{\"Version\":\"2012-10-17\"}";
+        service.putResourcePolicy(MANAGEMENT_ACCOUNT, content, Map.of("env", "test"));
 
-        service.putResourcePolicy(MANAGEMENT_ACCOUNT, content, Map.of("env", "test", "owner", "platform"));
-        assertEquals(Map.of("env", "test", "owner", "platform"),
-                service.describeResourcePolicy(MANAGEMENT_ACCOUNT).tags());
+        AwsException error = assertThrows(AwsException.class, () -> service.putResourcePolicy(
+                MANAGEMENT_ACCOUNT, "{\"Statement\":[]}", Map.of("env", "prod")));
+        assertEquals("InvalidInputException", error.getErrorCode());
 
-        // The resource policy is not addressable by TagResource/UntagResource, so Put is the only
-        // way a dropped key can be removed — CloudFormation relies on this to converge on update.
-        service.putResourcePolicy(MANAGEMENT_ACCOUNT, content, Map.of("env", "prod"));
-        assertEquals(Map.of("env", "prod"), service.describeResourcePolicy(MANAGEMENT_ACCOUNT).tags());
+        OrganizationsService.ResourcePolicyView policy = service.describeResourcePolicy(MANAGEMENT_ACCOUNT);
+        assertEquals(content, policy.content());
+        assertEquals(Map.of("env", "test"), policy.tags());
+    }
 
-        // Omitting Tags entirely is "don't touch", matching how the provisioner treats an absent
-        // Tags property on every other Organizations type.
-        service.putResourcePolicy(MANAGEMENT_ACCOUNT, content, null);
-        assertEquals(Map.of("env", "prod"), service.describeResourcePolicy(MANAGEMENT_ACCOUNT).tags());
+    @Test
+    void putResourcePolicyWithoutTagsUpdatesAnExistingPolicyAndKeepsItsTags() {
+        service.createOrganization(MANAGEMENT_ACCOUNT, "ALL");
+        String policyId = service.putResourcePolicy(MANAGEMENT_ACCOUNT, "{\"Version\":\"2012-10-17\"}",
+                Map.of("env", "test")).id();
+        String updated = "{\"Statement\":[]}";
+
+        OrganizationsService.ResourcePolicyView policy = service.putResourcePolicy(MANAGEMENT_ACCOUNT, updated, null);
+        assertEquals(policyId, policy.id());
+        assertEquals(updated, policy.content());
+        assertEquals(Map.of("env", "test"), policy.tags());
+
+        // An empty Tags list has no tags to apply, so it is not refused either.
+        assertEquals(Map.of("env", "test"), service.putResourcePolicy(MANAGEMENT_ACCOUNT, updated, Map.of()).tags());
+    }
+
+    @Test
+    void putResourcePolicyTagsAreListedThroughItsId() {
+        service.createOrganization(MANAGEMENT_ACCOUNT, "ALL");
+        String policyId = service.putResourcePolicy(MANAGEMENT_ACCOUNT, "{\"Version\":\"2012-10-17\"}",
+                Map.of("env", "test")).id();
+
+        assertEquals(Map.of("env", "test"), service.listTagsForResource(MANAGEMENT_ACCOUNT, policyId));
+    }
+
+    @Test
+    void anUnknownResourcePolicyIdIsNotATagTarget() {
+        service.createOrganization(MANAGEMENT_ACCOUNT, "ALL");
+        service.putResourcePolicy(MANAGEMENT_ACCOUNT, "{\"Version\":\"2012-10-17\"}", null);
+
+        AwsException error = assertThrows(AwsException.class, () -> service.tagResource(
+                MANAGEMENT_ACCOUNT, "rp-doesnotexist", Map.of("env", "test")));
+        assertEquals("TargetNotFoundException", error.getErrorCode());
     }
 
     @Test

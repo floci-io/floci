@@ -12,6 +12,7 @@ import org.junit.jupiter.api.Test;
 import java.util.List;
 import java.util.Optional;
 
+import static io.floci.aws.testing.IamTestPolicies.EMPTY_POLICY_DOCUMENT;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
@@ -42,7 +43,7 @@ class LambdaExecutionRoleCredentialsTest {
                 new InMemoryStorage<>(),
                 new InMemoryStorage<>(),
                 new RegionResolver("us-east-1", ACCOUNT_ID));
-        iamService.createRole(ROLE_NAME, "/", "{}", null, 0, null);
+        iamService.createRole(ROLE_NAME, "/", EMPTY_POLICY_DOCUMENT, null, 0, null);
         iamService.putRolePolicy(ROLE_NAME, "DenyS3", POLICY);
         credentials = new LambdaExecutionRoleCredentials(iamService);
     }

@@ -579,8 +579,11 @@ public class AppSyncService {
     public synchronized AppSyncType createType(String apiId, Map<String, Object> request) {
         assertSchemaNotBusy(apiId);
         getGraphqlApi(apiId);
-        String name = (String) request.get("name");
         String definition = (String) request.get("definition");
+        if (definition == null) {
+            throw new AwsException("BadRequestException", "A type definition is required", 400);
+        }
+        String name = (String) request.get("name");
         if (name == null || name.isBlank()) {
             name = extractTypeNameFromDefinition(definition);
         }
@@ -591,12 +594,17 @@ public class AppSyncService {
         if (typeStore.get(typeKey).isPresent()) {
             throw new AwsException("BadRequestException", "Type with name %s already exists.".formatted(name), 400);
         }
+        Object formatValue = request.get("format");
+        if (formatValue == null) {
+            throw new AwsException("BadRequestException", "A type format is required", 400);
+        }
+        TypeFormat format = parseEnum(TypeFormat.class, formatValue);
         AppSyncType type = new AppSyncType();
         type.setApiId(apiId);
         type.setName(name);
-        type.setDefinition((String) request.get("definition"));
+        type.setDefinition(definition);
         type.setDescription((String) request.get("description"));
-        type.setFormat(parseEnum(TypeFormat.class, request.getOrDefault("format", "SDL")));
+        type.setFormat(format);
 
         typeStore.put(typeKey, type);
         return type;
@@ -616,9 +624,18 @@ public class AppSyncService {
     public synchronized AppSyncType updateType(String apiId, String typeName, Map<String, Object> request) {
         assertSchemaNotBusy(apiId);
         AppSyncType existing = getType(apiId, typeName);
-        if (request.containsKey("definition")) existing.setDefinition((String) request.get("definition"));
-        if (request.containsKey("description")) existing.setDescription((String) request.get("description"));
-        if (request.containsKey("format")) existing.setFormat(parseEnum(TypeFormat.class, request.get("format")));
+        Object formatValue = request.get("format");
+        if (formatValue == null) {
+            throw new AwsException("BadRequestException", "A type format is required", 400);
+        }
+        TypeFormat format = parseEnum(TypeFormat.class, formatValue);
+        if (request.containsKey("definition")) {
+            existing.setDefinition((String) request.get("definition"));
+        }
+        if (request.containsKey("description")) {
+            existing.setDescription((String) request.get("description"));
+        }
+        existing.setFormat(format);
         typeStore.put(apiKey(apiId, typeName), existing);
         return existing;
     }
